@@ -14,6 +14,7 @@ pub const core = struct {
 pub const storage = struct {
     pub const vfs = @import("storage/vfs.zig");
     pub const page = @import("storage/page.zig");
+    pub const page_manager = @import("storage/page_manager.zig");
     pub const btree = @import("storage/btree.zig");
 };
 
@@ -59,6 +60,8 @@ pub const Vfs = storage.vfs.Vfs;
 pub const VfsFile = storage.vfs.File;
 pub const OpenFlags = storage.vfs.OpenFlags;
 pub const PosixVfs = storage.vfs.PosixVfs;
+
+pub const PageManager = storage.page_manager.PageManager;
 
 pub const Transaction = transaction.manager.Transaction;
 pub const TxnState = transaction.manager.TxnState;

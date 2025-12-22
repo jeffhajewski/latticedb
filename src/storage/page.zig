@@ -96,9 +96,9 @@ pub const FileFlags = struct {
     pub const LARGE_FILE_MODE: u32 = 0x10;
 };
 
-/// Calculate CRC32C checksum
+/// Calculate CRC32C checksum (Castagnoli polynomial)
 pub fn calculateChecksum(data: []const u8) u32 {
-    return std.hash.crc.Crc32SmallWithPoly(.Castagnoli).hash(data);
+    return std.hash.crc.Crc32Iscsi.hash(data);
 }
 
 test "page header size" {

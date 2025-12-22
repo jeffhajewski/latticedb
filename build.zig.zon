@@ -1,0 +1,13 @@
+.{
+    .name = .lattice,
+    .version = "0.1.0",
+    .fingerprint = 0xced309c8562b881e,
+    .minimum_zig_version = "0.13.0",
+    .paths = .{
+        "src",
+        "include",
+        "build.zig",
+        "build.zig.zon",
+        "LICENSE",
+    },
+}

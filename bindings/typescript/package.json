@@ -1,0 +1,53 @@
+{
+  "name": "lattice-db",
+  "version": "0.1.0",
+  "description": "TypeScript bindings for Lattice embedded knowledge graph database",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "build:native": "node-gyp rebuild",
+    "test": "jest",
+    "lint": "eslint src --ext .ts",
+    "clean": "rm -rf dist build",
+    "prepublishOnly": "npm run build"
+  },
+  "keywords": [
+    "database",
+    "graph",
+    "vector",
+    "embeddings",
+    "rag",
+    "ai",
+    "knowledge-graph"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/lattice-db/lattice"
+  },
+  "files": [
+    "dist",
+    "src/native",
+    "binding.gyp"
+  ],
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "dependencies": {
+    "node-addon-api": "^7.0.0"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.0",
+    "@types/node": "^20.0.0",
+    "@typescript-eslint/eslint-plugin": "^6.0.0",
+    "@typescript-eslint/parser": "^6.0.0",
+    "eslint": "^8.0.0",
+    "jest": "^29.0.0",
+    "node-gyp": "^10.0.0",
+    "ts-jest": "^29.0.0",
+    "typescript": "^5.0.0"
+  },
+  "gypfile": true
+}

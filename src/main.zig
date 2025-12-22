@@ -12,6 +12,7 @@ pub const core = struct {
 
 // Storage modules
 pub const storage = struct {
+    pub const vfs = @import("storage/vfs.zig");
     pub const page = @import("storage/page.zig");
     pub const btree = @import("storage/btree.zig");
 };
@@ -53,6 +54,11 @@ pub const PropertyValue = core.types.PropertyValue;
 pub const PageType = storage.page.PageType;
 pub const PageHeader = storage.page.PageHeader;
 pub const FileHeader = storage.page.FileHeader;
+
+pub const Vfs = storage.vfs.Vfs;
+pub const VfsFile = storage.vfs.File;
+pub const OpenFlags = storage.vfs.OpenFlags;
+pub const PosixVfs = storage.vfs.PosixVfs;
 
 pub const Transaction = transaction.manager.Transaction;
 pub const TxnState = transaction.manager.TxnState;

@@ -66,6 +66,9 @@ pub const PageManager = storage.page_manager.PageManager;
 pub const BufferPool = storage.buffer_pool.BufferPool;
 pub const BufferFrame = storage.buffer_pool.BufferFrame;
 
+pub const BTree = storage.btree.BTree;
+pub const BTreeError = storage.btree.BTreeError;
+
 pub const Transaction = transaction.manager.Transaction;
 pub const TxnState = transaction.manager.TxnState;
 pub const TxnMode = transaction.manager.TxnMode;

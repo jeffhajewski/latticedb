@@ -17,6 +17,7 @@ pub const storage = struct {
     pub const page_manager = @import("storage/page_manager.zig");
     pub const buffer_pool = @import("storage/buffer_pool.zig");
     pub const btree = @import("storage/btree.zig");
+    pub const wal = @import("storage/wal.zig");
 };
 
 // Vector search
@@ -68,6 +69,10 @@ pub const BufferFrame = storage.buffer_pool.BufferFrame;
 
 pub const BTree = storage.btree.BTree;
 pub const BTreeError = storage.btree.BTreeError;
+
+pub const WalManager = storage.wal.WalManager;
+pub const WalError = storage.wal.WalError;
+pub const WalRecordType = storage.wal.WalRecordType;
 
 pub const Transaction = transaction.manager.Transaction;
 pub const TxnState = transaction.manager.TxnState;

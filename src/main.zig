@@ -18,6 +18,7 @@ pub const storage = struct {
     pub const buffer_pool = @import("storage/buffer_pool.zig");
     pub const btree = @import("storage/btree.zig");
     pub const wal = @import("storage/wal.zig");
+    pub const checkpoint = @import("storage/checkpoint.zig");
 };
 
 // Vector search
@@ -73,6 +74,11 @@ pub const BTreeError = storage.btree.BTreeError;
 pub const WalManager = storage.wal.WalManager;
 pub const WalError = storage.wal.WalError;
 pub const WalRecordType = storage.wal.WalRecordType;
+
+pub const Checkpointer = storage.checkpoint.Checkpointer;
+pub const CheckpointMode = storage.checkpoint.CheckpointMode;
+pub const CheckpointError = storage.checkpoint.CheckpointError;
+pub const CheckpointStats = storage.checkpoint.CheckpointStats;
 
 pub const Transaction = transaction.manager.Transaction;
 pub const TxnManager = transaction.manager.TxnManager;

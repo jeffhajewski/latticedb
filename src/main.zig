@@ -75,8 +75,11 @@ pub const WalError = storage.wal.WalError;
 pub const WalRecordType = storage.wal.WalRecordType;
 
 pub const Transaction = transaction.manager.Transaction;
+pub const TxnManager = transaction.manager.TxnManager;
 pub const TxnState = transaction.manager.TxnState;
 pub const TxnMode = transaction.manager.TxnMode;
+pub const TxnError = transaction.manager.TxnError;
+pub const IsolationLevel = transaction.manager.IsolationLevel;
 
 pub const HnswConfig = vector.hnsw.HnswConfig;
 pub const DistanceMetric = vector.hnsw.DistanceMetric;

@@ -47,6 +47,14 @@ pub const concurrency = struct {
     pub const locking = @import("concurrency/locking.zig");
 };
 
+// Graph storage
+pub const graph = struct {
+    pub const symbols = @import("graph/symbols.zig");
+    pub const node = @import("graph/node.zig");
+    pub const edge = @import("graph/edge.zig");
+    pub const label_index = @import("graph/label_index.zig");
+};
+
 // C API
 pub const c_api = @import("api/c_api.zig");
 
@@ -95,6 +103,24 @@ pub const IsolationLevel = transaction.manager.IsolationLevel;
 
 pub const HnswConfig = vector.hnsw.HnswConfig;
 pub const DistanceMetric = vector.hnsw.DistanceMetric;
+
+pub const SymbolTable = graph.symbols.SymbolTable;
+pub const SymbolId = graph.symbols.SymbolId;
+pub const SymbolError = graph.symbols.SymbolError;
+
+pub const NodeStore = graph.node.NodeStore;
+pub const Node = graph.node.Node;
+pub const NodeError = graph.node.NodeError;
+
+pub const EdgeStore = graph.edge.EdgeStore;
+pub const Edge = graph.edge.Edge;
+pub const EdgeError = graph.edge.EdgeError;
+pub const EdgeKey = graph.edge.EdgeKey;
+pub const Direction = graph.edge.Direction;
+
+pub const LabelIndex = graph.label_index.LabelIndex;
+pub const LabelKey = graph.label_index.LabelKey;
+pub const LabelIndexError = graph.label_index.LabelIndexError;
 
 // Version information
 pub const VERSION = "0.1.0";

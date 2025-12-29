@@ -19,6 +19,7 @@ pub const storage = struct {
     pub const btree = @import("storage/btree.zig");
     pub const wal = @import("storage/wal.zig");
     pub const checkpoint = @import("storage/checkpoint.zig");
+    pub const recovery = @import("storage/recovery.zig");
 };
 
 // Vector search
@@ -79,6 +80,11 @@ pub const Checkpointer = storage.checkpoint.Checkpointer;
 pub const CheckpointMode = storage.checkpoint.CheckpointMode;
 pub const CheckpointError = storage.checkpoint.CheckpointError;
 pub const CheckpointStats = storage.checkpoint.CheckpointStats;
+
+pub const RecoveryManager = storage.recovery.RecoveryManager;
+pub const RecoveryError = storage.recovery.RecoveryError;
+pub const RecoveryStats = storage.recovery.RecoveryStats;
+pub const recoverDatabase = storage.recovery.recoverDatabase;
 
 pub const Transaction = transaction.manager.Transaction;
 pub const TxnManager = transaction.manager.TxnManager;

@@ -26,8 +26,10 @@ const PageHeader = page.PageHeader;
 
 /// Recovery errors
 pub const RecoveryError = error{
-    /// WAL is corrupted
+    /// WAL is corrupted (torn write at end, safe to proceed)
     CorruptedWal,
+    /// WAL has corruption with valid data after it (real corruption, unsafe)
+    MidLogCorruption,
     /// WAL UUID doesn't match database
     WalMismatch,
     /// I/O error during recovery
@@ -77,6 +79,10 @@ pub const RecoveryStats = struct {
     redo_operations: u64,
     /// Time taken in nanoseconds
     duration_ns: u64,
+    /// Whether recovery stopped due to tail corruption (torn write)
+    stopped_at_corruption: bool,
+    /// Frame number where corruption was detected (if any)
+    corrupted_frame: ?u64,
 };
 
 // ============================================================================
@@ -96,6 +102,53 @@ pub const RecoveryManager = struct {
         };
     }
 
+    /// Check if there are valid frames after the given frame number.
+    /// Used to distinguish tail corruption (torn write) from mid-log corruption.
+    fn hasValidFramesAfter(self: *Self, wal: *WalManager, corrupted_frame: u64) RecoveryError!bool {
+        _ = self;
+
+        const frame_count = wal.header.frame_count;
+
+        // Check up to 10 frames ahead (or until end of WAL)
+        // If any are valid, we have mid-log corruption
+        const max_scan = @min(corrupted_frame + 10, frame_count);
+
+        var frame_buf: [wal_mod.FRAME_SIZE]u8 align(4096) = undefined;
+
+        var frame_num = corrupted_frame + 1;
+        while (frame_num < max_scan) : (frame_num += 1) {
+            // Read frame directly
+            const offset = wal_mod.FRAME_SIZE + frame_num * wal_mod.FRAME_SIZE;
+            const n = wal.file.read(offset, &frame_buf) catch {
+                continue; // IO error, try next frame
+            };
+
+            if (n != wal_mod.FRAME_SIZE) {
+                continue; // Incomplete read, try next frame
+            }
+
+            // Parse frame header and verify checksum
+            const frame_header = std.mem.bytesAsValue(
+                wal_mod.WalFrameHeader,
+                frame_buf[0..@sizeOf(wal_mod.WalFrameHeader)],
+            ).*;
+
+            // Validate checksum
+            if (frame_header.data_size > 0 and frame_header.data_size <= wal_mod.FRAME_DATA_SIZE) {
+                const data = frame_buf[@sizeOf(wal_mod.WalFrameHeader)..][0..frame_header.data_size];
+                const expected = page.calculateChecksum(data);
+
+                if (frame_header.checksum == expected) {
+                    // Found a valid frame after corruption - this is mid-log corruption
+                    return true;
+                }
+            }
+        }
+
+        // No valid frames found after corruption - this is tail corruption
+        return false;
+    }
+
     /// Perform crash recovery
     /// Returns statistics about the recovery process
     pub fn recover(self: *Self, wal: *WalManager, pm: *PageManager) RecoveryError!RecoveryStats {
@@ -111,6 +164,8 @@ pub const RecoveryManager = struct {
             .transactions_rolled_back = 0,
             .redo_operations = 0,
             .duration_ns = 0,
+            .stopped_at_corruption = false,
+            .corrupted_frame = null,
         };
 
         // Phase 1: Analysis - scan WAL to determine transaction states
@@ -162,7 +217,19 @@ pub const RecoveryManager = struct {
             const maybe_record = wal_iter.next(&payload_buf) catch |err| {
                 switch (err) {
                     WalError.ChecksumMismatch => {
-                        // Reached corrupted/incomplete frame - stop here
+                        // Got corruption - need to determine if it's tail or mid-log
+                        // The iterator's current_frame is the frame that failed
+                        const corrupted_frame = wal_iter.current_frame;
+                        stats.corrupted_frame = corrupted_frame;
+
+                        // Scan ahead to check for valid frames after corruption
+                        if (try self.hasValidFramesAfter(wal, corrupted_frame)) {
+                            // Valid frames exist after corruption - this is real corruption
+                            return RecoveryError.MidLogCorruption;
+                        }
+
+                        // No valid frames after - this is tail corruption (torn write)
+                        stats.stopped_at_corruption = true;
                         break;
                     },
                     WalError.IoError => return RecoveryError.IoError,
@@ -599,4 +666,130 @@ test "recovery respects checkpoint_lsn" {
     try std.testing.expectEqual(@as(u64, 3), stats.start_lsn);
     try std.testing.expectEqual(@as(u32, 1), stats.transactions_found);
     try std.testing.expectEqual(@as(u32, 1), stats.transactions_committed);
+}
+
+test "recovery handles tail corruption (torn write)" {
+    const allocator = std.testing.allocator;
+
+    const vfs = @import("vfs.zig");
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_recovery_tail_corrupt_test.db";
+    const wal_path = "/tmp/lattice_recovery_tail_corrupt_test.wal";
+
+    vfs_impl.delete(db_path) catch {};
+    vfs_impl.delete(wal_path) catch {};
+
+    var pm = try PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var uuid: [16]u8 = undefined;
+    std.crypto.random.bytes(&uuid);
+
+    var wal = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
+
+    // Write a committed transaction
+    _ = try wal.appendRecord(.txn_begin, 1, 0, &[_]u8{});
+    _ = try wal.appendRecord(.insert, 1, 1, "test data");
+    _ = try wal.appendRecord(.txn_commit, 1, 2, &[_]u8{});
+    try wal.sync();
+
+    // Corrupt the last frame by writing garbage after the valid data
+    // This simulates a torn write at the end of WAL
+    const frame_count = wal.header.frame_count;
+    if (frame_count > 0) {
+        // Write garbage to corrupt the last frame's checksum
+        const last_frame_offset = wal_mod.FRAME_SIZE + (frame_count - 1) * wal_mod.FRAME_SIZE;
+        var garbage: [64]u8 = undefined;
+        @memset(&garbage, 0xFF);
+        // Write garbage to data area (after header) to corrupt checksum
+        _ = wal.file.write(last_frame_offset + @sizeOf(wal_mod.WalFrameHeader), &garbage) catch {};
+    }
+
+    // Close and reopen to simulate crash recovery
+    wal.deinit();
+
+    var wal2 = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
+    defer {
+        wal2.deinit();
+        vfs_impl.delete(wal_path) catch {};
+    }
+
+    // Recovery should succeed (tail corruption is tolerated)
+    const stats = try recoverDatabase(allocator, &wal2, &pm);
+
+    // Should indicate we stopped at corruption
+    try std.testing.expect(stats.stopped_at_corruption);
+    try std.testing.expect(stats.corrupted_frame != null);
+}
+
+test "recovery fails on mid-log corruption" {
+    const allocator = std.testing.allocator;
+
+    const vfs = @import("vfs.zig");
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_recovery_midlog_corrupt_test.db";
+    const wal_path = "/tmp/lattice_recovery_midlog_corrupt_test.wal";
+
+    vfs_impl.delete(db_path) catch {};
+    vfs_impl.delete(wal_path) catch {};
+
+    var pm = try PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var uuid: [16]u8 = undefined;
+    std.crypto.random.bytes(&uuid);
+
+    var wal = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
+
+    // Write first transaction and sync (frame 0)
+    _ = try wal.appendRecord(.txn_begin, 1, 0, &[_]u8{});
+    _ = try wal.appendRecord(.insert, 1, 1, "data1");
+    _ = try wal.appendRecord(.txn_commit, 1, 2, &[_]u8{});
+    try wal.sync();
+
+    // Write second transaction and sync (frame 1)
+    _ = try wal.appendRecord(.txn_begin, 2, 0, &[_]u8{});
+    _ = try wal.appendRecord(.insert, 2, 4, "data2");
+    _ = try wal.appendRecord(.txn_commit, 2, 5, &[_]u8{});
+    try wal.sync();
+
+    // Write third transaction and sync (frame 2)
+    _ = try wal.appendRecord(.txn_begin, 3, 0, &[_]u8{});
+    _ = try wal.appendRecord(.insert, 3, 7, "data3");
+    _ = try wal.appendRecord(.txn_commit, 3, 8, &[_]u8{});
+    try wal.sync();
+
+    const frame_count = wal.header.frame_count;
+
+    // Corrupt frame 1 (middle frame) - frame 2 will still be valid after it
+    if (frame_count >= 2) {
+        const mid_frame_offset = wal_mod.FRAME_SIZE + 0 * wal_mod.FRAME_SIZE; // Corrupt frame 0
+        var garbage: [64]u8 = undefined;
+        @memset(&garbage, 0xFF);
+        // Write garbage to data area to corrupt checksum
+        _ = wal.file.write(mid_frame_offset + @sizeOf(wal_mod.WalFrameHeader), &garbage) catch {};
+    }
+
+    // Close and reopen
+    wal.deinit();
+
+    var wal2 = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
+    defer {
+        wal2.deinit();
+        vfs_impl.delete(wal_path) catch {};
+    }
+
+    // Recovery should FAIL with MidLogCorruption because valid frames exist after corruption
+    const result = recoverDatabase(allocator, &wal2, &pm);
+    try std.testing.expectError(RecoveryError.MidLogCorruption, result);
 }

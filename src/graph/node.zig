@@ -148,11 +148,13 @@ pub const NodeStore = struct {
     }
 
     /// Delete a node
-    /// NOTE: B+Tree delete not yet implemented, this is a no-op
     pub fn delete(self: *Self, node_id: NodeId) NodeError!void {
-        _ = self;
-        _ = node_id;
-        // TODO: Implement when B+Tree delete is available
+        var key_buf: [8]u8 = undefined;
+        std.mem.writeInt(u64, &key_buf, node_id, .little);
+
+        self.tree.delete(&key_buf) catch |err| {
+            return mapBTreeError(err);
+        };
     }
 
     /// Check if a node exists
@@ -432,4 +434,42 @@ test "node store exists" {
     const node_id = try store.create(&[_]SymbolId{}, &[_]Property{});
     try std.testing.expectEqual(@as(NodeId, 1), node_id);
     try std.testing.expect(store.exists(1));
+}
+
+test "node store delete" {
+    const allocator = std.testing.allocator;
+
+    const vfs = @import("../storage/vfs.zig");
+    const buffer_pool = @import("../storage/buffer_pool.zig");
+    const page_manager = @import("../storage/page_manager.zig");
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_node_delete_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try buffer_pool.BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var tree = try BTree.init(allocator, &bp);
+
+    var store = NodeStore.init(allocator, &tree);
+
+    // Create a node
+    const node_id = try store.create(&[_]SymbolId{1000}, &[_]Property{});
+    try std.testing.expect(store.exists(node_id));
+
+    // Delete the node
+    try store.delete(node_id);
+    try std.testing.expect(!store.exists(node_id));
+
+    // Deleting again should fail with NotFound
+    try std.testing.expectError(NodeError.NotFound, store.delete(node_id));
 }

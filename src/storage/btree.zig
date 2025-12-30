@@ -742,6 +742,55 @@ pub const BTree = struct {
     }
 
     // ========================================================================
+    // Delete
+    // ========================================================================
+
+    /// Delete a key from the tree
+    /// Returns KeyNotFound if the key doesn't exist
+    pub fn delete(self: *Self, key: []const u8) BTreeError!void {
+        // Find the leaf containing the key
+        const leaf_page = try self.findLeafForKey(key);
+
+        // Fetch the leaf with exclusive latch
+        const frame = self.bp.fetchPage(leaf_page, .exclusive) catch return BTreeError.BufferPoolFull;
+
+        // Find the key in the leaf
+        const search = LeafNode.searchSlot(frame.data, key, self.comparator);
+        if (!search.found) {
+            self.bp.unpinPage(frame, false);
+            return BTreeError.KeyNotFound;
+        }
+
+        // Remove the entry from the leaf
+        self.deleteLeafEntry(frame.data, search.slot);
+
+        self.bp.unpinPage(frame, true);
+
+        // Note: We don't handle underflow (merge/redistribute) for simplicity.
+        // Underflowed pages still work correctly, they just have wasted space.
+        // A background compaction process could reclaim this space later.
+    }
+
+    /// Remove an entry from a leaf node by shifting slots
+    fn deleteLeafEntry(self: *Self, buf: []u8, slot: u16) void {
+        _ = self;
+        const num_entries = LeafNode.getNumEntries(buf);
+
+        // Shift slots down to fill the gap
+        // Note: We don't reclaim the actual entry space at the end of the page.
+        // This creates "dead" space that would be reclaimed on page compaction.
+        if (slot < num_entries - 1) {
+            const slots_start = LEAF_SLOTS_OFFSET + slot * LEAF_SLOT_SIZE;
+            const next_slot_start = LEAF_SLOTS_OFFSET + (slot + 1) * LEAF_SLOT_SIZE;
+            const slots_end = LEAF_SLOTS_OFFSET + num_entries * LEAF_SLOT_SIZE;
+            std.mem.copyForwards(u8, buf[slots_start..slots_end - LEAF_SLOT_SIZE], buf[next_slot_start..slots_end]);
+        }
+
+        // Decrement entry count
+        LeafNode.setNumEntries(buf, num_entries - 1);
+    }
+
+    // ========================================================================
     // Range Scan
     // ========================================================================
 
@@ -1052,4 +1101,162 @@ test "btree leaf split" {
         const val = try tree.get(key);
         try std.testing.expect(val != null);
     }
+}
+
+test "btree delete single key" {
+    const allocator = std.testing.allocator;
+
+    const vfs = @import("vfs.zig");
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const path = "/tmp/lattice_btree_test_delete.db";
+    vfs_impl.delete(path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 65536);
+    defer bp.deinit();
+
+    var tree = try BTree.init(allocator, &bp);
+
+    // Insert keys
+    try tree.insert("key1", "value1");
+    try tree.insert("key2", "value2");
+    try tree.insert("key3", "value3");
+
+    // Verify key2 exists
+    const val = try tree.get("key2");
+    try std.testing.expect(val != null);
+
+    // Delete key2
+    try tree.delete("key2");
+
+    // Verify key2 no longer exists
+    const val_after = try tree.get("key2");
+    try std.testing.expect(val_after == null);
+
+    // Verify other keys still exist
+    try std.testing.expect((try tree.get("key1")) != null);
+    try std.testing.expect((try tree.get("key3")) != null);
+}
+
+test "btree delete non-existent key" {
+    const allocator = std.testing.allocator;
+
+    const vfs = @import("vfs.zig");
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const path = "/tmp/lattice_btree_test_delete_notfound.db";
+    vfs_impl.delete(path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 65536);
+    defer bp.deinit();
+
+    var tree = try BTree.init(allocator, &bp);
+
+    // Insert a key
+    try tree.insert("key1", "value1");
+
+    // Try to delete non-existent key
+    try std.testing.expectError(BTreeError.KeyNotFound, tree.delete("nonexistent"));
+
+    // Original key should still exist
+    try std.testing.expect((try tree.get("key1")) != null);
+}
+
+test "btree delete multiple keys" {
+    const allocator = std.testing.allocator;
+
+    const vfs = @import("vfs.zig");
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const path = "/tmp/lattice_btree_test_delete_multi.db";
+    vfs_impl.delete(path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 65536);
+    defer bp.deinit();
+
+    var tree = try BTree.init(allocator, &bp);
+
+    // Insert 20 keys
+    var buf: [32]u8 = undefined;
+    for (0..20) |i| {
+        const key = std.fmt.bufPrint(&buf, "key{d:03}", .{i}) catch unreachable;
+        try tree.insert(key, "value");
+    }
+
+    // Delete every other key
+    for (0..10) |i| {
+        const key = std.fmt.bufPrint(&buf, "key{d:03}", .{i * 2}) catch unreachable;
+        try tree.delete(key);
+    }
+
+    // Verify deleted keys are gone
+    for (0..10) |i| {
+        const key = std.fmt.bufPrint(&buf, "key{d:03}", .{i * 2}) catch unreachable;
+        const val = try tree.get(key);
+        try std.testing.expect(val == null);
+    }
+
+    // Verify remaining keys still exist
+    for (0..10) |i| {
+        const key = std.fmt.bufPrint(&buf, "key{d:03}", .{i * 2 + 1}) catch unreachable;
+        const val = try tree.get(key);
+        try std.testing.expect(val != null);
+    }
+}
+
+test "btree delete and reinsert" {
+    const allocator = std.testing.allocator;
+
+    const vfs = @import("vfs.zig");
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const path = "/tmp/lattice_btree_test_delete_reinsert.db";
+    vfs_impl.delete(path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 65536);
+    defer bp.deinit();
+
+    var tree = try BTree.init(allocator, &bp);
+
+    // Insert key
+    try tree.insert("key1", "value1");
+    try std.testing.expect((try tree.get("key1")) != null);
+
+    // Delete key
+    try tree.delete("key1");
+    try std.testing.expect((try tree.get("key1")) == null);
+
+    // Reinsert with different value
+    try tree.insert("key1", "value2");
+    const val = try tree.get("key1");
+    try std.testing.expect(val != null);
+    try std.testing.expectEqualStrings("value2", val.?);
 }

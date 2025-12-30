@@ -87,17 +87,13 @@ pub const LabelIndex = struct {
     }
 
     /// Remove a label from a node
-    /// NOTE: B+Tree delete not yet implemented, this is a no-op
     pub fn remove(self: *Self, label_id: SymbolId, node_id: NodeId) LabelIndexError!void {
-        _ = self;
-        _ = label_id;
-        _ = node_id;
-        // TODO: Implement when B+Tree delete is available
-        // const key = LabelKey{ .label_id = label_id, .node_id = node_id };
-        // const key_bytes = key.toBytes();
-        // self.tree.delete(&key_bytes) catch |err| {
-        //     return mapBTreeError(err);
-        // };
+        const key = LabelKey{ .label_id = label_id, .node_id = node_id };
+        const key_bytes = key.toBytes();
+
+        self.tree.delete(&key_bytes) catch |err| {
+            return mapBTreeError(err);
+        };
     }
 
     /// Check if a node has a label
@@ -186,7 +182,7 @@ test "label index add and check" {
     try std.testing.expect(!index.hasLabel(label_employee, node2));
 }
 
-test "label index remove (stubbed)" {
+test "label index remove" {
     const allocator = std.testing.allocator;
 
     const vfs = @import("../storage/vfs.zig");
@@ -218,10 +214,10 @@ test "label index remove (stubbed)" {
     try index.add(label, node);
     try std.testing.expect(index.hasLabel(label, node));
 
-    // NOTE: remove is a no-op until B+Tree delete is implemented
+    // Remove the label
     try index.remove(label, node);
-    // Label still exists because remove is stubbed
-    try std.testing.expect(index.hasLabel(label, node));
+    // Label should no longer exist
+    try std.testing.expect(!index.hasLabel(label, node));
 }
 
 test "label index add multiple" {

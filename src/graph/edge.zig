@@ -189,18 +189,40 @@ pub const EdgeStore = struct {
     }
 
     /// Delete an edge
-    /// NOTE: B+Tree delete not yet implemented, this is a no-op
+    /// Uses double-delete pattern: removes both outgoing and incoming entries
     pub fn delete(
         self: *Self,
         source: NodeId,
         target: NodeId,
         edge_type: SymbolId,
     ) EdgeError!void {
-        _ = self;
-        _ = source;
-        _ = target;
-        _ = edge_type;
-        // TODO: Implement when B+Tree delete is available
+        // Delete outgoing key (source, outgoing, type, target)
+        const outgoing_key = EdgeKey{
+            .source = source,
+            .direction = .outgoing,
+            .edge_type = edge_type,
+            .target = target,
+        };
+        const outgoing_bytes = outgoing_key.toBytes();
+
+        self.tree.delete(&outgoing_bytes) catch |err| {
+            return mapBTreeError(err);
+        };
+
+        // Delete incoming key (target, incoming, type, source)
+        const incoming_key = EdgeKey{
+            .source = target,
+            .direction = .incoming,
+            .edge_type = edge_type,
+            .target = source,
+        };
+        const incoming_bytes = incoming_key.toBytes();
+
+        self.tree.delete(&incoming_bytes) catch |err| {
+            // Outgoing already deleted but incoming failed - inconsistent state
+            // In production, this would need proper transaction rollback
+            return mapBTreeError(err);
+        };
     }
 
     /// Check if an edge exists
@@ -511,4 +533,54 @@ test "edge key serialization" {
     try std.testing.expectEqual(key.direction, parsed.direction);
     try std.testing.expectEqual(key.edge_type, parsed.edge_type);
     try std.testing.expectEqual(key.target, parsed.target);
+}
+
+test "edge store delete" {
+    const allocator = std.testing.allocator;
+
+    const vfs = @import("../storage/vfs.zig");
+    const buffer_pool = @import("../storage/buffer_pool.zig");
+    const page_manager = @import("../storage/page_manager.zig");
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_edge_delete_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try buffer_pool.BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var tree = try BTree.init(allocator, &bp);
+
+    var store = EdgeStore.init(allocator, &tree);
+
+    const edge_type: SymbolId = 1000;
+
+    // Create an edge
+    try store.create(1, 2, edge_type, &[_]Property{});
+    try std.testing.expect(store.exists(1, 2, edge_type));
+
+    // Verify both outgoing and incoming keys exist
+    const outgoing_key = EdgeKey{ .source = 1, .direction = .outgoing, .edge_type = edge_type, .target = 2 };
+    const incoming_key = EdgeKey{ .source = 2, .direction = .incoming, .edge_type = edge_type, .target = 1 };
+    try std.testing.expect((try tree.get(&outgoing_key.toBytes())) != null);
+    try std.testing.expect((try tree.get(&incoming_key.toBytes())) != null);
+
+    // Delete the edge
+    try store.delete(1, 2, edge_type);
+    try std.testing.expect(!store.exists(1, 2, edge_type));
+
+    // Verify both keys are removed (double-delete)
+    try std.testing.expect((try tree.get(&outgoing_key.toBytes())) == null);
+    try std.testing.expect((try tree.get(&incoming_key.toBytes())) == null);
+
+    // Deleting again should fail with NotFound
+    try std.testing.expectError(EdgeError.NotFound, store.delete(1, 2, edge_type));
 }

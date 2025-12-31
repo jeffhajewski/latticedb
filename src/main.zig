@@ -25,6 +25,7 @@ pub const storage = struct {
 // Vector search
 pub const vector = struct {
     pub const hnsw = @import("vector/hnsw.zig");
+    pub const storage = @import("vector/storage.zig");
 };
 
 // Full-text search
@@ -102,7 +103,12 @@ pub const TxnError = transaction.manager.TxnError;
 pub const IsolationLevel = transaction.manager.IsolationLevel;
 
 pub const HnswConfig = vector.hnsw.HnswConfig;
+pub const HnswIndex = vector.hnsw.HnswIndex;
+pub const HnswError = vector.hnsw.HnswError;
+pub const SearchResult = vector.hnsw.SearchResult;
 pub const DistanceMetric = vector.hnsw.DistanceMetric;
+pub const VectorStorage = vector.storage.VectorStorage;
+pub const VectorStorageError = vector.storage.VectorStorageError;
 
 pub const SymbolTable = graph.symbols.SymbolTable;
 pub const SymbolId = graph.symbols.SymbolId;

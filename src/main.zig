@@ -26,6 +26,7 @@ pub const storage = struct {
 pub const vector = struct {
     pub const hnsw = @import("vector/hnsw.zig");
     pub const storage = @import("vector/storage.zig");
+    pub const embedding = @import("vector/embedding.zig");
 };
 
 // Full-text search
@@ -109,6 +110,11 @@ pub const SearchResult = vector.hnsw.SearchResult;
 pub const DistanceMetric = vector.hnsw.DistanceMetric;
 pub const VectorStorage = vector.storage.VectorStorage;
 pub const VectorStorageError = vector.storage.VectorStorageError;
+
+pub const EmbeddingClient = vector.embedding.EmbeddingClient;
+pub const EmbeddingConfig = vector.embedding.Config;
+pub const EmbeddingError = vector.embedding.EmbeddingError;
+pub const EmbeddingApiFormat = vector.embedding.ApiFormat;
 
 pub const SymbolTable = graph.symbols.SymbolTable;
 pub const SymbolId = graph.symbols.SymbolId;

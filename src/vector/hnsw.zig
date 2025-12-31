@@ -12,6 +12,7 @@ const types = @import("../core/types.zig");
 const page = @import("../storage/page.zig");
 const buffer_pool = @import("../storage/buffer_pool.zig");
 const storage = @import("storage.zig");
+const simd_distance = @import("distance.zig");
 
 const Allocator = std.mem.Allocator;
 const PageId = types.PageId;
@@ -88,52 +89,24 @@ pub const HnswStats = struct {
     memory_bytes: u64,
 };
 
-/// Calculate Euclidean distance between two vectors
-pub fn euclideanDistance(a: []const f32, b: []const f32) f32 {
-    std.debug.assert(a.len == b.len);
-    var sum: f32 = 0.0;
-    for (a, b) |ai, bi| {
-        const diff = ai - bi;
-        sum += diff * diff;
-    }
-    return @sqrt(sum);
-}
+/// Calculate Euclidean distance between two vectors (SIMD-optimized)
+pub const euclideanDistance = simd_distance.euclideanDistance;
 
-/// Calculate cosine distance between two vectors
-pub fn cosineDistance(a: []const f32, b: []const f32) f32 {
-    std.debug.assert(a.len == b.len);
-    var dot: f32 = 0.0;
-    var norm_a: f32 = 0.0;
-    var norm_b: f32 = 0.0;
-    for (a, b) |ai, bi| {
-        dot += ai * bi;
-        norm_a += ai * ai;
-        norm_b += bi * bi;
-    }
-    const denom = @sqrt(norm_a) * @sqrt(norm_b);
-    if (denom == 0.0) return 1.0;
-    return 1.0 - (dot / denom);
-}
+/// Calculate cosine distance between two vectors (SIMD-optimized)
+pub const cosineDistance = simd_distance.cosineDistance;
 
-/// Calculate negative inner product (for similarity: lower is better)
-pub fn innerProductDistance(a: []const f32, b: []const f32) f32 {
-    std.debug.assert(a.len == b.len);
-    var dot: f32 = 0.0;
-    for (a, b) |ai, bi| {
-        dot += ai * bi;
-    }
-    return -dot; // Negative so lower = more similar
-}
+/// Calculate negative inner product (SIMD-optimized)
+pub const innerProductDistance = simd_distance.innerProductDistance;
 
 /// Distance function type
 pub const DistanceFn = *const fn ([]const f32, []const f32) f32;
 
-/// Get the distance function for a metric
+/// Get the distance function for a metric (returns SIMD-optimized version)
 pub fn getDistanceFn(metric: DistanceMetric) DistanceFn {
     return switch (metric) {
-        .euclidean => euclideanDistance,
-        .cosine => cosineDistance,
-        .inner_product => innerProductDistance,
+        .euclidean => simd_distance.euclideanDistance,
+        .cosine => simd_distance.cosineDistance,
+        .inner_product => simd_distance.innerProductDistance,
     };
 }
 

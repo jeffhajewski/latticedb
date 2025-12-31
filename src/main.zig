@@ -27,6 +27,7 @@ pub const vector = struct {
     pub const hnsw = @import("vector/hnsw.zig");
     pub const storage = @import("vector/storage.zig");
     pub const embedding = @import("vector/embedding.zig");
+    pub const distance = @import("vector/distance.zig");
 };
 
 // Full-text search

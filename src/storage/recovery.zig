@@ -5,12 +5,15 @@
 //! uncommitted transactions are ignored (their changes weren't applied).
 
 const std = @import("std");
-const wal_mod = @import("wal.zig");
-const page_manager = @import("page_manager.zig");
-const buffer_pool = @import("buffer_pool.zig");
-const page = @import("page.zig");
+const lattice = @import("lattice");
 
 const Allocator = std.mem.Allocator;
+
+const wal_mod = lattice.storage.wal;
+const page_manager = lattice.storage.page_manager;
+const buffer_pool = lattice.storage.buffer_pool;
+const page = lattice.storage.page;
+
 const WalManager = wal_mod.WalManager;
 const WalIterator = wal_mod.WalIterator;
 const WalRecord = wal_mod.WalRecord;

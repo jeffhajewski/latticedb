@@ -4,13 +4,15 @@
 //! Keys and values are variable-length byte slices.
 
 const std = @import("std");
-const types = @import("../core/types.zig");
-const page = @import("page.zig");
-const buffer_pool = @import("buffer_pool.zig");
-const page_manager = @import("page_manager.zig");
+const lattice = @import("lattice");
 
 const Allocator = std.mem.Allocator;
 const Order = std.math.Order;
+
+const types = lattice.core.types;
+const page = lattice.storage.page;
+const buffer_pool = lattice.storage.buffer_pool;
+const locking = lattice.concurrency.locking;
 
 pub const PageId = types.PageId;
 pub const NULL_PAGE = types.NULL_PAGE;
@@ -18,7 +20,7 @@ const PageHeader = page.PageHeader;
 const PageType = page.PageType;
 const BufferPool = buffer_pool.BufferPool;
 const BufferFrame = buffer_pool.BufferFrame;
-const LatchMode = @import("../concurrency/locking.zig").LatchMode;
+const LatchMode = locking.LatchMode;
 
 /// B+Tree errors
 pub const BTreeError = error{
@@ -916,7 +918,8 @@ pub const BTree = struct {
 test "btree create empty" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("vfs.zig");
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();
 
@@ -939,7 +942,8 @@ test "btree create empty" {
 test "btree insert and get" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("vfs.zig");
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();
 
@@ -973,7 +977,8 @@ test "btree insert and get" {
 test "btree multiple inserts" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("vfs.zig");
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();
 
@@ -1007,7 +1012,8 @@ test "btree multiple inserts" {
 test "btree duplicate key error" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("vfs.zig");
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();
 
@@ -1032,7 +1038,8 @@ test "btree duplicate key error" {
 test "btree range scan" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("vfs.zig");
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();
 
@@ -1069,7 +1076,8 @@ test "btree range scan" {
 test "btree leaf split" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("vfs.zig");
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();
 
@@ -1106,7 +1114,8 @@ test "btree leaf split" {
 test "btree delete single key" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("vfs.zig");
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();
 
@@ -1148,7 +1157,8 @@ test "btree delete single key" {
 test "btree delete non-existent key" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("vfs.zig");
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();
 
@@ -1179,7 +1189,8 @@ test "btree delete non-existent key" {
 test "btree delete multiple keys" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("vfs.zig");
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();
 
@@ -1228,7 +1239,8 @@ test "btree delete multiple keys" {
 test "btree delete and reinsert" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("vfs.zig");
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();
 

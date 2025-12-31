@@ -11,6 +11,9 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
 
+    // Add self-import so internal files can use @import("lattice")
+    lib_module.addImport("lattice", lib_module);
+
     // Core static library
     const lib = b.addLibrary(.{
         .name = "lattice",
@@ -57,6 +60,9 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = optimize,
     });
+
+    // Add self-import for tests
+    lib_test_module.addImport("lattice", lib_test_module);
 
     // Library tests (tests within src/)
     const lib_tests = b.addTest(.{

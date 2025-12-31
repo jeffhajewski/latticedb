@@ -4,12 +4,15 @@
 //! This bounds recovery time - we only need to replay from checkpoint_lsn forward.
 
 const std = @import("std");
-const buffer_pool = @import("buffer_pool.zig");
-const page_manager = @import("page_manager.zig");
-const wal_mod = @import("wal.zig");
-const locking = @import("../concurrency/locking.zig");
+const lattice = @import("lattice");
 
 const Allocator = std.mem.Allocator;
+
+const buffer_pool = lattice.storage.buffer_pool;
+const page_manager = lattice.storage.page_manager;
+const wal_mod = lattice.storage.wal;
+const locking = lattice.concurrency.locking;
+
 const BufferPool = buffer_pool.BufferPool;
 const PageManager = page_manager.PageManager;
 const WalManager = wal_mod.WalManager;

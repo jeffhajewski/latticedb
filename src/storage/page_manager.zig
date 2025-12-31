@@ -4,11 +4,13 @@
 //! goes through this module, which handles checksums and the freelist.
 
 const std = @import("std");
-const vfs = @import("vfs.zig");
-const page = @import("page.zig");
-const types = @import("../core/types.zig");
+const lattice = @import("lattice");
 
 const Allocator = std.mem.Allocator;
+const vfs = lattice.storage.vfs;
+const page = lattice.storage.page;
+const types = lattice.core.types;
+
 const File = vfs.File;
 const Vfs = vfs.Vfs;
 const VfsError = vfs.VfsError;

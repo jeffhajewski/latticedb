@@ -15,18 +15,21 @@
 //! This enables efficient traversal in both directions.
 
 const std = @import("std");
-const btree = @import("../storage/btree.zig");
-const types = @import("../core/types.zig");
-const symbols = @import("symbols.zig");
-const node = @import("node.zig");
+const lattice = @import("lattice");
 
 const Allocator = std.mem.Allocator;
+
+const btree = lattice.storage.btree;
+const types = lattice.core.types;
+const symbols = lattice.graph.symbols;
+const node_mod = lattice.graph.node;
+
 const BTree = btree.BTree;
 const BTreeError = btree.BTreeError;
 const NodeId = types.NodeId;
 const PropertyValue = types.PropertyValue;
 const SymbolId = symbols.SymbolId;
-const Property = node.Property;
+const Property = node_mod.Property;
 
 /// Edge direction
 pub const Direction = enum(u8) {

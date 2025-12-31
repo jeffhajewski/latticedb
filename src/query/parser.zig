@@ -3,7 +3,9 @@
 //! Parses Cypher queries with vector and full-text search extensions.
 
 const std = @import("std");
-const types = @import("../core/types.zig");
+const lattice = @import("lattice");
+
+const types = lattice.core.types;
 
 /// Query type classification
 pub const QueryType = enum {

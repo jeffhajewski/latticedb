@@ -11,11 +11,14 @@
 //!   - properties: [PropertyEntry] × num_properties
 
 const std = @import("std");
-const btree = @import("../storage/btree.zig");
-const types = @import("../core/types.zig");
-const symbols = @import("symbols.zig");
+const lattice = @import("lattice");
 
 const Allocator = std.mem.Allocator;
+
+const btree = lattice.storage.btree;
+const types = lattice.core.types;
+const symbols = lattice.graph.symbols;
+
 const BTree = btree.BTree;
 const BTreeError = btree.BTreeError;
 const NodeId = types.NodeId;

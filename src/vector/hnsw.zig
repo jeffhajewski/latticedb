@@ -8,20 +8,24 @@
 //! - Search proceeds from top layer down, using greedy traversal
 
 const std = @import("std");
-const types = @import("../core/types.zig");
-const page = @import("../storage/page.zig");
-const buffer_pool = @import("../storage/buffer_pool.zig");
-const storage = @import("storage.zig");
-const simd_distance = @import("distance.zig");
+const lattice = @import("lattice");
 
 const Allocator = std.mem.Allocator;
+
+const types = lattice.core.types;
+const page = lattice.storage.page;
+const buffer_pool = lattice.storage.buffer_pool;
+const vec_storage = lattice.vector.storage;
+const simd_distance = lattice.vector.distance;
+const locking = lattice.concurrency.locking;
+
 const PageId = types.PageId;
 const NULL_PAGE = types.NULL_PAGE;
 const PageHeader = page.PageHeader;
 const BufferPool = buffer_pool.BufferPool;
-const VectorStorage = storage.VectorStorage;
-const VectorLocation = storage.VectorLocation;
-const LatchMode = @import("../concurrency/locking.zig").LatchMode;
+const VectorStorage = vec_storage.VectorStorage;
+const VectorLocation = vec_storage.VectorLocation;
+const LatchMode = locking.LatchMode;
 
 pub const NodeId = types.NodeId;
 pub const VectorDimension = types.VectorDimension;
@@ -752,8 +756,8 @@ test "inner product distance" {
 test "hnsw index init and stats" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("../storage/vfs.zig");
-    const page_manager = @import("../storage/page_manager.zig");
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
 
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();
@@ -792,8 +796,8 @@ test "hnsw index init and stats" {
 test "hnsw insert single vector" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("../storage/vfs.zig");
-    const page_manager = @import("../storage/page_manager.zig");
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
 
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();
@@ -835,8 +839,8 @@ test "hnsw insert single vector" {
 test "hnsw insert and search" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("../storage/vfs.zig");
-    const page_manager = @import("../storage/page_manager.zig");
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
 
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();
@@ -892,8 +896,8 @@ test "hnsw insert and search" {
 test "hnsw search empty index" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("../storage/vfs.zig");
-    const page_manager = @import("../storage/page_manager.zig");
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
 
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();

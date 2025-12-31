@@ -3,8 +3,10 @@
 //! Provides the stable C ABI interface for language bindings.
 
 const std = @import("std");
-const types = @import("../core/types.zig");
-const transaction = @import("../transaction/manager.zig");
+const lattice = @import("lattice");
+
+const types = lattice.core.types;
+const transaction = lattice.transaction.manager;
 
 /// Opaque database handle
 pub const Database = opaque {};

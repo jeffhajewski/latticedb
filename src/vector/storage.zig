@@ -8,17 +8,21 @@
 //!   - Vector data: [vector_id: u64][f32; dimensions] × vector_count
 
 const std = @import("std");
-const types = @import("../core/types.zig");
-const page = @import("../storage/page.zig");
-const buffer_pool = @import("../storage/buffer_pool.zig");
+const lattice = @import("lattice");
 
 const Allocator = std.mem.Allocator;
+
+const types = lattice.core.types;
+const page = lattice.storage.page;
+const buffer_pool = lattice.storage.buffer_pool;
+const locking = lattice.concurrency.locking;
+
 const PageId = types.PageId;
 const NULL_PAGE = types.NULL_PAGE;
 const PageHeader = page.PageHeader;
 const PageType = page.PageType;
 const BufferPool = buffer_pool.BufferPool;
-const LatchMode = @import("../concurrency/locking.zig").LatchMode;
+const LatchMode = locking.LatchMode;
 
 /// Vector storage errors
 pub const VectorStorageError = error{

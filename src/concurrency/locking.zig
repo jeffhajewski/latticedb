@@ -3,7 +3,9 @@
 //! Provides locking and latching for thread-safe operations.
 
 const std = @import("std");
-const types = @import("../core/types.zig");
+const lattice = @import("lattice");
+
+const types = lattice.core.types;
 
 pub const PageId = types.PageId;
 

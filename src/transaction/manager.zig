@@ -4,10 +4,13 @@
 //! Manages transaction lifecycle: begin, commit, abort, savepoints.
 
 const std = @import("std");
-const types = @import("../core/types.zig");
-const wal_mod = @import("../storage/wal.zig");
+const lattice = @import("lattice");
 
 const Allocator = std.mem.Allocator;
+
+const types = lattice.core.types;
+const wal_mod = lattice.storage.wal;
+
 const WalManager = wal_mod.WalManager;
 const WalRecordType = wal_mod.WalRecordType;
 const WalError = wal_mod.WalError;

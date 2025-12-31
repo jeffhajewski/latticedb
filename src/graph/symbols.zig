@@ -11,9 +11,11 @@
 //!   - 1000-65535: User-defined symbols
 
 const std = @import("std");
-const btree = @import("../storage/btree.zig");
+const lattice = @import("lattice");
 
 const Allocator = std.mem.Allocator;
+
+const btree = lattice.storage.btree;
 const BTree = btree.BTree;
 const BTreeError = btree.BTreeError;
 

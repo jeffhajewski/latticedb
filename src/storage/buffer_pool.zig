@@ -4,13 +4,16 @@
 //! dirty page tracking, and Clock eviction algorithm.
 
 const std = @import("std");
-const page_manager = @import("page_manager.zig");
-const page = @import("page.zig");
-const locking = @import("../concurrency/locking.zig");
-const types = @import("../core/types.zig");
+const lattice = @import("lattice");
 
 const Allocator = std.mem.Allocator;
 const Alignment = std.mem.Alignment;
+
+const page_manager = lattice.storage.page_manager;
+const page = lattice.storage.page;
+const locking = lattice.concurrency.locking;
+const types = lattice.core.types;
+
 const PageManager = page_manager.PageManager;
 const PageManagerError = page_manager.PageManagerError;
 const PageHeader = page.PageHeader;

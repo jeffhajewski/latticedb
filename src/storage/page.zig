@@ -3,7 +3,9 @@
 //! Defines page types, headers, and low-level page operations.
 
 const std = @import("std");
-const types = @import("../core/types.zig");
+const lattice = @import("lattice");
+
+const types = lattice.core.types;
 
 pub const PageId = types.PageId;
 pub const DEFAULT_PAGE_SIZE = types.DEFAULT_PAGE_SIZE;

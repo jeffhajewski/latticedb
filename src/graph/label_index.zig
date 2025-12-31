@@ -122,8 +122,109 @@ pub const LabelIndex = struct {
         }
     }
 
-    // TODO: Add range scan for getNodesByLabel(label_id) -> []NodeId
-    // This requires B+Tree range iteration which isn't implemented yet
+    /// Get all node IDs with a given label
+    /// Returns an allocated slice that the caller must free
+    pub fn getNodesByLabel(self: *Self, label_id: SymbolId) LabelIndexError![]NodeId {
+        // Create start and end keys for the range
+        // Start: (label_id, 0)
+        // End: (label_id + 1, 0) - exclusive
+        const start_key = LabelKey{ .label_id = label_id, .node_id = 0 };
+        const end_key = LabelKey{ .label_id = label_id +| 1, .node_id = 0 };
+
+        const start_bytes = start_key.toBytes();
+        const end_bytes = end_key.toBytes();
+
+        var iter = self.tree.range(&start_bytes, &end_bytes) catch |err| {
+            return mapBTreeError(err);
+        };
+        defer iter.deinit();
+
+        // Collect results
+        var results = std.ArrayList(NodeId).init(self.allocator);
+        errdefer results.deinit();
+
+        while (true) {
+            const entry = iter.next() catch |err| {
+                results.deinit();
+                return mapBTreeError(err);
+            };
+
+            if (entry) |e| {
+                const key = LabelKey.fromBytes(e.key);
+                // Verify we're still in the correct label range
+                if (key.label_id != label_id) break;
+                results.append(key.node_id) catch return LabelIndexError.OutOfMemory;
+            } else {
+                break;
+            }
+        }
+
+        return results.toOwnedSlice() catch return LabelIndexError.OutOfMemory;
+    }
+
+    /// Iterator for scanning nodes with a label (lazy evaluation)
+    pub const NodeIterator = struct {
+        tree_iter: btree.BTree.Iterator,
+        label_id: SymbolId,
+        done: bool,
+
+        /// Get the next node ID with this label
+        pub fn next(self: *NodeIterator) LabelIndexError!?NodeId {
+            if (self.done) return null;
+
+            const entry = self.tree_iter.next() catch |err| {
+                self.done = true;
+                return mapBTreeError(err);
+            };
+
+            if (entry) |e| {
+                const key = LabelKey.fromBytes(e.key);
+                // Check if we've moved past this label
+                if (key.label_id != self.label_id) {
+                    self.done = true;
+                    return null;
+                }
+                return key.node_id;
+            } else {
+                self.done = true;
+                return null;
+            }
+        }
+
+        /// Clean up iterator resources
+        pub fn deinit(self: *NodeIterator) void {
+            self.tree_iter.deinit();
+        }
+    };
+
+    /// Create an iterator for nodes with a given label (lazy evaluation)
+    pub fn iterNodesByLabel(self: *Self, label_id: SymbolId) LabelIndexError!NodeIterator {
+        const start_key = LabelKey{ .label_id = label_id, .node_id = 0 };
+        const start_bytes = start_key.toBytes();
+
+        // No end key - we check label_id in the iterator
+        const iter = self.tree.range(&start_bytes, null) catch |err| {
+            return mapBTreeError(err);
+        };
+
+        return NodeIterator{
+            .tree_iter = iter,
+            .label_id = label_id,
+            .done = false,
+        };
+    }
+
+    /// Count nodes with a given label
+    pub fn countNodesByLabel(self: *Self, label_id: SymbolId) LabelIndexError!u64 {
+        var iter = try self.iterNodesByLabel(label_id);
+        defer iter.deinit();
+
+        var count: u64 = 0;
+        while (try iter.next() != null) {
+            count += 1;
+        }
+        return count;
+    }
 };
 
 /// Map B+Tree errors to LabelIndex errors
@@ -142,9 +243,9 @@ fn mapBTreeError(err: BTreeError) LabelIndexError {
 test "label index add and check" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("../storage/vfs.zig");
-    const buffer_pool = @import("../storage/buffer_pool.zig");
-    const page_manager = @import("../storage/page_manager.zig");
+    const vfs = lattice.storage.vfs;
+    const buffer_pool = lattice.storage.buffer_pool;
+    const page_manager = lattice.storage.page_manager;
 
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();
@@ -188,9 +289,9 @@ test "label index add and check" {
 test "label index remove" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("../storage/vfs.zig");
-    const buffer_pool = @import("../storage/buffer_pool.zig");
-    const page_manager = @import("../storage/page_manager.zig");
+    const vfs = lattice.storage.vfs;
+    const buffer_pool = lattice.storage.buffer_pool;
+    const page_manager = lattice.storage.page_manager;
 
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();
@@ -226,9 +327,9 @@ test "label index remove" {
 test "label index add multiple" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("../storage/vfs.zig");
-    const buffer_pool = @import("../storage/buffer_pool.zig");
-    const page_manager = @import("../storage/page_manager.zig");
+    const vfs = lattice.storage.vfs;
+    const buffer_pool = lattice.storage.buffer_pool;
+    const page_manager = lattice.storage.page_manager;
 
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();

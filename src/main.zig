@@ -82,6 +82,8 @@ pub const BufferFrame = storage.buffer_pool.BufferFrame;
 
 pub const BTree = storage.btree.BTree;
 pub const BTreeError = storage.btree.BTreeError;
+pub const BTreeIterator = storage.btree.BTree.Iterator;
+pub const BTreeEntry = storage.btree.Entry;
 
 pub const WalManager = storage.wal.WalManager;
 pub const WalError = storage.wal.WalError;
@@ -130,10 +132,12 @@ pub const Edge = graph.edge.Edge;
 pub const EdgeError = graph.edge.EdgeError;
 pub const EdgeKey = graph.edge.EdgeKey;
 pub const Direction = graph.edge.Direction;
+pub const EdgeIterator = graph.edge.EdgeStore.EdgeIterator;
 
 pub const LabelIndex = graph.label_index.LabelIndex;
 pub const LabelKey = graph.label_index.LabelKey;
 pub const LabelIndexError = graph.label_index.LabelIndexError;
+pub const LabelNodeIterator = graph.label_index.LabelIndex.NodeIterator;
 
 // Version information
 pub const VERSION = "0.1.0";

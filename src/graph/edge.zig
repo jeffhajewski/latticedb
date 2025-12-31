@@ -247,11 +247,228 @@ pub const EdgeStore = struct {
         return result != null;
     }
 
-    // TODO: Add range queries for:
-    // - getOutgoing(node_id) -> all outgoing edges
-    // - getIncoming(node_id) -> all incoming edges
-    // - getOutgoingByType(node_id, type) -> outgoing edges of specific type
-    // - getIncomingByType(node_id, type) -> incoming edges of specific type
+    // ========================================================================
+    // Range Queries
+    // ========================================================================
+
+    /// Edge iterator for range scans
+    pub const EdgeIterator = struct {
+        tree_iter: btree.BTree.Iterator,
+        allocator: Allocator,
+        done: bool,
+
+        /// Get the next edge in the range
+        /// Caller owns the returned Edge and must call deinit() on it
+        pub fn next(self: *EdgeIterator) EdgeError!?Edge {
+            if (self.done) return null;
+
+            const entry = self.tree_iter.next() catch |err| {
+                self.done = true;
+                return mapBTreeError(err);
+            };
+
+            if (entry) |e| {
+                const key = EdgeKey.fromBytes(e.key);
+                // Reconstruct source/target based on direction
+                const source = if (key.direction == .outgoing) key.source else key.target;
+                const target = if (key.direction == .outgoing) key.target else key.source;
+                const edge = deserializeEdge(self.allocator, source, target, key.edge_type, e.value) catch {
+                    return EdgeError.InvalidData;
+                };
+                return edge;
+            } else {
+                self.done = true;
+                return null;
+            }
+        }
+
+        /// Clean up iterator resources
+        pub fn deinit(self: *EdgeIterator) void {
+            self.tree_iter.deinit();
+        }
+    };
+
+    /// Get all outgoing edges from a node
+    pub fn getOutgoing(self: *Self, node_id: NodeId) EdgeError!EdgeIterator {
+        // Range: (node_id, OUTGOING, 0, 0) to (node_id, INCOMING, 0, 0)
+        const start_key = EdgeKey{
+            .source = node_id,
+            .direction = .outgoing,
+            .edge_type = 0,
+            .target = 0,
+        };
+        const end_key = EdgeKey{
+            .source = node_id,
+            .direction = .incoming, // Stop before incoming edges
+            .edge_type = 0,
+            .target = 0,
+        };
+
+        const start_bytes = start_key.toBytes();
+        const end_bytes = end_key.toBytes();
+
+        const iter = self.tree.range(&start_bytes, &end_bytes) catch |err| {
+            return mapBTreeError(err);
+        };
+
+        return EdgeIterator{
+            .tree_iter = iter,
+            .allocator = self.allocator,
+            .done = false,
+        };
+    }
+
+    /// Get all incoming edges to a node
+    pub fn getIncoming(self: *Self, node_id: NodeId) EdgeError!EdgeIterator {
+        // Range: (node_id, INCOMING, 0, 0) to (node_id + 1, OUTGOING, 0, 0)
+        const start_key = EdgeKey{
+            .source = node_id,
+            .direction = .incoming,
+            .edge_type = 0,
+            .target = 0,
+        };
+        const end_key = EdgeKey{
+            .source = node_id +| 1,
+            .direction = .outgoing,
+            .edge_type = 0,
+            .target = 0,
+        };
+
+        const start_bytes = start_key.toBytes();
+        const end_bytes = end_key.toBytes();
+
+        const iter = self.tree.range(&start_bytes, &end_bytes) catch |err| {
+            return mapBTreeError(err);
+        };
+
+        return EdgeIterator{
+            .tree_iter = iter,
+            .allocator = self.allocator,
+            .done = false,
+        };
+    }
+
+    /// Get outgoing edges of a specific type
+    pub fn getOutgoingByType(self: *Self, node_id: NodeId, edge_type: SymbolId) EdgeError!EdgeIterator {
+        // Range: (node_id, OUTGOING, type, 0) to (node_id, OUTGOING, type + 1, 0)
+        const start_key = EdgeKey{
+            .source = node_id,
+            .direction = .outgoing,
+            .edge_type = edge_type,
+            .target = 0,
+        };
+        const end_key = EdgeKey{
+            .source = node_id,
+            .direction = .outgoing,
+            .edge_type = edge_type +| 1,
+            .target = 0,
+        };
+
+        const start_bytes = start_key.toBytes();
+        const end_bytes = end_key.toBytes();
+
+        const iter = self.tree.range(&start_bytes, &end_bytes) catch |err| {
+            return mapBTreeError(err);
+        };
+
+        return EdgeIterator{
+            .tree_iter = iter,
+            .allocator = self.allocator,
+            .done = false,
+        };
+    }
+
+    /// Get incoming edges of a specific type
+    pub fn getIncomingByType(self: *Self, node_id: NodeId, edge_type: SymbolId) EdgeError!EdgeIterator {
+        // Range: (node_id, INCOMING, type, 0) to (node_id, INCOMING, type + 1, 0)
+        const start_key = EdgeKey{
+            .source = node_id,
+            .direction = .incoming,
+            .edge_type = edge_type,
+            .target = 0,
+        };
+        const end_key = EdgeKey{
+            .source = node_id,
+            .direction = .incoming,
+            .edge_type = edge_type +| 1,
+            .target = 0,
+        };
+
+        const start_bytes = start_key.toBytes();
+        const end_bytes = end_key.toBytes();
+
+        const iter = self.tree.range(&start_bytes, &end_bytes) catch |err| {
+            return mapBTreeError(err);
+        };
+
+        return EdgeIterator{
+            .tree_iter = iter,
+            .allocator = self.allocator,
+            .done = false,
+        };
+    }
+
+    /// Get all edges (both directions) for a node
+    pub fn getAllEdges(self: *Self, node_id: NodeId) EdgeError!EdgeIterator {
+        // Range: (node_id, 0, 0, 0) to (node_id + 1, 0, 0, 0)
+        const start_key = EdgeKey{
+            .source = node_id,
+            .direction = .outgoing,
+            .edge_type = 0,
+            .target = 0,
+        };
+        const end_key = EdgeKey{
+            .source = node_id +| 1,
+            .direction = .outgoing,
+            .edge_type = 0,
+            .target = 0,
+        };
+
+        const start_bytes = start_key.toBytes();
+        const end_bytes = end_key.toBytes();
+
+        const iter = self.tree.range(&start_bytes, &end_bytes) catch |err| {
+            return mapBTreeError(err);
+        };
+
+        return EdgeIterator{
+            .tree_iter = iter,
+            .allocator = self.allocator,
+            .done = false,
+        };
+    }
+
+    /// Count outgoing edges from a node
+    pub fn countOutgoing(self: *Self, node_id: NodeId) EdgeError!u64 {
+        var iter = try self.getOutgoing(node_id);
+        defer iter.deinit();
+
+        var count: u64 = 0;
+        while (true) {
+            if (try iter.next()) |edge| {
+                var e = edge;
+                e.deinit(self.allocator);
+                count += 1;
+            } else break;
+        }
+        return count;
+    }
+
+    /// Count incoming edges to a node
+    pub fn countIncoming(self: *Self, node_id: NodeId) EdgeError!u64 {
+        var iter = try self.getIncoming(node_id);
+        defer iter.deinit();
+
+        var count: u64 = 0;
+        while (true) {
+            if (try iter.next()) |edge| {
+                var e = edge;
+                e.deinit(self.allocator);
+                count += 1;
+            } else break;
+        }
+        return count;
+    }
 };
 
 // ============================================================================
@@ -391,9 +608,9 @@ fn mapBTreeError(err: BTreeError) EdgeError {
 test "edge store create and get" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("../storage/vfs.zig");
-    const buffer_pool = @import("../storage/buffer_pool.zig");
-    const page_manager = @import("../storage/page_manager.zig");
+    const vfs = lattice.storage.vfs;
+    const buffer_pool = lattice.storage.buffer_pool;
+    const page_manager = lattice.storage.page_manager;
 
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();
@@ -436,9 +653,9 @@ test "edge store create and get" {
 test "edge store double-write" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("../storage/vfs.zig");
-    const buffer_pool = @import("../storage/buffer_pool.zig");
-    const page_manager = @import("../storage/page_manager.zig");
+    const vfs = lattice.storage.vfs;
+    const buffer_pool = lattice.storage.buffer_pool;
+    const page_manager = lattice.storage.page_manager;
 
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();
@@ -489,9 +706,9 @@ test "edge store double-write" {
 test "edge store exists" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("../storage/vfs.zig");
-    const buffer_pool = @import("../storage/buffer_pool.zig");
-    const page_manager = @import("../storage/page_manager.zig");
+    const vfs = lattice.storage.vfs;
+    const buffer_pool = lattice.storage.buffer_pool;
+    const page_manager = lattice.storage.page_manager;
 
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();
@@ -541,9 +758,9 @@ test "edge key serialization" {
 test "edge store delete" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("../storage/vfs.zig");
-    const buffer_pool = @import("../storage/buffer_pool.zig");
-    const page_manager = @import("../storage/page_manager.zig");
+    const vfs = lattice.storage.vfs;
+    const buffer_pool = lattice.storage.buffer_pool;
+    const page_manager = lattice.storage.page_manager;
 
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();

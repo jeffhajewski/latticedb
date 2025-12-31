@@ -177,9 +177,9 @@ fn mapBTreeError(err: BTreeError) SymbolError {
 test "symbol table intern and lookup" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("../storage/vfs.zig");
-    const buffer_pool = @import("../storage/buffer_pool.zig");
-    const page_manager = @import("../storage/page_manager.zig");
+    const vfs = lattice.storage.vfs;
+    const buffer_pool = lattice.storage.buffer_pool;
+    const page_manager = lattice.storage.page_manager;
 
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();
@@ -233,9 +233,9 @@ test "symbol table intern and lookup" {
 test "symbol table not found" {
     const allocator = std.testing.allocator;
 
-    const vfs = @import("../storage/vfs.zig");
-    const buffer_pool = @import("../storage/buffer_pool.zig");
-    const page_manager = @import("../storage/page_manager.zig");
+    const vfs = lattice.storage.vfs;
+    const buffer_pool = lattice.storage.buffer_pool;
+    const page_manager = lattice.storage.page_manager;
 
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();

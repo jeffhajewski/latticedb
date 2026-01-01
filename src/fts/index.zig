@@ -21,6 +21,7 @@ const dictionary_mod = @import("dictionary.zig");
 const posting_mod = @import("posting.zig");
 const scorer_mod = @import("scorer.zig");
 const fuzzy_mod = @import("fuzzy.zig");
+const stopwords_mod = @import("stopwords.zig");
 
 const Tokenizer = tokenizer_mod.Tokenizer;
 const TokenizerConfig = tokenizer_mod.TokenizerConfig;
@@ -1075,8 +1076,10 @@ pub const FtsIndex = struct {
                     normalized[j] = std.ascii.toLower(c);
                 }
 
-                // Check stop words
-                if (self.config.tokenizer.remove_stop_words and tokenizer_mod.isStopWord(normalized)) {
+                // Check stop words (language-aware)
+                if (self.config.tokenizer.remove_stop_words and
+                    stopwords_mod.isStopWord(normalized, self.config.tokenizer.language))
+                {
                     self.allocator.free(normalized);
                     continue;
                 }

@@ -6,6 +6,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const stemmer = @import("stemmer.zig");
+const stopwords = @import("stopwords.zig");
 
 /// Token type classification
 pub const TokenType = enum {
@@ -101,28 +102,13 @@ pub const TermEntry = struct {
 // Stop Words
 // ============================================================================
 
-/// Common English stop words (filtered during tokenization)
-pub const ENGLISH_STOP_WORDS = [_][]const u8{
-    "a",     "an",    "and",   "are",   "as",    "at",    "be",    "by",
-    "for",   "from",  "has",   "have",  "he",    "in",    "is",    "it",
-    "its",   "of",    "on",    "or",    "that",  "the",   "to",    "was",
-    "were",  "will",  "with",  "this",  "but",   "they",  "had",   "not",
-    "you",   "which", "can",   "if",    "their", "said",  "each",  "she",
-    "do",    "how",   "we",    "so",    "up",    "out",   "about", "who",
-    "been",  "would", "there", "what",  "when",  "your",  "all",   "no",
-    "just",  "more",  "some",  "into",  "than",  "could", "other", "then",
-    "only",  "over",  "such",  "our",   "also",  "may",   "these", "after",
-    "any",   "most",  "very",  "where", "much",  "should","those", "being",
-};
+/// Re-export English stop words for backwards compatibility
+pub const ENGLISH_STOP_WORDS = stopwords.ENGLISH_STOP_WORDS;
 
-/// Check if a token is a stop word
+/// Check if a token is a stop word (English only, for backwards compatibility)
+/// Use stopwords.isStopWord(token, language) for multi-language support
 pub fn isStopWord(token: []const u8) bool {
-    for (&ENGLISH_STOP_WORDS) |stop_word| {
-        if (std.mem.eql(u8, token, stop_word)) {
-            return true;
-        }
-    }
-    return false;
+    return stopwords.isStopWord(token, .english);
 }
 
 // ============================================================================
@@ -194,12 +180,12 @@ pub const Tokenizer = struct {
                     var lower_buf: [64]u8 = undefined;
                     if (token_len <= 64) {
                         const lower = toLowerSlice(token_text, &lower_buf);
-                        if (isStopWord(lower)) {
+                        if (stopwords.isStopWord(lower, self.config.language)) {
                             continue;
                         }
                     }
                 } else {
-                    if (isStopWord(token_text)) {
+                    if (stopwords.isStopWord(token_text, self.config.language)) {
                         continue;
                     }
                 }
@@ -303,12 +289,23 @@ pub fn normalize(allocator: Allocator, text: []const u8) ![]u8 {
     return result;
 }
 
-/// Normalize and optionally stem a token
+/// Normalize and optionally stem a token (English only, for backwards compatibility)
 /// Returns the processed token in the output buffer, and length
 pub fn normalizeAndStem(
     text: []const u8,
     buf: *[64]u8,
     use_stemming: bool,
+) []const u8 {
+    return normalizeAndStemWithLanguage(text, buf, use_stemming, .english);
+}
+
+/// Normalize and optionally stem a token with language-aware processing
+/// Returns the processed token in the output buffer
+pub fn normalizeAndStemWithLanguage(
+    text: []const u8,
+    buf: *[64]u8,
+    use_stemming: bool,
+    language: Language,
 ) []const u8 {
     if (text.len == 0 or text.len > 64) {
         return text;
@@ -320,10 +317,10 @@ pub fn normalizeAndStem(
     }
     const lowercased = buf[0..text.len];
 
-    // Then stem if requested
+    // Then stem if requested (language-aware)
     if (use_stemming) {
         var stem_buf: [64]u8 = undefined;
-        const stemmed = stemmer.stem(lowercased, &stem_buf);
+        const stemmed = stemmer.stemWithLanguage(lowercased, &stem_buf, language);
         @memcpy(buf[0..stemmed.len], stemmed);
         return buf[0..stemmed.len];
     }
@@ -331,15 +328,26 @@ pub fn normalizeAndStem(
     return lowercased;
 }
 
-/// Normalize, stem, and allocate a copy
+/// Normalize, stem, and allocate a copy (English only, for backwards compatibility)
 /// Caller owns the returned slice
 pub fn normalizeAndStemAlloc(
     allocator: Allocator,
     text: []const u8,
     use_stemming: bool,
 ) ![]u8 {
+    return normalizeAndStemAllocWithLanguage(allocator, text, use_stemming, .english);
+}
+
+/// Normalize, stem, and allocate a copy with language-aware processing
+/// Caller owns the returned slice
+pub fn normalizeAndStemAllocWithLanguage(
+    allocator: Allocator,
+    text: []const u8,
+    use_stemming: bool,
+    language: Language,
+) ![]u8 {
     var buf: [64]u8 = undefined;
-    const processed = normalizeAndStem(text, &buf, use_stemming);
+    const processed = normalizeAndStemWithLanguage(text, &buf, use_stemming, language);
     return allocator.dupe(u8, processed);
 }
 
@@ -506,4 +514,94 @@ test "normalizeAndStemAlloc" {
     const result = try normalizeAndStemAlloc(allocator, "RUNNING", true);
     defer allocator.free(result);
     try std.testing.expectEqualStrings("run", result);
+}
+
+test "tokenizer with german stop words" {
+    const allocator = std.testing.allocator;
+    // "Der schnelle Fuchs" - "Der" is a German stop word
+    const text = "Der schnelle Fuchs";
+
+    var tokenizer_de = Tokenizer.init(allocator, text, .{
+        .remove_stop_words = true,
+        .min_token_length = 2,
+        .language = .german,
+    });
+
+    const tokens = try tokenizer_de.tokenizeAll();
+    defer allocator.free(tokens);
+
+    // "Der" should be filtered as German stop word
+    // "schnelle", "Fuchs" should remain
+    try std.testing.expectEqual(@as(usize, 2), tokens.len);
+    try std.testing.expectEqualStrings("schnelle", tokens[0].text);
+    try std.testing.expectEqualStrings("Fuchs", tokens[1].text);
+}
+
+test "tokenizer with french stop words" {
+    const allocator = std.testing.allocator;
+    // "Le chat noir" - "Le" is a French stop word
+    const text = "Le chat noir";
+
+    var tokenizer_fr = Tokenizer.init(allocator, text, .{
+        .remove_stop_words = true,
+        .min_token_length = 2,
+        .language = .french,
+    });
+
+    const tokens = try tokenizer_fr.tokenizeAll();
+    defer allocator.free(tokens);
+
+    // "Le" should be filtered as French stop word
+    // "chat", "noir" should remain
+    try std.testing.expectEqual(@as(usize, 2), tokens.len);
+    try std.testing.expectEqualStrings("chat", tokens[0].text);
+    try std.testing.expectEqualStrings("noir", tokens[1].text);
+}
+
+test "tokenizer language isolation" {
+    const allocator = std.testing.allocator;
+    // "the cat" - "the" is English, should NOT be filtered for German
+    const text = "the cat der";
+
+    // German tokenizer should NOT filter "the"
+    var tokenizer_de = Tokenizer.init(allocator, text, .{
+        .remove_stop_words = true,
+        .min_token_length = 2,
+        .language = .german,
+    });
+
+    const tokens_de = try tokenizer_de.tokenizeAll();
+    defer allocator.free(tokens_de);
+
+    // "the" stays (not German stop word), "cat" stays, "der" filtered
+    try std.testing.expectEqual(@as(usize, 2), tokens_de.len);
+    try std.testing.expectEqualStrings("the", tokens_de[0].text);
+    try std.testing.expectEqualStrings("cat", tokens_de[1].text);
+
+    // English tokenizer should filter "the" but not "der"
+    var tokenizer_en = Tokenizer.init(allocator, text, .{
+        .remove_stop_words = true,
+        .min_token_length = 2,
+        .language = .english,
+    });
+
+    const tokens_en = try tokenizer_en.tokenizeAll();
+    defer allocator.free(tokens_en);
+
+    // "the" filtered, "cat" stays, "der" stays
+    try std.testing.expectEqual(@as(usize, 2), tokens_en.len);
+    try std.testing.expectEqualStrings("cat", tokens_en[0].text);
+    try std.testing.expectEqualStrings("der", tokens_en[1].text);
+}
+
+test "normalizeAndStemWithLanguage" {
+    var buf: [64]u8 = undefined;
+
+    // English stemming works
+    const en_result = normalizeAndStemWithLanguage("RUNNING", &buf, true, .english);
+    try std.testing.expectEqualStrings("run", en_result);
+
+    // German stemming doesn't change the word (no German stemmer)
+    const de_result = normalizeAndStemWithLanguage("RUNNING", &buf, true, .german);
+    try std.testing.expectEqualStrings("running", de_result);
 }

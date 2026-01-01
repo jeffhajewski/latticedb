@@ -3,6 +3,8 @@
 //! Implements the Porter stemming algorithm to reduce words to their root forms.
 //! This improves search recall by matching different forms of the same word.
 //!
+//! Currently only English is supported. Other languages return words unchanged.
+//!
 //! Examples:
 //!   - "running", "runs", "ran" -> "run"
 //!   - "happily", "happiness" -> "happi"
@@ -10,13 +12,30 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const tokenizer = @import("tokenizer.zig");
+const Language = tokenizer.Language;
 
-/// Stem a word using the Porter algorithm.
+/// Stem a word using the Porter algorithm (English only).
 /// Returns a slice into the provided buffer with the stemmed word.
 /// The input word should be lowercase ASCII.
+/// For backwards compatibility, defaults to English.
 pub fn stem(word: []const u8, buf: *[64]u8) []const u8 {
+    return stemWithLanguage(word, buf, .english);
+}
+
+/// Stem a word using the appropriate stemmer for the given language.
+/// Currently only English (Porter stemmer) is supported.
+/// Other languages return the word unchanged (copied to buffer).
+pub fn stemWithLanguage(word: []const u8, buf: *[64]u8, language: Language) []const u8 {
     if (word.len == 0 or word.len > 64) {
         return word;
+    }
+
+    // Only English stemming is currently supported
+    // For other languages, return the word unchanged
+    if (language != .english) {
+        @memcpy(buf[0..word.len], word);
+        return buf[0..word.len];
     }
 
     // Copy word to mutable buffer
@@ -386,4 +405,22 @@ test "porter stemmer advanced" {
     try std.testing.expectEqualStrings("rate", stem("rate", &buf));
     try std.testing.expectEqualStrings("control", stem("controll", &buf));
     try std.testing.expectEqualStrings("roll", stem("roll", &buf));
+}
+
+test "stemmer language support" {
+    var buf: [64]u8 = undefined;
+
+    // English stemming works
+    try std.testing.expectEqualStrings("run", stemWithLanguage("running", &buf, .english));
+    try std.testing.expectEqualStrings("connect", stemWithLanguage("connected", &buf, .english));
+
+    // Non-English languages return words unchanged
+    try std.testing.expectEqualStrings("running", stemWithLanguage("running", &buf, .german));
+    try std.testing.expectEqualStrings("running", stemWithLanguage("running", &buf, .french));
+    try std.testing.expectEqualStrings("running", stemWithLanguage("running", &buf, .spanish));
+    try std.testing.expectEqualStrings("connected", stemWithLanguage("connected", &buf, .russian));
+
+    // German words stay unchanged (no German stemmer)
+    try std.testing.expectEqualStrings("laufen", stemWithLanguage("laufen", &buf, .german));
+    try std.testing.expectEqualStrings("verbunden", stemWithLanguage("verbunden", &buf, .german));
 }

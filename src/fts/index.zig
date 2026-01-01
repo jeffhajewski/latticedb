@@ -596,27 +596,43 @@ pub const FtsIndex = struct {
     }
 
     /// Search with explicit mode (AND or OR)
+    /// Supports quoted phrases: `database "quick brown" -mysql`
     pub fn searchWithMode(
         self: *Self,
         query_text: []const u8,
         mode: QueryMode,
         limit: u32,
     ) FtsError![]ScoredDoc {
-        // Parse query (handles -exclusions)
+        // Parse query (handles -exclusions and "phrases")
         var terms_buf: [32][]u8 = undefined;
         var excluded_buf: [32][]u8 = undefined;
+        var phrases_buf: [MAX_PHRASES][MAX_PHRASE_TERMS][]u8 = undefined;
+        var phrase_lens: [MAX_PHRASES]usize = undefined;
         var num_terms: usize = 0;
         var num_excluded: usize = 0;
+        var num_phrases: usize = 0;
 
-        try self.parseQueryTerms(query_text, &terms_buf, &num_terms, &excluded_buf, &num_excluded);
+        try self.parseQueryTerms(
+            query_text,
+            &terms_buf,
+            &num_terms,
+            &excluded_buf,
+            &num_excluded,
+            &phrases_buf,
+            &phrase_lens,
+            &num_phrases,
+        );
 
         // Cleanup on exit
         defer {
             for (terms_buf[0..num_terms]) |t| self.allocator.free(t);
             for (excluded_buf[0..num_excluded]) |t| self.allocator.free(t);
+            for (0..num_phrases) |p| {
+                for (phrases_buf[p][0..phrase_lens[p]]) |t| self.allocator.free(t);
+            }
         }
 
-        if (num_terms == 0) {
+        if (num_terms == 0 and num_phrases == 0) {
             return &[_]ScoredDoc{};
         }
 
@@ -630,29 +646,142 @@ pub const FtsIndex = struct {
             const_excluded[i] = t;
         }
 
-        // No exclusions, use simple path
-        if (num_excluded == 0) {
-            if (num_terms == 1) {
-                return self.searchSingleTerm(const_terms[0], limit);
+        // Get initial candidates based on terms and phrases
+        var candidates: []ScoredDoc = undefined;
+        var candidates_owned = false;
+
+        if (num_phrases > 0 and self.config.store_positions) {
+            // Search phrases first (most restrictive)
+            var const_phrase: [MAX_PHRASE_TERMS][]const u8 = undefined;
+            for (phrases_buf[0][0..phrase_lens[0]], 0..) |t, i| {
+                const_phrase[i] = t;
             }
-            return switch (mode) {
-                .@"and" => self.searchMultiTerm(const_terms[0..num_terms], limit),
-                .@"or" => self.searchMultiTermOr(const_terms[0..num_terms], limit),
+            candidates = try self.searchPhraseTerms(const_phrase[0..phrase_lens[0]], limit * 4);
+            candidates_owned = true;
+
+            // Intersect with additional phrases
+            for (1..num_phrases) |p| {
+                var next_phrase: [MAX_PHRASE_TERMS][]const u8 = undefined;
+                for (phrases_buf[p][0..phrase_lens[p]], 0..) |t, i| {
+                    next_phrase[i] = t;
+                }
+                const phrase_results = try self.searchPhraseTerms(next_phrase[0..phrase_lens[p]], limit * 4);
+                defer self.allocator.free(phrase_results);
+
+                // Build set of phrase matches
+                var phrase_docs = std.AutoHashMap(DocId, f32).init(self.allocator);
+                defer phrase_docs.deinit();
+                for (phrase_results) |doc| {
+                    phrase_docs.put(doc.doc_id, doc.score) catch continue;
+                }
+
+                // Filter candidates to those matching this phrase
+                var filtered: ArrayListUnmanaged(ScoredDoc) = .{};
+                for (candidates) |doc| {
+                    if (phrase_docs.get(doc.doc_id)) |score| {
+                        filtered.append(self.allocator, .{
+                            .doc_id = doc.doc_id,
+                            .score = doc.score + score,
+                        }) catch continue;
+                    }
+                }
+
+                self.allocator.free(candidates);
+                candidates = filtered.toOwnedSlice(self.allocator) catch {
+                    return FtsError.OutOfMemory;
+                };
+            }
+
+            // Intersect with regular terms if any
+            if (num_terms > 0) {
+                const term_results = switch (mode) {
+                    .@"and" => if (num_terms == 1)
+                        try self.searchSingleTerm(const_terms[0], limit * 4)
+                    else
+                        try self.searchMultiTerm(const_terms[0..num_terms], limit * 4),
+                    .@"or" => if (num_terms == 1)
+                        try self.searchSingleTerm(const_terms[0], limit * 4)
+                    else
+                        try self.searchMultiTermOr(const_terms[0..num_terms], limit * 4),
+                };
+                defer self.allocator.free(term_results);
+
+                // Build set of term matches
+                var term_docs = std.AutoHashMap(DocId, f32).init(self.allocator);
+                defer term_docs.deinit();
+                for (term_results) |doc| {
+                    term_docs.put(doc.doc_id, doc.score) catch continue;
+                }
+
+                // Filter phrase candidates by term matches (AND mode) or merge (OR mode)
+                var filtered: ArrayListUnmanaged(ScoredDoc) = .{};
+                if (mode == .@"and") {
+                    for (candidates) |doc| {
+                        if (term_docs.get(doc.doc_id)) |score| {
+                            filtered.append(self.allocator, .{
+                                .doc_id = doc.doc_id,
+                                .score = doc.score + score,
+                            }) catch continue;
+                        }
+                    }
+                } else {
+                    // OR mode: include all from both
+                    var seen = std.AutoHashMap(DocId, void).init(self.allocator);
+                    defer seen.deinit();
+                    for (candidates) |doc| {
+                        const extra = term_docs.get(doc.doc_id) orelse 0;
+                        filtered.append(self.allocator, .{
+                            .doc_id = doc.doc_id,
+                            .score = doc.score + extra,
+                        }) catch continue;
+                        seen.put(doc.doc_id, {}) catch continue;
+                    }
+                    for (term_results) |doc| {
+                        if (!seen.contains(doc.doc_id)) {
+                            filtered.append(self.allocator, doc) catch continue;
+                        }
+                    }
+                }
+
+                self.allocator.free(candidates);
+                candidates = filtered.toOwnedSlice(self.allocator) catch {
+                    return FtsError.OutOfMemory;
+                };
+            }
+        } else if (num_terms > 0) {
+            // No phrases (or positions not stored), just use term search
+            candidates = switch (mode) {
+                .@"and" => if (num_terms == 1)
+                    try self.searchSingleTerm(const_terms[0], limit * 2)
+                else
+                    try self.searchMultiTerm(const_terms[0..num_terms], limit * 2),
+                .@"or" => if (num_terms == 1)
+                    try self.searchSingleTerm(const_terms[0], limit * 2)
+                else
+                    try self.searchMultiTermOr(const_terms[0..num_terms], limit * 2),
             };
+            candidates_owned = true;
+        } else {
+            return &[_]ScoredDoc{};
         }
 
-        // Has exclusions - get candidates then filter
-        const candidates = switch (mode) {
-            .@"and" => if (num_terms == 1)
-                try self.searchSingleTerm(const_terms[0], limit * 2) // Over-fetch for filtering
-            else
-                try self.searchMultiTerm(const_terms[0..num_terms], limit * 2),
-            .@"or" => if (num_terms == 1)
-                try self.searchSingleTerm(const_terms[0], limit * 2)
-            else
-                try self.searchMultiTermOr(const_terms[0..num_terms], limit * 2),
-        };
-        defer self.allocator.free(candidates);
+        defer if (candidates_owned) self.allocator.free(candidates);
+
+        // Apply exclusions if any
+        if (num_excluded == 0) {
+            // No exclusions - sort and return top K
+            std.mem.sort(ScoredDoc, candidates, {}, ScoredDoc.lessThan);
+            if (candidates.len <= limit) {
+                const result = self.allocator.dupe(ScoredDoc, candidates) catch {
+                    return FtsError.OutOfMemory;
+                };
+                return result;
+            }
+            const result = self.allocator.dupe(ScoredDoc, candidates[0..limit]) catch {
+                return FtsError.OutOfMemory;
+            };
+            return result;
+        }
 
         // Build exclusion set
         var excluded_docs = std.AutoHashMap(DocId, void).init(self.allocator);
@@ -679,16 +808,29 @@ pub const FtsIndex = struct {
                 results.append(self.allocator, doc) catch {
                     return FtsError.OutOfMemory;
                 };
-                if (results.items.len >= limit) break;
             }
         }
 
-        return results.toOwnedSlice(self.allocator) catch {
+        // Sort and return top K
+        std.mem.sort(ScoredDoc, results.items, {}, ScoredDoc.lessThan);
+
+        const result_slice = results.toOwnedSlice(self.allocator) catch {
             return FtsError.OutOfMemory;
         };
+
+        if (result_slice.len > limit) {
+            self.allocator.free(result_slice[limit..]);
+            return result_slice[0..limit];
+        }
+        return result_slice;
     }
 
-    /// Parse query text into terms and exclusions
+    /// Phrase storage: array of term arrays (max 8 phrases, max 8 terms each)
+    const MAX_PHRASES: usize = 8;
+    const MAX_PHRASE_TERMS: usize = 8;
+
+    /// Parse query text into terms, phrases, and exclusions
+    /// Phrases are detected by quoted strings: "quick brown fox"
     fn parseQueryTerms(
         self: *Self,
         query_text: []const u8,
@@ -696,11 +838,14 @@ pub const FtsIndex = struct {
         num_terms: *usize,
         excluded_buf: *[32][]u8,
         num_excluded: *usize,
+        phrases_buf: *[MAX_PHRASES][MAX_PHRASE_TERMS][]u8,
+        phrase_lens: *[MAX_PHRASES]usize,
+        num_phrases: *usize,
     ) FtsError!void {
         num_terms.* = 0;
         num_excluded.* = 0;
+        num_phrases.* = 0;
 
-        // Simple tokenization that respects -prefix for exclusions
         var i: usize = 0;
         while (i < query_text.len) {
             // Skip whitespace
@@ -714,7 +859,82 @@ pub const FtsIndex = struct {
             if (is_excluded) i += 1;
             if (i >= query_text.len) break;
 
-            // Find word end
+            // Check for quoted phrase
+            if (query_text[i] == '"') {
+                i += 1; // Skip opening quote
+                if (i >= query_text.len) break;
+
+                // Parse phrase terms until closing quote
+                if (num_phrases.* < MAX_PHRASES) {
+                    const phrase_idx = num_phrases.*;
+                    phrase_lens[phrase_idx] = 0;
+
+                    while (i < query_text.len and query_text[i] != '"') {
+                        // Skip whitespace within phrase
+                        while (i < query_text.len and query_text[i] != '"' and std.ascii.isWhitespace(query_text[i])) {
+                            i += 1;
+                        }
+                        if (i >= query_text.len or query_text[i] == '"') break;
+
+                        // Find word end
+                        const start = i;
+                        while (i < query_text.len and query_text[i] != '"' and (std.ascii.isAlphanumeric(query_text[i]) or query_text[i] == '_')) {
+                            i += 1;
+                        }
+
+                        if (i > start and phrase_lens[phrase_idx] < MAX_PHRASE_TERMS) {
+                            const word = query_text[start..i];
+
+                            // Skip if too short
+                            if (word.len >= self.config.tokenizer.min_token_length) {
+                                // Normalize to lowercase
+                                const normalized = self.allocator.alloc(u8, word.len) catch {
+                                    return FtsError.OutOfMemory;
+                                };
+                                for (word, 0..) |c, j| {
+                                    normalized[j] = std.ascii.toLower(c);
+                                }
+
+                                // Don't filter stop words in phrases (they're positionally significant)
+                                phrases_buf[phrase_idx][phrase_lens[phrase_idx]] = normalized;
+                                phrase_lens[phrase_idx] += 1;
+                            }
+                        }
+                    }
+
+                    // Skip closing quote
+                    if (i < query_text.len and query_text[i] == '"') {
+                        i += 1;
+                    }
+
+                    // Only count phrase if it has at least 2 terms
+                    if (phrase_lens[phrase_idx] >= 2) {
+                        num_phrases.* += 1;
+                    } else {
+                        // Single word "phrase" - add as regular term
+                        if (phrase_lens[phrase_idx] == 1) {
+                            if (is_excluded) {
+                                if (num_excluded.* < 32) {
+                                    excluded_buf[num_excluded.*] = phrases_buf[phrase_idx][0];
+                                    num_excluded.* += 1;
+                                } else {
+                                    self.allocator.free(phrases_buf[phrase_idx][0]);
+                                }
+                            } else {
+                                if (num_terms.* < 32) {
+                                    terms_buf[num_terms.*] = phrases_buf[phrase_idx][0];
+                                    num_terms.* += 1;
+                                } else {
+                                    self.allocator.free(phrases_buf[phrase_idx][0]);
+                                }
+                            }
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Find word end (regular term)
             const start = i;
             while (i < query_text.len and (std.ascii.isAlphanumeric(query_text[i]) or query_text[i] == '_')) {
                 i += 1;
@@ -1322,4 +1542,73 @@ test "fts phrase query" {
     const results2 = try index.search("quick brown", 10);
     defer index.freeResults(results2);
     try std.testing.expectEqual(@as(usize, 4), results2.len);
+}
+
+test "fts quoted phrase syntax" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_fts_quoted_phrase_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var dict_tree = try BTree.init(allocator, &bp);
+    var lengths_tree = try BTree.init(allocator, &bp);
+
+    // Enable position storage for phrase queries
+    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, .{
+        .store_positions = true,
+    });
+
+    // Index documents
+    _ = try index.indexDocument(1, "quick brown fox jumps");
+    _ = try index.indexDocument(2, "brown quick dog runs");
+    _ = try index.indexDocument(3, "the quick brown rabbit hops");
+    _ = try index.indexDocument(4, "lazy brown dog sleeps");
+
+    // Test 1: Quoted phrase "quick brown" via searchWithMode
+    // Should match doc1 and doc3 where "quick brown" appears adjacently
+    const results1 = try index.searchWithMode("\"quick brown\"", .@"and", 10);
+    defer index.freeResults(results1);
+    try std.testing.expectEqual(@as(usize, 2), results1.len);
+
+    // Test 2: Quoted phrase with additional term: "quick brown" jumps
+    // Should match doc1 (has both phrase AND term "jumps")
+    const results2 = try index.searchWithMode("\"quick brown\" jumps", .@"and", 10);
+    defer index.freeResults(results2);
+    try std.testing.expectEqual(@as(usize, 1), results2.len);
+    try std.testing.expectEqual(@as(DocId, 1), results2[0].doc_id);
+
+    // Test 3: Quoted phrase with exclusion: "quick brown" -fox
+    // Should match doc3 (has phrase, excludes doc1 with "fox")
+    const results3 = try index.searchWithMode("\"quick brown\" -fox", .@"and", 10);
+    defer index.freeResults(results3);
+    try std.testing.expectEqual(@as(usize, 1), results3.len);
+    try std.testing.expectEqual(@as(DocId, 3), results3[0].doc_id);
+
+    // Test 4: Single word in quotes treated as regular term
+    // "fox" should match doc1
+    const results4 = try index.searchWithMode("\"fox\"", .@"and", 10);
+    defer index.freeResults(results4);
+    try std.testing.expectEqual(@as(usize, 1), results4.len);
+    try std.testing.expectEqual(@as(DocId, 1), results4[0].doc_id);
+
+    // Test 5: OR mode with quoted phrase
+    // "quick brown" OR dog should match doc1, doc2, doc3, doc4
+    const results5 = try index.searchWithMode("\"quick brown\" dog", .@"or", 10);
+    defer index.freeResults(results5);
+    try std.testing.expectEqual(@as(usize, 4), results5.len);
 }

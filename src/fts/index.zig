@@ -439,84 +439,126 @@ pub const FtsIndex = struct {
     }
 
     /// Search for multiple terms (AND semantics - documents must contain all terms)
+    /// Uses skip pointer optimization for efficient intersection
     fn searchMultiTerm(self: *Self, terms: []const []const u8, limit: u32) FtsError![]ScoredDoc {
+        // Use optimized skip pointer intersection
+        return self.searchMultiTermWithSkip(terms, limit);
+    }
+
+    /// Optimized multi-term AND search using skip pointers
+    /// Uses the smallest posting list to drive intersection
+    fn searchMultiTermWithSkip(self: *Self, terms: []const []const u8, limit: u32) FtsError![]ScoredDoc {
         if (terms.len == 0) {
             return &[_]ScoredDoc{};
         }
 
-        // Collect posting iterators and dict entries for all terms
-        var doc_scores = std.AutoHashMap(DocId, f32).init(self.allocator);
-        defer doc_scores.deinit();
+        if (terms.len == 1) {
+            return self.searchSingleTerm(terms[0], limit);
+        }
 
-        var doc_term_count = std.AutoHashMap(DocId, u32).init(self.allocator);
-        defer doc_term_count.deinit();
+        // Gather dictionary entries and sort by doc_freq (smallest first)
+        const SearchTermInfo = struct {
+            term: []const u8,
+            dict_entry: DictionaryEntry,
+        };
 
-        const term_count = terms.len;
+        var term_infos_buf: [32]SearchTermInfo = undefined;
+        var num_valid_terms: usize = 0;
 
         for (terms) |term| {
-            const dict_entry = self.dictionary.get(term) catch {
-                continue;
-            } orelse {
-                continue;
-            };
+            if (num_valid_terms >= 32) break;
 
+            const dict_entry = self.dictionary.get(term) catch continue orelse continue;
             if (dict_entry.posting_page == 0) continue;
 
-            var iter = self.posting_store.iterate(dict_entry.posting_page) catch {
-                continue;
+            term_infos_buf[num_valid_terms] = .{
+                .term = term,
+                .dict_entry = dict_entry,
             };
-            defer iter.deinit();
+            num_valid_terms += 1;
+        }
 
-            while (iter.next() catch null) |entry| {
-                const doc_length = self.doc_lengths.getLength(entry.doc_id) catch {
-                    continue;
-                };
+        if (num_valid_terms == 0) {
+            return &[_]ScoredDoc{};
+        }
 
-                const score = self.scorer.scoreTerm(
-                    entry.term_freq,
-                    dict_entry.doc_freq,
-                    doc_length,
-                );
+        // Sort by doc_freq ascending (smallest list first)
+        const term_infos = term_infos_buf[0..num_valid_terms];
+        std.mem.sort(SearchTermInfo, term_infos, {}, struct {
+            fn lessThan(_: void, a: SearchTermInfo, b: SearchTermInfo) bool {
+                return a.dict_entry.doc_freq < b.dict_entry.doc_freq;
+            }
+        }.lessThan);
 
-                // Accumulate score
-                const score_result = doc_scores.getOrPut(entry.doc_id) catch {
-                    return FtsError.OutOfMemory;
-                };
-                if (score_result.found_existing) {
-                    score_result.value_ptr.* += score;
-                } else {
-                    score_result.value_ptr.* = score;
-                }
+        // Use smallest posting list to drive intersection
+        const driver = term_infos[0];
+        var driver_iter = self.posting_store.iterate(driver.dict_entry.posting_page) catch {
+            return FtsError.PostingError;
+        };
+        defer driver_iter.deinit();
 
-                // Count terms matched
-                const count_result = doc_term_count.getOrPut(entry.doc_id) catch {
-                    return FtsError.OutOfMemory;
-                };
-                if (count_result.found_existing) {
-                    count_result.value_ptr.* += 1;
-                } else {
-                    count_result.value_ptr.* = 1;
-                }
+        // Create iterators for other terms
+        var other_iters: [31]posting_mod.PostingIterator = undefined;
+        var num_other_iters: usize = 0;
+
+        for (term_infos[1..]) |info| {
+            other_iters[num_other_iters] = self.posting_store.iterate(info.dict_entry.posting_page) catch continue;
+            num_other_iters += 1;
+        }
+        defer {
+            for (other_iters[0..num_other_iters]) |*iter| {
+                iter.deinit();
             }
         }
 
-        // Filter to documents that match all terms and collect results
+        // Intersection with skip pointers
         var results: ArrayListUnmanaged(ScoredDoc) = .{};
         errdefer results.deinit(self.allocator);
 
-        var score_iter = doc_scores.iterator();
-        while (score_iter.next()) |entry| {
-            const doc_id = entry.key_ptr.*;
-            const matched_terms = doc_term_count.get(doc_id) orelse 0;
+        while (driver_iter.next() catch null) |driver_entry| {
+            const doc_id = driver_entry.doc_id;
+            var all_match = true;
+            var total_score: f32 = 0.0;
 
-            // Only include if document matches all terms
-            if (matched_terms == term_count) {
+            // Score from driver term
+            const driver_doc_length = self.doc_lengths.getLength(doc_id) catch {
+                continue;
+            };
+            total_score += self.scorer.scoreTerm(
+                driver_entry.term_freq,
+                driver.dict_entry.doc_freq,
+                driver_doc_length,
+            );
+
+            // Check other terms using skipTo
+            for (other_iters[0..num_other_iters], term_infos[1..][0..num_other_iters]) |*iter, info| {
+                const other_entry = iter.skipTo(doc_id) catch null;
+                if (other_entry == null or other_entry.?.doc_id != doc_id) {
+                    all_match = false;
+                    break;
+                }
+
+                // Add score contribution
+                total_score += self.scorer.scoreTerm(
+                    other_entry.?.term_freq,
+                    info.dict_entry.doc_freq,
+                    driver_doc_length,
+                );
+            }
+
+            if (all_match) {
                 results.append(self.allocator, .{
                     .doc_id = doc_id,
-                    .score = entry.value_ptr.*,
+                    .score = total_score,
                 }) catch {
                     return FtsError.OutOfMemory;
                 };
+
+                // Early exit if we have enough results (before sorting)
+                // This is an optimization for large result sets
+                if (results.items.len >= limit * 2) {
+                    break;
+                }
             }
         }
 

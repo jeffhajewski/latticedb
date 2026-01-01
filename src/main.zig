@@ -33,6 +33,10 @@ pub const vector = struct {
 // Full-text search
 pub const fts = struct {
     pub const tokenizer = @import("fts/tokenizer.zig");
+    pub const dictionary = @import("fts/dictionary.zig");
+    pub const posting = @import("fts/posting.zig");
+    pub const scorer = @import("fts/scorer.zig");
+    pub const index = @import("fts/index.zig");
 };
 
 // Query system
@@ -138,6 +142,16 @@ pub const LabelIndex = graph.label_index.LabelIndex;
 pub const LabelKey = graph.label_index.LabelKey;
 pub const LabelIndexError = graph.label_index.LabelIndexError;
 pub const LabelNodeIterator = graph.label_index.LabelIndex.NodeIterator;
+
+// Full-text search re-exports
+pub const FtsIndex = fts.index.FtsIndex;
+pub const FtsConfig = fts.index.FtsConfig;
+pub const FtsError = fts.index.FtsError;
+pub const FtsStats = fts.index.FtsStats;
+pub const Tokenizer = fts.tokenizer.Tokenizer;
+pub const TokenizerConfig = fts.tokenizer.TokenizerConfig;
+pub const ScoredDoc = fts.scorer.ScoredDoc;
+pub const Bm25Config = fts.scorer.Bm25Config;
 
 // Version information
 pub const VERSION = "0.1.0";

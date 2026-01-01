@@ -37,6 +37,7 @@ pub const fts = struct {
     pub const posting = @import("fts/posting.zig");
     pub const scorer = @import("fts/scorer.zig");
     pub const index = @import("fts/index.zig");
+    pub const stemmer = @import("fts/stemmer.zig");
 };
 
 // Query system

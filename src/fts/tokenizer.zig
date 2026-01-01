@@ -5,6 +5,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const stemmer = @import("stemmer.zig");
 
 /// Token type classification
 pub const TokenType = enum {
@@ -46,6 +47,8 @@ pub const TokenizerConfig = struct {
     remove_accents: bool = true,
     /// Remove stop words
     remove_stop_words: bool = true,
+    /// Apply Porter stemming (reduces words to root form)
+    use_stemming: bool = false,
     /// Language for stop words and stemming
     language: Language = .english,
 };
@@ -300,6 +303,46 @@ pub fn normalize(allocator: Allocator, text: []const u8) ![]u8 {
     return result;
 }
 
+/// Normalize and optionally stem a token
+/// Returns the processed token in the output buffer, and length
+pub fn normalizeAndStem(
+    text: []const u8,
+    buf: *[64]u8,
+    use_stemming: bool,
+) []const u8 {
+    if (text.len == 0 or text.len > 64) {
+        return text;
+    }
+
+    // First lowercase
+    for (text, 0..) |c, i| {
+        buf[i] = std.ascii.toLower(c);
+    }
+    const lowercased = buf[0..text.len];
+
+    // Then stem if requested
+    if (use_stemming) {
+        var stem_buf: [64]u8 = undefined;
+        const stemmed = stemmer.stem(lowercased, &stem_buf);
+        @memcpy(buf[0..stemmed.len], stemmed);
+        return buf[0..stemmed.len];
+    }
+
+    return lowercased;
+}
+
+/// Normalize, stem, and allocate a copy
+/// Caller owns the returned slice
+pub fn normalizeAndStemAlloc(
+    allocator: Allocator,
+    text: []const u8,
+    use_stemming: bool,
+) ![]u8 {
+    var buf: [64]u8 = undefined;
+    const processed = normalizeAndStem(text, &buf, use_stemming);
+    return allocator.dupe(u8, processed);
+}
+
 // ============================================================================
 // Character Classification
 // ============================================================================
@@ -430,4 +473,37 @@ test "tokenizer reset" {
     const token = tokenizer.next();
     try std.testing.expect(token != null);
     try std.testing.expectEqualStrings("hello", token.?.text);
+}
+
+test "normalizeAndStem without stemming" {
+    var buf: [64]u8 = undefined;
+
+    // Without stemming, just lowercases
+    const result1 = normalizeAndStem("HELLO", &buf, false);
+    try std.testing.expectEqualStrings("hello", result1);
+
+    const result2 = normalizeAndStem("Running", &buf, false);
+    try std.testing.expectEqualStrings("running", result2);
+}
+
+test "normalizeAndStem with stemming" {
+    var buf: [64]u8 = undefined;
+
+    // With stemming, reduces to root form
+    const result1 = normalizeAndStem("running", &buf, true);
+    try std.testing.expectEqualStrings("run", result1);
+
+    const result2 = normalizeAndStem("CONNECTED", &buf, true);
+    try std.testing.expectEqualStrings("connect", result2);
+
+    const result3 = normalizeAndStem("happily", &buf, true);
+    try std.testing.expectEqualStrings("happili", result3);
+}
+
+test "normalizeAndStemAlloc" {
+    const allocator = std.testing.allocator;
+
+    const result = try normalizeAndStemAlloc(allocator, "RUNNING", true);
+    defer allocator.free(result);
+    try std.testing.expectEqualStrings("run", result);
 }

@@ -44,6 +44,31 @@ pub const FtsConfig = struct {
     store_positions: bool = false,
 };
 
+/// Query mode for boolean search
+pub const QueryMode = enum {
+    /// All terms must match (default)
+    @"and",
+    /// Any term can match
+    @"or",
+};
+
+/// Parsed query with terms and exclusions
+pub const ParsedQuery = struct {
+    /// Terms that must/should match (depending on mode)
+    terms: [][]const u8,
+    /// Terms that must NOT match (documents with these are excluded)
+    excluded: [][]const u8,
+    /// Phrase queries (terms that must appear adjacent)
+    phrases: [][]const []const u8,
+    /// How to combine terms
+    mode: QueryMode,
+
+    /// Number of allocated term strings
+    term_count: usize,
+    excluded_count: usize,
+    phrase_count: usize,
+};
+
 /// FTS Index errors
 pub const FtsError = error{
     /// Document not found
@@ -121,6 +146,12 @@ pub const FtsIndex = struct {
     // Indexing Operations
     // ========================================================================
 
+    /// Term info for indexing (frequency + positions)
+    const TermInfo = struct {
+        freq: u32,
+        positions: ArrayListUnmanaged(u32),
+    };
+
     /// Index a document's text content
     /// Returns the number of tokens indexed
     pub fn indexDocument(
@@ -139,9 +170,16 @@ pub const FtsIndex = struct {
             return 0;
         }
 
-        // 2. Count term frequencies
-        var term_freqs = StringHashMap(u32).init(self.allocator);
-        defer term_freqs.deinit();
+        // 2. Count term frequencies and collect positions
+        var term_infos = StringHashMap(TermInfo).init(self.allocator);
+        defer {
+            var it = term_infos.iterator();
+            while (it.next()) |entry| {
+                entry.value_ptr.positions.deinit(self.allocator);
+                self.allocator.free(entry.key_ptr.*);
+            }
+            term_infos.deinit();
+        }
 
         for (tokens) |token| {
             // Normalize to lowercase
@@ -155,73 +193,85 @@ pub const FtsIndex = struct {
                 continue; // Skip tokens > 64 chars
             };
 
-            const result = term_freqs.getOrPut(normalized) catch {
+            const result = term_infos.getOrPut(normalized) catch {
                 return FtsError.OutOfMemory;
             };
             if (result.found_existing) {
-                result.value_ptr.* += 1;
+                result.value_ptr.freq += 1;
+                if (self.config.store_positions) {
+                    result.value_ptr.positions.append(self.allocator, token.position) catch {
+                        return FtsError.OutOfMemory;
+                    };
+                }
             } else {
                 // Need to copy the key since normalized is stack-allocated
                 const key_copy = self.allocator.dupe(u8, normalized) catch {
                     return FtsError.OutOfMemory;
                 };
                 result.key_ptr.* = key_copy;
-                result.value_ptr.* = 1;
+                result.value_ptr.* = TermInfo{
+                    .freq = 1,
+                    .positions = .{},
+                };
+                if (self.config.store_positions) {
+                    result.value_ptr.positions.append(self.allocator, token.position) catch {
+                        return FtsError.OutOfMemory;
+                    };
+                }
             }
         }
 
         // 3. Update dictionary and posting lists for each term
-        var iter = term_freqs.iterator();
+        var iter = term_infos.iterator();
         while (iter.next()) |entry| {
             const term = entry.key_ptr.*;
-            const freq = entry.value_ptr.*;
+            const info = entry.value_ptr.*;
 
             // Get or create token in dictionary
             const token_id = self.dictionary.getOrCreate(term) catch {
-                self.allocator.free(term);
                 return FtsError.DictionaryError;
             };
 
             // Get current dictionary entry
             var dict_entry = self.dictionary.get(term) catch {
-                self.allocator.free(term);
                 return FtsError.DictionaryError;
             } orelse {
-                self.allocator.free(term);
                 return FtsError.DictionaryError;
             };
 
             // Create posting list if needed
             if (dict_entry.posting_page == 0) {
                 const page_id = self.posting_store.create(token_id) catch {
-                    self.allocator.free(term);
                     return FtsError.PostingError;
                 };
                 self.dictionary.setPostingPage(term, page_id) catch {
-                    self.allocator.free(term);
                     return FtsError.DictionaryError;
                 };
                 dict_entry.posting_page = page_id;
             }
 
-            // Append posting entry
-            _ = self.posting_store.append(dict_entry.posting_page, PostingEntry{
+            // Append posting entry with positions if configured
+            const posting_entry = PostingEntry{
                 .doc_id = doc_id,
-                .term_freq = freq,
-                .positions = null,
-            }) catch {
-                self.allocator.free(term);
+                .term_freq = info.freq,
+                .positions = if (self.config.store_positions and info.positions.items.len > 0)
+                    info.positions.items
+                else
+                    null,
+            };
+
+            _ = self.posting_store.appendWithPositions(
+                dict_entry.posting_page,
+                posting_entry,
+                self.config.store_positions,
+            ) catch {
                 return FtsError.PostingError;
             };
 
             // Update document frequency
             self.dictionary.incrementDocFreq(term) catch {
-                self.allocator.free(term);
                 return FtsError.DictionaryError;
             };
-
-            // Free the copied key
-            self.allocator.free(term);
         }
 
         // 4. Store document length
@@ -491,6 +541,504 @@ pub const FtsIndex = struct {
     }
 
     // ========================================================================
+    // Boolean Search Operations
+    // ========================================================================
+
+    /// Search with OR semantics (any term matches)
+    pub fn searchOr(
+        self: *Self,
+        query_text: []const u8,
+        limit: u32,
+    ) FtsError![]ScoredDoc {
+        return self.searchWithMode(query_text, .@"or", limit);
+    }
+
+    /// Search with explicit mode (AND or OR)
+    pub fn searchWithMode(
+        self: *Self,
+        query_text: []const u8,
+        mode: QueryMode,
+        limit: u32,
+    ) FtsError![]ScoredDoc {
+        // Parse query (handles -exclusions)
+        var terms_buf: [32][]u8 = undefined;
+        var excluded_buf: [32][]u8 = undefined;
+        var num_terms: usize = 0;
+        var num_excluded: usize = 0;
+
+        try self.parseQueryTerms(query_text, &terms_buf, &num_terms, &excluded_buf, &num_excluded);
+
+        // Cleanup on exit
+        defer {
+            for (terms_buf[0..num_terms]) |t| self.allocator.free(t);
+            for (excluded_buf[0..num_excluded]) |t| self.allocator.free(t);
+        }
+
+        if (num_terms == 0) {
+            return &[_]ScoredDoc{};
+        }
+
+        // Cast to const slices
+        var const_terms: [32][]const u8 = undefined;
+        for (terms_buf[0..num_terms], 0..) |t, i| {
+            const_terms[i] = t;
+        }
+        var const_excluded: [32][]const u8 = undefined;
+        for (excluded_buf[0..num_excluded], 0..) |t, i| {
+            const_excluded[i] = t;
+        }
+
+        // No exclusions, use simple path
+        if (num_excluded == 0) {
+            if (num_terms == 1) {
+                return self.searchSingleTerm(const_terms[0], limit);
+            }
+            return switch (mode) {
+                .@"and" => self.searchMultiTerm(const_terms[0..num_terms], limit),
+                .@"or" => self.searchMultiTermOr(const_terms[0..num_terms], limit),
+            };
+        }
+
+        // Has exclusions - get candidates then filter
+        const candidates = switch (mode) {
+            .@"and" => if (num_terms == 1)
+                try self.searchSingleTerm(const_terms[0], limit * 2) // Over-fetch for filtering
+            else
+                try self.searchMultiTerm(const_terms[0..num_terms], limit * 2),
+            .@"or" => if (num_terms == 1)
+                try self.searchSingleTerm(const_terms[0], limit * 2)
+            else
+                try self.searchMultiTermOr(const_terms[0..num_terms], limit * 2),
+        };
+        defer self.allocator.free(candidates);
+
+        // Build exclusion set
+        var excluded_docs = std.AutoHashMap(DocId, void).init(self.allocator);
+        defer excluded_docs.deinit();
+
+        for (const_excluded[0..num_excluded]) |term| {
+            const dict_entry = self.dictionary.get(term) catch continue orelse continue;
+            if (dict_entry.posting_page == 0) continue;
+
+            var iter = self.posting_store.iterate(dict_entry.posting_page) catch continue;
+            defer iter.deinit();
+
+            while (iter.next() catch null) |entry| {
+                excluded_docs.put(entry.doc_id, {}) catch continue;
+            }
+        }
+
+        // Filter results
+        var results: ArrayListUnmanaged(ScoredDoc) = .{};
+        errdefer results.deinit(self.allocator);
+
+        for (candidates) |doc| {
+            if (!excluded_docs.contains(doc.doc_id)) {
+                results.append(self.allocator, doc) catch {
+                    return FtsError.OutOfMemory;
+                };
+                if (results.items.len >= limit) break;
+            }
+        }
+
+        return results.toOwnedSlice(self.allocator) catch {
+            return FtsError.OutOfMemory;
+        };
+    }
+
+    /// Parse query text into terms and exclusions
+    fn parseQueryTerms(
+        self: *Self,
+        query_text: []const u8,
+        terms_buf: *[32][]u8,
+        num_terms: *usize,
+        excluded_buf: *[32][]u8,
+        num_excluded: *usize,
+    ) FtsError!void {
+        num_terms.* = 0;
+        num_excluded.* = 0;
+
+        // Simple tokenization that respects -prefix for exclusions
+        var i: usize = 0;
+        while (i < query_text.len) {
+            // Skip whitespace
+            while (i < query_text.len and std.ascii.isWhitespace(query_text[i])) {
+                i += 1;
+            }
+            if (i >= query_text.len) break;
+
+            // Check for exclusion prefix
+            const is_excluded = query_text[i] == '-';
+            if (is_excluded) i += 1;
+            if (i >= query_text.len) break;
+
+            // Find word end
+            const start = i;
+            while (i < query_text.len and (std.ascii.isAlphanumeric(query_text[i]) or query_text[i] == '_')) {
+                i += 1;
+            }
+
+            if (i > start) {
+                const word = query_text[start..i];
+
+                // Skip "OR" keyword and stop words
+                if (std.ascii.eqlIgnoreCase(word, "OR") or
+                    std.ascii.eqlIgnoreCase(word, "AND") or
+                    std.ascii.eqlIgnoreCase(word, "NOT"))
+                {
+                    continue;
+                }
+
+                // Skip if too short
+                if (word.len < self.config.tokenizer.min_token_length) continue;
+
+                // Normalize to lowercase
+                const normalized = self.allocator.alloc(u8, word.len) catch {
+                    return FtsError.OutOfMemory;
+                };
+                for (word, 0..) |c, j| {
+                    normalized[j] = std.ascii.toLower(c);
+                }
+
+                // Check stop words
+                if (self.config.tokenizer.remove_stop_words and tokenizer_mod.isStopWord(normalized)) {
+                    self.allocator.free(normalized);
+                    continue;
+                }
+
+                // Add to appropriate list
+                if (is_excluded) {
+                    if (num_excluded.* < 32) {
+                        excluded_buf[num_excluded.*] = normalized;
+                        num_excluded.* += 1;
+                    } else {
+                        self.allocator.free(normalized);
+                    }
+                } else {
+                    if (num_terms.* < 32) {
+                        terms_buf[num_terms.*] = normalized;
+                        num_terms.* += 1;
+                    } else {
+                        self.allocator.free(normalized);
+                    }
+                }
+            }
+        }
+    }
+
+    /// Search with OR semantics (documents matching any term)
+    fn searchMultiTermOr(self: *Self, terms: []const []const u8, limit: u32) FtsError![]ScoredDoc {
+        if (terms.len == 0) {
+            return &[_]ScoredDoc{};
+        }
+
+        // Collect scores for all documents matching any term
+        var doc_scores = std.AutoHashMap(DocId, f32).init(self.allocator);
+        defer doc_scores.deinit();
+
+        for (terms) |term| {
+            const dict_entry = self.dictionary.get(term) catch continue orelse continue;
+            if (dict_entry.posting_page == 0) continue;
+
+            var iter = self.posting_store.iterate(dict_entry.posting_page) catch continue;
+            defer iter.deinit();
+
+            while (iter.next() catch null) |entry| {
+                const doc_length = self.doc_lengths.getLength(entry.doc_id) catch continue;
+
+                const score = self.scorer.scoreTerm(
+                    entry.term_freq,
+                    dict_entry.doc_freq,
+                    doc_length,
+                );
+
+                // Accumulate score (OR = sum of matching term scores)
+                const result = doc_scores.getOrPut(entry.doc_id) catch {
+                    return FtsError.OutOfMemory;
+                };
+                if (result.found_existing) {
+                    result.value_ptr.* += score;
+                } else {
+                    result.value_ptr.* = score;
+                }
+            }
+        }
+
+        // Collect all results (no term count filter for OR)
+        var results: ArrayListUnmanaged(ScoredDoc) = .{};
+        errdefer results.deinit(self.allocator);
+
+        var score_iter = doc_scores.iterator();
+        while (score_iter.next()) |entry| {
+            results.append(self.allocator, .{
+                .doc_id = entry.key_ptr.*,
+                .score = entry.value_ptr.*,
+            }) catch {
+                return FtsError.OutOfMemory;
+            };
+        }
+
+        // Sort by score descending
+        std.mem.sort(ScoredDoc, results.items, {}, ScoredDoc.lessThan);
+
+        // Return top K
+        const result_slice = results.toOwnedSlice(self.allocator) catch {
+            return FtsError.OutOfMemory;
+        };
+
+        if (result_slice.len > limit) {
+            self.allocator.free(result_slice[limit..]);
+            return result_slice[0..limit];
+        }
+        return result_slice;
+    }
+
+    // ========================================================================
+    // Phrase Search
+    // ========================================================================
+
+    /// Search for an exact phrase (terms must appear adjacent in order)
+    /// Requires store_positions=true in config
+    pub fn searchPhrase(
+        self: *Self,
+        phrase_text: []const u8,
+        limit: u32,
+    ) FtsError![]ScoredDoc {
+        if (!self.config.store_positions) {
+            // Fall back to AND search if positions not stored
+            return self.search(phrase_text, limit);
+        }
+
+        // Tokenize phrase
+        var tok = Tokenizer.init(self.allocator, phrase_text, self.config.tokenizer);
+        const tokens = tok.tokenizeAll() catch {
+            return FtsError.TokenizerError;
+        };
+        defer self.allocator.free(tokens);
+
+        if (tokens.len == 0) {
+            return &[_]ScoredDoc{};
+        }
+
+        // Single word "phrase" is just a regular search
+        if (tokens.len == 1) {
+            var lower_buf: [64]u8 = undefined;
+            if (tokens[0].text.len <= 64) {
+                for (tokens[0].text, 0..) |c, i| {
+                    lower_buf[i] = std.ascii.toLower(c);
+                }
+                return self.searchSingleTerm(lower_buf[0..tokens[0].text.len], limit);
+            }
+            return &[_]ScoredDoc{};
+        }
+
+        // Collect normalized terms
+        var phrase_terms: [32][]u8 = undefined;
+        var num_terms: usize = 0;
+        defer {
+            for (phrase_terms[0..num_terms]) |t| {
+                self.allocator.free(t);
+            }
+        }
+
+        for (tokens) |token| {
+            if (num_terms >= 32) break;
+            if (token.text.len > 64) continue;
+
+            const normalized = self.allocator.alloc(u8, token.text.len) catch {
+                return FtsError.OutOfMemory;
+            };
+            for (token.text, 0..) |c, i| {
+                normalized[i] = std.ascii.toLower(c);
+            }
+            phrase_terms[num_terms] = normalized;
+            num_terms += 1;
+        }
+
+        if (num_terms < 2) {
+            return &[_]ScoredDoc{};
+        }
+
+        return self.searchPhraseTerms(phrase_terms[0..num_terms], limit);
+    }
+
+    /// Search for phrase with pre-tokenized terms
+    fn searchPhraseTerms(self: *Self, terms: []const []const u8, limit: u32) FtsError![]ScoredDoc {
+        if (terms.len < 2) {
+            return &[_]ScoredDoc{};
+        }
+
+        // Collect postings for first term (smallest result set optimization)
+        var first_term_docs = std.AutoHashMap(DocId, []const u32).init(self.allocator);
+        defer {
+            var it = first_term_docs.valueIterator();
+            while (it.next()) |positions| {
+                self.allocator.free(positions.*);
+            }
+            first_term_docs.deinit();
+        }
+
+        const first_entry = self.dictionary.get(terms[0]) catch {
+            return FtsError.DictionaryError;
+        } orelse {
+            return &[_]ScoredDoc{};
+        };
+
+        if (first_entry.posting_page == 0) {
+            return &[_]ScoredDoc{};
+        }
+
+        var iter = self.posting_store.iterate(first_entry.posting_page) catch {
+            return FtsError.PostingError;
+        };
+        defer iter.deinit();
+
+        while (true) {
+            const entry_opt = iter.nextWithPositions(self.allocator) catch {
+                break;
+            };
+            if (entry_opt) |entry| {
+                if (entry.positions) |pos| {
+                    first_term_docs.put(entry.doc_id, pos) catch {
+                        self.allocator.free(pos);
+                        return FtsError.OutOfMemory;
+                    };
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Now check each subsequent term and verify phrase positions
+        var phrase_matches = std.AutoHashMap(DocId, f32).init(self.allocator);
+        defer phrase_matches.deinit();
+
+        // Initialize candidates from first term
+        var first_iter = first_term_docs.iterator();
+        while (first_iter.next()) |entry| {
+            phrase_matches.put(entry.key_ptr.*, 0.0) catch {
+                return FtsError.OutOfMemory;
+            };
+        }
+
+        // For each subsequent term, verify position adjacency
+        for (terms[1..], 1..) |term, term_idx| {
+            const dict_entry = self.dictionary.get(term) catch {
+                continue;
+            } orelse {
+                // Term not found, no phrase matches possible
+                phrase_matches.clearAndFree();
+                break;
+            };
+
+            if (dict_entry.posting_page == 0) {
+                phrase_matches.clearAndFree();
+                break;
+            }
+
+            var term_iter = self.posting_store.iterate(dict_entry.posting_page) catch {
+                continue;
+            };
+            defer term_iter.deinit();
+
+            // Track which docs still match after this term
+            var still_matching = std.AutoHashMap(DocId, f32).init(self.allocator);
+            defer still_matching.deinit();
+
+            while (true) {
+                const entry_opt = term_iter.nextWithPositions(self.allocator) catch {
+                    break;
+                };
+                if (entry_opt) |entry| {
+                    defer if (entry.positions) |p| self.allocator.free(p);
+
+                    // Only check docs that matched so far
+                    if (!phrase_matches.contains(entry.doc_id)) continue;
+
+                    // Get first term positions for this doc
+                    const first_positions = first_term_docs.get(entry.doc_id) orelse continue;
+                    const current_positions = entry.positions orelse continue;
+
+                    // Check if any position in current term = first_pos + term_idx
+                    var found_adjacent = false;
+                    for (first_positions) |first_pos| {
+                        const expected_pos = first_pos + @as(u32, @intCast(term_idx));
+                        for (current_positions) |cur_pos| {
+                            if (cur_pos == expected_pos) {
+                                found_adjacent = true;
+                                break;
+                            }
+                        }
+                        if (found_adjacent) break;
+                    }
+
+                    if (found_adjacent) {
+                        // Get score contribution
+                        const doc_length = self.doc_lengths.getLength(entry.doc_id) catch 1;
+                        const score = self.scorer.scoreTerm(
+                            entry.term_freq,
+                            dict_entry.doc_freq,
+                            doc_length,
+                        );
+                        const existing = phrase_matches.get(entry.doc_id) orelse 0.0;
+                        still_matching.put(entry.doc_id, existing + score) catch {
+                            return FtsError.OutOfMemory;
+                        };
+                    }
+                } else {
+                    break;
+                }
+            }
+
+            // Update phrase_matches to only docs that still match
+            phrase_matches.clearAndFree();
+            var still_iter = still_matching.iterator();
+            while (still_iter.next()) |entry| {
+                phrase_matches.put(entry.key_ptr.*, entry.value_ptr.*) catch {
+                    return FtsError.OutOfMemory;
+                };
+            }
+        }
+
+        // Add score from first term
+        var match_iter = phrase_matches.iterator();
+        while (match_iter.next()) |entry| {
+            const doc_id = entry.key_ptr.*;
+            const doc_length = self.doc_lengths.getLength(doc_id) catch 1;
+            const first_score = self.scorer.scoreTerm(1, first_entry.doc_freq, doc_length);
+            entry.value_ptr.* += first_score;
+        }
+
+        // Collect results
+        var results: ArrayListUnmanaged(ScoredDoc) = .{};
+        errdefer results.deinit(self.allocator);
+
+        var result_iter = phrase_matches.iterator();
+        while (result_iter.next()) |entry| {
+            results.append(self.allocator, .{
+                .doc_id = entry.key_ptr.*,
+                .score = entry.value_ptr.*,
+            }) catch {
+                return FtsError.OutOfMemory;
+            };
+        }
+
+        // Sort by score descending
+        std.mem.sort(ScoredDoc, results.items, {}, ScoredDoc.lessThan);
+
+        // Return top K
+        const result_slice = results.toOwnedSlice(self.allocator) catch {
+            return FtsError.OutOfMemory;
+        };
+
+        if (result_slice.len > limit) {
+            self.allocator.free(result_slice[limit..]);
+            return result_slice[0..limit];
+        }
+        return result_slice;
+    }
+
+    // ========================================================================
     // Statistics
     // ========================================================================
 
@@ -570,4 +1118,166 @@ test "fts index basic" {
     const results4 = try index.search("elephant", 10);
     defer index.freeResults(results4);
     try std.testing.expectEqual(@as(usize, 0), results4.len);
+}
+
+test "fts OR query" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_fts_or_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var dict_tree = try BTree.init(allocator, &bp);
+    var lengths_tree = try BTree.init(allocator, &bp);
+
+    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, .{});
+
+    // Index documents with distinct terms
+    _ = try index.indexDocument(1, "apple banana cherry");
+    _ = try index.indexDocument(2, "banana date elderberry");
+    _ = try index.indexDocument(3, "cherry fig grape");
+    _ = try index.indexDocument(4, "date apple fig");
+
+    // OR search: "apple banana" should match docs 1, 2, 4
+    // doc1 has both, doc2 has banana, doc4 has apple
+    const results1 = try index.searchOr("apple banana", 10);
+    defer index.freeResults(results1);
+    try std.testing.expectEqual(@as(usize, 3), results1.len);
+
+    // AND search: "apple banana" should match only doc1
+    const results2 = try index.search("apple banana", 10);
+    defer index.freeResults(results2);
+    try std.testing.expectEqual(@as(usize, 1), results2.len);
+    try std.testing.expectEqual(@as(DocId, 1), results2[0].doc_id);
+
+    // OR with non-existent term: "apple zebra" should match docs 1, 4
+    const results3 = try index.searchOr("apple zebra", 10);
+    defer index.freeResults(results3);
+    try std.testing.expectEqual(@as(usize, 2), results3.len);
+}
+
+test "fts NOT query (exclusions)" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_fts_not_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var dict_tree = try BTree.init(allocator, &bp);
+    var lengths_tree = try BTree.init(allocator, &bp);
+
+    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, .{});
+
+    // Index documents
+    _ = try index.indexDocument(1, "apple banana cherry");
+    _ = try index.indexDocument(2, "apple date elderberry");
+    _ = try index.indexDocument(3, "apple fig grape");
+    _ = try index.indexDocument(4, "banana cherry date");
+
+    // Search "apple" without exclusion: should match 1, 2, 3
+    const results1 = try index.search("apple", 10);
+    defer index.freeResults(results1);
+    try std.testing.expectEqual(@as(usize, 3), results1.len);
+
+    // Search "apple -banana": should match 2, 3 (exclude 1 which has banana)
+    const results2 = try index.searchWithMode("apple -banana", .@"and", 10);
+    defer index.freeResults(results2);
+    try std.testing.expectEqual(@as(usize, 2), results2.len);
+
+    // Verify neither result is doc1
+    for (results2) |doc| {
+        try std.testing.expect(doc.doc_id != 1);
+    }
+
+    // Search "apple -banana -fig": should match only doc2
+    const results3 = try index.searchWithMode("apple -banana -fig", .@"and", 10);
+    defer index.freeResults(results3);
+    try std.testing.expectEqual(@as(usize, 1), results3.len);
+    try std.testing.expectEqual(@as(DocId, 2), results3[0].doc_id);
+}
+
+test "fts phrase query" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_fts_phrase_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var dict_tree = try BTree.init(allocator, &bp);
+    var lengths_tree = try BTree.init(allocator, &bp);
+
+    // Enable position storage for phrase queries
+    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, .{
+        .store_positions = true,
+    });
+
+    // Index documents with specific word ordering
+    _ = try index.indexDocument(1, "quick brown fox"); // has "quick brown"
+    _ = try index.indexDocument(2, "brown quick dog"); // has both but NOT adjacent as "quick brown"
+    _ = try index.indexDocument(3, "the quick brown rabbit"); // has "quick brown"
+    _ = try index.indexDocument(4, "very brown and quick"); // has both but NOT adjacent
+
+    // Phrase search "quick brown" should only match docs where words are adjacent
+    const results1 = try index.searchPhrase("quick brown", 10);
+    defer index.freeResults(results1);
+
+    // Should match doc1 and doc3 (where "quick brown" appears as a phrase)
+    try std.testing.expectEqual(@as(usize, 2), results1.len);
+
+    // Verify results are doc1 and doc3
+    var found_doc1 = false;
+    var found_doc3 = false;
+    for (results1) |doc| {
+        if (doc.doc_id == 1) found_doc1 = true;
+        if (doc.doc_id == 3) found_doc3 = true;
+    }
+    try std.testing.expect(found_doc1);
+    try std.testing.expect(found_doc3);
+
+    // Compare with AND search which should match all 4 docs
+    const results2 = try index.search("quick brown", 10);
+    defer index.freeResults(results2);
+    try std.testing.expectEqual(@as(usize, 4), results2.len);
 }

@@ -168,6 +168,11 @@ pub const PostingStore = struct {
     /// Append a posting entry to a list
     /// Returns the page ID where the entry was stored (may be different if overflow)
     pub fn append(self: *Self, page_id: PageId, entry: PostingEntry) PostingError!PageId {
+        return self.appendWithPositions(page_id, entry, false);
+    }
+
+    /// Append a posting entry with optional position storage
+    pub fn appendWithPositions(self: *Self, page_id: PageId, entry: PostingEntry, store_positions: bool) PostingError!PageId {
         const frame = self.bp.fetchPage(page_id, .exclusive) catch {
             return PostingError.BufferPoolError;
         };
@@ -176,15 +181,27 @@ pub const PostingStore = struct {
         const data = frame.data;
         var posting_header = PostingPageHeader.read(data);
 
-        // Encode the entry
-        var encode_buf: [32]u8 = undefined;
+        // Encode the entry - use larger buffer for positions
+        var encode_buf: [512]u8 = undefined;
         var encode_len: usize = 0;
 
-        // Delta-encode doc_id (for first entry, delta = doc_id)
-        // For simplicity in append, we store absolute doc_id since we don't have previous
-        // The iterator will handle delta decoding
+        // Encode doc_id and term_freq
         encode_len += encodeVarint(entry.doc_id, encode_buf[encode_len..]);
         encode_len += encodeVarint(entry.term_freq, encode_buf[encode_len..]);
+
+        // Encode positions if requested and available
+        const has_positions = store_positions and entry.positions != null;
+        if (has_positions) {
+            const positions = entry.positions.?;
+            // Encode position count
+            encode_len += encodeVarint(positions.len, encode_buf[encode_len..]);
+            // Encode each position (absolute for now, could delta-encode later)
+            for (positions) |pos| {
+                encode_len += encodeVarint(pos, encode_buf[encode_len..]);
+            }
+            // Set has_positions flag
+            posting_header.flags |= 0x01;
+        }
 
         // Check if there's space
         const current_end = posting_header.data_start + self.getDataSize(data, posting_header);
@@ -192,12 +209,22 @@ pub const PostingStore = struct {
             // Need to allocate overflow page
             const new_page_id = try self.create(posting_header.token_id);
 
-            // Link pages
+            // Link pages and preserve flags
+            const new_flags = posting_header.flags;
             posting_header.next_page = new_page_id;
             posting_header.write(data);
 
+            // Create new page with same flags
+            const new_frame = self.bp.fetchPage(new_page_id, .exclusive) catch {
+                return PostingError.BufferPoolError;
+            };
+            defer self.bp.unpinPage(new_frame, true);
+            var new_header = PostingPageHeader.read(new_frame.data);
+            new_header.flags = new_flags;
+            new_header.write(new_frame.data);
+
             // Recursively append to new page
-            return self.append(new_page_id, entry);
+            return self.appendWithPositions(new_page_id, entry, store_positions);
         }
 
         // Write entry
@@ -213,6 +240,8 @@ pub const PostingStore = struct {
     /// Get the size of posting data in a page
     fn getDataSize(self: *Self, data: []const u8, header: PostingPageHeader) usize {
         _ = self;
+        const has_positions = (header.flags & 0x01) != 0;
+
         // Scan through entries to find the end
         var offset: usize = header.data_start;
         var entries_read: u32 = 0;
@@ -225,6 +254,17 @@ pub const PostingStore = struct {
             // Decode term_freq
             const freq_result = decodeVarint(data[offset..]);
             offset += freq_result.bytes;
+
+            // Skip positions if present
+            if (has_positions) {
+                const pos_count_result = decodeVarint(data[offset..]);
+                offset += pos_count_result.bytes;
+                var pos_idx: usize = 0;
+                while (pos_idx < pos_count_result.value) : (pos_idx += 1) {
+                    const pos_result = decodeVarint(data[offset..]);
+                    offset += pos_result.bytes;
+                }
+            }
 
             entries_read += 1;
         }
@@ -246,12 +286,13 @@ pub const PostingIterator = struct {
     entries_read: u32,
     total_entries: u32,
     last_doc_id: DocId, // For delta decoding (not used in simplified version)
+    has_positions: bool,
     done: bool,
 
     const Self = @This();
 
     pub fn init(store: *PostingStore, page_id: PageId) PostingError!Self {
-        // Read header to get entry count
+        // Read header to get entry count and flags
         const frame = store.bp.fetchPage(page_id, .shared) catch {
             return PostingError.BufferPoolError;
         };
@@ -266,12 +307,22 @@ pub const PostingIterator = struct {
             .entries_read = 0,
             .total_entries = header.num_entries,
             .last_doc_id = 0,
+            .has_positions = (header.flags & 0x01) != 0,
             .done = header.num_entries == 0,
         };
     }
 
-    /// Get the next posting entry
+    /// Get the next posting entry (without positions)
     pub fn next(self: *Self) PostingError!?PostingEntry {
+        return self.nextInternal(null);
+    }
+
+    /// Get the next posting entry with positions (caller must free positions)
+    pub fn nextWithPositions(self: *Self, allocator: Allocator) PostingError!?PostingEntry {
+        return self.nextInternal(allocator);
+    }
+
+    fn nextInternal(self: *Self, allocator: ?Allocator) PostingError!?PostingEntry {
         if (self.done) return null;
 
         const frame = self.store.bp.fetchPage(self.current_page, .shared) catch {
@@ -281,6 +332,7 @@ pub const PostingIterator = struct {
 
         const data = frame.data;
         const header = PostingPageHeader.read(data);
+        const page_has_positions = (header.flags & 0x01) != 0;
 
         if (self.entries_read >= header.num_entries) {
             // Check for next page
@@ -289,8 +341,16 @@ pub const PostingIterator = struct {
                 self.current_offset = DATA_OFFSET;
                 self.entries_read = 0;
 
+                // Update has_positions for new page
+                const next_frame = self.store.bp.fetchPage(header.next_page, .shared) catch {
+                    return PostingError.BufferPoolError;
+                };
+                defer self.store.bp.unpinPage(next_frame, false);
+                const next_header = PostingPageHeader.read(next_frame.data);
+                self.has_positions = (next_header.flags & 0x01) != 0;
+
                 // Recursively get from next page
-                return self.next();
+                return self.nextInternal(allocator);
             }
             self.done = true;
             return null;
@@ -303,12 +363,38 @@ pub const PostingIterator = struct {
         const freq_result = decodeVarint(data[self.current_offset..]);
         self.current_offset += freq_result.bytes;
 
+        // Decode positions if present
+        var positions: ?[]u32 = null;
+        if (page_has_positions) {
+            const pos_count_result = decodeVarint(data[self.current_offset..]);
+            self.current_offset += pos_count_result.bytes;
+            const pos_count: usize = @intCast(pos_count_result.value);
+
+            if (allocator != null and pos_count > 0) {
+                // Allocate and read positions
+                positions = allocator.?.alloc(u32, pos_count) catch {
+                    return PostingError.OutOfMemory;
+                };
+                for (0..pos_count) |i| {
+                    const pos_result = decodeVarint(data[self.current_offset..]);
+                    self.current_offset += pos_result.bytes;
+                    positions.?[i] = @intCast(pos_result.value);
+                }
+            } else {
+                // Skip positions
+                for (0..pos_count) |_| {
+                    const pos_result = decodeVarint(data[self.current_offset..]);
+                    self.current_offset += pos_result.bytes;
+                }
+            }
+        }
+
         self.entries_read += 1;
 
         return PostingEntry{
             .doc_id = doc_result.value,
             .term_freq = @intCast(freq_result.value),
-            .positions = null,
+            .positions = if (positions) |p| p else null,
         };
     }
 

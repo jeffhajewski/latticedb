@@ -20,6 +20,7 @@ const tokenizer_mod = @import("tokenizer.zig");
 const dictionary_mod = @import("dictionary.zig");
 const posting_mod = @import("posting.zig");
 const scorer_mod = @import("scorer.zig");
+const fuzzy_mod = @import("fuzzy.zig");
 
 const Tokenizer = tokenizer_mod.Tokenizer;
 const TokenizerConfig = tokenizer_mod.TokenizerConfig;
@@ -593,6 +594,118 @@ pub const FtsIndex = struct {
         limit: u32,
     ) FtsError![]ScoredDoc {
         return self.searchWithMode(query_text, .@"or", limit);
+    }
+
+    /// Search with fuzzy matching (typo tolerance)
+    /// Terms with edit distance <= max_distance will match
+    pub fn searchFuzzy(
+        self: *Self,
+        query_text: []const u8,
+        fuzzy_config: fuzzy_mod.FuzzyConfig,
+        limit: u32,
+    ) FtsError![]ScoredDoc {
+        // Tokenize query
+        var tok = Tokenizer.init(self.allocator, query_text, self.config.tokenizer);
+        const tokens = tok.tokenizeAll() catch {
+            return FtsError.TokenizerError;
+        };
+        defer self.allocator.free(tokens);
+
+        if (tokens.len == 0) {
+            return &[_]ScoredDoc{};
+        }
+
+        // Collect all document scores (handles multiple fuzzy expansions)
+        var doc_scores = std.AutoHashMap(DocId, f32).init(self.allocator);
+        defer doc_scores.deinit();
+
+        // Process each query term
+        for (tokens) |token| {
+            // Normalize token
+            var lower_buf: [64]u8 = undefined;
+            const normalized = if (token.text.len <= 64) blk: {
+                for (token.text, 0..) |c, i| {
+                    lower_buf[i] = std.ascii.toLower(c);
+                }
+                break :blk lower_buf[0..token.text.len];
+            } else continue;
+
+            // Skip short terms for fuzzy matching
+            if (normalized.len < fuzzy_config.min_term_length) {
+                // Try exact match for short terms
+                const results = try self.searchSingleTerm(normalized, limit * 2);
+                defer self.allocator.free(results);
+                for (results) |doc| {
+                    const current = doc_scores.get(doc.doc_id) orelse 0.0;
+                    doc_scores.put(doc.doc_id, @max(current, doc.score)) catch continue;
+                }
+                continue;
+            }
+
+            // Find fuzzy matches for this term
+            const fuzzy_matches = fuzzy_mod.expandFuzzyTerms(
+                self.allocator,
+                normalized,
+                &self.dictionary,
+                fuzzy_config.max_distance,
+            ) catch {
+                return FtsError.DictionaryError;
+            };
+            defer fuzzy_mod.freeMatches(self.allocator, fuzzy_matches);
+
+            // Score documents from each fuzzy match
+            for (fuzzy_matches) |match| {
+                if (match.entry.posting_page == 0) continue;
+
+                var iter = self.posting_store.iterate(match.entry.posting_page) catch continue;
+                defer iter.deinit();
+
+                while (iter.next() catch null) |posting| {
+                    const doc_length = self.doc_lengths.getLength(posting.doc_id) catch continue;
+
+                    // Score with fuzzy penalty
+                    const score = self.scorer.scoreTermFuzzy(
+                        posting.term_freq,
+                        match.entry.doc_freq,
+                        doc_length,
+                        match.distance,
+                        fuzzy_config.max_distance,
+                    );
+
+                    // Accumulate scores (max for same doc from different terms)
+                    const current = doc_scores.get(posting.doc_id) orelse 0.0;
+                    doc_scores.put(posting.doc_id, current + score) catch continue;
+                }
+            }
+        }
+
+        // Convert to result array
+        var results: ArrayListUnmanaged(ScoredDoc) = .{};
+        errdefer results.deinit(self.allocator);
+
+        var iter = doc_scores.iterator();
+        while (iter.next()) |entry| {
+            results.append(self.allocator, .{
+                .doc_id = entry.key_ptr.*,
+                .score = entry.value_ptr.*,
+            }) catch {
+                return FtsError.OutOfMemory;
+            };
+        }
+
+        // Sort by score descending
+        std.mem.sort(ScoredDoc, results.items, {}, ScoredDoc.lessThan);
+
+        // Return top K
+        const result_slice = results.toOwnedSlice(self.allocator) catch {
+            return FtsError.OutOfMemory;
+        };
+
+        if (result_slice.len > limit) {
+            self.allocator.free(result_slice[limit..]);
+            return result_slice[0..limit];
+        }
+        return result_slice;
     }
 
     /// Search with explicit mode (AND or OR)
@@ -1611,4 +1724,66 @@ test "fts quoted phrase syntax" {
     const results5 = try index.searchWithMode("\"quick brown\" dog", .@"or", 10);
     defer index.freeResults(results5);
     try std.testing.expectEqual(@as(usize, 4), results5.len);
+}
+
+test "fts fuzzy search" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_fts_fuzzy_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var dict_tree = try BTree.init(allocator, &bp);
+    var lengths_tree = try BTree.init(allocator, &bp);
+
+    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, .{});
+
+    // Index documents with specific terms
+    _ = try index.indexDocument(1, "database systems and optimization");
+    _ = try index.indexDocument(2, "datastore management");
+    _ = try index.indexDocument(3, "the quick brown fox");
+    _ = try index.indexDocument(4, "advanced algorithms");
+
+    // Test 1: Exact match still works
+    const results1 = try index.searchFuzzy("database", .{ .max_distance = 2, .min_term_length = 4 }, 10);
+    defer index.freeResults(results1);
+    try std.testing.expectEqual(@as(usize, 1), results1.len);
+    try std.testing.expectEqual(@as(DocId, 1), results1[0].doc_id);
+
+    // Test 2: Typo "databse" should match "database" (edit distance 1)
+    const results2 = try index.searchFuzzy("databse", .{ .max_distance = 2, .min_term_length = 4 }, 10);
+    defer index.freeResults(results2);
+    try std.testing.expectEqual(@as(usize, 1), results2.len);
+    try std.testing.expectEqual(@as(DocId, 1), results2[0].doc_id);
+
+    // Test 3: Typo "quikc" should match "quick" (edit distance 2)
+    const results3 = try index.searchFuzzy("quikc", .{ .max_distance = 2, .min_term_length = 4 }, 10);
+    defer index.freeResults(results3);
+    try std.testing.expectEqual(@as(usize, 1), results3.len);
+    try std.testing.expectEqual(@as(DocId, 3), results3[0].doc_id);
+
+    // Test 4: No match for too distant terms
+    const results4 = try index.searchFuzzy("zebra", .{ .max_distance = 2, .min_term_length = 4 }, 10);
+    defer index.freeResults(results4);
+    try std.testing.expectEqual(@as(usize, 0), results4.len);
+
+    // Test 5: Multiple fuzzy matches - "datastore" and "database" both within distance 2 of "databas"
+    const results5 = try index.searchFuzzy("databas", .{ .max_distance = 2, .min_term_length = 4 }, 10);
+    defer index.freeResults(results5);
+    // Should match doc1 (database) - datastore is distance 3 from databas
+    try std.testing.expect(results5.len >= 1);
 }

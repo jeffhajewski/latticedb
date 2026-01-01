@@ -244,6 +244,32 @@ pub const Bm25Scorer = struct {
         return idf * tf_norm;
     }
 
+    /// Calculate BM25 score with fuzzy distance penalty
+    /// Applies quadratic penalty: score * (1 - (distance/max_distance)^2)
+    pub fn scoreTermFuzzy(
+        self: *Self,
+        term_freq: u32,
+        doc_freq: u32,
+        doc_length: u32,
+        edit_distance: u32,
+        max_distance: u32,
+    ) f32 {
+        const base_score = self.scoreTerm(term_freq, doc_freq, doc_length);
+
+        // Apply distance penalty
+        if (max_distance == 0) {
+            return if (edit_distance == 0) base_score else 0.0;
+        }
+        if (edit_distance >= max_distance) {
+            return 0.0;
+        }
+
+        const ratio = @as(f32, @floatFromInt(edit_distance)) / @as(f32, @floatFromInt(max_distance));
+        const penalty = 1.0 - (ratio * ratio);
+
+        return base_score * penalty;
+    }
+
     /// Calculate BM25 score for a document with multiple terms
     pub fn scoreDocument(
         self: *Self,

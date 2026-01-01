@@ -214,6 +214,55 @@ pub const Dictionary = struct {
         if (self.next_token_id <= FIRST_TOKEN_ID) return 0;
         return self.next_token_id - FIRST_TOKEN_ID;
     }
+
+    /// Iterator over all dictionary entries
+    pub const DictionaryIterator = struct {
+        tree_iter: BTree.Iterator,
+
+        const IterSelf = @This();
+
+        /// Item returned by iterator
+        pub const Item = struct {
+            term: []const u8,
+            entry: DictionaryEntry,
+        };
+
+        /// Get next entry from dictionary
+        pub fn next(self: *IterSelf) DictionaryError!?Item {
+            const tree_item = self.tree_iter.next() catch |err| {
+                return mapBTreeError(err);
+            };
+
+            if (tree_item) |item| {
+                if (item.value.len < @sizeOf(DictionaryEntry)) {
+                    return DictionaryError.InvalidData;
+                }
+                return Item{
+                    .term = item.key,
+                    .entry = DictionaryEntry.deserialize(item.value),
+                };
+            }
+
+            return null;
+        }
+
+        /// Clean up iterator resources
+        pub fn deinit(self: *IterSelf) void {
+            self.tree_iter.deinit();
+        }
+    };
+
+    /// Create an iterator over all dictionary entries
+    /// Iterator must be deinit'd when done
+    pub fn iterate(self: *Self) DictionaryError!DictionaryIterator {
+        const tree_iter = self.tree.range(null, null) catch |err| {
+            return mapBTreeError(err);
+        };
+
+        return DictionaryIterator{
+            .tree_iter = tree_iter,
+        };
+    }
 };
 
 /// Map B+Tree errors to Dictionary errors

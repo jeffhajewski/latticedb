@@ -21,6 +21,7 @@ const dictionary_mod = @import("dictionary.zig");
 const posting_mod = @import("posting.zig");
 const scorer_mod = @import("scorer.zig");
 const fuzzy_mod = @import("fuzzy.zig");
+const prefix_mod = @import("prefix.zig");
 const stopwords_mod = @import("stopwords.zig");
 
 const Tokenizer = tokenizer_mod.Tokenizer;
@@ -692,6 +693,189 @@ pub const FtsIndex = struct {
             }) catch {
                 return FtsError.OutOfMemory;
             };
+        }
+
+        // Sort by score descending
+        std.mem.sort(ScoredDoc, results.items, {}, ScoredDoc.lessThan);
+
+        // Return top K
+        const result_slice = results.toOwnedSlice(self.allocator) catch {
+            return FtsError.OutOfMemory;
+        };
+
+        if (result_slice.len > limit) {
+            self.allocator.free(result_slice[limit..]);
+            return result_slice[0..limit];
+        }
+        return result_slice;
+    }
+
+    /// Search with prefix/wildcard matching
+    /// Terms ending with * are expanded to all matching dictionary terms
+    /// Example: "optim*" matches "optimize", "optimization", "optimizer"
+    pub fn searchWithPrefix(
+        self: *Self,
+        query_text: []const u8,
+        prefix_config: prefix_mod.PrefixConfig,
+        limit: u32,
+    ) FtsError![]ScoredDoc {
+        // Collect all document scores
+        var doc_scores = std.AutoHashMap(DocId, f32).init(self.allocator);
+        defer doc_scores.deinit();
+
+        // Track term counts for AND semantics
+        var doc_term_counts = std.AutoHashMap(DocId, u32).init(self.allocator);
+        defer doc_term_counts.deinit();
+
+        // Parse query manually to detect wildcards
+        var i: usize = 0;
+        var total_terms: u32 = 0;
+
+        while (i < query_text.len) {
+            // Skip whitespace
+            while (i < query_text.len and std.ascii.isWhitespace(query_text[i])) {
+                i += 1;
+            }
+            if (i >= query_text.len) break;
+
+            // Check for exclusion prefix (skip for now - basic implementation)
+            if (query_text[i] == '-') {
+                // Skip excluded terms
+                i += 1;
+                while (i < query_text.len and !std.ascii.isWhitespace(query_text[i])) {
+                    i += 1;
+                }
+                continue;
+            }
+
+            // Find end of term (including potential *)
+            const start = i;
+            while (i < query_text.len and !std.ascii.isWhitespace(query_text[i])) {
+                i += 1;
+            }
+
+            if (i > start) {
+                const term = query_text[start..i];
+                total_terms += 1;
+
+                // Check if this is a wildcard term
+                if (prefix_mod.hasWildcard(term)) {
+                    const prefix = prefix_mod.extractPrefix(term);
+
+                    // Normalize to lowercase
+                    var lower_buf: [64]u8 = undefined;
+                    if (prefix.len > 64 or prefix.len < prefix_config.min_prefix_length) {
+                        continue;
+                    }
+                    for (prefix, 0..) |c, j| {
+                        lower_buf[j] = std.ascii.toLower(c);
+                    }
+                    const normalized_prefix = lower_buf[0..prefix.len];
+
+                    // Expand prefix to matching terms
+                    const prefix_matches = prefix_mod.expandPrefixTerms(
+                        self.allocator,
+                        normalized_prefix,
+                        &self.dictionary,
+                        prefix_config,
+                    ) catch {
+                        return FtsError.DictionaryError;
+                    };
+                    defer prefix_mod.freeMatches(self.allocator, prefix_matches);
+
+                    // Score documents from each prefix match
+                    for (prefix_matches) |match| {
+                        if (match.entry.posting_page == 0) continue;
+
+                        var iter = self.posting_store.iterate(match.entry.posting_page) catch continue;
+                        defer iter.deinit();
+
+                        while (iter.next() catch null) |posting| {
+                            const doc_length = self.doc_lengths.getLength(posting.doc_id) catch continue;
+
+                            // Score without penalty (exact prefix match)
+                            const score = self.scorer.scoreTerm(
+                                posting.term_freq,
+                                match.entry.doc_freq,
+                                doc_length,
+                            );
+
+                            // Accumulate scores
+                            const current = doc_scores.get(posting.doc_id) orelse 0.0;
+                            doc_scores.put(posting.doc_id, current + score) catch continue;
+
+                            // Track term presence for AND semantics
+                            const count = doc_term_counts.get(posting.doc_id) orelse 0;
+                            if (count < total_terms) {
+                                doc_term_counts.put(posting.doc_id, count + 1) catch continue;
+                            }
+                        }
+                    }
+                } else {
+                    // Regular term - exact match
+                    var lower_buf: [64]u8 = undefined;
+                    if (term.len > 64 or term.len < self.config.tokenizer.min_token_length) {
+                        continue;
+                    }
+                    for (term, 0..) |c, j| {
+                        lower_buf[j] = std.ascii.toLower(c);
+                    }
+                    const normalized = lower_buf[0..term.len];
+
+                    // Skip stop words
+                    if (self.config.tokenizer.remove_stop_words and
+                        stopwords_mod.isStopWord(normalized, self.config.tokenizer.language))
+                    {
+                        total_terms -= 1; // Don't count stop words
+                        continue;
+                    }
+
+                    // Look up in dictionary
+                    const dict_entry = self.dictionary.get(normalized) catch continue orelse continue;
+                    if (dict_entry.posting_page == 0) continue;
+
+                    var iter = self.posting_store.iterate(dict_entry.posting_page) catch continue;
+                    defer iter.deinit();
+
+                    while (iter.next() catch null) |posting| {
+                        const doc_length = self.doc_lengths.getLength(posting.doc_id) catch continue;
+
+                        const score = self.scorer.scoreTerm(
+                            posting.term_freq,
+                            dict_entry.doc_freq,
+                            doc_length,
+                        );
+
+                        const current = doc_scores.get(posting.doc_id) orelse 0.0;
+                        doc_scores.put(posting.doc_id, current + score) catch continue;
+
+                        const count = doc_term_counts.get(posting.doc_id) orelse 0;
+                        if (count < total_terms) {
+                            doc_term_counts.put(posting.doc_id, count + 1) catch continue;
+                        }
+                    }
+                }
+            }
+        }
+
+        // Convert to result array (AND semantics: require all terms)
+        var results: ArrayListUnmanaged(ScoredDoc) = .{};
+        errdefer results.deinit(self.allocator);
+
+        var score_iter = doc_scores.iterator();
+        while (score_iter.next()) |entry| {
+            const doc_id = entry.key_ptr.*;
+            const term_count = doc_term_counts.get(doc_id) orelse 0;
+
+            // Only include if document has all terms (AND semantics)
+            if (total_terms == 0 or term_count >= total_terms) {
+                results.append(self.allocator, .{
+                    .doc_id = doc_id,
+                    .score = entry.value_ptr.*,
+                }) catch {
+                    return FtsError.OutOfMemory;
+                };
+            }
         }
 
         // Sort by score descending
@@ -1789,4 +1973,73 @@ test "fts fuzzy search" {
     defer index.freeResults(results5);
     // Should match doc1 (database) - datastore is distance 3 from databas
     try std.testing.expect(results5.len >= 1);
+}
+
+test "fts prefix search" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_fts_prefix_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var dict_tree = try BTree.init(allocator, &bp);
+    var lengths_tree = try BTree.init(allocator, &bp);
+
+    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, .{});
+
+    // Index documents with terms that share prefixes
+    _ = try index.indexDocument(1, "database systems");
+    _ = try index.indexDocument(2, "datastore management");
+    _ = try index.indexDocument(3, "data analysis");
+    _ = try index.indexDocument(4, "optimize performance");
+    _ = try index.indexDocument(5, "optimization techniques");
+    _ = try index.indexDocument(6, "optimizer settings");
+    _ = try index.indexDocument(7, "unrelated content");
+
+    // Test 1: Prefix "data*" should match docs 1, 2, 3
+    const results1 = try index.searchWithPrefix("data*", .{ .min_prefix_length = 2, .max_expansions = 50 }, 10);
+    defer index.freeResults(results1);
+    try std.testing.expectEqual(@as(usize, 3), results1.len);
+
+    // Test 2: Prefix "optim*" should match docs 4, 5, 6
+    const results2 = try index.searchWithPrefix("optim*", .{ .min_prefix_length = 2, .max_expansions = 50 }, 10);
+    defer index.freeResults(results2);
+    try std.testing.expectEqual(@as(usize, 3), results2.len);
+
+    // Test 3: Mixed query - regular term + prefix
+    // "systems data*" should only match doc 1 (has both "systems" and "database")
+    const results3 = try index.searchWithPrefix("systems data*", .{ .min_prefix_length = 2, .max_expansions = 50 }, 10);
+    defer index.freeResults(results3);
+    try std.testing.expectEqual(@as(usize, 1), results3.len);
+    try std.testing.expectEqual(@as(DocId, 1), results3[0].doc_id);
+
+    // Test 4: No match for non-existent prefix
+    const results4 = try index.searchWithPrefix("xyz*", .{ .min_prefix_length = 2, .max_expansions = 50 }, 10);
+    defer index.freeResults(results4);
+    try std.testing.expectEqual(@as(usize, 0), results4.len);
+
+    // Test 5: Prefix too short (below min_prefix_length) returns no results
+    const results5 = try index.searchWithPrefix("d*", .{ .min_prefix_length = 2, .max_expansions = 50 }, 10);
+    defer index.freeResults(results5);
+    try std.testing.expectEqual(@as(usize, 0), results5.len);
+
+    // Test 6: Exact term without wildcard still works
+    const results6 = try index.searchWithPrefix("database", .{ .min_prefix_length = 2, .max_expansions = 50 }, 10);
+    defer index.freeResults(results6);
+    try std.testing.expectEqual(@as(usize, 1), results6.len);
+    try std.testing.expectEqual(@as(DocId, 1), results6[0].doc_id);
 }

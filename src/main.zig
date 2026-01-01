@@ -38,6 +38,9 @@ pub const fts = struct {
     pub const scorer = @import("fts/scorer.zig");
     pub const index = @import("fts/index.zig");
     pub const stemmer = @import("fts/stemmer.zig");
+    pub const fuzzy = @import("fts/fuzzy.zig");
+    pub const prefix = @import("fts/prefix.zig");
+    pub const stopwords = @import("fts/stopwords.zig");
 };
 
 // Query system

@@ -263,6 +263,23 @@ pub const Dictionary = struct {
             .tree_iter = tree_iter,
         };
     }
+
+    /// Create an iterator over dictionary entries in a key range
+    /// Both start_key and end_key are optional (null means unbounded)
+    /// Iterator must be deinit'd when done
+    pub fn iterateRange(
+        self: *Self,
+        start_key: ?[]const u8,
+        end_key: ?[]const u8,
+    ) DictionaryError!DictionaryIterator {
+        const tree_iter = self.tree.range(start_key, end_key) catch |err| {
+            return mapBTreeError(err);
+        };
+
+        return DictionaryIterator{
+            .tree_iter = tree_iter,
+        };
+    }
 };
 
 /// Map B+Tree errors to Dictionary errors

@@ -41,6 +41,7 @@ pub const fts = struct {
     pub const fuzzy = @import("fts/fuzzy.zig");
     pub const prefix = @import("fts/prefix.zig");
     pub const stopwords = @import("fts/stopwords.zig");
+    pub const highlight = @import("fts/highlight.zig");
 };
 
 // Query system
@@ -156,6 +157,10 @@ pub const Tokenizer = fts.tokenizer.Tokenizer;
 pub const TokenizerConfig = fts.tokenizer.TokenizerConfig;
 pub const ScoredDoc = fts.scorer.ScoredDoc;
 pub const Bm25Config = fts.scorer.Bm25Config;
+pub const HighlightConfig = fts.highlight.HighlightConfig;
+pub const HighlightResult = fts.highlight.HighlightResult;
+pub const HighlightError = fts.highlight.HighlightError;
+pub const Snippet = fts.highlight.Snippet;
 
 // Version information
 pub const VERSION = "0.1.0";

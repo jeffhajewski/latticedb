@@ -190,6 +190,20 @@ pub const Dictionary = struct {
         try self.update(token, updated);
     }
 
+    /// Subtract from total frequency count (for document removal)
+    pub fn subtractTotalFreq(self: *Self, token: []const u8, count: u64) DictionaryError!void {
+        const entry = try self.get(token) orelse return DictionaryError.NotFound;
+
+        const updated = DictionaryEntry{
+            .token_id = entry.token_id,
+            .doc_freq = entry.doc_freq,
+            .total_freq = if (entry.total_freq >= count) entry.total_freq - count else 0,
+            .posting_page = entry.posting_page,
+        };
+
+        try self.update(token, updated);
+    }
+
     /// Set the posting page for a token
     pub fn setPostingPage(self: *Self, token: []const u8, page_id: PageId) DictionaryError!void {
         const entry = try self.get(token) orelse return DictionaryError.NotFound;

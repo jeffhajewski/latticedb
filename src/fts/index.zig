@@ -23,6 +23,7 @@ const scorer_mod = @import("scorer.zig");
 const fuzzy_mod = @import("fuzzy.zig");
 const prefix_mod = @import("prefix.zig");
 const stopwords_mod = @import("stopwords.zig");
+const reverse_index_mod = @import("reverse_index.zig");
 
 const Tokenizer = tokenizer_mod.Tokenizer;
 const TokenizerConfig = tokenizer_mod.TokenizerConfig;
@@ -36,6 +37,7 @@ const DocLengthStore = scorer_mod.DocLengthStore;
 const Bm25Scorer = scorer_mod.Bm25Scorer;
 const Bm25Config = scorer_mod.Bm25Config;
 const ScoredDoc = scorer_mod.ScoredDoc;
+const ReverseIndex = reverse_index_mod.ReverseIndex;
 
 /// FTS Index configuration
 pub const FtsConfig = struct {
@@ -116,19 +118,23 @@ pub const FtsIndex = struct {
     posting_store: PostingStore,
     doc_lengths: DocLengthStore,
     scorer: Bm25Scorer,
+    reverse_index: ?ReverseIndex,
 
     // B+Trees (references, not owned)
     dict_tree: *BTree,
     lengths_tree: *BTree,
+    reverse_tree: ?*BTree,
 
     const Self = @This();
 
     /// Initialize a new FTS index
+    /// reverse_tree is optional - if provided, enables proper document deletion
     pub fn init(
         allocator: Allocator,
         bp: *BufferPool,
         dict_tree: *BTree,
         lengths_tree: *BTree,
+        reverse_tree: ?*BTree,
         config: FtsConfig,
     ) Self {
         var doc_lengths = DocLengthStore.init(allocator, lengths_tree);
@@ -140,8 +146,10 @@ pub const FtsIndex = struct {
             .posting_store = PostingStore.init(allocator, bp),
             .doc_lengths = doc_lengths,
             .scorer = Bm25Scorer.init(config.bm25, &doc_lengths),
+            .reverse_index = if (reverse_tree) |rt| ReverseIndex.init(allocator, rt) else null,
             .dict_tree = dict_tree,
             .lengths_tree = lengths_tree,
+            .reverse_tree = reverse_tree,
         };
     }
 
@@ -282,6 +290,27 @@ pub const FtsIndex = struct {
             return FtsError.ScorerError;
         };
 
+        // 5. Store reverse index entry for document deletion support
+        if (self.reverse_index) |*ri| {
+            // Collect unique terms - allocate array directly
+            const num_terms = term_infos.count();
+            const term_slice = self.allocator.alloc([]const u8, num_terms) catch {
+                return FtsError.OutOfMemory;
+            };
+            defer self.allocator.free(term_slice);
+
+            var term_iter = term_infos.iterator();
+            var idx: usize = 0;
+            while (term_iter.next()) |entry| {
+                term_slice[idx] = entry.key_ptr.*;
+                idx += 1;
+            }
+
+            ri.setDocTerms(doc_id, term_slice) catch {
+                return FtsError.IoError;
+            };
+        }
+
         // Update scorer's reference to doc_lengths
         self.scorer = Bm25Scorer.init(self.config.bm25, &self.doc_lengths);
 
@@ -289,15 +318,40 @@ pub const FtsIndex = struct {
     }
 
     /// Remove a document from the index
+    /// If reverse_index is available, properly cleans up posting lists and stats
     pub fn removeDocument(self: *Self, doc_id: DocId) FtsError!void {
-        // Remove from doc lengths (this updates stats)
-        self.doc_lengths.removeDoc(doc_id) catch {
-            return FtsError.ScorerError;
-        };
+        // If we have a reverse index, do proper cleanup
+        if (self.reverse_index) |*ri| {
+            // 1. Get terms from reverse index
+            const terms = ri.getDocTerms(doc_id) catch {
+                return FtsError.IoError;
+            } orelse {
+                // Document not in reverse index, just remove doc length
+                self.doc_lengths.removeDoc(doc_id) catch {};
+                return;
+            };
+            defer ri.freeTerms(terms);
 
-        // Note: Ideally we should also remove entries from posting lists
-        // and update doc frequencies. For now, we skip this as it requires
-        // scanning all posting lists. Documents will be filtered during search.
+            // 2. For each term, remove from posting list and update dictionary
+            for (terms) |term| {
+                const entry = self.dictionary.get(term) catch continue orelse continue;
+
+                if (entry.posting_page != 0) {
+                    const result = self.posting_store.removeEntry(entry.posting_page, doc_id) catch continue;
+                    if (result.found) {
+                        // Update dictionary statistics
+                        self.dictionary.decrementDocFreq(term) catch {};
+                        self.dictionary.subtractTotalFreq(term, result.term_freq) catch {};
+                    }
+                }
+            }
+
+            // 3. Remove reverse index entry
+            ri.removeDoc(doc_id) catch {};
+        }
+
+        // 4. Remove from doc lengths (this updates stats)
+        self.doc_lengths.removeDoc(doc_id) catch {};
     }
 
     // ========================================================================
@@ -1644,7 +1698,7 @@ test "fts index basic" {
     var dict_tree = try BTree.init(allocator, &bp);
     var lengths_tree = try BTree.init(allocator, &bp);
 
-    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, .{});
+    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{});
 
     // Index some documents
     const doc1_tokens = try index.indexDocument(1, "The quick brown fox jumps over the lazy dog");
@@ -1706,7 +1760,7 @@ test "fts OR query" {
     var dict_tree = try BTree.init(allocator, &bp);
     var lengths_tree = try BTree.init(allocator, &bp);
 
-    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, .{});
+    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{});
 
     // Index documents with distinct terms
     _ = try index.indexDocument(1, "apple banana cherry");
@@ -1756,7 +1810,7 @@ test "fts NOT query (exclusions)" {
     var dict_tree = try BTree.init(allocator, &bp);
     var lengths_tree = try BTree.init(allocator, &bp);
 
-    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, .{});
+    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{});
 
     // Index documents
     _ = try index.indexDocument(1, "apple banana cherry");
@@ -1811,7 +1865,7 @@ test "fts phrase query" {
     var lengths_tree = try BTree.init(allocator, &bp);
 
     // Enable position storage for phrase queries
-    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, .{
+    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{
         .store_positions = true,
     });
 
@@ -1869,7 +1923,7 @@ test "fts quoted phrase syntax" {
     var lengths_tree = try BTree.init(allocator, &bp);
 
     // Enable position storage for phrase queries
-    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, .{
+    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{
         .store_positions = true,
     });
 
@@ -1937,7 +1991,7 @@ test "fts fuzzy search" {
     var dict_tree = try BTree.init(allocator, &bp);
     var lengths_tree = try BTree.init(allocator, &bp);
 
-    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, .{});
+    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{});
 
     // Index documents with specific terms
     _ = try index.indexDocument(1, "database systems and optimization");
@@ -1999,7 +2053,7 @@ test "fts prefix search" {
     var dict_tree = try BTree.init(allocator, &bp);
     var lengths_tree = try BTree.init(allocator, &bp);
 
-    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, .{});
+    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{});
 
     // Index documents with terms that share prefixes
     _ = try index.indexDocument(1, "database systems");

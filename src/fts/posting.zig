@@ -304,6 +304,201 @@ pub const PostingStore = struct {
     pub fn iterate(self: *Self, page_id: PageId) PostingError!PostingIterator {
         return PostingIterator.init(self, page_id);
     }
+
+    /// Result of removing an entry from posting list
+    pub const RemovalResult = struct {
+        found: bool,
+        term_freq: u32,
+    };
+
+    /// Remove an entry from a posting list by doc_id
+    /// Returns the term frequency of the removed entry if found
+    pub fn removeEntry(self: *Self, posting_page: PageId, target_doc_id: DocId) PostingError!RemovalResult {
+        var current_page = posting_page;
+
+        while (current_page != 0) {
+            const frame = self.bp.fetchPage(current_page, .exclusive) catch {
+                return PostingError.BufferPoolError;
+            };
+
+            const data = frame.data;
+            var header = PostingPageHeader.read(data);
+            const has_positions = (header.flags & 0x01) != 0;
+
+            // Collect all entries except the target
+            var kept_entries = std.ArrayList(StoredEntry).init(self.allocator);
+            defer {
+                for (kept_entries.items) |entry| {
+                    if (entry.positions) |pos| {
+                        self.allocator.free(pos);
+                    }
+                }
+                kept_entries.deinit();
+            }
+
+            var found_entry: ?StoredEntry = null;
+            var offset: usize = header.data_start;
+
+            for (0..header.num_entries) |_| {
+                const doc_result = decodeVarint(data[offset..]);
+                offset += doc_result.bytes;
+
+                const freq_result = decodeVarint(data[offset..]);
+                offset += freq_result.bytes;
+
+                var positions: ?[]u32 = null;
+                if (has_positions) {
+                    const pos_count_result = decodeVarint(data[offset..]);
+                    offset += pos_count_result.bytes;
+                    const pos_count: usize = @intCast(pos_count_result.value);
+
+                    if (pos_count > 0) {
+                        positions = self.allocator.alloc(u32, pos_count) catch {
+                            self.bp.unpinPage(frame, false);
+                            return PostingError.OutOfMemory;
+                        };
+                        for (0..pos_count) |i| {
+                            const pos_result = decodeVarint(data[offset..]);
+                            offset += pos_result.bytes;
+                            positions.?[i] = @intCast(pos_result.value);
+                        }
+                    }
+                }
+
+                const entry = StoredEntry{
+                    .doc_id = doc_result.value,
+                    .term_freq = @intCast(freq_result.value),
+                    .positions = positions,
+                };
+
+                if (doc_result.value == target_doc_id) {
+                    found_entry = entry;
+                } else {
+                    kept_entries.append(entry) catch {
+                        if (positions) |pos| self.allocator.free(pos);
+                        self.bp.unpinPage(frame, false);
+                        return PostingError.OutOfMemory;
+                    };
+                }
+            }
+
+            if (found_entry) |removed| {
+                // Rebuild page with remaining entries
+                self.rebuildPage(data, &header, kept_entries.items, has_positions);
+
+                // Update header
+                header.num_entries = @intCast(kept_entries.items.len);
+
+                // Rebuild skip pointers
+                self.rebuildSkipPointers(data, &header, kept_entries.items, has_positions);
+
+                header.write(data);
+                self.bp.unpinPage(frame, true);
+
+                // Free removed entry's positions
+                if (removed.positions) |pos| {
+                    self.allocator.free(pos);
+                }
+
+                return .{ .found = true, .term_freq = removed.term_freq };
+            }
+
+            // Entry not found in this page, try next
+            const next_page = header.next_page;
+            self.bp.unpinPage(frame, false);
+            current_page = next_page;
+        }
+
+        return .{ .found = false, .term_freq = 0 };
+    }
+
+    /// Temporary storage for entry during rebuild
+    const StoredEntry = struct {
+        doc_id: DocId,
+        term_freq: u32,
+        positions: ?[]u32,
+    };
+
+    /// Rebuild page data from entries
+    fn rebuildPage(self: *Self, data: []u8, header: *PostingPageHeader, entries: []const StoredEntry, has_positions: bool) void {
+        _ = self;
+        var offset: usize = header.data_start;
+
+        for (entries) |entry| {
+            // Encode doc_id
+            offset += encodeVarint(entry.doc_id, data[offset..]);
+
+            // Encode term_freq
+            offset += encodeVarint(entry.term_freq, data[offset..]);
+
+            // Encode positions if present
+            if (has_positions) {
+                if (entry.positions) |positions| {
+                    offset += encodeVarint(positions.len, data[offset..]);
+                    for (positions) |pos| {
+                        offset += encodeVarint(pos, data[offset..]);
+                    }
+                } else {
+                    offset += encodeVarint(0, data[offset..]);
+                }
+            }
+        }
+
+        // Zero out remaining data area (optional, for cleanliness)
+        if (offset < PAGE_SIZE) {
+            @memset(data[offset..PAGE_SIZE], 0);
+        }
+    }
+
+    /// Rebuild skip pointers after page modification
+    fn rebuildSkipPointers(self: *Self, data: []u8, header: *PostingPageHeader, entries: []const StoredEntry, has_positions: bool) void {
+        _ = self;
+        // Clear existing skip pointers
+        header.num_skip_pointers = 0;
+
+        if (entries.len < SKIP_INTERVAL) {
+            return;
+        }
+
+        // Scan through entries to build skip pointers
+        var offset: usize = header.data_start;
+        var skip_count: u16 = 0;
+
+        for (entries, 0..) |entry, idx| {
+            // Create skip pointer at SKIP_INTERVAL boundaries (e.g., at entry 128, 256, etc.)
+            if (idx > 0 and idx % SKIP_INTERVAL == 0 and skip_count < MAX_SKIP_POINTERS) {
+                const skip_ptr = SkipPointer{
+                    .doc_id = entry.doc_id,
+                    .byte_offset = @intCast(offset - header.data_start),
+                    .entry_count = @intCast(idx),
+                };
+                const skip_offset = HEADER_END + skip_count * @sizeOf(SkipPointer);
+                var skip_buf: [@sizeOf(SkipPointer)]u8 = undefined;
+                skip_ptr.serialize(&skip_buf);
+                @memcpy(data[skip_offset..][0..@sizeOf(SkipPointer)], &skip_buf);
+                skip_count += 1;
+            }
+
+            // Calculate size of this entry to advance offset
+            var entry_buf: [256]u8 = undefined;
+            var entry_size: usize = 0;
+            entry_size += encodeVarint(entry.doc_id, entry_buf[entry_size..]);
+            entry_size += encodeVarint(entry.term_freq, entry_buf[entry_size..]);
+            if (has_positions) {
+                if (entry.positions) |positions| {
+                    entry_size += encodeVarint(positions.len, entry_buf[entry_size..]);
+                    for (positions) |pos| {
+                        entry_size += encodeVarint(pos, entry_buf[entry_size..]);
+                    }
+                } else {
+                    entry_size += encodeVarint(0, entry_buf[entry_size..]);
+                }
+            }
+            offset += entry_size;
+        }
+
+        header.num_skip_pointers = skip_count;
+    }
 };
 
 /// Iterator for reading posting entries

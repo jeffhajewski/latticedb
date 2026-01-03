@@ -560,16 +560,16 @@ pub const Database = struct {
             return DatabaseError.IoError;
         };
 
-        var nodes = std.ArrayList(NodeId).init(self.allocator);
-        errdefer nodes.deinit();
+        var nodes: std.ArrayList(NodeId) = .empty;
+        errdefer nodes.deinit(self.allocator);
 
         while (iter.next() catch null) |node_id| {
-            nodes.append(node_id) catch {
+            nodes.append(self.allocator, node_id) catch {
                 return DatabaseError.OutOfMemory;
             };
         }
 
-        return nodes.toOwnedSlice() catch {
+        return nodes.toOwnedSlice(self.allocator) catch {
             return DatabaseError.OutOfMemory;
         };
     }

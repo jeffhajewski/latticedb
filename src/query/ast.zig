@@ -21,9 +21,7 @@ pub const SourceLocation = struct {
     column: u32,
     length: u32 = 0,
 
-    pub fn format(self: SourceLocation, comptime fmt: []const u8, options: std.fmt.FormatOptions, writer: anytype) !void {
-        _ = fmt;
-        _ = options;
+    pub fn format(self: SourceLocation, writer: anytype) !void {
         try writer.print("{d}:{d}", .{ self.line, self.column });
     }
 };
@@ -258,7 +256,7 @@ pub const MapExpr = struct {
 test "source location format" {
     const loc = SourceLocation{ .line = 10, .column = 5, .length = 3 };
     var buf: [32]u8 = undefined;
-    const result = std.fmt.bufPrint(&buf, "{}", .{loc}) catch unreachable;
+    const result = std.fmt.bufPrint(&buf, "{f}", .{loc}) catch unreachable;
     try std.testing.expectEqualStrings("10:5", result);
 }
 

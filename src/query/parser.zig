@@ -253,7 +253,7 @@ pub const Parser = struct {
             .lexer = Lexer.init(source),
             .current = undefined,
             .previous = undefined,
-            .errors = std.ArrayList(ParseError).init(allocator),
+            .errors = .empty,
             .had_error = false,
             .panic_mode = false,
         };
@@ -262,7 +262,7 @@ pub const Parser = struct {
     /// Free parser resources
     pub fn deinit(self: *Self) void {
         self.arena.deinit();
-        self.errors.deinit();
+        self.errors.deinit(self.allocator);
     }
 
     /// Parse the query and return result
@@ -270,11 +270,11 @@ pub const Parser = struct {
         // Prime the parser with first token
         self.advance();
 
-        var clauses = std.ArrayList(ast.Clause).init(self.arena.allocator());
+        var clauses: std.ArrayList(ast.Clause) = .empty;
 
         while (!self.check(.eof)) {
             if (self.parseClause()) |clause| {
-                clauses.append(clause) catch {
+                clauses.append(self.arena.allocator(), clause) catch {
                     self.errorAtCurrent("Out of memory");
                     break;
                 };
@@ -294,7 +294,7 @@ pub const Parser = struct {
             return .{ .query = null, .errors = self.errors.items };
         };
         query.* = .{
-            .clauses = clauses.toOwnedSlice() catch &[_]ast.Clause{},
+            .clauses = clauses.toOwnedSlice(self.arena.allocator()) catch &[_]ast.Clause{},
             .allocator = self.arena.allocator(),
         };
 
@@ -329,11 +329,11 @@ pub const Parser = struct {
 
     fn parseMatchClause(self: *Self) ?ast.Clause {
         const loc = self.previousLocation();
-        var patterns = std.ArrayList(ast.Pattern).init(self.arena.allocator());
+        var patterns: std.ArrayList(ast.Pattern) = .empty;
 
         // Parse first pattern
         if (self.parsePattern()) |pattern| {
-            patterns.append(pattern) catch return null;
+            patterns.append(self.arena.allocator(), pattern) catch return null;
         } else {
             return null;
         }
@@ -341,7 +341,7 @@ pub const Parser = struct {
         // Parse additional comma-separated patterns
         while (self.match(.comma)) {
             if (self.parsePattern()) |pattern| {
-                patterns.append(pattern) catch return null;
+                patterns.append(self.arena.allocator(), pattern) catch return null;
             } else {
                 return null;
             }
@@ -349,7 +349,7 @@ pub const Parser = struct {
 
         const clause = self.arena.allocator().create(ast.MatchClause) catch return null;
         clause.* = .{
-            .patterns = patterns.toOwnedSlice() catch return null,
+            .patterns = patterns.toOwnedSlice(self.arena.allocator()) catch return null,
             .location = loc,
         };
 
@@ -375,11 +375,11 @@ pub const Parser = struct {
         const loc = self.previousLocation();
         const distinct = self.match(.kw_distinct);
 
-        var items = std.ArrayList(ast.ReturnItem).init(self.arena.allocator());
+        var items: std.ArrayList(ast.ReturnItem) = .empty;
 
         // Parse first return item
         if (self.parseReturnItem()) |item| {
-            items.append(item) catch return null;
+            items.append(self.arena.allocator(), item) catch return null;
         } else {
             return null;
         }
@@ -387,7 +387,7 @@ pub const Parser = struct {
         // Parse additional comma-separated items
         while (self.match(.comma)) {
             if (self.parseReturnItem()) |item| {
-                items.append(item) catch return null;
+                items.append(self.arena.allocator(), item) catch return null;
             } else {
                 return null;
             }
@@ -396,7 +396,7 @@ pub const Parser = struct {
         const clause = self.arena.allocator().create(ast.ReturnClause) catch return null;
         clause.* = .{
             .distinct = distinct,
-            .items = items.toOwnedSlice() catch return null,
+            .items = items.toOwnedSlice(self.arena.allocator()) catch return null,
             .location = loc,
         };
 
@@ -429,11 +429,11 @@ pub const Parser = struct {
         }
 
         const loc = self.previousLocation();
-        var items = std.ArrayList(ast.OrderItem).init(self.arena.allocator());
+        var items: std.ArrayList(ast.OrderItem) = .empty;
 
         // Parse first order item
         if (self.parseOrderItem()) |item| {
-            items.append(item) catch return null;
+            items.append(self.arena.allocator(), item) catch return null;
         } else {
             return null;
         }
@@ -441,7 +441,7 @@ pub const Parser = struct {
         // Parse additional comma-separated items
         while (self.match(.comma)) {
             if (self.parseOrderItem()) |item| {
-                items.append(item) catch return null;
+                items.append(self.arena.allocator(), item) catch return null;
             } else {
                 return null;
             }
@@ -449,7 +449,7 @@ pub const Parser = struct {
 
         const clause = self.arena.allocator().create(ast.OrderByClause) catch return null;
         clause.* = .{
-            .items = items.toOwnedSlice() catch return null,
+            .items = items.toOwnedSlice(self.arena.allocator()) catch return null,
             .location = loc,
         };
 
@@ -503,13 +503,13 @@ pub const Parser = struct {
     // ========================================================================
 
     fn parsePattern(self: *Self) ?ast.Pattern {
-        var elements = std.ArrayList(ast.PatternElement).init(self.arena.allocator());
+        var elements: std.ArrayList(ast.PatternElement) = .empty;
 
         // Pattern must start with a node
         if (self.parseNodePattern()) |node| {
             const node_ptr = self.arena.allocator().create(ast.NodePattern) catch return null;
             node_ptr.* = node;
-            elements.append(.{ .node = node_ptr }) catch return null;
+            elements.append(self.arena.allocator(), .{ .node = node_ptr }) catch return null;
         } else {
             return null;
         }
@@ -519,7 +519,7 @@ pub const Parser = struct {
             if (self.parseEdgePattern()) |edge| {
                 const edge_ptr = self.arena.allocator().create(ast.EdgePattern) catch return null;
                 edge_ptr.* = edge;
-                elements.append(.{ .edge = edge_ptr }) catch return null;
+                elements.append(self.arena.allocator(), .{ .edge = edge_ptr }) catch return null;
             } else {
                 return null;
             }
@@ -528,7 +528,7 @@ pub const Parser = struct {
             if (self.parseNodePattern()) |node| {
                 const node_ptr = self.arena.allocator().create(ast.NodePattern) catch return null;
                 node_ptr.* = node;
-                elements.append(.{ .node = node_ptr }) catch return null;
+                elements.append(self.arena.allocator(), .{ .node = node_ptr }) catch return null;
             } else {
                 self.errorAtCurrent("Expected node pattern after relationship");
                 return null;
@@ -536,7 +536,7 @@ pub const Parser = struct {
         }
 
         return .{
-            .elements = elements.toOwnedSlice() catch return null,
+            .elements = elements.toOwnedSlice(self.arena.allocator()) catch return null,
         };
     }
 
@@ -551,7 +551,7 @@ pub const Parser = struct {
 
         const loc = self.previousLocation();
         var variable: ?[]const u8 = null;
-        var labels = std.ArrayList([]const u8).init(self.arena.allocator());
+        var labels: std.ArrayList([]const u8) = .empty;
         var properties: ?[]ast.PropertyEntry = null;
 
         // Optional variable
@@ -566,7 +566,7 @@ pub const Parser = struct {
                 self.errorAtCurrent("Expected label after ':'");
                 return null;
             }
-            labels.append(self.current.text) catch return null;
+            labels.append(self.arena.allocator(), self.current.text) catch return null;
             self.advance();
         }
 
@@ -581,7 +581,7 @@ pub const Parser = struct {
 
         return .{
             .variable = variable,
-            .labels = labels.toOwnedSlice() catch return null,
+            .labels = labels.toOwnedSlice(self.arena.allocator()) catch return null,
             .properties = properties,
             .location = loc,
         };
@@ -603,7 +603,7 @@ pub const Parser = struct {
 
         // Parse optional relationship details: [variable:TYPE {props}]
         var variable: ?[]const u8 = null;
-        var types_list = std.ArrayList([]const u8).init(self.arena.allocator());
+        var types_list: std.ArrayList([]const u8) = .empty;
         var properties: ?[]ast.PropertyEntry = null;
 
         if (self.match(.lbracket)) {
@@ -619,7 +619,7 @@ pub const Parser = struct {
                     self.errorAtCurrent("Expected relationship type after ':'");
                     return null;
                 }
-                types_list.append(self.current.text) catch return null;
+                types_list.append(self.arena.allocator(), self.current.text) catch return null;
                 self.advance();
 
                 // Handle multiple types with |
@@ -628,7 +628,7 @@ pub const Parser = struct {
                         self.errorAtCurrent("Expected relationship type after '|'");
                         return null;
                     }
-                    types_list.append(self.current.text) catch return null;
+                    types_list.append(self.arena.allocator(), self.current.text) catch return null;
                     self.advance();
                 }
             }
@@ -659,7 +659,7 @@ pub const Parser = struct {
 
         return .{
             .variable = variable,
-            .types = types_list.toOwnedSlice() catch return null,
+            .types = types_list.toOwnedSlice(self.arena.allocator()) catch return null,
             .direction = direction,
             .properties = properties,
             .location = loc,
@@ -671,12 +671,12 @@ pub const Parser = struct {
             return null;
         }
 
-        var entries = std.ArrayList(ast.PropertyEntry).init(self.arena.allocator());
+        var entries: std.ArrayList(ast.PropertyEntry) = .empty;
 
         if (!self.check(.rbrace)) {
             // Parse first entry
             if (self.parsePropertyEntry()) |entry| {
-                entries.append(entry) catch return null;
+                entries.append(self.arena.allocator(), entry) catch return null;
             } else {
                 return null;
             }
@@ -684,7 +684,7 @@ pub const Parser = struct {
             // Parse additional entries
             while (self.match(.comma)) {
                 if (self.parsePropertyEntry()) |entry| {
-                    entries.append(entry) catch return null;
+                    entries.append(self.arena.allocator(), entry) catch return null;
                 } else {
                     return null;
                 }
@@ -695,7 +695,7 @@ pub const Parser = struct {
             return null;
         }
 
-        return entries.toOwnedSlice() catch null;
+        return entries.toOwnedSlice(self.arena.allocator()) catch null;
     }
 
     fn parsePropertyEntry(self: *Self) ?ast.PropertyEntry {
@@ -847,15 +847,15 @@ pub const Parser = struct {
     }
 
     fn parseListLiteral(self: *Self, loc: ast.SourceLocation) ?*ast.Expression {
-        var elements = std.ArrayList(*ast.Expression).init(self.arena.allocator());
+        var elements: std.ArrayList(*ast.Expression) = .empty;
 
         if (!self.check(.rbracket)) {
             const first = self.parseExpression() orelse return null;
-            elements.append(first) catch return null;
+            elements.append(self.arena.allocator(), first) catch return null;
 
             while (self.match(.comma)) {
                 const elem = self.parseExpression() orelse return null;
-                elements.append(elem) catch return null;
+                elements.append(self.arena.allocator(), elem) catch return null;
             }
         }
 
@@ -865,7 +865,7 @@ pub const Parser = struct {
 
         const list = self.arena.allocator().create(ast.ListExpr) catch return null;
         list.* = .{
-            .elements = elements.toOwnedSlice() catch return null,
+            .elements = elements.toOwnedSlice(self.arena.allocator()) catch return null,
             .location = loc,
         };
 
@@ -875,15 +875,15 @@ pub const Parser = struct {
     }
 
     fn parseMapLiteral(self: *Self, loc: ast.SourceLocation) ?*ast.Expression {
-        var entries = std.ArrayList(ast.PropertyEntry).init(self.arena.allocator());
+        var entries: std.ArrayList(ast.PropertyEntry) = .empty;
 
         if (!self.check(.rbrace)) {
             const first = self.parsePropertyEntry() orelse return null;
-            entries.append(first) catch return null;
+            entries.append(self.arena.allocator(), first) catch return null;
 
             while (self.match(.comma)) {
                 const entry = self.parsePropertyEntry() orelse return null;
-                entries.append(entry) catch return null;
+                entries.append(self.arena.allocator(), entry) catch return null;
             }
         }
 
@@ -893,7 +893,7 @@ pub const Parser = struct {
 
         const map = self.arena.allocator().create(ast.MapExpr) catch return null;
         map.* = .{
-            .entries = entries.toOwnedSlice() catch return null,
+            .entries = entries.toOwnedSlice(self.arena.allocator()) catch return null,
             .location = loc,
         };
 
@@ -903,15 +903,15 @@ pub const Parser = struct {
     }
 
     fn parseFunctionCall(self: *Self, name: []const u8, loc: ast.SourceLocation) ?*ast.Expression {
-        var args = std.ArrayList(*ast.Expression).init(self.arena.allocator());
+        var args: std.ArrayList(*ast.Expression) = .empty;
 
         if (!self.check(.rparen)) {
             const first = self.parseExpression() orelse return null;
-            args.append(first) catch return null;
+            args.append(self.arena.allocator(), first) catch return null;
 
             while (self.match(.comma)) {
                 const arg = self.parseExpression() orelse return null;
-                args.append(arg) catch return null;
+                args.append(self.arena.allocator(), arg) catch return null;
             }
         }
 
@@ -922,7 +922,7 @@ pub const Parser = struct {
         const call = self.arena.allocator().create(ast.FunctionCall) catch return null;
         call.* = .{
             .name = name,
-            .arguments = args.toOwnedSlice() catch return null,
+            .arguments = args.toOwnedSlice(self.arena.allocator()) catch return null,
             .location = loc,
         };
 
@@ -1231,7 +1231,7 @@ pub const Parser = struct {
         self.panic_mode = true;
         self.had_error = true;
 
-        self.errors.append(.{
+        self.errors.append(self.allocator, .{
             .message = message,
             .line = loc.line,
             .column = loc.column,

@@ -326,14 +326,14 @@ pub const PostingStore = struct {
             const has_positions = (header.flags & 0x01) != 0;
 
             // Collect all entries except the target
-            var kept_entries = std.ArrayList(StoredEntry).init(self.allocator);
+            var kept_entries: std.ArrayList(StoredEntry) = .empty;
             defer {
                 for (kept_entries.items) |entry| {
                     if (entry.positions) |pos| {
                         self.allocator.free(pos);
                     }
                 }
-                kept_entries.deinit();
+                kept_entries.deinit(self.allocator);
             }
 
             var found_entry: ?StoredEntry = null;
@@ -374,7 +374,7 @@ pub const PostingStore = struct {
                 if (doc_result.value == target_doc_id) {
                     found_entry = entry;
                 } else {
-                    kept_entries.append(entry) catch {
+                    kept_entries.append(self.allocator, entry) catch {
                         if (positions) |pos| self.allocator.free(pos);
                         self.bp.unpinPage(frame, false);
                         return PostingError.OutOfMemory;

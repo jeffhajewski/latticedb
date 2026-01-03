@@ -48,6 +48,7 @@ pub const fts = struct {
 // Query system
 pub const query = struct {
     pub const parser = @import("query/parser.zig");
+    pub const semantic = @import("query/semantic.zig");
 };
 
 // Transaction management
@@ -162,6 +163,13 @@ pub const HighlightConfig = fts.highlight.HighlightConfig;
 pub const HighlightResult = fts.highlight.HighlightResult;
 pub const HighlightError = fts.highlight.HighlightError;
 pub const Snippet = fts.highlight.Snippet;
+
+// Semantic analyzer re-exports
+pub const SemanticAnalyzer = query.semantic.SemanticAnalyzer;
+pub const SemanticError = query.semantic.SemanticError;
+pub const AnalysisResult = query.semantic.AnalysisResult;
+pub const VariableInfo = query.semantic.VariableInfo;
+pub const VariableKind = query.semantic.VariableKind;
 
 // Version information
 pub const VERSION = "0.1.0";

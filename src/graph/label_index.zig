@@ -140,12 +140,12 @@ pub const LabelIndex = struct {
         defer iter.deinit();
 
         // Collect results
-        var results = std.ArrayList(NodeId).init(self.allocator);
-        errdefer results.deinit();
+        var results: std.ArrayList(NodeId) = .empty;
+        errdefer results.deinit(self.allocator);
 
         while (true) {
             const entry = iter.next() catch |err| {
-                results.deinit();
+                results.deinit(self.allocator);
                 return mapBTreeError(err);
             };
 
@@ -153,13 +153,13 @@ pub const LabelIndex = struct {
                 const key = LabelKey.fromBytes(e.key);
                 // Verify we're still in the correct label range
                 if (key.label_id != label_id) break;
-                results.append(key.node_id) catch return LabelIndexError.OutOfMemory;
+                results.append(self.allocator, key.node_id) catch return LabelIndexError.OutOfMemory;
             } else {
                 break;
             }
         }
 
-        return results.toOwnedSlice() catch return LabelIndexError.OutOfMemory;
+        return results.toOwnedSlice(self.allocator) catch return LabelIndexError.OutOfMemory;
     }
 
     /// Iterator for scanning nodes with a label (lazy evaluation)

@@ -244,26 +244,30 @@ pub const Lexer = struct {
             _ = self.advance();
         }
 
+        var is_float = false;
+
         // Check for decimal point
         if (self.peek() == '.' and self.peekAhead(1) != null and isDigit(self.peekAhead(1).?)) {
+            is_float = true;
             _ = self.advance(); // consume '.'
             while (!self.isAtEnd() and isDigit(self.peek().?)) {
                 _ = self.advance();
             }
-            // Check for exponent
-            if (self.peek() == 'e' or self.peek() == 'E') {
-                _ = self.advance();
-                if (self.peek() == '+' or self.peek() == '-') {
-                    _ = self.advance();
-                }
-                while (!self.isAtEnd() and isDigit(self.peek().?)) {
-                    _ = self.advance();
-                }
-            }
-            return self.makeTokenAt(.float, start);
         }
 
-        return self.makeTokenAt(.integer, start);
+        // Check for exponent (valid for both integer and decimal forms: 1e10, 3.14e-2)
+        if (self.peek() == 'e' or self.peek() == 'E') {
+            is_float = true;
+            _ = self.advance();
+            if (self.peek() == '+' or self.peek() == '-') {
+                _ = self.advance();
+            }
+            while (!self.isAtEnd() and isDigit(self.peek().?)) {
+                _ = self.advance();
+            }
+        }
+
+        return self.makeTokenAt(if (is_float) .float else .integer, start);
     }
 
     /// Scan identifier or keyword

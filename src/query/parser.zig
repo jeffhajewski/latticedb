@@ -1385,10 +1385,11 @@ test "parse order by limit skip" {
 
     const result = parser.parse();
     try std.testing.expect(result.query != null);
-    try std.testing.expectEqual(@as(usize, 4), result.query.?.clauses.len);
+    try std.testing.expectEqual(@as(usize, 5), result.query.?.clauses.len);
 
     try std.testing.expect(result.query.?.clauses[2] == .order_by);
     try std.testing.expect(result.query.?.clauses[3] == .limit);
+    try std.testing.expect(result.query.?.clauses[4] == .skip);
 }
 
 test "parse function call" {

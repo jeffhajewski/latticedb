@@ -42,6 +42,22 @@ pub const PageHeader = extern struct {
     }
 };
 
+/// Tree index for accessing tree_roots array
+pub const TreeIndex = enum(u8) {
+    node = 0,
+    edge = 1,
+    label = 2,
+    symbol_forward = 3,
+    symbol_reverse = 4,
+    fts_dict = 5,
+    fts_lengths = 6,
+    fts_reverse = 7,
+    // Reserved for future use: 8-15
+};
+
+/// Maximum number of B+Tree root pages stored in header
+pub const MAX_TREES: usize = 16;
+
 /// File header structure (first 4KB of database file)
 pub const FileHeader = extern struct {
     magic: u32,
@@ -51,14 +67,15 @@ pub const FileHeader = extern struct {
     flags: u32,
     node_count: u64,
     edge_count: u64,
-    btree_root_page: PageId,
+    btree_root_page: PageId, // Legacy, kept for compatibility
     vector_segment_page: PageId,
     fts_segment_page: PageId,
     freelist_page: PageId,
     schema_page: PageId,
+    tree_roots: [MAX_TREES]PageId, // B+Tree root pages
     wal_frame_count: u64,
     checkpoint_seq: u32,
-    reserved1: [20]u8,
+    reserved1: [4]u8,
     file_uuid: [16]u8,
     created_timestamp: u64,
     modified_timestamp: u64,
@@ -78,14 +95,30 @@ pub const FileHeader = extern struct {
             .fts_segment_page = types.NULL_PAGE,
             .freelist_page = types.NULL_PAGE,
             .schema_page = types.NULL_PAGE,
+            .tree_roots = [_]PageId{types.NULL_PAGE} ** MAX_TREES,
             .wal_frame_count = 0,
             .checkpoint_seq = 0,
-            .reserved1 = [_]u8{0} ** 20,
+            .reserved1 = [_]u8{0} ** 4,
             .file_uuid = [_]u8{0} ** 16,
             .created_timestamp = 0,
             .modified_timestamp = 0,
             .application_id = [_]u8{0} ** 32,
         };
+    }
+
+    /// Get tree root page by index
+    pub fn getTreeRoot(self: *const FileHeader, index: TreeIndex) PageId {
+        return self.tree_roots[@intFromEnum(index)];
+    }
+
+    /// Set tree root page by index
+    pub fn setTreeRoot(self: *FileHeader, index: TreeIndex, page_id: PageId) void {
+        self.tree_roots[@intFromEnum(index)] = page_id;
+    }
+
+    /// Check if trees have been initialized
+    pub fn hasInitializedTrees(self: *const FileHeader) bool {
+        return self.tree_roots[@intFromEnum(TreeIndex.node)] != types.NULL_PAGE;
     }
 };
 

@@ -270,6 +270,13 @@ pub const PageManager = struct {
         return &self.header;
     }
 
+    /// Update the file header with new values.
+    pub fn updateHeader(self: *Self, new_header: *const FileHeader) PageManagerError!void {
+        if (self.read_only) return PageManagerError.PermissionDenied;
+        self.header = new_header.*;
+        try self.writeHeader();
+    }
+
     /// Get current page count.
     pub fn pageCount(self: *const Self) u32 {
         const file_size = self.file.size() catch return 1;

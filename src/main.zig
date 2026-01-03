@@ -20,6 +20,7 @@ pub const storage = struct {
     pub const wal = @import("storage/wal.zig");
     pub const checkpoint = @import("storage/checkpoint.zig");
     pub const recovery = @import("storage/recovery.zig");
+    pub const database = @import("storage/database.zig");
 };
 
 // Vector search

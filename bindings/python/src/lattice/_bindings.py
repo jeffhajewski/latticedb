@@ -67,6 +67,106 @@ LATTICE_ERROR_VERSION_MISMATCH = -11
 LATTICE_ERROR_CHECKSUM = -12
 LATTICE_ERROR_OUT_OF_MEMORY = -13
 
+
+# Exception classes
+class LatticeError(Exception):
+    """Base exception for all Lattice errors."""
+
+    def __init__(self, message: str, code: int = LATTICE_ERROR):
+        super().__init__(message)
+        self.code = code
+
+
+class LatticeIOError(LatticeError):
+    """I/O error during database operations."""
+
+    pass
+
+
+class LatticeCorruptionError(LatticeError):
+    """Database corruption detected."""
+
+    pass
+
+
+class LatticeNotFoundError(LatticeError):
+    """Requested item not found."""
+
+    pass
+
+
+class LatticeAlreadyExistsError(LatticeError):
+    """Item already exists."""
+
+    pass
+
+
+class LatticeInvalidArgError(LatticeError):
+    """Invalid argument provided."""
+
+    pass
+
+
+class LatticeTxnAbortedError(LatticeError):
+    """Transaction was aborted."""
+
+    pass
+
+
+class LatticeLockTimeoutError(LatticeError):
+    """Lock acquisition timed out."""
+
+    pass
+
+
+class LatticeReadOnlyError(LatticeError):
+    """Cannot write to read-only database/transaction."""
+
+    pass
+
+
+class LatticeFullError(LatticeError):
+    """Database is full."""
+
+    pass
+
+
+class LatticeVersionMismatchError(LatticeError):
+    """Database version mismatch."""
+
+    pass
+
+
+class LatticeChecksumError(LatticeError):
+    """Checksum verification failed."""
+
+    pass
+
+
+class LatticeOutOfMemoryError(LatticeError):
+    """Out of memory."""
+
+    pass
+
+
+# Map error codes to exception classes
+_ERROR_MAP = {
+    LATTICE_ERROR: LatticeError,
+    LATTICE_ERROR_IO: LatticeIOError,
+    LATTICE_ERROR_CORRUPTION: LatticeCorruptionError,
+    LATTICE_ERROR_NOT_FOUND: LatticeNotFoundError,
+    LATTICE_ERROR_ALREADY_EXISTS: LatticeAlreadyExistsError,
+    LATTICE_ERROR_INVALID_ARG: LatticeInvalidArgError,
+    LATTICE_ERROR_TXN_ABORTED: LatticeTxnAbortedError,
+    LATTICE_ERROR_LOCK_TIMEOUT: LatticeLockTimeoutError,
+    LATTICE_ERROR_READ_ONLY: LatticeReadOnlyError,
+    LATTICE_ERROR_FULL: LatticeFullError,
+    LATTICE_ERROR_VERSION_MISMATCH: LatticeVersionMismatchError,
+    LATTICE_ERROR_CHECKSUM: LatticeChecksumError,
+    LATTICE_ERROR_OUT_OF_MEMORY: LatticeOutOfMemoryError,
+}
+
+
 # Transaction modes
 LATTICE_TXN_READ_ONLY = 0
 LATTICE_TXN_READ_WRITE = 1
@@ -187,9 +287,116 @@ class LatticeLib:
         self._lib.lattice_node_delete.argtypes = [LatticeTxn, LatticeNodeId]
         self._lib.lattice_node_delete.restype = c_int
 
+        # lattice_node_set_property
+        self._lib.lattice_node_set_property.argtypes = [
+            LatticeTxn,
+            LatticeNodeId,
+            c_char_p,
+            POINTER(LatticeValue),
+        ]
+        self._lib.lattice_node_set_property.restype = c_int
+
+        # lattice_node_get_property
+        self._lib.lattice_node_get_property.argtypes = [
+            LatticeTxn,
+            LatticeNodeId,
+            c_char_p,
+            POINTER(LatticeValue),
+        ]
+        self._lib.lattice_node_get_property.restype = c_int
+
+        # lattice_node_set_vector
+        self._lib.lattice_node_set_vector.argtypes = [
+            LatticeTxn,
+            LatticeNodeId,
+            c_char_p,
+            POINTER(ctypes.c_float),
+            c_uint32,
+        ]
+        self._lib.lattice_node_set_vector.restype = c_int
+
+        # lattice_edge_create
+        self._lib.lattice_edge_create.argtypes = [
+            LatticeTxn,
+            LatticeNodeId,
+            LatticeNodeId,
+            c_char_p,
+            POINTER(LatticeEdgeId),
+        ]
+        self._lib.lattice_edge_create.restype = c_int
+
+        # lattice_edge_delete
+        self._lib.lattice_edge_delete.argtypes = [LatticeTxn, LatticeEdgeId]
+        self._lib.lattice_edge_delete.restype = c_int
+
+        # lattice_query_prepare
+        self._lib.lattice_query_prepare.argtypes = [
+            LatticeDatabase,
+            c_char_p,
+            POINTER(LatticeQuery),
+        ]
+        self._lib.lattice_query_prepare.restype = c_int
+
+        # lattice_query_bind
+        self._lib.lattice_query_bind.argtypes = [
+            LatticeQuery,
+            c_char_p,
+            POINTER(LatticeValue),
+        ]
+        self._lib.lattice_query_bind.restype = c_int
+
+        # lattice_query_bind_vector
+        self._lib.lattice_query_bind_vector.argtypes = [
+            LatticeQuery,
+            c_char_p,
+            POINTER(ctypes.c_float),
+            c_uint32,
+        ]
+        self._lib.lattice_query_bind_vector.restype = c_int
+
+        # lattice_query_execute
+        self._lib.lattice_query_execute.argtypes = [
+            LatticeQuery,
+            LatticeTxn,
+            POINTER(LatticeResult),
+        ]
+        self._lib.lattice_query_execute.restype = c_int
+
+        # lattice_query_free
+        self._lib.lattice_query_free.argtypes = [LatticeQuery]
+        self._lib.lattice_query_free.restype = None
+
+        # lattice_result_next
+        self._lib.lattice_result_next.argtypes = [LatticeResult]
+        self._lib.lattice_result_next.restype = c_bool
+
+        # lattice_result_column_count
+        self._lib.lattice_result_column_count.argtypes = [LatticeResult]
+        self._lib.lattice_result_column_count.restype = c_uint32
+
+        # lattice_result_column_name
+        self._lib.lattice_result_column_name.argtypes = [LatticeResult, c_uint32]
+        self._lib.lattice_result_column_name.restype = c_char_p
+
+        # lattice_result_get
+        self._lib.lattice_result_get.argtypes = [
+            LatticeResult,
+            c_uint32,
+            POINTER(LatticeValue),
+        ]
+        self._lib.lattice_result_get.restype = c_int
+
+        # lattice_result_free
+        self._lib.lattice_result_free.argtypes = [LatticeResult]
+        self._lib.lattice_result_free.restype = None
+
         # lattice_version
         self._lib.lattice_version.argtypes = []
         self._lib.lattice_version.restype = c_char_p
+
+        # lattice_error_message
+        self._lib.lattice_error_message.argtypes = [c_int]
+        self._lib.lattice_error_message.restype = c_char_p
 
 
 # Global library instance (lazy loaded)
@@ -202,3 +409,101 @@ def get_lib() -> LatticeLib:
     if _lib is None:
         _lib = LatticeLib()
     return _lib
+
+
+def library_available() -> bool:
+    """Check if the native library is available."""
+    return _find_library() is not None
+
+
+def check_error(code: int) -> None:
+    """Check error code and raise appropriate exception if not OK.
+
+    Args:
+        code: The error code returned by a C API function.
+
+    Raises:
+        LatticeError: If the code indicates an error.
+    """
+    if code == LATTICE_OK:
+        return
+
+    # Try to get error message from library
+    try:
+        lib = get_lib()
+        msg_ptr = lib._lib.lattice_error_message(code)
+        if msg_ptr:
+            message = msg_ptr.decode("utf-8")
+        else:
+            message = f"Unknown error (code {code})"
+    except Exception:
+        message = f"Error code {code}"
+
+    # Get the appropriate exception class
+    exc_class = _ERROR_MAP.get(code, LatticeError)
+    raise exc_class(message, code)
+
+
+def value_to_python(c_value: LatticeValue):
+    """Convert a LatticeValue to a Python value.
+
+    Args:
+        c_value: The C value structure.
+
+    Returns:
+        The corresponding Python value (None, bool, int, float, str, or bytes).
+    """
+    value_type = c_value.type
+
+    if value_type == LATTICE_VALUE_NULL:
+        return None
+    elif value_type == LATTICE_VALUE_BOOL:
+        return c_value.data.bool_val
+    elif value_type == LATTICE_VALUE_INT:
+        return c_value.data.int_val
+    elif value_type == LATTICE_VALUE_FLOAT:
+        return c_value.data.float_val
+    elif value_type == LATTICE_VALUE_STRING:
+        string_val = c_value.data.string_val
+        if string_val.ptr and string_val.len > 0:
+            return string_val.ptr[:string_val.len].decode("utf-8")
+        return ""
+    elif value_type == LATTICE_VALUE_BYTES:
+        bytes_val = c_value.data.bytes_val
+        if bytes_val.ptr and bytes_val.len > 0:
+            return bytes(bytes_val.ptr[:bytes_val.len])
+        return b""
+    else:
+        # LIST and MAP not supported yet
+        return None
+
+
+def python_to_value(py_val, c_value: LatticeValue) -> None:
+    """Fill a LatticeValue from a Python value.
+
+    Args:
+        py_val: The Python value to convert.
+        c_value: The C value structure to fill.
+    """
+    if py_val is None:
+        c_value.type = LATTICE_VALUE_NULL
+    elif isinstance(py_val, bool):
+        c_value.type = LATTICE_VALUE_BOOL
+        c_value.data.bool_val = py_val
+    elif isinstance(py_val, int):
+        c_value.type = LATTICE_VALUE_INT
+        c_value.data.int_val = py_val
+    elif isinstance(py_val, float):
+        c_value.type = LATTICE_VALUE_FLOAT
+        c_value.data.float_val = py_val
+    elif isinstance(py_val, str):
+        c_value.type = LATTICE_VALUE_STRING
+        encoded = py_val.encode("utf-8")
+        c_value.data.string_val.ptr = encoded
+        c_value.data.string_val.len = len(encoded)
+    elif isinstance(py_val, bytes):
+        c_value.type = LATTICE_VALUE_BYTES
+        c_value.data.bytes_val.ptr = ctypes.cast(py_val, POINTER(ctypes.c_uint8))
+        c_value.data.bytes_val.len = len(py_val)
+    else:
+        raise TypeError(f"Unsupported value type: {type(py_val).__name__}")

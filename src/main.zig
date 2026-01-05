@@ -49,6 +49,19 @@ pub const fts = struct {
 pub const query = struct {
     pub const parser = @import("query/parser.zig");
     pub const semantic = @import("query/semantic.zig");
+    pub const executor = @import("query/executor.zig");
+    pub const expression = @import("query/expression.zig");
+    pub const planner = @import("query/planner.zig");
+
+    pub const operators = struct {
+        pub const scan = @import("query/operators/scan.zig");
+        pub const filter = @import("query/operators/filter.zig");
+        pub const project = @import("query/operators/project.zig");
+        pub const expand = @import("query/operators/expand.zig");
+        pub const vector = @import("query/operators/vector.zig");
+        pub const fts = @import("query/operators/fts.zig");
+        pub const limit = @import("query/operators/limit.zig");
+    };
 };
 
 // Transaction management

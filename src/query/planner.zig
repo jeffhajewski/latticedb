@@ -2,6 +2,8 @@
 //!
 //! Transforms parsed AST into executable operator trees.
 //! Handles MATCH, WHERE, RETURN, ORDER BY, LIMIT, SKIP clauses.
+//! Recognizes vector distance (<=>)  and FTS match (@@) operators
+//! and creates specialized search operators for them.
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -10,6 +12,7 @@ const ast = @import("ast.zig");
 const semantic = @import("semantic.zig");
 const executor = @import("executor.zig");
 const expression = @import("expression.zig");
+const parser = @import("parser.zig");
 
 const Operator = executor.Operator;
 const OperatorError = executor.OperatorError;
@@ -22,6 +25,8 @@ const filter_ops = @import("operators/filter.zig");
 const project_ops = @import("operators/project.zig");
 const expand_ops = @import("operators/expand.zig");
 const limit_ops = @import("operators/limit.zig");
+const vector_ops = @import("operators/vector.zig");
+const fts_ops = @import("operators/fts.zig");
 
 const btree = @import("../storage/btree.zig");
 const BTree = btree.BTree;
@@ -35,6 +40,12 @@ const EdgeStore = edge_mod.EdgeStore;
 const symbols = @import("../graph/symbols.zig");
 const SymbolTable = symbols.SymbolTable;
 const SymbolId = symbols.SymbolId;
+
+const hnsw = @import("../vector/hnsw.zig");
+const HnswIndex = hnsw.HnswIndex;
+
+const fts_index_mod = @import("../fts/index.zig");
+const FtsIndex = fts_index_mod.FtsIndex;
 
 // ============================================================================
 // Types
@@ -68,6 +79,10 @@ pub const StorageContext = struct {
     edge_store: ?*EdgeStore,
     /// Symbol table
     symbol_table: ?*SymbolTable,
+    /// HNSW vector index (optional)
+    hnsw_index: ?*HnswIndex = null,
+    /// FTS index (optional)
+    fts_index: ?*FtsIndex = null,
 };
 
 /// Variable binding during planning
@@ -236,14 +251,247 @@ pub const QueryPlanner = struct {
     }
 
     /// Plan a WHERE clause
+    /// Detects vector distance (<=>)  and FTS match (@@) operators and creates
+    /// specialized search operators for them instead of generic filters.
     fn planWhere(self: *Self, where: *const ast.WhereClause, input: ?Operator) PlannerError!Operator {
         const input_op = input orelse return PlannerError.InvalidQuery;
 
+        // Check for vector search pattern: x.embedding <=> $query [< threshold]
+        if (self.detectVectorSearch(where.condition)) |vector_info| {
+            return self.planVectorSearch(input_op, vector_info);
+        }
+
+        // Check for FTS pattern: x.text @@ $query
+        if (self.detectFtsSearch(where.condition)) |fts_info| {
+            return self.planFtsSearch(input_op, fts_info);
+        }
+
+        // Default: create a filter operator
         const filter = filter_ops.Filter.init(self.allocator, input_op, where.condition) catch {
             return PlannerError.OutOfMemory;
         };
 
         return filter.operator();
+    }
+
+    /// Information extracted from a vector search pattern
+    const VectorSearchInfo = struct {
+        /// The variable slot being searched (e.g., slot for 'n' in n.embedding)
+        variable_slot: ?u8,
+        /// Parameter name for query vector (e.g., "query" from $query)
+        param_name: ?[]const u8,
+        /// Literal query vector (if provided directly)
+        query_vector: ?[]const f32,
+        /// Distance threshold (e.g., 0.5 from < 0.5)
+        threshold: ?f32,
+        /// The property being searched
+        property_name: ?[]const u8,
+    };
+
+    /// Detect vector search pattern in expression
+    /// Patterns: `x.prop <=> $param < threshold` or `x.prop <=> $param`
+    fn detectVectorSearch(self: *Self, expr: *const ast.Expression) ?VectorSearchInfo {
+        // Pattern 1: (x.prop <=> $param) < threshold
+        if (expr.* == .binary) {
+            const binary = expr.binary;
+
+            // Check for comparison with threshold: (vector_distance_expr) < threshold
+            if (binary.operator == .lt or binary.operator == .lte) {
+                if (binary.left.* == .binary) {
+                    const inner = binary.left.binary;
+                    if (inner.operator == .vector_distance) {
+                        var info = self.extractVectorInfo(inner) orelse return null;
+                        // Extract threshold from right side
+                        if (binary.right.* == .literal) {
+                            const lit = binary.right.literal;
+                            if (lit.value == .float) {
+                                info.threshold = @floatCast(lit.value.float);
+                            } else if (lit.value == .integer) {
+                                info.threshold = @floatFromInt(lit.value.integer);
+                            }
+                        }
+                        return info;
+                    }
+                }
+            }
+
+            // Pattern 2: x.prop <=> $param (no threshold)
+            if (binary.operator == .vector_distance) {
+                return self.extractVectorInfo(binary);
+            }
+        }
+
+        return null;
+    }
+
+    /// Extract vector search info from a binary expression with vector_distance operator
+    fn extractVectorInfo(self: *Self, binary: ast.BinaryExpr) ?VectorSearchInfo {
+        var info = VectorSearchInfo{
+            .variable_slot = null,
+            .param_name = null,
+            .query_vector = null,
+            .threshold = null,
+            .property_name = null,
+        };
+
+        // Left side should be property access: x.embedding
+        if (binary.left.* == .property_access) {
+            const prop_access = binary.left.property_access;
+            info.property_name = prop_access.property;
+
+            // Get the variable's slot
+            if (prop_access.base.* == .variable) {
+                const var_name = prop_access.base.variable.name;
+                info.variable_slot = self.getSlot(var_name);
+            }
+        }
+
+        // Right side should be parameter: $query
+        if (binary.right.* == .parameter) {
+            info.param_name = binary.right.parameter.name;
+        }
+
+        // Must have at least variable and parameter
+        if (info.variable_slot != null and info.param_name != null) {
+            return info;
+        }
+
+        return null;
+    }
+
+    /// Plan a vector search operator
+    fn planVectorSearch(self: *Self, input: Operator, info: VectorSearchInfo) PlannerError!Operator {
+        const hnsw_index = self.storage.hnsw_index orelse return PlannerError.MissingStorage;
+
+        const output_slot = info.variable_slot orelse return PlannerError.InvalidQuery;
+        const param_name = info.param_name orelse return PlannerError.InvalidQuery;
+
+        // Create VectorSearchWithInput operator
+        const k: u32 = 100; // Default k for search
+        const vector_search = vector_ops.VectorSearchWithInput.init(
+            self.allocator,
+            input,
+            output_slot,
+            param_name,
+            k,
+            info.threshold,
+            hnsw_index,
+        ) catch {
+            return PlannerError.OutOfMemory;
+        };
+
+        return vector_search.operator();
+    }
+
+    /// Information extracted from an FTS search pattern
+    const FtsSearchInfo = struct {
+        /// The variable slot being searched
+        variable_slot: ?u8,
+        /// Parameter name for query text
+        param_name: ?[]const u8,
+        /// Literal query text (if provided directly)
+        query_text: ?[]const u8,
+        /// The property being searched
+        property_name: ?[]const u8,
+    };
+
+    /// Detect FTS search pattern in expression
+    /// Pattern: `x.prop @@ $param` or `x.prop @@ "literal"`
+    fn detectFtsSearch(self: *Self, expr: *const ast.Expression) ?FtsSearchInfo {
+        if (expr.* == .binary) {
+            const binary = expr.binary;
+
+            if (binary.operator == .fts_match) {
+                return self.extractFtsInfo(binary);
+            }
+        }
+
+        return null;
+    }
+
+    /// Extract FTS search info from a binary expression with fts_match operator
+    fn extractFtsInfo(self: *Self, binary: ast.BinaryExpr) ?FtsSearchInfo {
+        var info = FtsSearchInfo{
+            .variable_slot = null,
+            .param_name = null,
+            .query_text = null,
+            .property_name = null,
+        };
+
+        // Left side should be property access: x.text
+        if (binary.left.* == .property_access) {
+            const prop_access = binary.left.property_access;
+            info.property_name = prop_access.property;
+
+            // Get the variable's slot
+            if (prop_access.base.* == .variable) {
+                const var_name = prop_access.base.variable.name;
+                info.variable_slot = self.getSlot(var_name);
+            }
+        }
+
+        // Right side: parameter ($query) or literal ("search text")
+        if (binary.right.* == .parameter) {
+            info.param_name = binary.right.parameter.name;
+        } else if (binary.right.* == .literal) {
+            const lit = binary.right.literal;
+            if (lit.value == .string) {
+                info.query_text = lit.value.string;
+            }
+        }
+
+        // Must have variable and either parameter or literal
+        if (info.variable_slot != null and (info.param_name != null or info.query_text != null)) {
+            return info;
+        }
+
+        return null;
+    }
+
+    /// Plan an FTS search operator
+    fn planFtsSearch(self: *Self, input: Operator, info: FtsSearchInfo) PlannerError!Operator {
+        const fts_index = self.storage.fts_index orelse return PlannerError.MissingStorage;
+
+        const output_slot = info.variable_slot orelse return PlannerError.InvalidQuery;
+
+        // If we have literal query text, use standalone FtsSearch
+        if (info.query_text) |query_text| {
+            // For literal queries, we use a standalone FtsSearch
+            // The input operator is not used - this is an optimization where
+            // we replace the scan with an index lookup
+            // Note: In a full implementation, we'd want to intersect results
+            // For now, the FTS index becomes the primary scan source
+            input.deinit(self.allocator);
+
+            const fts_search = fts_ops.FtsSearch.init(
+                self.allocator,
+                output_slot,
+                query_text,
+                100, // Default limit
+                null, // No min score
+                fts_index,
+            ) catch {
+                return PlannerError.OutOfMemory;
+            };
+
+            return fts_search.operator();
+        }
+
+        // Use parameter-based search with input operator
+        const param_name = info.param_name orelse return PlannerError.InvalidQuery;
+
+        const fts_search = fts_ops.FtsSearchWithInput.init(
+            self.allocator,
+            input,
+            output_slot,
+            param_name,
+            100, // Default limit
+            fts_index,
+        ) catch {
+            return PlannerError.OutOfMemory;
+        };
+
+        return fts_search.operator();
     }
 
     /// Plan a RETURN clause

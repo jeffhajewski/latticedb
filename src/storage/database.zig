@@ -703,6 +703,8 @@ pub const Database = struct {
             .label_index = &self.label_index,
             .edge_store = &self.edge_store,
             .symbol_table = &self.symbol_table,
+            .hnsw_index = null, // TODO: Add HNSW index to Database when vector storage is integrated
+            .fts_index = if (self.fts_index) |*fts| fts else null,
         };
 
         var planner = QueryPlanner.init(self.allocator, storage_ctx);

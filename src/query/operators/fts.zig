@@ -165,9 +165,10 @@ fn mapFtsError(err: FtsError) OperatorError {
 // ============================================================================
 
 /// FTS search operator that takes query from parameters.
-/// Useful for queries like: MATCH (d:Doc) WHERE d.text @@ $query
+/// Performs full-text search using FTS index with BM25 scoring.
+/// Used for queries like: MATCH (d:Doc) WHERE d.text @@ $query
 pub const FtsSearchWithInput = struct {
-    /// Input operator
+    /// Input operator (not used in current implementation - index is primary source)
     input: Operator,
     /// Slot to output results to
     output_slot: u8,
@@ -177,6 +178,10 @@ pub const FtsSearchWithInput = struct {
     limit: u32,
     /// FTS index
     index: *FtsIndex,
+    /// Search results
+    results: ?[]ScoredDoc,
+    /// Current result index
+    current_index: usize,
     /// Output row
     output_row: ?*Row,
     /// Whether opened
@@ -202,6 +207,8 @@ pub const FtsSearchWithInput = struct {
             .param_name = param_name,
             .limit = limit,
             .index = index,
+            .results = null,
+            .current_index = 0,
             .output_row = null,
             .opened = false,
             .allocator = allocator,
@@ -230,23 +237,59 @@ pub const FtsSearchWithInput = struct {
         // Allocate output row
         self.output_row = ctx.allocRow() catch return OperatorError.OutOfMemory;
 
-        // Open input
+        // Open input (we maintain lifecycle even if not using results)
         try self.input.open(ctx);
         self.opened = true;
+
+        // Get query text from parameters
+        const param_value = ctx.getParameter(self.param_name) orelse {
+            // No parameter provided - can't perform search
+            return OperatorError.UnboundVariable;
+        };
+
+        // Extract query text from parameter
+        const query_text = extractTextFromParam(param_value) orelse {
+            return OperatorError.TypeError;
+        };
+
+        // Perform the FTS search
+        self.results = self.index.search(query_text, self.limit) catch |err| {
+            return mapFtsError(err);
+        };
+        self.current_index = 0;
     }
 
-    fn next(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!?*Row {
+    fn next(ptr: *anyopaque, _: *ExecutionContext) OperatorError!?*Row {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        _ = ctx;
 
         if (!self.opened) return OperatorError.NotInitialized;
 
-        // Simplified - full implementation would perform FTS search
+        const results = self.results orelse return null;
+        const output_row = self.output_row orelse return OperatorError.NotInitialized;
+
+        if (self.current_index < results.len) {
+            const result = results[self.current_index];
+            self.current_index += 1;
+
+            // Build output row
+            output_row.clear();
+            output_row.setSlot(self.output_slot, .{ .node_ref = result.doc_id });
+            output_row.setScore(self.output_slot, result.score);
+
+            return output_row;
+        }
+
         return null;
     }
 
     fn close(ptr: *anyopaque, ctx: *ExecutionContext) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
+
+        // Free search results
+        if (self.results) |results| {
+            self.index.freeResults(results);
+            self.results = null;
+        }
 
         if (self.opened) {
             self.input.close(ctx);
@@ -257,10 +300,23 @@ pub const FtsSearchWithInput = struct {
     fn deinit(ptr: *anyopaque, allocator: Allocator) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
+        // Free results if not already freed
+        if (self.results) |results| {
+            self.index.freeResults(results);
+        }
+
         self.input.deinit(allocator);
         allocator.destroy(self);
     }
 };
+
+/// Extract query text from a PropertyValue parameter
+fn extractTextFromParam(param: types.PropertyValue) ?[]const u8 {
+    return switch (param) {
+        .string_value => |s| s,
+        else => null,
+    };
+}
 
 // ============================================================================
 // Tests

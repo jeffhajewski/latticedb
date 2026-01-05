@@ -2,12 +2,23 @@
 Database class for Lattice Python bindings.
 """
 
+from ctypes import byref, c_void_p
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
-import numpy as np
-from numpy.typing import NDArray
+if TYPE_CHECKING:
+    import numpy as np
+    from numpy.typing import NDArray
 
+from lattice._bindings import (
+    LATTICE_TXN_READ_ONLY,
+    LATTICE_VALUE_NULL,
+    LatticeValue,
+    OpenOptions,
+    check_error,
+    get_lib,
+    value_to_python,
+)
 from lattice.transaction import Transaction
 from lattice.types import Node, QueryResult, VectorSearchResult
 
@@ -60,16 +71,33 @@ class Database:
         """Open the database connection."""
         if self._handle is not None:
             return
-        # TODO: Call lattice_open via ctypes
-        self._handle = object()  # Placeholder
+
+        lib = get_lib()
+        opts = OpenOptions(
+            create=self._create,
+            read_only=self._read_only,
+            cache_size_mb=self._cache_size_mb,
+            page_size=4096,
+        )
+        db_ptr = c_void_p()
+        code = lib._lib.lattice_open(
+            str(self._path).encode("utf-8"),
+            byref(opts),
+            byref(db_ptr),
+        )
+        check_error(code)
+        self._handle = db_ptr
 
     def close(self) -> None:
         """Close the database connection."""
-        if self._closed:
+        if self._closed or self._handle is None:
             return
-        # TODO: Call lattice_close via ctypes
+
+        lib = get_lib()
+        code = lib._lib.lattice_close(self._handle)
         self._handle = None
         self._closed = True
+        check_error(code)
 
     def read(self) -> Transaction:
         """
@@ -106,12 +134,82 @@ class Database:
         Returns:
             Query results.
         """
-        # TODO: Implement query execution
-        return QueryResult(columns=[])
+        if self._handle is None:
+            raise RuntimeError("Database is not open")
+
+        lib = get_lib()
+        query_ptr = c_void_p()
+        txn_ptr = c_void_p()
+        result_ptr = c_void_p()
+
+        try:
+            # Prepare the query
+            code = lib._lib.lattice_query_prepare(
+                self._handle,
+                cypher.encode("utf-8"),
+                byref(query_ptr),
+            )
+            check_error(code)
+
+            # TODO: Bind parameters when lattice_query_bind is implemented
+            # if parameters:
+            #     for name, value in parameters.items():
+            #         ...
+
+            # Begin a read-only transaction for the query
+            code = lib._lib.lattice_begin(
+                self._handle,
+                LATTICE_TXN_READ_ONLY,
+                byref(txn_ptr),
+            )
+            check_error(code)
+
+            # Execute the query
+            code = lib._lib.lattice_query_execute(
+                query_ptr,
+                txn_ptr,
+                byref(result_ptr),
+            )
+            check_error(code)
+
+            # Collect column names
+            column_count = lib._lib.lattice_result_column_count(result_ptr)
+            columns = []
+            for i in range(column_count):
+                name_ptr = lib._lib.lattice_result_column_name(result_ptr, i)
+                if name_ptr:
+                    columns.append(name_ptr.decode("utf-8"))
+                else:
+                    columns.append(f"column_{i}")
+
+            # Collect all rows
+            rows: List[Dict[str, Any]] = []
+            while lib._lib.lattice_result_next(result_ptr):
+                row: Dict[str, Any] = {}
+                for i, col_name in enumerate(columns):
+                    c_value = LatticeValue()
+                    c_value.type = LATTICE_VALUE_NULL
+                    code = lib._lib.lattice_result_get(result_ptr, i, byref(c_value))
+                    if code == 0:  # LATTICE_OK
+                        row[col_name] = value_to_python(c_value)
+                    else:
+                        row[col_name] = None
+                rows.append(row)
+
+            return QueryResult(columns=columns, _rows=rows)
+
+        finally:
+            # Clean up in reverse order
+            if result_ptr.value:
+                lib._lib.lattice_result_free(result_ptr)
+            if txn_ptr.value:
+                lib._lib.lattice_rollback(txn_ptr)
+            if query_ptr.value:
+                lib._lib.lattice_query_free(query_ptr)
 
     def vector_search(
         self,
-        vector: NDArray[np.float32],
+        vector: "NDArray[np.float32]",
         *,
         key: str = "embedding",
         k: int = 10,

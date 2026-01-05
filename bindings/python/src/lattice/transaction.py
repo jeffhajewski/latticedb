@@ -2,14 +2,24 @@
 Transaction class for Lattice Python bindings.
 """
 
+import ctypes
+from ctypes import byref, c_uint64, c_void_p
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-import numpy as np
-from numpy.typing import NDArray
-
+from lattice._bindings import (
+    LATTICE_TXN_READ_ONLY,
+    LATTICE_TXN_READ_WRITE,
+    LatticeValue,
+    check_error,
+    get_lib,
+    python_to_value,
+)
 from lattice.types import Edge, Node, PropertyValue
 
 if TYPE_CHECKING:
+    import numpy as np
+    from numpy.typing import NDArray
+
     from lattice.database import Database
 
 
@@ -52,8 +62,15 @@ class Transaction:
 
     def _begin(self) -> None:
         """Begin the transaction."""
-        # TODO: Call lattice_begin via ctypes
-        self._handle = object()  # Placeholder
+        if self._db._handle is None:
+            raise RuntimeError("Database is not open")
+
+        lib = get_lib()
+        txn_ptr = c_void_p()
+        mode = LATTICE_TXN_READ_ONLY if self._read_only else LATTICE_TXN_READ_WRITE
+        code = lib._lib.lattice_begin(self._db._handle, mode, byref(txn_ptr))
+        check_error(code)
+        self._handle = txn_ptr
 
     def commit(self) -> None:
         """Commit the transaction."""
@@ -61,8 +78,14 @@ class Transaction:
             raise RuntimeError("Transaction already committed")
         if self._rolled_back:
             raise RuntimeError("Transaction already rolled back")
-        # TODO: Call lattice_commit via ctypes
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        code = lib._lib.lattice_commit(self._handle)
+        self._handle = None
         self._committed = True
+        check_error(code)
 
     def rollback(self) -> None:
         """Rollback the transaction."""
@@ -70,8 +93,15 @@ class Transaction:
             raise RuntimeError("Transaction already committed")
         if self._rolled_back:
             return
-        # TODO: Call lattice_rollback via ctypes
+        if self._handle is None:
+            self._rolled_back = True
+            return
+
+        lib = get_lib()
+        code = lib._lib.lattice_rollback(self._handle)
+        self._handle = None
         self._rolled_back = True
+        check_error(code)
 
     def create_node(
         self,
@@ -83,7 +113,7 @@ class Transaction:
         Create a new node.
 
         Args:
-            labels: Node labels.
+            labels: Node labels (currently only first label is used).
             properties: Node properties.
 
         Returns:
@@ -91,12 +121,33 @@ class Transaction:
         """
         if self._read_only:
             raise RuntimeError("Cannot create node in read-only transaction")
-        # TODO: Call lattice_node_create via ctypes
-        node = Node(
-            id=0,  # Placeholder
-            labels=labels or [],
-            properties=properties or {},
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        node_id = c_uint64()
+
+        # C API only supports one label at creation time
+        label = labels[0] if labels else ""
+        code = lib._lib.lattice_node_create(
+            self._handle,
+            label.encode("utf-8"),
+            byref(node_id),
         )
+        check_error(code)
+
+        node = Node(
+            id=node_id.value,
+            labels=labels or [],
+            properties={},
+        )
+
+        # Set properties if provided
+        if properties:
+            for key, value in properties.items():
+                self.set_property(node.id, key, value)
+                node.properties[key] = value
+
         return node
 
     def delete_node(self, node_id: int) -> None:
@@ -108,7 +159,12 @@ class Transaction:
         """
         if self._read_only:
             raise RuntimeError("Cannot delete node in read-only transaction")
-        # TODO: Call lattice_node_delete via ctypes
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        code = lib._lib.lattice_node_delete(self._handle, node_id)
+        check_error(code)
 
     def get_node(self, node_id: int) -> Optional[Node]:
         """
@@ -139,13 +195,25 @@ class Transaction:
         """
         if self._read_only:
             raise RuntimeError("Cannot set property in read-only transaction")
-        # TODO: Call lattice_node_set_property via ctypes
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        c_value = LatticeValue()
+        python_to_value(value, c_value)
+        code = lib._lib.lattice_node_set_property(
+            self._handle,
+            node_id,
+            key.encode("utf-8"),
+            byref(c_value),
+        )
+        check_error(code)
 
     def set_vector(
         self,
         node_id: int,
         key: str,
-        vector: NDArray[np.float32],
+        vector: "NDArray[np.float32]",
     ) -> None:
         """
         Set a vector embedding on a node.
@@ -157,7 +225,23 @@ class Transaction:
         """
         if self._read_only:
             raise RuntimeError("Cannot set vector in read-only transaction")
-        # TODO: Call lattice_node_set_vector via ctypes
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        import numpy as np
+
+        lib = get_lib()
+        # Ensure vector is float32 and contiguous
+        vec = np.ascontiguousarray(vector, dtype=np.float32)
+        vec_ptr = vec.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+        code = lib._lib.lattice_node_set_vector(
+            self._handle,
+            node_id,
+            key.encode("utf-8"),
+            vec_ptr,
+            len(vec),
+        )
+        check_error(code)
 
     def create_edge(
         self,
@@ -174,16 +258,30 @@ class Transaction:
             source_id: Source node ID.
             target_id: Target node ID.
             edge_type: Edge type/label.
-            properties: Edge properties.
+            properties: Edge properties (not yet supported).
 
         Returns:
             The created edge.
         """
         if self._read_only:
             raise RuntimeError("Cannot create edge in read-only transaction")
-        # TODO: Call lattice_edge_create via ctypes
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        edge_id = c_uint64()
+        code = lib._lib.lattice_edge_create(
+            self._handle,
+            source_id,
+            target_id,
+            edge_type.encode("utf-8"),
+            byref(edge_id),
+        )
+        check_error(code)
+
+        # Note: Edge properties not yet supported in C API
         edge = Edge(
-            id=0,  # Placeholder
+            id=edge_id.value,
             source_id=source_id,
             target_id=target_id,
             edge_type=edge_type,
@@ -200,7 +298,12 @@ class Transaction:
         """
         if self._read_only:
             raise RuntimeError("Cannot delete edge in read-only transaction")
-        # TODO: Call lattice_edge_delete via ctypes
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        code = lib._lib.lattice_edge_delete(self._handle, edge_id)
+        check_error(code)
 
     @property
     def is_read_only(self) -> bool:

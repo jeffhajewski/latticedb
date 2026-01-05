@@ -59,6 +59,18 @@ const FtsConfig = fts_mod.FtsConfig;
 const txn_mod = lattice.transaction.manager;
 const TxnManager = txn_mod.TxnManager;
 
+// Query system
+const parser_mod = lattice.query.parser;
+const Parser = parser_mod.Parser;
+const semantic_mod = lattice.query.semantic;
+const SemanticAnalyzer = semantic_mod.SemanticAnalyzer;
+const planner_mod = lattice.query.planner;
+const QueryPlanner = planner_mod.QueryPlanner;
+const StorageContext = planner_mod.StorageContext;
+const executor_mod = lattice.query.executor;
+const ExecutionContext = executor_mod.ExecutionContext;
+const execute = executor_mod.execute;
+
 /// Database errors
 pub const DatabaseError = error{
     FileNotFound,
@@ -70,6 +82,80 @@ pub const DatabaseError = error{
     TreeInitFailed,
     AlreadyExists,
     ReadOnly,
+};
+
+/// Query execution errors
+pub const QueryError = error{
+    /// Query parsing failed
+    ParseError,
+    /// Semantic analysis failed
+    SemanticError,
+    /// Query planning failed
+    PlanError,
+    /// Query execution failed
+    ExecutionError,
+    /// Out of memory
+    OutOfMemory,
+};
+
+/// A single value in a query result
+pub const ResultValue = union(enum) {
+    null_val: void,
+    bool_val: bool,
+    int_val: i64,
+    float_val: f64,
+    string_val: []const u8,
+    node_id: NodeId,
+
+    /// Format for display
+    pub fn format(self: ResultValue, writer: anytype) !void {
+        switch (self) {
+            .null_val => try writer.writeAll("null"),
+            .bool_val => |b| try writer.print("{}", .{b}),
+            .int_val => |i| try writer.print("{}", .{i}),
+            .float_val => |f| try writer.print("{d:.6}", .{f}),
+            .string_val => |s| try writer.print("\"{s}\"", .{s}),
+            .node_id => |id| try writer.print("Node({d})", .{id}),
+        }
+    }
+};
+
+/// A row in a query result
+pub const ResultRow = struct {
+    values: []ResultValue,
+
+    pub fn deinit(self: *ResultRow, allocator: Allocator) void {
+        allocator.free(self.values);
+    }
+};
+
+/// Result of a query execution
+pub const QueryResult = struct {
+    /// Column names from RETURN clause
+    columns: [][]const u8,
+    /// Result rows
+    rows: []ResultRow,
+    /// Allocator used for results
+    allocator: Allocator,
+
+    /// Free the query result
+    pub fn deinit(self: *QueryResult) void {
+        for (self.rows) |*row| {
+            row.deinit(self.allocator);
+        }
+        self.allocator.free(self.rows);
+        self.allocator.free(self.columns);
+    }
+
+    /// Get number of rows
+    pub fn rowCount(self: *const QueryResult) usize {
+        return self.rows.len;
+    }
+
+    /// Get number of columns
+    pub fn columnCount(self: *const QueryResult) usize {
+        return self.columns.len;
+    }
 };
 
 /// Database configuration
@@ -573,6 +659,168 @@ pub const Database = struct {
             return DatabaseError.OutOfMemory;
         };
     }
+
+    // ========================================================================
+    // Query Execution
+    // ========================================================================
+
+    /// Execute a Cypher query and return results.
+    ///
+    /// Example:
+    /// ```
+    /// const result = try db.query("MATCH (n:Person) RETURN n");
+    /// defer result.deinit();
+    ///
+    /// for (result.rows) |row| {
+    ///     for (row.values) |val| {
+    ///         // process value
+    ///     }
+    /// }
+    /// ```
+    pub fn query(self: *Self, cypher: []const u8) QueryError!QueryResult {
+        // 1. Parse the query
+        var parser = Parser.init(self.allocator, cypher);
+        const parse_result = parser.parse();
+
+        if (parse_result.query == null) {
+            return QueryError.ParseError;
+        }
+        const ast_query = parse_result.query.?;
+        defer ast_query.deinit(self.allocator);
+
+        // 2. Semantic analysis
+        var analyzer = SemanticAnalyzer.init(self.allocator);
+        defer analyzer.deinit();
+
+        const analysis = analyzer.analyze(ast_query);
+        if (!analysis.success) {
+            return QueryError.SemanticError;
+        }
+
+        // 3. Create planner with storage context
+        const storage_ctx = StorageContext{
+            .node_tree = &self.node_tree,
+            .label_index = &self.label_index,
+            .edge_store = &self.edge_store,
+            .symbol_table = &self.symbol_table,
+        };
+
+        var planner = QueryPlanner.init(self.allocator, storage_ctx);
+        defer planner.deinit();
+
+        // 4. Plan the query
+        const root_op = planner.plan(ast_query, &analysis) catch {
+            return QueryError.PlanError;
+        };
+        defer root_op.deinit(self.allocator);
+
+        // 5. Create execution context
+        var exec_ctx = ExecutionContext.init(self.allocator);
+        defer exec_ctx.deinit();
+
+        // Register variable bindings from planner
+        var binding_iter = planner.bindings.iterator();
+        while (binding_iter.next()) |entry| {
+            exec_ctx.registerVariable(entry.key_ptr.*, entry.value_ptr.slot) catch {
+                return QueryError.OutOfMemory;
+            };
+        }
+
+        // 6. Execute the query
+        var exec_result = execute(self.allocator, root_op, &exec_ctx) catch {
+            return QueryError.ExecutionError;
+        };
+        defer exec_result.deinit();
+
+        // 7. Convert executor result to database result
+        return self.convertResult(&exec_result, &planner);
+    }
+
+    /// Convert executor result to database-friendly result format
+    fn convertResult(
+        self: *Self,
+        exec_result: *executor_mod.QueryResult,
+        planner: *QueryPlanner,
+    ) QueryError!QueryResult {
+        // Build column names from planner bindings
+        const num_cols = planner.next_slot;
+        var columns = self.allocator.alloc([]const u8, num_cols) catch {
+            return QueryError.OutOfMemory;
+        };
+        errdefer self.allocator.free(columns);
+
+        // Initialize columns with slot numbers as names (default)
+        for (0..num_cols) |i| {
+            columns[i] = std.fmt.allocPrint(self.allocator, "col{}", .{i}) catch {
+                return QueryError.OutOfMemory;
+            };
+        }
+
+        // Try to get actual variable names
+        var binding_iter = planner.bindings.iterator();
+        while (binding_iter.next()) |entry| {
+            const slot = entry.value_ptr.slot;
+            if (slot < num_cols) {
+                // Free default name and use actual variable name
+                self.allocator.free(columns[slot]);
+                columns[slot] = self.allocator.dupe(u8, entry.key_ptr.*) catch {
+                    return QueryError.OutOfMemory;
+                };
+            }
+        }
+
+        // Convert rows
+        var rows = self.allocator.alloc(ResultRow, exec_result.rows.items.len) catch {
+            return QueryError.OutOfMemory;
+        };
+        errdefer {
+            for (rows) |*row| {
+                row.deinit(self.allocator);
+            }
+            self.allocator.free(rows);
+        }
+
+        for (exec_result.rows.items, 0..) |exec_row, row_idx| {
+            var values = self.allocator.alloc(ResultValue, num_cols) catch {
+                return QueryError.OutOfMemory;
+            };
+
+            for (0..num_cols) |col_idx| {
+                const slot: u8 = @intCast(col_idx);
+                if (exec_row.getSlot(slot)) |slot_value| {
+                    values[col_idx] = self.slotToResultValue(slot_value);
+                } else {
+                    values[col_idx] = .{ .null_val = {} };
+                }
+            }
+
+            rows[row_idx] = ResultRow{ .values = values };
+        }
+
+        return QueryResult{
+            .columns = columns,
+            .rows = rows,
+            .allocator = self.allocator,
+        };
+    }
+
+    /// Convert a slot value to a result value
+    fn slotToResultValue(self: *Self, slot: executor_mod.SlotValue) ResultValue {
+        _ = self;
+        return switch (slot) {
+            .empty => .{ .null_val = {} },
+            .node_ref => |id| .{ .node_id = id },
+            .edge_ref => .{ .null_val = {} }, // TODO: Add edge_id to ResultValue if needed
+            .property => |prop| switch (prop) {
+                .null_value => .{ .null_val = {} },
+                .bool_value => |b| .{ .bool_val = b },
+                .int_value => |i| .{ .int_val = i },
+                .float_value => |f| .{ .float_val = f },
+                .string_value => |s| .{ .string_val = s },
+                .symbol_id => |id| .{ .int_val = @intCast(id) },
+            },
+        };
+    }
 };
 
 // ============================================================================
@@ -667,4 +915,89 @@ test "graph crud operations" {
     try db.deleteNode(alice);
     try std.testing.expect(!db.nodeExists(alice));
     try std.testing.expect(db.nodeExists(bob));
+}
+
+test "query: simple MATCH RETURN" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_query_test.ltdb";
+
+    // Create database
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = false,
+            .enable_fts = false,
+        },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    // Create some test nodes
+    const alice = try db.createNode(&[_][]const u8{"Person"});
+    const bob = try db.createNode(&[_][]const u8{"Person"});
+    _ = try db.createNode(&[_][]const u8{"Company"});
+
+    // Query for Person nodes
+    var result = try db.query("MATCH (n:Person) RETURN n");
+    defer result.deinit();
+
+    // Should find 2 Person nodes
+    try std.testing.expectEqual(@as(usize, 2), result.rowCount());
+    try std.testing.expectEqual(@as(usize, 1), result.columnCount());
+
+    // Verify we got the right node IDs
+    var found_alice = false;
+    var found_bob = false;
+    for (result.rows) |row| {
+        if (row.values[0] == .node_id) {
+            if (row.values[0].node_id == alice) found_alice = true;
+            if (row.values[0].node_id == bob) found_bob = true;
+        }
+    }
+    try std.testing.expect(found_alice);
+    try std.testing.expect(found_bob);
+}
+
+test "query: parse error" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_query_error_test.ltdb";
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = false,
+            .enable_fts = false,
+        },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    // Invalid query syntax
+    const result = db.query("MATCH (n RETURN n");
+    try std.testing.expectError(QueryError.ParseError, result);
+}
+
+test "query: semantic error" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_query_semantic_test.ltdb";
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = false,
+            .enable_fts = false,
+        },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    // Reference undefined variable
+    const result = db.query("MATCH (n) RETURN m");
+    try std.testing.expectError(QueryError.SemanticError, result);
 }

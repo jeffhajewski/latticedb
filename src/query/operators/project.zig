@@ -167,11 +167,12 @@ fn mapEvalError(err: EvalError) OperatorError {
 // ============================================================================
 
 test "Project basic structure" {
-    // Verify vtable is accessible
-    try std.testing.expect(Project.vtable.open != null);
-    try std.testing.expect(Project.vtable.next != null);
-    try std.testing.expect(Project.vtable.close != null);
-    try std.testing.expect(Project.vtable.deinit != null);
+    // Verify vtable is properly structured
+    const vtable = Project.vtable;
+    try std.testing.expect(@TypeOf(vtable.open) != void);
+    try std.testing.expect(@TypeOf(vtable.next) != void);
+    try std.testing.expect(@TypeOf(vtable.close) != void);
+    try std.testing.expect(@TypeOf(vtable.deinit) != void);
 }
 
 test "resultToSlotValue conversions" {

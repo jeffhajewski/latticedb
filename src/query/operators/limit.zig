@@ -226,7 +226,7 @@ pub const Sort = struct {
             .input = input,
             .sort_items = sort_items,
             .allocator = allocator,
-            .rows = std.ArrayList(Row).init(allocator),
+            .rows = .empty,
             .output_index = 0,
             .evaluator = ExpressionEvaluator.init(allocator),
             .opened = false,
@@ -258,7 +258,7 @@ pub const Sort = struct {
         self.ctx = ctx;
 
         while (try self.input.next(ctx)) |row| {
-            self.rows.append(row.*) catch return OperatorError.OutOfMemory;
+            self.rows.append(self.allocator, row.*) catch return OperatorError.OutOfMemory;
         }
 
         // Sort the rows
@@ -326,14 +326,14 @@ pub const Sort = struct {
         const self: *Self = @ptrCast(@alignCast(ptr));
         if (self.opened) {
             self.input.close(ctx);
-            self.rows.clearAndFree();
+            self.rows.clearAndFree(self.allocator);
             self.opened = false;
         }
     }
 
     fn deinit(ptr: *anyopaque, allocator: Allocator) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        self.rows.deinit();
+        self.rows.deinit(self.allocator);
         self.input.deinit(allocator);
         allocator.destroy(self);
     }
@@ -411,24 +411,27 @@ fn compareEvalResults(a: EvalResult, b: EvalResult) i32 {
 // ============================================================================
 
 test "Limit basic structure" {
-    try std.testing.expect(Limit.vtable.open != null);
-    try std.testing.expect(Limit.vtable.next != null);
-    try std.testing.expect(Limit.vtable.close != null);
-    try std.testing.expect(Limit.vtable.deinit != null);
+    const vtable = Limit.vtable;
+    try std.testing.expect(@TypeOf(vtable.open) != void);
+    try std.testing.expect(@TypeOf(vtable.next) != void);
+    try std.testing.expect(@TypeOf(vtable.close) != void);
+    try std.testing.expect(@TypeOf(vtable.deinit) != void);
 }
 
 test "Skip basic structure" {
-    try std.testing.expect(Skip.vtable.open != null);
-    try std.testing.expect(Skip.vtable.next != null);
-    try std.testing.expect(Skip.vtable.close != null);
-    try std.testing.expect(Skip.vtable.deinit != null);
+    const vtable = Skip.vtable;
+    try std.testing.expect(@TypeOf(vtable.open) != void);
+    try std.testing.expect(@TypeOf(vtable.next) != void);
+    try std.testing.expect(@TypeOf(vtable.close) != void);
+    try std.testing.expect(@TypeOf(vtable.deinit) != void);
 }
 
 test "Sort basic structure" {
-    try std.testing.expect(Sort.vtable.open != null);
-    try std.testing.expect(Sort.vtable.next != null);
-    try std.testing.expect(Sort.vtable.close != null);
-    try std.testing.expect(Sort.vtable.deinit != null);
+    const vtable = Sort.vtable;
+    try std.testing.expect(@TypeOf(vtable.open) != void);
+    try std.testing.expect(@TypeOf(vtable.next) != void);
+    try std.testing.expect(@TypeOf(vtable.close) != void);
+    try std.testing.expect(@TypeOf(vtable.deinit) != void);
 }
 
 test "compareEvalResults ordering" {

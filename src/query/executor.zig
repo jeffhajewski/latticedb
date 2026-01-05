@@ -337,14 +337,14 @@ pub const QueryResult = struct {
     pub fn init(allocator: Allocator) Self {
         return Self{
             .columns = &[_][]const u8{},
-            .rows = std.ArrayList(Row).init(allocator),
+            .rows = .empty,
             .allocator = allocator,
         };
     }
 
     /// Free the result
     pub fn deinit(self: *Self) void {
-        self.rows.deinit();
+        self.rows.deinit(self.allocator);
     }
 
     /// Get number of rows
@@ -354,7 +354,7 @@ pub const QueryResult = struct {
 
     /// Add a row to the result
     pub fn addRow(self: *Self, row: Row) !void {
-        try self.rows.append(row);
+        try self.rows.append(self.allocator, row);
     }
 };
 

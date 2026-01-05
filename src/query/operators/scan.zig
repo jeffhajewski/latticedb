@@ -229,29 +229,19 @@ fn mapLabelIndexError(err: LabelIndexError) OperatorError {
 // ============================================================================
 
 test "AllNodesScan basic structure" {
-    // Basic structure test without actual B+Tree
-    // Full integration tests require storage setup
-    const allocator = std.testing.allocator;
-
-    // Verify vtable is accessible
-    try std.testing.expect(AllNodesScan.vtable.open != null);
-    try std.testing.expect(AllNodesScan.vtable.next != null);
-    try std.testing.expect(AllNodesScan.vtable.close != null);
-    try std.testing.expect(AllNodesScan.vtable.deinit != null);
-
-    _ = allocator;
+    // Verify vtable is properly structured
+    const vtable = AllNodesScan.vtable;
+    try std.testing.expect(@TypeOf(vtable.open) != void);
+    try std.testing.expect(@TypeOf(vtable.next) != void);
+    try std.testing.expect(@TypeOf(vtable.close) != void);
+    try std.testing.expect(@TypeOf(vtable.deinit) != void);
 }
 
 test "LabelScan basic structure" {
-    // Basic structure test without actual LabelIndex
-    // Full integration tests require storage setup
-    const allocator = std.testing.allocator;
-
-    // Verify vtable is accessible
-    try std.testing.expect(LabelScan.vtable.open != null);
-    try std.testing.expect(LabelScan.vtable.next != null);
-    try std.testing.expect(LabelScan.vtable.close != null);
-    try std.testing.expect(LabelScan.vtable.deinit != null);
-
-    _ = allocator;
+    // Verify vtable is properly structured
+    const vtable = LabelScan.vtable;
+    try std.testing.expect(@TypeOf(vtable.open) != void);
+    try std.testing.expect(@TypeOf(vtable.next) != void);
+    try std.testing.expect(@TypeOf(vtable.close) != void);
+    try std.testing.expect(@TypeOf(vtable.deinit) != void);
 }

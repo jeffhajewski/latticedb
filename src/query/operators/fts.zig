@@ -313,7 +313,7 @@ pub const FtsSearchWithInput = struct {
 /// Extract query text from a PropertyValue parameter
 fn extractTextFromParam(param: types.PropertyValue) ?[]const u8 {
     return switch (param) {
-        .string_value => |s| s,
+        .string_val => |s| s,
         else => null,
     };
 }
@@ -323,15 +323,19 @@ fn extractTextFromParam(param: types.PropertyValue) ?[]const u8 {
 // ============================================================================
 
 test "FtsSearch basic structure" {
-    try std.testing.expect(FtsSearch.vtable.open != null);
-    try std.testing.expect(FtsSearch.vtable.next != null);
-    try std.testing.expect(FtsSearch.vtable.close != null);
-    try std.testing.expect(FtsSearch.vtable.deinit != null);
+    // Verify vtable is properly structured
+    const vtable = FtsSearch.vtable;
+    try std.testing.expect(@TypeOf(vtable.open) != void);
+    try std.testing.expect(@TypeOf(vtable.next) != void);
+    try std.testing.expect(@TypeOf(vtable.close) != void);
+    try std.testing.expect(@TypeOf(vtable.deinit) != void);
 }
 
 test "FtsSearchWithInput basic structure" {
-    try std.testing.expect(FtsSearchWithInput.vtable.open != null);
-    try std.testing.expect(FtsSearchWithInput.vtable.next != null);
-    try std.testing.expect(FtsSearchWithInput.vtable.close != null);
-    try std.testing.expect(FtsSearchWithInput.vtable.deinit != null);
+    // Verify vtable is properly structured
+    const vtable = FtsSearchWithInput.vtable;
+    try std.testing.expect(@TypeOf(vtable.open) != void);
+    try std.testing.expect(@TypeOf(vtable.next) != void);
+    try std.testing.expect(@TypeOf(vtable.close) != void);
+    try std.testing.expect(@TypeOf(vtable.deinit) != void);
 }

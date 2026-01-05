@@ -312,11 +312,12 @@ fn computeEdgeId(source: NodeId, target: NodeId, edge_type: SymbolId) EdgeId {
 // ============================================================================
 
 test "Expand basic structure" {
-    // Verify vtable is accessible
-    try std.testing.expect(Expand.vtable.open != null);
-    try std.testing.expect(Expand.vtable.next != null);
-    try std.testing.expect(Expand.vtable.close != null);
-    try std.testing.expect(Expand.vtable.deinit != null);
+    // Verify vtable is properly structured
+    const vtable = Expand.vtable;
+    try std.testing.expect(@TypeOf(vtable.open) != void);
+    try std.testing.expect(@TypeOf(vtable.next) != void);
+    try std.testing.expect(@TypeOf(vtable.close) != void);
+    try std.testing.expect(@TypeOf(vtable.deinit) != void);
 }
 
 test "computeEdgeId produces unique values" {

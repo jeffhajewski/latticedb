@@ -180,7 +180,7 @@ pub const QueryPlanner = struct {
                         // Look up first label (TODO: handle multiple labels)
                         const label_id = symbol_table.lookup(node_pattern.labels[0]) catch {
                             return PlannerError.UnknownLabel;
-                        } orelse return PlannerError.UnknownLabel;
+                        };
 
                         const label_scan = scan_ops.LabelScan.init(self.allocator, slot, label_id, label_index_ptr) catch {
                             return PlannerError.OutOfMemory;
@@ -300,7 +300,7 @@ pub const QueryPlanner = struct {
                 if (binary.left.* == .binary) {
                     const inner = binary.left.binary;
                     if (inner.operator == .vector_distance) {
-                        var info = self.extractVectorInfo(inner) orelse return null;
+                        var info = self.extractVectorInfo(inner.*) orelse return null;
                         // Extract threshold from right side
                         if (binary.right.* == .literal) {
                             const lit = binary.right.literal;
@@ -317,7 +317,7 @@ pub const QueryPlanner = struct {
 
             // Pattern 2: x.prop <=> $param (no threshold)
             if (binary.operator == .vector_distance) {
-                return self.extractVectorInfo(binary);
+                return self.extractVectorInfo(binary.*);
             }
         }
 
@@ -340,8 +340,8 @@ pub const QueryPlanner = struct {
             info.property_name = prop_access.property;
 
             // Get the variable's slot
-            if (prop_access.base.* == .variable) {
-                const var_name = prop_access.base.variable.name;
+            if (prop_access.object.* == .variable) {
+                const var_name = prop_access.object.variable.name;
                 info.variable_slot = self.getSlot(var_name);
             }
         }
@@ -402,7 +402,7 @@ pub const QueryPlanner = struct {
             const binary = expr.binary;
 
             if (binary.operator == .fts_match) {
-                return self.extractFtsInfo(binary);
+                return self.extractFtsInfo(binary.*);
             }
         }
 
@@ -424,8 +424,8 @@ pub const QueryPlanner = struct {
             info.property_name = prop_access.property;
 
             // Get the variable's slot
-            if (prop_access.base.* == .variable) {
-                const var_name = prop_access.base.variable.name;
+            if (prop_access.object.* == .variable) {
+                const var_name = prop_access.object.variable.name;
                 info.variable_slot = self.getSlot(var_name);
             }
         }

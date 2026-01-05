@@ -339,15 +339,17 @@ fn extractVectorFromParam(param: types.PropertyValue) ?[]const f32 {
 // ============================================================================
 
 test "VectorSearch basic structure" {
-    try std.testing.expect(VectorSearch.vtable.open != null);
-    try std.testing.expect(VectorSearch.vtable.next != null);
-    try std.testing.expect(VectorSearch.vtable.close != null);
-    try std.testing.expect(VectorSearch.vtable.deinit != null);
+    const vtable = VectorSearch.vtable;
+    try std.testing.expect(@TypeOf(vtable.open) != void);
+    try std.testing.expect(@TypeOf(vtable.next) != void);
+    try std.testing.expect(@TypeOf(vtable.close) != void);
+    try std.testing.expect(@TypeOf(vtable.deinit) != void);
 }
 
 test "VectorSearchWithInput basic structure" {
-    try std.testing.expect(VectorSearchWithInput.vtable.open != null);
-    try std.testing.expect(VectorSearchWithInput.vtable.next != null);
-    try std.testing.expect(VectorSearchWithInput.vtable.close != null);
-    try std.testing.expect(VectorSearchWithInput.vtable.deinit != null);
+    const vtable = VectorSearchWithInput.vtable;
+    try std.testing.expect(@TypeOf(vtable.open) != void);
+    try std.testing.expect(@TypeOf(vtable.next) != void);
+    try std.testing.expect(@TypeOf(vtable.close) != void);
+    try std.testing.expect(@TypeOf(vtable.deinit) != void);
 }

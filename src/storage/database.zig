@@ -268,9 +268,9 @@ pub const Database = struct {
                 self.vfs.vfs(),
                 wal_path,
                 self.page_manager.getHeader().file_uuid,
-            ) catch {
+            ) catch blk: {
                 // WAL init failure is non-fatal, continue without WAL
-                self.wal = null;
+                break :blk null;
             };
         }
 
@@ -323,10 +323,7 @@ pub const Database = struct {
             tm.deinit();
         }
 
-        // 8. FTS index
-        if (self.fts_index) |*fts| {
-            fts.deinit();
-        }
+        // 8. FTS index (no explicit deinit needed - components don't own resources)
 
         // 7. Graph stores (no explicit deinit needed - they don't own resources)
         // 6. Symbol table (no explicit deinit needed)
@@ -642,21 +639,8 @@ pub const Database = struct {
             return DatabaseError.IoError;
         };
 
-        var iter = self.label_index.getNodes(label_id) catch {
+        return self.label_index.getNodesByLabel(label_id) catch {
             return DatabaseError.IoError;
-        };
-
-        var nodes: std.ArrayList(NodeId) = .empty;
-        errdefer nodes.deinit(self.allocator);
-
-        while (iter.next() catch null) |node_id| {
-            nodes.append(self.allocator, node_id) catch {
-                return DatabaseError.OutOfMemory;
-            };
-        }
-
-        return nodes.toOwnedSlice(self.allocator) catch {
-            return DatabaseError.OutOfMemory;
         };
     }
 
@@ -686,7 +670,7 @@ pub const Database = struct {
             return QueryError.ParseError;
         }
         const ast_query = parse_result.query.?;
-        defer ast_query.deinit(self.allocator);
+        defer ast_query.deinit();
 
         // 2. Semantic analysis
         var analyzer = SemanticAnalyzer.init(self.allocator);
@@ -814,12 +798,12 @@ pub const Database = struct {
             .node_ref => |id| .{ .node_id = id },
             .edge_ref => .{ .null_val = {} }, // TODO: Add edge_id to ResultValue if needed
             .property => |prop| switch (prop) {
-                .null_value => .{ .null_val = {} },
-                .bool_value => |b| .{ .bool_val = b },
-                .int_value => |i| .{ .int_val = i },
-                .float_value => |f| .{ .float_val = f },
-                .string_value => |s| .{ .string_val = s },
-                .symbol_id => |id| .{ .int_val = @intCast(id) },
+                .null_val => .{ .null_val = {} },
+                .bool_val => |b| .{ .bool_val = b },
+                .int_val => |i| .{ .int_val = i },
+                .float_val => |f| .{ .float_val = f },
+                .string_val => |s| .{ .string_val = s },
+                .bytes_val, .list_val, .map_val => .{ .null_val = {} },
             },
         };
     }

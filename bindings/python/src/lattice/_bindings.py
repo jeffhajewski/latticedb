@@ -18,6 +18,7 @@ from ctypes import (
     c_int,
     c_int64,
     c_size_t,
+    c_uint16,
     c_uint32,
     c_uint64,
     c_void_p,
@@ -219,6 +220,8 @@ class OpenOptions(Structure):
         ("read_only", c_bool),
         ("cache_size_mb", c_uint32),
         ("page_size", c_uint32),
+        ("enable_vector", c_bool),
+        ("vector_dimensions", c_uint16),
     ]
 
 

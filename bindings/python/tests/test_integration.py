@@ -290,7 +290,6 @@ class TestQueries:
 class TestVectorOperations:
     """Tests for vector operations."""
 
-    @pytest.mark.skip(reason="Vector operations not yet implemented in C API")
     def test_set_vector(self, tmp_path):
         """Test setting a vector on a node."""
         pytest.importorskip("numpy")
@@ -298,7 +297,8 @@ class TestVectorOperations:
 
         db_path = tmp_path / "test.db"
 
-        with Database(db_path, create=True) as db:
+        # Must enable vector storage with correct dimensions
+        with Database(db_path, create=True, enable_vector=True, vector_dimensions=4) as db:
             with db.write() as txn:
                 node = txn.create_node(labels=["Document"])
                 vector = np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32)

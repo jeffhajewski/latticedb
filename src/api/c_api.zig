@@ -189,6 +189,8 @@ pub const lattice_open_options = extern struct {
     read_only: bool = false,
     cache_size_mb: u32 = 100,
     page_size: u32 = 4096,
+    enable_vector: bool = false,
+    vector_dimensions: u16 = 128,
 };
 
 // ============================================================================
@@ -311,6 +313,8 @@ pub export fn lattice_open(
         zig_options.create = opts.create;
         zig_options.read_only = opts.read_only;
         zig_options.config.buffer_pool_size = @as(usize, opts.cache_size_mb) * 1024 * 1024;
+        zig_options.config.enable_vector = opts.enable_vector;
+        zig_options.config.vector_dimensions = opts.vector_dimensions;
     }
 
     // Open the database
@@ -467,7 +471,7 @@ pub export fn lattice_node_get_property(
     }
 }
 
-/// Set a vector on a node (stub for MVP)
+/// Set a vector on a node
 pub export fn lattice_node_set_vector(
     txn: ?*lattice_txn,
     node_id: lattice_node_id,
@@ -475,13 +479,24 @@ pub export fn lattice_node_set_vector(
     vector: [*c]const f32,
     dimensions: u32,
 ) lattice_error {
-    _ = txn;
-    _ = node_id;
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+
+    if (txn_handle.read_only) return .err_read_only;
+
+    // Key is currently ignored - vectors are stored by node_id
+    // In future, we could support multiple vectors per node with different keys
     _ = key;
-    _ = vector;
-    _ = dimensions;
-    // TODO: Implement vector operations
-    return .err;
+
+    if (vector == null or dimensions == 0) return .err_invalid_arg;
+
+    // Convert C pointer to Zig slice
+    const vector_slice = vector[0..dimensions];
+
+    txn_handle.db_handle.db.setNodeVector(node_id, vector_slice) catch |err| {
+        return mapDatabaseError(err);
+    };
+
+    return .ok;
 }
 
 // ============================================================================

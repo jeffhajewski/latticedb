@@ -56,6 +56,11 @@ const fts_mod = lattice.fts.index;
 const FtsIndex = fts_mod.FtsIndex;
 const FtsConfig = fts_mod.FtsConfig;
 
+// Vector storage
+const vector_storage_mod = lattice.vector.storage;
+const VectorStorage = vector_storage_mod.VectorStorage;
+const VectorStorageError = vector_storage_mod.VectorStorageError;
+
 // Transactions
 const txn_mod = lattice.transaction.manager;
 const TxnManager = txn_mod.TxnManager;
@@ -170,6 +175,10 @@ pub const DatabaseConfig = struct {
     enable_fts: bool = true,
     /// FTS configuration
     fts_config: FtsConfig = .{},
+    /// Enable vector storage
+    enable_vector: bool = false,
+    /// Vector dimensions (required if enable_vector is true)
+    vector_dimensions: u16 = 128,
 };
 
 /// Options for opening a database
@@ -210,6 +219,7 @@ pub const Database = struct {
 
     // Indexes
     fts_index: ?FtsIndex,
+    vector_storage: ?VectorStorage,
 
     // Transactions
     txn_manager: ?TxnManager,
@@ -305,6 +315,16 @@ pub const Database = struct {
                 if (self.fts_reverse_tree) |*t| t else null,
                 options.config.fts_config,
             );
+        }
+
+        // 8b. Initialize Vector Storage (optional)
+        self.vector_storage = null;
+        if (options.config.enable_vector) {
+            self.vector_storage = VectorStorage.init(
+                allocator,
+                &self.buffer_pool,
+                options.config.vector_dimensions,
+            ) catch null;
         }
 
         // 9. Initialize Transaction Manager
@@ -667,6 +687,36 @@ pub const Database = struct {
         }
 
         return null;
+    }
+
+    // ========================================================================
+    // Vector Operations
+    // ========================================================================
+
+    /// Set a vector embedding on a node.
+    /// The vector is stored in the vector storage and associated with the node.
+    pub fn setNodeVector(
+        self: *Self,
+        node_id: NodeId,
+        vector: []const f32,
+    ) !void {
+        if (self.read_only) return DatabaseError.PermissionDenied;
+
+        // Check if vector storage is enabled
+        const vs = &(self.vector_storage orelse return DatabaseError.IoError);
+
+        // Verify node exists
+        if (!self.nodeExists(node_id)) {
+            return DatabaseError.NotFound;
+        }
+
+        // Store the vector (using node_id as vector_id)
+        _ = vs.store(node_id, vector) catch |err| {
+            return switch (err) {
+                VectorStorageError.DimensionMismatch => DatabaseError.IoError,
+                else => DatabaseError.IoError,
+            };
+        };
     }
 
     // ========================================================================

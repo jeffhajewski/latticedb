@@ -41,6 +41,8 @@ pub const NodeError = error{
     OutOfMemory,
     /// B+Tree error
     BTreeError,
+    /// Buffer pool is full
+    BufferPoolFull,
 };
 
 /// A property entry (key-value pair)
@@ -166,11 +168,16 @@ pub const NodeStore = struct {
     }
 
     /// Check if a node exists
-    pub fn exists(self: *Self, node_id: NodeId) bool {
+    pub fn exists(self: *Self, node_id: NodeId) NodeError!bool {
         var key_buf: [8]u8 = undefined;
         std.mem.writeInt(u64, &key_buf, node_id, .little);
 
-        const result = self.tree.get(&key_buf) catch return false;
+        const result = self.tree.get(&key_buf) catch |err| {
+            return switch (err) {
+                BTreeError.BufferPoolFull => NodeError.BufferPoolFull,
+                else => NodeError.BTreeError,
+            };
+        };
         return result != null;
     }
 };
@@ -408,7 +415,7 @@ test "node store not found" {
     var store = NodeStore.init(allocator, &tree);
 
     try std.testing.expectError(NodeError.NotFound, store.get(999));
-    try std.testing.expect(!store.exists(999));
+    try std.testing.expect(!(try store.exists(999)));
 }
 
 test "node store exists" {
@@ -437,11 +444,11 @@ test "node store exists" {
 
     var store = NodeStore.init(allocator, &tree);
 
-    try std.testing.expect(!store.exists(1));
+    try std.testing.expect(!(try store.exists(1)));
 
     const node_id = try store.create(&[_]SymbolId{}, &[_]Property{});
     try std.testing.expectEqual(@as(NodeId, 1), node_id);
-    try std.testing.expect(store.exists(1));
+    try std.testing.expect(try store.exists(1));
 }
 
 test "node store delete" {
@@ -472,11 +479,11 @@ test "node store delete" {
 
     // Create a node
     const node_id = try store.create(&[_]SymbolId{1000}, &[_]Property{});
-    try std.testing.expect(store.exists(node_id));
+    try std.testing.expect(try store.exists(node_id));
 
     // Delete the node
     try store.delete(node_id);
-    try std.testing.expect(!store.exists(node_id));
+    try std.testing.expect(!(try store.exists(node_id)));
 
     // Deleting again should fail with NotFound
     try std.testing.expectError(NodeError.NotFound, store.delete(node_id));

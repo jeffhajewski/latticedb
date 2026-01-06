@@ -625,8 +625,13 @@ pub const Database = struct {
     }
 
     /// Check if a node exists
-    pub fn nodeExists(self: *Self, node_id: NodeId) bool {
-        return self.node_store.exists(node_id);
+    pub fn nodeExists(self: *Self, node_id: NodeId) DatabaseError!bool {
+        return self.node_store.exists(node_id) catch |err| {
+            return switch (err) {
+                node_mod.NodeError.BufferPoolFull => DatabaseError.BufferPoolFull,
+                else => DatabaseError.IoError,
+            };
+        };
     }
 
     /// Set a property on a node
@@ -738,7 +743,7 @@ pub const Database = struct {
         const vs = &(self.vector_storage orelse return DatabaseError.IoError);
 
         // Verify node exists
-        if (!self.nodeExists(node_id)) {
+        if (!(try self.nodeExists(node_id))) {
             return DatabaseError.NotFound;
         }
 
@@ -1302,8 +1307,8 @@ test "graph crud operations" {
     const alice = try db.createNode(&[_][]const u8{"Person"});
     const bob = try db.createNode(&[_][]const u8{"Person"});
 
-    try std.testing.expect(db.nodeExists(alice));
-    try std.testing.expect(db.nodeExists(bob));
+    try std.testing.expect(try db.nodeExists(alice));
+    try std.testing.expect(try db.nodeExists(bob));
 
     // Create edge
     try db.createEdge(alice, bob, "KNOWS");
@@ -1329,8 +1334,8 @@ test "graph crud operations" {
 
     // Delete node
     try db.deleteNode(alice);
-    try std.testing.expect(!db.nodeExists(alice));
-    try std.testing.expect(db.nodeExists(bob));
+    try std.testing.expect(!(try db.nodeExists(alice)));
+    try std.testing.expect(try db.nodeExists(bob));
 }
 
 test "query: simple MATCH RETURN" {

@@ -531,7 +531,12 @@ pub export fn lattice_node_exists(
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    exists_out.* = txn_handle.db_handle.db.node_store.exists(node_id);
+    exists_out.* = txn_handle.db_handle.db.node_store.exists(node_id) catch |err| {
+        return switch (err) {
+            node_mod.NodeError.BufferPoolFull => .err_full,
+            else => .err_io,
+        };
+    };
     return .ok;
 }
 

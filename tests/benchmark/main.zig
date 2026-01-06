@@ -235,7 +235,8 @@ fn createVectorData(db: *Database, node_ids: []const u64, dimensions: usize) !vo
         }
         db.setNodeVector(node_id, vector) catch |err| {
             if (i == 0) {
-                std.debug.print("    First node ({d}) exists: {}\n", .{ node_id, db.nodeExists(node_id) });
+                const exists = db.nodeExists(node_id) catch false;
+                std.debug.print("    First node ({d}) exists: {}\n", .{ node_id, exists });
             }
             return err;
         };

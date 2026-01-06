@@ -161,6 +161,10 @@ pub const QueryResult = struct {
             row.deinit(self.allocator);
         }
         self.allocator.free(self.rows);
+        // Free each column name string
+        for (self.columns) |col| {
+            self.allocator.free(col);
+        }
         self.allocator.free(self.columns);
     }
 
@@ -601,15 +605,14 @@ pub const Database = struct {
         if (self.read_only) return DatabaseError.PermissionDenied;
 
         // Get node to find its labels for index cleanup
-        if (try self.getNode(node_id)) |node| {
+        if (try self.getNode(node_id)) |n| {
+            var node = n;
+            defer node.deinit(self.allocator);
+
             // Remove from label index
             for (node.labels) |label_id| {
                 self.label_index.remove(label_id, node_id) catch {};
             }
-
-            // Free node data
-            self.allocator.free(node.labels);
-            self.allocator.free(node.properties);
         }
 
         // Delete from node store
@@ -922,13 +925,14 @@ pub const Database = struct {
     pub fn query(self: *Self, cypher: []const u8) QueryError!QueryResult {
         // 1. Parse the query
         var parser = Parser.init(self.allocator, cypher);
+        defer parser.deinit();
+
         const parse_result = parser.parse();
 
         if (parse_result.query == null) {
             return QueryError.ParseError;
         }
         const ast_query = parse_result.query.?;
-        defer ast_query.deinit();
 
         // 2. Semantic analysis
         var analyzer = SemanticAnalyzer.init(self.allocator);
@@ -988,13 +992,14 @@ pub const Database = struct {
     ) QueryError!QueryResult {
         // 1. Parse the query
         var parser = Parser.init(self.allocator, cypher);
+        defer parser.deinit();
+
         const parse_result = parser.parse();
 
         if (parse_result.query == null) {
             return QueryError.ParseError;
         }
         const ast_query = parse_result.query.?;
-        defer ast_query.deinit();
 
         // 2. Semantic analysis
         var analyzer = SemanticAnalyzer.init(self.allocator);

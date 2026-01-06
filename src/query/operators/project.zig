@@ -133,6 +133,9 @@ pub const Project = struct {
         // Also deinit the input operator
         self.input.deinit(allocator);
 
+        // Free the items array
+        allocator.free(self.items);
+
         allocator.destroy(self);
     }
 };

@@ -507,3 +507,62 @@ class TestFtsOperations:
 
             # Should return empty list
             assert len(results) == 0
+
+
+class TestUtilities:
+    """Tests for utility functions."""
+
+    def test_version(self):
+        """Test version() returns a version string."""
+        from lattice import version
+
+        ver = version()
+        assert isinstance(ver, str)
+        assert len(ver) > 0
+        # Should be in semver format (e.g., "0.1.0")
+        parts = ver.split(".")
+        assert len(parts) >= 2
+
+    def test_node_exists(self, tmp_path):
+        """Test node_exists() method."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                # Create a node
+                node = txn.create_node(labels=["Person"])
+
+                # Node should exist
+                assert txn.node_exists(node.id) is True
+
+                # Non-existent node should not exist
+                assert txn.node_exists(999999) is False
+
+                txn.commit()
+
+            # Check in read transaction too
+            with db.read() as txn:
+                assert txn.node_exists(node.id) is True
+                assert txn.node_exists(999999) is False
+
+    def test_node_exists_after_delete(self, tmp_path):
+        """Test node_exists() returns False after node deletion."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                node = txn.create_node(labels=["Person"])
+                node_id = node.id
+                txn.commit()
+
+            with db.write() as txn:
+                # Node should exist before deletion
+                assert txn.node_exists(node_id) is True
+
+                # Delete the node
+                txn.delete_node(node_id)
+
+                # Node should not exist after deletion
+                assert txn.node_exists(node_id) is False
+
+                txn.commit()

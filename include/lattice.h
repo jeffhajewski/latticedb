@@ -92,14 +92,16 @@ typedef struct {
 
 /* Open options */
 typedef struct {
-    bool create;           /* Create if not exists */
-    bool read_only;        /* Open in read-only mode */
+    bool create;            /* Create if not exists */
+    bool read_only;         /* Open in read-only mode */
     uint32_t cache_size_mb; /* Cache size in MB (default: 100) */
-    uint32_t page_size;    /* Page size in bytes (default: 4096) */
+    uint32_t page_size;     /* Page size in bytes (default: 4096) */
+    bool enable_vector;     /* Enable vector storage for embeddings */
+    uint16_t vector_dimensions; /* Vector dimensions (default: 128) */
 } lattice_open_options;
 
 /* Default open options */
-#define LATTICE_OPEN_OPTIONS_DEFAULT { false, false, 100, 4096 }
+#define LATTICE_OPEN_OPTIONS_DEFAULT { false, false, 100, 4096, false, 128 }
 
 /*
  * Database operations

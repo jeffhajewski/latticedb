@@ -28,6 +28,11 @@ from lattice.transaction import Transaction
 from lattice.types import Node, QueryResult, VectorSearchResult, FtsSearchResult
 
 
+def _is_numpy_array(value: Any) -> bool:
+    """Check if a value is a numpy array without importing numpy."""
+    return type(value).__module__ == "numpy" and type(value).__name__ == "ndarray"
+
+
 class Database:
     """
     Lattice database connection.
@@ -142,10 +147,26 @@ class Database:
 
         Args:
             cypher: The Cypher query string.
-            parameters: Query parameters.
+            parameters: Query parameters. Supports scalar types (None, bool, int,
+                float, str, bytes) and numpy arrays for vector parameters.
 
         Returns:
             Query results.
+
+        Example:
+            # Scalar parameters
+            result = db.query(
+                "MATCH (n:Person) WHERE n.name = $name RETURN n",
+                parameters={"name": "Alice"}
+            )
+
+            # Vector parameters (requires numpy)
+            import numpy as np
+            query_vec = np.random.rand(128).astype(np.float32)
+            result = db.query(
+                "MATCH (n:Document) WHERE n.embedding <=> $vec < 0.5 RETURN n",
+                parameters={"vec": query_vec}
+            )
         """
         if self._handle is None:
             raise RuntimeError("Database is not open")
@@ -167,16 +188,30 @@ class Database:
             # Bind parameters if provided
             if parameters:
                 for name, value in parameters.items():
-                    c_value = LatticeValue()
-                    # Keep reference to any allocated data until C call completes
-                    _ref = python_to_value(value, c_value)
-                    code = lib._lib.lattice_query_bind(
-                        query_ptr,
-                        name.encode("utf-8"),
-                        byref(c_value),
-                    )
-                    del _ref  # Now safe to release
-                    check_error(code)
+                    # Check if value is a numpy array (vector parameter)
+                    if _is_numpy_array(value):
+                        import numpy as np
+                        # Ensure vector is float32 and contiguous
+                        vec = np.ascontiguousarray(value, dtype=np.float32)
+                        vec_ptr = vec.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+                        code = lib._lib.lattice_query_bind_vector(
+                            query_ptr,
+                            name.encode("utf-8"),
+                            vec_ptr,
+                            len(vec),
+                        )
+                        check_error(code)
+                    else:
+                        c_value = LatticeValue()
+                        # Keep reference to any allocated data until C call completes
+                        _ref = python_to_value(value, c_value)
+                        code = lib._lib.lattice_query_bind(
+                            query_ptr,
+                            name.encode("utf-8"),
+                            byref(c_value),
+                        )
+                        del _ref  # Now safe to release
+                        check_error(code)
 
             # Begin a read-only transaction for the query
             code = lib._lib.lattice_begin(

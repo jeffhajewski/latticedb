@@ -407,6 +407,25 @@ class Transaction:
         )
         check_error(code)
 
+    def node_exists(self, node_id: int) -> bool:
+        """
+        Check if a node exists.
+
+        Args:
+            node_id: The node ID to check.
+
+        Returns:
+            True if the node exists, False otherwise.
+        """
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        exists = ctypes.c_bool()
+        code = lib._lib.lattice_node_exists(self._handle, node_id, ctypes.byref(exists))
+        check_error(code)
+        return exists.value
+
     @property
     def is_read_only(self) -> bool:
         """Return True if this is a read-only transaction."""

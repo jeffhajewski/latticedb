@@ -84,6 +84,7 @@ Database(
 - `is_active` - True if transaction is still active
 - `get_node(node_id: int)` - Get a node by ID, returns `Node` or `None`
 - `get_property(node_id: int, key: str)` - Get a property value, returns value or `None`
+- `node_exists(node_id: int)` - Check if a node exists, returns `True` or `False`
 
 #### Write Operations
 
@@ -132,6 +133,14 @@ result = db.query(
 result = db.query(
     "MATCH (n:Person) WHERE n.name = $name AND n.age > $min_age RETURN n",
     parameters={"name": "Alice", "min_age": 20}
+)
+
+# Vector parameter (requires numpy)
+import numpy as np
+query_vec = np.random.rand(384).astype(np.float32)
+result = db.query(
+    "MATCH (n:Document) WHERE n.embedding <=> $vec < 0.5 RETURN n",
+    parameters={"vec": query_vec}
 )
 ```
 
@@ -263,6 +272,19 @@ except LatticeIOError:
     print("I/O error")
 except LatticeError as e:
     print(f"Error: {e}")
+```
+
+## Utilities
+
+```python
+from lattice import version, library_available
+
+# Check if the native library is available
+if library_available():
+    print("Library found")
+
+# Get the native library version
+print(f"Lattice version: {version()}")
 ```
 
 ## Requirements

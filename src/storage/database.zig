@@ -890,6 +890,91 @@ pub const Database = struct {
         return self.edge_store.exists(source, target, type_id);
     }
 
+    /// Edge info for traversal results
+    pub const EdgeInfo = struct {
+        source: NodeId,
+        target: NodeId,
+        edge_type: []const u8,
+    };
+
+    /// Get all outgoing edges from a node.
+    /// Caller owns the returned slice and must free it with freeEdgeInfos.
+    pub fn getOutgoingEdges(self: *Self, node_id: NodeId) ![]EdgeInfo {
+        var iter = self.edge_store.getOutgoing(node_id) catch {
+            return DatabaseError.IoError;
+        };
+        defer iter.deinit();
+
+        var edges: std.ArrayList(EdgeInfo) = .empty;
+        errdefer edges.deinit(self.allocator);
+
+        while (try iter.next()) |edge| {
+            // Free the edge's owned memory after extracting info
+            defer {
+                var e = edge;
+                e.deinit(self.allocator);
+            }
+
+            // resolve() returns an allocated string - use it directly, no need to dupe
+            const edge_type_str = self.symbol_table.resolve(edge.edge_type) catch {
+                continue;
+            };
+            edges.append(self.allocator, .{
+                .source = edge.source,
+                .target = edge.target,
+                .edge_type = edge_type_str,
+            }) catch {
+                self.allocator.free(edge_type_str);
+                return DatabaseError.OutOfMemory;
+            };
+        }
+
+        return edges.toOwnedSlice(self.allocator);
+    }
+
+    /// Get all incoming edges to a node.
+    /// Caller owns the returned slice and must free it with freeEdgeInfos.
+    pub fn getIncomingEdges(self: *Self, node_id: NodeId) ![]EdgeInfo {
+        var iter = self.edge_store.getIncoming(node_id) catch {
+            return DatabaseError.IoError;
+        };
+        defer iter.deinit();
+
+        var edges: std.ArrayList(EdgeInfo) = .empty;
+        errdefer edges.deinit(self.allocator);
+
+        while (try iter.next()) |edge| {
+            // Free the edge's owned memory after extracting info
+            defer {
+                var e = edge;
+                e.deinit(self.allocator);
+            }
+
+            // resolve() returns an allocated string - use it directly, no need to dupe
+            const edge_type_str = self.symbol_table.resolve(edge.edge_type) catch {
+                continue;
+            };
+            edges.append(self.allocator, .{
+                .source = edge.source,
+                .target = edge.target,
+                .edge_type = edge_type_str,
+            }) catch {
+                self.allocator.free(edge_type_str);
+                return DatabaseError.OutOfMemory;
+            };
+        }
+
+        return edges.toOwnedSlice(self.allocator);
+    }
+
+    /// Free edge info slice returned by getOutgoingEdges or getIncomingEdges.
+    pub fn freeEdgeInfos(self: *Self, edges: []EdgeInfo) void {
+        for (edges) |edge| {
+            self.allocator.free(edge.edge_type);
+        }
+        self.allocator.free(edges);
+    }
+
     // ========================================================================
     // Label Operations
     // ========================================================================
@@ -1331,4 +1416,43 @@ test "query: semantic error" {
     // Reference undefined variable
     const result = db.query("MATCH (n) RETURN m");
     try std.testing.expectError(QueryError.SemanticError, result);
+}
+
+test "edge traversal" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_edge_traversal_test.ltdb";
+
+    // Create database
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = false,
+            .enable_fts = false,
+        },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    // Create nodes
+    const alice = try db.createNode(&[_][]const u8{"Person"});
+    const bob = try db.createNode(&[_][]const u8{"Person"});
+    const charlie = try db.createNode(&[_][]const u8{"Person"});
+
+    // Create edges: alice -[KNOWS]-> bob, alice -[LIKES]-> charlie
+    try db.createEdge(alice, bob, "KNOWS");
+    try db.createEdge(alice, charlie, "LIKES");
+
+    // Test outgoing edges from alice
+    const outgoing = try db.getOutgoingEdges(alice);
+    defer db.freeEdgeInfos(outgoing);
+    try std.testing.expectEqual(@as(usize, 2), outgoing.len);
+
+    // Test incoming edges to charlie
+    const incoming = try db.getIncomingEdges(charlie);
+    defer db.freeEdgeInfos(incoming);
+    try std.testing.expectEqual(@as(usize, 1), incoming.len);
+    try std.testing.expectEqual(alice, incoming[0].source);
+    try std.testing.expectEqual(charlie, incoming[0].target);
 }

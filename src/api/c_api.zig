@@ -94,6 +94,13 @@ const FtsResultHandle = struct {
     db_handle: *DatabaseHandle,
 };
 
+/// Internal edge result handle for edge traversal
+const EdgeResultHandle = struct {
+    edges: []Database.EdgeInfo,
+    count: usize,
+    db_handle: *DatabaseHandle,
+};
+
 // ============================================================================
 // C-Exposed Opaque Types
 // ============================================================================
@@ -115,6 +122,9 @@ pub const lattice_vector_result = opaque {};
 
 /// Opaque FTS search result handle for C API
 pub const lattice_fts_result = opaque {};
+
+/// Opaque edge result handle for C API
+pub const lattice_edge_result = opaque {};
 
 /// Node ID type for C API
 pub const lattice_node_id = types.NodeId;
@@ -827,6 +837,103 @@ pub export fn lattice_edge_delete(
     };
 
     return .ok;
+}
+
+/// Get all outgoing edges from a node
+pub export fn lattice_edge_get_outgoing(
+    txn: ?*lattice_txn,
+    node_id: lattice_node_id,
+    result_out: *?*lattice_edge_result,
+) lattice_error {
+    result_out.* = null;
+
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+
+    const edges = txn_handle.db_handle.db.getOutgoingEdges(node_id) catch |err| {
+        return mapAnyError(err);
+    };
+
+    const result_handle = global_allocator.create(EdgeResultHandle) catch {
+        txn_handle.db_handle.db.freeEdgeInfos(edges);
+        return .err_out_of_memory;
+    };
+
+    result_handle.* = EdgeResultHandle{
+        .edges = edges,
+        .count = edges.len,
+        .db_handle = txn_handle.db_handle,
+    };
+
+    result_out.* = toOpaque(lattice_edge_result, result_handle);
+    return .ok;
+}
+
+/// Get all incoming edges to a node
+pub export fn lattice_edge_get_incoming(
+    txn: ?*lattice_txn,
+    node_id: lattice_node_id,
+    result_out: *?*lattice_edge_result,
+) lattice_error {
+    result_out.* = null;
+
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+
+    const edges = txn_handle.db_handle.db.getIncomingEdges(node_id) catch |err| {
+        return mapAnyError(err);
+    };
+
+    const result_handle = global_allocator.create(EdgeResultHandle) catch {
+        txn_handle.db_handle.db.freeEdgeInfos(edges);
+        return .err_out_of_memory;
+    };
+
+    result_handle.* = EdgeResultHandle{
+        .edges = edges,
+        .count = edges.len,
+        .db_handle = txn_handle.db_handle,
+    };
+
+    result_out.* = toOpaque(lattice_edge_result, result_handle);
+    return .ok;
+}
+
+/// Get the number of edges in an edge result set
+pub export fn lattice_edge_result_count(result: ?*lattice_edge_result) u32 {
+    const result_handle = toHandle(EdgeResultHandle, result) orelse return 0;
+    return @intCast(result_handle.count);
+}
+
+/// Get an edge from an edge result set by index
+pub export fn lattice_edge_result_get(
+    result: ?*lattice_edge_result,
+    index: u32,
+    source_out: *lattice_node_id,
+    target_out: *lattice_node_id,
+    edge_type_out: *[*c]const u8,
+    edge_type_len_out: *c_uint,
+) lattice_error {
+    const result_handle = toHandle(EdgeResultHandle, result) orelse return .err_invalid_arg;
+
+    if (index >= result_handle.count) return .err_invalid_arg;
+
+    const edge = result_handle.edges[index];
+    source_out.* = edge.source;
+    target_out.* = edge.target;
+    edge_type_out.* = edge.edge_type.ptr;
+    edge_type_len_out.* = @intCast(edge.edge_type.len);
+
+    return .ok;
+}
+
+/// Free an edge result set
+pub export fn lattice_edge_result_free(result: ?*lattice_edge_result) void {
+    const result_handle = toHandle(EdgeResultHandle, result) orelse return;
+
+    // Free the edge infos through database
+    result_handle.db_handle.db.freeEdgeInfos(result_handle.edges);
+
+    // Free the handle itself
+    global_allocator.destroy(result_handle);
 }
 
 // ============================================================================

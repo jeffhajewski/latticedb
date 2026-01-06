@@ -31,6 +31,7 @@ typedef struct lattice_query lattice_query;
 typedef struct lattice_result lattice_result;
 typedef struct lattice_vector_result lattice_vector_result;
 typedef struct lattice_fts_result lattice_fts_result;
+typedef struct lattice_edge_result lattice_edge_result;
 
 /* ID types */
 typedef uint64_t lattice_node_id;
@@ -317,6 +318,58 @@ lattice_error lattice_edge_delete(
     lattice_node_id target,
     const char* edge_type
 );
+
+/*
+ * Edge traversal operations
+ *
+ * Get edges connected to a node:
+ *   1. Call lattice_edge_get_outgoing() or lattice_edge_get_incoming()
+ *   2. Get result count with lattice_edge_result_count()
+ *   3. Iterate results with lattice_edge_result_get()
+ *   4. Free with lattice_edge_result_free()
+ *
+ * Example:
+ *   lattice_edge_result* edges;
+ *   lattice_edge_get_outgoing(txn, node_id, &edges);
+ *   uint32_t count = lattice_edge_result_count(edges);
+ *   for (uint32_t i = 0; i < count; i++) {
+ *       lattice_node_id source, target;
+ *       const char* type;
+ *       uint32_t type_len;
+ *       lattice_edge_result_get(edges, i, &source, &target, &type, &type_len);
+ *   }
+ *   lattice_edge_result_free(edges);
+ */
+
+/* Get all outgoing edges from a node */
+lattice_error lattice_edge_get_outgoing(
+    lattice_txn* txn,
+    lattice_node_id node_id,
+    lattice_edge_result** result_out
+);
+
+/* Get all incoming edges to a node */
+lattice_error lattice_edge_get_incoming(
+    lattice_txn* txn,
+    lattice_node_id node_id,
+    lattice_edge_result** result_out
+);
+
+/* Get the number of edges in a result set */
+uint32_t lattice_edge_result_count(lattice_edge_result* result);
+
+/* Get an edge from a result set by index */
+lattice_error lattice_edge_result_get(
+    lattice_edge_result* result,
+    uint32_t index,
+    lattice_node_id* source_out,
+    lattice_node_id* target_out,
+    const char** edge_type_out,
+    uint32_t* edge_type_len_out
+);
+
+/* Free an edge result set */
+void lattice_edge_result_free(lattice_edge_result* result);
 
 /*
  * Query operations

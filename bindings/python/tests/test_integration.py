@@ -282,6 +282,90 @@ class TestEdgeOperations:
                 txn.delete_edge(alice.id, bob.id, "KNOWS")
                 txn.commit()
 
+    def test_get_outgoing_edges(self, tmp_path):
+        """Test getting outgoing edges from a node."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                alice = txn.create_node(labels=["Person"])
+                bob = txn.create_node(labels=["Person"])
+                charlie = txn.create_node(labels=["Person"])
+
+                txn.create_edge(alice.id, bob.id, "KNOWS")
+                txn.create_edge(alice.id, charlie.id, "LIKES")
+                alice_id = alice.id
+                bob_id = bob.id
+                charlie_id = charlie.id
+                txn.commit()
+
+            with db.read() as txn:
+                edges = txn.get_outgoing_edges(alice_id)
+                assert len(edges) == 2
+
+                # Check edge details
+                targets = {e.target_id for e in edges}
+                assert bob_id in targets
+                assert charlie_id in targets
+
+                edge_types = {e.edge_type for e in edges}
+                assert "KNOWS" in edge_types
+                assert "LIKES" in edge_types
+
+                # All edges should have alice as source
+                for edge in edges:
+                    assert edge.source_id == alice_id
+
+    def test_get_incoming_edges(self, tmp_path):
+        """Test getting incoming edges to a node."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                alice = txn.create_node(labels=["Person"])
+                bob = txn.create_node(labels=["Person"])
+                charlie = txn.create_node(labels=["Person"])
+
+                txn.create_edge(alice.id, charlie.id, "KNOWS")
+                txn.create_edge(bob.id, charlie.id, "LIKES")
+                alice_id = alice.id
+                bob_id = bob.id
+                charlie_id = charlie.id
+                txn.commit()
+
+            with db.read() as txn:
+                edges = txn.get_incoming_edges(charlie_id)
+                assert len(edges) == 2
+
+                # Check edge details
+                sources = {e.source_id for e in edges}
+                assert alice_id in sources
+                assert bob_id in sources
+
+                edge_types = {e.edge_type for e in edges}
+                assert "KNOWS" in edge_types
+                assert "LIKES" in edge_types
+
+                # All edges should have charlie as target
+                for edge in edges:
+                    assert edge.target_id == charlie_id
+
+    def test_get_edges_empty(self, tmp_path):
+        """Test getting edges when none exist."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                node = txn.create_node(labels=["Person"])
+                node_id = node.id
+                txn.commit()
+
+            with db.read() as txn:
+                outgoing = txn.get_outgoing_edges(node_id)
+                incoming = txn.get_incoming_edges(node_id)
+                assert len(outgoing) == 0
+                assert len(incoming) == 0
+
 
 class TestQueries:
     """Tests for Cypher query execution."""

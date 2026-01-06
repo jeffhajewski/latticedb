@@ -232,6 +232,7 @@ LatticeQuery = c_void_p
 LatticeResult = c_void_p
 LatticeVectorResult = c_void_p
 LatticeFtsResult = c_void_p
+LatticeEdgeResult = c_void_p
 LatticeNodeId = c_uint64
 LatticeEdgeId = c_uint64
 
@@ -422,6 +423,41 @@ class LatticeLib:
             c_char_p,
         ]
         self._lib.lattice_edge_delete.restype = c_int
+
+        # lattice_edge_get_outgoing
+        self._lib.lattice_edge_get_outgoing.argtypes = [
+            LatticeTxn,
+            LatticeNodeId,
+            POINTER(LatticeEdgeResult),
+        ]
+        self._lib.lattice_edge_get_outgoing.restype = c_int
+
+        # lattice_edge_get_incoming
+        self._lib.lattice_edge_get_incoming.argtypes = [
+            LatticeTxn,
+            LatticeNodeId,
+            POINTER(LatticeEdgeResult),
+        ]
+        self._lib.lattice_edge_get_incoming.restype = c_int
+
+        # lattice_edge_result_count
+        self._lib.lattice_edge_result_count.argtypes = [LatticeEdgeResult]
+        self._lib.lattice_edge_result_count.restype = c_uint32
+
+        # lattice_edge_result_get
+        self._lib.lattice_edge_result_get.argtypes = [
+            LatticeEdgeResult,
+            c_uint32,
+            POINTER(LatticeNodeId),
+            POINTER(LatticeNodeId),
+            POINTER(c_char_p),
+            POINTER(c_uint32),
+        ]
+        self._lib.lattice_edge_result_get.restype = c_int
+
+        # lattice_edge_result_free
+        self._lib.lattice_edge_result_free.argtypes = [LatticeEdgeResult]
+        self._lib.lattice_edge_result_free.restype = None
 
         # lattice_query_prepare
         self._lib.lattice_query_prepare.argtypes = [

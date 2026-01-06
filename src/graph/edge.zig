@@ -256,6 +256,8 @@ pub const EdgeStore = struct {
         tree_iter: btree.BTree.Iterator,
         allocator: Allocator,
         done: bool,
+        // Owned copy of end_key for manual checking (BTree Iterator's end_key slice would dangle)
+        end_key_storage: [19]u8,
 
         /// Get the next edge in the range
         /// Caller owns the returned Edge and must call deinit() on it
@@ -268,6 +270,13 @@ pub const EdgeStore = struct {
             };
 
             if (entry) |e| {
+                // Manual end_key check since we can't use the BTree iterator's end_key
+                // (it would be a dangling pointer after the struct is returned)
+                if (std.mem.order(u8, e.key, &self.end_key_storage) != .lt) {
+                    self.done = true;
+                    return null;
+                }
+
                 const key = EdgeKey.fromBytes(e.key);
                 // Reconstruct source/target based on direction
                 const source = if (key.direction == .outgoing) key.source else key.target;
@@ -307,14 +316,16 @@ pub const EdgeStore = struct {
         const start_bytes = start_key.toBytes();
         const end_bytes = end_key.toBytes();
 
-        const iter = self.tree.range(&start_bytes, &end_bytes) catch |err| {
+        // Pass null as end_key to BTree - we do the check ourselves in EdgeIterator.next()
+        const tree_iter = self.tree.range(&start_bytes, null) catch |err| {
             return mapBTreeError(err);
         };
 
         return EdgeIterator{
-            .tree_iter = iter,
+            .tree_iter = tree_iter,
             .allocator = self.allocator,
             .done = false,
+            .end_key_storage = end_bytes,
         };
     }
 
@@ -337,14 +348,16 @@ pub const EdgeStore = struct {
         const start_bytes = start_key.toBytes();
         const end_bytes = end_key.toBytes();
 
-        const iter = self.tree.range(&start_bytes, &end_bytes) catch |err| {
+        // Pass null as end_key to BTree - we do the check ourselves in EdgeIterator.next()
+        const tree_iter = self.tree.range(&start_bytes, null) catch |err| {
             return mapBTreeError(err);
         };
 
         return EdgeIterator{
-            .tree_iter = iter,
+            .tree_iter = tree_iter,
             .allocator = self.allocator,
             .done = false,
+            .end_key_storage = end_bytes,
         };
     }
 
@@ -367,14 +380,15 @@ pub const EdgeStore = struct {
         const start_bytes = start_key.toBytes();
         const end_bytes = end_key.toBytes();
 
-        const iter = self.tree.range(&start_bytes, &end_bytes) catch |err| {
+        const tree_iter = self.tree.range(&start_bytes, null) catch |err| {
             return mapBTreeError(err);
         };
 
         return EdgeIterator{
-            .tree_iter = iter,
+            .tree_iter = tree_iter,
             .allocator = self.allocator,
             .done = false,
+            .end_key_storage = end_bytes,
         };
     }
 
@@ -397,14 +411,15 @@ pub const EdgeStore = struct {
         const start_bytes = start_key.toBytes();
         const end_bytes = end_key.toBytes();
 
-        const iter = self.tree.range(&start_bytes, &end_bytes) catch |err| {
+        const tree_iter = self.tree.range(&start_bytes, null) catch |err| {
             return mapBTreeError(err);
         };
 
         return EdgeIterator{
-            .tree_iter = iter,
+            .tree_iter = tree_iter,
             .allocator = self.allocator,
             .done = false,
+            .end_key_storage = end_bytes,
         };
     }
 
@@ -427,14 +442,15 @@ pub const EdgeStore = struct {
         const start_bytes = start_key.toBytes();
         const end_bytes = end_key.toBytes();
 
-        const iter = self.tree.range(&start_bytes, &end_bytes) catch |err| {
+        const tree_iter = self.tree.range(&start_bytes, null) catch |err| {
             return mapBTreeError(err);
         };
 
         return EdgeIterator{
-            .tree_iter = iter,
+            .tree_iter = tree_iter,
             .allocator = self.allocator,
             .done = false,
+            .end_key_storage = end_bytes,
         };
     }
 
@@ -701,6 +717,56 @@ test "edge store double-write" {
     const incoming_bytes = incoming_key.toBytes();
     const incoming_result = tree.get(&incoming_bytes) catch null;
     try std.testing.expect(incoming_result != null);
+}
+
+test "edge store getOutgoing iteration" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const buffer_pool = lattice.storage.buffer_pool;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_edge_getoutgoing_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try buffer_pool.BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var tree = try BTree.init(allocator, &bp);
+
+    var store = EdgeStore.init(allocator, &tree);
+
+    // Create edges: 1 -> 2 (KNOWS), 1 -> 3 (LIKES)
+    const knows_type: SymbolId = 1000;
+    const likes_type: SymbolId = 1001;
+    try store.create(1, 2, knows_type, &[_]Property{});
+    try store.create(1, 3, likes_type, &[_]Property{});
+
+    // Verify edges exist
+    try std.testing.expect(store.exists(1, 2, knows_type));
+    try std.testing.expect(store.exists(1, 3, likes_type));
+
+    // Iterate outgoing edges from node 1
+    var iter = try store.getOutgoing(1);
+    defer iter.deinit();
+
+    var count: usize = 0;
+    while (try iter.next()) |edge| {
+        var e = edge;
+        e.deinit(allocator);
+        count += 1;
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), count);
 }
 
 test "edge store exists" {

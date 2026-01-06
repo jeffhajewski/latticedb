@@ -407,6 +407,90 @@ class Transaction:
         )
         check_error(code)
 
+    def get_outgoing_edges(self, node_id: int) -> List[Edge]:
+        """
+        Get all outgoing edges from a node.
+
+        Args:
+            node_id: The source node ID.
+
+        Returns:
+            List of edges originating from the node.
+        """
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        result_ptr = c_void_p()
+        code = lib._lib.lattice_edge_get_outgoing(
+            self._handle, node_id, byref(result_ptr)
+        )
+        check_error(code)
+
+        return self._collect_edge_results(result_ptr, lib)
+
+    def get_incoming_edges(self, node_id: int) -> List[Edge]:
+        """
+        Get all incoming edges to a node.
+
+        Args:
+            node_id: The target node ID.
+
+        Returns:
+            List of edges pointing to the node.
+        """
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        result_ptr = c_void_p()
+        code = lib._lib.lattice_edge_get_incoming(
+            self._handle, node_id, byref(result_ptr)
+        )
+        check_error(code)
+
+        return self._collect_edge_results(result_ptr, lib)
+
+    def _collect_edge_results(self, result_ptr: c_void_p, lib: Any) -> List[Edge]:
+        """
+        Helper to collect edges from a result handle.
+
+        Args:
+            result_ptr: The edge result handle.
+            lib: The library instance.
+
+        Returns:
+            List of Edge objects.
+        """
+        edges: List[Edge] = []
+        try:
+            count = lib._lib.lattice_edge_result_count(result_ptr)
+            for i in range(count):
+                source = c_uint64()
+                target = c_uint64()
+                edge_type_ptr = ctypes.c_char_p()
+                edge_type_len = ctypes.c_uint32()
+                code = lib._lib.lattice_edge_result_get(
+                    result_ptr,
+                    i,
+                    byref(source),
+                    byref(target),
+                    byref(edge_type_ptr),
+                    byref(edge_type_len),
+                )
+                check_error(code)
+                edge_type = edge_type_ptr.value[:edge_type_len.value].decode("utf-8") if edge_type_ptr.value else ""
+                edges.append(Edge(
+                    id=0,  # Edge ID not available from traversal
+                    source_id=source.value,
+                    target_id=target.value,
+                    edge_type=edge_type,
+                    properties={},
+                ))
+        finally:
+            lib._lib.lattice_edge_result_free(result_ptr)
+        return edges
+
     def node_exists(self, node_id: int) -> bool:
         """
         Check if a node exists.

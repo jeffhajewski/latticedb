@@ -168,6 +168,12 @@ fn setupDatabase(allocator: std.mem.Allocator, path: []const u8, config: struct 
     // Remove existing file
     std.fs.cwd().deleteFile(path) catch {};
 
+    // Use larger buffer pool for FTS and Vector workloads to avoid exhaustion
+    const buffer_size: usize = if (config.enable_fts or config.enable_vector)
+        128 * 1024 * 1024 // 128MB for FTS/Vector
+    else
+        4 * 1024 * 1024; // 4MB default
+
     const db = try Database.open(allocator, path, .{
         .create = true,
         .config = .{
@@ -175,6 +181,7 @@ fn setupDatabase(allocator: std.mem.Allocator, path: []const u8, config: struct 
             .enable_fts = config.enable_fts,
             .enable_vector = config.enable_vector,
             .vector_dimensions = config.vector_dimensions,
+            .buffer_pool_size = buffer_size,
         },
     });
 
@@ -252,7 +259,10 @@ fn createFtsData(db: *Database, node_ids: []const u64, allocator: std.mem.Alloca
         const text_buf = try allocator.alloc(u8, base_text.len + 20);
         defer allocator.free(text_buf);
         const text = std.fmt.bufPrint(text_buf, "{s} {d}", .{ base_text, i }) catch base_text;
-        try db.ftsIndexDocument(node_id, text);
+        db.ftsIndexDocument(node_id, text) catch |err| {
+            std.debug.print("    FTS index error at doc {d}: {any}\n", .{ i, err });
+            return err;
+        };
     }
 }
 
@@ -415,10 +425,53 @@ pub fn main() !void {
 
     std.debug.print("\n", .{});
 
-    // Full-Text Search - skipped due to FTS index initialization issue
-    // The fts_index field is null even when enable_fts=true, needs investigation
-    std.debug.print("─── Full-Text Search ──────────────────────────────────────────────────────────\n", .{});
-    std.debug.print("  (skipped - FTS index initialization issue)\n", .{});
+    // ========================================================================
+    // Full-Text Search
+    // ========================================================================
+    std.debug.print("─── Full-Text Search ───────────────────────────────────────────────────────────\n", .{});
+
+    {
+        const fts_path = "/tmp/lattice_bench_fts.ltdb";
+        std.fs.cwd().deleteFile(fts_path) catch {};
+
+        var fts_db = setupDatabase(allocator, fts_path, .{
+            .enable_fts = true,
+        }) catch |err| {
+            std.debug.print("  Failed to setup FTS DB: {any}\n", .{err});
+            return;
+        };
+        defer {
+            fts_db.close();
+            std.fs.cwd().deleteFile(fts_path) catch {};
+        }
+
+        // Debug: Check if FTS index was initialized
+        std.debug.print("  FTS config.enable_fts: {}\n", .{fts_db.config.enable_fts});
+        std.debug.print("  FTS index initialized: {}\n", .{fts_db.fts_index != null});
+
+        // Create some nodes for FTS indexing
+        const fts_node_ids = createNodes(fts_db, 100, "Document") catch |err| {
+            std.debug.print("  Failed to create nodes for FTS: {any}\n", .{err});
+            return;
+        };
+        defer allocator.free(fts_node_ids);
+
+        // Index documents
+        createFtsData(fts_db, fts_node_ids, allocator) catch |err| {
+            std.debug.print("  Failed to create FTS data: {any}\n", .{err});
+            return;
+        };
+
+        var fts_ctx = FtsSearchContext{ .db = fts_db, .query = "database performance" };
+
+        const fts_result = runBenchmarkDynamic("FTS search (100 documents)", 10, 100, &fts_ctx, struct {
+            fn run(ctx: *FtsSearchContext) void {
+                ctx.run();
+            }
+        }.run);
+        fts_result.print();
+    }
+
     std.debug.print("\n", .{});
 
     // ========================================================================

@@ -488,9 +488,14 @@ pub const FtsIndex = struct {
         };
 
         if (result_slice.len > limit) {
-            // Free excess elements
-            self.allocator.free(result_slice[limit..]);
-            return result_slice[0..limit];
+            // Shrink to limit - allocate new smaller slice
+            const trimmed = self.allocator.alloc(ScoredDoc, limit) catch {
+                self.allocator.free(result_slice);
+                return FtsError.OutOfMemory;
+            };
+            @memcpy(trimmed, result_slice[0..limit]);
+            self.allocator.free(result_slice);
+            return trimmed;
         }
         return result_slice;
     }
@@ -628,14 +633,21 @@ pub const FtsIndex = struct {
         };
 
         if (result_slice.len > limit) {
-            self.allocator.free(result_slice[limit..]);
-            return result_slice[0..limit];
+            const trimmed = self.allocator.alloc(ScoredDoc, limit) catch {
+                self.allocator.free(result_slice);
+                return FtsError.OutOfMemory;
+            };
+            @memcpy(trimmed, result_slice[0..limit]);
+            self.allocator.free(result_slice);
+            return trimmed;
         }
         return result_slice;
     }
 
     /// Free search results
     pub fn freeResults(self: *Self, results: []ScoredDoc) void {
+        // Empty slices from &[_]ScoredDoc{} are compile-time literals, not allocated
+        if (results.len == 0) return;
         self.allocator.free(results);
     }
 
@@ -758,8 +770,13 @@ pub const FtsIndex = struct {
         };
 
         if (result_slice.len > limit) {
-            self.allocator.free(result_slice[limit..]);
-            return result_slice[0..limit];
+            const trimmed = self.allocator.alloc(ScoredDoc, limit) catch {
+                self.allocator.free(result_slice);
+                return FtsError.OutOfMemory;
+            };
+            @memcpy(trimmed, result_slice[0..limit]);
+            self.allocator.free(result_slice);
+            return trimmed;
         }
         return result_slice;
     }
@@ -941,8 +958,13 @@ pub const FtsIndex = struct {
         };
 
         if (result_slice.len > limit) {
-            self.allocator.free(result_slice[limit..]);
-            return result_slice[0..limit];
+            const trimmed = self.allocator.alloc(ScoredDoc, limit) catch {
+                self.allocator.free(result_slice);
+                return FtsError.OutOfMemory;
+            };
+            @memcpy(trimmed, result_slice[0..limit]);
+            self.allocator.free(result_slice);
+            return trimmed;
         }
         return result_slice;
     }
@@ -1171,8 +1193,13 @@ pub const FtsIndex = struct {
         };
 
         if (result_slice.len > limit) {
-            self.allocator.free(result_slice[limit..]);
-            return result_slice[0..limit];
+            const trimmed = self.allocator.alloc(ScoredDoc, limit) catch {
+                self.allocator.free(result_slice);
+                return FtsError.OutOfMemory;
+            };
+            @memcpy(trimmed, result_slice[0..limit]);
+            self.allocator.free(result_slice);
+            return trimmed;
         }
         return result_slice;
     }
@@ -1403,8 +1430,13 @@ pub const FtsIndex = struct {
         };
 
         if (result_slice.len > limit) {
-            self.allocator.free(result_slice[limit..]);
-            return result_slice[0..limit];
+            const trimmed = self.allocator.alloc(ScoredDoc, limit) catch {
+                self.allocator.free(result_slice);
+                return FtsError.OutOfMemory;
+            };
+            @memcpy(trimmed, result_slice[0..limit]);
+            self.allocator.free(result_slice);
+            return trimmed;
         }
         return result_slice;
     }
@@ -1648,8 +1680,13 @@ pub const FtsIndex = struct {
         };
 
         if (result_slice.len > limit) {
-            self.allocator.free(result_slice[limit..]);
-            return result_slice[0..limit];
+            const trimmed = self.allocator.alloc(ScoredDoc, limit) catch {
+                self.allocator.free(result_slice);
+                return FtsError.OutOfMemory;
+            };
+            @memcpy(trimmed, result_slice[0..limit]);
+            self.allocator.free(result_slice);
+            return trimmed;
         }
         return result_slice;
     }

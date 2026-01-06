@@ -690,18 +690,26 @@ pub const BTree = struct {
         // If we're inserting at the end (slot == num_keys), new_child becomes right_child
 
         if (slot == num_keys) {
-            // Inserting at end: old right_child becomes left child of new key, child becomes right_child
+            // Inserting at end: old right_child becomes left child of new key, new_child becomes right_child
             const old_right = InternalNode.getRightChild(buf);
             InternalNode.setSlot(buf, slot, new_offset, old_right);
             InternalNode.setRightChild(buf, child);
         } else {
-            // Inserting in middle: child at slot stays as left child, need to propagate
-            // Actually after shifting, the slot at `slot` needs the old child, and child
-            // goes into the next slot's child position... but we shifted already.
+            // Inserting in middle after a child split:
+            // - The original child (with keys < split_key) should remain as left child of new key
+            // - The new_child (with keys >= split_key) goes to the RIGHT of the new key
+            //
+            // After shifting, slot[slot+1] contains the old slot[slot] data.
+            // old_child = what was at slot[slot] before shift = now at slot[slot+1]
+            // We need:
+            // - slot[slot] = (new_key, old_child) -- old_child is for keys < new_key
+            // - slot[slot+1].child = new_child   -- new_child is for keys >= new_key and < slot[slot+1].key
+            const old_child = InternalNode.getChild(buf, slot + 1);
+            InternalNode.setSlot(buf, slot, new_offset, old_child);
 
-            // Let me just set the new slot with the new child to the left, keeping structure consistent
-            // The caller ensures child is the right sibling of the original child at this position
-            InternalNode.setSlot(buf, slot, new_offset, child);
+            // Now update slot[slot+1]'s child to new_child while preserving its key
+            const next_key_offset = InternalNode.getKeyOffset(buf, slot + 1);
+            InternalNode.setSlot(buf, slot + 1, next_key_offset, child);
         }
 
         InternalNode.setNumKeys(buf, num_keys + 1);
@@ -734,10 +742,15 @@ pub const BTree = struct {
 
         // Initialize new root as internal node
         InternalNode.init(frame.data, new_level);
-        InternalNode.setRightChild(frame.data, right_child);
 
-        // Insert the single key with left child
-        self.insertInternalEntry(frame.data, 0, split_key, left_child);
+        // insertInternalEntry expects: child parameter = NEW child (right of split key)
+        // The "old" right_child becomes slot[0].child (left of the key)
+        // So we set left_child as initial right_child, then insert with right_child
+        InternalNode.setRightChild(frame.data, left_child);
+
+        // Insert split_key with right_child as the new child
+        // This will: slot[0] = (split_key, left_child), right_child = right_child
+        self.insertInternalEntry(frame.data, 0, split_key, right_child);
 
         self.bp.unpinPage(frame, true);
         self.root_page = new_root;

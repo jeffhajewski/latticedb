@@ -208,6 +208,36 @@ with Database("mydb.ltdb", create=True, enable_vector=True, vector_dimensions=38
 - `k`: Number of nearest neighbors to return (default: 10)
 - `ef_search`: HNSW exploration factor - higher values are slower but more accurate (default: 64)
 
+### Full-Text Search
+
+Index text content and search with BM25 scoring:
+
+```python
+with Database("mydb.ltdb", create=True) as db:
+    # Index documents
+    with db.write() as txn:
+        doc1 = txn.create_node(labels=["Document"])
+        txn.set_property(doc1.id, "title", "Introduction to ML")
+        txn.fts_index(doc1.id, "Machine learning is a subset of artificial intelligence")
+
+        doc2 = txn.create_node(labels=["Document"])
+        txn.set_property(doc2.id, "title", "Deep Learning Guide")
+        txn.fts_index(doc2.id, "Deep learning uses neural networks")
+
+        txn.commit()
+
+    # Search for documents
+    results = db.fts_search("machine learning", limit=10)
+
+    for result in results:
+        print(f"Node {result.node_id}: score={result.score:.4f}")
+```
+
+#### FTS Search Parameters
+
+- `query`: Search query text
+- `limit`: Maximum number of results to return (default: 10)
+
 ## Supported Property Types
 
 - `None` - Null value

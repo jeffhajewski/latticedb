@@ -55,6 +55,10 @@ const LabelIndex = label_index_mod.LabelIndex;
 const fts_mod = lattice.fts.index;
 const FtsIndex = fts_mod.FtsIndex;
 const FtsConfig = fts_mod.FtsConfig;
+const FtsError = fts_mod.FtsError;
+
+const scorer_mod = lattice.fts.scorer;
+pub const FtsSearchResult = scorer_mod.ScoredDoc;
 
 // Vector storage and HNSW
 const vector_storage_mod = lattice.vector.storage;
@@ -778,6 +782,55 @@ pub const Database = struct {
     /// Free vector search results allocated by vectorSearch.
     pub fn freeVectorSearchResults(self: *Self, results: []VectorSearchResult) void {
         self.allocator.free(results);
+    }
+
+    // ========================================================================
+    // Full-Text Search Operations
+    // ========================================================================
+
+    /// Search for documents matching a text query using BM25 scoring.
+    /// Returns node IDs and scores sorted by relevance (highest first).
+    pub fn ftsSearch(
+        self: *Self,
+        query_text: []const u8,
+        limit: u32,
+    ) DatabaseError![]FtsSearchResult {
+        const fts = &(self.fts_index orelse return DatabaseError.IoError);
+
+        return fts.search(query_text, limit) catch |err| {
+            return switch (err) {
+                FtsError.TokenizerError => DatabaseError.IoError,
+                FtsError.OutOfMemory => DatabaseError.OutOfMemory,
+                else => DatabaseError.IoError,
+            };
+        };
+    }
+
+    /// Free FTS search results allocated by ftsSearch.
+    pub fn freeFtsSearchResults(self: *Self, results: []FtsSearchResult) void {
+        if (self.fts_index) |*fts| {
+            fts.freeResults(results);
+        }
+    }
+
+    /// Index a text document for full-text search.
+    /// The document is associated with the given node ID.
+    pub fn ftsIndexDocument(
+        self: *Self,
+        node_id: NodeId,
+        text: []const u8,
+    ) DatabaseError!void {
+        if (self.read_only) return DatabaseError.PermissionDenied;
+
+        const fts = &(self.fts_index orelse return DatabaseError.IoError);
+
+        _ = fts.indexDocument(node_id, text) catch |err| {
+            return switch (err) {
+                FtsError.TokenizerError => DatabaseError.IoError,
+                FtsError.OutOfMemory => DatabaseError.OutOfMemory,
+                else => DatabaseError.IoError,
+            };
+        };
     }
 
     // ========================================================================

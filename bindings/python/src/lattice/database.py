@@ -14,6 +14,7 @@ if TYPE_CHECKING:
 from lattice._bindings import (
     LATTICE_TXN_READ_ONLY,
     LATTICE_VALUE_NULL,
+    LatticeFtsResult,
     LatticeNodeId,
     LatticeValue,
     LatticeVectorResult,
@@ -24,7 +25,7 @@ from lattice._bindings import (
     value_to_python,
 )
 from lattice.transaction import Transaction
-from lattice.types import Node, QueryResult, VectorSearchResult
+from lattice.types import Node, QueryResult, VectorSearchResult, FtsSearchResult
 
 
 class Database:
@@ -300,22 +301,59 @@ class Database:
         self,
         query: str,
         *,
-        key: str = "text",
         limit: int = 10,
-    ) -> List[Node]:
+    ) -> List[FtsSearchResult]:
         """
-        Full-text search.
+        Full-text search using BM25 scoring.
 
         Args:
-            query: Search query.
-            key: Text property key to search.
-            limit: Maximum number of results.
+            query: Search query text.
+            limit: Maximum number of results to return.
 
         Returns:
-            List of matching nodes.
+            List of search results with node IDs and BM25 scores, sorted by relevance.
         """
-        # TODO: Implement FTS search
-        return []
+        if self._handle is None:
+            raise RuntimeError("Database is not open")
+
+        lib = get_lib()
+        result_ptr = c_void_p()
+
+        # Encode query to bytes
+        query_bytes = query.encode("utf-8")
+
+        # Call the C API
+        code = lib._lib.lattice_fts_search(
+            self._handle,
+            query_bytes,
+            len(query_bytes),
+            limit,
+            byref(result_ptr),
+        )
+        check_error(code)
+
+        try:
+            # Get result count
+            count = lib._lib.lattice_fts_result_count(result_ptr)
+
+            # Collect results
+            results: List[FtsSearchResult] = []
+            for i in range(count):
+                node_id = LatticeNodeId()
+                score = ctypes.c_float()
+                code = lib._lib.lattice_fts_result_get(
+                    result_ptr, i, byref(node_id), byref(score)
+                )
+                check_error(code)
+                results.append(
+                    FtsSearchResult(node_id=node_id.value, score=score.value)
+                )
+
+            return results
+        finally:
+            # Free the result handle
+            if result_ptr.value:
+                lib._lib.lattice_fts_result_free(result_ptr)
 
     @property
     def path(self) -> Path:

@@ -30,6 +30,7 @@ typedef struct lattice_txn lattice_txn;
 typedef struct lattice_query lattice_query;
 typedef struct lattice_result lattice_result;
 typedef struct lattice_vector_result lattice_vector_result;
+typedef struct lattice_fts_result lattice_fts_result;
 
 /* ID types */
 typedef uint64_t lattice_node_id;
@@ -235,6 +236,64 @@ lattice_error lattice_vector_result_get(
 
 /* Free vector search results */
 void lattice_vector_result_free(lattice_vector_result* result);
+
+/*
+ * Full-text search operations
+ *
+ * BM25-scored full-text search:
+ *   1. Index documents with lattice_fts_index()
+ *   2. Search with lattice_fts_search()
+ *   3. Get result count with lattice_fts_result_count()
+ *   4. Iterate results with lattice_fts_result_get()
+ *   5. Free with lattice_fts_result_free()
+ *
+ * Example:
+ *   // Index a document
+ *   const char* text = "The quick brown fox jumps over the lazy dog";
+ *   lattice_fts_index(txn, node_id, text, strlen(text));
+ *
+ *   // Search
+ *   lattice_fts_result* results;
+ *   lattice_fts_search(db, "quick fox", 9, 10, &results);
+ *   uint32_t count = lattice_fts_result_count(results);
+ *   for (uint32_t i = 0; i < count; i++) {
+ *       lattice_node_id node_id;
+ *       float score;
+ *       lattice_fts_result_get(results, i, &node_id, &score);
+ *   }
+ *   lattice_fts_result_free(results);
+ */
+
+/* Index a text document for full-text search */
+lattice_error lattice_fts_index(
+    lattice_txn* txn,
+    lattice_node_id node_id,
+    const char* text,
+    size_t text_len
+);
+
+/* Search for documents matching a text query */
+lattice_error lattice_fts_search(
+    lattice_database* db,
+    const char* query,
+    size_t query_len,
+    uint32_t limit,
+    lattice_fts_result** result_out
+);
+
+/* Get the number of FTS results */
+uint32_t lattice_fts_result_count(lattice_fts_result* result);
+
+/* Get a result by index (returns node_id and BM25 score) */
+lattice_error lattice_fts_result_get(
+    lattice_fts_result* result,
+    uint32_t index,
+    lattice_node_id* node_id_out,
+    float* score_out
+);
+
+/* Free FTS search results */
+void lattice_fts_result_free(lattice_fts_result* result);
 
 /*
  * Edge operations

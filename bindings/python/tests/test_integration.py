@@ -446,3 +446,64 @@ class TestVectorOperations:
 
             # Should return empty list
             assert len(results) == 0
+
+
+class TestFtsOperations:
+    """Tests for full-text search operations."""
+
+    def test_fts_index_and_search(self, tmp_path):
+        """Test indexing and searching text."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            # Create nodes and index text
+            with db.write() as txn:
+                node1 = txn.create_node(labels=["Document"])
+                txn.set_property(node1.id, "title", "Introduction to Machine Learning")
+                txn.fts_index(node1.id, "Machine learning is a subset of artificial intelligence")
+
+                node2 = txn.create_node(labels=["Document"])
+                txn.set_property(node2.id, "title", "Deep Learning Guide")
+                txn.fts_index(node2.id, "Deep learning uses neural networks for complex tasks")
+
+                node3 = txn.create_node(labels=["Document"])
+                txn.set_property(node3.id, "title", "Python Programming")
+                txn.fts_index(node3.id, "Python is a popular programming language")
+
+                txn.commit()
+
+            # Search for "machine learning"
+            results = db.fts_search("machine learning", limit=10)
+
+            # Should find at least one result
+            assert len(results) >= 1
+
+            # First result should be the machine learning document
+            assert results[0].node_id == node1.id
+            assert results[0].score > 0
+
+    def test_fts_search_no_results(self, tmp_path):
+        """Test FTS search with no matching documents."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                node = txn.create_node(labels=["Document"])
+                txn.fts_index(node.id, "The quick brown fox")
+                txn.commit()
+
+            # Search for something not in the index
+            results = db.fts_search("elephant zebra", limit=10)
+
+            # Should return empty list
+            assert len(results) == 0
+
+    def test_fts_search_empty_database(self, tmp_path):
+        """Test FTS search on empty database."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            results = db.fts_search("anything", limit=10)
+
+            # Should return empty list
+            assert len(results) == 0

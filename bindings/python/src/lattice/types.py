@@ -130,3 +130,12 @@ class VectorSearchResult:
     node_id: int
     distance: float
     node: Optional[Node] = None
+
+
+@dataclass
+class FtsSearchResult:
+    """Result of a full-text search."""
+
+    node_id: int
+    score: float
+    node: Optional[Node] = None

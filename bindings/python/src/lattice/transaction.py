@@ -314,6 +314,33 @@ class Transaction:
         )
         check_error(code)
 
+    def fts_index(
+        self,
+        node_id: int,
+        text: str,
+    ) -> None:
+        """
+        Index text for full-text search on a node.
+
+        Args:
+            node_id: The node ID to associate with the text.
+            text: The text content to index.
+        """
+        if self._read_only:
+            raise RuntimeError("Cannot index text in read-only transaction")
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        text_bytes = text.encode("utf-8")
+        code = lib._lib.lattice_fts_index(
+            self._handle,
+            node_id,
+            text_bytes,
+            len(text_bytes),
+        )
+        check_error(code)
+
     def create_edge(
         self,
         source_id: int,

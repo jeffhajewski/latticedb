@@ -20,6 +20,7 @@ const ResultValue = database.ResultValue;
 const OpenOptions = database.OpenOptions;
 const DatabaseConfig = database.DatabaseConfig;
 const VectorSearchResult = database.VectorSearchResult;
+const FtsSearchResult = database.FtsSearchResult;
 const node_mod = lattice.graph.node;
 
 // ============================================================================
@@ -86,6 +87,13 @@ const VectorResultHandle = struct {
     count: usize,
 };
 
+/// Internal FTS search result handle
+const FtsResultHandle = struct {
+    results: []FtsSearchResult,
+    count: usize,
+    db_handle: *DatabaseHandle,
+};
+
 // ============================================================================
 // C-Exposed Opaque Types
 // ============================================================================
@@ -104,6 +112,9 @@ pub const lattice_result = opaque {};
 
 /// Opaque vector search result handle for C API
 pub const lattice_vector_result = opaque {};
+
+/// Opaque FTS search result handle for C API
+pub const lattice_fts_result = opaque {};
 
 /// Node ID type for C API
 pub const lattice_node_id = types.NodeId;
@@ -673,6 +684,99 @@ pub export fn lattice_vector_result_free(
 
     // Free the results slice (allocated by Database.vectorSearch)
     global_allocator.free(result_handle.results);
+
+    // Free the handle itself
+    global_allocator.destroy(result_handle);
+}
+
+// ============================================================================
+// Full-Text Search Operations
+// ============================================================================
+
+/// Index a text document for full-text search.
+pub export fn lattice_fts_index(
+    txn: ?*lattice_txn,
+    node_id: lattice_node_id,
+    text: [*c]const u8,
+    text_len: usize,
+) lattice_error {
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+
+    if (txn_handle.read_only) return .err_read_only;
+    if (text == null or text_len == 0) return .err_invalid_arg;
+
+    const text_slice = text[0..text_len];
+
+    txn_handle.db_handle.db.ftsIndexDocument(node_id, text_slice) catch |err| {
+        return mapDatabaseError(err);
+    };
+
+    return .ok;
+}
+
+/// Search for documents matching a text query using BM25 scoring.
+pub export fn lattice_fts_search(
+    db: ?*lattice_database,
+    query_text: [*c]const u8,
+    query_len: usize,
+    limit: u32,
+    result_out: *?*lattice_fts_result,
+) lattice_error {
+    const db_handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
+
+    if (query_text == null or query_len == 0 or limit == 0) return .err_invalid_arg;
+
+    const query_slice = query_text[0..query_len];
+
+    // Perform the search
+    const results = db_handle.db.ftsSearch(query_slice, limit) catch |err| {
+        return mapDatabaseError(err);
+    };
+
+    // Create result handle
+    const result_handle = global_allocator.create(FtsResultHandle) catch return .err_out_of_memory;
+    result_handle.* = FtsResultHandle{
+        .results = results,
+        .count = results.len,
+        .db_handle = db_handle,
+    };
+
+    result_out.* = toOpaque(lattice_fts_result, result_handle);
+    return .ok;
+}
+
+/// Get the number of FTS search results.
+pub export fn lattice_fts_result_count(
+    result: ?*lattice_fts_result,
+) u32 {
+    const result_handle = toHandle(FtsResultHandle, result) orelse return 0;
+    return @intCast(result_handle.count);
+}
+
+/// Get a result from an FTS search result set.
+pub export fn lattice_fts_result_get(
+    result: ?*lattice_fts_result,
+    index: u32,
+    node_id_out: *lattice_node_id,
+    score_out: *f32,
+) lattice_error {
+    const result_handle = toHandle(FtsResultHandle, result) orelse return .err_invalid_arg;
+
+    if (index >= result_handle.count) return .err_invalid_arg;
+
+    node_id_out.* = result_handle.results[index].doc_id;
+    score_out.* = result_handle.results[index].score;
+    return .ok;
+}
+
+/// Free an FTS search result set.
+pub export fn lattice_fts_result_free(
+    result: ?*lattice_fts_result,
+) void {
+    const result_handle = toHandle(FtsResultHandle, result) orelse return;
+
+    // Free the results through database (uses FTS index's allocator)
+    result_handle.db_handle.db.freeFtsSearchResults(result_handle.results);
 
     // Free the handle itself
     global_allocator.destroy(result_handle);

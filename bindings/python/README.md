@@ -180,15 +180,33 @@ To use vector embeddings, enable vector storage when opening the database:
 import numpy as np
 
 with Database("mydb.ltdb", create=True, enable_vector=True, vector_dimensions=384) as db:
+    # Store vectors
     with db.write() as txn:
-        node = txn.create_node(labels=["Document"])
+        node1 = txn.create_node(labels=["Document"])
+        txn.set_property(node1.id, "title", "Introduction to ML")
+        embedding1 = np.random.rand(384).astype(np.float32)
+        txn.set_vector(node1.id, "embedding", embedding1)
 
-        # Store a vector embedding
-        embedding = np.random.rand(384).astype(np.float32)
-        txn.set_vector(node.id, "embedding", embedding)
+        node2 = txn.create_node(labels=["Document"])
+        txn.set_property(node2.id, "title", "Deep Learning Guide")
+        embedding2 = np.random.rand(384).astype(np.float32)
+        txn.set_vector(node2.id, "embedding", embedding2)
 
         txn.commit()
+
+    # Search for similar vectors (HNSW approximate nearest neighbor)
+    query_vector = np.random.rand(384).astype(np.float32)
+    results = db.vector_search(query_vector, k=10, ef_search=64)
+
+    for result in results:
+        print(f"Node {result.node_id}: distance={result.distance:.4f}")
 ```
+
+#### Vector Search Parameters
+
+- `vector`: Query vector (numpy array of float32)
+- `k`: Number of nearest neighbors to return (default: 10)
+- `ef_search`: HNSW exploration factor - higher values are slower but more accurate (default: 64)
 
 ## Supported Property Types
 

@@ -19,6 +19,7 @@ const QueryResult = database.QueryResult;
 const ResultValue = database.ResultValue;
 const OpenOptions = database.OpenOptions;
 const DatabaseConfig = database.DatabaseConfig;
+const VectorSearchResult = database.VectorSearchResult;
 const node_mod = lattice.graph.node;
 
 // ============================================================================
@@ -79,6 +80,12 @@ const ResultHandle = struct {
     started: bool,
 };
 
+/// Internal vector search result handle
+const VectorResultHandle = struct {
+    results: []VectorSearchResult,
+    count: usize,
+};
+
 // ============================================================================
 // C-Exposed Opaque Types
 // ============================================================================
@@ -94,6 +101,9 @@ pub const lattice_query = opaque {};
 
 /// Opaque result set handle for C API
 pub const lattice_result = opaque {};
+
+/// Opaque vector search result handle for C API
+pub const lattice_vector_result = opaque {};
 
 /// Node ID type for C API
 pub const lattice_node_id = types.NodeId;
@@ -594,6 +604,78 @@ pub export fn lattice_node_set_vector(
     };
 
     return .ok;
+}
+
+/// Search for similar vectors using HNSW index.
+/// Returns a vector result handle containing node IDs and distances.
+pub export fn lattice_vector_search(
+    db: ?*lattice_database,
+    vector: [*c]const f32,
+    dimensions: u32,
+    k: u32,
+    ef_search: u16,
+    result_out: *?*lattice_vector_result,
+) lattice_error {
+    const db_handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
+
+    if (vector == null or dimensions == 0 or k == 0) return .err_invalid_arg;
+
+    // Convert C pointer to Zig slice
+    const query_vector = vector[0..dimensions];
+
+    // Perform the search
+    const ef = if (ef_search == 0) null else ef_search;
+    const results = db_handle.db.vectorSearch(query_vector, k, ef) catch |err| {
+        return mapDatabaseError(err);
+    };
+
+    // Create result handle
+    const result_handle = global_allocator.create(VectorResultHandle) catch return .err_out_of_memory;
+    result_handle.* = VectorResultHandle{
+        .results = results,
+        .count = results.len,
+    };
+
+    result_out.* = toOpaque(lattice_vector_result, result_handle);
+    return .ok;
+}
+
+/// Get the number of results in a vector search result set.
+pub export fn lattice_vector_result_count(
+    result: ?*lattice_vector_result,
+) u32 {
+    const result_handle = toHandle(VectorResultHandle, result) orelse return 0;
+    return @intCast(result_handle.count);
+}
+
+/// Get a result from a vector search result set.
+/// Returns the node ID and distance at the given index.
+pub export fn lattice_vector_result_get(
+    result: ?*lattice_vector_result,
+    index: u32,
+    node_id_out: *lattice_node_id,
+    distance_out: *f32,
+) lattice_error {
+    const result_handle = toHandle(VectorResultHandle, result) orelse return .err_invalid_arg;
+
+    if (index >= result_handle.count) return .err_invalid_arg;
+
+    node_id_out.* = result_handle.results[index].node_id;
+    distance_out.* = result_handle.results[index].distance;
+    return .ok;
+}
+
+/// Free a vector search result set.
+pub export fn lattice_vector_result_free(
+    result: ?*lattice_vector_result,
+) void {
+    const result_handle = toHandle(VectorResultHandle, result) orelse return;
+
+    // Free the results slice (allocated by Database.vectorSearch)
+    global_allocator.free(result_handle.results);
+
+    // Free the handle itself
+    global_allocator.destroy(result_handle);
 }
 
 // ============================================================================

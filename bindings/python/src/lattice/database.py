@@ -2,6 +2,7 @@
 Database class for Lattice Python bindings.
 """
 
+import ctypes
 from ctypes import byref, c_void_p
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
@@ -13,7 +14,9 @@ if TYPE_CHECKING:
 from lattice._bindings import (
     LATTICE_TXN_READ_ONLY,
     LATTICE_VALUE_NULL,
+    LatticeNodeId,
     LatticeValue,
+    LatticeVectorResult,
     OpenOptions,
     check_error,
     get_lib,
@@ -229,24 +232,69 @@ class Database:
         self,
         vector: "NDArray[np.float32]",
         *,
-        key: str = "embedding",
         k: int = 10,
         ef_search: int = 64,
     ) -> List[VectorSearchResult]:
         """
-        Search for similar vectors.
+        Search for similar vectors using HNSW index.
 
         Args:
-            vector: Query vector.
-            key: Vector property key.
+            vector: Query vector (numpy array of float32).
             k: Number of results to return.
-            ef_search: HNSW ef parameter for search.
+            ef_search: HNSW ef parameter for search (0 for default).
 
         Returns:
-            List of search results with distances.
+            List of search results with node IDs and distances, sorted by similarity.
         """
-        # TODO: Implement vector search
-        return []
+        if self._handle is None:
+            raise RuntimeError("Database is not open")
+
+        import numpy as np
+
+        # Ensure vector is float32 contiguous array
+        if not isinstance(vector, np.ndarray):
+            vector = np.array(vector, dtype=np.float32)
+        elif vector.dtype != np.float32:
+            vector = vector.astype(np.float32)
+        if not vector.flags["C_CONTIGUOUS"]:
+            vector = np.ascontiguousarray(vector)
+
+        lib = get_lib()
+        result_ptr = c_void_p()
+
+        # Call the C API
+        code = lib._lib.lattice_vector_search(
+            self._handle,
+            vector.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            len(vector),
+            k,
+            ef_search,
+            byref(result_ptr),
+        )
+        check_error(code)
+
+        try:
+            # Get result count
+            count = lib._lib.lattice_vector_result_count(result_ptr)
+
+            # Collect results
+            results: List[VectorSearchResult] = []
+            for i in range(count):
+                node_id = LatticeNodeId()
+                distance = ctypes.c_float()
+                code = lib._lib.lattice_vector_result_get(
+                    result_ptr, i, byref(node_id), byref(distance)
+                )
+                check_error(code)
+                results.append(
+                    VectorSearchResult(node_id=node_id.value, distance=distance.value)
+                )
+
+            return results
+        finally:
+            # Free the result handle
+            if result_ptr.value:
+                lib._lib.lattice_vector_result_free(result_ptr)
 
     def fts_search(
         self,

@@ -394,3 +394,55 @@ class TestVectorOperations:
                 vector = np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32)
                 txn.set_vector(node.id, "embedding", vector)
                 txn.commit()
+
+    def test_vector_search(self, tmp_path):
+        """Test vector similarity search."""
+        pytest.importorskip("numpy")
+        import numpy as np
+
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True, enable_vector=True, vector_dimensions=4) as db:
+            # Create nodes with vectors
+            with db.write() as txn:
+                node1 = txn.create_node(labels=["Document"])
+                txn.set_property(node1.id, "name", "doc1")
+                txn.set_vector(node1.id, "embedding", np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+
+                node2 = txn.create_node(labels=["Document"])
+                txn.set_property(node2.id, "name", "doc2")
+                txn.set_vector(node2.id, "embedding", np.array([0.9, 0.1, 0.0, 0.0], dtype=np.float32))
+
+                node3 = txn.create_node(labels=["Document"])
+                txn.set_property(node3.id, "name", "doc3")
+                txn.set_vector(node3.id, "embedding", np.array([0.0, 0.0, 1.0, 0.0], dtype=np.float32))
+
+                txn.commit()
+
+            # Search for vectors similar to [1.0, 0.0, 0.0, 0.0]
+            query = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+            results = db.vector_search(query, k=2)
+
+            # Should return at least 2 results
+            assert len(results) >= 2
+
+            # First result should be node1 (exact match)
+            assert results[0].node_id == node1.id
+            assert results[0].distance < 0.01  # Very close to 0
+
+            # Second result should be node2 (close to query)
+            assert results[1].node_id == node2.id
+
+    def test_vector_search_empty(self, tmp_path):
+        """Test vector search on empty database returns empty results."""
+        pytest.importorskip("numpy")
+        import numpy as np
+
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True, enable_vector=True, vector_dimensions=4) as db:
+            query = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+            results = db.vector_search(query, k=10)
+
+            # Should return empty list
+            assert len(results) == 0

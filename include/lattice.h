@@ -29,6 +29,7 @@ typedef struct lattice_database lattice_database;
 typedef struct lattice_txn lattice_txn;
 typedef struct lattice_query lattice_query;
 typedef struct lattice_result lattice_result;
+typedef struct lattice_vector_result lattice_vector_result;
 
 /* ID types */
 typedef uint64_t lattice_node_id;
@@ -188,6 +189,52 @@ lattice_error lattice_node_set_vector(
     const float* vector,
     uint32_t dimensions
 );
+
+/*
+ * Vector search operations
+ *
+ * Search for similar vectors using HNSW index:
+ *   1. Call lattice_vector_search() with query vector
+ *   2. Get result count with lattice_vector_result_count()
+ *   3. Iterate results with lattice_vector_result_get()
+ *   4. Free with lattice_vector_result_free()
+ *
+ * Example:
+ *   float query[128] = { ... };
+ *   lattice_vector_result* results;
+ *   lattice_vector_search(db, query, 128, 10, 64, &results);
+ *   uint32_t count = lattice_vector_result_count(results);
+ *   for (uint32_t i = 0; i < count; i++) {
+ *       lattice_node_id node_id;
+ *       float distance;
+ *       lattice_vector_result_get(results, i, &node_id, &distance);
+ *   }
+ *   lattice_vector_result_free(results);
+ */
+
+/* Search for similar vectors */
+lattice_error lattice_vector_search(
+    lattice_database* db,
+    const float* vector,
+    uint32_t dimensions,
+    uint32_t k,                 /* Number of results to return */
+    uint16_t ef_search,         /* HNSW ef parameter (0 for default) */
+    lattice_vector_result** result_out
+);
+
+/* Get the number of results */
+uint32_t lattice_vector_result_count(lattice_vector_result* result);
+
+/* Get a result by index */
+lattice_error lattice_vector_result_get(
+    lattice_vector_result* result,
+    uint32_t index,
+    lattice_node_id* node_id_out,
+    float* distance_out
+);
+
+/* Free vector search results */
+void lattice_vector_result_free(lattice_vector_result* result);
 
 /*
  * Edge operations

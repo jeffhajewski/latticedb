@@ -56,10 +56,16 @@ const fts_mod = lattice.fts.index;
 const FtsIndex = fts_mod.FtsIndex;
 const FtsConfig = fts_mod.FtsConfig;
 
-// Vector storage
+// Vector storage and HNSW
 const vector_storage_mod = lattice.vector.storage;
 const VectorStorage = vector_storage_mod.VectorStorage;
 const VectorStorageError = vector_storage_mod.VectorStorageError;
+
+const hnsw_mod = lattice.vector.hnsw;
+const HnswIndex = hnsw_mod.HnswIndex;
+const HnswConfig = hnsw_mod.HnswConfig;
+const HnswError = hnsw_mod.HnswError;
+pub const VectorSearchResult = hnsw_mod.SearchResult;
 
 // Transactions
 const txn_mod = lattice.transaction.manager;
@@ -220,6 +226,7 @@ pub const Database = struct {
     // Indexes
     fts_index: ?FtsIndex,
     vector_storage: ?VectorStorage,
+    hnsw_index: ?HnswIndex,
 
     // Transactions
     txn_manager: ?TxnManager,
@@ -319,12 +326,25 @@ pub const Database = struct {
 
         // 8b. Initialize Vector Storage (optional)
         self.vector_storage = null;
+        self.hnsw_index = null;
         if (options.config.enable_vector) {
             self.vector_storage = VectorStorage.init(
                 allocator,
                 &self.buffer_pool,
                 options.config.vector_dimensions,
             ) catch null;
+
+            // 8c. Initialize HNSW index if vector storage is available
+            if (self.vector_storage) |*vs| {
+                self.hnsw_index = HnswIndex.init(
+                    allocator,
+                    &self.buffer_pool,
+                    vs,
+                    HnswConfig{
+                        .dimensions = options.config.vector_dimensions,
+                    },
+                );
+            }
         }
 
         // 9. Initialize Transaction Manager
@@ -343,6 +363,11 @@ pub const Database = struct {
         // 9. Transaction manager
         if (self.txn_manager) |*tm| {
             tm.deinit();
+        }
+
+        // 8c. HNSW index
+        if (self.hnsw_index) |*hnsw| {
+            hnsw.deinit();
         }
 
         // 8. FTS index (no explicit deinit needed - components don't own resources)
@@ -694,7 +719,7 @@ pub const Database = struct {
     // ========================================================================
 
     /// Set a vector embedding on a node.
-    /// The vector is stored in the vector storage and associated with the node.
+    /// The vector is stored in the vector storage and indexed in HNSW for similarity search.
     pub fn setNodeVector(
         self: *Self,
         node_id: NodeId,
@@ -717,6 +742,42 @@ pub const Database = struct {
                 else => DatabaseError.IoError,
             };
         };
+
+        // Index the vector in HNSW for similarity search
+        if (self.hnsw_index) |*hnsw| {
+            hnsw.insert(node_id, vector) catch |err| {
+                return switch (err) {
+                    HnswError.DimensionMismatch => DatabaseError.IoError,
+                    HnswError.OutOfMemory => DatabaseError.OutOfMemory,
+                    else => DatabaseError.IoError,
+                };
+            };
+        }
+    }
+
+    /// Search for similar vectors using HNSW index.
+    /// Returns node IDs and distances sorted by similarity (closest first).
+    pub fn vectorSearch(
+        self: *Self,
+        query_vector: []const f32,
+        k: u32,
+        ef_search: ?u16,
+    ) DatabaseError![]VectorSearchResult {
+        const hnsw = &(self.hnsw_index orelse return DatabaseError.IoError);
+
+        return hnsw.search(query_vector, k, ef_search) catch |err| {
+            return switch (err) {
+                HnswError.EmptyIndex => self.allocator.alloc(VectorSearchResult, 0) catch return DatabaseError.OutOfMemory,
+                HnswError.NotFound => self.allocator.alloc(VectorSearchResult, 0) catch return DatabaseError.OutOfMemory,
+                HnswError.OutOfMemory => DatabaseError.OutOfMemory,
+                else => DatabaseError.IoError,
+            };
+        };
+    }
+
+    /// Free vector search results allocated by vectorSearch.
+    pub fn freeVectorSearchResults(self: *Self, results: []VectorSearchResult) void {
+        self.allocator.free(results);
     }
 
     // ========================================================================
@@ -831,7 +892,7 @@ pub const Database = struct {
             .label_index = &self.label_index,
             .edge_store = &self.edge_store,
             .symbol_table = &self.symbol_table,
-            .hnsw_index = null, // TODO: Add HNSW index to Database when vector storage is integrated
+            .hnsw_index = if (self.hnsw_index) |*hnsw| hnsw else null,
             .fts_index = if (self.fts_index) |*fts| fts else null,
         };
 
@@ -897,7 +958,7 @@ pub const Database = struct {
             .label_index = &self.label_index,
             .edge_store = &self.edge_store,
             .symbol_table = &self.symbol_table,
-            .hnsw_index = null,
+            .hnsw_index = if (self.hnsw_index) |*hnsw| hnsw else null,
             .fts_index = if (self.fts_index) |*fts| fts else null,
         };
 

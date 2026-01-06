@@ -105,6 +105,29 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_lib_tests.step);
 
+    // Benchmark module - imports the library module
+    const bench_module = b.createModule(.{
+        .root_source_file = b.path("tests/benchmark/main.zig"),
+        .target = target,
+        .optimize = .ReleaseFast, // Always optimize benchmarks
+        .imports = &.{
+            .{ .name = "lattice", .module = lib_module },
+        },
+    });
+
+    // Benchmark executable
+    const bench_exe = b.addExecutable(.{
+        .name = "lattice-bench",
+        .root_module = bench_module,
+    });
+    bench_exe.linkLibrary(lib);
+
+    const run_bench = b.addRunArtifact(bench_exe);
+    run_bench.step.dependOn(&bench_exe.step);
+
+    const bench_step = b.step("benchmark", "Run performance benchmarks");
+    bench_step.dependOn(&run_bench.step);
+
     // Run CLI
     const run_cli = b.addRunArtifact(cli);
     run_cli.step.dependOn(b.getInstallStep());

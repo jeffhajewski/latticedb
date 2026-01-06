@@ -200,13 +200,15 @@ class Transaction:
 
         lib = get_lib()
         c_value = LatticeValue()
-        python_to_value(value, c_value)
+        # Keep reference to any allocated data until C call completes
+        _ref = python_to_value(value, c_value)
         code = lib._lib.lattice_node_set_property(
             self._handle,
             node_id,
             key.encode("utf-8"),
             byref(c_value),
         )
+        del _ref  # Now safe to release
         check_error(code)
 
     def set_vector(
@@ -289,12 +291,14 @@ class Transaction:
         )
         return edge
 
-    def delete_edge(self, edge_id: int) -> None:
+    def delete_edge(self, source_id: int, target_id: int, edge_type: str) -> None:
         """
-        Delete an edge.
+        Delete an edge between two nodes.
 
         Args:
-            edge_id: ID of the edge to delete.
+            source_id: ID of the source node.
+            target_id: ID of the target node.
+            edge_type: Type of the edge to delete.
         """
         if self._read_only:
             raise RuntimeError("Cannot delete edge in read-only transaction")
@@ -302,7 +306,9 @@ class Transaction:
             raise RuntimeError("Transaction not started")
 
         lib = get_lib()
-        code = lib._lib.lattice_edge_delete(self._handle, edge_id)
+        code = lib._lib.lattice_edge_delete(
+            self._handle, source_id, target_id, edge_type.encode("utf-8")
+        )
         check_error(code)
 
     @property

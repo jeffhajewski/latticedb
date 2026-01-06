@@ -138,13 +138,18 @@ pub const NodeStore = struct {
             return NodeError.NotFound;
         }
 
+        // Delete the old entry
+        self.tree.delete(&key_buf) catch |err| {
+            return mapBTreeError(err);
+        };
+
         // Serialize new data
         var buf: [4096]u8 = undefined;
         const serialized = serializeNode(labels, properties, &buf) catch {
             return NodeError.BufferTooSmall;
         };
 
-        // Update in B+Tree (insert overwrites)
+        // Insert the new data
         self.tree.insert(&key_buf, serialized) catch |err| {
             return mapBTreeError(err);
         };

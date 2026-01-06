@@ -185,10 +185,12 @@ lattice_error lattice_edge_create(
     lattice_edge_id* edge_out
 );
 
-/* Delete an edge */
+/* Delete an edge between two nodes */
 lattice_error lattice_edge_delete(
     lattice_txn* txn,
-    lattice_edge_id edge_id
+    lattice_node_id source,
+    lattice_node_id target,
+    const char* edge_type
 );
 
 /*

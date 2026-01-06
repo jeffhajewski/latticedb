@@ -13,6 +13,7 @@ const lattice = @import("lattice");
 const types = lattice.core.types;
 const PageId = types.PageId;
 const NodeId = types.NodeId;
+const PropertyValue = types.PropertyValue;
 const NULL_PAGE = types.NULL_PAGE;
 
 // Storage layer
@@ -82,6 +83,7 @@ pub const DatabaseError = error{
     TreeInitFailed,
     AlreadyExists,
     ReadOnly,
+    NotFound,
 };
 
 /// Query execution errors
@@ -575,6 +577,98 @@ pub const Database = struct {
         return self.node_store.exists(node_id);
     }
 
+    /// Set a property on a node
+    pub fn setNodeProperty(
+        self: *Self,
+        node_id: NodeId,
+        key: []const u8,
+        value: PropertyValue,
+    ) !void {
+        if (self.read_only) return DatabaseError.PermissionDenied;
+
+        // Get the existing node
+        var existing_node = self.node_store.get(node_id) catch |err| {
+            return switch (err) {
+                node_mod.NodeError.NotFound => DatabaseError.NotFound,
+                else => DatabaseError.IoError,
+            };
+        };
+        defer existing_node.deinit(self.allocator);
+
+        // Intern the property key
+        const key_id = self.symbol_table.intern(key) catch {
+            return DatabaseError.IoError;
+        };
+
+        // Build new properties array with the updated/added property
+        var new_props: std.ArrayList(node_mod.Property) = .empty;
+        defer new_props.deinit(self.allocator);
+
+        // Copy existing properties, replacing if key matches
+        var found = false;
+        for (existing_node.properties) |prop| {
+            if (prop.key_id == key_id) {
+                new_props.append(self.allocator, .{ .key_id = key_id, .value = value }) catch {
+                    return DatabaseError.IoError;
+                };
+                found = true;
+            } else {
+                new_props.append(self.allocator, prop) catch {
+                    return DatabaseError.IoError;
+                };
+            }
+        }
+
+        // Add new property if not found
+        if (!found) {
+            new_props.append(self.allocator, .{ .key_id = key_id, .value = value }) catch {
+                return DatabaseError.IoError;
+            };
+        }
+
+        // Update the node
+        self.node_store.update(node_id, existing_node.labels, new_props.items) catch {
+            return DatabaseError.IoError;
+        };
+    }
+
+    /// Get a property from a node.
+    /// Note: The caller owns the returned PropertyValue and must call deinit on it
+    /// for string/bytes values to avoid memory leaks.
+    pub fn getNodeProperty(
+        self: *Self,
+        node_id: NodeId,
+        key: []const u8,
+    ) !?PropertyValue {
+        // Get the node
+        var existing_node = self.node_store.get(node_id) catch |err| {
+            return switch (err) {
+                node_mod.NodeError.NotFound => DatabaseError.NotFound,
+                else => DatabaseError.IoError,
+            };
+        };
+        defer existing_node.deinit(self.allocator);
+
+        // Intern the property key
+        const key_id = self.symbol_table.intern(key) catch {
+            return DatabaseError.IoError;
+        };
+
+        // Find the property and clone it
+        for (existing_node.properties) |prop| {
+            if (prop.key_id == key_id) {
+                // Clone the value to avoid returning a pointer to freed memory
+                return switch (prop.value) {
+                    .string_val => |s| .{ .string_val = self.allocator.dupe(u8, s) catch return DatabaseError.OutOfMemory },
+                    .bytes_val => |b| .{ .bytes_val = self.allocator.dupe(u8, b) catch return DatabaseError.OutOfMemory },
+                    else => prop.value, // Primitives are copied by value
+                };
+            }
+        }
+
+        return null;
+    }
+
     // ========================================================================
     // Graph Operations - Edges
     // ========================================================================
@@ -896,6 +990,14 @@ test "graph crud operations" {
     // Delete edge
     try db.deleteEdge(alice, bob, "KNOWS");
     try std.testing.expect(!db.edgeExists(alice, bob, "KNOWS"));
+
+    // Test setNodeProperty
+    try db.setNodeProperty(alice, "name", .{ .string_val = "Alice" });
+    const name_val = try db.getNodeProperty(alice, "name");
+    try std.testing.expect(name_val != null);
+    try std.testing.expectEqualStrings("Alice", name_val.?.string_val);
+    // Free the cloned string
+    allocator.free(name_val.?.string_val);
 
     // Delete node
     try db.deleteNode(alice);

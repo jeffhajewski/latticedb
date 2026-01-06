@@ -171,7 +171,6 @@ class TestNodeOperations:
                 txn.delete_node(node_id)
                 txn.commit()
 
-    @pytest.mark.skip(reason="Property operations not yet implemented in C API")
     def test_set_property(self, tmp_path):
         """Test setting a property on a node."""
         db_path = tmp_path / "test.db"
@@ -213,7 +212,6 @@ class TestEdgeOperations:
                 assert edge.edge_type == "KNOWS"
                 txn.commit()
 
-    @pytest.mark.skip(reason="Edge deletion not yet implemented in C API")
     def test_delete_edge(self, tmp_path):
         """Test deleting an edge."""
         db_path = tmp_path / "test.db"
@@ -224,7 +222,7 @@ class TestEdgeOperations:
                 bob = txn.create_node(labels=["Person"])
                 edge = txn.create_edge(alice.id, bob.id, "KNOWS")
 
-                txn.delete_edge(edge.id)
+                txn.delete_edge(alice.id, bob.id, "KNOWS")
                 txn.commit()
 
 

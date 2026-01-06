@@ -114,6 +114,7 @@ fn mapDatabaseError(err: DatabaseError) lattice_error {
         DatabaseError.TreeInitFailed => .err_io,
         DatabaseError.AlreadyExists => .err_already_exists,
         DatabaseError.ReadOnly => .err_read_only,
+        DatabaseError.NotFound => .err_not_found,
     };
 }
 
@@ -419,34 +420,51 @@ pub export fn lattice_node_delete(
     return .ok;
 }
 
-/// Set a property on a node (stub for MVP)
+/// Set a property on a node
 pub export fn lattice_node_set_property(
     txn: ?*lattice_txn,
     node_id: lattice_node_id,
     key: [*c]const u8,
     value: ?*const lattice_value,
 ) lattice_error {
-    _ = txn;
-    _ = node_id;
-    _ = key;
-    _ = value;
-    // TODO: Implement property operations
-    return .err;
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+
+    if (txn_handle.read_only) return .err_read_only;
+
+    const key_slice = cStrToSlice(key) orelse return .err_invalid_arg;
+    const c_val = value orelse return .err_invalid_arg;
+
+    // Convert C value to Zig PropertyValue
+    const zig_value = cValueToZigValue(c_val);
+
+    txn_handle.db_handle.db.setNodeProperty(node_id, key_slice, zig_value) catch |err| {
+        return mapDatabaseError(err);
+    };
+
+    return .ok;
 }
 
-/// Get a property from a node (stub for MVP)
+/// Get a property from a node
 pub export fn lattice_node_get_property(
     txn: ?*lattice_txn,
     node_id: lattice_node_id,
     key: [*c]const u8,
     value_out: *lattice_value,
 ) lattice_error {
-    _ = txn;
-    _ = node_id;
-    _ = key;
-    _ = value_out;
-    // TODO: Implement property operations
-    return .err_not_found;
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+
+    const key_slice = cStrToSlice(key) orelse return .err_invalid_arg;
+
+    const maybe_value = txn_handle.db_handle.db.getNodeProperty(node_id, key_slice) catch |err| {
+        return mapDatabaseError(err);
+    };
+
+    if (maybe_value) |zig_value| {
+        zigValueToCValue(zig_value, value_out);
+        return .ok;
+    } else {
+        return .err_not_found;
+    }
 }
 
 /// Set a vector on a node (stub for MVP)
@@ -493,15 +511,24 @@ pub export fn lattice_edge_create(
     return .ok;
 }
 
-/// Delete an edge (stub for MVP - needs edge lookup)
+/// Delete an edge between two nodes
 pub export fn lattice_edge_delete(
     txn: ?*lattice_txn,
-    edge_id: lattice_edge_id,
+    source: lattice_node_id,
+    target: lattice_node_id,
+    edge_type: [*c]const u8,
 ) lattice_error {
-    _ = txn;
-    _ = edge_id;
-    // TODO: Need to decompose edge_id and lookup edge type
-    return .err;
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+
+    if (txn_handle.read_only) return .err_read_only;
+
+    const type_slice = cStrToSlice(edge_type) orelse return .err_invalid_arg;
+
+    txn_handle.db_handle.db.deleteEdge(source, target, type_slice) catch |err| {
+        return mapDatabaseError(err);
+    };
+
+    return .ok;
 }
 
 // ============================================================================

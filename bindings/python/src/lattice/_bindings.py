@@ -326,7 +326,12 @@ class LatticeLib:
         self._lib.lattice_edge_create.restype = c_int
 
         # lattice_edge_delete
-        self._lib.lattice_edge_delete.argtypes = [LatticeTxn, LatticeEdgeId]
+        self._lib.lattice_edge_delete.argtypes = [
+            LatticeTxn,
+            LatticeNodeId,
+            LatticeNodeId,
+            c_char_p,
+        ]
         self._lib.lattice_edge_delete.restype = c_int
 
         # lattice_query_prepare
@@ -478,32 +483,42 @@ def value_to_python(c_value: LatticeValue):
         return None
 
 
-def python_to_value(py_val, c_value: LatticeValue) -> None:
+def python_to_value(py_val, c_value: LatticeValue):
     """Fill a LatticeValue from a Python value.
 
     Args:
         py_val: The Python value to convert.
         c_value: The C value structure to fill.
+
+    Returns:
+        Any references that need to be kept alive during the C call,
+        or None if no references need to be kept.
     """
     if py_val is None:
         c_value.type = LATTICE_VALUE_NULL
+        return None
     elif isinstance(py_val, bool):
         c_value.type = LATTICE_VALUE_BOOL
         c_value.data.bool_val = py_val
+        return None
     elif isinstance(py_val, int):
         c_value.type = LATTICE_VALUE_INT
         c_value.data.int_val = py_val
+        return None
     elif isinstance(py_val, float):
         c_value.type = LATTICE_VALUE_FLOAT
         c_value.data.float_val = py_val
+        return None
     elif isinstance(py_val, str):
         c_value.type = LATTICE_VALUE_STRING
         encoded = py_val.encode("utf-8")
         c_value.data.string_val.ptr = encoded
         c_value.data.string_val.len = len(encoded)
+        return encoded  # Keep reference alive
     elif isinstance(py_val, bytes):
         c_value.type = LATTICE_VALUE_BYTES
         c_value.data.bytes_val.ptr = ctypes.cast(py_val, POINTER(ctypes.c_uint8))
         c_value.data.bytes_val.len = len(py_val)
+        return py_val  # Keep reference alive
     else:
         raise TypeError(f"Unsupported value type: {type(py_val).__name__}")

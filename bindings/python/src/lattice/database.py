@@ -17,6 +17,7 @@ from lattice._bindings import (
     OpenOptions,
     check_error,
     get_lib,
+    python_to_value,
     value_to_python,
 )
 from lattice.transaction import Transaction
@@ -159,10 +160,19 @@ class Database:
             )
             check_error(code)
 
-            # TODO: Bind parameters when lattice_query_bind is implemented
-            # if parameters:
-            #     for name, value in parameters.items():
-            #         ...
+            # Bind parameters if provided
+            if parameters:
+                for name, value in parameters.items():
+                    c_value = LatticeValue()
+                    # Keep reference to any allocated data until C call completes
+                    _ref = python_to_value(value, c_value)
+                    code = lib._lib.lattice_query_bind(
+                        query_ptr,
+                        name.encode("utf-8"),
+                        byref(c_value),
+                    )
+                    del _ref  # Now safe to release
+                    check_error(code)
 
             # Begin a read-only transaction for the query
             code = lib._lib.lattice_begin(

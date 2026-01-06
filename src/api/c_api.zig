@@ -50,6 +50,26 @@ const QueryHandle = struct {
     cypher: []const u8,
     cypher_owned: bool,
     db_handle: *DatabaseHandle,
+    /// Bound parameters (name -> value)
+    parameters: std.StringHashMap(PropertyValue),
+
+    fn init(cypher: []const u8, cypher_owned: bool, db_handle: *DatabaseHandle) QueryHandle {
+        return .{
+            .cypher = cypher,
+            .cypher_owned = cypher_owned,
+            .db_handle = db_handle,
+            .parameters = std.StringHashMap(PropertyValue).init(global_allocator),
+        };
+    }
+
+    fn deinit(self: *QueryHandle) void {
+        // Free parameter keys (we own copies of them)
+        var iter = self.parameters.iterator();
+        while (iter.next()) |entry| {
+            global_allocator.free(entry.key_ptr.*);
+        }
+        self.parameters.deinit();
+    }
 };
 
 /// Internal result handle wrapping query results
@@ -647,26 +667,34 @@ pub export fn lattice_query_prepare(
         return .err_out_of_memory;
     };
 
-    query_handle.* = .{
-        .cypher = cypher_copy,
-        .cypher_owned = true,
-        .db_handle = db_handle,
-    };
+    query_handle.* = QueryHandle.init(cypher_copy, true, db_handle);
 
     query_out.* = @ptrCast(query_handle);
     return .ok;
 }
 
-/// Bind a parameter to a query (stub for MVP)
+/// Bind a parameter to a query
 pub export fn lattice_query_bind(
     query: ?*lattice_query,
     name: [*c]const u8,
     value: ?*const lattice_value,
 ) lattice_error {
-    _ = query;
-    _ = name;
-    _ = value;
-    // TODO: Implement parameter binding
+    const query_handle = toHandle(QueryHandle, query) orelse return .err_invalid_arg;
+    const name_slice = cStrToSlice(name) orelse return .err_invalid_arg;
+    const c_value = value orelse return .err_invalid_arg;
+
+    // Convert C value to Zig PropertyValue
+    const zig_value = cValueToZigValue(c_value);
+
+    // Copy the name since we need to own it
+    const name_copy = global_allocator.dupe(u8, name_slice) catch return .err_out_of_memory;
+
+    // Store in parameters map (may overwrite existing)
+    query_handle.parameters.put(name_copy, zig_value) catch {
+        global_allocator.free(name_copy);
+        return .err_out_of_memory;
+    };
+
     return .ok;
 }
 
@@ -696,10 +724,15 @@ pub export fn lattice_query_execute(
     const query_handle = toHandle(QueryHandle, query) orelse return .err_invalid_arg;
     _ = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    // Execute the query
-    const result = query_handle.db_handle.db.query(query_handle.cypher) catch |err| {
-        return mapQueryError(err);
-    };
+    // Execute the query (with or without parameters)
+    const result = if (query_handle.parameters.count() > 0)
+        query_handle.db_handle.db.queryWithParams(query_handle.cypher, &query_handle.parameters) catch |err| {
+            return mapQueryError(err);
+        }
+    else
+        query_handle.db_handle.db.query(query_handle.cypher) catch |err| {
+            return mapQueryError(err);
+        };
 
     // Create result handle
     const result_handle = global_allocator.create(ResultHandle) catch {
@@ -721,6 +754,9 @@ pub export fn lattice_query_execute(
 /// Free a prepared query
 pub export fn lattice_query_free(query: ?*lattice_query) void {
     const query_handle = toHandle(QueryHandle, query) orelse return;
+
+    // Clean up parameters
+    query_handle.deinit();
 
     if (query_handle.cypher_owned) {
         global_allocator.free(@constCast(query_handle.cypher));

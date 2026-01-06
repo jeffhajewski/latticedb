@@ -325,6 +325,41 @@ class TestQueries:
             result = db.query("MATCH (n:NonexistentLabel) RETURN n")
             assert len(result) == 0
 
+    def test_query_with_parameters(self, tmp_path):
+        """Test query with bound parameters."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                txn.create_node(
+                    labels=["Person"],
+                    properties={"name": "Alice", "age": 30},
+                )
+                txn.create_node(
+                    labels=["Person"],
+                    properties={"name": "Bob", "age": 25},
+                )
+                txn.commit()
+
+            # Query with string parameter
+            result = db.query(
+                "MATCH (n:Person) WHERE n.name = $name RETURN n.name",
+                parameters={"name": "Alice"},
+            )
+            rows = list(result)
+            assert len(rows) == 1
+            # Column name is 'n' (variable name), value is the property
+            assert rows[0]["n"] == "Alice"
+
+            # Query with integer parameter
+            result = db.query(
+                "MATCH (n:Person) WHERE n.age = $age RETURN n.name",
+                parameters={"age": 25},
+            )
+            rows = list(result)
+            assert len(rows) == 1
+            assert rows[0]["n"] == "Bob"
+
     def test_query_result_iteration(self, tmp_path):
         """Test iterating over query results."""
         db_path = tmp_path / "test.db"

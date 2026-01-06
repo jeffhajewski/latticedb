@@ -866,6 +866,80 @@ pub const Database = struct {
         return self.convertResult(&exec_result, &planner);
     }
 
+    /// Execute a Cypher query with bound parameters.
+    pub fn queryWithParams(
+        self: *Self,
+        cypher: []const u8,
+        params: *const std.StringHashMap(types.PropertyValue),
+    ) QueryError!QueryResult {
+        // 1. Parse the query
+        var parser = Parser.init(self.allocator, cypher);
+        const parse_result = parser.parse();
+
+        if (parse_result.query == null) {
+            return QueryError.ParseError;
+        }
+        const ast_query = parse_result.query.?;
+        defer ast_query.deinit();
+
+        // 2. Semantic analysis
+        var analyzer = SemanticAnalyzer.init(self.allocator);
+        defer analyzer.deinit();
+
+        const analysis = analyzer.analyze(ast_query);
+        if (!analysis.success) {
+            return QueryError.SemanticError;
+        }
+
+        // 3. Create planner with storage context
+        const storage_ctx = StorageContext{
+            .node_tree = &self.node_tree,
+            .label_index = &self.label_index,
+            .edge_store = &self.edge_store,
+            .symbol_table = &self.symbol_table,
+            .hnsw_index = null,
+            .fts_index = if (self.fts_index) |*fts| fts else null,
+        };
+
+        var planner = QueryPlanner.init(self.allocator, storage_ctx);
+        defer planner.deinit();
+
+        // 4. Plan the query
+        const root_op = planner.plan(ast_query, &analysis) catch {
+            return QueryError.PlanError;
+        };
+        defer root_op.deinit(self.allocator);
+
+        // 5. Create execution context with storage access for property lookups
+        var exec_ctx = ExecutionContext.initWithStorage(self.allocator, &self.node_store, &self.symbol_table);
+        defer exec_ctx.deinit();
+
+        // Register variable bindings from planner
+        var binding_iter = planner.bindings.iterator();
+        while (binding_iter.next()) |entry| {
+            exec_ctx.registerVariable(entry.key_ptr.*, entry.value_ptr.slot) catch {
+                return QueryError.OutOfMemory;
+            };
+        }
+
+        // 5b. Set bound parameters
+        var param_iter = params.iterator();
+        while (param_iter.next()) |entry| {
+            exec_ctx.setParameter(entry.key_ptr.*, entry.value_ptr.*) catch {
+                return QueryError.OutOfMemory;
+            };
+        }
+
+        // 6. Execute the query
+        var exec_result = execute(self.allocator, root_op, &exec_ctx) catch {
+            return QueryError.ExecutionError;
+        };
+        defer exec_result.deinit();
+
+        // 7. Convert executor result to database result
+        return self.convertResult(&exec_result, &planner);
+    }
+
     /// Convert executor result to database-friendly result format
     fn convertResult(
         self: *Self,

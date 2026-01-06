@@ -82,8 +82,36 @@ pub const graph = struct {
     pub const label_index = @import("graph/label_index.zig");
 };
 
-// C API
+// C API - explicitly export all C API functions for shared library
 pub const c_api = @import("api/c_api.zig");
+
+// Force C API exports to be included in the library
+comptime {
+    _ = &c_api.lattice_open;
+    _ = &c_api.lattice_close;
+    _ = &c_api.lattice_begin;
+    _ = &c_api.lattice_commit;
+    _ = &c_api.lattice_rollback;
+    _ = &c_api.lattice_node_create;
+    _ = &c_api.lattice_node_delete;
+    _ = &c_api.lattice_node_set_property;
+    _ = &c_api.lattice_node_get_property;
+    _ = &c_api.lattice_node_set_vector;
+    _ = &c_api.lattice_edge_create;
+    _ = &c_api.lattice_edge_delete;
+    _ = &c_api.lattice_query_prepare;
+    _ = &c_api.lattice_query_bind;
+    _ = &c_api.lattice_query_bind_vector;
+    _ = &c_api.lattice_query_execute;
+    _ = &c_api.lattice_query_free;
+    _ = &c_api.lattice_result_next;
+    _ = &c_api.lattice_result_column_count;
+    _ = &c_api.lattice_result_column_name;
+    _ = &c_api.lattice_result_get;
+    _ = &c_api.lattice_result_free;
+    _ = &c_api.lattice_version;
+    _ = &c_api.lattice_error_message;
+}
 
 // Re-export common types at top level
 pub const NodeId = core.types.NodeId;

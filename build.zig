@@ -21,6 +21,21 @@ pub fn build(b: *std.Build) void {
         .linkage = .static,
     });
 
+    // Shared library module (for Python/FFI bindings)
+    const shared_lib_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    shared_lib_module.addImport("lattice", shared_lib_module);
+
+    // Shared library
+    const shared_lib = b.addLibrary(.{
+        .name = "lattice",
+        .root_module = shared_lib_module,
+        .linkage = .dynamic,
+    });
+
     // CLI module - imports the library module
     const cli_module = b.createModule(.{
         .root_source_file = b.path("src/cli/main.zig"),
@@ -72,11 +87,16 @@ pub fn build(b: *std.Build) void {
 
     // Install artifacts
     b.installArtifact(lib);
+    b.installArtifact(shared_lib);
     b.installArtifact(cli);
 
     // Build steps
     const lib_step = b.step("lib", "Build static library only");
     lib_step.dependOn(&lib.step);
+
+    const shared_step = b.step("shared", "Build shared library (for Python bindings)");
+    const install_shared = b.addInstallArtifact(shared_lib, .{});
+    shared_step.dependOn(&install_shared.step);
 
     const cli_step = b.step("cli", "Build CLI executable only");
     cli_step.dependOn(&cli.step);

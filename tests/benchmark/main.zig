@@ -168,12 +168,7 @@ fn setupDatabase(allocator: std.mem.Allocator, path: []const u8, config: struct 
     // Remove existing file
     std.fs.cwd().deleteFile(path) catch {};
 
-    // Use larger buffer pool for FTS and Vector workloads to avoid exhaustion
-    const buffer_size: usize = if (config.enable_fts or config.enable_vector)
-        128 * 1024 * 1024 // 128MB for FTS/Vector
-    else
-        4 * 1024 * 1024; // 4MB default
-
+    // Use auto-scaling buffer pool (buffer_pool_size=0 triggers automatic sizing)
     const db = try Database.open(allocator, path, .{
         .create = true,
         .config = .{
@@ -181,7 +176,7 @@ fn setupDatabase(allocator: std.mem.Allocator, path: []const u8, config: struct 
             .enable_fts = config.enable_fts,
             .enable_vector = config.enable_vector,
             .vector_dimensions = config.vector_dimensions,
-            .buffer_pool_size = buffer_size,
+            // buffer_pool_size defaults to 0 (auto-scale based on enabled features)
         },
     });
 

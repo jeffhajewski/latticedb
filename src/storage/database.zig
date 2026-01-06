@@ -181,8 +181,9 @@ pub const QueryResult = struct {
 
 /// Database configuration
 pub const DatabaseConfig = struct {
-    /// Buffer pool size in bytes (default 4MB)
-    buffer_pool_size: usize = 4 * 1024 * 1024,
+    /// Buffer pool size in bytes (default 4MB, auto-scales for vector/FTS)
+    /// Set to 0 to use automatic sizing based on enabled features
+    buffer_pool_size: usize = 0,
     /// Enable write-ahead logging
     enable_wal: bool = true,
     /// Enable full-text search
@@ -193,6 +194,23 @@ pub const DatabaseConfig = struct {
     enable_vector: bool = false,
     /// Vector dimensions (required if enable_vector is true)
     vector_dimensions: u16 = 128,
+
+    /// Compute effective buffer pool size based on enabled features
+    /// - Base: 4MB for simple graph operations
+    /// - FTS enabled: 16MB (dictionary B+Tree, posting lists)
+    /// - Vector enabled: 16MB (HNSW connections, vector pages)
+    /// - Both enabled: 32MB
+    pub fn effectiveBufferPoolSize(self: DatabaseConfig) usize {
+        if (self.buffer_pool_size > 0) {
+            return self.buffer_pool_size;
+        }
+
+        const base_size: usize = 4 * 1024 * 1024; // 4MB
+        const fts_size: usize = if (self.enable_fts) 12 * 1024 * 1024 else 0; // +12MB
+        const vector_size: usize = if (self.enable_vector) 12 * 1024 * 1024 else 0; // +12MB
+
+        return base_size + fts_size + vector_size;
+    }
 };
 
 /// Options for opening a database
@@ -276,8 +294,9 @@ pub const Database = struct {
         };
         errdefer self.page_manager.deinit();
 
-        // 3. Initialize BufferPool
-        self.buffer_pool = BufferPool.init(allocator, &self.page_manager, options.config.buffer_pool_size) catch {
+        // 3. Initialize BufferPool (auto-scales based on enabled features)
+        const effective_pool_size = options.config.effectiveBufferPoolSize();
+        self.buffer_pool = BufferPool.init(allocator, &self.page_manager, effective_pool_size) catch {
             return DatabaseError.BufferPoolFull;
         };
         errdefer self.buffer_pool.deinit();

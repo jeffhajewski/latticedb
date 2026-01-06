@@ -144,7 +144,6 @@ class TestNodeOperations:
                 assert "Person" in node.labels
                 txn.commit()
 
-    @pytest.mark.skip(reason="Property operations not yet implemented in C API")
     def test_create_node_with_properties(self, tmp_path):
         """Test creating a node with properties."""
         db_path = tmp_path / "test.db"
@@ -244,7 +243,6 @@ class TestQueries:
             result = db.query("MATCH (n:Person) RETURN n")
             assert len(result) >= 2
 
-    @pytest.mark.skip(reason="Property operations not yet implemented in C API")
     def test_query_with_properties(self, tmp_path):
         """Test query returning properties."""
         db_path = tmp_path / "test.db"
@@ -261,7 +259,6 @@ class TestQueries:
             rows = list(result)
             assert len(rows) >= 1
 
-    @pytest.mark.skip(reason="Query on empty label returns error instead of empty result")
     def test_empty_result(self, tmp_path):
         """Test query with no results."""
         db_path = tmp_path / "test.db"

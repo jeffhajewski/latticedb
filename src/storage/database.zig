@@ -844,8 +844,8 @@ pub const Database = struct {
         };
         defer root_op.deinit(self.allocator);
 
-        // 5. Create execution context
-        var exec_ctx = ExecutionContext.init(self.allocator);
+        // 5. Create execution context with storage access for property lookups
+        var exec_ctx = ExecutionContext.initWithStorage(self.allocator, &self.node_store, &self.symbol_table);
         defer exec_ctx.deinit();
 
         // Register variable bindings from planner

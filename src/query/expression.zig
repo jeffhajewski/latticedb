@@ -237,13 +237,49 @@ pub const ExpressionEvaluator = struct {
         // Evaluate the object expression
         const obj = try self.evaluate(pa.object, row, ctx);
 
-        // For now, we just return null for property access
-        // In a full implementation, we'd look up the property from the node/edge store
-        _ = obj;
-        _ = pa.property;
+        // Handle node property access
+        if (obj == .node_ref) {
+            const node_id = obj.node_ref;
 
-        // Property access requires storage layer integration
-        // For now, return null - operators will handle property lookups
+            // Get the node store and symbol table from context
+            const node_store = ctx.node_store orelse return .{ .null_val = {} };
+            const symbol_table = ctx.symbol_table orelse return .{ .null_val = {} };
+
+            // Look up the property key symbol ID
+            const key_id = symbol_table.lookup(pa.property) catch {
+                // Property key not found in symbol table means no node has this property
+                return .{ .null_val = {} };
+            };
+
+            // Get the node from storage
+            var node = node_store.get(node_id) catch {
+                return .{ .null_val = {} };
+            };
+            defer node.deinit(self.allocator);
+
+            // Find the property with matching key_id
+            for (node.properties) |prop| {
+                if (prop.key_id == key_id) {
+                    // Clone string/bytes values since node will be freed
+                    return switch (prop.value) {
+                        .string_val => |s| blk: {
+                            const cloned = self.allocator.dupe(u8, s) catch return EvalError.OutOfMemory;
+                            break :blk .{ .string_val = cloned };
+                        },
+                        .bytes_val => |b| blk: {
+                            const cloned = self.allocator.dupe(u8, b) catch return EvalError.OutOfMemory;
+                            break :blk .{ .string_val = cloned };
+                        },
+                        else => EvalResult.fromPropertyValue(prop.value),
+                    };
+                }
+            }
+
+            // Property not found on this node
+            return .{ .null_val = {} };
+        }
+
+        // TODO: Handle edge property access
         return .{ .null_val = {} };
     }
 

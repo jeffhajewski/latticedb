@@ -8,10 +8,18 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 
-const types = @import("../core/types.zig");
+const lattice = @import("lattice");
+
+const types = lattice.core.types;
 const NodeId = types.NodeId;
 const EdgeId = types.EdgeId;
 const PropertyValue = types.PropertyValue;
+
+const node_mod = lattice.graph.node;
+const NodeStore = node_mod.NodeStore;
+
+const symbols_mod = lattice.graph.symbols;
+const SymbolTable = symbols_mod.SymbolTable;
 
 // ============================================================================
 // Constants
@@ -266,6 +274,12 @@ pub const ExecutionContext = struct {
     /// Variable name to slot mapping
     variables: std.StringHashMap(u8),
 
+    /// Node store for property lookups (optional)
+    node_store: ?*NodeStore,
+
+    /// Symbol table for property key resolution (optional)
+    symbol_table: ?*SymbolTable,
+
     const Self = @This();
 
     /// Create a new execution context
@@ -275,6 +289,20 @@ pub const ExecutionContext = struct {
             .row_arena = std.heap.ArenaAllocator.init(allocator),
             .parameters = std.StringHashMap(PropertyValue).init(allocator),
             .variables = std.StringHashMap(u8).init(allocator),
+            .node_store = null,
+            .symbol_table = null,
+        };
+    }
+
+    /// Create a new execution context with storage access
+    pub fn initWithStorage(allocator: Allocator, node_store: *NodeStore, symbol_table: *SymbolTable) Self {
+        return Self{
+            .allocator = allocator,
+            .row_arena = std.heap.ArenaAllocator.init(allocator),
+            .parameters = std.StringHashMap(PropertyValue).init(allocator),
+            .variables = std.StringHashMap(u8).init(allocator),
+            .node_store = node_store,
+            .symbol_table = symbol_table,
         };
     }
 

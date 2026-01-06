@@ -67,6 +67,8 @@ pub const PlannerError = error{
     MissingStorage,
     /// Unsupported operation
     Unsupported,
+    /// Internal error (unexpected condition)
+    InternalError,
 };
 
 /// Storage context for planning (references to storage structures)
@@ -178,8 +180,11 @@ pub const QueryPlanner = struct {
                         const symbol_table = self.storage.symbol_table orelse return PlannerError.MissingStorage;
 
                         // Look up first label (TODO: handle multiple labels)
-                        const label_id = symbol_table.lookup(node_pattern.labels[0]) catch {
-                            return PlannerError.UnknownLabel;
+                        // If label is not found in symbol table, use NULL_SYMBOL (0) which has no nodes
+                        // This will result in an empty scan rather than an error
+                        const label_id = symbol_table.lookup(node_pattern.labels[0]) catch |err| switch (err) {
+                            symbols.SymbolError.NotFound => symbols.NULL_SYMBOL, // Label doesn't exist = empty result
+                            else => return PlannerError.InternalError,
                         };
 
                         const label_scan = scan_ops.LabelScan.init(self.allocator, slot, label_id, label_index_ptr) catch {

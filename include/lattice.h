@@ -212,23 +212,37 @@ lattice_error lattice_edge_delete(
 
 /*
  * Query operations
+ *
+ * Queries use a prepare/bind/execute pattern:
+ *   1. Prepare the query with lattice_query_prepare()
+ *   2. Bind parameters with lattice_query_bind() (optional)
+ *   3. Execute with lattice_query_execute()
+ *   4. Iterate results with lattice_result_next() / lattice_result_get()
+ *   5. Free resources with lattice_query_free() and lattice_result_free()
+ *
+ * Example:
+ *   lattice_query* query;
+ *   lattice_query_prepare(db, "MATCH (n) WHERE n.name = $name RETURN n", &query);
+ *   lattice_value val = { .type = LATTICE_VALUE_STRING, .data.string_val = {"Alice", 5} };
+ *   lattice_query_bind(query, "name", &val);
+ *   lattice_query_execute(query, txn, &result);
  */
 
-/* Prepare a Cypher query */
+/* Prepare a Cypher query for execution */
 lattice_error lattice_query_prepare(
     lattice_database* db,
     const char* cypher,
     lattice_query** query_out
 );
 
-/* Bind a parameter to a query */
+/* Bind a parameter to a prepared query (use $name in Cypher) */
 lattice_error lattice_query_bind(
     lattice_query* query,
-    const char* name,
+    const char* name,       /* Parameter name without $ prefix */
     const lattice_value* value
 );
 
-/* Bind a vector parameter */
+/* Bind a vector parameter to a prepared query */
 lattice_error lattice_query_bind_vector(
     lattice_query* query,
     const char* name,
@@ -236,14 +250,14 @@ lattice_error lattice_query_bind_vector(
     uint32_t dimensions
 );
 
-/* Execute a query */
+/* Execute a prepared query and get results */
 lattice_error lattice_query_execute(
     lattice_query* query,
     lattice_txn* txn,
     lattice_result** result_out
 );
 
-/* Free a query */
+/* Free a prepared query (call after done with results) */
 void lattice_query_free(lattice_query* query);
 
 /*

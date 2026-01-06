@@ -25,14 +25,15 @@ from lattice import Database
 with Database("mydb.ltdb", create=True) as db:
     # Write transaction
     with db.write() as txn:
-        # Create nodes
-        alice = txn.create_node(labels=["Person"])
-        bob = txn.create_node(labels=["Person"])
-
-        # Set properties
-        txn.set_property(alice.id, "name", "Alice")
-        txn.set_property(alice.id, "age", 30)
-        txn.set_property(bob.id, "name", "Bob")
+        # Create nodes with properties
+        alice = txn.create_node(
+            labels=["Person"],
+            properties={"name": "Alice", "age": 30}
+        )
+        bob = txn.create_node(
+            labels=["Person"],
+            properties={"name": "Bob", "age": 25}
+        )
 
         # Create relationships
         txn.create_edge(alice.id, bob.id, "KNOWS")
@@ -40,9 +41,15 @@ with Database("mydb.ltdb", create=True) as db:
         txn.commit()
 
     # Query with Cypher
-    result = db.query("MATCH (n:Person) RETURN n")
+    result = db.query("MATCH (n:Person) RETURN n.name")
     for row in result:
-        print(row)
+        print(row)  # {'n': 'Alice'}, {'n': 'Bob'}
+
+    # Query with parameters (safe from injection)
+    result = db.query(
+        "MATCH (n:Person) WHERE n.name = $name RETURN n",
+        parameters={"name": "Alice"}
+    )
 ```
 
 ## API Reference
@@ -67,7 +74,7 @@ Database(
 - `close()` - Close the database connection
 - `read()` - Start a read-only transaction (context manager)
 - `write()` - Start a read-write transaction (context manager)
-- `query(cypher: str)` - Execute a Cypher query
+- `query(cypher: str, parameters: dict = None)` - Execute a Cypher query with optional parameters
 
 ### Transaction
 
@@ -75,16 +82,95 @@ Database(
 
 - `is_read_only` - True if read-only transaction
 - `is_active` - True if transaction is still active
+- `get_node(node_id: int)` - Get a node by ID, returns `Node` or `None`
+- `get_property(node_id: int, key: str)` - Get a property value, returns value or `None`
 
 #### Write Operations
 
-- `create_node(labels: list[str])` - Create a node with labels
+- `create_node(labels: list[str], properties: dict = None)` - Create a node with labels and optional properties
 - `delete_node(node_id: int)` - Delete a node
 - `set_property(node_id: int, key: str, value)` - Set a property on a node
+- `set_vector(node_id: int, key: str, vector: np.ndarray)` - Set a vector embedding
 - `create_edge(source_id: int, target_id: int, edge_type: str)` - Create an edge
 - `delete_edge(source_id: int, target_id: int, edge_type: str)` - Delete an edge
 - `commit()` - Commit the transaction
 - `rollback()` - Rollback the transaction
+
+### Querying
+
+#### Basic Queries
+
+```python
+# Simple match
+result = db.query("MATCH (n:Person) RETURN n")
+
+# Return properties
+result = db.query("MATCH (n:Person) RETURN n.name")
+
+# With WHERE clause
+result = db.query("MATCH (n:Person) WHERE n.age > 25 RETURN n.name")
+```
+
+#### Parameterized Queries
+
+Use parameters to safely pass values into queries:
+
+```python
+# String parameter
+result = db.query(
+    "MATCH (n:Person) WHERE n.name = $name RETURN n",
+    parameters={"name": "Alice"}
+)
+
+# Integer parameter
+result = db.query(
+    "MATCH (n:Person) WHERE n.age = $age RETURN n.name",
+    parameters={"age": 30}
+)
+
+# Multiple parameters
+result = db.query(
+    "MATCH (n:Person) WHERE n.name = $name AND n.age > $min_age RETURN n",
+    parameters={"name": "Alice", "min_age": 20}
+)
+```
+
+#### Working with Results
+
+```python
+result = db.query("MATCH (n:Person) RETURN n.name")
+
+# Get column names
+print(result.columns)  # ['n']
+
+# Iterate rows
+for row in result:
+    print(row)  # {'n': 'Alice'}
+
+# Get all rows as list
+rows = list(result)
+
+# Get row count
+print(len(result))
+```
+
+### Reading Node Data
+
+```python
+with db.read() as txn:
+    # Get a node by ID
+    node = txn.get_node(node_id)
+    if node:
+        print(f"ID: {node.id}")
+        print(f"Labels: {node.labels}")
+
+    # Get individual properties
+    name = txn.get_property(node_id, "name")
+    age = txn.get_property(node_id, "age")
+
+    # Returns None if property doesn't exist
+    unknown = txn.get_property(node_id, "nonexistent")  # None
+```
 
 ### Vector Operations
 

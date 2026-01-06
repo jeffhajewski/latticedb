@@ -7,12 +7,15 @@ from ctypes import byref, c_uint64, c_void_p
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from lattice._bindings import (
+    LATTICE_ERROR_NOT_FOUND,
+    LATTICE_OK,
     LATTICE_TXN_READ_ONLY,
     LATTICE_TXN_READ_WRITE,
     LatticeValue,
     check_error,
     get_lib,
     python_to_value,
+    value_to_python,
 )
 from lattice.types import Edge, Node, PropertyValue
 
@@ -176,8 +179,42 @@ class Transaction:
         Returns:
             The node, or None if not found.
         """
-        # TODO: Implement node lookup
-        return None
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+
+        # Check if node exists
+        exists = ctypes.c_bool()
+        code = lib._lib.lattice_node_exists(self._handle, node_id, ctypes.byref(exists))
+        check_error(code)
+
+        if not exists.value:
+            return None
+
+        # Get labels
+        labels_ptr = ctypes.c_char_p()
+        code = lib._lib.lattice_node_get_labels(
+            self._handle, node_id, ctypes.byref(labels_ptr)
+        )
+        if code == LATTICE_ERROR_NOT_FOUND:
+            return None
+        check_error(code)
+
+        # Parse comma-separated labels
+        labels: List[str] = []
+        if labels_ptr.value:
+            labels_str = labels_ptr.value.decode("utf-8")
+            if labels_str:
+                labels = labels_str.split(",")
+            # Free the allocated string
+            lib._lib.lattice_free_string(labels_ptr)
+
+        return Node(
+            id=node_id,
+            labels=labels,
+            properties={},  # Properties can be fetched with get_property()
+        )
 
     def set_property(
         self,
@@ -210,6 +247,38 @@ class Transaction:
         )
         del _ref  # Now safe to release
         check_error(code)
+
+    def get_property(
+        self,
+        node_id: int,
+        key: str,
+    ) -> Optional[PropertyValue]:
+        """
+        Get a property from a node.
+
+        Args:
+            node_id: The node ID.
+            key: Property key.
+
+        Returns:
+            The property value, or None if not found.
+        """
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        c_value = LatticeValue()
+        code = lib._lib.lattice_node_get_property(
+            self._handle,
+            node_id,
+            key.encode("utf-8"),
+            byref(c_value),
+        )
+
+        if code == LATTICE_ERROR_NOT_FOUND:
+            return None
+        check_error(code)
+        return value_to_python(c_value)
 
     def set_vector(
         self,

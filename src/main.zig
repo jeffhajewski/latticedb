@@ -96,6 +96,9 @@ comptime {
     _ = &c_api.lattice_node_delete;
     _ = &c_api.lattice_node_set_property;
     _ = &c_api.lattice_node_get_property;
+    _ = &c_api.lattice_node_exists;
+    _ = &c_api.lattice_node_get_labels;
+    _ = &c_api.lattice_free_string;
     _ = &c_api.lattice_node_set_vector;
     _ = &c_api.lattice_edge_create;
     _ = &c_api.lattice_edge_delete;

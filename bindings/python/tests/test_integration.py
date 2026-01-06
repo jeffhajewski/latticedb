@@ -191,6 +191,64 @@ class TestNodeOperations:
                 with pytest.raises(RuntimeError, match="read-only"):
                     txn.create_node(labels=["Person"])
 
+    def test_get_node(self, tmp_path):
+        """Test retrieving a node by ID."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                created = txn.create_node(labels=["Person"])
+                node_id = created.id
+                txn.commit()
+
+            # Retrieve in a new transaction
+            with db.read() as txn:
+                node = txn.get_node(node_id)
+                assert node is not None
+                assert node.id == node_id
+                assert "Person" in node.labels
+
+    def test_get_node_not_found(self, tmp_path):
+        """Test that get_node returns None for nonexistent node."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.read() as txn:
+                node = txn.get_node(99999)
+                assert node is None
+
+    def test_get_property(self, tmp_path):
+        """Test retrieving a property from a node."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                node = txn.create_node(labels=["Person"])
+                txn.set_property(node.id, "name", "Alice")
+                txn.set_property(node.id, "age", 30)
+                txn.set_property(node.id, "active", True)
+                node_id = node.id
+                txn.commit()
+
+            # Retrieve in a new transaction
+            with db.read() as txn:
+                assert txn.get_property(node_id, "name") == "Alice"
+                assert txn.get_property(node_id, "age") == 30
+                assert txn.get_property(node_id, "active") is True
+
+    def test_get_property_not_found(self, tmp_path):
+        """Test that get_property returns None for nonexistent property."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                node = txn.create_node(labels=["Person"])
+                node_id = node.id
+                txn.commit()
+
+            with db.read() as txn:
+                assert txn.get_property(node_id, "nonexistent") is None
+
 
 class TestEdgeOperations:
     """Tests for edge CRUD operations."""

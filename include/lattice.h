@@ -163,6 +163,23 @@ lattice_error lattice_node_get_property(
     lattice_value* value_out
 );
 
+/* Check if a node exists */
+lattice_error lattice_node_exists(
+    lattice_txn* txn,
+    lattice_node_id node_id,
+    bool* exists_out
+);
+
+/* Get labels for a node (comma-separated string, caller must free) */
+lattice_error lattice_node_get_labels(
+    lattice_txn* txn,
+    lattice_node_id node_id,
+    char** labels_out
+);
+
+/* Free a string allocated by lattice (e.g., from lattice_node_get_labels) */
+void lattice_free_string(char* str);
+
 /* Set a vector on a node */
 lattice_error lattice_node_set_vector(
     lattice_txn* txn,

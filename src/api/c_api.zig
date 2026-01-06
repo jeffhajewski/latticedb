@@ -19,6 +19,7 @@ const QueryResult = database.QueryResult;
 const ResultValue = database.ResultValue;
 const OpenOptions = database.OpenOptions;
 const DatabaseConfig = database.DatabaseConfig;
+const node_mod = lattice.graph.node;
 
 // ============================================================================
 // Global Allocator
@@ -469,6 +470,82 @@ pub export fn lattice_node_get_property(
     } else {
         return .err_not_found;
     }
+}
+
+/// Check if a node exists
+pub export fn lattice_node_exists(
+    txn: ?*lattice_txn,
+    node_id: lattice_node_id,
+    exists_out: *bool,
+) lattice_error {
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+
+    exists_out.* = txn_handle.db_handle.db.node_store.exists(node_id);
+    return .ok;
+}
+
+/// Get labels for a node as comma-separated string
+pub export fn lattice_node_get_labels(
+    txn: ?*lattice_txn,
+    node_id: lattice_node_id,
+    labels_out: *[*c]u8,
+) lattice_error {
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+
+    // Get the node from storage
+    var node = txn_handle.db_handle.db.node_store.get(node_id) catch |err| {
+        return switch (err) {
+            node_mod.NodeError.NotFound => .err_not_found,
+            else => .err,
+        };
+    };
+    defer node.deinit(txn_handle.db_handle.db.allocator);
+
+    // Build comma-separated label string
+    var total_len: usize = 0;
+    for (node.labels, 0..) |label_id, i| {
+        if (i > 0) total_len += 1; // comma
+        const label_str = txn_handle.db_handle.db.symbol_table.resolve(label_id) catch {
+            continue;
+        };
+        total_len += label_str.len;
+    }
+
+    // Allocate result string (plus null terminator)
+    const result = global_allocator.alloc(u8, total_len + 1) catch {
+        return .err_out_of_memory;
+    };
+
+    // Fill the string
+    var pos: usize = 0;
+    for (node.labels, 0..) |label_id, i| {
+        if (i > 0) {
+            result[pos] = ',';
+            pos += 1;
+        }
+        const label_str = txn_handle.db_handle.db.symbol_table.resolve(label_id) catch {
+            continue;
+        };
+        @memcpy(result[pos..][0..label_str.len], label_str);
+        pos += label_str.len;
+    }
+    result[pos] = 0; // null terminator
+
+    labels_out.* = result.ptr;
+    return .ok;
+}
+
+/// Free a string allocated by lattice
+pub export fn lattice_free_string(str: [*c]u8) void {
+    if (str == null) return;
+
+    // We need to find the length to free the correct slice
+    // Since we always null-terminate, find the length
+    var len: usize = 0;
+    while (str[len] != 0) : (len += 1) {}
+
+    const slice = str[0 .. len + 1];
+    global_allocator.free(slice);
 }
 
 /// Set a vector on a node

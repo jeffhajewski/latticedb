@@ -14,6 +14,7 @@ const buffer_pool_test = @import("buffer_pool_test.zig");
 const page_manager_test = @import("page_manager_test.zig");
 const graph_test = @import("graph_test.zig");
 const query_test = @import("query_test.zig");
+const search_test = @import("search_test.zig");
 
 // Re-export tests from all modules
 test {
@@ -57,6 +58,7 @@ test {
     _ = page_manager_test;
     _ = graph_test;
     _ = query_test;
+    _ = search_test;
 }
 
 test "lattice version" {

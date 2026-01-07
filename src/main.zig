@@ -47,7 +47,9 @@ pub const fts = struct {
 
 // Query system
 pub const query = struct {
+    pub const lexer = @import("query/lexer.zig");
     pub const parser = @import("query/parser.zig");
+    pub const ast = @import("query/ast.zig");
     pub const semantic = @import("query/semantic.zig");
     pub const executor = @import("query/executor.zig");
     pub const expression = @import("query/expression.zig");

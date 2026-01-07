@@ -13,6 +13,7 @@ const wal_test = @import("wal_test.zig");
 const buffer_pool_test = @import("buffer_pool_test.zig");
 const page_manager_test = @import("page_manager_test.zig");
 const graph_test = @import("graph_test.zig");
+const query_test = @import("query_test.zig");
 
 // Re-export tests from all modules
 test {
@@ -29,8 +30,10 @@ test {
     // Full-text search
     _ = lattice.fts.tokenizer;
 
-    // Query
+    // Query layer - inline tests
+    _ = lattice.query.lexer;
     _ = lattice.query.parser;
+    _ = lattice.query.executor;
 
     // Transaction
     _ = lattice.transaction.manager;
@@ -53,6 +56,7 @@ test {
     _ = buffer_pool_test;
     _ = page_manager_test;
     _ = graph_test;
+    _ = query_test;
 }
 
 test "lattice version" {

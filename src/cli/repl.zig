@@ -7,11 +7,13 @@ const std = @import("std");
 const lattice = @import("lattice");
 const output = @import("output.zig");
 const args_mod = @import("args.zig");
+const history_mod = @import("history.zig");
 
 const Database = lattice.storage.database.Database;
 const QueryResult = lattice.storage.database.QueryResult;
 const ResultValue = lattice.storage.database.ResultValue;
 const OutputFormat = args_mod.OutputFormat;
+const History = history_mod.History;
 
 /// Managed array list for allocator tracking
 fn ManagedArrayList(comptime T: type) type {
@@ -25,21 +27,38 @@ pub const Repl = struct {
     format: OutputFormat,
     show_timing: bool,
     running: bool,
+    history: History,
+    multiline_enabled: bool,
 
     const Self = @This();
 
     pub fn init(allocator: std.mem.Allocator, db: *Database, initial_format: OutputFormat) Self {
+        // Try to load history from default path
+        const history = if (History.getDefaultPath(allocator)) |path| blk: {
+            defer allocator.free(path);
+            break :blk History.initWithFile(allocator, path);
+        } else History.init(allocator);
+
         return Self{
             .allocator = allocator,
             .db = db,
             .format = initial_format,
             .show_timing = false,
             .running = true,
+            .history = history,
+            .multiline_enabled = true,
         };
+    }
+
+    pub fn deinit(self: *Self) void {
+        self.history.save() catch {};
+        self.history.deinit();
     }
 
     /// Run the REPL loop
     pub fn run(self: *Self, stdout: anytype, stderr: anytype) !void {
+        defer self.deinit();
+
         const stdin = std.fs.File.stdin().deprecatedReader();
 
         // Print welcome message
@@ -50,9 +69,18 @@ pub const Repl = struct {
         var line_buf = ManagedArrayList(u8).init(self.allocator);
         defer line_buf.deinit();
 
+        var query_buf = ManagedArrayList(u8).init(self.allocator);
+        defer query_buf.deinit();
+
+        var in_multiline = false;
+
         while (self.running) {
             // Print prompt
-            try stdout.writeAll("lattice> ");
+            if (in_multiline) {
+                try stdout.writeAll("     ...> ");
+            } else {
+                try stdout.writeAll("lattice> ");
+            }
 
             // Read line
             line_buf.items.len = 0;
@@ -66,19 +94,134 @@ pub const Repl = struct {
 
             const line = std.mem.trim(u8, line_buf.items, " \t\r\n");
 
-            if (line.len == 0) continue;
+            // Empty line in multiline mode continues, otherwise skip
+            if (line.len == 0) {
+                if (in_multiline) {
+                    // Empty line in multiline - execute what we have
+                    if (query_buf.items.len > 0) {
+                        const query = std.mem.trim(u8, query_buf.items, " \t\r\n");
+                        if (query.len > 0) {
+                            self.history.add(query) catch {};
+                            self.executeQuery(query, stdout, stderr);
+                        }
+                        query_buf.items.len = 0;
+                    }
+                    in_multiline = false;
+                }
+                continue;
+            }
 
-            // Handle dot commands
-            if (line[0] == '.') {
+            // Handle dot commands (only at start of input, not in multiline)
+            if (!in_multiline and line[0] == '.') {
                 self.handleDotCommand(line, stdout, stderr) catch |err| {
                     output.printError(stderr, "Command failed: {s}", .{@errorName(err)});
                 };
                 continue;
             }
 
-            // Execute as Cypher query
-            self.executeQuery(line, stdout, stderr);
+            // Accumulate query
+            if (in_multiline and query_buf.items.len > 0) {
+                try query_buf.append(' ');
+            }
+            try query_buf.appendSlice(line);
+
+            // Check if query is complete
+            if (self.multiline_enabled and !isQueryComplete(query_buf.items)) {
+                in_multiline = true;
+                continue;
+            }
+
+            // Execute complete query
+            const query = std.mem.trim(u8, query_buf.items, " \t\r\n");
+            if (query.len > 0) {
+                self.history.add(query) catch {};
+                self.executeQuery(query, stdout, stderr);
+            }
+
+            query_buf.items.len = 0;
+            in_multiline = false;
         }
+    }
+
+    /// Check if a query is complete (ends with semicolon and balanced brackets)
+    fn isQueryComplete(query: []const u8) bool {
+        const trimmed = std.mem.trim(u8, query, " \t\r\n");
+        if (trimmed.len == 0) return true;
+
+        // Check for balanced brackets
+        var paren_count: i32 = 0;
+        var bracket_count: i32 = 0;
+        var brace_count: i32 = 0;
+        var in_string = false;
+        var escape_next = false;
+
+        for (trimmed) |c| {
+            if (escape_next) {
+                escape_next = false;
+                continue;
+            }
+
+            if (c == '\\') {
+                escape_next = true;
+                continue;
+            }
+
+            if (c == '"' or c == '\'') {
+                in_string = !in_string;
+                continue;
+            }
+
+            if (in_string) continue;
+
+            switch (c) {
+                '(' => paren_count += 1,
+                ')' => paren_count -= 1,
+                '[' => bracket_count += 1,
+                ']' => bracket_count -= 1,
+                '{' => brace_count += 1,
+                '}' => brace_count -= 1,
+                else => {},
+            }
+        }
+
+        // Unbalanced brackets means incomplete
+        if (paren_count != 0 or bracket_count != 0 or brace_count != 0) {
+            return false;
+        }
+
+        // Query ending with semicolon is complete
+        if (trimmed[trimmed.len - 1] == ';') {
+            return true;
+        }
+
+        // Queries without semicolon are also accepted (single line)
+        // But keywords that typically continue might indicate incomplete
+        const upper = std.ascii.allocUpperString(std.heap.page_allocator, trimmed) catch return true;
+        defer std.heap.page_allocator.free(upper);
+
+        // If ends with certain keywords, probably incomplete
+        const incomplete_endings = [_][]const u8{
+            "WHERE",
+            "AND",
+            "OR",
+            "SET",
+            "WITH",
+            "ORDER BY",
+            "RETURN",
+            "MATCH",
+            "CREATE",
+            "MERGE",
+            "DELETE",
+            "REMOVE",
+        };
+
+        for (incomplete_endings) |ending| {
+            if (std.mem.endsWith(u8, upper, ending)) {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     /// Handle dot commands
@@ -130,9 +273,45 @@ pub const Repl = struct {
         } else if (std.mem.eql(u8, command, ".clear")) {
             // Clear screen (ANSI escape)
             try stdout.writeAll("\x1b[2J\x1b[H");
+        } else if (std.mem.eql(u8, command, ".history")) {
+            try self.showHistory(stdout, parts.next());
+        } else if (std.mem.eql(u8, command, ".multiline")) {
+            const arg = parts.next();
+            if (arg) |a| {
+                if (std.mem.eql(u8, a, "on")) {
+                    self.multiline_enabled = true;
+                    try stdout.writeAll("Multi-line input enabled\n");
+                } else if (std.mem.eql(u8, a, "off")) {
+                    self.multiline_enabled = false;
+                    try stdout.writeAll("Multi-line input disabled\n");
+                } else {
+                    output.printError(stderr, "Usage: .multiline on|off", .{});
+                }
+            } else {
+                try stdout.print("Multi-line: {s}\n", .{if (self.multiline_enabled) "on" else "off"});
+            }
         } else {
             output.printError(stderr, "Unknown command: {s}. Type .help for help.", .{command});
         }
+    }
+
+    fn showHistory(self: *Self, stdout: anytype, count_arg: ?[]const u8) !void {
+        const max_show: usize = if (count_arg) |arg|
+            std.fmt.parseInt(usize, arg, 10) catch 20
+        else
+            20;
+
+        const total = self.history.count();
+        if (total == 0) {
+            try stdout.writeAll("No history\n");
+            return;
+        }
+
+        const start = if (total > max_show) total - max_show else 0;
+        for (self.history.entries.items[start..], start..) |entry, i| {
+            try stdout.print("{d:>4}  {s}\n", .{ i + 1, entry });
+        }
+        try stdout.print("({d} entries total)\n", .{total});
     }
 
     /// Execute a Cypher query and display results
@@ -415,11 +594,17 @@ pub const Repl = struct {
             \\  .exit, .quit, .q    Exit the REPL
             \\  .format <fmt>       Set output format (table, json, csv)
             \\  .timing on|off      Toggle query timing display
+            \\  .multiline on|off   Toggle multi-line input mode
+            \\  .history [n]        Show last n commands (default: 20)
             \\  .labels, .tables    List all node labels
             \\  .types              List all edge types
             \\  .schema             Show inferred schema
             \\  .count              Show node/edge counts
             \\  .clear              Clear the screen
+            \\
+            \\Multi-line Input:
+            \\  Queries with unclosed brackets continue on the next line.
+            \\  Enter an empty line to execute a multi-line query.
             \\
             \\Cypher Examples:
             \\  CREATE (n:Person {name: "Alice"})

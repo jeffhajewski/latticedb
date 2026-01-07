@@ -7,6 +7,7 @@ const lattice = @import("lattice");
 const args_mod = @import("args.zig");
 const output = @import("output.zig");
 const repl_mod = @import("repl.zig");
+const import_export = @import("import_export.zig");
 
 const Args = args_mod.Args;
 const Command = args_mod.Command;
@@ -96,9 +97,9 @@ fn runCommand(
         .schema => try cmdSchema(allocator, stdout, stderr, parsed_args),
         .compact => try cmdCompact(stdout, stderr, parsed_args),
         .check => try cmdCheck(stdout, stderr, parsed_args),
-        .import => try cmdImport(stdout, stderr, parsed_args),
-        .@"export" => try cmdExport(stdout, stderr, parsed_args),
-        .dump => try cmdDump(stdout, stderr, parsed_args),
+        .import => try cmdImport(allocator, stdout, stderr, parsed_args),
+        .@"export" => try cmdExport(allocator, stdout, stderr, parsed_args),
+        .dump => try cmdDump(allocator, stdout, stderr, parsed_args),
     }
 }
 
@@ -625,37 +626,230 @@ fn cmdCheck(stdout: anytype, stderr: anytype, parsed_args: *const Args) !void {
     output.printInfo(stdout, "Integrity check not yet implemented", .{});
 }
 
-fn cmdImport(stdout: anytype, stderr: anytype, parsed_args: *const Args) !void {
+fn cmdImport(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    stderr: anytype,
+    parsed_args: *const Args,
+) !void {
     const path = parsed_args.path.?;
     const file = parsed_args.file orelse {
         output.printError(stderr, "No import file specified. Use --file=<path>", .{});
         return;
     };
 
-    // TODO: Import data
+    // Open database
+    var db = Database.open(allocator, path, .{}) catch |err| {
+        output.printError(stderr, "Failed to open database: {s}", .{@errorName(err)});
+        return;
+    };
+    defer db.close();
+
     output.printInfo(stdout, "Importing {s} into {s}...", .{ file, path });
-    output.printInfo(stdout, "Import not yet implemented", .{});
+
+    // Detect file format by extension
+    const is_json = std.mem.endsWith(u8, file, ".json");
+    const is_csv = std.mem.endsWith(u8, file, ".csv");
+
+    if (!is_json and !is_csv) {
+        output.printError(stderr, "Unknown file format. Use .json or .csv extension.", .{});
+        return;
+    }
+
+    const stats = if (is_json)
+        import_export.importJson(allocator, db, file, parsed_args.batch_size, parsed_args.on_error_skip)
+    else
+        import_export.importCsv(allocator, db, file, parsed_args.batch_size, parsed_args.on_error_skip);
+
+    if (stats) |s| {
+        switch (parsed_args.format) {
+            .table => {
+                output.printSuccess(stdout, "Import complete", .{});
+                try stdout.print("  Nodes imported: {d}\n", .{s.nodes_imported});
+                if (s.nodes_failed > 0) {
+                    try stdout.print("  Nodes failed:   {d}\n", .{s.nodes_failed});
+                }
+                try stdout.print("  Edges imported: {d}\n", .{s.edges_imported});
+                if (s.edges_failed > 0) {
+                    try stdout.print("  Edges failed:   {d}\n", .{s.edges_failed});
+                }
+            },
+            .json => {
+                try stdout.print("{{\"nodes_imported\":{d},\"nodes_failed\":{d},\"edges_imported\":{d},\"edges_failed\":{d}}}\n", .{
+                    s.nodes_imported,
+                    s.nodes_failed,
+                    s.edges_imported,
+                    s.edges_failed,
+                });
+            },
+            .csv => {
+                try stdout.writeAll("metric,count\n");
+                try stdout.print("nodes_imported,{d}\n", .{s.nodes_imported});
+                try stdout.print("nodes_failed,{d}\n", .{s.nodes_failed});
+                try stdout.print("edges_imported,{d}\n", .{s.edges_imported});
+                try stdout.print("edges_failed,{d}\n", .{s.edges_failed});
+            },
+        }
+    } else |err| {
+        output.printError(stderr, "Import failed: {s}", .{@errorName(err)});
+    }
 }
 
-fn cmdExport(stdout: anytype, stderr: anytype, parsed_args: *const Args) !void {
+fn cmdExport(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    stderr: anytype,
+    parsed_args: *const Args,
+) !void {
     const path = parsed_args.path.?;
     const file = parsed_args.file orelse {
         output.printError(stderr, "No export file specified. Use --file=<path>", .{});
         return;
     };
 
-    // TODO: Export data
+    // Open database
+    var db = Database.open(allocator, path, .{
+        .read_only = true,
+    }) catch |err| {
+        output.printError(stderr, "Failed to open database: {s}", .{@errorName(err)});
+        return;
+    };
+    defer db.close();
+
     output.printInfo(stdout, "Exporting {s} to {s}...", .{ path, file });
-    output.printInfo(stdout, "Export not yet implemented", .{});
+
+    // Detect file format by extension
+    const is_json = std.mem.endsWith(u8, file, ".json");
+    const is_csv = std.mem.endsWith(u8, file, ".csv");
+
+    if (!is_json and !is_csv) {
+        output.printError(stderr, "Unknown file format. Use .json or .csv extension.", .{});
+        return;
+    }
+
+    if (is_json) {
+        // Export to JSON
+        const out_file = std.fs.cwd().createFile(file, .{}) catch |err| {
+            output.printError(stderr, "Cannot create output file: {s}", .{@errorName(err)});
+            return;
+        };
+        defer out_file.close();
+
+        const writer = out_file.deprecatedWriter();
+
+        const stats = import_export.exportJson(allocator, db, writer, parsed_args.label_filter);
+
+        if (stats) |s| {
+            switch (parsed_args.format) {
+                .table => {
+                    output.printSuccess(stdout, "Export complete", .{});
+                    try stdout.print("  Nodes exported: {d}\n", .{s.nodes_exported});
+                    try stdout.print("  Edges exported: {d}\n", .{s.edges_exported});
+                },
+                .json => {
+                    try stdout.print("{{\"nodes_exported\":{d},\"edges_exported\":{d}}}\n", .{
+                        s.nodes_exported,
+                        s.edges_exported,
+                    });
+                },
+                .csv => {
+                    try stdout.writeAll("metric,count\n");
+                    try stdout.print("nodes_exported,{d}\n", .{s.nodes_exported});
+                    try stdout.print("edges_exported,{d}\n", .{s.edges_exported});
+                },
+            }
+        } else |err| {
+            output.printError(stderr, "Export failed: {s}", .{@errorName(err)});
+        }
+    } else {
+        // Export to CSV - creates two files: file_nodes.csv and file_edges.csv
+        const base_name = file[0 .. file.len - 4]; // Remove .csv
+
+        var nodes_path_buf: [1024]u8 = undefined;
+        const nodes_path = std.fmt.bufPrint(&nodes_path_buf, "{s}_nodes.csv", .{base_name}) catch {
+            output.printError(stderr, "Path too long", .{});
+            return;
+        };
+
+        var edges_path_buf: [1024]u8 = undefined;
+        const edges_path = std.fmt.bufPrint(&edges_path_buf, "{s}_edges.csv", .{base_name}) catch {
+            output.printError(stderr, "Path too long", .{});
+            return;
+        };
+
+        const nodes_file = std.fs.cwd().createFile(nodes_path, .{}) catch |err| {
+            output.printError(stderr, "Cannot create nodes file: {s}", .{@errorName(err)});
+            return;
+        };
+        defer nodes_file.close();
+
+        const edges_file = std.fs.cwd().createFile(edges_path, .{}) catch |err| {
+            output.printError(stderr, "Cannot create edges file: {s}", .{@errorName(err)});
+            return;
+        };
+        defer edges_file.close();
+
+        const nodes_writer = nodes_file.deprecatedWriter();
+        const edges_writer = edges_file.deprecatedWriter();
+
+        const stats = import_export.exportCsv(allocator, db, nodes_writer, edges_writer, parsed_args.label_filter);
+
+        if (stats) |s| {
+            switch (parsed_args.format) {
+                .table => {
+                    output.printSuccess(stdout, "Export complete", .{});
+                    try stdout.print("  Nodes exported: {d} -> {s}\n", .{ s.nodes_exported, nodes_path });
+                    try stdout.print("  Edges exported: {d} -> {s}\n", .{ s.edges_exported, edges_path });
+                },
+                .json => {
+                    try stdout.print("{{\"nodes_exported\":{d},\"edges_exported\":{d},\"nodes_file\":\"{s}\",\"edges_file\":\"{s}\"}}\n", .{
+                        s.nodes_exported,
+                        s.edges_exported,
+                        nodes_path,
+                        edges_path,
+                    });
+                },
+                .csv => {
+                    try stdout.writeAll("metric,value\n");
+                    try stdout.print("nodes_exported,{d}\n", .{s.nodes_exported});
+                    try stdout.print("edges_exported,{d}\n", .{s.edges_exported});
+                    try stdout.print("nodes_file,{s}\n", .{nodes_path});
+                    try stdout.print("edges_file,{s}\n", .{edges_path});
+                },
+            }
+        } else |err| {
+            output.printError(stderr, "Export failed: {s}", .{@errorName(err)});
+        }
+    }
 }
 
-fn cmdDump(stdout: anytype, stderr: anytype, parsed_args: *const Args) !void {
-    _ = stderr;
+fn cmdDump(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    stderr: anytype,
+    parsed_args: *const Args,
+) !void {
     const path = parsed_args.path.?;
 
-    // TODO: Dump database
-    output.printInfo(stdout, "Dumping {s}...", .{path});
-    output.printInfo(stdout, "Dump not yet implemented", .{});
+    // Open database
+    var db = Database.open(allocator, path, .{
+        .read_only = true,
+    }) catch |err| {
+        output.printError(stderr, "Failed to open database: {s}", .{@errorName(err)});
+        return;
+    };
+    defer db.close();
+
+    // Dump to stdout as JSON
+    const stats = import_export.exportJson(allocator, db, stdout, parsed_args.label_filter);
+
+    if (stats) |s| {
+        // Print stats to stderr so they don't mix with JSON output
+        const stderr_writer = std.fs.File.stderr().deprecatedWriter();
+        try stderr_writer.print("Dumped {d} nodes, {d} edges\n", .{ s.nodes_exported, s.edges_exported });
+    } else |err| {
+        output.printError(stderr, "Dump failed: {s}", .{@errorName(err)});
+    }
 }
 
 // ============================================

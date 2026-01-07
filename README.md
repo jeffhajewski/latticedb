@@ -4,6 +4,12 @@
 
 Lattice is a single-file, embeddable knowledge graph database designed for AI and RAG applications. It combines property graph storage, vector similarity search, and full-text search in one lightweight package.
 
+## Install
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/jeffhajewski/latticedb/main/dist/install.sh | bash
+```
+
 ```cypher
 -- Find documents similar to a query, then traverse to related concepts
 MATCH (chunk:Chunk)-[:PART_OF]->(doc:Document)

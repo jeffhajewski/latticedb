@@ -405,6 +405,7 @@ pub const BTree = struct {
 
         // If root split, create new root
         if (result.split) |split_info| {
+            defer self.allocator.free(@constCast(split_info.key));
             try self.createNewRoot(split_info.key, result.page_id, split_info.new_page);
         }
     }
@@ -522,25 +523,52 @@ pub const BTree = struct {
         const total = num_entries + 1;
         const split_point = total / 2;
 
-        // Temporary storage for entries
+        // IMPORTANT: Read sibling pointer BEFORE reinitializing old_buf
+        const old_next = LeafNode.getNextLeaf(old_buf);
+
+        // Calculate total size needed for key/value data copies
+        var total_data_size: usize = 0;
+        for (0..num_entries) |i| {
+            const entry = LeafNode.getEntry(old_buf, @intCast(i));
+            total_data_size += entry.key.len + entry.value.len;
+        }
+
+        // Allocate temporary storage for entries and their data
+        // We must copy entry data because entries point into old_buf which we reinitialize
         var entries = self.allocator.alloc(Entry, total) catch return BTreeError.OutOfMemory;
         defer self.allocator.free(entries);
 
-        // Collect existing entries
+        var data_buffer = self.allocator.alloc(u8, total_data_size) catch {
+            return BTreeError.OutOfMemory;
+        };
+        defer self.allocator.free(data_buffer);
+
+        // Collect existing entries, copying their data to avoid aliasing
+        var data_offset: usize = 0;
         var j: usize = 0;
         for (0..num_entries) |i| {
             if (i == slot) {
+                // New entry doesn't need copying - it comes from outside old_buf
                 entries[j] = .{ .key = key, .value = value };
                 j += 1;
             }
-            entries[j] = LeafNode.getEntry(old_buf, @intCast(i));
+            const entry = LeafNode.getEntry(old_buf, @intCast(i));
+            // Copy key
+            const key_copy = data_buffer[data_offset..][0..entry.key.len];
+            @memcpy(key_copy, entry.key);
+            data_offset += entry.key.len;
+            // Copy value
+            const value_copy = data_buffer[data_offset..][0..entry.value.len];
+            @memcpy(value_copy, entry.value);
+            data_offset += entry.value.len;
+            entries[j] = .{ .key = key_copy, .value = value_copy };
             j += 1;
         }
         if (slot == num_entries) {
             entries[j] = .{ .key = key, .value = value };
         }
 
-        // Reinitialize old leaf
+        // Reinitialize old leaf - now safe because we copied all data
         LeafNode.init(old_buf);
 
         // Write first half to old page
@@ -554,7 +582,6 @@ pub const BTree = struct {
         }
 
         // Update sibling pointers
-        const old_next = LeafNode.getNextLeaf(old_buf);
         LeafNode.setNextLeaf(old_buf, new_page_id);
         LeafNode.setPrevLeaf(new_buf, old_page_id);
         LeafNode.setNextLeaf(new_buf, old_next);

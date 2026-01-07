@@ -1,18 +1,24 @@
 //! Lattice unit test runner.
 //!
-//! Imports and runs all unit tests from the source modules.
+//! Imports and runs all unit tests from the source modules and behavioral tests.
 
 const std = @import("std");
 
 // Import the lattice module to run its tests
 const lattice = @import("lattice");
 
+// Import behavioral test modules
+const btree_test = @import("btree_test.zig");
+const wal_test = @import("wal_test.zig");
+const buffer_pool_test = @import("buffer_pool_test.zig");
+const page_manager_test = @import("page_manager_test.zig");
+
 // Re-export tests from all modules
 test {
     // Core types
     _ = lattice.core.types;
 
-    // Storage
+    // Storage - inline tests
     _ = lattice.storage.page;
     _ = lattice.storage.btree;
 
@@ -33,6 +39,12 @@ test {
 
     // C API
     _ = lattice.c_api;
+
+    // Behavioral tests
+    _ = btree_test;
+    _ = wal_test;
+    _ = buffer_pool_test;
+    _ = page_manager_test;
 }
 
 test "lattice version" {

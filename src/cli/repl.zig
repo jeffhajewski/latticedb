@@ -267,7 +267,7 @@ pub const Repl = struct {
         } else if (std.mem.eql(u8, command, ".types")) {
             try self.showEdgeTypes(stdout, stderr);
         } else if (std.mem.eql(u8, command, ".schema")) {
-            try stdout.writeAll("Schema inference not yet implemented\n");
+            try self.showSchema(stdout, stderr);
         } else if (std.mem.eql(u8, command, ".count")) {
             try self.showCounts(stdout);
         } else if (std.mem.eql(u8, command, ".clear")) {
@@ -566,24 +566,110 @@ pub const Repl = struct {
     }
 
     fn showLabels(self: *Self, stdout: anytype, stderr: anytype) !void {
-        _ = stderr;
-        // TODO: Get actual labels from database when API is available
-        _ = self;
-        try stdout.writeAll("Label listing not yet implemented\n");
+        const labels = self.db.getAllLabels() catch |err| {
+            output.printError(stderr, "Failed to get labels: {s}", .{@errorName(err)});
+            return;
+        };
+        defer self.db.freeLabelInfos(labels);
+
+        if (labels.len == 0) {
+            try stdout.writeAll("No labels found\n");
+            return;
+        }
+
+        try stdout.writeAll("Labels:\n");
+        for (labels) |info| {
+            try stdout.print("  {s} ({d} node{s})\n", .{
+                info.name,
+                info.count,
+                if (info.count == 1) "" else "s",
+            });
+        }
+        try stdout.print("{d} label{s} total\n", .{
+            labels.len,
+            if (labels.len == 1) "" else "s",
+        });
     }
 
     fn showEdgeTypes(self: *Self, stdout: anytype, stderr: anytype) !void {
-        _ = stderr;
-        // TODO: Get actual edge types from database when API is available
-        _ = self;
-        try stdout.writeAll("Edge type listing not yet implemented\n");
+        const types = self.db.getAllEdgeTypes() catch |err| {
+            output.printError(stderr, "Failed to get edge types: {s}", .{@errorName(err)});
+            return;
+        };
+        defer self.db.freeEdgeTypeInfos(types);
+
+        if (types.len == 0) {
+            try stdout.writeAll("No edge types found\n");
+            return;
+        }
+
+        try stdout.writeAll("Edge Types:\n");
+        for (types) |info| {
+            try stdout.print("  {s} ({d} edge{s})\n", .{
+                info.name,
+                info.count,
+                if (info.count == 1) "" else "s",
+            });
+        }
+        try stdout.print("{d} edge type{s} total\n", .{
+            types.len,
+            if (types.len == 1) "" else "s",
+        });
+    }
+
+    fn showSchema(self: *Self, stdout: anytype, stderr: anytype) !void {
+        const labels = self.db.getAllLabels() catch |err| {
+            output.printError(stderr, "Failed to get labels: {s}", .{@errorName(err)});
+            return;
+        };
+        defer self.db.freeLabelInfos(labels);
+
+        const edge_types = self.db.getAllEdgeTypes() catch |err| {
+            output.printError(stderr, "Failed to get edge types: {s}", .{@errorName(err)});
+            return;
+        };
+        defer self.db.freeEdgeTypeInfos(edge_types);
+
+        try stdout.writeAll("Schema\n");
+        try stdout.writeAll("══════\n\n");
+
+        if (labels.len == 0) {
+            try stdout.writeAll("No node labels defined\n\n");
+        } else {
+            try stdout.writeAll("Node Labels:\n");
+            for (labels) |info| {
+                try stdout.print("  (:{s}) - {d} node(s)\n", .{ info.name, info.count });
+            }
+            try stdout.writeAll("\n");
+        }
+
+        if (edge_types.len == 0) {
+            try stdout.writeAll("No edge types defined\n");
+        } else {
+            try stdout.writeAll("Edge Types:\n");
+            for (edge_types) |info| {
+                try stdout.print("  [:{s}] - {d} edge(s)\n", .{ info.name, info.count });
+            }
+        }
+
+        try stdout.writeAll("\n");
+        try stdout.print("Total: {d} label(s), {d} edge type(s)\n", .{ labels.len, edge_types.len });
     }
 
     fn showCounts(self: *Self, stdout: anytype) !void {
         const node_count = self.db.nodeCount();
         const edge_count = self.db.edgeCount();
-        try stdout.print("Nodes: {d}\n", .{node_count});
-        try stdout.print("Edges: {d}\n", .{edge_count});
+
+        const labels = self.db.getAllLabels() catch &[_]Database.LabelInfo{};
+        defer if (labels.len > 0) self.db.freeLabelInfos(@constCast(labels));
+
+        const edge_types = self.db.getAllEdgeTypes() catch &[_]Database.EdgeTypeInfo{};
+        defer if (edge_types.len > 0) self.db.freeEdgeTypeInfos(@constCast(edge_types));
+
+        try stdout.print("Nodes:      {d}\n", .{node_count});
+        try stdout.print("Edges:      {d}\n", .{edge_count});
+        try stdout.print("Labels:     {d}\n", .{labels.len});
+        try stdout.print("Edge Types: {d}\n", .{edge_types.len});
     }
 
     fn printReplHelp(self: *Self, stdout: anytype) !void {

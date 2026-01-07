@@ -91,9 +91,9 @@ fn runCommand(
         .count => try cmdCount(allocator, stdout, stderr, parsed_args),
         .query => try cmdQuery(allocator, stdout, stderr, parsed_args),
         .exec => try cmdExec(allocator, stdout, stderr, parsed_args),
-        .labels => try cmdLabels(allocator, stdout, parsed_args),
-        .types => try cmdTypes(allocator, stdout, parsed_args),
-        .schema => try cmdSchema(allocator, stdout, parsed_args),
+        .labels => try cmdLabels(allocator, stdout, stderr, parsed_args),
+        .types => try cmdTypes(allocator, stdout, stderr, parsed_args),
+        .schema => try cmdSchema(allocator, stdout, stderr, parsed_args),
         .compact => try cmdCompact(stdout, stderr, parsed_args),
         .check => try cmdCheck(stdout, stderr, parsed_args),
         .import => try cmdImport(stdout, stderr, parsed_args),
@@ -226,7 +226,7 @@ fn cmdCount(
     const path = parsed_args.path.?;
 
     // Open database
-    const db = Database.open(allocator, path, .{
+    var db = Database.open(allocator, path, .{
         .read_only = true,
     }) catch |err| {
         output.printError(stderr, "Failed to open database: {s}", .{@errorName(err)});
@@ -237,9 +237,15 @@ fn cmdCount(
     const node_count = db.nodeCount();
     const edge_count = db.edgeCount();
 
-    // TODO: Get actual label and edge type counts when API is available
-    const label_count: u64 = 0;
-    const edge_type_count: u64 = 0;
+    // Get label and edge type counts
+    const labels = db.getAllLabels() catch &[_]Database.LabelInfo{};
+    defer if (labels.len > 0) db.freeLabelInfos(@constCast(labels));
+
+    const edge_types = db.getAllEdgeTypes() catch &[_]Database.EdgeTypeInfo{};
+    defer if (edge_types.len > 0) db.freeEdgeTypeInfos(@constCast(edge_types));
+
+    const label_count: u64 = labels.len;
+    const edge_type_count: u64 = edge_types.len;
 
     switch (parsed_args.format) {
         .table => {
@@ -355,55 +361,250 @@ fn cmdExec(
 fn cmdLabels(
     allocator: std.mem.Allocator,
     stdout: anytype,
+    stderr: anytype,
     parsed_args: *const Args,
 ) !void {
-    _ = allocator;
+    const path = parsed_args.path.?;
 
-    // TODO: List labels from database
+    // Open database
+    var db = Database.open(allocator, path, .{
+        .read_only = true,
+    }) catch |err| {
+        output.printError(stderr, "Failed to open database: {s}", .{@errorName(err)});
+        return;
+    };
+    defer db.close();
+
+    // Get all labels
+    const labels = db.getAllLabels() catch |err| {
+        output.printError(stderr, "Failed to get labels: {s}", .{@errorName(err)});
+        return;
+    };
+    defer db.freeLabelInfos(labels);
+
     switch (parsed_args.format) {
         .table => {
-            try stdout.writeAll("┌───────┬───────┐\n");
-            try stdout.writeAll("│ Label │ Count │\n");
-            try stdout.writeAll("├───────┼───────┤\n");
-            try stdout.writeAll("│ (none)│ 0     │\n");
-            try stdout.writeAll("└───────┴───────┘\n");
+            if (labels.len == 0) {
+                try stdout.writeAll("No labels found\n");
+                return;
+            }
+
+            // Calculate max label width for formatting
+            var max_width: usize = 5; // "Label"
+            for (labels) |info| {
+                if (info.name.len > max_width) max_width = info.name.len;
+            }
+
+            // Print table header
+            try stdout.writeAll("┌─");
+            for (0..max_width) |_| try stdout.writeAll("─");
+            try stdout.writeAll("─┬────────────┐\n");
+
+            try stdout.writeAll("│ ");
+            try stdout.print("{s}", .{"Label"});
+            for (0..max_width - 5) |_| try stdout.writeAll(" ");
+            try stdout.writeAll(" │ Count      │\n");
+
+            try stdout.writeAll("├─");
+            for (0..max_width) |_| try stdout.writeAll("─");
+            try stdout.writeAll("─┼────────────┤\n");
+
+            // Print rows
+            for (labels) |info| {
+                try stdout.writeAll("│ ");
+                try stdout.print("{s}", .{info.name});
+                for (0..max_width - info.name.len) |_| try stdout.writeAll(" ");
+                try stdout.print(" │ {d: >10} │\n", .{info.count});
+            }
+
+            try stdout.writeAll("└─");
+            for (0..max_width) |_| try stdout.writeAll("─");
+            try stdout.writeAll("─┴────────────┘\n");
+
+            try stdout.print("{d} label(s)\n", .{labels.len});
         },
-        .json => try stdout.writeAll("{\"labels\":[]}\n"),
-        .csv => try stdout.writeAll("label,count\n"),
+        .json => {
+            try stdout.writeAll("{\"labels\":[");
+            for (labels, 0..) |info, i| {
+                if (i > 0) try stdout.writeAll(",");
+                try stdout.print("{{\"name\":\"{s}\",\"count\":{d}}}", .{ info.name, info.count });
+            }
+            try stdout.writeAll("]}\n");
+        },
+        .csv => {
+            try stdout.writeAll("label,count\n");
+            for (labels) |info| {
+                try stdout.print("{s},{d}\n", .{ info.name, info.count });
+            }
+        },
     }
 }
 
 fn cmdTypes(
     allocator: std.mem.Allocator,
     stdout: anytype,
+    stderr: anytype,
     parsed_args: *const Args,
 ) !void {
-    _ = allocator;
+    const path = parsed_args.path.?;
 
-    // TODO: List edge types from database
+    // Open database
+    var db = Database.open(allocator, path, .{
+        .read_only = true,
+    }) catch |err| {
+        output.printError(stderr, "Failed to open database: {s}", .{@errorName(err)});
+        return;
+    };
+    defer db.close();
+
+    // Get all edge types
+    const types = db.getAllEdgeTypes() catch |err| {
+        output.printError(stderr, "Failed to get edge types: {s}", .{@errorName(err)});
+        return;
+    };
+    defer db.freeEdgeTypeInfos(types);
+
     switch (parsed_args.format) {
         .table => {
-            try stdout.writeAll("┌──────┬───────┐\n");
-            try stdout.writeAll("│ Type │ Count │\n");
-            try stdout.writeAll("├──────┼───────┤\n");
-            try stdout.writeAll("│(none)│ 0     │\n");
-            try stdout.writeAll("└──────┴───────┘\n");
+            if (types.len == 0) {
+                try stdout.writeAll("No edge types found\n");
+                return;
+            }
+
+            // Calculate max type width for formatting
+            var max_width: usize = 4; // "Type"
+            for (types) |info| {
+                if (info.name.len > max_width) max_width = info.name.len;
+            }
+
+            // Print table header
+            try stdout.writeAll("┌─");
+            for (0..max_width) |_| try stdout.writeAll("─");
+            try stdout.writeAll("─┬────────────┐\n");
+
+            try stdout.writeAll("│ ");
+            try stdout.print("{s}", .{"Type"});
+            for (0..max_width - 4) |_| try stdout.writeAll(" ");
+            try stdout.writeAll(" │ Count      │\n");
+
+            try stdout.writeAll("├─");
+            for (0..max_width) |_| try stdout.writeAll("─");
+            try stdout.writeAll("─┼────────────┤\n");
+
+            // Print rows
+            for (types) |info| {
+                try stdout.writeAll("│ ");
+                try stdout.print("{s}", .{info.name});
+                for (0..max_width - info.name.len) |_| try stdout.writeAll(" ");
+                try stdout.print(" │ {d: >10} │\n", .{info.count});
+            }
+
+            try stdout.writeAll("└─");
+            for (0..max_width) |_| try stdout.writeAll("─");
+            try stdout.writeAll("─┴────────────┘\n");
+
+            try stdout.print("{d} edge type(s)\n", .{types.len});
         },
-        .json => try stdout.writeAll("{\"types\":[]}\n"),
-        .csv => try stdout.writeAll("type,count\n"),
+        .json => {
+            try stdout.writeAll("{\"types\":[");
+            for (types, 0..) |info, i| {
+                if (i > 0) try stdout.writeAll(",");
+                try stdout.print("{{\"name\":\"{s}\",\"count\":{d}}}", .{ info.name, info.count });
+            }
+            try stdout.writeAll("]}\n");
+        },
+        .csv => {
+            try stdout.writeAll("type,count\n");
+            for (types) |info| {
+                try stdout.print("{s},{d}\n", .{ info.name, info.count });
+            }
+        },
     }
 }
 
 fn cmdSchema(
     allocator: std.mem.Allocator,
     stdout: anytype,
+    stderr: anytype,
     parsed_args: *const Args,
 ) !void {
-    _ = allocator;
-    _ = parsed_args;
+    const path = parsed_args.path.?;
 
-    // TODO: Infer schema from database
-    try stdout.writeAll("Schema inference not yet implemented\n");
+    // Open database
+    var db = Database.open(allocator, path, .{
+        .read_only = true,
+    }) catch |err| {
+        output.printError(stderr, "Failed to open database: {s}", .{@errorName(err)});
+        return;
+    };
+    defer db.close();
+
+    // Get all labels
+    const labels = db.getAllLabels() catch |err| {
+        output.printError(stderr, "Failed to get labels: {s}", .{@errorName(err)});
+        return;
+    };
+    defer db.freeLabelInfos(labels);
+
+    // Get all edge types
+    const edge_types = db.getAllEdgeTypes() catch |err| {
+        output.printError(stderr, "Failed to get edge types: {s}", .{@errorName(err)});
+        return;
+    };
+    defer db.freeEdgeTypeInfos(edge_types);
+
+    switch (parsed_args.format) {
+        .table => {
+            try stdout.writeAll("Schema\n");
+            try stdout.writeAll("══════\n\n");
+
+            // Print node labels
+            if (labels.len == 0) {
+                try stdout.writeAll("No node labels defined\n\n");
+            } else {
+                try stdout.writeAll("Node Labels:\n");
+                for (labels) |info| {
+                    try stdout.print("  (:{s}) - {d} node(s)\n", .{ info.name, info.count });
+                }
+                try stdout.writeAll("\n");
+            }
+
+            // Print edge types
+            if (edge_types.len == 0) {
+                try stdout.writeAll("No edge types defined\n");
+            } else {
+                try stdout.writeAll("Edge Types:\n");
+                for (edge_types) |info| {
+                    try stdout.print("  [:{s}] - {d} edge(s)\n", .{ info.name, info.count });
+                }
+            }
+
+            try stdout.writeAll("\n");
+            try stdout.print("Total: {d} label(s), {d} edge type(s)\n", .{ labels.len, edge_types.len });
+        },
+        .json => {
+            try stdout.writeAll("{\"schema\":{\"labels\":[");
+            for (labels, 0..) |info, i| {
+                if (i > 0) try stdout.writeAll(",");
+                try stdout.print("{{\"name\":\"{s}\",\"count\":{d}}}", .{ info.name, info.count });
+            }
+            try stdout.writeAll("],\"edge_types\":[");
+            for (edge_types, 0..) |info, i| {
+                if (i > 0) try stdout.writeAll(",");
+                try stdout.print("{{\"name\":\"{s}\",\"count\":{d}}}", .{ info.name, info.count });
+            }
+            try stdout.writeAll("]}}\n");
+        },
+        .csv => {
+            try stdout.writeAll("type,name,count\n");
+            for (labels) |info| {
+                try stdout.print("label,{s},{d}\n", .{ info.name, info.count });
+            }
+            for (edge_types) |info| {
+                try stdout.print("edge_type,{s},{d}\n", .{ info.name, info.count });
+            }
+        },
+    }
 }
 
 fn cmdCompact(stdout: anytype, stderr: anytype, parsed_args: *const Args) !void {

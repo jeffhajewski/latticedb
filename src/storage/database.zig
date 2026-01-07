@@ -1003,6 +1003,158 @@ pub const Database = struct {
     // Label Operations
     // ========================================================================
 
+    /// Label info with name and count
+    pub const LabelInfo = struct {
+        name: []const u8,
+        count: u64,
+    };
+
+    /// Edge type info with name and count
+    pub const EdgeTypeInfo = struct {
+        name: []const u8,
+        count: u64,
+    };
+
+    /// Get all labels in the database with their node counts.
+    /// Returns an allocated slice that the caller must free with freeLabelInfos.
+    pub fn getAllLabels(self: *Self) DatabaseError![]LabelInfo {
+        // Iterate the label tree to find unique label_ids
+        var label_set = std.AutoHashMap(symbols_mod.SymbolId, u64).init(self.allocator);
+        defer label_set.deinit();
+
+        // Iterate all entries in the label tree
+        var iter = self.label_tree.range(null, null) catch {
+            return DatabaseError.IoError;
+        };
+        defer iter.deinit();
+
+        while (true) {
+            const entry = iter.next() catch {
+                break;
+            };
+            if (entry) |e| {
+                // Parse the label key: (label_id: u16, node_id: u64)
+                if (e.key.len >= 2) {
+                    const label_id = std.mem.readInt(u16, e.key[0..2], .big);
+                    // Increment count for this label
+                    const gop = label_set.getOrPut(label_id) catch {
+                        return DatabaseError.OutOfMemory;
+                    };
+                    if (gop.found_existing) {
+                        gop.value_ptr.* += 1;
+                    } else {
+                        gop.value_ptr.* = 1;
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Convert to array of LabelInfo
+        var result: std.ArrayList(LabelInfo) = .empty;
+        errdefer {
+            for (result.items) |info| {
+                self.allocator.free(info.name);
+            }
+            result.deinit(self.allocator);
+        }
+
+        var set_iter = label_set.iterator();
+        while (set_iter.next()) |kv| {
+            const label_name = self.symbol_table.resolve(kv.key_ptr.*) catch continue;
+            result.append(self.allocator, .{
+                .name = label_name,
+                .count = kv.value_ptr.*,
+            }) catch {
+                self.allocator.free(label_name);
+                return DatabaseError.OutOfMemory;
+            };
+        }
+
+        return result.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+    }
+
+    /// Free label info slice returned by getAllLabels.
+    pub fn freeLabelInfos(self: *Self, labels: []LabelInfo) void {
+        for (labels) |info| {
+            self.allocator.free(info.name);
+        }
+        self.allocator.free(labels);
+    }
+
+    /// Get all edge types in the database with their counts.
+    /// Returns an allocated slice that the caller must free with freeEdgeTypeInfos.
+    pub fn getAllEdgeTypes(self: *Self) DatabaseError![]EdgeTypeInfo {
+        // Iterate the edge tree to find unique type_ids from outgoing edges only
+        var type_set = std.AutoHashMap(symbols_mod.SymbolId, u64).init(self.allocator);
+        defer type_set.deinit();
+
+        // Iterate all entries in the edge tree
+        var iter = self.edge_tree.range(null, null) catch {
+            return DatabaseError.IoError;
+        };
+        defer iter.deinit();
+
+        while (true) {
+            const entry = iter.next() catch {
+                break;
+            };
+            if (entry) |e| {
+                // Parse edge key: (source_id: u64, direction: u8, type_id: u16, target_id: u64)
+                if (e.key.len >= 11) {
+                    const direction = e.key[8];
+                    // Only count outgoing edges (direction=0) to avoid double counting
+                    if (direction == 0) {
+                        const type_id = std.mem.readInt(u16, e.key[9..11], .big);
+                        // Increment count for this edge type
+                        const gop = type_set.getOrPut(type_id) catch {
+                            return DatabaseError.OutOfMemory;
+                        };
+                        if (gop.found_existing) {
+                            gop.value_ptr.* += 1;
+                        } else {
+                            gop.value_ptr.* = 1;
+                        }
+                    }
+                }
+            } else {
+                break;
+            }
+        }
+
+        // Convert to array of EdgeTypeInfo
+        var result: std.ArrayList(EdgeTypeInfo) = .empty;
+        errdefer {
+            for (result.items) |info| {
+                self.allocator.free(info.name);
+            }
+            result.deinit(self.allocator);
+        }
+
+        var set_iter = type_set.iterator();
+        while (set_iter.next()) |kv| {
+            const type_name = self.symbol_table.resolve(kv.key_ptr.*) catch continue;
+            result.append(self.allocator, .{
+                .name = type_name,
+                .count = kv.value_ptr.*,
+            }) catch {
+                self.allocator.free(type_name);
+                return DatabaseError.OutOfMemory;
+            };
+        }
+
+        return result.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+    }
+
+    /// Free edge type info slice returned by getAllEdgeTypes.
+    pub fn freeEdgeTypeInfos(self: *Self, edge_types: []EdgeTypeInfo) void {
+        for (edge_types) |info| {
+            self.allocator.free(info.name);
+        }
+        self.allocator.free(edge_types);
+    }
+
     /// Get all nodes with a specific label
     pub fn getNodesByLabel(self: *Self, label: []const u8) ![]NodeId {
         const label_id = self.symbol_table.intern(label) catch {
@@ -1479,4 +1631,77 @@ test "edge traversal" {
     try std.testing.expectEqual(@as(usize, 1), incoming.len);
     try std.testing.expectEqual(alice, incoming[0].source);
     try std.testing.expectEqual(charlie, incoming[0].target);
+}
+
+test "introspection: getAllLabels and getAllEdgeTypes" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_introspection_test.ltdb";
+
+    // Create database
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = false,
+            .enable_fts = false,
+        },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    // Initially no labels or edge types
+    const initial_labels = try db.getAllLabels();
+    defer db.freeLabelInfos(initial_labels);
+    try std.testing.expectEqual(@as(usize, 0), initial_labels.len);
+
+    const initial_types = try db.getAllEdgeTypes();
+    defer db.freeEdgeTypeInfos(initial_types);
+    try std.testing.expectEqual(@as(usize, 0), initial_types.len);
+
+    // Create nodes with labels
+    const alice = try db.createNode(&[_][]const u8{"Person"});
+    const bob = try db.createNode(&[_][]const u8{"Person"});
+    const acme = try db.createNode(&[_][]const u8{"Company"});
+
+    // Create edges
+    try db.createEdge(alice, bob, "KNOWS");
+    try db.createEdge(alice, acme, "WORKS_AT");
+    try db.createEdge(bob, acme, "WORKS_AT");
+
+    // Check labels
+    const labels = try db.getAllLabels();
+    defer db.freeLabelInfos(labels);
+    try std.testing.expectEqual(@as(usize, 2), labels.len);
+
+    // Check individual labels (order may vary)
+    var person_count: u64 = 0;
+    var company_count: u64 = 0;
+    for (labels) |info| {
+        if (std.mem.eql(u8, info.name, "Person")) {
+            person_count = info.count;
+        } else if (std.mem.eql(u8, info.name, "Company")) {
+            company_count = info.count;
+        }
+    }
+    try std.testing.expectEqual(@as(u64, 2), person_count);
+    try std.testing.expectEqual(@as(u64, 1), company_count);
+
+    // Check edge types
+    const edge_types = try db.getAllEdgeTypes();
+    defer db.freeEdgeTypeInfos(edge_types);
+    try std.testing.expectEqual(@as(usize, 2), edge_types.len);
+
+    // Check individual edge types (order may vary)
+    var knows_count: u64 = 0;
+    var works_at_count: u64 = 0;
+    for (edge_types) |info| {
+        if (std.mem.eql(u8, info.name, "KNOWS")) {
+            knows_count = info.count;
+        } else if (std.mem.eql(u8, info.name, "WORKS_AT")) {
+            works_at_count = info.count;
+        }
+    }
+    try std.testing.expectEqual(@as(u64, 1), knows_count);
+    try std.testing.expectEqual(@as(u64, 2), works_at_count);
 }

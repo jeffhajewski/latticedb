@@ -12,6 +12,7 @@ const btree_test = @import("btree_test.zig");
 const wal_test = @import("wal_test.zig");
 const buffer_pool_test = @import("buffer_pool_test.zig");
 const page_manager_test = @import("page_manager_test.zig");
+const graph_test = @import("graph_test.zig");
 
 // Re-export tests from all modules
 test {
@@ -40,11 +41,18 @@ test {
     // C API
     _ = lattice.c_api;
 
+    // Graph layer - inline tests
+    _ = lattice.graph.symbols;
+    _ = lattice.graph.node;
+    _ = lattice.graph.edge;
+    _ = lattice.graph.label_index;
+
     // Behavioral tests
     _ = btree_test;
     _ = wal_test;
     _ = buffer_pool_test;
     _ = page_manager_test;
+    _ = graph_test;
 }
 
 test "lattice version" {

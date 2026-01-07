@@ -6,10 +6,12 @@ const std = @import("std");
 const lattice = @import("lattice");
 const args_mod = @import("args.zig");
 const output = @import("output.zig");
+const repl_mod = @import("repl.zig");
 
 const Args = args_mod.Args;
 const Command = args_mod.Command;
 const OutputFormat = args_mod.OutputFormat;
+const Repl = repl_mod.Repl;
 
 // Database types
 const Database = lattice.storage.database.Database;
@@ -274,15 +276,18 @@ fn cmdQuery(
     stderr: anytype,
     parsed_args: *const Args,
 ) !void {
-    _ = allocator;
     const path = parsed_args.path.?;
-    _ = stderr;
 
-    // TODO: Implement REPL
-    try stdout.print("LatticeDB v{s}\n", .{VERSION});
-    try stdout.print("Connected to: {s}\n", .{path});
-    try stdout.writeAll("Type .help for help, .exit to quit\n\n");
-    try stdout.writeAll("Interactive query shell not yet implemented\n");
+    // Open database
+    const db = Database.open(allocator, path, .{}) catch |err| {
+        output.printError(stderr, "Failed to open database: {s}", .{@errorName(err)});
+        return;
+    };
+    defer db.close();
+
+    // Start REPL
+    var repl = Repl.init(allocator, db, parsed_args.format);
+    try repl.run(stdout, stderr);
 }
 
 fn cmdExec(
@@ -291,16 +296,60 @@ fn cmdExec(
     stderr: anytype,
     parsed_args: *const Args,
 ) !void {
-    _ = allocator;
+    const path = parsed_args.path.?;
 
-    const query_string = parsed_args.query_string orelse {
-        output.printError(stderr, "No query provided. Use --query=\"...\" or provide as positional argument", .{});
+    // Get query string from --query or --file
+    var query_string: []const u8 = undefined;
+    var query_owned = false;
+
+    if (parsed_args.query_string) |qs| {
+        query_string = qs;
+    } else if (parsed_args.file) |file_path| {
+        // Read query from file
+        const file = std.fs.cwd().openFile(file_path, .{}) catch |err| {
+            output.printError(stderr, "Cannot open query file: {s}", .{@errorName(err)});
+            return;
+        };
+        defer file.close();
+
+        query_string = file.readToEndAlloc(allocator, 1024 * 1024) catch |err| {
+            output.printError(stderr, "Cannot read query file: {s}", .{@errorName(err)});
+            return;
+        };
+        query_owned = true;
+    } else {
+        output.printError(stderr, "No query provided. Use --query=\"...\" or --file=<path>", .{});
+        return;
+    }
+    defer if (query_owned) allocator.free(query_string);
+
+    // Open database
+    const db = Database.open(allocator, path, .{}) catch |err| {
+        output.printError(stderr, "Failed to open database: {s}", .{@errorName(err)});
         return;
     };
+    defer db.close();
 
-    // TODO: Execute query
-    _ = query_string;
-    output.printInfo(stdout, "Query execution not yet implemented", .{});
+    // Execute query
+    var result = db.query(query_string) catch |err| {
+        const err_msg = switch (err) {
+            error.ParseError => "Parse error: invalid Cypher syntax",
+            error.SemanticError => "Semantic error: invalid query structure",
+            error.PlanError => "Plan error: could not create execution plan",
+            error.ExecutionError => "Execution error: query failed",
+            error.OutOfMemory => "Out of memory",
+        };
+        output.printError(stderr, "{s}", .{err_msg});
+        return;
+    };
+    defer result.deinit();
+
+    // Display result using REPL's display logic
+    var repl = Repl.init(allocator, db, parsed_args.format);
+    repl.show_timing = false; // No timing for exec command
+    repl.displayResult(&result, stdout, 0) catch |err| {
+        output.printError(stderr, "Failed to display results: {s}", .{@errorName(err)});
+    };
 }
 
 fn cmdLabels(

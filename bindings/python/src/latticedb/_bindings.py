@@ -27,24 +27,62 @@ from pathlib import Path
 from typing import Optional
 
 
-def _find_library() -> Optional[Path]:
-    """Find the lattice shared library."""
-    # Search paths in order of preference
-    search_paths = [
-        # Development: relative to bindings
-        Path(__file__).parent.parent.parent.parent.parent / "zig-out" / "lib",
-        # Installed: system library paths
-        Path("/usr/local/lib"),
-        Path("/usr/lib"),
-    ]
-
-    lib_name = {
+def _get_lib_name() -> str:
+    """Get the library filename for the current platform."""
+    return {
         "darwin": "liblattice.dylib",
         "linux": "liblattice.so",
         "win32": "lattice.dll",
     }.get(sys.platform, "liblattice.so")
 
-    for path in search_paths:
+
+def _find_library() -> Optional[Path]:
+    """Find the lattice shared library.
+
+    Search order:
+    1. LATTICE_LIB_PATH environment variable (explicit path)
+    2. Package lib directory (bundled in wheel)
+    3. Development build directory (zig-out/lib)
+    4. Homebrew paths (macOS)
+    5. System library paths
+    """
+    lib_name = _get_lib_name()
+
+    # 1. Check environment variable for explicit path
+    env_path = os.environ.get("LATTICE_LIB_PATH")
+    if env_path:
+        path = Path(env_path)
+        if path.exists():
+            return path
+        # If env var is a directory, look for lib inside
+        if path.is_dir():
+            lib_path = path / lib_name
+            if lib_path.exists():
+                return lib_path
+
+    # 2. Package lib directory (for bundled wheels)
+    package_lib = Path(__file__).parent / "lib" / lib_name
+    if package_lib.exists():
+        return package_lib
+
+    # 3. Development: relative to bindings (zig-out/lib)
+    dev_path = Path(__file__).parent.parent.parent.parent.parent / "zig-out" / "lib" / lib_name
+    if dev_path.exists():
+        return dev_path
+
+    # 4. System paths
+    system_paths = [
+        Path("/usr/local/lib"),
+        Path("/usr/lib"),
+        Path.home() / ".local" / "lib",
+    ]
+
+    # Add Homebrew paths on macOS
+    if sys.platform == "darwin":
+        system_paths.insert(0, Path("/opt/homebrew/lib"))
+        system_paths.insert(1, Path("/usr/local/opt/latticedb/lib"))
+
+    for path in system_paths:
         lib_path = path / lib_name
         if lib_path.exists():
             return lib_path

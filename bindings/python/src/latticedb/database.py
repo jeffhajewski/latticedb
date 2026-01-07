@@ -11,7 +11,7 @@ if TYPE_CHECKING:
     import numpy as np
     from numpy.typing import NDArray
 
-from lattice._bindings import (
+from latticedb._bindings import (
     LATTICE_TXN_READ_ONLY,
     LATTICE_VALUE_NULL,
     LatticeFtsResult,
@@ -24,8 +24,8 @@ from lattice._bindings import (
     python_to_value,
     value_to_python,
 )
-from lattice.transaction import Transaction
-from lattice.types import Node, QueryResult, VectorSearchResult, FtsSearchResult
+from latticedb.transaction import Transaction
+from latticedb.types import Node, QueryResult, VectorSearchResult, FtsSearchResult
 
 
 def _is_numpy_array(value: Any) -> bool:

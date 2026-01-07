@@ -163,7 +163,7 @@ npm install lattice-db
 ### From Source
 
 ```bash
-git clone https://github.com/anthropics/latticedb.git
+git clone https://github.com/jeffhajewski/latticedb.git
 cd latticedb
 zig build -Doptimize=ReleaseFast
 ```
@@ -220,7 +220,7 @@ RETURN doc.title, author.name, chunk.text
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
-│                      Lattice Database                        │
+│                      Lattice Database                       │
 ├─────────────────────────────────────────────────────────────┤
 │  Cypher Parser  │  Query Planner  │  Volcano Executor       │
 ├─────────────────────────────────────────────────────────────┤
@@ -228,9 +228,9 @@ RETURN doc.title, author.name, chunk.text
 ├─────────────────────────────────────────────────────────────┤
 │  Transaction Manager  │  MVCC  │  Write-Ahead Log           │
 ├─────────────────────────────────────────────────────────────┤
-│  Buffer Pool    │  Page Manager   │  B+Tree                  │
+│  Buffer Pool    │  Page Manager   │  B+Tree                 │
 ├─────────────────────────────────────────────────────────────┤
-│                     Single File Storage                      │
+│                     Single File Storage                     │
 └─────────────────────────────────────────────────────────────┘
 ```
 

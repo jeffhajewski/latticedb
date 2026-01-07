@@ -1,0 +1,4 @@
+include README.md
+include LICENSE
+recursive-include src/latticedb/lib *.so *.dylib *.dll
+include src/latticedb/py.typed

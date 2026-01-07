@@ -5,8 +5,8 @@ Basic tests for Lattice Python bindings.
 import pytest
 import numpy as np
 
-from lattice import Database, Node, Edge, Value
-from lattice.types import QueryResult, VectorSearchResult
+from latticedb import Database, Node, Edge, Value
+from latticedb.types import QueryResult, VectorSearchResult
 
 
 class TestNode:

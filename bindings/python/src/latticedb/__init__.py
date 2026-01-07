@@ -5,10 +5,10 @@ A single-file knowledge graph database for AI/RAG applications.
 Combines property graph storage, HNSW vector search, and BM25 full-text search.
 """
 
-from lattice.database import Database
-from lattice.transaction import Transaction
-from lattice.types import Node, Edge, QueryResult, Value, VectorSearchResult, FtsSearchResult
-from lattice._bindings import (
+from latticedb.database import Database
+from latticedb.transaction import Transaction
+from latticedb.types import Node, Edge, QueryResult, Value, VectorSearchResult, FtsSearchResult
+from latticedb._bindings import (
     LatticeError,
     LatticeIOError,
     LatticeCorruptionError,

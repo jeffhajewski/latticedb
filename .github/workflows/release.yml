@@ -1,0 +1,264 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version (without v prefix)'
+        required: true
+        type: string
+      publish_pypi:
+        description: 'Publish to PyPI'
+        type: boolean
+        default: false
+
+env:
+  ZIG_VERSION: "0.14.0"
+
+jobs:
+  # ============================================
+  # Build native binaries for all platforms
+  # Using Zig cross-compilation from single runner
+  # ============================================
+  build-native:
+    name: Build Native Libraries
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        target:
+          - x86_64-linux-gnu
+          - aarch64-linux-gnu
+          - x86_64-macos
+          - aarch64-macos
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build shared library
+        run: |
+          mkdir -p dist/build/${{ matrix.target }}/{bin,lib,include}
+
+          zig build shared \
+            -Dtarget=${{ matrix.target }} \
+            -Doptimize=ReleaseFast
+
+          # Copy to target directory
+          cp zig-out/lib/liblattice.* dist/build/${{ matrix.target }}/lib/ || true
+
+      - name: Build CLI
+        run: |
+          zig build cli \
+            -Dtarget=${{ matrix.target }} \
+            -Doptimize=ReleaseFast
+
+          # Copy to target directory
+          cp zig-out/bin/lattice* dist/build/${{ matrix.target }}/bin/ || true
+
+      - name: Copy header
+        run: cp include/lattice.h dist/build/${{ matrix.target }}/include/
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: native-${{ matrix.target }}
+          path: dist/build/${{ matrix.target }}
+
+  # ============================================
+  # Create GitHub Release with tarballs
+  # ============================================
+  release-github:
+    name: GitHub Release
+    needs: build-native
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          pattern: native-*
+          path: dist/build
+
+      - name: Reorganize artifacts
+        run: |
+          mkdir -p dist/build-final
+          for dir in dist/build/native-*; do
+            target=$(basename "$dir" | sed 's/native-//')
+            mv "$dir" "dist/build-final/$target"
+          done
+          rm -rf dist/build
+          mv dist/build-final dist/build
+
+      - name: Create release packages
+        run: |
+          VERSION=${{ steps.version.outputs.version }}
+          mkdir -p dist/release
+
+          for target_dir in dist/build/*; do
+            target=$(basename "$target_dir")
+            archive="latticedb-${VERSION}-${target}.tar.gz"
+
+            echo "Creating $archive..."
+            tar -czf "dist/release/$archive" \
+              -C "$target_dir" \
+              --transform "s,^,latticedb-${VERSION}/," \
+              .
+          done
+
+          # Generate checksums
+          cd dist/release
+          shasum -a 256 *.tar.gz > SHA256SUMS
+          cat SHA256SUMS
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: LatticeDB v${{ steps.version.outputs.version }}
+          files: dist/release/*
+          generate_release_notes: true
+          draft: ${{ github.event_name == 'workflow_dispatch' }}
+
+  # ============================================
+  # Build Python wheels for each platform
+  # ============================================
+  build-wheels:
+    name: Build Wheel (${{ matrix.os }})
+    needs: build-native
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-linux-gnu
+            python_platform: manylinux_2_17_x86_64
+          - os: ubuntu-latest
+            target: aarch64-linux-gnu
+            python_platform: manylinux_2_17_aarch64
+          - os: macos-13  # Intel
+            target: x86_64-macos
+            python_platform: macosx_10_9_x86_64
+          - os: macos-14  # ARM64
+            target: aarch64-macos
+            python_platform: macosx_11_0_arm64
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download native library
+        uses: actions/download-artifact@v4
+        with:
+          name: native-${{ matrix.target }}
+          path: native-lib
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tools
+        run: pip install build wheel
+
+      - name: Copy native library to package
+        run: |
+          mkdir -p bindings/python/src/latticedb/lib
+          cp native-lib/lib/* bindings/python/src/latticedb/lib/
+          ls -la bindings/python/src/latticedb/lib/
+
+      - name: Build wheel
+        run: |
+          cd bindings/python
+          python -m build --wheel
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: wheel-${{ matrix.target }}
+          path: bindings/python/dist/*.whl
+
+  # ============================================
+  # Build source distribution
+  # ============================================
+  build-sdist:
+    name: Build Source Distribution
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Build sdist
+        run: |
+          cd bindings/python
+          python -m build --sdist
+
+      - name: Upload sdist
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: bindings/python/dist/*.tar.gz
+
+  # ============================================
+  # Publish to PyPI
+  # ============================================
+  publish-pypi:
+    name: Publish to PyPI
+    needs: [build-wheels, build-sdist, release-github]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_pypi)
+
+    environment:
+      name: pypi
+      url: https://pypi.org/p/latticedb
+
+    permissions:
+      id-token: write  # Required for trusted publishing
+
+    steps:
+      - name: Download all wheels
+        uses: actions/download-artifact@v4
+        with:
+          pattern: wheel-*
+          path: dist
+          merge-multiple: true
+
+      - name: Download sdist
+        uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+
+      - name: List distributions
+        run: ls -la dist/
+
+      - name: Publish to PyPI
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          packages-dir: dist/

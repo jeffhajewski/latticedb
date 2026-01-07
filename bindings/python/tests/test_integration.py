@@ -7,7 +7,7 @@ They are skipped if the library is not found.
 
 import pytest
 
-from lattice import (
+from latticedb import (
     Database,
     LatticeError,
     LatticeNotFoundError,
@@ -598,7 +598,7 @@ class TestUtilities:
 
     def test_version(self):
         """Test version() returns a version string."""
-        from lattice import version
+        from latticedb import version
 
         ver = version()
         assert isinstance(ver, str)

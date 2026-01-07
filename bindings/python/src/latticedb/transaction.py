@@ -6,7 +6,7 @@ import ctypes
 from ctypes import byref, c_uint64, c_void_p
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
-from lattice._bindings import (
+from latticedb._bindings import (
     LATTICE_ERROR_NOT_FOUND,
     LATTICE_OK,
     LATTICE_TXN_READ_ONLY,
@@ -17,13 +17,13 @@ from lattice._bindings import (
     python_to_value,
     value_to_python,
 )
-from lattice.types import Edge, Node, PropertyValue
+from latticedb.types import Edge, Node, PropertyValue
 
 if TYPE_CHECKING:
     import numpy as np
     from numpy.typing import NDArray
 
-    from lattice.database import Database
+    from latticedb.database import Database
 
 
 class Transaction:

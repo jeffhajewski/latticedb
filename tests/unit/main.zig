@@ -15,6 +15,7 @@ const page_manager_test = @import("page_manager_test.zig");
 const graph_test = @import("graph_test.zig");
 const query_test = @import("query_test.zig");
 const search_test = @import("search_test.zig");
+const c_api_test = @import("c_api_test.zig");
 
 // Re-export tests from all modules
 test {
@@ -59,6 +60,7 @@ test {
     _ = graph_test;
     _ = query_test;
     _ = search_test;
+    _ = c_api_test;
 }
 
 test "lattice version" {

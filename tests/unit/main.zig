@@ -17,6 +17,7 @@ const query_test = @import("query_test.zig");
 const search_test = @import("search_test.zig");
 const c_api_test = @import("c_api_test.zig");
 const concurrency_test = @import("concurrency_test.zig");
+const transaction_test = @import("transaction_test.zig");
 
 // Re-export tests from all modules
 test {
@@ -63,6 +64,7 @@ test {
     _ = search_test;
     _ = c_api_test;
     _ = concurrency_test;
+    _ = transaction_test;
 }
 
 test "lattice version" {

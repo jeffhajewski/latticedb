@@ -277,8 +277,10 @@ test "rwlatch: concurrent readers" {
                         }
                     }
 
-                    // Small delay to increase overlap chance
-                    std.atomic.spinLoopHint();
+                    // Longer delay to increase overlap chance
+                    for (0..100) |_| {
+                        std.atomic.spinLoopHint();
+                    }
 
                     _ = active.fetchSub(1, .seq_cst);
                     l.releaseShared();

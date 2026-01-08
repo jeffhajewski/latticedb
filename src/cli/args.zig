@@ -189,7 +189,9 @@ pub const Args = struct {
                 if (args.command == null) {
                     args.command = Command.fromString(arg);
                     if (args.command == null) {
-                        return error.UnknownCommand;
+                        // Not a known command - treat as path and default to query (REPL)
+                        args.command = .query;
+                        args.path = arg;
                     }
                 } else if (args.path == null and args.command.?.requiresPath()) {
                     args.path = arg;
@@ -214,7 +216,6 @@ pub const Error = error{
     InvalidCacheSize,
     InvalidBatchSize,
     UnknownOption,
-    UnknownCommand,
     MissingPath,
     OutOfMemory,
 };

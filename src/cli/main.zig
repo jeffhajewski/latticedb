@@ -34,7 +34,6 @@ pub fn main() !void {
 
     var parsed_args = Args.parse(allocator, argv) catch |err| {
         switch (err) {
-            error.UnknownCommand => output.printError(stderr, "Unknown command. Use 'lattice help' for available commands.", .{}),
             error.UnknownOption => output.printError(stderr, "Unknown option. Use 'lattice help' for available options.", .{}),
             error.InvalidFormat => output.printError(stderr, "Invalid format. Use: table, json, or csv", .{}),
             error.InvalidVectorDims => output.printError(stderr, "Invalid vector dimensions. Must be a positive integer.", .{}),

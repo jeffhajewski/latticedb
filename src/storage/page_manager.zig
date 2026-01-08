@@ -89,7 +89,11 @@ pub const PageManager = struct {
 
         const file_size = file.size() catch return PageManagerError.IoError;
 
-        if (file_size == 0 and options.create) {
+        if (file_size == 0) {
+            // Empty file - initialize as new database (like SQLite behavior)
+            if (options.read_only) {
+                return PageManagerError.InvalidHeader;
+            }
             try self.initNewFile();
         } else if (file_size >= DEFAULT_PAGE_SIZE) {
             try self.loadHeader();

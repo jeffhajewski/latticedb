@@ -531,6 +531,38 @@ class TestVectorOperations:
             # Should return empty list
             assert len(results) == 0
 
+    def test_query_with_vector_parameter(self, tmp_path):
+        """Test Cypher query with vector parameter binding."""
+        pytest.importorskip("numpy")
+        import numpy as np
+
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True, enable_vector=True, vector_dimensions=4) as db:
+            # Create nodes with vectors
+            with db.write() as txn:
+                node1 = txn.create_node(labels=["Document"])
+                txn.set_property(node1.id, "name", "doc1")
+                txn.set_vector(node1.id, "embedding", np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+
+                node2 = txn.create_node(labels=["Document"])
+                txn.set_property(node2.id, "name", "doc2")
+                txn.set_vector(node2.id, "embedding", np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32))
+
+                txn.commit()
+
+            # Query with vector parameter - this tests lattice_query_bind_vector
+            query_vec = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+            result = db.query(
+                "MATCH (n:Document) RETURN n.name",
+                parameters={"vec": query_vec}
+            )
+
+            # Should return results (the query doesn't use the vector yet,
+            # but binding should succeed without error)
+            rows = list(result)
+            assert len(rows) == 2
+
 
 class TestFtsOperations:
     """Tests for full-text search operations."""

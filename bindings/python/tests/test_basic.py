@@ -117,3 +117,56 @@ class TestVectorSearchResult:
         assert result.node_id == 1
         assert result.distance == 0.5
         assert result.node is None
+
+
+class TestValueConversion:
+    """Tests for value type conversion between Python and C."""
+
+    def test_value_type_constants(self) -> None:
+        """Test value type constants match C API."""
+        from latticedb._bindings import (
+            LATTICE_VALUE_NULL,
+            LATTICE_VALUE_BOOL,
+            LATTICE_VALUE_INT,
+            LATTICE_VALUE_FLOAT,
+            LATTICE_VALUE_STRING,
+            LATTICE_VALUE_BYTES,
+            LATTICE_VALUE_VECTOR,
+            LATTICE_VALUE_LIST,
+            LATTICE_VALUE_MAP,
+        )
+        assert LATTICE_VALUE_NULL == 0
+        assert LATTICE_VALUE_BOOL == 1
+        assert LATTICE_VALUE_INT == 2
+        assert LATTICE_VALUE_FLOAT == 3
+        assert LATTICE_VALUE_STRING == 4
+        assert LATTICE_VALUE_BYTES == 5
+        assert LATTICE_VALUE_VECTOR == 6
+        assert LATTICE_VALUE_LIST == 7
+        assert LATTICE_VALUE_MAP == 8
+
+    def test_python_to_value_numpy_array(self) -> None:
+        """Test converting numpy array to LatticeValue."""
+        from latticedb._bindings import (
+            LATTICE_VALUE_VECTOR,
+            LatticeValue,
+            python_to_value,
+        )
+
+        vec = np.array([1.0, 2.0, 3.0], dtype=np.float32)
+        c_value = LatticeValue()
+        ref = python_to_value(vec, c_value)
+
+        assert c_value.type == LATTICE_VALUE_VECTOR
+        assert c_value.data.vector_val.dimensions == 3
+        # Reference should be kept alive
+        assert ref is not None
+
+    def test_is_numpy_array(self) -> None:
+        """Test numpy array detection."""
+        from latticedb._bindings import _is_numpy_array
+
+        assert _is_numpy_array(np.array([1, 2, 3])) is True
+        assert _is_numpy_array([1, 2, 3]) is False
+        assert _is_numpy_array("not an array") is False
+        assert _is_numpy_array(42) is False

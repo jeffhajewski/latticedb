@@ -217,8 +217,9 @@ LATTICE_VALUE_INT = 2
 LATTICE_VALUE_FLOAT = 3
 LATTICE_VALUE_STRING = 4
 LATTICE_VALUE_BYTES = 5
-LATTICE_VALUE_LIST = 6
-LATTICE_VALUE_MAP = 7
+LATTICE_VALUE_VECTOR = 6
+LATTICE_VALUE_LIST = 7
+LATTICE_VALUE_MAP = 8
 
 
 class StringValue(Structure):
@@ -235,6 +236,13 @@ class BytesValue(Structure):
     ]
 
 
+class VectorValue(Structure):
+    _fields_ = [
+        ("ptr", POINTER(ctypes.c_float)),
+        ("dimensions", c_uint32),
+    ]
+
+
 class ValueData(Union):
     _fields_ = [
         ("bool_val", c_bool),
@@ -242,6 +250,7 @@ class ValueData(Union):
         ("float_val", c_double),
         ("string_val", StringValue),
         ("bytes_val", BytesValue),
+        ("vector_val", VectorValue),
     ]
 
 
@@ -619,7 +628,7 @@ def value_to_python(c_value: LatticeValue):
         c_value: The C value structure.
 
     Returns:
-        The corresponding Python value (None, bool, int, float, str, or bytes).
+        The corresponding Python value (None, bool, int, float, str, bytes, or numpy array).
     """
     value_type = c_value.type
 
@@ -641,9 +650,21 @@ def value_to_python(c_value: LatticeValue):
         if bytes_val.ptr and bytes_val.len > 0:
             return bytes(bytes_val.ptr[:bytes_val.len])
         return b""
+    elif value_type == LATTICE_VALUE_VECTOR:
+        import numpy as np
+        vector_val = c_value.data.vector_val
+        if vector_val.ptr and vector_val.dimensions > 0:
+            # Create numpy array from C float pointer
+            return np.ctypeslib.as_array(vector_val.ptr, shape=(vector_val.dimensions,)).copy()
+        return np.array([], dtype=np.float32)
     else:
         # LIST and MAP not supported yet
         return None
+
+
+def _is_numpy_array(value) -> bool:
+    """Check if a value is a numpy array without importing numpy."""
+    return type(value).__module__ == "numpy" and type(value).__name__ == "ndarray"
 
 
 def python_to_value(py_val, c_value: LatticeValue):
@@ -683,5 +704,13 @@ def python_to_value(py_val, c_value: LatticeValue):
         c_value.data.bytes_val.ptr = ctypes.cast(py_val, POINTER(ctypes.c_uint8))
         c_value.data.bytes_val.len = len(py_val)
         return py_val  # Keep reference alive
+    elif _is_numpy_array(py_val):
+        import numpy as np
+        # Ensure vector is float32 and contiguous
+        vec = np.ascontiguousarray(py_val, dtype=np.float32)
+        c_value.type = LATTICE_VALUE_VECTOR
+        c_value.data.vector_val.ptr = vec.ctypes.data_as(POINTER(ctypes.c_float))
+        c_value.data.vector_val.dimensions = len(vec)
+        return vec  # Keep reference alive
     else:
         raise TypeError(f"Unsupported value type: {type(py_val).__name__}")

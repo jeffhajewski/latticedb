@@ -41,6 +41,7 @@ pub const ErrorCode = enum {
     non_boolean_condition,
     invalid_property_access,
     invalid_delete_target,
+    invalid_set_target,
 };
 
 /// A semantic error with location info
@@ -122,6 +123,7 @@ pub const SemanticAnalyzer = struct {
                 .skip => |s| self.analyzeSkipClause(s),
                 .create => |c| self.analyzeCreateClause(c),
                 .delete => |d| self.analyzeDeleteClause(d),
+                .set => |s| self.analyzeSetClause(s),
             }
         }
 
@@ -227,6 +229,51 @@ pub const SemanticAnalyzer = struct {
             // Verify it's a variable reference (not a complex expression)
             if (expr.* != .variable) {
                 self.addError(.invalid_delete_target, expr.getLocation(), "DELETE requires variable references");
+            }
+        }
+    }
+
+    fn analyzeSetClause(self: *Self, clause: *const ast.SetClause) void {
+        for (clause.items) |item| {
+            switch (item) {
+                .property => |p| {
+                    // Verify target is a bound variable
+                    self.analyzeExpression(p.target);
+                    if (p.target.* != .variable) {
+                        self.addError(.invalid_set_target, p.target.getLocation(), "SET property target must be a variable");
+                    }
+                    // Analyze value expression
+                    self.analyzeExpression(p.value);
+                },
+                .labels => |l| {
+                    // Verify target is a bound node variable
+                    self.analyzeExpression(l.target);
+                    if (l.target.* != .variable) {
+                        self.addError(.invalid_set_target, l.target.getLocation(), "SET labels target must be a variable");
+                    } else {
+                        // Check it's a node (not an edge)
+                        const var_name = l.target.variable.name;
+                        if (self.variables.get(var_name)) |info| {
+                            if (info.kind == .edge) {
+                                self.addError(.invalid_set_target, l.target.getLocation(), "Cannot SET labels on an edge");
+                            }
+                        }
+                    }
+                },
+                .replace_properties => |r| {
+                    self.analyzeExpression(r.target);
+                    if (r.target.* != .variable) {
+                        self.addError(.invalid_set_target, r.target.getLocation(), "SET = target must be a variable");
+                    }
+                    self.analyzeExpression(r.map);
+                },
+                .merge_properties => |m| {
+                    self.analyzeExpression(m.target);
+                    if (m.target.* != .variable) {
+                        self.addError(.invalid_set_target, m.target.getLocation(), "SET += target must be a variable");
+                    }
+                    self.analyzeExpression(m.map);
+                },
             }
         }
     }

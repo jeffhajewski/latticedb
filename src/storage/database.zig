@@ -911,6 +911,132 @@ pub const Database = struct {
         }
     }
 
+    /// Remove a property from a node.
+    pub fn removeNodeProperty(
+        self: *Self,
+        txn: ?*Transaction,
+        node_id: NodeId,
+        key: []const u8,
+    ) !void {
+        if (self.read_only) return DatabaseError.PermissionDenied;
+
+        if (txn) |t| {
+            if (!t.isActive()) return DatabaseError.TransactionNotActive;
+            if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+        }
+
+        var existing_node = self.node_store.get(node_id) catch |err| {
+            return switch (err) {
+                node_mod.NodeError.NotFound => DatabaseError.NotFound,
+                else => DatabaseError.IoError,
+            };
+        };
+        defer existing_node.deinit(self.allocator);
+
+        const key_id = self.symbol_table.intern(key) catch {
+            return DatabaseError.IoError;
+        };
+
+        // Build new properties array without the specified key
+        var new_props: std.ArrayList(node_mod.Property) = .empty;
+        defer new_props.deinit(self.allocator);
+
+        for (existing_node.properties) |prop| {
+            if (prop.key_id != key_id) {
+                new_props.append(self.allocator, prop) catch {
+                    return DatabaseError.IoError;
+                };
+            }
+        }
+
+        // Update the node
+        self.node_store.update(node_id, existing_node.labels, new_props.items) catch {
+            return DatabaseError.IoError;
+        };
+    }
+
+    /// Add a label to a node.
+    pub fn addNodeLabel(
+        self: *Self,
+        txn: ?*Transaction,
+        node_id: NodeId,
+        label: []const u8,
+    ) !void {
+        if (self.read_only) return DatabaseError.PermissionDenied;
+
+        if (txn) |t| {
+            if (!t.isActive()) return DatabaseError.TransactionNotActive;
+            if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+        }
+
+        var existing_node = self.node_store.get(node_id) catch |err| {
+            return switch (err) {
+                node_mod.NodeError.NotFound => DatabaseError.NotFound,
+                else => DatabaseError.IoError,
+            };
+        };
+        defer existing_node.deinit(self.allocator);
+
+        const label_id = self.symbol_table.intern(label) catch {
+            return DatabaseError.IoError;
+        };
+
+        // Check if label already exists
+        for (existing_node.labels) |l| {
+            if (l == label_id) return; // Already has this label
+        }
+
+        // Build new labels array with the added label
+        var new_labels: std.ArrayList(symbols_mod.SymbolId) = .empty;
+        defer new_labels.deinit(self.allocator);
+
+        for (existing_node.labels) |l| {
+            new_labels.append(self.allocator, l) catch {
+                return DatabaseError.IoError;
+            };
+        }
+        new_labels.append(self.allocator, label_id) catch {
+            return DatabaseError.IoError;
+        };
+
+        // Update the node
+        self.node_store.update(node_id, new_labels.items, existing_node.properties) catch {
+            return DatabaseError.IoError;
+        };
+
+        // Update label index
+        self.label_index.add(label_id, node_id) catch {
+            return DatabaseError.IoError;
+        };
+    }
+
+    /// Clear all properties from a node.
+    pub fn clearNodeProperties(
+        self: *Self,
+        txn: ?*Transaction,
+        node_id: NodeId,
+    ) !void {
+        if (self.read_only) return DatabaseError.PermissionDenied;
+
+        if (txn) |t| {
+            if (!t.isActive()) return DatabaseError.TransactionNotActive;
+            if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+        }
+
+        var existing_node = self.node_store.get(node_id) catch |err| {
+            return switch (err) {
+                node_mod.NodeError.NotFound => DatabaseError.NotFound,
+                else => DatabaseError.IoError,
+            };
+        };
+        defer existing_node.deinit(self.allocator);
+
+        // Update node with empty properties
+        self.node_store.update(node_id, existing_node.labels, &[_]node_mod.Property{}) catch {
+            return DatabaseError.IoError;
+        };
+    }
+
     /// Get a property from a node.
     /// Note: The caller owns the returned PropertyValue and must call deinit on it
     /// for string/bytes values to avoid memory leaks.

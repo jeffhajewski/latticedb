@@ -55,6 +55,8 @@ pub const OperatorError = error{
     UnboundVariable,
     /// Property not found
     PropertyNotFound,
+    /// Operation not supported
+    Unsupported,
 };
 
 // ============================================================================

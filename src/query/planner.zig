@@ -160,6 +160,7 @@ pub const QueryPlanner = struct {
                 .skip => |s| try self.planSkip(s, current_op),
                 .create => |c| try self.planCreate(c, current_op),
                 .delete => |d| try self.planDelete(d, current_op),
+                .set => |s| try self.planSet(s, current_op),
             };
         }
 
@@ -783,6 +784,82 @@ pub const QueryPlanner = struct {
         return op;
     }
 
+    /// Plan a SET clause
+    fn planSet(self: *Self, set_clause: *const ast.SetClause, input: ?Operator) PlannerError!Operator {
+        const database = self.storage.database orelse return PlannerError.MissingStorage;
+        var op = input orelse return PlannerError.InvalidQuery;
+
+        for (set_clause.items) |item| {
+            switch (item) {
+                .property => |p| {
+                    // Get variable slot from target expression
+                    const var_name = getVariableName(p.target) orelse return PlannerError.InvalidQuery;
+                    const binding = self.bindings.get(var_name) orelse return PlannerError.InvalidQuery;
+
+                    const set_prop = mutation_ops.SetProperty.init(
+                        self.allocator,
+                        op,
+                        binding.slot,
+                        p.property_name,
+                        p.value,
+                        database,
+                    ) catch return PlannerError.OutOfMemory;
+
+                    op = set_prop.operator();
+                },
+                .labels => |l| {
+                    // Get variable slot
+                    const var_name = getVariableName(l.target) orelse return PlannerError.InvalidQuery;
+                    const binding = self.bindings.get(var_name) orelse return PlannerError.InvalidQuery;
+
+                    if (binding.kind != .node) return PlannerError.InvalidQuery;
+
+                    const set_labels = mutation_ops.SetLabels.init(
+                        self.allocator,
+                        op,
+                        binding.slot,
+                        l.label_names,
+                        database,
+                    ) catch return PlannerError.OutOfMemory;
+
+                    op = set_labels.operator();
+                },
+                .replace_properties => |r| {
+                    // Get variable slot
+                    const var_name = getVariableName(r.target) orelse return PlannerError.InvalidQuery;
+                    const binding = self.bindings.get(var_name) orelse return PlannerError.InvalidQuery;
+
+                    const set_replace = mutation_ops.SetPropertiesReplace.init(
+                        self.allocator,
+                        op,
+                        binding.slot,
+                        r.map,
+                        database,
+                    ) catch return PlannerError.OutOfMemory;
+
+                    op = set_replace.operator();
+                },
+                .merge_properties => |m| {
+                    // Get variable slot
+                    const var_name = getVariableName(m.target) orelse return PlannerError.InvalidQuery;
+                    const binding = self.bindings.get(var_name) orelse return PlannerError.InvalidQuery;
+
+                    const set_merge = mutation_ops.SetPropertiesMerge.init(
+                        self.allocator,
+                        op,
+                        binding.slot,
+                        m.map,
+                        database,
+                    ) catch return PlannerError.OutOfMemory;
+
+                    op = set_merge.operator();
+                },
+            }
+        }
+
+        return op;
+    }
+
     /// Allocate a new variable slot
     fn allocateSlot(self: *Self) PlannerError!u8 {
         if (self.next_slot >= MAX_SLOTS) {
@@ -818,6 +895,14 @@ pub const QueryPlanner = struct {
         }
     }
 };
+
+/// Get variable name from an expression (if it's a simple variable reference)
+fn getVariableName(expr: *const ast.Expression) ?[]const u8 {
+    return switch (expr.*) {
+        .variable => |v| v.name,
+        else => null,
+    };
+}
 
 // ============================================================================
 // Tests

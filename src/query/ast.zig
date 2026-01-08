@@ -51,6 +51,7 @@ pub const Clause = union(enum) {
     skip: *SkipClause,
     create: *CreateClause,
     delete: *DeleteClause,
+    set: *SetClause,
 };
 
 // ============================================================================
@@ -117,6 +118,37 @@ pub const DeleteClause = struct {
     detach: bool, // true for DETACH DELETE
     expressions: []*Expression, // Variables to delete (n, r, etc.)
     location: SourceLocation,
+};
+
+/// SET clause - modifies properties and labels
+pub const SetClause = struct {
+    items: []SetItem,
+    location: SourceLocation,
+};
+
+/// Individual SET operation
+pub const SetItem = union(enum) {
+    /// SET n.prop = expr
+    property: struct {
+        target: *Expression, // Variable reference (n)
+        property_name: []const u8,
+        value: *Expression, // Value expression
+    },
+    /// SET n:Label or SET n:Label1:Label2
+    labels: struct {
+        target: *Expression, // Variable reference
+        label_names: []const []const u8,
+    },
+    /// SET n = {map} (replace all)
+    replace_properties: struct {
+        target: *Expression,
+        map: *Expression, // Map literal expression
+    },
+    /// SET n += {map} (merge)
+    merge_properties: struct {
+        target: *Expression,
+        map: *Expression,
+    },
 };
 
 // ============================================================================

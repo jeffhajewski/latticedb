@@ -1,6 +1,6 @@
-//! Mutation operators for CREATE and DELETE clauses.
+//! Mutation operators for CREATE, DELETE, and SET clauses.
 //!
-//! These operators modify the graph by creating or deleting nodes and edges.
+//! These operators modify the graph by creating, deleting, or updating nodes and edges.
 //! They follow the Volcano iterator model but perform side effects.
 
 const std = @import("std");
@@ -519,6 +519,438 @@ pub const DeleteEdge = struct {
         self.database.deleteEdge(null, source_id, target_id, self.edge_type) catch {
             return OperatorError.StorageError;
         };
+
+        return row;
+    }
+
+    fn close(ptr: *anyopaque, ctx: *ExecutionContext) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        if (self.opened) {
+            self.input.close(ctx);
+            self.opened = false;
+        }
+    }
+
+    fn deinit(ptr: *anyopaque, allocator: Allocator) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.input.deinit(allocator);
+        allocator.destroy(self);
+    }
+};
+
+// ============================================================================
+// SetProperty Operator
+// ============================================================================
+
+/// Operator that sets a property on a node or edge for each input row.
+pub const SetProperty = struct {
+    /// Input operator
+    input: Operator,
+    /// Slot containing target node/edge
+    target_slot: u8,
+    /// Property name to set
+    property_name: []const u8,
+    /// Value expression
+    value_expr: *const ast.Expression,
+    /// Database reference
+    database: *Database,
+    /// Expression evaluator
+    evaluator: ExpressionEvaluator,
+    /// Whether operator is opened
+    opened: bool,
+
+    const Self = @This();
+
+    /// Create a new SetProperty operator
+    pub fn init(
+        allocator: Allocator,
+        input: Operator,
+        target_slot: u8,
+        property_name: []const u8,
+        value_expr: *const ast.Expression,
+        database: *Database,
+    ) !*Self {
+        const self = try allocator.create(Self);
+        self.* = Self{
+            .input = input,
+            .target_slot = target_slot,
+            .property_name = property_name,
+            .value_expr = value_expr,
+            .database = database,
+            .evaluator = ExpressionEvaluator.init(allocator),
+            .opened = false,
+        };
+        return self;
+    }
+
+    /// Get the Operator interface
+    pub fn operator(self: *Self) Operator {
+        return Operator{
+            .vtable = &vtable,
+            .ptr = self,
+        };
+    }
+
+    const vtable = Operator.VTable{
+        .open = open,
+        .next = next,
+        .close = close,
+        .deinit = deinit,
+    };
+
+    fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        try self.input.open(ctx);
+        self.opened = true;
+    }
+
+    fn next(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!?*Row {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+
+        if (!self.opened) return OperatorError.NotInitialized;
+
+        const row = try self.input.next(ctx) orelse return null;
+
+        // Get target from row
+        const target_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
+
+        // Evaluate value expression
+        const value = self.evaluator.evaluate(self.value_expr, row, ctx) catch {
+            return OperatorError.EvaluationError;
+        };
+
+        // Apply property update based on target type
+        switch (target_val) {
+            .node_ref => |node_id| {
+                if (value == .null_val) {
+                    // NULL removes property
+                    self.database.removeNodeProperty(null, node_id, self.property_name) catch {
+                        return OperatorError.StorageError;
+                    };
+                } else {
+                    const prop_value = evalResultToPropertyValue(value) orelse return OperatorError.TypeError;
+                    self.database.setNodeProperty(null, node_id, self.property_name, prop_value) catch {
+                        return OperatorError.StorageError;
+                    };
+                }
+            },
+            .edge_ref => |_| {
+                // Edge property support would go here
+                // For now, edge properties not fully implemented
+                return OperatorError.Unsupported;
+            },
+            else => return OperatorError.TypeError,
+        }
+
+        return row;
+    }
+
+    fn close(ptr: *anyopaque, ctx: *ExecutionContext) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        if (self.opened) {
+            self.input.close(ctx);
+            self.opened = false;
+        }
+    }
+
+    fn deinit(ptr: *anyopaque, allocator: Allocator) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.input.deinit(allocator);
+        allocator.destroy(self);
+    }
+};
+
+// ============================================================================
+// SetLabels Operator
+// ============================================================================
+
+/// Operator that adds labels to a node for each input row.
+pub const SetLabels = struct {
+    /// Input operator
+    input: Operator,
+    /// Slot containing target node
+    target_slot: u8,
+    /// Labels to add
+    label_names: []const []const u8,
+    /// Database reference
+    database: *Database,
+    /// Whether operator is opened
+    opened: bool,
+
+    const Self = @This();
+
+    /// Create a new SetLabels operator
+    pub fn init(
+        allocator: Allocator,
+        input: Operator,
+        target_slot: u8,
+        label_names: []const []const u8,
+        database: *Database,
+    ) !*Self {
+        const self = try allocator.create(Self);
+        self.* = Self{
+            .input = input,
+            .target_slot = target_slot,
+            .label_names = label_names,
+            .database = database,
+            .opened = false,
+        };
+        return self;
+    }
+
+    /// Get the Operator interface
+    pub fn operator(self: *Self) Operator {
+        return Operator{
+            .vtable = &vtable,
+            .ptr = self,
+        };
+    }
+
+    const vtable = Operator.VTable{
+        .open = open,
+        .next = next,
+        .close = close,
+        .deinit = deinit,
+    };
+
+    fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        try self.input.open(ctx);
+        self.opened = true;
+    }
+
+    fn next(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!?*Row {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+
+        if (!self.opened) return OperatorError.NotInitialized;
+
+        const row = try self.input.next(ctx) orelse return null;
+
+        // Get target node from row
+        const target_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
+        const node_id = target_val.asNodeId() orelse return OperatorError.TypeError;
+
+        // Add each label
+        for (self.label_names) |label| {
+            self.database.addNodeLabel(null, node_id, label) catch {
+                return OperatorError.StorageError;
+            };
+        }
+
+        return row;
+    }
+
+    fn close(ptr: *anyopaque, ctx: *ExecutionContext) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        if (self.opened) {
+            self.input.close(ctx);
+            self.opened = false;
+        }
+    }
+
+    fn deinit(ptr: *anyopaque, allocator: Allocator) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.input.deinit(allocator);
+        allocator.destroy(self);
+    }
+};
+
+// ============================================================================
+// SetPropertiesReplace Operator
+// ============================================================================
+
+/// Operator that replaces all properties on a node (SET n = {map}).
+pub const SetPropertiesReplace = struct {
+    /// Input operator
+    input: Operator,
+    /// Slot containing target node
+    target_slot: u8,
+    /// Map expression
+    map_expr: *const ast.Expression,
+    /// Database reference
+    database: *Database,
+    /// Expression evaluator
+    evaluator: ExpressionEvaluator,
+    /// Whether operator is opened
+    opened: bool,
+
+    const Self = @This();
+
+    /// Create a new SetPropertiesReplace operator
+    pub fn init(
+        allocator: Allocator,
+        input: Operator,
+        target_slot: u8,
+        map_expr: *const ast.Expression,
+        database: *Database,
+    ) !*Self {
+        const self = try allocator.create(Self);
+        self.* = Self{
+            .input = input,
+            .target_slot = target_slot,
+            .map_expr = map_expr,
+            .database = database,
+            .evaluator = ExpressionEvaluator.init(allocator),
+            .opened = false,
+        };
+        return self;
+    }
+
+    /// Get the Operator interface
+    pub fn operator(self: *Self) Operator {
+        return Operator{
+            .vtable = &vtable,
+            .ptr = self,
+        };
+    }
+
+    const vtable = Operator.VTable{
+        .open = open,
+        .next = next,
+        .close = close,
+        .deinit = deinit,
+    };
+
+    fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        try self.input.open(ctx);
+        self.opened = true;
+    }
+
+    fn next(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!?*Row {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+
+        if (!self.opened) return OperatorError.NotInitialized;
+
+        const row = try self.input.next(ctx) orelse return null;
+
+        // Get target node from row
+        const target_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
+        const node_id = target_val.asNodeId() orelse return OperatorError.TypeError;
+
+        // Map expression should be a map literal
+        if (self.map_expr.* != .map) {
+            return OperatorError.TypeError;
+        }
+
+        const map = self.map_expr.map;
+
+        // Clear existing properties
+        self.database.clearNodeProperties(null, node_id) catch {
+            return OperatorError.StorageError;
+        };
+
+        // Set properties from map
+        for (map.entries) |entry| {
+            const value = self.evaluator.evaluate(entry.value, row, ctx) catch continue;
+            const prop_value = evalResultToPropertyValue(value) orelse continue;
+            self.database.setNodeProperty(null, node_id, entry.key, prop_value) catch continue;
+        }
+
+        return row;
+    }
+
+    fn close(ptr: *anyopaque, ctx: *ExecutionContext) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        if (self.opened) {
+            self.input.close(ctx);
+            self.opened = false;
+        }
+    }
+
+    fn deinit(ptr: *anyopaque, allocator: Allocator) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.input.deinit(allocator);
+        allocator.destroy(self);
+    }
+};
+
+// ============================================================================
+// SetPropertiesMerge Operator
+// ============================================================================
+
+/// Operator that merges properties on a node (SET n += {map}).
+pub const SetPropertiesMerge = struct {
+    /// Input operator
+    input: Operator,
+    /// Slot containing target node
+    target_slot: u8,
+    /// Map expression
+    map_expr: *const ast.Expression,
+    /// Database reference
+    database: *Database,
+    /// Expression evaluator
+    evaluator: ExpressionEvaluator,
+    /// Whether operator is opened
+    opened: bool,
+
+    const Self = @This();
+
+    /// Create a new SetPropertiesMerge operator
+    pub fn init(
+        allocator: Allocator,
+        input: Operator,
+        target_slot: u8,
+        map_expr: *const ast.Expression,
+        database: *Database,
+    ) !*Self {
+        const self = try allocator.create(Self);
+        self.* = Self{
+            .input = input,
+            .target_slot = target_slot,
+            .map_expr = map_expr,
+            .database = database,
+            .evaluator = ExpressionEvaluator.init(allocator),
+            .opened = false,
+        };
+        return self;
+    }
+
+    /// Get the Operator interface
+    pub fn operator(self: *Self) Operator {
+        return Operator{
+            .vtable = &vtable,
+            .ptr = self,
+        };
+    }
+
+    const vtable = Operator.VTable{
+        .open = open,
+        .next = next,
+        .close = close,
+        .deinit = deinit,
+    };
+
+    fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        try self.input.open(ctx);
+        self.opened = true;
+    }
+
+    fn next(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!?*Row {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+
+        if (!self.opened) return OperatorError.NotInitialized;
+
+        const row = try self.input.next(ctx) orelse return null;
+
+        // Get target node from row
+        const target_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
+        const node_id = target_val.asNodeId() orelse return OperatorError.TypeError;
+
+        // Map expression should be a map literal
+        if (self.map_expr.* != .map) {
+            return OperatorError.TypeError;
+        }
+
+        const map = self.map_expr.map;
+
+        // Merge: set properties from map (keeps existing, overwrites on conflict)
+        for (map.entries) |entry| {
+            const value = self.evaluator.evaluate(entry.value, row, ctx) catch continue;
+            const prop_value = evalResultToPropertyValue(value) orelse continue;
+            self.database.setNodeProperty(null, node_id, entry.key, prop_value) catch continue;
+        }
 
         return row;
     }

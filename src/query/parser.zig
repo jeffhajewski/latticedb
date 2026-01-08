@@ -202,6 +202,7 @@ pub const TokenType = enum {
     gt,
     gte,
     plus,
+    plus_equal, // +=
     minus,
     star,
     slash,
@@ -332,8 +333,10 @@ pub const Parser = struct {
             return self.parseDeleteClause(true);
         } else if (self.match(.kw_delete)) {
             return self.parseDeleteClause(false);
+        } else if (self.match(.kw_set)) {
+            return self.parseSetClause();
         } else {
-            self.errorAtCurrent("Expected MATCH, WHERE, RETURN, CREATE, DELETE, ORDER BY, LIMIT, or SKIP");
+            self.errorAtCurrent("Expected MATCH, WHERE, RETURN, CREATE, DELETE, SET, ORDER BY, LIMIT, or SKIP");
             return null;
         }
     }
@@ -566,6 +569,130 @@ pub const Parser = struct {
         };
 
         return .{ .delete = clause };
+    }
+
+    fn parseSetClause(self: *Self) ?ast.Clause {
+        const loc = self.previousLocation();
+        var items: std.ArrayList(ast.SetItem) = .empty;
+
+        // Parse first SET item
+        if (self.parseSetItem()) |item| {
+            items.append(self.arena.allocator(), item) catch return null;
+        } else {
+            return null;
+        }
+
+        // Parse additional comma-separated items
+        while (self.match(.comma)) {
+            if (self.parseSetItem()) |item| {
+                items.append(self.arena.allocator(), item) catch return null;
+            } else {
+                return null;
+            }
+        }
+
+        const clause = self.arena.allocator().create(ast.SetClause) catch return null;
+        clause.* = .{
+            .items = items.toOwnedSlice(self.arena.allocator()) catch return null,
+            .location = loc,
+        };
+
+        return .{ .set = clause };
+    }
+
+    fn parseSetItem(self: *Self) ?ast.SetItem {
+        // Parse variable name first
+        if (!self.check(.identifier)) {
+            self.errorAtCurrent("Expected variable name in SET");
+            return null;
+        }
+        const var_name = self.current.text;
+        const var_loc = self.currentLocation();
+        self.advance();
+
+        // Create variable expression
+        const var_expr = self.arena.allocator().create(ast.Expression) catch return null;
+        var_expr.* = .{ .variable = .{ .name = var_name, .location = var_loc } };
+
+        // Determine the type of SET operation based on what follows
+        if (self.match(.colon)) {
+            // SET n:Label - label assignment
+            return self.parseSetLabels(var_expr);
+        } else if (self.match(.plus_equal)) {
+            // SET n += {map} - merge properties
+            return self.parseSetMerge(var_expr);
+        } else if (self.match(.eq)) {
+            // SET n = {map} - replace all properties
+            return self.parseSetReplace(var_expr);
+        } else if (self.match(.dot)) {
+            // SET n.prop = value - property assignment
+            if (!self.check(.identifier)) {
+                self.errorAtCurrent("Expected property name after '.'");
+                return null;
+            }
+            const prop_name = self.current.text;
+            self.advance();
+
+            if (!self.consume(.eq, "Expected '=' after property name in SET")) {
+                return null;
+            }
+
+            const value = self.parseExpression() orelse return null;
+            return .{ .property = .{
+                .target = var_expr,
+                .property_name = prop_name,
+                .value = value,
+            } };
+        }
+
+        self.errorAtCurrent("Expected '.', ':', '=', or '+=' after variable in SET");
+        return null;
+    }
+
+    fn parseSetLabels(self: *Self, target: *ast.Expression) ?ast.SetItem {
+        // Already consumed first colon, parse labels
+        var labels: std.ArrayList([]const u8) = .empty;
+
+        // First label
+        if (!self.check(.identifier)) {
+            self.errorAtCurrent("Expected label name after ':'");
+            return null;
+        }
+        labels.append(self.arena.allocator(), self.current.text) catch return null;
+        self.advance();
+
+        // Additional labels (SET n:Label1:Label2)
+        while (self.match(.colon)) {
+            if (!self.check(.identifier)) {
+                self.errorAtCurrent("Expected label name after ':'");
+                return null;
+            }
+            labels.append(self.arena.allocator(), self.current.text) catch return null;
+            self.advance();
+        }
+
+        return .{ .labels = .{
+            .target = target,
+            .label_names = labels.toOwnedSlice(self.arena.allocator()) catch return null,
+        } };
+    }
+
+    fn parseSetMerge(self: *Self, target: *ast.Expression) ?ast.SetItem {
+        // Already consumed +=, expect map expression
+        const map = self.parseExpression() orelse return null;
+        return .{ .merge_properties = .{
+            .target = target,
+            .map = map,
+        } };
+    }
+
+    fn parseSetReplace(self: *Self, target: *ast.Expression) ?ast.SetItem {
+        // Already consumed =, expect map expression
+        const map = self.parseExpression() orelse return null;
+        return .{ .replace_properties = .{
+            .target = target,
+            .map = map,
+        } };
     }
 
     // ========================================================================
@@ -1315,7 +1442,7 @@ pub const Parser = struct {
         while (!self.check(.eof)) {
             // Synchronize at clause boundaries
             switch (self.current.token_type) {
-                .kw_match, .kw_where, .kw_return, .kw_order, .kw_limit, .kw_skip, .kw_create, .kw_delete, .kw_detach => return,
+                .kw_match, .kw_where, .kw_return, .kw_order, .kw_limit, .kw_skip, .kw_create, .kw_delete, .kw_detach, .kw_set => return,
                 else => self.advance(),
             }
         }

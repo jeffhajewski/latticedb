@@ -783,3 +783,109 @@ test "parser: CREATE with incoming edge direction parses" {
     // Check it's an incoming edge
     try std.testing.expectEqual(parser_mod.EdgeDirection.incoming, edge.direction);
 }
+
+// ============================================================================
+// SET Clause Tests
+// ============================================================================
+
+test "parser: SET property parses" {
+    var parser = Parser.init(std.testing.allocator, "MATCH (n:Person) SET n.age = 30");
+    defer parser.deinit();
+
+    const result = parser.parse();
+    try std.testing.expect(result.query != null);
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+    try std.testing.expectEqual(@as(usize, 2), result.query.?.clauses.len);
+
+    // Second clause is SET
+    try std.testing.expect(result.query.?.clauses[1] == .set);
+    const set = result.query.?.clauses[1].set;
+    try std.testing.expectEqual(@as(usize, 1), set.items.len);
+
+    // First item is a property assignment
+    const item = set.items[0];
+    try std.testing.expect(item == .property);
+    try std.testing.expectEqualStrings("age", item.property.property_name);
+}
+
+test "parser: SET multiple properties parses" {
+    var parser = Parser.init(std.testing.allocator, "MATCH (n:Person) SET n.age = 30, n.name = \"Alice\"");
+    defer parser.deinit();
+
+    const result = parser.parse();
+    try std.testing.expect(result.query != null);
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+
+    const set = result.query.?.clauses[1].set;
+    try std.testing.expectEqual(@as(usize, 2), set.items.len);
+
+    // Both items are property assignments
+    try std.testing.expect(set.items[0] == .property);
+    try std.testing.expect(set.items[1] == .property);
+    try std.testing.expectEqualStrings("age", set.items[0].property.property_name);
+    try std.testing.expectEqualStrings("name", set.items[1].property.property_name);
+}
+
+test "parser: SET labels parses" {
+    var parser = Parser.init(std.testing.allocator, "MATCH (n:Person) SET n:Admin:Verified");
+    defer parser.deinit();
+
+    const result = parser.parse();
+    try std.testing.expect(result.query != null);
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+
+    const set = result.query.?.clauses[1].set;
+    try std.testing.expectEqual(@as(usize, 1), set.items.len);
+
+    // Item is a labels assignment
+    const item = set.items[0];
+    try std.testing.expect(item == .labels);
+    try std.testing.expectEqual(@as(usize, 2), item.labels.label_names.len);
+    try std.testing.expectEqualStrings("Admin", item.labels.label_names[0]);
+    try std.testing.expectEqualStrings("Verified", item.labels.label_names[1]);
+}
+
+test "parser: SET replace properties parses" {
+    var parser = Parser.init(std.testing.allocator, "MATCH (n:Person) SET n = {name: \"Alice\", age: 30}");
+    defer parser.deinit();
+
+    const result = parser.parse();
+    try std.testing.expect(result.query != null);
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+
+    const set = result.query.?.clauses[1].set;
+    try std.testing.expectEqual(@as(usize, 1), set.items.len);
+
+    // Item is a replace_properties assignment
+    const item = set.items[0];
+    try std.testing.expect(item == .replace_properties);
+    try std.testing.expect(item.replace_properties.map.* == .map);
+}
+
+test "parser: SET merge properties parses" {
+    var parser = Parser.init(std.testing.allocator, "MATCH (n:Person) SET n += {email: \"alice@example.com\"}");
+    defer parser.deinit();
+
+    const result = parser.parse();
+    try std.testing.expect(result.query != null);
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+
+    const set = result.query.?.clauses[1].set;
+    try std.testing.expectEqual(@as(usize, 1), set.items.len);
+
+    // Item is a merge_properties assignment
+    const item = set.items[0];
+    try std.testing.expect(item == .merge_properties);
+    try std.testing.expect(item.merge_properties.map.* == .map);
+}
+
+test "lexer: += tokenized as single operator" {
+    var lexer = Lexer.init("n += {a: 1}");
+
+    const t1 = lexer.nextToken();
+    try std.testing.expectEqual(TokenType.identifier, t1.token_type);
+
+    const t2 = lexer.nextToken();
+    try std.testing.expectEqual(TokenType.plus_equal, t2.token_type);
+    try std.testing.expectEqualStrings("+=", t2.text);
+}

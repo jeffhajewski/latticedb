@@ -54,7 +54,13 @@ pub const Lexer = struct {
             ':' => return self.makeTokenAt(.colon, start),
             ',' => return self.makeTokenAt(.comma, start),
             '.' => return self.makeTokenAt(.dot, start),
-            '+' => return self.makeTokenAt(.plus, start),
+            '+' => {
+                if (self.peek() == '=') {
+                    _ = self.advance();
+                    return self.makeTokenAt(.plus_equal, start);
+                }
+                return self.makeTokenAt(.plus, start);
+            },
             '*' => return self.makeTokenAt(.star, start),
             '/' => return self.makeTokenAt(.slash, start),
             '%' => return self.makeTokenAt(.percent, start),

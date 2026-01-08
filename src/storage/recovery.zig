@@ -23,6 +23,15 @@ const PageManager = page_manager.PageManager;
 const BufferPool = buffer_pool.BufferPool;
 const PageHeader = page.PageHeader;
 
+// Graph layer for logical redo
+const node_mod = lattice.graph.node;
+const edge_mod = lattice.graph.edge;
+const NodeStore = node_mod.NodeStore;
+const EdgeStore = edge_mod.EdgeStore;
+
+// WAL payload deserialization
+const wal_payload = lattice.transaction.wal_payload;
+
 // ============================================================================
 // Types
 // ============================================================================
@@ -88,6 +97,13 @@ pub const RecoveryStats = struct {
     corrupted_frame: ?u64,
 };
 
+/// Context for logical redo operations (optional)
+/// When provided, recovery can redo insert/update/delete operations
+pub const LogicalRecoveryContext = struct {
+    node_store: *NodeStore,
+    edge_store: *EdgeStore,
+};
+
 // ============================================================================
 // Recovery Manager
 // ============================================================================
@@ -95,6 +111,8 @@ pub const RecoveryStats = struct {
 /// Manages crash recovery
 pub const RecoveryManager = struct {
     allocator: Allocator,
+    /// Optional context for logical redo
+    logical_ctx: ?LogicalRecoveryContext,
 
     const Self = @This();
 
@@ -102,6 +120,15 @@ pub const RecoveryManager = struct {
     pub fn init(allocator: Allocator) Self {
         return Self{
             .allocator = allocator,
+            .logical_ctx = null,
+        };
+    }
+
+    /// Initialize with logical recovery context
+    pub fn initWithLogicalContext(allocator: Allocator, ctx: LogicalRecoveryContext) Self {
+        return Self{
+            .allocator = allocator,
+            .logical_ctx = ctx,
         };
     }
 
@@ -351,14 +378,24 @@ pub const RecoveryManager = struct {
                     }
                 },
 
-                .insert, .update, .delete => {
-                    // Logical operations - in a full implementation, these would
-                    // be applied to the B+Tree. For now, we assume page_write
-                    // captures the physical changes.
-                    //
-                    // A production system would either:
-                    // 1. Use physiological logging (page_id + operation within page)
-                    // 2. Re-execute the logical operation against the B+Tree
+                .insert => {
+                    if (self.logical_ctx) |ctx| {
+                        self.redoInsert(ctx, entry.payload) catch {};
+                    }
+                    stats.redo_operations += 1;
+                },
+
+                .update => {
+                    if (self.logical_ctx) |ctx| {
+                        self.redoUpdate(ctx, entry.payload) catch {};
+                    }
+                    stats.redo_operations += 1;
+                },
+
+                .delete => {
+                    if (self.logical_ctx) |ctx| {
+                        self.redoDelete(ctx, entry.payload) catch {};
+                    }
                     stats.redo_operations += 1;
                 },
 
@@ -366,6 +403,78 @@ pub const RecoveryManager = struct {
             }
 
             self.allocator.free(entry.payload);
+        }
+    }
+
+    /// Redo an insert operation
+    fn redoInsert(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) !void {
+        if (payload.len == 0) return;
+
+        const payload_type = payload[0];
+
+        // Node insert
+        if (payload_type == @intFromEnum(wal_payload.PayloadType.node_insert)) {
+            const node_payload = wal_payload.deserializeNodeInsert(payload) catch return;
+            // Extract label IDs
+            var label_ids: std.ArrayListUnmanaged(u16) = .{};
+            defer label_ids.deinit(self.allocator);
+            for (0..node_payload.label_count) |i| {
+                label_ids.append(self.allocator, node_payload.getLabelId(i)) catch return;
+            }
+            // Re-create the node with its original ID
+            ctx.node_store.createWithId(
+                node_payload.node_id,
+                label_ids.items,
+                &[_]node_mod.Property{},
+            ) catch {};
+        }
+        // Edge insert
+        else if (payload_type == @intFromEnum(wal_payload.PayloadType.edge_insert)) {
+            const edge_payload = wal_payload.deserializeEdgeInsert(payload) catch return;
+            ctx.edge_store.create(
+                edge_payload.source,
+                edge_payload.target,
+                edge_payload.type_id,
+                &[_]node_mod.Property{},
+            ) catch {};
+        }
+    }
+
+    /// Redo an update operation
+    fn redoUpdate(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) !void {
+        _ = self;
+        _ = ctx;
+        if (payload.len == 0) return;
+
+        const payload_type = payload[0];
+
+        // Property update - simplified for now
+        if (payload_type == @intFromEnum(wal_payload.PayloadType.node_update)) {
+            // Would need to apply property update
+            // Full implementation requires storing the new value in WAL
+        }
+    }
+
+    /// Redo a delete operation
+    fn redoDelete(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) !void {
+        _ = self;
+        if (payload.len == 0) return;
+
+        const payload_type = payload[0];
+
+        // Node delete
+        if (payload_type == @intFromEnum(wal_payload.PayloadType.node_delete)) {
+            const node_payload = wal_payload.deserializeNodeDelete(payload) catch return;
+            ctx.node_store.delete(node_payload.node_id) catch {};
+        }
+        // Edge delete
+        else if (payload_type == @intFromEnum(wal_payload.PayloadType.edge_delete)) {
+            const edge_payload = wal_payload.deserializeEdgeDelete(payload) catch return;
+            ctx.edge_store.delete(
+                edge_payload.source,
+                edge_payload.target,
+                edge_payload.type_id,
+            ) catch {};
         }
     }
 };

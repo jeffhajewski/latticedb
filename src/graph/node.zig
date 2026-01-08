@@ -108,6 +108,35 @@ pub const NodeStore = struct {
         return node_id;
     }
 
+    /// Create a node with a specific ID (for recovery)
+    /// Updates next_id if the provided ID is >= current next_id
+    pub fn createWithId(
+        self: *Self,
+        node_id: NodeId,
+        labels: []const SymbolId,
+        properties: []const Property,
+    ) NodeError!void {
+        // Update next_id to avoid collisions
+        if (node_id >= self.next_id) {
+            self.next_id = node_id + 1;
+        }
+
+        // Serialize node data
+        var buf: [4096]u8 = undefined;
+        const serialized = serializeNode(labels, properties, &buf) catch {
+            return NodeError.BufferTooSmall;
+        };
+
+        // Create key from node_id
+        var key_buf: [8]u8 = undefined;
+        std.mem.writeInt(u64, &key_buf, node_id, .little);
+
+        // Insert into B+Tree
+        self.tree.insert(&key_buf, serialized) catch |err| {
+            return mapBTreeError(err);
+        };
+    }
+
     /// Get a node by ID
     pub fn get(self: *Self, node_id: NodeId) NodeError!Node {
         var key_buf: [8]u8 = undefined;

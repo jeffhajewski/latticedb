@@ -69,6 +69,7 @@ pub const query = struct {
 // Transaction management
 pub const transaction = struct {
     pub const manager = @import("transaction/manager.zig");
+    pub const wal_payload = @import("transaction/wal_payload.zig");
 };
 
 // Concurrency primitives

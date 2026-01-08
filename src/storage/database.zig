@@ -78,6 +78,9 @@ const Transaction = txn_mod.Transaction;
 const TxnMode = txn_mod.TxnMode;
 const TxnError = txn_mod.TxnError;
 
+const wal_payload = lattice.transaction.wal_payload;
+const WalRecordType = wal_mod.WalRecordType;
+
 // Query system
 const parser_mod = lattice.query.parser;
 const Parser = parser_mod.Parser;
@@ -658,7 +661,18 @@ pub const Database = struct {
             self.label_index.add(label_id, node_id) catch {};
         }
 
-        // WAL logging will be added in PR 3
+        // Log to WAL if transaction is provided
+        if (txn) |t| {
+            if (self.txn_manager) |*tm| {
+                var buf: [256]u8 = undefined;
+                const payload = wal_payload.serializeNodeInsert(&buf, node_id, label_ids) catch {
+                    return DatabaseError.IoError;
+                };
+                _ = tm.logOperation(t, .insert, payload) catch {
+                    return DatabaseError.IoError;
+                };
+            }
+        }
 
         return node_id;
     }
@@ -685,10 +699,27 @@ pub const Database = struct {
             if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
         }
 
-        // Get node to find its labels for index cleanup
+        // Get node to find its labels for index cleanup and WAL logging
+        var node_labels: []const u16 = &[_]u16{};
         if (try self.getNode(node_id)) |n| {
             var node = n;
             defer node.deinit(self.allocator);
+
+            node_labels = node.labels;
+
+            // Log to WAL before deletion (for undo purposes)
+            if (txn) |t| {
+                if (self.txn_manager) |*tm| {
+                    var buf: [512]u8 = undefined;
+                    // For now, we don't serialize properties - will be added in PR 4
+                    const payload = wal_payload.serializeNodeDelete(&buf, node_id, node.labels, &[_]u8{}) catch {
+                        return DatabaseError.IoError;
+                    };
+                    _ = tm.logOperation(t, .delete, payload) catch {
+                        return DatabaseError.IoError;
+                    };
+                }
+            }
 
             // Remove from label index
             for (node.labels) |label_id| {
@@ -703,8 +734,6 @@ pub const Database = struct {
                 else => DatabaseError.IoError,
             };
         };
-
-        // WAL logging will be added in PR 3
     }
 
     /// Check if a node exists
@@ -779,7 +808,19 @@ pub const Database = struct {
             return DatabaseError.IoError;
         };
 
-        // WAL logging will be added in PR 3
+        // Log to WAL if transaction is provided
+        if (txn) |t| {
+            if (self.txn_manager) |*tm| {
+                var buf: [512]u8 = undefined;
+                // For now, serialize without full value data - will be enhanced in PR 4
+                const payload = wal_payload.serializePropertyUpdate(&buf, node_id, key_id, null, &[_]u8{}) catch {
+                    return DatabaseError.IoError;
+                };
+                _ = tm.logOperation(t, .update, payload) catch {
+                    return DatabaseError.IoError;
+                };
+            }
+        }
     }
 
     /// Get a property from a node.
@@ -965,7 +1006,18 @@ pub const Database = struct {
             return DatabaseError.IoError;
         };
 
-        // WAL logging will be added in PR 3
+        // Log to WAL if transaction is provided
+        if (txn) |t| {
+            if (self.txn_manager) |*tm| {
+                var buf: [64]u8 = undefined;
+                const payload = wal_payload.serializeEdgeInsert(&buf, source, target, type_id) catch {
+                    return DatabaseError.IoError;
+                };
+                _ = tm.logOperation(t, .insert, payload) catch {
+                    return DatabaseError.IoError;
+                };
+            }
+        }
     }
 
     /// Delete an edge
@@ -990,11 +1042,23 @@ pub const Database = struct {
             return DatabaseError.IoError;
         };
 
+        // Log to WAL before deletion (for undo purposes)
+        if (txn) |t| {
+            if (self.txn_manager) |*tm| {
+                var buf: [128]u8 = undefined;
+                // For now, we don't serialize edge properties - will be added in PR 4
+                const payload = wal_payload.serializeEdgeDelete(&buf, source, target, type_id, &[_]u8{}) catch {
+                    return DatabaseError.IoError;
+                };
+                _ = tm.logOperation(t, .delete, payload) catch {
+                    return DatabaseError.IoError;
+                };
+            }
+        }
+
         self.edge_store.delete(source, target, type_id) catch {
             return DatabaseError.IoError;
         };
-
-        // WAL logging will be added in PR 3
     }
 
     /// Check if an edge exists

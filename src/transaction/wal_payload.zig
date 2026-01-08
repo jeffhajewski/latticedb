@@ -54,7 +54,14 @@ pub fn serializeNodeInsert(
 /// Deserialized node insert payload
 pub const NodeInsertPayload = struct {
     node_id: u64,
-    label_ids: []const u16,
+    label_count: u16,
+    label_bytes: []const u8,
+
+    /// Get a label ID at the given index
+    pub fn getLabelId(self: NodeInsertPayload, index: usize) u16 {
+        const offset = index * 2;
+        return std.mem.readInt(u16, self.label_bytes[offset..][0..2], .little);
+    }
 };
 
 /// Deserialize a node insert payload
@@ -70,13 +77,13 @@ pub fn deserializeNodeInsert(payload: []const u8) PayloadError!NodeInsertPayload
     const expected_size = 11 + (label_count * 2);
     if (payload.len < expected_size) return PayloadError.InvalidPayload;
 
-    // Return a view into the payload for label_ids
+    // Return a view into the payload for label bytes
     const label_bytes = payload[11..][0 .. label_count * 2];
-    const label_ids: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, label_bytes));
 
     return NodeInsertPayload{
         .node_id = node_id,
-        .label_ids = label_ids,
+        .label_count = label_count,
+        .label_bytes = label_bytes,
     };
 }
 
@@ -115,8 +122,15 @@ pub fn serializeNodeDelete(
 /// Deserialized node delete payload
 pub const NodeDeletePayload = struct {
     node_id: u64,
-    label_ids: []const u16,
+    label_count: u16,
+    label_bytes: []const u8,
     properties: []const u8,
+
+    /// Get a label ID at the given index
+    pub fn getLabelId(self: NodeDeletePayload, index: usize) u16 {
+        const offset = index * 2;
+        return std.mem.readInt(u16, self.label_bytes[offset..][0..2], .little);
+    }
 };
 
 /// Deserialize a node delete payload
@@ -134,7 +148,6 @@ pub fn deserializeNodeDelete(payload: []const u8) PayloadError!NodeDeletePayload
     if (payload.len < offset + labels_size + 4) return PayloadError.InvalidPayload;
 
     const label_bytes = payload[offset..][0..labels_size];
-    const label_ids: []const u16 = @alignCast(std.mem.bytesAsSlice(u16, label_bytes));
     offset += labels_size;
 
     const props_len = std.mem.readInt(u32, payload[offset..][0..4], .little);
@@ -145,7 +158,8 @@ pub fn deserializeNodeDelete(payload: []const u8) PayloadError!NodeDeletePayload
 
     return NodeDeletePayload{
         .node_id = node_id,
-        .label_ids = label_ids,
+        .label_count = label_count,
+        .label_bytes = label_bytes,
         .properties = properties,
     };
 }
@@ -351,10 +365,10 @@ test "node_insert: serialize and deserialize round-trip" {
     const result = try deserializeNodeInsert(serialized);
 
     try std.testing.expectEqual(@as(u64, 42), result.node_id);
-    try std.testing.expectEqual(@as(usize, 3), result.label_ids.len);
-    try std.testing.expectEqual(@as(u16, 1), result.label_ids[0]);
-    try std.testing.expectEqual(@as(u16, 2), result.label_ids[1]);
-    try std.testing.expectEqual(@as(u16, 3), result.label_ids[2]);
+    try std.testing.expectEqual(@as(u16, 3), result.label_count);
+    try std.testing.expectEqual(@as(u16, 1), result.getLabelId(0));
+    try std.testing.expectEqual(@as(u16, 2), result.getLabelId(1));
+    try std.testing.expectEqual(@as(u16, 3), result.getLabelId(2));
 }
 
 test "node_insert: empty labels" {
@@ -365,7 +379,7 @@ test "node_insert: empty labels" {
     const result = try deserializeNodeInsert(serialized);
 
     try std.testing.expectEqual(@as(u64, 100), result.node_id);
-    try std.testing.expectEqual(@as(usize, 0), result.label_ids.len);
+    try std.testing.expectEqual(@as(u16, 0), result.label_count);
 }
 
 test "node_insert: buffer too small" {
@@ -385,7 +399,9 @@ test "node_delete: serialize and deserialize with properties" {
     const result = try deserializeNodeDelete(serialized);
 
     try std.testing.expectEqual(@as(u64, 99), result.node_id);
-    try std.testing.expectEqual(@as(usize, 2), result.label_ids.len);
+    try std.testing.expectEqual(@as(u16, 2), result.label_count);
+    try std.testing.expectEqual(@as(u16, 10), result.getLabelId(0));
+    try std.testing.expectEqual(@as(u16, 20), result.getLabelId(1));
     try std.testing.expectEqualStrings(props, result.properties);
 }
 
@@ -453,15 +469,14 @@ test "property_update: serialize and deserialize without old value" {
 
 test "wrong payload type returns error" {
     var buf: [256]u8 = undefined;
-    const label_ids = [_]u16{1};
 
-    // Serialize as node_insert
-    const serialized = try serializeNodeInsert(&buf, 1, &label_ids);
+    // Serialize as edge_insert (19 bytes)
+    const serialized = try serializeEdgeInsert(&buf, 1, 2, 3);
 
-    // Try to deserialize as edge_insert
+    // Try to deserialize as node_insert (requires different type byte)
     try std.testing.expectError(
         PayloadError.UnexpectedPayloadType,
-        deserializeEdgeInsert(serialized),
+        deserializeNodeInsert(serialized),
     );
 }
 

@@ -2,12 +2,30 @@
 
 **The Embedded Knowledge Graph Database**
 
-Lattice is a single-file, embeddable knowledge graph database designed for AI and RAG applications. It combines property graph storage, vector similarity search, and full-text search in one lightweight package.
+LatticeDB is a single-file, embeddable knowledge graph database designed for AI and RAG applications. It combines property graph storage, vector similarity search, and full-text search in one lightweight package.
 
 ## Install
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/jeffhajewski/latticedb/main/dist/install.sh | bash
+```
+
+## Quick Example
+
+```bash
+$ lattice mydb.db
+LatticeDB v0.1.0
+Connected to: mydb.db
+
+lattice> CREATE (p:Person {name: "Alice", age: 30})
+Created 1 node
+
+lattice> MATCH (p:Person) RETURN p.name, p.age
+┌─────────┬───────┐
+│ p.name  │ p.age │
+├─────────┼───────┤
+│ "Alice" │ 30    │
+└─────────┴───────┘
 ```
 
 ```cypher
@@ -220,6 +238,29 @@ WHERE chunk.embedding <=> $query < 0.4
   AND doc.content @@ "introduction"
 MATCH (doc)-[:AUTHORED_BY]->(author:Person)
 RETURN doc.title, author.name, chunk.text
+```
+
+### Data Mutation
+
+```cypher
+-- Create nodes and relationships
+CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})
+
+-- Update properties
+MATCH (p:Person {name: "Alice"})
+SET p.age = 31, p.city = "NYC"
+
+-- Add labels
+MATCH (p:Person {name: "Alice"})
+SET p:Admin:Verified
+
+-- Remove properties and labels
+MATCH (p:Person {name: "Alice"})
+REMOVE p.city, p:Verified
+
+-- Delete nodes (DETACH removes connected edges)
+MATCH (p:Person {name: "Bob"})
+DETACH DELETE p
 ```
 
 ## Architecture

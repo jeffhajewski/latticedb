@@ -112,6 +112,25 @@ result = db.query("MATCH (n:Person) RETURN n.name")
 result = db.query("MATCH (n:Person) WHERE n.age > 25 RETURN n.name")
 ```
 
+#### Data Mutation
+
+```python
+# Create nodes and relationships
+db.query("CREATE (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person {name: 'Bob'})")
+
+# Update properties
+db.query("MATCH (n:Person {name: 'Alice'}) SET n.age = 31, n.city = 'NYC'")
+
+# Add labels
+db.query("MATCH (n:Person {name: 'Alice'}) SET n:Admin:Verified")
+
+# Remove properties and labels
+db.query("MATCH (n:Person {name: 'Alice'}) REMOVE n.city, n:Verified")
+
+# Delete nodes (DETACH removes connected edges)
+db.query("MATCH (n:Person {name: 'Bob'}) DETACH DELETE n")
+```
+
 #### Parameterized Queries
 
 Use parameters to safely pass values into queries:

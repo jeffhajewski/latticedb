@@ -65,10 +65,15 @@ const QueryHandle = struct {
     }
 
     fn deinit(self: *QueryHandle) void {
-        // Free parameter keys (we own copies of them)
+        // Free parameter keys and values (we own copies of them)
         var iter = self.parameters.iterator();
         while (iter.next()) |entry| {
             global_allocator.free(entry.key_ptr.*);
+            // Free vector data if this is a vector parameter
+            switch (entry.value_ptr.*) {
+                .vector_val => |v| global_allocator.free(v),
+                else => {},
+            }
         }
         self.parameters.deinit();
     }
@@ -216,8 +221,9 @@ pub const lattice_value_type = enum(c_int) {
     float = 3,
     string = 4,
     bytes = 5,
-    list = 6,
-    map = 7,
+    vector = 6,
+    list = 7,
+    map = 8,
 };
 
 /// Property value for C API
@@ -234,6 +240,10 @@ pub const lattice_value = extern struct {
         bytes_val: extern struct {
             ptr: [*c]const u8,
             len: usize,
+        },
+        vector_val: extern struct {
+            ptr: [*c]const f32,
+            dimensions: u32,
         },
     },
 };
@@ -284,6 +294,11 @@ fn zigValueToCValue(zig_val: PropertyValue, c_val: *lattice_value) void {
             c_val.data.bytes_val.ptr = b.ptr;
             c_val.data.bytes_val.len = b.len;
         },
+        .vector_val => |v| {
+            c_val.value_type = .vector;
+            c_val.data.vector_val.ptr = v.ptr;
+            c_val.data.vector_val.dimensions = @intCast(v.len);
+        },
         .list_val, .map_val => {
             // Complex types not supported in MVP
             c_val.value_type = .null;
@@ -328,6 +343,7 @@ fn cValueToZigValue(c_val: *const lattice_value) PropertyValue {
         .float => .{ .float_val = c_val.data.float_val },
         .string => .{ .string_val = c_val.data.string_val.ptr[0..c_val.data.string_val.len] },
         .bytes => .{ .bytes_val = c_val.data.bytes_val.ptr[0..c_val.data.bytes_val.len] },
+        .vector => .{ .vector_val = c_val.data.vector_val.ptr[0..c_val.data.vector_val.dimensions] },
         .list, .map => .{ .null_val = {} },
     };
 }
@@ -999,18 +1015,38 @@ pub export fn lattice_query_bind(
     return .ok;
 }
 
-/// Bind a vector parameter (stub for MVP)
+/// Bind a vector parameter to a prepared query
 pub export fn lattice_query_bind_vector(
     query: ?*lattice_query,
     name: [*c]const u8,
     vector: [*c]const f32,
     dimensions: u32,
 ) lattice_error {
-    _ = query;
-    _ = name;
-    _ = vector;
-    _ = dimensions;
-    // TODO: Implement vector parameter binding
+    const query_handle = toHandle(QueryHandle, query) orelse return .err_invalid_arg;
+    const name_slice = cStrToSlice(name) orelse return .err_invalid_arg;
+
+    if (vector == null or dimensions == 0) return .err_invalid_arg;
+
+    // Copy the vector data since we need to own it
+    const vector_copy = global_allocator.alloc(f32, dimensions) catch return .err_out_of_memory;
+    @memcpy(vector_copy, vector[0..dimensions]);
+
+    // Create PropertyValue with vector
+    const zig_value = PropertyValue{ .vector_val = vector_copy };
+
+    // Copy the name since we need to own it
+    const name_copy = global_allocator.dupe(u8, name_slice) catch {
+        global_allocator.free(vector_copy);
+        return .err_out_of_memory;
+    };
+
+    // Store in parameters map (may overwrite existing)
+    query_handle.parameters.put(name_copy, zig_value) catch {
+        global_allocator.free(name_copy);
+        global_allocator.free(vector_copy);
+        return .err_out_of_memory;
+    };
+
     return .ok;
 }
 
@@ -1166,6 +1202,7 @@ test "value type tags match header" {
     try std.testing.expectEqual(@as(c_int, 0), @intFromEnum(lattice_value_type.null));
     try std.testing.expectEqual(@as(c_int, 1), @intFromEnum(lattice_value_type.bool));
     try std.testing.expectEqual(@as(c_int, 4), @intFromEnum(lattice_value_type.string));
+    try std.testing.expectEqual(@as(c_int, 6), @intFromEnum(lattice_value_type.vector));
 }
 
 test "version returns expected string" {
@@ -1191,4 +1228,33 @@ test "c string conversion" {
 
     const null_result = cStrToSlice(null);
     try std.testing.expect(null_result == null);
+}
+
+test "vector value conversion" {
+    // Test Zig to C conversion
+    const zig_vector = [_]f32{ 1.0, 2.0, 3.0 };
+    const zig_val = PropertyValue{ .vector_val = &zig_vector };
+
+    var c_val: lattice_value = undefined;
+    zigValueToCValue(zig_val, &c_val);
+
+    try std.testing.expectEqual(lattice_value_type.vector, c_val.value_type);
+    try std.testing.expectEqual(@as(u32, 3), c_val.data.vector_val.dimensions);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), c_val.data.vector_val.ptr[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), c_val.data.vector_val.ptr[1], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), c_val.data.vector_val.ptr[2], 0.001);
+
+    // Test C to Zig conversion
+    const back_to_zig = cValueToZigValue(&c_val);
+    try std.testing.expectEqual(@as(usize, 3), back_to_zig.vector_val.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), back_to_zig.vector_val[0], 0.001);
+}
+
+test "vector parameter binding validation" {
+    // Test that null vector returns error
+    try std.testing.expectEqual(lattice_error.err_invalid_arg, lattice_query_bind_vector(null, "query", null, 128));
+
+    // Test that zero dimensions returns error (when query handle is null)
+    const dummy_vec = [_]f32{1.0};
+    try std.testing.expectEqual(lattice_error.err_invalid_arg, lattice_query_bind_vector(null, "query", &dummy_vec, 0));
 }

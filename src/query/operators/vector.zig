@@ -322,16 +322,11 @@ pub const VectorSearchWithInput = struct {
 };
 
 /// Extract a vector ([]const f32) from a PropertyValue parameter
-/// Currently supports vectors stored as the internal vector representation
 fn extractVectorFromParam(param: types.PropertyValue) ?[]const f32 {
-    // For MVP, we expect the vector to be passed directly
-    // In a full implementation, this would handle various formats
-    switch (param) {
-        // If we had a vector type in PropertyValue, we'd extract it here
-        // For now, this is a placeholder - actual implementation depends on
-        // how vectors are passed as query parameters
-        else => return null,
-    }
+    return switch (param) {
+        .vector_val => |v| v,
+        else => null,
+    };
 }
 
 // ============================================================================

@@ -361,12 +361,21 @@ fn writePropertyValueJson(writer: anytype, val: PropertyValue) !void {
             try writer.writeByte('"');
         },
         .bytes_val => |bytes| {
-            // Encode bytes as base64 string
+            // Encode bytes as hex string
             try writer.writeByte('"');
             for (bytes) |b| {
                 try writer.print("{x:0>2}", .{b});
             }
             try writer.writeByte('"');
+        },
+        .vector_val => |vec| {
+            // Output vector as JSON array of floats
+            try writer.writeByte('[');
+            for (vec, 0..) |f, i| {
+                if (i > 0) try writer.writeByte(',');
+                try writer.print("{d}", .{f});
+            }
+            try writer.writeByte(']');
         },
         .list_val => |list| {
             try writer.writeByte('[');

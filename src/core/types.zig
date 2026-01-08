@@ -49,6 +49,7 @@ pub const PropertyValue = union(enum) {
     float_val: f64,
     string_val: []const u8,
     bytes_val: []const u8,
+    vector_val: []const f32,
     list_val: []const PropertyValue,
     map_val: []const MapEntry,
 
@@ -61,6 +62,7 @@ pub const PropertyValue = union(enum) {
         switch (self.*) {
             .string_val => |s| allocator.free(s),
             .bytes_val => |b| allocator.free(b),
+            .vector_val => |v| allocator.free(v),
             .list_val => |list| {
                 for (list) |*item| {
                     var mutable_item = item.*;

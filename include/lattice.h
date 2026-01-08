@@ -69,8 +69,9 @@ typedef enum {
     LATTICE_VALUE_FLOAT = 3,
     LATTICE_VALUE_STRING = 4,
     LATTICE_VALUE_BYTES = 5,
-    LATTICE_VALUE_LIST = 6,
-    LATTICE_VALUE_MAP = 7
+    LATTICE_VALUE_VECTOR = 6,
+    LATTICE_VALUE_LIST = 7,
+    LATTICE_VALUE_MAP = 8
 } lattice_value_type;
 
 /* Property value */
@@ -88,6 +89,10 @@ typedef struct {
             const uint8_t* ptr;
             size_t len;
         } bytes_val;
+        struct {
+            const float* ptr;
+            uint32_t dimensions;
+        } vector_val;
     } data;
 } lattice_value;
 

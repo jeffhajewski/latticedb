@@ -128,7 +128,7 @@ pub const EvalResult = union(enum) {
             .float_val => |f| .{ .float_val = f },
             .string_val => |s| .{ .string_val = s },
             .bytes_val => |b| .{ .string_val = b },
-            .list_val, .map_val => .{ .null_val = {} }, // TODO: proper list/map conversion
+            .vector_val, .list_val, .map_val => .{ .null_val = {} }, // TODO: proper vector/list/map conversion
         };
     }
 

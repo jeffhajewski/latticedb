@@ -262,13 +262,20 @@ fn serializeValue(writer: anytype, value: PropertyValue) !void {
             try writer.writeInt(u32, @intCast(b.len), .little);
             try writer.writeAll(b);
         },
-        .list_val => {
+        .vector_val => |v| {
             try writer.writeByte(6);
+            try writer.writeInt(u32, @intCast(v.len), .little);
+            for (v) |f| {
+                try writer.writeInt(u32, @bitCast(f), .little);
+            }
+        },
+        .list_val => {
+            try writer.writeByte(7);
             // TODO: Implement list serialization
             try writer.writeInt(u32, 0, .little);
         },
         .map_val => {
-            try writer.writeByte(7);
+            try writer.writeByte(8);
             // TODO: Implement map serialization
             try writer.writeInt(u32, 0, .little);
         },
@@ -343,12 +350,22 @@ fn deserializeValue(allocator: Allocator, reader: anytype) !PropertyValue {
             }
             break :blk PropertyValue{ .bytes_val = bytes };
         },
-        6 => {
+        6 => blk: {
+            // Vector
+            const len = try reader.readInt(u32, .little);
+            const vec = try allocator.alloc(f32, len);
+            errdefer allocator.free(vec);
+            for (0..len) |i| {
+                vec[i] = @bitCast(try reader.readInt(u32, .little));
+            }
+            break :blk PropertyValue{ .vector_val = vec };
+        },
+        7 => {
             // List - read count and skip for now
             _ = try reader.readInt(u32, .little);
             return PropertyValue{ .list_val = &[_]PropertyValue{} };
         },
-        7 => {
+        8 => {
             // Map - read count and skip for now
             _ = try reader.readInt(u32, .little);
             return PropertyValue{ .map_val = &[_]PropertyValue.MapEntry{} };

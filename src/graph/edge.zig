@@ -532,6 +532,13 @@ fn serializeValue(writer: anytype, value: PropertyValue) !void {
             try writer.writeInt(u32, @intCast(b.len), .little);
             try writer.writeAll(b);
         },
+        .vector_val => |v| {
+            try writer.writeByte(6);
+            try writer.writeInt(u32, @intCast(v.len), .little);
+            for (v) |f| {
+                try writer.writeInt(u32, @bitCast(f), .little);
+            }
+        },
         .list_val, .map_val => {
             try writer.writeByte(0); // Treat as null for now
         },

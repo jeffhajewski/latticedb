@@ -1816,7 +1816,7 @@ pub const Database = struct {
                 .int_val => |i| .{ .int_val = i },
                 .float_val => |f| .{ .float_val = f },
                 .string_val => |s| .{ .string_val = s },
-                .bytes_val, .list_val, .map_val => .{ .null_val = {} },
+                .bytes_val, .vector_val, .list_val, .map_val => .{ .null_val = {} },
             },
         };
     }

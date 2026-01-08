@@ -269,15 +269,23 @@ fn serializeValue(writer: anytype, value: PropertyValue) !void {
                 try writer.writeInt(u32, @bitCast(f), .little);
             }
         },
-        .list_val => {
+        .list_val => |list| {
             try writer.writeByte(7);
-            // TODO: Implement list serialization
-            try writer.writeInt(u32, 0, .little);
+            try writer.writeInt(u32, @intCast(list.len), .little);
+            for (list) |item| {
+                try serializeValue(writer, item);
+            }
         },
-        .map_val => {
+        .map_val => |map| {
             try writer.writeByte(8);
-            // TODO: Implement map serialization
-            try writer.writeInt(u32, 0, .little);
+            try writer.writeInt(u32, @intCast(map.len), .little);
+            for (map) |entry| {
+                // Write key (length-prefixed string)
+                try writer.writeInt(u32, @intCast(entry.key.len), .little);
+                try writer.writeAll(entry.key);
+                // Write value (recursive)
+                try serializeValue(writer, entry.value);
+            }
         },
     }
 }
@@ -360,15 +368,55 @@ fn deserializeValue(allocator: Allocator, reader: anytype) !PropertyValue {
             }
             break :blk PropertyValue{ .vector_val = vec };
         },
-        7 => {
-            // List - read count and skip for now
-            _ = try reader.readInt(u32, .little);
-            return PropertyValue{ .list_val = &[_]PropertyValue{} };
+        7 => blk: {
+            // List
+            const count = try reader.readInt(u32, .little);
+            if (count == 0) {
+                break :blk PropertyValue{ .list_val = &[_]PropertyValue{} };
+            }
+            const list = try allocator.alloc(PropertyValue, count);
+            errdefer {
+                for (list) |*item| {
+                    var mutable = item.*;
+                    mutable.deinit(allocator);
+                }
+                allocator.free(list);
+            }
+            for (0..count) |i| {
+                list[i] = try deserializeValue(allocator, reader);
+            }
+            break :blk PropertyValue{ .list_val = list };
         },
-        8 => {
-            // Map - read count and skip for now
-            _ = try reader.readInt(u32, .little);
-            return PropertyValue{ .map_val = &[_]PropertyValue.MapEntry{} };
+        8 => blk: {
+            // Map
+            const count = try reader.readInt(u32, .little);
+            if (count == 0) {
+                break :blk PropertyValue{ .map_val = &[_]PropertyValue.MapEntry{} };
+            }
+            const map = try allocator.alloc(PropertyValue.MapEntry, count);
+            errdefer {
+                for (map) |*entry| {
+                    allocator.free(entry.key);
+                    var mutable = entry.value;
+                    mutable.deinit(allocator);
+                }
+                allocator.free(map);
+            }
+            for (0..count) |i| {
+                // Read key
+                const key_len = try reader.readInt(u32, .little);
+                const key = try allocator.alloc(u8, key_len);
+                errdefer allocator.free(key);
+                const key_bytes_read = try reader.readAll(key);
+                if (key_bytes_read != key_len) {
+                    allocator.free(key);
+                    return error.EndOfStream;
+                }
+                // Read value
+                const value = try deserializeValue(allocator, reader);
+                map[i] = .{ .key = key, .value = value };
+            }
+            break :blk PropertyValue{ .map_val = map };
         },
         else => error.InvalidData,
     };
@@ -533,4 +581,94 @@ test "node store delete" {
 
     // Deleting again should fail with NotFound
     try std.testing.expectError(NodeError.NotFound, store.delete(node_id));
+}
+
+test "property value list serialization round-trip" {
+    const allocator = std.testing.allocator;
+
+    // Create a list with mixed types
+    var list_items = [_]PropertyValue{
+        PropertyValue{ .int_val = 42 },
+        PropertyValue{ .string_val = "hello" },
+        PropertyValue{ .bool_val = true },
+    };
+    const list_val = PropertyValue{ .list_val = &list_items };
+
+    // Serialize
+    var buf: [1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try serializeValue(stream.writer(), list_val);
+
+    // Deserialize
+    stream.pos = 0;
+    var result = try deserializeValue(allocator, stream.reader());
+    defer result.deinit(allocator);
+
+    // Verify
+    try std.testing.expectEqual(@as(usize, 3), result.list_val.len);
+    try std.testing.expectEqual(@as(i64, 42), result.list_val[0].int_val);
+    try std.testing.expectEqualStrings("hello", result.list_val[1].string_val);
+    try std.testing.expectEqual(true, result.list_val[2].bool_val);
+}
+
+test "property value map serialization round-trip" {
+    const allocator = std.testing.allocator;
+
+    // Create a map
+    var map_entries = [_]PropertyValue.MapEntry{
+        .{ .key = "name", .value = PropertyValue{ .string_val = "Alice" } },
+        .{ .key = "age", .value = PropertyValue{ .int_val = 30 } },
+    };
+    const map_val = PropertyValue{ .map_val = &map_entries };
+
+    // Serialize
+    var buf: [1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try serializeValue(stream.writer(), map_val);
+
+    // Deserialize
+    stream.pos = 0;
+    var result = try deserializeValue(allocator, stream.reader());
+    defer result.deinit(allocator);
+
+    // Verify
+    try std.testing.expectEqual(@as(usize, 2), result.map_val.len);
+    try std.testing.expectEqualStrings("name", result.map_val[0].key);
+    try std.testing.expectEqualStrings("Alice", result.map_val[0].value.string_val);
+    try std.testing.expectEqualStrings("age", result.map_val[1].key);
+    try std.testing.expectEqual(@as(i64, 30), result.map_val[1].value.int_val);
+}
+
+test "property value nested list/map serialization" {
+    const allocator = std.testing.allocator;
+
+    // Create nested structure: { "items": [1, 2, 3] }
+    var inner_list = [_]PropertyValue{
+        PropertyValue{ .int_val = 1 },
+        PropertyValue{ .int_val = 2 },
+        PropertyValue{ .int_val = 3 },
+    };
+    var map_entries = [_]PropertyValue.MapEntry{
+        .{ .key = "items", .value = PropertyValue{ .list_val = &inner_list } },
+    };
+    const nested_val = PropertyValue{ .map_val = &map_entries };
+
+    // Serialize
+    var buf: [1024]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+    try serializeValue(stream.writer(), nested_val);
+
+    // Deserialize
+    stream.pos = 0;
+    var result = try deserializeValue(allocator, stream.reader());
+    defer result.deinit(allocator);
+
+    // Verify
+    try std.testing.expectEqual(@as(usize, 1), result.map_val.len);
+    try std.testing.expectEqualStrings("items", result.map_val[0].key);
+    const items = result.map_val[0].value.list_val;
+    try std.testing.expectEqual(@as(usize, 3), items.len);
+    try std.testing.expectEqual(@as(i64, 1), items[0].int_val);
+    try std.testing.expectEqual(@as(i64, 2), items[1].int_val);
+    try std.testing.expectEqual(@as(i64, 3), items[2].int_val);
 }

@@ -539,8 +539,21 @@ fn serializeValue(writer: anytype, value: PropertyValue) !void {
                 try writer.writeInt(u32, @bitCast(f), .little);
             }
         },
-        .list_val, .map_val => {
-            try writer.writeByte(0); // Treat as null for now
+        .list_val => |list| {
+            try writer.writeByte(7);
+            try writer.writeInt(u32, @intCast(list.len), .little);
+            for (list) |item| {
+                try serializeValue(writer, item);
+            }
+        },
+        .map_val => |map| {
+            try writer.writeByte(8);
+            try writer.writeInt(u32, @intCast(map.len), .little);
+            for (map) |entry| {
+                try writer.writeInt(u32, @intCast(entry.key.len), .little);
+                try writer.writeAll(entry.key);
+                try serializeValue(writer, entry.value);
+            }
         },
     }
 }
@@ -610,6 +623,64 @@ fn deserializeValue(allocator: Allocator, reader: anytype) !PropertyValue {
                 return error.EndOfStream;
             }
             break :blk PropertyValue{ .bytes_val = bytes };
+        },
+        6 => blk: {
+            // Vector
+            const len = try reader.readInt(u32, .little);
+            const vec = try allocator.alloc(f32, len);
+            errdefer allocator.free(vec);
+            for (0..len) |i| {
+                vec[i] = @bitCast(try reader.readInt(u32, .little));
+            }
+            break :blk PropertyValue{ .vector_val = vec };
+        },
+        7 => blk: {
+            // List
+            const count = try reader.readInt(u32, .little);
+            if (count == 0) {
+                break :blk PropertyValue{ .list_val = &[_]PropertyValue{} };
+            }
+            const list = try allocator.alloc(PropertyValue, count);
+            errdefer {
+                for (list) |*item| {
+                    var mutable = item.*;
+                    mutable.deinit(allocator);
+                }
+                allocator.free(list);
+            }
+            for (0..count) |i| {
+                list[i] = try deserializeValue(allocator, reader);
+            }
+            break :blk PropertyValue{ .list_val = list };
+        },
+        8 => blk: {
+            // Map
+            const count = try reader.readInt(u32, .little);
+            if (count == 0) {
+                break :blk PropertyValue{ .map_val = &[_]PropertyValue.MapEntry{} };
+            }
+            const map = try allocator.alloc(PropertyValue.MapEntry, count);
+            errdefer {
+                for (map) |*entry| {
+                    allocator.free(entry.key);
+                    var mutable = entry.value;
+                    mutable.deinit(allocator);
+                }
+                allocator.free(map);
+            }
+            for (0..count) |i| {
+                const key_len = try reader.readInt(u32, .little);
+                const key = try allocator.alloc(u8, key_len);
+                errdefer allocator.free(key);
+                const key_bytes_read = try reader.readAll(key);
+                if (key_bytes_read != key_len) {
+                    allocator.free(key);
+                    return error.EndOfStream;
+                }
+                const value = try deserializeValue(allocator, reader);
+                map[i] = .{ .key = key, .value = value };
+            }
+            break :blk PropertyValue{ .map_val = map };
         },
         else => PropertyValue{ .null_val = {} },
     };

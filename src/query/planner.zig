@@ -100,6 +100,13 @@ pub const VarBinding = struct {
     kind: semantic.VariableKind,
 };
 
+/// Edge binding with additional metadata for deletion
+pub const EdgeBinding = struct {
+    source_slot: u8,
+    target_slot: u8,
+    edge_type: []const u8,
+};
+
 // ============================================================================
 // Query Planner
 // ============================================================================
@@ -109,6 +116,7 @@ pub const QueryPlanner = struct {
     allocator: Allocator,
     storage: StorageContext,
     bindings: std.StringHashMap(VarBinding),
+    edge_bindings: std.StringHashMap(EdgeBinding),
     next_slot: u8,
 
     const Self = @This();
@@ -119,6 +127,7 @@ pub const QueryPlanner = struct {
             .allocator = allocator,
             .storage = storage,
             .bindings = std.StringHashMap(VarBinding).init(allocator),
+            .edge_bindings = std.StringHashMap(EdgeBinding).init(allocator),
             .next_slot = 0,
         };
     }
@@ -126,6 +135,7 @@ pub const QueryPlanner = struct {
     /// Free planner resources
     pub fn deinit(self: *Self) void {
         self.bindings.deinit();
+        self.edge_bindings.deinit();
     }
 
     /// Plan a complete query
@@ -134,6 +144,7 @@ pub const QueryPlanner = struct {
 
         // Reset bindings for this query
         self.bindings.clearRetainingCapacity();
+        self.edge_bindings.clearRetainingCapacity();
         self.next_slot = 0;
 
         var current_op: ?Operator = null;
@@ -220,6 +231,15 @@ pub const QueryPlanner = struct {
                     if (edge_pattern.variable) |name| {
                         edge_slot = try self.allocateSlot();
                         try self.bindVariable(name, edge_slot.?, .edge);
+
+                        // Store edge binding metadata for DELETE support
+                        if (edge_pattern.types.len > 0) {
+                            self.edge_bindings.put(name, .{
+                                .source_slot = source_slot,
+                                .target_slot = target_slot,
+                                .edge_type = edge_pattern.types[0],
+                            }) catch return PlannerError.OutOfMemory;
+                        }
                     }
 
                     // Determine edge type
@@ -599,62 +619,113 @@ pub const QueryPlanner = struct {
         const database = self.storage.database orelse return PlannerError.MissingStorage;
         var op = input;
 
+        // Pending edge info for deferred creation
+        const PendingEdge = struct {
+            source_slot: u8,
+            edge_pattern: *const ast.EdgePattern,
+        };
+
         // Process each pattern in CREATE
         for (create.patterns) |pattern| {
             var prev_node_slot: ?u8 = null;
+            var pending_edge: ?PendingEdge = null;
 
             for (pattern.elements) |element| {
                 switch (element) {
                     .node => |node_pattern| {
-                        const slot = try self.allocateSlot();
+                        var slot: u8 = undefined;
+                        var need_create = true;
 
-                        // Bind variable if present
+                        // Check if this references an existing variable (from MATCH)
                         if (node_pattern.variable) |name| {
-                            try self.bindVariable(name, slot, .node);
-                        }
-
-                        // Build properties list
-                        var properties: std.ArrayList(mutation_ops.CreateNode.PropertyKV) = .empty;
-                        if (node_pattern.properties) |props| {
-                            for (props) |prop| {
-                                properties.append(self.allocator, .{
-                                    .key = prop.key,
-                                    .value_expr = prop.value,
-                                }) catch return PlannerError.OutOfMemory;
+                            if (self.bindings.get(name)) |existing| {
+                                // Variable already bound - use existing slot, don't create
+                                slot = existing.slot;
+                                need_create = false;
+                            } else {
+                                // New variable - allocate slot and bind
+                                slot = try self.allocateSlot();
+                                try self.bindVariable(name, slot, .node);
                             }
+                        } else {
+                            // Anonymous node - always create
+                            slot = try self.allocateSlot();
                         }
 
-                        // Create the CreateNode operator
-                        const create_node = mutation_ops.CreateNode.init(
-                            self.allocator,
-                            op,
-                            node_pattern.labels,
-                            properties.toOwnedSlice(self.allocator) catch return PlannerError.OutOfMemory,
-                            slot,
-                            database,
-                        ) catch return PlannerError.OutOfMemory;
+                        if (need_create) {
+                            // Build properties list
+                            var properties: std.ArrayList(mutation_ops.CreateNode.PropertyKV) = .empty;
+                            if (node_pattern.properties) |props| {
+                                for (props) |prop| {
+                                    properties.append(self.allocator, .{
+                                        .key = prop.key,
+                                        .value_expr = prop.value,
+                                    }) catch return PlannerError.OutOfMemory;
+                                }
+                            }
 
-                        op = create_node.operator();
+                            // Create the CreateNode operator
+                            const create_node = mutation_ops.CreateNode.init(
+                                self.allocator,
+                                op,
+                                node_pattern.labels,
+                                properties.toOwnedSlice(self.allocator) catch return PlannerError.OutOfMemory,
+                                slot,
+                                database,
+                            ) catch return PlannerError.OutOfMemory;
+
+                            op = create_node.operator();
+                        }
+
+                        // If there's a pending edge, now we have the target - create it
+                        if (pending_edge) |pe| {
+                            if (pe.edge_pattern.types.len == 0) {
+                                return PlannerError.InvalidQuery; // Edge type required
+                            }
+
+                            // Bind edge variable if present
+                            if (pe.edge_pattern.variable) |edge_name| {
+                                const edge_slot = try self.allocateSlot();
+                                try self.bindVariable(edge_name, edge_slot, .edge);
+                            }
+
+                            // Determine direction and create edge
+                            // For incoming edges (<-[]-), the current node is the source
+                            const source_slot = if (pe.edge_pattern.direction == .incoming) slot else pe.source_slot;
+                            const target_slot = if (pe.edge_pattern.direction == .incoming) pe.source_slot else slot;
+
+                            const create_edge = mutation_ops.CreateEdge.init(
+                                self.allocator,
+                                op.?,
+                                source_slot,
+                                target_slot,
+                                pe.edge_pattern.types[0], // Use first type
+                                null, // Edge slot tracking deferred
+                                database,
+                            ) catch return PlannerError.OutOfMemory;
+
+                            op = create_edge.operator();
+                            pending_edge = null;
+                        }
+
                         prev_node_slot = slot;
                     },
                     .edge => |edge_pattern| {
                         // Edge requires a source node from previous element
-                        if (prev_node_slot == null) {
-                            return PlannerError.InvalidQuery;
-                        }
+                        const source = prev_node_slot orelse return PlannerError.InvalidQuery;
 
-                        // The target node must be the next element in the pattern
-                        // For simplicity, we require edges to connect nodes already created
-                        // A more complete implementation would look ahead
-                        if (edge_pattern.types.len == 0) {
-                            return PlannerError.InvalidQuery; // Edge type required for CREATE
-                        }
-
-                        // Edge creation is deferred until we have the target node
-                        // For MVP, we only support simple node creation
-                        // Full edge support would require two-pass pattern processing
+                        // Defer edge creation until we have the target node
+                        pending_edge = .{
+                            .source_slot = source,
+                            .edge_pattern = edge_pattern,
+                        };
                     },
                 }
+            }
+
+            // Check for dangling edge (edge without target node)
+            if (pending_edge != null) {
+                return PlannerError.InvalidQuery;
             }
         }
 
@@ -677,8 +748,8 @@ pub const QueryPlanner = struct {
             const var_name = expr.variable.name;
             const binding = self.bindings.get(var_name) orelse return PlannerError.InvalidQuery;
 
-            // Create DeleteNode operator (for now, only support node deletion)
             if (binding.kind == .node) {
+                // Create DeleteNode operator
                 const delete_node = mutation_ops.DeleteNode.init(
                     self.allocator,
                     op,
@@ -688,8 +759,25 @@ pub const QueryPlanner = struct {
                 ) catch return PlannerError.OutOfMemory;
 
                 op = delete_node.operator();
+            } else if (binding.kind == .edge) {
+                // Look up edge metadata for deletion
+                const edge_meta = self.edge_bindings.get(var_name) orelse {
+                    // Edge without metadata - can't delete (need source/target/type)
+                    return PlannerError.InvalidQuery;
+                };
+
+                // Create DeleteEdge operator
+                const delete_edge = mutation_ops.DeleteEdge.init(
+                    self.allocator,
+                    op,
+                    edge_meta.source_slot,
+                    edge_meta.target_slot,
+                    edge_meta.edge_type,
+                    database,
+                ) catch return PlannerError.OutOfMemory;
+
+                op = delete_edge.operator();
             }
-            // Edge deletion would require more complex handling
         }
 
         return op;

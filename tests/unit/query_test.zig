@@ -709,3 +709,77 @@ test "lexer: DETACH keyword recognized" {
     const t2 = lexer.nextToken();
     try std.testing.expectEqual(TokenType.kw_delete, t2.token_type);
 }
+
+test "parser: CREATE with edge pattern parses" {
+    var parser = Parser.init(std.testing.allocator, "CREATE (a:Person)-[:KNOWS]->(b:Person)");
+    defer parser.deinit();
+
+    const result = parser.parse();
+    try std.testing.expect(result.query != null);
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+    try std.testing.expectEqual(@as(usize, 1), result.query.?.clauses.len);
+    try std.testing.expect(result.query.?.clauses[0] == .create);
+
+    const create = result.query.?.clauses[0].create;
+    try std.testing.expectEqual(@as(usize, 1), create.patterns.len);
+
+    // Pattern should have: node, edge, node
+    const pattern = create.patterns[0];
+    try std.testing.expectEqual(@as(usize, 3), pattern.elements.len);
+    try std.testing.expect(pattern.elements[0] == .node);
+    try std.testing.expect(pattern.elements[1] == .edge);
+    try std.testing.expect(pattern.elements[2] == .node);
+
+    // Check edge type
+    const edge = pattern.elements[1].edge;
+    try std.testing.expectEqual(@as(usize, 1), edge.types.len);
+    try std.testing.expectEqualStrings("KNOWS", edge.types[0]);
+}
+
+test "parser: CREATE edge between existing nodes parses" {
+    // This pattern is used after MATCH to create edge between matched nodes
+    var parser = Parser.init(std.testing.allocator, "MATCH (a:Person), (b:Person) CREATE (a)-[:KNOWS]->(b)");
+    defer parser.deinit();
+
+    const result = parser.parse();
+    try std.testing.expect(result.query != null);
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+    try std.testing.expectEqual(@as(usize, 2), result.query.?.clauses.len);
+
+    // First clause is MATCH
+    try std.testing.expect(result.query.?.clauses[0] == .match);
+    // Second clause is CREATE
+    try std.testing.expect(result.query.?.clauses[1] == .create);
+}
+
+test "parser: DELETE edge variable parses" {
+    var parser = Parser.init(std.testing.allocator, "MATCH (a)-[r:KNOWS]->(b) DELETE r");
+    defer parser.deinit();
+
+    const result = parser.parse();
+    try std.testing.expect(result.query != null);
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+    try std.testing.expectEqual(@as(usize, 2), result.query.?.clauses.len);
+
+    // Second clause is DELETE
+    const delete = result.query.?.clauses[1].delete;
+    try std.testing.expectEqual(@as(usize, 1), delete.expressions.len);
+    try std.testing.expect(delete.expressions[0].* == .variable);
+    try std.testing.expectEqualStrings("r", delete.expressions[0].variable.name);
+}
+
+test "parser: CREATE with incoming edge direction parses" {
+    var parser = Parser.init(std.testing.allocator, "CREATE (a:Person)<-[:KNOWS]-(b:Person)");
+    defer parser.deinit();
+
+    const result = parser.parse();
+    try std.testing.expect(result.query != null);
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+
+    const create = result.query.?.clauses[0].create;
+    const pattern = create.patterns[0];
+    const edge = pattern.elements[1].edge;
+
+    // Check it's an incoming edge
+    try std.testing.expectEqual(parser_mod.EdgeDirection.incoming, edge.direction);
+}

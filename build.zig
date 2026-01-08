@@ -99,7 +99,8 @@ pub fn build(b: *std.Build) void {
     shared_step.dependOn(&install_shared.step);
 
     const cli_step = b.step("cli", "Build CLI executable only");
-    cli_step.dependOn(&cli.step);
+    const install_cli = b.addInstallArtifact(cli, .{});
+    cli_step.dependOn(&install_cli.step);
 
     const test_step = b.step("test", "Run unit tests");
     test_step.dependOn(&run_unit_tests.step);

@@ -119,17 +119,30 @@ pub const Savepoint = struct {
     undo_position: usize,
 };
 
-/// Undo log entry for rollback
-const UndoEntry = struct {
-    /// Type of operation to undo
-    op_type: UndoOpType,
-    /// LSN of the operation
-    lsn: u64,
-    /// Operation-specific data
-    data: []const u8,
+/// Entity type for undo operations
+pub const EntityType = enum(u8) {
+    node,
+    edge,
+    property,
 };
 
-const UndoOpType = enum(u8) {
+/// Undo log entry for rollback
+pub const UndoEntry = struct {
+    /// Type of operation to undo
+    op_type: UndoOpType,
+    /// Type of entity affected
+    entity_type: EntityType,
+    /// Primary entity ID (node_id for nodes/properties, source for edges)
+    entity_id: u64,
+    /// Secondary ID (target node for edges, 0 otherwise)
+    secondary_id: u64,
+    /// Type ID for edges, key_id for properties
+    type_id: u16,
+    /// Previous data for restoring on undo (owned, must be freed)
+    prev_data: ?[]const u8,
+};
+
+pub const UndoOpType = enum(u8) {
     insert,
     update,
     delete,
@@ -309,6 +322,13 @@ pub const TxnManager = struct {
 
         // Clean up transaction entry
         entry.savepoints.deinit(self.allocator);
+
+        // Free prev_data in undo entries
+        for (entry.undo_log.items) |undo_entry| {
+            if (undo_entry.prev_data) |data| {
+                self.allocator.free(data);
+            }
+        }
         entry.undo_log.deinit(self.allocator);
         _ = self.active_txns.remove(txn.id);
 
@@ -411,6 +431,61 @@ pub const TxnManager = struct {
         entry.last_lsn = lsn;
 
         return lsn;
+    }
+
+    /// Add an undo entry to the transaction's undo log
+    /// Called by Database operations to enable rollback on abort
+    pub fn addUndoEntry(
+        self: *Self,
+        txn: *Transaction,
+        op_type: UndoOpType,
+        entity_type: EntityType,
+        entity_id: u64,
+        secondary_id: u64,
+        type_id: u16,
+        prev_data: ?[]const u8,
+    ) TxnError!void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (!txn.isActive()) {
+            return TxnError.NotActive;
+        }
+
+        const entry = self.active_txns.getPtr(txn.id) orelse {
+            return TxnError.NotFound;
+        };
+
+        // Copy prev_data if provided (we own the copy)
+        const owned_data: ?[]const u8 = if (prev_data) |data| blk: {
+            const copy = self.allocator.alloc(u8, data.len) catch {
+                return TxnError.OutOfMemory;
+            };
+            @memcpy(copy, data);
+            break :blk copy;
+        } else null;
+
+        entry.undo_log.append(self.allocator, .{
+            .op_type = op_type,
+            .entity_type = entity_type,
+            .entity_id = entity_id,
+            .secondary_id = secondary_id,
+            .type_id = type_id,
+            .prev_data = owned_data,
+        }) catch {
+            if (owned_data) |data| self.allocator.free(data);
+            return TxnError.OutOfMemory;
+        };
+    }
+
+    /// Get the undo log for a transaction (for executing undo operations before abort)
+    /// Returns slice of undo entries in forward order; caller should iterate in reverse
+    pub fn getUndoLog(self: *Self, txn: *Transaction) ?[]const UndoEntry {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        const entry = self.active_txns.getPtr(txn.id) orelse return null;
+        return entry.undo_log.items;
     }
 
     /// Get transaction by ID (returns null if not found or not active)

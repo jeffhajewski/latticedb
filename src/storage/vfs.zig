@@ -385,13 +385,12 @@ pub const PosixFile = struct {
             .exclusive => std.c.F.WRLCK,
         };
 
-        var flock = std.c.Flock{
-            .type = lock_type,
-            .whence = 0, // SEEK_SET
-            .start = 0,
-            .len = 0, // Entire file
-            .pid = 0,
-        };
+        var flock: std.c.Flock = std.mem.zeroes(std.c.Flock);
+        flock.type = lock_type;
+        flock.whence = 0; // SEEK_SET
+        flock.start = 0;
+        flock.len = 0; // Entire file
+        flock.pid = 0;
 
         _ = std.posix.fcntl(self.fd, std.c.F.SETLKW, @intFromPtr(&flock)) catch |err| {
             return switch (err) {
@@ -403,13 +402,12 @@ pub const PosixFile = struct {
 
     /// Unlock file.
     pub fn unlockFile(self: *Self) void {
-        var flock = std.c.Flock{
-            .type = std.c.F.UNLCK,
-            .whence = 0, // SEEK_SET
-            .start = 0,
-            .len = 0,
-            .pid = 0,
-        };
+        var flock: std.c.Flock = std.mem.zeroes(std.c.Flock);
+        flock.type = std.c.F.UNLCK;
+        flock.whence = 0; // SEEK_SET
+        flock.start = 0;
+        flock.len = 0;
+        flock.pid = 0;
 
         _ = std.posix.fcntl(self.fd, std.c.F.SETLK, @intFromPtr(&flock)) catch {};
     }

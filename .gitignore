@@ -13,8 +13,8 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.egg-info/
-dist/
-build/
+bindings/python/dist/
+bindings/python/build/
 .eggs/
 *.egg
 .venv/
@@ -31,7 +31,7 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 .npm
-dist/
+bindings/typescript/dist/
 *.tsbuildinfo
 
 # Native addons
@@ -58,3 +58,7 @@ test_*.db
 *.tmp
 *.temp
 *.log
+
+# Release build artifacts (keep dist/*.sh scripts tracked)
+dist/build/
+dist/release/

@@ -105,7 +105,7 @@ const NodeCreateContext = struct {
 
     fn run(self: *@This()) void {
         const labels = &[_][]const u8{"BenchNode"};
-        _ = self.db.createNode(labels) catch {};
+        _ = self.db.createNode(null, labels) catch {};
     }
 };
 
@@ -187,7 +187,7 @@ fn createNodes(db: *Database, count: usize, label: []const u8) ![]u64 {
     const labels = &[_][]const u8{label};
     var ids = try db.allocator.alloc(u64, count);
     for (0..count) |i| {
-        ids[i] = try db.createNode(labels);
+        ids[i] = try db.createNode(null, labels);
     }
     return ids;
 }
@@ -196,11 +196,11 @@ fn createNodesWithProperties(db: *Database, count: usize) ![]u64 {
     const labels = &[_][]const u8{"Person"};
     var ids = try db.allocator.alloc(u64, count);
     for (0..count) |i| {
-        ids[i] = try db.createNode(labels);
+        ids[i] = try db.createNode(null, labels);
         var name_buf: [32]u8 = undefined;
         const name = std.fmt.bufPrint(&name_buf, "Person {d}", .{i}) catch "Unknown";
-        try db.setNodeProperty(ids[i], "name", .{ .string_val = name });
-        try db.setNodeProperty(ids[i], "age", .{ .int_val = @as(i64, @intCast(i % 100)) });
+        try db.setNodeProperty(null,ids[i], "name", .{ .string_val = name });
+        try db.setNodeProperty(null,ids[i], "age", .{ .int_val = @as(i64, @intCast(i % 100)) });
     }
     return ids;
 }
@@ -212,7 +212,7 @@ fn createEdges(db: *Database, node_ids: []const u64, edges_per_node: usize) !voi
             const target_idx = rng.intRangeAtMost(usize, 0, node_ids.len - 1);
             const target = node_ids[target_idx];
             if (source != target) {
-                _ = db.createEdge(source, target, "KNOWS") catch {};
+                _ = db.createEdge(null,source, target, "KNOWS") catch {};
             }
         }
     }

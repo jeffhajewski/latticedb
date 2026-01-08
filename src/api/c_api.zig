@@ -167,6 +167,9 @@ fn mapDatabaseError(err: DatabaseError) lattice_error {
         DatabaseError.AlreadyExists => .err_already_exists,
         DatabaseError.ReadOnly => .err_read_only,
         DatabaseError.NotFound => .err_not_found,
+        DatabaseError.TransactionNotActive => .err_invalid_arg,
+        DatabaseError.TransactionReadOnly => .err_read_only,
+        DatabaseError.TransactionsNotEnabled => .err_invalid_arg,
     };
 }
 
@@ -452,7 +455,7 @@ pub export fn lattice_node_create(
     const label_slice = cStrToSlice(label) orelse return .err_invalid_arg;
     const labels = [_][]const u8{label_slice};
 
-    const node_id = txn_handle.db_handle.db.createNode(&labels) catch |err| {
+    const node_id = txn_handle.db_handle.db.createNode(null,&labels) catch |err| {
         return mapAnyError(err);
     };
 
@@ -469,7 +472,7 @@ pub export fn lattice_node_delete(
 
     if (txn_handle.read_only) return .err_read_only;
 
-    txn_handle.db_handle.db.deleteNode(node_id) catch |err| {
+    txn_handle.db_handle.db.deleteNode(null,node_id) catch |err| {
         return mapAnyError(err);
     };
 
@@ -493,7 +496,7 @@ pub export fn lattice_node_set_property(
     // Convert C value to Zig PropertyValue
     const zig_value = cValueToZigValue(c_val);
 
-    txn_handle.db_handle.db.setNodeProperty(node_id, key_slice, zig_value) catch |err| {
+    txn_handle.db_handle.db.setNodeProperty(null, node_id, key_slice, zig_value) catch |err| {
         return mapDatabaseError(err);
     };
 
@@ -815,7 +818,7 @@ pub export fn lattice_edge_create(
 
     const type_slice = cStrToSlice(edge_type) orelse return .err_invalid_arg;
 
-    txn_handle.db_handle.db.createEdge(source, target, type_slice) catch |err| {
+    txn_handle.db_handle.db.createEdge(null, source, target, type_slice) catch |err| {
         return mapAnyError(err);
     };
 
@@ -837,7 +840,7 @@ pub export fn lattice_edge_delete(
 
     const type_slice = cStrToSlice(edge_type) orelse return .err_invalid_arg;
 
-    txn_handle.db_handle.db.deleteEdge(source, target, type_slice) catch |err| {
+    txn_handle.db_handle.db.deleteEdge(null, source, target, type_slice) catch |err| {
         return mapDatabaseError(err);
     };
 

@@ -74,6 +74,9 @@ pub const VectorSearchResult = hnsw_mod.SearchResult;
 // Transactions
 const txn_mod = lattice.transaction.manager;
 const TxnManager = txn_mod.TxnManager;
+const Transaction = txn_mod.Transaction;
+const TxnMode = txn_mod.TxnMode;
+const TxnError = txn_mod.TxnError;
 
 // Query system
 const parser_mod = lattice.query.parser;
@@ -99,6 +102,9 @@ pub const DatabaseError = error{
     AlreadyExists,
     ReadOnly,
     NotFound,
+    TransactionNotActive,
+    TransactionReadOnly,
+    TransactionsNotEnabled,
 };
 
 /// Query execution errors
@@ -428,6 +434,46 @@ pub const Database = struct {
     }
 
     // ========================================================================
+    // Transaction Management
+    // ========================================================================
+
+    /// Begin a new transaction
+    /// Returns a Transaction handle that must be passed to mutating operations
+    pub fn beginTransaction(self: *Self, mode: TxnMode) DatabaseError!Transaction {
+        const tm = self.txn_manager orelse return DatabaseError.TransactionsNotEnabled;
+        return tm.begin(mode, .snapshot) catch |err| {
+            return switch (err) {
+                TxnError.TooManyTransactions => DatabaseError.OutOfMemory,
+                else => DatabaseError.IoError,
+            };
+        };
+    }
+
+    /// Commit a transaction, making all changes durable
+    pub fn commitTransaction(self: *Self, txn: *Transaction) DatabaseError!void {
+        const tm = self.txn_manager orelse return DatabaseError.TransactionsNotEnabled;
+        tm.commit(txn) catch |err| {
+            return switch (err) {
+                TxnError.NotActive => DatabaseError.TransactionNotActive,
+                TxnError.NotFound => DatabaseError.NotFound,
+                else => DatabaseError.IoError,
+            };
+        };
+    }
+
+    /// Abort a transaction, rolling back all changes
+    pub fn abortTransaction(self: *Self, txn: *Transaction) DatabaseError!void {
+        const tm = self.txn_manager orelse return DatabaseError.TransactionsNotEnabled;
+        tm.abort(txn) catch |err| {
+            return switch (err) {
+                TxnError.NotActive => DatabaseError.TransactionNotActive,
+                TxnError.NotFound => DatabaseError.NotFound,
+                else => DatabaseError.IoError,
+            };
+        };
+    }
+
+    // ========================================================================
     // Tree Initialization
     // ========================================================================
 
@@ -580,8 +626,15 @@ pub const Database = struct {
 
     /// Create a new node with the given labels
     /// Returns the new node's ID
-    pub fn createNode(self: *Self, labels: []const []const u8) !NodeId {
+    /// If txn is null, the operation is auto-committed
+    pub fn createNode(self: *Self, txn: ?*Transaction, labels: []const []const u8) !NodeId {
         if (self.read_only) return DatabaseError.PermissionDenied;
+
+        // Validate transaction if provided
+        if (txn) |t| {
+            if (!t.isActive()) return DatabaseError.TransactionNotActive;
+            if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+        }
 
         // Intern all labels
         var label_ids = self.allocator.alloc(symbols_mod.SymbolId, labels.len) catch {
@@ -605,6 +658,8 @@ pub const Database = struct {
             self.label_index.add(label_id, node_id) catch {};
         }
 
+        // WAL logging will be added in PR 3
+
         return node_id;
     }
 
@@ -620,8 +675,15 @@ pub const Database = struct {
     }
 
     /// Delete a node
-    pub fn deleteNode(self: *Self, node_id: NodeId) !void {
+    /// If txn is null, the operation is auto-committed
+    pub fn deleteNode(self: *Self, txn: ?*Transaction, node_id: NodeId) !void {
         if (self.read_only) return DatabaseError.PermissionDenied;
+
+        // Validate transaction if provided
+        if (txn) |t| {
+            if (!t.isActive()) return DatabaseError.TransactionNotActive;
+            if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+        }
 
         // Get node to find its labels for index cleanup
         if (try self.getNode(node_id)) |n| {
@@ -641,6 +703,8 @@ pub const Database = struct {
                 else => DatabaseError.IoError,
             };
         };
+
+        // WAL logging will be added in PR 3
     }
 
     /// Check if a node exists
@@ -654,13 +718,21 @@ pub const Database = struct {
     }
 
     /// Set a property on a node
+    /// If txn is null, the operation is auto-committed
     pub fn setNodeProperty(
         self: *Self,
+        txn: ?*Transaction,
         node_id: NodeId,
         key: []const u8,
         value: PropertyValue,
     ) !void {
         if (self.read_only) return DatabaseError.PermissionDenied;
+
+        // Validate transaction if provided
+        if (txn) |t| {
+            if (!t.isActive()) return DatabaseError.TransactionNotActive;
+            if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+        }
 
         // Get the existing node
         var existing_node = self.node_store.get(node_id) catch |err| {
@@ -706,6 +778,8 @@ pub const Database = struct {
         self.node_store.update(node_id, existing_node.labels, new_props.items) catch {
             return DatabaseError.IoError;
         };
+
+        // WAL logging will be added in PR 3
     }
 
     /// Get a property from a node.
@@ -865,13 +939,21 @@ pub const Database = struct {
     // ========================================================================
 
     /// Create an edge between two nodes
+    /// If txn is null, the operation is auto-committed
     pub fn createEdge(
         self: *Self,
+        txn: ?*Transaction,
         source: NodeId,
         target: NodeId,
         edge_type: []const u8,
     ) !void {
         if (self.read_only) return DatabaseError.PermissionDenied;
+
+        // Validate transaction if provided
+        if (txn) |t| {
+            if (!t.isActive()) return DatabaseError.TransactionNotActive;
+            if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+        }
 
         // Intern edge type
         const type_id = self.symbol_table.intern(edge_type) catch {
@@ -882,16 +964,26 @@ pub const Database = struct {
         self.edge_store.create(source, target, type_id, &[_]node_mod.Property{}) catch {
             return DatabaseError.IoError;
         };
+
+        // WAL logging will be added in PR 3
     }
 
     /// Delete an edge
+    /// If txn is null, the operation is auto-committed
     pub fn deleteEdge(
         self: *Self,
+        txn: ?*Transaction,
         source: NodeId,
         target: NodeId,
         edge_type: []const u8,
     ) !void {
         if (self.read_only) return DatabaseError.PermissionDenied;
+
+        // Validate transaction if provided
+        if (txn) |t| {
+            if (!t.isActive()) return DatabaseError.TransactionNotActive;
+            if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+        }
 
         // Intern edge type
         const type_id = self.symbol_table.intern(edge_type) catch {
@@ -901,6 +993,8 @@ pub const Database = struct {
         self.edge_store.delete(source, target, type_id) catch {
             return DatabaseError.IoError;
         };
+
+        // WAL logging will be added in PR 3
     }
 
     /// Check if an edge exists
@@ -1636,14 +1730,14 @@ test "graph crud operations" {
     }
 
     // Create nodes
-    const alice = try db.createNode(&[_][]const u8{"Person"});
-    const bob = try db.createNode(&[_][]const u8{"Person"});
+    const alice = try db.createNode(null, &[_][]const u8{"Person"});
+    const bob = try db.createNode(null, &[_][]const u8{"Person"});
 
     try std.testing.expect(try db.nodeExists(alice));
     try std.testing.expect(try db.nodeExists(bob));
 
     // Create edge
-    try db.createEdge(alice, bob, "KNOWS");
+    try db.createEdge(null, alice, bob, "KNOWS");
     try std.testing.expect(db.edgeExists(alice, bob, "KNOWS"));
     try std.testing.expect(!db.edgeExists(bob, alice, "KNOWS")); // directed
 
@@ -1653,11 +1747,11 @@ test "graph crud operations" {
     try std.testing.expectEqual(@as(usize, 2), people.len);
 
     // Delete edge
-    try db.deleteEdge(alice, bob, "KNOWS");
+    try db.deleteEdge(null, alice, bob, "KNOWS");
     try std.testing.expect(!db.edgeExists(alice, bob, "KNOWS"));
 
     // Test setNodeProperty
-    try db.setNodeProperty(alice, "name", .{ .string_val = "Alice" });
+    try db.setNodeProperty(null, alice, "name", .{ .string_val = "Alice" });
     const name_val = try db.getNodeProperty(alice, "name");
     try std.testing.expect(name_val != null);
     try std.testing.expectEqualStrings("Alice", name_val.?.string_val);
@@ -1665,7 +1759,7 @@ test "graph crud operations" {
     allocator.free(name_val.?.string_val);
 
     // Delete node
-    try db.deleteNode(alice);
+    try db.deleteNode(null, alice);
     try std.testing.expect(!(try db.nodeExists(alice)));
     try std.testing.expect(try db.nodeExists(bob));
 }
@@ -1688,9 +1782,9 @@ test "query: simple MATCH RETURN" {
     }
 
     // Create some test nodes
-    const alice = try db.createNode(&[_][]const u8{"Person"});
-    const bob = try db.createNode(&[_][]const u8{"Person"});
-    _ = try db.createNode(&[_][]const u8{"Company"});
+    const alice = try db.createNode(null, &[_][]const u8{"Person"});
+    const bob = try db.createNode(null, &[_][]const u8{"Person"});
+    _ = try db.createNode(null, &[_][]const u8{"Company"});
 
     // Query for Person nodes
     var result = try db.query("MATCH (n:Person) RETURN n");
@@ -1773,13 +1867,13 @@ test "edge traversal" {
     }
 
     // Create nodes
-    const alice = try db.createNode(&[_][]const u8{"Person"});
-    const bob = try db.createNode(&[_][]const u8{"Person"});
-    const charlie = try db.createNode(&[_][]const u8{"Person"});
+    const alice = try db.createNode(null, &[_][]const u8{"Person"});
+    const bob = try db.createNode(null, &[_][]const u8{"Person"});
+    const charlie = try db.createNode(null, &[_][]const u8{"Person"});
 
     // Create edges: alice -[KNOWS]-> bob, alice -[LIKES]-> charlie
-    try db.createEdge(alice, bob, "KNOWS");
-    try db.createEdge(alice, charlie, "LIKES");
+    try db.createEdge(null, alice, bob, "KNOWS");
+    try db.createEdge(null, alice, charlie, "LIKES");
 
     // Test outgoing edges from alice
     const outgoing = try db.getOutgoingEdges(alice);
@@ -1821,14 +1915,14 @@ test "introspection: getAllLabels and getAllEdgeTypes" {
     try std.testing.expectEqual(@as(usize, 0), initial_types.len);
 
     // Create nodes with labels
-    const alice = try db.createNode(&[_][]const u8{"Person"});
-    const bob = try db.createNode(&[_][]const u8{"Person"});
-    const acme = try db.createNode(&[_][]const u8{"Company"});
+    const alice = try db.createNode(null, &[_][]const u8{"Person"});
+    const bob = try db.createNode(null, &[_][]const u8{"Person"});
+    const acme = try db.createNode(null, &[_][]const u8{"Company"});
 
     // Create edges
-    try db.createEdge(alice, bob, "KNOWS");
-    try db.createEdge(alice, acme, "WORKS_AT");
-    try db.createEdge(bob, acme, "WORKS_AT");
+    try db.createEdge(null, alice, bob, "KNOWS");
+    try db.createEdge(null, alice, acme, "WORKS_AT");
+    try db.createEdge(null, bob, acme, "WORKS_AT");
 
     // Check labels
     const labels = try db.getAllLabels();

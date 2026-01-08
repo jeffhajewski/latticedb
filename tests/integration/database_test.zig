@@ -39,16 +39,16 @@ test "database: data persists across close and reopen" {
         });
 
         // Create nodes with properties
-        const alice = try db.createNode(&[_][]const u8{"Person"});
-        try db.setNodeProperty(alice, "name", .{ .string_val = "Alice" });
-        try db.setNodeProperty(alice, "age", .{ .int_val = 30 });
+        const alice = try db.createNode(null, &[_][]const u8{"Person"});
+        try db.setNodeProperty(null,alice, "name", .{ .string_val = "Alice" });
+        try db.setNodeProperty(null,alice, "age", .{ .int_val = 30 });
 
-        const bob = try db.createNode(&[_][]const u8{"Person"});
-        try db.setNodeProperty(bob, "name", .{ .string_val = "Bob" });
-        try db.setNodeProperty(bob, "age", .{ .int_val = 25 });
+        const bob = try db.createNode(null, &[_][]const u8{"Person"});
+        try db.setNodeProperty(null,bob, "name", .{ .string_val = "Bob" });
+        try db.setNodeProperty(null,bob, "age", .{ .int_val = 25 });
 
         // Create edge
-        try db.createEdge(alice, bob, "KNOWS");
+        try db.createEdge(null,alice, bob, "KNOWS");
 
         db.close();
     }
@@ -101,10 +101,10 @@ test "database: labels persist and are queryable after reopen" {
             .config = .{ .enable_wal = false, .enable_fts = false },
         });
 
-        _ = try db.createNode(&[_][]const u8{"Person"});
-        _ = try db.createNode(&[_][]const u8{"Person"});
-        _ = try db.createNode(&[_][]const u8{"Company"});
-        _ = try db.createNode(&[_][]const u8{ "Person", "Employee" }); // Multi-label
+        _ = try db.createNode(null, &[_][]const u8{"Person"});
+        _ = try db.createNode(null, &[_][]const u8{"Person"});
+        _ = try db.createNode(null, &[_][]const u8{"Company"});
+        _ = try db.createNode(null, &[_][]const u8{ "Person", "Employee" }); // Multi-label
 
         db.close();
     }
@@ -150,10 +150,10 @@ test "database: tree roots saved correctly across sessions" {
 
         // Create many nodes to force B+Tree splits
         for (0..100) |i| {
-            const node_id = try db.createNode(&[_][]const u8{"TestNode"});
+            const node_id = try db.createNode(null, &[_][]const u8{"TestNode"});
             var buf: [32]u8 = undefined;
             const name = std.fmt.bufPrint(&buf, "Node_{d}", .{i}) catch unreachable;
-            try db.setNodeProperty(node_id, "name", .{ .string_val = name });
+            try db.setNodeProperty(null,node_id, "name", .{ .string_val = name });
         }
 
         db.close();
@@ -201,9 +201,9 @@ test "database: delete node removes from label index" {
     }
 
     // Create nodes
-    const n1 = try db.createNode(&[_][]const u8{"ToDelete"});
-    const n2 = try db.createNode(&[_][]const u8{"ToDelete"});
-    const n3 = try db.createNode(&[_][]const u8{"ToDelete"});
+    const n1 = try db.createNode(null, &[_][]const u8{"ToDelete"});
+    const n2 = try db.createNode(null, &[_][]const u8{"ToDelete"});
+    const n3 = try db.createNode(null, &[_][]const u8{"ToDelete"});
 
     // Verify 3 nodes with label
     const before = try db.getNodesByLabel("ToDelete");
@@ -211,7 +211,7 @@ test "database: delete node removes from label index" {
     try std.testing.expectEqual(@as(usize, 3), before.len);
 
     // Delete middle node
-    try db.deleteNode(n2);
+    try db.deleteNode(null,n2);
 
     // Verify only 2 nodes remain with label
     const after = try db.getNodesByLabel("ToDelete");
@@ -245,14 +245,14 @@ test "database: edge operations are consistent" {
     }
 
     // Create a small social graph
-    const alice = try db.createNode(&[_][]const u8{"Person"});
-    const bob = try db.createNode(&[_][]const u8{"Person"});
-    const charlie = try db.createNode(&[_][]const u8{"Person"});
+    const alice = try db.createNode(null, &[_][]const u8{"Person"});
+    const bob = try db.createNode(null, &[_][]const u8{"Person"});
+    const charlie = try db.createNode(null, &[_][]const u8{"Person"});
 
     // Create edges: alice -> bob, alice -> charlie, bob -> charlie
-    try db.createEdge(alice, bob, "KNOWS");
-    try db.createEdge(alice, charlie, "KNOWS");
-    try db.createEdge(bob, charlie, "KNOWS");
+    try db.createEdge(null,alice, bob, "KNOWS");
+    try db.createEdge(null,alice, charlie, "KNOWS");
+    try db.createEdge(null,bob, charlie, "KNOWS");
 
     // Verify outgoing from alice
     const alice_out = try db.getOutgoingEdges(alice);
@@ -265,7 +265,7 @@ test "database: edge operations are consistent" {
     try std.testing.expectEqual(@as(usize, 2), charlie_in.len);
 
     // Delete an edge and verify
-    try db.deleteEdge(alice, bob, "KNOWS");
+    try db.deleteEdge(null,alice, bob, "KNOWS");
 
     const alice_out_after = try db.getOutgoingEdges(alice);
     defer db.freeEdgeInfos(alice_out_after);
@@ -288,10 +288,10 @@ test "database: self-loop edge works correctly" {
         std.fs.cwd().deleteFile(path) catch {};
     }
 
-    const node = try db.createNode(&[_][]const u8{"Node"});
+    const node = try db.createNode(null, &[_][]const u8{"Node"});
 
     // Self-loop: node -> node
-    try db.createEdge(node, node, "SELF_REF");
+    try db.createEdge(null,node, node, "SELF_REF");
 
     // Should appear in both outgoing and incoming
     const outgoing = try db.getOutgoingEdges(node);
@@ -325,17 +325,17 @@ test "database: query with property filter" {
     }
 
     // Create test data
-    const alice = try db.createNode(&[_][]const u8{"Person"});
-    try db.setNodeProperty(alice, "name", .{ .string_val = "Alice" });
-    try db.setNodeProperty(alice, "age", .{ .int_val = 30 });
+    const alice = try db.createNode(null, &[_][]const u8{"Person"});
+    try db.setNodeProperty(null,alice, "name", .{ .string_val = "Alice" });
+    try db.setNodeProperty(null,alice, "age", .{ .int_val = 30 });
 
-    const bob = try db.createNode(&[_][]const u8{"Person"});
-    try db.setNodeProperty(bob, "name", .{ .string_val = "Bob" });
-    try db.setNodeProperty(bob, "age", .{ .int_val = 25 });
+    const bob = try db.createNode(null, &[_][]const u8{"Person"});
+    try db.setNodeProperty(null,bob, "name", .{ .string_val = "Bob" });
+    try db.setNodeProperty(null,bob, "age", .{ .int_val = 25 });
 
-    const charlie = try db.createNode(&[_][]const u8{"Person"});
-    try db.setNodeProperty(charlie, "name", .{ .string_val = "Charlie" });
-    try db.setNodeProperty(charlie, "age", .{ .int_val = 35 });
+    const charlie = try db.createNode(null, &[_][]const u8{"Person"});
+    try db.setNodeProperty(null,charlie, "name", .{ .string_val = "Charlie" });
+    try db.setNodeProperty(null,charlie, "age", .{ .int_val = 35 });
 
     // Query all Person nodes
     var result = try db.query("MATCH (n:Person) RETURN n");
@@ -360,7 +360,7 @@ test "database: query with LIMIT" {
 
     // Create many nodes
     for (0..20) |_| {
-        _ = try db.createNode(&[_][]const u8{"Item"});
+        _ = try db.createNode(null, &[_][]const u8{"Item"});
     }
 
     // Query with limit
@@ -393,13 +393,13 @@ test "database: fts search returns relevant results" {
     }
 
     // Create documents
-    const doc1 = try db.createNode(&[_][]const u8{"Document"});
+    const doc1 = try db.createNode(null, &[_][]const u8{"Document"});
     try db.ftsIndexDocument(doc1, "The quick brown fox jumps over the lazy dog");
 
-    const doc2 = try db.createNode(&[_][]const u8{"Document"});
+    const doc2 = try db.createNode(null, &[_][]const u8{"Document"});
     try db.ftsIndexDocument(doc2, "A lazy cat sleeps on the couch");
 
-    const doc3 = try db.createNode(&[_][]const u8{"Document"});
+    const doc3 = try db.createNode(null, &[_][]const u8{"Document"});
     try db.ftsIndexDocument(doc3, "Quick reflexes are important for athletes");
 
     // Search for "quick"
@@ -429,7 +429,7 @@ test "database: fts handles document updates" {
     }
 
     // Create and index document
-    const doc = try db.createNode(&[_][]const u8{"Document"});
+    const doc = try db.createNode(null, &[_][]const u8{"Document"});
     try db.ftsIndexDocument(doc, "original content about apples");
 
     // Search for "apples"
@@ -466,13 +466,13 @@ test "database: vector search finds similar nodes" {
     }
 
     // Create nodes with vectors
-    const n1 = try db.createNode(&[_][]const u8{"Embedding"});
+    const n1 = try db.createNode(null, &[_][]const u8{"Embedding"});
     try db.setNodeVector(n1, &[_]f32{ 1.0, 0.0, 0.0, 0.0 });
 
-    const n2 = try db.createNode(&[_][]const u8{"Embedding"});
+    const n2 = try db.createNode(null, &[_][]const u8{"Embedding"});
     try db.setNodeVector(n2, &[_]f32{ 0.9, 0.1, 0.0, 0.0 }); // Similar to n1
 
-    const n3 = try db.createNode(&[_][]const u8{"Embedding"});
+    const n3 = try db.createNode(null, &[_][]const u8{"Embedding"});
     try db.setNodeVector(n3, &[_]f32{ 0.0, 0.0, 1.0, 0.0 }); // Orthogonal
 
     // Search for vectors similar to [1, 0, 0, 0]
@@ -513,8 +513,8 @@ test "database: handles many nodes efficiently" {
 
     // Create many nodes with properties
     for (0..node_count) |i| {
-        const node = try db.createNode(&[_][]const u8{"StressNode"});
-        try db.setNodeProperty(node, "index", .{ .int_val = @intCast(i) });
+        const node = try db.createNode(null, &[_][]const u8{"StressNode"});
+        try db.setNodeProperty(null,node, "index", .{ .int_val = @intCast(i) });
     }
 
     // Verify count
@@ -544,12 +544,12 @@ test "database: handles many edges efficiently" {
     }
 
     // Create a star topology: center node with 100 connections
-    const center = try db.createNode(&[_][]const u8{"Center"});
+    const center = try db.createNode(null, &[_][]const u8{"Center"});
 
     const spoke_count = 100;
     for (0..spoke_count) |_| {
-        const spoke = try db.createNode(&[_][]const u8{"Spoke"});
-        try db.createEdge(center, spoke, "CONNECTED");
+        const spoke = try db.createNode(null, &[_][]const u8{"Spoke"});
+        try db.createEdge(null,center, spoke, "CONNECTED");
     }
 
     // Verify edges
@@ -586,7 +586,7 @@ test "database: read-only mode prevents writes" {
             .create = true,
             .config = .{ .enable_wal = false, .enable_fts = false },
         });
-        _ = try db.createNode(&[_][]const u8{"Test"});
+        _ = try db.createNode(null, &[_][]const u8{"Test"});
         db.close();
     }
 
@@ -603,7 +603,7 @@ test "database: read-only mode prevents writes" {
         try std.testing.expect(try db.nodeExists(1));
 
         // Write should fail
-        const result = db.createNode(&[_][]const u8{"NewNode"});
+        const result = db.createNode(null, &[_][]const u8{"NewNode"});
         try std.testing.expectError(lattice.storage.database.DatabaseError.PermissionDenied, result);
     }
 
@@ -625,13 +625,13 @@ test "database: property type handling" {
         std.fs.cwd().deleteFile(path) catch {};
     }
 
-    const node = try db.createNode(&[_][]const u8{"TypeTest"});
+    const node = try db.createNode(null, &[_][]const u8{"TypeTest"});
 
     // Test different property types
-    try db.setNodeProperty(node, "string_prop", .{ .string_val = "hello" });
-    try db.setNodeProperty(node, "int_prop", .{ .int_val = 42 });
-    try db.setNodeProperty(node, "float_prop", .{ .float_val = 3.14 });
-    try db.setNodeProperty(node, "bool_prop", .{ .bool_val = true });
+    try db.setNodeProperty(null,node, "string_prop", .{ .string_val = "hello" });
+    try db.setNodeProperty(null,node, "int_prop", .{ .int_val = 42 });
+    try db.setNodeProperty(null,node, "float_prop", .{ .float_val = 3.14 });
+    try db.setNodeProperty(null,node, "bool_prop", .{ .bool_val = true });
 
     // Verify each type
     const str = try db.getNodeProperty(node, "string_prop");

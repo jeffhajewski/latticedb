@@ -138,7 +138,7 @@ fn importNode(
     }
 
     // Create the node
-    const node_id = db.createNode(labels_list.items) catch {
+    const node_id = db.createNode(null,labels_list.items) catch {
         return error.DatabaseError;
     };
 
@@ -151,7 +151,7 @@ fn importNode(
             var iter = props_val.object.iterator();
             while (iter.next()) |entry| {
                 const prop_val = jsonToPropertyValue(entry.value_ptr.*) catch continue;
-                db.setNodeProperty(node_id, entry.key_ptr.*, prop_val) catch continue;
+                db.setNodeProperty(null,node_id, entry.key_ptr.*, prop_val) catch continue;
             }
         }
     }
@@ -189,7 +189,7 @@ fn importEdge(
     const target_id = id_map.get(target_str) orelse return error.InvalidNodeId;
 
     // Create the edge
-    db.createEdge(source_id, target_id, edge_type) catch {
+    db.createEdge(null,source_id, target_id, edge_type) catch {
         return error.DatabaseError;
     };
 
@@ -495,7 +495,7 @@ fn importNodeCsvLine(
     }
 
     // Create node
-    const node_id = db.createNode(labels_list.items) catch {
+    const node_id = db.createNode(null,labels_list.items) catch {
         return error.DatabaseError;
     };
 
@@ -511,7 +511,7 @@ fn importNodeCsvLine(
             else |_|
                 .{ .string_val = val };
 
-            db.setNodeProperty(node_id, header, prop_val) catch continue;
+            db.setNodeProperty(null,node_id, header, prop_val) catch continue;
         }
     }
 }
@@ -563,7 +563,7 @@ fn importEdgeCsvLine(db: *Database, line: []const u8) !void {
         return error.InvalidNodeId;
     };
 
-    db.createEdge(source_id, target_id, edge_type) catch {
+    db.createEdge(null,source_id, target_id, edge_type) catch {
         return error.DatabaseError;
     };
 }

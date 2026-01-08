@@ -446,49 +446,56 @@ pub const Database = struct {
     /// Begin a new transaction
     /// Returns a Transaction handle that must be passed to mutating operations
     pub fn beginTransaction(self: *Self, mode: TxnMode) DatabaseError!Transaction {
-        const tm = self.txn_manager orelse return DatabaseError.TransactionsNotEnabled;
-        return tm.begin(mode, .snapshot) catch |err| {
-            return switch (err) {
-                TxnError.TooManyTransactions => DatabaseError.OutOfMemory,
-                else => DatabaseError.IoError,
+        if (self.txn_manager) |*tm| {
+            return tm.begin(mode, .snapshot) catch |err| {
+                return switch (err) {
+                    TxnError.TooManyTransactions => DatabaseError.OutOfMemory,
+                    else => DatabaseError.IoError,
+                };
             };
-        };
+        }
+        return DatabaseError.TransactionsNotEnabled;
     }
 
     /// Commit a transaction, making all changes durable
     pub fn commitTransaction(self: *Self, txn: *Transaction) DatabaseError!void {
-        const tm = self.txn_manager orelse return DatabaseError.TransactionsNotEnabled;
-        tm.commit(txn) catch |err| {
-            return switch (err) {
-                TxnError.NotActive => DatabaseError.TransactionNotActive,
-                TxnError.NotFound => DatabaseError.NotFound,
-                else => DatabaseError.IoError,
+        if (self.txn_manager) |*tm| {
+            tm.commit(txn) catch |err| {
+                return switch (err) {
+                    TxnError.NotActive => DatabaseError.TransactionNotActive,
+                    TxnError.NotFound => DatabaseError.NotFound,
+                    else => DatabaseError.IoError,
+                };
             };
-        };
+            return;
+        }
+        return DatabaseError.TransactionsNotEnabled;
     }
 
     /// Abort a transaction, rolling back all changes
     pub fn abortTransaction(self: *Self, txn: *Transaction) DatabaseError!void {
-        const tm = self.txn_manager orelse return DatabaseError.TransactionsNotEnabled;
-
-        // Execute undo operations in reverse order before aborting
-        if (tm.getUndoLog(txn)) |undo_log| {
-            var i = undo_log.len;
-            while (i > 0) {
-                i -= 1;
-                self.executeUndo(undo_log[i]) catch {
-                    // Log error but continue with remaining undos
-                };
+        if (self.txn_manager) |*tm| {
+            // Execute undo operations in reverse order before aborting
+            if (tm.getUndoLog(txn)) |undo_log| {
+                var i = undo_log.len;
+                while (i > 0) {
+                    i -= 1;
+                    self.executeUndo(undo_log[i]) catch {
+                        // Log error but continue with remaining undos
+                    };
+                }
             }
-        }
 
-        tm.abort(txn) catch |err| {
-            return switch (err) {
-                TxnError.NotActive => DatabaseError.TransactionNotActive,
-                TxnError.NotFound => DatabaseError.NotFound,
-                else => DatabaseError.IoError,
+            tm.abort(txn) catch |err| {
+                return switch (err) {
+                    TxnError.NotActive => DatabaseError.TransactionNotActive,
+                    TxnError.NotFound => DatabaseError.NotFound,
+                    else => DatabaseError.IoError,
+                };
             };
-        };
+            return;
+        }
+        return DatabaseError.TransactionsNotEnabled;
     }
 
     /// Execute a single undo operation

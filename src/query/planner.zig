@@ -161,6 +161,7 @@ pub const QueryPlanner = struct {
                 .create => |c| try self.planCreate(c, current_op),
                 .delete => |d| try self.planDelete(d, current_op),
                 .set => |s| try self.planSet(s, current_op),
+                .remove => |r| try self.planRemove(r, current_op),
             };
         }
 
@@ -853,6 +854,51 @@ pub const QueryPlanner = struct {
                     ) catch return PlannerError.OutOfMemory;
 
                     op = set_merge.operator();
+                },
+            }
+        }
+
+        return op;
+    }
+
+    /// Plan a REMOVE clause
+    fn planRemove(self: *Self, remove_clause: *const ast.RemoveClause, input: ?Operator) PlannerError!Operator {
+        const database = self.storage.database orelse return PlannerError.MissingStorage;
+        var op = input orelse return PlannerError.InvalidQuery;
+
+        for (remove_clause.items) |item| {
+            switch (item) {
+                .property => |p| {
+                    // Get variable slot from target expression
+                    const var_name = getVariableName(p.target) orelse return PlannerError.InvalidQuery;
+                    const binding = self.bindings.get(var_name) orelse return PlannerError.InvalidQuery;
+
+                    const remove_prop = mutation_ops.RemoveProperty.init(
+                        self.allocator,
+                        op,
+                        binding.slot,
+                        p.property_name,
+                        database,
+                    ) catch return PlannerError.OutOfMemory;
+
+                    op = remove_prop.operator();
+                },
+                .labels => |l| {
+                    // Get variable slot
+                    const var_name = getVariableName(l.target) orelse return PlannerError.InvalidQuery;
+                    const binding = self.bindings.get(var_name) orelse return PlannerError.InvalidQuery;
+
+                    if (binding.kind != .node) return PlannerError.InvalidQuery;
+
+                    const remove_labels = mutation_ops.RemoveLabels.init(
+                        self.allocator,
+                        op,
+                        binding.slot,
+                        l.label_names,
+                        database,
+                    ) catch return PlannerError.OutOfMemory;
+
+                    op = remove_labels.operator();
                 },
             }
         }

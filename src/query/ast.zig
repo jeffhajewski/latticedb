@@ -52,6 +52,7 @@ pub const Clause = union(enum) {
     create: *CreateClause,
     delete: *DeleteClause,
     set: *SetClause,
+    remove: *RemoveClause,
 };
 
 // ============================================================================
@@ -148,6 +149,26 @@ pub const SetItem = union(enum) {
     merge_properties: struct {
         target: *Expression,
         map: *Expression,
+    },
+};
+
+/// REMOVE clause - removes properties and labels
+pub const RemoveClause = struct {
+    items: []RemoveItem,
+    location: SourceLocation,
+};
+
+/// Individual REMOVE operation
+pub const RemoveItem = union(enum) {
+    /// REMOVE n.prop
+    property: struct {
+        target: *Expression, // Variable reference (n)
+        property_name: []const u8,
+    },
+    /// REMOVE n:Label or REMOVE n:Label1:Label2
+    labels: struct {
+        target: *Expression, // Variable reference
+        label_names: []const []const u8,
     },
 };
 

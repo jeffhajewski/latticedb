@@ -42,6 +42,7 @@ pub const ErrorCode = enum {
     invalid_property_access,
     invalid_delete_target,
     invalid_set_target,
+    invalid_remove_target,
 };
 
 /// A semantic error with location info
@@ -124,6 +125,7 @@ pub const SemanticAnalyzer = struct {
                 .create => |c| self.analyzeCreateClause(c),
                 .delete => |d| self.analyzeDeleteClause(d),
                 .set => |s| self.analyzeSetClause(s),
+                .remove => |r| self.analyzeRemoveClause(r),
             }
         }
 
@@ -273,6 +275,35 @@ pub const SemanticAnalyzer = struct {
                         self.addError(.invalid_set_target, m.target.getLocation(), "SET += target must be a variable");
                     }
                     self.analyzeExpression(m.map);
+                },
+            }
+        }
+    }
+
+    fn analyzeRemoveClause(self: *Self, clause: *const ast.RemoveClause) void {
+        for (clause.items) |item| {
+            switch (item) {
+                .property => |p| {
+                    // Verify target is a bound variable
+                    self.analyzeExpression(p.target);
+                    if (p.target.* != .variable) {
+                        self.addError(.invalid_remove_target, p.target.getLocation(), "REMOVE property target must be a variable");
+                    }
+                },
+                .labels => |l| {
+                    // Verify target is a bound node variable
+                    self.analyzeExpression(l.target);
+                    if (l.target.* != .variable) {
+                        self.addError(.invalid_remove_target, l.target.getLocation(), "REMOVE labels target must be a variable");
+                    } else {
+                        // Check it's a node (not an edge)
+                        const var_name = l.target.variable.name;
+                        if (self.variables.get(var_name)) |info| {
+                            if (info.kind == .edge) {
+                                self.addError(.invalid_remove_target, l.target.getLocation(), "Cannot REMOVE labels from an edge");
+                            }
+                        }
+                    }
                 },
             }
         }

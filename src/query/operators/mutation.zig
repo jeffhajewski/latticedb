@@ -971,6 +971,202 @@ pub const SetPropertiesMerge = struct {
 };
 
 // ============================================================================
+// RemoveProperty Operator
+// ============================================================================
+
+/// Operator that removes a property from a node or edge for each input row.
+pub const RemoveProperty = struct {
+    /// Input operator
+    input: Operator,
+    /// Slot containing target node/edge
+    target_slot: u8,
+    /// Property name to remove
+    property_name: []const u8,
+    /// Database reference
+    database: *Database,
+    /// Whether operator is opened
+    opened: bool,
+
+    const Self = @This();
+
+    /// Create a new RemoveProperty operator
+    pub fn init(
+        allocator: Allocator,
+        input: Operator,
+        target_slot: u8,
+        property_name: []const u8,
+        database: *Database,
+    ) !*Self {
+        const self = try allocator.create(Self);
+        self.* = Self{
+            .input = input,
+            .target_slot = target_slot,
+            .property_name = property_name,
+            .database = database,
+            .opened = false,
+        };
+        return self;
+    }
+
+    /// Get the Operator interface
+    pub fn operator(self: *Self) Operator {
+        return Operator{
+            .vtable = &vtable,
+            .ptr = self,
+        };
+    }
+
+    const vtable = Operator.VTable{
+        .open = open,
+        .next = next,
+        .close = close,
+        .deinit = deinit,
+    };
+
+    fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        try self.input.open(ctx);
+        self.opened = true;
+    }
+
+    fn next(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!?*Row {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+
+        if (!self.opened) return OperatorError.NotInitialized;
+
+        const row = try self.input.next(ctx) orelse return null;
+
+        // Get target from row
+        const target_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
+
+        // Remove property based on target type
+        switch (target_val) {
+            .node_ref => |node_id| {
+                self.database.removeNodeProperty(null, node_id, self.property_name) catch {
+                    return OperatorError.StorageError;
+                };
+            },
+            .edge_ref => |_| {
+                // Edge property support would go here
+                return OperatorError.Unsupported;
+            },
+            else => return OperatorError.TypeError,
+        }
+
+        return row;
+    }
+
+    fn close(ptr: *anyopaque, ctx: *ExecutionContext) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        if (self.opened) {
+            self.input.close(ctx);
+            self.opened = false;
+        }
+    }
+
+    fn deinit(ptr: *anyopaque, allocator: Allocator) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.input.deinit(allocator);
+        allocator.destroy(self);
+    }
+};
+
+// ============================================================================
+// RemoveLabels Operator
+// ============================================================================
+
+/// Operator that removes labels from a node for each input row.
+pub const RemoveLabels = struct {
+    /// Input operator
+    input: Operator,
+    /// Slot containing target node
+    target_slot: u8,
+    /// Labels to remove
+    label_names: []const []const u8,
+    /// Database reference
+    database: *Database,
+    /// Whether operator is opened
+    opened: bool,
+
+    const Self = @This();
+
+    /// Create a new RemoveLabels operator
+    pub fn init(
+        allocator: Allocator,
+        input: Operator,
+        target_slot: u8,
+        label_names: []const []const u8,
+        database: *Database,
+    ) !*Self {
+        const self = try allocator.create(Self);
+        self.* = Self{
+            .input = input,
+            .target_slot = target_slot,
+            .label_names = label_names,
+            .database = database,
+            .opened = false,
+        };
+        return self;
+    }
+
+    /// Get the Operator interface
+    pub fn operator(self: *Self) Operator {
+        return Operator{
+            .vtable = &vtable,
+            .ptr = self,
+        };
+    }
+
+    const vtable = Operator.VTable{
+        .open = open,
+        .next = next,
+        .close = close,
+        .deinit = deinit,
+    };
+
+    fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        try self.input.open(ctx);
+        self.opened = true;
+    }
+
+    fn next(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!?*Row {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+
+        if (!self.opened) return OperatorError.NotInitialized;
+
+        const row = try self.input.next(ctx) orelse return null;
+
+        // Get target node from row
+        const target_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
+        const node_id = target_val.asNodeId() orelse return OperatorError.TypeError;
+
+        // Remove each label
+        for (self.label_names) |label| {
+            self.database.removeNodeLabel(null, node_id, label) catch {
+                return OperatorError.StorageError;
+            };
+        }
+
+        return row;
+    }
+
+    fn close(ptr: *anyopaque, ctx: *ExecutionContext) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        if (self.opened) {
+            self.input.close(ctx);
+            self.opened = false;
+        }
+    }
+
+    fn deinit(ptr: *anyopaque, allocator: Allocator) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.input.deinit(allocator);
+        allocator.destroy(self);
+    }
+};
+
+// ============================================================================
 // Helpers
 // ============================================================================
 

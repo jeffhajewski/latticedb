@@ -337,6 +337,7 @@ fn lookupKeyword(text: []const u8) ?TokenType {
     if (std.mem.eql(u8, lower, "delete")) return .kw_delete;
     if (std.mem.eql(u8, lower, "detach")) return .kw_detach;
     if (std.mem.eql(u8, lower, "set")) return .kw_set;
+    if (std.mem.eql(u8, lower, "remove")) return .kw_remove;
     if (std.mem.eql(u8, lower, "merge")) return .kw_merge;
     if (std.mem.eql(u8, lower, "with")) return .kw_with;
     if (std.mem.eql(u8, lower, "as")) return .kw_as;

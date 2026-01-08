@@ -1010,6 +1010,60 @@ pub const Database = struct {
         };
     }
 
+    /// Remove a label from a node.
+    pub fn removeNodeLabel(
+        self: *Self,
+        txn: ?*Transaction,
+        node_id: NodeId,
+        label: []const u8,
+    ) !void {
+        if (self.read_only) return DatabaseError.PermissionDenied;
+
+        if (txn) |t| {
+            if (!t.isActive()) return DatabaseError.TransactionNotActive;
+            if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+        }
+
+        var existing_node = self.node_store.get(node_id) catch |err| {
+            return switch (err) {
+                node_mod.NodeError.NotFound => DatabaseError.NotFound,
+                else => DatabaseError.IoError,
+            };
+        };
+        defer existing_node.deinit(self.allocator);
+
+        const label_id = self.symbol_table.lookup(label) catch {
+            return; // Label doesn't exist, nothing to remove
+        };
+
+        // Build new labels array without the removed label
+        var new_labels: std.ArrayList(symbols_mod.SymbolId) = .empty;
+        defer new_labels.deinit(self.allocator);
+
+        var found = false;
+        for (existing_node.labels) |l| {
+            if (l == label_id) {
+                found = true;
+            } else {
+                new_labels.append(self.allocator, l) catch {
+                    return DatabaseError.IoError;
+                };
+            }
+        }
+
+        if (!found) return; // Label wasn't on this node
+
+        // Update the node
+        self.node_store.update(node_id, new_labels.items, existing_node.properties) catch {
+            return DatabaseError.IoError;
+        };
+
+        // Update label index
+        self.label_index.remove(label_id, node_id) catch {
+            return DatabaseError.IoError;
+        };
+    }
+
     /// Clear all properties from a node.
     pub fn clearNodeProperties(
         self: *Self,

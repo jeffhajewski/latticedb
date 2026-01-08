@@ -165,6 +165,7 @@ pub const TokenType = enum {
     kw_delete,
     kw_detach,
     kw_set,
+    kw_remove,
     kw_merge,
     kw_with,
     kw_as,
@@ -335,8 +336,10 @@ pub const Parser = struct {
             return self.parseDeleteClause(false);
         } else if (self.match(.kw_set)) {
             return self.parseSetClause();
+        } else if (self.match(.kw_remove)) {
+            return self.parseRemoveClause();
         } else {
-            self.errorAtCurrent("Expected MATCH, WHERE, RETURN, CREATE, DELETE, SET, ORDER BY, LIMIT, or SKIP");
+            self.errorAtCurrent("Expected MATCH, WHERE, RETURN, CREATE, DELETE, SET, REMOVE, ORDER BY, LIMIT, or SKIP");
             return null;
         }
     }
@@ -692,6 +695,100 @@ pub const Parser = struct {
         return .{ .replace_properties = .{
             .target = target,
             .map = map,
+        } };
+    }
+
+    fn parseRemoveClause(self: *Self) ?ast.Clause {
+        const loc = self.previousLocation();
+        var items: std.ArrayList(ast.RemoveItem) = .empty;
+
+        // Parse first REMOVE item
+        if (self.parseRemoveItem()) |item| {
+            items.append(self.arena.allocator(), item) catch return null;
+        } else {
+            return null;
+        }
+
+        // Parse additional comma-separated items
+        while (self.match(.comma)) {
+            if (self.parseRemoveItem()) |item| {
+                items.append(self.arena.allocator(), item) catch return null;
+            } else {
+                return null;
+            }
+        }
+
+        const clause = self.arena.allocator().create(ast.RemoveClause) catch return null;
+        clause.* = .{
+            .items = items.toOwnedSlice(self.arena.allocator()) catch return null,
+            .location = loc,
+        };
+
+        return .{ .remove = clause };
+    }
+
+    fn parseRemoveItem(self: *Self) ?ast.RemoveItem {
+        // Parse variable name first
+        if (!self.check(.identifier)) {
+            self.errorAtCurrent("Expected variable name in REMOVE");
+            return null;
+        }
+        const var_name = self.current.text;
+        const var_loc = self.currentLocation();
+        self.advance();
+
+        // Create variable expression
+        const var_expr = self.arena.allocator().create(ast.Expression) catch return null;
+        var_expr.* = .{ .variable = .{ .name = var_name, .location = var_loc } };
+
+        // Determine the type of REMOVE operation based on what follows
+        if (self.match(.colon)) {
+            // REMOVE n:Label - label removal
+            return self.parseRemoveLabels(var_expr);
+        } else if (self.match(.dot)) {
+            // REMOVE n.prop - property removal
+            if (!self.check(.identifier)) {
+                self.errorAtCurrent("Expected property name after '.'");
+                return null;
+            }
+            const prop_name = self.current.text;
+            self.advance();
+
+            return .{ .property = .{
+                .target = var_expr,
+                .property_name = prop_name,
+            } };
+        }
+
+        self.errorAtCurrent("Expected '.' or ':' after variable in REMOVE");
+        return null;
+    }
+
+    fn parseRemoveLabels(self: *Self, target: *ast.Expression) ?ast.RemoveItem {
+        // Already consumed first colon, parse labels
+        var labels: std.ArrayList([]const u8) = .empty;
+
+        // First label
+        if (!self.check(.identifier)) {
+            self.errorAtCurrent("Expected label name after ':'");
+            return null;
+        }
+        labels.append(self.arena.allocator(), self.current.text) catch return null;
+        self.advance();
+
+        // Additional labels (REMOVE n:Label1:Label2)
+        while (self.match(.colon)) {
+            if (!self.check(.identifier)) {
+                self.errorAtCurrent("Expected label name after ':'");
+                return null;
+            }
+            labels.append(self.arena.allocator(), self.current.text) catch return null;
+            self.advance();
+        }
+
+        return .{ .labels = .{
+            .target = target,
+            .label_names = labels.toOwnedSlice(self.arena.allocator()) catch return null,
         } };
     }
 
@@ -1442,7 +1539,7 @@ pub const Parser = struct {
         while (!self.check(.eof)) {
             // Synchronize at clause boundaries
             switch (self.current.token_type) {
-                .kw_match, .kw_where, .kw_return, .kw_order, .kw_limit, .kw_skip, .kw_create, .kw_delete, .kw_detach, .kw_set => return,
+                .kw_match, .kw_where, .kw_return, .kw_order, .kw_limit, .kw_skip, .kw_create, .kw_delete, .kw_detach, .kw_set, .kw_remove => return,
                 else => self.advance(),
             }
         }
@@ -1634,4 +1731,70 @@ test "query types" {
 test "binary operators" {
     const op = BinaryOp.vector_distance;
     try std.testing.expectEqual(BinaryOp.vector_distance, op);
+}
+
+test "parse REMOVE property" {
+    const source = "MATCH (n:Person) REMOVE n.age";
+    var parser = Parser.init(std.testing.allocator, source);
+    defer parser.deinit();
+
+    const result = parser.parse();
+    try std.testing.expect(result.query != null);
+    try std.testing.expectEqual(@as(usize, 2), result.query.?.clauses.len);
+
+    // Second clause is REMOVE
+    try std.testing.expect(result.query.?.clauses[1] == .remove);
+    const remove = result.query.?.clauses[1].remove;
+    try std.testing.expectEqual(@as(usize, 1), remove.items.len);
+    try std.testing.expect(remove.items[0] == .property);
+    try std.testing.expectEqualStrings("age", remove.items[0].property.property_name);
+}
+
+test "parse REMOVE labels" {
+    const source = "MATCH (n:Person) REMOVE n:Admin";
+    var parser = Parser.init(std.testing.allocator, source);
+    defer parser.deinit();
+
+    const result = parser.parse();
+    try std.testing.expect(result.query != null);
+    try std.testing.expectEqual(@as(usize, 2), result.query.?.clauses.len);
+
+    // Second clause is REMOVE
+    try std.testing.expect(result.query.?.clauses[1] == .remove);
+    const remove = result.query.?.clauses[1].remove;
+    try std.testing.expectEqual(@as(usize, 1), remove.items.len);
+    try std.testing.expect(remove.items[0] == .labels);
+    try std.testing.expectEqual(@as(usize, 1), remove.items[0].labels.label_names.len);
+    try std.testing.expectEqualStrings("Admin", remove.items[0].labels.label_names[0]);
+}
+
+test "parse REMOVE multiple labels" {
+    const source = "MATCH (n:Person) REMOVE n:Admin:Verified";
+    var parser = Parser.init(std.testing.allocator, source);
+    defer parser.deinit();
+
+    const result = parser.parse();
+    try std.testing.expect(result.query != null);
+
+    const remove = result.query.?.clauses[1].remove;
+    try std.testing.expectEqual(@as(usize, 1), remove.items.len);
+    try std.testing.expect(remove.items[0] == .labels);
+    try std.testing.expectEqual(@as(usize, 2), remove.items[0].labels.label_names.len);
+    try std.testing.expectEqualStrings("Admin", remove.items[0].labels.label_names[0]);
+    try std.testing.expectEqualStrings("Verified", remove.items[0].labels.label_names[1]);
+}
+
+test "parse REMOVE multiple items" {
+    const source = "MATCH (n:Person) REMOVE n.age, n.email, n:Temp";
+    var parser = Parser.init(std.testing.allocator, source);
+    defer parser.deinit();
+
+    const result = parser.parse();
+    try std.testing.expect(result.query != null);
+
+    const remove = result.query.?.clauses[1].remove;
+    try std.testing.expectEqual(@as(usize, 3), remove.items.len);
+    try std.testing.expect(remove.items[0] == .property);
+    try std.testing.expect(remove.items[1] == .property);
+    try std.testing.expect(remove.items[2] == .labels);
 }

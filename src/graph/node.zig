@@ -236,7 +236,21 @@ fn serializeNode(labels: []const SymbolId, properties: []const Property, buf: []
     return buf[0..stream.pos];
 }
 
-/// Serialize a property value
+/// Serialize a property value to binary format.
+///
+/// Wire format (all integers little-endian):
+/// | Tag | Type    | Payload                                    |
+/// |-----|---------|---------------------------------------------|
+/// |  0  | null    | (none)                                      |
+/// |  1  | bool    | u8 (0=false, 1=true)                        |
+/// |  2  | int     | i64                                         |
+/// |  3  | float   | u64 (bitcast f64)                           |
+/// |  4  | string  | u32 len, [len]u8                            |
+/// |  5  | bytes   | u32 len, [len]u8                            |
+/// |  6  | vector  | u32 len, [len]u32 (bitcast f32)             |
+/// |  7  | list    | u32 count, [count]value (recursive)         |
+/// |  8  | map     | u32 count, [count](u32 key_len, key, value) |
+///
 fn serializeValue(writer: anytype, value: PropertyValue) !void {
     switch (value) {
         .null_val => try writer.writeByte(0),

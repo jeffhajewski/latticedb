@@ -49,6 +49,8 @@ pub const Clause = union(enum) {
     order_by: *OrderByClause,
     limit: *LimitClause,
     skip: *SkipClause,
+    create: *CreateClause,
+    delete: *DeleteClause,
 };
 
 // ============================================================================
@@ -101,6 +103,19 @@ pub const LimitClause = struct {
 /// SKIP clause
 pub const SkipClause = struct {
     count: *Expression,
+    location: SourceLocation,
+};
+
+/// CREATE clause - creates nodes and edges from patterns
+pub const CreateClause = struct {
+    patterns: []Pattern,
+    location: SourceLocation,
+};
+
+/// DELETE clause - deletes nodes/edges
+pub const DeleteClause = struct {
+    detach: bool, // true for DETACH DELETE
+    expressions: []*Expression, // Variables to delete (n, r, etc.)
     location: SourceLocation,
 };
 

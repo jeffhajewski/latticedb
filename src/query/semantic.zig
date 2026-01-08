@@ -40,6 +40,7 @@ pub const ErrorCode = enum {
     non_integer_limit,
     non_boolean_condition,
     invalid_property_access,
+    invalid_delete_target,
 };
 
 /// A semantic error with location info
@@ -119,6 +120,8 @@ pub const SemanticAnalyzer = struct {
                 .order_by => |o| self.analyzeOrderByClause(o),
                 .limit => |l| self.analyzeLimitClause(l),
                 .skip => |s| self.analyzeSkipClause(s),
+                .create => |c| self.analyzeCreateClause(c),
+                .delete => |d| self.analyzeDeleteClause(d),
             }
         }
 
@@ -183,6 +186,48 @@ pub const SemanticAnalyzer = struct {
         const expr_type = self.inferType(clause.count);
         if (expr_type != .integer and expr_type != .any and expr_type != .unknown) {
             self.addError(.non_integer_limit, clause.location, "SKIP requires integer expression");
+        }
+    }
+
+    fn analyzeCreateClause(self: *Self, clause: *const ast.CreateClause) void {
+        // Register variables from CREATE patterns (creates new nodes/edges)
+        for (clause.patterns) |pattern| {
+            for (pattern.elements) |element| {
+                switch (element) {
+                    .node => |n| {
+                        self.registerNodeVariable(n);
+                        // Analyze property expressions
+                        if (n.properties) |props| {
+                            for (props) |prop| {
+                                self.analyzeExpression(prop.value);
+                            }
+                        }
+                    },
+                    .edge => |e| {
+                        self.registerEdgeVariable(e);
+                        // Analyze property expressions
+                        if (e.properties) |props| {
+                            for (props) |prop| {
+                                self.analyzeExpression(prop.value);
+                            }
+                        }
+                    },
+                }
+            }
+        }
+    }
+
+    fn analyzeDeleteClause(self: *Self, clause: *const ast.DeleteClause) void {
+        _ = clause.detach; // detach flag doesn't affect semantic analysis
+
+        // Each expression should be a bound variable
+        for (clause.expressions) |expr| {
+            self.analyzeExpression(expr);
+
+            // Verify it's a variable reference (not a complex expression)
+            if (expr.* != .variable) {
+                self.addError(.invalid_delete_target, expr.getLocation(), "DELETE requires variable references");
+            }
         }
     }
 

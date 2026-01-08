@@ -27,6 +27,7 @@ const expand_ops = @import("operators/expand.zig");
 const limit_ops = @import("operators/limit.zig");
 const vector_ops = @import("operators/vector.zig");
 const fts_ops = @import("operators/fts.zig");
+const mutation_ops = @import("operators/mutation.zig");
 
 const btree = @import("../storage/btree.zig");
 const BTree = btree.BTree;
@@ -46,6 +47,9 @@ const HnswIndex = hnsw.HnswIndex;
 
 const fts_index_mod = @import("../fts/index.zig");
 const FtsIndex = fts_index_mod.FtsIndex;
+
+const database_mod = @import("../storage/database.zig");
+const Database = database_mod.Database;
 
 // ============================================================================
 // Types
@@ -85,6 +89,8 @@ pub const StorageContext = struct {
     hnsw_index: ?*HnswIndex = null,
     /// FTS index (optional)
     fts_index: ?*FtsIndex = null,
+    /// Database for mutation operations (optional)
+    database: ?*Database = null,
 };
 
 /// Variable binding during planning
@@ -141,6 +147,8 @@ pub const QueryPlanner = struct {
                 .order_by => |o| try self.planOrderBy(o, current_op),
                 .limit => |l| try self.planLimit(l, current_op),
                 .skip => |s| try self.planSkip(s, current_op),
+                .create => |c| try self.planCreate(c, current_op),
+                .delete => |d| try self.planDelete(d, current_op),
             };
         }
 
@@ -584,6 +592,107 @@ pub const QueryPlanner = struct {
         };
 
         return skip.operator();
+    }
+
+    /// Plan a CREATE clause
+    fn planCreate(self: *Self, create: *const ast.CreateClause, input: ?Operator) PlannerError!Operator {
+        const database = self.storage.database orelse return PlannerError.MissingStorage;
+        var op = input;
+
+        // Process each pattern in CREATE
+        for (create.patterns) |pattern| {
+            var prev_node_slot: ?u8 = null;
+
+            for (pattern.elements) |element| {
+                switch (element) {
+                    .node => |node_pattern| {
+                        const slot = try self.allocateSlot();
+
+                        // Bind variable if present
+                        if (node_pattern.variable) |name| {
+                            try self.bindVariable(name, slot, .node);
+                        }
+
+                        // Build properties list
+                        var properties: std.ArrayList(mutation_ops.CreateNode.PropertyKV) = .empty;
+                        if (node_pattern.properties) |props| {
+                            for (props) |prop| {
+                                properties.append(self.allocator, .{
+                                    .key = prop.key,
+                                    .value_expr = prop.value,
+                                }) catch return PlannerError.OutOfMemory;
+                            }
+                        }
+
+                        // Create the CreateNode operator
+                        const create_node = mutation_ops.CreateNode.init(
+                            self.allocator,
+                            op,
+                            node_pattern.labels,
+                            properties.toOwnedSlice(self.allocator) catch return PlannerError.OutOfMemory,
+                            slot,
+                            database,
+                        ) catch return PlannerError.OutOfMemory;
+
+                        op = create_node.operator();
+                        prev_node_slot = slot;
+                    },
+                    .edge => |edge_pattern| {
+                        // Edge requires a source node from previous element
+                        if (prev_node_slot == null) {
+                            return PlannerError.InvalidQuery;
+                        }
+
+                        // The target node must be the next element in the pattern
+                        // For simplicity, we require edges to connect nodes already created
+                        // A more complete implementation would look ahead
+                        if (edge_pattern.types.len == 0) {
+                            return PlannerError.InvalidQuery; // Edge type required for CREATE
+                        }
+
+                        // Edge creation is deferred until we have the target node
+                        // For MVP, we only support simple node creation
+                        // Full edge support would require two-pass pattern processing
+                    },
+                }
+            }
+        }
+
+        return op orelse PlannerError.InvalidQuery;
+    }
+
+    /// Plan a DELETE clause
+    fn planDelete(self: *Self, delete: *const ast.DeleteClause, input: ?Operator) PlannerError!Operator {
+        const database = self.storage.database orelse return PlannerError.MissingStorage;
+        const input_op = input orelse return PlannerError.InvalidQuery;
+        var op = input_op;
+
+        // Process each expression to delete
+        for (delete.expressions) |expr| {
+            // Expression should be a variable reference
+            if (expr.* != .variable) {
+                return PlannerError.InvalidQuery;
+            }
+
+            const var_name = expr.variable.name;
+            const binding = self.bindings.get(var_name) orelse return PlannerError.InvalidQuery;
+
+            // Create DeleteNode operator (for now, only support node deletion)
+            if (binding.kind == .node) {
+                const delete_node = mutation_ops.DeleteNode.init(
+                    self.allocator,
+                    op,
+                    binding.slot,
+                    delete.detach,
+                    database,
+                ) catch return PlannerError.OutOfMemory;
+
+                op = delete_node.operator();
+            }
+            // Edge deletion would require more complex handling
+        }
+
+        return op;
     }
 
     /// Allocate a new variable slot

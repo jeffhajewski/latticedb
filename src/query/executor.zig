@@ -21,6 +21,9 @@ const NodeStore = node_mod.NodeStore;
 const symbols_mod = lattice.graph.symbols;
 const SymbolTable = symbols_mod.SymbolTable;
 
+const database_mod = lattice.storage.database;
+const Database = database_mod.Database;
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -280,6 +283,9 @@ pub const ExecutionContext = struct {
     /// Symbol table for property key resolution (optional)
     symbol_table: ?*SymbolTable,
 
+    /// Database reference for mutation operators (optional)
+    database: ?*Database,
+
     const Self = @This();
 
     /// Create a new execution context
@@ -291,6 +297,7 @@ pub const ExecutionContext = struct {
             .variables = std.StringHashMap(u8).init(allocator),
             .node_store = null,
             .symbol_table = null,
+            .database = null,
         };
     }
 
@@ -303,6 +310,7 @@ pub const ExecutionContext = struct {
             .variables = std.StringHashMap(u8).init(allocator),
             .node_store = node_store,
             .symbol_table = symbol_table,
+            .database = null,
         };
     }
 

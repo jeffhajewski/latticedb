@@ -620,3 +620,92 @@ test "executor: slot value type checks" {
     const empty_val = SlotValue{ .empty = {} };
     try std.testing.expect(empty_val.isEmpty());
 }
+
+// ============================================================================
+// CREATE/DELETE Parsing Tests
+// ============================================================================
+
+test "parser: CREATE (n:Person) parses" {
+    var parser = Parser.init(std.testing.allocator, "CREATE (n:Person)");
+    defer parser.deinit();
+
+    const result = parser.parse();
+    try std.testing.expect(result.query != null);
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+    try std.testing.expectEqual(@as(usize, 1), result.query.?.clauses.len);
+    try std.testing.expect(result.query.?.clauses[0] == .create);
+}
+
+test "parser: CREATE with properties parses" {
+    var parser = Parser.init(std.testing.allocator, "CREATE (n:Person {name: \"Alice\", age: 30})");
+    defer parser.deinit();
+
+    const result = parser.parse();
+    try std.testing.expect(result.query != null);
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+
+    const create = result.query.?.clauses[0].create;
+    try std.testing.expectEqual(@as(usize, 1), create.patterns.len);
+
+    const pattern = create.patterns[0];
+    try std.testing.expectEqual(@as(usize, 1), pattern.elements.len);
+
+    const node = pattern.elements[0].node;
+    try std.testing.expect(node.variable != null);
+    try std.testing.expectEqualStrings("n", node.variable.?);
+    try std.testing.expectEqual(@as(usize, 1), node.labels.len);
+    try std.testing.expectEqualStrings("Person", node.labels[0]);
+    try std.testing.expect(node.properties != null);
+    try std.testing.expectEqual(@as(usize, 2), node.properties.?.len);
+}
+
+test "parser: DELETE n parses" {
+    var parser = Parser.init(std.testing.allocator, "MATCH (n:Person) DELETE n");
+    defer parser.deinit();
+
+    const result = parser.parse();
+    try std.testing.expect(result.query != null);
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+    try std.testing.expectEqual(@as(usize, 2), result.query.?.clauses.len);
+
+    // Second clause is DELETE
+    try std.testing.expect(result.query.?.clauses[1] == .delete);
+    const delete = result.query.?.clauses[1].delete;
+    try std.testing.expect(!delete.detach);
+    try std.testing.expectEqual(@as(usize, 1), delete.expressions.len);
+}
+
+test "parser: DETACH DELETE parses" {
+    var parser = Parser.init(std.testing.allocator, "MATCH (n:Person) DETACH DELETE n");
+    defer parser.deinit();
+
+    const result = parser.parse();
+    try std.testing.expect(result.query != null);
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+
+    // Second clause is DELETE with detach=true
+    const delete = result.query.?.clauses[1].delete;
+    try std.testing.expect(delete.detach);
+}
+
+test "parser: DELETE multiple variables parses" {
+    var parser = Parser.init(std.testing.allocator, "MATCH (a), (b) DELETE a, b");
+    defer parser.deinit();
+
+    const result = parser.parse();
+    try std.testing.expect(result.query != null);
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+
+    const delete = result.query.?.clauses[1].delete;
+    try std.testing.expectEqual(@as(usize, 2), delete.expressions.len);
+}
+
+test "lexer: DETACH keyword recognized" {
+    var lexer = Lexer.init("DETACH DELETE");
+
+    const t1 = lexer.nextToken();
+    try std.testing.expectEqual(TokenType.kw_detach, t1.token_type);
+
+    const t2 = lexer.nextToken();
+    try std.testing.expectEqual(TokenType.kw_delete, t2.token_type);
+}

@@ -163,6 +163,7 @@ pub const TokenType = enum {
     kw_return,
     kw_create,
     kw_delete,
+    kw_detach,
     kw_set,
     kw_merge,
     kw_with,
@@ -321,8 +322,18 @@ pub const Parser = struct {
             return self.parseLimitClause();
         } else if (self.match(.kw_skip)) {
             return self.parseSkipClause();
+        } else if (self.match(.kw_create)) {
+            return self.parseCreateClause();
+        } else if (self.match(.kw_detach)) {
+            // DETACH DELETE
+            if (!self.consume(.kw_delete, "Expected DELETE after DETACH")) {
+                return null;
+            }
+            return self.parseDeleteClause(true);
+        } else if (self.match(.kw_delete)) {
+            return self.parseDeleteClause(false);
         } else {
-            self.errorAtCurrent("Expected MATCH, WHERE, RETURN, ORDER BY, LIMIT, or SKIP");
+            self.errorAtCurrent("Expected MATCH, WHERE, RETURN, CREATE, DELETE, ORDER BY, LIMIT, or SKIP");
             return null;
         }
     }
@@ -496,6 +507,65 @@ pub const Parser = struct {
         };
 
         return .{ .skip = clause };
+    }
+
+    fn parseCreateClause(self: *Self) ?ast.Clause {
+        const loc = self.previousLocation();
+        var patterns: std.ArrayList(ast.Pattern) = .empty;
+
+        // Parse first pattern (reuse same pattern parsing as MATCH)
+        if (self.parsePattern()) |pattern| {
+            patterns.append(self.arena.allocator(), pattern) catch return null;
+        } else {
+            return null;
+        }
+
+        // Parse additional comma-separated patterns
+        while (self.match(.comma)) {
+            if (self.parsePattern()) |pattern| {
+                patterns.append(self.arena.allocator(), pattern) catch return null;
+            } else {
+                return null;
+            }
+        }
+
+        const clause = self.arena.allocator().create(ast.CreateClause) catch return null;
+        clause.* = .{
+            .patterns = patterns.toOwnedSlice(self.arena.allocator()) catch return null,
+            .location = loc,
+        };
+
+        return .{ .create = clause };
+    }
+
+    fn parseDeleteClause(self: *Self, detach: bool) ?ast.Clause {
+        const loc = self.previousLocation();
+        var expressions: std.ArrayList(*ast.Expression) = .empty;
+
+        // Parse first expression (variable to delete)
+        if (self.parseExpression()) |expr| {
+            expressions.append(self.arena.allocator(), expr) catch return null;
+        } else {
+            return null;
+        }
+
+        // Parse additional comma-separated expressions
+        while (self.match(.comma)) {
+            if (self.parseExpression()) |expr| {
+                expressions.append(self.arena.allocator(), expr) catch return null;
+            } else {
+                return null;
+            }
+        }
+
+        const clause = self.arena.allocator().create(ast.DeleteClause) catch return null;
+        clause.* = .{
+            .detach = detach,
+            .expressions = expressions.toOwnedSlice(self.arena.allocator()) catch return null,
+            .location = loc,
+        };
+
+        return .{ .delete = clause };
     }
 
     // ========================================================================
@@ -1245,7 +1315,7 @@ pub const Parser = struct {
         while (!self.check(.eof)) {
             // Synchronize at clause boundaries
             switch (self.current.token_type) {
-                .kw_match, .kw_where, .kw_return, .kw_order, .kw_limit, .kw_skip => return,
+                .kw_match, .kw_where, .kw_return, .kw_order, .kw_limit, .kw_skip, .kw_create, .kw_delete, .kw_detach => return,
                 else => self.advance(),
             }
         }

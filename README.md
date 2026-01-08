@@ -1,4 +1,4 @@
-# Lattice
+# LatticeDB
 
 **The Embedded Knowledge Graph Database**
 

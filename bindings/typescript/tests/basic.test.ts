@@ -1,10 +1,13 @@
 /**
  * Basic tests for Lattice TypeScript bindings.
+ *
+ * These are unit tests for type definitions and basic functionality.
+ * Integration tests require the native module to be built.
  */
 
 import { Value, Node, Edge, QueryResult, VectorSearchResult } from '../src/types';
 import { Database } from '../src/database';
-import { Transaction } from '../src/transaction';
+import { isNativeAvailable } from '../src/native';
 
 describe('Value', () => {
   test('null value', () => {
@@ -102,17 +105,22 @@ describe('VectorSearchResult', () => {
 
 describe('Database', () => {
   test('create database instance', () => {
-    const db = new Database('test.lattice', { create: true });
-    expect(db.getPath()).toBe('test.lattice');
+    const db = new Database('test.db', { create: true });
+    expect(db.getPath()).toBe('test.db');
+    expect(db.isOpen()).toBe(false);
+  });
+
+  test('default options', () => {
+    const db = new Database('test.db');
+    expect(db.getPath()).toBe('test.db');
     expect(db.isOpen()).toBe(false);
   });
 });
 
-describe('Transaction', () => {
-  test('create transaction', () => {
-    const db = new Database('test.lattice');
-    const txn = new Transaction(db, { readOnly: true });
-    expect(txn.isReadOnly()).toBe(true);
-    expect(txn.isActive()).toBe(true);
+describe('Native module', () => {
+  test('check native availability', () => {
+    // This test just verifies the function works
+    const available = isNativeAvailable();
+    expect(typeof available).toBe('boolean');
   });
 });

@@ -2,6 +2,29 @@
  * Lattice: Embedded Knowledge Graph Database
  *
  * TypeScript bindings for the Lattice database.
+ *
+ * @example
+ * ```typescript
+ * import { Database } from 'lattice-db';
+ *
+ * const db = new Database('knowledge.db', { create: true });
+ * await db.open();
+ *
+ * await db.write(async (txn) => {
+ *   const node = await txn.createNode({
+ *     labels: ['Person'],
+ *     properties: { name: 'Alice', age: 30 }
+ *   });
+ *   console.log('Created node:', node.id);
+ * });
+ *
+ * const result = await db.query('MATCH (n:Person) RETURN n.name');
+ * for (const row of result.rows) {
+ *   console.log(row);
+ * }
+ *
+ * await db.close();
+ * ```
  */
 
 export { Database, DatabaseOptions } from './database';
@@ -13,4 +36,21 @@ export {
   QueryResult,
   VectorSearchResult,
   PropertyValue,
+  CreateNodeOptions,
+  CreateEdgeOptions,
+  VectorSearchOptions,
+  FtsSearchOptions,
 } from './types';
+export { isNativeAvailable } from './native';
+
+/**
+ * Get the library version.
+ */
+export function version(): string {
+  try {
+    const { getNative } = require('./native');
+    return getNative().version();
+  } catch {
+    return '0.1.0';
+  }
+}

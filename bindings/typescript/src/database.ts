@@ -4,13 +4,13 @@
 
 import { Transaction } from './transaction';
 import {
-  Node,
   QueryResult,
   VectorSearchResult,
   PropertyValue,
   VectorSearchOptions,
   FtsSearchOptions,
 } from './types';
+import { getNative, NativeDatabase, NativeQueryResult } from './native';
 
 /**
  * Options for opening a database.
@@ -22,6 +22,10 @@ export interface DatabaseOptions {
   readOnly?: boolean;
   /** Cache size in megabytes */
   cacheSizeMb?: number;
+  /** Enable vector storage */
+  enableVector?: boolean;
+  /** Vector dimensions (default: 128) */
+  vectorDimensions?: number;
 }
 
 /**
@@ -29,20 +33,23 @@ export interface DatabaseOptions {
  *
  * @example
  * ```typescript
- * const db = new Database('knowledge.lattice', { create: true });
+ * const db = new Database('knowledge.db', { create: true });
+ * await db.open();
+ *
  * await db.write(async (txn) => {
- *   const node = await txn.createNode({
- *     labels: ['Person'],
- *     properties: { name: 'Alice' }
- *   });
+ *   const nodeId = await txn.createNode({ labels: ['Person'], properties: { name: 'Alice' } });
  * });
+ *
+ * const result = await db.query('MATCH (n:Person) RETURN n.name');
+ * console.log(result.rows);
+ *
  * await db.close();
  * ```
  */
 export class Database {
   private readonly path: string;
   private readonly options: DatabaseOptions;
-  private handle: unknown | null = null;
+  private native: NativeDatabase | null = null;
   private closed = false;
 
   /**
@@ -57,6 +64,8 @@ export class Database {
       create: false,
       readOnly: false,
       cacheSizeMb: 100,
+      enableVector: false,
+      vectorDimensions: 128,
       ...options,
     };
   }
@@ -65,22 +74,30 @@ export class Database {
    * Open the database connection.
    */
   async open(): Promise<void> {
-    if (this.handle !== null) {
+    if (this.native !== null) {
       return;
     }
-    // TODO: Call native lattice_open
-    this.handle = {};
+
+    const mod = getNative();
+    this.native = new mod.Database();
+    this.native.open(this.path, {
+      create: this.options.create,
+      readOnly: this.options.readOnly,
+      cacheSizeMb: this.options.cacheSizeMb,
+      enableVector: this.options.enableVector,
+      vectorDimensions: this.options.vectorDimensions,
+    });
   }
 
   /**
    * Close the database connection.
    */
   async close(): Promise<void> {
-    if (this.closed) {
+    if (this.closed || this.native === null) {
       return;
     }
-    // TODO: Call native lattice_close
-    this.handle = null;
+    this.native.close();
+    this.native = null;
     this.closed = true;
   }
 
@@ -91,13 +108,14 @@ export class Database {
    * @returns Result of the transaction function
    */
   async read<T>(fn: (txn: Transaction) => Promise<T>): Promise<T> {
-    const txn = new Transaction(this, { readOnly: true });
+    this.ensureOpen();
+    const nativeTxn = this.native!.begin(true);
+    const txn = new Transaction(nativeTxn, true);
     try {
-      await txn.begin();
       const result = await fn(txn);
       return result;
     } finally {
-      await txn.rollback();
+      txn.rollback();
     }
   }
 
@@ -111,14 +129,15 @@ export class Database {
     if (this.options.readOnly) {
       throw new Error('Cannot write to a read-only database');
     }
-    const txn = new Transaction(this, { readOnly: false });
+    this.ensureOpen();
+    const nativeTxn = this.native!.begin(false);
+    const txn = new Transaction(nativeTxn, false);
     try {
-      await txn.begin();
       const result = await fn(txn);
-      await txn.commit();
+      txn.commit();
       return result;
     } catch (error) {
-      await txn.rollback();
+      txn.rollback();
       throw error;
     }
   }
@@ -134,10 +153,12 @@ export class Database {
     cypher: string,
     parameters?: Record<string, PropertyValue>
   ): Promise<QueryResult> {
-    // TODO: Implement query execution
-    void cypher;
-    void parameters;
-    return { columns: [], rows: [] };
+    this.ensureOpen();
+    const result: NativeQueryResult = this.native!.query(cypher, parameters as Record<string, unknown>);
+    return {
+      columns: result.columns,
+      rows: result.rows as Record<string, PropertyValue>[],
+    };
   }
 
   /**
@@ -151,10 +172,15 @@ export class Database {
     vector: Float32Array,
     options?: VectorSearchOptions
   ): Promise<VectorSearchResult[]> {
-    // TODO: Implement vector search
-    void vector;
-    void options;
-    return [];
+    this.ensureOpen();
+    const results = this.native!.vectorSearch(vector, {
+      k: options?.k ?? 10,
+      efSearch: options?.efSearch ?? 0,
+    });
+    return results.map((r) => ({
+      nodeId: r.nodeId,
+      distance: r.distance,
+    }));
   }
 
   /**
@@ -162,13 +188,20 @@ export class Database {
    *
    * @param query - Search query
    * @param options - Search options
-   * @returns Matching nodes
+   * @returns Matching nodes with scores
    */
-  async ftsSearch(query: string, options?: FtsSearchOptions): Promise<Node[]> {
-    // TODO: Implement FTS search
-    void query;
-    void options;
-    return [];
+  async ftsSearch(
+    query: string,
+    options?: FtsSearchOptions
+  ): Promise<Array<{ nodeId: bigint; score: number }>> {
+    this.ensureOpen();
+    const results = this.native!.ftsSearch(query, {
+      limit: options?.limit ?? 10,
+    });
+    return results.map((r) => ({
+      nodeId: r.nodeId,
+      score: r.score,
+    }));
   }
 
   /**
@@ -182,6 +215,15 @@ export class Database {
    * Check if the database is open.
    */
   isOpen(): boolean {
-    return this.handle !== null && !this.closed;
+    return this.native !== null && !this.closed;
+  }
+
+  /**
+   * Ensure the database is open.
+   */
+  private ensureOpen(): void {
+    if (this.native === null || this.closed) {
+      throw new Error('Database is not open');
+    }
   }
 }

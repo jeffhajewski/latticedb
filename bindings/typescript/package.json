@@ -7,10 +7,11 @@
   "scripts": {
     "build": "tsc",
     "build:native": "node-gyp rebuild",
+    "build:all": "npm run build:native && npm run build",
     "test": "jest",
     "lint": "eslint src --ext .ts",
     "clean": "rm -rf dist build",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build:all"
   },
   "keywords": [
     "database",
@@ -19,13 +20,20 @@
     "embeddings",
     "rag",
     "ai",
-    "knowledge-graph"
+    "knowledge-graph",
+    "cypher",
+    "hnsw",
+    "bm25"
   ],
   "author": "",
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/lattice-db/lattice"
+    "url": "https://github.com/jeffhajewski/latticedb"
+  },
+  "homepage": "https://github.com/jeffhajewski/latticedb#readme",
+  "bugs": {
+    "url": "https://github.com/jeffhajewski/latticedb/issues"
   },
   "files": [
     "dist",

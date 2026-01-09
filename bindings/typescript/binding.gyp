@@ -9,25 +9,39 @@
         "<!@(node -p \"require('node-addon-api').include\")",
         "../../include"
       ],
-      "libraries": [
-        "-L../../zig-out/lib",
-        "-llattice"
-      ],
       "defines": ["NAPI_DISABLE_CPP_EXCEPTIONS"],
       "conditions": [
         [
           "OS=='mac'",
           {
+            "libraries": [
+              "-L<(module_root_dir)/../../zig-out/lib",
+              "-llattice",
+              "-Wl,-rpath,@loader_path/../../zig-out/lib"
+            ],
             "xcode_settings": {
               "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
               "CLANG_CXX_LIBRARY": "libc++",
-              "MACOSX_DEPLOYMENT_TARGET": "10.15"
+              "MACOSX_DEPLOYMENT_TARGET": "15.0"
             }
+          }
+        ],
+        [
+          "OS=='linux'",
+          {
+            "libraries": [
+              "-L<(module_root_dir)/../../zig-out/lib",
+              "-llattice",
+              "-Wl,-rpath,$ORIGIN/../../zig-out/lib"
+            ]
           }
         ],
         [
           "OS=='win'",
           {
+            "libraries": [
+              "<(module_root_dir)/../../zig-out/lib/lattice.lib"
+            ],
             "msvs_settings": {
               "VCCLCompilerTool": {
                 "ExceptionHandling": 1

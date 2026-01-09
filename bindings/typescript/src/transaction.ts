@@ -2,7 +2,6 @@
  * Transaction class for Lattice TypeScript bindings.
  */
 
-import type { Database } from './database';
 import {
   Node,
   Edge,
@@ -10,71 +9,59 @@ import {
   CreateNodeOptions,
   CreateEdgeOptions,
 } from './types';
-
-/**
- * Transaction options.
- */
-export interface TransactionOptions {
-  /** Whether this is a read-only transaction */
-  readOnly?: boolean;
-}
+import { NativeTransaction } from './native';
 
 /**
  * A database transaction.
  *
  * Transactions provide atomic, isolated access to the database.
+ * Use `Database.read()` or `Database.write()` to create transactions.
  */
 export class Transaction {
-  private readonly db: Database;
+  private native: NativeTransaction | null;
   private readonly readOnly: boolean;
-  private handle: unknown | null = null;
   private committed = false;
   private rolledBack = false;
 
   /**
-   * Create a new transaction.
-   *
-   * @param db - Database connection
-   * @param options - Transaction options
+   * Create a new transaction wrapper.
+   * @internal
    */
-  constructor(db: Database, options: TransactionOptions = {}) {
-    this.db = db;
-    this.readOnly = options.readOnly ?? false;
-  }
-
-  /**
-   * Begin the transaction.
-   */
-  async begin(): Promise<void> {
-    // TODO: Call native lattice_begin
-    this.handle = {};
+  constructor(native: NativeTransaction, readOnly: boolean) {
+    this.native = native;
+    this.readOnly = readOnly;
   }
 
   /**
    * Commit the transaction.
    */
-  async commit(): Promise<void> {
+  commit(): void {
     if (this.committed) {
       throw new Error('Transaction already committed');
     }
     if (this.rolledBack) {
       throw new Error('Transaction already rolled back');
     }
-    // TODO: Call native lattice_commit
+    if (this.native === null) {
+      throw new Error('Transaction closed');
+    }
+    this.native.commit();
+    this.native = null;
     this.committed = true;
   }
 
   /**
    * Rollback the transaction.
    */
-  async rollback(): Promise<void> {
+  rollback(): void {
     if (this.committed) {
       throw new Error('Transaction already committed');
     }
-    if (this.rolledBack) {
+    if (this.rolledBack || this.native === null) {
       return;
     }
-    // TODO: Call native lattice_rollback
+    this.native.rollback();
+    this.native = null;
     this.rolledBack = true;
   }
 
@@ -85,14 +72,30 @@ export class Transaction {
    * @returns The created node
    */
   async createNode(options: CreateNodeOptions = {}): Promise<Node> {
-    if (this.readOnly) {
-      throw new Error('Cannot create node in read-only transaction');
+    this.ensureWritable();
+
+    const labels = options.labels ?? [];
+    const properties = options.properties ?? {};
+
+    // Create node with first label (or empty)
+    const firstLabel = labels[0] ?? '';
+    const nodeId = this.native!.createNode(firstLabel);
+
+    // Add additional labels
+    for (let i = 1; i < labels.length; i++) {
+      // Note: The C API currently only supports one label at creation
+      // Additional labels would need a separate API call
     }
-    // TODO: Call native lattice_node_create
+
+    // Set properties
+    for (const [key, value] of Object.entries(properties)) {
+      this.native!.setProperty(nodeId, key, value);
+    }
+
     return {
-      id: BigInt(0),
-      labels: options.labels ?? [],
-      properties: options.properties ?? {},
+      id: nodeId,
+      labels,
+      properties,
     };
   }
 
@@ -102,11 +105,19 @@ export class Transaction {
    * @param nodeId - ID of the node to delete
    */
   async deleteNode(nodeId: bigint): Promise<void> {
-    if (this.readOnly) {
-      throw new Error('Cannot delete node in read-only transaction');
-    }
-    // TODO: Call native lattice_node_delete
-    void nodeId;
+    this.ensureWritable();
+    this.native!.deleteNode(nodeId);
+  }
+
+  /**
+   * Check if a node exists.
+   *
+   * @param nodeId - The node ID
+   * @returns True if the node exists
+   */
+  async nodeExists(nodeId: bigint): Promise<boolean> {
+    this.ensureActive();
+    return this.native!.nodeExists(nodeId);
   }
 
   /**
@@ -116,9 +127,19 @@ export class Transaction {
    * @returns The node, or null if not found
    */
   async getNode(nodeId: bigint): Promise<Node | null> {
-    // TODO: Implement node lookup
-    void nodeId;
-    return null;
+    this.ensureActive();
+
+    if (!this.native!.nodeExists(nodeId)) {
+      return null;
+    }
+
+    const labels = this.native!.getLabels(nodeId) ?? [];
+
+    return {
+      id: nodeId,
+      labels,
+      properties: {}, // Properties need to be fetched individually
+    };
   }
 
   /**
@@ -133,13 +154,20 @@ export class Transaction {
     key: string,
     value: PropertyValue
   ): Promise<void> {
-    if (this.readOnly) {
-      throw new Error('Cannot set property in read-only transaction');
-    }
-    // TODO: Call native lattice_node_set_property
-    void nodeId;
-    void key;
-    void value;
+    this.ensureWritable();
+    this.native!.setProperty(nodeId, key, value);
+  }
+
+  /**
+   * Get a property from a node.
+   *
+   * @param nodeId - The node ID
+   * @param key - Property key
+   * @returns The property value, or null if not found
+   */
+  async getProperty(nodeId: bigint, key: string): Promise<PropertyValue> {
+    this.ensureActive();
+    return this.native!.getProperty(nodeId, key) as PropertyValue;
   }
 
   /**
@@ -154,13 +182,19 @@ export class Transaction {
     key: string,
     vector: Float32Array
   ): Promise<void> {
-    if (this.readOnly) {
-      throw new Error('Cannot set vector in read-only transaction');
-    }
-    // TODO: Call native lattice_node_set_vector
-    void nodeId;
-    void key;
-    void vector;
+    this.ensureWritable();
+    this.native!.setVector(nodeId, key, vector);
+  }
+
+  /**
+   * Index text for full-text search.
+   *
+   * @param nodeId - The node ID
+   * @param text - Text to index
+   */
+  async ftsIndex(nodeId: bigint, text: string): Promise<void> {
+    this.ensureWritable();
+    this.native!.ftsIndex(nodeId, text);
   }
 
   /**
@@ -178,12 +212,15 @@ export class Transaction {
     edgeType: string,
     options: CreateEdgeOptions = {}
   ): Promise<Edge> {
-    if (this.readOnly) {
-      throw new Error('Cannot create edge in read-only transaction');
-    }
-    // TODO: Call native lattice_edge_create
+    this.ensureWritable();
+
+    const edgeId = this.native!.createEdge(sourceId, targetId, edgeType);
+
+    // Set properties if provided
+    // Note: Edge properties would need additional C API support
+
     return {
-      id: BigInt(0),
+      id: edgeId,
       sourceId,
       targetId,
       type: edgeType,
@@ -194,14 +231,53 @@ export class Transaction {
   /**
    * Delete an edge.
    *
-   * @param edgeId - ID of the edge to delete
+   * @param sourceId - Source node ID
+   * @param targetId - Target node ID
+   * @param edgeType - Edge type
    */
-  async deleteEdge(edgeId: bigint): Promise<void> {
-    if (this.readOnly) {
-      throw new Error('Cannot delete edge in read-only transaction');
-    }
-    // TODO: Call native lattice_edge_delete
-    void edgeId;
+  async deleteEdge(
+    sourceId: bigint,
+    targetId: bigint,
+    edgeType: string
+  ): Promise<void> {
+    this.ensureWritable();
+    this.native!.deleteEdge(sourceId, targetId, edgeType);
+  }
+
+  /**
+   * Get outgoing edges from a node.
+   *
+   * @param nodeId - The node ID
+   * @returns Array of edges
+   */
+  async getOutgoingEdges(nodeId: bigint): Promise<Edge[]> {
+    this.ensureActive();
+    const edges = this.native!.getOutgoingEdges(nodeId);
+    return edges.map((e, i) => ({
+      id: BigInt(i), // Edge IDs not returned from traversal
+      sourceId: e.sourceId,
+      targetId: e.targetId,
+      type: e.type,
+      properties: {},
+    }));
+  }
+
+  /**
+   * Get incoming edges to a node.
+   *
+   * @param nodeId - The node ID
+   * @returns Array of edges
+   */
+  async getIncomingEdges(nodeId: bigint): Promise<Edge[]> {
+    this.ensureActive();
+    const edges = this.native!.getIncomingEdges(nodeId);
+    return edges.map((e, i) => ({
+      id: BigInt(i), // Edge IDs not returned from traversal
+      sourceId: e.sourceId,
+      targetId: e.targetId,
+      type: e.type,
+      properties: {},
+    }));
   }
 
   /**
@@ -215,6 +291,25 @@ export class Transaction {
    * Check if the transaction is still active.
    */
   isActive(): boolean {
-    return !this.committed && !this.rolledBack;
+    return !this.committed && !this.rolledBack && this.native !== null;
+  }
+
+  /**
+   * Ensure transaction is active.
+   */
+  private ensureActive(): void {
+    if (!this.isActive()) {
+      throw new Error('Transaction is not active');
+    }
+  }
+
+  /**
+   * Ensure transaction is writable.
+   */
+  private ensureWritable(): void {
+    this.ensureActive();
+    if (this.readOnly) {
+      throw new Error('Cannot write in read-only transaction');
+    }
   }
 }

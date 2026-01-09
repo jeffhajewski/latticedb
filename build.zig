@@ -22,9 +22,17 @@ pub fn build(b: *std.Build) void {
     });
 
     // Shared library module (for Python/FFI bindings)
+    // For macOS, set minimum deployment target for compatibility with node-gyp
+    var shared_target = target;
+    if (target.result.os.tag == .macos) {
+        var query = target.query;
+        query.os_version_min = .{ .semver = .{ .major = 11, .minor = 0, .patch = 0 } };
+        shared_target = b.resolveTargetQuery(query);
+    }
+
     const shared_lib_module = b.createModule(.{
         .root_source_file = b.path("src/main.zig"),
-        .target = target,
+        .target = shared_target,
         .optimize = optimize,
     });
     shared_lib_module.addImport("lattice", shared_lib_module);

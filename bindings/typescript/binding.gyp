@@ -4,6 +4,7 @@
       "target_name": "lattice_native",
       "cflags!": ["-fno-exceptions"],
       "cflags_cc!": ["-fno-exceptions"],
+      "cflags_cc": ["-fno-use-cxa-atexit"],
       "sources": ["src/native/addon.cpp"],
       "include_dirs": [
         "<!@(node -p \"require('node-addon-api').include\")",
@@ -20,9 +21,11 @@
               "-Wl,-rpath,@loader_path/../../zig-out/lib"
             ],
             "xcode_settings": {
-              "GCC_ENABLE_CPP_EXCEPTIONS": "YES",
+              "GCC_ENABLE_CPP_EXCEPTIONS": "NO",
               "CLANG_CXX_LIBRARY": "libc++",
-              "MACOSX_DEPLOYMENT_TARGET": "15.0"
+              "MACOSX_DEPLOYMENT_TARGET": "11.0",
+              "OTHER_CPLUSPLUSFLAGS": ["-fno-use-cxa-atexit", "-fno-exceptions", "-fno-rtti"],
+              "OTHER_LDFLAGS": ["-undefined", "dynamic_lookup"]
             }
           }
         ],

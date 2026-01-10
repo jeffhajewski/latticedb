@@ -124,6 +124,7 @@ pub const EntityType = enum(u8) {
     node,
     edge,
     property,
+    label,
 };
 
 /// Undo log entry for rollback

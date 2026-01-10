@@ -1300,3 +1300,121 @@ test "rollback: new property added in txn is removed on abort" {
     const restored_val = try db.getNodeProperty(node_id, "email");
     try std.testing.expect(restored_val == null);
 }
+
+test "rollback: label addition is undone on abort" {
+    if (!databaseSupportsTransactions()) {
+        return error.SkipZigTest;
+    }
+
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_txn_label_add_rollback.ltdb";
+
+    // Clean up from previous runs
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = true,
+            .enable_fts = false,
+            .enable_vector = false,
+        },
+    });
+    defer db.close();
+
+    // 1. Create node with one label (auto-commit)
+    const node_id = try db.createNode(null, &[_][]const u8{"Person"});
+
+    // Verify initial labels
+    const initial_labels = try db.getNodeLabels(node_id);
+    defer {
+        for (initial_labels) |label| allocator.free(label);
+        allocator.free(initial_labels);
+    }
+    try std.testing.expectEqual(@as(usize, 1), initial_labels.len);
+
+    // 2. Begin transaction and add another label
+    var txn = try db.beginTransaction(.read_write);
+    try db.addNodeLabel(&txn, node_id, "Employee");
+
+    // Verify label was added
+    const labels_after_add = try db.getNodeLabels(node_id);
+    defer {
+        for (labels_after_add) |label| allocator.free(label);
+        allocator.free(labels_after_add);
+    }
+    try std.testing.expectEqual(@as(usize, 2), labels_after_add.len);
+
+    // 3. Abort - should remove the added label
+    try db.abortTransaction(&txn);
+
+    // 4. Verify only original label remains
+    const restored_labels = try db.getNodeLabels(node_id);
+    defer {
+        for (restored_labels) |label| allocator.free(label);
+        allocator.free(restored_labels);
+    }
+    try std.testing.expectEqual(@as(usize, 1), restored_labels.len);
+}
+
+test "rollback: label removal is undone on abort" {
+    if (!databaseSupportsTransactions()) {
+        return error.SkipZigTest;
+    }
+
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_txn_label_remove_rollback.ltdb";
+
+    // Clean up from previous runs
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = true,
+            .enable_fts = false,
+            .enable_vector = false,
+        },
+    });
+    defer db.close();
+
+    // 1. Create node with two labels (auto-commit)
+    const node_id = try db.createNode(null, &[_][]const u8{ "Person", "Employee" });
+
+    // Verify initial labels
+    const initial_labels = try db.getNodeLabels(node_id);
+    defer {
+        for (initial_labels) |label| allocator.free(label);
+        allocator.free(initial_labels);
+    }
+    try std.testing.expectEqual(@as(usize, 2), initial_labels.len);
+
+    // 2. Begin transaction and remove a label
+    var txn = try db.beginTransaction(.read_write);
+    try db.removeNodeLabel(&txn, node_id, "Employee");
+
+    // Verify label was removed
+    const labels_after_remove = try db.getNodeLabels(node_id);
+    defer {
+        for (labels_after_remove) |label| allocator.free(label);
+        allocator.free(labels_after_remove);
+    }
+    try std.testing.expectEqual(@as(usize, 1), labels_after_remove.len);
+
+    // 3. Abort - should restore the removed label
+    try db.abortTransaction(&txn);
+
+    // 4. Verify both labels are restored
+    const restored_labels = try db.getNodeLabels(node_id);
+    defer {
+        for (restored_labels) |label| allocator.free(label);
+        allocator.free(restored_labels);
+    }
+    try std.testing.expectEqual(@as(usize, 2), restored_labels.len);
+}

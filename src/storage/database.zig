@@ -716,6 +716,61 @@ pub const Database = struct {
                     }
                 },
             },
+            .label => switch (entry.op_type) {
+                // Undo of label insert is remove the label
+                .insert => {
+                    const label_id: symbols_mod.SymbolId = entry.type_id;
+
+                    // Get current node
+                    var node = self.node_store.get(entry.entity_id) catch return;
+                    defer node.deinit(self.allocator);
+
+                    // Build new labels array without the removed label
+                    var new_labels: std.ArrayListUnmanaged(symbols_mod.SymbolId) = .empty;
+                    defer new_labels.deinit(self.allocator);
+
+                    for (node.labels) |l| {
+                        if (l != label_id) {
+                            new_labels.append(self.allocator, l) catch continue;
+                        }
+                    }
+
+                    // Update the node
+                    self.node_store.update(entry.entity_id, new_labels.items, node.properties) catch {};
+
+                    // Update label index
+                    self.label_index.remove(label_id, entry.entity_id) catch {};
+                },
+                // Undo of label delete is add the label back
+                .delete => {
+                    const label_id: symbols_mod.SymbolId = entry.type_id;
+
+                    // Get current node
+                    var node = self.node_store.get(entry.entity_id) catch return;
+                    defer node.deinit(self.allocator);
+
+                    // Check if label already exists
+                    for (node.labels) |l| {
+                        if (l == label_id) return; // Already has this label
+                    }
+
+                    // Build new labels array with the added label
+                    var new_labels: std.ArrayListUnmanaged(symbols_mod.SymbolId) = .empty;
+                    defer new_labels.deinit(self.allocator);
+
+                    for (node.labels) |l| {
+                        new_labels.append(self.allocator, l) catch continue;
+                    }
+                    new_labels.append(self.allocator, label_id) catch return;
+
+                    // Update the node
+                    self.node_store.update(entry.entity_id, new_labels.items, node.properties) catch {};
+
+                    // Update label index
+                    self.label_index.add(label_id, entry.entity_id) catch {};
+                },
+                .update => {},
+            },
         }
     }
 
@@ -1278,6 +1333,13 @@ pub const Database = struct {
         self.label_index.add(label_id, node_id) catch {
             return DatabaseError.IoError;
         };
+
+        // Log undo entry for transaction rollback
+        if (txn) |t| {
+            if (self.txn_manager) |*tm| {
+                tm.addUndoEntry(t, .insert, .label, node_id, 0, label_id, null) catch {};
+            }
+        }
     }
 
     /// Remove a label from a node.
@@ -1332,6 +1394,13 @@ pub const Database = struct {
         self.label_index.remove(label_id, node_id) catch {
             return DatabaseError.IoError;
         };
+
+        // Log undo entry for transaction rollback
+        if (txn) |t| {
+            if (self.txn_manager) |*tm| {
+                tm.addUndoEntry(t, .delete, .label, node_id, 0, label_id, null) catch {};
+            }
+        }
     }
 
     /// Clear all properties from a node.

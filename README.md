@@ -29,11 +29,11 @@ lattice> MATCH (p:Person) RETURN p.name, p.age
 ```
 
 ```cypher
--- Find documents similar to a query, then traverse to related concepts
+-- Find documents similar to a query, then traverse to author
 MATCH (chunk:Chunk)-[:PART_OF]->(doc:Document)
 WHERE chunk.embedding <=> $query_vector < 0.3
-MATCH (chunk)-[:MENTIONS]->(concept:Concept)
-RETURN doc.title, chunk.text, collect(concept.name) AS concepts
+MATCH (doc)-[:AUTHORED_BY]->(author:Person)
+RETURN doc.title, chunk.text, author.name
 ```
 
 ## Features
@@ -59,59 +59,62 @@ RETURN doc.title, chunk.text, collect(concept.name) AS concepts
 ### Python
 
 ```python
-import lattice
+from lattice import Database
 
 # Open or create a database
-db = lattice.open("knowledge.db")
+with Database("knowledge.db", create=True, enable_vector=True) as db:
+    with db.write() as txn:
+        # Create nodes
+        doc = txn.create_node(
+            labels=["Document"],
+            properties={"title": "Introduction to Graph Databases", "author": "Jane Smith"}
+        )
 
-with db.transaction() as tx:
-    # Create nodes
-    doc = tx.create_node(["Document"], {
-        "title": "Introduction to Graph Databases",
-        "author": "Jane Smith"
-    })
+        chunk = txn.create_node(
+            labels=["Chunk"],
+            properties={"text": "Graph databases store data as nodes and edges..."}
+        )
+        txn.set_vector(chunk.id, "embedding", embedding_model.encode("Graph databases..."))
 
-    chunk = tx.create_node(["Chunk"], {
-        "text": "Graph databases store data as nodes and edges...",
-        "embedding": embedding_model.encode("Graph databases store...")
-    })
+        # Create relationship
+        txn.create_edge(chunk.id, doc.id, "PART_OF")
+        txn.commit()
 
-    # Create relationship
-    tx.create_edge(chunk, doc, "PART_OF")
+    # Query with Cypher
+    results = db.query("""
+        MATCH (c:Chunk)-[:PART_OF]->(d:Document)
+        WHERE c.embedding <=> $query < 0.5
+        RETURN d.title, c.text
+        LIMIT 10
+    """, parameters={"query": query_embedding})
 
-# Query with Cypher
-results = db.query("""
-    MATCH (c:Chunk)-[:PART_OF]->(d:Document)
-    WHERE c.embedding <=> $query < 0.5
-    RETURN d.title, c.text
-    LIMIT 10
-""", {"query": query_embedding})
-
-for row in results:
-    print(f"{row['d.title']}: {row['c.text'][:100]}...")
+    for row in results:
+        print(f"{row['d.title']}: {row['c.text'][:100]}...")
 ```
 
 ### TypeScript
 
 ```typescript
-import { Database } from 'lattice';
+import { Database } from 'lattice-db';
 
-const db = await Database.open('knowledge.db');
+const db = new Database('knowledge.db', { create: true, enableVector: true });
+await db.open();
 
-await db.transaction(async (tx) => {
+await db.write(async (txn) => {
   // Create nodes
-  const doc = await tx.createNode(['Document'], {
-    title: 'Introduction to Graph Databases',
-    author: 'Jane Smith'
+  const doc = await txn.createNode({
+    labels: ['Document'],
+    properties: { title: 'Introduction to Graph Databases', author: 'Jane Smith' }
   });
 
-  const chunk = await tx.createNode(['Chunk'], {
-    text: 'Graph databases store data as nodes and edges...',
-    embedding: new Float32Array(await embed('Graph databases store...'))
+  const chunk = await txn.createNode({
+    labels: ['Chunk'],
+    properties: { text: 'Graph databases store data as nodes and edges...' }
   });
+  await txn.setVector(chunk.id, 'embedding', new Float32Array(await embed('Graph databases...')));
 
   // Create relationship
-  await tx.createEdge(chunk, doc, 'PART_OF');
+  await txn.createEdge(chunk.id, doc.id, 'PART_OF');
 });
 
 // Query with Cypher
@@ -121,6 +124,8 @@ const results = await db.query(`
   RETURN d.title, c.text
   LIMIT 10
 `, { query: queryEmbedding });
+
+await db.close();
 ```
 
 ### C
@@ -129,19 +134,24 @@ const results = await db.query(`
 #include <lattice.h>
 
 int main() {
-    lattice_db *db;
-    lattice_open("knowledge.db", 0, &db);
+    lattice_database *db;
+    lattice_open("knowledge.db", NULL, &db);
 
     lattice_txn *txn;
-    lattice_txn_begin(db, LATTICE_TXN_READWRITE, &txn);
+    lattice_begin(db, LATTICE_TXN_READ_WRITE, &txn);
 
     // Create a node
     lattice_node_id doc;
-    const char *labels[] = {"Document"};
-    lattice_node_create(txn, labels, 1, &doc);
-    lattice_node_set_string(txn, doc, "title", "Introduction to Graph Databases");
+    lattice_node_create(txn, "Document", &doc);
 
-    lattice_txn_commit(txn);
+    // Set a property
+    lattice_value title = {
+        .type = LATTICE_VALUE_STRING,
+        .data.string_val = { "Introduction to Graph Databases", 31 }
+    };
+    lattice_node_set_property(txn, doc, "title", &title);
+
+    lattice_commit(txn);
     lattice_close(db);
     return 0;
 }
@@ -167,8 +177,9 @@ zig build -Doptimize=ReleaseFast
 | Output | Description |
 |--------|-------------|
 | `zig-out/lib/liblattice.a` | Static library |
+| `zig-out/lib/liblattice.dylib` | Shared library (macOS) |
 | `zig-out/bin/lattice` | CLI tool |
-| `zig-out/include/lattice.h` | C header |
+| `include/lattice.h` | C header |
 
 ## Installation
 
@@ -196,6 +207,21 @@ zig build -Doptimize=ReleaseFast
 
 Lattice uses Cypher with extensions for vector and full-text search.
 
+### Supported Features
+
+| Feature | Status |
+|---------|--------|
+| MATCH, WHERE, RETURN | ✓ |
+| CREATE, DELETE, SET, REMOVE | ✓ |
+| ORDER BY, LIMIT, SKIP | ✓ |
+| DETACH DELETE | ✓ |
+| Vector distance (`<=>`) | ✓ |
+| Full-text search (`@@`) | ✓ |
+| Functions: `id()`, `coalesce()`, `abs()`, `size()`, `toInteger()` | ✓ |
+| Variable-length paths (`*1..3`) | Planned |
+| Aggregations (`count`, `collect`, `sum`) | Planned |
+| MERGE, WITH, OPTIONAL MATCH | Planned |
+
 ### Pattern Matching
 
 ```cypher
@@ -203,10 +229,10 @@ Lattice uses Cypher with extensions for vector and full-text search.
 MATCH (a:Person)-[:KNOWS]->(b:Person)
 RETURN a.name, b.name
 
--- Variable-length paths
-MATCH (a:Person)-[:KNOWS*1..3]->(b:Person)
+-- Multi-hop traversal
+MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person)
 WHERE a.name = "Alice"
-RETURN b.name, length(path) AS distance
+RETURN c.name
 ```
 
 ### Vector Search
@@ -351,7 +377,13 @@ Lattice's inverted index with BM25 scoring is highly competitive with dedicated 
 
 ## Project Status
 
-Lattice is in active development. See the [roadmap](context/ROADMAP.md) for current progress.
+Lattice has completed all core development phases:
+- **Phase 1-3:** Storage engine, transactions, graph model
+- **Phase 4:** Cypher query system with extensions
+- **Phase 5:** HNSW vector search, BM25 full-text search
+- **Phase 6:** C API, Python bindings, TypeScript bindings
+
+See the [roadmap](context/ROADMAP.md) for detailed progress.
 
 ## Contributing
 

@@ -17,6 +17,11 @@ This guide covers how to set up your development environment, build the project,
   python3 --version  # Should show 3.9 or higher
   ```
 
+- **Node.js 18+** - For TypeScript bindings
+  ```bash
+  node --version  # Should show v18 or higher
+  ```
+
 ### Optional
 
 - **NumPy** - Required for vector operations in Python bindings
@@ -39,9 +44,12 @@ latticedb/
 │   └── lattice.h
 ├── bindings/
 │   ├── python/            # Python bindings
-│   └── typescript/        # TypeScript bindings (planned)
+│   └── typescript/        # TypeScript/Node.js bindings
 ├── tests/
-│   └── unit/              # Zig unit tests
+│   ├── unit/              # Zig unit tests
+│   ├── integration/       # Integration tests
+│   ├── fuzz/              # Fuzz tests
+│   └── benchmark/         # Performance benchmarks
 ├── docs/                  # Implementation documentation
 └── context/               # Architecture decisions
 ```
@@ -130,6 +138,37 @@ This runs:
    pytest tests/ -v
    ```
 
+### TypeScript Tests
+
+1. **Build the shared library and TypeScript bindings:**
+
+   ```bash
+   zig build shared
+   cd bindings/typescript
+   npm install
+   npm run build:all
+   ```
+
+2. **Run tests:**
+
+   ```bash
+   npm test
+   ```
+
+### Fuzz Tests
+
+Run fuzz tests to verify robustness against malformed input:
+
+```bash
+zig build fuzz
+```
+
+For continuous fuzzing (longer runs):
+
+```bash
+zig build fuzz -- --fuzz
+```
+
 ### Test Output
 
 - Unit tests: Always run, test Python types and data structures
@@ -155,13 +194,21 @@ tests/test_integration.py: 21 skipped (Native library not found)
 2. Run `pytest tests/test_basic.py` for quick feedback
 3. Build the shared library and run `pytest tests/` for full testing
 
+### Making Changes to TypeScript Bindings
+
+1. Make your changes in `bindings/typescript/src/`
+2. Build with `npm run build:all`
+3. Run tests with `npm test`
+
 ### Adding New C API Functions
 
 1. Add the function declaration to `include/lattice.h`
 2. Implement the function in `src/api/c_api.zig`
-3. Add the ctypes signature in `bindings/python/src/lattice/_bindings.py`
-4. Add Python wrapper in `database.py` or `transaction.py`
-5. Add tests
+3. For Python: Add ctypes signature in `bindings/python/src/lattice/_bindings.py`
+4. For Python: Add wrapper in `database.py` or `transaction.py`
+5. For TypeScript: Add N-API wrapper in `bindings/typescript/src/addon.cpp`
+6. For TypeScript: Add TypeScript wrapper in appropriate source file
+7. Add tests for all bindings
 
 ## Code Style
 
@@ -177,11 +224,20 @@ tests/test_integration.py: 21 skipped (Native library not found)
 - Use type hints for all public functions
 - Run `mypy` for type checking: `mypy src/lattice/`
 
+### TypeScript
+
+- Use TypeScript strict mode
+- Provide type definitions for all public APIs
+- Format with Prettier
+
 ## Pull Request Process
 
 1. Create a feature branch from `main`
 2. Make your changes with clear, focused commits
-3. Ensure all tests pass (`zig build test` and `pytest tests/`)
+3. Ensure all tests pass:
+   - Zig: `zig build test`
+   - Python: `pytest tests/`
+   - TypeScript: `npm test` (in `bindings/typescript/`)
 4. Update documentation if needed
 5. Submit a PR with a clear description
 

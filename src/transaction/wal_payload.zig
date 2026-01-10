@@ -5,6 +5,17 @@
 //! during recovery or abort.
 
 const std = @import("std");
+const Allocator = std.mem.Allocator;
+const types = @import("../core/types.zig");
+const PropertyValue = types.PropertyValue;
+const symbols = @import("../graph/symbols.zig");
+const SymbolId = symbols.SymbolId;
+
+/// Property struct for serialization (matches node.zig)
+pub const Property = struct {
+    key_id: SymbolId,
+    value: PropertyValue,
+};
 
 /// Payload type identifiers for WAL records
 pub const PayloadType = enum(u8) {
@@ -350,6 +361,246 @@ pub fn deserializePropertyUpdate(payload: []const u8) PayloadError!PropertyUpdat
         .key_id = key_id,
         .old_value = old_value,
         .new_value = new_value,
+    };
+}
+
+// ============================================================================
+// Property Serialization for Undo
+// ============================================================================
+
+/// Serialize properties to bytes for undo storage.
+/// Format: num_props(u16) + [key_id(u16) + value]...
+/// Uses same value format as node.zig serializeValue.
+pub fn serializeProperties(allocator: Allocator, properties: []const Property) ![]u8 {
+    // Calculate required size
+    var size: usize = 2; // num_properties: u16
+    for (properties) |prop| {
+        size += 2; // key_id: u16
+        size += propertyValueSize(prop.value);
+    }
+
+    const buf = try allocator.alloc(u8, size);
+    errdefer allocator.free(buf);
+
+    var stream = std.io.fixedBufferStream(buf);
+    const writer = stream.writer();
+
+    writer.writeInt(u16, @intCast(properties.len), .little) catch unreachable;
+    for (properties) |prop| {
+        writer.writeInt(u16, prop.key_id, .little) catch unreachable;
+        serializePropertyValue(writer, prop.value) catch unreachable;
+    }
+
+    return buf;
+}
+
+/// Deserialize properties from bytes.
+/// Caller owns returned slice and must free property values.
+pub fn deserializeProperties(allocator: Allocator, data: []const u8) ![]Property {
+    if (data.len < 2) return error.InvalidPayload;
+
+    var stream = std.io.fixedBufferStream(data);
+    const reader = stream.reader();
+
+    const num_props = try reader.readInt(u16, .little);
+    if (num_props == 0) return &[_]Property{};
+
+    const properties = try allocator.alloc(Property, num_props);
+    errdefer {
+        for (properties) |*prop| {
+            var val = prop.value;
+            val.deinit(allocator);
+        }
+        allocator.free(properties);
+    }
+
+    for (properties) |*prop| {
+        prop.key_id = try reader.readInt(u16, .little);
+        prop.value = try deserializePropertyValue(allocator, reader);
+    }
+
+    return properties;
+}
+
+/// Serialize a single PropertyValue to a fixed buffer.
+/// Returns number of bytes written, or error if buffer too small.
+pub fn serializePropertyValueToBuf(buf: []u8, value: PropertyValue) !usize {
+    var stream = std.io.fixedBufferStream(buf);
+    try serializePropertyValue(stream.writer(), value);
+    return stream.pos;
+}
+
+/// Deserialize a single PropertyValue from bytes.
+pub fn deserializePropertyValueFromBytes(allocator: Allocator, data: []const u8) !PropertyValue {
+    var stream = std.io.fixedBufferStream(data);
+    return deserializePropertyValue(allocator, stream.reader());
+}
+
+/// Calculate size needed for a PropertyValue.
+fn propertyValueSize(value: PropertyValue) usize {
+    return switch (value) {
+        .null_val => 1,
+        .bool_val => 2,
+        .int_val => 9,
+        .float_val => 9,
+        .string_val => |s| 5 + s.len,
+        .bytes_val => |b| 5 + b.len,
+        .vector_val => |v| 5 + v.len * 4,
+        .list_val => |l| blk: {
+            var s: usize = 5;
+            for (l) |item| s += propertyValueSize(item);
+            break :blk s;
+        },
+        .map_val => |m| blk: {
+            var s: usize = 5;
+            for (m) |entry| {
+                s += 4 + entry.key.len + propertyValueSize(entry.value);
+            }
+            break :blk s;
+        },
+    };
+}
+
+/// Serialize a property value to a writer.
+/// Wire format matches node.zig serializeValue.
+fn serializePropertyValue(writer: anytype, value: PropertyValue) !void {
+    switch (value) {
+        .null_val => try writer.writeByte(0),
+        .bool_val => |b| {
+            try writer.writeByte(1);
+            try writer.writeByte(if (b) 1 else 0);
+        },
+        .int_val => |i| {
+            try writer.writeByte(2);
+            try writer.writeInt(i64, i, .little);
+        },
+        .float_val => |f| {
+            try writer.writeByte(3);
+            try writer.writeInt(u64, @bitCast(f), .little);
+        },
+        .string_val => |s| {
+            try writer.writeByte(4);
+            try writer.writeInt(u32, @intCast(s.len), .little);
+            try writer.writeAll(s);
+        },
+        .bytes_val => |b| {
+            try writer.writeByte(5);
+            try writer.writeInt(u32, @intCast(b.len), .little);
+            try writer.writeAll(b);
+        },
+        .vector_val => |v| {
+            try writer.writeByte(6);
+            try writer.writeInt(u32, @intCast(v.len), .little);
+            for (v) |f| {
+                try writer.writeInt(u32, @bitCast(f), .little);
+            }
+        },
+        .list_val => |list| {
+            try writer.writeByte(7);
+            try writer.writeInt(u32, @intCast(list.len), .little);
+            for (list) |item| {
+                try serializePropertyValue(writer, item);
+            }
+        },
+        .map_val => |map| {
+            try writer.writeByte(8);
+            try writer.writeInt(u32, @intCast(map.len), .little);
+            for (map) |entry| {
+                try writer.writeInt(u32, @intCast(entry.key.len), .little);
+                try writer.writeAll(entry.key);
+                try serializePropertyValue(writer, entry.value);
+            }
+        },
+    }
+}
+
+/// Deserialize a property value from a reader.
+fn deserializePropertyValue(allocator: Allocator, reader: anytype) !PropertyValue {
+    const type_tag = try reader.readByte();
+
+    return switch (type_tag) {
+        0 => PropertyValue{ .null_val = {} },
+        1 => PropertyValue{ .bool_val = (try reader.readByte()) != 0 },
+        2 => PropertyValue{ .int_val = try reader.readInt(i64, .little) },
+        3 => PropertyValue{ .float_val = @bitCast(try reader.readInt(u64, .little)) },
+        4 => blk: {
+            const len = try reader.readInt(u32, .little);
+            const str = try allocator.alloc(u8, len);
+            errdefer allocator.free(str);
+            const bytes_read = try reader.readAll(str);
+            if (bytes_read != len) {
+                allocator.free(str);
+                return error.EndOfStream;
+            }
+            break :blk PropertyValue{ .string_val = str };
+        },
+        5 => blk: {
+            const len = try reader.readInt(u32, .little);
+            const bytes = try allocator.alloc(u8, len);
+            errdefer allocator.free(bytes);
+            const bytes_read = try reader.readAll(bytes);
+            if (bytes_read != len) {
+                allocator.free(bytes);
+                return error.EndOfStream;
+            }
+            break :blk PropertyValue{ .bytes_val = bytes };
+        },
+        6 => blk: {
+            const count = try reader.readInt(u32, .little);
+            const vec = try allocator.alloc(f32, count);
+            errdefer allocator.free(vec);
+            for (vec) |*f| {
+                f.* = @bitCast(try reader.readInt(u32, .little));
+            }
+            break :blk PropertyValue{ .vector_val = vec };
+        },
+        7 => blk: {
+            const count = try reader.readInt(u32, .little);
+            if (count == 0) {
+                break :blk PropertyValue{ .list_val = &[_]PropertyValue{} };
+            }
+            const list = try allocator.alloc(PropertyValue, count);
+            errdefer {
+                for (list) |*item| {
+                    var v = item.*;
+                    v.deinit(allocator);
+                }
+                allocator.free(list);
+            }
+            for (list) |*item| {
+                item.* = try deserializePropertyValue(allocator, reader);
+            }
+            break :blk PropertyValue{ .list_val = list };
+        },
+        8 => blk: {
+            const count = try reader.readInt(u32, .little);
+            if (count == 0) {
+                break :blk PropertyValue{ .map_val = &[_]PropertyValue.MapEntry{} };
+            }
+            const map = try allocator.alloc(PropertyValue.MapEntry, count);
+            errdefer {
+                for (map) |*entry| {
+                    allocator.free(entry.key);
+                    var v = entry.value;
+                    v.deinit(allocator);
+                }
+                allocator.free(map);
+            }
+            for (map) |*entry| {
+                const key_len = try reader.readInt(u32, .little);
+                const key = try allocator.alloc(u8, key_len);
+                errdefer allocator.free(key);
+                const key_read = try reader.readAll(key);
+                if (key_read != key_len) {
+                    allocator.free(key);
+                    return error.EndOfStream;
+                }
+                entry.key = key;
+                entry.value = try deserializePropertyValue(allocator, reader);
+            }
+            break :blk PropertyValue{ .map_val = map };
+        },
+        else => error.InvalidPayload,
     };
 }
 

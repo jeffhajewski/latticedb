@@ -22,6 +22,9 @@ const DatabaseConfig = database.DatabaseConfig;
 const VectorSearchResult = database.VectorSearchResult;
 const FtsSearchResult = database.FtsSearchResult;
 const node_mod = lattice.graph.node;
+const txn_mod = lattice.transaction.manager;
+const Transaction = txn_mod.Transaction;
+const TxnMode = txn_mod.TxnMode;
 
 // ============================================================================
 // Global Allocator
@@ -41,10 +44,10 @@ const DatabaseHandle = struct {
     db: *Database,
 };
 
-/// Internal transaction handle (placeholder for future MVCC support)
+/// Internal transaction handle wrapping actual Transaction
 const TxnHandle = struct {
     db_handle: *DatabaseHandle,
-    read_only: bool,
+    txn: Transaction, // Actual Transaction struct from TxnManager
 };
 
 /// Internal query handle storing prepared query state
@@ -425,11 +428,39 @@ pub export fn lattice_begin(
 
     const db_handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
 
-    // Create transaction handle
+    // Map C API mode to TxnMode
+    const txn_mode: TxnMode = if (mode == .read_only) .read_only else .read_write;
+
+    // Actually begin a transaction in the database
+    const txn = db_handle.db.beginTransaction(txn_mode) catch |err| {
+        return switch (err) {
+            DatabaseError.TransactionsNotEnabled => {
+                // Fallback: create handle without transaction for non-WAL databases
+                const txn_handle = global_allocator.create(TxnHandle) catch return .err_out_of_memory;
+                txn_handle.* = .{
+                    .db_handle = db_handle,
+                    .txn = Transaction{
+                        .id = 0, // Sentinel for "no real txn"
+                        .state = .active,
+                        .mode = txn_mode,
+                        .isolation = .snapshot,
+                        .start_ts = 0,
+                        .commit_ts = 0,
+                    },
+                };
+                txn_out.* = @ptrCast(txn_handle);
+                return .ok;
+            },
+            DatabaseError.OutOfMemory => .err_out_of_memory,
+            else => .err,
+        };
+    };
+
+    // Create transaction handle with real transaction
     const txn_handle = global_allocator.create(TxnHandle) catch return .err_out_of_memory;
     txn_handle.* = .{
         .db_handle = db_handle,
-        .read_only = mode == .read_only,
+        .txn = txn,
     };
 
     txn_out.* = @ptrCast(txn_handle);
@@ -440,7 +471,18 @@ pub export fn lattice_begin(
 pub export fn lattice_commit(txn: ?*lattice_txn) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    // For MVP, no explicit commit needed
+    // Only commit if this is a real transaction (id != 0)
+    if (txn_handle.txn.id != 0) {
+        txn_handle.db_handle.db.commitTransaction(&txn_handle.txn) catch |err| {
+            // Don't destroy handle on error - let caller retry or rollback
+            return switch (err) {
+                DatabaseError.TransactionNotActive => .err_txn_aborted,
+                DatabaseError.IoError => .err_io,
+                else => .err,
+            };
+        };
+    }
+
     global_allocator.destroy(txn_handle);
     return .ok;
 }
@@ -449,7 +491,18 @@ pub export fn lattice_commit(txn: ?*lattice_txn) lattice_error {
 pub export fn lattice_rollback(txn: ?*lattice_txn) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    // For MVP, no rollback support - just free handle
+    // Only abort if this is a real transaction (id != 0)
+    if (txn_handle.txn.id != 0) {
+        txn_handle.db_handle.db.abortTransaction(&txn_handle.txn) catch |err| {
+            // Still destroy handle even on error - transaction is unusable
+            global_allocator.destroy(txn_handle);
+            return switch (err) {
+                DatabaseError.TransactionNotActive => .err_txn_aborted,
+                else => .err,
+            };
+        };
+    }
+
     global_allocator.destroy(txn_handle);
     return .ok;
 }
@@ -466,12 +519,14 @@ pub export fn lattice_node_create(
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    if (txn_handle.read_only) return .err_read_only;
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
 
     const label_slice = cStrToSlice(label) orelse return .err_invalid_arg;
     const labels = [_][]const u8{label_slice};
 
-    const node_id = txn_handle.db_handle.db.createNode(null,&labels) catch |err| {
+    // Pass transaction if it's a real one (id != 0)
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+    const node_id = txn_handle.db_handle.db.createNode(txn_ptr, &labels) catch |err| {
         return mapAnyError(err);
     };
 
@@ -486,9 +541,11 @@ pub export fn lattice_node_delete(
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    if (txn_handle.read_only) return .err_read_only;
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
 
-    txn_handle.db_handle.db.deleteNode(null,node_id) catch |err| {
+    // Pass transaction if it's a real one (id != 0)
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+    txn_handle.db_handle.db.deleteNode(txn_ptr, node_id) catch |err| {
         return mapAnyError(err);
     };
 
@@ -504,7 +561,7 @@ pub export fn lattice_node_set_property(
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    if (txn_handle.read_only) return .err_read_only;
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
 
     const key_slice = cStrToSlice(key) orelse return .err_invalid_arg;
     const c_val = value orelse return .err_invalid_arg;
@@ -512,7 +569,9 @@ pub export fn lattice_node_set_property(
     // Convert C value to Zig PropertyValue
     const zig_value = cValueToZigValue(c_val);
 
-    txn_handle.db_handle.db.setNodeProperty(null, node_id, key_slice, zig_value) catch |err| {
+    // Pass transaction if it's a real one (id != 0)
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+    txn_handle.db_handle.db.setNodeProperty(txn_ptr, node_id, key_slice, zig_value) catch |err| {
         return mapDatabaseError(err);
     };
 
@@ -633,7 +692,7 @@ pub export fn lattice_node_set_vector(
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    if (txn_handle.read_only) return .err_read_only;
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
 
     // Key is currently ignored - vectors are stored by node_id
     // In future, we could support multiple vectors per node with different keys
@@ -736,7 +795,7 @@ pub export fn lattice_fts_index(
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    if (txn_handle.read_only) return .err_read_only;
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
     if (text == null or text_len == 0) return .err_invalid_arg;
 
     const text_slice = text[0..text_len];
@@ -830,11 +889,13 @@ pub export fn lattice_edge_create(
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    if (txn_handle.read_only) return .err_read_only;
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
 
     const type_slice = cStrToSlice(edge_type) orelse return .err_invalid_arg;
 
-    txn_handle.db_handle.db.createEdge(null, source, target, type_slice) catch |err| {
+    // Pass transaction if it's a real one (id != 0)
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+    txn_handle.db_handle.db.createEdge(txn_ptr, source, target, type_slice) catch |err| {
         return mapAnyError(err);
     };
 
@@ -852,11 +913,13 @@ pub export fn lattice_edge_delete(
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    if (txn_handle.read_only) return .err_read_only;
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
 
     const type_slice = cStrToSlice(edge_type) orelse return .err_invalid_arg;
 
-    txn_handle.db_handle.db.deleteEdge(null, source, target, type_slice) catch |err| {
+    // Pass transaction if it's a real one (id != 0)
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+    txn_handle.db_handle.db.deleteEdge(txn_ptr, source, target, type_slice) catch |err| {
         return mapDatabaseError(err);
     };
 

@@ -529,27 +529,86 @@ pub const Database = struct {
             .node => switch (entry.op_type) {
                 // Undo of insert is delete
                 .insert => {
+                    // First remove from label index
+                    if (self.node_store.get(entry.entity_id)) |existing| {
+                        var node = existing;
+                        defer node.deinit(self.allocator);
+                        for (node.labels) |label_id| {
+                            self.label_index.remove(label_id, entry.entity_id) catch {};
+                        }
+                    } else |_| {}
                     self.node_store.delete(entry.entity_id) catch {};
-                    // Also remove from label index if we had labels
-                    // (simplified - full implementation would use prev_data)
                 },
                 // Undo of delete is re-insert using prev_data
                 .delete => {
                     if (entry.prev_data) |data| {
                         const payload = wal_payload.deserializeNodeDelete(data) catch return;
-                        // Create node with original labels
+
+                        // Extract label IDs
                         var label_ids = self.allocator.alloc(u16, payload.label_count) catch return;
                         defer self.allocator.free(label_ids);
                         for (0..payload.label_count) |idx| {
                             label_ids[idx] = payload.getLabelId(idx);
                         }
-                        // Re-create the node (note: this creates a new ID, not the original)
-                        // Full implementation would use createWithId in NodeStore
-                        _ = self.node_store.create(label_ids, &[_]node_mod.Property{}) catch {};
+
+                        // Deserialize properties if present
+                        var properties: []node_mod.Property = &[_]node_mod.Property{};
+                        var owns_properties = false;
+                        if (payload.properties.len > 0) {
+                            const wal_props = wal_payload.deserializeProperties(self.allocator, payload.properties) catch &[_]wal_payload.Property{};
+                            if (wal_props.len > 0) {
+                                // Convert wal_payload.Property to node_mod.Property (same layout)
+                                properties = @constCast(@ptrCast(wal_props));
+                                owns_properties = true;
+                            }
+                        }
+                        defer if (owns_properties) {
+                            for (properties) |*prop| {
+                                var val = prop.value;
+                                val.deinit(self.allocator);
+                            }
+                            self.allocator.free(properties);
+                        };
+
+                        // Re-create node with ORIGINAL ID using createWithId
+                        self.node_store.createWithId(entry.entity_id, label_ids, properties) catch {};
+
+                        // Restore label index entries
+                        for (label_ids) |label_id| {
+                            self.label_index.add(label_id, entry.entity_id) catch {};
+                        }
                     }
                 },
                 .update => {
-                    // Property update undo - simplified for now
+                    // Property update undo - restore from prev_data
+                    if (entry.prev_data) |data| {
+                        const update_payload = wal_payload.deserializePropertyUpdate(data) catch return;
+
+                        // Get current node
+                        var node = self.node_store.get(entry.entity_id) catch return;
+                        defer node.deinit(self.allocator);
+
+                        // Build new properties array
+                        var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
+                        defer new_props.deinit(self.allocator);
+
+                        // Copy existing properties, replacing or removing the updated one
+                        for (node.properties) |prop| {
+                            if (prop.key_id == update_payload.key_id) {
+                                // If there was an old value, restore it
+                                if (update_payload.old_value) |old_bytes| {
+                                    const old_val = wal_payload.deserializePropertyValueFromBytes(self.allocator, old_bytes) catch continue;
+                                    new_props.append(self.allocator, .{ .key_id = prop.key_id, .value = old_val }) catch continue;
+                                }
+                                // If old_value is null, property didn't exist before - skip it
+                            } else {
+                                new_props.append(self.allocator, prop) catch continue;
+                            }
+                        }
+
+                        // Update the node with restored properties
+                        self.node_store.update(entry.entity_id, node.labels, new_props.items) catch {};
+                    }
                 },
             },
             .edge => switch (entry.op_type) {
@@ -557,19 +616,90 @@ pub const Database = struct {
                 .insert => {
                     self.edge_store.delete(entry.entity_id, entry.secondary_id, entry.type_id) catch {};
                 },
-                // Undo of delete is re-insert
+                // Undo of delete is re-insert with original properties
                 .delete => {
-                    self.edge_store.create(entry.entity_id, entry.secondary_id, entry.type_id, &[_]node_mod.Property{}) catch {};
+                    var properties: []node_mod.Property = &[_]node_mod.Property{};
+                    var owns_properties = false;
+
+                    if (entry.prev_data) |data| {
+                        const payload = wal_payload.deserializeEdgeDelete(data) catch {
+                            // Fallback: create edge without properties
+                            self.edge_store.create(entry.entity_id, entry.secondary_id, entry.type_id, &[_]node_mod.Property{}) catch {};
+                            return;
+                        };
+                        if (payload.properties.len > 0) {
+                            const wal_props = wal_payload.deserializeProperties(self.allocator, payload.properties) catch &[_]wal_payload.Property{};
+                            if (wal_props.len > 0) {
+                                properties = @constCast(@ptrCast(wal_props));
+                                owns_properties = true;
+                            }
+                        }
+                    }
+                    defer if (owns_properties) {
+                        for (properties) |*prop| {
+                            var val = prop.value;
+                            val.deinit(self.allocator);
+                        }
+                        self.allocator.free(properties);
+                    };
+
+                    self.edge_store.create(entry.entity_id, entry.secondary_id, entry.type_id, properties) catch {};
                 },
                 .update => {},
             },
             .property => switch (entry.op_type) {
                 // Undo of property insert is delete the property
                 .insert => {
-                    // Would need to implement removeNodeProperty
+                    // Get current node and remove the property
+                    var node = self.node_store.get(entry.entity_id) catch return;
+                    defer node.deinit(self.allocator);
+
+                    var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
+                    defer new_props.deinit(self.allocator);
+
+                    // Copy all properties except the one being removed
+                    for (node.properties) |prop| {
+                        if (prop.key_id != entry.type_id) {
+                            new_props.append(self.allocator, prop) catch continue;
+                        }
+                    }
+
+                    self.node_store.update(entry.entity_id, node.labels, new_props.items) catch {};
                 },
                 .update, .delete => {
-                    // Would restore from prev_data
+                    // Restore from prev_data (same as node .update)
+                    if (entry.prev_data) |data| {
+                        const update_payload = wal_payload.deserializePropertyUpdate(data) catch return;
+
+                        var node = self.node_store.get(entry.entity_id) catch return;
+                        defer node.deinit(self.allocator);
+
+                        var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
+                        defer new_props.deinit(self.allocator);
+
+                        var found = false;
+                        for (node.properties) |prop| {
+                            if (prop.key_id == update_payload.key_id) {
+                                found = true;
+                                if (update_payload.old_value) |old_bytes| {
+                                    const old_val = wal_payload.deserializePropertyValueFromBytes(self.allocator, old_bytes) catch continue;
+                                    new_props.append(self.allocator, .{ .key_id = prop.key_id, .value = old_val }) catch continue;
+                                }
+                            } else {
+                                new_props.append(self.allocator, prop) catch continue;
+                            }
+                        }
+
+                        // If property was deleted, we need to add it back
+                        if (!found and update_payload.old_value != null) {
+                            if (update_payload.old_value) |old_bytes| {
+                                const old_val = wal_payload.deserializePropertyValueFromBytes(self.allocator, old_bytes) catch return;
+                                new_props.append(self.allocator, .{ .key_id = update_payload.key_id, .value = old_val }) catch return;
+                            }
+                        }
+
+                        self.node_store.update(entry.entity_id, node.labels, new_props.items) catch {};
+                    }
                 },
             },
         }
@@ -843,9 +973,15 @@ pub const Database = struct {
             // Log to WAL and add undo entry before deletion
             if (txn) |t| {
                 if (self.txn_manager) |*tm| {
-                    var buf: [512]u8 = undefined;
-                    // Serialize node data for WAL and undo
-                    const payload = wal_payload.serializeNodeDelete(&buf, node_id, node.labels, &[_]u8{}) catch {
+                    // Serialize properties for undo
+                    const prop_bytes = wal_payload.serializeProperties(self.allocator, @ptrCast(node.properties)) catch {
+                        return DatabaseError.OutOfMemory;
+                    };
+                    defer self.allocator.free(prop_bytes);
+
+                    var buf: [4096]u8 = undefined;
+                    // Serialize node data for WAL and undo (now with properties)
+                    const payload = wal_payload.serializeNodeDelete(&buf, node_id, node.labels, prop_bytes) catch {
                         return DatabaseError.IoError;
                     };
                     _ = tm.logOperation(t, .delete, payload) catch {
@@ -915,13 +1051,16 @@ pub const Database = struct {
         };
 
         // Build new properties array with the updated/added property
-        var new_props: std.ArrayList(node_mod.Property) = .empty;
+        var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
         defer new_props.deinit(self.allocator);
 
         // Copy existing properties, replacing if key matches
+        // Also capture old value for undo
         var found = false;
+        var old_value: ?PropertyValue = null;
         for (existing_node.properties) |prop| {
             if (prop.key_id == key_id) {
+                old_value = prop.value; // Capture old value for undo
                 new_props.append(self.allocator, .{ .key_id = key_id, .value = value }) catch {
                     return DatabaseError.IoError;
                 };
@@ -948,18 +1087,37 @@ pub const Database = struct {
         // Log to WAL and add undo entry if transaction is provided
         if (txn) |t| {
             if (self.txn_manager) |*tm| {
-                var buf: [512]u8 = undefined;
-                // Serialize property update for WAL
-                const payload = wal_payload.serializePropertyUpdate(&buf, node_id, key_id, null, &[_]u8{}) catch {
+                // Serialize old value for undo (if it existed)
+                var old_value_bytes: ?[]u8 = null;
+                var owns_old_bytes = false;
+                if (old_value) |ov| {
+                    var old_buf: [512]u8 = undefined;
+                    const old_size = wal_payload.serializePropertyValueToBuf(&old_buf, ov) catch null;
+                    if (old_size) |sz| {
+                        old_value_bytes = self.allocator.dupe(u8, old_buf[0..sz]) catch null;
+                        owns_old_bytes = old_value_bytes != null;
+                    }
+                }
+                defer if (owns_old_bytes) self.allocator.free(old_value_bytes.?);
+
+                // Serialize new value
+                var new_buf: [512]u8 = undefined;
+                const new_size = wal_payload.serializePropertyValueToBuf(&new_buf, value) catch {
+                    return DatabaseError.IoError;
+                };
+
+                var buf: [1024]u8 = undefined;
+                // Serialize property update for WAL (now with old value)
+                const payload = wal_payload.serializePropertyUpdate(&buf, node_id, key_id, old_value_bytes, new_buf[0..new_size]) catch {
                     return DatabaseError.IoError;
                 };
                 _ = tm.logOperation(t, .update, payload) catch {
                     return DatabaseError.IoError;
                 };
-                // Undo of update: store old value info
+                // Undo of update: store payload containing old value
                 // For new properties (found=false), undo is delete; for existing, restore old value
                 const undo_op: UndoOpType = if (found) .update else .insert;
-                tm.addUndoEntry(t, undo_op, .property, node_id, 0, key_id, null) catch {
+                tm.addUndoEntry(t, undo_op, .property, node_id, 0, key_id, payload) catch {
                     return DatabaseError.IoError;
                 };
             }
@@ -1372,16 +1530,29 @@ pub const Database = struct {
         // Log to WAL and add undo entry before deletion
         if (txn) |t| {
             if (self.txn_manager) |*tm| {
-                var buf: [128]u8 = undefined;
-                // Serialize edge data for WAL
-                const payload = wal_payload.serializeEdgeDelete(&buf, source, target, type_id, &[_]u8{}) catch {
+                // Capture edge properties before delete for undo
+                var prop_bytes: []u8 = &[_]u8{};
+                var owns_prop_bytes = false;
+                if (self.edge_store.get(source, target, type_id)) |existing_edge| {
+                    var edge = existing_edge;
+                    defer edge.deinit(self.allocator);
+                    if (edge.properties.len > 0) {
+                        prop_bytes = wal_payload.serializeProperties(self.allocator, @ptrCast(edge.properties)) catch &[_]u8{};
+                        owns_prop_bytes = prop_bytes.len > 0;
+                    }
+                } else |_| {}
+                defer if (owns_prop_bytes) self.allocator.free(prop_bytes);
+
+                var buf: [2048]u8 = undefined;
+                // Serialize edge data for WAL (now with properties)
+                const payload = wal_payload.serializeEdgeDelete(&buf, source, target, type_id, prop_bytes) catch {
                     return DatabaseError.IoError;
                 };
                 _ = tm.logOperation(t, .delete, payload) catch {
                     return DatabaseError.IoError;
                 };
-                // Undo of delete is re-insert
-                tm.addUndoEntry(t, .delete, .edge, source, target, type_id, null) catch {
+                // Undo of delete is re-insert; store serialized edge data for property recovery
+                tm.addUndoEntry(t, .delete, .edge, source, target, type_id, payload) catch {
                     return DatabaseError.IoError;
                 };
             }

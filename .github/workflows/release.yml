@@ -14,9 +14,13 @@ on:
         description: 'Publish to PyPI'
         type: boolean
         default: false
+      publish_npm:
+        description: 'Publish to npm'
+        type: boolean
+        default: false
 
 env:
-  ZIG_VERSION: "0.14.0"
+  ZIG_VERSION: "0.13.0"
 
 jobs:
   # ============================================
@@ -262,3 +266,111 @@ jobs:
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
+
+  # ============================================
+  # Build npm package with prebuilt binaries
+  # ============================================
+  build-npm:
+    name: Build npm Package (${{ matrix.os }})
+    needs: build-native
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: macos-14  # ARM64
+            target: aarch64-macos
+          - os: macos-13  # Intel
+            target: x86_64-macos
+          - os: ubuntu-latest
+            target: x86_64-linux-gnu
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download native library
+        uses: actions/download-artifact@v4
+        with:
+          name: native-${{ matrix.target }}
+          path: native-lib
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Copy native library
+        run: |
+          mkdir -p zig-out/lib
+          cp native-lib/lib/* zig-out/lib/
+          ls -la zig-out/lib/
+
+      - name: Install dependencies
+        working-directory: bindings/typescript
+        run: npm ci --ignore-scripts
+
+      - name: Build TypeScript
+        working-directory: bindings/typescript
+        run: npm run build
+
+      - name: Build native addon
+        working-directory: bindings/typescript
+        run: npm run build:native
+
+      - name: Run tests
+        working-directory: bindings/typescript
+        run: npm test
+
+      - name: Install prebuildify
+        run: npm install -g prebuildify
+
+      - name: Create prebuilt binary
+        working-directory: bindings/typescript
+        run: prebuildify --napi --strip
+
+      - name: Upload prebuilt
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-prebuild-${{ matrix.target }}
+          path: bindings/typescript/prebuilds
+
+  # ============================================
+  # Publish to npm
+  # ============================================
+  publish-npm:
+    name: Publish to npm
+    needs: [build-npm, release-github]
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_npm)
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          registry-url: 'https://registry.npmjs.org'
+
+      - name: Download all prebuilds
+        uses: actions/download-artifact@v4
+        with:
+          pattern: npm-prebuild-*
+          path: bindings/typescript/prebuilds
+          merge-multiple: true
+
+      - name: List prebuilds
+        run: ls -laR bindings/typescript/prebuilds/
+
+      - name: Install dependencies
+        working-directory: bindings/typescript
+        run: npm ci --ignore-scripts
+
+      - name: Build TypeScript
+        working-directory: bindings/typescript
+        run: npm run build
+
+      - name: Publish to npm
+        working-directory: bindings/typescript
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}

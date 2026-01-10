@@ -18,7 +18,7 @@
             "libraries": [
               "-L<(module_root_dir)/../../zig-out/lib",
               "-llattice",
-              "-Wl,-rpath,@loader_path/../../zig-out/lib"
+              "-Wl,-rpath,@loader_path/../../../../zig-out/lib"
             ],
             "xcode_settings": {
               "GCC_ENABLE_CPP_EXCEPTIONS": "NO",
@@ -35,7 +35,7 @@
             "libraries": [
               "-L<(module_root_dir)/../../zig-out/lib",
               "-llattice",
-              "-Wl,-rpath,$ORIGIN/../../zig-out/lib"
+              "-Wl,-rpath,$ORIGIN/../../../../zig-out/lib"
             ]
           }
         ],

@@ -1,0 +1,43 @@
+# Source files (TypeScript sources not needed, dist/ has compiled JS)
+src/
+!src/native/
+
+# Tests
+tests/
+*.test.ts
+*.test.js
+jest.config.js
+coverage/
+
+# Build artifacts
+build/
+!build/Release/*.node
+*.o
+*.obj
+
+# Development files
+.eslintrc*
+.prettierrc*
+tsconfig.json
+CMakeLists.txt
+
+# Git
+.git/
+.gitignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Lock files (not needed for published package)
+package-lock.json

@@ -1,0 +1,158 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  ZIG_VERSION: "0.13.0"
+
+jobs:
+  # ============================================
+  # Build and test Zig code
+  # ============================================
+  zig-build:
+    name: Zig Build & Test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build
+        run: zig build
+
+      - name: Run tests
+        run: zig build test
+
+      - name: Build shared library
+        run: zig build shared
+
+      - name: Upload shared library
+        uses: actions/upload-artifact@v4
+        with:
+          name: shared-lib-${{ matrix.os }}
+          path: zig-out/lib/
+
+  # ============================================
+  # Python tests
+  # ============================================
+  python-test:
+    name: Python Tests
+    needs: zig-build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14]
+        python-version: ['3.9', '3.11', '3.12']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download shared library
+        uses: actions/download-artifact@v4
+        with:
+          name: shared-lib-${{ matrix.os }}
+          path: zig-out/lib
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Install dependencies
+        run: |
+          cd bindings/python
+          pip install -e ".[dev]"
+
+      - name: Run tests
+        run: |
+          cd bindings/python
+          LATTICE_LIB_PATH=$GITHUB_WORKSPACE/zig-out/lib pytest -v
+
+  # ============================================
+  # TypeScript tests
+  # ============================================
+  typescript-test:
+    name: TypeScript Tests
+    needs: zig-build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-latest, macos-14]
+        node-version: ['18', '20']
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download shared library
+        uses: actions/download-artifact@v4
+        with:
+          name: shared-lib-${{ matrix.os }}
+          path: zig-out/lib
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node-version }}
+
+      - name: Install dependencies
+        working-directory: bindings/typescript
+        run: npm ci --ignore-scripts
+
+      - name: Build TypeScript
+        working-directory: bindings/typescript
+        run: npm run build
+
+      - name: Build native addon
+        working-directory: bindings/typescript
+        run: npm run build:native
+
+      - name: Run tests
+        working-directory: bindings/typescript
+        run: npm test
+
+  # ============================================
+  # Lint checks
+  # ============================================
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python linters
+        run: pip install ruff mypy
+
+      - name: Run ruff
+        run: |
+          cd bindings/python
+          ruff check src/
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install TypeScript dependencies
+        working-directory: bindings/typescript
+        run: npm ci --ignore-scripts
+
+      - name: Run ESLint
+        working-directory: bindings/typescript
+        run: npm run lint || true  # Don't fail on lint errors for now

@@ -12,7 +12,8 @@
     "test": "jest",
     "lint": "eslint src --ext .ts",
     "clean": "rm -rf dist build",
-    "prepublishOnly": "npm run build:all"
+    "prepare": "npm run build:all",
+    "prepublishOnly": "npm test"
   },
   "keywords": [
     "database",
@@ -26,7 +27,7 @@
     "hnsw",
     "bm25"
   ],
-  "author": "",
+  "author": "Jeff Hajewski <jeff@latticedb.dev>",
   "license": "MIT",
   "repository": {
     "type": "git",
@@ -39,7 +40,9 @@
   "files": [
     "dist",
     "src/native",
-    "binding.gyp"
+    "binding.gyp",
+    "include",
+    "prebuilds"
   ],
   "engines": {
     "node": ">=18.0.0"

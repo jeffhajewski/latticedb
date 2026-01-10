@@ -406,8 +406,10 @@ pub fn deserializeProperties(allocator: Allocator, data: []const u8) ![]Property
     if (num_props == 0) return &[_]Property{};
 
     const properties = try allocator.alloc(Property, num_props);
+    var initialized_count: usize = 0;
     errdefer {
-        for (properties) |*prop| {
+        // Only deinit properties that were successfully initialized
+        for (properties[0..initialized_count]) |*prop| {
             var val = prop.value;
             val.deinit(allocator);
         }
@@ -417,6 +419,7 @@ pub fn deserializeProperties(allocator: Allocator, data: []const u8) ![]Property
     for (properties) |*prop| {
         prop.key_id = try reader.readInt(u16, .little);
         prop.value = try deserializePropertyValue(allocator, reader);
+        initialized_count += 1;
     }
 
     return properties;

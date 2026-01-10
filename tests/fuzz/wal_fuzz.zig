@@ -260,31 +260,29 @@ test "wal: handles wrong type markers" {
     try fuzzNodeInsert(&buf);
 }
 
-// NOTE: This test triggers a panic in deserializePropertyValue - bug to fix
-// test "wal: handles maximum length claims" {
-//     const allocator = std.testing.allocator;
-//
-//     // Payload claiming huge length but with small buffer
-//     var buf: [10]u8 = undefined;
-//     buf[0] = 0x01; // Type
-//     std.mem.writeInt(u64, buf[1..9], 0xFFFFFFFFFFFFFFFF, .little); // Huge length
-//     try fuzzProperties(allocator, &buf);
-// }
+test "wal: handles maximum length claims" {
+    const allocator = std.testing.allocator;
+
+    // Payload claiming huge length but with small buffer
+    var buf: [10]u8 = undefined;
+    buf[0] = 0x01; // Type
+    std.mem.writeInt(u64, buf[1..9], 0xFFFFFFFFFFFFFFFF, .little); // Huge length
+    try fuzzProperties(allocator, &buf);
+}
 
 test "wal: handles null bytes in middle" {
     const allocator = std.testing.allocator;
     try fuzzProperties(allocator, &[_]u8{ 0x00, 0x00, 0x00, 0x00, 0x00 });
 }
 
-// NOTE: This test triggers a panic in deserializePropertyValue - bug to fix
-// test "wal: handles valid-looking but corrupt data" {
-//     const allocator = std.testing.allocator;
-//
-//     // Property count = 1, but data is truncated
-//     var buf: [10]u8 = undefined;
-//     std.mem.writeInt(u16, buf[0..2], 1, .little); // 1 property
-//     std.mem.writeInt(u16, buf[2..4], 0, .little); // key_id = 0
-//     buf[4] = 0x01; // type = bool
-//     // Missing value byte
-//     try fuzzProperties(allocator, buf[0..5]);
-// }
+test "wal: handles valid-looking but corrupt data" {
+    const allocator = std.testing.allocator;
+
+    // Property count = 1, but data is truncated
+    var buf: [10]u8 = undefined;
+    std.mem.writeInt(u16, buf[0..2], 1, .little); // 1 property
+    std.mem.writeInt(u16, buf[2..4], 0, .little); // key_id = 0
+    buf[4] = 0x01; // type = bool
+    // Missing value byte
+    try fuzzProperties(allocator, buf[0..5]);
+}

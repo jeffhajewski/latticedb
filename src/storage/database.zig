@@ -332,6 +332,10 @@ pub const Database = struct {
             };
         }
 
+        // Initialize these early since saveTreeRoots() checks them
+        self.vector_storage = null;
+        self.hnsw_index = null;
+
         // 5. Initialize or load B+Trees
         const header = self.page_manager.getHeader();
         const is_new = !header.hasInitializedTrees();
@@ -364,14 +368,26 @@ pub const Database = struct {
         }
 
         // 8b. Initialize Vector Storage (optional)
-        self.vector_storage = null;
-        self.hnsw_index = null;
+        // (vector_storage and hnsw_index already initialized to null above)
+        const is_existing_vectors = options.config.enable_vector and header.vector_segment_page != NULL_PAGE;
         if (options.config.enable_vector) {
-            self.vector_storage = VectorStorage.init(
-                allocator,
-                &self.buffer_pool,
-                options.config.vector_dimensions,
-            ) catch null;
+            // Check if vector storage already exists (from a previous session)
+            if (header.vector_segment_page != NULL_PAGE) {
+                // Open existing vector storage
+                self.vector_storage = VectorStorage.open(
+                    allocator,
+                    &self.buffer_pool,
+                    header.vector_segment_page,
+                    options.config.vector_dimensions,
+                ) catch null;
+            } else {
+                // Create new vector storage
+                self.vector_storage = VectorStorage.init(
+                    allocator,
+                    &self.buffer_pool,
+                    options.config.vector_dimensions,
+                ) catch null;
+            }
 
             // 8c. Initialize HNSW index if vector storage is available
             if (self.vector_storage) |*vs| {
@@ -383,6 +399,15 @@ pub const Database = struct {
                         .dimensions = options.config.vector_dimensions,
                     },
                 );
+
+                // 8d. Rebuild HNSW index from existing vectors if reopening database
+                if (is_existing_vectors) {
+                    if (self.hnsw_index) |*hnsw| {
+                        self.rebuildHnswIndex(vs, hnsw) catch {
+                            // Log error but continue - index will be empty
+                        };
+                    }
+                }
             }
         }
 
@@ -668,9 +693,39 @@ pub const Database = struct {
             header.setTreeRoot(.fts_reverse, tree.getRootPage());
         }
 
+        // Save vector storage first page for persistence
+        if (self.vector_storage) |vs| {
+            header.vector_segment_page = vs.first_page;
+        }
+
         self.page_manager.updateHeader(&header) catch {
             return DatabaseError.IoError;
         };
+    }
+
+    /// Rebuild the HNSW index from persisted vectors
+    fn rebuildHnswIndex(self: *Self, vs: *VectorStorage, hnsw: *HnswIndex) !void {
+        // Get all stored vector entries
+        const entries = vs.getAllEntries(self.allocator) catch return;
+        defer if (entries.len > 0) self.allocator.free(entries);
+
+        // Track unique IDs to avoid duplicate insertions
+        var seen = std.AutoHashMap(u64, void).init(self.allocator);
+        defer seen.deinit();
+
+        // Insert each vector into the HNSW index
+        for (entries) |entry| {
+            // Skip duplicates
+            if (seen.contains(entry.id)) continue;
+            seen.put(entry.id, {}) catch continue;
+
+            // Get the vector data from storage
+            const vector = vs.getByLocation(entry.location) catch continue;
+            defer vs.free(vector);
+
+            // Insert into HNSW index
+            hnsw.insert(entry.id, vector) catch continue;
+        }
     }
 
     // ========================================================================

@@ -146,6 +146,37 @@ pub const VectorStorage = struct {
         };
     }
 
+    /// Open existing vector storage from a known first page
+    pub fn open(allocator: Allocator, bp: *BufferPool, first_page: PageId, dimensions: u16) !Self {
+        const bytes_per_vector: u32 = 8 + @as(u32, dimensions) * 4;
+
+        const available = PAGE_SIZE - VECTOR_DATA_OFFSET;
+        if (bytes_per_vector > available) {
+            return VectorStorageError.VectorTooLarge;
+        }
+
+        const vectors_per_page: u16 = @intCast(available / bytes_per_vector);
+
+        // Validate the existing page
+        const frame = bp.fetchPage(first_page, .shared) catch return VectorStorageError.BufferPoolError;
+        defer bp.unpinPage(frame, false);
+
+        // Read and validate header
+        const vph = VectorPageHeader.read(frame.data);
+        if (vph.dimensions != dimensions) {
+            return VectorStorageError.DimensionMismatch;
+        }
+
+        return Self{
+            .allocator = allocator,
+            .bp = bp,
+            .dimensions = dimensions,
+            .bytes_per_vector = bytes_per_vector,
+            .vectors_per_page = vectors_per_page,
+            .first_page = first_page,
+        };
+    }
+
     /// Store a vector and return its location
     pub fn store(self: *Self, vector_id: u64, vector: []const f32) VectorStorageError!VectorLocation {
         if (vector.len != self.dimensions) {
@@ -288,6 +319,92 @@ pub const VectorStorage = struct {
         }
 
         return total;
+    }
+
+    /// Iterate over all stored vectors, calling the callback for each one.
+    /// The callback receives (vector_id, vector_data) and returns true to continue, false to stop.
+    /// The vector data is only valid during the callback.
+    pub fn forEach(self: *Self, callback: *const fn (u64, []const f32) bool) VectorStorageError!void {
+        var current_page = self.first_page;
+
+        while (current_page != NULL_PAGE) {
+            const frame = self.bp.fetchPage(current_page, .shared) catch return VectorStorageError.BufferPoolError;
+            const vph = VectorPageHeader.read(frame.data);
+
+            // Process each vector on this page
+            var slot: u16 = 0;
+            while (slot < vph.vector_count) : (slot += 1) {
+                const offset = VECTOR_DATA_OFFSET + @as(usize, slot) * self.bytes_per_vector;
+
+                // Read vector_id
+                const vector_id = std.mem.readInt(u64, frame.data[offset..][0..8], .little);
+
+                // Read vector data into temporary buffer
+                const float_offset = offset + 8;
+                var vector_buf: [1024]f32 = undefined; // Max 1024 dimensions
+                for (0..self.dimensions) |i| {
+                    const byte_offset = float_offset + i * 4;
+                    const bits = std.mem.readInt(u32, frame.data[byte_offset..][0..4], .little);
+                    vector_buf[i] = @bitCast(bits);
+                }
+
+                // Call callback with vector data
+                const should_continue = callback(vector_id, vector_buf[0..self.dimensions]);
+                if (!should_continue) {
+                    self.bp.unpinPage(frame, false);
+                    return;
+                }
+            }
+
+            current_page = vph.next_page;
+            self.bp.unpinPage(frame, false);
+        }
+    }
+
+    /// Entry returned by the iterator
+    pub const VectorEntry = struct {
+        id: u64,
+        location: VectorLocation,
+    };
+
+    /// Get all vector IDs and their locations
+    pub fn getAllEntries(self: *Self, allocator: Allocator) VectorStorageError![]VectorEntry {
+        // First count total vectors
+        const total_count = self.count() catch return VectorStorageError.BufferPoolError;
+        if (total_count == 0) return &[_]VectorEntry{};
+
+        // Allocate result array
+        var entries = allocator.alloc(VectorEntry, @intCast(total_count)) catch return VectorStorageError.OutOfMemory;
+        errdefer allocator.free(entries);
+
+        var index: usize = 0;
+        var current_page = self.first_page;
+
+        while (current_page != NULL_PAGE) {
+            const frame = self.bp.fetchPage(current_page, .shared) catch return VectorStorageError.BufferPoolError;
+            const vph = VectorPageHeader.read(frame.data);
+
+            var slot: u16 = 0;
+            while (slot < vph.vector_count) : (slot += 1) {
+                const offset = VECTOR_DATA_OFFSET + @as(usize, slot) * self.bytes_per_vector;
+                const vector_id = std.mem.readInt(u64, frame.data[offset..][0..8], .little);
+
+                entries[index] = VectorEntry{
+                    .id = vector_id,
+                    .location = VectorLocation{
+                        .page_id = current_page,
+                        .slot_index = slot,
+                    },
+                };
+                index += 1;
+            }
+
+            const next_page = vph.next_page;
+            self.bp.unpinPage(frame, false);
+            current_page = next_page;
+        }
+
+        return entries;
     }
 };
 

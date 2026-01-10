@@ -187,16 +187,40 @@ pub const QueryPlanner = struct {
         for (pattern.elements) |element| {
             switch (element) {
                 .node => |node_pattern| {
-                    const slot = try self.allocateSlot();
+                    // If prev_node_slot is set, this node follows an edge.
+                    // Use the target slot from the Expand operator instead of allocating a new slot.
+                    const slot = if (prev_node_slot != null and op != null)
+                        prev_node_slot.? // Use target slot from preceding edge's Expand
+                    else
+                        try self.allocateSlot();
 
                     // Bind variable if present
                     if (node_pattern.variable) |name| {
                         try self.bindVariable(name, slot, .node);
                     }
 
-                    // Create scan operator
-                    if (node_pattern.labels.len > 0) {
-                        // Label scan
+                    // Determine if we need to create a scan or filter
+                    const is_target_of_edge = prev_node_slot != null and op != null;
+
+                    if (is_target_of_edge) {
+                        // This node is the target of an edge - data comes from Expand operator.
+                        // If labels are specified, add a filter to check them.
+                        if (node_pattern.labels.len > 0) {
+                            const symbol_table = self.storage.symbol_table orelse return PlannerError.MissingStorage;
+                            const label_id = symbol_table.lookup(node_pattern.labels[0]) catch |err| switch (err) {
+                                symbols.SymbolError.NotFound => symbols.NULL_SYMBOL,
+                                else => return PlannerError.InternalError,
+                            };
+
+                            // Create a label filter for the target node
+                            const label_filter = filter_ops.LabelFilter.init(self.allocator, op.?, slot, label_id) catch {
+                                return PlannerError.OutOfMemory;
+                            };
+                            op = label_filter.operator();
+                        }
+                        // If no labels, no filter needed - just use the Expand output as-is
+                    } else if (node_pattern.labels.len > 0) {
+                        // First node with labels - create a label scan
                         const label_index_ptr = self.storage.label_index orelse return PlannerError.MissingStorage;
                         const symbol_table = self.storage.symbol_table orelse return PlannerError.MissingStorage;
 

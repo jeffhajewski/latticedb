@@ -677,12 +677,18 @@ pub const Database = struct {
                         var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
                         defer new_props.deinit(self.allocator);
 
+                        // Track deserialized string values that need freeing after update()
+                        var deserialized_string: ?[]const u8 = null;
+
                         var found = false;
                         for (node.properties) |prop| {
                             if (prop.key_id == update_payload.key_id) {
                                 found = true;
                                 if (update_payload.old_value) |old_bytes| {
                                     const old_val = wal_payload.deserializePropertyValueFromBytes(self.allocator, old_bytes) catch continue;
+                                    if (old_val == .string_val) {
+                                        deserialized_string = old_val.string_val;
+                                    }
                                     new_props.append(self.allocator, .{ .key_id = prop.key_id, .value = old_val }) catch continue;
                                 }
                             } else {
@@ -694,11 +700,19 @@ pub const Database = struct {
                         if (!found and update_payload.old_value != null) {
                             if (update_payload.old_value) |old_bytes| {
                                 const old_val = wal_payload.deserializePropertyValueFromBytes(self.allocator, old_bytes) catch return;
+                                if (old_val == .string_val) {
+                                    deserialized_string = old_val.string_val;
+                                }
                                 new_props.append(self.allocator, .{ .key_id = update_payload.key_id, .value = old_val }) catch return;
                             }
                         }
 
                         self.node_store.update(entry.entity_id, node.labels, new_props.items) catch {};
+
+                        // Free deserialized string after update() has copied it
+                        if (deserialized_string) |s| {
+                            self.allocator.free(s);
+                        }
                     }
                 },
             },
@@ -1150,8 +1164,20 @@ pub const Database = struct {
             return DatabaseError.IoError;
         };
 
+        // Find and capture the old value for undo
+        var old_value: ?PropertyValue = null;
+        for (existing_node.properties) |prop| {
+            if (prop.key_id == key_id) {
+                old_value = prop.value;
+                break;
+            }
+        }
+
+        // If property doesn't exist, nothing to remove
+        if (old_value == null) return;
+
         // Build new properties array without the specified key
-        var new_props: std.ArrayList(node_mod.Property) = .empty;
+        var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
         defer new_props.deinit(self.allocator);
 
         for (existing_node.properties) |prop| {
@@ -1166,6 +1192,37 @@ pub const Database = struct {
         self.node_store.update(node_id, existing_node.labels, new_props.items) catch {
             return DatabaseError.IoError;
         };
+
+        // Log to WAL and add undo entry if transaction is provided
+        if (txn) |t| {
+            if (self.txn_manager) |*tm| {
+                // Serialize old value for undo
+                var old_value_bytes: ?[]u8 = null;
+                var owns_old_bytes = false;
+                if (old_value) |ov| {
+                    var old_buf: [512]u8 = undefined;
+                    const old_size = wal_payload.serializePropertyValueToBuf(&old_buf, ov) catch null;
+                    if (old_size) |sz| {
+                        old_value_bytes = self.allocator.dupe(u8, old_buf[0..sz]) catch null;
+                        owns_old_bytes = old_value_bytes != null;
+                    }
+                }
+                defer if (owns_old_bytes) self.allocator.free(old_value_bytes.?);
+
+                var buf: [1024]u8 = undefined;
+                // Serialize property delete for WAL (old value, no new value)
+                const payload = wal_payload.serializePropertyUpdate(&buf, node_id, key_id, old_value_bytes, &[_]u8{}) catch {
+                    return DatabaseError.IoError;
+                };
+                _ = tm.logOperation(t, .delete, payload) catch {
+                    return DatabaseError.IoError;
+                };
+                // Undo of delete is restore the old value
+                tm.addUndoEntry(t, .delete, .property, node_id, 0, key_id, payload) catch {
+                    return DatabaseError.IoError;
+                };
+            }
+        }
     }
 
     /// Add a label to a node.

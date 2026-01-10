@@ -1104,3 +1104,199 @@ test "future: savepoint rollback undoes property changes" {
     }
     // Future implementation requires savepoint API in Database
 }
+
+// ============================================================================
+// Property Rollback Tests (newly implemented)
+// ============================================================================
+
+test "rollback: node deletion restores node with original ID" {
+    if (!databaseSupportsTransactions()) {
+        return error.SkipZigTest;
+    }
+
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_txn_delete_restore_id.ltdb";
+
+    // Clean up from previous runs
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = true,
+            .enable_fts = false,
+            .enable_vector = false,
+        },
+    });
+    defer db.close();
+
+    // 1. Create node (auto-commit)
+    const original_id = try db.createNode(null, &[_][]const u8{"Person"});
+
+    // 2. Begin transaction and delete the node
+    var txn = try db.beginTransaction(.read_write);
+    try db.deleteNode(&txn, original_id);
+
+    // Verify node is gone
+    try std.testing.expect(!(try db.nodeExists(original_id)));
+
+    // 3. Abort - should restore node with SAME ID
+    try db.abortTransaction(&txn);
+
+    // 4. Verify node exists with original ID
+    try std.testing.expect(try db.nodeExists(original_id));
+}
+
+test "rollback: property update restores old value" {
+    if (!databaseSupportsTransactions()) {
+        return error.SkipZigTest;
+    }
+
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_txn_prop_update_rollback.ltdb";
+    const PropertyValue = lattice.core.types.PropertyValue;
+
+    // Clean up from previous runs
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = true,
+            .enable_fts = false,
+            .enable_vector = false,
+        },
+    });
+    defer db.close();
+
+    // 1. Create node with property (auto-commit)
+    const node_id = try db.createNode(null, &[_][]const u8{"Person"});
+    try db.setNodeProperty(null, node_id, "age", PropertyValue{ .int_val = 25 });
+
+    // Verify initial property
+    const initial_val = try db.getNodeProperty(node_id, "age");
+    try std.testing.expectEqual(@as(i64, 25), initial_val.?.int_val);
+
+    // 2. Begin transaction and update property
+    var txn = try db.beginTransaction(.read_write);
+    try db.setNodeProperty(&txn, node_id, "age", PropertyValue{ .int_val = 30 });
+
+    // Verify property updated
+    const updated_val = try db.getNodeProperty(node_id, "age");
+    try std.testing.expectEqual(@as(i64, 30), updated_val.?.int_val);
+
+    // 3. Abort - should restore old value
+    try db.abortTransaction(&txn);
+
+    // 4. Verify property has original value
+    const restored_val = try db.getNodeProperty(node_id, "age");
+    try std.testing.expectEqual(@as(i64, 25), restored_val.?.int_val);
+}
+
+test "rollback: property removal restores property" {
+    if (!databaseSupportsTransactions()) {
+        return error.SkipZigTest;
+    }
+
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_txn_prop_remove_rollback.ltdb";
+    const PropertyValue = lattice.core.types.PropertyValue;
+
+    // Clean up from previous runs
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = true,
+            .enable_fts = false,
+            .enable_vector = false,
+        },
+    });
+    defer db.close();
+
+    // 1. Create node with property (auto-commit)
+    const node_id = try db.createNode(null, &[_][]const u8{"Person"});
+    try db.setNodeProperty(null, node_id, "name", PropertyValue{ .string_val = "Alice" });
+
+    // Verify initial property
+    const initial_val = try db.getNodeProperty(node_id, "name");
+    try std.testing.expect(initial_val != null);
+    try std.testing.expectEqualStrings("Alice", initial_val.?.string_val);
+    allocator.free(initial_val.?.string_val);
+
+    // 2. Begin transaction and remove property
+    var txn = try db.beginTransaction(.read_write);
+    try db.removeNodeProperty(&txn, node_id, "name");
+
+    // Verify property removed
+    const removed_val = try db.getNodeProperty(node_id, "name");
+    try std.testing.expect(removed_val == null);
+
+    // 3. Abort - should restore property
+    try db.abortTransaction(&txn);
+
+    // 4. Verify property restored
+    const restored_val = try db.getNodeProperty(node_id, "name");
+    try std.testing.expect(restored_val != null);
+    try std.testing.expectEqualStrings("Alice", restored_val.?.string_val);
+    allocator.free(restored_val.?.string_val);
+}
+
+test "rollback: new property added in txn is removed on abort" {
+    if (!databaseSupportsTransactions()) {
+        return error.SkipZigTest;
+    }
+
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_txn_prop_add_rollback.ltdb";
+    const PropertyValue = lattice.core.types.PropertyValue;
+
+    // Clean up from previous runs
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = true,
+            .enable_fts = false,
+            .enable_vector = false,
+        },
+    });
+    defer db.close();
+
+    // 1. Create node without properties (auto-commit)
+    const node_id = try db.createNode(null, &[_][]const u8{"Person"});
+
+    // Verify no property
+    const initial_val = try db.getNodeProperty(node_id, "email");
+    try std.testing.expect(initial_val == null);
+
+    // 2. Begin transaction and add property
+    var txn = try db.beginTransaction(.read_write);
+    try db.setNodeProperty(&txn, node_id, "email", PropertyValue{ .string_val = "alice@example.com" });
+
+    // Verify property added
+    const added_val = try db.getNodeProperty(node_id, "email");
+    try std.testing.expect(added_val != null);
+    allocator.free(added_val.?.string_val);
+
+    // 3. Abort - should remove the new property
+    try db.abortTransaction(&txn);
+
+    // 4. Verify property removed
+    const restored_val = try db.getNodeProperty(node_id, "email");
+    try std.testing.expect(restored_val == null);
+}

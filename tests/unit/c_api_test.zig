@@ -211,6 +211,316 @@ test "c_api: read-only transaction prevents writes" {
     _ = c_api.lattice_commit(txn);
 }
 
+test "c_api: rollback undoes node creation" {
+    const path = "/tmp/lattice_capi_rollback_node_create.db";
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        std.fs.cwd().deleteFile(path) catch {};
+        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    // Begin transaction and create node
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+
+    var node_id: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &node_id));
+
+    // Verify node exists within transaction
+    var exists: bool = false;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_exists(txn, node_id, &exists));
+    try std.testing.expect(exists);
+
+    // Rollback transaction
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_rollback(txn));
+
+    // Start new transaction to verify node doesn't exist
+    var txn2: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &txn2));
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_exists(txn2, node_id, &exists));
+    try std.testing.expect(!exists); // Node should NOT exist after rollback
+
+    _ = c_api.lattice_commit(txn2);
+}
+
+test "c_api: rollback undoes node deletion" {
+    const path = "/tmp/lattice_capi_rollback_node_delete.db";
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        std.fs.cwd().deleteFile(path) catch {};
+        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    // First, create and commit a node
+    var node_id: lattice_node_id = 0;
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &node_id));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+    }
+
+    // Now delete the node in a new transaction but rollback
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+
+        // Verify node exists before delete
+        var exists: bool = false;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_exists(txn, node_id, &exists));
+        try std.testing.expect(exists);
+
+        // Delete node
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_delete(txn, node_id));
+
+        // Verify node doesn't exist after delete (within same txn)
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_exists(txn, node_id, &exists));
+        try std.testing.expect(!exists);
+
+        // Rollback
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_rollback(txn));
+    }
+
+    // Verify node still exists after rollback
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &txn));
+
+        var exists: bool = false;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_exists(txn, node_id, &exists));
+        try std.testing.expect(exists); // Node should still exist after rollback
+
+        _ = c_api.lattice_commit(txn);
+    }
+}
+
+test "c_api: rollback undoes property changes" {
+    const path = "/tmp/lattice_capi_rollback_property.db";
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        std.fs.cwd().deleteFile(path) catch {};
+        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    // Create node with initial property
+    var node_id: lattice_node_id = 0;
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &node_id));
+
+        var age_value = lattice_value{
+            .value_type = .int,
+            .data = .{ .int_val = 25 },
+        };
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_property(txn, node_id, "age", &age_value));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+    }
+
+    // Modify property but rollback
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+
+        // Change age to 30
+        var new_age = lattice_value{
+            .value_type = .int,
+            .data = .{ .int_val = 30 },
+        };
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_property(txn, node_id, "age", &new_age));
+
+        // Verify new value is visible within transaction
+        var retrieved: lattice_value = undefined;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_get_property(txn, node_id, "age", &retrieved));
+        try std.testing.expectEqual(@as(i64, 30), retrieved.data.int_val);
+
+        // Rollback
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_rollback(txn));
+    }
+
+    // Verify original value is restored after rollback
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &txn));
+
+        var retrieved: lattice_value = undefined;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_get_property(txn, node_id, "age", &retrieved));
+        try std.testing.expectEqual(@as(i64, 25), retrieved.data.int_val); // Original value restored
+
+        _ = c_api.lattice_commit(txn);
+    }
+}
+
+test "c_api: committed changes persist across transactions" {
+    const path = "/tmp/lattice_capi_commit_persist.db";
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        std.fs.cwd().deleteFile(path) catch {};
+        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var node_id: lattice_node_id = 0;
+
+    // Create node and set property, then commit
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &node_id));
+
+        const name = "Alice";
+        var name_value = lattice_value{
+            .value_type = .string,
+            .data = .{ .string_val = .{ .ptr = name.ptr, .len = name.len } },
+        };
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_property(txn, node_id, "name", &name_value));
+
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+    }
+
+    // Verify in new transaction that changes persisted
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &txn));
+
+        // Node should exist
+        var exists: bool = false;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_exists(txn, node_id, &exists));
+        try std.testing.expect(exists);
+
+        // Property should be set
+        var retrieved: lattice_value = undefined;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_get_property(txn, node_id, "name", &retrieved));
+        try std.testing.expectEqual(lattice_value_type.string, retrieved.value_type);
+
+        _ = c_api.lattice_commit(txn);
+    }
+}
+
+test "c_api: rollback undoes edge creation" {
+    const path = "/tmp/lattice_capi_rollback_edge.db";
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        std.fs.cwd().deleteFile(path) catch {};
+        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    // Create two nodes first (committed)
+    var alice: lattice_node_id = 0;
+    var bob: lattice_node_id = 0;
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &alice));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &bob));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+    }
+
+    // Create edge but rollback
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+
+        var edge_id: u64 = 0;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, alice, bob, "KNOWS", &edge_id));
+
+        // Verify edge exists within transaction
+        var edge_result: ?*c_api.lattice_edge_result = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_get_outgoing(txn, alice, &edge_result));
+        const count = c_api.lattice_edge_result_count(edge_result);
+        try std.testing.expectEqual(@as(u32, 1), count);
+        c_api.lattice_edge_result_free(edge_result);
+
+        // Rollback
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_rollback(txn));
+    }
+
+    // Verify edge doesn't exist after rollback
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &txn));
+
+        var edge_result: ?*c_api.lattice_edge_result = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_get_outgoing(txn, alice, &edge_result));
+        const count = c_api.lattice_edge_result_count(edge_result);
+        try std.testing.expectEqual(@as(u32, 0), count); // No edges after rollback
+        c_api.lattice_edge_result_free(edge_result);
+
+        _ = c_api.lattice_commit(txn);
+    }
+}
+
 // ============================================================================
 // Node Operations Tests
 // ============================================================================

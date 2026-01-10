@@ -156,6 +156,28 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("benchmark", "Run performance benchmarks");
     bench_step.dependOn(&run_bench.step);
 
+    // Fuzz test module - imports the library module
+    const fuzz_module = b.createModule(.{
+        .root_source_file = b.path("tests/fuzz/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "lattice", .module = lib_module },
+        },
+    });
+
+    // Fuzz tests (run with: zig build fuzz -- --fuzz)
+    const fuzz_tests = b.addTest(.{
+        .root_module = fuzz_module,
+    });
+    const run_fuzz_tests = b.addRunArtifact(fuzz_tests);
+    if (b.args) |args| {
+        run_fuzz_tests.addArgs(args);
+    }
+
+    const fuzz_step = b.step("fuzz", "Run fuzz tests (add -- --fuzz for continuous fuzzing)");
+    fuzz_step.dependOn(&run_fuzz_tests.step);
+
     // Run CLI
     const run_cli = b.addRunArtifact(cli);
     run_cli.step.dependOn(b.getInstallStep());

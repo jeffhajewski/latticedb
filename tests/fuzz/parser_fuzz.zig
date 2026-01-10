@@ -146,8 +146,7 @@ test "parser: handles numeric edge cases" {
     const allocator = std.testing.allocator;
     try fuzzParser(allocator, "MATCH (n) WHERE n.x = 9999999999999999999999999999");
     try fuzzParser(allocator, "MATCH (n) WHERE n.x = -0");
-    // NOTE: ".5" causes panic in getNextPrecedence - parser bug to fix
-    // try fuzzParser(allocator, "MATCH (n) WHERE n.x = .5");
+    try fuzzParser(allocator, "MATCH (n) WHERE n.x = .5"); // Was panicking, now returns error
     try fuzzParser(allocator, "MATCH (n) WHERE n.x = 0.5");
     try fuzzParser(allocator, "MATCH (n) WHERE n.x = 1e999");
 }

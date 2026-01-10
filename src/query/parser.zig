@@ -1302,8 +1302,10 @@ pub const Parser = struct {
     fn getNextPrecedence(self: *Self, prec: Precedence) Precedence {
         _ = self;
         // Right-associative for power, left-associative for others
+        // For primary (highest precedence), stay at primary to avoid overflow
         return switch (prec) {
             .power => .power, // right-associative
+            .primary => .primary, // already at highest precedence
             else => @enumFromInt(@intFromEnum(prec) + 1),
         };
     }

@@ -28,6 +28,7 @@ const limit_ops = @import("operators/limit.zig");
 const vector_ops = @import("operators/vector.zig");
 const fts_ops = @import("operators/fts.zig");
 const mutation_ops = @import("operators/mutation.zig");
+const aggregate_ops = @import("operators/aggregate.zig");
 
 const btree = @import("../storage/btree.zig");
 const BTree = btree.BTree;
@@ -557,7 +558,20 @@ pub const QueryPlanner = struct {
     fn planReturn(self: *Self, ret: *const ast.ReturnClause, input: ?Operator) PlannerError!Operator {
         const input_op = input orelse return PlannerError.InvalidQuery;
 
-        // Create projection items
+        // Check if any RETURN items contain aggregate functions
+        var has_aggregates = false;
+        for (ret.items) |item| {
+            if (aggregate_ops.containsAggregate(item.expression)) {
+                has_aggregates = true;
+                break;
+            }
+        }
+
+        if (has_aggregates) {
+            return self.planAggregateReturn(ret, input_op);
+        }
+
+        // No aggregates - create simple projection
         var items = self.allocator.alloc(project_ops.ProjectItem, ret.items.len) catch {
             return PlannerError.OutOfMemory;
         };
@@ -575,6 +589,102 @@ pub const QueryPlanner = struct {
         };
 
         return project.operator();
+    }
+
+    /// Plan a RETURN clause with aggregations
+    fn planAggregateReturn(self: *Self, ret: *const ast.ReturnClause, input_op: Operator) PlannerError!Operator {
+        // Separate items into grouping keys and aggregates
+        var group_keys: std.ArrayList(aggregate_ops.GroupKey) = .empty;
+        defer group_keys.deinit(self.allocator);
+
+        var agg_items: std.ArrayList(aggregate_ops.AggregateItem) = .empty;
+        defer agg_items.deinit(self.allocator);
+
+        // Also build projection items for the final output
+        var proj_items: std.ArrayList(project_ops.ProjectItem) = .empty;
+        defer proj_items.deinit(self.allocator);
+
+        for (ret.items, 0..) |item, i| {
+            const slot: u8 = @intCast(i);
+
+            if (self.isDirectAggregate(item.expression)) |agg_info| {
+                // Direct aggregate function call: count(n), sum(n.val), etc.
+                agg_items.append(self.allocator, .{
+                    .func = agg_info.func,
+                    .expr = agg_info.arg,
+                    .output_slot = slot,
+                    .distinct = false,
+                }) catch return PlannerError.OutOfMemory;
+
+                // Projection just passes through the aggregate result
+                proj_items.append(self.allocator, .{
+                    .expr = item.expression,
+                    .output_slot = slot,
+                }) catch return PlannerError.OutOfMemory;
+            } else if (aggregate_ops.containsAggregate(item.expression)) {
+                // Complex expression containing aggregate - not yet supported
+                // For now, treat as error
+                return PlannerError.InvalidQuery;
+            } else {
+                // Non-aggregate expression - becomes a grouping key
+                group_keys.append(self.allocator, .{
+                    .expr = item.expression,
+                    .output_slot = slot,
+                }) catch return PlannerError.OutOfMemory;
+
+                proj_items.append(self.allocator, .{
+                    .expr = item.expression,
+                    .output_slot = slot,
+                }) catch return PlannerError.OutOfMemory;
+            }
+        }
+
+        // Create owned slices for the Aggregate operator
+        const owned_group_keys = self.allocator.dupe(aggregate_ops.GroupKey, group_keys.items) catch {
+            return PlannerError.OutOfMemory;
+        };
+        errdefer self.allocator.free(owned_group_keys);
+
+        const owned_agg_items = self.allocator.dupe(aggregate_ops.AggregateItem, agg_items.items) catch {
+            return PlannerError.OutOfMemory;
+        };
+        errdefer self.allocator.free(owned_agg_items);
+
+        // Create the aggregate operator
+        const aggregate = aggregate_ops.Aggregate.init(
+            self.allocator,
+            input_op,
+            owned_group_keys,
+            owned_agg_items,
+        ) catch {
+            return PlannerError.OutOfMemory;
+        };
+
+        // The aggregate operator already outputs to the correct slots,
+        // so we can return it directly without an additional projection
+        return aggregate.operator();
+    }
+
+    /// Check if an expression is a direct aggregate function call (e.g., count(n), sum(n.val))
+    /// Returns the aggregate function type and argument if so
+    fn isDirectAggregate(self: *Self, expr: *const ast.Expression) ?struct { func: aggregate_ops.AggregateFunc, arg: ?*const ast.Expression } {
+        _ = self;
+        switch (expr.*) {
+            .function_call => |f| {
+                if (aggregate_ops.parseAggregateFunc(f.name)) |func| {
+                    // COUNT(*) has no arguments
+                    if (func == .count and f.arguments.len == 0) {
+                        return .{ .func = .count_star, .arg = null };
+                    }
+                    // Other aggregates need exactly one argument
+                    if (f.arguments.len == 1) {
+                        return .{ .func = func, .arg = f.arguments[0] };
+                    }
+                }
+            },
+            else => {},
+        }
+        return null;
     }
 
     /// Plan an ORDER BY clause

@@ -215,11 +215,11 @@ Lattice uses Cypher with extensions for vector and full-text search.
 | CREATE, DELETE, SET, REMOVE | ✓ |
 | ORDER BY, LIMIT, SKIP | ✓ |
 | DETACH DELETE | ✓ |
+| Aggregations (`count`, `sum`, `avg`, `min`, `max`, `collect`) | ✓ |
 | Vector distance (`<=>`) | ✓ |
 | Full-text search (`@@`) | ✓ |
 | Functions: `id()`, `coalesce()`, `abs()`, `size()`, `toInteger()` | ✓ |
 | Variable-length paths (`*1..3`) | Planned |
-| Aggregations (`count`, `collect`, `sum`) | Planned |
 | MERGE, WITH, OPTIONAL MATCH | Planned |
 
 ### Pattern Matching
@@ -264,6 +264,19 @@ WHERE chunk.embedding <=> $query < 0.4
   AND doc.content @@ "introduction"
 MATCH (doc)-[:AUTHORED_BY]->(author:Person)
 RETURN doc.title, author.name, chunk.text
+```
+
+### Aggregations
+
+```cypher
+-- Count nodes
+MATCH (n:Person) RETURN count(n)
+
+-- Statistics
+MATCH (p:Person) RETURN min(p.age), max(p.age), avg(p.age), sum(p.age)
+
+-- Collect values into a list
+MATCH (p:Person) RETURN collect(p.name)
 ```
 
 ### Data Mutation

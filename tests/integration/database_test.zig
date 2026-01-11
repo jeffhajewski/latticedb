@@ -370,6 +370,206 @@ test "database: query with LIMIT" {
 }
 
 // ============================================================================
+// Aggregation Tests
+// ============================================================================
+
+test "database: count aggregation" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_agg_count_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    // Create some Person nodes
+    for (0..5) |_| {
+        _ = try db.createNode(null, &[_][]const u8{"Person"});
+    }
+
+    // Count all Person nodes
+    var result = try db.query("MATCH (n:Person) RETURN count(n)");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+
+    // Get the count value
+    const count_val = result.rows[0].values[0];
+    switch (count_val) {
+        .int_val => |v| {
+            try std.testing.expectEqual(@as(i64, 5), v);
+        },
+        else => return error.UnexpectedValueType,
+    }
+}
+
+test "database: sum aggregation" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_agg_sum_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    // Create Person nodes with ages
+    const ages = [_]i64{ 20, 30, 40, 50 };
+    for (ages) |age| {
+        const node = try db.createNode(null, &[_][]const u8{"Person"});
+        try db.setNodeProperty(null, node, "age", .{ .int_val = age });
+    }
+
+    // Sum ages
+    var result = try db.query("MATCH (n:Person) RETURN sum(n.age)");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+
+    const sum_val = result.rows[0].values[0];
+    switch (sum_val) {
+        .float_val => |v| {
+            try std.testing.expectApproxEqAbs(@as(f64, 140.0), v, 0.001);
+        },
+        else => return error.UnexpectedValueType,
+    }
+}
+
+test "database: avg aggregation" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_agg_avg_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    // Create Person nodes with ages
+    const ages = [_]i64{ 20, 30, 40, 50 };
+    for (ages) |age| {
+        const node = try db.createNode(null, &[_][]const u8{"Person"});
+        try db.setNodeProperty(null, node, "age", .{ .int_val = age });
+    }
+
+    // Average ages
+    var result = try db.query("MATCH (n:Person) RETURN avg(n.age)");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+
+    const avg_val = result.rows[0].values[0];
+    switch (avg_val) {
+        .float_val => |v| {
+            try std.testing.expectApproxEqAbs(@as(f64, 35.0), v, 0.001);
+        },
+        else => return error.UnexpectedValueType,
+    }
+}
+
+test "database: min/max aggregation" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_agg_minmax_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    // Create Person nodes with ages
+    const ages = [_]i64{ 25, 35, 15, 45 };
+    for (ages) |age| {
+        const node = try db.createNode(null, &[_][]const u8{"Person"});
+        try db.setNodeProperty(null, node, "age", .{ .int_val = age });
+    }
+
+    // Min age
+    {
+        var result = try db.query("MATCH (n:Person) RETURN min(n.age)");
+        defer result.deinit();
+
+        try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+
+        const min_val = result.rows[0].values[0];
+        switch (min_val) {
+            .int_val => |v| {
+                try std.testing.expectEqual(@as(i64, 15), v);
+            },
+            else => return error.UnexpectedValueType,
+        }
+    }
+
+    // Max age
+    {
+        var result = try db.query("MATCH (n:Person) RETURN max(n.age)");
+        defer result.deinit();
+
+        try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+
+        const max_val = result.rows[0].values[0];
+        switch (max_val) {
+            .int_val => |v| {
+                try std.testing.expectEqual(@as(i64, 45), v);
+            },
+            else => return error.UnexpectedValueType,
+        }
+    }
+}
+
+test "database: count with empty result" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_agg_count_empty_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    // No nodes created - count should return 0
+    var result = try db.query("MATCH (n:Person) RETURN count(n)");
+    defer result.deinit();
+
+    // COUNT(*) on empty set returns 1 row with count 0
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+
+    const count_val = result.rows[0].values[0];
+    switch (count_val) {
+        .int_val => |v| {
+            try std.testing.expectEqual(@as(i64, 0), v);
+        },
+        else => return error.UnexpectedValueType,
+    }
+}
+
+// ============================================================================
 // FTS Integration Tests
 // ============================================================================
 

@@ -195,12 +195,22 @@ pub const NodePattern = struct {
     location: SourceLocation,
 };
 
-/// Edge pattern: -[variable:TYPE {props}]->
+/// Range quantifier for variable-length paths: *min..max
+pub const RangeQuantifier = struct {
+    /// Minimum hops (default 1)
+    min_hops: u32,
+    /// Maximum hops (null means unbounded)
+    max_hops: ?u32,
+};
+
+/// Edge pattern: -[variable:TYPE*min..max {props}]->
 pub const EdgePattern = struct {
     variable: ?[]const u8,
     types: [][]const u8,
     direction: EdgeDirection,
     properties: ?[]PropertyEntry,
+    /// Optional range quantifier for variable-length paths
+    quantifier: ?RangeQuantifier,
     location: SourceLocation,
 };
 

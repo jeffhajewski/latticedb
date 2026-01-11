@@ -24,6 +24,7 @@ const scan_ops = @import("operators/scan.zig");
 const filter_ops = @import("operators/filter.zig");
 const project_ops = @import("operators/project.zig");
 const expand_ops = @import("operators/expand.zig");
+const var_expand_ops = @import("operators/var_expand.zig");
 const limit_ops = @import("operators/limit.zig");
 const vector_ops = @import("operators/vector.zig");
 const fts_ops = @import("operators/fts.zig");
@@ -285,21 +286,41 @@ pub const QueryPlanner = struct {
                         .both => .both,
                     };
 
-                    // Create expand operator
+                    // Create expand operator (variable-length or regular)
                     const edge_store = self.storage.edge_store orelse return PlannerError.MissingStorage;
-                    const expand = expand_ops.Expand.init(
-                        self.allocator,
-                        op.?,
-                        source_slot,
-                        target_slot,
-                        edge_slot,
-                        edge_type,
-                        expand_dir,
-                        edge_store,
-                    ) catch {
-                        return PlannerError.OutOfMemory;
-                    };
-                    op = expand.operator();
+
+                    if (edge_pattern.quantifier) |quant| {
+                        // Variable-length path: use VariableLengthExpand
+                        const var_expand = var_expand_ops.VariableLengthExpand.init(
+                            self.allocator,
+                            op.?,
+                            source_slot,
+                            target_slot,
+                            edge_type,
+                            expand_dir,
+                            edge_store,
+                            quant.min_hops,
+                            quant.max_hops,
+                        ) catch {
+                            return PlannerError.OutOfMemory;
+                        };
+                        op = var_expand.operator();
+                    } else {
+                        // Regular single-hop expand
+                        const expand = expand_ops.Expand.init(
+                            self.allocator,
+                            op.?,
+                            source_slot,
+                            target_slot,
+                            edge_slot,
+                            edge_type,
+                            expand_dir,
+                            edge_store,
+                        ) catch {
+                            return PlannerError.OutOfMemory;
+                        };
+                        op = expand.operator();
+                    }
 
                     // Target becomes the new "previous node" for next edge
                     prev_node_slot = target_slot;

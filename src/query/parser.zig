@@ -221,6 +221,7 @@ pub const TokenType = enum {
     colon,
     comma,
     dot,
+    dotdot, // .. for range quantifiers
     pipe,
     arrow_right,
     arrow_left,
@@ -895,10 +896,11 @@ pub const Parser = struct {
             return null;
         }
 
-        // Parse optional relationship details: [variable:TYPE {props}]
+        // Parse optional relationship details: [variable:TYPE*min..max {props}]
         var variable: ?[]const u8 = null;
         var types_list: std.ArrayList([]const u8) = .empty;
         var properties: ?[]ast.PropertyEntry = null;
+        var quantifier: ?ast.RangeQuantifier = null;
 
         if (self.match(.lbracket)) {
             // Optional variable
@@ -925,6 +927,11 @@ pub const Parser = struct {
                     types_list.append(self.arena.allocator(), self.current.text) catch return null;
                     self.advance();
                 }
+            }
+
+            // Optional range quantifier: *min..max
+            if (self.match(.star)) {
+                quantifier = self.parseRangeQuantifier();
             }
 
             // Optional properties
@@ -956,7 +963,45 @@ pub const Parser = struct {
             .types = types_list.toOwnedSlice(self.arena.allocator()) catch return null,
             .direction = direction,
             .properties = properties,
+            .quantifier = quantifier,
             .location = loc,
+        };
+    }
+
+    /// Parse a range quantifier: *, *n, *n..m, *n.., *..m
+    fn parseRangeQuantifier(self: *Self) ast.RangeQuantifier {
+        var min_hops: u32 = 1;
+        var max_hops: ?u32 = null;
+
+        // Check for min value
+        if (self.check(.integer)) {
+            min_hops = @intCast(std.fmt.parseInt(u32, self.current.text, 10) catch 1);
+            self.advance();
+
+            // Check for range: ..max or just ..
+            if (self.match(.dotdot)) {
+                if (self.check(.integer)) {
+                    max_hops = @intCast(std.fmt.parseInt(u32, self.current.text, 10) catch min_hops);
+                    self.advance();
+                }
+                // else max_hops stays null (unbounded)
+            } else {
+                // Exactly n hops (e.g., *3 means exactly 3)
+                max_hops = min_hops;
+            }
+        } else if (self.match(.dotdot)) {
+            // *..max format (min defaults to 1)
+            if (self.check(.integer)) {
+                max_hops = @intCast(std.fmt.parseInt(u32, self.current.text, 10) catch 1);
+                self.advance();
+            }
+            // else unbounded: *.. (same as *)
+        }
+        // else just * with no numbers (min=1, max=null means unbounded)
+
+        return .{
+            .min_hops = min_hops,
+            .max_hops = max_hops,
         };
     }
 

@@ -570,6 +570,167 @@ test "database: count with empty result" {
 }
 
 // ============================================================================
+// Variable-Length Path Tests
+// ============================================================================
+
+test "database: variable-length path 1 to 2 hops" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_var_path_1_2_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    // Create a chain: Start -> A -> B -> C (using distinct labels)
+    // Start is the only "Root" node so we can filter on label
+    const start = try db.createNode(null, &[_][]const u8{"Root"});
+
+    const a = try db.createNode(null, &[_][]const u8{"Target"});
+    const b = try db.createNode(null, &[_][]const u8{"Target"});
+    const c = try db.createNode(null, &[_][]const u8{"Target"});
+
+    // Create edges: Start->A->B->C
+    _ = try db.createEdge(null, start, a, "NEXT");
+    _ = try db.createEdge(null, a, b, "NEXT");
+    _ = try db.createEdge(null, b, c, "NEXT");
+
+    // Query: Find all Target nodes reachable from Root in 1-2 hops
+    var result = try db.query(
+        \\MATCH (s:Root)-[:NEXT*1..2]->(t:Target)
+        \\RETURN t
+    );
+    defer result.deinit();
+
+    // Should find A (1 hop) and B (2 hops), not C (3 hops)
+    try std.testing.expectEqual(@as(usize, 2), result.rowCount());
+}
+
+test "database: variable-length path exact hops" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_var_path_exact_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    // Create a chain: Start -> A -> B -> C
+    const start = try db.createNode(null, &[_][]const u8{"Root"});
+
+    const a = try db.createNode(null, &[_][]const u8{"Target"});
+    const b = try db.createNode(null, &[_][]const u8{"Target"});
+    const c = try db.createNode(null, &[_][]const u8{"Target"});
+
+    // Create edges: Start->A->B->C
+    _ = try db.createEdge(null, start, a, "NEXT");
+    _ = try db.createEdge(null, a, b, "NEXT");
+    _ = try db.createEdge(null, b, c, "NEXT");
+
+    // Query: Find Target nodes exactly 2 hops from Root
+    var result = try db.query(
+        \\MATCH (s:Root)-[:NEXT*2]->(t:Target)
+        \\RETURN t
+    );
+    defer result.deinit();
+
+    // Should find only B (exactly 2 hops)
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+}
+
+test "database: variable-length path with branching" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_var_path_branch_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    // Create a branching graph:
+    //     B -> D
+    //    /
+    //   Start
+    //    \
+    //     C -> E
+    const start = try db.createNode(null, &[_][]const u8{"Root"});
+
+    const b = try db.createNode(null, &[_][]const u8{"Target"});
+    const c = try db.createNode(null, &[_][]const u8{"Target"});
+    const d = try db.createNode(null, &[_][]const u8{"Target"});
+    const e = try db.createNode(null, &[_][]const u8{"Target"});
+
+    // Create edges: Start->B, Start->C, B->D, C->E
+    _ = try db.createEdge(null, start, b, "NEXT");
+    _ = try db.createEdge(null, start, c, "NEXT");
+    _ = try db.createEdge(null, b, d, "NEXT");
+    _ = try db.createEdge(null, c, e, "NEXT");
+
+    // Query: Find all Target nodes within 2 hops from Root
+    var result = try db.query(
+        \\MATCH (s:Root)-[:NEXT*1..2]->(t:Target)
+        \\RETURN t
+    );
+    defer result.deinit();
+
+    // Should find: B, C (1 hop), D, E (2 hops) = 4 results
+    try std.testing.expectEqual(@as(usize, 4), result.rowCount());
+}
+
+test "database: variable-length path unbounded star" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_var_path_star_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    // Create a chain: Start -> A -> B
+    const start = try db.createNode(null, &[_][]const u8{"Root"});
+
+    const a = try db.createNode(null, &[_][]const u8{"Target"});
+    const b = try db.createNode(null, &[_][]const u8{"Target"});
+
+    _ = try db.createEdge(null, start, a, "NEXT");
+    _ = try db.createEdge(null, a, b, "NEXT");
+
+    // Query with unbounded path (*) - should find all reachable Target nodes
+    var result = try db.query(
+        \\MATCH (s:Root)-[:NEXT*]->(t:Target)
+        \\RETURN t
+    );
+    defer result.deinit();
+
+    // Should find A (1 hop) and B (2 hops)
+    try std.testing.expectEqual(@as(usize, 2), result.rowCount());
+}
+
+// ============================================================================
 // FTS Integration Tests
 // ============================================================================
 

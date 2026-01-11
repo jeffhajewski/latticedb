@@ -219,7 +219,7 @@ Lattice uses Cypher with extensions for vector and full-text search.
 | Vector distance (`<=>`) | ✓ |
 | Full-text search (`@@`) | ✓ |
 | Functions: `id()`, `coalesce()`, `abs()`, `size()`, `toInteger()` | ✓ |
-| Variable-length paths (`*1..3`) | Planned |
+| Variable-length paths (`*1..3`) | ✓ |
 | MERGE, WITH, OPTIONAL MATCH | Planned |
 
 ### Pattern Matching
@@ -233,6 +233,26 @@ RETURN a.name, b.name
 MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person)
 WHERE a.name = "Alice"
 RETURN c.name
+```
+
+### Variable-Length Paths
+
+```cypher
+-- Find all people within 1-3 hops
+MATCH (a:Person)-[:KNOWS*1..3]->(b:Person)
+RETURN a.name, b.name
+
+-- Exactly 2 hops
+MATCH (a:Person)-[:KNOWS*2]->(b:Person)
+RETURN b.name
+
+-- Any number of hops (unbounded)
+MATCH (start:Root)-[:NEXT*]->(target:Node)
+RETURN target
+
+-- Minimum 2 hops, no maximum
+MATCH (a:Person)-[:KNOWS*2..]->(b:Person)
+RETURN b.name
 ```
 
 ### Vector Search

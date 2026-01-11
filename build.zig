@@ -156,6 +156,29 @@ pub fn build(b: *std.Build) void {
     const bench_step = b.step("benchmark", "Run performance benchmarks");
     bench_step.dependOn(&run_bench.step);
 
+    // Stress test module
+    const stress_module = b.createModule(.{
+        .root_source_file = b.path("tests/benchmark/stress_test.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .imports = &.{
+            .{ .name = "lattice", .module = lib_module },
+        },
+    });
+
+    // Stress test executable
+    const stress_exe = b.addExecutable(.{
+        .name = "lattice-stress",
+        .root_module = stress_module,
+    });
+    stress_exe.linkLibrary(lib);
+
+    const run_stress = b.addRunArtifact(stress_exe);
+    run_stress.step.dependOn(&stress_exe.step);
+
+    const stress_step = b.step("stress", "Run stress tests to find performance limits");
+    stress_step.dependOn(&run_stress.step);
+
     // Fuzz test module - imports the library module
     const fuzz_module = b.createModule(.{
         .root_source_file = b.path("tests/fuzz/main.zig"),

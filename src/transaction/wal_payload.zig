@@ -52,11 +52,11 @@ pub fn serializeNodeInsert(
     var stream = std.io.fixedBufferStream(buf);
     const writer = stream.writer();
 
-    writer.writeByte(@intFromEnum(PayloadType.node_insert)) catch unreachable;
-    writer.writeInt(u64, node_id, .little) catch unreachable;
-    writer.writeInt(u16, @intCast(label_ids.len), .little) catch unreachable;
+    writer.writeByte(@intFromEnum(PayloadType.node_insert)) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u64, node_id, .little) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u16, @intCast(label_ids.len), .little) catch return PayloadError.BufferTooSmall;
     for (label_ids) |lid| {
-        writer.writeInt(u16, lid, .little) catch unreachable;
+        writer.writeInt(u16, lid, .little) catch return PayloadError.BufferTooSmall;
     }
 
     return buf[0..stream.pos];
@@ -116,15 +116,15 @@ pub fn serializeNodeDelete(
     var stream = std.io.fixedBufferStream(buf);
     const writer = stream.writer();
 
-    writer.writeByte(@intFromEnum(PayloadType.node_delete)) catch unreachable;
-    writer.writeInt(u64, node_id, .little) catch unreachable;
-    writer.writeInt(u16, @intCast(label_ids.len), .little) catch unreachable;
+    writer.writeByte(@intFromEnum(PayloadType.node_delete)) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u64, node_id, .little) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u16, @intCast(label_ids.len), .little) catch return PayloadError.BufferTooSmall;
     for (label_ids) |lid| {
-        writer.writeInt(u16, lid, .little) catch unreachable;
+        writer.writeInt(u16, lid, .little) catch return PayloadError.BufferTooSmall;
     }
-    writer.writeInt(u32, @intCast(properties.len), .little) catch unreachable;
+    writer.writeInt(u32, @intCast(properties.len), .little) catch return PayloadError.BufferTooSmall;
     if (properties.len > 0) {
-        writer.writeAll(properties) catch unreachable;
+        writer.writeAll(properties) catch return PayloadError.BufferTooSmall;
     }
 
     return buf[0..stream.pos];
@@ -193,10 +193,10 @@ pub fn serializeEdgeInsert(
     var stream = std.io.fixedBufferStream(buf);
     const writer = stream.writer();
 
-    writer.writeByte(@intFromEnum(PayloadType.edge_insert)) catch unreachable;
-    writer.writeInt(u64, source, .little) catch unreachable;
-    writer.writeInt(u64, target, .little) catch unreachable;
-    writer.writeInt(u16, type_id, .little) catch unreachable;
+    writer.writeByte(@intFromEnum(PayloadType.edge_insert)) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u64, source, .little) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u64, target, .little) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u16, type_id, .little) catch return PayloadError.BufferTooSmall;
 
     return buf[0..stream.pos];
 }
@@ -241,13 +241,13 @@ pub fn serializeEdgeDelete(
     var stream = std.io.fixedBufferStream(buf);
     const writer = stream.writer();
 
-    writer.writeByte(@intFromEnum(PayloadType.edge_delete)) catch unreachable;
-    writer.writeInt(u64, source, .little) catch unreachable;
-    writer.writeInt(u64, target, .little) catch unreachable;
-    writer.writeInt(u16, type_id, .little) catch unreachable;
-    writer.writeInt(u32, @intCast(properties.len), .little) catch unreachable;
+    writer.writeByte(@intFromEnum(PayloadType.edge_delete)) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u64, source, .little) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u64, target, .little) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u16, type_id, .little) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u32, @intCast(properties.len), .little) catch return PayloadError.BufferTooSmall;
     if (properties.len > 0) {
-        writer.writeAll(properties) catch unreachable;
+        writer.writeAll(properties) catch return PayloadError.BufferTooSmall;
     }
 
     return buf[0..stream.pos];
@@ -304,19 +304,19 @@ pub fn serializePropertyUpdate(
     var stream = std.io.fixedBufferStream(buf);
     const writer = stream.writer();
 
-    writer.writeByte(@intFromEnum(PayloadType.node_update)) catch unreachable;
-    writer.writeInt(u64, node_id, .little) catch unreachable;
-    writer.writeInt(u16, key_id, .little) catch unreachable;
+    writer.writeByte(@intFromEnum(PayloadType.node_update)) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u64, node_id, .little) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u16, key_id, .little) catch return PayloadError.BufferTooSmall;
 
     // Old value (for undo) - length 0 means was null/absent
-    writer.writeInt(u32, @intCast(old_len), .little) catch unreachable;
+    writer.writeInt(u32, @intCast(old_len), .little) catch return PayloadError.BufferTooSmall;
     if (old_value) |ov| {
-        writer.writeAll(ov) catch unreachable;
+        writer.writeAll(ov) catch return PayloadError.BufferTooSmall;
     }
 
     // New value
-    writer.writeInt(u32, @intCast(new_value.len), .little) catch unreachable;
-    writer.writeAll(new_value) catch unreachable;
+    writer.writeInt(u32, @intCast(new_value.len), .little) catch return PayloadError.BufferTooSmall;
+    writer.writeAll(new_value) catch return PayloadError.BufferTooSmall;
 
     return buf[0..stream.pos];
 }
@@ -385,10 +385,10 @@ pub fn serializeProperties(allocator: Allocator, properties: []const Property) !
     var stream = std.io.fixedBufferStream(buf);
     const writer = stream.writer();
 
-    writer.writeInt(u16, @intCast(properties.len), .little) catch unreachable;
+    writer.writeInt(u16, @intCast(properties.len), .little) catch return error.BufferTooSmall;
     for (properties) |prop| {
-        writer.writeInt(u16, prop.key_id, .little) catch unreachable;
-        serializePropertyValue(writer, prop.value) catch unreachable;
+        writer.writeInt(u16, prop.key_id, .little) catch return error.BufferTooSmall;
+        serializePropertyValue(writer, prop.value) catch return error.BufferTooSmall;
     }
 
     return buf;
@@ -740,4 +740,37 @@ test "truncated payload returns error" {
         PayloadError.InvalidPayload,
         deserializeNodeInsert(&truncated),
     );
+}
+
+test "node_delete: buffer too small" {
+    var buf: [10]u8 = undefined;
+    const label_ids = [_]u16{ 1, 2 };
+    const props = "some_properties";
+
+    const result = serializeNodeDelete(&buf, 42, &label_ids, props);
+    try std.testing.expectError(PayloadError.BufferTooSmall, result);
+}
+
+test "edge_insert: buffer too small" {
+    var buf: [10]u8 = undefined;
+
+    const result = serializeEdgeInsert(&buf, 1, 2, 100);
+    try std.testing.expectError(PayloadError.BufferTooSmall, result);
+}
+
+test "edge_delete: buffer too small" {
+    var buf: [15]u8 = undefined;
+    const props = "edge_properties";
+
+    const result = serializeEdgeDelete(&buf, 1, 2, 100, props);
+    try std.testing.expectError(PayloadError.BufferTooSmall, result);
+}
+
+test "property_update: buffer too small" {
+    var buf: [10]u8 = undefined;
+    const old_val = "old_value";
+    const new_val = "new_value";
+
+    const result = serializePropertyUpdate(&buf, 42, 7, old_val, new_val);
+    try std.testing.expectError(PayloadError.BufferTooSmall, result);
 }

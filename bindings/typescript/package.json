@@ -48,6 +48,7 @@
     "node": ">=18.0.0"
   },
   "dependencies": {
+    "koffi": "^2.9.0",
     "node-addon-api": "^7.0.0"
   },
   "devDependencies": {

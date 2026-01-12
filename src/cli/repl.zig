@@ -465,6 +465,7 @@ pub const Repl = struct {
             .float_val => 10, // Approximate
             .string_val => |s| s.len + 2, // Include quotes
             .node_id => 12, // "Node(xxxxx)"
+            .edge_id => 12, // "Edge(xxxxx)"
         };
     }
 
@@ -505,6 +506,12 @@ pub const Repl = struct {
             .node_id => |id| {
                 var buf: [32]u8 = undefined;
                 const slice = std.fmt.bufPrint(&buf, "Node({d})", .{id}) catch return 0;
+                try writer.writeAll(slice);
+                return slice.len;
+            },
+            .edge_id => |id| {
+                var buf: [32]u8 = undefined;
+                const slice = std.fmt.bufPrint(&buf, "Edge({d})", .{id}) catch return 0;
                 try writer.writeAll(slice);
                 return slice.len;
             },
@@ -723,6 +730,7 @@ fn writeJsonValue(writer: anytype, val: ResultValue) !void {
             try writer.writeByte('"');
         },
         .node_id => |id| try writer.print("{d}", .{id}),
+        .edge_id => |id| try writer.print("{d}", .{id}),
     }
 }
 
@@ -758,6 +766,7 @@ fn writeCsvValue(writer: anytype, val: ResultValue) !void {
             }
         },
         .node_id => |id| try writer.print("{d}", .{id}),
+        .edge_id => |id| try writer.print("{d}", .{id}),
     }
 }
 

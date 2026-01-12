@@ -334,6 +334,10 @@ fn resultValueToCValue(result_val: ResultValue, c_val: *lattice_value) void {
             c_val.value_type = .int;
             c_val.data.int_val = @intCast(id);
         },
+        .edge_id => |id| {
+            c_val.value_type = .int;
+            c_val.data.int_val = @intCast(id);
+        },
     }
 }
 

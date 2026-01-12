@@ -13,6 +13,7 @@ const lattice = @import("lattice");
 const types = lattice.core.types;
 const PageId = types.PageId;
 const NodeId = types.NodeId;
+const EdgeId = types.EdgeId;
 const PropertyValue = types.PropertyValue;
 const NULL_PAGE = types.NULL_PAGE;
 
@@ -135,6 +136,7 @@ pub const ResultValue = union(enum) {
     float_val: f64,
     string_val: []const u8,
     node_id: NodeId,
+    edge_id: EdgeId,
 
     /// Format for display
     pub fn format(self: ResultValue, writer: anytype) !void {
@@ -145,6 +147,7 @@ pub const ResultValue = union(enum) {
             .float_val => |f| try writer.print("{d:.6}", .{f}),
             .string_val => |s| try writer.print("\"{s}\"", .{s}),
             .node_id => |id| try writer.print("Node({d})", .{id}),
+            .edge_id => |id| try writer.print("Edge({d})", .{id}),
         }
     }
 };
@@ -2354,7 +2357,7 @@ pub const Database = struct {
         return switch (slot) {
             .empty => .{ .null_val = {} },
             .node_ref => |id| .{ .node_id = id },
-            .edge_ref => .{ .null_val = {} }, // TODO: Add edge_id to ResultValue if needed
+            .edge_ref => |id| .{ .edge_id = id },
             .property => |prop| switch (prop) {
                 .null_val => .{ .null_val = {} },
                 .bool_val => |b| .{ .bool_val = b },

@@ -197,12 +197,9 @@ pub const VariableLengthExpand = struct {
         const output_row = self.output_row orelse return null;
         const input_row = self.current_input orelse return null;
 
+        // Copy ALL populated slots from input (preserves multi-hop chain)
         output_row.clear();
-
-        // Copy source slot from input
-        if (input_row.getSlot(self.source_slot)) |source_val| {
-            output_row.setSlot(self.source_slot, source_val);
-        }
+        output_row.copyFrom(input_row);
 
         // Set target node
         output_row.setSlot(self.target_slot, .{ .node_ref = target_id });

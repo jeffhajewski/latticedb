@@ -194,13 +194,9 @@ pub const Expand = struct {
                 }
             }
 
-            // Build output row
+            // Build output row - copy ALL populated slots from input
             output_row.clear();
-
-            // Copy source slot from input
-            if (input_row.getSlot(self.source_slot)) |source_val| {
-                output_row.setSlot(self.source_slot, source_val);
-            }
+            output_row.copyFrom(input_row);
 
             // Determine target node based on direction
             const target_id = if (self.in_incoming_phase) edge.source else edge.target;

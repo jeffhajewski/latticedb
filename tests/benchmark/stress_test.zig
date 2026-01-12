@@ -548,6 +548,22 @@ fn stressTestQueries(allocator: Allocator, node_count: usize, edges_per_node: us
         }
     }
 
+    // Three-hop traversal
+    {
+        const start = std.time.nanoTimestamp();
+        const query_result = db.query("MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person)-[:KNOWS]->(d:Person) RETURN a, b, c, d LIMIT 100");
+        const end = std.time.nanoTimestamp();
+        if (query_result) |_| {
+            var result = query_result catch unreachable;
+            defer result.deinit();
+            printTiming("    Three-hop traversal LIMIT 100", @intCast(end - start));
+            std.debug.print("      Returned {d} rows\n", .{result.rowCount()});
+        } else |err| {
+            printTiming("    Three-hop traversal LIMIT 100 (FAILED)", @intCast(end - start));
+            std.debug.print("      Error: {}\n", .{err});
+        }
+    }
+
     // Aggregation
     {
         const start = std.time.nanoTimestamp();

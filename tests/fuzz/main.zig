@@ -19,6 +19,7 @@ pub const wal_fuzz = @import("wal_fuzz.zig");
 pub const btree_fuzz = @import("btree_fuzz.zig");
 pub const hnsw_fuzz = @import("hnsw_fuzz.zig");
 pub const symbol_fuzz = @import("symbol_fuzz.zig");
+pub const traversal_fuzz = @import("traversal_fuzz.zig");
 
 test {
     // Reference all fuzz tests so they're included

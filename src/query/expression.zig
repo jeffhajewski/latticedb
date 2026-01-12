@@ -15,9 +15,22 @@ const NodeId = types.NodeId;
 const EdgeId = types.EdgeId;
 const PropertyValue = types.PropertyValue;
 
+const symbols = @import("../graph/symbols.zig");
+const SymbolId = symbols.SymbolId;
+
 const Row = executor.Row;
 const SlotValue = executor.SlotValue;
 const ExecutionContext = executor.ExecutionContext;
+
+/// Decode an edge ID back to its components.
+/// Note: This encoding assumes target < 65536 and source < 4 billion.
+fn decodeEdgeId(edge_id: EdgeId) struct { source: NodeId, target: NodeId, edge_type: SymbolId } {
+    return .{
+        .source = edge_id >> 32,
+        .target = (edge_id >> 16) & 0xFFFF,
+        .edge_type = @intCast(edge_id & 0xFFFF),
+    };
+}
 
 // ============================================================================
 // Errors
@@ -279,7 +292,52 @@ pub const ExpressionEvaluator = struct {
             return .{ .null_val = {} };
         }
 
-        // TODO: Handle edge property access
+        // Handle edge property access
+        if (obj == .edge_ref) {
+            const edge_id = obj.edge_ref;
+
+            // Get the database and symbol table from context
+            const database = ctx.database orelse return .{ .null_val = {} };
+            const symbol_table = ctx.symbol_table orelse return .{ .null_val = {} };
+
+            // Decode edge ID to get source, target, and edge type
+            const decoded = decodeEdgeId(edge_id);
+
+            // Look up the property key symbol ID
+            const key_id = symbol_table.lookup(pa.property) catch {
+                // Property key not found in symbol table
+                return .{ .null_val = {} };
+            };
+
+            // Get the edge from storage
+            var edge = database.edge_store.get(decoded.source, decoded.target, decoded.edge_type) catch {
+                return .{ .null_val = {} };
+            };
+            defer edge.deinit(self.allocator);
+
+            // Find the property with matching key_id
+            for (edge.properties) |prop| {
+                if (prop.key_id == key_id) {
+                    // Clone string/bytes values since edge will be freed
+                    return switch (prop.value) {
+                        .string_val => |s| blk: {
+                            const cloned = self.allocator.dupe(u8, s) catch return EvalError.OutOfMemory;
+                            break :blk .{ .string_val = cloned };
+                        },
+                        .bytes_val => |b| blk: {
+                            const cloned = self.allocator.dupe(u8, b) catch return EvalError.OutOfMemory;
+                            break :blk .{ .string_val = cloned };
+                        },
+                        else => EvalResult.fromPropertyValue(prop.value),
+                    };
+                }
+            }
+
+            // Property not found on this edge
+            return .{ .null_val = {} };
+        }
+
+        // Unknown object type
         return .{ .null_val = {} };
     }
 

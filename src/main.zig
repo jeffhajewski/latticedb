@@ -71,6 +71,7 @@ pub const query = struct {
 pub const transaction = struct {
     pub const manager = @import("transaction/manager.zig");
     pub const wal_payload = @import("transaction/wal_payload.zig");
+    pub const mvcc = @import("transaction/mvcc.zig");
 };
 
 // Concurrency primitives
@@ -164,6 +165,12 @@ pub const TxnState = transaction.manager.TxnState;
 pub const TxnMode = transaction.manager.TxnMode;
 pub const TxnError = transaction.manager.TxnError;
 pub const IsolationLevel = transaction.manager.IsolationLevel;
+
+pub const Snapshot = transaction.mvcc.Snapshot;
+pub const VersionInfo = transaction.mvcc.VersionInfo;
+pub const VersionChain = transaction.mvcc.VersionChain;
+pub const isVisible = transaction.mvcc.isVisible;
+pub const canGarbageCollect = transaction.mvcc.canGarbageCollect;
 
 pub const HnswConfig = vector.hnsw.HnswConfig;
 pub const HnswIndex = vector.hnsw.HnswIndex;

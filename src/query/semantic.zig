@@ -43,6 +43,7 @@ pub const ErrorCode = enum {
     invalid_delete_target,
     invalid_set_target,
     invalid_remove_target,
+    internal_error,
 };
 
 /// A semantic error with location info
@@ -61,6 +62,8 @@ pub const AnalysisResult = struct {
     success: bool,
     errors: []const SemanticError,
     variables: []const VariableInfo,
+    /// True if some errors were dropped due to OOM
+    errors_dropped: bool,
 };
 
 /// Inferred type for expressions
@@ -87,6 +90,8 @@ pub const SemanticAnalyzer = struct {
     errors: std.ArrayList(SemanticError),
     variables: std.StringHashMap(VariableInfo),
     variable_list: std.ArrayList(VariableInfo),
+    /// Tracks if any errors were dropped due to OOM
+    errors_dropped: bool,
 
     const Self = @This();
 
@@ -97,6 +102,7 @@ pub const SemanticAnalyzer = struct {
             .errors = .empty,
             .variables = std.StringHashMap(VariableInfo).init(allocator),
             .variable_list = .empty,
+            .errors_dropped = false,
         };
     }
 
@@ -130,9 +136,10 @@ pub const SemanticAnalyzer = struct {
         }
 
         return .{
-            .success = self.errors.items.len == 0,
+            .success = self.errors.items.len == 0 and !self.errors_dropped,
             .errors = self.errors.items,
             .variables = self.variable_list.items,
+            .errors_dropped = self.errors_dropped,
         };
     }
 
@@ -348,8 +355,13 @@ pub const SemanticAnalyzer = struct {
                 .kind = kind,
                 .location = location,
             };
-            self.variables.put(name, info) catch {};
-            self.variable_list.append(self.allocator, info) catch {};
+            self.variables.put(name, info) catch |err| {
+                self.addErrorFmt(.internal_error, location, "Failed to register variable '{s}': out of memory ({any})", .{ name, err });
+                return;
+            };
+            self.variable_list.append(self.allocator, info) catch |err| {
+                self.addErrorFmt(.internal_error, location, "Failed to track variable '{s}': out of memory ({any})", .{ name, err });
+            };
         }
     }
 
@@ -523,24 +535,32 @@ pub const SemanticAnalyzer = struct {
     // ========================================================================
 
     fn addError(self: *Self, code: ErrorCode, location: ast.SourceLocation, message: []const u8) void {
-        const msg_copy = self.allocator.dupe(u8, message) catch return;
+        const msg_copy = self.allocator.dupe(u8, message) catch {
+            self.errors_dropped = true;
+            return;
+        };
         self.errors.append(self.allocator, .{
             .code = code,
             .message = msg_copy,
             .location = location,
         }) catch {
             self.allocator.free(msg_copy);
+            self.errors_dropped = true;
         };
     }
 
     fn addErrorFmt(self: *Self, code: ErrorCode, location: ast.SourceLocation, comptime fmt: []const u8, args: anytype) void {
-        const message = std.fmt.allocPrint(self.allocator, fmt, args) catch return;
+        const message = std.fmt.allocPrint(self.allocator, fmt, args) catch {
+            self.errors_dropped = true;
+            return;
+        };
         self.errors.append(self.allocator, .{
             .code = code,
             .message = message,
             .location = location,
         }) catch {
             self.allocator.free(message);
+            self.errors_dropped = true;
         };
     }
 };

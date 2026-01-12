@@ -137,6 +137,15 @@ pub const ResultValue = union(enum) {
     string_val: []const u8,
     node_id: NodeId,
     edge_id: EdgeId,
+    bytes_val: []const u8,
+    vector_val: []const f32,
+    list_val: []const ResultValue,
+    map_val: []const MapEntry,
+
+    pub const MapEntry = struct {
+        key: []const u8,
+        value: ResultValue,
+    };
 
     /// Format for display
     pub fn format(self: ResultValue, writer: anytype) !void {
@@ -148,6 +157,25 @@ pub const ResultValue = union(enum) {
             .string_val => |s| try writer.print("\"{s}\"", .{s}),
             .node_id => |id| try writer.print("Node({d})", .{id}),
             .edge_id => |id| try writer.print("Edge({d})", .{id}),
+            .bytes_val => |b| try writer.print("<bytes:{d}>", .{b.len}),
+            .vector_val => |v| try writer.print("<vector:{d}>", .{v.len}),
+            .list_val => |list| {
+                try writer.writeByte('[');
+                for (list, 0..) |item, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    try item.format(writer);
+                }
+                try writer.writeByte(']');
+            },
+            .map_val => |map| {
+                try writer.writeByte('{');
+                for (map, 0..) |entry, i| {
+                    if (i > 0) try writer.writeAll(", ");
+                    try writer.print("{s}: ", .{entry.key});
+                    try entry.value.format(writer);
+                }
+                try writer.writeByte('}');
+            },
         }
     }
 };
@@ -2335,7 +2363,7 @@ pub const Database = struct {
             for (0..num_cols) |col_idx| {
                 const slot: u8 = @intCast(col_idx);
                 if (exec_row.getSlot(slot)) |slot_value| {
-                    values[col_idx] = self.slotToResultValue(slot_value);
+                    values[col_idx] = try self.slotToResultValue(slot_value);
                 } else {
                     values[col_idx] = .{ .null_val = {} };
                 }
@@ -2352,19 +2380,45 @@ pub const Database = struct {
     }
 
     /// Convert a slot value to a result value
-    fn slotToResultValue(self: *Self, slot: executor_mod.SlotValue) ResultValue {
-        _ = self;
+    fn slotToResultValue(self: *Self, slot: executor_mod.SlotValue) QueryError!ResultValue {
         return switch (slot) {
             .empty => .{ .null_val = {} },
             .node_ref => |id| .{ .node_id = id },
             .edge_ref => |id| .{ .edge_id = id },
-            .property => |prop| switch (prop) {
-                .null_val => .{ .null_val = {} },
-                .bool_val => |b| .{ .bool_val = b },
-                .int_val => |i| .{ .int_val = i },
-                .float_val => |f| .{ .float_val = f },
-                .string_val => |s| .{ .string_val = s },
-                .bytes_val, .vector_val, .list_val, .map_val => .{ .null_val = {} },
+            .property => |prop| try self.propertyToResultValue(prop),
+        };
+    }
+
+    /// Convert a PropertyValue to a ResultValue (recursive for lists/maps)
+    fn propertyToResultValue(self: *Self, prop: PropertyValue) QueryError!ResultValue {
+        return switch (prop) {
+            .null_val => .{ .null_val = {} },
+            .bool_val => |b| .{ .bool_val = b },
+            .int_val => |i| .{ .int_val = i },
+            .float_val => |f| .{ .float_val = f },
+            .string_val => |s| .{ .string_val = s },
+            .bytes_val => |b| .{ .bytes_val = b },
+            .vector_val => |v| .{ .vector_val = v },
+            .list_val => |list| blk: {
+                const result_list = self.allocator.alloc(ResultValue, list.len) catch {
+                    return QueryError.OutOfMemory;
+                };
+                for (list, 0..) |item, i| {
+                    result_list[i] = try self.propertyToResultValue(item);
+                }
+                break :blk .{ .list_val = result_list };
+            },
+            .map_val => |map| blk: {
+                const result_map = self.allocator.alloc(ResultValue.MapEntry, map.len) catch {
+                    return QueryError.OutOfMemory;
+                };
+                for (map, 0..) |entry, i| {
+                    result_map[i] = .{
+                        .key = entry.key,
+                        .value = try self.propertyToResultValue(entry.value),
+                    };
+                }
+                break :blk .{ .map_val = result_map };
             },
         };
     }

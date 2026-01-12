@@ -338,6 +338,21 @@ fn resultValueToCValue(result_val: ResultValue, c_val: *lattice_value) void {
             c_val.value_type = .int;
             c_val.data.int_val = @intCast(id);
         },
+        .bytes_val => |b| {
+            c_val.value_type = .bytes;
+            c_val.data.bytes_val.ptr = b.ptr;
+            c_val.data.bytes_val.len = b.len;
+        },
+        .vector_val => |v| {
+            c_val.value_type = .vector;
+            c_val.data.vector_val.ptr = v.ptr;
+            c_val.data.vector_val.dimensions = @intCast(v.len);
+        },
+        .list_val, .map_val => {
+            // Complex nested types require separate iteration API
+            // For now, mark as null in C API
+            c_val.value_type = .null;
+        },
     }
 }
 

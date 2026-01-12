@@ -451,7 +451,6 @@ pub const Repl = struct {
     }
 
     fn valueDisplayLen(self: *Self, val: ResultValue) usize {
-        _ = self;
         return switch (val) {
             .null_val => 4, // "null"
             .bool_val => |b| if (b) 4 else 5, // "true" or "false"
@@ -466,11 +465,31 @@ pub const Repl = struct {
             .string_val => |s| s.len + 2, // Include quotes
             .node_id => 12, // "Node(xxxxx)"
             .edge_id => 12, // "Edge(xxxxx)"
+            .bytes_val => |b| 10 + countDigits(b.len), // "<bytes:N>"
+            .vector_val => |v| 10 + countDigits(v.len), // "<vector:N>"
+            .list_val => |list| blk: {
+                if (list.len == 0) break :blk 2; // "[]"
+                var len: usize = 2; // brackets
+                for (list, 0..) |item, i| {
+                    if (i > 0) len += 2; // ", "
+                    len += self.valueDisplayLen(item);
+                }
+                break :blk len;
+            },
+            .map_val => |map| blk: {
+                if (map.len == 0) break :blk 2; // "{}"
+                var len: usize = 2; // braces
+                for (map, 0..) |entry, i| {
+                    if (i > 0) len += 2; // ", "
+                    len += entry.key.len + 2; // "key: "
+                    len += self.valueDisplayLen(entry.value);
+                }
+                break :blk len;
+            },
         };
     }
 
     fn writeValue(self: *Self, writer: anytype, val: ResultValue) !usize {
-        _ = self;
         switch (val) {
             .null_val => {
                 try writer.writeAll("null");
@@ -514,6 +533,51 @@ pub const Repl = struct {
                 const slice = std.fmt.bufPrint(&buf, "Edge({d})", .{id}) catch return 0;
                 try writer.writeAll(slice);
                 return slice.len;
+            },
+            .bytes_val => |b| {
+                var buf: [32]u8 = undefined;
+                const slice = std.fmt.bufPrint(&buf, "<bytes:{d}>", .{b.len}) catch return 0;
+                try writer.writeAll(slice);
+                return slice.len;
+            },
+            .vector_val => |v| {
+                var buf: [32]u8 = undefined;
+                const slice = std.fmt.bufPrint(&buf, "<vector:{d}>", .{v.len}) catch return 0;
+                try writer.writeAll(slice);
+                return slice.len;
+            },
+            .list_val => |list| {
+                var total: usize = 0;
+                try writer.writeByte('[');
+                total += 1;
+                for (list, 0..) |item, i| {
+                    if (i > 0) {
+                        try writer.writeAll(", ");
+                        total += 2;
+                    }
+                    total += try self.writeValue(writer, item);
+                }
+                try writer.writeByte(']');
+                total += 1;
+                return total;
+            },
+            .map_val => |map| {
+                var total: usize = 0;
+                try writer.writeByte('{');
+                total += 1;
+                for (map, 0..) |entry, i| {
+                    if (i > 0) {
+                        try writer.writeAll(", ");
+                        total += 2;
+                    }
+                    try writer.writeAll(entry.key);
+                    try writer.writeAll(": ");
+                    total += entry.key.len + 2;
+                    total += try self.writeValue(writer, entry.value);
+                }
+                try writer.writeByte('}');
+                total += 1;
+                return total;
             },
         }
     }
@@ -708,6 +772,15 @@ pub const Repl = struct {
     }
 };
 
+/// Count decimal digits in a number
+fn countDigits(n: usize) usize {
+    if (n == 0) return 1;
+    var count: usize = 0;
+    var val = n;
+    while (val > 0) : (val /= 10) count += 1;
+    return count;
+}
+
 /// Write a value as JSON
 fn writeJsonValue(writer: anytype, val: ResultValue) !void {
     switch (val) {
@@ -731,6 +804,35 @@ fn writeJsonValue(writer: anytype, val: ResultValue) !void {
         },
         .node_id => |id| try writer.print("{d}", .{id}),
         .edge_id => |id| try writer.print("{d}", .{id}),
+        .bytes_val => |b| {
+            // Output as base64-encoded string in JSON
+            try writer.print("\"<bytes:{d}>\"", .{b.len});
+        },
+        .vector_val => |v| {
+            try writer.writeByte('[');
+            for (v, 0..) |f, i| {
+                if (i > 0) try writer.writeByte(',');
+                try writer.print("{d}", .{f});
+            }
+            try writer.writeByte(']');
+        },
+        .list_val => |list| {
+            try writer.writeByte('[');
+            for (list, 0..) |item, i| {
+                if (i > 0) try writer.writeByte(',');
+                try writeJsonValue(writer, item);
+            }
+            try writer.writeByte(']');
+        },
+        .map_val => |map| {
+            try writer.writeByte('{');
+            for (map, 0..) |entry, i| {
+                if (i > 0) try writer.writeByte(',');
+                try writer.print("\"{s}\":", .{entry.key});
+                try writeJsonValue(writer, entry.value);
+            }
+            try writer.writeByte('}');
+        },
     }
 }
 
@@ -767,6 +869,14 @@ fn writeCsvValue(writer: anytype, val: ResultValue) !void {
         },
         .node_id => |id| try writer.print("{d}", .{id}),
         .edge_id => |id| try writer.print("{d}", .{id}),
+        .bytes_val => |b| try writer.print("<bytes:{d}>", .{b.len}),
+        .vector_val => |v| try writer.print("<vector:{d}>", .{v.len}),
+        .list_val, .map_val => {
+            // For CSV, output complex types as quoted JSON
+            try writer.writeByte('"');
+            try writeJsonValue(writer, val);
+            try writer.writeByte('"');
+        },
     }
 }
 

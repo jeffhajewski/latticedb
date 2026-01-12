@@ -535,21 +535,16 @@ pub const QueryPlanner = struct {
 
         const output_slot = info.variable_slot orelse return PlannerError.InvalidQuery;
 
-        // If we have literal query text, use standalone FtsSearch
+        // If we have literal query text, use FtsSearchWithInput with literal
         if (info.query_text) |query_text| {
-            // For literal queries, we use a standalone FtsSearch
-            // The input operator is not used - this is an optimization where
-            // we replace the scan with an index lookup
-            // Note: In a full implementation, we'd want to intersect results
-            // For now, the FTS index becomes the primary scan source
-            input.deinit(self.allocator);
-
-            const fts_search = fts_ops.FtsSearch.init(
+            // Use FtsSearchWithInput which filters FTS results against the input operator
+            // This ensures MATCH constraints (like labels) are respected
+            const fts_search = fts_ops.FtsSearchWithInput.initWithLiteral(
                 self.allocator,
+                input,
                 output_slot,
                 query_text,
                 100, // Default limit
-                null, // No min score
                 fts_index,
             ) catch {
                 return PlannerError.OutOfMemory;

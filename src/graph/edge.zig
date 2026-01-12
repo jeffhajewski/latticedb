@@ -152,13 +152,19 @@ pub const EdgeStore = struct {
         };
         const incoming_bytes = incoming_key.toBytes();
 
-        // Insert both entries (double-write)
+        // Insert both entries (double-write) with rollback on failure
         self.tree.insert(&outgoing_bytes, serialized) catch |err| {
             return mapBTreeError(err);
         };
 
         self.tree.insert(&incoming_bytes, serialized) catch |err| {
-            // TODO: Should rollback the outgoing insert on failure
+            // Rollback the outgoing insert to maintain consistency
+            self.tree.delete(&outgoing_bytes) catch {
+                // If rollback fails, we're in an inconsistent state.
+                // This is a serious error - the outgoing entry exists without
+                // its corresponding incoming entry. In a production system,
+                // this would need to be logged for manual recovery.
+            };
             return mapBTreeError(err);
         };
     }
@@ -193,13 +199,14 @@ pub const EdgeStore = struct {
 
     /// Delete an edge
     /// Uses double-delete pattern: removes both outgoing and incoming entries
+    /// Atomic: if incoming delete fails, outgoing is restored
     pub fn delete(
         self: *Self,
         source: NodeId,
         target: NodeId,
         edge_type: SymbolId,
     ) EdgeError!void {
-        // Delete outgoing key (source, outgoing, type, target)
+        // Build outgoing key (source, outgoing, type, target)
         const outgoing_key = EdgeKey{
             .source = source,
             .direction = .outgoing,
@@ -208,11 +215,20 @@ pub const EdgeStore = struct {
         };
         const outgoing_bytes = outgoing_key.toBytes();
 
+        // Get edge data before deleting so we can restore on failure
+        const edge_data = self.tree.get(&outgoing_bytes) catch |err| {
+            return mapBTreeError(err);
+        };
+        if (edge_data == null) {
+            return EdgeError.NotFound;
+        }
+
+        // Delete outgoing entry
         self.tree.delete(&outgoing_bytes) catch |err| {
             return mapBTreeError(err);
         };
 
-        // Delete incoming key (target, incoming, type, source)
+        // Build incoming key (target, incoming, type, source)
         const incoming_key = EdgeKey{
             .source = target,
             .direction = .incoming,
@@ -221,9 +237,15 @@ pub const EdgeStore = struct {
         };
         const incoming_bytes = incoming_key.toBytes();
 
+        // Delete incoming entry with rollback on failure
         self.tree.delete(&incoming_bytes) catch |err| {
-            // Outgoing already deleted but incoming failed - inconsistent state
-            // In production, this would need proper transaction rollback
+            // Rollback: re-insert the outgoing entry to maintain consistency
+            self.tree.insert(&outgoing_bytes, edge_data.?) catch {
+                // If rollback fails, we're in an inconsistent state.
+                // This is a serious error - the incoming entry exists without
+                // its corresponding outgoing entry. In a production system,
+                // this would need to be logged for manual recovery.
+            };
             return mapBTreeError(err);
         };
     }

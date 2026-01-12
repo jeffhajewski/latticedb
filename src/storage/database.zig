@@ -986,7 +986,15 @@ pub const Database = struct {
 
         // Update label index
         for (label_ids) |label_id| {
-            self.label_index.add(label_id, node_id) catch {};
+            self.label_index.add(label_id, node_id) catch |err| {
+                // Note: Node is already created at this point. If label index fails,
+                // the node exists but won't be queryable by this label.
+                // In a transaction, the caller should rollback.
+                return switch (err) {
+                    label_index_mod.LabelIndexError.OutOfMemory => DatabaseError.OutOfMemory,
+                    else => DatabaseError.IoError,
+                };
+            };
         }
 
         // Log to WAL and add undo entry if transaction is provided
@@ -1065,7 +1073,12 @@ pub const Database = struct {
 
             // Remove from label index
             for (node.labels) |label_id| {
-                self.label_index.remove(label_id, node_id) catch {};
+                self.label_index.remove(label_id, node_id) catch |err| {
+                    return switch (err) {
+                        label_index_mod.LabelIndexError.OutOfMemory => DatabaseError.OutOfMemory,
+                        else => DatabaseError.IoError,
+                    };
+                };
             }
         }
 

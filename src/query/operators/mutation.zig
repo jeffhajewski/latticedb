@@ -163,11 +163,11 @@ pub const CreateNode = struct {
         if (row) |r| {
             for (self.properties) |prop| {
                 const value = self.evaluator.evaluate(prop.value_expr, r, ctx) catch {
-                    continue; // Skip property on eval error
+                    continue; // Skip property on eval error (expression may reference missing vars)
                 };
                 const prop_value = evalResultToPropertyValue(value) orelse continue;
                 self.database.setNodeProperty(null, node_id, prop.key, prop_value) catch {
-                    continue; // Skip property on error
+                    return OperatorError.StorageError;
                 };
             }
         } else {
@@ -175,11 +175,11 @@ pub const CreateNode = struct {
             var dummy_row = Row.init();
             for (self.properties) |prop| {
                 const value = self.evaluator.evaluate(prop.value_expr, &dummy_row, ctx) catch {
-                    continue; // Skip property on eval error
+                    continue; // Skip property on eval error (expression may reference missing vars)
                 };
                 const prop_value = evalResultToPropertyValue(value) orelse continue;
                 self.database.setNodeProperty(null, node_id, prop.key, prop_value) catch {
-                    continue; // Skip property on error
+                    return OperatorError.StorageError;
                 };
             }
         }
@@ -410,7 +410,7 @@ pub const DeleteNode = struct {
         defer self.database.freeEdgeInfos(outgoing);
 
         for (outgoing) |edge| {
-            self.database.deleteEdge(null, edge.source, edge.target, edge.edge_type) catch {};
+            try self.database.deleteEdge(null, edge.source, edge.target, edge.edge_type);
         }
 
         // Delete incoming edges
@@ -418,7 +418,7 @@ pub const DeleteNode = struct {
         defer self.database.freeEdgeInfos(incoming);
 
         for (incoming) |edge| {
-            self.database.deleteEdge(null, edge.source, edge.target, edge.edge_type) catch {};
+            try self.database.deleteEdge(null, edge.source, edge.target, edge.edge_type);
         }
     }
 

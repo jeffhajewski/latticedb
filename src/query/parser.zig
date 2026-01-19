@@ -245,6 +245,8 @@ pub const Parser = struct {
     errors: std.ArrayList(ParseError),
     had_error: bool,
     panic_mode: bool,
+    /// Tracks if any errors were dropped due to OOM
+    errors_dropped: bool,
 
     const Self = @This();
 
@@ -260,6 +262,7 @@ pub const Parser = struct {
             .errors = .empty,
             .had_error = false,
             .panic_mode = false,
+            .errors_dropped = false,
         };
     }
 
@@ -287,15 +290,21 @@ pub const Parser = struct {
             }
         }
 
-        if (self.had_error) {
+        // Fail if we had errors or if errors were dropped due to OOM
+        if (self.had_error or self.errors_dropped) {
             return .{
                 .query = null,
                 .errors = self.errors.items,
+                .errors_dropped = self.errors_dropped,
             };
         }
 
         const query = self.arena.allocator().create(ast.Query) catch {
-            return .{ .query = null, .errors = self.errors.items };
+            return .{
+                .query = null,
+                .errors = self.errors.items,
+                .errors_dropped = self.errors_dropped,
+            };
         };
         query.* = .{
             .clauses = clauses.toOwnedSlice(self.arena.allocator()) catch &[_]ast.Clause{},
@@ -305,6 +314,7 @@ pub const Parser = struct {
         return .{
             .query = query,
             .errors = self.errors.items,
+            .errors_dropped = self.errors_dropped,
         };
     }
 
@@ -1577,7 +1587,9 @@ pub const Parser = struct {
             .line = loc.line,
             .column = loc.column,
             .length = loc.length,
-        }) catch {};
+        }) catch {
+            self.errors_dropped = true;
+        };
     }
 
     fn synchronize(self: *Self) void {
@@ -1597,6 +1609,8 @@ pub const Parser = struct {
 pub const ParserResult = struct {
     query: ?*ast.Query,
     errors: []ParseError,
+    /// True if some errors were dropped due to OOM
+    errors_dropped: bool,
 };
 
 // ============================================================================

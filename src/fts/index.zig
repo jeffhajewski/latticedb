@@ -320,6 +320,9 @@ pub const FtsIndex = struct {
     /// Remove a document from the index
     /// If reverse_index is available, properly cleans up posting lists and stats
     pub fn removeDocument(self: *Self, doc_id: DocId) FtsError!void {
+        // Track if any dictionary stat updates failed (non-fatal but should be reported)
+        var stats_update_failed = false;
+
         // If we have a reverse index, do proper cleanup
         if (self.reverse_index) |*ri| {
             // 1. Get terms from reverse index
@@ -327,7 +330,12 @@ pub const FtsIndex = struct {
                 return FtsError.IoError;
             } orelse {
                 // Document not in reverse index, just remove doc length
-                self.doc_lengths.removeDoc(doc_id) catch {};
+                self.doc_lengths.removeDoc(doc_id) catch |err| {
+                    return switch (err) {
+                        error.OutOfMemory => FtsError.OutOfMemory,
+                        else => FtsError.IoError,
+                    };
+                };
                 return;
             };
             defer ri.freeTerms(terms);
@@ -339,19 +347,39 @@ pub const FtsIndex = struct {
                 if (entry.posting_page != 0) {
                     const result = self.posting_store.removeEntry(entry.posting_page, doc_id) catch continue;
                     if (result.found) {
-                        // Update dictionary statistics
-                        self.dictionary.decrementDocFreq(term) catch {};
-                        self.dictionary.subtractTotalFreq(term, result.term_freq) catch {};
+                        // Update dictionary statistics - track failures
+                        self.dictionary.decrementDocFreq(term) catch {
+                            stats_update_failed = true;
+                        };
+                        self.dictionary.subtractTotalFreq(term, result.term_freq) catch {
+                            stats_update_failed = true;
+                        };
                     }
                 }
             }
 
             // 3. Remove reverse index entry
-            ri.removeDoc(doc_id) catch {};
+            ri.removeDoc(doc_id) catch |err| {
+                return switch (err) {
+                    error.OutOfMemory => FtsError.OutOfMemory,
+                    else => FtsError.IoError,
+                };
+            };
         }
 
         // 4. Remove from doc lengths (this updates stats)
-        self.doc_lengths.removeDoc(doc_id) catch {};
+        self.doc_lengths.removeDoc(doc_id) catch |err| {
+            return switch (err) {
+                error.OutOfMemory => FtsError.OutOfMemory,
+                else => FtsError.IoError,
+            };
+        };
+
+        // If dictionary stats updates failed, report it
+        // The document is removed but stats may be inconsistent
+        if (stats_update_failed) {
+            return FtsError.DictionaryError;
+        }
     }
 
     // ========================================================================

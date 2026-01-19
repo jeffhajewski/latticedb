@@ -1381,7 +1381,15 @@ pub const Database = struct {
         // Log undo entry for transaction rollback
         if (txn) |t| {
             if (self.txn_manager) |*tm| {
-                tm.addUndoEntry(t, .insert, .label, node_id, 0, label_id, null) catch {};
+                tm.addUndoEntry(t, .insert, .label, node_id, 0, label_id, null) catch |err| {
+                    // Rollback: remove label from index and restore node
+                    self.label_index.remove(label_id, node_id) catch {};
+                    self.node_store.update(node_id, existing_node.labels, existing_node.properties) catch {};
+                    return switch (err) {
+                        TxnError.OutOfMemory => DatabaseError.OutOfMemory,
+                        else => DatabaseError.IoError,
+                    };
+                };
             }
         }
     }
@@ -1442,7 +1450,15 @@ pub const Database = struct {
         // Log undo entry for transaction rollback
         if (txn) |t| {
             if (self.txn_manager) |*tm| {
-                tm.addUndoEntry(t, .delete, .label, node_id, 0, label_id, null) catch {};
+                tm.addUndoEntry(t, .delete, .label, node_id, 0, label_id, null) catch |err| {
+                    // Rollback: re-add label to index and restore node
+                    self.label_index.add(label_id, node_id) catch {};
+                    self.node_store.update(node_id, existing_node.labels, existing_node.properties) catch {};
+                    return switch (err) {
+                        TxnError.OutOfMemory => DatabaseError.OutOfMemory,
+                        else => DatabaseError.IoError,
+                    };
+                };
             }
         }
     }

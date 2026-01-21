@@ -392,6 +392,30 @@ HNSW scales as O(log N). Projected performance at 1M vectors meets the < 10ms ta
 
 Lattice's inverted index with BM25 scoring is highly competitive with dedicated search engines.
 
+#### Graph Traversal vs SQLite
+
+LatticeDB's native graph traversal compared to SQLite using JOINs and recursive CTEs on a social network graph with power-law degree distribution.
+
+**Small Scale (10K nodes, 50K edges)**
+
+| Workload | LatticeDB | SQLite | Speedup |
+|----------|-----------|--------|--------:|
+| 1-hop traversal | 10 us | 12 us | 1.2x |
+| 2-hop traversal | 33 us | 42 us | 1.3x |
+| 3-hop traversal | 139 us | 124 us | 0.9x |
+| Variable path (1..5) | 9.3 ms | 4.1 ms | 0.4x |
+
+**Medium Scale (100K nodes, 500K edges)**
+
+| Workload | LatticeDB | SQLite | Speedup |
+|----------|-----------|--------|--------:|
+| 1-hop traversal | 35 us | 1.0 ms | **30x** |
+| 2-hop traversal | 162 us | 1.9 ms | **12x** |
+| 3-hop traversal | 835 us | 1.9 ms | **2.3x** |
+| Variable path (1..5) | 27 ms | 8.4 ms | 0.3x |
+
+At small scale, both databases perform similarly. At medium scale, LatticeDB's native edge indexes dominate for fixed-hop traversals (up to 30x faster), while SQLite's recursive CTE implementation is more efficient for variable-length path queries. Run `zig build sqlite-benchmark` to reproduce.
+
 ### Design Targets
 
 | Goal | Target | Status |

@@ -179,6 +179,30 @@ pub fn build(b: *std.Build) void {
     const stress_step = b.step("stress", "Run stress tests to find performance limits");
     stress_step.dependOn(&run_stress.step);
 
+    // SQLite comparison benchmark module
+    const sqlite_bench_module = b.createModule(.{
+        .root_source_file = b.path("tests/benchmark/sqlite_comparison.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .imports = &.{
+            .{ .name = "lattice", .module = lib_module },
+        },
+    });
+
+    // SQLite comparison benchmark executable
+    const sqlite_bench_exe = b.addExecutable(.{
+        .name = "sqlite-benchmark",
+        .root_module = sqlite_bench_module,
+    });
+    sqlite_bench_exe.linkLibrary(lib);
+    sqlite_bench_exe.linkSystemLibrary("sqlite3");
+
+    const run_sqlite_bench = b.addRunArtifact(sqlite_bench_exe);
+    run_sqlite_bench.step.dependOn(&sqlite_bench_exe.step);
+
+    const sqlite_bench_step = b.step("sqlite-benchmark", "Run SQLite vs LatticeDB comparison benchmark");
+    sqlite_bench_step.dependOn(&run_sqlite_bench.step);
+
     // Fuzz test module - imports the library module
     const fuzz_module = b.createModule(.{
         .root_source_file = b.path("tests/fuzz/main.zig"),

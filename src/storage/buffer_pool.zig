@@ -137,9 +137,17 @@ pub const BufferPool = struct {
         };
     }
 
-    /// Clean up the buffer pool, flushing dirty pages.
+    /// Close the buffer pool, flushing all dirty pages.
+    /// Returns an error if flushing fails - data may not be persisted.
+    /// Call this before deinit() if you need durability guarantees.
+    pub fn close(self: *Self) BufferPoolError!void {
+        try self.flushAll();
+    }
+
+    /// Clean up the buffer pool, flushing dirty pages (best effort).
+    /// For guaranteed durability, call close() first and handle errors.
     pub fn deinit(self: *Self) void {
-        // Flush all dirty pages before cleanup
+        // Flush all dirty pages before cleanup (best effort)
         self.flushAll() catch {};
 
         // Free all frame data buffers

@@ -451,7 +451,32 @@ pub const Database = struct {
         return self;
     }
 
-    /// Close the database and release all resources
+    /// Sync all pending writes to disk.
+    /// Call this before close() if you need durability guarantees.
+    /// Returns an error if flushing fails - data may not be persisted.
+    pub fn sync(self: *Self) DatabaseError!void {
+        if (self.read_only) return;
+
+        // Save B+Tree root pages
+        self.saveTreeRoots() catch {
+            return DatabaseError.IoError;
+        };
+
+        // Flush buffer pool
+        self.buffer_pool.close() catch {
+            return DatabaseError.IoError;
+        };
+
+        // Sync WAL if present
+        if (self.wal) |*wal| {
+            wal.sync() catch {
+                return DatabaseError.IoError;
+            };
+        }
+    }
+
+    /// Close the database and release all resources.
+    /// For guaranteed durability, call sync() first and handle errors.
     pub fn close(self: *Self) void {
         // Reverse initialization order
 
@@ -470,7 +495,7 @@ pub const Database = struct {
         // 7. Graph stores (no explicit deinit needed - they don't own resources)
         // 6. Symbol table (no explicit deinit needed)
 
-        // 5. B+Trees - save root pages before closing
+        // 5. B+Trees - save root pages before closing (best effort)
         if (!self.read_only) {
             self.saveTreeRoots() catch {};
         }

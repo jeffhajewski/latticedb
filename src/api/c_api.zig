@@ -427,10 +427,19 @@ pub export fn lattice_open(
 pub export fn lattice_close(db: ?*lattice_database) lattice_error {
     const handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
 
+    // Sync first to ensure durability, capture any errors
+    const sync_result = handle.db.sync();
+
+    // Always close and free resources
     handle.db.close();
     global_allocator.destroy(handle);
 
-    return .ok;
+    // Return sync error if there was one
+    if (sync_result) |_| {
+        return .ok;
+    } else |_| {
+        return .err_io;
+    }
 }
 
 // ============================================================================

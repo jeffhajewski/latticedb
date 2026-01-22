@@ -469,9 +469,14 @@ const LatticeDb = struct {
 
     fn run1Hop(self: *LatticeDb, node_idx: u32) u32 {
         const node_id = self.node_ids[@intCast(node_idx)];
-        const edges = self.db.getOutgoingEdges(node_id) catch return 0;
-        defer self.db.freeEdgeInfos(edges);
-        return @intCast(edges.len);
+        var iter = self.db.getOutgoingEdgeRefs(node_id) catch return 0;
+        defer iter.deinit();
+
+        var count: u32 = 0;
+        while (iter.next() catch null) |_| {
+            count += 1;
+        }
+        return count;
     }
 
     fn run2Hop(self: *LatticeDb, node_idx: u32) u32 {
@@ -479,14 +484,17 @@ const LatticeDb = struct {
         var count: u32 = 0;
 
         // First hop
-        const edges1 = self.db.getOutgoingEdges(node_id) catch return 0;
-        defer self.db.freeEdgeInfos(edges1);
+        var iter1 = self.db.getOutgoingEdgeRefs(node_id) catch return 0;
+        defer iter1.deinit();
 
-        for (edges1) |e1| {
+        while (iter1.next() catch null) |e1| {
             // Second hop
-            const edges2 = self.db.getOutgoingEdges(e1.target) catch continue;
-            defer self.db.freeEdgeInfos(edges2);
-            count += @intCast(edges2.len);
+            var iter2 = self.db.getOutgoingEdgeRefs(e1.target) catch continue;
+            defer iter2.deinit();
+
+            while (iter2.next() catch null) |_| {
+                count += 1;
+            }
         }
 
         return count;
@@ -497,19 +505,22 @@ const LatticeDb = struct {
         var count: u32 = 0;
 
         // First hop
-        const edges1 = self.db.getOutgoingEdges(node_id) catch return 0;
-        defer self.db.freeEdgeInfos(edges1);
+        var iter1 = self.db.getOutgoingEdgeRefs(node_id) catch return 0;
+        defer iter1.deinit();
 
-        for (edges1) |e1| {
+        while (iter1.next() catch null) |e1| {
             // Second hop
-            const edges2 = self.db.getOutgoingEdges(e1.target) catch continue;
-            defer self.db.freeEdgeInfos(edges2);
+            var iter2 = self.db.getOutgoingEdgeRefs(e1.target) catch continue;
+            defer iter2.deinit();
 
-            for (edges2) |e2| {
+            while (iter2.next() catch null) |e2| {
                 // Third hop
-                const edges3 = self.db.getOutgoingEdges(e2.target) catch continue;
-                defer self.db.freeEdgeInfos(edges3);
-                count += @intCast(edges3.len);
+                var iter3 = self.db.getOutgoingEdgeRefs(e2.target) catch continue;
+                defer iter3.deinit();
+
+                while (iter3.next() catch null) |_| {
+                    count += 1;
+                }
             }
         }
 
@@ -519,8 +530,10 @@ const LatticeDb = struct {
     fn runVarPath(self: *LatticeDb, node_idx: u32, allocator: std.mem.Allocator) u32 {
         const node_id = self.node_ids[@intCast(node_idx)];
 
-        // BFS up to depth 5
-        var visited = std.AutoHashMap(u64, void).init(allocator);
+        // BFS up to depth 5 - use DynamicBitSet for visited tracking
+        // Node IDs are 1-based and sequential, so max_node_id = node_ids.len
+        const bitset_size = self.node_ids.len + 1;
+        var visited = std.DynamicBitSet.initEmpty(allocator, bitset_size) catch return 0;
         defer visited.deinit();
 
         var current_level = std.ArrayListUnmanaged(u64){};
@@ -530,20 +543,23 @@ const LatticeDb = struct {
         defer next_level.deinit(allocator);
 
         current_level.append(allocator, node_id) catch return 0;
-        visited.put(node_id, {}) catch return 0;
+        visited.set(@intCast(node_id));
+        var visited_count: u32 = 1; // Track count manually for O(1) access
 
         var depth: u32 = 0;
         while (depth < 5 and current_level.items.len > 0) {
             next_level.clearRetainingCapacity();
 
             for (current_level.items) |current| {
-                const edges = self.db.getOutgoingEdges(current) catch continue;
-                defer self.db.freeEdgeInfos(edges);
+                var iter = self.db.getOutgoingEdgeRefs(current) catch continue;
+                defer iter.deinit();
 
-                for (edges) |e| {
-                    if (!visited.contains(e.target)) {
-                        visited.put(e.target, {}) catch continue;
-                        next_level.append(allocator, e.target) catch continue;
+                while (iter.next() catch null) |edge_ref| {
+                    const target: usize = @intCast(edge_ref.target);
+                    if (!visited.isSet(target)) {
+                        visited.set(target);
+                        visited_count += 1;
+                        next_level.append(allocator, edge_ref.target) catch continue;
                     }
                 }
             }
@@ -553,8 +569,129 @@ const LatticeDb = struct {
         }
 
         // Subtract 1 for the starting node
-        return @intCast(if (visited.count() > 0) visited.count() - 1 else 0);
+        return if (visited_count > 0) visited_count - 1 else 0;
     }
+
+    /// Instrumented version of runVarPath for profiling bottlenecks
+    fn runVarPathInstrumented(self: *LatticeDb, node_idx: u32, allocator: std.mem.Allocator) struct { count: u32, timings: VarPathTimings } {
+        const node_id = self.node_ids[@intCast(node_idx)];
+
+        var timings = VarPathTimings{};
+        var timer = std.time.Timer.start() catch return .{ .count = 0, .timings = timings };
+
+        // Initialization
+        const bitset_size = self.node_ids.len + 1;
+        var visited = std.DynamicBitSet.initEmpty(allocator, bitset_size) catch return .{ .count = 0, .timings = timings };
+        defer visited.deinit();
+
+        var current_level = std.ArrayListUnmanaged(u64){};
+        defer current_level.deinit(allocator);
+
+        var next_level = std.ArrayListUnmanaged(u64){};
+        defer next_level.deinit(allocator);
+
+        current_level.append(allocator, node_id) catch return .{ .count = 0, .timings = timings };
+        visited.set(@intCast(node_id));
+        var visited_count: u32 = 1;
+
+        timings.init_ns = timer.lap();
+
+        var depth: u32 = 0;
+        while (depth < 5 and current_level.items.len > 0) {
+            next_level.clearRetainingCapacity();
+
+            for (current_level.items) |current| {
+                // Time: getOutgoingEdgeRefs
+                _ = timer.lap();
+                var iter = self.db.getOutgoingEdgeRefs(current) catch continue;
+                timings.get_edges_ns += timer.lap();
+                defer iter.deinit();
+
+                // Time: iteration
+                while (true) {
+                    _ = timer.lap();
+                    const edge_ref = iter.next() catch null;
+                    timings.iter_next_ns += timer.lap();
+
+                    if (edge_ref == null) break;
+
+                    const target: usize = @intCast(edge_ref.?.target);
+
+                    // Time: bitset check
+                    _ = timer.lap();
+                    const already_visited = visited.isSet(target);
+                    timings.bitset_check_ns += timer.lap();
+
+                    if (!already_visited) {
+                        // Time: bitset set
+                        _ = timer.lap();
+                        visited.set(target);
+                        timings.bitset_set_ns += timer.lap();
+
+                        visited_count += 1;
+
+                        // Time: append
+                        _ = timer.lap();
+                        next_level.append(allocator, edge_ref.?.target) catch continue;
+                        timings.append_ns += timer.lap();
+                    }
+                }
+                timings.iter_deinit_count += 1;
+            }
+
+            std.mem.swap(std.ArrayListUnmanaged(u64), &current_level, &next_level);
+            depth += 1;
+        }
+
+        timings.visited_count = visited_count;
+        return .{ .count = if (visited_count > 0) visited_count - 1 else 0, .timings = timings };
+    }
+
+    const VarPathTimings = struct {
+        init_ns: u64 = 0,
+        get_edges_ns: u64 = 0,
+        iter_next_ns: u64 = 0,
+        bitset_check_ns: u64 = 0,
+        bitset_set_ns: u64 = 0,
+        append_ns: u64 = 0,
+        iter_deinit_count: u64 = 0,
+        visited_count: u32 = 0,
+
+        fn add(self: *VarPathTimings, other: VarPathTimings) void {
+            self.init_ns += other.init_ns;
+            self.get_edges_ns += other.get_edges_ns;
+            self.iter_next_ns += other.iter_next_ns;
+            self.bitset_check_ns += other.bitset_check_ns;
+            self.bitset_set_ns += other.bitset_set_ns;
+            self.append_ns += other.append_ns;
+            self.iter_deinit_count += other.iter_deinit_count;
+            self.visited_count += other.visited_count;
+        }
+
+        fn print(self: VarPathTimings, iterations: u64) void {
+            const total = self.init_ns + self.get_edges_ns + self.iter_next_ns +
+                self.bitset_check_ns + self.bitset_set_ns + self.append_ns;
+
+            std.debug.print("\n  === VarPath Timing Breakdown ({} iterations, avg {} visited) ===\n", .{ iterations, self.visited_count / @as(u32, @intCast(iterations)) });
+            std.debug.print("  | Operation          |    Time    |   %   |\n", .{});
+            std.debug.print("  |--------------------+------------+-------|\n", .{});
+            printRow("Initialization", self.init_ns, total);
+            printRow("getOutgoingEdgeRefs", self.get_edges_ns, total);
+            printRow("iter.next()", self.iter_next_ns, total);
+            printRow("bitset.isSet()", self.bitset_check_ns, total);
+            printRow("bitset.set()", self.bitset_set_ns, total);
+            printRow("next_level.append", self.append_ns, total);
+            std.debug.print("  |--------------------+------------+-------|\n", .{});
+            std.debug.print("  | TOTAL              | {:>7.2} ms | 100%  |\n", .{@as(f64, @floatFromInt(total)) / 1_000_000.0});
+            std.debug.print("\n", .{});
+        }
+
+        fn printRow(name: []const u8, ns: u64, total: u64) void {
+            const pct = if (total > 0) @as(f64, @floatFromInt(ns)) / @as(f64, @floatFromInt(total)) * 100.0 else 0.0;
+            const ms = @as(f64, @floatFromInt(ns)) / 1_000_000.0;
+            std.debug.print("  | {s:<18} | {:>7.2} ms | {:>4.1}% |\n", .{ name, ms, pct });
+        }
+    };
 };
 
 // ============================================================================
@@ -638,6 +775,25 @@ fn lattice3HopWrapper(db: *LatticeDb, node: u32, _: std.mem.Allocator) u32 {
 
 fn latticeVarPathWrapper(db: *LatticeDb, node: u32, allocator: std.mem.Allocator) u32 {
     return db.runVarPath(node, allocator);
+}
+
+fn runVarPathProfiling(lattice_db: *LatticeDb, test_nodes: []const u32, allocator: std.mem.Allocator, config: Config) void {
+    std.debug.print("\n  Running VarPath profiling...\n", .{});
+
+    var total_timings = LatticeDb.VarPathTimings{};
+    const total_iters = config.warmup_iterations + config.measure_iterations;
+
+    for (0..total_iters) |i| {
+        const node = test_nodes[i % test_nodes.len];
+        const result = lattice_db.runVarPathInstrumented(node, allocator);
+
+        // Only accumulate after warmup
+        if (i >= config.warmup_iterations) {
+            total_timings.add(result.timings);
+        }
+    }
+
+    total_timings.print(config.measure_iterations);
 }
 
 fn runBenchmarkSuite(
@@ -746,6 +902,11 @@ fn runBenchmarkSuite(
         sqliteVarPathWrapper,
         latticeVarPathWrapper,
     );
+
+    // Run instrumented profiling for medium+ scale
+    if (scale == .medium) {
+        runVarPathProfiling(&lattice_db, test_nodes, allocator, reduced_config);
+    }
 
     return results;
 }

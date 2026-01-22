@@ -17,6 +17,7 @@ const label_index_mod = lattice.graph.label_index;
 const types = lattice.core.types;
 const btree = lattice.storage.btree;
 
+const Allocator = std.mem.Allocator;
 const SymbolTable = symbols_mod.SymbolTable;
 const SymbolError = symbols_mod.SymbolError;
 const SymbolId = symbols_mod.SymbolId;
@@ -26,6 +27,8 @@ const Node = node_mod.Node;
 const Property = node_mod.Property;
 const EdgeStore = edge_mod.EdgeStore;
 const EdgeError = edge_mod.EdgeError;
+const EdgeRef = edge_mod.EdgeRef;
+const BatchEdgeResults = edge_mod.BatchEdgeResults;
 const LabelIndex = label_index_mod.LabelIndex;
 const PropertyValue = types.PropertyValue;
 const NodeId = types.NodeId;
@@ -557,6 +560,334 @@ test "edges: filter by type with getOutgoingByType" {
     }
 
     try std.testing.expectEqual(@as(usize, 2), count);
+}
+
+// ============================================================================
+// Batch Edge Query Tests
+//
+// These tests ensure that getOutgoingRefsBatch produces identical results to
+// calling getOutgoingRefs individually for each node. This catches bugs in
+// optimized scan implementations that might skip nodes or collect wrong edges.
+// ============================================================================
+
+/// Helper: collect all outgoing EdgeRefs for a node using the individual iterator API.
+fn collectOutgoingRefs(store: *EdgeStore, node_id: NodeId, allocator: Allocator) ![]EdgeRef {
+    var refs = std.ArrayListUnmanaged(EdgeRef){};
+    var iter = try store.getOutgoingRefs(node_id);
+    defer iter.deinit();
+    while (try iter.next()) |ref| {
+        refs.append(allocator, ref) catch return EdgeError.OutOfMemory;
+    }
+    return refs.toOwnedSlice(allocator) catch return EdgeError.OutOfMemory;
+}
+
+test "edges: batch fetch matches individual for sparse node IDs" {
+    // This is the exact scenario that triggered the stale-end_key bug:
+    // Nodes with large gaps in ID space, where many B+Tree entries for
+    // intermediate nodes exist between the requested nodes.
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "batch_sparse");
+    defer db.deinit();
+
+    var tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree);
+
+    const type_a: SymbolId = 100;
+    const type_b: SymbolId = 200;
+
+    // Create a graph where edges exist for many nodes, but we only batch-query a few.
+    // This ensures the scan must skip over entries for non-requested nodes.
+    //
+    // Node 10 -> 20, 30 (type_a)
+    // Node 20 -> 10 (type_a)          <-- between requested nodes 10 and 50
+    // Node 30 -> 40 (type_b)          <-- between requested nodes 10 and 50
+    // Node 50 -> 60, 70, 80 (type_a)
+    // Node 60 -> 10 (type_a)          <-- between requested nodes 50 and 100
+    // Node 100 -> 10 (type_b)
+    try store.create(10, 20, type_a, &[_]Property{});
+    try store.create(10, 30, type_a, &[_]Property{});
+    try store.create(20, 10, type_a, &[_]Property{});
+    try store.create(30, 40, type_b, &[_]Property{});
+    try store.create(50, 60, type_a, &[_]Property{});
+    try store.create(50, 70, type_a, &[_]Property{});
+    try store.create(50, 80, type_a, &[_]Property{});
+    try store.create(60, 10, type_a, &[_]Property{});
+    try store.create(100, 10, type_b, &[_]Property{});
+
+    // Batch fetch for nodes [10, 50, 100] - with gaps containing other nodes' edges
+    const batch_nodes = [_]NodeId{ 50, 10, 100 }; // Intentionally unsorted
+    var batch = try store.getOutgoingRefsBatch(&batch_nodes, allocator);
+    defer batch.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), batch.results.len);
+
+    // Cross-validate each node against individual API
+    for (batch.results, 0..) |result, i| {
+        const individual = try collectOutgoingRefs(&store, result.node_id, allocator);
+        defer allocator.free(individual);
+
+        const batch_edges = batch.getEdges(i);
+        try std.testing.expectEqual(individual.len, batch_edges.len);
+
+        for (individual, 0..) |ref, j| {
+            try std.testing.expectEqual(ref.source, batch_edges[j].source);
+            try std.testing.expectEqual(ref.target, batch_edges[j].target);
+            try std.testing.expectEqual(ref.edge_type, batch_edges[j].edge_type);
+        }
+    }
+
+    // Also verify specific expected counts
+    try std.testing.expectEqual(@as(NodeId, 10), batch.results[0].node_id);
+    try std.testing.expectEqual(@as(usize, 2), batch.getEdges(0).len); // 10->20, 10->30
+    try std.testing.expectEqual(@as(NodeId, 50), batch.results[1].node_id);
+    try std.testing.expectEqual(@as(usize, 3), batch.getEdges(1).len); // 50->60, 50->70, 50->80
+    try std.testing.expectEqual(@as(NodeId, 100), batch.results[2].node_id);
+    try std.testing.expectEqual(@as(usize, 1), batch.getEdges(2).len); // 100->10
+}
+
+test "edges: batch fetch does not include edges from non-requested nodes" {
+    // Regression test: a scan-based batch implementation must not accidentally
+    // include edges from nodes that happen to fall between requested nodes in
+    // the B+Tree key space.
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "batch_noleak");
+    defer db.deinit();
+
+    var tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree);
+
+    const edge_type: SymbolId = 42;
+
+    // Node 1 has edges
+    try store.create(1, 100, edge_type, &[_]Property{});
+
+    // Nodes 2-9 each have edges (these are NOT in our batch query)
+    for (2..10) |i| {
+        try store.create(@intCast(i), 200, edge_type, &[_]Property{});
+    }
+
+    // Node 10 has edges
+    try store.create(10, 300, edge_type, &[_]Property{});
+
+    // Batch query only nodes 1 and 10 - must not include edges from nodes 2-9
+    const batch_nodes = [_]NodeId{ 1, 10 };
+    var batch = try store.getOutgoingRefsBatch(&batch_nodes, allocator);
+    defer batch.deinit();
+
+    // Node 1: exactly 1 edge (to 100)
+    const node1_edges = batch.getEdges(0);
+    try std.testing.expectEqual(@as(usize, 1), node1_edges.len);
+    try std.testing.expectEqual(@as(NodeId, 1), node1_edges[0].source);
+    try std.testing.expectEqual(@as(NodeId, 100), node1_edges[0].target);
+
+    // Node 10: exactly 1 edge (to 300)
+    const node10_edges = batch.getEdges(1);
+    try std.testing.expectEqual(@as(usize, 1), node10_edges.len);
+    try std.testing.expectEqual(@as(NodeId, 10), node10_edges[0].source);
+    try std.testing.expectEqual(@as(NodeId, 300), node10_edges[0].target);
+
+    // Total edges in batch should be exactly 2 (not 10)
+    try std.testing.expectEqual(@as(usize, 2), batch.edges.len);
+}
+
+test "edges: batch fetch handles nodes with no outgoing edges" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "batch_noout");
+    defer db.deinit();
+
+    var tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree);
+
+    const edge_type: SymbolId = 1;
+
+    // Node 5 has edges TO it, but none FROM it
+    try store.create(1, 5, edge_type, &[_]Property{});
+    try store.create(10, 5, edge_type, &[_]Property{});
+
+    // Node 20 has outgoing edges
+    try store.create(20, 30, edge_type, &[_]Property{});
+
+    // Batch includes node with only incoming edges (5), and nodes not in tree at all (999)
+    const batch_nodes = [_]NodeId{ 5, 20, 999 };
+    var batch = try store.getOutgoingRefsBatch(&batch_nodes, allocator);
+    defer batch.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), batch.results.len);
+
+    // Node 5: has incoming edges but no outgoing
+    try std.testing.expectEqual(@as(NodeId, 5), batch.results[0].node_id);
+    try std.testing.expectEqual(@as(usize, 0), batch.getEdges(0).len);
+
+    // Node 20: has outgoing edge
+    try std.testing.expectEqual(@as(NodeId, 20), batch.results[1].node_id);
+    try std.testing.expectEqual(@as(usize, 1), batch.getEdges(1).len);
+
+    // Node 999: doesn't exist at all
+    try std.testing.expectEqual(@as(NodeId, 999), batch.results[2].node_id);
+    try std.testing.expectEqual(@as(usize, 0), batch.getEdges(2).len);
+}
+
+test "edges: batch fetch single node matches individual fetch" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "batch_single");
+    defer db.deinit();
+
+    var tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree);
+
+    const type_a: SymbolId = 10;
+    const type_b: SymbolId = 20;
+
+    try store.create(42, 1, type_a, &[_]Property{});
+    try store.create(42, 2, type_b, &[_]Property{});
+    try store.create(42, 3, type_a, &[_]Property{});
+
+    // Single-node batch
+    const batch_nodes = [_]NodeId{42};
+    var batch = try store.getOutgoingRefsBatch(&batch_nodes, allocator);
+    defer batch.deinit();
+
+    // Cross-validate
+    const individual = try collectOutgoingRefs(&store, 42, allocator);
+    defer allocator.free(individual);
+
+    try std.testing.expectEqual(individual.len, batch.getEdges(0).len);
+    for (individual, 0..) |ref, i| {
+        try std.testing.expectEqual(ref.source, batch.getEdges(0)[i].source);
+        try std.testing.expectEqual(ref.target, batch.getEdges(0)[i].target);
+        try std.testing.expectEqual(ref.edge_type, batch.getEdges(0)[i].edge_type);
+    }
+}
+
+test "edges: batch fetch with many nodes cross-validates against individual" {
+    // Property-style test: create a non-trivial graph and verify batch
+    // results match individual results for a large random subset of nodes.
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "batch_many");
+    defer db.deinit();
+
+    var tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree);
+
+    const edge_type: SymbolId = 1;
+
+    // Create a graph with 50 nodes, each having 0-5 outgoing edges
+    var prng = std.Random.DefaultPrng.init(12345);
+    const random = prng.random();
+
+    const num_nodes: u64 = 50;
+    for (1..num_nodes + 1) |source| {
+        const num_edges = random.intRangeAtMost(u32, 0, 5);
+        for (0..num_edges) |_| {
+            const target = random.intRangeAtMost(u64, 1, num_nodes);
+            if (target != source) {
+                store.create(@intCast(source), @intCast(target), edge_type, &[_]Property{}) catch {
+                    // Duplicate edges are fine, just skip
+                    continue;
+                };
+            }
+        }
+    }
+
+    // Batch fetch ALL nodes
+    var all_nodes: [50]NodeId = undefined;
+    for (0..50) |i| {
+        all_nodes[i] = @intCast(i + 1);
+    }
+
+    // Shuffle to test unsorted input
+    random.shuffle(NodeId, &all_nodes);
+
+    var batch = try store.getOutgoingRefsBatch(&all_nodes, allocator);
+    defer batch.deinit();
+
+    try std.testing.expectEqual(@as(usize, 50), batch.results.len);
+
+    // Verify every node's batch result matches individual fetch
+    for (batch.results, 0..) |result, i| {
+        const individual = try collectOutgoingRefs(&store, result.node_id, allocator);
+        defer allocator.free(individual);
+
+        const batch_edges = batch.getEdges(i);
+        try std.testing.expectEqual(individual.len, batch_edges.len);
+
+        for (individual, 0..) |ref, j| {
+            try std.testing.expectEqual(ref.source, batch_edges[j].source);
+            try std.testing.expectEqual(ref.target, batch_edges[j].target);
+            try std.testing.expectEqual(ref.edge_type, batch_edges[j].edge_type);
+        }
+    }
+}
+
+test "edges: batch fetch with duplicate node IDs" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "batch_dup");
+    defer db.deinit();
+
+    var tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree);
+
+    try store.create(5, 10, 1, &[_]Property{});
+    try store.create(5, 20, 1, &[_]Property{});
+
+    // Same node twice in batch - should get results for both entries
+    const batch_nodes = [_]NodeId{ 5, 5 };
+    var batch = try store.getOutgoingRefsBatch(&batch_nodes, allocator);
+    defer batch.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), batch.results.len);
+
+    // Both results should reference node 5
+    try std.testing.expectEqual(@as(NodeId, 5), batch.results[0].node_id);
+    try std.testing.expectEqual(@as(NodeId, 5), batch.results[1].node_id);
+
+    // First occurrence should get the edges (scan collects them)
+    try std.testing.expectEqual(@as(usize, 2), batch.getEdges(0).len);
+
+    // Second occurrence: edges already consumed by scan, so it gets 0
+    // (this is expected behavior for duplicate inputs - caller should deduplicate)
+    try std.testing.expectEqual(@as(usize, 0), batch.getEdges(1).len);
+}
+
+test "edges: batch fetch adjacent nodes (dense IDs)" {
+    // Test the best-case scenario for batch scanning: nodes with adjacent IDs
+    // where no entries need to be skipped between them.
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "batch_dense");
+    defer db.deinit();
+
+    var tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree);
+
+    const edge_type: SymbolId = 1;
+
+    // Create consecutive nodes with edges
+    try store.create(1, 10, edge_type, &[_]Property{});
+    try store.create(2, 20, edge_type, &[_]Property{});
+    try store.create(2, 21, edge_type, &[_]Property{});
+    try store.create(3, 30, edge_type, &[_]Property{});
+    try store.create(4, 40, edge_type, &[_]Property{});
+    try store.create(4, 41, edge_type, &[_]Property{});
+    try store.create(4, 42, edge_type, &[_]Property{});
+
+    const batch_nodes = [_]NodeId{ 1, 2, 3, 4 };
+    var batch = try store.getOutgoingRefsBatch(&batch_nodes, allocator);
+    defer batch.deinit();
+
+    // Cross-validate each
+    for (batch.results, 0..) |result, i| {
+        const individual = try collectOutgoingRefs(&store, result.node_id, allocator);
+        defer allocator.free(individual);
+
+        const batch_edges = batch.getEdges(i);
+        try std.testing.expectEqual(individual.len, batch_edges.len);
+    }
+
+    // Verify counts: 1, 2, 1, 3
+    try std.testing.expectEqual(@as(usize, 1), batch.getEdges(0).len);
+    try std.testing.expectEqual(@as(usize, 2), batch.getEdges(1).len);
+    try std.testing.expectEqual(@as(usize, 1), batch.getEdges(2).len);
+    try std.testing.expectEqual(@as(usize, 3), batch.getEdges(3).len);
 }
 
 // ============================================================================

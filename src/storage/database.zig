@@ -48,6 +48,8 @@ const NodeStore = node_mod.NodeStore;
 
 const edge_mod = lattice.graph.edge;
 const EdgeStore = edge_mod.EdgeStore;
+pub const EdgeRef = edge_mod.EdgeRef;
+pub const EdgeRefIterator = edge_mod.EdgeStore.EdgeRefIterator;
 
 const label_index_mod = lattice.graph.label_index;
 const LabelIndex = label_index_mod.LabelIndex;
@@ -1868,6 +1870,39 @@ pub const Database = struct {
             self.allocator.free(edge.edge_type);
         }
         self.allocator.free(edges);
+    }
+
+    /// Get lightweight iterator for outgoing edges (no property deserialization).
+    /// Returns EdgeRef containing only (source, target, edge_type_id).
+    /// Ideal for graph traversal (BFS/DFS) where properties are not needed.
+    /// Caller must call iter.deinit() when done.
+    pub fn getOutgoingEdgeRefs(self: *Self, node_id: NodeId) !EdgeRefIterator {
+        return self.edge_store.getOutgoingRefs(node_id) catch {
+            return DatabaseError.IoError;
+        };
+    }
+
+    /// Get lightweight iterator for incoming edges (no property deserialization).
+    /// Returns EdgeRef containing only (source, target, edge_type_id).
+    /// Caller must call iter.deinit() when done.
+    pub fn getIncomingEdgeRefs(self: *Self, node_id: NodeId) !EdgeRefIterator {
+        return self.edge_store.getIncomingRefs(node_id) catch {
+            return DatabaseError.IoError;
+        };
+    }
+
+    /// Get outgoing edge refs for multiple nodes in a single B+Tree scan.
+    /// Optimized for BFS workloads - exploits B+Tree key ordering.
+    /// Returns BatchEdgeResults with edges for all input nodes.
+    /// Caller must call result.deinit() when done.
+    pub fn getOutgoingEdgeRefsBatch(
+        self: *Self,
+        node_ids: []const NodeId,
+        allocator: Allocator,
+    ) DatabaseError!edge_mod.BatchEdgeResults {
+        return self.edge_store.getOutgoingRefsBatch(node_ids, allocator) catch {
+            return DatabaseError.IoError;
+        };
     }
 
     // ========================================================================

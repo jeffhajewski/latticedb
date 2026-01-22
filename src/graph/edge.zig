@@ -76,6 +76,40 @@ pub const Edge = struct {
     }
 };
 
+/// Lightweight edge reference containing only traversal-relevant fields.
+/// No allocations - all data extracted from the 19-byte key.
+pub const EdgeRef = struct {
+    source: NodeId,
+    target: NodeId,
+    edge_type: SymbolId,
+};
+
+/// Result for a single node's edges in batch operation
+pub const BatchEdgeResult = struct {
+    node_id: NodeId,
+    edges_start: usize, // Index into shared edge buffer
+    edges_len: usize,
+};
+
+/// Full batch result with ownership. Contains edges for multiple nodes
+/// collected in a single B+Tree scan, exploiting key ordering.
+pub const BatchEdgeResults = struct {
+    results: []BatchEdgeResult, // One per input node (in sorted order)
+    edges: []EdgeRef, // All edges, contiguous
+    allocator: Allocator,
+
+    pub fn deinit(self: *BatchEdgeResults) void {
+        self.allocator.free(self.results);
+        self.allocator.free(self.edges);
+    }
+
+    /// Get edges for a specific result index
+    pub fn getEdges(self: *const BatchEdgeResults, idx: usize) []const EdgeRef {
+        const r = self.results[idx];
+        return self.edges[r.edges_start..][0..r.edges_len];
+    }
+};
+
 /// Edge key for B+Tree lookups
 pub const EdgeKey = struct {
     source: NodeId,
@@ -319,6 +353,54 @@ pub const EdgeStore = struct {
         }
     };
 
+    /// Lightweight iterator that returns EdgeRef without deserializing properties.
+    /// Zero allocations per iteration - ideal for graph traversal (BFS/DFS).
+    pub const EdgeRefIterator = struct {
+        tree_iter: btree.BTree.Iterator,
+        done: bool,
+        /// Owned copy of end_key for manual checking (BTree Iterator's end_key slice would dangle)
+        end_key_storage: [19]u8,
+
+        /// Get the next edge reference in the range.
+        /// Returns EdgeRef with source, target, and edge_type_id.
+        /// No allocations - caller does not need to free anything.
+        pub fn next(self: *EdgeRefIterator) EdgeError!?EdgeRef {
+            if (self.done) return null;
+
+            const entry = self.tree_iter.next() catch |err| {
+                self.done = true;
+                return mapBTreeError(err);
+            };
+
+            if (entry) |e| {
+                // Manual end_key check since we can't use the BTree iterator's end_key
+                if (std.mem.order(u8, e.key, &self.end_key_storage) != .lt) {
+                    self.done = true;
+                    return null;
+                }
+
+                const key = EdgeKey.fromBytes(e.key);
+                // Reconstruct source/target based on direction
+                const source = if (key.direction == .outgoing) key.source else key.target;
+                const target = if (key.direction == .outgoing) key.target else key.source;
+
+                return EdgeRef{
+                    .source = source,
+                    .target = target,
+                    .edge_type = key.edge_type,
+                };
+            } else {
+                self.done = true;
+                return null;
+            }
+        }
+
+        /// Clean up iterator resources
+        pub fn deinit(self: *EdgeRefIterator) void {
+            self.tree_iter.deinit();
+        }
+    };
+
     /// Get all outgoing edges from a node
     pub fn getOutgoing(self: *Self, node_id: NodeId) EdgeError!EdgeIterator {
         // Range: (node_id, OUTGOING, 0, 0) to (node_id, INCOMING, 0, 0)
@@ -442,6 +524,290 @@ pub const EdgeStore = struct {
             .allocator = self.allocator,
             .done = false,
             .end_key_storage = end_bytes,
+        };
+    }
+
+    // ========================================================================
+    // Lightweight Edge Reference Queries (No Property Deserialization)
+    // ========================================================================
+
+    /// Get lightweight iterator for outgoing edges (no property deserialization).
+    /// Returns EdgeRef containing only (source, target, edge_type_id).
+    /// Ideal for graph traversal (BFS/DFS) where properties are not needed.
+    pub fn getOutgoingRefs(self: *Self, node_id: NodeId) EdgeError!EdgeRefIterator {
+        // Range: (node_id, OUTGOING, 0, 0) to (node_id, INCOMING, 0, 0)
+        const start_key = EdgeKey{
+            .source = node_id,
+            .direction = .outgoing,
+            .edge_type = 0,
+            .target = 0,
+        };
+        const end_key = EdgeKey{
+            .source = node_id,
+            .direction = .incoming, // Stop before incoming edges
+            .edge_type = 0,
+            .target = 0,
+        };
+
+        const start_bytes = start_key.toBytes();
+        const end_bytes = end_key.toBytes();
+
+        const tree_iter = self.tree.range(&start_bytes, null) catch |err| {
+            return mapBTreeError(err);
+        };
+
+        return EdgeRefIterator{
+            .tree_iter = tree_iter,
+            .done = false,
+            .end_key_storage = end_bytes,
+        };
+    }
+
+    /// Get lightweight iterator for incoming edges (no property deserialization).
+    /// Returns EdgeRef containing only (source, target, edge_type_id).
+    pub fn getIncomingRefs(self: *Self, node_id: NodeId) EdgeError!EdgeRefIterator {
+        // Range: (node_id, INCOMING, 0, 0) to (node_id + 1, OUTGOING, 0, 0)
+        const start_key = EdgeKey{
+            .source = node_id,
+            .direction = .incoming,
+            .edge_type = 0,
+            .target = 0,
+        };
+        const end_key = EdgeKey{
+            .source = node_id +| 1,
+            .direction = .outgoing,
+            .edge_type = 0,
+            .target = 0,
+        };
+
+        const start_bytes = start_key.toBytes();
+        const end_bytes = end_key.toBytes();
+
+        const tree_iter = self.tree.range(&start_bytes, null) catch |err| {
+            return mapBTreeError(err);
+        };
+
+        return EdgeRefIterator{
+            .tree_iter = tree_iter,
+            .done = false,
+            .end_key_storage = end_bytes,
+        };
+    }
+
+    /// Get lightweight iterator for outgoing edges of a specific type.
+    pub fn getOutgoingRefsByType(self: *Self, node_id: NodeId, edge_type: SymbolId) EdgeError!EdgeRefIterator {
+        // Range: (node_id, OUTGOING, type, 0) to (node_id, OUTGOING, type + 1, 0)
+        const start_key = EdgeKey{
+            .source = node_id,
+            .direction = .outgoing,
+            .edge_type = edge_type,
+            .target = 0,
+        };
+        const end_key = EdgeKey{
+            .source = node_id,
+            .direction = .outgoing,
+            .edge_type = edge_type +| 1,
+            .target = 0,
+        };
+
+        const start_bytes = start_key.toBytes();
+        const end_bytes = end_key.toBytes();
+
+        const tree_iter = self.tree.range(&start_bytes, null) catch |err| {
+            return mapBTreeError(err);
+        };
+
+        return EdgeRefIterator{
+            .tree_iter = tree_iter,
+            .done = false,
+            .end_key_storage = end_bytes,
+        };
+    }
+
+    /// Get lightweight iterator for incoming edges of a specific type.
+    pub fn getIncomingRefsByType(self: *Self, node_id: NodeId, edge_type: SymbolId) EdgeError!EdgeRefIterator {
+        // Range: (node_id, INCOMING, type, 0) to (node_id, INCOMING, type + 1, 0)
+        const start_key = EdgeKey{
+            .source = node_id,
+            .direction = .incoming,
+            .edge_type = edge_type,
+            .target = 0,
+        };
+        const end_key = EdgeKey{
+            .source = node_id,
+            .direction = .incoming,
+            .edge_type = edge_type +| 1,
+            .target = 0,
+        };
+
+        const start_bytes = start_key.toBytes();
+        const end_bytes = end_key.toBytes();
+
+        const tree_iter = self.tree.range(&start_bytes, null) catch |err| {
+            return mapBTreeError(err);
+        };
+
+        return EdgeRefIterator{
+            .tree_iter = tree_iter,
+            .done = false,
+            .end_key_storage = end_bytes,
+        };
+    }
+
+    // ========================================================================
+    // Batch Edge Queries (Optimized for BFS)
+    // ========================================================================
+
+    /// Get outgoing edge refs for multiple nodes in a single B+Tree scan.
+    /// Exploits B+Tree key ordering: sorted node IDs produce sorted key ranges.
+    /// Significantly faster than individual getOutgoingRefs calls for BFS.
+    ///
+    /// Returns BatchEdgeResults with edges for all input nodes. The results
+    /// are ordered by sorted node_id, not the original input order.
+    pub fn getOutgoingRefsBatch(
+        self: *Self,
+        node_ids: []const NodeId,
+        alloc: Allocator,
+    ) EdgeError!BatchEdgeResults {
+        if (node_ids.len == 0) {
+            return BatchEdgeResults{
+                .results = &.{},
+                .edges = &.{},
+                .allocator = alloc,
+            };
+        }
+
+        // 1. Sort node IDs (copy to avoid mutating input)
+        const sorted_ids = alloc.dupe(NodeId, node_ids) catch {
+            return EdgeError.OutOfMemory;
+        };
+        defer alloc.free(sorted_ids);
+        std.mem.sort(NodeId, sorted_ids, {}, std.sort.asc(NodeId));
+
+        // 2. Allocate results array (one per input node)
+        var results = alloc.alloc(BatchEdgeResult, sorted_ids.len) catch {
+            return EdgeError.OutOfMemory;
+        };
+        errdefer alloc.free(results);
+
+        // 3. Collect edges via single scan using unmanaged list
+        var edges = std.ArrayListUnmanaged(EdgeRef){};
+        errdefer edges.deinit(alloc);
+
+        // 4. Start scan from first node's key
+        const start_edge_key = EdgeKey{
+            .source = sorted_ids[0],
+            .direction = .outgoing,
+            .edge_type = 0,
+            .target = 0,
+        };
+        const start_key = start_edge_key.toBytes();
+
+        var tree_iter = self.tree.range(&start_key, null) catch |err| {
+            return mapBTreeError(err);
+        };
+        defer tree_iter.deinit();
+
+        // 5. Scan through B+Tree collecting edges for each node.
+        // Use a pending_key buffer to avoid losing entries consumed from the iterator.
+        var node_idx: usize = 0;
+        var edges_start: usize = 0;
+        var pending_key: ?[19]u8 = null; // Buffered key from lookahead
+        var iter_exhausted = false;
+
+        while (node_idx < sorted_ids.len) {
+            const current_node = sorted_ids[node_idx];
+
+            // End boundary: first incoming edge for this node
+            const end_edge_key = EdgeKey{
+                .source = current_node,
+                .direction = .incoming,
+                .edge_type = 0,
+                .target = 0,
+            };
+            const end_key = end_edge_key.toBytes();
+
+            // Collect outgoing edges for current_node
+            while (true) {
+                // Get next key: from pending buffer or from iterator
+                var key_bytes: [19]u8 = undefined;
+
+                if (pending_key) |pk| {
+                    key_bytes = pk;
+                    pending_key = null;
+                } else if (iter_exhausted) {
+                    break;
+                } else {
+                    const entry = tree_iter.next() catch |err| {
+                        return mapBTreeError(err);
+                    };
+                    if (entry) |e| {
+                        @memcpy(&key_bytes, e.key[0..19]);
+                    } else {
+                        iter_exhausted = true;
+                        break;
+                    }
+                }
+
+                // Check if past current node's outgoing range
+                if (std.mem.order(u8, &key_bytes, &end_key) != .lt) {
+                    // Save for next node and stop collecting
+                    pending_key = key_bytes;
+                    break;
+                }
+
+                // Only collect outgoing edges from current_node
+                const key = EdgeKey.fromBytes(&key_bytes);
+                if (key.source == current_node and key.direction == .outgoing) {
+                    edges.append(alloc, EdgeRef{
+                        .source = key.source,
+                        .target = key.target,
+                        .edge_type = key.edge_type,
+                    }) catch {
+                        return EdgeError.OutOfMemory;
+                    };
+                }
+            }
+
+            // Record result for this node
+            results[node_idx] = .{
+                .node_id = current_node,
+                .edges_start = edges_start,
+                .edges_len = edges.items.len - edges_start,
+            };
+            edges_start = edges.items.len;
+            node_idx += 1;
+
+            // Skip nodes that are before the pending key's source
+            if (pending_key) |pk| {
+                const pk_source = std.mem.readInt(u64, pk[0..8], .big);
+                while (node_idx < sorted_ids.len and sorted_ids[node_idx] < pk_source) {
+                    results[node_idx] = .{
+                        .node_id = sorted_ids[node_idx],
+                        .edges_start = edges_start,
+                        .edges_len = 0,
+                    };
+                    node_idx += 1;
+                }
+            } else if (iter_exhausted) {
+                // Fill remaining nodes with empty results
+                while (node_idx < sorted_ids.len) {
+                    results[node_idx] = .{
+                        .node_id = sorted_ids[node_idx],
+                        .edges_start = edges_start,
+                        .edges_len = 0,
+                    };
+                    node_idx += 1;
+                }
+            }
+        }
+
+        return BatchEdgeResults{
+            .results = results,
+            .edges = edges.toOwnedSlice(alloc) catch {
+                return EdgeError.OutOfMemory;
+            },
+            .allocator = alloc,
         };
     }
 
@@ -969,4 +1335,184 @@ test "edge store delete" {
 
     // Deleting again should fail with NotFound
     try std.testing.expectError(EdgeError.NotFound, store.delete(1, 2, edge_type));
+}
+
+test "batch edge fetch matches individual fetches" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const buffer_pool = lattice.storage.buffer_pool;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_edge_batch_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try buffer_pool.BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var tree = try BTree.init(allocator, &bp);
+
+    var store = EdgeStore.init(allocator, &tree);
+
+    // Create a graph with gaps in node IDs to test sparse batching:
+    // Node 1 -> 10, 20
+    // Node 5 -> 30
+    // Node 10 -> 1, 5
+    // Node 50 -> 1
+    // Node 100 (no outgoing edges)
+    const type_a: SymbolId = 100;
+    const type_b: SymbolId = 200;
+
+    try store.create(1, 10, type_a, &[_]Property{});
+    try store.create(1, 20, type_b, &[_]Property{});
+    try store.create(5, 30, type_a, &[_]Property{});
+    try store.create(10, 1, type_a, &[_]Property{});
+    try store.create(10, 5, type_b, &[_]Property{});
+    try store.create(50, 1, type_a, &[_]Property{});
+
+    // Test batch fetch for nodes [1, 5, 10, 50, 100] (includes gaps and a node with no edges)
+    const batch_nodes = [_]NodeId{ 100, 5, 1, 50, 10 }; // Unsorted to test sorting
+    var batch_result = try store.getOutgoingRefsBatch(&batch_nodes, allocator);
+    defer batch_result.deinit();
+
+    // Verify we got 5 results (one per node)
+    try std.testing.expectEqual(@as(usize, 5), batch_result.results.len);
+
+    // Results should be sorted by node_id
+    try std.testing.expectEqual(@as(NodeId, 1), batch_result.results[0].node_id);
+    try std.testing.expectEqual(@as(NodeId, 5), batch_result.results[1].node_id);
+    try std.testing.expectEqual(@as(NodeId, 10), batch_result.results[2].node_id);
+    try std.testing.expectEqual(@as(NodeId, 50), batch_result.results[3].node_id);
+    try std.testing.expectEqual(@as(NodeId, 100), batch_result.results[4].node_id);
+
+    // Verify edge counts match individual fetches
+    // Node 1: 2 outgoing edges
+    try std.testing.expectEqual(@as(usize, 2), batch_result.getEdges(0).len);
+    // Node 5: 1 outgoing edge
+    try std.testing.expectEqual(@as(usize, 1), batch_result.getEdges(1).len);
+    // Node 10: 2 outgoing edges
+    try std.testing.expectEqual(@as(usize, 2), batch_result.getEdges(2).len);
+    // Node 50: 1 outgoing edge
+    try std.testing.expectEqual(@as(usize, 1), batch_result.getEdges(3).len);
+    // Node 100: 0 outgoing edges
+    try std.testing.expectEqual(@as(usize, 0), batch_result.getEdges(4).len);
+
+    // Verify actual edge data matches individual iterator results
+    // Node 1's edges
+    const node1_edges = batch_result.getEdges(0);
+    try std.testing.expectEqual(@as(NodeId, 1), node1_edges[0].source);
+    try std.testing.expectEqual(@as(NodeId, 10), node1_edges[0].target);
+    try std.testing.expectEqual(type_a, node1_edges[0].edge_type);
+    try std.testing.expectEqual(@as(NodeId, 1), node1_edges[1].source);
+    try std.testing.expectEqual(@as(NodeId, 20), node1_edges[1].target);
+    try std.testing.expectEqual(type_b, node1_edges[1].edge_type);
+
+    // Node 5's edges
+    const node5_edges = batch_result.getEdges(1);
+    try std.testing.expectEqual(@as(NodeId, 5), node5_edges[0].source);
+    try std.testing.expectEqual(@as(NodeId, 30), node5_edges[0].target);
+
+    // Node 10's edges
+    const node10_edges = batch_result.getEdges(2);
+    try std.testing.expectEqual(@as(NodeId, 10), node10_edges[0].source);
+    try std.testing.expectEqual(@as(NodeId, 1), node10_edges[0].target);
+    try std.testing.expectEqual(@as(NodeId, 10), node10_edges[1].source);
+    try std.testing.expectEqual(@as(NodeId, 5), node10_edges[1].target);
+
+    // Cross-check against individual getOutgoingRefs
+    for (batch_result.results, 0..) |result, i| {
+        var iter = try store.getOutgoingRefs(result.node_id);
+        defer iter.deinit();
+
+        const batch_edges = batch_result.getEdges(i);
+        var individual_count: usize = 0;
+        while (try iter.next()) |ref| {
+            try std.testing.expect(individual_count < batch_edges.len);
+            try std.testing.expectEqual(ref.source, batch_edges[individual_count].source);
+            try std.testing.expectEqual(ref.target, batch_edges[individual_count].target);
+            try std.testing.expectEqual(ref.edge_type, batch_edges[individual_count].edge_type);
+            individual_count += 1;
+        }
+        try std.testing.expectEqual(batch_edges.len, individual_count);
+    }
+}
+
+test "batch edge fetch empty input" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const buffer_pool = lattice.storage.buffer_pool;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_edge_batch_empty_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try buffer_pool.BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var tree = try BTree.init(allocator, &bp);
+
+    var store = EdgeStore.init(allocator, &tree);
+
+    // Empty batch
+    const empty: []const NodeId = &.{};
+    var result = try store.getOutgoingRefsBatch(empty, allocator);
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 0), result.results.len);
+    try std.testing.expectEqual(@as(usize, 0), result.edges.len);
+}
+
+test "batch edge fetch nodes with no edges" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const buffer_pool = lattice.storage.buffer_pool;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_edge_batch_noedges_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try buffer_pool.BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var tree = try BTree.init(allocator, &bp);
+
+    var store = EdgeStore.init(allocator, &tree);
+
+    // Query nodes that don't exist in the tree
+    const nodes = [_]NodeId{ 999, 1000, 1001 };
+    var result = try store.getOutgoingRefsBatch(&nodes, allocator);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), result.results.len);
+    for (0..3) |i| {
+        try std.testing.expectEqual(@as(usize, 0), result.getEdges(i).len);
+    }
 }

@@ -54,6 +54,10 @@ pub const EdgeRefIterator = edge_mod.EdgeStore.EdgeRefIterator;
 const label_index_mod = lattice.graph.label_index;
 const LabelIndex = label_index_mod.LabelIndex;
 
+const adjacency_cache_mod = lattice.graph.adjacency_cache;
+const AdjacencyCache = adjacency_cache_mod.AdjacencyCache;
+pub const CachedEdge = adjacency_cache_mod.CachedEdge;
+
 // FTS
 const fts_mod = lattice.fts.index;
 const FtsIndex = fts_mod.FtsIndex;
@@ -239,18 +243,28 @@ pub const DatabaseConfig = struct {
     enable_vector: bool = false,
     /// Vector dimensions (required if enable_vector is true)
     vector_dimensions: u16 = 128,
+    /// Enable in-memory adjacency cache for accelerated graph traversals
+    enable_adjacency_cache: bool = false,
 
-    /// Compute effective buffer pool size based on enabled features
-    /// - Base: 4MB for simple graph operations
-    /// - FTS enabled: 16MB (dictionary B+Tree, posting lists)
-    /// - Vector enabled: 16MB (HNSW connections, vector pages)
-    /// - Both enabled: 32MB
+    /// Compute effective buffer pool size based on enabled features.
+    /// Priority: LATTICE_BUFFER_POOL_MB env var > explicit buffer_pool_size > auto-sizing.
+    /// Auto-sizing:
+    /// - Base: 16MB for graph operations (covers ~50K edges comfortably)
+    /// - FTS enabled: +12MB (dictionary B+Tree, posting lists)
+    /// - Vector enabled: +12MB (HNSW connections, vector pages)
     pub fn effectiveBufferPoolSize(self: DatabaseConfig) usize {
+        // Environment variable override (useful for tuning without recompilation)
+        if (std.posix.getenv("LATTICE_BUFFER_POOL_MB")) |mb_str| {
+            if (std.fmt.parseInt(usize, mb_str, 10)) |mb| {
+                if (mb > 0) return mb * 1024 * 1024;
+            } else |_| {}
+        }
+
         if (self.buffer_pool_size > 0) {
             return self.buffer_pool_size;
         }
 
-        const base_size: usize = 4 * 1024 * 1024; // 4MB
+        const base_size: usize = 16 * 1024 * 1024; // 16MB
         const fts_size: usize = if (self.enable_fts) 12 * 1024 * 1024 else 0; // +12MB
         const vector_size: usize = if (self.enable_vector) 12 * 1024 * 1024 else 0; // +12MB
 
@@ -301,6 +315,9 @@ pub const Database = struct {
 
     // Transactions
     txn_manager: ?TxnManager,
+
+    // Caches
+    adjacency_cache: ?AdjacencyCache,
 
     // Configuration
     config: DatabaseConfig,
@@ -450,6 +467,12 @@ pub const Database = struct {
             self.txn_manager = TxnManager.init(allocator, wal);
         }
 
+        // 10. Initialize Adjacency Cache (optional)
+        self.adjacency_cache = if (options.config.enable_adjacency_cache)
+            AdjacencyCache.init(allocator)
+        else
+            null;
+
         return self;
     }
 
@@ -481,6 +504,11 @@ pub const Database = struct {
     /// For guaranteed durability, call sync() first and handle errors.
     pub fn close(self: *Self) void {
         // Reverse initialization order
+
+        // 10. Adjacency cache
+        if (self.adjacency_cache) |*cache| {
+            cache.deinit();
+        }
 
         // 9. Transaction manager
         if (self.txn_manager) |*tm| {
@@ -1716,6 +1744,11 @@ pub const Database = struct {
                 };
             }
         }
+
+        // Invalidate adjacency cache for source node
+        if (self.adjacency_cache) |*cache| {
+            cache.invalidate(source);
+        }
     }
 
     /// Delete an edge
@@ -1774,6 +1807,11 @@ pub const Database = struct {
         self.edge_store.delete(source, target, type_id) catch {
             return DatabaseError.IoError;
         };
+
+        // Invalidate adjacency cache for source node
+        if (self.adjacency_cache) |*cache| {
+            cache.invalidate(source);
+        }
     }
 
     /// Check if an edge exists
@@ -1880,6 +1918,24 @@ pub const Database = struct {
         return self.edge_store.getOutgoingRefs(node_id) catch {
             return DatabaseError.IoError;
         };
+    }
+
+    /// Get cached outgoing edges for a node. If the adjacency cache is enabled
+    /// and the node is cached, returns the cached slice directly (no B+Tree access).
+    /// On cache miss, populates the cache from the B+Tree and returns the result.
+    /// Falls back to the uncached iterator path if the cache is disabled.
+    pub fn getOutgoingEdgesCached(self: *Self, node_id: NodeId) !?[]const CachedEdge {
+        if (self.adjacency_cache) |*cache| {
+            if (cache.get(node_id)) |edges| {
+                return edges;
+            }
+            // Cache miss - populate from edge store
+            cache.populateNode(&self.edge_store, node_id) catch {
+                return null; // Fall back to uncached path
+            };
+            return cache.get(node_id);
+        }
+        return null; // Cache not enabled
     }
 
     /// Get lightweight iterator for incoming edges (no property deserialization).

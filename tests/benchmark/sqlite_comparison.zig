@@ -430,6 +430,7 @@ const LatticeDb = struct {
                 .enable_wal = false,
                 .enable_fts = false,
                 .enable_vector = false,
+                .enable_adjacency_cache = true,
             },
         });
 
@@ -551,15 +552,28 @@ const LatticeDb = struct {
             next_level.clearRetainingCapacity();
 
             for (current_level.items) |current| {
-                var iter = self.db.getOutgoingEdgeRefs(current) catch continue;
-                defer iter.deinit();
+                // Try adjacency cache first (warm cache: ~50ns per node)
+                if (self.db.getOutgoingEdgesCached(current) catch null) |cached_edges| {
+                    for (cached_edges) |edge| {
+                        const target: usize = @intCast(edge.target);
+                        if (!visited.isSet(target)) {
+                            visited.set(target);
+                            visited_count += 1;
+                            next_level.append(allocator, edge.target) catch continue;
+                        }
+                    }
+                } else {
+                    // Fallback: uncached B+Tree iterator path
+                    var iter = self.db.getOutgoingEdgeRefs(current) catch continue;
+                    defer iter.deinit();
 
-                while (iter.next() catch null) |edge_ref| {
-                    const target: usize = @intCast(edge_ref.target);
-                    if (!visited.isSet(target)) {
-                        visited.set(target);
-                        visited_count += 1;
-                        next_level.append(allocator, edge_ref.target) catch continue;
+                    while (iter.next() catch null) |edge_ref| {
+                        const target: usize = @intCast(edge_ref.target);
+                        if (!visited.isSet(target)) {
+                            visited.set(target);
+                            visited_count += 1;
+                            next_level.append(allocator, edge_ref.target) catch continue;
+                        }
                     }
                 }
             }

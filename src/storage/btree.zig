@@ -1082,6 +1082,35 @@ pub const BTree = struct {
             return entry;
         }
 
+        /// Reposition the iterator to the first entry >= key.
+        /// Optimized for forward seeks: if key is on the current leaf page,
+        /// avoids root-to-leaf traversal entirely.
+        pub fn seekForward(self: *Iterator, key: []const u8) BTreeError!void {
+            if (self.current_frame) |frame| {
+                // Fast path: check if key is within current leaf's range
+                const num_entries = LeafNode.getNumEntries(frame.data);
+                if (num_entries > 0) {
+                    const last_key = LeafNode.getKey(frame.data, num_entries - 1);
+                    if (self.tree.comparator(key, last_key) != .gt) {
+                        // Key is within this page - binary search for slot
+                        const result = LeafNode.searchSlot(frame.data, key, self.tree.comparator);
+                        self.current_slot = result.slot;
+                        return;
+                    }
+                }
+                // Key is beyond current page - unpin and do full traversal
+                self.tree.bp.unpinPage(frame, false);
+                self.current_frame = null;
+            }
+
+            // Fall back to full tree traversal
+            const leaf_page = try self.tree.findLeafForKey(key);
+            const new_frame = self.tree.bp.fetchPage(leaf_page, .shared) catch return BTreeError.BufferPoolFull;
+            const result = LeafNode.searchSlot(new_frame.data, key, self.tree.comparator);
+            self.current_frame = new_frame;
+            self.current_slot = result.slot;
+        }
+
         /// Clean up the iterator
         pub fn deinit(self: *Iterator) void {
             if (self.current_frame) |frame| {

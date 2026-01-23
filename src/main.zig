@@ -85,6 +85,7 @@ pub const graph = struct {
     pub const node = @import("graph/node.zig");
     pub const edge = @import("graph/edge.zig");
     pub const label_index = @import("graph/label_index.zig");
+    pub const adjacency_cache = @import("graph/adjacency_cache.zig");
 };
 
 // C API - explicitly export all C API functions for shared library
@@ -204,6 +205,9 @@ pub const LabelIndex = graph.label_index.LabelIndex;
 pub const LabelKey = graph.label_index.LabelKey;
 pub const LabelIndexError = graph.label_index.LabelIndexError;
 pub const LabelNodeIterator = graph.label_index.LabelIndex.NodeIterator;
+
+pub const AdjacencyCache = graph.adjacency_cache.AdjacencyCache;
+pub const CachedEdge = graph.adjacency_cache.CachedEdge;
 
 // Full-text search re-exports
 pub const FtsIndex = fts.index.FtsIndex;

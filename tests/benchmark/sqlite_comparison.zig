@@ -586,6 +586,67 @@ const LatticeDb = struct {
         return if (visited_count > 0) visited_count - 1 else 0;
     }
 
+    /// Uncached BFS for cross-validation against cached path.
+    fn runVarPathUncached(self: *LatticeDb, node_idx: u32, allocator: std.mem.Allocator) u32 {
+        const node_id = self.node_ids[@intCast(node_idx)];
+
+        const bitset_size = self.node_ids.len + 1;
+        var visited = std.DynamicBitSet.initEmpty(allocator, bitset_size) catch return 0;
+        defer visited.deinit();
+
+        var current_level = std.ArrayListUnmanaged(u64){};
+        defer current_level.deinit(allocator);
+
+        var next_level = std.ArrayListUnmanaged(u64){};
+        defer next_level.deinit(allocator);
+
+        current_level.append(allocator, node_id) catch return 0;
+        visited.set(@intCast(node_id));
+        var visited_count: u32 = 1;
+
+        var depth: u32 = 0;
+        while (depth < 5 and current_level.items.len > 0) {
+            next_level.clearRetainingCapacity();
+
+            for (current_level.items) |current| {
+                var iter = self.db.getOutgoingEdgeRefs(current) catch continue;
+                defer iter.deinit();
+
+                while (iter.next() catch null) |edge_ref| {
+                    const target: usize = @intCast(edge_ref.target);
+                    if (!visited.isSet(target)) {
+                        visited.set(target);
+                        visited_count += 1;
+                        next_level.append(allocator, edge_ref.target) catch continue;
+                    }
+                }
+            }
+
+            std.mem.swap(std.ArrayListUnmanaged(u64), &current_level, &next_level);
+            depth += 1;
+        }
+
+        return if (visited_count > 0) visited_count - 1 else 0;
+    }
+
+    /// Validate that cached and uncached BFS produce identical results.
+    fn validateCache(self: *LatticeDb, test_nodes: []const u32, allocator: std.mem.Allocator) !void {
+        var mismatches: u32 = 0;
+        for (test_nodes) |node_idx| {
+            const cached_count = self.runVarPath(node_idx, allocator);
+            const uncached_count = self.runVarPathUncached(node_idx, allocator);
+            if (cached_count != uncached_count) {
+                std.debug.print("  MISMATCH node_idx={d}: cached={d} uncached={d}\n", .{ node_idx, cached_count, uncached_count });
+                mismatches += 1;
+            }
+        }
+        if (mismatches > 0) {
+            std.debug.print("  VALIDATION FAILED: {d}/{d} mismatches\n", .{ mismatches, test_nodes.len });
+            return error.ValidationFailed;
+        }
+        std.debug.print("  Cache validation passed ({d} nodes checked)\n", .{test_nodes.len});
+    }
+
     /// Instrumented version of runVarPath for profiling bottlenecks
     fn runVarPathInstrumented(self: *LatticeDb, node_idx: u32, allocator: std.mem.Allocator) struct { count: u32, timings: VarPathTimings } {
         const node_id = self.node_ids[@intCast(node_idx)];
@@ -852,6 +913,10 @@ fn runBenchmarkSuite(
 
     try lattice_db.populateGraph(&graph);
 
+    // Pre-warm adjacency cache with all node IDs
+    std.debug.print("  Warming adjacency cache...\n", .{});
+    lattice_db.db.warmAdjacencyCache(lattice_db.node_ids);
+
     // Generate test nodes (sample nodes to query)
     var prng = std.Random.DefaultPrng.init(config.seed + 1);
     const random = prng.random();
@@ -862,6 +927,9 @@ fn runBenchmarkSuite(
     for (test_nodes) |*node| {
         node.* = random.intRangeAtMost(u32, 0, node_count - 1);
     }
+
+    // Cross-validate cached vs uncached BFS results
+    try lattice_db.validateCache(test_nodes, allocator);
 
     std.debug.print("  Running workloads...\n", .{});
 

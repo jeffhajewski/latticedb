@@ -1938,6 +1938,15 @@ pub const Database = struct {
         return null; // Cache not enabled
     }
 
+    /// Pre-warm the adjacency cache for the given node IDs.
+    /// Populates cache entries by reading from the edge B+Tree in sorted order
+    /// to exploit key locality. No-op if the adjacency cache is disabled.
+    pub fn warmAdjacencyCache(self: *Self, node_ids: []const NodeId) void {
+        if (self.adjacency_cache) |*cache| {
+            cache.populateFrom(&self.edge_store, node_ids) catch {};
+        }
+    }
+
     /// Get lightweight iterator for incoming edges (no property deserialization).
     /// Returns EdgeRef containing only (source, target, edge_type_id).
     /// Caller must call iter.deinit() when done.

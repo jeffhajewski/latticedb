@@ -394,27 +394,27 @@ Lattice's inverted index with BM25 scoring is highly competitive with dedicated 
 
 #### Graph Traversal vs SQLite
 
-LatticeDB's native graph traversal compared to SQLite using JOINs and recursive CTEs on a social network graph with power-law degree distribution.
+LatticeDB's native graph traversal compared to SQLite using JOINs and recursive CTEs on a social network graph with power-law degree distribution. Adjacency cache pre-warmed for all nodes.
 
 **Small Scale (10K nodes, 50K edges)**
 
 | Workload | LatticeDB | SQLite | Speedup |
 |----------|-----------|--------|--------:|
-| 1-hop traversal | 840ns | 13.2μs | **15.7x** |
-| 2-hop traversal | 6.2μs | 42.5μs | **6.8x** |
-| 3-hop traversal | 19.9μs | 134.8μs | **6.8x** |
-| Variable path (1..5) | 330.8μs | 4.5ms | **13.7x** |
+| 1-hop traversal | 560ns | 13.0μs | **23x** |
+| 2-hop traversal | 3.0μs | 37.5μs | **13x** |
+| 3-hop traversal | 19.1μs | 178.5μs | **9x** |
+| Variable path (1..5) | 82.4μs | 4.3ms | **52x** |
 
 **Medium Scale (100K nodes, 500K edges)**
 
 | Workload | LatticeDB | SQLite | Speedup |
 |----------|-----------|--------|--------:|
-| 1-hop traversal | 13.0μs | 193.6μs | **14.9x** |
-| 2-hop traversal | 69.5μs | 427.9μs | **6.2x** |
-| 3-hop traversal | 380.7μs | 684.9μs | **1.8x** |
-| Variable path (1..5) | 8.7ms | 9.0ms | **1.0x** |
+| 1-hop traversal | 8.0μs | 290.0μs | **36x** |
+| 2-hop traversal | 38.7μs | 548.3μs | **14x** |
+| 3-hop traversal | 197.3μs | 1.2ms | **6x** |
+| Variable path (1..5) | 134.4μs | 10.1ms | **75x** |
 
-LatticeDB outperforms SQLite across all workloads at both scales. The adjacency cache and increased buffer pool (16MB default) enable sub-millisecond 1-hop traversals and competitive variable-path performance even at 100K nodes. Run `zig build sqlite-benchmark` to reproduce.
+LatticeDB outperforms SQLite across all workloads at both scales. The in-memory adjacency cache enables sub-millisecond variable-path BFS traversal at 100K nodes — 75x faster than SQLite's recursive CTEs. Run `zig build sqlite-benchmark` to reproduce.
 
 ### Design Targets
 

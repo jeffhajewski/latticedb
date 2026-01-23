@@ -400,21 +400,21 @@ LatticeDB's native graph traversal compared to SQLite using JOINs and recursive 
 
 | Workload | LatticeDB | SQLite | Speedup |
 |----------|-----------|--------|--------:|
-| 1-hop traversal | 10 us | 12 us | 1.2x |
-| 2-hop traversal | 33 us | 42 us | 1.3x |
-| 3-hop traversal | 139 us | 124 us | 0.9x |
-| Variable path (1..5) | 9.3 ms | 4.1 ms | 0.4x |
+| 1-hop traversal | 840ns | 13.2μs | **15.7x** |
+| 2-hop traversal | 6.2μs | 42.5μs | **6.8x** |
+| 3-hop traversal | 19.9μs | 134.8μs | **6.8x** |
+| Variable path (1..5) | 330.8μs | 4.5ms | **13.7x** |
 
 **Medium Scale (100K nodes, 500K edges)**
 
 | Workload | LatticeDB | SQLite | Speedup |
 |----------|-----------|--------|--------:|
-| 1-hop traversal | 35 us | 1.0 ms | **30x** |
-| 2-hop traversal | 162 us | 1.9 ms | **12x** |
-| 3-hop traversal | 835 us | 1.9 ms | **2.3x** |
-| Variable path (1..5) | 27 ms | 8.4 ms | 0.3x |
+| 1-hop traversal | 13.0μs | 193.6μs | **14.9x** |
+| 2-hop traversal | 69.5μs | 427.9μs | **6.2x** |
+| 3-hop traversal | 380.7μs | 684.9μs | **1.8x** |
+| Variable path (1..5) | 8.7ms | 9.0ms | **1.0x** |
 
-At small scale, both databases perform similarly. At medium scale, LatticeDB's native edge indexes dominate for fixed-hop traversals (up to 30x faster), while SQLite's recursive CTE implementation is more efficient for variable-length path queries. Run `zig build sqlite-benchmark` to reproduce.
+LatticeDB outperforms SQLite across all workloads at both scales. The adjacency cache and increased buffer pool (16MB default) enable sub-millisecond 1-hop traversals and competitive variable-path performance even at 100K nodes. Run `zig build sqlite-benchmark` to reproduce.
 
 ### Design Targets
 

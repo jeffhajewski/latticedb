@@ -78,9 +78,9 @@ pub const Entry = struct {
 // ============================================================================
 
 /// Internal node helper functions
-const InternalNode = struct {
+pub const InternalNode = struct {
     /// Get number of keys in this internal node
-    fn getNumKeys(buf: []const u8) u16 {
+    pub fn getNumKeys(buf: []const u8) u16 {
         return std.mem.readInt(u16, buf[@sizeOf(PageHeader)..][0..2], .little);
     }
 
@@ -90,7 +90,7 @@ const InternalNode = struct {
     }
 
     /// Get level (0 = just above leaves)
-    fn getLevel(buf: []const u8) u16 {
+    pub fn getLevel(buf: []const u8) u16 {
         return std.mem.readInt(u16, buf[@sizeOf(PageHeader) + 2 ..][0..2], .little);
     }
 
@@ -100,7 +100,7 @@ const InternalNode = struct {
     }
 
     /// Get rightmost child pointer
-    fn getRightChild(buf: []const u8) PageId {
+    pub fn getRightChild(buf: []const u8) PageId {
         return std.mem.readInt(u32, buf[@sizeOf(PageHeader) + 4 ..][0..4], .little);
     }
 
@@ -116,7 +116,7 @@ const InternalNode = struct {
     }
 
     /// Get child pointer at slot index
-    fn getChild(buf: []const u8, slot: u16) PageId {
+    pub fn getChild(buf: []const u8, slot: u16) PageId {
         const start = INTERNAL_SLOTS_OFFSET + slot * INTERNAL_SLOT_SIZE + 2;
         return std.mem.readInt(u32, buf[start..][0..4], .little);
     }
@@ -129,7 +129,7 @@ const InternalNode = struct {
     }
 
     /// Get key at slot (returns slice into buffer)
-    fn getKey(buf: []const u8, slot: u16) []const u8 {
+    pub fn getKey(buf: []const u8, slot: u16) []const u8 {
         const offset = getKeyOffset(buf, slot);
         const key_len = std.mem.readInt(u16, buf[offset..][0..2], .little);
         return buf[offset + 2 ..][0..key_len];
@@ -164,9 +164,9 @@ const InternalNode = struct {
 };
 
 /// Leaf node helper functions
-const LeafNode = struct {
+pub const LeafNode = struct {
     /// Get number of entries
-    fn getNumEntries(buf: []const u8) u16 {
+    pub fn getNumEntries(buf: []const u8) u16 {
         return std.mem.readInt(u16, buf[@sizeOf(PageHeader)..][0..2], .little);
     }
 
@@ -186,7 +186,7 @@ const LeafNode = struct {
     }
 
     /// Get next leaf pointer
-    fn getNextLeaf(buf: []const u8) PageId {
+    pub fn getNextLeaf(buf: []const u8) PageId {
         return std.mem.readInt(u32, buf[@sizeOf(PageHeader) + 4 ..][0..4], .little);
     }
 
@@ -196,7 +196,7 @@ const LeafNode = struct {
     }
 
     /// Get previous leaf pointer
-    fn getPrevLeaf(buf: []const u8) PageId {
+    pub fn getPrevLeaf(buf: []const u8) PageId {
         return std.mem.readInt(u32, buf[@sizeOf(PageHeader) + 8 ..][0..4], .little);
     }
 
@@ -218,7 +218,7 @@ const LeafNode = struct {
     }
 
     /// Get key at slot
-    fn getKey(buf: []const u8, slot: u16) []const u8 {
+    pub fn getKey(buf: []const u8, slot: u16) []const u8 {
         const offset = getEntryOffset(buf, slot);
         const key_len = std.mem.readInt(u16, buf[offset..][0..2], .little);
         return buf[offset + 4 ..][0..key_len];
@@ -523,8 +523,9 @@ pub const BTree = struct {
         const total = num_entries + 1;
         const split_point = total / 2;
 
-        // IMPORTANT: Read sibling pointer BEFORE reinitializing old_buf
+        // IMPORTANT: Read sibling pointers BEFORE reinitializing old_buf
         const old_next = LeafNode.getNextLeaf(old_buf);
+        const old_prev = LeafNode.getPrevLeaf(old_buf);
 
         // Calculate total size needed for key/value data copies
         var total_data_size: usize = 0;
@@ -583,6 +584,7 @@ pub const BTree = struct {
 
         // Update sibling pointers
         LeafNode.setNextLeaf(old_buf, new_page_id);
+        LeafNode.setPrevLeaf(old_buf, old_prev);
         LeafNode.setPrevLeaf(new_buf, old_page_id);
         LeafNode.setNextLeaf(new_buf, old_next);
 

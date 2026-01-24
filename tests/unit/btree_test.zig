@@ -509,3 +509,286 @@ test "btree: interleaved insert and delete maintains consistency" {
     // Verify sorted order
     try helpers.assertBTreeSortedIteration(&tree, 100);
 }
+
+// ============================================================================
+// Structural: Deep B+Tree split verification
+// ============================================================================
+
+test "btree: root transitions from leaf to internal after first split" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "root_trans");
+    defer db.deinit();
+
+    var tree = try db.createBTree();
+
+    // Initially root is a leaf
+    const stats_before = try helpers.getTreeStats(&tree);
+    try std.testing.expect(stats_before.root_is_leaf);
+    try std.testing.expectEqual(@as(u16, 1), stats_before.height);
+
+    // Insert enough to trigger at least one split
+    for (0..250) |i| {
+        var buf: [32]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "key{d:08}", .{i}) catch unreachable;
+        try tree.insert(key, "value");
+    }
+
+    // After splits, root should be internal
+    const stats_after = try helpers.getTreeStats(&tree);
+    try std.testing.expect(!stats_after.root_is_leaf);
+    try std.testing.expectEqual(@as(u16, 2), stats_after.height);
+    try std.testing.expectEqual(@as(usize, 250), stats_after.total_entries);
+}
+
+test "btree: leaf split distributes entries approximately evenly" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "split_dist");
+    defer db.deinit();
+
+    var tree = try db.createBTree();
+
+    for (0..250) |i| {
+        var buf: [32]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "key{d:08}", .{i}) catch unreachable;
+        try tree.insert(key, "value");
+    }
+
+    const stats = try helpers.getTreeStats(&tree);
+    try std.testing.expect(stats.leaf_count > 1);
+    // Verify min/max ratio is within 3x (reasonable split distribution)
+    try std.testing.expect(stats.min_leaf_entries > 0);
+    try std.testing.expect(stats.max_leaf_entries <= stats.min_leaf_entries * 3);
+}
+
+test "btree: internal node contains correct separator keys" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "sep_keys");
+    defer db.deinit();
+
+    var tree = try db.createBTree();
+
+    const count: usize = 1000;
+    for (0..count) |i| {
+        var buf: [32]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "key{d:08}", .{i}) catch unreachable;
+        try tree.insert(key, "value");
+    }
+
+    // Validate all structural invariants
+    try helpers.validateBTreeInvariants(&tree);
+
+    // Verify all keys retrievable
+    for (0..count) |i| {
+        var buf: [32]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "key{d:08}", .{i}) catch unreachable;
+        const value = try tree.get(key);
+        try std.testing.expect(value != null);
+    }
+}
+
+test "btree: leaf sibling pointers form valid doubly-linked list" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "leaf_chain");
+    defer db.deinit();
+
+    var tree = try db.createBTree();
+
+    const count: usize = 1000;
+    for (0..count) |i| {
+        var buf: [32]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "key{d:08}", .{i}) catch unreachable;
+        try tree.insert(key, "value");
+    }
+
+    // Validate leaf chain integrity
+    try helpers.validateBTreeInvariants(&tree);
+
+    // Verify leaf count is > 3
+    const stats = try helpers.getTreeStats(&tree);
+    try std.testing.expect(stats.leaf_count > 3);
+    try std.testing.expectEqual(@as(usize, count), stats.total_entries);
+}
+
+test "btree: height grows to 3 with sufficient entries" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.initWithPoolSize(allocator, "height3", 1024 * 1024);
+    defer db.deinit();
+
+    var tree = try db.createBTree();
+
+    const count: usize = 50_000;
+    for (0..count) |i| {
+        var buf: [32]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "key{d:08}", .{i}) catch unreachable;
+        try tree.insert(key, "val");
+    }
+
+    const stats = try helpers.getTreeStats(&tree);
+    try std.testing.expect(stats.height >= 3);
+    try std.testing.expectEqual(@as(usize, count), stats.total_entries);
+
+    // Validate invariants hold at height 3+
+    try helpers.validateBTreeInvariants(&tree);
+}
+
+test "btree: cascading split propagates leaf through internal to new root" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.initWithPoolSize(allocator, "cascade", 1024 * 1024);
+    defer db.deinit();
+
+    var tree = try db.createBTree();
+
+    var saw_height_1 = false;
+    var saw_height_2 = false;
+    var saw_height_3 = false;
+
+    const count: usize = 50_000;
+    for (0..count) |i| {
+        var buf: [32]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "key{d:08}", .{i}) catch unreachable;
+        try tree.insert(key, "val");
+
+        // Check frequently at the start to catch height=1, then less often
+        const check = if (i < 500) (i % 50 == 49) else (i % 2000 == 1999);
+        if (check) {
+            const stats = try helpers.getTreeStats(&tree);
+            if (stats.height == 1) saw_height_1 = true;
+            if (stats.height == 2) saw_height_2 = true;
+            if (stats.height >= 3) saw_height_3 = true;
+        }
+    }
+
+    // We should have observed the transitions
+    try std.testing.expect(saw_height_1);
+    try std.testing.expect(saw_height_2);
+    try std.testing.expect(saw_height_3);
+
+    try helpers.validateBTreeInvariants(&tree);
+}
+
+test "btree: range scan across split boundaries returns all entries" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "range_split");
+    defer db.deinit();
+
+    var tree = try db.createBTree();
+
+    const count: usize = 1000;
+    for (0..count) |i| {
+        var buf: [32]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "key{d:08}", .{i}) catch unreachable;
+        try tree.insert(key, "value");
+    }
+
+    // Range from 25% to 75%: keys 250..750
+    var start_buf: [32]u8 = undefined;
+    var end_buf: [32]u8 = undefined;
+    const start_key = std.fmt.bufPrint(&start_buf, "key{d:08}", .{@as(usize, 250)}) catch unreachable;
+    const end_key = std.fmt.bufPrint(&end_buf, "key{d:08}", .{@as(usize, 750)}) catch unreachable;
+
+    var iter = try tree.range(start_key, end_key);
+    defer iter.deinit();
+
+    var range_count: usize = 0;
+    var prev_key_buf: [32]u8 = undefined;
+    var prev_key_len: usize = 0;
+    while (try iter.next()) |entry| {
+        // Verify sorted order within range
+        if (range_count > 0) {
+            const prev = prev_key_buf[0..prev_key_len];
+            const order = std.mem.order(u8, prev, entry.key);
+            try std.testing.expect(order == .lt);
+        }
+        @memcpy(prev_key_buf[0..entry.key.len], entry.key);
+        prev_key_len = entry.key.len;
+        range_count += 1;
+    }
+
+    try std.testing.expectEqual(@as(usize, 500), range_count);
+}
+
+test "btree: reverse-order inserts produce valid tree structure" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "rev_struct");
+    defer db.deinit();
+
+    var tree = try db.createBTree();
+
+    const count: usize = 1000;
+    var i: usize = count;
+    while (i > 0) {
+        i -= 1;
+        var buf: [32]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "key{d:08}", .{i}) catch unreachable;
+        try tree.insert(key, "value");
+    }
+
+    // Validate structural invariants hold with reverse insertion
+    try helpers.validateBTreeInvariants(&tree);
+
+    const stats = try helpers.getTreeStats(&tree);
+    try std.testing.expectEqual(@as(usize, count), stats.total_entries);
+    try std.testing.expect(!stats.root_is_leaf);
+}
+
+test "btree: interleaved pattern inserts produce valid tree structure" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "interlv_struct");
+    defer db.deinit();
+
+    var tree = try db.createBTree();
+
+    const count: usize = 1000;
+    // Insert even numbers first
+    var i: usize = 0;
+    while (i < count) : (i += 2) {
+        var buf: [32]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "key{d:08}", .{i}) catch unreachable;
+        try tree.insert(key, "value");
+    }
+    // Then odd numbers
+    i = 1;
+    while (i < count) : (i += 2) {
+        var buf: [32]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "key{d:08}", .{i}) catch unreachable;
+        try tree.insert(key, "value");
+    }
+
+    // Validate invariants with interleaved insertion pattern
+    try helpers.validateBTreeInvariants(&tree);
+
+    const stats = try helpers.getTreeStats(&tree);
+    try std.testing.expectEqual(@as(usize, count), stats.total_entries);
+
+    // Verify sorted iteration
+    try helpers.assertBTreeSortedIteration(&tree, count);
+}
+
+test "btree: delete after split maintains valid tree structure" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "del_split");
+    defer db.deinit();
+
+    var tree = try db.createBTree();
+
+    const count: usize = 500;
+    for (0..count) |i| {
+        var buf: [32]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "key{d:08}", .{i}) catch unreachable;
+        try tree.insert(key, "value");
+    }
+
+    // Delete every other entry (250 deletions)
+    for (0..count / 2) |i| {
+        var buf: [32]u8 = undefined;
+        const key = std.fmt.bufPrint(&buf, "key{d:08}", .{i * 2}) catch unreachable;
+        try tree.delete(key);
+    }
+
+    // Verify remaining count
+    const remaining = try helpers.countBTreeEntries(&tree);
+    try std.testing.expectEqual(@as(usize, 250), remaining);
+
+    // Verify sorted iteration of remaining entries
+    try helpers.assertBTreeSortedIteration(&tree, 250);
+}

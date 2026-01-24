@@ -450,6 +450,21 @@ lattice_error lattice_result_get(
 void lattice_result_free(lattice_result* result);
 
 /*
+ * Query cache operations
+ */
+
+/* Clear the query cache */
+lattice_error lattice_query_cache_clear(lattice_database* db);
+
+/* Get query cache statistics */
+lattice_error lattice_query_cache_stats(
+    lattice_database* db,
+    uint32_t* entries_out,
+    uint64_t* hits_out,
+    uint64_t* misses_out
+);
+
+/*
  * Utility functions
  */
 

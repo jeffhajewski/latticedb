@@ -390,6 +390,46 @@ class Database:
             if result_ptr.value:
                 lib._lib.lattice_fts_result_free(result_ptr)
 
+    def cache_clear(self) -> None:
+        """
+        Clear the query cache.
+
+        Removes all cached parsed queries, forcing re-parsing on next execution.
+        """
+        if self._handle is None:
+            raise RuntimeError("Database is not open")
+
+        lib = get_lib()
+        code = lib._lib.lattice_query_cache_clear(self._handle)
+        check_error(code)
+
+    def cache_stats(self) -> Dict[str, Any]:
+        """
+        Get query cache statistics.
+
+        Returns:
+            Dictionary with 'entries' (int), 'hits' (int), and 'misses' (int).
+        """
+        if self._handle is None:
+            raise RuntimeError("Database is not open")
+
+        lib = get_lib()
+        entries = ctypes.c_uint32()
+        hits = ctypes.c_uint64()
+        misses = ctypes.c_uint64()
+        code = lib._lib.lattice_query_cache_stats(
+            self._handle,
+            byref(entries),
+            byref(hits),
+            byref(misses),
+        )
+        check_error(code)
+        return {
+            "entries": entries.value,
+            "hits": hits.value,
+            "misses": misses.value,
+        }
+
     @property
     def path(self) -> Path:
         """Return the database file path."""

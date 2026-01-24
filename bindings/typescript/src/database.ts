@@ -205,6 +205,26 @@ export class Database {
   }
 
   /**
+   * Clear the query cache.
+   *
+   * Removes all cached parsed queries, forcing re-parsing on next execution.
+   */
+  async cacheClear(): Promise<void> {
+    this.ensureOpen();
+    this.native!.cacheClear();
+  }
+
+  /**
+   * Get query cache statistics.
+   *
+   * @returns Object with entries count, hit count, and miss count.
+   */
+  async cacheStats(): Promise<{ entries: number; hits: number; misses: number }> {
+    this.ensureOpen();
+    return this.native!.cacheStats();
+  }
+
+  /**
    * Get the database file path.
    */
   getPath(): string {

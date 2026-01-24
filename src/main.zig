@@ -54,6 +54,7 @@ pub const query = struct {
     pub const executor = @import("query/executor.zig");
     pub const expression = @import("query/expression.zig");
     pub const planner = @import("query/planner.zig");
+    pub const cache = @import("query/cache.zig");
 
     pub const operators = struct {
         pub const scan = @import("query/operators/scan.zig");
@@ -118,6 +119,8 @@ comptime {
     _ = &c_api.lattice_result_column_name;
     _ = &c_api.lattice_result_get;
     _ = &c_api.lattice_result_free;
+    _ = &c_api.lattice_query_cache_clear;
+    _ = &c_api.lattice_query_cache_stats;
     _ = &c_api.lattice_version;
     _ = &c_api.lattice_error_message;
 }
@@ -229,6 +232,11 @@ pub const SemanticError = query.semantic.SemanticError;
 pub const AnalysisResult = query.semantic.AnalysisResult;
 pub const VariableInfo = query.semantic.VariableInfo;
 pub const VariableKind = query.semantic.VariableKind;
+
+// Query cache re-exports
+pub const QueryCache = query.cache.QueryCache;
+pub const CacheEntry = query.cache.CacheEntry;
+pub const CacheStats = query.cache.CacheStats;
 
 // Version information
 pub const VERSION = "0.1.0";

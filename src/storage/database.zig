@@ -96,12 +96,15 @@ const parser_mod = lattice.query.parser;
 const Parser = parser_mod.Parser;
 const semantic_mod = lattice.query.semantic;
 const SemanticAnalyzer = semantic_mod.SemanticAnalyzer;
+const VariableInfo = semantic_mod.VariableInfo;
 const planner_mod = lattice.query.planner;
 const QueryPlanner = planner_mod.QueryPlanner;
 const StorageContext = planner_mod.StorageContext;
 const executor_mod = lattice.query.executor;
 const ExecutionContext = executor_mod.ExecutionContext;
 const execute = executor_mod.execute;
+const cache_mod = lattice.query.cache;
+const QueryCache = cache_mod.QueryCache;
 
 /// Database errors
 pub const DatabaseError = error{
@@ -245,6 +248,10 @@ pub const DatabaseConfig = struct {
     vector_dimensions: u16 = 128,
     /// Enable in-memory adjacency cache for accelerated graph traversals
     enable_adjacency_cache: bool = false,
+    /// Enable query cache for parsed ASTs
+    enable_query_cache: bool = true,
+    /// Maximum number of cached query entries
+    query_cache_size: u32 = 128,
 
     /// Compute effective buffer pool size based on enabled features.
     /// Priority: LATTICE_BUFFER_POOL_MB env var > explicit buffer_pool_size > auto-sizing.
@@ -318,6 +325,7 @@ pub const Database = struct {
 
     // Caches
     adjacency_cache: ?AdjacencyCache,
+    query_cache: ?*QueryCache,
 
     // Configuration
     config: DatabaseConfig,
@@ -473,6 +481,12 @@ pub const Database = struct {
         else
             null;
 
+        // 11. Initialize Query Cache (optional)
+        self.query_cache = if (options.config.enable_query_cache)
+            QueryCache.init(allocator, options.config.query_cache_size) catch null
+        else
+            null;
+
         return self;
     }
 
@@ -504,6 +518,11 @@ pub const Database = struct {
     /// For guaranteed durability, call sync() first and handle errors.
     pub fn close(self: *Self) void {
         // Reverse initialization order
+
+        // 11. Query cache
+        if (self.query_cache) |cache| {
+            cache.deinit();
+        }
 
         // 10. Adjacency cache
         if (self.adjacency_cache) |*cache| {
@@ -1100,6 +1119,9 @@ pub const Database = struct {
             }
         }
 
+        // Invalidate query cache (labels changed)
+        if (self.query_cache) |cache| cache.bumpSchemaVersion();
+
         return node_id;
     }
 
@@ -1175,6 +1197,9 @@ pub const Database = struct {
                 else => DatabaseError.IoError,
             };
         };
+
+        // Invalidate query cache (labels changed)
+        if (self.query_cache) |cache| cache.bumpSchemaVersion();
     }
 
     /// Check if a node exists
@@ -1749,6 +1774,9 @@ pub const Database = struct {
         if (self.adjacency_cache) |*cache| {
             cache.invalidate(source);
         }
+
+        // Invalidate query cache (edge types changed)
+        if (self.query_cache) |cache| cache.bumpSchemaVersion();
     }
 
     /// Delete an edge
@@ -1812,6 +1840,9 @@ pub const Database = struct {
         if (self.adjacency_cache) |*cache| {
             cache.invalidate(source);
         }
+
+        // Invalidate query cache (edge types changed)
+        if (self.query_cache) |cache| cache.bumpSchemaVersion();
     }
 
     /// Check if an edge exists
@@ -2316,65 +2347,7 @@ pub const Database = struct {
     /// }
     /// ```
     pub fn query(self: *Self, cypher: []const u8) QueryError!QueryResult {
-        // 1. Parse the query
-        var parser = Parser.init(self.allocator, cypher);
-        defer parser.deinit();
-
-        const parse_result = parser.parse();
-
-        if (parse_result.query == null) {
-            return QueryError.ParseError;
-        }
-        const ast_query = parse_result.query.?;
-
-        // 2. Semantic analysis
-        var analyzer = SemanticAnalyzer.init(self.allocator);
-        defer analyzer.deinit();
-
-        const analysis = analyzer.analyze(ast_query);
-        if (!analysis.success) {
-            return QueryError.SemanticError;
-        }
-
-        // 3. Create planner with storage context
-        const storage_ctx = StorageContext{
-            .node_tree = &self.node_tree,
-            .label_index = &self.label_index,
-            .edge_store = &self.edge_store,
-            .symbol_table = &self.symbol_table,
-            .hnsw_index = if (self.hnsw_index) |*hnsw| hnsw else null,
-            .fts_index = if (self.fts_index) |*fts| fts else null,
-        };
-
-        var planner = QueryPlanner.init(self.allocator, storage_ctx);
-        defer planner.deinit();
-
-        // 4. Plan the query
-        const root_op = planner.plan(ast_query, &analysis) catch {
-            return QueryError.PlanError;
-        };
-        defer root_op.deinit(self.allocator);
-
-        // 5. Create execution context with storage access for property lookups
-        var exec_ctx = ExecutionContext.initWithStorage(self.allocator, &self.node_store, &self.symbol_table);
-        defer exec_ctx.deinit();
-
-        // Register variable bindings from planner
-        var binding_iter = planner.bindings.iterator();
-        while (binding_iter.next()) |entry| {
-            exec_ctx.registerVariable(entry.key_ptr.*, entry.value_ptr.slot) catch {
-                return QueryError.OutOfMemory;
-            };
-        }
-
-        // 6. Execute the query
-        var exec_result = execute(self.allocator, root_op, &exec_ctx) catch {
-            return QueryError.ExecutionError;
-        };
-        defer exec_result.deinit();
-
-        // 7. Convert executor result to database result
-        return self.convertResult(&exec_result, &planner);
+        return self.executeQuery(cypher, null);
     }
 
     /// Execute a Cypher query with bound parameters.
@@ -2383,27 +2356,124 @@ pub const Database = struct {
         cypher: []const u8,
         params: *const std.StringHashMap(types.PropertyValue),
     ) QueryError!QueryResult {
-        // 1. Parse the query
-        var parser = Parser.init(self.allocator, cypher);
-        defer parser.deinit();
+        return self.executeQuery(cypher, params);
+    }
 
-        const parse_result = parser.parse();
-
-        if (parse_result.query == null) {
-            return QueryError.ParseError;
+    /// Clear the query cache (if enabled).
+    pub fn clearQueryCache(self: *Self) void {
+        if (self.query_cache) |cache| {
+            cache.clear();
         }
-        const ast_query = parse_result.query.?;
+    }
 
-        // 2. Semantic analysis
-        var analyzer = SemanticAnalyzer.init(self.allocator);
-        defer analyzer.deinit();
+    /// Get query cache statistics.
+    pub fn queryCacheStats(self: *Self) cache_mod.CacheStats {
+        if (self.query_cache) |cache| {
+            return cache.getStats();
+        }
+        return .{ .entries = 0, .hits = 0, .misses = 0 };
+    }
 
-        const analysis = analyzer.analyze(ast_query);
-        if (!analysis.success) {
-            return QueryError.SemanticError;
+    /// Internal: Execute a query with optional parameters, using the cache when available.
+    fn executeQuery(
+        self: *Self,
+        cypher: []const u8,
+        params: ?*const std.StringHashMap(types.PropertyValue),
+    ) QueryError!QueryResult {
+        var cache_entry: ?*cache_mod.CacheEntry = null;
+        defer {
+            if (cache_entry) |entry| entry.unpin();
         }
 
-        // 3. Create planner with storage context
+        var ast_query: *lattice.query.ast.Query = undefined;
+        var analysis_vars: []const VariableInfo = &[_]VariableInfo{};
+
+        // Fallback parser/analyzer for cache miss
+        var parser: ?Parser = null;
+        defer {
+            if (parser) |*p| p.deinit();
+        }
+        var analyzer: ?SemanticAnalyzer = null;
+        defer {
+            if (analyzer) |*a| a.deinit();
+        }
+
+        // Try the cache first
+        if (self.query_cache) |cache| {
+            cache_entry = cache.get(cypher);
+        }
+
+        if (cache_entry) |entry| {
+            // Cache hit: use the cached AST and variables
+            ast_query = entry.query;
+            analysis_vars = entry.variables;
+        } else {
+            // Cache miss: parse and analyze
+            if (self.query_cache != null) {
+                // Parse with a cache-owned arena so the AST can be cached
+                var cache_arena = std.heap.ArenaAllocator.init(self.allocator);
+
+                // Copy source into arena so AST slices remain valid
+                const owned_source = cache_arena.allocator().dupe(u8, cypher) catch {
+                    cache_arena.deinit();
+                    return QueryError.OutOfMemory;
+                };
+
+                var cache_parser = Parser.initWithArena(self.allocator, owned_source, cache_arena);
+                const parse_result = cache_parser.parse();
+
+                if (parse_result.query == null) {
+                    // Parse failed - clean up and return error
+                    cache_parser.errors.deinit(self.allocator);
+                    cache_parser.arena.deinit();
+                    return QueryError.ParseError;
+                }
+                ast_query = parse_result.query.?;
+
+                // Semantic analysis
+                var sem = SemanticAnalyzer.init(self.allocator);
+                const analysis = sem.analyze(ast_query);
+                if (!analysis.success) {
+                    sem.deinit();
+                    cache_parser.errors.deinit(self.allocator);
+                    cache_parser.arena.deinit();
+                    return QueryError.SemanticError;
+                }
+                analysis_vars = analysis.variables;
+
+                // Store in cache (cache takes ownership of the arena)
+                const arena_to_cache = cache_parser.arena;
+                cache_parser.errors.deinit(self.allocator);
+                self.query_cache.?.put(cypher, ast_query, analysis_vars, arena_to_cache);
+
+                // Re-fetch from cache to get a pinned entry
+                cache_entry = self.query_cache.?.get(cypher);
+                if (cache_entry) |entry| {
+                    ast_query = entry.query;
+                    analysis_vars = entry.variables;
+                }
+
+                sem.deinit();
+            } else {
+                // No cache: standard parse path
+                parser = Parser.init(self.allocator, cypher);
+                const parse_result = parser.?.parse();
+
+                if (parse_result.query == null) {
+                    return QueryError.ParseError;
+                }
+                ast_query = parse_result.query.?;
+
+                analyzer = SemanticAnalyzer.init(self.allocator);
+                const analysis = analyzer.?.analyze(ast_query);
+                if (!analysis.success) {
+                    return QueryError.SemanticError;
+                }
+                analysis_vars = analysis.variables;
+            }
+        }
+
+        // Plan the query
         const storage_ctx = StorageContext{
             .node_tree = &self.node_tree,
             .label_index = &self.label_index,
@@ -2416,17 +2486,22 @@ pub const Database = struct {
         var planner = QueryPlanner.init(self.allocator, storage_ctx);
         defer planner.deinit();
 
-        // 4. Plan the query
-        const root_op = planner.plan(ast_query, &analysis) catch {
+        const analysis_result = semantic_mod.AnalysisResult{
+            .success = true,
+            .errors = &[_]semantic_mod.SemanticError{},
+            .variables = analysis_vars,
+            .errors_dropped = false,
+        };
+
+        const root_op = planner.plan(ast_query, &analysis_result) catch {
             return QueryError.PlanError;
         };
         defer root_op.deinit(self.allocator);
 
-        // 5. Create execution context with storage access for property lookups
+        // Execute
         var exec_ctx = ExecutionContext.initWithStorage(self.allocator, &self.node_store, &self.symbol_table);
         defer exec_ctx.deinit();
 
-        // Register variable bindings from planner
         var binding_iter = planner.bindings.iterator();
         while (binding_iter.next()) |entry| {
             exec_ctx.registerVariable(entry.key_ptr.*, entry.value_ptr.slot) catch {
@@ -2434,21 +2509,21 @@ pub const Database = struct {
             };
         }
 
-        // 5b. Set bound parameters
-        var param_iter = params.iterator();
-        while (param_iter.next()) |entry| {
-            exec_ctx.setParameter(entry.key_ptr.*, entry.value_ptr.*) catch {
-                return QueryError.OutOfMemory;
-            };
+        // Set bound parameters if provided
+        if (params) |p| {
+            var param_iter = p.iterator();
+            while (param_iter.next()) |entry| {
+                exec_ctx.setParameter(entry.key_ptr.*, entry.value_ptr.*) catch {
+                    return QueryError.OutOfMemory;
+                };
+            }
         }
 
-        // 6. Execute the query
         var exec_result = execute(self.allocator, root_op, &exec_ctx) catch {
             return QueryError.ExecutionError;
         };
         defer exec_result.deinit();
 
-        // 7. Convert executor result to database result
         return self.convertResult(&exec_result, &planner);
     }
 

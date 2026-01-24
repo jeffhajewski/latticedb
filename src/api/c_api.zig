@@ -1254,6 +1254,39 @@ pub export fn lattice_result_free(result: ?*lattice_result) void {
 // Utility Functions
 // ============================================================================
 
+// ============================================================================
+// Query Cache Operations
+// ============================================================================
+
+/// Clear the query cache
+pub export fn lattice_query_cache_clear(db: ?*lattice_database) lattice_error {
+    const db_handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
+    db_handle.db.clearQueryCache();
+    return .ok;
+}
+
+/// Get query cache statistics
+pub export fn lattice_query_cache_stats(
+    db: ?*lattice_database,
+    entries_out: ?*u32,
+    hits_out: ?*u64,
+    misses_out: ?*u64,
+) lattice_error {
+    const db_handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
+
+    const stats = db_handle.db.queryCacheStats();
+
+    if (entries_out) |p| p.* = stats.entries;
+    if (hits_out) |p| p.* = stats.hits;
+    if (misses_out) |p| p.* = stats.misses;
+
+    return .ok;
+}
+
+// ============================================================================
+// Utility Functions
+// ============================================================================
+
 /// Get version string
 pub export fn lattice_version() [*c]const u8 {
     return "0.1.0";

@@ -247,6 +247,9 @@ pub const Parser = struct {
     panic_mode: bool,
     /// Tracks if any errors were dropped due to OOM
     errors_dropped: bool,
+    /// When false, the arena is owned externally (e.g., by the query cache)
+    /// and deinit will not free it.
+    owns_arena: bool = true,
 
     const Self = @This();
 
@@ -263,12 +266,33 @@ pub const Parser = struct {
             .had_error = false,
             .panic_mode = false,
             .errors_dropped = false,
+            .owns_arena = true,
+        };
+    }
+
+    /// Initialize parser with an externally-owned arena.
+    /// The caller retains ownership of the arena; deinit will not free it.
+    /// Use this when the AST should outlive the parser (e.g., for caching).
+    pub fn initWithArena(allocator: Allocator, source: []const u8, arena: std.heap.ArenaAllocator) Self {
+        return .{
+            .allocator = allocator,
+            .arena = arena,
+            .lexer = Lexer.init(source),
+            .current = undefined,
+            .previous = undefined,
+            .errors = .empty,
+            .had_error = false,
+            .panic_mode = false,
+            .errors_dropped = false,
+            .owns_arena = false,
         };
     }
 
     /// Free parser resources
     pub fn deinit(self: *Self) void {
-        self.arena.deinit();
+        if (self.owns_arena) {
+            self.arena.deinit();
+        }
         self.errors.deinit(self.allocator);
     }
 

@@ -39,6 +39,8 @@ const BTreeError = btree_mod.BTreeError;
 const wal_mod = lattice.storage.wal;
 const WalManager = wal_mod.WalManager;
 
+const recovery_mod = lattice.storage.recovery;
+
 // Graph layer
 const symbols_mod = lattice.graph.symbols;
 const SymbolTable = symbols_mod.SymbolTable;
@@ -437,6 +439,22 @@ pub const Database = struct {
         self.node_store = NodeStore.init(allocator, &self.node_tree);
         self.edge_store = EdgeStore.init(allocator, &self.edge_tree);
         self.label_index = LabelIndex.init(allocator, &self.label_tree);
+
+        // 7b. Run WAL recovery if needed
+        if (self.wal) |*wal| {
+            var rm = recovery_mod.RecoveryManager.initWithLogicalContext(allocator, .{
+                .node_store = &self.node_store,
+                .edge_store = &self.edge_store,
+            });
+            const stats = rm.recover(wal, &self.page_manager) catch |err| switch (err) {
+                error.MidLogCorruption => return DatabaseError.InvalidDatabase,
+                else => return DatabaseError.IoError,
+            };
+            // Persist recovered state if any redo operations were applied
+            if (stats.redo_operations > 0) {
+                self.saveTreeRoots() catch {};
+            }
+        }
 
         // 8. Initialize FTS (optional)
         self.fts_index = null;

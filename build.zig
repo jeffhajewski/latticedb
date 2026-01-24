@@ -133,6 +133,25 @@ pub fn build(b: *std.Build) void {
     const integration_test_step = b.step("integration-test", "Run integration tests");
     integration_test_step.dependOn(&run_integration_tests.step);
 
+    // Crash test module - imports the library module
+    const crash_test_module = b.createModule(.{
+        .root_source_file = b.path("tests/crash/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "lattice", .module = lib_module },
+        },
+    });
+
+    // Crash tests
+    const crash_tests = b.addTest(.{
+        .root_module = crash_test_module,
+    });
+    const run_crash_tests = b.addRunArtifact(crash_tests);
+
+    const crash_test_step = b.step("crash-test", "Run crash recovery tests");
+    crash_test_step.dependOn(&run_crash_tests.step);
+
     // Benchmark module - imports the library module
     const bench_module = b.createModule(.{
         .root_source_file = b.path("tests/benchmark/main.zig"),

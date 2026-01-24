@@ -213,7 +213,7 @@ pub const LabelFilter = struct {
             var node = node_store.get(node_id) catch {
                 continue; // Node not found, skip
             };
-            defer node.deinit(self.allocator);
+            defer node.deinit(ctx.allocator);
 
             // Check if the node has the required label
             for (node.labels) |label| {

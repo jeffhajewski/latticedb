@@ -143,16 +143,27 @@ pub const EvalResult = union(enum) {
         };
     }
 
-    /// Convert from PropertyValue (allocator needed for list/map conversion)
+    /// Convert from PropertyValue, cloning all borrowed data.
+    /// All slice data (strings, vectors, map keys) is duplicated onto the
+    /// provided allocator so the result is independent of the source lifetime.
     pub fn fromPropertyValue(pv: PropertyValue, allocator: Allocator) Self {
         return switch (pv) {
             .null_val => .{ .null_val = {} },
             .bool_val => |b| .{ .bool_val = b },
             .int_val => |i| .{ .int_val = i },
             .float_val => |f| .{ .float_val = f },
-            .string_val => |s| .{ .string_val = s },
-            .bytes_val => |b| .{ .string_val = b },
-            .vector_val => |v| .{ .vector_val = v },
+            .string_val => |s| blk: {
+                const cloned = allocator.dupe(u8, s) catch break :blk .{ .null_val = {} };
+                break :blk .{ .string_val = cloned };
+            },
+            .bytes_val => |b| blk: {
+                const cloned = allocator.dupe(u8, b) catch break :blk .{ .null_val = {} };
+                break :blk .{ .string_val = cloned };
+            },
+            .vector_val => |v| blk: {
+                const cloned = allocator.dupe(f32, v) catch break :blk .{ .null_val = {} };
+                break :blk .{ .vector_val = cloned };
+            },
             .list_val => |list| blk: {
                 const results = allocator.alloc(EvalResult, list.len) catch
                     break :blk .{ .null_val = {} };
@@ -166,7 +177,7 @@ pub const EvalResult = union(enum) {
                     break :blk .{ .null_val = {} };
                 for (map, 0..) |entry, i| {
                     entries[i] = .{
-                        .key = entry.key,
+                        .key = allocator.dupe(u8, entry.key) catch break :blk .{ .null_val = {} },
                         .value = fromPropertyValue(entry.value, allocator),
                     };
                 }
@@ -317,23 +328,12 @@ pub const ExpressionEvaluator = struct {
             var node = node_store.get(node_id) catch {
                 return .{ .null_val = {} };
             };
-            defer node.deinit(self.allocator);
+            defer node.deinit(ctx.allocator);
 
             // Find the property with matching key_id
             for (node.properties) |prop| {
                 if (prop.key_id == key_id) {
-                    // Clone string/bytes values since node will be freed
-                    return switch (prop.value) {
-                        .string_val => |s| blk: {
-                            const cloned = self.allocator.dupe(u8, s) catch return EvalError.OutOfMemory;
-                            break :blk .{ .string_val = cloned };
-                        },
-                        .bytes_val => |b| blk: {
-                            const cloned = self.allocator.dupe(u8, b) catch return EvalError.OutOfMemory;
-                            break :blk .{ .string_val = cloned };
-                        },
-                        else => EvalResult.fromPropertyValue(prop.value, self.allocator),
-                    };
+                    return EvalResult.fromPropertyValue(prop.value, self.allocator);
                 }
             }
 
@@ -362,23 +362,12 @@ pub const ExpressionEvaluator = struct {
             var edge = database.edge_store.get(decoded.source, decoded.target, decoded.edge_type) catch {
                 return .{ .null_val = {} };
             };
-            defer edge.deinit(self.allocator);
+            defer edge.deinit(ctx.allocator);
 
             // Find the property with matching key_id
             for (edge.properties) |prop| {
                 if (prop.key_id == key_id) {
-                    // Clone string/bytes values since edge will be freed
-                    return switch (prop.value) {
-                        .string_val => |s| blk: {
-                            const cloned = self.allocator.dupe(u8, s) catch return EvalError.OutOfMemory;
-                            break :blk .{ .string_val = cloned };
-                        },
-                        .bytes_val => |b| blk: {
-                            const cloned = self.allocator.dupe(u8, b) catch return EvalError.OutOfMemory;
-                            break :blk .{ .string_val = cloned };
-                        },
-                        else => EvalResult.fromPropertyValue(prop.value, self.allocator),
-                    };
+                    return EvalResult.fromPropertyValue(prop.value, self.allocator);
                 }
             }
 
@@ -998,6 +987,7 @@ test "evaluate parameter reference" {
     };
 
     const result = try eval.evaluate(&expr, &row, &ctx);
+    defer allocator.free(result.string_val);
     try std.testing.expectEqualStrings("Alice", result.string_val);
 }
 
@@ -1030,4 +1020,232 @@ test "eval result conversions" {
 
     const bool_result = EvalResult{ .bool_val = true };
     try std.testing.expectEqual(true, bool_result.toBool().?);
+}
+
+test "fromPropertyValue converts list" {
+    const allocator = std.testing.allocator;
+
+    var items = [_]PropertyValue{
+        .{ .int_val = 1 },
+        .{ .int_val = 2 },
+        .{ .string_val = "three" },
+    };
+    const pv = PropertyValue{ .list_val = &items };
+
+    const result = EvalResult.fromPropertyValue(pv, allocator);
+    defer {
+        allocator.free(result.list_val[2].string_val);
+        allocator.free(result.list_val);
+    }
+
+    try std.testing.expectEqual(@as(usize, 3), result.list_val.len);
+    try std.testing.expectEqual(@as(i64, 1), result.list_val[0].int_val);
+    try std.testing.expectEqual(@as(i64, 2), result.list_val[1].int_val);
+    try std.testing.expectEqualStrings("three", result.list_val[2].string_val);
+}
+
+test "fromPropertyValue converts vector" {
+    const allocator = std.testing.allocator;
+
+    const vec = [_]f32{ 1.0, 2.5, 3.0 };
+    const pv = PropertyValue{ .vector_val = &vec };
+
+    const result = EvalResult.fromPropertyValue(pv, allocator);
+    defer allocator.free(result.vector_val);
+
+    try std.testing.expectEqual(@as(usize, 3), result.vector_val.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), result.vector_val[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.5), result.vector_val[1], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), result.vector_val[2], 0.001);
+}
+
+test "fromPropertyValue converts map" {
+    const allocator = std.testing.allocator;
+
+    var entries = [_]PropertyValue.MapEntry{
+        .{ .key = "name", .value = .{ .string_val = "Alice" } },
+        .{ .key = "age", .value = .{ .int_val = 30 } },
+    };
+    const pv = PropertyValue{ .map_val = &entries };
+
+    const result = EvalResult.fromPropertyValue(pv, allocator);
+    defer {
+        allocator.free(result.map_val[0].key);
+        allocator.free(result.map_val[0].value.string_val);
+        allocator.free(result.map_val[1].key);
+        allocator.free(result.map_val);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), result.map_val.len);
+    try std.testing.expectEqualStrings("name", result.map_val[0].key);
+    try std.testing.expectEqualStrings("Alice", result.map_val[0].value.string_val);
+    try std.testing.expectEqualStrings("age", result.map_val[1].key);
+    try std.testing.expectEqual(@as(i64, 30), result.map_val[1].value.int_val);
+}
+
+test "fromPropertyValue converts nested list" {
+    const allocator = std.testing.allocator;
+
+    var inner = [_]PropertyValue{ .{ .int_val = 10 }, .{ .int_val = 20 } };
+    var items = [_]PropertyValue{
+        .{ .int_val = 1 },
+        .{ .list_val = &inner },
+    };
+    const pv = PropertyValue{ .list_val = &items };
+
+    const result = EvalResult.fromPropertyValue(pv, allocator);
+    defer {
+        // Free inner list allocation
+        allocator.free(result.list_val[1].list_val);
+        allocator.free(result.list_val);
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), result.list_val.len);
+    try std.testing.expectEqual(@as(i64, 1), result.list_val[0].int_val);
+    const nested = result.list_val[1].list_val;
+    try std.testing.expectEqual(@as(usize, 2), nested.len);
+    try std.testing.expectEqual(@as(i64, 10), nested[0].int_val);
+    try std.testing.expectEqual(@as(i64, 20), nested[1].int_val);
+}
+
+test "toPropertyValue converts list" {
+    const allocator = std.testing.allocator;
+
+    const items = [_]EvalResult{
+        .{ .int_val = 5 },
+        .{ .string_val = "hello" },
+        .{ .bool_val = true },
+    };
+    const eval = EvalResult{ .list_val = &items };
+
+    const pv = eval.toPropertyValue(allocator);
+    defer allocator.free(pv.list_val);
+
+    try std.testing.expectEqual(@as(usize, 3), pv.list_val.len);
+    try std.testing.expectEqual(@as(i64, 5), pv.list_val[0].int_val);
+    try std.testing.expectEqualStrings("hello", pv.list_val[1].string_val);
+    try std.testing.expectEqual(true, pv.list_val[2].bool_val);
+}
+
+test "toPropertyValue converts vector" {
+    const allocator = std.testing.allocator;
+
+    const vec = [_]f32{ 0.5, 1.5, 2.5 };
+    const eval = EvalResult{ .vector_val = &vec };
+
+    const pv = eval.toPropertyValue(allocator);
+
+    try std.testing.expectEqual(@as(usize, 3), pv.vector_val.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.5), pv.vector_val[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.5), pv.vector_val[1], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.5), pv.vector_val[2], 0.001);
+}
+
+test "toPropertyValue converts map" {
+    const allocator = std.testing.allocator;
+
+    const entries = [_]EvalResult.MapEntry{
+        .{ .key = "x", .value = .{ .int_val = 10 } },
+        .{ .key = "y", .value = .{ .float_val = 3.14 } },
+    };
+    const eval = EvalResult{ .map_val = &entries };
+
+    const pv = eval.toPropertyValue(allocator);
+    defer allocator.free(pv.map_val);
+
+    try std.testing.expectEqual(@as(usize, 2), pv.map_val.len);
+    try std.testing.expectEqualStrings("x", pv.map_val[0].key);
+    try std.testing.expectEqual(@as(i64, 10), pv.map_val[0].value.int_val);
+    try std.testing.expectEqualStrings("y", pv.map_val[1].key);
+    try std.testing.expectApproxEqAbs(@as(f64, 3.14), pv.map_val[1].value.float_val, 0.001);
+}
+
+test "fromPropertyValue/toPropertyValue round-trip for list" {
+    const allocator = std.testing.allocator;
+
+    var items = [_]PropertyValue{
+        .{ .int_val = 42 },
+        .{ .float_val = 2.718 },
+        .{ .bool_val = false },
+    };
+    const original = PropertyValue{ .list_val = &items };
+
+    // PropertyValue -> EvalResult -> PropertyValue
+    const eval = EvalResult.fromPropertyValue(original, allocator);
+    defer allocator.free(eval.list_val);
+
+    const roundtrip = eval.toPropertyValue(allocator);
+    defer allocator.free(roundtrip.list_val);
+
+    try std.testing.expectEqual(@as(usize, 3), roundtrip.list_val.len);
+    try std.testing.expectEqual(@as(i64, 42), roundtrip.list_val[0].int_val);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.718), roundtrip.list_val[1].float_val, 0.001);
+    try std.testing.expectEqual(false, roundtrip.list_val[2].bool_val);
+}
+
+test "fromPropertyValue/toPropertyValue round-trip for vector" {
+    const allocator = std.testing.allocator;
+
+    const vec = [_]f32{ 1.0, 2.0, 3.0 };
+    const original = PropertyValue{ .vector_val = &vec };
+
+    const eval = EvalResult.fromPropertyValue(original, allocator);
+    defer allocator.free(eval.vector_val);
+
+    const roundtrip = eval.toPropertyValue(allocator);
+    // vector_val in PropertyValue just copies the slice from EvalResult (no new alloc)
+    // so no need to free roundtrip.vector_val separately
+
+    try std.testing.expectEqual(@as(usize, 3), roundtrip.vector_val.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), roundtrip.vector_val[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), roundtrip.vector_val[1], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), roundtrip.vector_val[2], 0.001);
+}
+
+test "fromPropertyValue/toPropertyValue round-trip for map" {
+    const allocator = std.testing.allocator;
+
+    var entries = [_]PropertyValue.MapEntry{
+        .{ .key = "status", .value = .{ .string_val = "active" } },
+        .{ .key = "count", .value = .{ .int_val = 7 } },
+    };
+    const original = PropertyValue{ .map_val = &entries };
+
+    const eval = EvalResult.fromPropertyValue(original, allocator);
+    defer {
+        allocator.free(eval.map_val[0].key);
+        allocator.free(eval.map_val[0].value.string_val);
+        allocator.free(eval.map_val[1].key);
+        allocator.free(eval.map_val);
+    }
+
+    const roundtrip = eval.toPropertyValue(allocator);
+    defer allocator.free(roundtrip.map_val);
+
+    try std.testing.expectEqual(@as(usize, 2), roundtrip.map_val.len);
+    try std.testing.expectEqualStrings("status", roundtrip.map_val[0].key);
+    try std.testing.expectEqualStrings("active", roundtrip.map_val[0].value.string_val);
+    try std.testing.expectEqualStrings("count", roundtrip.map_val[1].key);
+    try std.testing.expectEqual(@as(i64, 7), roundtrip.map_val[1].value.int_val);
+}
+
+test "list_val and map_val truthiness" {
+    const empty_list = EvalResult{ .list_val = &[_]EvalResult{} };
+    try std.testing.expect(!empty_list.isTruthy());
+
+    const nonempty_list = EvalResult{ .list_val = &[_]EvalResult{.{ .int_val = 1 }} };
+    try std.testing.expect(nonempty_list.isTruthy());
+
+    const empty_vec = EvalResult{ .vector_val = &[_]f32{} };
+    try std.testing.expect(!empty_vec.isTruthy());
+
+    const nonempty_vec = EvalResult{ .vector_val = &[_]f32{1.0} };
+    try std.testing.expect(nonempty_vec.isTruthy());
+
+    const empty_map = EvalResult{ .map_val = &[_]EvalResult.MapEntry{} };
+    try std.testing.expect(!empty_map.isTruthy());
+
+    const map_entries = [_]EvalResult.MapEntry{.{ .key = "a", .value = .{ .int_val = 1 } }};
+    const nonempty_map = EvalResult{ .map_val = &map_entries };
+    try std.testing.expect(nonempty_map.isTruthy());
 }

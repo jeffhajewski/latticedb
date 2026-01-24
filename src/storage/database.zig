@@ -156,6 +156,29 @@ pub const ResultValue = union(enum) {
         value: ResultValue,
     };
 
+    /// Free all owned memory in this value (recursive for lists/maps)
+    pub fn deinit(self: *const ResultValue, allocator: Allocator) void {
+        switch (self.*) {
+            .string_val => |s| allocator.free(s),
+            .bytes_val => |b| allocator.free(b),
+            .vector_val => |v| allocator.free(v),
+            .list_val => |list| {
+                for (list) |*item| {
+                    item.deinit(allocator);
+                }
+                allocator.free(list);
+            },
+            .map_val => |map| {
+                for (map) |*entry| {
+                    allocator.free(entry.key);
+                    entry.value.deinit(allocator);
+                }
+                allocator.free(map);
+            },
+            else => {},
+        }
+    }
+
     /// Format for display
     pub fn format(self: ResultValue, writer: anytype) !void {
         switch (self) {
@@ -194,6 +217,9 @@ pub const ResultRow = struct {
     values: []ResultValue,
 
     pub fn deinit(self: *ResultRow, allocator: Allocator) void {
+        for (self.values) |*val| {
+            val.deinit(allocator);
+        }
         allocator.free(self.values);
     }
 };
@@ -2483,8 +2509,14 @@ pub const Database = struct {
             .fts_index = if (self.fts_index) |*fts| fts else null,
         };
 
-        var planner = QueryPlanner.init(self.allocator, storage_ctx);
-        defer planner.deinit();
+        // Use an arena for all query execution temporaries (operator structs,
+        // expression evaluation results, intermediate PropertyValues).
+        // This ensures no leaks from list/map/vector conversions during evaluation.
+        var query_arena = std.heap.ArenaAllocator.init(self.allocator);
+        defer query_arena.deinit();
+        const query_alloc = query_arena.allocator();
+
+        var planner = QueryPlanner.init(query_alloc, storage_ctx);
 
         const analysis_result = semantic_mod.AnalysisResult{
             .success = true,
@@ -2496,7 +2528,6 @@ pub const Database = struct {
         const root_op = planner.plan(ast_query, &analysis_result) catch {
             return QueryError.PlanError;
         };
-        defer root_op.deinit(self.allocator);
 
         // Execute
         var exec_ctx = ExecutionContext.initWithStorage(self.allocator, &self.node_store, &self.symbol_table);
@@ -2519,10 +2550,9 @@ pub const Database = struct {
             }
         }
 
-        var exec_result = execute(self.allocator, root_op, &exec_ctx) catch {
+        var exec_result = execute(query_alloc, root_op, &exec_ctx) catch {
             return QueryError.ExecutionError;
         };
-        defer exec_result.deinit();
 
         return self.convertResult(&exec_result, &planner);
     }
@@ -2605,16 +2635,17 @@ pub const Database = struct {
         };
     }
 
-    /// Convert a PropertyValue to a ResultValue (recursive for lists/maps)
+    /// Convert a PropertyValue to a ResultValue (recursive for lists/maps).
+    /// Clones all slice data so the result is independent of the source lifetime.
     fn propertyToResultValue(self: *Self, prop: PropertyValue) QueryError!ResultValue {
         return switch (prop) {
             .null_val => .{ .null_val = {} },
             .bool_val => |b| .{ .bool_val = b },
             .int_val => |i| .{ .int_val = i },
             .float_val => |f| .{ .float_val = f },
-            .string_val => |s| .{ .string_val = s },
-            .bytes_val => |b| .{ .bytes_val = b },
-            .vector_val => |v| .{ .vector_val = v },
+            .string_val => |s| .{ .string_val = self.allocator.dupe(u8, s) catch return QueryError.OutOfMemory },
+            .bytes_val => |b| .{ .bytes_val = self.allocator.dupe(u8, b) catch return QueryError.OutOfMemory },
+            .vector_val => |v| .{ .vector_val = self.allocator.dupe(f32, v) catch return QueryError.OutOfMemory },
             .list_val => |list| blk: {
                 const result_list = self.allocator.alloc(ResultValue, list.len) catch {
                     return QueryError.OutOfMemory;
@@ -2630,7 +2661,7 @@ pub const Database = struct {
                 };
                 for (map, 0..) |entry, i| {
                     result_map[i] = .{
-                        .key = entry.key,
+                        .key = self.allocator.dupe(u8, entry.key) catch return QueryError.OutOfMemory,
                         .value = try self.propertyToResultValue(entry.value),
                     };
                 }

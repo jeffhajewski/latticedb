@@ -190,3 +190,61 @@ test "resultToSlotValue conversions" {
     const int_slot = resultToSlotValue(.{ .int_val = 42 }, std.testing.allocator);
     try std.testing.expectEqual(@as(i64, 42), int_slot.asProperty().?.int_val);
 }
+
+test "resultToSlotValue converts list to property" {
+    const allocator = std.testing.allocator;
+
+    const items = [_]EvalResult{
+        .{ .int_val = 10 },
+        .{ .int_val = 20 },
+        .{ .string_val = "hi" },
+    };
+    const list_result = EvalResult{ .list_val = &items };
+
+    const slot = resultToSlotValue(list_result, allocator);
+    defer allocator.free(slot.asProperty().?.list_val);
+
+    const prop = slot.asProperty().?;
+    try std.testing.expectEqual(@as(usize, 3), prop.list_val.len);
+    try std.testing.expectEqual(@as(i64, 10), prop.list_val[0].int_val);
+    try std.testing.expectEqual(@as(i64, 20), prop.list_val[1].int_val);
+    try std.testing.expectEqualStrings("hi", prop.list_val[2].string_val);
+}
+
+test "resultToSlotValue converts vector to property" {
+    const vec = [_]f32{ 1.0, 2.0, 3.0 };
+    const vec_result = EvalResult{ .vector_val = &vec };
+
+    const slot = resultToSlotValue(vec_result, std.testing.allocator);
+
+    const prop = slot.asProperty().?;
+    try std.testing.expectEqual(@as(usize, 3), prop.vector_val.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), prop.vector_val[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), prop.vector_val[1], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), prop.vector_val[2], 0.001);
+}
+
+test "resultToSlotValue converts map to property" {
+    const allocator = std.testing.allocator;
+
+    const entries = [_]EvalResult.MapEntry{
+        .{ .key = "foo", .value = .{ .int_val = 99 } },
+        .{ .key = "bar", .value = .{ .bool_val = true } },
+    };
+    const map_result = EvalResult{ .map_val = &entries };
+
+    const slot = resultToSlotValue(map_result, allocator);
+    defer allocator.free(slot.asProperty().?.map_val);
+
+    const prop = slot.asProperty().?;
+    try std.testing.expectEqual(@as(usize, 2), prop.map_val.len);
+    try std.testing.expectEqualStrings("foo", prop.map_val[0].key);
+    try std.testing.expectEqual(@as(i64, 99), prop.map_val[0].value.int_val);
+    try std.testing.expectEqualStrings("bar", prop.map_val[1].key);
+    try std.testing.expectEqual(true, prop.map_val[1].value.bool_val);
+}
+
+test "resultToSlotValue null produces empty slot" {
+    const slot = resultToSlotValue(.{ .null_val = {} }, std.testing.allocator);
+    try std.testing.expect(slot.isEmpty());
+}

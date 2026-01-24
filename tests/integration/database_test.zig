@@ -1008,3 +1008,274 @@ test "database: property type handling" {
     const b = try db.getNodeProperty(node, "bool_prop");
     try std.testing.expectEqual(true, b.?.bool_val);
 }
+
+// ============================================================================
+// List/Vector/Map Property Tests
+// ============================================================================
+
+test "database: list property round-trip through query" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_list_prop_query_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = false,
+            .enable_fts = false,
+            .enable_query_cache = false,
+        },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    const node = try db.createNode(null, &[_][]const u8{"ListNode"});
+    var list_items = [_]PropertyValue{
+        .{ .int_val = 10 },
+        .{ .int_val = 20 },
+        .{ .int_val = 30 },
+    };
+    try db.setNodeProperty(null, node, "scores", .{ .list_val = &list_items });
+
+    // Query the list property
+    var result = try db.query("MATCH (n:ListNode) RETURN n.scores");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+
+    const val = result.rows[0].values[0];
+    switch (val) {
+        .list_val => |list| {
+            try std.testing.expectEqual(@as(usize, 3), list.len);
+            try std.testing.expectEqual(@as(i64, 10), list[0].int_val);
+            try std.testing.expectEqual(@as(i64, 20), list[1].int_val);
+            try std.testing.expectEqual(@as(i64, 30), list[2].int_val);
+        },
+        else => return error.UnexpectedValueType,
+    }
+}
+
+test "database: vector property round-trip through query" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_vec_prop_query_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = false,
+            .enable_fts = false,
+            .enable_query_cache = false,
+        },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    const node = try db.createNode(null, &[_][]const u8{"VecNode"});
+    const vec = [_]f32{ 0.1, 0.2, 0.3, 0.4 };
+    try db.setNodeProperty(null, node, "embedding", .{ .vector_val = &vec });
+
+    // Query the vector property
+    var result = try db.query("MATCH (n:VecNode) RETURN n.embedding");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+
+    const val = result.rows[0].values[0];
+    switch (val) {
+        .vector_val => |v| {
+            try std.testing.expectEqual(@as(usize, 4), v.len);
+            try std.testing.expectApproxEqAbs(@as(f32, 0.1), v[0], 0.001);
+            try std.testing.expectApproxEqAbs(@as(f32, 0.2), v[1], 0.001);
+            try std.testing.expectApproxEqAbs(@as(f32, 0.3), v[2], 0.001);
+            try std.testing.expectApproxEqAbs(@as(f32, 0.4), v[3], 0.001);
+        },
+        else => return error.UnexpectedValueType,
+    }
+}
+
+test "database: map property round-trip through query" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_map_prop_query_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = false,
+            .enable_fts = false,
+            .enable_query_cache = false,
+        },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    const node = try db.createNode(null, &[_][]const u8{"MapNode"});
+    var map_entries = [_]PropertyValue.MapEntry{
+        .{ .key = "city", .value = .{ .string_val = "Portland" } },
+        .{ .key = "zip", .value = .{ .int_val = 97201 } },
+    };
+    try db.setNodeProperty(null, node, "address", .{ .map_val = &map_entries });
+
+    // Query the map property
+    var result = try db.query("MATCH (n:MapNode) RETURN n.address");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+
+    const val = result.rows[0].values[0];
+    switch (val) {
+        .map_val => |map| {
+            try std.testing.expectEqual(@as(usize, 2), map.len);
+            try std.testing.expectEqualStrings("city", map[0].key);
+            try std.testing.expectEqualStrings("Portland", map[0].value.string_val);
+            try std.testing.expectEqualStrings("zip", map[1].key);
+            try std.testing.expectEqual(@as(i64, 97201), map[1].value.int_val);
+        },
+        else => return error.UnexpectedValueType,
+    }
+}
+
+test "database: mixed-type list property through query" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_mixed_list_query_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = false,
+            .enable_fts = false,
+            .enable_query_cache = false,
+        },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    const node = try db.createNode(null, &[_][]const u8{"MixedNode"});
+    var list_items = [_]PropertyValue{
+        .{ .int_val = 42 },
+        .{ .string_val = "hello" },
+        .{ .bool_val = true },
+        .{ .float_val = 2.718 },
+    };
+    try db.setNodeProperty(null, node, "mixed", .{ .list_val = &list_items });
+
+    var result = try db.query("MATCH (n:MixedNode) RETURN n.mixed");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+
+    const val = result.rows[0].values[0];
+    switch (val) {
+        .list_val => |list| {
+            try std.testing.expectEqual(@as(usize, 4), list.len);
+            try std.testing.expectEqual(@as(i64, 42), list[0].int_val);
+            try std.testing.expectEqualStrings("hello", list[1].string_val);
+            try std.testing.expectEqual(true, list[2].bool_val);
+            try std.testing.expectApproxEqAbs(@as(f64, 2.718), list[3].float_val, 0.001);
+        },
+        else => return error.UnexpectedValueType,
+    }
+}
+
+test "database: empty list property through query" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_empty_list_query_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = false,
+            .enable_fts = false,
+            .enable_query_cache = false,
+        },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    const node = try db.createNode(null, &[_][]const u8{"EmptyListNode"});
+    try db.setNodeProperty(null, node, "tags", .{ .list_val = &[_]PropertyValue{} });
+
+    var result = try db.query("MATCH (n:EmptyListNode) RETURN n.tags");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+
+    const val = result.rows[0].values[0];
+    switch (val) {
+        .list_val => |list| {
+            try std.testing.expectEqual(@as(usize, 0), list.len);
+        },
+        else => return error.UnexpectedValueType,
+    }
+}
+
+test "database: multiple complex properties on same node" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_multi_complex_query_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = false,
+            .enable_fts = false,
+            .enable_query_cache = false,
+        },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    const node = try db.createNode(null, &[_][]const u8{"ComplexNode"});
+
+    // Set multiple complex properties
+    var scores = [_]PropertyValue{ .{ .int_val = 85 }, .{ .int_val = 92 } };
+    try db.setNodeProperty(null, node, "scores", .{ .list_val = &scores });
+    try db.setNodeProperty(null, node, "name", .{ .string_val = "Alice" });
+
+    // Query name property
+    {
+        var result = try db.query("MATCH (n:ComplexNode) RETURN n.name");
+        defer result.deinit();
+
+        try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+        try std.testing.expectEqualStrings("Alice", result.rows[0].values[0].string_val);
+    }
+
+    // Query scores property (list)
+    {
+        var result = try db.query("MATCH (n:ComplexNode) RETURN n.scores");
+        defer result.deinit();
+
+        try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+        const scores_val = result.rows[0].values[0];
+        switch (scores_val) {
+            .list_val => |list| {
+                try std.testing.expectEqual(@as(usize, 2), list.len);
+                try std.testing.expectEqual(@as(i64, 85), list[0].int_val);
+                try std.testing.expectEqual(@as(i64, 92), list[1].int_val);
+            },
+            else => return error.UnexpectedValueType,
+        }
+    }
+}

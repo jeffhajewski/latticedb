@@ -1203,3 +1203,82 @@ test "DeleteNode basic structure" {
     try std.testing.expect(@TypeOf(vtable.close) != void);
     try std.testing.expect(@TypeOf(vtable.deinit) != void);
 }
+
+test "evalResultToPropertyValue scalar types" {
+    const allocator = std.testing.allocator;
+
+    const null_pv = evalResultToPropertyValue(.{ .null_val = {} }, allocator);
+    try std.testing.expect(null_pv != null);
+    try std.testing.expect(null_pv.? == .null_val);
+
+    const bool_pv = evalResultToPropertyValue(.{ .bool_val = true }, allocator);
+    try std.testing.expectEqual(true, bool_pv.?.bool_val);
+
+    const int_pv = evalResultToPropertyValue(.{ .int_val = 99 }, allocator);
+    try std.testing.expectEqual(@as(i64, 99), int_pv.?.int_val);
+
+    const float_pv = evalResultToPropertyValue(.{ .float_val = 1.5 }, allocator);
+    try std.testing.expectApproxEqAbs(@as(f64, 1.5), float_pv.?.float_val, 0.001);
+
+    const str_pv = evalResultToPropertyValue(.{ .string_val = "test" }, allocator);
+    try std.testing.expectEqualStrings("test", str_pv.?.string_val);
+}
+
+test "evalResultToPropertyValue returns null for node/edge refs" {
+    const allocator = std.testing.allocator;
+
+    const node_pv = evalResultToPropertyValue(.{ .node_ref = 42 }, allocator);
+    try std.testing.expect(node_pv == null);
+
+    const edge_pv = evalResultToPropertyValue(.{ .edge_ref = 7 }, allocator);
+    try std.testing.expect(edge_pv == null);
+}
+
+test "evalResultToPropertyValue converts vector" {
+    const allocator = std.testing.allocator;
+
+    const vec = [_]f32{ 1.0, 2.0, 3.0 };
+    const pv = evalResultToPropertyValue(.{ .vector_val = &vec }, allocator);
+
+    try std.testing.expect(pv != null);
+    try std.testing.expectEqual(@as(usize, 3), pv.?.vector_val.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.0), pv.?.vector_val[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 2.0), pv.?.vector_val[1], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 3.0), pv.?.vector_val[2], 0.001);
+}
+
+test "evalResultToPropertyValue converts list" {
+    const allocator = std.testing.allocator;
+
+    const items = [_]EvalResult{
+        .{ .int_val = 1 },
+        .{ .int_val = 2 },
+        .{ .string_val = "three" },
+    };
+    const pv = evalResultToPropertyValue(.{ .list_val = &items }, allocator);
+    defer allocator.free(pv.?.list_val);
+
+    try std.testing.expect(pv != null);
+    try std.testing.expectEqual(@as(usize, 3), pv.?.list_val.len);
+    try std.testing.expectEqual(@as(i64, 1), pv.?.list_val[0].int_val);
+    try std.testing.expectEqual(@as(i64, 2), pv.?.list_val[1].int_val);
+    try std.testing.expectEqualStrings("three", pv.?.list_val[2].string_val);
+}
+
+test "evalResultToPropertyValue converts map" {
+    const allocator = std.testing.allocator;
+
+    const entries = [_]EvalResult.MapEntry{
+        .{ .key = "name", .value = .{ .string_val = "Alice" } },
+        .{ .key = "score", .value = .{ .int_val = 95 } },
+    };
+    const pv = evalResultToPropertyValue(.{ .map_val = &entries }, allocator);
+    defer allocator.free(pv.?.map_val);
+
+    try std.testing.expect(pv != null);
+    try std.testing.expectEqual(@as(usize, 2), pv.?.map_val.len);
+    try std.testing.expectEqualStrings("name", pv.?.map_val[0].key);
+    try std.testing.expectEqualStrings("Alice", pv.?.map_val[0].value.string_val);
+    try std.testing.expectEqualStrings("score", pv.?.map_val[1].key);
+    try std.testing.expectEqual(@as(i64, 95), pv.?.map_val[1].value.int_val);
+}

@@ -183,7 +183,7 @@ pub const Expand = struct {
         if (edge_opt) |edge| {
             defer {
                 var e = edge;
-                e.deinit(self.allocator);
+                e.deinit(self.edge_store.allocator);
             }
 
             // Filter by edge type if specified

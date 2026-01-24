@@ -296,7 +296,7 @@ pub const VariableLengthExpand = struct {
             if (edge_opt) |edge| {
                 defer {
                     var e = edge;
-                    e.deinit(self.allocator);
+                    e.deinit(self.edge_store.allocator);
                 }
 
                 // Get target node based on direction

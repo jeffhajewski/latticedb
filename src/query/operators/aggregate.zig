@@ -673,3 +673,68 @@ test "Accumulator collect" {
     const result = acc.result();
     try std.testing.expectEqual(@as(usize, 3), result.list_val.len);
 }
+
+test "Accumulator collect preserves values" {
+    const allocator = std.testing.allocator;
+    var acc = Accumulator.init(allocator, .collect);
+    defer acc.deinit();
+
+    try acc.accumulate(.{ .int_val = 10 });
+    try acc.accumulate(.{ .string_val = "hello" });
+    try acc.accumulate(.{ .bool_val = true });
+    try acc.accumulate(.{ .float_val = 2.5 });
+
+    const result = acc.result();
+    try std.testing.expectEqual(@as(usize, 4), result.list_val.len);
+    try std.testing.expectEqual(@as(i64, 10), result.list_val[0].int_val);
+    try std.testing.expectEqualStrings("hello", result.list_val[1].string_val);
+    try std.testing.expectEqual(true, result.list_val[2].bool_val);
+    try std.testing.expectApproxEqAbs(@as(f64, 2.5), result.list_val[3].float_val, 0.001);
+}
+
+test "resultToSlotValue converts list" {
+    const allocator = std.testing.allocator;
+
+    const items = [_]EvalResult{
+        .{ .int_val = 100 },
+        .{ .string_val = "test" },
+    };
+    const list_result = EvalResult{ .list_val = &items };
+
+    const slot = resultToSlotValue(list_result, allocator);
+    defer allocator.free(slot.asProperty().?.list_val);
+
+    const prop = slot.asProperty().?;
+    try std.testing.expectEqual(@as(usize, 2), prop.list_val.len);
+    try std.testing.expectEqual(@as(i64, 100), prop.list_val[0].int_val);
+    try std.testing.expectEqualStrings("test", prop.list_val[1].string_val);
+}
+
+test "resultToSlotValue converts vector" {
+    const vec = [_]f32{ 0.1, 0.2, 0.3, 0.4 };
+    const vec_result = EvalResult{ .vector_val = &vec };
+
+    const slot = resultToSlotValue(vec_result, std.testing.allocator);
+
+    const prop = slot.asProperty().?;
+    try std.testing.expectEqual(@as(usize, 4), prop.vector_val.len);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.1), prop.vector_val[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.4), prop.vector_val[3], 0.001);
+}
+
+test "resultToSlotValue converts map" {
+    const allocator = std.testing.allocator;
+
+    const entries = [_]EvalResult.MapEntry{
+        .{ .key = "key1", .value = .{ .int_val = 1 } },
+    };
+    const map_result = EvalResult{ .map_val = &entries };
+
+    const slot = resultToSlotValue(map_result, allocator);
+    defer allocator.free(slot.asProperty().?.map_val);
+
+    const prop = slot.asProperty().?;
+    try std.testing.expectEqual(@as(usize, 1), prop.map_val.len);
+    try std.testing.expectEqualStrings("key1", prop.map_val[0].key);
+    try std.testing.expectEqual(@as(i64, 1), prop.map_val[0].value.int_val);
+}

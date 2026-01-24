@@ -448,7 +448,7 @@ pub const ExpressionEvaluator = struct {
             .contains => self.stringContains(left, right),
             .starts_with => self.stringStartsWith(left, right),
             .ends_with => self.stringEndsWith(left, right),
-            .regex_match => .{ .null_val = {} }, // TODO: regex support
+            .regex_match => self.regexMatch(left, right),
 
             // List operator
             .in_ => self.listContains(left, right),
@@ -835,6 +835,25 @@ pub const ExpressionEvaluator = struct {
     }
 
     // ========================================================================
+    // Regex helpers
+    // ========================================================================
+
+    fn regexMatch(_: *Self, left: EvalResult, right: EvalResult) EvalResult {
+        const text = switch (left) {
+            .string_val => |s| s,
+            else => return .{ .null_val = {} },
+        };
+
+        const pattern = switch (right) {
+            .string_val => |s| s,
+            else => return .{ .null_val = {} },
+        };
+
+        // Cypher =~ does a full match (pattern anchored to start and end)
+        return .{ .bool_val = regexFullMatch(text, pattern) };
+    }
+
+    // ========================================================================
     // List helpers
     // ========================================================================
 
@@ -854,6 +873,335 @@ pub const ExpressionEvaluator = struct {
         return .{ .bool_val = false };
     }
 };
+
+// ============================================================================
+// Regex Engine
+// ============================================================================
+
+/// Match text against pattern (full match — pattern must match the entire text).
+/// Supports: . * + ? | () [] [^] \d \w \s \D \W \S and literal escapes.
+fn regexFullMatch(text: []const u8, pattern: []const u8) bool {
+    // Try to match the full pattern against the full text
+    const result = regexMatchHere(text, 0, pattern, 0);
+    return result != null and result.? == text.len;
+}
+
+/// Try to match pattern[pi..] against text[ti..].
+/// Returns the text index after the match, or null if no match.
+fn regexMatchHere(text: []const u8, ti: usize, pattern: []const u8, pi: usize) ?usize {
+    // End of pattern — match succeeds at current text position
+    if (pi >= pattern.len) return ti;
+
+    // Handle alternation: try left side, then right side
+    if (findAlternation(pattern, pi)) |alt_pos| {
+        // Try left branch (pattern[pi..alt_pos])
+        const left_result = regexMatchBranch(text, ti, pattern[pi..alt_pos]);
+        if (left_result != null) return left_result;
+        // Try right branch (pattern[alt_pos+1..])
+        return regexMatchBranch(text, ti, pattern[alt_pos + 1 ..]);
+    }
+
+    // Handle grouping with parentheses
+    if (pi < pattern.len and pattern[pi] == '(') {
+        if (findClosingParen(pattern, pi)) |close| {
+            const sub_pattern = pattern[pi + 1 .. close];
+            const after_close = close + 1;
+
+            // Check for quantifier after group
+            if (after_close < pattern.len) {
+                switch (pattern[after_close]) {
+                    '*' => return matchQuantified(text, ti, sub_pattern, pattern, after_close + 1, 0, text.len),
+                    '+' => return matchQuantified(text, ti, sub_pattern, pattern, after_close + 1, 1, text.len),
+                    '?' => {
+                        // Try matching the group, then continue
+                        const group_match = regexMatchBranch(text, ti, sub_pattern);
+                        if (group_match) |end| {
+                            const rest = regexMatchHere(text, end, pattern, after_close + 1);
+                            if (rest != null) return rest;
+                        }
+                        // Try skipping the group
+                        return regexMatchHere(text, ti, pattern, after_close + 1);
+                    },
+                    else => {},
+                }
+            }
+
+            // No quantifier — match group exactly once
+            const group_match = regexMatchBranch(text, ti, sub_pattern);
+            if (group_match) |end| {
+                return regexMatchHere(text, end, pattern, after_close);
+            }
+            return null;
+        }
+        // Unmatched paren — treat as literal
+    }
+
+    // Parse current atom
+    const atom = parseAtom(pattern, pi) orelse return null;
+
+    // Check for quantifier after atom
+    const after_atom = atom.end;
+    if (after_atom < pattern.len) {
+        switch (pattern[after_atom]) {
+            '*' => return matchAtomQuantified(text, ti, atom, pattern, after_atom + 1, 0, text.len),
+            '+' => return matchAtomQuantified(text, ti, atom, pattern, after_atom + 1, 1, text.len),
+            '?' => {
+                // Try matching atom then rest
+                if (ti < text.len and matchAtomChar(atom, text[ti])) {
+                    const rest = regexMatchHere(text, ti + 1, pattern, after_atom + 1);
+                    if (rest != null) return rest;
+                }
+                // Try skipping atom
+                return regexMatchHere(text, ti, pattern, after_atom + 1);
+            },
+            else => {},
+        }
+    }
+
+    // No quantifier — match exactly one character
+    if (ti >= text.len) return null;
+    if (!matchAtomChar(atom, text[ti])) return null;
+    return regexMatchHere(text, ti + 1, pattern, after_atom);
+}
+
+/// Match a branch (sub-pattern without top-level alternation)
+fn regexMatchBranch(text: []const u8, ti: usize, pattern: []const u8) ?usize {
+    return regexMatchHere(text, ti, pattern, 0);
+}
+
+/// Find top-level alternation '|' (not inside parentheses)
+fn findAlternation(pattern: []const u8, start: usize) ?usize {
+    var depth: usize = 0;
+    var i = start;
+    while (i < pattern.len) : (i += 1) {
+        switch (pattern[i]) {
+            '(' => depth += 1,
+            ')' => {
+                if (depth > 0) depth -= 1;
+            },
+            '|' => {
+                if (depth == 0) return i;
+            },
+            '\\' => i += 1, // skip escaped char
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// Find matching closing parenthesis
+fn findClosingParen(pattern: []const u8, open: usize) ?usize {
+    var depth: usize = 1;
+    var i = open + 1;
+    while (i < pattern.len) : (i += 1) {
+        switch (pattern[i]) {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if (depth == 0) return i;
+            },
+            '\\' => i += 1,
+            else => {},
+        }
+    }
+    return null;
+}
+
+/// Atom representation — a single matchable unit
+const Atom = struct {
+    kind: AtomKind,
+    end: usize, // index in pattern after this atom
+
+    const AtomKind = union(enum) {
+        dot: void, // .
+        literal: u8, // exact character
+        char_class: CharClass, // [...]
+        shorthand: Shorthand, // \d, \w, \s, \D, \W, \S
+    };
+};
+
+const CharClass = struct {
+    start: usize, // start of class content in pattern
+    end: usize, // end of class content (before ])
+    negated: bool,
+    pattern: []const u8, // reference to full pattern
+};
+
+const Shorthand = enum { digit, word, space, not_digit, not_word, not_space };
+
+/// Parse a single atom from pattern at position pi
+fn parseAtom(pattern: []const u8, pi: usize) ?Atom {
+    if (pi >= pattern.len) return null;
+
+    switch (pattern[pi]) {
+        '.' => return .{ .kind = .{ .dot = {} }, .end = pi + 1 },
+        '[' => {
+            // Character class
+            var i = pi + 1;
+            const negated = i < pattern.len and pattern[i] == '^';
+            if (negated) i += 1;
+            const content_start = i;
+            // First char after ^ can be ] without closing
+            if (i < pattern.len and pattern[i] == ']') i += 1;
+            while (i < pattern.len and pattern[i] != ']') : (i += 1) {
+                if (pattern[i] == '\\' and i + 1 < pattern.len) i += 1;
+            }
+            if (i >= pattern.len) return null; // unclosed bracket
+            return .{
+                .kind = .{ .char_class = .{
+                    .start = content_start,
+                    .end = i,
+                    .negated = negated,
+                    .pattern = pattern,
+                } },
+                .end = i + 1,
+            };
+        },
+        '\\' => {
+            if (pi + 1 >= pattern.len) return null;
+            const next = pattern[pi + 1];
+            const shorthand: ?Shorthand = switch (next) {
+                'd' => .digit,
+                'D' => .not_digit,
+                'w' => .word,
+                'W' => .not_word,
+                's' => .space,
+                'S' => .not_space,
+                else => null,
+            };
+            if (shorthand) |sh| {
+                return .{ .kind = .{ .shorthand = sh }, .end = pi + 2 };
+            }
+            // Escaped literal
+            return .{ .kind = .{ .literal = next }, .end = pi + 2 };
+        },
+        else => |c| return .{ .kind = .{ .literal = c }, .end = pi + 1 },
+    }
+}
+
+/// Check if a character matches an atom
+fn matchAtomChar(atom: Atom, ch: u8) bool {
+    switch (atom.kind) {
+        .dot => return ch != '\n', // . matches anything except newline
+        .literal => |c| return ch == c,
+        .shorthand => |sh| return matchShorthand(sh, ch),
+        .char_class => |cc| return matchCharClass(cc, ch),
+    }
+}
+
+fn matchShorthand(sh: Shorthand, ch: u8) bool {
+    return switch (sh) {
+        .digit => std.ascii.isDigit(ch),
+        .not_digit => !std.ascii.isDigit(ch),
+        .word => std.ascii.isAlphanumeric(ch) or ch == '_',
+        .not_word => !(std.ascii.isAlphanumeric(ch) or ch == '_'),
+        .space => std.ascii.isWhitespace(ch),
+        .not_space => !std.ascii.isWhitespace(ch),
+    };
+}
+
+fn matchCharClass(cc: CharClass, ch: u8) bool {
+    var matched = false;
+    var i = cc.start;
+    while (i < cc.end) {
+        var c: u8 = undefined;
+        if (cc.pattern[i] == '\\' and i + 1 < cc.end) {
+            const next = cc.pattern[i + 1];
+            // Check shorthands inside character class
+            const sh: ?Shorthand = switch (next) {
+                'd' => .digit,
+                'D' => .not_digit,
+                'w' => .word,
+                'W' => .not_word,
+                's' => .space,
+                'S' => .not_space,
+                else => null,
+            };
+            if (sh) |s| {
+                if (matchShorthand(s, ch)) matched = true;
+                i += 2;
+                continue;
+            }
+            c = next;
+            i += 2;
+        } else {
+            c = cc.pattern[i];
+            i += 1;
+        }
+
+        // Check for range (e.g., a-z)
+        if (i < cc.end and cc.pattern[i] == '-' and i + 1 < cc.end) {
+            var end_c: u8 = undefined;
+            if (cc.pattern[i + 1] == '\\' and i + 2 < cc.end) {
+                end_c = cc.pattern[i + 2];
+                i += 3;
+            } else {
+                end_c = cc.pattern[i + 1];
+                i += 2;
+            }
+            if (ch >= c and ch <= end_c) matched = true;
+        } else {
+            if (ch == c) matched = true;
+        }
+    }
+
+    return if (cc.negated) !matched else matched;
+}
+
+/// Match an atom with quantifier (* or +), greedy, then try rest of pattern
+fn matchAtomQuantified(text: []const u8, ti: usize, atom: Atom, pattern: []const u8, pi: usize, min: usize, max: usize) ?usize {
+    // Count how many times the atom matches (greedy)
+    var count: usize = 0;
+    var pos = ti;
+    while (pos < text.len and count < max) {
+        if (!matchAtomChar(atom, text[pos])) break;
+        count += 1;
+        pos += 1;
+    }
+
+    // Try from longest match down to minimum (greedy backtracking)
+    while (count >= min) {
+        const rest = regexMatchHere(text, ti + count, pattern, pi);
+        if (rest != null) return rest;
+        if (count == 0) break;
+        count -= 1;
+    }
+    return null;
+}
+
+/// Match a group sub-pattern with quantifier (* or +)
+fn matchQuantified(text: []const u8, ti: usize, sub_pattern: []const u8, pattern: []const u8, pi: usize, min: usize, max: usize) ?usize {
+    // Collect all possible match lengths for the group
+    // For groups, we need to try matching the sub-pattern repeatedly
+    var positions: [256]usize = undefined;
+    var pos_count: usize = 0;
+
+    // Start with current position
+    positions[0] = ti;
+    pos_count = 1;
+
+    // Greedily try to match sub_pattern as many times as possible
+    var count: usize = 0;
+    var current = ti;
+    while (count < max and pos_count < 256) {
+        const match_end = regexMatchBranch(text, current, sub_pattern);
+        if (match_end == null or match_end.? == current) break; // no progress
+        current = match_end.?;
+        count += 1;
+        positions[pos_count] = current;
+        pos_count += 1;
+    }
+
+    // Try from longest match down to minimum (greedy)
+    var idx: usize = pos_count;
+    while (idx > 0) {
+        idx -= 1;
+        if (idx < min) break;
+        const rest = regexMatchHere(text, positions[idx], pattern, pi);
+        if (rest != null) return rest;
+    }
+    return null;
+}
 
 // ============================================================================
 // Tests

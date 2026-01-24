@@ -53,6 +53,9 @@ pub const Clause = union(enum) {
     delete: *DeleteClause,
     set: *SetClause,
     remove: *RemoveClause,
+    with: *WithClause,
+    merge: *MergeClause,
+    unwind: *UnwindClause,
 };
 
 // ============================================================================
@@ -170,6 +173,29 @@ pub const RemoveItem = union(enum) {
         target: *Expression, // Variable reference
         label_names: []const []const u8,
     },
+};
+
+/// WITH clause - projection that feeds into the next query part
+pub const WithClause = struct {
+    distinct: bool,
+    items: []ReturnItem,
+    where: ?*Expression, // optional WHERE filter after WITH
+    location: SourceLocation,
+};
+
+/// MERGE clause - match or create a pattern
+pub const MergeClause = struct {
+    pattern: Pattern,
+    on_create: ?[]SetItem, // ON CREATE SET ...
+    on_match: ?[]SetItem, // ON MATCH SET ...
+    location: SourceLocation,
+};
+
+/// UNWIND clause - expand a list into rows
+pub const UnwindClause = struct {
+    expression: *Expression,
+    variable: []const u8, // AS variable
+    location: SourceLocation,
 };
 
 // ============================================================================

@@ -1185,6 +1185,232 @@ fn evalResultToPropertyValue(result: EvalResult, allocator: Allocator) ?Property
 }
 
 // ============================================================================
+// MergeNode Operator
+// ============================================================================
+
+/// Operator that implements MERGE for a single node pattern.
+/// Finds an existing node matching labels and properties, or creates one.
+pub const MergeNode = struct {
+    /// Optional input operator
+    input: ?Operator,
+    /// Labels for the node pattern
+    labels: []const []const u8,
+    /// Property expressions for matching/creating
+    properties: []const CreateNode.PropertyKV,
+    /// Output slot for the merged node ID
+    output_slot: u8,
+    /// Database reference
+    database: *Database,
+    /// Expression evaluator
+    evaluator: ExpressionEvaluator,
+    /// ON CREATE SET items (property key/value pairs)
+    on_create_props: []const CreateNode.PropertyKV,
+    /// ON MATCH SET items (property key/value pairs)
+    on_match_props: []const CreateNode.PropertyKV,
+    /// Whether opened
+    opened: bool,
+    /// Whether merged (for no-input case)
+    merged: bool,
+    /// Output row
+    current_row: ?*Row,
+    /// Allocator
+    allocator: Allocator,
+
+    const Self = @This();
+
+    pub fn init(
+        allocator: Allocator,
+        input: ?Operator,
+        labels: []const []const u8,
+        properties: []const CreateNode.PropertyKV,
+        output_slot: u8,
+        database: *Database,
+        on_create_props: []const CreateNode.PropertyKV,
+        on_match_props: []const CreateNode.PropertyKV,
+    ) !*Self {
+        const self = try allocator.create(Self);
+        self.* = Self{
+            .input = input,
+            .labels = labels,
+            .properties = properties,
+            .output_slot = output_slot,
+            .database = database,
+            .evaluator = ExpressionEvaluator.init(allocator),
+            .on_create_props = on_create_props,
+            .on_match_props = on_match_props,
+            .opened = false,
+            .merged = false,
+            .current_row = null,
+            .allocator = allocator,
+        };
+        return self;
+    }
+
+    pub fn operator(self: *Self) Operator {
+        return Operator{
+            .vtable = &vtable,
+            .ptr = self,
+        };
+    }
+
+    const vtable = Operator.VTable{
+        .open = open,
+        .next = next,
+        .close = close,
+        .deinit = deinit,
+    };
+
+    fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.current_row = ctx.allocRow() catch return OperatorError.OutOfMemory;
+        if (self.input) |input| {
+            try input.open(ctx);
+        }
+        self.opened = true;
+        self.merged = false;
+    }
+
+    fn next(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!?*Row {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        if (!self.opened) return OperatorError.NotInitialized;
+
+        const output_row = self.current_row orelse return OperatorError.NotInitialized;
+
+        if (self.input) |input| {
+            const input_row = try input.next(ctx) orelse return null;
+            output_row.copyFrom(input_row);
+            const node_id = self.mergeNode(ctx, input_row) catch {
+                return OperatorError.StorageError;
+            };
+            output_row.setSlot(self.output_slot, .{ .node_ref = node_id });
+            return output_row;
+        }
+
+        // No input — single merge
+        if (self.merged) return null;
+        self.merged = true;
+
+        output_row.clear();
+        const node_id = self.mergeNode(ctx, null) catch {
+            return OperatorError.StorageError;
+        };
+        output_row.setSlot(self.output_slot, .{ .node_ref = node_id });
+        return output_row;
+    }
+
+    fn mergeNode(self: *Self, ctx: *ExecutionContext, row: ?*const Row) !NodeId {
+        // Try to find an existing node matching the pattern
+        if (self.labels.len > 0) {
+            const candidates = self.database.getNodesByLabel(self.labels[0]) catch &[_]NodeId{};
+            defer self.allocator.free(candidates);
+
+            for (candidates) |candidate_id| {
+                if (self.matchesProperties(candidate_id, ctx, row)) {
+                    // ON MATCH: apply on_match properties
+                    self.applySetItems(candidate_id, self.on_match_props, ctx, row);
+                    return candidate_id;
+                }
+            }
+        }
+
+        // Not found — create the node
+        const node_id = try self.database.createNode(null, self.labels);
+
+        // Set the pattern properties on the new node
+        var dummy_row = Row.init();
+        const eval_row: *const Row = if (row) |r| r else &dummy_row;
+        for (self.properties) |prop| {
+            const value = self.evaluator.evaluate(prop.value_expr, eval_row, ctx) catch continue;
+            const prop_value = evalResultToPropertyValue(value, self.allocator) orelse continue;
+            self.database.setNodeProperty(null, node_id, prop.key, prop_value) catch {};
+        }
+
+        // ON CREATE: apply on_create properties
+        self.applySetItems(node_id, self.on_create_props, ctx, row);
+
+        return node_id;
+    }
+
+    fn matchesProperties(self: *Self, node_id: NodeId, ctx: *ExecutionContext, row: ?*const Row) bool {
+        if (self.properties.len == 0) return true;
+
+        var dummy_row = Row.init();
+        const eval_row: *const Row = if (row) |r| r else &dummy_row;
+
+        for (self.properties) |prop| {
+            // Evaluate the expected value from the pattern
+            const expected = self.evaluator.evaluate(prop.value_expr, eval_row, ctx) catch return false;
+            const expected_pv = evalResultToPropertyValue(expected, self.allocator) orelse return false;
+
+            // Get the actual value from the node
+            const actual = self.database.getNodeProperty(node_id, prop.key) catch return false;
+            if (actual == null) return false;
+
+            // Compare values
+            if (!propertyValuesEqual(expected_pv, actual.?)) {
+                // Free allocated string from getNodeProperty if needed
+                if (actual.? == .string_val) {
+                    self.allocator.free(actual.?.string_val);
+                }
+                return false;
+            }
+            if (actual.? == .string_val) {
+                self.allocator.free(actual.?.string_val);
+            }
+        }
+        return true;
+    }
+
+    fn applySetItems(self: *Self, node_id: NodeId, items: []const CreateNode.PropertyKV, ctx: *ExecutionContext, row: ?*const Row) void {
+        var dummy_row = Row.init();
+        const eval_row: *const Row = if (row) |r| r else &dummy_row;
+        for (items) |prop| {
+            const value = self.evaluator.evaluate(prop.value_expr, eval_row, ctx) catch continue;
+            const prop_value = evalResultToPropertyValue(value, self.allocator) orelse continue;
+            self.database.setNodeProperty(null, node_id, prop.key, prop_value) catch {};
+        }
+    }
+
+    fn close(ptr: *anyopaque, ctx: *ExecutionContext) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        if (self.opened) {
+            if (self.input) |input| input.close(ctx);
+            self.opened = false;
+        }
+    }
+
+    fn deinit(ptr: *anyopaque, allocator: Allocator) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        if (self.input) |input| input.deinit(allocator);
+        allocator.destroy(self);
+    }
+};
+
+/// Compare two PropertyValue values for equality
+fn propertyValuesEqual(a: PropertyValue, b: PropertyValue) bool {
+    return switch (a) {
+        .null_val => b == .null_val,
+        .bool_val => |av| switch (b) {
+            .bool_val => |bv| av == bv,
+            else => false,
+        },
+        .int_val => |av| switch (b) {
+            .int_val => |bv| av == bv,
+            else => false,
+        },
+        .float_val => |av| switch (b) {
+            .float_val => |bv| av == bv,
+            else => false,
+        },
+        .string_val => |av| switch (b) {
+            .string_val => |bv| std.mem.eql(u8, av, bv),
+            else => false,
+        },
+        else => false,
+    };
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 

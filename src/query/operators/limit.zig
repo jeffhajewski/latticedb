@@ -261,32 +261,17 @@ pub const Sort = struct {
             self.rows.append(self.allocator, row.*) catch return OperatorError.OutOfMemory;
         }
 
-        // Sort the rows
-        // Note: We can't use the sort comparison function directly with ctx
-        // because Zig's sort doesn't support closures. We use a workaround.
+        // Sort the rows using std.mem.sort with self as context
         if (self.sort_items.len > 0) {
-            self.sortRows();
+            std.mem.sort(Row, self.rows.items, self, sortLessThan);
         }
 
         self.output_index = 0;
         self.opened = true;
     }
 
-    fn sortRows(self: *Self) void {
-        // Simple bubble sort for now (not optimal but works)
-        // TODO: Replace with more efficient sorting
-        const items = self.rows.items;
-        if (items.len <= 1) return;
-
-        var i: usize = 0;
-        while (i < items.len - 1) : (i += 1) {
-            var j: usize = 0;
-            while (j < items.len - 1 - i) : (j += 1) {
-                if (self.compareRows(&items[j], &items[j + 1]) > 0) {
-                    std.mem.swap(Row, &items[j], &items[j + 1]);
-                }
-            }
-        }
+    fn sortLessThan(self: *Self, a: Row, b: Row) bool {
+        return self.compareRows(&a, &b) < 0;
     }
 
     fn compareRows(self: *Self, a: *const Row, b: *const Row) i32 {

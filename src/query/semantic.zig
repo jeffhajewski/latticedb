@@ -132,6 +132,9 @@ pub const SemanticAnalyzer = struct {
                 .delete => |d| self.analyzeDeleteClause(d),
                 .set => |s| self.analyzeSetClause(s),
                 .remove => |r| self.analyzeRemoveClause(r),
+                .with => |w| self.analyzeWithClause(w),
+                .merge => |m| self.analyzeMergeClause(m),
+                .unwind => |u| self.analyzeUnwindClause(u),
             }
         }
 
@@ -314,6 +317,66 @@ pub const SemanticAnalyzer = struct {
                 },
             }
         }
+    }
+
+    fn analyzeWithClause(self: *Self, clause: *const ast.WithClause) void {
+        // Analyze each WITH item expression
+        for (clause.items) |item| {
+            self.analyzeExpression(item.expression);
+        }
+        // Analyze optional WHERE condition
+        if (clause.where) |condition| {
+            self.analyzeExpression(condition);
+        }
+        // WITH introduces new scope - re-register variables from aliases
+        for (clause.items) |item| {
+            if (item.alias) |alias| {
+                self.registerVariable(alias, .node, clause.location);
+            } else if (item.expression.* == .variable) {
+                self.registerVariable(item.expression.variable.name, .node, clause.location);
+            }
+        }
+    }
+
+    fn analyzeMergeClause(self: *Self, clause: *const ast.MergeClause) void {
+        // Analyze the pattern (register variables, check expressions)
+        for (clause.pattern.elements) |element| {
+            switch (element) {
+                .node => |n| self.registerNodeVariable(n),
+                .edge => |e| self.registerEdgeVariable(e),
+            }
+        }
+        // Analyze ON CREATE SET items
+        if (clause.on_create) |items| {
+            for (items) |item| {
+                switch (item) {
+                    .property => |p| {
+                        self.analyzeExpression(p.target);
+                        self.analyzeExpression(p.value);
+                    },
+                    else => {},
+                }
+            }
+        }
+        // Analyze ON MATCH SET items
+        if (clause.on_match) |items| {
+            for (items) |item| {
+                switch (item) {
+                    .property => |p| {
+                        self.analyzeExpression(p.target);
+                        self.analyzeExpression(p.value);
+                    },
+                    else => {},
+                }
+            }
+        }
+    }
+
+    fn analyzeUnwindClause(self: *Self, clause: *const ast.UnwindClause) void {
+        // Analyze the expression
+        self.analyzeExpression(clause.expression);
+        // Register the variable
+        self.registerVariable(clause.variable, .node, clause.location);
     }
 
     // ========================================================================

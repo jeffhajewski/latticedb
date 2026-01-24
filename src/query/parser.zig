@@ -168,6 +168,8 @@ pub const TokenType = enum {
     kw_remove,
     kw_merge,
     kw_with,
+    kw_unwind,
+    kw_on,
     kw_as,
     kw_order,
     kw_by,
@@ -373,8 +375,14 @@ pub const Parser = struct {
             return self.parseSetClause();
         } else if (self.match(.kw_remove)) {
             return self.parseRemoveClause();
+        } else if (self.match(.kw_with)) {
+            return self.parseWithClause();
+        } else if (self.match(.kw_merge)) {
+            return self.parseMergeClause();
+        } else if (self.match(.kw_unwind)) {
+            return self.parseUnwindClause();
         } else {
-            self.errorAtCurrent("Expected MATCH, WHERE, RETURN, CREATE, DELETE, SET, REMOVE, ORDER BY, LIMIT, or SKIP");
+            self.errorAtCurrent("Expected MATCH, WHERE, RETURN, CREATE, DELETE, SET, REMOVE, WITH, MERGE, UNWIND, ORDER BY, LIMIT, or SKIP");
             return null;
         }
     }
@@ -825,6 +833,133 @@ pub const Parser = struct {
             .target = target,
             .label_names = labels.toOwnedSlice(self.arena.allocator()) catch return null,
         } };
+    }
+
+    // ========================================================================
+    // WITH, MERGE, UNWIND Parsing
+    // ========================================================================
+
+    fn parseWithClause(self: *Self) ?ast.Clause {
+        const loc = self.previousLocation();
+        const distinct = self.match(.kw_distinct);
+
+        var items: std.ArrayList(ast.ReturnItem) = .empty;
+
+        // Parse first WITH item (same syntax as RETURN items)
+        if (self.parseReturnItem()) |item| {
+            items.append(self.arena.allocator(), item) catch return null;
+        } else {
+            return null;
+        }
+
+        // Parse additional comma-separated items
+        while (self.match(.comma)) {
+            if (self.parseReturnItem()) |item| {
+                items.append(self.arena.allocator(), item) catch return null;
+            } else {
+                return null;
+            }
+        }
+
+        // Optional WHERE after WITH
+        var where_expr: ?*ast.Expression = null;
+        if (self.match(.kw_where)) {
+            where_expr = self.parseExpression();
+            if (where_expr == null) return null;
+        }
+
+        const clause = self.arena.allocator().create(ast.WithClause) catch return null;
+        clause.* = .{
+            .distinct = distinct,
+            .items = items.toOwnedSlice(self.arena.allocator()) catch return null,
+            .where = where_expr,
+            .location = loc,
+        };
+
+        return .{ .with = clause };
+    }
+
+    fn parseMergeClause(self: *Self) ?ast.Clause {
+        const loc = self.previousLocation();
+
+        // Parse a single pattern (MERGE takes exactly one pattern)
+        const pattern = self.parsePattern() orelse return null;
+
+        // Parse optional ON CREATE SET / ON MATCH SET
+        var on_create: ?[]ast.SetItem = null;
+        var on_match: ?[]ast.SetItem = null;
+
+        while (self.match(.kw_on)) {
+            if (self.match(.kw_create)) {
+                if (!self.consume(.kw_set, "Expected SET after ON CREATE")) return null;
+                on_create = self.parseMergeSetItems();
+                if (on_create == null) return null;
+            } else if (self.match(.kw_match)) {
+                if (!self.consume(.kw_set, "Expected SET after ON MATCH")) return null;
+                on_match = self.parseMergeSetItems();
+                if (on_match == null) return null;
+            } else {
+                self.errorAtCurrent("Expected CREATE or MATCH after ON");
+                return null;
+            }
+        }
+
+        const clause = self.arena.allocator().create(ast.MergeClause) catch return null;
+        clause.* = .{
+            .pattern = pattern,
+            .on_create = on_create,
+            .on_match = on_match,
+            .location = loc,
+        };
+
+        return .{ .merge = clause };
+    }
+
+    /// Parse comma-separated SET items for MERGE's ON CREATE/ON MATCH SET
+    fn parseMergeSetItems(self: *Self) ?[]ast.SetItem {
+        var items: std.ArrayList(ast.SetItem) = .empty;
+
+        if (self.parseSetItem()) |item| {
+            items.append(self.arena.allocator(), item) catch return null;
+        } else {
+            return null;
+        }
+
+        while (self.match(.comma)) {
+            if (self.parseSetItem()) |item| {
+                items.append(self.arena.allocator(), item) catch return null;
+            } else {
+                return null;
+            }
+        }
+
+        return items.toOwnedSlice(self.arena.allocator()) catch null;
+    }
+
+    fn parseUnwindClause(self: *Self) ?ast.Clause {
+        const loc = self.previousLocation();
+
+        // Parse the expression to unwind
+        const expr = self.parseExpression() orelse return null;
+
+        // Expect AS variable
+        if (!self.consume(.kw_as, "Expected AS after UNWIND expression")) return null;
+
+        if (!self.check(.identifier)) {
+            self.errorAtCurrent("Expected variable name after AS");
+            return null;
+        }
+        const variable = self.current.text;
+        self.advance();
+
+        const clause = self.arena.allocator().create(ast.UnwindClause) catch return null;
+        clause.* = .{
+            .expression = expr,
+            .variable = variable,
+            .location = loc,
+        };
+
+        return .{ .unwind = clause };
     }
 
     // ========================================================================

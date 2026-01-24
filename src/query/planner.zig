@@ -30,6 +30,7 @@ const vector_ops = @import("operators/vector.zig");
 const fts_ops = @import("operators/fts.zig");
 const mutation_ops = @import("operators/mutation.zig");
 const aggregate_ops = @import("operators/aggregate.zig");
+const unwind_ops = @import("operators/unwind.zig");
 
 const btree = @import("../storage/btree.zig");
 const BTree = btree.BTree;
@@ -164,6 +165,9 @@ pub const QueryPlanner = struct {
                 .delete => |d| try self.planDelete(d, current_op),
                 .set => |s| try self.planSet(s, current_op),
                 .remove => |r| try self.planRemove(r, current_op),
+                .with => |w| try self.planWith(w, current_op),
+                .merge => |m| try self.planMerge(m, current_op),
+                .unwind => |u| try self.planUnwind(u, current_op),
             };
         }
 
@@ -1079,6 +1083,165 @@ pub const QueryPlanner = struct {
         return op;
     }
 
+    /// Plan a WITH clause (projection that feeds into next query part)
+    fn planWith(self: *Self, with_clause: *const ast.WithClause, input: ?Operator) PlannerError!Operator {
+        const input_op = input orelse return PlannerError.InvalidQuery;
+
+        // Check for aggregates (same logic as RETURN)
+        var has_aggregates = false;
+        for (with_clause.items) |item| {
+            if (aggregate_ops.containsAggregate(item.expression)) {
+                has_aggregates = true;
+                break;
+            }
+        }
+
+        var op: Operator = undefined;
+        if (has_aggregates) {
+            // Reuse the aggregate return planning by creating a temporary ReturnClause
+            const ret = self.allocator.create(ast.ReturnClause) catch return PlannerError.OutOfMemory;
+            ret.* = .{
+                .distinct = with_clause.distinct,
+                .items = with_clause.items,
+                .location = with_clause.location,
+            };
+            op = try self.planAggregateReturn(ret, input_op);
+        } else {
+            // Simple projection
+            var items = self.allocator.alloc(project_ops.ProjectItem, with_clause.items.len) catch {
+                return PlannerError.OutOfMemory;
+            };
+            for (with_clause.items, 0..) |item, i| {
+                items[i] = .{
+                    .expr = item.expression,
+                    .output_slot = @intCast(i),
+                };
+            }
+            const project = project_ops.Project.init(self.allocator, input_op, items) catch {
+                return PlannerError.OutOfMemory;
+            };
+            op = project.operator();
+        }
+
+        // Reset bindings to WITH aliases (WITH introduces a new scope)
+        self.bindings.clearRetainingCapacity();
+        self.next_slot = 0;
+
+        for (with_clause.items, 0..) |item, i| {
+            const name = item.alias orelse getExpressionName(item.expression) orelse continue;
+            try self.bindVariable(name, @intCast(i), .node);
+            self.next_slot = @intCast(i + 1);
+        }
+
+        // Add WHERE filter if present
+        if (with_clause.where) |condition| {
+            const filter = filter_ops.Filter.init(self.allocator, op, condition) catch {
+                return PlannerError.OutOfMemory;
+            };
+            op = filter.operator();
+        }
+
+        return op;
+    }
+
+    /// Plan a MERGE clause (find or create a node pattern)
+    fn planMerge(self: *Self, merge_clause: *const ast.MergeClause, input: ?Operator) PlannerError!Operator {
+        const database = self.storage.database orelse return PlannerError.MissingStorage;
+
+        // Extract node pattern info from the first element
+        const pattern = merge_clause.pattern;
+        if (pattern.elements.len == 0) return PlannerError.InvalidQuery;
+
+        const node_pattern = switch (pattern.elements[0]) {
+            .node => |n| n,
+            .edge => return PlannerError.InvalidQuery, // MERGE edge not supported yet
+        };
+
+        const slot = try self.allocateSlot();
+        if (node_pattern.variable) |name| {
+            try self.bindVariable(name, slot, .node);
+        }
+
+        // Extract property KVs from the pattern
+        var properties: []const mutation_ops.CreateNode.PropertyKV = &.{};
+        if (node_pattern.properties) |props| {
+            var kvs = self.allocator.alloc(mutation_ops.CreateNode.PropertyKV, props.len) catch {
+                return PlannerError.OutOfMemory;
+            };
+            for (props, 0..) |prop, i| {
+                kvs[i] = .{
+                    .key = prop.key,
+                    .value_expr = prop.value,
+                };
+            }
+            properties = kvs;
+        }
+
+        // Extract ON CREATE SET properties
+        var on_create_props: []const mutation_ops.CreateNode.PropertyKV = &.{};
+        if (merge_clause.on_create) |items| {
+            on_create_props = try self.extractSetProperties(items);
+        }
+
+        // Extract ON MATCH SET properties
+        var on_match_props: []const mutation_ops.CreateNode.PropertyKV = &.{};
+        if (merge_clause.on_match) |items| {
+            on_match_props = try self.extractSetProperties(items);
+        }
+
+        const merge_op = mutation_ops.MergeNode.init(
+            self.allocator,
+            input,
+            node_pattern.labels,
+            properties,
+            slot,
+            database,
+            on_create_props,
+            on_match_props,
+        ) catch return PlannerError.OutOfMemory;
+
+        return merge_op.operator();
+    }
+
+    /// Extract property key-value pairs from SET items (for MERGE ON CREATE/ON MATCH)
+    fn extractSetProperties(self: *Self, items: []const ast.SetItem) PlannerError![]const mutation_ops.CreateNode.PropertyKV {
+        var kvs: std.ArrayList(mutation_ops.CreateNode.PropertyKV) = .empty;
+        defer kvs.deinit(self.allocator);
+
+        for (items) |item| {
+            switch (item) {
+                .property => |p| {
+                    kvs.append(self.allocator, .{
+                        .key = p.property_name,
+                        .value_expr = p.value,
+                    }) catch return PlannerError.OutOfMemory;
+                },
+                else => {}, // Labels and map operations not supported in MERGE ON CREATE/MATCH
+            }
+        }
+
+        return kvs.toOwnedSlice(self.allocator) catch return PlannerError.OutOfMemory;
+    }
+
+    /// Plan an UNWIND clause (expand list into rows)
+    fn planUnwind(self: *Self, unwind_clause: *const ast.UnwindClause, input: ?Operator) PlannerError!Operator {
+        // UNWIND needs an input (even if it's just a single-row source)
+        // If no input, we'd need a "single row" operator. For now, require input.
+        const input_op = input orelse return PlannerError.InvalidQuery;
+
+        const slot = try self.allocateSlot();
+        try self.bindVariable(unwind_clause.variable, slot, .node);
+
+        const unwind = unwind_ops.Unwind.init(
+            self.allocator,
+            input_op,
+            unwind_clause.expression,
+            slot,
+        ) catch return PlannerError.OutOfMemory;
+
+        return unwind.operator();
+    }
+
     /// Allocate a new variable slot
     fn allocateSlot(self: *Self) PlannerError!u8 {
         if (self.next_slot >= MAX_SLOTS) {
@@ -1119,6 +1282,16 @@ pub const QueryPlanner = struct {
 fn getVariableName(expr: *const ast.Expression) ?[]const u8 {
     return switch (expr.*) {
         .variable => |v| v.name,
+        else => null,
+    };
+}
+
+/// Get a name for an expression (variable name or property access path)
+fn getExpressionName(expr: *const ast.Expression) ?[]const u8 {
+    return switch (expr.*) {
+        .variable => |v| v.name,
+        .property_access => |pa| pa.property,
+        .function_call => |f| f.name,
         else => null,
     };
 }

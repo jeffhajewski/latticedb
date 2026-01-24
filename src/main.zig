@@ -65,6 +65,7 @@ pub const query = struct {
         pub const fts = @import("query/operators/fts.zig");
         pub const limit = @import("query/operators/limit.zig");
         pub const mutation = @import("query/operators/mutation.zig");
+        pub const unwind = @import("query/operators/unwind.zig");
     };
 };
 

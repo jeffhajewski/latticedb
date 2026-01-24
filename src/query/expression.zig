@@ -84,6 +84,15 @@ pub const EvalResult = union(enum) {
     edge_ref: EdgeId,
     /// List result
     list_val: []const EvalResult,
+    /// Vector result (float32 array)
+    vector_val: []const f32,
+    /// Map result (key-value pairs)
+    map_val: []const MapEntry,
+
+    pub const MapEntry = struct {
+        key: []const u8,
+        value: EvalResult,
+    };
 
     const Self = @This();
 
@@ -103,6 +112,8 @@ pub const EvalResult = union(enum) {
             .node_ref => true,
             .edge_ref => true,
             .list_val => |l| l.len > 0,
+            .vector_val => |v| v.len > 0,
+            .map_val => |m| m.len > 0,
         };
     }
 
@@ -132,8 +143,8 @@ pub const EvalResult = union(enum) {
         };
     }
 
-    /// Convert from PropertyValue
-    pub fn fromPropertyValue(pv: PropertyValue) Self {
+    /// Convert from PropertyValue (allocator needed for list/map conversion)
+    pub fn fromPropertyValue(pv: PropertyValue, allocator: Allocator) Self {
         return switch (pv) {
             .null_val => .{ .null_val = {} },
             .bool_val => |b| .{ .bool_val = b },
@@ -141,12 +152,31 @@ pub const EvalResult = union(enum) {
             .float_val => |f| .{ .float_val = f },
             .string_val => |s| .{ .string_val = s },
             .bytes_val => |b| .{ .string_val = b },
-            .vector_val, .list_val, .map_val => .{ .null_val = {} }, // TODO: proper vector/list/map conversion
+            .vector_val => |v| .{ .vector_val = v },
+            .list_val => |list| blk: {
+                const results = allocator.alloc(EvalResult, list.len) catch
+                    break :blk .{ .null_val = {} };
+                for (list, 0..) |item, i| {
+                    results[i] = fromPropertyValue(item, allocator);
+                }
+                break :blk .{ .list_val = results };
+            },
+            .map_val => |map| blk: {
+                const entries = allocator.alloc(MapEntry, map.len) catch
+                    break :blk .{ .null_val = {} };
+                for (map, 0..) |entry, i| {
+                    entries[i] = .{
+                        .key = entry.key,
+                        .value = fromPropertyValue(entry.value, allocator),
+                    };
+                }
+                break :blk .{ .map_val = entries };
+            },
         };
     }
 
-    /// Convert to PropertyValue
-    pub fn toPropertyValue(self: Self) PropertyValue {
+    /// Convert to PropertyValue (allocator needed for list/map conversion)
+    pub fn toPropertyValue(self: Self, allocator: Allocator) PropertyValue {
         return switch (self) {
             .null_val => .{ .null_val = {} },
             .bool_val => |b| .{ .bool_val = b },
@@ -155,7 +185,26 @@ pub const EvalResult = union(enum) {
             .string_val => |s| .{ .string_val = s },
             .node_ref => |id| .{ .int_val = @intCast(id) },
             .edge_ref => |id| .{ .int_val = @intCast(id) },
-            .list_val => .{ .null_val = {} }, // TODO: proper list conversion
+            .vector_val => |v| .{ .vector_val = v },
+            .list_val => |list| blk: {
+                const props = allocator.alloc(PropertyValue, list.len) catch
+                    break :blk .{ .null_val = {} };
+                for (list, 0..) |item, i| {
+                    props[i] = item.toPropertyValue(allocator);
+                }
+                break :blk .{ .list_val = props };
+            },
+            .map_val => |map| blk: {
+                const entries = allocator.alloc(PropertyValue.MapEntry, map.len) catch
+                    break :blk .{ .null_val = {} };
+                for (map, 0..) |entry, i| {
+                    entries[i] = .{
+                        .key = entry.key,
+                        .value = entry.value.toPropertyValue(allocator),
+                    };
+                }
+                break :blk .{ .map_val = entries };
+            },
         };
     }
 };
@@ -194,7 +243,7 @@ pub const ExpressionEvaluator = struct {
             .unary => |u| self.evaluateUnary(u, row, ctx),
             .function_call => |f| self.evaluateFunction(f, row, ctx),
             .list => |l| self.evaluateList(l, row, ctx),
-            .map => self.evaluateMap(),
+            .map => |m| self.evaluateMap(m, row, ctx),
         };
     }
 
@@ -211,7 +260,7 @@ pub const ExpressionEvaluator = struct {
 
     /// Evaluate a variable reference
     fn evaluateVariable(
-        _: *Self,
+        self: *Self,
         v: ast.VariableRef,
         row: *const Row,
         ctx: *const ExecutionContext,
@@ -226,18 +275,18 @@ pub const ExpressionEvaluator = struct {
             .empty => EvalError.EmptySlot,
             .node_ref => |id| .{ .node_ref = id },
             .edge_ref => |id| .{ .edge_ref = id },
-            .property => |pv| EvalResult.fromPropertyValue(pv),
+            .property => |pv| EvalResult.fromPropertyValue(pv, self.allocator),
         };
     }
 
     /// Evaluate a parameter reference
     fn evaluateParameter(
-        _: *Self,
+        self: *Self,
         p: ast.ParameterRef,
         ctx: *const ExecutionContext,
     ) EvalError!EvalResult {
         const pv = ctx.getParameter(p.name) orelse return EvalError.ParameterNotFound;
-        return EvalResult.fromPropertyValue(pv);
+        return EvalResult.fromPropertyValue(pv, self.allocator);
     }
 
     /// Evaluate a property access expression
@@ -283,7 +332,7 @@ pub const ExpressionEvaluator = struct {
                             const cloned = self.allocator.dupe(u8, b) catch return EvalError.OutOfMemory;
                             break :blk .{ .string_val = cloned };
                         },
-                        else => EvalResult.fromPropertyValue(prop.value),
+                        else => EvalResult.fromPropertyValue(prop.value, self.allocator),
                     };
                 }
             }
@@ -328,7 +377,7 @@ pub const ExpressionEvaluator = struct {
                             const cloned = self.allocator.dupe(u8, b) catch return EvalError.OutOfMemory;
                             break :blk .{ .string_val = cloned };
                         },
-                        else => EvalResult.fromPropertyValue(prop.value),
+                        else => EvalResult.fromPropertyValue(prop.value, self.allocator),
                     };
                 }
             }
@@ -541,10 +590,24 @@ pub const ExpressionEvaluator = struct {
         return .{ .list_val = results };
     }
 
-    /// Evaluate a map expression (returns null for now)
-    fn evaluateMap(_: *Self) EvalResult {
-        // TODO: implement map evaluation
-        return .{ .null_val = {} };
+    /// Evaluate a map expression {key: value, ...}
+    fn evaluateMap(
+        self: *Self,
+        m: *const ast.MapExpr,
+        row: *const Row,
+        ctx: *const ExecutionContext,
+    ) EvalError!EvalResult {
+        const entries = self.allocator.alloc(EvalResult.MapEntry, m.entries.len) catch return EvalError.OutOfMemory;
+        errdefer self.allocator.free(entries);
+
+        for (m.entries, 0..) |entry, i| {
+            entries[i] = .{
+                .key = entry.key,
+                .value = try self.evaluate(entry.value, row, ctx),
+            };
+        }
+
+        return .{ .map_val = entries };
     }
 
     // ========================================================================

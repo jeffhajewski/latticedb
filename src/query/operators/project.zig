@@ -105,7 +105,7 @@ pub const Project = struct {
             };
 
             // Convert result to slot value
-            const slot_value = resultToSlotValue(result);
+            const slot_value = resultToSlotValue(result, self.evaluator.allocator);
             output_row.setSlot(item.output_slot, slot_value);
 
             // Copy distances and scores from input if this is a passthrough
@@ -141,7 +141,7 @@ pub const Project = struct {
 };
 
 /// Convert an EvalResult to a SlotValue
-fn resultToSlotValue(result: EvalResult) SlotValue {
+fn resultToSlotValue(result: EvalResult, allocator: Allocator) SlotValue {
     return switch (result) {
         .null_val => .{ .empty = {} },
         .node_ref => |id| .{ .node_ref = id },
@@ -150,7 +150,9 @@ fn resultToSlotValue(result: EvalResult) SlotValue {
         .int_val => |i| .{ .property = .{ .int_val = i } },
         .float_val => |f| .{ .property = .{ .float_val = f } },
         .string_val => |s| .{ .property = .{ .string_val = s } },
-        .list_val => .{ .empty = {} }, // TODO: proper list handling
+        .vector_val => |v| .{ .property = .{ .vector_val = v } },
+        .list_val => .{ .property = result.toPropertyValue(allocator) },
+        .map_val => .{ .property = result.toPropertyValue(allocator) },
     };
 }
 
@@ -179,12 +181,12 @@ test "Project basic structure" {
 }
 
 test "resultToSlotValue conversions" {
-    const node_slot = resultToSlotValue(.{ .node_ref = 123 });
+    const node_slot = resultToSlotValue(.{ .node_ref = 123 }, std.testing.allocator);
     try std.testing.expectEqual(@as(u64, 123), node_slot.asNodeId().?);
 
-    const bool_slot = resultToSlotValue(.{ .bool_val = true });
+    const bool_slot = resultToSlotValue(.{ .bool_val = true }, std.testing.allocator);
     try std.testing.expectEqual(true, bool_slot.asProperty().?.bool_val);
 
-    const int_slot = resultToSlotValue(.{ .int_val = 42 });
+    const int_slot = resultToSlotValue(.{ .int_val = 42 }, std.testing.allocator);
     try std.testing.expectEqual(@as(i64, 42), int_slot.asProperty().?.int_val);
 }

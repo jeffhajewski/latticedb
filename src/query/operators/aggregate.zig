@@ -379,7 +379,7 @@ pub const Aggregate = struct {
                 // Output aggregate results
                 for (self.agg_items, 0..) |item, i| {
                     const result = group.accumulators[i].result();
-                    output_row.setSlot(item.output_slot, resultToSlotValue(result));
+                    output_row.setSlot(item.output_slot, resultToSlotValue(result, self.allocator));
                 }
 
                 // Clear global group so we don't return it again
@@ -401,13 +401,13 @@ pub const Aggregate = struct {
 
                 // Output group key values
                 for (self.group_keys, 0..) |gk, i| {
-                    output_row.setSlot(gk.output_slot, resultToSlotValue(entry.value_ptr.key_values[i]));
+                    output_row.setSlot(gk.output_slot, resultToSlotValue(entry.value_ptr.key_values[i], self.allocator));
                 }
 
                 // Output aggregate results
                 for (self.agg_items, 0..) |item, i| {
                     const result = entry.value_ptr.accumulators[i].result();
-                    output_row.setSlot(item.output_slot, resultToSlotValue(result));
+                    output_row.setSlot(item.output_slot, resultToSlotValue(result, self.allocator));
                 }
 
                 return output_row;
@@ -490,12 +490,20 @@ fn hashValue(value: EvalResult, buf: []u8) usize {
             buf[0] = 8;
             len = 1;
         },
+        .vector_val => {
+            buf[0] = 9;
+            len = 1;
+        },
+        .map_val => {
+            buf[0] = 10;
+            len = 1;
+        },
     }
     return len;
 }
 
 /// Convert an EvalResult to a SlotValue
-fn resultToSlotValue(result: EvalResult) SlotValue {
+fn resultToSlotValue(result: EvalResult, allocator: Allocator) SlotValue {
     return switch (result) {
         .null_val => .{ .empty = {} },
         .node_ref => |id| .{ .node_ref = id },
@@ -504,7 +512,9 @@ fn resultToSlotValue(result: EvalResult) SlotValue {
         .int_val => |i| .{ .property = .{ .int_val = i } },
         .float_val => |f| .{ .property = .{ .float_val = f } },
         .string_val => |s| .{ .property = .{ .string_val = s } },
-        .list_val => .{ .empty = {} }, // TODO: proper list handling
+        .vector_val => |v| .{ .property = .{ .vector_val = v } },
+        .list_val => .{ .property = result.toPropertyValue(allocator) },
+        .map_val => .{ .property = result.toPropertyValue(allocator) },
     };
 }
 

@@ -165,7 +165,7 @@ pub const CreateNode = struct {
                 const value = self.evaluator.evaluate(prop.value_expr, r, ctx) catch {
                     continue; // Skip property on eval error (expression may reference missing vars)
                 };
-                const prop_value = evalResultToPropertyValue(value) orelse continue;
+                const prop_value = evalResultToPropertyValue(value, self.evaluator.allocator) orelse continue;
                 self.database.setNodeProperty(null, node_id, prop.key, prop_value) catch {
                     return OperatorError.StorageError;
                 };
@@ -177,7 +177,7 @@ pub const CreateNode = struct {
                 const value = self.evaluator.evaluate(prop.value_expr, &dummy_row, ctx) catch {
                     continue; // Skip property on eval error (expression may reference missing vars)
                 };
-                const prop_value = evalResultToPropertyValue(value) orelse continue;
+                const prop_value = evalResultToPropertyValue(value, self.evaluator.allocator) orelse continue;
                 self.database.setNodeProperty(null, node_id, prop.key, prop_value) catch {
                     return OperatorError.StorageError;
                 };
@@ -628,7 +628,7 @@ pub const SetProperty = struct {
                         return OperatorError.StorageError;
                     };
                 } else {
-                    const prop_value = evalResultToPropertyValue(value) orelse return OperatorError.TypeError;
+                    const prop_value = evalResultToPropertyValue(value, self.evaluator.allocator) orelse return OperatorError.TypeError;
                     self.database.setNodeProperty(null, node_id, self.property_name, prop_value) catch {
                         return OperatorError.StorageError;
                     };
@@ -843,7 +843,7 @@ pub const SetPropertiesReplace = struct {
         // Set properties from map
         for (map.entries) |entry| {
             const value = self.evaluator.evaluate(entry.value, row, ctx) catch continue;
-            const prop_value = evalResultToPropertyValue(value) orelse continue;
+            const prop_value = evalResultToPropertyValue(value, self.evaluator.allocator) orelse continue;
             self.database.setNodeProperty(null, node_id, entry.key, prop_value) catch continue;
         }
 
@@ -948,7 +948,7 @@ pub const SetPropertiesMerge = struct {
         // Merge: set properties from map (keeps existing, overwrites on conflict)
         for (map.entries) |entry| {
             const value = self.evaluator.evaluate(entry.value, row, ctx) catch continue;
-            const prop_value = evalResultToPropertyValue(value) orelse continue;
+            const prop_value = evalResultToPropertyValue(value, self.evaluator.allocator) orelse continue;
             self.database.setNodeProperty(null, node_id, entry.key, prop_value) catch continue;
         }
 
@@ -1171,15 +1171,16 @@ pub const RemoveLabels = struct {
 // ============================================================================
 
 /// Convert EvalResult to PropertyValue
-fn evalResultToPropertyValue(result: EvalResult) ?PropertyValue {
+fn evalResultToPropertyValue(result: EvalResult, allocator: Allocator) ?PropertyValue {
     return switch (result) {
         .null_val => .{ .null_val = {} },
         .bool_val => |b| .{ .bool_val = b },
         .int_val => |i| .{ .int_val = i },
         .float_val => |f| .{ .float_val = f },
         .string_val => |s| .{ .string_val = s },
+        .vector_val => |v| .{ .vector_val = v },
         .node_ref, .edge_ref => null, // Can't convert refs to property
-        .list_val => null, // List conversion not yet supported
+        .list_val, .map_val => result.toPropertyValue(allocator),
     };
 }
 

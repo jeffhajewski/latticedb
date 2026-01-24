@@ -1279,3 +1279,118 @@ test "database: multiple complex properties on same node" {
         }
     }
 }
+
+// ============================================================
+// Multi-Label Query Tests
+// ============================================================
+
+test "database: multi-label query filters nodes with all specified labels" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_multi_label_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false, .enable_vector = false },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    // Create nodes with varying label combinations
+    const alice = try db.createNode(null, &[_][]const u8{ "Person", "Employee" });
+    try db.setNodeProperty(null, alice, "name", .{ .string_val = "Alice" });
+
+    const bob = try db.createNode(null, &[_][]const u8{ "Person", "Manager" });
+    try db.setNodeProperty(null, bob, "name", .{ .string_val = "Bob" });
+
+    const charlie = try db.createNode(null, &[_][]const u8{ "Person", "Employee", "Senior" });
+    try db.setNodeProperty(null, charlie, "name", .{ .string_val = "Charlie" });
+
+    const dave = try db.createNode(null, &[_][]const u8{"Person"});
+    try db.setNodeProperty(null, dave, "name", .{ .string_val = "Dave" });
+
+    // Query with two labels: Person AND Employee
+    var result1 = try db.query("MATCH (n:Person:Employee) RETURN n");
+    defer result1.deinit();
+    // Alice has Person+Employee, Charlie has Person+Employee+Senior
+    try std.testing.expectEqual(@as(usize, 2), result1.rowCount());
+
+    // Query with two labels: Person AND Manager
+    var result2 = try db.query("MATCH (n:Person:Manager) RETURN n");
+    defer result2.deinit();
+    // Only Bob has both Person and Manager
+    try std.testing.expectEqual(@as(usize, 1), result2.rowCount());
+
+    // Query with single label: Person (all four nodes)
+    var result3 = try db.query("MATCH (n:Person) RETURN n");
+    defer result3.deinit();
+    try std.testing.expectEqual(@as(usize, 4), result3.rowCount());
+}
+
+test "database: multi-label query on target of edge" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_multi_label_edge_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false, .enable_vector = false },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    // Create nodes
+    const alice = try db.createNode(null, &[_][]const u8{ "Person", "Employee" });
+    try db.setNodeProperty(null, alice, "name", .{ .string_val = "Alice" });
+
+    const bob = try db.createNode(null, &[_][]const u8{ "Person", "Manager" });
+    try db.setNodeProperty(null, bob, "name", .{ .string_val = "Bob" });
+
+    const charlie = try db.createNode(null, &[_][]const u8{ "Person", "Employee" });
+    try db.setNodeProperty(null, charlie, "name", .{ .string_val = "Charlie" });
+
+    // Create edges: Alice and Charlie work with Bob
+    try db.createEdge(null, alice, bob, "WORKS_WITH");
+    try db.createEdge(null, charlie, bob, "WORKS_WITH");
+    try db.createEdge(null, alice, charlie, "WORKS_WITH");
+
+    // Query: find Person nodes that work with a Person:Manager
+    var result = try db.query("MATCH (a:Person)-[:WORKS_WITH]->(b:Person:Manager) RETURN b");
+    defer result.deinit();
+    // Alice->Bob and Charlie->Bob; Bob is the only Person:Manager target
+    try std.testing.expectEqual(@as(usize, 2), result.rowCount());
+}
+
+test "database: three labels on node pattern" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_three_label_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false, .enable_vector = false },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    // Create nodes with varying label counts
+    _ = try db.createNode(null, &[_][]const u8{ "Person", "Employee" });
+    const senior = try db.createNode(null, &[_][]const u8{ "Person", "Employee", "Senior" });
+    try db.setNodeProperty(null, senior, "name", .{ .string_val = "Senior Employee" });
+    _ = try db.createNode(null, &[_][]const u8{ "Person", "Manager", "Senior" });
+
+    // Query with three labels: Person AND Employee AND Senior
+    var result = try db.query("MATCH (n:Person:Employee:Senior) RETURN n");
+    defer result.deinit();
+    // Only the second node has all three labels
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+}

@@ -219,6 +219,18 @@ pub const QueryPlanner = struct {
                                 return PlannerError.OutOfMemory;
                             };
                             op = label_filter.operator();
+
+                            // Chain filters for additional labels (AND semantics)
+                            for (node_pattern.labels[1..]) |label_name| {
+                                const extra_id = symbol_table.lookup(label_name) catch |err| switch (err) {
+                                    symbols.SymbolError.NotFound => symbols.NULL_SYMBOL,
+                                    else => return PlannerError.InternalError,
+                                };
+                                const extra_filter = filter_ops.LabelFilter.init(self.allocator, op.?, slot, extra_id) catch {
+                                    return PlannerError.OutOfMemory;
+                                };
+                                op = extra_filter.operator();
+                            }
                         }
                         // If no labels, no filter needed - just use the Expand output as-is
                     } else if (node_pattern.labels.len > 0) {
@@ -226,7 +238,6 @@ pub const QueryPlanner = struct {
                         const label_index_ptr = self.storage.label_index orelse return PlannerError.MissingStorage;
                         const symbol_table = self.storage.symbol_table orelse return PlannerError.MissingStorage;
 
-                        // Look up first label (TODO: handle multiple labels)
                         // If label is not found in symbol table, use NULL_SYMBOL (0) which has no nodes
                         // This will result in an empty scan rather than an error
                         const label_id = symbol_table.lookup(node_pattern.labels[0]) catch |err| switch (err) {
@@ -238,6 +249,18 @@ pub const QueryPlanner = struct {
                             return PlannerError.OutOfMemory;
                         };
                         op = label_scan.operator();
+
+                        // Chain filters for additional labels (AND semantics)
+                        for (node_pattern.labels[1..]) |label_name| {
+                            const extra_id = symbol_table.lookup(label_name) catch |err| switch (err) {
+                                symbols.SymbolError.NotFound => symbols.NULL_SYMBOL,
+                                else => return PlannerError.InternalError,
+                            };
+                            const extra_filter = filter_ops.LabelFilter.init(self.allocator, op.?, slot, extra_id) catch {
+                                return PlannerError.OutOfMemory;
+                            };
+                            op = extra_filter.operator();
+                        }
                     } else if (op == null) {
                         // All nodes scan
                         const node_tree = self.storage.node_tree orelse return PlannerError.MissingStorage;

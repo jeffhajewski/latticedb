@@ -286,9 +286,7 @@ test "btree: survives multiple page splits" {
 
     var tree = try db.createBTree();
 
-    // Insert enough to trigger splits (limited to avoid known bug in split code)
-    // TODO: Increase count after fixing @memcpy alias bug in splitLeafAndInsert
-    const count: usize = 100;
+    const count: usize = 500;
     const keys = try helpers.generateSortedKeys(allocator, count, "key");
     defer helpers.freeKeys(allocator, keys);
 

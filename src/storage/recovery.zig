@@ -442,16 +442,53 @@ pub const RecoveryManager = struct {
 
     /// Redo an update operation
     fn redoUpdate(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) !void {
-        _ = self;
-        _ = ctx;
         if (payload.len == 0) return;
 
         const payload_type = payload[0];
 
-        // Property update - simplified for now
+        // Property update
         if (payload_type == @intFromEnum(wal_payload.PayloadType.node_update)) {
-            // Would need to apply property update
-            // Full implementation requires storing the new value in WAL
+            const update_payload = wal_payload.deserializePropertyUpdate(payload) catch return;
+
+            // Get the current node (should already exist from redoInsert)
+            var node = ctx.node_store.get(update_payload.node_id) catch return;
+            defer node.deinit(self.allocator);
+
+            if (update_payload.new_value.len == 0) {
+                // Property removed — rebuild properties without this key
+                var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
+                defer new_props.deinit(self.allocator);
+                for (node.properties) |prop| {
+                    if (prop.key_id != update_payload.key_id) {
+                        new_props.append(self.allocator, prop) catch return;
+                    }
+                }
+                ctx.node_store.update(update_payload.node_id, node.labels, new_props.items) catch {};
+            } else {
+                // Deserialize the new property value from WAL bytes
+                var new_value = wal_payload.deserializePropertyValueFromBytes(
+                    self.allocator,
+                    update_payload.new_value,
+                ) catch return;
+                defer new_value.deinit(self.allocator);
+
+                // Build updated properties list: replace existing or append new
+                var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
+                defer new_props.deinit(self.allocator);
+                var found = false;
+                for (node.properties) |prop| {
+                    if (prop.key_id == update_payload.key_id) {
+                        new_props.append(self.allocator, .{ .key_id = update_payload.key_id, .value = new_value }) catch return;
+                        found = true;
+                    } else {
+                        new_props.append(self.allocator, prop) catch return;
+                    }
+                }
+                if (!found) {
+                    new_props.append(self.allocator, .{ .key_id = update_payload.key_id, .value = new_value }) catch return;
+                }
+                ctx.node_store.update(update_payload.node_id, node.labels, new_props.items) catch {};
+            }
         }
     }
 

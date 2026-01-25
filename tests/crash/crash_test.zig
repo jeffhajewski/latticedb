@@ -12,6 +12,7 @@ const DatabaseConfig = lattice.storage.database.DatabaseConfig;
 const OpenOptions = lattice.storage.database.OpenOptions;
 const FileHeader = lattice.storage.page.FileHeader;
 const NodeId = lattice.core.types.NodeId;
+const PropertyValue = lattice.core.types.PropertyValue;
 const NULL_PAGE = lattice.core.types.NULL_PAGE;
 
 // ============================================================================
@@ -372,5 +373,127 @@ test "data persists across multiple crash-recover cycles" {
         for (batch2_ids) |id| {
             try std.testing.expect(try db.nodeExists(id));
         }
+    }
+}
+
+test "property updates recovered after crash" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_property.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var node_id: NodeId = undefined;
+
+    // Create a node and set a property
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+        var txn = try db.beginTransaction(.read_write);
+        node_id = try db.createNode(&txn, &[_][]const u8{});
+        try db.setNodeProperty(&txn, node_id, "age", .{ .int_val = 42 });
+        try db.commitTransaction(&txn);
+        db.close();
+    }
+
+    // Simulate crash
+    try simulateCrash(path);
+
+    // Reopen - recovery should replay both insert and property update
+    {
+        var db = try openCrashTestDb(allocator, path, false);
+        defer db.close();
+
+        // Node should exist
+        try std.testing.expect(try db.nodeExists(node_id));
+
+        // Get the raw node and verify property is present
+        var node = try db.node_store.get(node_id);
+        defer node.deinit(allocator);
+
+        // Should have exactly 1 property with int value 42
+        try std.testing.expectEqual(@as(usize, 1), node.properties.len);
+        try std.testing.expectEqual(@as(i64, 42), node.properties[0].value.int_val);
+    }
+}
+
+test "multiple property updates on same node recovered" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_multi_prop.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var node_id: NodeId = undefined;
+
+    // Create a node and set multiple properties
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+        var txn = try db.beginTransaction(.read_write);
+        node_id = try db.createNode(&txn, &[_][]const u8{});
+        try db.setNodeProperty(&txn, node_id, "x", .{ .int_val = 10 });
+        try db.setNodeProperty(&txn, node_id, "y", .{ .int_val = 20 });
+        try db.setNodeProperty(&txn, node_id, "z", .{ .int_val = 30 });
+        try db.commitTransaction(&txn);
+        db.close();
+    }
+
+    // Simulate crash
+    try simulateCrash(path);
+
+    // Reopen - all 3 properties should be recovered
+    {
+        var db = try openCrashTestDb(allocator, path, false);
+        defer db.close();
+
+        try std.testing.expect(try db.nodeExists(node_id));
+
+        var node = try db.node_store.get(node_id);
+        defer node.deinit(allocator);
+
+        // Should have 3 properties
+        try std.testing.expectEqual(@as(usize, 3), node.properties.len);
+
+        // Verify values (order may vary, so check by summing)
+        var sum: i64 = 0;
+        for (node.properties) |prop| {
+            sum += prop.value.int_val;
+        }
+        try std.testing.expectEqual(@as(i64, 60), sum);
+    }
+}
+
+test "property overwrite recovered with latest value" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_prop_overwrite.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var node_id: NodeId = undefined;
+
+    // Create a node, set a property, then overwrite it
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+        var txn = try db.beginTransaction(.read_write);
+        node_id = try db.createNode(&txn, &[_][]const u8{});
+        try db.setNodeProperty(&txn, node_id, "score", .{ .int_val = 100 });
+        try db.setNodeProperty(&txn, node_id, "score", .{ .int_val = 999 });
+        try db.commitTransaction(&txn);
+        db.close();
+    }
+
+    // Simulate crash
+    try simulateCrash(path);
+
+    // Reopen - should have the latest value (999)
+    {
+        var db = try openCrashTestDb(allocator, path, false);
+        defer db.close();
+
+        try std.testing.expect(try db.nodeExists(node_id));
+
+        var node = try db.node_store.get(node_id);
+        defer node.deinit(allocator);
+
+        // Should have exactly 1 property with the overwritten value
+        try std.testing.expectEqual(@as(usize, 1), node.properties.len);
+        try std.testing.expectEqual(@as(i64, 999), node.properties[0].value.int_val);
     }
 }

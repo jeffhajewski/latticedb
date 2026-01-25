@@ -290,6 +290,13 @@ pub const TxnManager = struct {
 
         // Clean up transaction entry
         entry.savepoints.deinit(self.allocator);
+
+        // Free prev_data in undo entries
+        for (entry.undo_log.items) |undo_entry| {
+            if (undo_entry.prev_data) |data| {
+                self.allocator.free(data);
+            }
+        }
         entry.undo_log.deinit(self.allocator);
         _ = self.active_txns.remove(txn.id);
 

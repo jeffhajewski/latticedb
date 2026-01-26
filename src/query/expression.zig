@@ -555,8 +555,282 @@ pub const ExpressionEvaluator = struct {
 
         if (std.mem.eql(u8, f.name, "toString")) {
             if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
-            // String conversion requires allocation - defer to runtime
-            return .{ .null_val = {} };
+            const arg = try self.evaluate(f.arguments[0], row, ctx);
+            return switch (arg) {
+                .string_val => arg,
+                .int_val => |i| blk: {
+                    const s = std.fmt.allocPrint(self.allocator, "{d}", .{i}) catch return EvalError.OutOfMemory;
+                    break :blk .{ .string_val = s };
+                },
+                .float_val => |fv| blk: {
+                    const s = std.fmt.allocPrint(self.allocator, "{d}", .{fv}) catch return EvalError.OutOfMemory;
+                    break :blk .{ .string_val = s };
+                },
+                .bool_val => |b| .{ .string_val = if (b) "true" else "false" },
+                .null_val => .{ .string_val = "null" },
+                else => .{ .null_val = {} },
+            };
+        }
+
+        // String functions
+        if (std.mem.eql(u8, f.name, "toLower")) {
+            if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
+            const arg = try self.evaluate(f.arguments[0], row, ctx);
+            return switch (arg) {
+                .string_val => |s| blk: {
+                    const copy = self.allocator.dupe(u8, s) catch return EvalError.OutOfMemory;
+                    for (copy) |*c| {
+                        c.* = std.ascii.toLower(c.*);
+                    }
+                    break :blk .{ .string_val = copy };
+                },
+                .null_val => .{ .null_val = {} },
+                else => EvalError.TypeError,
+            };
+        }
+
+        if (std.mem.eql(u8, f.name, "toUpper")) {
+            if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
+            const arg = try self.evaluate(f.arguments[0], row, ctx);
+            return switch (arg) {
+                .string_val => |s| blk: {
+                    const copy = self.allocator.dupe(u8, s) catch return EvalError.OutOfMemory;
+                    for (copy) |*c| {
+                        c.* = std.ascii.toUpper(c.*);
+                    }
+                    break :blk .{ .string_val = copy };
+                },
+                .null_val => .{ .null_val = {} },
+                else => EvalError.TypeError,
+            };
+        }
+
+        if (std.mem.eql(u8, f.name, "trim")) {
+            if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
+            const arg = try self.evaluate(f.arguments[0], row, ctx);
+            return switch (arg) {
+                .string_val => |s| .{ .string_val = std.mem.trim(u8, s, " \t\n\r") },
+                .null_val => .{ .null_val = {} },
+                else => EvalError.TypeError,
+            };
+        }
+
+        if (std.mem.eql(u8, f.name, "substring")) {
+            if (f.arguments.len < 2 or f.arguments.len > 3) return EvalError.InvalidArgumentCount;
+            const arg = try self.evaluate(f.arguments[0], row, ctx);
+            const start_arg = try self.evaluate(f.arguments[1], row, ctx);
+            const s = switch (arg) {
+                .string_val => |sv| sv,
+                .null_val => return .{ .null_val = {} },
+                else => return EvalError.TypeError,
+            };
+            const start_raw = start_arg.toInt() orelse return EvalError.TypeError;
+            const start: usize = if (start_raw < 0) 0 else @intCast(@min(start_raw, @as(i64, @intCast(s.len))));
+            if (f.arguments.len == 3) {
+                const len_arg = try self.evaluate(f.arguments[2], row, ctx);
+                const length_raw = len_arg.toInt() orelse return EvalError.TypeError;
+                const length: usize = if (length_raw < 0) 0 else @intCast(@min(length_raw, @as(i64, @intCast(s.len - start))));
+                return .{ .string_val = s[start .. start + length] };
+            }
+            return .{ .string_val = s[start..] };
+        }
+
+        if (std.mem.eql(u8, f.name, "replace")) {
+            if (f.arguments.len != 3) return EvalError.InvalidArgumentCount;
+            const arg = try self.evaluate(f.arguments[0], row, ctx);
+            const search_arg = try self.evaluate(f.arguments[1], row, ctx);
+            const replace_arg = try self.evaluate(f.arguments[2], row, ctx);
+            const s = switch (arg) {
+                .string_val => |sv| sv,
+                .null_val => return .{ .null_val = {} },
+                else => return EvalError.TypeError,
+            };
+            const search = switch (search_arg) {
+                .string_val => |sv| sv,
+                else => return EvalError.TypeError,
+            };
+            const replacement = switch (replace_arg) {
+                .string_val => |sv| sv,
+                else => return EvalError.TypeError,
+            };
+            if (search.len == 0) {
+                return .{ .string_val = s };
+            }
+            var result_buf: std.ArrayListUnmanaged(u8) = .empty;
+            errdefer result_buf.deinit(self.allocator);
+            var i: usize = 0;
+            while (i < s.len) {
+                if (i + search.len <= s.len and std.mem.eql(u8, s[i .. i + search.len], search)) {
+                    result_buf.appendSlice(self.allocator, replacement) catch return EvalError.OutOfMemory;
+                    i += search.len;
+                } else {
+                    result_buf.append(self.allocator, s[i]) catch return EvalError.OutOfMemory;
+                    i += 1;
+                }
+            }
+            return .{ .string_val = result_buf.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory };
+        }
+
+        if (std.mem.eql(u8, f.name, "split")) {
+            if (f.arguments.len != 2) return EvalError.InvalidArgumentCount;
+            const arg = try self.evaluate(f.arguments[0], row, ctx);
+            const delim_arg = try self.evaluate(f.arguments[1], row, ctx);
+            const s = switch (arg) {
+                .string_val => |sv| sv,
+                .null_val => return .{ .null_val = {} },
+                else => return EvalError.TypeError,
+            };
+            const delimiter = switch (delim_arg) {
+                .string_val => |sv| sv,
+                else => return EvalError.TypeError,
+            };
+            var parts: std.ArrayListUnmanaged(EvalResult) = .empty;
+            errdefer parts.deinit(self.allocator);
+            var iter = std.mem.splitSequence(u8, s, delimiter);
+            while (iter.next()) |part| {
+                parts.append(self.allocator, .{ .string_val = part }) catch return EvalError.OutOfMemory;
+            }
+            return .{ .list_val = parts.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory };
+        }
+
+        // List functions
+        if (std.mem.eql(u8, f.name, "head")) {
+            if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
+            const arg = try self.evaluate(f.arguments[0], row, ctx);
+            return switch (arg) {
+                .list_val => |l| if (l.len > 0) l[0] else .{ .null_val = {} },
+                .null_val => .{ .null_val = {} },
+                else => EvalError.TypeError,
+            };
+        }
+
+        if (std.mem.eql(u8, f.name, "tail")) {
+            if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
+            const arg = try self.evaluate(f.arguments[0], row, ctx);
+            return switch (arg) {
+                .list_val => |l| if (l.len > 1)
+                    .{ .list_val = l[1..] }
+                else
+                    .{ .list_val = &[_]EvalResult{} },
+                .null_val => .{ .null_val = {} },
+                else => EvalError.TypeError,
+            };
+        }
+
+        if (std.mem.eql(u8, f.name, "last")) {
+            if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
+            const arg = try self.evaluate(f.arguments[0], row, ctx);
+            return switch (arg) {
+                .list_val => |l| if (l.len > 0) l[l.len - 1] else .{ .null_val = {} },
+                .null_val => .{ .null_val = {} },
+                else => EvalError.TypeError,
+            };
+        }
+
+        if (std.mem.eql(u8, f.name, "range")) {
+            if (f.arguments.len < 2 or f.arguments.len > 3) return EvalError.InvalidArgumentCount;
+            const start_arg = try self.evaluate(f.arguments[0], row, ctx);
+            const end_arg = try self.evaluate(f.arguments[1], row, ctx);
+            const start = start_arg.toInt() orelse return EvalError.TypeError;
+            const end = end_arg.toInt() orelse return EvalError.TypeError;
+            var step: i64 = 1;
+            if (f.arguments.len == 3) {
+                const step_arg = try self.evaluate(f.arguments[2], row, ctx);
+                step = step_arg.toInt() orelse return EvalError.TypeError;
+                if (step == 0) return EvalError.InvalidOperation;
+            }
+            var items: std.ArrayListUnmanaged(EvalResult) = .empty;
+            errdefer items.deinit(self.allocator);
+            // Cypher range() is inclusive on both ends
+            if (step > 0) {
+                var i = start;
+                while (i <= end) : (i += step) {
+                    items.append(self.allocator, .{ .int_val = i }) catch return EvalError.OutOfMemory;
+                }
+            } else {
+                var i = start;
+                while (i >= end) : (i += step) {
+                    items.append(self.allocator, .{ .int_val = i }) catch return EvalError.OutOfMemory;
+                }
+            }
+            return .{ .list_val = items.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory };
+        }
+
+        // Type/graph functions
+        if (std.mem.eql(u8, f.name, "type")) {
+            if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
+            const arg = try self.evaluate(f.arguments[0], row, ctx);
+            return switch (arg) {
+                .edge_ref => |edge_id| blk: {
+                    const symbol_table = ctx.symbol_table orelse break :blk .{ .null_val = {} };
+                    const decoded = decodeEdgeId(edge_id);
+                    const resolved = symbol_table.resolve(decoded.edge_type) catch break :blk .{ .null_val = {} };
+                    break :blk .{ .string_val = resolved };
+                },
+                .null_val => .{ .null_val = {} },
+                else => EvalError.TypeError,
+            };
+        }
+
+        if (std.mem.eql(u8, f.name, "labels")) {
+            if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
+            const arg = try self.evaluate(f.arguments[0], row, ctx);
+            return switch (arg) {
+                .node_ref => |node_id| blk: {
+                    const node_store = ctx.node_store orelse break :blk .{ .null_val = {} };
+                    const symbol_table = ctx.symbol_table orelse break :blk .{ .null_val = {} };
+                    var node = node_store.get(node_id) catch break :blk .{ .null_val = {} };
+                    defer node.deinit(ctx.allocator);
+                    var label_list: std.ArrayListUnmanaged(EvalResult) = .empty;
+                    for (node.labels) |label_id| {
+                        const resolved = symbol_table.resolve(label_id) catch continue;
+                        label_list.append(self.allocator, .{ .string_val = resolved }) catch return EvalError.OutOfMemory;
+                    }
+                    break :blk .{ .list_val = label_list.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory };
+                },
+                .null_val => .{ .null_val = {} },
+                else => EvalError.TypeError,
+            };
+        }
+
+        if (std.mem.eql(u8, f.name, "properties")) {
+            if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
+            const arg = try self.evaluate(f.arguments[0], row, ctx);
+            if (arg == .node_ref) {
+                const node_id = arg.node_ref;
+                const node_store = ctx.node_store orelse return .{ .null_val = {} };
+                const symbol_table = ctx.symbol_table orelse return .{ .null_val = {} };
+                var node = node_store.get(node_id) catch return .{ .null_val = {} };
+                defer node.deinit(ctx.allocator);
+                var entries: std.ArrayListUnmanaged(EvalResult.MapEntry) = .empty;
+                for (node.properties) |prop| {
+                    const key = symbol_table.resolve(prop.key_id) catch continue;
+                    entries.append(self.allocator, .{
+                        .key = key,
+                        .value = EvalResult.fromPropertyValue(prop.value, self.allocator),
+                    }) catch return EvalError.OutOfMemory;
+                }
+                return .{ .map_val = entries.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory };
+            } else if (arg == .edge_ref) {
+                const edge_id = arg.edge_ref;
+                const database = ctx.database orelse return .{ .null_val = {} };
+                const symbol_table = ctx.symbol_table orelse return .{ .null_val = {} };
+                const decoded = decodeEdgeId(edge_id);
+                var edge = database.edge_store.get(decoded.source, decoded.target, decoded.edge_type) catch return .{ .null_val = {} };
+                defer edge.deinit(ctx.allocator);
+                var entries: std.ArrayListUnmanaged(EvalResult.MapEntry) = .empty;
+                for (edge.properties) |prop| {
+                    const key = symbol_table.resolve(prop.key_id) catch continue;
+                    entries.append(self.allocator, .{
+                        .key = key,
+                        .value = EvalResult.fromPropertyValue(prop.value, self.allocator),
+                    }) catch return EvalError.OutOfMemory;
+                }
+                return .{ .map_val = entries.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory };
+            } else if (arg == .null_val) {
+                return .{ .null_val = {} };
+            }
+            return EvalError.TypeError;
         }
 
         return EvalError.UnknownFunction;

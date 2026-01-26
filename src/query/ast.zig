@@ -338,6 +338,7 @@ pub const UnaryExpr = struct {
 pub const FunctionCall = struct {
     name: []const u8,
     arguments: []*Expression,
+    distinct: bool = false,
     location: SourceLocation,
 };
 

@@ -30,6 +30,7 @@ const vector_ops = @import("operators/vector.zig");
 const fts_ops = @import("operators/fts.zig");
 const mutation_ops = @import("operators/mutation.zig");
 const aggregate_ops = @import("operators/aggregate.zig");
+const distinct_ops = @import("operators/distinct.zig");
 const unwind_ops = @import("operators/unwind.zig");
 
 const btree = @import("../storage/btree.zig");
@@ -611,7 +612,14 @@ pub const QueryPlanner = struct {
         }
 
         if (has_aggregates) {
-            return self.planAggregateReturn(ret, input_op);
+            var result_op = try self.planAggregateReturn(ret, input_op);
+            if (ret.distinct) {
+                const distinct = distinct_ops.Distinct.init(self.allocator, result_op) catch {
+                    return PlannerError.OutOfMemory;
+                };
+                result_op = distinct.operator();
+            }
+            return result_op;
         }
 
         // No aggregates - create simple projection
@@ -631,7 +639,14 @@ pub const QueryPlanner = struct {
             return PlannerError.OutOfMemory;
         };
 
-        return project.operator();
+        var result_op = project.operator();
+        if (ret.distinct) {
+            const distinct = distinct_ops.Distinct.init(self.allocator, result_op) catch {
+                return PlannerError.OutOfMemory;
+            };
+            result_op = distinct.operator();
+        }
+        return result_op;
     }
 
     /// Plan a RETURN clause with aggregations
@@ -656,7 +671,7 @@ pub const QueryPlanner = struct {
                     .func = agg_info.func,
                     .expr = agg_info.arg,
                     .output_slot = slot,
-                    .distinct = false,
+                    .distinct = agg_info.distinct,
                 }) catch return PlannerError.OutOfMemory;
 
                 // Projection just passes through the aggregate result
@@ -709,19 +724,19 @@ pub const QueryPlanner = struct {
     }
 
     /// Check if an expression is a direct aggregate function call (e.g., count(n), sum(n.val))
-    /// Returns the aggregate function type and argument if so
-    fn isDirectAggregate(self: *Self, expr: *const ast.Expression) ?struct { func: aggregate_ops.AggregateFunc, arg: ?*const ast.Expression } {
+    /// Returns the aggregate function type, argument, and distinct flag if so
+    fn isDirectAggregate(self: *Self, expr: *const ast.Expression) ?struct { func: aggregate_ops.AggregateFunc, arg: ?*const ast.Expression, distinct: bool } {
         _ = self;
         switch (expr.*) {
             .function_call => |f| {
                 if (aggregate_ops.parseAggregateFunc(f.name)) |func| {
                     // COUNT(*) has no arguments
                     if (func == .count and f.arguments.len == 0) {
-                        return .{ .func = .count_star, .arg = null };
+                        return .{ .func = .count_star, .arg = null, .distinct = f.distinct };
                     }
                     // Other aggregates need exactly one argument
                     if (f.arguments.len == 1) {
-                        return .{ .func = func, .arg = f.arguments[0] };
+                        return .{ .func = func, .arg = f.arguments[0], .distinct = f.distinct };
                     }
                 }
             },
@@ -1121,6 +1136,14 @@ pub const QueryPlanner = struct {
                 return PlannerError.OutOfMemory;
             };
             op = project.operator();
+        }
+
+        // Wrap with DISTINCT if specified
+        if (with_clause.distinct) {
+            const distinct = distinct_ops.Distinct.init(self.allocator, op) catch {
+                return PlannerError.OutOfMemory;
+            };
+            op = distinct.operator();
         }
 
         // Reset bindings to WITH aliases (WITH introduces a new scope)

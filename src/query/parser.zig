@@ -1412,6 +1412,7 @@ pub const Parser = struct {
 
     fn parseFunctionCall(self: *Self, name: []const u8, loc: ast.SourceLocation) ?*ast.Expression {
         var args: std.ArrayList(*ast.Expression) = .empty;
+        const has_distinct = self.match(.kw_distinct);
 
         if (!self.check(.rparen)) {
             const first = self.parseExpression() orelse return null;
@@ -1431,6 +1432,7 @@ pub const Parser = struct {
         call.* = .{
             .name = name,
             .arguments = args.toOwnedSlice(self.arena.allocator()) catch return null,
+            .distinct = has_distinct,
             .location = loc,
         };
 

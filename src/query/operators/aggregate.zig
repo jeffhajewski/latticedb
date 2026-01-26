@@ -70,20 +70,49 @@ const Accumulator = struct {
     max_val: ?EvalResult = null,
     collected: std.ArrayList(EvalResult),
     allocator: Allocator,
+    distinct: bool = false,
+    seen_values: std.StringHashMap(void),
 
-    fn init(allocator: Allocator, func: AggregateFunc) Accumulator {
+    fn init(allocator: Allocator, func: AggregateFunc, distinct: bool) Accumulator {
         return .{
             .func = func,
             .collected = .empty,
             .allocator = allocator,
+            .distinct = distinct,
+            .seen_values = std.StringHashMap(void).init(allocator),
         };
     }
 
     fn deinit(self: *Accumulator) void {
         self.collected.deinit(self.allocator);
+        // Free seen_values keys
+        var it = self.seen_values.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+        }
+        self.seen_values.deinit();
     }
 
     fn accumulate(self: *Accumulator, value: EvalResult) !void {
+        // If DISTINCT, check for duplicate values
+        if (self.distinct and !value.isNull()) {
+            var fp_buf: [1024]u8 = undefined;
+            const fp_len = hashValue(value, &fp_buf);
+            const fp = fp_buf[0..fp_len];
+
+            const key_copy = self.allocator.dupe(u8, fp) catch return error.OutOfMemory;
+            const gop = self.seen_values.getOrPut(key_copy) catch {
+                self.allocator.free(key_copy);
+                return error.OutOfMemory;
+            };
+
+            if (gop.found_existing) {
+                // Already seen this value - free the key copy and skip
+                self.allocator.free(key_copy);
+                return;
+            }
+        }
+
         switch (self.func) {
             .count_star => {
                 self.count += 1;
@@ -190,7 +219,7 @@ const GroupState = struct {
 
         const accumulators = try allocator.alloc(Accumulator, agg_items.len);
         for (accumulators, agg_items) |*acc, item| {
-            acc.* = Accumulator.init(allocator, item.func);
+            acc.* = Accumulator.init(allocator, item.func, item.distinct);
         }
 
         return .{
@@ -602,7 +631,7 @@ test "parseAggregateFunc" {
 
 test "Accumulator count" {
     const allocator = std.testing.allocator;
-    var acc = Accumulator.init(allocator, .count);
+    var acc = Accumulator.init(allocator, .count, false);
     defer acc.deinit();
 
     try acc.accumulate(.{ .int_val = 1 });
@@ -616,7 +645,7 @@ test "Accumulator count" {
 
 test "Accumulator sum" {
     const allocator = std.testing.allocator;
-    var acc = Accumulator.init(allocator, .sum);
+    var acc = Accumulator.init(allocator, .sum, false);
     defer acc.deinit();
 
     try acc.accumulate(.{ .int_val = 10 });
@@ -629,7 +658,7 @@ test "Accumulator sum" {
 
 test "Accumulator avg" {
     const allocator = std.testing.allocator;
-    var acc = Accumulator.init(allocator, .avg);
+    var acc = Accumulator.init(allocator, .avg, false);
     defer acc.deinit();
 
     try acc.accumulate(.{ .int_val = 10 });
@@ -643,10 +672,10 @@ test "Accumulator avg" {
 test "Accumulator min/max" {
     const allocator = std.testing.allocator;
 
-    var min_acc = Accumulator.init(allocator, .min);
+    var min_acc = Accumulator.init(allocator, .min, false);
     defer min_acc.deinit();
 
-    var max_acc = Accumulator.init(allocator, .max);
+    var max_acc = Accumulator.init(allocator, .max, false);
     defer max_acc.deinit();
 
     try min_acc.accumulate(.{ .int_val = 30 });
@@ -663,7 +692,7 @@ test "Accumulator min/max" {
 
 test "Accumulator collect" {
     const allocator = std.testing.allocator;
-    var acc = Accumulator.init(allocator, .collect);
+    var acc = Accumulator.init(allocator, .collect, false);
     defer acc.deinit();
 
     try acc.accumulate(.{ .int_val = 1 });
@@ -676,7 +705,7 @@ test "Accumulator collect" {
 
 test "Accumulator collect preserves values" {
     const allocator = std.testing.allocator;
-    var acc = Accumulator.init(allocator, .collect);
+    var acc = Accumulator.init(allocator, .collect, false);
     defer acc.deinit();
 
     try acc.accumulate(.{ .int_val = 10 });

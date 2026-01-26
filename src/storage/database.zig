@@ -445,6 +445,7 @@ pub const Database = struct {
             var rm = recovery_mod.RecoveryManager.initWithLogicalContext(allocator, .{
                 .node_store = &self.node_store,
                 .edge_store = &self.edge_store,
+                .symbol_table = &self.symbol_table,
             });
             const stats = rm.recover(wal, &self.page_manager) catch |err| switch (err) {
                 error.MidLogCorruption => return DatabaseError.InvalidDatabase,
@@ -733,6 +734,9 @@ pub const Database = struct {
                     if (entry.prev_data) |data| {
                         const update_payload = wal_payload.deserializePropertyUpdate(data) catch return;
 
+                        // Intern the key to get key_id for comparison
+                        const key_id = self.symbol_table.intern(update_payload.key) catch return;
+
                         // Get current node
                         var node = self.node_store.get(entry.entity_id) catch return;
                         defer node.deinit(self.allocator);
@@ -743,7 +747,7 @@ pub const Database = struct {
 
                         // Copy existing properties, replacing or removing the updated one
                         for (node.properties) |prop| {
-                            if (prop.key_id == update_payload.key_id) {
+                            if (prop.key_id == key_id) {
                                 // If there was an old value, restore it
                                 if (update_payload.old_value) |old_bytes| {
                                     const old_val = wal_payload.deserializePropertyValueFromBytes(self.allocator, old_bytes) catch continue;
@@ -820,6 +824,9 @@ pub const Database = struct {
                     if (entry.prev_data) |data| {
                         const update_payload = wal_payload.deserializePropertyUpdate(data) catch return;
 
+                        // Intern the key to get key_id for comparison
+                        const key_id = self.symbol_table.intern(update_payload.key) catch return;
+
                         var node = self.node_store.get(entry.entity_id) catch return;
                         defer node.deinit(self.allocator);
 
@@ -831,7 +838,7 @@ pub const Database = struct {
 
                         var found = false;
                         for (node.properties) |prop| {
-                            if (prop.key_id == update_payload.key_id) {
+                            if (prop.key_id == key_id) {
                                 found = true;
                                 if (update_payload.old_value) |old_bytes| {
                                     const old_val = wal_payload.deserializePropertyValueFromBytes(self.allocator, old_bytes) catch continue;
@@ -852,7 +859,7 @@ pub const Database = struct {
                                 if (old_val == .string_val) {
                                     deserialized_string = old_val.string_val;
                                 }
-                                new_props.append(self.allocator, .{ .key_id = update_payload.key_id, .value = old_val }) catch return;
+                                new_props.append(self.allocator, .{ .key_id = key_id, .value = old_val }) catch return;
                             }
                         }
 
@@ -1149,8 +1156,8 @@ pub const Database = struct {
         // Log to WAL and add undo entry if transaction is provided
         if (txn) |t| {
             if (self.txn_manager) |*tm| {
-                var buf: [256]u8 = undefined;
-                const payload = wal_payload.serializeNodeInsert(&buf, node_id, label_ids) catch {
+                var buf: [1024]u8 = undefined;
+                const payload = wal_payload.serializeNodeInsert(&buf, node_id, labels) catch {
                     return DatabaseError.IoError;
                 };
                 _ = tm.logOperation(t, .insert, payload) catch {
@@ -1343,9 +1350,9 @@ pub const Database = struct {
                     return DatabaseError.IoError;
                 };
 
-                var buf: [1024]u8 = undefined;
+                var buf: [2048]u8 = undefined;
                 // Serialize property update for WAL (now with old value)
-                const payload = wal_payload.serializePropertyUpdate(&buf, node_id, key_id, old_value_bytes, new_buf[0..new_size]) catch {
+                const payload = wal_payload.serializePropertyUpdate(&buf, node_id, key, old_value_bytes, new_buf[0..new_size]) catch {
                     return DatabaseError.IoError;
                 };
                 _ = tm.logOperation(t, .update, payload) catch {
@@ -1432,9 +1439,9 @@ pub const Database = struct {
                 }
                 defer if (owns_old_bytes) self.allocator.free(old_value_bytes.?);
 
-                var buf: [1024]u8 = undefined;
+                var buf: [2048]u8 = undefined;
                 // Serialize property delete for WAL (old value, no new value)
-                const payload = wal_payload.serializePropertyUpdate(&buf, node_id, key_id, old_value_bytes, &[_]u8{}) catch {
+                const payload = wal_payload.serializePropertyUpdate(&buf, node_id, key, old_value_bytes, &[_]u8{}) catch {
                     return DatabaseError.IoError;
                 };
                 _ = tm.logOperation(t, .delete, payload) catch {
@@ -1800,8 +1807,8 @@ pub const Database = struct {
         // Log to WAL and add undo entry if transaction is provided
         if (txn) |t| {
             if (self.txn_manager) |*tm| {
-                var buf: [64]u8 = undefined;
-                const payload = wal_payload.serializeEdgeInsert(&buf, source, target, type_id) catch {
+                var buf: [256]u8 = undefined;
+                const payload = wal_payload.serializeEdgeInsert(&buf, source, target, edge_type) catch {
                     return DatabaseError.IoError;
                 };
                 _ = tm.logOperation(t, .insert, payload) catch {

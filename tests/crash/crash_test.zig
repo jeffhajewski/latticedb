@@ -497,3 +497,133 @@ test "property overwrite recovered with latest value" {
         try std.testing.expectEqual(@as(i64, 999), node.properties[0].value.int_val);
     }
 }
+
+test "symbol table recovered - property keys resolve after crash" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_symbol_prop.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var node_id: NodeId = undefined;
+
+    // Create a node and set multiple properties with string keys
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+        var txn = try db.beginTransaction(.read_write);
+        node_id = try db.createNode(&txn, &[_][]const u8{});
+        try db.setNodeProperty(&txn, node_id, "name", .{ .string_val = "Alice" });
+        try db.setNodeProperty(&txn, node_id, "age", .{ .int_val = 30 });
+        try db.setNodeProperty(&txn, node_id, "active", .{ .bool_val = true });
+        try db.commitTransaction(&txn);
+        db.close();
+    }
+
+    // Simulate crash
+    try simulateCrash(path);
+
+    // Reopen - symbol table should be recovered from WAL, allowing property lookup by key string
+    {
+        var db = try openCrashTestDb(allocator, path, false);
+        defer db.close();
+
+        try std.testing.expect(try db.nodeExists(node_id));
+
+        // Test getNodeProperty - this interns the key and looks up the property
+        // If symbol table wasn't recovered, this wouldn't work
+        const name_val = try db.getNodeProperty(node_id, "name");
+        try std.testing.expect(name_val != null);
+        try std.testing.expectEqualStrings("Alice", name_val.?.string_val);
+        allocator.free(name_val.?.string_val);
+
+        const age_val = try db.getNodeProperty(node_id, "age");
+        try std.testing.expect(age_val != null);
+        try std.testing.expectEqual(@as(i64, 30), age_val.?.int_val);
+
+        const active_val = try db.getNodeProperty(node_id, "active");
+        try std.testing.expect(active_val != null);
+        try std.testing.expect(active_val.?.bool_val);
+    }
+}
+
+test "symbol table recovered - node labels resolved after crash" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_symbol_label.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var node_id: NodeId = undefined;
+
+    // Create a node with labels
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+        var txn = try db.beginTransaction(.read_write);
+        node_id = try db.createNode(&txn, &[_][]const u8{ "Person", "Employee" });
+        try db.commitTransaction(&txn);
+        db.close();
+    }
+
+    // Simulate crash
+    try simulateCrash(path);
+
+    // Reopen - symbol table should be recovered, labels resolvable
+    {
+        var db = try openCrashTestDb(allocator, path, false);
+        defer db.close();
+
+        try std.testing.expect(try db.nodeExists(node_id));
+
+        // Get raw node and verify labels can be resolved
+        var node = try db.node_store.get(node_id);
+        defer node.deinit(allocator);
+
+        try std.testing.expectEqual(@as(usize, 2), node.labels.len);
+
+        // Resolve labels via symbol table
+        const label1 = try db.symbol_table.resolve(node.labels[0]);
+        defer db.symbol_table.freeString(label1);
+        try std.testing.expectEqualStrings("Person", label1);
+
+        const label2 = try db.symbol_table.resolve(node.labels[1]);
+        defer db.symbol_table.freeString(label2);
+        try std.testing.expectEqualStrings("Employee", label2);
+    }
+}
+
+test "symbol table recovered - edge types resolved after crash" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_symbol_edge.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var src_id: NodeId = undefined;
+    var dst_id: NodeId = undefined;
+
+    // Create nodes and an edge with a specific type
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+        var txn = try db.beginTransaction(.read_write);
+        src_id = try db.createNode(&txn, &[_][]const u8{});
+        dst_id = try db.createNode(&txn, &[_][]const u8{});
+        try db.createEdge(&txn, src_id, dst_id, "KNOWS");
+        try db.commitTransaction(&txn);
+        db.close();
+    }
+
+    // Simulate crash
+    try simulateCrash(path);
+
+    // Reopen - edge type should be resolvable via symbol table
+    {
+        var db = try openCrashTestDb(allocator, path, false);
+        defer db.close();
+
+        try std.testing.expect(try db.nodeExists(src_id));
+        try std.testing.expect(try db.nodeExists(dst_id));
+
+        // Verify "KNOWS" is in the symbol table after recovery
+        const knows_id = try db.symbol_table.intern("KNOWS");
+        const resolved = try db.symbol_table.resolve(knows_id);
+        defer db.symbol_table.freeString(resolved);
+        try std.testing.expectEqualStrings("KNOWS", resolved);
+    }
+}

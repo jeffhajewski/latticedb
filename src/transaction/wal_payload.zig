@@ -40,13 +40,17 @@ pub const PayloadError = error{
 // ============================================================================
 
 /// Serialize a node insert operation
-/// Format: type(u8) + node_id(u64) + label_count(u16) + labels(u16[])
+/// Format: type(u8) + node_id(u64) + label_count(u16) + [label_len(u16) + label_str(u8[])]...
 pub fn serializeNodeInsert(
     buf: []u8,
     node_id: u64,
-    label_ids: []const u16,
+    labels: []const []const u8,
 ) PayloadError![]u8 {
-    const required_size = 1 + 8 + 2 + (label_ids.len * 2);
+    // Calculate required size: header + sum of (len + string) for each label
+    var required_size: usize = 1 + 8 + 2; // type + node_id + label_count
+    for (labels) |label| {
+        required_size += 2 + label.len; // len(u16) + string bytes
+    }
     if (buf.len < required_size) return PayloadError.BufferTooSmall;
 
     var stream = std.io.fixedBufferStream(buf);
@@ -54,9 +58,10 @@ pub fn serializeNodeInsert(
 
     writer.writeByte(@intFromEnum(PayloadType.node_insert)) catch return PayloadError.BufferTooSmall;
     writer.writeInt(u64, node_id, .little) catch return PayloadError.BufferTooSmall;
-    writer.writeInt(u16, @intCast(label_ids.len), .little) catch return PayloadError.BufferTooSmall;
-    for (label_ids) |lid| {
-        writer.writeInt(u16, lid, .little) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u16, @intCast(labels.len), .little) catch return PayloadError.BufferTooSmall;
+    for (labels) |label| {
+        writer.writeInt(u16, @intCast(label.len), .little) catch return PayloadError.BufferTooSmall;
+        writer.writeAll(label) catch return PayloadError.BufferTooSmall;
     }
 
     return buf[0..stream.pos];
@@ -66,12 +71,37 @@ pub fn serializeNodeInsert(
 pub const NodeInsertPayload = struct {
     node_id: u64,
     label_count: u16,
-    label_bytes: []const u8,
+    /// Raw bytes containing length-prefixed label strings
+    label_data: []const u8,
 
-    /// Get a label ID at the given index
-    pub fn getLabelId(self: NodeInsertPayload, index: usize) u16 {
-        const offset = index * 2;
-        return std.mem.readInt(u16, self.label_bytes[offset..][0..2], .little);
+    /// Iterator for label strings
+    pub const LabelIterator = struct {
+        data: []const u8,
+        offset: usize,
+        remaining: u16,
+
+        pub fn next(self: *LabelIterator) ?[]const u8 {
+            if (self.remaining == 0) return null;
+            if (self.offset + 2 > self.data.len) return null;
+
+            const len = std.mem.readInt(u16, self.data[self.offset..][0..2], .little);
+            self.offset += 2;
+
+            if (self.offset + len > self.data.len) return null;
+            const label = self.data[self.offset..][0..len];
+            self.offset += len;
+            self.remaining -= 1;
+            return label;
+        }
+    };
+
+    /// Get an iterator over label strings
+    pub fn labelIterator(self: NodeInsertPayload) LabelIterator {
+        return LabelIterator{
+            .data = self.label_data,
+            .offset = 0,
+            .remaining = self.label_count,
+        };
     }
 };
 
@@ -85,16 +115,13 @@ pub fn deserializeNodeInsert(payload: []const u8) PayloadError!NodeInsertPayload
     const node_id = std.mem.readInt(u64, payload[1..9], .little);
     const label_count = std.mem.readInt(u16, payload[9..11], .little);
 
-    const expected_size = 11 + (label_count * 2);
-    if (payload.len < expected_size) return PayloadError.InvalidPayload;
-
-    // Return a view into the payload for label bytes
-    const label_bytes = payload[11..][0 .. label_count * 2];
+    // Remaining bytes are label data (length-prefixed strings)
+    const label_data = payload[11..];
 
     return NodeInsertPayload{
         .node_id = node_id,
         .label_count = label_count,
-        .label_bytes = label_bytes,
+        .label_data = label_data,
     };
 }
 
@@ -180,14 +207,14 @@ pub fn deserializeNodeDelete(payload: []const u8) PayloadError!NodeDeletePayload
 // ============================================================================
 
 /// Serialize an edge insert operation
-/// Format: type(u8) + source(u64) + target(u64) + type_id(u16)
+/// Format: type(u8) + source(u64) + target(u64) + type_len(u16) + type_str(u8[])
 pub fn serializeEdgeInsert(
     buf: []u8,
     source: u64,
     target: u64,
-    type_id: u16,
+    edge_type: []const u8,
 ) PayloadError![]u8 {
-    const required_size = 1 + 8 + 8 + 2;
+    const required_size = 1 + 8 + 8 + 2 + edge_type.len;
     if (buf.len < required_size) return PayloadError.BufferTooSmall;
 
     var stream = std.io.fixedBufferStream(buf);
@@ -196,7 +223,8 @@ pub fn serializeEdgeInsert(
     writer.writeByte(@intFromEnum(PayloadType.edge_insert)) catch return PayloadError.BufferTooSmall;
     writer.writeInt(u64, source, .little) catch return PayloadError.BufferTooSmall;
     writer.writeInt(u64, target, .little) catch return PayloadError.BufferTooSmall;
-    writer.writeInt(u16, type_id, .little) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u16, @intCast(edge_type.len), .little) catch return PayloadError.BufferTooSmall;
+    writer.writeAll(edge_type) catch return PayloadError.BufferTooSmall;
 
     return buf[0..stream.pos];
 }
@@ -205,7 +233,7 @@ pub fn serializeEdgeInsert(
 pub const EdgeInsertPayload = struct {
     source: u64,
     target: u64,
-    type_id: u16,
+    edge_type: []const u8,
 };
 
 /// Deserialize an edge insert payload
@@ -215,10 +243,17 @@ pub fn deserializeEdgeInsert(payload: []const u8) PayloadError!EdgeInsertPayload
         return PayloadError.UnexpectedPayloadType;
     }
 
+    const source = std.mem.readInt(u64, payload[1..9], .little);
+    const target = std.mem.readInt(u64, payload[9..17], .little);
+    const type_len = std.mem.readInt(u16, payload[17..19], .little);
+
+    if (payload.len < 19 + type_len) return PayloadError.InvalidPayload;
+    const edge_type = payload[19..][0..type_len];
+
     return EdgeInsertPayload{
-        .source = std.mem.readInt(u64, payload[1..9], .little),
-        .target = std.mem.readInt(u64, payload[9..17], .little),
-        .type_id = std.mem.readInt(u16, payload[17..19], .little),
+        .source = source,
+        .target = target,
+        .edge_type = edge_type,
     };
 }
 
@@ -289,16 +324,16 @@ pub fn deserializeEdgeDelete(payload: []const u8) PayloadError!EdgeDeletePayload
 // ============================================================================
 
 /// Serialize a property update operation
-/// Format: type(u8) + node_id(u64) + key_id(u16) + old_len(u32) + old(u8[]) + new_len(u32) + new(u8[])
+/// Format: type(u8) + node_id(u64) + key_len(u16) + key(u8[]) + old_len(u32) + old(u8[]) + new_len(u32) + new(u8[])
 pub fn serializePropertyUpdate(
     buf: []u8,
     node_id: u64,
-    key_id: u16,
+    key: []const u8,
     old_value: ?[]const u8,
     new_value: []const u8,
 ) PayloadError![]u8 {
     const old_len = if (old_value) |ov| ov.len else 0;
-    const required_size = 1 + 8 + 2 + 4 + old_len + 4 + new_value.len;
+    const required_size = 1 + 8 + 2 + key.len + 4 + old_len + 4 + new_value.len;
     if (buf.len < required_size) return PayloadError.BufferTooSmall;
 
     var stream = std.io.fixedBufferStream(buf);
@@ -306,7 +341,8 @@ pub fn serializePropertyUpdate(
 
     writer.writeByte(@intFromEnum(PayloadType.node_update)) catch return PayloadError.BufferTooSmall;
     writer.writeInt(u64, node_id, .little) catch return PayloadError.BufferTooSmall;
-    writer.writeInt(u16, key_id, .little) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u16, @intCast(key.len), .little) catch return PayloadError.BufferTooSmall;
+    writer.writeAll(key) catch return PayloadError.BufferTooSmall;
 
     // Old value (for undo) - length 0 means was null/absent
     writer.writeInt(u32, @intCast(old_len), .little) catch return PayloadError.BufferTooSmall;
@@ -324,7 +360,7 @@ pub fn serializePropertyUpdate(
 /// Deserialized property update payload
 pub const PropertyUpdatePayload = struct {
     node_id: u64,
-    key_id: u16,
+    key: []const u8,
     old_value: ?[]const u8, // null if property was absent before
     new_value: []const u8,
 };
@@ -337,9 +373,13 @@ pub fn deserializePropertyUpdate(payload: []const u8) PayloadError!PropertyUpdat
     }
 
     const node_id = std.mem.readInt(u64, payload[1..9], .little);
-    const key_id = std.mem.readInt(u16, payload[9..11], .little);
+    const key_len = std.mem.readInt(u16, payload[9..11], .little);
 
     var offset: usize = 11;
+    if (payload.len < offset + key_len + 8) return PayloadError.InvalidPayload;
+
+    const key = payload[offset..][0..key_len];
+    offset += key_len;
 
     // Old value
     const old_len = std.mem.readInt(u32, payload[offset..][0..4], .little);
@@ -358,7 +398,7 @@ pub fn deserializePropertyUpdate(payload: []const u8) PayloadError!PropertyUpdat
 
     return PropertyUpdatePayload{
         .node_id = node_id,
-        .key_id = key_id,
+        .key = key,
         .old_value = old_value,
         .new_value = new_value,
     };
@@ -613,23 +653,26 @@ fn deserializePropertyValue(allocator: Allocator, reader: anytype) !PropertyValu
 
 test "node_insert: serialize and deserialize round-trip" {
     var buf: [256]u8 = undefined;
-    const label_ids = [_]u16{ 1, 2, 3 };
+    const labels = [_][]const u8{ "Person", "Employee", "Manager" };
 
-    const serialized = try serializeNodeInsert(&buf, 42, &label_ids);
+    const serialized = try serializeNodeInsert(&buf, 42, &labels);
     const result = try deserializeNodeInsert(serialized);
 
     try std.testing.expectEqual(@as(u64, 42), result.node_id);
     try std.testing.expectEqual(@as(u16, 3), result.label_count);
-    try std.testing.expectEqual(@as(u16, 1), result.getLabelId(0));
-    try std.testing.expectEqual(@as(u16, 2), result.getLabelId(1));
-    try std.testing.expectEqual(@as(u16, 3), result.getLabelId(2));
+
+    var iter = result.labelIterator();
+    try std.testing.expectEqualStrings("Person", iter.next().?);
+    try std.testing.expectEqualStrings("Employee", iter.next().?);
+    try std.testing.expectEqualStrings("Manager", iter.next().?);
+    try std.testing.expect(iter.next() == null);
 }
 
 test "node_insert: empty labels" {
     var buf: [256]u8 = undefined;
-    const label_ids = [_]u16{};
+    const labels = [_][]const u8{};
 
-    const serialized = try serializeNodeInsert(&buf, 100, &label_ids);
+    const serialized = try serializeNodeInsert(&buf, 100, &labels);
     const result = try deserializeNodeInsert(serialized);
 
     try std.testing.expectEqual(@as(u64, 100), result.node_id);
@@ -638,9 +681,9 @@ test "node_insert: empty labels" {
 
 test "node_insert: buffer too small" {
     var buf: [5]u8 = undefined;
-    const label_ids = [_]u16{ 1, 2 };
+    const labels = [_][]const u8{ "Person", "Employee" };
 
-    const result = serializeNodeInsert(&buf, 42, &label_ids);
+    const result = serializeNodeInsert(&buf, 42, &labels);
     try std.testing.expectError(PayloadError.BufferTooSmall, result);
 }
 
@@ -673,12 +716,12 @@ test "node_delete: empty properties" {
 test "edge_insert: serialize and deserialize" {
     var buf: [256]u8 = undefined;
 
-    const serialized = try serializeEdgeInsert(&buf, 1, 2, 100);
+    const serialized = try serializeEdgeInsert(&buf, 1, 2, "KNOWS");
     const result = try deserializeEdgeInsert(serialized);
 
     try std.testing.expectEqual(@as(u64, 1), result.source);
     try std.testing.expectEqual(@as(u64, 2), result.target);
-    try std.testing.expectEqual(@as(u16, 100), result.type_id);
+    try std.testing.expectEqualStrings("KNOWS", result.edge_type);
 }
 
 test "edge_delete: serialize and deserialize with properties" {
@@ -699,11 +742,11 @@ test "property_update: serialize and deserialize with old value" {
     const old_val = "old";
     const new_val = "new_value";
 
-    const serialized = try serializePropertyUpdate(&buf, 42, 7, old_val, new_val);
+    const serialized = try serializePropertyUpdate(&buf, 42, "name", old_val, new_val);
     const result = try deserializePropertyUpdate(serialized);
 
     try std.testing.expectEqual(@as(u64, 42), result.node_id);
-    try std.testing.expectEqual(@as(u16, 7), result.key_id);
+    try std.testing.expectEqualStrings("name", result.key);
     try std.testing.expectEqualStrings(old_val, result.old_value.?);
     try std.testing.expectEqualStrings(new_val, result.new_value);
 }
@@ -712,11 +755,11 @@ test "property_update: serialize and deserialize without old value" {
     var buf: [256]u8 = undefined;
     const new_val = "created";
 
-    const serialized = try serializePropertyUpdate(&buf, 100, 3, null, new_val);
+    const serialized = try serializePropertyUpdate(&buf, 100, "status", null, new_val);
     const result = try deserializePropertyUpdate(serialized);
 
     try std.testing.expectEqual(@as(u64, 100), result.node_id);
-    try std.testing.expectEqual(@as(u16, 3), result.key_id);
+    try std.testing.expectEqualStrings("status", result.key);
     try std.testing.expect(result.old_value == null);
     try std.testing.expectEqualStrings(new_val, result.new_value);
 }
@@ -724,8 +767,8 @@ test "property_update: serialize and deserialize without old value" {
 test "wrong payload type returns error" {
     var buf: [256]u8 = undefined;
 
-    // Serialize as edge_insert (19 bytes)
-    const serialized = try serializeEdgeInsert(&buf, 1, 2, 3);
+    // Serialize as edge_insert
+    const serialized = try serializeEdgeInsert(&buf, 1, 2, "KNOWS");
 
     // Try to deserialize as node_insert (requires different type byte)
     try std.testing.expectError(
@@ -754,7 +797,7 @@ test "node_delete: buffer too small" {
 test "edge_insert: buffer too small" {
     var buf: [10]u8 = undefined;
 
-    const result = serializeEdgeInsert(&buf, 1, 2, 100);
+    const result = serializeEdgeInsert(&buf, 1, 2, "KNOWS");
     try std.testing.expectError(PayloadError.BufferTooSmall, result);
 }
 
@@ -771,6 +814,6 @@ test "property_update: buffer too small" {
     const old_val = "old_value";
     const new_val = "new_value";
 
-    const result = serializePropertyUpdate(&buf, 42, 7, old_val, new_val);
+    const result = serializePropertyUpdate(&buf, 42, "name", old_val, new_val);
     try std.testing.expectError(PayloadError.BufferTooSmall, result);
 }

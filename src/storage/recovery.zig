@@ -26,8 +26,10 @@ const PageHeader = page.PageHeader;
 // Graph layer for logical redo
 const node_mod = lattice.graph.node;
 const edge_mod = lattice.graph.edge;
+const symbols_mod = lattice.graph.symbols;
 const NodeStore = node_mod.NodeStore;
 const EdgeStore = edge_mod.EdgeStore;
+const SymbolTable = symbols_mod.SymbolTable;
 
 // WAL payload deserialization
 const wal_payload = lattice.transaction.wal_payload;
@@ -102,6 +104,7 @@ pub const RecoveryStats = struct {
 pub const LogicalRecoveryContext = struct {
     node_store: *NodeStore,
     edge_store: *EdgeStore,
+    symbol_table: *SymbolTable,
 };
 
 // ============================================================================
@@ -415,11 +418,13 @@ pub const RecoveryManager = struct {
         // Node insert
         if (payload_type == @intFromEnum(wal_payload.PayloadType.node_insert)) {
             const node_payload = wal_payload.deserializeNodeInsert(payload) catch return;
-            // Extract label IDs
+            // Intern label strings to get label IDs
             var label_ids: std.ArrayListUnmanaged(u16) = .{};
             defer label_ids.deinit(self.allocator);
-            for (0..node_payload.label_count) |i| {
-                label_ids.append(self.allocator, node_payload.getLabelId(i)) catch return;
+            var iter = node_payload.labelIterator();
+            while (iter.next()) |label| {
+                const label_id = ctx.symbol_table.intern(label) catch return;
+                label_ids.append(self.allocator, label_id) catch return;
             }
             // Re-create the node with its original ID
             ctx.node_store.createWithId(
@@ -431,10 +436,12 @@ pub const RecoveryManager = struct {
         // Edge insert
         else if (payload_type == @intFromEnum(wal_payload.PayloadType.edge_insert)) {
             const edge_payload = wal_payload.deserializeEdgeInsert(payload) catch return;
+            // Intern edge type string to get type_id
+            const type_id = ctx.symbol_table.intern(edge_payload.edge_type) catch return;
             ctx.edge_store.create(
                 edge_payload.source,
                 edge_payload.target,
-                edge_payload.type_id,
+                type_id,
                 &[_]node_mod.Property{},
             ) catch {};
         }
@@ -450,6 +457,9 @@ pub const RecoveryManager = struct {
         if (payload_type == @intFromEnum(wal_payload.PayloadType.node_update)) {
             const update_payload = wal_payload.deserializePropertyUpdate(payload) catch return;
 
+            // Intern the property key string to get key_id
+            const key_id = ctx.symbol_table.intern(update_payload.key) catch return;
+
             // Get the current node (should already exist from redoInsert)
             var node = ctx.node_store.get(update_payload.node_id) catch return;
             defer node.deinit(self.allocator);
@@ -459,7 +469,7 @@ pub const RecoveryManager = struct {
                 var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
                 defer new_props.deinit(self.allocator);
                 for (node.properties) |prop| {
-                    if (prop.key_id != update_payload.key_id) {
+                    if (prop.key_id != key_id) {
                         new_props.append(self.allocator, prop) catch return;
                     }
                 }
@@ -477,15 +487,15 @@ pub const RecoveryManager = struct {
                 defer new_props.deinit(self.allocator);
                 var found = false;
                 for (node.properties) |prop| {
-                    if (prop.key_id == update_payload.key_id) {
-                        new_props.append(self.allocator, .{ .key_id = update_payload.key_id, .value = new_value }) catch return;
+                    if (prop.key_id == key_id) {
+                        new_props.append(self.allocator, .{ .key_id = key_id, .value = new_value }) catch return;
                         found = true;
                     } else {
                         new_props.append(self.allocator, prop) catch return;
                     }
                 }
                 if (!found) {
-                    new_props.append(self.allocator, .{ .key_id = update_payload.key_id, .value = new_value }) catch return;
+                    new_props.append(self.allocator, .{ .key_id = key_id, .value = new_value }) catch return;
                 }
                 ctx.node_store.update(update_payload.node_id, node.labels, new_props.items) catch {};
             }

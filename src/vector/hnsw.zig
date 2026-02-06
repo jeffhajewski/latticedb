@@ -460,6 +460,27 @@ pub const HnswIndex = struct {
         // If at max, would need pruning (handled elsewhere)
     }
 
+    /// Estimate total memory usage of the HNSW index
+    fn calculateMemoryUsage(self: *Self) u64 {
+        var total: u64 = @sizeOf(Self);
+
+        // HashMap: key + value + 1-byte metadata per slot
+        const cap: u64 = self.nodes.capacity();
+        total += cap * (@sizeOf(u64) + @sizeOf(HnswNodeEntry) + 1);
+
+        // Connection pages: one 4096-byte page per vector
+        total += self.vector_count * PAGE_SIZE;
+
+        // Vector storage pages
+        if (self.vector_count > 0) {
+            const vpp: u64 = self.vector_storage.vectors_per_page;
+            const vector_pages = (self.vector_count + vpp - 1) / vpp;
+            total += vector_pages * PAGE_SIZE;
+        }
+
+        return total;
+    }
+
     /// Get statistics about the index
     pub fn getStats(self: *Self) HnswStats {
         return HnswStats{
@@ -467,7 +488,7 @@ pub const HnswIndex = struct {
             .total_vectors = self.vector_count,
             .max_layer = self.max_layer,
             .entry_point = self.entry_point orelse 0,
-            .memory_bytes = 0, // TODO: Calculate actual memory usage
+            .memory_bytes = self.calculateMemoryUsage(),
         };
     }
 

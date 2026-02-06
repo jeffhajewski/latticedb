@@ -437,7 +437,7 @@ pub const ExpressionEvaluator = struct {
             .xor => .{ .bool_val = left.isTruthy() != right.isTruthy() },
 
             // Arithmetic operators
-            .add => self.arithmeticAdd(left, right),
+            .add => try self.arithmeticAdd(left, right),
             .sub => self.arithmeticSub(left, right),
             .mul => self.arithmeticMul(left, right),
             .div => self.arithmeticDiv(left, right),
@@ -950,7 +950,7 @@ pub const ExpressionEvaluator = struct {
     // Arithmetic helpers
     // ========================================================================
 
-    fn arithmeticAdd(_: *Self, left: EvalResult, right: EvalResult) EvalResult {
+    fn arithmeticAdd(self: *Self, left: EvalResult, right: EvalResult) EvalError!EvalResult {
         return switch (left) {
             .int_val => |l| switch (right) {
                 .int_val => |r| .{ .int_val = l + r },
@@ -964,10 +964,10 @@ pub const ExpressionEvaluator = struct {
             },
             .string_val => |l| switch (right) {
                 .string_val => |r| blk: {
-                    // String concatenation - would need allocation
-                    _ = l;
-                    _ = r;
-                    break :blk .{ .null_val = {} };
+                    const result = self.allocator.alloc(u8, l.len + r.len) catch return EvalError.OutOfMemory;
+                    @memcpy(result[0..l.len], l);
+                    @memcpy(result[l.len..], r);
+                    break :blk .{ .string_val = result };
                 },
                 else => .{ .null_val = {} },
             },

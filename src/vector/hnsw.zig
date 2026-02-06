@@ -430,7 +430,8 @@ pub const HnswIndex = struct {
         self.bp.unpinPage(frame, true);
     }
 
-    /// Add a single connection to a node's layer
+    /// Add a single connection to a node's layer, pruning the furthest
+    /// existing neighbor if already at max_connections.
     pub fn addConnection(
         self: *Self,
         connections_page: PageId,
@@ -447,8 +448,8 @@ pub const HnswIndex = struct {
             if (n == neighbor) return;
         }
 
-        // Add new connection
         if (neighbors.len < max_connections) {
+            // Room available — just append
             var new_neighbors = self.allocator.alloc(u64, neighbors.len + 1) catch return HnswError.OutOfMemory;
             defer self.allocator.free(new_neighbors);
 
@@ -456,8 +457,38 @@ pub const HnswIndex = struct {
             new_neighbors[neighbors.len] = neighbor;
 
             try self.setConnections(connections_page, node_id, layer, new_neighbors);
+        } else {
+            // At capacity — prune furthest neighbor to make room
+            const node_entry = self.getNode(node_id) orelse return;
+            const node_vec = try self.getVector(node_id, node_entry.vector_loc);
+            defer self.freeVector(node_vec);
+
+            // Find the furthest existing neighbor
+            var furthest_idx: usize = 0;
+            var furthest_dist: f32 = 0;
+            for (neighbors, 0..) |n, i| {
+                const n_entry = self.getNode(n) orelse continue;
+                const dist = try self.distanceTo(node_vec, n_entry.vector_loc);
+                if (dist > furthest_dist) {
+                    furthest_dist = dist;
+                    furthest_idx = i;
+                }
+            }
+
+            // Only replace if the new neighbor is closer than the furthest
+            const neighbor_entry = self.getNode(neighbor) orelse return;
+            const neighbor_dist = try self.distanceTo(node_vec, neighbor_entry.vector_loc);
+
+            if (neighbor_dist < furthest_dist) {
+                var new_neighbors = self.allocator.alloc(u64, neighbors.len) catch return HnswError.OutOfMemory;
+                defer self.allocator.free(new_neighbors);
+
+                @memcpy(new_neighbors, neighbors);
+                new_neighbors[furthest_idx] = neighbor;
+
+                try self.setConnections(connections_page, node_id, layer, new_neighbors);
+            }
         }
-        // If at max, would need pruning (handled elsewhere)
     }
 
     /// Estimate total memory usage of the HNSW index

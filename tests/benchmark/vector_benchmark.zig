@@ -118,7 +118,7 @@ fn generateClusterCenters(allocator: Allocator, n: usize, dimensions: u16, rng: 
 /// (σ=0.1), then normalized to unit length. This produces realistic distance
 /// structure so recall measurements are meaningful.
 fn generateClusteredVectors(allocator: Allocator, count: usize, dimensions: u16, rng: *std.Random.DefaultPrng) ![][]f32 {
-    const num_clusters = @max(count / 100, 1);
+    const num_clusters = @max(count / 1000, 10);
     const centers = try generateClusterCenters(allocator, num_clusters, dimensions, rng);
     defer {
         for (centers) |c| allocator.free(c);
@@ -150,6 +150,38 @@ fn generateClusteredVectors(allocator: Allocator, count: usize, dimensions: u16,
     }
 
     return vectors;
+}
+
+/// Generate query vectors by perturbing randomly-selected database vectors
+/// with small Gaussian noise. This guarantees true near-neighbors exist in the
+/// database, producing meaningful recall measurements.
+fn generateQueryVectors(allocator: Allocator, count: usize, db_vectors: []const []const f32, dimensions: u16, rng: *std.Random.DefaultPrng) ![][]f32 {
+    const queries = try allocator.alloc([]f32, count);
+    var initialized: usize = 0;
+    errdefer {
+        for (queries[0..initialized]) |q| allocator.free(q);
+        allocator.free(queries);
+    }
+
+    const noise_scale: f32 = 0.05;
+    for (0..count) |i| {
+        const base_idx = rng.random().intRangeLessThan(usize, 0, db_vectors.len);
+        const base = db_vectors[base_idx];
+        const q = try allocator.alloc(f32, dimensions);
+        var norm: f32 = 0;
+        for (0..dimensions) |d| {
+            q[d] = base[d] + gaussianRandom(rng) * noise_scale;
+            norm += q[d] * q[d];
+        }
+        norm = @sqrt(norm);
+        if (norm > 0) {
+            for (0..dimensions) |d| q[d] /= norm;
+        }
+        queries[i] = q;
+        initialized += 1;
+    }
+
+    return queries;
 }
 
 fn freeVectors(allocator: Allocator, vectors: [][]f32) void {
@@ -329,8 +361,8 @@ fn runScaleBenchmark(allocator: Allocator, scale: usize) !ScaleResult {
     const insert_end = std.time.nanoTimestamp();
     const insert_ns: u64 = @intCast(insert_end - insert_start);
 
-    // Generate search queries from same clustered distribution
-    const queries = try generateClusteredVectors(allocator, NUM_SEARCH_QUERIES, DIMENSIONS, &rng);
+    // Generate queries by perturbing random database vectors
+    const queries = try generateQueryVectors(allocator, NUM_SEARCH_QUERIES, vectors, DIMENSIONS, &rng);
     defer freeVectors(allocator, queries);
 
     // --- Warmup ---
@@ -411,8 +443,8 @@ fn runEfSearchSensitivity(allocator: Allocator, scale: usize) ![]EfResult {
         }
     }
 
-    // Generate queries from same clustered distribution
-    const queries = try generateClusteredVectors(allocator, NUM_SEARCH_QUERIES, DIMENSIONS, &rng);
+    // Generate queries by perturbing random database vectors
+    const queries = try generateQueryVectors(allocator, NUM_SEARCH_QUERIES, vectors, DIMENSIONS, &rng);
     defer freeVectors(allocator, queries);
 
     var results = try allocator.alloc(EfResult, EF_SEARCH_VALUES.len);

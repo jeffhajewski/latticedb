@@ -198,6 +198,31 @@ pub fn build(b: *std.Build) void {
     const stress_step = b.step("stress", "Run stress tests to find performance limits");
     stress_step.dependOn(&run_stress.step);
 
+    // Vector benchmark module
+    const vector_bench_module = b.createModule(.{
+        .root_source_file = b.path("tests/benchmark/vector_benchmark.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .imports = &.{
+            .{ .name = "lattice", .module = lib_module },
+        },
+    });
+
+    const vector_bench_exe = b.addExecutable(.{
+        .name = "vector-benchmark",
+        .root_module = vector_bench_module,
+    });
+    vector_bench_exe.linkLibrary(lib);
+
+    const run_vector_bench = b.addRunArtifact(vector_bench_exe);
+    run_vector_bench.step.dependOn(&vector_bench_exe.step);
+    if (b.args) |args| {
+        run_vector_bench.addArgs(args);
+    }
+
+    const vector_bench_step = b.step("vector-benchmark", "Run HNSW vector performance benchmarks");
+    vector_bench_step.dependOn(&run_vector_bench.step);
+
     // SQLite comparison benchmark module
     const sqlite_bench_module = b.createModule(.{
         .root_source_file = b.path("tests/benchmark/sqlite_comparison.zig"),

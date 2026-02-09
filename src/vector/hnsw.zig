@@ -298,6 +298,74 @@ pub const HnswIndex = struct {
         return self.distance_fn(query, vec);
     }
 
+    /// Calculate distance between two stored nodes by their IDs
+    fn distanceBetweenNodes(self: *Self, id_a: u64, id_b: u64) HnswError!f32 {
+        const node_a = self.getNode(id_a) orelse return HnswError.NotFound;
+        const node_b = self.getNode(id_b) orelse return HnswError.NotFound;
+        const vec_a = try self.getVector(id_a, node_a.vector_loc);
+        defer self.freeVector(vec_a);
+        return try self.distanceTo(vec_a, node_b.vector_loc);
+    }
+
+    /// Select neighbors using the heuristic from HNSW paper (Algorithm 4).
+    /// Picks diverse neighbors that cover different angular regions around the target.
+    /// candidates must be sorted by distance ascending.
+    /// Returns allocated []u64 that caller must free.
+    fn selectNeighborsHeuristic(
+        self: *Self,
+        target_id: u64,
+        candidates: []const SearchResult,
+        max_neighbors: u16,
+    ) HnswError![]u64 {
+        if (candidates.len == 0) {
+            return self.allocator.alloc(u64, 0) catch return HnswError.OutOfMemory;
+        }
+
+        var selected = std.array_list.Managed(u64).init(self.allocator);
+        defer selected.deinit();
+
+        // Track which candidates have been used
+        var used = self.allocator.alloc(bool, candidates.len) catch return HnswError.OutOfMemory;
+        defer self.allocator.free(used);
+        @memset(used, false);
+
+        // Phase 1 (diversity): select candidate only if closer to target than
+        // to any already-selected neighbor
+        for (candidates, 0..) |candidate, idx| {
+            if (selected.items.len >= max_neighbors) break;
+            if (candidate.node_id == target_id) {
+                used[idx] = true;
+                continue;
+            }
+
+            var is_diverse = true;
+            for (selected.items) |sel_id| {
+                const dist_to_selected = self.distanceBetweenNodes(candidate.node_id, sel_id) catch candidate.distance + 1.0;
+                if (dist_to_selected <= candidate.distance) {
+                    is_diverse = false;
+                    break;
+                }
+            }
+
+            if (is_diverse) {
+                selected.append(candidate.node_id) catch return HnswError.OutOfMemory;
+                used[idx] = true;
+            }
+        }
+
+        // Phase 2 (backfill): fill remaining slots with closest unused candidates
+        if (selected.items.len < max_neighbors) {
+            for (candidates, 0..) |candidate, idx| {
+                if (selected.items.len >= max_neighbors) break;
+                if (used[idx]) continue;
+                if (candidate.node_id == target_id) continue;
+                selected.append(candidate.node_id) catch return HnswError.OutOfMemory;
+            }
+        }
+
+        return selected.toOwnedSlice() catch return HnswError.OutOfMemory;
+    }
+
     // ========================================================================
     // Connection Management
     // ========================================================================
@@ -430,8 +498,8 @@ pub const HnswIndex = struct {
         self.bp.unpinPage(frame, true);
     }
 
-    /// Add a single connection to a node's layer, pruning the furthest
-    /// existing neighbor if already at max_connections.
+    /// Add a single connection to a node's layer, using heuristic pruning
+    /// when at max_connections capacity.
     pub fn addConnection(
         self: *Self,
         connections_page: PageId,
@@ -458,36 +526,43 @@ pub const HnswIndex = struct {
 
             try self.setConnections(connections_page, node_id, layer, new_neighbors);
         } else {
-            // At capacity — prune furthest neighbor to make room
+            // At capacity — use heuristic pruning to select diverse neighbors
             const node_entry = self.getNode(node_id) orelse return;
             const node_vec = try self.getVector(node_id, node_entry.vector_loc);
             defer self.freeVector(node_vec);
 
-            // Find the furthest existing neighbor
-            var furthest_idx: usize = 0;
-            var furthest_dist: f32 = 0;
+            // Build candidate list: existing neighbors + new neighbor
+            var candidates = self.allocator.alloc(SearchResult, neighbors.len + 1) catch return HnswError.OutOfMemory;
+            defer self.allocator.free(candidates);
+
             for (neighbors, 0..) |n, i| {
-                const n_entry = self.getNode(n) orelse continue;
-                const dist = try self.distanceTo(node_vec, n_entry.vector_loc);
-                if (dist > furthest_dist) {
-                    furthest_dist = dist;
-                    furthest_idx = i;
+                const n_entry = self.getNode(n) orelse {
+                    candidates[i] = .{ .node_id = n, .distance = std.math.inf(f32) };
+                    continue;
+                };
+                candidates[i] = .{
+                    .node_id = n,
+                    .distance = try self.distanceTo(node_vec, n_entry.vector_loc),
+                };
+            }
+            // Add the new neighbor candidate
+            const nb_entry = self.getNode(neighbor) orelse return;
+            candidates[neighbors.len] = .{
+                .node_id = neighbor,
+                .distance = try self.distanceTo(node_vec, nb_entry.vector_loc),
+            };
+
+            // Sort by distance ascending
+            std.mem.sort(SearchResult, candidates, {}, struct {
+                fn lessThan(_: void, a: SearchResult, b: SearchResult) bool {
+                    return a.distance < b.distance;
                 }
-            }
+            }.lessThan);
 
-            // Only replace if the new neighbor is closer than the furthest
-            const neighbor_entry = self.getNode(neighbor) orelse return;
-            const neighbor_dist = try self.distanceTo(node_vec, neighbor_entry.vector_loc);
+            const selected = try self.selectNeighborsHeuristic(node_id, candidates, max_connections);
+            defer self.allocator.free(selected);
 
-            if (neighbor_dist < furthest_dist) {
-                var new_neighbors = self.allocator.alloc(u64, neighbors.len) catch return HnswError.OutOfMemory;
-                defer self.allocator.free(new_neighbors);
-
-                @memcpy(new_neighbors, neighbors);
-                new_neighbors[furthest_idx] = neighbor;
-
-                try self.setConnections(connections_page, node_id, layer, new_neighbors);
-            }
+            try self.setConnections(connections_page, node_id, layer, selected);
         }
     }
 
@@ -732,17 +807,12 @@ pub const HnswIndex = struct {
             const candidates = try self.searchLayer(vector, current, layer_u8, self.config.ef_construction);
             defer self.allocator.free(candidates);
 
-            // Select M best neighbors
+            // Select diverse neighbors using heuristic (Algorithm 4)
             const max_conn: u16 = if (layer_u8 == 0) self.config.m_max0 else self.config.m;
-            const neighbor_count = @min(max_conn, @as(u16, @intCast(candidates.len)));
 
             // Set forward connections (from new node to neighbors)
-            const neighbors = self.allocator.alloc(u64, neighbor_count) catch return HnswError.OutOfMemory;
+            const neighbors = try self.selectNeighborsHeuristic(vector_id, candidates, max_conn);
             defer self.allocator.free(neighbors);
-
-            for (0..neighbor_count) |i| {
-                neighbors[i] = candidates[i].node_id;
-            }
 
             try self.setConnections(connections_page, vector_id, layer_u8, neighbors);
 

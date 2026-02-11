@@ -799,48 +799,36 @@ pub const HnswIndex = struct {
         return current;
     }
 
+    fn compareSearchResults(_: void, a: SearchResult, b: SearchResult) std.math.Order {
+        return std.math.order(a.distance, b.distance);
+    }
+
     /// Search layer with beam width (returns sorted candidates)
     fn searchLayer(self: *Self, query: []const f32, entry: u64, layer: u8, ef: u16) HnswError![]SearchResult {
         const entry_node = self.getNode(entry) orelse return HnswError.NotFound;
 
-        // Candidates and results stored as dynamic arrays
-        var candidates = std.array_list.Managed(SearchResult).init(self.allocator);
+        var candidates = std.PriorityQueue(SearchResult, void, compareSearchResults).init(self.allocator, {});
         defer candidates.deinit();
 
-        var results = std.array_list.Managed(SearchResult).init(self.allocator);
-        errdefer results.deinit();
+        var results = std.PriorityDequeue(SearchResult, void, compareSearchResults).init(self.allocator, {});
+        defer results.deinit();
 
         var visited = std.AutoHashMap(u64, void).init(self.allocator);
         defer visited.deinit();
 
         // Initialize with entry point
         const entry_dist = try self.distanceTo(query, entry_node.vector_loc);
-        candidates.append(.{ .node_id = entry, .distance = entry_dist }) catch return HnswError.OutOfMemory;
-        results.append(.{ .node_id = entry, .distance = entry_dist }) catch return HnswError.OutOfMemory;
+        const entry_result = SearchResult{ .node_id = entry, .distance = entry_dist };
+        candidates.add(entry_result) catch return HnswError.OutOfMemory;
+        results.add(entry_result) catch return HnswError.OutOfMemory;
         visited.put(entry, {}) catch return HnswError.OutOfMemory;
 
-        while (candidates.items.len > 0) {
-            // Find and remove closest candidate
-            var closest_idx: usize = 0;
-            var closest_dist = candidates.items[0].distance;
-            for (candidates.items[1..], 1..) |c, i| {
-                if (c.distance < closest_dist) {
-                    closest_idx = i;
-                    closest_dist = c.distance;
-                }
-            }
-            const closest = candidates.orderedRemove(closest_idx);
-
-            // Find furthest in results
-            var furthest_dist: f32 = 0;
-            for (results.items) |r| {
-                if (r.distance > furthest_dist) {
-                    furthest_dist = r.distance;
-                }
-            }
+        while (candidates.count() > 0) {
+            const closest = candidates.remove();
 
             // Stop if closest candidate is worse than worst result
-            if (results.items.len >= ef and closest.distance > furthest_dist) {
+            const furthest_dist = if (results.peekMax()) |r| r.distance else 0;
+            if (results.count() >= ef and closest.distance > furthest_dist) {
                 break;
             }
 
@@ -856,42 +844,26 @@ pub const HnswIndex = struct {
                 const neighbor_node = self.getNode(neighbor) orelse continue;
                 const dist = try self.distanceTo(query, neighbor_node.vector_loc);
 
-                // Recalculate furthest after potential modifications
-                var current_furthest: f32 = 0;
-                for (results.items) |r| {
-                    if (r.distance > current_furthest) {
-                        current_furthest = r.distance;
-                    }
-                }
+                const current_furthest = if (results.peekMax()) |r| r.distance else 0;
+                if (results.count() < ef or dist < current_furthest) {
+                    const result = SearchResult{ .node_id = neighbor, .distance = dist };
+                    candidates.add(result) catch return HnswError.OutOfMemory;
+                    results.add(result) catch return HnswError.OutOfMemory;
 
-                if (results.items.len < ef or dist < current_furthest) {
-                    candidates.append(.{ .node_id = neighbor, .distance = dist }) catch return HnswError.OutOfMemory;
-                    results.append(.{ .node_id = neighbor, .distance = dist }) catch return HnswError.OutOfMemory;
-
-                    // Remove furthest if over ef
-                    if (results.items.len > ef) {
-                        var furthest_idx: usize = 0;
-                        var max_dist: f32 = results.items[0].distance;
-                        for (results.items[1..], 1..) |r, i| {
-                            if (r.distance > max_dist) {
-                                furthest_idx = i;
-                                max_dist = r.distance;
-                            }
-                        }
-                        _ = results.orderedRemove(furthest_idx);
+                    if (results.count() > ef) {
+                        _ = results.removeMax();
                     }
                 }
             }
         }
 
-        // Sort results by distance
-        std.mem.sort(SearchResult, results.items, {}, struct {
-            fn lessThan(_: void, a: SearchResult, b: SearchResult) bool {
-                return a.distance < b.distance;
-            }
-        }.lessThan);
-
-        return results.toOwnedSlice() catch return HnswError.OutOfMemory;
+        // Drain results in min-order
+        const result_count = results.count();
+        const output = self.allocator.alloc(SearchResult, result_count) catch return HnswError.OutOfMemory;
+        for (0..result_count) |i| {
+            output[i] = results.removeMin();
+        }
+        return output;
     }
 
     // ========================================================================

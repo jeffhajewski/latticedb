@@ -8,6 +8,7 @@
 //!   - Vector data: [vector_id: u64][f32; dimensions] × vector_count
 
 const std = @import("std");
+const builtin = @import("builtin");
 const lattice = @import("lattice");
 
 const Allocator = std.mem.Allocator;
@@ -22,6 +23,7 @@ const NULL_PAGE = types.NULL_PAGE;
 const PageHeader = page.PageHeader;
 const PageType = page.PageType;
 const BufferPool = buffer_pool.BufferPool;
+const BufferFrame = buffer_pool.BufferFrame;
 const LatchMode = locking.LatchMode;
 
 /// Vector storage errors
@@ -283,6 +285,42 @@ pub const VectorStorage = struct {
         }
 
         return result;
+    }
+
+    /// A borrowed vector that points directly into a pinned page buffer.
+    /// Caller must call release() when done to unpin the page.
+    pub const BorrowedVector = struct {
+        data: []const f32,
+        frame: *BufferFrame,
+        bp: *BufferPool,
+
+        pub fn release(self: BorrowedVector) void {
+            self.bp.unpinPage(self.frame, false);
+        }
+    };
+
+    /// Borrow a vector by location, returning a zero-copy view into page data.
+    /// The page stays pinned until the caller calls release() on the result.
+    /// Only valid on little-endian architectures (comptime checked).
+    pub fn borrowByLocation(self: *Self, loc: VectorLocation) VectorStorageError!BorrowedVector {
+        comptime std.debug.assert(builtin.cpu.arch.endian() == .little);
+        const frame = self.bp.fetchPage(loc.page_id, .shared) catch return VectorStorageError.BufferPoolError;
+        // No defer unpin — caller must release
+
+        const vph = VectorPageHeader.read(frame.data);
+
+        if (loc.slot_index >= vph.vector_count) {
+            self.bp.unpinPage(frame, false);
+            return VectorStorageError.NotFound;
+        }
+
+        const float_offset = VECTOR_DATA_OFFSET + @as(usize, loc.slot_index) * self.bytes_per_vector + 8;
+        const f32_ptr: [*]const f32 = @ptrCast(@alignCast(frame.data[float_offset..].ptr));
+        return BorrowedVector{
+            .data = f32_ptr[0..self.dimensions],
+            .frame = frame,
+            .bp = self.bp,
+        };
     }
 
     /// Get vector ID at a location

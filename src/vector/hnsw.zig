@@ -527,31 +527,22 @@ pub const HnswIndex = struct {
         return level;
     }
 
-    /// Get vector data by ID from vector storage
-    fn getVector(self: *Self, vector_id: u64, loc: VectorLocation) HnswError![]f32 {
-        _ = vector_id;
-        return self.vector_storage.getByLocation(loc) catch return HnswError.StorageError;
-    }
-
-    /// Free vector data
-    fn freeVector(self: *Self, vector: []f32) void {
-        self.vector_storage.free(vector);
-    }
-
     /// Calculate distance between query and a stored vector
     fn distanceTo(self: *Self, query: []const f32, loc: VectorLocation) HnswError!f32 {
-        const vec = try self.getVector(0, loc);
-        defer self.freeVector(vec);
-        return self.distance_fn(query, vec);
+        const borrowed = self.vector_storage.borrowByLocation(loc) catch return HnswError.StorageError;
+        defer borrowed.release();
+        return self.distance_fn(query, borrowed.data);
     }
 
     /// Calculate distance between two stored nodes by their IDs
     fn distanceBetweenNodes(self: *Self, id_a: u64, id_b: u64) HnswError!f32 {
         const node_a = self.getNode(id_a) orelse return HnswError.NotFound;
         const node_b = self.getNode(id_b) orelse return HnswError.NotFound;
-        const vec_a = try self.getVector(id_a, node_a.vector_loc);
-        defer self.freeVector(vec_a);
-        return try self.distanceTo(vec_a, node_b.vector_loc);
+        const vec_a = self.vector_storage.borrowByLocation(node_a.vector_loc) catch return HnswError.StorageError;
+        defer vec_a.release();
+        const vec_b = self.vector_storage.borrowByLocation(node_b.vector_loc) catch return HnswError.StorageError;
+        defer vec_b.release();
+        return self.distance_fn(vec_a.data, vec_b.data);
     }
 
     /// Select neighbors using the heuristic from HNSW paper (Algorithm 4).
@@ -577,7 +568,8 @@ pub const HnswIndex = struct {
         @memset(used, false);
 
         // Phase 1 (diversity): select candidate only if closer to target than
-        // to any already-selected neighbor
+        // to any already-selected neighbor.
+        // Hoists candidate vector load outside the inner loop to avoid refetching.
         for (candidates, 0..) |candidate, idx| {
             if (selected.items.len >= max_neighbors) break;
             if (candidate.node_id == target_id) {
@@ -585,9 +577,16 @@ pub const HnswIndex = struct {
                 continue;
             }
 
+            const cand_node = self.getNode(candidate.node_id) orelse continue;
+            const cand_vec = self.vector_storage.borrowByLocation(cand_node.vector_loc) catch continue;
+            defer cand_vec.release();
+
             var is_diverse = true;
             for (selected.items) |sel_id| {
-                const dist_to_selected = self.distanceBetweenNodes(candidate.node_id, sel_id) catch candidate.distance + 1.0;
+                const sel_node = self.getNode(sel_id) orelse continue;
+                const sel_vec = self.vector_storage.borrowByLocation(sel_node.vector_loc) catch continue;
+                defer sel_vec.release();
+                const dist_to_selected = self.distance_fn(cand_vec.data, sel_vec.data);
                 if (dist_to_selected <= candidate.distance) {
                     is_diverse = false;
                     break;
@@ -668,8 +667,8 @@ pub const HnswIndex = struct {
         } else {
             // At capacity — use heuristic pruning to select diverse neighbors
             const node_entry = self.getNode(node_id) orelse return;
-            const node_vec = try self.getVector(node_id, node_entry.vector_loc);
-            defer self.freeVector(node_vec);
+            const node_vec = self.vector_storage.borrowByLocation(node_entry.vector_loc) catch return HnswError.StorageError;
+            defer node_vec.release();
 
             // Build candidate list: existing neighbors + new neighbor
             var candidates = self.allocator.alloc(SearchResult, neighbors.len + 1) catch return HnswError.OutOfMemory;
@@ -682,14 +681,14 @@ pub const HnswIndex = struct {
                 };
                 candidates[i] = .{
                     .node_id = n,
-                    .distance = try self.distanceTo(node_vec, n_entry.vector_loc),
+                    .distance = try self.distanceTo(node_vec.data, n_entry.vector_loc),
                 };
             }
             // Add the new neighbor candidate
             const nb_entry = self.getNode(neighbor) orelse return;
             candidates[neighbors.len] = .{
                 .node_id = neighbor,
-                .distance = try self.distanceTo(node_vec, nb_entry.vector_loc),
+                .distance = try self.distanceTo(node_vec.data, nb_entry.vector_loc),
             };
 
             // Sort by distance ascending

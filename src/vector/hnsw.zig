@@ -102,6 +102,12 @@ pub const cosineDistance = simd_distance.cosineDistance;
 /// Calculate negative inner product (SIMD-optimized)
 pub const innerProductDistance = simd_distance.innerProductDistance;
 
+/// Cosine distance for pre-normalized vectors: 1 - dot(a, b)
+/// ~3x fewer FLOPs than full cosine (no norms needed).
+pub fn normalizedCosineDistance(a: []const f32, b: []const f32) f32 {
+    return 1.0 - simd_distance.dotProduct(a, b);
+}
+
 /// Distance function type
 pub const DistanceFn = *const fn ([]const f32, []const f32) f32;
 
@@ -109,7 +115,7 @@ pub const DistanceFn = *const fn ([]const f32, []const f32) f32;
 pub fn getDistanceFn(metric: DistanceMetric) DistanceFn {
     return switch (metric) {
         .euclidean => simd_distance.euclideanDistance,
-        .cosine => simd_distance.cosineDistance,
+        .cosine => normalizedCosineDistance,
         .inner_product => simd_distance.innerProductDistance,
     };
 }
@@ -375,6 +381,42 @@ const ConnectionPool = struct {
         return self.allocator.alloc(u64, 0) catch return HnswError.OutOfMemory;
     }
 
+    /// Read connections for a node at a specific layer into a caller-provided buffer.
+    /// Returns a slice of buf containing the neighbor IDs.
+    fn getConnectionsInto(self: *Self, loc: ConnectionLocation, layer: u8, buf: []u64) HnswError![]u64 {
+        const frame = self.bp.fetchPage(loc.page_id, .shared) catch return HnswError.BufferPoolError;
+        defer self.bp.unpinPage(frame, false);
+
+        const hdr = ConnectionPoolPageHeader.read(frame.data);
+        const slot_offset = POOL_DATA_OFFSET + @as(usize, loc.slot_index) * @as(usize, hdr.slot_size);
+
+        const layer_count = frame.data[slot_offset];
+        if (layer_count == 0) {
+            return buf[0..0];
+        }
+
+        var offset = slot_offset + 1;
+        const slot_end = slot_offset + @as(usize, hdr.slot_size);
+        var i: u8 = 0;
+        while (i < layer_count and offset < slot_end) : (i += 1) {
+            const layer_num = frame.data[offset];
+            const count = std.mem.readInt(u16, frame.data[offset + 1 ..][0..2], .little);
+            offset += 3;
+
+            if (layer_num == layer) {
+                std.debug.assert(count <= buf.len);
+                for (0..count) |j| {
+                    buf[j] = std.mem.readInt(u64, frame.data[offset + j * 8 ..][0..8], .little);
+                }
+                return buf[0..count];
+            }
+
+            offset += @as(usize, count) * 8;
+        }
+
+        return buf[0..0];
+    }
+
     /// Write connections for a node at a specific layer into its slot
     fn setConnections(self: *Self, loc: ConnectionLocation, node_id: u64, layer: u8, neighbors: []const u64) HnswError!void {
         _ = node_id;
@@ -385,9 +427,11 @@ const ConnectionPool = struct {
         const slot_offset = POOL_DATA_OFFSET + @as(usize, loc.slot_index) * slot_size;
         const slot_end = slot_offset + slot_size;
 
-        // Read existing layers, rebuild with updated layer
-        var layers_data = std.array_list.Managed(u8).init(self.allocator);
-        defer layers_data.deinit();
+        // Read existing layers, rebuild with updated layer using stack buffer
+        var rebuild_buf: [2048]u8 = undefined;
+        var rebuild_len: usize = 0;
+
+        std.debug.assert(slot_size <= rebuild_buf.len);
 
         const old_layer_count = frame.data[slot_offset];
         var offset = slot_offset + 1;
@@ -403,10 +447,8 @@ const ConnectionPool = struct {
                 offset += 3 + @as(usize, count) * 8;
             } else {
                 const layer_size = 3 + @as(usize, count) * 8;
-                layers_data.appendSlice(frame.data[offset .. offset + layer_size]) catch {
-                    self.bp.unpinPage(frame, false);
-                    return HnswError.OutOfMemory;
-                };
+                @memcpy(rebuild_buf[rebuild_len..][0..layer_size], frame.data[offset .. offset + layer_size]);
+                rebuild_len += layer_size;
                 new_layer_count += 1;
                 offset += layer_size;
             }
@@ -414,35 +456,25 @@ const ConnectionPool = struct {
 
         // Add the new/updated layer
         if (neighbors.len > 0) {
-            layers_data.append(layer) catch {
-                self.bp.unpinPage(frame, false);
-                return HnswError.OutOfMemory;
-            };
-            var count_bytes: [2]u8 = undefined;
-            std.mem.writeInt(u16, &count_bytes, @intCast(neighbors.len), .little);
-            layers_data.appendSlice(&count_bytes) catch {
-                self.bp.unpinPage(frame, false);
-                return HnswError.OutOfMemory;
-            };
+            rebuild_buf[rebuild_len] = layer;
+            rebuild_len += 1;
+            std.mem.writeInt(u16, rebuild_buf[rebuild_len..][0..2], @intCast(neighbors.len), .little);
+            rebuild_len += 2;
             for (neighbors) |neighbor| {
-                var neighbor_bytes: [8]u8 = undefined;
-                std.mem.writeInt(u64, &neighbor_bytes, neighbor, .little);
-                layers_data.appendSlice(&neighbor_bytes) catch {
-                    self.bp.unpinPage(frame, false);
-                    return HnswError.OutOfMemory;
-                };
+                std.mem.writeInt(u64, rebuild_buf[rebuild_len..][0..8], neighbor, .little);
+                rebuild_len += 8;
             }
             new_layer_count += 1;
         }
 
         // Assert data fits within slot
-        std.debug.assert(1 + layers_data.items.len <= slot_size);
+        std.debug.assert(1 + rebuild_len <= slot_size);
 
         // Write back: layer_count + layer data + zero remaining
         frame.data[slot_offset] = new_layer_count;
-        @memcpy(frame.data[slot_offset + 1 ..][0..layers_data.items.len], layers_data.items);
+        @memcpy(frame.data[slot_offset + 1 ..][0..rebuild_len], rebuild_buf[0..rebuild_len]);
         // Zero remaining slot bytes
-        const used = 1 + layers_data.items.len;
+        const used = 1 + rebuild_len;
         if (used < slot_size) {
             @memset(frame.data[slot_offset + used .. slot_end], 0);
         }
@@ -559,8 +591,17 @@ pub const HnswIndex = struct {
             return self.allocator.alloc(u64, 0) catch return HnswError.OutOfMemory;
         }
 
+        const BorrowedVector = VectorStorage.BorrowedVector;
+
         var selected = std.array_list.Managed(u64).init(self.allocator);
         defer selected.deinit();
+
+        // Cache borrowed vectors for selected nodes to avoid re-fetching in inner loop
+        var selected_vecs = std.array_list.Managed(BorrowedVector).init(self.allocator);
+        defer {
+            for (selected_vecs.items) |v| v.release();
+            selected_vecs.deinit();
+        }
 
         // Track which candidates have been used
         var used = self.allocator.alloc(bool, candidates.len) catch return HnswError.OutOfMemory;
@@ -569,7 +610,6 @@ pub const HnswIndex = struct {
 
         // Phase 1 (diversity): select candidate only if closer to target than
         // to any already-selected neighbor.
-        // Hoists candidate vector load outside the inner loop to avoid refetching.
         for (candidates, 0..) |candidate, idx| {
             if (selected.items.len >= max_neighbors) break;
             if (candidate.node_id == target_id) {
@@ -579,13 +619,9 @@ pub const HnswIndex = struct {
 
             const cand_node = self.getNode(candidate.node_id) orelse continue;
             const cand_vec = self.vector_storage.borrowByLocation(cand_node.vector_loc) catch continue;
-            defer cand_vec.release();
 
             var is_diverse = true;
-            for (selected.items) |sel_id| {
-                const sel_node = self.getNode(sel_id) orelse continue;
-                const sel_vec = self.vector_storage.borrowByLocation(sel_node.vector_loc) catch continue;
-                defer sel_vec.release();
+            for (selected_vecs.items) |sel_vec| {
                 const dist_to_selected = self.distance_fn(cand_vec.data, sel_vec.data);
                 if (dist_to_selected <= candidate.distance) {
                     is_diverse = false;
@@ -594,8 +630,17 @@ pub const HnswIndex = struct {
             }
 
             if (is_diverse) {
-                selected.append(candidate.node_id) catch return HnswError.OutOfMemory;
+                selected.append(candidate.node_id) catch {
+                    cand_vec.release();
+                    return HnswError.OutOfMemory;
+                };
+                selected_vecs.append(cand_vec) catch {
+                    cand_vec.release();
+                    return HnswError.OutOfMemory;
+                };
                 used[idx] = true;
+            } else {
+                cand_vec.release();
             }
         }
 
@@ -647,8 +692,8 @@ pub const HnswIndex = struct {
         neighbor: u64,
         max_connections: u16,
     ) HnswError!void {
-        const neighbors = try self.getConnections(loc, layer);
-        defer self.allocator.free(neighbors);
+        var ac_conn_buf: [64]u64 = undefined;
+        const neighbors = try self.connection_pool.getConnectionsInto(loc, layer, &ac_conn_buf);
 
         // Check if already connected
         for (neighbors) |n| {
@@ -750,16 +795,24 @@ pub const HnswIndex = struct {
         const ef = ef_override orelse self.config.ef_search;
         std.debug.assert(query.len == self.config.dimensions);
 
+        // For cosine metric, normalize query to match stored normalized vectors
+        var norm_buf: [4096]f32 = undefined;
+        const search_query = if (self.config.metric == .cosine) blk: {
+            @memcpy(norm_buf[0..query.len], query);
+            simd_distance.normalize(norm_buf[0..query.len]);
+            break :blk @as([]const f32, norm_buf[0..query.len]);
+        } else query;
+
         var current = self.entry_point.?;
         var current_layer: i16 = @intCast(self.max_layer);
 
         // Phase 1: Greedy descent through upper layers
         while (current_layer > 0) : (current_layer -= 1) {
-            current = try self.searchLayerGreedy(query, current, @intCast(current_layer));
+            current = try self.searchLayerGreedy(search_query, current, @intCast(current_layer));
         }
 
         // Phase 2: Search layer 0 with beam width ef
-        const candidates = try self.searchLayer(query, current, 0, ef);
+        const candidates = try self.searchLayer(search_query, current, 0, ef);
         defer self.allocator.free(candidates);
 
         // Return top k results
@@ -778,11 +831,11 @@ pub const HnswIndex = struct {
         var current_node = entry_node;
         var current_dist = try self.distanceTo(query, current_node.vector_loc);
 
+        var conn_buf: [64]u64 = undefined;
         var improved = true;
         while (improved) {
             improved = false;
-            const neighbors = try self.getConnections(current_node.connections_loc, layer);
-            defer self.allocator.free(neighbors);
+            const neighbors = try self.connection_pool.getConnectionsInto(current_node.connections_loc, layer, &conn_buf);
 
             for (neighbors) |neighbor| {
                 const neighbor_node = self.getNode(neighbor) orelse continue;
@@ -808,12 +861,15 @@ pub const HnswIndex = struct {
 
         var candidates = std.PriorityQueue(SearchResult, void, compareSearchResults).init(self.allocator, {});
         defer candidates.deinit();
+        candidates.ensureTotalCapacity(ef) catch return HnswError.OutOfMemory;
 
         var results = std.PriorityDequeue(SearchResult, void, compareSearchResults).init(self.allocator, {});
         defer results.deinit();
+        results.ensureTotalCapacity(ef) catch return HnswError.OutOfMemory;
 
         var visited = std.AutoHashMap(u64, void).init(self.allocator);
         defer visited.deinit();
+        visited.ensureTotalCapacity(@as(u32, @intCast(ef)) * 2) catch return HnswError.OutOfMemory;
 
         // Initialize with entry point
         const entry_dist = try self.distanceTo(query, entry_node.vector_loc);
@@ -833,8 +889,8 @@ pub const HnswIndex = struct {
 
             // Explore neighbors
             const node = self.getNode(closest.node_id) orelse continue;
-            const neighbors = try self.getConnections(node.connections_loc, layer);
-            defer self.allocator.free(neighbors);
+            var sl_conn_buf: [64]u64 = undefined;
+            const neighbors = try self.connection_pool.getConnectionsInto(node.connections_loc, layer, &sl_conn_buf);
 
             for (neighbors) |neighbor| {
                 if (visited.contains(neighbor)) continue;
@@ -873,8 +929,17 @@ pub const HnswIndex = struct {
     pub fn insert(self: *Self, vector_id: u64, vector: []const f32) HnswError!void {
         std.debug.assert(vector.len == self.config.dimensions);
 
+        // For cosine metric, normalize vector before storing so we can use
+        // fast dot-product distance instead of full cosine computation.
+        var norm_buf: [4096]f32 = undefined;
+        const store_vector = if (self.config.metric == .cosine) blk: {
+            @memcpy(norm_buf[0..vector.len], vector);
+            simd_distance.normalize(norm_buf[0..vector.len]);
+            break :blk norm_buf[0..vector.len];
+        } else vector;
+
         // Store the vector data
-        const vector_loc = self.vector_storage.store(vector_id, vector) catch return HnswError.StorageError;
+        const vector_loc = self.vector_storage.store(vector_id, store_vector) catch return HnswError.StorageError;
 
         // Assign random level
         const level = self.randomLevel();
@@ -906,7 +971,7 @@ pub const HnswIndex = struct {
         // Phase 1: Descend from top to insertion level (greedy)
         var current_layer: i16 = @intCast(self.max_layer);
         while (current_layer > level) : (current_layer -= 1) {
-            current = try self.searchLayerGreedy(vector, current, @intCast(current_layer));
+            current = try self.searchLayerGreedy(store_vector, current, @intCast(current_layer));
         }
 
         // Phase 2: Insert at each layer from level down to 0
@@ -915,7 +980,7 @@ pub const HnswIndex = struct {
             const layer_u8: u8 = @intCast(insert_layer);
 
             // Find ef_construction nearest neighbors
-            const candidates = try self.searchLayer(vector, current, layer_u8, self.config.ef_construction);
+            const candidates = try self.searchLayer(store_vector, current, layer_u8, self.config.ef_construction);
             defer self.allocator.free(candidates);
 
             // Select diverse neighbors using heuristic (Algorithm 4)

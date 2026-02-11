@@ -98,6 +98,7 @@ pub const VectorStorage = struct {
     bytes_per_vector: u32,
     vectors_per_page: u16,
     first_page: PageId,
+    last_page: PageId,
 
     const Self = @This();
     const PAGE_SIZE: usize = 4096;
@@ -145,6 +146,7 @@ pub const VectorStorage = struct {
             .bytes_per_vector = bytes_per_vector,
             .vectors_per_page = vectors_per_page,
             .first_page = first_page,
+            .last_page = first_page,
         };
     }
 
@@ -159,14 +161,28 @@ pub const VectorStorage = struct {
 
         const vectors_per_page: u16 = @intCast(available / bytes_per_vector);
 
-        // Validate the existing page
-        const frame = bp.fetchPage(first_page, .shared) catch return VectorStorageError.BufferPoolError;
-        defer bp.unpinPage(frame, false);
+        // Validate the existing page and find last page in chain
+        var last_page = first_page;
+        {
+            const frame = bp.fetchPage(first_page, .shared) catch return VectorStorageError.BufferPoolError;
 
-        // Read and validate header
-        const vph = VectorPageHeader.read(frame.data);
-        if (vph.dimensions != dimensions) {
-            return VectorStorageError.DimensionMismatch;
+            // Read and validate header
+            const vph = VectorPageHeader.read(frame.data);
+            if (vph.dimensions != dimensions) {
+                bp.unpinPage(frame, false);
+                return VectorStorageError.DimensionMismatch;
+            }
+
+            var next = vph.next_page;
+            bp.unpinPage(frame, false);
+
+            // Walk chain to find last page
+            while (next != NULL_PAGE) {
+                last_page = next;
+                const f = bp.fetchPage(next, .shared) catch return VectorStorageError.BufferPoolError;
+                next = VectorPageHeader.read(f.data).next_page;
+                bp.unpinPage(f, false);
+            }
         }
 
         return Self{
@@ -176,6 +192,7 @@ pub const VectorStorage = struct {
             .bytes_per_vector = bytes_per_vector,
             .vectors_per_page = vectors_per_page,
             .first_page = first_page,
+            .last_page = last_page,
         };
     }
 
@@ -185,8 +202,8 @@ pub const VectorStorage = struct {
             return VectorStorageError.DimensionMismatch;
         }
 
-        // Find a page with space
-        var current_page = self.first_page;
+        // Start from last known page (avoids O(n) chain walk)
+        var current_page = self.last_page;
         var frame = self.bp.fetchPage(current_page, .exclusive) catch return VectorStorageError.BufferPoolError;
 
         while (true) {
@@ -256,6 +273,7 @@ pub const VectorStorage = struct {
                 new_vph.write(frame.data);
 
                 current_page = new_page;
+                self.last_page = new_page;
                 // Loop will find space on next iteration
             }
         }

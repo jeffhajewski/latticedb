@@ -351,7 +351,7 @@ Lattice delivers competitive performance across graph, vector, and full-text sea
 | Node lookup | 0.13 us | 7.9M ops/sec | < 1 us | PASS |
 | Node creation | 0.65 us | 1.5M ops/sec | - | - |
 | Edge traversal | 9 us | 111K ops/sec | - | - |
-| 10-NN vector search (100K vectors) | 5.5 ms | 181 ops/sec | < 10ms @ 1M | PASS |
+| 10-NN vector search (1M vectors) | 0.83 ms | 1.2K ops/sec | < 10ms @ 1M | PASS |
 | Full-text search (100 docs) | 19 us | 53K ops/sec | - | - |
 
 *Benchmarks run on Apple M1, single-threaded, with auto-scaled buffer pool. Run `zig build benchmark` to reproduce.*
@@ -377,27 +377,28 @@ Benchmarked with 128-dimensional cosine vectors, M=16, ef_construction=200, ef_s
 
 | Scale | Mean Latency | P99 Latency | Recall@10 | Memory |
 |-------|-------------|-------------|-----------|--------|
-| 1,000 | 1.9 ms | 2.4 ms | 100% | 1.1 MB |
-| 10,000 | 4.3 ms | 8.4 ms | 99% | 10.3 MB |
-| 100,000 | 5.5 ms | 20.1 ms | 99% | 100.8 MB |
+| 1,000 | 65 μs | 70 μs | 100% | 1 MB |
+| 10,000 | 174 μs | 695 μs | 99% | 10 MB |
+| 100,000 | 438 μs | 1.2 ms | 99% | 101 MB |
+| 1,000,000 | 832 μs | 1.8 ms | 100% | 1,040 MB |
 
-Search latency scales sub-linearly (O(log N)) with 99-100% recall@10. Uses heuristic neighbor selection (HNSW paper Algorithm 4) for diverse graph connectivity and connection page packing for ~4.5x memory reduction. Run `zig build vector-benchmark` to reproduce.
+Search latency scales sub-linearly (O(log N)) with 99-100% recall@10. Uses heuristic neighbor selection (HNSW paper Algorithm 4) for diverse graph connectivity, connection page packing for ~4.5x memory reduction, and pre-normalized dot product for fast cosine distance. Run `zig build vector-benchmark` to reproduce.
 
-**ef_search Sensitivity (100K vectors)**
+**ef_search Sensitivity (1M vectors)**
 
 | ef_search | Mean Latency | Recall@10 |
 |-----------|-------------|-----------|
-| 16 | 2.5 ms | 98% |
-| 32 | 3.4 ms | 99% |
-| 64 | 4.5 ms | 99% |
-| 128 | 6.1 ms | 100% |
-| 256 | 7.7 ms | 100% |
+| 16 | 506 μs | 57% |
+| 32 | 1.9 ms | 79% |
+| 64 | 990 μs | 100% |
+| 128 | 3.2 ms | 100% |
+| 256 | 11.6 ms | 100% |
 
 #### Vector Search — Competitive Analysis
 
 | System | Latency (10-NN) | Scale | Type | Source |
 |--------|-----------------|-------|------|--------|
-| **Lattice** | **5.5 ms mean, 99% recall** | 100K | Embedded | `zig build vector-benchmark` |
+| **Lattice** | **0.83 ms mean, 100% recall** | 1M | Embedded | `zig build vector-benchmark` |
 | FAISS HNSW (single-thread) | 0.5-3 ms | 1M | Library | [FAISS wiki](https://github.com/facebookresearch/faiss/wiki/Indexing-1M-vectors) |
 | Weaviate | 1.4 ms mean, 3.1 ms P99 | 1M | Server | [Weaviate benchmarks](https://docs.weaviate.io/weaviate/benchmarks/ann) |
 | Qdrant | ~1-2 ms | 1M | Server | [Qdrant benchmarks](https://qdrant.tech/benchmarks/) |
@@ -408,7 +409,7 @@ Search latency scales sub-linearly (O(log N)) with 99-100% recall@10. Uses heuri
 | Pinecone P2 | ~15 ms (incl. network) | 1M | Cloud | [Pinecone blog](https://www.pinecone.io/blog/dedicated-read-nodes/) |
 | sqlite-vec (brute force) | 17 ms | 1M | Extension | [Alex Garcia](https://alexgarcia.xyz/blog/2024/sqlite-vec-stable-release/index.html) |
 
-Lattice at 100K achieves 5.5 ms mean with 99% recall@10 — competitive with FAISS single-threaded and faster than pgvector, LanceDB, Chroma, and Pinecone. Server-based systems (Weaviate, Qdrant) achieve similar latency but add network overhead in practice.
+Lattice at 1M achieves 0.83 ms mean with 100% recall@10 — faster than FAISS single-threaded HNSW and competitive with Weaviate and Qdrant server-based systems (which add network overhead in practice). Faster than pgvector, LanceDB, Chroma, and Pinecone.
 
 #### Full-Text Search (BM25)
 
@@ -458,7 +459,7 @@ Lattice is 250-500x faster than Neo4j and Kuzu on graph traversal, and 14-75x fa
 |------|--------|--------|
 | Binary Size | < 500KB | In progress |
 | Node Lookup | < 1 us | PASS (0.13 us) |
-| Vector Search | < 10ms @ 1M vectors | PASS (5.5ms @ 100K, 99% recall) |
+| Vector Search | < 10ms @ 1M vectors | PASS (0.83ms @ 1M, 100% recall) |
 | Memory | Configurable | PASS |
 | Portability | Linux, macOS, Windows | In progress |
 

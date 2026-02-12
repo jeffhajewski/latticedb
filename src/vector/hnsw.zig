@@ -428,7 +428,7 @@ const ConnectionPool = struct {
         const slot_end = slot_offset + slot_size;
 
         // Read existing layers, rebuild with updated layer using stack buffer
-        var rebuild_buf: [2048]u8 = undefined;
+        var rebuild_buf: [PAGE_SIZE]u8 = undefined;
         var rebuild_len: usize = 0;
 
         std.debug.assert(slot_size <= rebuild_buf.len);

@@ -33,7 +33,9 @@ const Allocator = std.mem.Allocator;
 const DIMENSIONS: u16 = 128;
 const M: u16 = 16;
 const M_MAX0: u16 = 32;
-const EF_CONSTRUCTION: u16 = 200;
+const DEFAULT_EF_CONSTRUCTION: u16 = 200;
+const EF_CONSTRUCTION_VALUES = [_]u16{ 50, 64, 100, 150, 200 };
+const EF_CONSTRUCTION_SCALE: usize = 100_000;
 const DEFAULT_EF_SEARCH: u16 = 64;
 const K: u32 = 10;
 const SEED: u64 = 42;
@@ -251,6 +253,10 @@ const BenchIndex = struct {
     path: []const u8,
 
     fn init(allocator: Allocator, scale: usize, ef_search: u16) !BenchIndex {
+        return initWithEfC(allocator, scale, ef_search, DEFAULT_EF_CONSTRUCTION);
+    }
+
+    fn initWithEfC(allocator: Allocator, scale: usize, ef_search: u16, ef_construction: u16) !BenchIndex {
         var path_buf: [128]u8 = undefined;
         const timestamp = std.time.milliTimestamp();
         const random_val = std.crypto.random.int(u32);
@@ -288,7 +294,7 @@ const BenchIndex = struct {
             .dimensions = DIMENSIONS,
             .m = M,
             .m_max0 = M_MAX0,
-            .ef_construction = EF_CONSTRUCTION,
+            .ef_construction = ef_construction,
             .ef_search = ef_search,
             .metric = .cosine,
         };
@@ -325,29 +331,31 @@ const BenchIndex = struct {
 };
 
 // ============================================================================
-// Scale Benchmark
+// Benchmark Context (reusable across phases)
 // ============================================================================
 
-const ScaleResult = struct {
-    scale: usize,
-    insert_ms: f64,
-    mean_search_us: f64,
-    p50_search_us: f64,
-    p99_search_us: f64,
-    recall: f64,
-    memory_mb: f64,
+/// Holds a built index with its vectors and queries, reusable across benchmark phases.
+const BenchContext = struct {
+    bench: BenchIndex,
+    vectors: [][]f32,
+    queries: [][]f32,
+    allocator: Allocator,
+    insert_ns: u64,
+
+    fn deinit(self: *BenchContext) void {
+        self.bench.deinit();
+        freeVectors(self.allocator, self.vectors);
+        freeVectors(self.allocator, self.queries);
+    }
 };
 
-fn runScaleBenchmark(allocator: Allocator, scale: usize) !ScaleResult {
-    std.debug.print("  Running scale={d}...\n", .{scale});
+fn buildBenchContext(allocator: Allocator, scale: usize, ef_construction: u16) !BenchContext {
+    var bench = try BenchIndex.initWithEfC(allocator, scale, DEFAULT_EF_SEARCH, ef_construction);
+    errdefer bench.deinit();
 
-    var bench = try BenchIndex.init(allocator, scale, DEFAULT_EF_SEARCH);
-    defer bench.deinit();
-
-    // Generate clustered vectors for realistic recall
     var rng = std.Random.DefaultPrng.init(SEED);
     const vectors = try generateClusteredVectors(allocator, scale, DIMENSIONS, &rng);
-    defer freeVectors(allocator, vectors);
+    errdefer freeVectors(allocator, vectors);
 
     // --- Insertion ---
     const report_interval = @max(scale / 10, 10_000);
@@ -361,23 +369,46 @@ fn runScaleBenchmark(allocator: Allocator, scale: usize) !ScaleResult {
     const insert_end = std.time.nanoTimestamp();
     const insert_ns: u64 = @intCast(insert_end - insert_start);
 
-    // Generate queries by perturbing random database vectors
     const queries = try generateQueryVectors(allocator, NUM_SEARCH_QUERIES, vectors, DIMENSIONS, &rng);
-    defer freeVectors(allocator, queries);
 
+    return BenchContext{
+        .bench = bench,
+        .vectors = vectors,
+        .queries = queries,
+        .allocator = allocator,
+        .insert_ns = insert_ns,
+    };
+}
+
+// ============================================================================
+// Scale Benchmark
+// ============================================================================
+
+const ScaleResult = struct {
+    scale: usize,
+    insert_ms: f64,
+    mean_search_us: f64,
+    p50_search_us: f64,
+    p99_search_us: f64,
+    recall: f64,
+    memory_mb: f64,
+};
+
+/// Measure search latency and recall on an existing BenchContext.
+fn measureScale(allocator: Allocator, ctx: *BenchContext, scale: usize) !ScaleResult {
     // --- Warmup ---
     for (0..NUM_WARMUP_QUERIES) |i| {
-        const results = try bench.index.search(queries[i], K, null);
-        bench.index.freeResults(results);
+        const results = try ctx.bench.index.search(ctx.queries[i], K, null);
+        ctx.bench.index.freeResults(results);
     }
 
     // --- Search latency ---
     var timings: [NUM_SEARCH_QUERIES]u64 = undefined;
     for (0..NUM_SEARCH_QUERIES) |i| {
         const t0 = std.time.nanoTimestamp();
-        const results = try bench.index.search(queries[i], K, null);
+        const results = try ctx.bench.index.search(ctx.queries[i], K, null);
         const t1 = std.time.nanoTimestamp();
-        bench.index.freeResults(results);
+        ctx.bench.index.freeResults(results);
         timings[i] = @intCast(t1 - t0);
     }
 
@@ -390,22 +421,22 @@ fn runScaleBenchmark(allocator: Allocator, scale: usize) !ScaleResult {
     // --- Recall ---
     var total_recall: f64 = 0;
     for (0..NUM_RECALL_QUERIES) |i| {
-        const hnsw_results = try bench.index.search(queries[i], K, null);
-        defer bench.index.freeResults(hnsw_results);
+        const hnsw_results = try ctx.bench.index.search(ctx.queries[i], K, null);
+        defer ctx.bench.index.freeResults(hnsw_results);
 
-        var bf_topk = try bruteForceTopK(allocator, queries[i], vectors, K);
+        var bf_topk = try bruteForceTopK(allocator, ctx.queries[i], ctx.vectors, K);
         const recall = computeRecall(hnsw_results, &bf_topk, K);
         total_recall += recall;
     }
     const avg_recall = total_recall / @as(f64, @floatFromInt(NUM_RECALL_QUERIES));
 
     // --- Memory ---
-    const stats = bench.index.getStats();
+    const stats = ctx.bench.index.getStats();
     const memory_mb = @as(f64, @floatFromInt(stats.memory_bytes)) / (1024.0 * 1024.0);
 
     return ScaleResult{
         .scale = scale,
-        .insert_ms = nsToMs(insert_ns),
+        .insert_ms = nsToMs(ctx.insert_ns),
         .mean_search_us = nsToUs(mean_ns),
         .p50_search_us = nsToUs(p50_ns),
         .p99_search_us = nsToUs(p99_ns),
@@ -424,28 +455,9 @@ const EfResult = struct {
     recall: f64,
 };
 
-fn runEfSearchSensitivity(allocator: Allocator, scale: usize) ![]EfResult {
-    std.debug.print("\n  Building index for ef_search sensitivity ({d} vectors)...\n", .{scale});
-
-    // Build one index, test multiple ef values
-    var bench = try BenchIndex.init(allocator, scale, DEFAULT_EF_SEARCH);
-    defer bench.deinit();
-
-    var rng = std.Random.DefaultPrng.init(SEED);
-    const vectors = try generateClusteredVectors(allocator, scale, DIMENSIONS, &rng);
-    defer freeVectors(allocator, vectors);
-
-    const report_interval = @max(scale / 10, 10_000);
-    for (0..scale) |i| {
-        try bench.index.insert(@intCast(i + 1), vectors[i]);
-        if ((i + 1) % report_interval == 0) {
-            std.debug.print("    Inserted {d}/{d}...\n", .{ i + 1, scale });
-        }
-    }
-
-    // Generate queries by perturbing random database vectors
-    const queries = try generateQueryVectors(allocator, NUM_SEARCH_QUERIES, vectors, DIMENSIONS, &rng);
-    defer freeVectors(allocator, queries);
+/// Run ef_search sensitivity sweep on an existing BenchContext (no rebuild needed).
+fn runEfSearchSensitivity(allocator: Allocator, ctx: *BenchContext) ![]EfResult {
+    std.debug.print("\n  Running ef_search sensitivity...\n", .{});
 
     var results = try allocator.alloc(EfResult, EF_SEARCH_VALUES.len);
     errdefer allocator.free(results);
@@ -455,15 +467,93 @@ fn runEfSearchSensitivity(allocator: Allocator, scale: usize) ![]EfResult {
 
         // Warmup
         for (0..NUM_WARMUP_QUERIES) |i| {
-            const r = try bench.index.search(queries[i], K, ef);
-            bench.index.freeResults(r);
+            const r = try ctx.bench.index.search(ctx.queries[i], K, ef);
+            ctx.bench.index.freeResults(r);
         }
 
         // Latency
         var total_ns: u64 = 0;
         for (0..NUM_SEARCH_QUERIES) |i| {
             const t0 = std.time.nanoTimestamp();
-            const r = try bench.index.search(queries[i], K, ef);
+            const r = try ctx.bench.index.search(ctx.queries[i], K, ef);
+            const t1 = std.time.nanoTimestamp();
+            ctx.bench.index.freeResults(r);
+            total_ns += @as(u64, @intCast(t1 - t0));
+        }
+        const mean_ns = total_ns / NUM_SEARCH_QUERIES;
+
+        // Recall
+        var total_recall: f64 = 0;
+        for (0..NUM_RECALL_QUERIES) |i| {
+            const hnsw_results = try ctx.bench.index.search(ctx.queries[i], K, ef);
+            defer ctx.bench.index.freeResults(hnsw_results);
+
+            var bf_topk = try bruteForceTopK(allocator, ctx.queries[i], ctx.vectors, K);
+            const recall = computeRecall(hnsw_results, &bf_topk, K);
+            total_recall += recall;
+        }
+        const avg_recall = total_recall / @as(f64, @floatFromInt(NUM_RECALL_QUERIES));
+
+        results[ef_idx] = EfResult{
+            .ef_search = ef,
+            .mean_search_us = nsToUs(mean_ns),
+            .recall = avg_recall * 100.0,
+        };
+    }
+
+    return results;
+}
+
+// ============================================================================
+// ef_construction Sensitivity
+// ============================================================================
+
+const EfCResult = struct {
+    ef_construction: u16,
+    insert_rate: f64, // inserts/sec
+    mean_search_us: f64,
+    recall: f64,
+};
+
+fn runEfConstructionSensitivity(allocator: Allocator) ![]EfCResult {
+    const scale = EF_CONSTRUCTION_SCALE;
+    std.debug.print("\n  Building ef_construction sensitivity ({d} vectors)...\n", .{scale});
+
+    // Generate vectors once, reuse across all ef_c values
+    var rng = std.Random.DefaultPrng.init(SEED);
+    const vectors = try generateClusteredVectors(allocator, scale, DIMENSIONS, &rng);
+    defer freeVectors(allocator, vectors);
+
+    const queries = try generateQueryVectors(allocator, NUM_SEARCH_QUERIES, vectors, DIMENSIONS, &rng);
+    defer freeVectors(allocator, queries);
+
+    var results = try allocator.alloc(EfCResult, EF_CONSTRUCTION_VALUES.len);
+    errdefer allocator.free(results);
+
+    for (EF_CONSTRUCTION_VALUES, 0..) |ef_c, idx| {
+        std.debug.print("  Testing ef_construction={d}...\n", .{ef_c});
+
+        var bench = try BenchIndex.initWithEfC(allocator, scale, DEFAULT_EF_SEARCH, ef_c);
+        defer bench.deinit();
+
+        // Insert
+        const report_interval = @max(scale / 10, 10_000);
+        const insert_start = std.time.nanoTimestamp();
+        for (0..scale) |i| {
+            try bench.index.insert(@intCast(i + 1), vectors[i]);
+            if ((i + 1) % report_interval == 0) {
+                std.debug.print("    Inserted {d}/{d}...\n", .{ i + 1, scale });
+            }
+        }
+        const insert_end = std.time.nanoTimestamp();
+        const insert_ns: u64 = @intCast(insert_end - insert_start);
+        const insert_rate = @as(f64, @floatFromInt(scale)) / (@as(f64, @floatFromInt(insert_ns)) / 1_000_000_000.0);
+
+        // Search latency
+        var total_ns: u64 = 0;
+        for (0..NUM_SEARCH_QUERIES) |i| {
+            const t0 = std.time.nanoTimestamp();
+            const r = try bench.index.search(queries[i], K, null);
             const t1 = std.time.nanoTimestamp();
             bench.index.freeResults(r);
             total_ns += @as(u64, @intCast(t1 - t0));
@@ -473,7 +563,7 @@ fn runEfSearchSensitivity(allocator: Allocator, scale: usize) ![]EfResult {
         // Recall
         var total_recall: f64 = 0;
         for (0..NUM_RECALL_QUERIES) |i| {
-            const hnsw_results = try bench.index.search(queries[i], K, ef);
+            const hnsw_results = try bench.index.search(queries[i], K, null);
             defer bench.index.freeResults(hnsw_results);
 
             var bf_topk = try bruteForceTopK(allocator, queries[i], vectors, K);
@@ -482,8 +572,9 @@ fn runEfSearchSensitivity(allocator: Allocator, scale: usize) ![]EfResult {
         }
         const avg_recall = total_recall / @as(f64, @floatFromInt(NUM_RECALL_QUERIES));
 
-        results[ef_idx] = EfResult{
-            .ef_search = ef,
+        results[idx] = EfCResult{
+            .ef_construction = ef_c,
+            .insert_rate = insert_rate,
             .mean_search_us = nsToUs(mean_ns),
             .recall = avg_recall * 100.0,
         };
@@ -501,7 +592,7 @@ fn printHeader() void {
     std.debug.print("╔══════════════════════════════════════════════════════════╗\n", .{});
     std.debug.print("║       HNSW Vector Performance Benchmark                ║\n", .{});
     std.debug.print("╠══════════════════════════════════════════════════════════╣\n", .{});
-    std.debug.print("║ Dimensions: {d:<4} Metric: cosine  M: {d:<3} ef_c: {d:<4}     ║\n", .{ DIMENSIONS, M, EF_CONSTRUCTION });
+    std.debug.print("║ Dimensions: {d:<4} Metric: cosine  M: {d:<3}               ║\n", .{ DIMENSIONS, M });
     std.debug.print("╚══════════════════════════════════════════════════════════╝\n", .{});
 }
 
@@ -542,6 +633,24 @@ fn printEfResults(results: []const EfResult, scale: usize) void {
     std.debug.print("└───────────┴─────────────┴───────────┘\n", .{});
 }
 
+fn printEfCResults(results: []const EfCResult) void {
+    std.debug.print("\n═══ ef_construction Sensitivity ({d} vectors) ═══\n", .{EF_CONSTRUCTION_SCALE});
+    std.debug.print("┌─────────────────┬─────────────┬─────────────┬───────────┐\n", .{});
+    std.debug.print("│ ef_construction  │ Inserts/sec │ Mean (μs)   │ Recall@10 │\n", .{});
+    std.debug.print("├─────────────────┼─────────────┼─────────────┼───────────┤\n", .{});
+
+    for (results) |r| {
+        std.debug.print("│ {d:>15} │ {d:>11.1} │ {d:>11.2} │   {d:>5.1}%  │\n", .{
+            r.ef_construction,
+            r.insert_rate,
+            r.mean_search_us,
+            r.recall,
+        });
+    }
+
+    std.debug.print("└─────────────────┴─────────────┴─────────────┴───────────┘\n", .{});
+}
+
 // ============================================================================
 // Main
 // ============================================================================
@@ -551,38 +660,117 @@ pub fn main() !void {
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    // Parse CLI args for --quick flag
+    // Parse CLI args
     const argv = try std.process.argsAlloc(allocator);
     defer std.process.argsFree(allocator, argv);
 
     var quick = false;
-    for (argv[1..]) |arg| {
+    var run_scales = true;
+    var run_ef_search = true;
+    var run_ef_c_sweep = true;
+    var ef_construction: u16 = DEFAULT_EF_CONSTRUCTION;
+    var single_scale: ?usize = null;
+
+    var i: usize = 1;
+    while (i < argv.len) : (i += 1) {
+        const arg = argv[i];
         if (std.mem.eql(u8, arg, "--quick")) {
             quick = true;
+        } else if (std.mem.eql(u8, arg, "--scale-only")) {
+            run_ef_search = false;
+            run_ef_c_sweep = false;
+        } else if (std.mem.eql(u8, arg, "--ef-search-only")) {
+            run_scales = false;
+            run_ef_c_sweep = false;
+        } else if (std.mem.eql(u8, arg, "--ef-c-sweep-only")) {
+            run_scales = false;
+            run_ef_search = false;
+        } else if (std.mem.eql(u8, arg, "--ef-c")) {
+            i += 1;
+            if (i < argv.len) {
+                ef_construction = std.fmt.parseInt(u16, argv[i], 10) catch DEFAULT_EF_CONSTRUCTION;
+            }
+        } else if (std.mem.eql(u8, arg, "--scale")) {
+            i += 1;
+            if (i < argv.len) {
+                single_scale = std.fmt.parseInt(usize, argv[i], 10) catch null;
+            }
         }
     }
 
-    const scales: []const usize = if (quick) &QUICK_SCALES else &ALL_SCALES;
+    // Determine which scales to run
+    var single_scale_arr: [1]usize = undefined;
+    const scales: []const usize = if (single_scale) |s| blk: {
+        single_scale_arr[0] = s;
+        break :blk &single_scale_arr;
+    } else if (quick) &QUICK_SCALES else &ALL_SCALES;
 
     printHeader();
+    if (ef_construction != DEFAULT_EF_CONSTRUCTION) {
+        std.debug.print("  (ef_construction override: {d})\n", .{ef_construction});
+    }
     if (quick) {
         std.debug.print("  (quick mode — skipping 1M scale)\n", .{});
     }
+    if (single_scale != null) {
+        std.debug.print("  (single scale: {d})\n", .{single_scale.?});
+    }
 
     // --- Scale benchmarks ---
-    const scale_results = try allocator.alloc(ScaleResult, scales.len);
-    defer allocator.free(scale_results);
+    // Build each scale's index. Keep the largest alive for ef_search reuse.
+    var last_ctx: ?BenchContext = null;
+    var last_scale: usize = 0;
 
-    for (scales, 0..) |scale, i| {
-        scale_results[i] = try runScaleBenchmark(allocator, scale);
+    if (run_scales or run_ef_search) {
+        const scale_results = try allocator.alloc(ScaleResult, scales.len);
+        defer allocator.free(scale_results);
+
+        for (scales, 0..) |scale, si| {
+            std.debug.print("  Running scale={d}...\n", .{scale});
+
+            // Clean up previous context (unless we're keeping it)
+            if (last_ctx) |*ctx| {
+                ctx.deinit();
+                last_ctx = null;
+            }
+
+            var ctx = try buildBenchContext(allocator, scale, ef_construction);
+
+            if (run_scales) {
+                scale_results[si] = try measureScale(allocator, &ctx, scale);
+            }
+
+            last_ctx = ctx;
+            last_scale = scale;
+        }
+
+        if (run_scales) {
+            printScaleResults(scale_results);
+        }
     }
-    printScaleResults(scale_results);
 
-    // --- ef_search sensitivity at largest scale ---
-    const ef_scale = scales[scales.len - 1];
-    const ef_results = try runEfSearchSensitivity(allocator, ef_scale);
-    defer allocator.free(ef_results);
-    printEfResults(ef_results, ef_scale);
+    // --- ef_search sensitivity (reuses largest scale's index) ---
+    if (run_ef_search) {
+        if (last_ctx) |*ctx| {
+            std.debug.print("\n  ef_search sensitivity ({d} vectors, reusing index)...\n", .{last_scale});
+            const ef_results = try runEfSearchSensitivity(allocator, ctx);
+            defer allocator.free(ef_results);
+            printEfResults(ef_results, last_scale);
+        }
+    }
+
+    // Clean up reused context
+    if (last_ctx) |*ctx| {
+        ctx.deinit();
+        last_ctx = null;
+    }
+
+    // --- ef_construction sensitivity ---
+    if (run_ef_c_sweep) {
+        const efc_results = try runEfConstructionSensitivity(allocator);
+        defer allocator.free(efc_results);
+        printEfCResults(efc_results);
+    }
 
     std.debug.print("\nBenchmark complete.\n", .{});
 }

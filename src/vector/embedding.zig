@@ -90,34 +90,46 @@ pub const EmbeddingClient = struct {
         var headers = std.http.Client.Request.Headers{};
         headers.content_type = .{ .override = "application/json" };
 
+        // Build extra headers for auth
+        const auth_header_value = if (self.config.api_key) |key|
+            self.formatAuthHeader(key) catch return EmbeddingError.OutOfMemory
+        else
+            null;
+        defer if (auth_header_value) |v| self.allocator.free(v);
+
+        const auth_headers = if (auth_header_value) |v|
+            @as([]const std.http.Header, &[_]std.http.Header{
+                .{ .name = "Authorization", .value = v },
+            })
+        else
+            @as([]const std.http.Header, &[_]std.http.Header{});
+
         // Make HTTP request
-        var request = self.http_client.open(
-            .POST,
-            uri,
-            .{
-                .server_header_buffer = undefined,
-                .extra_headers = if (self.config.api_key) |key| &[_]std.http.Header{
-                    .{ .name = "Authorization", .value = self.formatAuthHeader(key) catch return EmbeddingError.OutOfMemory },
-                } else &[_]std.http.Header{},
-                .headers = headers,
-            },
-        ) catch return EmbeddingError.ConnectionFailed;
-        defer request.deinit();
+        var req = std.http.Client.request(&self.http_client, .POST, uri, .{
+            .headers = headers,
+            .extra_headers = auth_headers,
+        }) catch return EmbeddingError.ConnectionFailed;
+        defer req.deinit();
 
         // Send request body
-        request.write(body) catch return EmbeddingError.RequestFailed;
-        request.finish() catch return EmbeddingError.RequestFailed;
+        req.transfer_encoding = .{ .content_length = body.len };
+        var body_writer = req.sendBodyUnflushed(&.{}) catch return EmbeddingError.RequestFailed;
+        body_writer.writer.writeAll(body) catch return EmbeddingError.RequestFailed;
+        body_writer.end() catch return EmbeddingError.RequestFailed;
+        (req.connection orelse return EmbeddingError.RequestFailed).flush() catch return EmbeddingError.RequestFailed;
 
-        // Wait for response
-        request.wait() catch return EmbeddingError.RequestFailed;
+        // Receive response head
+        var redirect_buf: [8192]u8 = undefined;
+        var response = req.receiveHead(&redirect_buf) catch return EmbeddingError.RequestFailed;
 
         // Check status
-        if (request.status != .ok) {
+        if (response.head.status != .ok) {
             return EmbeddingError.ServerError;
         }
 
         // Read response body
-        const response_body = request.reader().readAllAlloc(self.allocator, 10 * 1024 * 1024) catch return EmbeddingError.OutOfMemory;
+        var reader = response.reader(&.{});
+        const response_body = reader.allocRemaining(self.allocator, std.Io.Limit.limited(10 * 1024 * 1024)) catch return EmbeddingError.OutOfMemory;
         defer self.allocator.free(response_body);
 
         // Parse embedding from response

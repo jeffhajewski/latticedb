@@ -21,6 +21,8 @@ const OpenOptions = database.OpenOptions;
 const DatabaseConfig = database.DatabaseConfig;
 const VectorSearchResult = database.VectorSearchResult;
 const FtsSearchResult = database.FtsSearchResult;
+const hash_embed_mod = lattice.vector.hash_embed;
+const embedding_mod = lattice.vector.embedding;
 const node_mod = lattice.graph.node;
 const txn_mod = lattice.transaction.manager;
 const Transaction = txn_mod.Transaction;
@@ -109,6 +111,11 @@ const EdgeResultHandle = struct {
     db_handle: *DatabaseHandle,
 };
 
+/// Internal embedding client handle
+const EmbeddingClientHandle = struct {
+    client: embedding_mod.EmbeddingClient,
+};
+
 // ============================================================================
 // C-Exposed Opaque Types
 // ============================================================================
@@ -133,6 +140,9 @@ pub const lattice_fts_result = opaque {};
 
 /// Opaque edge result handle for C API
 pub const lattice_edge_result = opaque {};
+
+/// Opaque embedding client handle for C API
+pub const lattice_embedding_client = opaque {};
 
 /// Node ID type for C API
 pub const lattice_node_id = types.NodeId;
@@ -1400,6 +1410,153 @@ pub export fn lattice_error_message(code: lattice_error) [*c]const u8 {
         .err_checksum => "Checksum error",
         .err_out_of_memory => "Out of memory",
     };
+}
+
+// ============================================================================
+// Embedding Operations
+// ============================================================================
+
+/// Embedding API format for C API
+pub const lattice_embedding_api_format = enum(c_int) {
+    ollama = 0,
+    openai = 1,
+};
+
+/// Embedding client configuration for C API
+pub const lattice_embedding_config = extern struct {
+    endpoint: [*c]const u8,
+    model: [*c]const u8,
+    api_format: lattice_embedding_api_format,
+    api_key: [*c]const u8,
+    timeout_ms: u32,
+};
+
+/// Generate a hash embedding (built-in, no external service).
+/// Caller must free the returned vector with lattice_hash_embed_free().
+pub export fn lattice_hash_embed(
+    text: [*c]const u8,
+    text_len: usize,
+    dimensions: u16,
+    vector_out: *?[*]f32,
+    dims_out: *u32,
+) lattice_error {
+    vector_out.* = null;
+    dims_out.* = 0;
+
+    if (text == null or text_len == 0) return .err_invalid_arg;
+    if (dimensions == 0) return .err_invalid_arg;
+
+    const text_slice = text[0..text_len];
+
+    const vector = hash_embed_mod.hashEmbed(global_allocator, text_slice, .{
+        .dimensions = dimensions,
+    }) catch |err| {
+        return switch (err) {
+            hash_embed_mod.HashEmbedError.OutOfMemory => .err_out_of_memory,
+            hash_embed_mod.HashEmbedError.EmptyInput => .err_invalid_arg,
+            hash_embed_mod.HashEmbedError.InvalidDimensions => .err_invalid_arg,
+        };
+    };
+
+    vector_out.* = vector.ptr;
+    dims_out.* = @intCast(vector.len);
+    return .ok;
+}
+
+/// Free a vector returned by lattice_hash_embed or lattice_embedding_client_embed.
+pub export fn lattice_hash_embed_free(
+    vector_ptr: ?[*]f32,
+    dimensions: u32,
+) void {
+    if (vector_ptr) |ptr| {
+        if (dimensions > 0) {
+            global_allocator.free(ptr[0..dimensions]);
+        }
+    }
+}
+
+/// Create an HTTP embedding client.
+pub export fn lattice_embedding_client_create(
+    config: ?*const lattice_embedding_config,
+    client_out: *?*lattice_embedding_client,
+) lattice_error {
+    client_out.* = null;
+
+    const cfg = config orelse return .err_invalid_arg;
+
+    const endpoint = cStrToSlice(cfg.endpoint) orelse return .err_invalid_arg;
+    const model = cStrToSlice(cfg.model) orelse return .err_invalid_arg;
+
+    const api_format: embedding_mod.ApiFormat = switch (cfg.api_format) {
+        .ollama => .ollama,
+        .openai => .openai,
+    };
+
+    const api_key: ?[]const u8 = cStrToSlice(cfg.api_key);
+
+    const timeout = if (cfg.timeout_ms == 0) @as(u32, 30_000) else cfg.timeout_ms;
+
+    const handle = global_allocator.create(EmbeddingClientHandle) catch return .err_out_of_memory;
+    handle.* = .{
+        .client = embedding_mod.EmbeddingClient.init(global_allocator, .{
+            .endpoint = endpoint,
+            .model = model,
+            .api_format = api_format,
+            .api_key = api_key,
+            .timeout_ms = timeout,
+        }),
+    };
+
+    client_out.* = @ptrCast(handle);
+    return .ok;
+}
+
+/// Generate an embedding via HTTP.
+/// Caller must free the returned vector with lattice_hash_embed_free().
+pub export fn lattice_embedding_client_embed(
+    client: ?*lattice_embedding_client,
+    text: [*c]const u8,
+    text_len: usize,
+    vector_out: *?[*]f32,
+    dims_out: *u32,
+) lattice_error {
+    vector_out.* = null;
+    dims_out.* = 0;
+
+    const handle = toHandle(EmbeddingClientHandle, client) orelse return .err_invalid_arg;
+
+    if (text == null or text_len == 0) return .err_invalid_arg;
+
+    const text_slice = text[0..text_len];
+
+    const vector = handle.client.embed(text_slice) catch |err| {
+        return switch (err) {
+            embedding_mod.EmbeddingError.ConnectionFailed,
+            embedding_mod.EmbeddingError.RequestFailed,
+            => .err_io,
+            embedding_mod.EmbeddingError.ServerError,
+            embedding_mod.EmbeddingError.ParseError,
+            embedding_mod.EmbeddingError.InvalidResponse,
+            => .err,
+            embedding_mod.EmbeddingError.NotConfigured,
+            embedding_mod.EmbeddingError.InvalidUri,
+            => .err_invalid_arg,
+            embedding_mod.EmbeddingError.OutOfMemory => .err_out_of_memory,
+        };
+    };
+
+    vector_out.* = vector.ptr;
+    dims_out.* = @intCast(vector.len);
+    return .ok;
+}
+
+/// Free an HTTP embedding client.
+pub export fn lattice_embedding_client_free(
+    client: ?*lattice_embedding_client,
+) void {
+    const handle = toHandle(EmbeddingClientHandle, client) orelse return;
+    handle.client.deinit();
+    global_allocator.destroy(handle);
 }
 
 // ============================================================================

@@ -341,6 +341,53 @@ lattice_error lattice_fts_result_get(
 void lattice_fts_result_free(lattice_fts_result* result);
 
 /*
+ * Embedding operations
+ */
+
+typedef struct lattice_embedding_client lattice_embedding_client;
+
+typedef enum {
+    LATTICE_EMBEDDING_OLLAMA = 0,
+    LATTICE_EMBEDDING_OPENAI = 1
+} lattice_embedding_api_format;
+
+typedef struct {
+    const char* endpoint;
+    const char* model;
+    lattice_embedding_api_format api_format;
+    const char* api_key;        /* NULL for no auth */
+    uint32_t timeout_ms;        /* 0 = default 30s */
+} lattice_embedding_config;
+
+/* Generate a hash embedding (built-in, no external service).
+ * Caller must free with lattice_hash_embed_free(). */
+lattice_error lattice_hash_embed(
+    const char* text, size_t text_len,
+    uint16_t dimensions,
+    float** vector_out, uint32_t* dims_out
+);
+
+/* Free a hash embedding vector */
+void lattice_hash_embed_free(float* vector, uint32_t dimensions);
+
+/* Create an HTTP embedding client */
+lattice_error lattice_embedding_client_create(
+    const lattice_embedding_config* config,
+    lattice_embedding_client** client_out
+);
+
+/* Generate an embedding via HTTP.
+ * Caller must free with lattice_hash_embed_free(). */
+lattice_error lattice_embedding_client_embed(
+    lattice_embedding_client* client,
+    const char* text, size_t text_len,
+    float** vector_out, uint32_t* dims_out
+);
+
+/* Free an HTTP embedding client */
+void lattice_embedding_client_free(lattice_embedding_client* client);
+
+/*
  * Edge operations
  */
 

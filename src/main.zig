@@ -29,6 +29,7 @@ pub const vector = struct {
     pub const storage = @import("vector/storage.zig");
     pub const embedding = @import("vector/embedding.zig");
     pub const distance = @import("vector/distance.zig");
+    pub const hash_embed = @import("vector/hash_embed.zig");
 };
 
 // Full-text search
@@ -124,6 +125,11 @@ comptime {
     _ = &c_api.lattice_query_cache_stats;
     _ = &c_api.lattice_version;
     _ = &c_api.lattice_error_message;
+    _ = &c_api.lattice_hash_embed;
+    _ = &c_api.lattice_hash_embed_free;
+    _ = &c_api.lattice_embedding_client_create;
+    _ = &c_api.lattice_embedding_client_embed;
+    _ = &c_api.lattice_embedding_client_free;
 }
 
 // Re-export common types at top level
@@ -189,6 +195,10 @@ pub const EmbeddingClient = vector.embedding.EmbeddingClient;
 pub const EmbeddingConfig = vector.embedding.Config;
 pub const EmbeddingError = vector.embedding.EmbeddingError;
 pub const EmbeddingApiFormat = vector.embedding.ApiFormat;
+
+pub const HashEmbedConfig = vector.hash_embed.HashEmbedConfig;
+pub const HashEmbedError = vector.hash_embed.HashEmbedError;
+pub const hashEmbed = vector.hash_embed.hashEmbed;
 
 pub const SymbolTable = graph.symbols.SymbolTable;
 pub const SymbolId = graph.symbols.SymbolId;

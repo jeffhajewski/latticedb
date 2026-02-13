@@ -18,6 +18,9 @@ const buffer_pool = lattice.storage.buffer_pool;
 const vec_storage = lattice.vector.storage;
 const simd_distance = lattice.vector.distance;
 const locking = lattice.concurrency.locking;
+const btree_mod = lattice.storage.btree;
+const BTree = btree_mod.BTree;
+const BTreeError = btree_mod.BTreeError;
 
 const PageId = types.PageId;
 const NULL_PAGE = types.NULL_PAGE;
@@ -513,6 +516,9 @@ pub const HnswIndex = struct {
     // Random number generator for level assignment
     rng: std.Random.DefaultPrng,
 
+    // Dirty flag for persistence
+    dirty: bool,
+
     const Self = @This();
     const PAGE_SIZE: usize = 4096;
 
@@ -535,6 +541,7 @@ pub const HnswIndex = struct {
             .connection_pool = ConnectionPool.init(allocator, bp, config.m, config.m_max0),
             .distance_fn = getDistanceFn(config.metric),
             .rng = std.Random.DefaultPrng.init(@intCast(std.time.timestamp())),
+            .dirty = false,
         };
     }
 
@@ -1114,12 +1121,137 @@ pub const HnswIndex = struct {
             self.max_layer = level;
         }
 
+        self.dirty = true;
         self.vector_count += 1;
     }
 
     /// Free search results allocated by search()
     pub fn freeResults(self: *Self, results: []SearchResult) void {
         self.allocator.free(results);
+    }
+
+    // ========================================================================
+    // Persistence (B+Tree backed)
+    // ========================================================================
+
+    /// Sentinel key used to store HNSW metadata in the B+Tree.
+    const METADATA_KEY = [_]u8{0xFF} ** 8;
+
+    /// Serialize HNSW metadata (entry_point, max_layer, vector_count, pool_heads)
+    /// into a stack buffer. Returns the slice of valid bytes.
+    fn serializeMetadata(self: *Self, buf: []u8) []const u8 {
+        // Header: entry_point(8) + max_layer(1) + vector_count(8) + pool_count(1) = 18
+        const ep: u64 = self.entry_point orelse 0;
+        std.mem.writeInt(u64, buf[0..8], ep, .little);
+        buf[8] = self.max_layer;
+        std.mem.writeInt(u64, buf[9..17], self.vector_count, .little);
+
+        // Pool heads
+        var pool_count: u8 = 0;
+        var offset: usize = 18;
+        var pool_iter = self.connection_pool.pool_heads.iterator();
+        while (pool_iter.next()) |entry| {
+            buf[offset] = entry.key_ptr.*;
+            std.mem.writeInt(u32, buf[offset + 1 ..][0..4], entry.value_ptr.*, .little);
+            offset += 5;
+            pool_count += 1;
+        }
+        buf[17] = pool_count;
+        return buf[0..offset];
+    }
+
+    /// Deserialize HNSW metadata from a buffer, restoring entry_point,
+    /// max_layer, vector_count, and pool_heads.
+    fn deserializeMetadata(self: *Self, data: []const u8) void {
+        const ep = std.mem.readInt(u64, data[0..8], .little);
+        self.entry_point = if (ep == 0) null else ep;
+        self.max_layer = data[8];
+        self.vector_count = std.mem.readInt(u64, data[9..17], .little);
+
+        const pool_count = data[17];
+        var offset: usize = 18;
+        var i: u8 = 0;
+        while (i < pool_count) : (i += 1) {
+            const level = data[offset];
+            const page_id = std.mem.readInt(u32, data[offset + 1 ..][0..4], .little);
+            self.connection_pool.pool_heads.put(level, page_id) catch {};
+            offset += 5;
+        }
+    }
+
+    /// Save the HNSW index state to a B+Tree for persistence.
+    /// Only writes if the index is dirty and non-empty.
+    pub fn saveToTree(self: *Self, tree: *BTree) HnswError!void {
+        if (!self.dirty or self.vector_count == 0) return;
+
+        // 1. Save metadata under sentinel key
+        var meta_buf: [1300]u8 = undefined;
+        const meta_data = self.serializeMetadata(&meta_buf);
+
+        // Delete-then-insert pattern (delete of missing key returns KeyNotFound, which we ignore)
+        tree.delete(&METADATA_KEY) catch |err| switch (err) {
+            BTreeError.KeyNotFound => {},
+            else => return HnswError.StorageError,
+        };
+        tree.insert(&METADATA_KEY, meta_data) catch return HnswError.StorageError;
+
+        // 2. Save each node entry
+        var iter = self.nodes.iterator();
+        while (iter.next()) |entry| {
+            var key_buf: [8]u8 = undefined;
+            std.mem.writeInt(u64, &key_buf, entry.key_ptr.*, .little);
+
+            var val_buf: [HnswNodeEntry.SERIALIZED_SIZE]u8 = undefined;
+            entry.value_ptr.serialize(&val_buf);
+
+            tree.delete(&key_buf) catch |err| switch (err) {
+                BTreeError.KeyNotFound => {},
+                else => return HnswError.StorageError,
+            };
+            tree.insert(&key_buf, &val_buf) catch return HnswError.StorageError;
+        }
+
+        self.dirty = false;
+    }
+
+    /// Load the HNSW index state from a B+Tree.
+    /// Returns true if successfully loaded, false if no persisted state found.
+    pub fn loadFromTree(self: *Self, tree: *BTree) HnswError!bool {
+        // 1. Look up metadata sentinel
+        const meta_val = tree.get(&METADATA_KEY) catch return HnswError.StorageError;
+        if (meta_val == null) return false;
+
+        // Copy metadata before B+Tree page is unpinned by subsequent operations
+        var meta_copy: [1300]u8 = undefined;
+        const meta_len = meta_val.?.len;
+        @memcpy(meta_copy[0..meta_len], meta_val.?);
+        self.deserializeMetadata(meta_copy[0..meta_len]);
+
+        // 2. Range scan all entries
+        var range_iter = tree.range(null, null) catch return HnswError.StorageError;
+        defer range_iter.deinit();
+
+        while (true) {
+            const entry = range_iter.next() catch return HnswError.StorageError;
+            if (entry == null) break;
+            const e = entry.?;
+
+            // Skip sentinel key
+            if (e.key.len == 8 and e.key[0] == 0xFF and e.key[1] == 0xFF and
+                e.key[2] == 0xFF and e.key[3] == 0xFF and e.key[4] == 0xFF and
+                e.key[5] == 0xFF and e.key[6] == 0xFF and e.key[7] == 0xFF)
+                continue;
+
+            if (e.key.len != 8 or e.value.len != HnswNodeEntry.SERIALIZED_SIZE) continue;
+
+            // Deserialize into an owned struct (no pointers into B+Tree page)
+            const node_entry = HnswNodeEntry.deserialize(e.value[0..HnswNodeEntry.SERIALIZED_SIZE]);
+            const vector_id = std.mem.readInt(u64, e.key[0..8], .little);
+            self.nodes.put(vector_id, node_entry) catch return HnswError.OutOfMemory;
+        }
+
+        self.dirty = false;
+        return true;
     }
 };
 

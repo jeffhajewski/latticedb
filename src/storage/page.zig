@@ -52,7 +52,8 @@ pub const TreeIndex = enum(u8) {
     fts_dict = 5,
     fts_lengths = 6,
     fts_reverse = 7,
-    // Reserved for future use: 8-15
+    hnsw_node = 8,
+    // Reserved for future use: 9-15
 };
 
 /// Maximum number of B+Tree root pages stored in header

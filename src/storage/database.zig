@@ -336,6 +336,7 @@ pub const Database = struct {
     fts_dict_tree: BTree,
     fts_lengths_tree: BTree,
     fts_reverse_tree: ?BTree,
+    hnsw_node_tree: ?BTree,
 
     // Graph stores
     symbol_table: SymbolTable,
@@ -421,6 +422,7 @@ pub const Database = struct {
         // Initialize these early since saveTreeRoots() checks them
         self.vector_storage = null;
         self.hnsw_index = null;
+        self.hnsw_node_tree = null;
 
         // 5. Initialize or load B+Trees
         const header = self.page_manager.getHeader();
@@ -503,12 +505,20 @@ pub const Database = struct {
                     },
                 );
 
-                // 8d. Rebuild HNSW index from existing vectors if reopening database
+                // 8d. Load HNSW index from B+Tree, or rebuild from vectors
                 if (is_existing_vectors) {
                     if (self.hnsw_index) |*hnsw| {
-                        self.rebuildHnswIndex(vs, hnsw) catch {
-                            // Log error but continue - index will be empty
-                        };
+                        var loaded = false;
+                        if (self.hnsw_node_tree) |*tree| {
+                            if (hnsw.loadFromTree(tree)) |ok| {
+                                loaded = ok;
+                            } else |_| {}
+                        }
+                        if (!loaded) {
+                            self.rebuildHnswIndex(vs, hnsw) catch {
+                                // Log error but continue - index will be empty
+                            };
+                        }
                     }
                 }
             }
@@ -540,6 +550,18 @@ pub const Database = struct {
     /// Returns an error if flushing fails - data may not be persisted.
     pub fn sync(self: *Self) DatabaseError!void {
         if (self.read_only) return;
+
+        // Persist HNSW index to B+Tree before saving roots
+        if (self.hnsw_index) |*hnsw| {
+            if (hnsw.vector_count > 0) {
+                if (self.hnsw_node_tree == null) {
+                    self.hnsw_node_tree = BTree.init(self.allocator, &self.buffer_pool) catch null;
+                }
+                if (self.hnsw_node_tree) |*tree| {
+                    hnsw.saveToTree(tree) catch {};
+                }
+            }
+        }
 
         // Save B+Tree root pages
         self.saveTreeRoots() catch {
@@ -972,6 +994,9 @@ pub const Database = struct {
             self.fts_reverse_tree = null;
         }
 
+        // hnsw_node_tree is created lazily on first sync when vectors exist
+        self.hnsw_node_tree = null;
+
         // Save root pages to header
         try self.saveTreeRoots();
     }
@@ -1031,6 +1056,17 @@ pub const Database = struct {
         } else {
             self.fts_reverse_tree = null;
         }
+
+        const hnsw_node_root = header.getTreeRoot(.hnsw_node);
+        if (hnsw_node_root != NULL_PAGE) {
+            self.hnsw_node_tree = BTree.open(
+                self.allocator,
+                &self.buffer_pool,
+                hnsw_node_root,
+            );
+        } else {
+            self.hnsw_node_tree = null;
+        }
     }
 
     fn saveTreeRoots(self: *Self) DatabaseError!void {
@@ -1046,6 +1082,10 @@ pub const Database = struct {
 
         if (self.fts_reverse_tree) |*tree| {
             header.setTreeRoot(.fts_reverse, tree.getRootPage());
+        }
+
+        if (self.hnsw_node_tree) |*tree| {
+            header.setTreeRoot(.hnsw_node, tree.getRootPage());
         }
 
         // Save vector storage first page for persistence

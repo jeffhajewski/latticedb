@@ -802,6 +802,44 @@ test "database: fts handles document updates" {
     // This tests the indexing worked correctly
 }
 
+test "database: fts fuzzy search finds documents with typos" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_fts_fuzzy_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = false,
+            .enable_fts = true,
+            .enable_vector = false,
+        },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    // Create and index documents
+    const doc1 = try db.createNode(null, &[_][]const u8{"Document"});
+    try db.ftsIndexDocument(doc1, "the database engine is fast");
+
+    const doc2 = try db.createNode(null, &[_][]const u8{"Document"});
+    try db.ftsIndexDocument(doc2, "machine learning models");
+
+    // Exact search should find "database"
+    const exact_results = try db.ftsSearch("database", 10);
+    defer db.freeFtsSearchResults(exact_results);
+    try std.testing.expectEqual(@as(usize, 1), exact_results.len);
+
+    // Fuzzy search with a typo: "databse" should still find "database"
+    const fuzzy_results = try db.ftsSearchFuzzy("databse", 10, 2, 4);
+    defer db.freeFtsSearchResults(fuzzy_results);
+    try std.testing.expectEqual(@as(usize, 1), fuzzy_results.len);
+    try std.testing.expectEqual(doc1, fuzzy_results[0].doc_id);
+}
+
 // ============================================================================
 // Vector Search Integration Tests
 // ============================================================================

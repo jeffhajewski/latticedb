@@ -922,6 +922,40 @@ pub export fn lattice_fts_search(
     return .ok;
 }
 
+/// Search for documents matching a text query with fuzzy (typo-tolerant) matching.
+pub export fn lattice_fts_search_fuzzy(
+    db: ?*lattice_database,
+    query_text: [*c]const u8,
+    query_len: usize,
+    limit: u32,
+    max_distance: u32,
+    min_term_length: u32,
+    result_out: *?*lattice_fts_result,
+) lattice_error {
+    const db_handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
+
+    if (query_text == null or query_len == 0 or limit == 0) return .err_invalid_arg;
+
+    const query_slice = query_text[0..query_len];
+
+    const eff_max_dist = if (max_distance == 0) 2 else max_distance;
+    const eff_min_len = if (min_term_length == 0) 4 else min_term_length;
+
+    const results = db_handle.db.ftsSearchFuzzy(query_slice, limit, eff_max_dist, eff_min_len) catch |err| {
+        return mapDatabaseError(err);
+    };
+
+    const result_handle = global_allocator.create(FtsResultHandle) catch return .err_out_of_memory;
+    result_handle.* = FtsResultHandle{
+        .results = results,
+        .count = results.len,
+        .db_handle = db_handle,
+    };
+
+    result_out.* = toOpaque(lattice_fts_result, result_handle);
+    return .ok;
+}
+
 /// Get the number of FTS search results.
 pub export fn lattice_fts_result_count(
     result: ?*lattice_fts_result,

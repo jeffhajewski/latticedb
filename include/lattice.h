@@ -313,6 +313,19 @@ lattice_error lattice_fts_search(
     lattice_fts_result** result_out
 );
 
+/* Search with fuzzy matching (typo tolerance).
+ * max_distance: max Levenshtein edit distance (0 = default 2)
+ * min_term_length: min term length for fuzzy expansion (0 = default 4) */
+lattice_error lattice_fts_search_fuzzy(
+    lattice_database* db,
+    const char* query,
+    size_t query_len,
+    uint32_t limit,
+    uint32_t max_distance,
+    uint32_t min_term_length,
+    lattice_fts_result** result_out
+);
+
 /* Get the number of FTS results */
 uint32_t lattice_fts_result_count(lattice_fts_result* result);
 

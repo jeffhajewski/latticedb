@@ -65,6 +65,7 @@ const fts_mod = lattice.fts.index;
 const FtsIndex = fts_mod.FtsIndex;
 const FtsConfig = fts_mod.FtsConfig;
 const FtsError = fts_mod.FtsError;
+const fuzzy_mod = lattice.fts.fuzzy;
 
 const scorer_mod = lattice.fts.scorer;
 pub const FtsSearchResult = scorer_mod.ScoredDoc;
@@ -1778,6 +1779,26 @@ pub const Database = struct {
         const fts = &(self.fts_index orelse return DatabaseError.IoError);
 
         return fts.search(query_text, limit) catch |err| {
+            return switch (err) {
+                FtsError.TokenizerError => DatabaseError.IoError,
+                FtsError.OutOfMemory => DatabaseError.OutOfMemory,
+                else => DatabaseError.IoError,
+            };
+        };
+    }
+
+    /// Search for documents matching a text query with fuzzy (typo-tolerant) matching.
+    pub fn ftsSearchFuzzy(
+        self: *Self,
+        query_text: []const u8,
+        limit: u32,
+        max_distance: u32,
+        min_term_length: u32,
+    ) DatabaseError![]FtsSearchResult {
+        const fts = &(self.fts_index orelse return DatabaseError.IoError);
+        const config = fuzzy_mod.FuzzyConfig{ .max_distance = max_distance, .min_term_length = min_term_length };
+
+        return fts.searchFuzzy(query_text, config, limit) catch |err| {
             return switch (err) {
                 FtsError.TokenizerError => DatabaseError.IoError,
                 FtsError.OutOfMemory => DatabaseError.OutOfMemory,

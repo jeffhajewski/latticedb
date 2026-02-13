@@ -577,6 +577,73 @@ pub const HnswIndex = struct {
         return self.distance_fn(vec_a.data, vec_b.data);
     }
 
+    // ========================================================================
+    // Batch Distance Computation
+    // ========================================================================
+
+    /// Entry for batch distance computation: a neighbor ID + its borrowed vector.
+    const BatchEntry = struct {
+        neighbor_id: u64,
+        borrowed: VectorStorage.BorrowedVector,
+    };
+
+    /// Borrow vectors for a batch of neighbor IDs, skipping failures.
+    /// Returns the number of entries actually filled into buf.
+    fn borrowNeighborVectors(self: *Self, neighbor_ids: []const u64, buf: []BatchEntry) usize {
+        var count: usize = 0;
+        for (neighbor_ids) |nid| {
+            if (count >= buf.len) break;
+            const node = self.getNode(nid) orelse continue;
+            const borrowed = self.vector_storage.borrowByLocation(node.vector_loc) catch continue;
+            buf[count] = .{ .neighbor_id = nid, .borrowed = borrowed };
+            count += 1;
+        }
+        return count;
+    }
+
+    /// Release all borrowed vectors in a batch.
+    fn releaseBatch(entries: []const BatchEntry) void {
+        for (entries) |e| e.borrowed.release();
+    }
+
+    /// Compute distances from query to all entries using batch4 SIMD where possible.
+    /// Falls back to single-vector distance_fn for the remainder (1-3 vectors).
+    fn batchComputeDistances(self: *Self, query: []const f32, entries: []const BatchEntry, out: []f32) void {
+        const n = entries.len;
+        var i: usize = 0;
+
+        // Process groups of 4
+        while (i + 4 <= n) : (i += 4) {
+            const d0 = entries[i + 0].borrowed.data;
+            const d1 = entries[i + 1].borrowed.data;
+            const d2 = entries[i + 2].borrowed.data;
+            const d3 = entries[i + 3].borrowed.data;
+
+            const results = switch (self.config.metric) {
+                .euclidean => blk: {
+                    const sq = simd_distance.euclideanDistanceSquaredBatch4(query, d0, d1, d2, d3);
+                    break :blk [4]f32{ @sqrt(sq[0]), @sqrt(sq[1]), @sqrt(sq[2]), @sqrt(sq[3]) };
+                },
+                .cosine => blk: {
+                    // Pre-normalized vectors: distance = 1 - dot(q, v)
+                    const dots = simd_distance.dotProductBatch4(query, d0, d1, d2, d3);
+                    break :blk [4]f32{ 1.0 - dots[0], 1.0 - dots[1], 1.0 - dots[2], 1.0 - dots[3] };
+                },
+                .inner_product => simd_distance.innerProductDistanceBatch4(query, d0, d1, d2, d3),
+            };
+
+            out[i + 0] = results[0];
+            out[i + 1] = results[1];
+            out[i + 2] = results[2];
+            out[i + 3] = results[3];
+        }
+
+        // Remainder (1-3 vectors)
+        while (i < n) : (i += 1) {
+            out[i] = self.distance_fn(query, entries[i].borrowed.data);
+        }
+    }
+
     /// Select neighbors using the heuristic from HNSW paper (Algorithm 4).
     /// Picks diverse neighbors that cover different angular regions around the target.
     /// candidates must be sorted by distance ascending.
@@ -824,6 +891,7 @@ pub const HnswIndex = struct {
     }
 
     /// Greedy search within a single layer (returns closest node)
+    /// Uses batch borrow/compute/release to amortize pin/unpin overhead.
     fn searchLayerGreedy(self: *Self, query: []const f32, entry: u64, layer: u8) HnswError!u64 {
         const entry_node = self.getNode(entry) orelse return HnswError.NotFound;
 
@@ -832,17 +900,26 @@ pub const HnswIndex = struct {
         var current_dist = try self.distanceTo(query, current_node.vector_loc);
 
         var conn_buf: [64]u64 = undefined;
+        var batch_buf: [64]BatchEntry = undefined;
+        var dist_buf: [64]f32 = undefined;
+
         var improved = true;
         while (improved) {
             improved = false;
             const neighbors = try self.connection_pool.getConnectionsInto(current_node.connections_loc, layer, &conn_buf);
 
-            for (neighbors) |neighbor| {
-                const neighbor_node = self.getNode(neighbor) orelse continue;
-                const dist = try self.distanceTo(query, neighbor_node.vector_loc);
+            // Batch borrow all neighbor vectors
+            const count = self.borrowNeighborVectors(neighbors, &batch_buf);
+            defer releaseBatch(batch_buf[0..count]);
+
+            // Batch compute all distances
+            self.batchComputeDistances(query, batch_buf[0..count], dist_buf[0..count]);
+
+            // Find minimum
+            for (batch_buf[0..count], dist_buf[0..count]) |be, dist| {
                 if (dist < current_dist) {
-                    current = neighbor;
-                    current_node = neighbor_node;
+                    current = be.neighbor_id;
+                    current_node = self.getNode(be.neighbor_id) orelse continue;
                     current_dist = dist;
                     improved = true;
                 }
@@ -855,7 +932,8 @@ pub const HnswIndex = struct {
         return std.math.order(a.distance, b.distance);
     }
 
-    /// Search layer with beam width (returns sorted candidates)
+    /// Search layer with beam width (returns sorted candidates).
+    /// Uses batch borrow/compute/release to amortize pin/unpin overhead.
     fn searchLayer(self: *Self, query: []const f32, entry: u64, layer: u8, ef: u16) HnswError![]SearchResult {
         const entry_node = self.getNode(entry) orelse return HnswError.NotFound;
 
@@ -878,6 +956,12 @@ pub const HnswIndex = struct {
         results.add(entry_result) catch return HnswError.OutOfMemory;
         visited.put(entry, {}) catch return HnswError.OutOfMemory;
 
+        // Stack buffers for batch processing
+        var sl_conn_buf: [64]u64 = undefined;
+        var unvisited_buf: [64]u64 = undefined;
+        var batch_buf: [64]BatchEntry = undefined;
+        var dist_buf: [64]f32 = undefined;
+
         while (candidates.count() > 0) {
             const closest = candidates.remove();
 
@@ -889,19 +973,31 @@ pub const HnswIndex = struct {
 
             // Explore neighbors
             const node = self.getNode(closest.node_id) orelse continue;
-            var sl_conn_buf: [64]u64 = undefined;
             const neighbors = try self.connection_pool.getConnectionsInto(node.connections_loc, layer, &sl_conn_buf);
 
+            // Phase 1: Filter — collect unvisited neighbor IDs, mark visited
+            var unvisited_count: usize = 0;
             for (neighbors) |neighbor| {
                 if (visited.contains(neighbor)) continue;
                 visited.put(neighbor, {}) catch return HnswError.OutOfMemory;
+                unvisited_buf[unvisited_count] = neighbor;
+                unvisited_count += 1;
+            }
 
-                const neighbor_node = self.getNode(neighbor) orelse continue;
-                const dist = try self.distanceTo(query, neighbor_node.vector_loc);
+            if (unvisited_count == 0) continue;
 
+            // Phase 2: Borrow — pin all pages at once
+            const batch_count = self.borrowNeighborVectors(unvisited_buf[0..unvisited_count], &batch_buf);
+            defer releaseBatch(batch_buf[0..batch_count]);
+
+            // Phase 3: Compute — batch SIMD distances
+            self.batchComputeDistances(query, batch_buf[0..batch_count], dist_buf[0..batch_count]);
+
+            // Phase 4: Process — insert into priority queues
+            for (batch_buf[0..batch_count], dist_buf[0..batch_count]) |be, dist| {
                 const current_furthest = if (results.peekMax()) |r| r.distance else 0;
                 if (results.count() < ef or dist < current_furthest) {
-                    const result = SearchResult{ .node_id = neighbor, .distance = dist };
+                    const result = SearchResult{ .node_id = be.neighbor_id, .distance = dist };
                     candidates.add(result) catch return HnswError.OutOfMemory;
                     results.add(result) catch return HnswError.OutOfMemory;
 

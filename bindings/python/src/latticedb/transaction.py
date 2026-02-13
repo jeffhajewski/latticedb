@@ -11,7 +11,9 @@ from latticedb._bindings import (
     LATTICE_OK,
     LATTICE_TXN_READ_ONLY,
     LATTICE_TXN_READ_WRITE,
+    LatticeNodeId,
     LatticeValue,
+    NodeWithVector,
     check_error,
     get_lib,
     python_to_value,
@@ -313,6 +315,58 @@ class Transaction:
             len(vec),
         )
         check_error(code)
+
+    def batch_insert(
+        self,
+        label: str,
+        vectors: "NDArray[np.float32]",
+    ) -> List[int]:
+        """Insert N nodes with vectors in a single FFI call.
+
+        Args:
+            label: Label for all nodes.
+            vectors: 2D array shape (N, dimensions), dtype float32.
+
+        Returns:
+            List of N node IDs.
+        """
+        if self._read_only:
+            raise RuntimeError("Cannot insert in read-only transaction")
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        import numpy as np
+
+        # Validate input
+        if vectors.ndim != 2:
+            raise ValueError(f"Expected 2D array, got {vectors.ndim}D")
+
+        vec = np.ascontiguousarray(vectors, dtype=np.float32)
+        n, dims = vec.shape
+        label_bytes = label.encode("utf-8")
+
+        # Build C array of NodeWithVector specs
+        specs = (NodeWithVector * n)()
+        for i in range(n):
+            specs[i].label = label_bytes
+            specs[i].vector = vec[i].ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+            specs[i].dimensions = dims
+
+        # Allocate output arrays
+        node_ids = (LatticeNodeId * n)()
+        count_out = ctypes.c_uint32(0)
+
+        lib = get_lib()
+        code = lib._lib.lattice_batch_insert(
+            self._handle,
+            specs,
+            n,
+            node_ids,
+            ctypes.byref(count_out),
+        )
+        check_error(code)
+
+        return [node_ids[i] for i in range(count_out.value)]
 
     def fts_index(
         self,

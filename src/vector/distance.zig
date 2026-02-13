@@ -175,6 +175,128 @@ pub fn normalize(a: []f32) void {
 }
 
 // ============================================================================
+// Batch Distance Functions (4-way interleaved)
+// ============================================================================
+
+/// Compute dot product of query against 4 target vectors simultaneously.
+/// Loads each query chunk once and reuses across 4 targets — saves 3/4 of
+/// query memory loads vs 4 individual dotProduct calls.
+pub fn dotProductBatch4(
+    query: []const f32,
+    v0: []const f32,
+    v1: []const f32,
+    v2: []const f32,
+    v3: []const f32,
+) [4]f32 {
+    std.debug.assert(query.len == v0.len);
+    std.debug.assert(query.len == v1.len);
+    std.debug.assert(query.len == v2.len);
+    std.debug.assert(query.len == v3.len);
+
+    const len = query.len;
+    const simd_len = len - (len % SIMD_WIDTH);
+
+    var dot0: SimdF32 = @splat(0.0);
+    var dot1: SimdF32 = @splat(0.0);
+    var dot2: SimdF32 = @splat(0.0);
+    var dot3: SimdF32 = @splat(0.0);
+
+    var i: usize = 0;
+    while (i < simd_len) : (i += SIMD_WIDTH) {
+        const vq: SimdF32 = query[i..][0..SIMD_WIDTH].*;
+        dot0 += vq * @as(SimdF32, v0[i..][0..SIMD_WIDTH].*);
+        dot1 += vq * @as(SimdF32, v1[i..][0..SIMD_WIDTH].*);
+        dot2 += vq * @as(SimdF32, v2[i..][0..SIMD_WIDTH].*);
+        dot3 += vq * @as(SimdF32, v3[i..][0..SIMD_WIDTH].*);
+    }
+
+    var result = [4]f32{
+        @reduce(.Add, dot0),
+        @reduce(.Add, dot1),
+        @reduce(.Add, dot2),
+        @reduce(.Add, dot3),
+    };
+
+    // Scalar remainder
+    while (i < len) : (i += 1) {
+        result[0] += query[i] * v0[i];
+        result[1] += query[i] * v1[i];
+        result[2] += query[i] * v2[i];
+        result[3] += query[i] * v3[i];
+    }
+
+    return result;
+}
+
+/// Compute squared Euclidean distance of query against 4 target vectors simultaneously.
+pub fn euclideanDistanceSquaredBatch4(
+    query: []const f32,
+    v0: []const f32,
+    v1: []const f32,
+    v2: []const f32,
+    v3: []const f32,
+) [4]f32 {
+    std.debug.assert(query.len == v0.len);
+    std.debug.assert(query.len == v1.len);
+    std.debug.assert(query.len == v2.len);
+    std.debug.assert(query.len == v3.len);
+
+    const len = query.len;
+    const simd_len = len - (len % SIMD_WIDTH);
+
+    var sum0: SimdF32 = @splat(0.0);
+    var sum1: SimdF32 = @splat(0.0);
+    var sum2: SimdF32 = @splat(0.0);
+    var sum3: SimdF32 = @splat(0.0);
+
+    var i: usize = 0;
+    while (i < simd_len) : (i += SIMD_WIDTH) {
+        const vq: SimdF32 = query[i..][0..SIMD_WIDTH].*;
+        const d0 = vq - @as(SimdF32, v0[i..][0..SIMD_WIDTH].*);
+        const d1 = vq - @as(SimdF32, v1[i..][0..SIMD_WIDTH].*);
+        const d2 = vq - @as(SimdF32, v2[i..][0..SIMD_WIDTH].*);
+        const d3 = vq - @as(SimdF32, v3[i..][0..SIMD_WIDTH].*);
+        sum0 += d0 * d0;
+        sum1 += d1 * d1;
+        sum2 += d2 * d2;
+        sum3 += d3 * d3;
+    }
+
+    var result = [4]f32{
+        @reduce(.Add, sum0),
+        @reduce(.Add, sum1),
+        @reduce(.Add, sum2),
+        @reduce(.Add, sum3),
+    };
+
+    // Scalar remainder
+    while (i < len) : (i += 1) {
+        const d0 = query[i] - v0[i];
+        const d1 = query[i] - v1[i];
+        const d2 = query[i] - v2[i];
+        const d3 = query[i] - v3[i];
+        result[0] += d0 * d0;
+        result[1] += d1 * d1;
+        result[2] += d2 * d2;
+        result[3] += d3 * d3;
+    }
+
+    return result;
+}
+
+/// Compute inner product distance (negative dot product) of query against 4 targets.
+pub fn innerProductDistanceBatch4(
+    query: []const f32,
+    v0: []const f32,
+    v1: []const f32,
+    v2: []const f32,
+    v3: []const f32,
+) [4]f32 {
+    const dots = dotProductBatch4(query, v0, v1, v2, v3);
+    return .{ -dots[0], -dots[1], -dots[2], -dots[3] };
+}
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -345,4 +467,88 @@ test "empty vectors" {
 
     try testing.expectApproxEqAbs(@as(f32, 0.0), euclideanDistance(&a, &b), 0.0001);
     try testing.expectApproxEqAbs(@as(f32, 0.0), dotProduct(&a, &b), 0.0001);
+}
+
+test "dotProductBatch4 matches individual calls" {
+    var query: [128]f32 = undefined;
+    var v0: [128]f32 = undefined;
+    var v1: [128]f32 = undefined;
+    var v2: [128]f32 = undefined;
+    var v3: [128]f32 = undefined;
+
+    for (0..128) |i| {
+        const fi: f32 = @floatFromInt(i);
+        query[i] = fi * 0.1;
+        v0[i] = fi * 0.2 + 1.0;
+        v1[i] = fi * 0.3 - 0.5;
+        v2[i] = fi * 0.05 + 2.0;
+        v3[i] = fi * 0.15 - 1.0;
+    }
+
+    const batch = dotProductBatch4(&query, &v0, &v1, &v2, &v3);
+    try testing.expectApproxEqAbs(dotProduct(&query, &v0), batch[0], 0.01);
+    try testing.expectApproxEqAbs(dotProduct(&query, &v1), batch[1], 0.01);
+    try testing.expectApproxEqAbs(dotProduct(&query, &v2), batch[2], 0.01);
+    try testing.expectApproxEqAbs(dotProduct(&query, &v3), batch[3], 0.01);
+}
+
+test "dotProductBatch4 non-simd-aligned length" {
+    // 13 elements: 8 SIMD + 5 scalar
+    var query = [_]f32{ 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13 };
+    var v0 = [_]f32{ 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2, 1 };
+    var v1 = [_]f32{ 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1 };
+    var v2 = [_]f32{ 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2, 2 };
+    var v3 = [_]f32{ 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+
+    const batch = dotProductBatch4(&query, &v0, &v1, &v2, &v3);
+    try testing.expectApproxEqAbs(dotProduct(&query, &v0), batch[0], 0.0001);
+    try testing.expectApproxEqAbs(dotProduct(&query, &v1), batch[1], 0.0001);
+    try testing.expectApproxEqAbs(dotProduct(&query, &v2), batch[2], 0.0001);
+    try testing.expectApproxEqAbs(dotProduct(&query, &v3), batch[3], 0.0001);
+}
+
+test "euclideanDistanceSquaredBatch4 matches individual calls" {
+    var query: [128]f32 = undefined;
+    var v0: [128]f32 = undefined;
+    var v1: [128]f32 = undefined;
+    var v2: [128]f32 = undefined;
+    var v3: [128]f32 = undefined;
+
+    for (0..128) |i| {
+        const fi: f32 = @floatFromInt(i);
+        query[i] = fi * 0.1;
+        v0[i] = fi * 0.2 + 1.0;
+        v1[i] = fi * 0.3 - 0.5;
+        v2[i] = fi * 0.05 + 2.0;
+        v3[i] = fi * 0.15 - 1.0;
+    }
+
+    const batch = euclideanDistanceSquaredBatch4(&query, &v0, &v1, &v2, &v3);
+    try testing.expectApproxEqAbs(euclideanDistanceSquared(&query, &v0), batch[0], 0.1);
+    try testing.expectApproxEqAbs(euclideanDistanceSquared(&query, &v1), batch[1], 0.1);
+    try testing.expectApproxEqAbs(euclideanDistanceSquared(&query, &v2), batch[2], 0.1);
+    try testing.expectApproxEqAbs(euclideanDistanceSquared(&query, &v3), batch[3], 0.1);
+}
+
+test "innerProductDistanceBatch4 matches individual calls" {
+    var query: [64]f32 = undefined;
+    var v0: [64]f32 = undefined;
+    var v1: [64]f32 = undefined;
+    var v2: [64]f32 = undefined;
+    var v3: [64]f32 = undefined;
+
+    for (0..64) |i| {
+        const fi: f32 = @floatFromInt(i);
+        query[i] = fi * 0.1;
+        v0[i] = fi * 0.2 + 1.0;
+        v1[i] = fi * 0.3 - 0.5;
+        v2[i] = fi * 0.05 + 2.0;
+        v3[i] = fi * 0.15 - 1.0;
+    }
+
+    const batch = innerProductDistanceBatch4(&query, &v0, &v1, &v2, &v3);
+    try testing.expectApproxEqAbs(innerProductDistance(&query, &v0), batch[0], 0.01);
+    try testing.expectApproxEqAbs(innerProductDistance(&query, &v1), batch[1], 0.01);
+    try testing.expectApproxEqAbs(innerProductDistance(&query, &v2), batch[2], 0.01);
+    try testing.expectApproxEqAbs(innerProductDistance(&query, &v3), batch[3], 0.01);
 }

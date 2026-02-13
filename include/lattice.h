@@ -200,6 +200,30 @@ lattice_error lattice_node_set_vector(
 );
 
 /*
+ * Batch insert operations
+ */
+
+/* Node spec for batch insert: label + vector */
+typedef struct {
+    const char* label;
+    const float* vector;
+    uint32_t dimensions;
+} lattice_node_with_vector;
+
+/* Create multiple nodes with vectors in a single call.
+ * On success, node_ids_out[0..count_out] contains created node IDs.
+ * On partial failure, count_out indicates how many succeeded;
+ * caller should rollback the transaction.
+ */
+lattice_error lattice_batch_insert(
+    lattice_txn* txn,
+    const lattice_node_with_vector* nodes,
+    uint32_t count,
+    lattice_node_id* node_ids_out,  /* caller-allocated, size count */
+    uint32_t* count_out             /* nodes successfully created */
+);
+
+/*
  * Vector search operations
  *
  * Search for similar vectors using HNSW index:

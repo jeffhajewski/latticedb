@@ -261,6 +261,16 @@ class LatticeValue(Structure):
     ]
 
 
+class NodeWithVector(Structure):
+    """Corresponds to lattice_node_with_vector in lattice.h."""
+
+    _fields_ = [
+        ("label", c_char_p),
+        ("vector", POINTER(ctypes.c_float)),
+        ("dimensions", c_uint32),
+    ]
+
+
 class OpenOptions(Structure):
     _fields_ = [
         ("create", c_bool),
@@ -387,6 +397,16 @@ class LatticeLib:
             c_uint32,
         ]
         self._lib.lattice_node_set_vector.restype = c_int
+
+        # lattice_batch_insert
+        self._lib.lattice_batch_insert.argtypes = [
+            LatticeTxn,
+            POINTER(NodeWithVector),
+            c_uint32,
+            POINTER(LatticeNodeId),
+            POINTER(c_uint32),
+        ]
+        self._lib.lattice_batch_insert.restype = c_int
 
         # lattice_vector_search
         self._lib.lattice_vector_search.argtypes = [

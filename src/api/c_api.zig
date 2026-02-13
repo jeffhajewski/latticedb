@@ -738,6 +738,62 @@ pub export fn lattice_node_set_vector(
     return .ok;
 }
 
+// ============================================================================
+// Batch Insert Operations
+// ============================================================================
+
+/// Node spec for batch insert: label + vector
+pub const lattice_node_with_vector = extern struct {
+    label: [*c]const u8,
+    vector: [*c]const f32,
+    dimensions: u32,
+};
+
+/// Create multiple nodes with vectors in a single call.
+/// On success, node_ids_out[0..count_out] contains created node IDs.
+/// On partial failure, count_out indicates how many succeeded.
+pub export fn lattice_batch_insert(
+    txn: ?*lattice_txn,
+    nodes: [*c]const lattice_node_with_vector,
+    count: u32,
+    node_ids_out: [*c]lattice_node_id,
+    count_out: *u32,
+) lattice_error {
+    count_out.* = 0;
+
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
+    if (nodes == null or count == 0 or node_ids_out == null) return .err_invalid_arg;
+
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+
+    var i: u32 = 0;
+    while (i < count) : (i += 1) {
+        const spec = nodes[i];
+
+        // Validate
+        const label_slice = cStrToSlice(spec.label) orelse return .err_invalid_arg;
+        if (spec.vector == null or spec.dimensions == 0) return .err_invalid_arg;
+
+        // Create node
+        const labels = [_][]const u8{label_slice};
+        const node_id = txn_handle.db_handle.db.createNode(txn_ptr, &labels) catch |err| {
+            return mapAnyError(err);
+        };
+
+        // Set vector
+        const vector_slice = spec.vector[0..spec.dimensions];
+        txn_handle.db_handle.db.setNodeVector(node_id, vector_slice) catch |err| {
+            return mapDatabaseError(err);
+        };
+
+        node_ids_out[i] = node_id;
+        count_out.* = i + 1;
+    }
+
+    return .ok;
+}
+
 /// Search for similar vectors using HNSW index.
 /// Returns a vector result handle containing node IDs and distances.
 pub export fn lattice_vector_search(

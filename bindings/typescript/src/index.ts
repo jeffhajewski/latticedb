@@ -40,6 +40,8 @@ export {
   CreateEdgeOptions,
   VectorSearchOptions,
   FtsSearchOptions,
+  EmbeddingApiFormat,
+  EmbeddingConfig,
 } from './types';
 export { isNativeAvailable } from './native';
 

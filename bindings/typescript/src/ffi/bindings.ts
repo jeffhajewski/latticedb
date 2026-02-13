@@ -16,6 +16,16 @@ const LatticeResult = koffi.opaque('lattice_result');
 const LatticeVectorResult = koffi.opaque('lattice_vector_result');
 const LatticeFtsResult = koffi.opaque('lattice_fts_result');
 const LatticeEdgeResult = koffi.opaque('lattice_edge_result');
+const LatticeEmbeddingClient = koffi.opaque('lattice_embedding_client');
+
+// Define struct for embedding config
+const LatticeEmbeddingConfig = koffi.struct('lattice_embedding_config', {
+  endpoint: 'const char*',
+  model: 'const char*',
+  api_format: 'int',
+  api_key: 'const char*',
+  timeout_ms: 'uint32',
+});
 
 // Define struct for open options
 const LatticeOpenOptions = koffi.struct('lattice_open_options', {
@@ -228,6 +238,28 @@ export interface LatticeBindings {
   ) => number;
   lattice_result_free: (result: unknown) => void;
 
+  // Embedding operations
+  lattice_hash_embed: (
+    text: string,
+    text_len: number,
+    dimensions: number,
+    vector_out: unknown[],
+    dims_out: Buffer
+  ) => number;
+  lattice_hash_embed_free: (vector: unknown, dimensions: number) => void;
+  lattice_embedding_client_create: (
+    config: unknown,
+    client_out: unknown[]
+  ) => number;
+  lattice_embedding_client_embed: (
+    client: unknown,
+    text: string,
+    text_len: number,
+    vector_out: unknown[],
+    dims_out: Buffer
+  ) => number;
+  lattice_embedding_client_free: (client: unknown) => void;
+
   // Utility
   lattice_version: () => string;
   lattice_error_message: (code: number) => string;
@@ -258,6 +290,9 @@ function createBindings(): LatticeBindings {
   const EdgeResultPtrPtr = koffi.pointer(EdgeResultPtr);
   const OpenOptionsPtr = koffi.pointer(LatticeOpenOptions);
   const ValuePtr = koffi.pointer(LatticeValue);
+  const EmbeddingClientPtr = koffi.pointer(LatticeEmbeddingClient);
+  const EmbeddingClientPtrPtr = koffi.pointer(EmbeddingClientPtr);
+  const EmbeddingConfigPtr = koffi.pointer(LatticeEmbeddingConfig);
 
   return {
     // Database operations
@@ -448,6 +483,33 @@ function createBindings(): LatticeBindings {
       koffi.out(ValuePtr), // value_out
     ]),
     lattice_result_free: lib.func('lattice_result_free', 'void', [ResultPtr]),
+
+    // Embedding operations
+    lattice_hash_embed: lib.func('lattice_hash_embed', 'int', [
+      'str', // text
+      'uintptr_t', // text_len (size_t)
+      'uint16', // dimensions
+      koffi.out(koffi.pointer(koffi.pointer('float'))), // vector_out
+      koffi.out(koffi.pointer('uint32')), // dims_out
+    ]),
+    lattice_hash_embed_free: lib.func('lattice_hash_embed_free', 'void', [
+      koffi.pointer('float'), // vector
+      'uint32', // dimensions
+    ]),
+    lattice_embedding_client_create: lib.func('lattice_embedding_client_create', 'int', [
+      EmbeddingConfigPtr, // config
+      koffi.out(EmbeddingClientPtrPtr), // client_out
+    ]),
+    lattice_embedding_client_embed: lib.func('lattice_embedding_client_embed', 'int', [
+      EmbeddingClientPtr, // client
+      'str', // text
+      'uintptr_t', // text_len (size_t)
+      koffi.out(koffi.pointer(koffi.pointer('float'))), // vector_out
+      koffi.out(koffi.pointer('uint32')), // dims_out
+    ]),
+    lattice_embedding_client_free: lib.func('lattice_embedding_client_free', 'void', [
+      EmbeddingClientPtr, // client
+    ]),
 
     // Utility
     lattice_version: lib.func('lattice_version', 'str', []),

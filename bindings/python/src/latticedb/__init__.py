@@ -8,6 +8,7 @@ Combines property graph storage, HNSW vector search, and BM25 full-text search.
 from latticedb.database import Database
 from latticedb.transaction import Transaction
 from latticedb.types import Node, Edge, QueryResult, Value, VectorSearchResult, FtsSearchResult
+from latticedb.embedding import hash_embed, EmbeddingClient, EmbeddingApiFormat
 from latticedb._bindings import (
     LatticeError,
     LatticeIOError,
@@ -64,6 +65,10 @@ __all__ = [
     "LatticeVersionMismatchError",
     "LatticeChecksumError",
     "LatticeOutOfMemoryError",
+    # Embedding
+    "hash_embed",
+    "EmbeddingClient",
+    "EmbeddingApiFormat",
     # Utilities
     "library_available",
     "version",

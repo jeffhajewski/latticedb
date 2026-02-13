@@ -64,6 +64,11 @@ export type FtsResultHandle = unknown;
 export type EdgeResultHandle = unknown;
 
 /**
+ * Opaque handle to an embedding client.
+ */
+export type EmbeddingClientHandle = unknown;
+
+/**
  * Options for opening a database.
  */
 export interface OpenOptions {
@@ -543,6 +548,110 @@ export class LatticeFFI {
    */
   resultFree(result: ResultHandle): void {
     this.bindings.lattice_result_free(result);
+  }
+
+  // ============================================================
+  // Embedding operations
+  // ============================================================
+
+  /**
+   * Generate a hash embedding (built-in, no external service).
+   */
+  hashEmbed(text: string, dimensions: number): Float32Array {
+    const vectorOut: unknown[] = [null];
+    const dimsOut = Buffer.alloc(4);
+    const err = this.bindings.lattice_hash_embed(
+      text,
+      text.length,
+      dimensions,
+      vectorOut,
+      dimsOut
+    );
+    this.checkError(err);
+
+    const dims = dimsOut.readUInt32LE();
+    const ptr = vectorOut[0];
+
+    try {
+      // Copy floats from C memory into a Float32Array
+      const result = new Float32Array(dims);
+      const src = Buffer.from(
+        (ptr as any as Buffer).buffer,
+        (ptr as any as Buffer).byteOffset,
+        dims * 4
+      );
+      for (let i = 0; i < dims; i++) {
+        result[i] = src.readFloatLE(i * 4);
+      }
+      return result;
+    } finally {
+      this.bindings.lattice_hash_embed_free(ptr, dims);
+    }
+  }
+
+  /**
+   * Create an HTTP embedding client.
+   */
+  embeddingClientCreate(config: {
+    endpoint: string;
+    model?: string;
+    apiFormat?: number;
+    apiKey?: string | null;
+    timeoutMs?: number;
+  }): EmbeddingClientHandle {
+    const cConfig = {
+      endpoint: config.endpoint,
+      model: config.model ?? 'nomic-embed-text',
+      api_format: config.apiFormat ?? 0,
+      api_key: config.apiKey ?? null,
+      timeout_ms: config.timeoutMs ?? 0,
+    };
+
+    const clientOut: unknown[] = [null];
+    const err = this.bindings.lattice_embedding_client_create(cConfig, clientOut);
+    this.checkError(err);
+    return clientOut[0];
+  }
+
+  /**
+   * Generate an embedding via an HTTP embedding client.
+   */
+  embeddingClientEmbed(client: EmbeddingClientHandle, text: string): Float32Array {
+    const vectorOut: unknown[] = [null];
+    const dimsOut = Buffer.alloc(4);
+    const err = this.bindings.lattice_embedding_client_embed(
+      client,
+      text,
+      text.length,
+      vectorOut,
+      dimsOut
+    );
+    this.checkError(err);
+
+    const dims = dimsOut.readUInt32LE();
+    const ptr = vectorOut[0];
+
+    try {
+      const result = new Float32Array(dims);
+      const src = Buffer.from(
+        (ptr as any as Buffer).buffer,
+        (ptr as any as Buffer).byteOffset,
+        dims * 4
+      );
+      for (let i = 0; i < dims; i++) {
+        result[i] = src.readFloatLE(i * 4);
+      }
+      return result;
+    } finally {
+      this.bindings.lattice_hash_embed_free(ptr, dims);
+    }
+  }
+
+  /**
+   * Free an HTTP embedding client.
+   */
+  embeddingClientFree(client: EmbeddingClientHandle): void {
+    this.bindings.lattice_embedding_client_free(client);
   }
 }
 

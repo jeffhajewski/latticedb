@@ -290,8 +290,19 @@ LatticeResult = c_void_p
 LatticeVectorResult = c_void_p
 LatticeFtsResult = c_void_p
 LatticeEdgeResult = c_void_p
+LatticeEmbeddingClient = c_void_p
 LatticeNodeId = c_uint64
 LatticeEdgeId = c_uint64
+
+
+class EmbeddingConfig(Structure):
+    _fields_ = [
+        ("endpoint", c_char_p),
+        ("model", c_char_p),
+        ("api_format", c_int),
+        ("api_key", c_char_p),
+        ("timeout_ms", c_uint32),
+    ]
 
 
 class LatticeLib:
@@ -594,6 +605,44 @@ class LatticeLib:
         # lattice_error_message
         self._lib.lattice_error_message.argtypes = [c_int]
         self._lib.lattice_error_message.restype = c_char_p
+
+        # lattice_hash_embed
+        self._lib.lattice_hash_embed.argtypes = [
+            c_char_p,
+            c_size_t,
+            c_uint16,
+            POINTER(POINTER(ctypes.c_float)),
+            POINTER(c_uint32),
+        ]
+        self._lib.lattice_hash_embed.restype = c_int
+
+        # lattice_hash_embed_free
+        self._lib.lattice_hash_embed_free.argtypes = [
+            POINTER(ctypes.c_float),
+            c_uint32,
+        ]
+        self._lib.lattice_hash_embed_free.restype = None
+
+        # lattice_embedding_client_create
+        self._lib.lattice_embedding_client_create.argtypes = [
+            POINTER(EmbeddingConfig),
+            POINTER(LatticeEmbeddingClient),
+        ]
+        self._lib.lattice_embedding_client_create.restype = c_int
+
+        # lattice_embedding_client_embed
+        self._lib.lattice_embedding_client_embed.argtypes = [
+            LatticeEmbeddingClient,
+            c_char_p,
+            c_size_t,
+            POINTER(POINTER(ctypes.c_float)),
+            POINTER(c_uint32),
+        ]
+        self._lib.lattice_embedding_client_embed.restype = c_int
+
+        # lattice_embedding_client_free
+        self._lib.lattice_embedding_client_free.argtypes = [LatticeEmbeddingClient]
+        self._lib.lattice_embedding_client_free.restype = None
 
 
 # Global library instance (lazy loaded)

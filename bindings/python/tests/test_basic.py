@@ -7,6 +7,8 @@ import numpy as np
 
 from latticedb import Database, Node, Edge, Value
 from latticedb.types import QueryResult, VectorSearchResult
+from latticedb._bindings import library_available
+from latticedb.embedding import EmbeddingApiFormat
 
 
 class TestNode:
@@ -170,3 +172,56 @@ class TestValueConversion:
         assert _is_numpy_array([1, 2, 3]) is False
         assert _is_numpy_array("not an array") is False
         assert _is_numpy_array(42) is False
+
+
+class TestEmbeddingApiFormat:
+    """Tests for EmbeddingApiFormat enum."""
+
+    def test_values(self) -> None:
+        """Test enum values match C API."""
+        assert EmbeddingApiFormat.OLLAMA == 0
+        assert EmbeddingApiFormat.OPENAI == 1
+
+    def test_is_int(self) -> None:
+        """Test enum values are integers."""
+        assert int(EmbeddingApiFormat.OLLAMA) == 0
+        assert int(EmbeddingApiFormat.OPENAI) == 1
+
+
+@pytest.mark.skipif(not library_available(), reason="Native library not found")
+class TestHashEmbed:
+    """Tests for hash_embed (requires native library)."""
+
+    def test_basic(self) -> None:
+        """Test basic hash embedding."""
+        from latticedb import hash_embed
+
+        vec = hash_embed("hello world", dimensions=128)
+        assert isinstance(vec, np.ndarray)
+        assert vec.dtype == np.float32
+        assert vec.shape == (128,)
+
+    def test_deterministic(self) -> None:
+        """Test that same text produces same embedding."""
+        from latticedb import hash_embed
+
+        vec1 = hash_embed("test input", dimensions=64)
+        vec2 = hash_embed("test input", dimensions=64)
+        np.testing.assert_array_equal(vec1, vec2)
+
+    def test_different_text(self) -> None:
+        """Test that different text produces different embeddings."""
+        from latticedb import hash_embed
+
+        vec1 = hash_embed("hello", dimensions=64)
+        vec2 = hash_embed("world", dimensions=64)
+        assert not np.array_equal(vec1, vec2)
+
+    def test_different_dimensions(self) -> None:
+        """Test different dimension sizes."""
+        from latticedb import hash_embed
+
+        vec64 = hash_embed("test", dimensions=64)
+        vec256 = hash_embed("test", dimensions=256)
+        assert vec64.shape == (64,)
+        assert vec256.shape == (256,)

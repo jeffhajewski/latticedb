@@ -134,3 +134,27 @@ export interface FtsSearchOptions {
   /** Maximum results */
   limit?: number;
 }
+
+/**
+ * API format for HTTP embedding services.
+ */
+export enum EmbeddingApiFormat {
+  Ollama = 0,
+  OpenAI = 1,
+}
+
+/**
+ * Configuration for an HTTP embedding client.
+ */
+export interface EmbeddingConfig {
+  /** HTTP endpoint URL */
+  endpoint: string;
+  /** Model name (default: "nomic-embed-text") */
+  model?: string;
+  /** API format (default: Ollama) */
+  apiFormat?: EmbeddingApiFormat;
+  /** API key for authentication (null for no auth) */
+  apiKey?: string;
+  /** Request timeout in milliseconds (0 = default 30s) */
+  timeoutMs?: number;
+}

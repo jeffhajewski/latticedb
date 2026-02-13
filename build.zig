@@ -93,6 +93,15 @@ pub fn build(b: *std.Build) void {
     });
     const run_lib_tests = b.addRunArtifact(lib_tests);
 
+    // ReleaseSmall: strip symbols, disable unwind tables, omit frame pointers
+    if (optimize == .ReleaseSmall) {
+        for ([_]*std.Build.Module{ lib_module, shared_lib_module, cli_module }) |mod| {
+            mod.strip = true;
+            mod.unwind_tables = .none;
+            mod.omit_frame_pointer = true;
+        }
+    }
+
     // Install artifacts
     b.installArtifact(lib);
     b.installArtifact(shared_lib);

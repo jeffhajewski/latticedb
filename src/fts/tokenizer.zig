@@ -530,11 +530,12 @@ test "tokenizer with german stop words" {
     const tokens = try tokenizer_de.tokenizeAll();
     defer allocator.free(tokens);
 
-    // "Der" should be filtered as German stop word
-    // "schnelle", "Fuchs" should remain
-    try std.testing.expectEqual(@as(usize, 2), tokens.len);
-    try std.testing.expectEqualStrings("schnelle", tokens[0].text);
-    try std.testing.expectEqualStrings("Fuchs", tokens[1].text);
+    // All languages use English stop words for binary size.
+    // "Der" is NOT an English stop word, so all 3 tokens remain.
+    try std.testing.expectEqual(@as(usize, 3), tokens.len);
+    try std.testing.expectEqualStrings("Der", tokens[0].text);
+    try std.testing.expectEqualStrings("schnelle", tokens[1].text);
+    try std.testing.expectEqualStrings("Fuchs", tokens[2].text);
 }
 
 test "tokenizer with french stop words" {
@@ -551,11 +552,12 @@ test "tokenizer with french stop words" {
     const tokens = try tokenizer_fr.tokenizeAll();
     defer allocator.free(tokens);
 
-    // "Le" should be filtered as French stop word
-    // "chat", "noir" should remain
-    try std.testing.expectEqual(@as(usize, 2), tokens.len);
-    try std.testing.expectEqualStrings("chat", tokens[0].text);
-    try std.testing.expectEqualStrings("noir", tokens[1].text);
+    // All languages use English stop words for binary size.
+    // "Le" is NOT an English stop word, so all 3 tokens remain.
+    try std.testing.expectEqual(@as(usize, 3), tokens.len);
+    try std.testing.expectEqualStrings("Le", tokens[0].text);
+    try std.testing.expectEqualStrings("chat", tokens[1].text);
+    try std.testing.expectEqualStrings("noir", tokens[2].text);
 }
 
 test "tokenizer language isolation" {
@@ -573,12 +575,13 @@ test "tokenizer language isolation" {
     const tokens_de = try tokenizer_de.tokenizeAll();
     defer allocator.free(tokens_de);
 
-    // "the" stays (not German stop word), "cat" stays, "der" filtered
+    // All languages use English stop words now.
+    // "the" is filtered (English stop word), "cat" stays, "der" stays (not English stop word)
     try std.testing.expectEqual(@as(usize, 2), tokens_de.len);
-    try std.testing.expectEqualStrings("the", tokens_de[0].text);
-    try std.testing.expectEqualStrings("cat", tokens_de[1].text);
+    try std.testing.expectEqualStrings("cat", tokens_de[0].text);
+    try std.testing.expectEqualStrings("der", tokens_de[1].text);
 
-    // English tokenizer should filter "the" but not "der"
+    // English tokenizer should also filter "the" but not "der"
     var tokenizer_en = Tokenizer.init(allocator, text, .{
         .remove_stop_words = true,
         .min_token_length = 2,
@@ -588,7 +591,7 @@ test "tokenizer language isolation" {
     const tokens_en = try tokenizer_en.tokenizeAll();
     defer allocator.free(tokens_en);
 
-    // "the" filtered, "cat" stays, "der" stays
+    // Same behavior: "the" filtered, "cat" stays, "der" stays
     try std.testing.expectEqual(@as(usize, 2), tokens_en.len);
     try std.testing.expectEqualStrings("cat", tokens_en[0].text);
     try std.testing.expectEqualStrings("der", tokens_en[1].text);

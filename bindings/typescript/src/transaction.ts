@@ -187,6 +187,22 @@ export class Transaction {
   }
 
   /**
+   * Batch insert multiple nodes with vectors in a single call.
+   *
+   * @param label - Label for all nodes
+   * @param vectors - Array of vectors (one per node)
+   * @returns Array of created node IDs
+   */
+  async batchInsert(
+    label: string,
+    vectors: Float32Array[]
+  ): Promise<bigint[]> {
+    this.ensureWritable();
+    const nodes = vectors.map((v) => ({ label, vector: v }));
+    return this.native!.batchInsert(nodes);
+  }
+
+  /**
    * Index text for full-text search.
    *
    * @param nodeId - The node ID

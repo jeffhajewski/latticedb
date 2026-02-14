@@ -465,6 +465,63 @@ describeIfNative('Database Integration', () => {
     });
   });
 
+  describe('Batch insert', () => {
+    beforeEach(async () => {
+      db = new Database(dbPath, { create: true, enableVector: true, vectorDimensions: 4 });
+      await db.open();
+    });
+
+    test('batch insert returns correct node IDs', async () => {
+      const nodeIds = await db.write(async (txn) => {
+        const vectors: Float32Array[] = [];
+        for (let i = 0; i < 10; i++) {
+          vectors.push(new Float32Array([i, i + 1, i + 2, i + 3]));
+        }
+        return await txn.batchInsert('Document', vectors);
+      });
+
+      expect(nodeIds.length).toBe(10);
+      // All IDs should be unique
+      const uniqueIds = new Set(nodeIds.map((id) => id.toString()));
+      expect(uniqueIds.size).toBe(10);
+
+      // Verify each node exists
+      await db.read(async (txn) => {
+        for (const id of nodeIds) {
+          expect(await txn.nodeExists(id)).toBe(true);
+        }
+      });
+    });
+
+    test('batch inserted vectors are searchable', async () => {
+      const nodeIds = await db.write(async (txn) => {
+        const vectors = [
+          new Float32Array([1.0, 0.0, 0.0, 0.0]),
+          new Float32Array([0.0, 1.0, 0.0, 0.0]),
+          new Float32Array([0.0, 0.0, 1.0, 0.0]),
+          new Float32Array([0.9, 0.1, 0.0, 0.0]),
+        ];
+        return await txn.batchInsert('Document', vectors);
+      });
+
+      expect(nodeIds.length).toBe(4);
+
+      // Search for vector similar to [1.0, 0.0, 0.0, 0.0]
+      const results = await db.vectorSearch(new Float32Array([1.0, 0.0, 0.0, 0.0]), { k: 2 });
+      expect(results.length).toBeGreaterThanOrEqual(2);
+      // First result should be the exact match
+      expect(results[0]!.nodeId).toBe(nodeIds[0]);
+    });
+
+    test('batch insert with empty array', async () => {
+      const nodeIds = await db.write(async (txn) => {
+        return await txn.batchInsert('Document', []);
+      });
+
+      expect(nodeIds.length).toBe(0);
+    });
+  });
+
   // Vector operations may not be available in all builds
   // These tests are informational - they may skip if vector storage isn't configured
   describe('Vector operations', () => {

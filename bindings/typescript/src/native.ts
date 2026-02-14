@@ -53,6 +53,7 @@ export interface NativeTransaction {
   setProperty(nodeId: bigint, key: string, value: unknown): void;
   getProperty(nodeId: bigint, key: string): unknown;
   setVector(nodeId: bigint, key: string, vector: Float32Array): void;
+  batchInsert(nodes: Array<{ label: string; vector: Float32Array }>): bigint[];
   ftsIndex(nodeId: bigint, text: string): void;
   createEdge(sourceId: bigint, targetId: bigint, edgeType: string): bigint;
   deleteEdge(sourceId: bigint, targetId: bigint, edgeType: string): void;

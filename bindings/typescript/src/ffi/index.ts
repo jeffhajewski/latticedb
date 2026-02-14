@@ -239,6 +239,43 @@ export class LatticeFFI {
     this.checkError(err);
   }
 
+  /**
+   * Batch insert multiple nodes with vectors.
+   */
+  batchInsert(
+    txn: TransactionHandle,
+    nodes: Array<{ label: string; vector: Float32Array }>
+  ): bigint[] {
+    const count = nodes.length;
+
+    // Build C array of NodeWithVector structs
+    const specs = nodes.map((n) => ({
+      label: n.label,
+      vector: n.vector,
+      dimensions: n.vector.length,
+    }));
+
+    // Allocate output buffers
+    const nodeIdsOut = Buffer.alloc(count * 8); // uint64 per node
+    const countOut = Buffer.alloc(4); // uint32
+
+    const err = this.bindings.lattice_batch_insert(
+      txn,
+      specs,
+      count,
+      nodeIdsOut,
+      countOut
+    );
+    this.checkError(err);
+
+    const created = countOut.readUInt32LE();
+    const ids: bigint[] = [];
+    for (let i = 0; i < created; i++) {
+      ids.push(nodeIdsOut.readBigUInt64LE(i * 8));
+    }
+    return ids;
+  }
+
   // ============================================================
   // Vector search operations
   // ============================================================

@@ -461,6 +461,82 @@ class TestQueries:
             assert count >= 3
 
 
+class TestBatchInsert:
+    """Tests for batch insert operations."""
+
+    def test_batch_insert_basic(self, tmp_path):
+        """Test batch inserting nodes with vectors."""
+        pytest.importorskip("numpy")
+        import numpy as np
+
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True, enable_vector=True, vector_dimensions=4) as db:
+            with db.write() as txn:
+                vectors = np.array(
+                    [[float(i + j) for j in range(4)] for i in range(10)],
+                    dtype=np.float32,
+                )
+                node_ids = txn.batch_insert("Document", vectors)
+
+                assert len(node_ids) == 10
+                # All IDs should be unique and positive
+                assert len(set(node_ids)) == 10
+                for nid in node_ids:
+                    assert nid > 0
+
+                # Verify each node exists
+                for nid in node_ids:
+                    assert txn.node_exists(nid)
+
+                txn.commit()
+
+    def test_batch_insert_vectors_searchable(self, tmp_path):
+        """Test that batch-inserted vectors are searchable."""
+        pytest.importorskip("numpy")
+        import numpy as np
+
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True, enable_vector=True, vector_dimensions=4) as db:
+            with db.write() as txn:
+                vectors = np.array(
+                    [
+                        [1.0, 0.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0, 0.0],
+                        [0.0, 0.0, 1.0, 0.0],
+                        [0.0, 0.0, 0.0, 1.0],
+                        [0.9, 0.1, 0.0, 0.0],
+                    ],
+                    dtype=np.float32,
+                )
+                node_ids = txn.batch_insert("Document", vectors)
+                assert len(node_ids) == 5
+                txn.commit()
+
+            # Search for vectors similar to [1.0, 0.0, 0.0, 0.0]
+            query = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+            results = db.vector_search(query, k=2)
+
+            assert len(results) >= 2
+            # First result should be node_ids[0] (exact match)
+            assert results[0].node_id == node_ids[0]
+
+    def test_batch_insert_empty(self, tmp_path):
+        """Test batch inserting zero nodes."""
+        pytest.importorskip("numpy")
+        import numpy as np
+
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True, enable_vector=True, vector_dimensions=4) as db:
+            with db.write() as txn:
+                vectors = np.empty((0, 4), dtype=np.float32)
+                node_ids = txn.batch_insert("Document", vectors)
+                assert len(node_ids) == 0
+                txn.commit()
+
+
 class TestVectorOperations:
     """Tests for vector operations."""
 

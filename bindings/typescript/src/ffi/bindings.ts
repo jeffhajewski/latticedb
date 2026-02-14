@@ -27,6 +27,13 @@ const LatticeEmbeddingConfig = koffi.struct('lattice_embedding_config', {
   timeout_ms: 'uint32',
 });
 
+// Define struct for batch insert
+const LatticeNodeWithVector = koffi.struct('lattice_node_with_vector', {
+  label: 'const char*',
+  vector: 'const float*',
+  dimensions: 'uint32',
+});
+
 // Define struct for open options
 const LatticeOpenOptions = koffi.struct('lattice_open_options', {
   create: 'bool',
@@ -125,6 +132,13 @@ export interface LatticeBindings {
     key: string,
     vector: Float32Array,
     dimensions: number
+  ) => number;
+  lattice_batch_insert: (
+    txn: unknown,
+    nodes: unknown,
+    count: number,
+    node_ids_out: Buffer,
+    count_out: Buffer
   ) => number;
 
   // Vector search operations
@@ -293,6 +307,7 @@ function createBindings(): LatticeBindings {
   const EmbeddingClientPtr = koffi.pointer(LatticeEmbeddingClient);
   const EmbeddingClientPtrPtr = koffi.pointer(EmbeddingClientPtr);
   const EmbeddingConfigPtr = koffi.pointer(LatticeEmbeddingConfig);
+  const NodeWithVectorPtr = koffi.pointer(LatticeNodeWithVector);
 
   return {
     // Database operations
@@ -354,6 +369,13 @@ function createBindings(): LatticeBindings {
       'str', // key
       koffi.pointer('float'), // vector
       'uint32', // dimensions
+    ]),
+    lattice_batch_insert: lib.func('lattice_batch_insert', 'int', [
+      TxnPtr,
+      NodeWithVectorPtr, // nodes array
+      'uint32', // count
+      koffi.out(koffi.pointer('uint64')), // node_ids_out
+      koffi.out(koffi.pointer('uint32')), // count_out
     ]),
 
     // Vector search operations

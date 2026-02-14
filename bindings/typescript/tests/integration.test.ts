@@ -589,4 +589,44 @@ describeIfNative('Database Integration', () => {
       expect(results.length).toBe(0);
     });
   });
+
+  describe('Query cache', () => {
+    beforeEach(async () => {
+      db = new Database(dbPath, { create: true });
+      await db.open();
+    });
+
+    test('cacheClear succeeds on empty cache', async () => {
+      await expect(db.cacheClear()).resolves.not.toThrow();
+    });
+
+    test('cacheStats returns zero counts initially', async () => {
+      const stats = await db.cacheStats();
+      expect(stats.entries).toBe(0);
+      expect(stats.hits).toBe(0);
+      expect(stats.misses).toBe(0);
+    });
+
+    test('cacheStats reflects queries', async () => {
+      // Create some data
+      await db.write(async (txn) => {
+        await txn.createNode({ labels: ['Person'], properties: { name: 'Alice' } });
+      });
+
+      // First query should be a cache miss
+      await db.query('MATCH (n:Person) RETURN n');
+      const stats1 = await db.cacheStats();
+      expect(stats1.misses).toBeGreaterThanOrEqual(1);
+
+      // Same query again should be a cache hit
+      await db.query('MATCH (n:Person) RETURN n');
+      const stats2 = await db.cacheStats();
+      expect(stats2.hits).toBeGreaterThan(stats1.hits);
+
+      // After clearing, entries should be 0
+      await db.cacheClear();
+      const stats3 = await db.cacheStats();
+      expect(stats3.entries).toBe(0);
+    });
+  });
 });

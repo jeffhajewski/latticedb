@@ -555,6 +555,30 @@ export class LatticeFFI {
     this.bindings.lattice_query_free(query);
   }
 
+  /**
+   * Clear the query cache.
+   */
+  cacheClear(db: DatabaseHandle): void {
+    const err = this.bindings.lattice_query_cache_clear(db);
+    this.checkError(err);
+  }
+
+  /**
+   * Get query cache statistics.
+   */
+  cacheStats(db: DatabaseHandle): { entries: number; hits: number; misses: number } {
+    const entriesOut = Buffer.alloc(4);
+    const hitsOut = Buffer.alloc(8);
+    const missesOut = Buffer.alloc(8);
+    const err = this.bindings.lattice_query_cache_stats(db, entriesOut, hitsOut, missesOut);
+    this.checkError(err);
+    return {
+      entries: entriesOut.readUInt32LE(),
+      hits: Number(hitsOut.readBigUInt64LE()),
+      misses: Number(missesOut.readBigUInt64LE()),
+    };
+  }
+
   // ============================================================
   // Result operations
   // ============================================================

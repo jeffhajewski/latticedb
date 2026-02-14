@@ -240,6 +240,13 @@ export interface LatticeBindings {
     result_out: unknown[]
   ) => number;
   lattice_query_free: (query: unknown) => void;
+  lattice_query_cache_clear: (db: unknown) => number;
+  lattice_query_cache_stats: (
+    db: unknown,
+    entries_out: Buffer,
+    hits_out: Buffer,
+    misses_out: Buffer
+  ) => number;
 
   // Result operations
   lattice_result_next: (result: unknown) => boolean;
@@ -489,6 +496,13 @@ function createBindings(): LatticeBindings {
       koffi.out(ResultPtrPtr), // result_out
     ]),
     lattice_query_free: lib.func('lattice_query_free', 'void', [QueryPtr]),
+    lattice_query_cache_clear: lib.func('lattice_query_cache_clear', 'int', [DatabasePtr]),
+    lattice_query_cache_stats: lib.func('lattice_query_cache_stats', 'int', [
+      DatabasePtr,
+      koffi.out(koffi.pointer('uint32')),
+      koffi.out(koffi.pointer('uint64')),
+      koffi.out(koffi.pointer('uint64')),
+    ]),
 
     // Result operations
     lattice_result_next: lib.func('lattice_result_next', 'bool', [ResultPtr]),

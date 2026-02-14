@@ -665,6 +665,8 @@ private:
     Napi::Value Query(const Napi::CallbackInfo& info);
     Napi::Value VectorSearch(const Napi::CallbackInfo& info);
     Napi::Value FtsSearch(const Napi::CallbackInfo& info);
+    Napi::Value CacheClear(const Napi::CallbackInfo& info);
+    Napi::Value CacheStats(const Napi::CallbackInfo& info);
 };
 
 Napi::FunctionReference DatabaseWrapper::constructor;
@@ -678,6 +680,8 @@ Napi::Object DatabaseWrapper::Init(Napi::Env env, Napi::Object exports) {
         InstanceMethod("query", &DatabaseWrapper::Query),
         InstanceMethod("vectorSearch", &DatabaseWrapper::VectorSearch),
         InstanceMethod("ftsSearch", &DatabaseWrapper::FtsSearch),
+        InstanceMethod("cacheClear", &DatabaseWrapper::CacheClear),
+        InstanceMethod("cacheStats", &DatabaseWrapper::CacheStats),
     });
 
     constructor = Napi::Persistent(func);
@@ -985,6 +989,45 @@ Napi::Value DatabaseWrapper::FtsSearch(const Napi::CallbackInfo& info) {
 
     lattice_fts_result_free(result);
     return results;
+}
+
+Napi::Value DatabaseWrapper::CacheClear(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+
+    if (db_ == nullptr) {
+        Napi::Error::New(env, "Database not open").ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
+
+    lattice_error err = lattice_query_cache_clear(db_);
+    if (err != LATTICE_OK) {
+        ThrowLatticeError(env, err);
+    }
+    return env.Undefined();
+}
+
+Napi::Value DatabaseWrapper::CacheStats(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+
+    if (db_ == nullptr) {
+        Napi::Error::New(env, "Database not open").ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
+
+    uint32_t entries = 0;
+    uint64_t hits = 0;
+    uint64_t misses = 0;
+    lattice_error err = lattice_query_cache_stats(db_, &entries, &hits, &misses);
+    if (err != LATTICE_OK) {
+        ThrowLatticeError(env, err);
+        return env.Undefined();
+    }
+
+    Napi::Object result = Napi::Object::New(env);
+    result.Set("entries", Napi::Number::New(env, entries));
+    result.Set("hits", Napi::Number::New(env, static_cast<double>(hits)));
+    result.Set("misses", Napi::Number::New(env, static_cast<double>(misses)));
+    return result;
 }
 
 /**

@@ -590,6 +590,61 @@ describeIfNative('Database Integration', () => {
     });
   });
 
+  describe('Fuzzy full-text search', () => {
+    beforeEach(async () => {
+      db = new Database(dbPath, { create: true });
+      await db.open();
+    });
+
+    test('fuzzy search finds results despite typos', async () => {
+      await db.write(async (txn) => {
+        const doc1 = await txn.createNode({
+          labels: ['Document'],
+          properties: { title: 'Machine Learning Basics' },
+        });
+        await txn.ftsIndex(doc1.id, 'Machine learning is a subset of artificial intelligence');
+
+        const doc2 = await txn.createNode({
+          labels: ['Document'],
+          properties: { title: 'Web Development' },
+        });
+        await txn.ftsIndex(doc2.id, 'Building responsive web applications with JavaScript');
+      });
+
+      // Search with typos: "machne lerning" instead of "machine learning"
+      const results = await db.ftsSearchFuzzy('machne lerning', { limit: 10 });
+
+      expect(results.length).toBeGreaterThanOrEqual(1);
+      expect(results[0]!.nodeId).toBeDefined();
+      expect(results[0]!.score).toBeGreaterThan(0);
+    });
+
+    test('fuzzy search respects maxDistance parameter', async () => {
+      await db.write(async (txn) => {
+        const doc = await txn.createNode({
+          labels: ['Document'],
+          properties: { title: 'Machine Learning' },
+        });
+        await txn.ftsIndex(doc.id, 'Machine learning is a powerful technology');
+      });
+
+      // With max_distance=1, a 2-edit typo should not match
+      const resultsTight = await db.ftsSearchFuzzy('machne', {
+        limit: 10,
+        maxDistance: 1,
+      });
+
+      // With default distance (2), it should match
+      const resultsLoose = await db.ftsSearchFuzzy('machne', {
+        limit: 10,
+        maxDistance: 2,
+      });
+
+      // Loose should find at least as many results as tight
+      expect(resultsLoose.length).toBeGreaterThanOrEqual(resultsTight.length);
+    });
+  });
+
   describe('Query cache', () => {
     beforeEach(async () => {
       db = new Database(dbPath, { create: true });

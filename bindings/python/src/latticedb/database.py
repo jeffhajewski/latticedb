@@ -390,6 +390,70 @@ class Database:
             if result_ptr.value:
                 lib._lib.lattice_fts_result_free(result_ptr)
 
+    def fts_search_fuzzy(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        max_distance: int = 0,
+        min_term_length: int = 0,
+    ) -> List[FtsSearchResult]:
+        """
+        Fuzzy full-text search using BM25 scoring with typo tolerance.
+
+        Args:
+            query: Search query text.
+            limit: Maximum number of results to return.
+            max_distance: Maximum edit distance for fuzzy matching (0 = default 2).
+            min_term_length: Minimum term length to apply fuzzy matching (0 = default 4).
+
+        Returns:
+            List of search results with node IDs and BM25 scores, sorted by relevance.
+        """
+        if self._handle is None:
+            raise RuntimeError("Database is not open")
+
+        lib = get_lib()
+        result_ptr = c_void_p()
+
+        # Encode query to bytes
+        query_bytes = query.encode("utf-8")
+
+        # Call the C API
+        code = lib._lib.lattice_fts_search_fuzzy(
+            self._handle,
+            query_bytes,
+            len(query_bytes),
+            limit,
+            max_distance,
+            min_term_length,
+            byref(result_ptr),
+        )
+        check_error(code)
+
+        try:
+            # Get result count
+            count = lib._lib.lattice_fts_result_count(result_ptr)
+
+            # Collect results
+            results: List[FtsSearchResult] = []
+            for i in range(count):
+                node_id = LatticeNodeId()
+                score = ctypes.c_float()
+                code = lib._lib.lattice_fts_result_get(
+                    result_ptr, i, byref(node_id), byref(score)
+                )
+                check_error(code)
+                results.append(
+                    FtsSearchResult(node_id=node_id.value, score=score.value)
+                )
+
+            return results
+        finally:
+            # Free the result handle
+            if result_ptr.value:
+                lib._lib.lattice_fts_result_free(result_ptr)
+
     def cache_clear(self) -> None:
         """
         Clear the query cache.

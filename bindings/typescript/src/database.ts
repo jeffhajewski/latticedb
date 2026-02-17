@@ -205,6 +205,29 @@ export class Database {
   }
 
   /**
+   * Fuzzy full-text search with typo tolerance.
+   *
+   * @param query - Search query
+   * @param options - Search options including maxDistance and minTermLength
+   * @returns Matching nodes with scores
+   */
+  async ftsSearchFuzzy(
+    query: string,
+    options?: FtsSearchOptions & { maxDistance?: number; minTermLength?: number }
+  ): Promise<Array<{ nodeId: bigint; score: number }>> {
+    this.ensureOpen();
+    const results = this.native!.ftsSearchFuzzy(query, {
+      limit: options?.limit ?? 10,
+      maxDistance: options?.maxDistance ?? 0,
+      minTermLength: options?.minTermLength ?? 0,
+    });
+    return results.map((r) => ({
+      nodeId: r.nodeId,
+      score: r.score,
+    }));
+  }
+
+  /**
    * Clear the query cache.
    *
    * Removes all cached parsed queries, forcing re-parsing on next execution.

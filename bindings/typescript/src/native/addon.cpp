@@ -665,6 +665,7 @@ private:
     Napi::Value Query(const Napi::CallbackInfo& info);
     Napi::Value VectorSearch(const Napi::CallbackInfo& info);
     Napi::Value FtsSearch(const Napi::CallbackInfo& info);
+    Napi::Value FtsSearchFuzzy(const Napi::CallbackInfo& info);
     Napi::Value CacheClear(const Napi::CallbackInfo& info);
     Napi::Value CacheStats(const Napi::CallbackInfo& info);
 };
@@ -680,6 +681,7 @@ Napi::Object DatabaseWrapper::Init(Napi::Env env, Napi::Object exports) {
         InstanceMethod("query", &DatabaseWrapper::Query),
         InstanceMethod("vectorSearch", &DatabaseWrapper::VectorSearch),
         InstanceMethod("ftsSearch", &DatabaseWrapper::FtsSearch),
+        InstanceMethod("ftsSearchFuzzy", &DatabaseWrapper::FtsSearchFuzzy),
         InstanceMethod("cacheClear", &DatabaseWrapper::CacheClear),
         InstanceMethod("cacheStats", &DatabaseWrapper::CacheStats),
     });
@@ -968,6 +970,62 @@ Napi::Value DatabaseWrapper::FtsSearch(const Napi::CallbackInfo& info) {
 
     lattice_fts_result* result = nullptr;
     lattice_error err = lattice_fts_search(db_, query.c_str(), query.length(), limit, &result);
+    if (err != LATTICE_OK) {
+        ThrowLatticeError(env, err);
+        return env.Undefined();
+    }
+
+    Napi::Array results = Napi::Array::New(env);
+    uint32_t count = lattice_fts_result_count(result);
+    for (uint32_t i = 0; i < count; i++) {
+        lattice_node_id node_id;
+        float score;
+        err = lattice_fts_result_get(result, i, &node_id, &score);
+        if (err == LATTICE_OK) {
+            Napi::Object item = Napi::Object::New(env);
+            item.Set("nodeId", Napi::BigInt::New(env, static_cast<uint64_t>(node_id)));
+            item.Set("score", Napi::Number::New(env, score));
+            results.Set(i, item);
+        }
+    }
+
+    lattice_fts_result_free(result);
+    return results;
+}
+
+Napi::Value DatabaseWrapper::FtsSearchFuzzy(const Napi::CallbackInfo& info) {
+    Napi::Env env = info.Env();
+
+    if (db_ == nullptr) {
+        Napi::Error::New(env, "Database not open").ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
+
+    if (info.Length() < 1 || !info[0].IsString()) {
+        Napi::TypeError::New(env, "Query must be a string").ThrowAsJavaScriptException();
+        return env.Undefined();
+    }
+
+    std::string query = info[0].As<Napi::String>().Utf8Value();
+    uint32_t limit = 10;
+    uint32_t max_distance = 0;
+    uint32_t min_term_length = 0;
+
+    if (info.Length() > 1 && info[1].IsObject()) {
+        Napi::Object opts = info[1].As<Napi::Object>();
+        if (opts.Has("limit") && opts.Get("limit").IsNumber()) {
+            limit = opts.Get("limit").As<Napi::Number>().Uint32Value();
+        }
+        if (opts.Has("maxDistance") && opts.Get("maxDistance").IsNumber()) {
+            max_distance = opts.Get("maxDistance").As<Napi::Number>().Uint32Value();
+        }
+        if (opts.Has("minTermLength") && opts.Get("minTermLength").IsNumber()) {
+            min_term_length = opts.Get("minTermLength").As<Napi::Number>().Uint32Value();
+        }
+    }
+
+    lattice_fts_result* result = nullptr;
+    lattice_error err = lattice_fts_search_fuzzy(db_, query.c_str(), query.length(), limit, max_distance, min_term_length, &result);
     if (err != LATTICE_OK) {
         ThrowLatticeError(env, err);
         return env.Undefined();

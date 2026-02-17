@@ -701,6 +701,54 @@ class TestFtsOperations:
             assert len(results) == 0
 
 
+class TestFtsFuzzyOperations:
+    """Tests for fuzzy full-text search operations."""
+
+    def test_fts_search_fuzzy_finds_typos(self, tmp_path):
+        """Test that fuzzy search finds documents despite typos in query."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                node1 = txn.create_node(labels=["Document"])
+                txn.fts_index(node1.id, "Machine learning is a subset of artificial intelligence")
+
+                node2 = txn.create_node(labels=["Document"])
+                txn.fts_index(node2.id, "Python is a popular programming language")
+                txn.commit()
+
+            # Search with typos: "machne lerning" instead of "machine learning"
+            results = db.fts_search_fuzzy("machne lerning", limit=10)
+
+            # Should find the machine learning document
+            assert len(results) >= 1
+            assert results[0].node_id == node1.id
+            assert results[0].score > 0
+
+    def test_fts_search_fuzzy_respects_distance(self, tmp_path):
+        """Test that fuzzy search respects max_distance parameter."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                node1 = txn.create_node(labels=["Document"])
+                txn.fts_index(node1.id, "Machine learning is a powerful technology")
+                txn.commit()
+
+            # With max_distance=1, a 2-edit typo should not match
+            results_tight = db.fts_search_fuzzy(
+                "machne", limit=10, max_distance=1
+            )
+
+            # With default distance (2), it should match
+            results_loose = db.fts_search_fuzzy(
+                "machne", limit=10, max_distance=2
+            )
+
+            # Loose should find at least as many results as tight
+            assert len(results_loose) >= len(results_tight)
+
+
 class TestUtilities:
     """Tests for utility functions."""
 

@@ -466,6 +466,18 @@ class LatticeLib:
         ]
         self._lib.lattice_fts_search.restype = c_int
 
+        # lattice_fts_search_fuzzy
+        self._lib.lattice_fts_search_fuzzy.argtypes = [
+            LatticeDatabase,
+            c_char_p,
+            c_size_t,
+            c_uint32,
+            c_uint32,
+            c_uint32,
+            POINTER(LatticeFtsResult),
+        ]
+        self._lib.lattice_fts_search_fuzzy.restype = c_int
+
         # lattice_fts_result_count
         self._lib.lattice_fts_result_count.argtypes = [LatticeFtsResult]
         self._lib.lattice_fts_result_count.restype = c_uint32

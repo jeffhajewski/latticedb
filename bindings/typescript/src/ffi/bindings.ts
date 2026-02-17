@@ -173,6 +173,15 @@ export interface LatticeBindings {
     limit: number,
     result_out: unknown[]
   ) => number;
+  lattice_fts_search_fuzzy: (
+    db: unknown,
+    query: string,
+    query_len: number,
+    limit: number,
+    max_distance: number,
+    min_term_length: number,
+    result_out: unknown[]
+  ) => number;
   lattice_fts_result_count: (result: unknown) => number;
   lattice_fts_result_get: (
     result: unknown,
@@ -419,6 +428,15 @@ function createBindings(): LatticeBindings {
       'str', // query
       'uintptr_t', // query_len (size_t)
       'uint32', // limit
+      koffi.out(FtsResultPtrPtr), // result_out
+    ]),
+    lattice_fts_search_fuzzy: lib.func('lattice_fts_search_fuzzy', 'int', [
+      DatabasePtr,
+      'str', // query
+      'uintptr_t', // query_len (size_t)
+      'uint32', // limit
+      'uint32', // max_distance
+      'uint32', // min_term_length
       koffi.out(FtsResultPtrPtr), // result_out
     ]),
     lattice_fts_result_count: lib.func('lattice_fts_result_count', 'uint32', [

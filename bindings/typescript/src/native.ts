@@ -78,6 +78,7 @@ export interface NativeDatabase {
   query(cypher: string, parameters?: Record<string, unknown>): NativeQueryResult;
   vectorSearch(vector: Float32Array, options?: { k?: number; efSearch?: number }): NativeVectorResult[];
   ftsSearch(query: string, options?: { limit?: number }): NativeFtsResult[];
+  ftsSearchFuzzy(query: string, options?: { limit?: number; maxDistance?: number; minTermLength?: number }): NativeFtsResult[];
   cacheClear(): void;
   cacheStats(): { entries: number; hits: number; misses: number };
 }

@@ -371,6 +371,30 @@ export class LatticeFFI {
   }
 
   /**
+   * Search for documents with fuzzy matching.
+   */
+  ftsSearchFuzzy(
+    db: DatabaseHandle,
+    query: string,
+    limit: number,
+    maxDistance: number = 0,
+    minTermLength: number = 0
+  ): FtsResultHandle {
+    const resultOut: unknown[] = [null];
+    const err = this.bindings.lattice_fts_search_fuzzy(
+      db,
+      query,
+      query.length,
+      limit,
+      maxDistance,
+      minTermLength,
+      resultOut
+    );
+    this.checkError(err);
+    return resultOut[0];
+  }
+
+  /**
    * Get the count of FTS results.
    */
   ftsResultCount(result: FtsResultHandle): number {

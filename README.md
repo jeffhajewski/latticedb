@@ -54,6 +54,25 @@ RETURN doc.title, chunk.text, author.name
 - **AI Agents** — Persistent memory with relationship awareness
 - **Local Development** — Lightweight alternative to Neo4j or Weaviate for testing
 
+## When to Use Something Else
+
+LatticeDB is fast, but speed is not the only thing that matters. Here are cases where a different tool is the better choice.
+
+**You need multiple applications writing to the same database at the same time.**
+LatticeDB is embedded with a single-writer model. One process opens the file and owns it. If you need many clients connecting over a network, use Neo4j, PostgreSQL, or another client-server database.
+
+**Your data is fundamentally tabular.**
+If your data fits naturally into rows and columns — sales records, user accounts, time series — a relational database like SQLite or PostgreSQL will be simpler and just as fast. Graph databases shine when relationships between records are the point, not an afterthought.
+
+**You need to scale beyond a single machine.**
+LatticeDB stores everything in one file on one machine. If you need sharding, replication, or distributed queries across billions of nodes, look at Neo4j cluster, Dgraph, or a managed service like Neptune.
+
+**You need the full Cypher language.**
+LatticeDB supports the most-used subset of Cypher but not all of it. Features like `OPTIONAL MATCH`, `MERGE`, and `CALL` procedures are not yet implemented. If your queries depend on these, Neo4j is the complete implementation.
+
+**You need mature tooling and ecosystem.**
+Neo4j has visualization tools, admin dashboards, monitoring, drivers in every language, and years of community resources. PostgreSQL has decades of tooling. LatticeDB is new and lean — which is a strength for embedding, but a weakness if you need a rich operational ecosystem around your database.
+
 ## Quick Start
 
 ### Python
@@ -451,7 +470,18 @@ Lattice's inverted index with BM25 scoring is ~300x faster than SQLite FTS5 and 
 | 3-hop traversal | 197.3μs | 1.2ms | **6x** |
 | Variable path (1..5) | 134.4μs | 10.1ms | **75x** |
 
-Lattice is 250-500x faster than Neo4j and Kuzu on graph traversal, and 14-75x faster than SQLite's recursive CTEs. Run `zig build sqlite-benchmark` to reproduce.
+**Depth-Limited Traversal (10K nodes, 50K edges)**
+
+| Depth | LatticeDB | SQLite | Speedup |
+|------:|----------:|-------:|--------:|
+| 10    | 311 μs    | 121 ms | **390x** |
+| 15    | 380 μs    | 271 ms | **713x** |
+| 25    | 318 μs    | 587 ms | **1,848x** |
+| 50    | 500 μs    | 1.4 s  | **2,819x** |
+
+LatticeDB uses BFS with adjacency cache and bitset visited tracking. SQLite uses a recursive CTE with `UNION` deduplication. Both compute identical reachable node sets (~8K nodes). The gap widens at deeper depths as SQLite's CTE overhead grows with each recursion level. Run `zig build graph-benchmark -- --quick` to reproduce.
+
+Lattice is 250-500x faster than Neo4j and Kuzu on graph traversal, and 14-75x faster than SQLite for fixed-hop queries. For depth-limited reachability (10-50 hops), Lattice is 390-2,800x faster as SQLite's recursive CTE overhead compounds with depth.
 
 ### Design Targets
 

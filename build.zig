@@ -256,6 +256,32 @@ pub fn build(b: *std.Build) void {
     const sqlite_bench_step = b.step("sqlite-benchmark", "Run SQLite vs LatticeDB comparison benchmark");
     sqlite_bench_step.dependOn(&run_sqlite_bench.step);
 
+    // Graph DFS benchmark module
+    const graph_bench_module = b.createModule(.{
+        .root_source_file = b.path("tests/benchmark/graph_dfs_benchmark.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .imports = &.{
+            .{ .name = "lattice", .module = lib_module },
+        },
+    });
+
+    const graph_bench_exe = b.addExecutable(.{
+        .name = "graph-benchmark",
+        .root_module = graph_bench_module,
+    });
+    graph_bench_exe.linkLibrary(lib);
+    graph_bench_exe.linkSystemLibrary("sqlite3");
+
+    const run_graph_bench = b.addRunArtifact(graph_bench_exe);
+    run_graph_bench.step.dependOn(&graph_bench_exe.step);
+    if (b.args) |args| {
+        run_graph_bench.addArgs(args);
+    }
+
+    const graph_bench_step = b.step("graph-benchmark", "Run DFS graph traversal benchmarks (LatticeDB vs SQLite)");
+    graph_bench_step.dependOn(&run_graph_bench.step);
+
     // Fuzz test module - imports the library module
     const fuzz_module = b.createModule(.{
         .root_source_file = b.path("tests/fuzz/main.zig"),

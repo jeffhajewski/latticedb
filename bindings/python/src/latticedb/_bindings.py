@@ -586,6 +586,19 @@ class LatticeLib:
         self._lib.lattice_query_free.argtypes = [LatticeQuery]
         self._lib.lattice_query_free.restype = None
 
+        # lattice_query_cache_clear
+        self._lib.lattice_query_cache_clear.argtypes = [LatticeDatabase]
+        self._lib.lattice_query_cache_clear.restype = c_int
+
+        # lattice_query_cache_stats
+        self._lib.lattice_query_cache_stats.argtypes = [
+            LatticeDatabase,
+            POINTER(c_uint32),
+            POINTER(c_uint64),
+            POINTER(c_uint64),
+        ]
+        self._lib.lattice_query_cache_stats.restype = c_int
+
         # lattice_result_next
         self._lib.lattice_result_next.argtypes = [LatticeResult]
         self._lib.lattice_result_next.restype = c_bool

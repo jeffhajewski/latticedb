@@ -269,6 +269,13 @@ export class LatticeFFI {
     this.checkError(err);
 
     const created = countOut.readUInt32LE();
+    if (created < count) {
+      throw new LatticeError(
+        `Batch insert partially failed: ${created}/${count} nodes created. Transaction should be rolled back.`,
+        LatticeErrorCode.Error
+      );
+    }
+
     const ids: bigint[] = [];
     for (let i = 0; i < created; i++) {
       ids.push(nodeIdsOut.readBigUInt64LE(i * 8));
@@ -346,7 +353,7 @@ export class LatticeFFI {
    * Index a document for full-text search.
    */
   ftsIndex(txn: TransactionHandle, nodeId: bigint, text: string): void {
-    const err = this.bindings.lattice_fts_index(txn, nodeId, text, text.length);
+    const err = this.bindings.lattice_fts_index(txn, nodeId, text, Buffer.byteLength(text, 'utf8'));
     this.checkError(err);
   }
 
@@ -362,7 +369,7 @@ export class LatticeFFI {
     const err = this.bindings.lattice_fts_search(
       db,
       query,
-      query.length,
+      Buffer.byteLength(query, 'utf8'),
       limit,
       resultOut
     );
@@ -384,7 +391,7 @@ export class LatticeFFI {
     const err = this.bindings.lattice_fts_search_fuzzy(
       db,
       query,
-      query.length,
+      Buffer.byteLength(query, 'utf8'),
       limit,
       maxDistance,
       minTermLength,
@@ -647,7 +654,7 @@ export class LatticeFFI {
     const dimsOut = Buffer.alloc(4);
     const err = this.bindings.lattice_hash_embed(
       text,
-      text.length,
+      Buffer.byteLength(text, 'utf8'),
       dimensions,
       vectorOut,
       dimsOut
@@ -707,7 +714,7 @@ export class LatticeFFI {
     const err = this.bindings.lattice_embedding_client_embed(
       client,
       text,
-      text.length,
+      Buffer.byteLength(text, 'utf8'),
       vectorOut,
       dimsOut
     );

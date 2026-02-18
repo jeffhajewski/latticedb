@@ -30,8 +30,8 @@ export interface Node {
  * An edge in the graph.
  */
 export interface Edge {
-  /** Unique edge identifier */
-  id: bigint;
+  /** Unique edge identifier (not available on traversal results) */
+  id?: bigint;
   /** Source node ID */
   sourceId: bigint;
   /** Target node ID */

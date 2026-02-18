@@ -269,8 +269,7 @@ export class Transaction {
   async getOutgoingEdges(nodeId: bigint): Promise<Edge[]> {
     this.ensureActive();
     const edges = this.native!.getOutgoingEdges(nodeId);
-    return edges.map((e, i) => ({
-      id: BigInt(i), // Edge IDs not returned from traversal
+    return edges.map((e) => ({
       sourceId: e.sourceId,
       targetId: e.targetId,
       type: e.type,
@@ -287,8 +286,7 @@ export class Transaction {
   async getIncomingEdges(nodeId: bigint): Promise<Edge[]> {
     this.ensureActive();
     const edges = this.native!.getIncomingEdges(nodeId);
-    return edges.map((e, i) => ({
-      id: BigInt(i), // Edge IDs not returned from traversal
+    return edges.map((e) => ({
       sourceId: e.sourceId,
       targetId: e.targetId,
       type: e.type,

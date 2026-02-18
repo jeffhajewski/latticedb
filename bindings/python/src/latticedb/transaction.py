@@ -366,7 +366,14 @@ class Transaction:
         )
         check_error(code)
 
-        return [node_ids[i] for i in range(count_out.value)]
+        created = count_out.value
+        if created < n:
+            raise RuntimeError(
+                f"Batch insert partially failed: {created}/{n} nodes created. "
+                "Transaction should be rolled back."
+            )
+
+        return [node_ids[i] for i in range(created)]
 
     def fts_index(
         self,

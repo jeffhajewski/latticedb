@@ -227,17 +227,18 @@ export class Transaction {
   ): Promise<Edge> {
     this.ensureWritable();
 
-    const edgeId = this.native!.createEdge(sourceId, targetId, edgeType);
+    if (options.properties && Object.keys(options.properties).length > 0) {
+      throw new Error('Edge properties are not yet supported');
+    }
 
-    // Set properties if provided
-    // Note: Edge properties would need additional C API support
+    const edgeId = this.native!.createEdge(sourceId, targetId, edgeType);
 
     return {
       id: edgeId,
       sourceId,
       targetId,
       type: edgeType,
-      properties: options.properties ?? {},
+      properties: {},
     };
   }
 

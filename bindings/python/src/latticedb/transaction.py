@@ -432,6 +432,8 @@ class Transaction:
             raise RuntimeError("Cannot create edge in read-only transaction")
         if self._handle is None:
             raise RuntimeError("Transaction not started")
+        if properties:
+            raise NotImplementedError("Edge properties are not yet supported")
 
         lib = get_lib()
         edge_id = c_uint64()
@@ -444,15 +446,13 @@ class Transaction:
         )
         check_error(code)
 
-        # Note: Edge properties not yet supported in C API
-        edge = Edge(
+        return Edge(
             id=edge_id.value,
             source_id=source_id,
             target_id=target_id,
             edge_type=edge_type,
-            properties=properties or {},
+            properties={},
         )
-        return edge
 
     def delete_edge(self, source_id: int, target_id: int, edge_type: str) -> None:
         """

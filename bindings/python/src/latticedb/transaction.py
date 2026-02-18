@@ -118,21 +118,27 @@ class Transaction:
         Create a new node.
 
         Args:
-            labels: Node labels (currently only first label is used).
+            labels: Node labels (at most one label supported).
             properties: Node properties.
 
         Returns:
             The created node.
+
+        Raises:
+            ValueError: If more than one label is provided.
         """
         if self._read_only:
             raise RuntimeError("Cannot create node in read-only transaction")
         if self._handle is None:
             raise RuntimeError("Transaction not started")
+        if labels and len(labels) > 1:
+            raise ValueError(
+                "Multiple labels are not yet supported. Pass at most one label."
+            )
 
         lib = get_lib()
         node_id = c_uint64()
 
-        # C API only supports one label at creation time
         label = labels[0] if labels else ""
         code = lib._lib.lattice_node_create(
             self._handle,

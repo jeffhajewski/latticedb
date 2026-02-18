@@ -77,15 +77,12 @@ export class Transaction {
     const labels = options.labels ?? [];
     const properties = options.properties ?? {};
 
-    // Create node with first label (or empty)
+    if (labels.length > 1) {
+      throw new Error('Multiple labels are not yet supported. Pass at most one label.');
+    }
+
     const firstLabel = labels[0] ?? '';
     const nodeId = this.native!.createNode(firstLabel);
-
-    // Add additional labels
-    for (let i = 1; i < labels.length; i++) {
-      // Note: The C API currently only supports one label at creation
-      // Additional labels would need a separate API call
-    }
 
     // Set properties
     for (const [key, value] of Object.entries(properties)) {

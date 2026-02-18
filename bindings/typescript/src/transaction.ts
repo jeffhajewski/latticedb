@@ -120,6 +120,9 @@ export class Transaction {
   /**
    * Get a node by ID.
    *
+   * Note: The returned node's `properties` will be empty. Use
+   * `getProperty()` to fetch individual properties by key.
+   *
    * @param nodeId - The node ID
    * @returns The node, or null if not found
    */
@@ -135,7 +138,7 @@ export class Transaction {
     return {
       id: nodeId,
       labels,
-      properties: {}, // Properties need to be fetched individually
+      properties: {},
     };
   }
 

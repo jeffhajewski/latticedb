@@ -181,6 +181,9 @@ class Transaction:
         """
         Get a node by ID.
 
+        Note: The returned node's ``properties`` will be empty. Use
+        :meth:`get_property` to fetch individual properties by key.
+
         Args:
             node_id: The node ID.
 

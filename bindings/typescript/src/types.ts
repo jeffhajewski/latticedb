@@ -117,8 +117,6 @@ export interface CreateEdgeOptions {
  * Options for vector search.
  */
 export interface VectorSearchOptions {
-  /** Vector property key */
-  key?: string;
   /** Number of results */
   k?: number;
   /** HNSW ef parameter */
@@ -129,8 +127,6 @@ export interface VectorSearchOptions {
  * Options for full-text search.
  */
 export interface FtsSearchOptions {
-  /** Text property key */
-  key?: string;
   /** Maximum results */
   limit?: number;
 }

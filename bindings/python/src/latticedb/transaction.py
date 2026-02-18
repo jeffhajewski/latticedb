@@ -492,6 +492,8 @@ class Transaction:
         code = lib._lib.lattice_edge_get_outgoing(
             self._handle, node_id, byref(result_ptr)
         )
+        if code == LATTICE_ERROR_NOT_FOUND:
+            return []
         check_error(code)
 
         return self._collect_edge_results(result_ptr, lib)
@@ -514,6 +516,8 @@ class Transaction:
         code = lib._lib.lattice_edge_get_incoming(
             self._handle, node_id, byref(result_ptr)
         )
+        if code == LATTICE_ERROR_NOT_FOUND:
+            return []
         check_error(code)
 
         return self._collect_edge_results(result_ptr, lib)

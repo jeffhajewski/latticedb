@@ -4,6 +4,7 @@
  * This module provides an ergonomic TypeScript interface to the raw C bindings.
  */
 
+import koffi from 'koffi';
 import { getBindings, LatticeBindings } from './bindings';
 import { isLibraryAvailable, getLibraryPath } from './library';
 import {
@@ -203,21 +204,26 @@ export class LatticeFFI {
 
   /**
    * Get labels for a node.
-   *
-   * Note: Due to koffi's automatic string conversion, we cannot free the
-   * allocated string. This causes a small memory leak per call.
    */
   getNodeLabels(txn: TransactionHandle, nodeId: bigint): string[] {
     const labelsOut: unknown[] = [null];
     const err = this.bindings.lattice_node_get_labels(txn, nodeId, labelsOut);
     this.checkError(err);
 
-    // koffi auto-decodes char* to string
-    const labelsStr = labelsOut[0] as string | null;
-    if (!labelsStr || labelsStr.length === 0) {
+    const ptr = labelsOut[0];
+    if (!ptr) {
       return [];
     }
-    return labelsStr.split(',');
+
+    try {
+      const labelsStr = koffi.decode(ptr, 'char', -1) as string;
+      if (!labelsStr || labelsStr.length === 0) {
+        return [];
+      }
+      return labelsStr.split(',');
+    } finally {
+      this.bindings.lattice_free_string(ptr);
+    }
   }
 
   /**

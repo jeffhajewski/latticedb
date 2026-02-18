@@ -358,13 +358,10 @@ function createBindings(): LatticeBindings {
       'uint64', // node_id
       koffi.out(koffi.pointer('bool')), // exists_out
     ]),
-    // NOTE: koffi auto-decodes char* to string, but we lose the pointer for freeing.
-    // This causes a small memory leak per call. Acceptable for now, can revisit with
-    // koffi.disposable() or modifying the C API to use caller-provided buffers.
     lattice_node_get_labels: lib.func('lattice_node_get_labels', 'int', [
       TxnPtr,
       'uint64', // node_id
-      koffi.out(koffi.pointer('char*')), // labels_out - auto-decoded to string
+      koffi.out(koffi.pointer('void*')), // labels_out - raw pointer for manual free
     ]),
     lattice_free_string: lib.func('lattice_free_string', 'void', ['void*']),
     lattice_node_set_property: lib.func('lattice_node_set_property', 'int', [

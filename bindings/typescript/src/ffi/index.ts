@@ -671,17 +671,8 @@ export class LatticeFFI {
     const ptr = vectorOut[0];
 
     try {
-      // Copy floats from C memory into a Float32Array
-      const result = new Float32Array(dims);
-      const src = Buffer.from(
-        (ptr as any as Buffer).buffer,
-        (ptr as any as Buffer).byteOffset,
-        dims * 4
-      );
-      for (let i = 0; i < dims; i++) {
-        result[i] = src.readFloatLE(i * 4);
-      }
-      return result;
+      const floats = koffi.decode(ptr, 'float', dims) as number[];
+      return new Float32Array(floats);
     } finally {
       this.bindings.lattice_hash_embed_free(ptr, dims);
     }
@@ -730,16 +721,8 @@ export class LatticeFFI {
     const ptr = vectorOut[0];
 
     try {
-      const result = new Float32Array(dims);
-      const src = Buffer.from(
-        (ptr as any as Buffer).buffer,
-        (ptr as any as Buffer).byteOffset,
-        dims * 4
-      );
-      for (let i = 0; i < dims; i++) {
-        result[i] = src.readFloatLE(i * 4);
-      }
-      return result;
+      const floats = koffi.decode(ptr, 'float', dims) as number[];
+      return new Float32Array(floats);
     } finally {
       this.bindings.lattice_hash_embed_free(ptr, dims);
     }

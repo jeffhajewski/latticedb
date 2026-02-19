@@ -196,7 +196,7 @@ jobs:
       - name: Build wheel
         run: |
           cd bindings/python
-          python -m build --wheel
+          python -m build --wheel -C--plat-name=${{ matrix.python_platform }}
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4

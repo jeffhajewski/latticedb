@@ -7,7 +7,7 @@ on:
     branches: [main]
 
 env:
-  ZIG_VERSION: "0.13.0"
+  ZIG_VERSION: "0.15.2"
 
 jobs:
   # ============================================
@@ -18,7 +18,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-14]
+        os: [ubuntu-latest, macos-14, windows-latest]
 
     steps:
       - uses: actions/checkout@v4
@@ -31,8 +31,11 @@ jobs:
       - name: Build
         run: zig build
 
-      - name: Run tests
+      - name: Run unit tests
         run: zig build test
+
+      - name: Run integration tests
+        run: zig build integration-test
 
       - name: Build shared library
         run: zig build shared
@@ -113,10 +116,6 @@ jobs:
         working-directory: bindings/typescript
         run: npm run build
 
-      - name: Build native addon
-        working-directory: bindings/typescript
-        run: npm run build:native
-
       - name: Run tests
         working-directory: bindings/typescript
         run: npm test
@@ -155,4 +154,4 @@ jobs:
 
       - name: Run ESLint
         working-directory: bindings/typescript
-        run: npm run lint || true  # Don't fail on lint errors for now
+        run: npm run lint

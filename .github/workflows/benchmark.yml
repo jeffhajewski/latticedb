@@ -1,0 +1,44 @@
+name: Benchmark
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - 'v*'
+
+env:
+  ZIG_VERSION: "0.15.2"
+
+jobs:
+  benchmark:
+    name: Run Benchmarks
+    runs-on: macos-14  # Apple Silicon, matches README numbers
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build
+        run: zig build -Doptimize=ReleaseFast
+
+      - name: Run performance benchmark
+        run: zig build benchmark
+
+      - name: Run SQLite comparison benchmark
+        run: zig build sqlite-benchmark
+
+      - name: Run graph benchmark
+        run: zig build graph-benchmark -- --quick
+
+      - name: Upload results
+        uses: actions/upload-artifact@v4
+        with:
+          name: benchmark-results
+          path: |
+            zig-out/
+            *.log
+          if-no-files-found: ignore

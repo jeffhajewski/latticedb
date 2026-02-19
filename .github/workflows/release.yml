@@ -20,7 +20,7 @@ on:
         default: false
 
 env:
-  ZIG_VERSION: "0.13.0"
+  ZIG_VERSION: "0.15.2"
 
 jobs:
   # ============================================
@@ -37,6 +37,7 @@ jobs:
           - aarch64-linux-gnu
           - x86_64-macos
           - aarch64-macos
+          - x86_64-windows-gnu
 
     steps:
       - uses: actions/checkout@v4
@@ -56,6 +57,7 @@ jobs:
 
           # Copy to target directory
           cp zig-out/lib/liblattice.* dist/build/${{ matrix.target }}/lib/ || true
+          cp zig-out/lib/lattice.* dist/build/${{ matrix.target }}/lib/ || true
 
       - name: Build CLI
         run: |
@@ -165,6 +167,9 @@ jobs:
           - os: macos-14  # ARM64
             target: aarch64-macos
             python_platform: macosx_11_0_arm64
+          - os: windows-latest
+            target: x86_64-windows-gnu
+            python_platform: win_amd64
 
     steps:
       - uses: actions/checkout@v4
@@ -201,6 +206,40 @@ jobs:
           path: bindings/python/dist/*.whl
 
   # ============================================
+  # Smoke test wheels
+  # ============================================
+  smoke-test-wheels:
+    name: Smoke Test (${{ matrix.os }})
+    needs: build-wheels
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-linux-gnu
+          - os: macos-14
+            target: aarch64-macos
+
+    steps:
+      - name: Download wheel
+        uses: actions/download-artifact@v4
+        with:
+          name: wheel-${{ matrix.target }}
+          path: dist
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install and test
+        run: |
+          python -m venv test-env
+          source test-env/bin/activate
+          pip install dist/*.whl
+          python -c "from latticedb import Database; print('Smoke test passed')"
+
+  # ============================================
   # Build source distribution
   # ============================================
   build-sdist:
@@ -234,7 +273,7 @@ jobs:
   # ============================================
   publish-pypi:
     name: Publish to PyPI
-    needs: [build-wheels, build-sdist, release-github]
+    needs: [build-wheels, build-sdist, smoke-test-wheels, release-github]
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_pypi)
 
@@ -268,41 +307,79 @@ jobs:
           packages-dir: dist/
 
   # ============================================
-  # Build npm package with prebuilt binaries
+  # Build and publish npm package
+  # Downloads all platform shared libraries and
+  # bundles them into a single package for koffi
   # ============================================
   build-npm:
-    name: Build npm Package (${{ matrix.os }})
+    name: Build npm Package
     needs: build-native
-    runs-on: ${{ matrix.os }}
-    strategy:
-      matrix:
-        include:
-          - os: macos-14  # ARM64
-            target: aarch64-macos
-          - os: macos-13  # Intel
-            target: x86_64-macos
-          - os: ubuntu-latest
-            target: x86_64-linux-gnu
+    runs-on: ubuntu-latest
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download native library
+      - name: Download Linux x86_64 library
         uses: actions/download-artifact@v4
         with:
-          name: native-${{ matrix.target }}
-          path: native-lib
+          name: native-x86_64-linux-gnu
+          path: native-x86_64-linux-gnu
+
+      - name: Download Linux aarch64 library
+        uses: actions/download-artifact@v4
+        with:
+          name: native-aarch64-linux-gnu
+          path: native-aarch64-linux-gnu
+
+      - name: Download macOS x86_64 library
+        uses: actions/download-artifact@v4
+        with:
+          name: native-x86_64-macos
+          path: native-x86_64-macos
+
+      - name: Download macOS aarch64 library
+        uses: actions/download-artifact@v4
+        with:
+          name: native-aarch64-macos
+          path: native-aarch64-macos
+
+      - name: Download Windows x86_64 library
+        uses: actions/download-artifact@v4
+        with:
+          name: native-x86_64-windows-gnu
+          path: native-x86_64-windows-gnu
+
+      - name: Copy shared libraries into package
+        run: |
+          PKG=bindings/typescript
+
+          # linux-x64
+          mkdir -p $PKG/lib/linux-x64
+          cp native-x86_64-linux-gnu/lib/liblattice.so $PKG/lib/linux-x64/ || true
+
+          # linux-arm64
+          mkdir -p $PKG/lib/linux-arm64
+          cp native-aarch64-linux-gnu/lib/liblattice.so $PKG/lib/linux-arm64/ || true
+
+          # darwin-x64
+          mkdir -p $PKG/lib/darwin-x64
+          cp native-x86_64-macos/lib/liblattice.dylib $PKG/lib/darwin-x64/ || true
+
+          # darwin-arm64
+          mkdir -p $PKG/lib/darwin-arm64
+          cp native-aarch64-macos/lib/liblattice.dylib $PKG/lib/darwin-arm64/ || true
+
+          # win32-x64
+          mkdir -p $PKG/lib/win32-x64
+          cp native-x86_64-windows-gnu/lib/lattice.dll $PKG/lib/win32-x64/ || true
+
+          echo "Bundled libraries:"
+          find $PKG/lib -type f | sort
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
           node-version: '20'
-
-      - name: Copy native library
-        run: |
-          mkdir -p zig-out/lib
-          cp native-lib/lib/* zig-out/lib/
-          ls -la zig-out/lib/
 
       - name: Install dependencies
         working-directory: bindings/typescript
@@ -312,26 +389,11 @@ jobs:
         working-directory: bindings/typescript
         run: npm run build
 
-      - name: Build native addon
-        working-directory: bindings/typescript
-        run: npm run build:native
-
-      - name: Run tests
-        working-directory: bindings/typescript
-        run: npm test
-
-      - name: Install prebuildify
-        run: npm install -g prebuildify
-
-      - name: Create prebuilt binary
-        working-directory: bindings/typescript
-        run: prebuildify --napi --strip
-
-      - name: Upload prebuilt
+      - name: Upload npm package
         uses: actions/upload-artifact@v4
         with:
-          name: npm-prebuild-${{ matrix.target }}
-          path: bindings/typescript/prebuilds
+          name: npm-package
+          path: bindings/typescript/
 
   # ============================================
   # Publish to npm
@@ -343,7 +405,11 @@ jobs:
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_npm)
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Download npm package
+        uses: actions/download-artifact@v4
+        with:
+          name: npm-package
+          path: bindings/typescript
 
       - name: Setup Node.js
         uses: actions/setup-node@v4
@@ -351,23 +417,8 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
-      - name: Download all prebuilds
-        uses: actions/download-artifact@v4
-        with:
-          pattern: npm-prebuild-*
-          path: bindings/typescript/prebuilds
-          merge-multiple: true
-
-      - name: List prebuilds
-        run: ls -laR bindings/typescript/prebuilds/
-
-      - name: Install dependencies
-        working-directory: bindings/typescript
-        run: npm ci --ignore-scripts
-
-      - name: Build TypeScript
-        working-directory: bindings/typescript
-        run: npm run build
+      - name: List bundled libraries
+        run: find bindings/typescript/lib -type f | sort || echo "No lib directory"
 
       - name: Publish to npm
         working-directory: bindings/typescript

@@ -31,13 +31,14 @@ jobs:
     name: Build Native Libraries
     runs-on: ubuntu-latest
     strategy:
+      fail-fast: false
       matrix:
         target:
           - x86_64-linux-gnu
           - aarch64-linux-gnu
           - x86_64-macos
           - aarch64-macos
-          - x86_64-windows-gnu
+          # TODO: Add x86_64-windows-gnu once vfs.zig/database.zig are ported from POSIX APIs
 
     steps:
       - uses: actions/checkout@v4
@@ -167,9 +168,7 @@ jobs:
           - os: macos-14  # ARM64
             target: aarch64-macos
             python_platform: macosx_11_0_arm64
-          - os: windows-latest
-            target: x86_64-windows-gnu
-            python_platform: win_amd64
+          # TODO: Add windows-latest / win_amd64 once Zig source compiles for Windows
 
     steps:
       - uses: actions/checkout@v4
@@ -343,11 +342,7 @@ jobs:
           name: native-aarch64-macos
           path: native-aarch64-macos
 
-      - name: Download Windows x86_64 library
-        uses: actions/download-artifact@v4
-        with:
-          name: native-x86_64-windows-gnu
-          path: native-x86_64-windows-gnu
+      # TODO: Download native-x86_64-windows-gnu once Windows build is supported
 
       - name: Copy shared libraries into package
         run: |
@@ -369,9 +364,7 @@ jobs:
           mkdir -p $PKG/lib/darwin-arm64
           cp native-aarch64-macos/lib/liblattice.dylib $PKG/lib/darwin-arm64/ || true
 
-          # win32-x64
-          mkdir -p $PKG/lib/win32-x64
-          cp native-x86_64-windows-gnu/lib/lattice.dll $PKG/lib/win32-x64/ || true
+          # TODO: win32-x64 once Windows build is supported
 
           echo "Bundled libraries:"
           find $PKG/lib -type f | sort

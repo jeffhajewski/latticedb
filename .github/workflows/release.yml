@@ -150,7 +150,7 @@ jobs:
   # Build Python wheels for each platform
   # ============================================
   build-wheels:
-    name: Build Wheel (${{ matrix.os }})
+    name: Build Wheel (${{ matrix.target }})
     needs: build-native
     runs-on: ${{ matrix.os }}
     strategy:
@@ -162,10 +162,10 @@ jobs:
           - os: ubuntu-latest
             target: aarch64-linux-gnu
             python_platform: manylinux_2_17_aarch64
-          - os: macos-13  # Intel
+          - os: ubuntu-latest
             target: x86_64-macos
             python_platform: macosx_10_9_x86_64
-          - os: macos-14  # ARM64
+          - os: ubuntu-latest
             target: aarch64-macos
             python_platform: macosx_11_0_arm64
           # TODO: Add windows-latest / win_amd64 once Zig source compiles for Windows

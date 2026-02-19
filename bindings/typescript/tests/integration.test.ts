@@ -9,10 +9,10 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { Database } from '../src/database';
-import { isNativeAvailable } from '../src/native';
+import { isLibraryAvailable } from '../src/ffi';
 
-// Skip all tests if native module is not available
-const describeIfNative = isNativeAvailable() ? describe : describe.skip;
+// Skip all tests if native library is not available
+const describeIfNative = isLibraryAvailable() ? describe : describe.skip;
 
 /**
  * Create a temporary database path for testing.

@@ -10,7 +10,11 @@ import {
   VectorSearchOptions,
   FtsSearchOptions,
 } from './types';
-import { getNative, NativeDatabase, NativeQueryResult } from './native';
+import {
+  getFFI,
+  LatticeFFI,
+  DatabaseHandle,
+} from './ffi';
 
 /**
  * Options for opening a database.
@@ -49,7 +53,8 @@ export interface DatabaseOptions {
 export class Database {
   private readonly path: string;
   private readonly options: DatabaseOptions;
-  private native: NativeDatabase | null = null;
+  private ffi: LatticeFFI | null = null;
+  private dbHandle: DatabaseHandle | null = null;
   private closed = false;
 
   /**
@@ -74,13 +79,12 @@ export class Database {
    * Open the database connection.
    */
   async open(): Promise<void> {
-    if (this.native !== null) {
+    if (this.dbHandle !== null) {
       return;
     }
 
-    const mod = getNative();
-    this.native = new mod.Database();
-    this.native.open(this.path, {
+    this.ffi = getFFI();
+    this.dbHandle = this.ffi.open(this.path, {
       create: this.options.create,
       readOnly: this.options.readOnly,
       cacheSizeMb: this.options.cacheSizeMb,
@@ -93,11 +97,11 @@ export class Database {
    * Close the database connection.
    */
   async close(): Promise<void> {
-    if (this.closed || this.native === null) {
+    if (this.closed || this.dbHandle === null || this.ffi === null) {
       return;
     }
-    this.native.close();
-    this.native = null;
+    this.ffi.close(this.dbHandle);
+    this.dbHandle = null;
     this.closed = true;
   }
 
@@ -109,8 +113,8 @@ export class Database {
    */
   async read<T>(fn: (txn: Transaction) => Promise<T>): Promise<T> {
     this.ensureOpen();
-    const nativeTxn = this.native!.begin(true);
-    const txn = new Transaction(nativeTxn, true);
+    const txnHandle = this.ffi!.begin(this.dbHandle!, true);
+    const txn = new Transaction(this.ffi!, txnHandle, true);
     try {
       const result = await fn(txn);
       return result;
@@ -130,8 +134,8 @@ export class Database {
       throw new Error('Cannot write to a read-only database');
     }
     this.ensureOpen();
-    const nativeTxn = this.native!.begin(false);
-    const txn = new Transaction(nativeTxn, false);
+    const txnHandle = this.ffi!.begin(this.dbHandle!, false);
+    const txn = new Transaction(this.ffi!, txnHandle, false);
     try {
       const result = await fn(txn);
       txn.commit();
@@ -154,11 +158,54 @@ export class Database {
     parameters?: Record<string, PropertyValue>
   ): Promise<QueryResult> {
     this.ensureOpen();
-    const result: NativeQueryResult = this.native!.query(cypher, parameters as Record<string, unknown>);
-    return {
-      columns: result.columns,
-      rows: result.rows as Record<string, PropertyValue>[],
-    };
+    const ffi = this.ffi!;
+
+    // Prepare query
+    const query = ffi.queryPrepare(this.dbHandle!, cypher);
+    try {
+      // Bind parameters
+      if (parameters) {
+        for (const [name, value] of Object.entries(parameters)) {
+          if (value instanceof Float32Array) {
+            ffi.queryBindVector(query, name, value);
+          } else {
+            ffi.queryBind(query, name, value);
+          }
+        }
+      }
+
+      // Execute within an auto-created read transaction
+      const txnHandle = ffi.begin(this.dbHandle!, true);
+      try {
+        const result = ffi.queryExecute(query, txnHandle);
+        try {
+          // Read columns
+          const columnCount = ffi.resultColumnCount(result);
+          const columns: string[] = [];
+          for (let i = 0; i < columnCount; i++) {
+            columns.push(ffi.resultColumnName(result, i));
+          }
+
+          // Read rows
+          const rows: Record<string, PropertyValue>[] = [];
+          while (ffi.resultNext(result)) {
+            const row: Record<string, PropertyValue> = {};
+            for (let i = 0; i < columnCount; i++) {
+              row[columns[i]!] = ffi.resultGet(result, i) as PropertyValue;
+            }
+            rows.push(row);
+          }
+
+          return { columns, rows };
+        } finally {
+          ffi.resultFree(result);
+        }
+      } finally {
+        ffi.rollback(txnHandle);
+      }
+    } finally {
+      ffi.queryFree(query);
+    }
   }
 
   /**
@@ -173,14 +220,22 @@ export class Database {
     options?: VectorSearchOptions
   ): Promise<VectorSearchResult[]> {
     this.ensureOpen();
-    const results = this.native!.vectorSearch(vector, {
-      k: options?.k ?? 10,
-      efSearch: options?.efSearch ?? 0,
-    });
-    return results.map((r) => ({
-      nodeId: r.nodeId,
-      distance: r.distance,
-    }));
+    const ffi = this.ffi!;
+    const k = options?.k ?? 10;
+    const efSearch = options?.efSearch ?? 0;
+
+    const resultHandle = ffi.vectorSearch(this.dbHandle!, vector, k, efSearch);
+    try {
+      const count = ffi.vectorResultCount(resultHandle);
+      const results: VectorSearchResult[] = [];
+      for (let i = 0; i < count; i++) {
+        const r = ffi.vectorResultGet(resultHandle, i);
+        results.push({ nodeId: r.nodeId, distance: r.distance });
+      }
+      return results;
+    } finally {
+      ffi.vectorResultFree(resultHandle);
+    }
   }
 
   /**
@@ -195,13 +250,20 @@ export class Database {
     options?: FtsSearchOptions
   ): Promise<Array<{ nodeId: bigint; score: number }>> {
     this.ensureOpen();
-    const results = this.native!.ftsSearch(query, {
-      limit: options?.limit ?? 10,
-    });
-    return results.map((r) => ({
-      nodeId: r.nodeId,
-      score: r.score,
-    }));
+    const ffi = this.ffi!;
+    const limit = options?.limit ?? 10;
+
+    const resultHandle = ffi.ftsSearch(this.dbHandle!, query, limit);
+    try {
+      const count = ffi.ftsResultCount(resultHandle);
+      const results: Array<{ nodeId: bigint; score: number }> = [];
+      for (let i = 0; i < count; i++) {
+        results.push(ffi.ftsResultGet(resultHandle, i));
+      }
+      return results;
+    } finally {
+      ffi.ftsResultFree(resultHandle);
+    }
   }
 
   /**
@@ -216,15 +278,22 @@ export class Database {
     options?: FtsSearchOptions & { maxDistance?: number; minTermLength?: number }
   ): Promise<Array<{ nodeId: bigint; score: number }>> {
     this.ensureOpen();
-    const results = this.native!.ftsSearchFuzzy(query, {
-      limit: options?.limit ?? 10,
-      maxDistance: options?.maxDistance ?? 0,
-      minTermLength: options?.minTermLength ?? 0,
-    });
-    return results.map((r) => ({
-      nodeId: r.nodeId,
-      score: r.score,
-    }));
+    const ffi = this.ffi!;
+    const limit = options?.limit ?? 10;
+    const maxDistance = options?.maxDistance ?? 0;
+    const minTermLength = options?.minTermLength ?? 0;
+
+    const resultHandle = ffi.ftsSearchFuzzy(this.dbHandle!, query, limit, maxDistance, minTermLength);
+    try {
+      const count = ffi.ftsResultCount(resultHandle);
+      const results: Array<{ nodeId: bigint; score: number }> = [];
+      for (let i = 0; i < count; i++) {
+        results.push(ffi.ftsResultGet(resultHandle, i));
+      }
+      return results;
+    } finally {
+      ffi.ftsResultFree(resultHandle);
+    }
   }
 
   /**
@@ -234,7 +303,7 @@ export class Database {
    */
   async cacheClear(): Promise<void> {
     this.ensureOpen();
-    this.native!.cacheClear();
+    this.ffi!.cacheClear(this.dbHandle!);
   }
 
   /**
@@ -244,7 +313,7 @@ export class Database {
    */
   async cacheStats(): Promise<{ entries: number; hits: number; misses: number }> {
     this.ensureOpen();
-    return this.native!.cacheStats();
+    return this.ffi!.cacheStats(this.dbHandle!);
   }
 
   /**
@@ -258,14 +327,14 @@ export class Database {
    * Check if the database is open.
    */
   isOpen(): boolean {
-    return this.native !== null && !this.closed;
+    return this.dbHandle !== null && !this.closed;
   }
 
   /**
    * Ensure the database is open.
    */
   private ensureOpen(): void {
-    if (this.native === null || this.closed) {
+    if (this.dbHandle === null || this.closed) {
       throw new Error('Database is not open');
     }
   }

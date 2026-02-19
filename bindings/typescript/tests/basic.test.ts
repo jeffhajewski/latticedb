@@ -7,7 +7,7 @@
 
 import { Value, Node, Edge, QueryResult, VectorSearchResult } from '../src/types';
 import { Database } from '../src/database';
-import { isNativeAvailable } from '../src/native';
+import { isLibraryAvailable } from '../src/ffi';
 
 describe('Value', () => {
   test('null value', () => {
@@ -117,10 +117,10 @@ describe('Database', () => {
   });
 });
 
-describe('Native module', () => {
-  test('check native availability', () => {
+describe('Library availability', () => {
+  test('check library availability', () => {
     // This test just verifies the function works
-    const available = isNativeAvailable();
+    const available = isLibraryAvailable();
     expect(typeof available).toBe('boolean');
   });
 });

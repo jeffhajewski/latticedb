@@ -253,6 +253,9 @@ export class LatticeFFI {
     nodes: Array<{ label: string; vector: Float32Array }>
   ): bigint[] {
     const count = nodes.length;
+    if (count === 0) {
+      return [];
+    }
 
     // Build C array of NodeWithVector structs
     const specs = nodes.map((n) => ({
@@ -287,6 +290,144 @@ export class LatticeFFI {
       ids.push(nodeIdsOut.readBigUInt64LE(i * 8));
     }
     return ids;
+  }
+
+  // ============================================================
+  // Property operations
+  // ============================================================
+
+  /**
+   * Set a property on a node.
+   */
+  setProperty(
+    txn: TransactionHandle,
+    nodeId: bigint,
+    key: string,
+    value: unknown
+  ): void {
+    const latticeValue = this.jsToLatticeValue(value);
+    const err = this.bindings.lattice_node_set_property(txn, nodeId, key, latticeValue);
+    this.checkError(err);
+  }
+
+  /**
+   * Get a property from a node.
+   */
+  getProperty(
+    txn: TransactionHandle,
+    nodeId: bigint,
+    key: string
+  ): unknown {
+    const valueOut = this.makeEmptyValue();
+    const err = this.bindings.lattice_node_get_property(txn, nodeId, key, valueOut);
+    this.checkError(err);
+    return this.latticeValueToJs(valueOut);
+  }
+
+  /**
+   * Get a value from a result set column.
+   */
+  resultGet(result: ResultHandle, index: number): unknown {
+    const valueOut = this.makeEmptyValue();
+    const err = this.bindings.lattice_result_get(result, index, valueOut);
+    this.checkError(err);
+    return this.latticeValueToJs(valueOut);
+  }
+
+  /**
+   * Bind a parameter to a query.
+   */
+  queryBind(query: QueryHandle, name: string, value: unknown): void {
+    const latticeValue = this.jsToLatticeValue(value);
+    const err = this.bindings.lattice_query_bind(query, name, latticeValue);
+    this.checkError(err);
+  }
+
+  /**
+   * Create an empty LatticeValue for use as an out parameter.
+   * koffi needs all union fields present to decode output properly.
+   */
+  private makeEmptyValue(): Record<string, unknown> {
+    return {
+      type: 0,
+      data: {
+        bool_val: false,
+        int_val: BigInt(0),
+        float_val: 0.0,
+        string_val: { ptr: null, len: 0 },
+        bytes_val: { ptr: null, len: 0 },
+        vector_val: { ptr: null, dimensions: 0 },
+      },
+    };
+  }
+
+  /**
+   * Convert a JS value to a LatticeValue struct for FFI.
+   * koffi unions require an object with a single property naming the active variant.
+   */
+  private jsToLatticeValue(value: unknown): Record<string, unknown> {
+    if (value === null || value === undefined) {
+      return { type: LatticeValueType.Null, data: { int_val: 0 } };
+    }
+    if (typeof value === 'boolean') {
+      return { type: LatticeValueType.Bool, data: { bool_val: value } };
+    }
+    if (typeof value === 'number') {
+      if (Number.isInteger(value)) {
+        return { type: LatticeValueType.Int, data: { int_val: value } };
+      }
+      return { type: LatticeValueType.Float, data: { float_val: value } };
+    }
+    if (typeof value === 'bigint') {
+      return { type: LatticeValueType.Int, data: { int_val: Number(value) } };
+    }
+    if (typeof value === 'string') {
+      const buf = Buffer.from(value, 'utf8');
+      return { type: LatticeValueType.String, data: { string_val: { ptr: buf, len: buf.length } } };
+    }
+    if (value instanceof Float32Array) {
+      return { type: LatticeValueType.Vector, data: { vector_val: { ptr: value, dimensions: value.length } } };
+    }
+    if (value instanceof Uint8Array) {
+      return { type: LatticeValueType.Bytes, data: { bytes_val: { ptr: value, len: value.length } } };
+    }
+    // Default: convert to string
+    const str = String(value);
+    const strBuf = Buffer.from(str, 'utf8');
+    return { type: LatticeValueType.String, data: { string_val: { ptr: strBuf, len: strBuf.length } } };
+  }
+
+  /**
+   * Convert a LatticeValue struct from FFI to a JS value.
+   */
+  private latticeValueToJs(val: Record<string, unknown>): unknown {
+    const type = val.type as number;
+    const data = val.data as Record<string, unknown>;
+
+    switch (type) {
+      case LatticeValueType.Null:
+        return null;
+      case LatticeValueType.Bool:
+        return data.bool_val as boolean;
+      case LatticeValueType.Int: {
+        // koffi returns int64 as BigInt; preserve BigInt for consistency
+        const iv = data.int_val;
+        return typeof iv === 'bigint' ? iv : BigInt(iv as number);
+      }
+      case LatticeValueType.Float:
+        return data.float_val as number;
+      case LatticeValueType.String: {
+        const sv = data.string_val as { ptr: unknown; len: number | bigint };
+        if (!sv.ptr) return null;
+        // koffi may decode const char* directly as a JS string
+        if (typeof sv.ptr === 'string') return sv.ptr;
+        const len = Number(sv.len);
+        if (len === 0) return '';
+        return koffi.decode(sv.ptr, 'char', len) as string;
+      }
+      default:
+        return null;
+    }
   }
 
   // ============================================================

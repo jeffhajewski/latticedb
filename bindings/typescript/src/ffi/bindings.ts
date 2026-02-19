@@ -298,6 +298,19 @@ export interface LatticeBindings {
 let _bindings: LatticeBindings | null = null;
 
 /**
+ * Try to bind a function, returning a throwing stub if not found.
+ * This allows graceful handling of functions not yet in the shared library.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function tryFunc(lib: ReturnType<typeof getLibrary>, name: string, ret: string, args: unknown[]): any {
+  try {
+    return lib.func(name, ret, args as string[]);
+  } catch {
+    return () => { throw new Error(`Function '${name}' is not available in the shared library`); };
+  }
+}
+
+/**
  * Create the FFI bindings by loading functions from the library.
  */
 function createBindings(): LatticeBindings {
@@ -427,7 +440,7 @@ function createBindings(): LatticeBindings {
       'uint32', // limit
       koffi.out(FtsResultPtrPtr), // result_out
     ]),
-    lattice_fts_search_fuzzy: lib.func('lattice_fts_search_fuzzy', 'int', [
+    lattice_fts_search_fuzzy: tryFunc(lib, 'lattice_fts_search_fuzzy', 'int', [
       DatabasePtr,
       'str', // query
       'uintptr_t', // query_len (size_t)
@@ -535,30 +548,30 @@ function createBindings(): LatticeBindings {
     ]),
     lattice_result_free: lib.func('lattice_result_free', 'void', [ResultPtr]),
 
-    // Embedding operations
-    lattice_hash_embed: lib.func('lattice_hash_embed', 'int', [
+    // Embedding operations (optional - may not be in all builds)
+    lattice_hash_embed: tryFunc(lib, 'lattice_hash_embed', 'int', [
       'str', // text
       'uintptr_t', // text_len (size_t)
       'uint16', // dimensions
       koffi.out(koffi.pointer(koffi.pointer('float'))), // vector_out
       koffi.out(koffi.pointer('uint32')), // dims_out
     ]),
-    lattice_hash_embed_free: lib.func('lattice_hash_embed_free', 'void', [
+    lattice_hash_embed_free: tryFunc(lib, 'lattice_hash_embed_free', 'void', [
       koffi.pointer('float'), // vector
       'uint32', // dimensions
     ]),
-    lattice_embedding_client_create: lib.func('lattice_embedding_client_create', 'int', [
+    lattice_embedding_client_create: tryFunc(lib, 'lattice_embedding_client_create', 'int', [
       EmbeddingConfigPtr, // config
       koffi.out(EmbeddingClientPtrPtr), // client_out
     ]),
-    lattice_embedding_client_embed: lib.func('lattice_embedding_client_embed', 'int', [
+    lattice_embedding_client_embed: tryFunc(lib, 'lattice_embedding_client_embed', 'int', [
       EmbeddingClientPtr, // client
       'str', // text
       'uintptr_t', // text_len (size_t)
       koffi.out(koffi.pointer(koffi.pointer('float'))), // vector_out
       koffi.out(koffi.pointer('uint32')), // dims_out
     ]),
-    lattice_embedding_client_free: lib.func('lattice_embedding_client_free', 'void', [
+    lattice_embedding_client_free: tryFunc(lib, 'lattice_embedding_client_free', 'void', [
       EmbeddingClientPtr, // client
     ]),
 

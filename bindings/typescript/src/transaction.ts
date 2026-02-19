@@ -9,7 +9,10 @@ import {
   CreateNodeOptions,
   CreateEdgeOptions,
 } from './types';
-import { NativeTransaction } from './native';
+import {
+  LatticeFFI,
+  TransactionHandle,
+} from './ffi';
 
 /**
  * A database transaction.
@@ -18,7 +21,8 @@ import { NativeTransaction } from './native';
  * Use `Database.read()` or `Database.write()` to create transactions.
  */
 export class Transaction {
-  private native: NativeTransaction | null;
+  private ffi: LatticeFFI;
+  private txnHandle: TransactionHandle | null;
   private readonly readOnly: boolean;
   private committed = false;
   private rolledBack = false;
@@ -27,8 +31,9 @@ export class Transaction {
    * Create a new transaction wrapper.
    * @internal
    */
-  constructor(native: NativeTransaction, readOnly: boolean) {
-    this.native = native;
+  constructor(ffi: LatticeFFI, txnHandle: TransactionHandle, readOnly: boolean) {
+    this.ffi = ffi;
+    this.txnHandle = txnHandle;
     this.readOnly = readOnly;
   }
 
@@ -42,11 +47,11 @@ export class Transaction {
     if (this.rolledBack) {
       throw new Error('Transaction already rolled back');
     }
-    if (this.native === null) {
+    if (this.txnHandle === null) {
       throw new Error('Transaction closed');
     }
-    this.native.commit();
-    this.native = null;
+    this.ffi.commit(this.txnHandle);
+    this.txnHandle = null;
     this.committed = true;
   }
 
@@ -57,11 +62,11 @@ export class Transaction {
     if (this.committed) {
       throw new Error('Transaction already committed');
     }
-    if (this.rolledBack || this.native === null) {
+    if (this.rolledBack || this.txnHandle === null) {
       return;
     }
-    this.native.rollback();
-    this.native = null;
+    this.ffi.rollback(this.txnHandle);
+    this.txnHandle = null;
     this.rolledBack = true;
   }
 
@@ -82,11 +87,11 @@ export class Transaction {
     }
 
     const firstLabel = labels[0] ?? '';
-    const nodeId = this.native!.createNode(firstLabel);
+    const nodeId = this.ffi.createNode(this.txnHandle!, firstLabel);
 
     // Set properties
     for (const [key, value] of Object.entries(properties)) {
-      this.native!.setProperty(nodeId, key, value);
+      this.ffi.setProperty(this.txnHandle!, nodeId, key, value);
     }
 
     return {
@@ -103,7 +108,7 @@ export class Transaction {
    */
   async deleteNode(nodeId: bigint): Promise<void> {
     this.ensureWritable();
-    this.native!.deleteNode(nodeId);
+    this.ffi.deleteNode(this.txnHandle!, nodeId);
   }
 
   /**
@@ -114,7 +119,7 @@ export class Transaction {
    */
   async nodeExists(nodeId: bigint): Promise<boolean> {
     this.ensureActive();
-    return this.native!.nodeExists(nodeId);
+    return this.ffi.nodeExists(this.txnHandle!, nodeId);
   }
 
   /**
@@ -129,11 +134,11 @@ export class Transaction {
   async getNode(nodeId: bigint): Promise<Node | null> {
     this.ensureActive();
 
-    if (!this.native!.nodeExists(nodeId)) {
+    if (!this.ffi.nodeExists(this.txnHandle!, nodeId)) {
       return null;
     }
 
-    const labels = this.native!.getLabels(nodeId) ?? [];
+    const labels = this.ffi.getNodeLabels(this.txnHandle!, nodeId);
 
     return {
       id: nodeId,
@@ -155,7 +160,7 @@ export class Transaction {
     value: PropertyValue
   ): Promise<void> {
     this.ensureWritable();
-    this.native!.setProperty(nodeId, key, value);
+    this.ffi.setProperty(this.txnHandle!, nodeId, key, value);
   }
 
   /**
@@ -167,7 +172,7 @@ export class Transaction {
    */
   async getProperty(nodeId: bigint, key: string): Promise<PropertyValue> {
     this.ensureActive();
-    return this.native!.getProperty(nodeId, key) as PropertyValue;
+    return this.ffi.getProperty(this.txnHandle!, nodeId, key) as PropertyValue;
   }
 
   /**
@@ -183,7 +188,7 @@ export class Transaction {
     vector: Float32Array
   ): Promise<void> {
     this.ensureWritable();
-    this.native!.setVector(nodeId, key, vector);
+    this.ffi.setVector(this.txnHandle!, nodeId, key, vector);
   }
 
   /**
@@ -199,7 +204,7 @@ export class Transaction {
   ): Promise<bigint[]> {
     this.ensureWritable();
     const nodes = vectors.map((v) => ({ label, vector: v }));
-    return this.native!.batchInsert(nodes);
+    return this.ffi.batchInsert(this.txnHandle!, nodes);
   }
 
   /**
@@ -210,7 +215,7 @@ export class Transaction {
    */
   async ftsIndex(nodeId: bigint, text: string): Promise<void> {
     this.ensureWritable();
-    this.native!.ftsIndex(nodeId, text);
+    this.ffi.ftsIndex(this.txnHandle!, nodeId, text);
   }
 
   /**
@@ -234,7 +239,7 @@ export class Transaction {
       throw new Error('Edge properties are not yet supported');
     }
 
-    const edgeId = this.native!.createEdge(sourceId, targetId, edgeType);
+    const edgeId = this.ffi.createEdge(this.txnHandle!, sourceId, targetId, edgeType);
 
     return {
       id: edgeId,
@@ -258,7 +263,7 @@ export class Transaction {
     edgeType: string
   ): Promise<void> {
     this.ensureWritable();
-    this.native!.deleteEdge(sourceId, targetId, edgeType);
+    this.ffi.deleteEdge(this.txnHandle!, sourceId, targetId, edgeType);
   }
 
   /**
@@ -269,13 +274,23 @@ export class Transaction {
    */
   async getOutgoingEdges(nodeId: bigint): Promise<Edge[]> {
     this.ensureActive();
-    const edges = this.native!.getOutgoingEdges(nodeId);
-    return edges.map((e) => ({
-      sourceId: e.sourceId,
-      targetId: e.targetId,
-      type: e.type,
-      properties: {},
-    }));
+    const resultHandle = this.ffi.getOutgoingEdges(this.txnHandle!, nodeId);
+    try {
+      const count = this.ffi.edgeResultCount(resultHandle);
+      const edges: Edge[] = [];
+      for (let i = 0; i < count; i++) {
+        const e = this.ffi.edgeResultGet(resultHandle, i);
+        edges.push({
+          sourceId: e.source,
+          targetId: e.target,
+          type: e.edgeType,
+          properties: {},
+        });
+      }
+      return edges;
+    } finally {
+      this.ffi.edgeResultFree(resultHandle);
+    }
   }
 
   /**
@@ -286,13 +301,23 @@ export class Transaction {
    */
   async getIncomingEdges(nodeId: bigint): Promise<Edge[]> {
     this.ensureActive();
-    const edges = this.native!.getIncomingEdges(nodeId);
-    return edges.map((e) => ({
-      sourceId: e.sourceId,
-      targetId: e.targetId,
-      type: e.type,
-      properties: {},
-    }));
+    const resultHandle = this.ffi.getIncomingEdges(this.txnHandle!, nodeId);
+    try {
+      const count = this.ffi.edgeResultCount(resultHandle);
+      const edges: Edge[] = [];
+      for (let i = 0; i < count; i++) {
+        const e = this.ffi.edgeResultGet(resultHandle, i);
+        edges.push({
+          sourceId: e.source,
+          targetId: e.target,
+          type: e.edgeType,
+          properties: {},
+        });
+      }
+      return edges;
+    } finally {
+      this.ffi.edgeResultFree(resultHandle);
+    }
   }
 
   /**
@@ -306,7 +331,7 @@ export class Transaction {
    * Check if the transaction is still active.
    */
   isActive(): boolean {
-    return !this.committed && !this.rolledBack && this.native !== null;
+    return !this.committed && !this.rolledBack && this.txnHandle !== null;
   }
 
   /**

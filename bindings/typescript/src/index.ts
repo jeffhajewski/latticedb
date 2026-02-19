@@ -43,15 +43,15 @@ export {
   EmbeddingApiFormat,
   EmbeddingConfig,
 } from './types';
-export { isNativeAvailable } from './native';
+export { isLibraryAvailable } from './ffi';
 
 /**
  * Get the library version.
  */
 export function version(): string {
   try {
-    const { getNative } = require('./native');
-    return getNative().version();
+    const { getFFI } = require('./ffi');
+    return getFFI().version();
   } catch {
     return '0.1.0';
   }

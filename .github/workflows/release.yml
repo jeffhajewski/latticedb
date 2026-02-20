@@ -196,7 +196,13 @@ jobs:
       - name: Build wheel
         run: |
           cd bindings/python
-          python -m build --wheel -C--plat-name=${{ matrix.python_platform }}
+          python -m build --wheel
+
+      - name: Retag wheel for platform
+        run: |
+          cd bindings/python
+          wheel tags --platform-tag=${{ matrix.python_platform }} --remove dist/*.whl
+          ls -la dist/
 
       - name: Upload wheel
         uses: actions/upload-artifact@v4
@@ -397,6 +403,9 @@ jobs:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.publish_npm)
 
+    permissions:
+      id-token: write  # Required for npm provenance/OIDC publishing
+
     steps:
       - name: Download npm package
         uses: actions/download-artifact@v4
@@ -419,6 +428,4 @@ jobs:
 
       - name: Publish to npm
         working-directory: bindings/typescript
-        run: npm publish --access public
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: npm publish --access public --provenance

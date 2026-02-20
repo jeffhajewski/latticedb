@@ -6,7 +6,6 @@
 
 import koffi from 'koffi';
 import { getBindings, LatticeBindings } from './bindings';
-import { isLibraryAvailable, getLibraryPath } from './library';
 import {
   LatticeErrorCode,
   LatticeTxnMode,

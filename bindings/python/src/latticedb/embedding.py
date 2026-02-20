@@ -14,7 +14,6 @@ import numpy as np
 
 from latticedb._bindings import (
     EmbeddingConfig,
-    LatticeEmbeddingClient,
     check_error,
     get_lib,
 )

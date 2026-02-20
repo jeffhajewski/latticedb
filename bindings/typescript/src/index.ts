@@ -50,9 +50,10 @@ export { isLibraryAvailable } from './ffi';
  */
 export function version(): string {
   try {
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
     const { getFFI } = require('./ffi');
     return getFFI().version();
   } catch {
-    return '0.1.0';
+    return '0.2.1';
   }
 }

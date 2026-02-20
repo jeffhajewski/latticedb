@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
 from latticedb._bindings import (
     LATTICE_ERROR_NOT_FOUND,
-    LATTICE_OK,
     LATTICE_TXN_READ_ONLY,
     LATTICE_TXN_READ_WRITE,
     LatticeNodeId,

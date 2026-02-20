@@ -14,10 +14,8 @@ if TYPE_CHECKING:
 from latticedb._bindings import (
     LATTICE_TXN_READ_ONLY,
     LATTICE_VALUE_NULL,
-    LatticeFtsResult,
     LatticeNodeId,
     LatticeValue,
-    LatticeVectorResult,
     OpenOptions,
     check_error,
     get_lib,
@@ -25,7 +23,7 @@ from latticedb._bindings import (
     value_to_python,
 )
 from latticedb.transaction import Transaction
-from latticedb.types import Node, QueryResult, VectorSearchResult, FtsSearchResult
+from latticedb.types import QueryResult, VectorSearchResult, FtsSearchResult
 
 
 def _is_numpy_array(value: Any) -> bool:

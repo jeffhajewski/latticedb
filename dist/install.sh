@@ -143,26 +143,30 @@ main() {
         error "Binary not found in archive"
     fi
 
-    # Optionally install library
+    # Install shared library (needed by Python/TypeScript bindings)
     if [ -d "$EXTRACT_DIR/lib" ]; then
-        LIB_DIR="${LATTICE_LIB_DIR:-/usr/local/lib}"
-        if [ -w "$LIB_DIR" ]; then
-            cp "$EXTRACT_DIR/lib/"* "$LIB_DIR/" 2>/dev/null || true
-            info "Libraries installed to $LIB_DIR"
+        LIB_DIR="${LATTICE_LIB_DIR:-}"
+        if [ -z "$LIB_DIR" ]; then
+            if [ -w "/usr/local/lib" ]; then
+                LIB_DIR="/usr/local/lib"
+            else
+                LIB_DIR="$HOME/.local/lib"
+                mkdir -p "$LIB_DIR"
+            fi
         fi
+        cp "$EXTRACT_DIR/lib/"* "$LIB_DIR/" 2>/dev/null || true
+        info "Libraries installed to $LIB_DIR"
     fi
 
     # Verify installation
     echo ""
     if [ -x "$INSTALL_DIR/lattice" ]; then
-        info "LatticeDB installed successfully!"
+        info "LatticeDB v$VERSION installed successfully!"
         echo ""
 
         # Check if in PATH
-        if command_exists lattice; then
-            "$INSTALL_DIR/lattice" --version 2>/dev/null || echo "  lattice CLI ready"
-        else
-            warn "$INSTALL_DIR is not in your PATH"
+        if ! command_exists lattice || [ "$(command -v lattice)" != "$INSTALL_DIR/lattice" ]; then
+            warn "$INSTALL_DIR is not in your PATH (or an older version shadows it)"
             echo ""
             echo "Add to your shell config:"
             echo "  export PATH=\"$INSTALL_DIR:\$PATH\""

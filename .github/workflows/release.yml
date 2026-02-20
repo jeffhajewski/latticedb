@@ -410,6 +410,10 @@ jobs:
           node-version: '20'
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Install dependencies
+        working-directory: bindings/typescript
+        run: npm ci --ignore-scripts
+
       - name: List bundled libraries
         run: find bindings/typescript/lib -type f | sort || echo "No lib directory"
 

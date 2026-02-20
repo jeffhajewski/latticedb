@@ -40,7 +40,7 @@ def version() -> str:
         return result.decode("utf-8")
     return __version__
 
-__version__ = "0.1.0"
+__version__ = "0.2.1"
 __all__ = [
     # Core classes
     "Database",

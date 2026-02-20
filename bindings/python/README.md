@@ -1,55 +1,61 @@
-# Lattice Python Bindings
+# LatticeDB Python Bindings
 
-Python bindings for [LatticeDB](https://github.com/latticedb/latticedb), an embedded knowledge graph database for AI/RAG applications.
+Python bindings for [LatticeDB](https://github.com/jeffhajewski/latticedb), an embedded knowledge graph database for AI/RAG applications.
 
 ## Installation
 
-### From Source
-
 ```bash
-# Build the native library first
-cd /path/to/latticedb
-zig build shared
-
-# Install the Python package
-cd bindings/python
-pip install -e .
+pip install latticedb
 ```
+
+The native shared library (`liblattice.dylib` / `liblattice.so`) must be available on the system. Install it via the [install script](https://github.com/jeffhajewski/latticedb#installation) or build from source with `zig build shared`.
 
 ## Quick Start
 
 ```python
-from lattice import Database
+import numpy as np
+from latticedb import Database
 
-# Create a new database
-with Database("mydb.ltdb", create=True) as db:
-    # Write transaction
+with Database("knowledge.db", create=True, enable_vector=True, vector_dimensions=4) as db:
+    # Create nodes, edges, and index content
     with db.write() as txn:
-        # Create nodes with properties
         alice = txn.create_node(
             labels=["Person"],
-            properties={"name": "Alice", "age": 30}
+            properties={"name": "Alice", "age": 30},
         )
         bob = txn.create_node(
             labels=["Person"],
-            properties={"name": "Bob", "age": 25}
+            properties={"name": "Bob", "age": 25},
         )
-
-        # Create relationships
         txn.create_edge(alice.id, bob.id, "KNOWS")
+
+        # Index text for full-text search
+        txn.fts_index(alice.id, "Alice works on machine learning research")
+        txn.fts_index(bob.id, "Bob studies deep learning and neural networks")
+
+        # Store vector embeddings
+        txn.set_vector(alice.id, "embedding", np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
+        txn.set_vector(bob.id, "embedding", np.array([0.0, 1.0, 0.0, 0.0], dtype=np.float32))
 
         txn.commit()
 
     # Query with Cypher
-    result = db.query("MATCH (n:Person) RETURN n.name")
+    result = db.query("MATCH (n:Person) WHERE n.age > 20 RETURN n.name, n.age")
     for row in result:
-        print(row)  # {'n': 'Alice'}, {'n': 'Bob'}
+        print(row)
 
-    # Query with parameters (safe from injection)
-    result = db.query(
-        "MATCH (n:Person) WHERE n.name = $name RETURN n",
-        parameters={"name": "Alice"}
-    )
+    # Vector similarity search
+    query_vec = np.array([0.9, 0.1, 0.0, 0.0], dtype=np.float32)
+    for r in db.vector_search(query_vec, k=2):
+        print(f"Node {r.node_id}: distance={r.distance:.4f}")
+
+    # Full-text search
+    for r in db.fts_search("machine learning"):
+        print(f"Node {r.node_id}: score={r.score:.4f}")
+
+    # Fuzzy search (typo-tolerant)
+    for r in db.fts_search_fuzzy("machin lerning"):
+        print(f"Node {r.node_id}: score={r.score:.4f}")
 ```
 
 ## API Reference
@@ -70,201 +76,167 @@ Database(
 
 #### Methods
 
-- `open()` - Open the database connection
-- `close()` - Close the database connection
+- `open()` / `close()` - Open/close the database (also works as context manager)
 - `read()` - Start a read-only transaction (context manager)
 - `write()` - Start a read-write transaction (context manager)
-- `query(cypher: str, parameters: dict = None)` - Execute a Cypher query with optional parameters
+- `query(cypher, parameters=None)` - Execute a Cypher query
+- `vector_search(vector, k=10, ef_search=64)` - k-NN vector search
+- `fts_search(query, limit=10)` - Full-text search
+- `fts_search_fuzzy(query, limit=10, max_distance=0, min_term_length=0)` - Fuzzy full-text search
+- `cache_clear()` - Clear the query cache
+- `cache_stats()` - Get cache hit/miss statistics
 
 ### Transaction
 
 #### Read Operations
 
-- `is_read_only` - True if read-only transaction
-- `is_active` - True if transaction is still active
-- `get_node(node_id: int)` - Get a node by ID, returns `Node` or `None`
-- `get_property(node_id: int, key: str)` - Get a property value, returns value or `None`
-- `node_exists(node_id: int)` - Check if a node exists, returns `True` or `False`
+- `get_node(node_id)` - Get a node by ID, returns `Node` or `None`
+- `node_exists(node_id)` - Check if a node exists
+- `get_property(node_id, key)` - Get a property value
+- `get_outgoing_edges(node_id)` - Get outgoing edges from a node
+- `get_incoming_edges(node_id)` - Get incoming edges to a node
+- `is_read_only` / `is_active` - Transaction state
 
 #### Write Operations
 
-- `create_node(labels: list[str], properties: dict = None)` - Create a node with labels and optional properties
-- `delete_node(node_id: int)` - Delete a node
-- `set_property(node_id: int, key: str, value)` - Set a property on a node
-- `set_vector(node_id: int, key: str, vector: np.ndarray)` - Set a vector embedding
-- `create_edge(source_id: int, target_id: int, edge_type: str)` - Create an edge
-- `delete_edge(source_id: int, target_id: int, edge_type: str)` - Delete an edge
-- `commit()` - Commit the transaction
-- `rollback()` - Rollback the transaction
+- `create_node(labels=[], properties=None)` - Create a node
+- `delete_node(node_id)` - Delete a node
+- `set_property(node_id, key, value)` - Set a property on a node
+- `set_vector(node_id, key, vector)` - Set a vector embedding
+- `batch_insert(label, vectors)` - Batch insert nodes with vectors (see below)
+- `fts_index(node_id, text)` - Index text for full-text search
+- `create_edge(source_id, target_id, edge_type)` - Create an edge
+- `delete_edge(source_id, target_id, edge_type)` - Delete an edge
+- `commit()` / `rollback()` - Commit or rollback the transaction
 
-### Querying
+### Batch Insert
 
-#### Basic Queries
-
-```python
-# Simple match
-result = db.query("MATCH (n:Person) RETURN n")
-
-# Return properties
-result = db.query("MATCH (n:Person) RETURN n.name")
-
-# With WHERE clause
-result = db.query("MATCH (n:Person) WHERE n.age > 25 RETURN n.name")
-```
-
-#### Data Mutation
-
-```python
-# Create nodes and relationships
-db.query("CREATE (a:Person {name: 'Alice'})-[:KNOWS]->(b:Person {name: 'Bob'})")
-
-# Update properties
-db.query("MATCH (n:Person {name: 'Alice'}) SET n.age = 31, n.city = 'NYC'")
-
-# Add labels
-db.query("MATCH (n:Person {name: 'Alice'}) SET n:Admin:Verified")
-
-# Remove properties and labels
-db.query("MATCH (n:Person {name: 'Alice'}) REMOVE n.city, n:Verified")
-
-# Delete nodes (DETACH removes connected edges)
-db.query("MATCH (n:Person {name: 'Bob'}) DETACH DELETE n")
-```
-
-#### Parameterized Queries
-
-Use parameters to safely pass values into queries:
-
-```python
-# String parameter
-result = db.query(
-    "MATCH (n:Person) WHERE n.name = $name RETURN n",
-    parameters={"name": "Alice"}
-)
-
-# Integer parameter
-result = db.query(
-    "MATCH (n:Person) WHERE n.age = $age RETURN n.name",
-    parameters={"age": 30}
-)
-
-# Multiple parameters
-result = db.query(
-    "MATCH (n:Person) WHERE n.name = $name AND n.age > $min_age RETURN n",
-    parameters={"name": "Alice", "min_age": 20}
-)
-
-# Vector parameter (requires numpy)
-import numpy as np
-query_vec = np.random.rand(384).astype(np.float32)
-result = db.query(
-    "MATCH (n:Document) WHERE n.embedding <=> $vec < 0.5 RETURN n",
-    parameters={"vec": query_vec}
-)
-```
-
-#### Working with Results
-
-```python
-result = db.query("MATCH (n:Person) RETURN n.name")
-
-# Get column names
-print(result.columns)  # ['n']
-
-# Iterate rows
-for row in result:
-    print(row)  # {'n': 'Alice'}
-
-# Get all rows as list
-rows = list(result)
-
-# Get row count
-print(len(result))
-```
-
-### Reading Node Data
-
-```python
-with db.read() as txn:
-    # Get a node by ID
-    node = txn.get_node(node_id)
-    if node:
-        print(f"ID: {node.id}")
-        print(f"Labels: {node.labels}")
-
-    # Get individual properties
-    name = txn.get_property(node_id, "name")
-    age = txn.get_property(node_id, "age")
-
-    # Returns None if property doesn't exist
-    unknown = txn.get_property(node_id, "nonexistent")  # None
-```
-
-### Vector Operations
-
-To use vector embeddings, enable vector storage when opening the database:
+Insert many nodes with vectors in a single efficient call:
 
 ```python
 import numpy as np
 
-with Database("mydb.ltdb", create=True, enable_vector=True, vector_dimensions=384) as db:
-    # Store vectors
+with Database("vectors.db", create=True, enable_vector=True, vector_dimensions=128) as db:
     with db.write() as txn:
-        node1 = txn.create_node(labels=["Document"])
-        txn.set_property(node1.id, "title", "Introduction to ML")
-        embedding1 = np.random.rand(384).astype(np.float32)
-        txn.set_vector(node1.id, "embedding", embedding1)
-
-        node2 = txn.create_node(labels=["Document"])
-        txn.set_property(node2.id, "title", "Deep Learning Guide")
-        embedding2 = np.random.rand(384).astype(np.float32)
-        txn.set_vector(node2.id, "embedding", embedding2)
-
+        vectors = np.random.rand(1000, 128).astype(np.float32)
+        node_ids = txn.batch_insert("Document", vectors)
+        print(f"Created {len(node_ids)} nodes")
         txn.commit()
-
-    # Search for similar vectors (HNSW approximate nearest neighbor)
-    query_vector = np.random.rand(384).astype(np.float32)
-    results = db.vector_search(query_vector, k=10, ef_search=64)
-
-    for result in results:
-        print(f"Node {result.node_id}: distance={result.distance:.4f}")
 ```
-
-#### Vector Search Parameters
-
-- `vector`: Query vector (numpy array of float32)
-- `k`: Number of nearest neighbors to return (default: 10)
-- `ef_search`: HNSW exploration factor - higher values are slower but more accurate (default: 64)
 
 ### Full-Text Search
 
-Index text content and search with BM25 scoring:
+#### Exact Search
 
 ```python
-with Database("mydb.ltdb", create=True) as db:
-    # Index documents
-    with db.write() as txn:
-        doc1 = txn.create_node(labels=["Document"])
-        txn.set_property(doc1.id, "title", "Introduction to ML")
-        txn.fts_index(doc1.id, "Machine learning is a subset of artificial intelligence")
-
-        doc2 = txn.create_node(labels=["Document"])
-        txn.set_property(doc2.id, "title", "Deep Learning Guide")
-        txn.fts_index(doc2.id, "Deep learning uses neural networks")
-
-        txn.commit()
-
-    # Search for documents
-    results = db.fts_search("machine learning", limit=10)
-
-    for result in results:
-        print(f"Node {result.node_id}: score={result.score:.4f}")
+results = db.fts_search("machine learning", limit=10)
+for r in results:
+    print(f"Node {r.node_id}: score={r.score:.4f}")
 ```
 
-#### FTS Search Parameters
+#### Fuzzy Search (Typo-Tolerant)
 
-- `query`: Search query text
-- `limit`: Maximum number of results to return (default: 10)
+```python
+# Finds "machine learning" even with typos
+results = db.fts_search_fuzzy("machne lerning", limit=10)
+
+# Control fuzzy matching sensitivity
+results = db.fts_search_fuzzy(
+    "machne",
+    limit=10,
+    max_distance=2,      # Max edit distance (default: 2)
+    min_term_length=4,   # Min term length for fuzzy matching (default: 4)
+)
+```
+
+### Embeddings
+
+LatticeDB includes a built-in hash embedding function and an HTTP client for external embedding services.
+
+#### Hash Embeddings (Built-in)
+
+Deterministic, no external service needed. Useful for testing or simple keyword-based similarity:
+
+```python
+from latticedb import hash_embed
+
+vec = hash_embed("hello world", dimensions=128)
+print(vec.shape)  # (128,)
+```
+
+#### HTTP Embedding Client
+
+Connect to Ollama, OpenAI, or compatible APIs:
+
+```python
+from latticedb import EmbeddingClient, EmbeddingApiFormat
+
+# Ollama (default)
+with EmbeddingClient("http://localhost:11434") as client:
+    vec = client.embed("hello world")
+
+# OpenAI-compatible API
+with EmbeddingClient(
+    "https://api.openai.com/v1",
+    model="text-embedding-3-small",
+    api_format=EmbeddingApiFormat.OPENAI,
+    api_key="sk-...",
+) as client:
+    vec = client.embed("hello world")
+```
+
+### Edge Traversal
+
+```python
+with db.read() as txn:
+    outgoing = txn.get_outgoing_edges(node_id)
+    for edge in outgoing:
+        print(f"{edge.source_id} --[{edge.edge_type}]--> {edge.target_id}")
+
+    incoming = txn.get_incoming_edges(node_id)
+    for edge in incoming:
+        print(f"{edge.source_id} --[{edge.edge_type}]--> {edge.target_id}")
+```
+
+### Cypher Queries
+
+```python
+# Pattern matching
+result = db.query("MATCH (n:Person) RETURN n.name")
+
+# With parameters
+result = db.query(
+    "MATCH (n:Person) WHERE n.name = $name RETURN n",
+    parameters={"name": "Alice"},
+)
+
+# Vector similarity in Cypher
+result = db.query(
+    "MATCH (n:Document) WHERE n.embedding <=> $vec < 0.5 RETURN n.title",
+    parameters={"vec": query_vector},
+)
+
+# Full-text search in Cypher
+result = db.query(
+    'MATCH (n:Document) WHERE n.content @@ "machine learning" RETURN n.title'
+)
+
+# Data mutation
+db.query("CREATE (n:Person {name: 'Charlie', age: 35})")
+db.query("MATCH (n:Person {name: 'Charlie'}) SET n.age = 36")
+db.query("MATCH (n:Person {name: 'Charlie'}) DETACH DELETE n")
+```
+
+### Query Cache
+
+```python
+# Get cache statistics
+stats = db.cache_stats()
+print(f"Entries: {stats['entries']}, Hits: {stats['hits']}, Misses: {stats['misses']}")
+
+# Clear the cache
+db.cache_clear()
+```
 
 ## Supported Property Types
 
@@ -277,13 +249,11 @@ with Database("mydb.ltdb", create=True) as db:
 
 ## Error Handling
 
-The library raises typed exceptions:
-
 ```python
-from lattice import LatticeError, LatticeNotFoundError, LatticeIOError
+from latticedb import LatticeError, LatticeNotFoundError, LatticeIOError
 
 try:
-    with Database("nonexistent.ltdb") as db:
+    with Database("nonexistent.db") as db:
         pass
 except LatticeNotFoundError:
     print("Database not found")
@@ -293,29 +263,12 @@ except LatticeError as e:
     print(f"Error: {e}")
 ```
 
-## Utilities
-
-```python
-from lattice import version, library_available
-
-# Check if the native library is available
-if library_available():
-    print("Library found")
-
-# Get the native library version
-print(f"Lattice version: {version()}")
-```
-
 ## Requirements
 
 - Python 3.9+
-- NumPy (optional, for vector operations)
+- NumPy (for vector operations)
 - The native LatticeDB library (`liblattice.dylib` / `liblattice.so`)
-
-## Building from Source
-
-See [CONTRIBUTING.md](../../CONTRIBUTING.md) for build instructions.
 
 ## License
 
-Same license as LatticeDB.
+MIT

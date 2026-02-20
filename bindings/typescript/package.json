@@ -1,6 +1,6 @@
 {
   "name": "@hajewski/latticedb",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "TypeScript bindings for Lattice embedded knowledge graph database",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

@@ -428,4 +428,4 @@ jobs:
 
       - name: Publish to npm
         working-directory: bindings/typescript
-        run: npm publish --access public --provenance
+        run: npm publish --ignore-scripts --access public --provenance

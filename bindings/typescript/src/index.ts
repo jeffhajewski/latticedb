@@ -43,6 +43,7 @@ export {
   EmbeddingApiFormat,
   EmbeddingConfig,
 } from './types';
+export { hashEmbed, EmbeddingClient } from './embedding';
 export { isLibraryAvailable } from './ffi';
 
 /**

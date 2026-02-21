@@ -211,10 +211,9 @@ LatticeDB includes a built-in hash embedding function and an HTTP client for ext
 Deterministic, no external service needed. Useful for testing or simple keyword-based similarity:
 
 ```typescript
-import { getFFI } from "@hajewski/latticedb/ffi";
+import { hashEmbed } from "@hajewski/latticedb";
 
-const ffi = getFFI();
-const vec = ffi.hashEmbed("hello world", 128);
+const vec = hashEmbed("hello world", 128);
 console.log(vec.length); // 128
 ```
 
@@ -223,26 +222,24 @@ console.log(vec.length); // 128
 Connect to Ollama, OpenAI, or compatible APIs:
 
 ```typescript
-import { getFFI, EmbeddingApiFormat } from "@hajewski/latticedb";
-
-const ffi = getFFI();
+import { EmbeddingClient, EmbeddingApiFormat } from "@hajewski/latticedb";
 
 // Ollama (default)
-const client = ffi.embeddingClientCreate({
+const client = new EmbeddingClient({
   endpoint: "http://localhost:11434",
 });
-const vec = ffi.embeddingClientEmbed(client, "hello world");
-ffi.embeddingClientFree(client);
+const vec = client.embed("hello world");
+client.close();
 
 // OpenAI-compatible API
-const openaiClient = ffi.embeddingClientCreate({
+const openaiClient = new EmbeddingClient({
   endpoint: "https://api.openai.com/v1",
   model: "text-embedding-3-small",
   apiFormat: EmbeddingApiFormat.OpenAI,
   apiKey: "sk-...",
 });
-const embedding = ffi.embeddingClientEmbed(openaiClient, "hello world");
-ffi.embeddingClientFree(openaiClient);
+const embedding = openaiClient.embed("hello world");
+openaiClient.close();
 ```
 
 ### Edge Traversal

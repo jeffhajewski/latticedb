@@ -1,0 +1,35 @@
+/* LatticeDB documentation theme overrides */
+
+:root {
+    --lattice-accent: #4a90d9;
+}
+
+/* Improve code block readability */
+pre code {
+    font-size: 0.9em;
+    line-height: 1.5;
+}
+
+/* Style tables consistently */
+table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 1em 0;
+}
+
+table th {
+    background-color: rgba(74, 144, 217, 0.1);
+    font-weight: 600;
+}
+
+table td, table th {
+    padding: 0.5em 0.75em;
+    border: 1px solid var(--table-border-color);
+}
+
+/* Highlight important notes */
+blockquote {
+    border-left: 4px solid var(--lattice-accent);
+    padding: 0.5em 1em;
+    margin: 1em 0;
+}

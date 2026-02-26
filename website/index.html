@@ -1,0 +1,553 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>LatticeDB - The Embedded Database for AI</title>
+<meta name="description" content="Single-file embedded database combining graph, vector search, and full-text search. Sub-millisecond performance. No server, no configuration.">
+<style>
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+  color: #1a1a1a;
+  background: #fff;
+  line-height: 1.6;
+  -webkit-font-smoothing: antialiased;
+}
+
+a { color: #4a90d9; text-decoration: none; }
+a:hover { text-decoration: underline; }
+
+.container { max-width: 960px; margin: 0 auto; padding: 0 24px; }
+
+/* Nav */
+nav {
+  border-bottom: 1px solid #e8e8e8;
+  padding: 16px 0;
+}
+nav .container {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.logo {
+  font-size: 20px;
+  font-weight: 700;
+  color: #1a1a1a;
+  letter-spacing: -0.5px;
+}
+.logo span { color: #4a90d9; }
+nav .links { display: flex; gap: 24px; }
+nav .links a { color: #555; font-size: 15px; }
+nav .links a:hover { color: #4a90d9; }
+
+/* Hero */
+.hero {
+  padding: 80px 0 60px;
+  text-align: center;
+}
+.hero h1 {
+  font-size: 40px;
+  font-weight: 700;
+  line-height: 1.2;
+  letter-spacing: -1px;
+  max-width: 640px;
+  margin: 0 auto 16px;
+}
+.hero .subhead {
+  font-size: 18px;
+  color: #555;
+  max-width: 560px;
+  margin: 0 auto 8px;
+}
+.hero .positioning {
+  font-size: 16px;
+  color: #888;
+  margin-bottom: 40px;
+  font-style: italic;
+}
+.install-tabs {
+  display: flex;
+  justify-content: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+.install-tabs button {
+  background: none;
+  border: 1px solid #ddd;
+  padding: 6px 16px;
+  border-radius: 6px;
+  font-size: 14px;
+  cursor: pointer;
+  color: #555;
+  font-family: inherit;
+}
+.install-tabs button.active {
+  background: #4a90d9;
+  color: #fff;
+  border-color: #4a90d9;
+}
+.install-cmd {
+  background: #f5f5f5;
+  border-radius: 8px;
+  padding: 16px 24px;
+  max-width: 600px;
+  margin: 0 auto;
+  font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
+  font-size: 14px;
+  text-align: left;
+  overflow-x: auto;
+}
+.install-cmd code { display: none; }
+.install-cmd code.active { display: block; }
+
+/* Code example */
+.code-example {
+  padding: 0 0 60px;
+}
+.code-example h2 {
+  text-align: center;
+  font-size: 24px;
+  margin-bottom: 8px;
+}
+.code-example .caption {
+  text-align: center;
+  color: #888;
+  font-size: 15px;
+  margin-bottom: 24px;
+}
+pre {
+  background: #1e1e1e;
+  color: #d4d4d4;
+  border-radius: 8px;
+  padding: 24px;
+  overflow-x: auto;
+  font-family: "SF Mono", "Fira Code", "Fira Mono", Menlo, Consolas, monospace;
+  font-size: 14px;
+  line-height: 1.5;
+}
+pre .kw { color: #569cd6; }
+pre .fn { color: #dcdcaa; }
+pre .str { color: #ce9178; }
+pre .op { color: #d4d4d4; }
+pre .cm { color: #6a9955; }
+pre .var { color: #9cdcfe; }
+
+/* Stats */
+.stats {
+  padding: 60px 0;
+  background: #f9f9f9;
+}
+.stats h2 {
+  text-align: center;
+  font-size: 24px;
+  margin-bottom: 32px;
+}
+.stats-grid {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 24px;
+}
+.stat-card {
+  text-align: center;
+  padding: 24px 16px;
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid #e8e8e8;
+}
+.stat-number {
+  font-size: 32px;
+  font-weight: 700;
+  color: #4a90d9;
+  line-height: 1.2;
+}
+.stat-unit {
+  font-size: 16px;
+  font-weight: 400;
+  color: #888;
+}
+.stat-label {
+  font-size: 14px;
+  color: #555;
+  margin-top: 8px;
+}
+
+/* Comparison */
+.comparison {
+  padding: 60px 0;
+}
+.comparison h2 {
+  text-align: center;
+  font-size: 24px;
+  margin-bottom: 32px;
+}
+.comparison h3 {
+  font-size: 18px;
+  margin-bottom: 16px;
+  color: #333;
+}
+.table-wrapper {
+  margin-bottom: 32px;
+  overflow-x: auto;
+}
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 14px;
+}
+th {
+  text-align: left;
+  padding: 10px 12px;
+  border-bottom: 2px solid #ddd;
+  font-weight: 600;
+  color: #333;
+}
+td {
+  padding: 10px 12px;
+  border-bottom: 1px solid #eee;
+  color: #555;
+}
+tr.highlight td {
+  font-weight: 600;
+  color: #1a1a1a;
+  background: #f0f6ff;
+}
+
+/* Features */
+.features {
+  padding: 60px 0;
+  background: #f9f9f9;
+}
+.features h2 {
+  text-align: center;
+  font-size: 24px;
+  margin-bottom: 32px;
+}
+.features-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+}
+.feature-card {
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid #e8e8e8;
+  padding: 24px;
+}
+.feature-card h3 {
+  font-size: 18px;
+  margin-bottom: 12px;
+  color: #1a1a1a;
+}
+.feature-card ul {
+  list-style: none;
+  padding: 0;
+}
+.feature-card li {
+  font-size: 14px;
+  color: #555;
+  padding: 4px 0;
+}
+.feature-card li::before {
+  content: "\2022";
+  color: #4a90d9;
+  font-weight: bold;
+  margin-right: 8px;
+}
+
+/* Quick start */
+.quickstart {
+  padding: 60px 0;
+}
+.quickstart h2 {
+  text-align: center;
+  font-size: 24px;
+  margin-bottom: 32px;
+}
+.quickstart h3 {
+  font-size: 18px;
+  margin-bottom: 12px;
+  color: #333;
+}
+.quickstart-block {
+  margin-bottom: 32px;
+}
+.quickstart pre {
+  margin-top: 12px;
+}
+
+/* Footer */
+footer {
+  border-top: 1px solid #e8e8e8;
+  padding: 32px 0;
+  text-align: center;
+  color: #888;
+  font-size: 14px;
+}
+footer a { color: #4a90d9; }
+footer .footer-links {
+  display: flex;
+  justify-content: center;
+  gap: 24px;
+  margin-bottom: 12px;
+}
+
+/* Responsive */
+@media (max-width: 768px) {
+  .hero { padding: 48px 0 40px; }
+  .hero h1 { font-size: 28px; }
+  .hero .subhead { font-size: 16px; }
+  .stats-grid { grid-template-columns: repeat(2, 1fr); }
+  .features-grid { grid-template-columns: 1fr; }
+  .stat-number { font-size: 24px; }
+  pre { font-size: 13px; padding: 16px; }
+}
+@media (max-width: 480px) {
+  .stats-grid { grid-template-columns: 1fr; }
+  .install-tabs { flex-wrap: wrap; }
+}
+</style>
+</head>
+<body>
+
+<!-- Nav -->
+<nav>
+  <div class="container">
+    <div class="logo">Lattice<span>DB</span></div>
+    <div class="links">
+      <a href="https://docs.latticedb.org">Docs</a>
+      <a href="https://github.com/jeffhajewski/latticedb">GitHub</a>
+    </div>
+  </div>
+</nav>
+
+<!-- Hero -->
+<section class="hero">
+  <div class="container">
+    <h1>The embedded database for AI that understands relationships.</h1>
+    <p class="subhead">One file. Graph + vector + full-text search. Sub-millisecond. No server, no configuration.</p>
+    <p class="positioning">Think SQLite, but for knowledge graphs.</p>
+
+    <div class="install-tabs">
+      <button class="active" onclick="showInstall('cli')">CLI</button>
+      <button onclick="showInstall('python')">Python</button>
+      <button onclick="showInstall('npm')">Node.js</button>
+    </div>
+    <div class="install-cmd">
+      <code id="install-cli" class="active">curl -fsSL https://raw.githubusercontent.com/jeffhajewski/latticedb/main/dist/install.sh | bash</code>
+      <code id="install-python">pip install latticedb</code>
+      <code id="install-npm">npm install @hajewski/latticedb</code>
+    </div>
+  </div>
+</section>
+
+<!-- Code example -->
+<section class="code-example">
+  <div class="container">
+    <h2>One query. Three search modes.</h2>
+    <p class="caption">Vector similarity, full-text search, and graph traversal in a single Cypher query.</p>
+    <pre><span class="cm">-- Find chunks similar to a query, traverse to their document, then to the author</span>
+<span class="kw">MATCH</span> (chunk:Chunk)-[:PART_OF]-&gt;(doc:Document)-[:AUTHORED_BY]-&gt;(author:Person)
+<span class="kw">WHERE</span> chunk.embedding <span class="op">&lt;=&gt;</span> <span class="var">$query_vector</span> &lt; <span class="str">0.3</span>
+  <span class="kw">AND</span> doc.content <span class="op">@@</span> <span class="str">"neural networks"</span>
+<span class="kw">RETURN</span> doc.title, chunk.text, author.name
+<span class="kw">ORDER BY</span> chunk.embedding <span class="op">&lt;=&gt;</span> <span class="var">$query_vector</span>
+<span class="kw">LIMIT</span> <span class="str">10</span></pre>
+  </div>
+</section>
+
+<!-- Stats -->
+<section class="stats">
+  <div class="container">
+    <h2>Built for speed</h2>
+    <div class="stats-grid">
+      <div class="stat-card">
+        <div class="stat-number">0.13<span class="stat-unit"> &micro;s</span></div>
+        <div class="stat-label">Node lookup</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number">0.83<span class="stat-unit"> ms</span></div>
+        <div class="stat-label">10-NN vector search @ 1M</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number">14&ndash;2819<span class="stat-unit">x</span></div>
+        <div class="stat-label">Faster graph traversal vs SQLite</div>
+      </div>
+      <div class="stat-card">
+        <div class="stat-number">19<span class="stat-unit"> &micro;s</span></div>
+        <div class="stat-label">Full-text search (300x faster than FTS5)</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Competitive Comparison -->
+<section class="comparison">
+  <div class="container">
+    <h2>How it compares</h2>
+
+    <h3>Vector Search (10-NN, 1M vectors)</h3>
+    <div class="table-wrapper">
+      <table>
+        <thead>
+          <tr><th>System</th><th>Latency</th><th>Recall</th><th>Type</th></tr>
+        </thead>
+        <tbody>
+          <tr class="highlight"><td>LatticeDB</td><td>0.83 ms</td><td>100%</td><td>Embedded</td></tr>
+          <tr><td>FAISS HNSW</td><td>0.5&ndash;3 ms</td><td>&mdash;</td><td>Library</td></tr>
+          <tr><td>Weaviate</td><td>1.4 ms</td><td>&mdash;</td><td>Server</td></tr>
+          <tr><td>Qdrant</td><td>~1&ndash;2 ms</td><td>&mdash;</td><td>Server</td></tr>
+          <tr><td>pgvector</td><td>~5 ms</td><td>99%</td><td>Extension</td></tr>
+          <tr><td>Chroma</td><td>4&ndash;5 ms</td><td>&mdash;</td><td>Embedded</td></tr>
+          <tr><td>Pinecone</td><td>~15 ms</td><td>&mdash;</td><td>Cloud</td></tr>
+        </tbody>
+      </table>
+    </div>
+
+    <h3>Graph Traversal (2-hop, 100K nodes)</h3>
+    <div class="table-wrapper">
+      <table>
+        <thead>
+          <tr><th>System</th><th>Latency</th><th>Type</th></tr>
+        </thead>
+        <tbody>
+          <tr class="highlight"><td>LatticeDB</td><td>39 &micro;s</td><td>Embedded</td></tr>
+          <tr><td>SQLite (recursive CTE)</td><td>548 &micro;s</td><td>Embedded</td></tr>
+          <tr><td>Kuzu</td><td>19 ms</td><td>Embedded</td></tr>
+          <tr><td>Neo4j</td><td>10 ms</td><td>Server</td></tr>
+        </tbody>
+      </table>
+    </div>
+  </div>
+</section>
+
+<!-- Features -->
+<section class="features">
+  <div class="container">
+    <h2>Everything in one library</h2>
+    <div class="features-grid">
+      <div class="feature-card">
+        <h3>Graph</h3>
+        <ul>
+          <li>Nodes and edges with labels and properties</li>
+          <li>Multi-hop traversal, variable-length paths</li>
+          <li>ACID transactions with snapshot isolation</li>
+          <li>MERGE, WITH, UNWIND, aggregations</li>
+        </ul>
+      </div>
+      <div class="feature-card">
+        <h3>Vector Search</h3>
+        <ul>
+          <li>HNSW approximate nearest neighbor</li>
+          <li>Configurable M, ef parameters</li>
+          <li>100% recall at 1M vectors</li>
+          <li>Built-in hash embeddings or Ollama/OpenAI</li>
+        </ul>
+      </div>
+      <div class="feature-card">
+        <h3>Full-Text Search</h3>
+        <ul>
+          <li>BM25-ranked inverted index</li>
+          <li>Tokenization and stemming</li>
+          <li>Fuzzy search with Levenshtein distance</li>
+          <li>300x faster than SQLite FTS5</li>
+        </ul>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- Quick Start -->
+<section class="quickstart">
+  <div class="container">
+    <h2>Get started in 30 seconds</h2>
+
+    <div class="quickstart-block">
+      <h3>Python</h3>
+      <div class="install-cmd" style="margin-bottom:12px"><code class="active">pip install latticedb</code></div>
+      <pre><span class="kw">from</span> latticedb <span class="kw">import</span> Database, hash_embed
+
+<span class="kw">with</span> Database(<span class="str">"knowledge.db"</span>, create=<span class="var">True</span>, enable_vector=<span class="var">True</span>, vector_dimensions=<span class="str">128</span>) <span class="kw">as</span> db:
+    <span class="kw">with</span> db.write() <span class="kw">as</span> txn:
+        alice = txn.create_node(labels=[<span class="str">"Person"</span>], properties={<span class="str">"name"</span>: <span class="str">"Alice"</span>})
+        doc = txn.create_node(labels=[<span class="str">"Document"</span>], properties={<span class="str">"title"</span>: <span class="str">"Attention Is All You Need"</span>})
+        chunk = txn.create_node(labels=[<span class="str">"Chunk"</span>], properties={<span class="str">"text"</span>: <span class="str">"Self-attention..."</span>})
+
+        txn.set_vector(chunk.id, <span class="str">"embedding"</span>, hash_embed(<span class="str">"transformer"</span>, dimensions=<span class="str">128</span>))
+        txn.create_edge(chunk.id, doc.id, <span class="str">"PART_OF"</span>)
+        txn.create_edge(doc.id, alice.id, <span class="str">"AUTHORED_BY"</span>)
+        txn.commit()
+
+    results = db.query(<span class="str">"""
+        MATCH (chunk:Chunk)-[:PART_OF]-&gt;(doc:Document)-[:AUTHORED_BY]-&gt;(author:Person)
+        WHERE chunk.embedding &lt;=&gt; $query &lt; 0.5
+        RETURN doc.title, chunk.text, author.name
+        ORDER BY chunk.embedding &lt;=&gt; $query
+        LIMIT 5
+    """</span>, parameters={<span class="str">"query"</span>: hash_embed(<span class="str">"attention mechanism"</span>, dimensions=<span class="str">128</span>)})
+
+    <span class="kw">for</span> row <span class="kw">in</span> results:
+        print(f<span class="str">"{row['doc.title']} by {row['author.name']}"</span>)</pre>
+    </div>
+
+    <div class="quickstart-block">
+      <h3>TypeScript</h3>
+      <div class="install-cmd" style="margin-bottom:12px"><code class="active">npm install @hajewski/latticedb</code></div>
+      <pre><span class="kw">import</span> { Database, hashEmbed } <span class="kw">from</span> <span class="str">"@hajewski/latticedb"</span>;
+
+<span class="kw">const</span> db = <span class="kw">new</span> Database(<span class="str">"knowledge.db"</span>, {
+  create: <span class="var">true</span>, enableVector: <span class="var">true</span>, vectorDimensions: <span class="str">128</span>,
+});
+<span class="kw">await</span> db.open();
+
+<span class="kw">await</span> db.write(<span class="kw">async</span> (txn) =&gt; {
+  <span class="kw">const</span> alice = <span class="kw">await</span> txn.createNode({ labels: [<span class="str">"Person"</span>], properties: { name: <span class="str">"Alice"</span> } });
+  <span class="kw">const</span> doc = <span class="kw">await</span> txn.createNode({ labels: [<span class="str">"Document"</span>], properties: { title: <span class="str">"Attention Is All You Need"</span> } });
+  <span class="kw">const</span> chunk = <span class="kw">await</span> txn.createNode({ labels: [<span class="str">"Chunk"</span>], properties: { text: <span class="str">"Self-attention..."</span> } });
+
+  <span class="kw">await</span> txn.setVector(chunk.id, <span class="str">"embedding"</span>, hashEmbed(<span class="str">"transformer"</span>, <span class="str">128</span>));
+  <span class="kw">await</span> txn.createEdge(chunk.id, doc.id, <span class="str">"PART_OF"</span>);
+  <span class="kw">await</span> txn.createEdge(doc.id, alice.id, <span class="str">"AUTHORED_BY"</span>);
+});
+
+<span class="kw">const</span> results = <span class="kw">await</span> db.query(
+  <span class="str">`MATCH (chunk:Chunk)-[:PART_OF]-&gt;(doc:Document)-[:AUTHORED_BY]-&gt;(author:Person)
+   WHERE chunk.embedding &lt;=&gt; $query &lt; 0.5
+   RETURN doc.title, chunk.text, author.name
+   ORDER BY chunk.embedding &lt;=&gt; $query
+   LIMIT 5`</span>,
+  { query: hashEmbed(<span class="str">"attention mechanism"</span>, <span class="str">128</span>) }
+);
+
+<span class="kw">for</span> (<span class="kw">const</span> row <span class="kw">of</span> results.rows) {
+  console.log(<span class="str">`${row["doc.title"]} by ${row["author.name"]}`</span>);
+}
+
+<span class="kw">await</span> db.close();</pre>
+    </div>
+  </div>
+</section>
+
+<!-- Footer -->
+<footer>
+  <div class="container">
+    <div class="footer-links">
+      <a href="https://docs.latticedb.org">Documentation</a>
+      <a href="https://github.com/jeffhajewski/latticedb">GitHub</a>
+    </div>
+    <p>MIT License &middot; Built with Zig &middot; No dependencies</p>
+  </div>
+</footer>
+
+<script>
+function showInstall(tab) {
+  document.querySelectorAll('.install-tabs button').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('.hero .install-cmd code').forEach(c => c.classList.remove('active'));
+  document.querySelector(`.install-tabs button[onclick="showInstall('${tab}')"]`).classList.add('active');
+  document.getElementById('install-' + tab).classList.add('active');
+}
+</script>
+
+</body>
+</html>

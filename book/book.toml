@@ -16,7 +16,7 @@ git-repository-icon = "fa-github"
 edit-url-template = "https://github.com/jeffhajewski/latticedb/edit/main/book/src/{path}"
 site-url = "https://docs.latticedb.org/"
 no-section-label = false
-additional-css = ["custom.css"]
+additional-css = ["src/custom.css"]
 
 [output.html.search]
 enable = true

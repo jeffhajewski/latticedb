@@ -365,6 +365,64 @@ test "database: getAllEdgeTypes counts parallel edges and reflects deletes" {
     try std.testing.expectEqual(@as(u64, 1), likes_count);
 }
 
+test "database: edge type counts persist across reopen after endpoint delete" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_edge_type_count_reopen_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    {
+        var db = try Database.open(allocator, path, .{
+            .create = true,
+            .config = .{
+                .enable_wal = true,
+                .enable_fts = false,
+                .enable_vector = false,
+            },
+        });
+
+        const n1 = try db.createNode(null, &[_][]const u8{"N"});
+        const n2 = try db.createNode(null, &[_][]const u8{"N"});
+        const n3 = try db.createNode(null, &[_][]const u8{"N"});
+
+        _ = try db.createEdgeAndGetId(null, n1, n2, "REL");
+        _ = try db.createEdgeAndGetId(null, n1, n2, "REL");
+        _ = try db.createEdgeAndGetId(null, n2, n3, "LIKES");
+
+        try db.deleteEdge(null, n1, n2, "REL");
+
+        db.close();
+    }
+
+    {
+        var db = try Database.open(allocator, path, .{
+            .create = false,
+            .config = .{
+                .enable_wal = true,
+                .enable_fts = false,
+                .enable_vector = false,
+            },
+        });
+        defer db.close();
+
+        const edge_types = try db.getAllEdgeTypes();
+        defer db.freeEdgeTypeInfos(edge_types);
+
+        var rel_count: u64 = 0;
+        var likes_count: u64 = 0;
+        for (edge_types) |info| {
+            if (std.mem.eql(u8, info.name, "REL")) rel_count = info.count;
+            if (std.mem.eql(u8, info.name, "LIKES")) likes_count = info.count;
+        }
+
+        try std.testing.expectEqual(@as(u64, 1), rel_count);
+        try std.testing.expectEqual(@as(u64, 1), likes_count);
+    }
+}
+
 test "database: tree roots saved correctly across sessions" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_tree_roots_test.ltdb";

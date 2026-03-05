@@ -485,6 +485,55 @@ test "aborted edge delete is not replayed after crash" {
     }
 }
 
+test "aborted endpoint delete is not replayed after crash" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_aborted_endpoint_delete_edge.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var edge1: EdgeId = undefined;
+    var edge2: EdgeId = undefined;
+    var src_id: NodeId = undefined;
+    var dst_id: NodeId = undefined;
+
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+
+        var create_txn = try db.beginTransaction(.read_write);
+        src_id = try db.createNode(&create_txn, &[_][]const u8{});
+        dst_id = try db.createNode(&create_txn, &[_][]const u8{});
+        edge1 = try db.createEdgeAndGetId(&create_txn, src_id, dst_id, "REL");
+        edge2 = try db.createEdgeAndGetId(&create_txn, src_id, dst_id, "REL");
+        try db.commitTransaction(&create_txn);
+
+        var delete_txn = try db.beginTransaction(.read_write);
+        try db.deleteEdge(&delete_txn, src_id, dst_id, "REL");
+        try db.abortTransaction(&delete_txn);
+
+        db.close();
+    }
+
+    try simulateCrash(path);
+
+    {
+        var db = try openCrashTestDb(allocator, path, false);
+        defer db.close();
+
+        var restored1 = try db.edge_store.getById(edge1);
+        defer restored1.deinit(allocator);
+        var restored2 = try db.edge_store.getById(edge2);
+        defer restored2.deinit(allocator);
+
+        var iter = try db.getOutgoingEdgeRefs(src_id);
+        defer iter.deinit();
+        var count: usize = 0;
+        while (try iter.next()) |_| {
+            count += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 2), count);
+    }
+}
+
 test "insert and delete same edge in one committed txn leaves no edge after crash" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_crash_insert_delete_same_txn_edge.ltdb";

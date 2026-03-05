@@ -1096,6 +1096,62 @@ test "rollback: deleteEdge(source,target,type) restores the exact deleted edge i
     defer restored2.deinit(allocator);
 }
 
+test "rollback: endpoint delete restores deleted parallel edge properties" {
+    if (!databaseSupportsTransactions()) {
+        return error.SkipZigTest;
+    }
+
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_txn_delete_edge_endpoint_props_rollback.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = true,
+            .enable_fts = false,
+            .enable_vector = false,
+        },
+    });
+    defer db.close();
+
+    const source = try db.createNode(null, &[_][]const u8{});
+    const target = try db.createNode(null, &[_][]const u8{});
+    const rel_type = try db.symbol_table.intern("REL");
+    const weight_key = try db.symbol_table.intern("w");
+
+    const props1 = [_]lattice.graph.node.Property{
+        .{ .key_id = weight_key, .value = .{ .int_val = 11 } },
+    };
+    const props2 = [_]lattice.graph.node.Property{
+        .{ .key_id = weight_key, .value = .{ .int_val = 22 } },
+    };
+
+    const edge1 = try db.edge_store.createAndGetId(source, target, rel_type, &props1);
+    const edge2 = try db.edge_store.createAndGetId(source, target, rel_type, &props2);
+
+    var txn = try db.beginTransaction(.read_write);
+    try db.deleteEdge(&txn, source, target, "REL");
+
+    try std.testing.expectError(lattice.graph.edge.EdgeError.NotFound, db.edge_store.getById(edge1));
+    var still_present = try db.edge_store.getById(edge2);
+    defer still_present.deinit(allocator);
+    try std.testing.expectEqual(@as(i64, 22), still_present.properties[0].value.int_val);
+
+    try db.abortTransaction(&txn);
+
+    var restored1 = try db.edge_store.getById(edge1);
+    defer restored1.deinit(allocator);
+    var restored2 = try db.edge_store.getById(edge2);
+    defer restored2.deinit(allocator);
+    try std.testing.expectEqual(@as(i64, 11), restored1.properties[0].value.int_val);
+    try std.testing.expectEqual(@as(i64, 22), restored2.properties[0].value.int_val);
+}
+
 test "future: crash mid-transaction loses graph changes" {
     if (!databaseSupportsTransactions()) {
         return error.SkipZigTest;

@@ -798,6 +798,131 @@ test "c_api: get outgoing edges" {
     _ = c_api.lattice_commit(txn);
 }
 
+test "c_api: edge IDs stay monotonic across rollback and parallel creates" {
+    const path = "/tmp/lattice_capi_edge_id_monotonic_test.db";
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        std.fs.cwd().deleteFile(path) catch {};
+        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var alice: lattice_node_id = 0;
+    var bob: lattice_node_id = 0;
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &alice));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &bob));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+    }
+
+    var rolled_back_id: u64 = 0;
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, alice, bob, "REL", &rolled_back_id));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_rollback(txn));
+    }
+
+    var edge1: u64 = 0;
+    var edge2: u64 = 0;
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, alice, bob, "REL", &edge1));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, alice, bob, "REL", &edge2));
+        try std.testing.expect(edge1 > rolled_back_id);
+        try std.testing.expect(edge2 > edge1);
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+    }
+
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &txn));
+        var edge_result: ?*c_api.lattice_edge_result = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_get_outgoing(txn, alice, &edge_result));
+        try std.testing.expectEqual(@as(u32, 2), c_api.lattice_edge_result_count(edge_result));
+        c_api.lattice_edge_result_free(edge_result);
+        _ = c_api.lattice_commit(txn);
+    }
+}
+
+test "c_api: edge ID allocator persists across reopen" {
+    const path = "/tmp/lattice_capi_edge_id_reopen_test.db";
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer {
+        std.fs.cwd().deleteFile(path) catch {};
+        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var db: ?*lattice_database = null;
+    var options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+
+    var alice: lattice_node_id = 0;
+    var bob: lattice_node_id = 0;
+    var edge1: u64 = 0;
+    var edge2: u64 = 0;
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &alice));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &bob));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, alice, bob, "REL", &edge1));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, alice, bob, "REL", &edge2));
+        try std.testing.expect(edge2 > edge1);
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+    }
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_close(db));
+    db = null;
+
+    options.create = false;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer _ = c_api.lattice_close(db);
+
+    var edge3: u64 = 0;
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, alice, bob, "REL", &edge3));
+        try std.testing.expect(edge3 > edge2);
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+    }
+
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &txn));
+        var edge_result: ?*c_api.lattice_edge_result = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_get_outgoing(txn, alice, &edge_result));
+        try std.testing.expectEqual(@as(u32, 3), c_api.lattice_edge_result_count(edge_result));
+        c_api.lattice_edge_result_free(edge_result);
+        _ = c_api.lattice_commit(txn);
+    }
+}
+
 // ============================================================================
 // Query Tests
 // ============================================================================

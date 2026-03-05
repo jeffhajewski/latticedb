@@ -446,12 +446,8 @@ pub const DeleteNode = struct {
 pub const DeleteEdge = struct {
     /// Input operator
     input: Operator,
-    /// Slot containing edge info (source node for now)
-    source_slot: u8,
-    /// Slot containing target node
-    target_slot: u8,
-    /// Edge type to delete
-    edge_type: []const u8,
+    /// Slot containing edge ID
+    edge_slot: u8,
     /// Database reference
     database: *Database,
     /// Whether operator is opened
@@ -463,17 +459,13 @@ pub const DeleteEdge = struct {
     pub fn init(
         allocator: Allocator,
         input: Operator,
-        source_slot: u8,
-        target_slot: u8,
-        edge_type: []const u8,
+        edge_slot: u8,
         database: *Database,
     ) !*Self {
         const self = try allocator.create(Self);
         self.* = Self{
             .input = input,
-            .source_slot = source_slot,
-            .target_slot = target_slot,
-            .edge_type = edge_type,
+            .edge_slot = edge_slot,
             .database = database,
             .opened = false,
         };
@@ -508,15 +500,11 @@ pub const DeleteEdge = struct {
 
         const row = try self.input.next(ctx) orelse return null;
 
-        // Get source and target from row
-        const source_val = row.getSlot(self.source_slot) orelse return OperatorError.UnboundVariable;
-        const target_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
+        // Get edge ID from row
+        const edge_val = row.getSlot(self.edge_slot) orelse return OperatorError.UnboundVariable;
+        const edge_id = edge_val.asEdgeId() orelse return OperatorError.TypeError;
 
-        const source_id = source_val.asNodeId() orelse return OperatorError.TypeError;
-        const target_id = target_val.asNodeId() orelse return OperatorError.TypeError;
-
-        // Delete the edge
-        self.database.deleteEdge(null, source_id, target_id, self.edge_type) catch {
+        self.database.deleteEdgeById(null, edge_id) catch {
             return OperatorError.StorageError;
         };
 

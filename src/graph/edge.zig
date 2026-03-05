@@ -2,17 +2,21 @@
 //!
 //! Stores edges using a B+Tree with composite keys for efficient traversal.
 //!
-//! Key format: (source_id: u64, direction: u8, type_id: u16, target_id: u64)
+//! Traversal key format: (source_id: u64, direction: u8, type_id: u16, target_id: u64, edge_id: u64)
 //!   - source_id: The node we're querying from
 //!   - direction: 0 = outgoing, 1 = incoming
 //!   - type_id: Edge type (interned string)
 //!   - target_id: The node on the other end
+//!   - edge_id: Stable, monotonic edge identity (supports parallel edges)
 //!
-//! Double-write rule: Each edge is stored twice:
-//!   (A, 0, TYPE, B) -> edge_data  (outgoing from A)
-//!   (B, 1, TYPE, A) -> edge_data  (incoming to B)
+//! Double-write rule: Each edge is stored twice in the traversal tree:
+//!   (A, 0, TYPE, B, EID) -> edge_data (outgoing from A)
+//!   (B, 1, TYPE, A, EID) -> empty     (incoming to B)
 //!
-//! This enables efficient traversal in both directions.
+//! Edge ID index:
+//!   edge_id -> (source, target, type_id)
+//!
+//! This layout preserves efficient traversal while storing edge payload once.
 
 const std = @import("std");
 const lattice = @import("lattice");
@@ -27,6 +31,7 @@ const node_mod = lattice.graph.node;
 const BTree = btree.BTree;
 const BTreeError = btree.BTreeError;
 const NodeId = types.NodeId;
+const EdgeId = types.EdgeId;
 const PropertyValue = types.PropertyValue;
 const SymbolId = symbols.SymbolId;
 const Property = node_mod.Property;
@@ -61,6 +66,7 @@ pub const EdgeError = error{
 
 /// An edge in the graph
 pub const Edge = struct {
+    id: EdgeId,
     source: NodeId,
     target: NodeId,
     edge_type: SymbolId,
@@ -77,8 +83,9 @@ pub const Edge = struct {
 };
 
 /// Lightweight edge reference containing only traversal-relevant fields.
-/// No allocations - all data extracted from the 19-byte key.
+/// No allocations - all data extracted from the traversal key.
 pub const EdgeRef = struct {
+    id: EdgeId,
     source: NodeId,
     target: NodeId,
     edge_type: SymbolId,
@@ -116,14 +123,16 @@ pub const EdgeKey = struct {
     direction: Direction,
     edge_type: SymbolId,
     target: NodeId,
+    edge_id: EdgeId,
 
-    /// Serialize key to bytes (19 bytes total)
-    pub fn toBytes(self: EdgeKey) [19]u8 {
-        var buf: [19]u8 = undefined;
+    /// Serialize key to bytes (27 bytes total)
+    pub fn toBytes(self: EdgeKey) [27]u8 {
+        var buf: [27]u8 = undefined;
         std.mem.writeInt(u64, buf[0..8], self.source, .big); // big-endian for lexicographic order
         buf[8] = @intFromEnum(self.direction);
         std.mem.writeInt(u16, buf[9..11], self.edge_type, .big);
         std.mem.writeInt(u64, buf[11..19], self.target, .big);
+        std.mem.writeInt(u64, buf[19..27], self.edge_id, .big);
         return buf;
     }
 
@@ -134,6 +143,7 @@ pub const EdgeKey = struct {
             .direction = @enumFromInt(bytes[8]),
             .edge_type = std.mem.readInt(u16, bytes[9..11], .big),
             .target = std.mem.readInt(u64, bytes[11..19], .big),
+            .edge_id = std.mem.readInt(u64, bytes[19..27], .big),
         };
     }
 };
@@ -142,29 +152,121 @@ pub const EdgeKey = struct {
 pub const EdgeStore = struct {
     allocator: Allocator,
     tree: *BTree,
+    edge_id_index: *BTree,
+    next_edge_id: EdgeId,
 
     const Self = @This();
+    const EDGE_ID_META_KEY: EdgeId = 0;
 
-    /// Initialize edge store with a B+Tree
-    pub fn init(allocator: Allocator, tree: *BTree) Self {
-        return Self{
+    /// Initialize edge store with traversal and edge_id index B+Trees.
+    pub fn init(allocator: Allocator, tree: *BTree, edge_id_index: *BTree) Self {
+        var self = Self{
             .allocator = allocator,
             .tree = tree,
+            .edge_id_index = edge_id_index,
+            .next_edge_id = 1,
+        };
+        self.next_edge_id = self.loadNextEdgeId() catch 1;
+        return self;
+    }
+
+    fn edgeIdToKey(edge_id: EdgeId) [8]u8 {
+        var key: [8]u8 = undefined;
+        std.mem.writeInt(u64, &key, edge_id, .little);
+        return key;
+    }
+
+    fn loadNextEdgeId(self: *Self) EdgeError!EdgeId {
+        const meta_key = edgeIdToKey(EDGE_ID_META_KEY);
+        const meta = self.edge_id_index.get(&meta_key) catch |err| {
+            return mapBTreeError(err);
+        };
+        if (meta) |data| {
+            if (data.len == 8) {
+                const next = std.mem.readInt(u64, data[0..8], .little);
+                return if (next == 0) 1 else next;
+            }
+        }
+
+        // Fallback when metadata is missing: derive from max indexed edge_id.
+        var max_id: EdgeId = 0;
+        var iter = self.edge_id_index.range(null, null) catch |err| {
+            return mapBTreeError(err);
+        };
+        defer iter.deinit();
+
+        while (iter.next() catch null) |entry| {
+            if (entry.key.len != 8) continue;
+            const edge_id = std.mem.readInt(u64, entry.key[0..8], .little);
+            if (edge_id == EDGE_ID_META_KEY) continue;
+            if (edge_id > max_id) max_id = edge_id;
+        }
+
+        const next = max_id + 1;
+        try self.persistNextEdgeId(next);
+        return next;
+    }
+
+    fn persistNextEdgeId(self: *Self, next_edge_id: EdgeId) EdgeError!void {
+        const meta_key = edgeIdToKey(EDGE_ID_META_KEY);
+        var meta_value: [8]u8 = undefined;
+        std.mem.writeInt(u64, &meta_value, next_edge_id, .little);
+
+        self.edge_id_index.delete(&meta_key) catch |err| switch (err) {
+            BTreeError.KeyNotFound => {},
+            else => return mapBTreeError(err),
+        };
+        self.edge_id_index.insert(&meta_key, &meta_value) catch |err| {
+            return mapBTreeError(err);
         };
     }
 
+    fn findMatchingEdgeId(
+        self: *Self,
+        source: NodeId,
+        target: NodeId,
+        edge_type: SymbolId,
+    ) EdgeError!?EdgeId {
+        const start_key = EdgeKey{
+            .source = source,
+            .direction = .outgoing,
+            .edge_type = edge_type,
+            .target = target,
+            .edge_id = 0,
+        };
+        const start_bytes = start_key.toBytes();
+
+        var iter = self.tree.range(&start_bytes, null) catch |err| {
+            return mapBTreeError(err);
+        };
+        defer iter.deinit();
+
+        while (iter.next() catch null) |entry| {
+            const key = EdgeKey.fromBytes(entry.key);
+            if (key.source == source and key.direction == .outgoing and key.edge_type == edge_type and key.target == target) {
+                return key.edge_id;
+            }
+            break;
+        }
+
+        return null;
+    }
+
     /// Create a new edge between two nodes
-    /// Uses double-write pattern: stores both outgoing and incoming entries
-    pub fn create(
+    /// Uses double-write pattern: outgoing stores payload, incoming stores empty payload.
+    pub fn createAndGetId(
         self: *Self,
         source: NodeId,
         target: NodeId,
         edge_type: SymbolId,
         properties: []const Property,
-    ) EdgeError!void {
-        // Serialize edge data
+    ) EdgeError!EdgeId {
+        const edge_id = self.next_edge_id;
+        const next_edge_id = edge_id + 1;
+
+        // Serialize edge record (stored once in edge_id_index tree).
         var buf: [4096]u8 = undefined;
-        const serialized = serializeEdge(properties, &buf) catch {
+        const serialized = serializeEdge(source, target, edge_type, properties, &buf) catch {
             return EdgeError.BufferTooSmall;
         };
 
@@ -174,6 +276,7 @@ pub const EdgeStore = struct {
             .direction = .outgoing,
             .edge_type = edge_type,
             .target = target,
+            .edge_id = edge_id,
         };
         const outgoing_bytes = outgoing_key.toBytes();
 
@@ -183,24 +286,115 @@ pub const EdgeStore = struct {
             .direction = .incoming,
             .edge_type = edge_type,
             .target = source,
+            .edge_id = edge_id,
         };
         const incoming_bytes = incoming_key.toBytes();
 
-        // Insert both entries (double-write) with rollback on failure
-        self.tree.insert(&outgoing_bytes, serialized) catch |err| {
+        const id_key = edgeIdToKey(edge_id);
+
+        // Insert all entries with rollback on failure
+        self.tree.insert(&outgoing_bytes, &[_]u8{}) catch |err| {
             return mapBTreeError(err);
         };
 
-        self.tree.insert(&incoming_bytes, serialized) catch |err| {
-            // Rollback the outgoing insert to maintain consistency
+        self.tree.insert(&incoming_bytes, &[_]u8{}) catch |err| {
             self.tree.delete(&outgoing_bytes) catch {
-                // If rollback fails, we're in an inconsistent state.
-                // This is a serious error - the outgoing entry exists without
-                // its corresponding incoming entry. In a production system,
-                // this would need to be logged for manual recovery.
             };
             return mapBTreeError(err);
         };
+
+        self.edge_id_index.insert(&id_key, serialized) catch |err| {
+            self.tree.delete(&incoming_bytes) catch {};
+            self.tree.delete(&outgoing_bytes) catch {};
+            return mapBTreeError(err);
+        };
+
+        self.persistNextEdgeId(next_edge_id) catch |err| {
+            self.edge_id_index.delete(&id_key) catch {};
+            self.tree.delete(&incoming_bytes) catch {};
+            self.tree.delete(&outgoing_bytes) catch {};
+            return err;
+        };
+
+        self.next_edge_id = next_edge_id;
+        return edge_id;
+    }
+
+    pub fn create(
+        self: *Self,
+        source: NodeId,
+        target: NodeId,
+        edge_type: SymbolId,
+        properties: []const Property,
+    ) EdgeError!void {
+        _ = try self.createAndGetId(source, target, edge_type, properties);
+    }
+
+    /// Create an edge with an explicit edge_id (used by recovery/undo).
+    pub fn createWithId(
+        self: *Self,
+        edge_id: EdgeId,
+        source: NodeId,
+        target: NodeId,
+        edge_type: SymbolId,
+        properties: []const Property,
+    ) EdgeError!void {
+        if (edge_id == EDGE_ID_META_KEY) return EdgeError.InvalidData;
+
+        // Reject duplicate edge IDs
+        const existing = self.getById(edge_id);
+        if (existing) |edge| {
+            var e = edge;
+            e.deinit(self.allocator);
+            return EdgeError.AlreadyExists;
+        } else |err| switch (err) {
+            EdgeError.NotFound => {},
+            else => return err,
+        }
+
+        var buf: [4096]u8 = undefined;
+        const serialized = serializeEdge(source, target, edge_type, properties, &buf) catch {
+            return EdgeError.BufferTooSmall;
+        };
+
+        const outgoing_key = EdgeKey{
+            .source = source,
+            .direction = .outgoing,
+            .edge_type = edge_type,
+            .target = target,
+            .edge_id = edge_id,
+        };
+        const outgoing_bytes = outgoing_key.toBytes();
+
+        const incoming_key = EdgeKey{
+            .source = target,
+            .direction = .incoming,
+            .edge_type = edge_type,
+            .target = source,
+            .edge_id = edge_id,
+        };
+        const incoming_bytes = incoming_key.toBytes();
+
+        const id_key = edgeIdToKey(edge_id);
+
+        self.tree.insert(&outgoing_bytes, &[_]u8{}) catch |err| {
+            return mapBTreeError(err);
+        };
+        self.tree.insert(&incoming_bytes, &[_]u8{}) catch |err| {
+            self.tree.delete(&outgoing_bytes) catch {};
+            return mapBTreeError(err);
+        };
+        self.edge_id_index.insert(&id_key, serialized) catch |err| {
+            self.tree.delete(&incoming_bytes) catch {};
+            self.tree.delete(&outgoing_bytes) catch {};
+            return mapBTreeError(err);
+        };
+
+        if (edge_id >= self.next_edge_id) {
+            const new_next = edge_id + 1;
+            try self.persistNextEdgeId(new_next);
+            self.next_edge_id = new_next;
+        }
     }
 
     /// Get an edge by source, target, and type
@@ -210,25 +404,24 @@ pub const EdgeStore = struct {
         target: NodeId,
         edge_type: SymbolId,
     ) EdgeError!Edge {
-        const key = EdgeKey{
-            .source = source,
-            .direction = .outgoing,
-            .edge_type = edge_type,
-            .target = target,
+        const edge_id = (try self.findMatchingEdgeId(source, target, edge_type)) orelse {
+            return EdgeError.NotFound;
         };
-        const key_bytes = key.toBytes();
+        return self.getById(edge_id);
+    }
 
-        const data = self.tree.get(&key_bytes) catch |err| {
+    /// Get an edge by stable edge_id.
+    pub fn getById(self: *Self, edge_id: EdgeId) EdgeError!Edge {
+        const id_key = edgeIdToKey(edge_id);
+        const edge_data = self.edge_id_index.get(&id_key) catch |err| {
             return mapBTreeError(err);
         };
-
-        if (data) |serialized| {
-            return deserializeEdge(self.allocator, source, target, edge_type, serialized) catch {
-                return EdgeError.InvalidData;
-            };
+        if (edge_data == null or edge_data.?.len == 0) {
+            return EdgeError.NotFound;
         }
-
-        return EdgeError.NotFound;
+        return deserializeEdge(self.allocator, edge_id, edge_data.?) catch {
+            return EdgeError.InvalidData;
+        };
     }
 
     /// Delete an edge
@@ -240,46 +433,62 @@ pub const EdgeStore = struct {
         target: NodeId,
         edge_type: SymbolId,
     ) EdgeError!void {
-        // Build outgoing key (source, outgoing, type, target)
-        const outgoing_key = EdgeKey{
-            .source = source,
-            .direction = .outgoing,
-            .edge_type = edge_type,
-            .target = target,
+        const edge_id = (try self.findMatchingEdgeId(source, target, edge_type)) orelse {
+            return EdgeError.NotFound;
         };
-        const outgoing_bytes = outgoing_key.toBytes();
+        return self.deleteById(edge_id);
+    }
 
-        // Get edge data before deleting so we can restore on failure
-        const edge_data = self.tree.get(&outgoing_bytes) catch |err| {
+    /// Delete an edge by stable edge_id.
+    pub fn deleteById(self: *Self, edge_id: EdgeId) EdgeError!void {
+        const id_key = edgeIdToKey(edge_id);
+        const edge_data = self.edge_id_index.get(&id_key) catch |err| {
             return mapBTreeError(err);
         };
-        if (edge_data == null) {
+        if (edge_data == null or edge_data.?.len == 0) {
             return EdgeError.NotFound;
         }
+        var edge = deserializeEdge(self.allocator, edge_id, edge_data.?) catch {
+            return EdgeError.InvalidData;
+        };
+        defer edge.deinit(self.allocator);
+
+        const outgoing_key = EdgeKey{
+            .source = edge.source,
+            .direction = .outgoing,
+            .edge_type = edge.edge_type,
+            .target = edge.target,
+            .edge_id = edge_id,
+        };
+        const outgoing_bytes = outgoing_key.toBytes();
 
         // Delete outgoing entry
         self.tree.delete(&outgoing_bytes) catch |err| {
             return mapBTreeError(err);
         };
 
-        // Build incoming key (target, incoming, type, source)
+        // Build incoming key (target, incoming, type, source, edge_id)
         const incoming_key = EdgeKey{
-            .source = target,
+            .source = edge.target,
             .direction = .incoming,
-            .edge_type = edge_type,
-            .target = source,
+            .edge_type = edge.edge_type,
+            .target = edge.source,
+            .edge_id = edge_id,
         };
         const incoming_bytes = incoming_key.toBytes();
 
         // Delete incoming entry with rollback on failure
         self.tree.delete(&incoming_bytes) catch |err| {
-            // Rollback: re-insert the outgoing entry to maintain consistency
-            self.tree.insert(&outgoing_bytes, edge_data.?) catch {
-                // If rollback fails, we're in an inconsistent state.
-                // This is a serious error - the incoming entry exists without
-                // its corresponding outgoing entry. In a production system,
-                // this would need to be logged for manual recovery.
+            self.tree.insert(&outgoing_bytes, &[_]u8{}) catch {
             };
+            return mapBTreeError(err);
+        };
+
+        // Delete edge data entry with rollback on failure
+        self.edge_id_index.delete(&id_key) catch |err| {
+            self.tree.insert(&outgoing_bytes, &[_]u8{}) catch {};
+            self.tree.insert(&incoming_bytes, &[_]u8{}) catch {};
+            self.edge_id_index.insert(&id_key, edge_data.?) catch {};
             return mapBTreeError(err);
         };
     }
@@ -291,16 +500,8 @@ pub const EdgeStore = struct {
         target: NodeId,
         edge_type: SymbolId,
     ) bool {
-        const key = EdgeKey{
-            .source = source,
-            .direction = .outgoing,
-            .edge_type = edge_type,
-            .target = target,
-        };
-        const key_bytes = key.toBytes();
-
-        const result = self.tree.get(&key_bytes) catch return false;
-        return result != null;
+        const edge_id = self.findMatchingEdgeId(source, target, edge_type) catch return false;
+        return edge_id != null;
     }
 
     // ========================================================================
@@ -311,9 +512,10 @@ pub const EdgeStore = struct {
     pub const EdgeIterator = struct {
         tree_iter: btree.BTree.Iterator,
         allocator: Allocator,
+        store: *Self,
         done: bool,
         // Owned copy of end_key for manual checking (BTree Iterator's end_key slice would dangle)
-        end_key_storage: [19]u8,
+        end_key_storage: [27]u8,
 
         /// Get the next edge in the range
         /// Caller owns the returned Edge and must call deinit() on it
@@ -334,12 +536,7 @@ pub const EdgeStore = struct {
                 }
 
                 const key = EdgeKey.fromBytes(e.key);
-                // Reconstruct source/target based on direction
-                const source = if (key.direction == .outgoing) key.source else key.target;
-                const target = if (key.direction == .outgoing) key.target else key.source;
-                const edge = deserializeEdge(self.allocator, source, target, key.edge_type, e.value) catch {
-                    return EdgeError.InvalidData;
-                };
+                const edge = try self.store.getById(key.edge_id);
                 return edge;
             } else {
                 self.done = true;
@@ -359,7 +556,7 @@ pub const EdgeStore = struct {
         tree_iter: btree.BTree.Iterator,
         done: bool,
         /// Owned copy of end_key for manual checking (BTree Iterator's end_key slice would dangle)
-        end_key_storage: [19]u8,
+        end_key_storage: [27]u8,
 
         /// Get the next edge reference in the range.
         /// Returns EdgeRef with source, target, and edge_type_id.
@@ -385,6 +582,7 @@ pub const EdgeStore = struct {
                 const target = if (key.direction == .outgoing) key.target else key.source;
 
                 return EdgeRef{
+                    .id = key.edge_id,
                     .source = source,
                     .target = target,
                     .edge_type = key.edge_type,
@@ -409,12 +607,14 @@ pub const EdgeStore = struct {
             .direction = .outgoing,
             .edge_type = 0,
             .target = 0,
+            .edge_id = 0,
         };
         const end_key = EdgeKey{
             .source = node_id,
             .direction = .incoming, // Stop before incoming edges
             .edge_type = 0,
             .target = 0,
+            .edge_id = 0,
         };
 
         const start_bytes = start_key.toBytes();
@@ -428,6 +628,7 @@ pub const EdgeStore = struct {
         return EdgeIterator{
             .tree_iter = tree_iter,
             .allocator = self.allocator,
+            .store = self,
             .done = false,
             .end_key_storage = end_bytes,
         };
@@ -441,12 +642,14 @@ pub const EdgeStore = struct {
             .direction = .incoming,
             .edge_type = 0,
             .target = 0,
+            .edge_id = 0,
         };
         const end_key = EdgeKey{
             .source = node_id +| 1,
             .direction = .outgoing,
             .edge_type = 0,
             .target = 0,
+            .edge_id = 0,
         };
 
         const start_bytes = start_key.toBytes();
@@ -460,6 +663,7 @@ pub const EdgeStore = struct {
         return EdgeIterator{
             .tree_iter = tree_iter,
             .allocator = self.allocator,
+            .store = self,
             .done = false,
             .end_key_storage = end_bytes,
         };
@@ -473,12 +677,14 @@ pub const EdgeStore = struct {
             .direction = .outgoing,
             .edge_type = edge_type,
             .target = 0,
+            .edge_id = 0,
         };
         const end_key = EdgeKey{
             .source = node_id,
             .direction = .outgoing,
             .edge_type = edge_type +| 1,
             .target = 0,
+            .edge_id = 0,
         };
 
         const start_bytes = start_key.toBytes();
@@ -491,6 +697,7 @@ pub const EdgeStore = struct {
         return EdgeIterator{
             .tree_iter = tree_iter,
             .allocator = self.allocator,
+            .store = self,
             .done = false,
             .end_key_storage = end_bytes,
         };
@@ -504,12 +711,14 @@ pub const EdgeStore = struct {
             .direction = .incoming,
             .edge_type = edge_type,
             .target = 0,
+            .edge_id = 0,
         };
         const end_key = EdgeKey{
             .source = node_id,
             .direction = .incoming,
             .edge_type = edge_type +| 1,
             .target = 0,
+            .edge_id = 0,
         };
 
         const start_bytes = start_key.toBytes();
@@ -522,6 +731,7 @@ pub const EdgeStore = struct {
         return EdgeIterator{
             .tree_iter = tree_iter,
             .allocator = self.allocator,
+            .store = self,
             .done = false,
             .end_key_storage = end_bytes,
         };
@@ -541,12 +751,14 @@ pub const EdgeStore = struct {
             .direction = .outgoing,
             .edge_type = 0,
             .target = 0,
+            .edge_id = 0,
         };
         const end_key = EdgeKey{
             .source = node_id,
             .direction = .incoming, // Stop before incoming edges
             .edge_type = 0,
             .target = 0,
+            .edge_id = 0,
         };
 
         const start_bytes = start_key.toBytes();
@@ -572,12 +784,14 @@ pub const EdgeStore = struct {
             .direction = .incoming,
             .edge_type = 0,
             .target = 0,
+            .edge_id = 0,
         };
         const end_key = EdgeKey{
             .source = node_id +| 1,
             .direction = .outgoing,
             .edge_type = 0,
             .target = 0,
+            .edge_id = 0,
         };
 
         const start_bytes = start_key.toBytes();
@@ -602,12 +816,14 @@ pub const EdgeStore = struct {
             .direction = .outgoing,
             .edge_type = edge_type,
             .target = 0,
+            .edge_id = 0,
         };
         const end_key = EdgeKey{
             .source = node_id,
             .direction = .outgoing,
             .edge_type = edge_type +| 1,
             .target = 0,
+            .edge_id = 0,
         };
 
         const start_bytes = start_key.toBytes();
@@ -632,12 +848,14 @@ pub const EdgeStore = struct {
             .direction = .incoming,
             .edge_type = edge_type,
             .target = 0,
+            .edge_id = 0,
         };
         const end_key = EdgeKey{
             .source = node_id,
             .direction = .incoming,
             .edge_type = edge_type +| 1,
             .target = 0,
+            .edge_id = 0,
         };
 
         const start_bytes = start_key.toBytes();
@@ -700,6 +918,7 @@ pub const EdgeStore = struct {
             .direction = .outgoing,
             .edge_type = 0,
             .target = 0,
+            .edge_id = 0,
         };
         const start_key = start_edge_key.toBytes();
 
@@ -712,7 +931,7 @@ pub const EdgeStore = struct {
         // Use a pending_key buffer to avoid losing entries consumed from the iterator.
         var node_idx: usize = 0;
         var edges_start: usize = 0;
-        var pending_key: ?[19]u8 = null; // Buffered key from lookahead
+        var pending_key: ?[27]u8 = null; // Buffered key from lookahead
         var iter_exhausted = false;
 
         while (node_idx < sorted_ids.len) {
@@ -724,13 +943,14 @@ pub const EdgeStore = struct {
                 .direction = .incoming,
                 .edge_type = 0,
                 .target = 0,
+                .edge_id = 0,
             };
             const end_key = end_edge_key.toBytes();
 
             // Collect outgoing edges for current_node
             while (true) {
                 // Get next key: from pending buffer or from iterator
-                var key_bytes: [19]u8 = undefined;
+                var key_bytes: [27]u8 = undefined;
 
                 if (pending_key) |pk| {
                     key_bytes = pk;
@@ -742,7 +962,7 @@ pub const EdgeStore = struct {
                         return mapBTreeError(err);
                     };
                     if (entry) |e| {
-                        @memcpy(&key_bytes, e.key[0..19]);
+                        @memcpy(&key_bytes, e.key[0..27]);
                     } else {
                         iter_exhausted = true;
                         break;
@@ -760,6 +980,7 @@ pub const EdgeStore = struct {
                 const key = EdgeKey.fromBytes(&key_bytes);
                 if (key.source == current_node and key.direction == .outgoing) {
                     edges.append(alloc, EdgeRef{
+                        .id = key.edge_id,
                         .source = key.source,
                         .target = key.target,
                         .edge_type = key.edge_type,
@@ -819,12 +1040,14 @@ pub const EdgeStore = struct {
             .direction = .outgoing,
             .edge_type = 0,
             .target = 0,
+            .edge_id = 0,
         };
         const end_key = EdgeKey{
             .source = node_id +| 1,
             .direction = .outgoing,
             .edge_type = 0,
             .target = 0,
+            .edge_id = 0,
         };
 
         const start_bytes = start_key.toBytes();
@@ -837,6 +1060,7 @@ pub const EdgeStore = struct {
         return EdgeIterator{
             .tree_iter = tree_iter,
             .allocator = self.allocator,
+            .store = self,
             .done = false,
             .end_key_storage = end_bytes,
         };
@@ -879,10 +1103,20 @@ pub const EdgeStore = struct {
 // Serialization
 // ============================================================================
 
-/// Serialize edge data (properties only, key info is in the B+Tree key)
-fn serializeEdge(properties: []const Property, buf: []u8) ![]u8 {
+/// Serialize full edge data for edge_id lookup tree.
+fn serializeEdge(
+    source: NodeId,
+    target: NodeId,
+    edge_type: SymbolId,
+    properties: []const Property,
+    buf: []u8,
+) ![]u8 {
     var stream = std.io.fixedBufferStream(buf);
     const writer = stream.writer();
+
+    try writer.writeInt(u64, source, .little);
+    try writer.writeInt(u64, target, .little);
+    try writer.writeInt(u16, edge_type, .little);
 
     // Write properties
     try writer.writeInt(u16, @intCast(properties.len), .little);
@@ -949,13 +1183,15 @@ fn serializeValue(writer: anytype, value: PropertyValue) !void {
 /// Deserialize edge data
 fn deserializeEdge(
     allocator: Allocator,
-    source: NodeId,
-    target: NodeId,
-    edge_type: SymbolId,
+    edge_id: EdgeId,
     data: []const u8,
 ) !Edge {
     var stream = std.io.fixedBufferStream(data);
     const reader = stream.reader();
+
+    const source = try reader.readInt(u64, .little);
+    const target = try reader.readInt(u64, .little);
+    const edge_type = try reader.readInt(u16, .little);
 
     // Read properties
     const num_props = try reader.readInt(u16, .little);
@@ -974,6 +1210,7 @@ fn deserializeEdge(
     }
 
     return Edge{
+        .id = edge_id,
         .source = source,
         .target = target,
         .edge_type = edge_type,
@@ -1110,8 +1347,9 @@ test "edge store create and get" {
     defer bp.deinit();
 
     var tree = try BTree.init(allocator, &bp);
+    var edge_id_tree = try BTree.init(allocator, &bp);
 
-    var store = EdgeStore.init(allocator, &tree);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     // Create an edge: (1)-[:KNOWS {since: 2020}]->(2)
     const edge_type: SymbolId = 1000; // KNOWS
@@ -1155,8 +1393,9 @@ test "edge store double-write" {
     defer bp.deinit();
 
     var tree = try BTree.init(allocator, &bp);
+    var edge_id_tree = try BTree.init(allocator, &bp);
 
-    var store = EdgeStore.init(allocator, &tree);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     // Create an edge
     const edge_type: SymbolId = 1000;
@@ -1168,6 +1407,7 @@ test "edge store double-write" {
         .direction = .outgoing,
         .edge_type = edge_type,
         .target = 2,
+        .edge_id = 1,
     };
     const outgoing_bytes = outgoing_key.toBytes();
     const outgoing_result = tree.get(&outgoing_bytes) catch null;
@@ -1179,6 +1419,7 @@ test "edge store double-write" {
         .direction = .incoming,
         .edge_type = edge_type,
         .target = 1,
+        .edge_id = 1,
     };
     const incoming_bytes = incoming_key.toBytes();
     const incoming_result = tree.get(&incoming_bytes) catch null;
@@ -1208,8 +1449,9 @@ test "edge store getOutgoing iteration" {
     defer bp.deinit();
 
     var tree = try BTree.init(allocator, &bp);
+    var edge_id_tree = try BTree.init(allocator, &bp);
 
-    var store = EdgeStore.init(allocator, &tree);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     // Create edges: 1 -> 2 (KNOWS), 1 -> 3 (LIKES)
     const knows_type: SymbolId = 1000;
@@ -1258,8 +1500,9 @@ test "edge store exists" {
     defer bp.deinit();
 
     var tree = try BTree.init(allocator, &bp);
+    var edge_id_tree = try BTree.init(allocator, &bp);
 
-    var store = EdgeStore.init(allocator, &tree);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     const edge_type: SymbolId = 1000;
 
@@ -1276,6 +1519,7 @@ test "edge key serialization" {
         .direction = .outgoing,
         .edge_type = 456,
         .target = 789,
+        .edge_id = 42,
     };
 
     const bytes = key.toBytes();
@@ -1285,6 +1529,7 @@ test "edge key serialization" {
     try std.testing.expectEqual(key.direction, parsed.direction);
     try std.testing.expectEqual(key.edge_type, parsed.edge_type);
     try std.testing.expectEqual(key.target, parsed.target);
+    try std.testing.expectEqual(key.edge_id, parsed.edge_id);
 }
 
 test "edge store delete" {
@@ -1310,8 +1555,9 @@ test "edge store delete" {
     defer bp.deinit();
 
     var tree = try BTree.init(allocator, &bp);
+    var edge_id_tree = try BTree.init(allocator, &bp);
 
-    var store = EdgeStore.init(allocator, &tree);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     const edge_type: SymbolId = 1000;
 
@@ -1320,8 +1566,8 @@ test "edge store delete" {
     try std.testing.expect(store.exists(1, 2, edge_type));
 
     // Verify both outgoing and incoming keys exist
-    const outgoing_key = EdgeKey{ .source = 1, .direction = .outgoing, .edge_type = edge_type, .target = 2 };
-    const incoming_key = EdgeKey{ .source = 2, .direction = .incoming, .edge_type = edge_type, .target = 1 };
+    const outgoing_key = EdgeKey{ .source = 1, .direction = .outgoing, .edge_type = edge_type, .target = 2, .edge_id = 1 };
+    const incoming_key = EdgeKey{ .source = 2, .direction = .incoming, .edge_type = edge_type, .target = 1, .edge_id = 1 };
     try std.testing.expect((try tree.get(&outgoing_key.toBytes())) != null);
     try std.testing.expect((try tree.get(&incoming_key.toBytes())) != null);
 
@@ -1360,8 +1606,9 @@ test "batch edge fetch matches individual fetches" {
     defer bp.deinit();
 
     var tree = try BTree.init(allocator, &bp);
+    var edge_id_tree = try BTree.init(allocator, &bp);
 
-    var store = EdgeStore.init(allocator, &tree);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     // Create a graph with gaps in node IDs to test sparse batching:
     // Node 1 -> 10, 20
@@ -1469,8 +1716,9 @@ test "batch edge fetch empty input" {
     defer bp.deinit();
 
     var tree = try BTree.init(allocator, &bp);
+    var edge_id_tree = try BTree.init(allocator, &bp);
 
-    var store = EdgeStore.init(allocator, &tree);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     // Empty batch
     const empty: []const NodeId = &.{};
@@ -1503,8 +1751,9 @@ test "batch edge fetch nodes with no edges" {
     defer bp.deinit();
 
     var tree = try BTree.init(allocator, &bp);
+    var edge_id_tree = try BTree.init(allocator, &bp);
 
-    var store = EdgeStore.init(allocator, &tree);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     // Query nodes that don't exist in the tree
     const nodes = [_]NodeId{ 999, 1000, 1001 };
@@ -1514,5 +1763,123 @@ test "batch edge fetch nodes with no edges" {
     try std.testing.expectEqual(@as(usize, 3), result.results.len);
     for (0..3) |i| {
         try std.testing.expectEqual(@as(usize, 0), result.getEdges(i).len);
+    }
+}
+
+test "edge store supports parallel edges and deleteById" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const buffer_pool = lattice.storage.buffer_pool;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_edge_parallel_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try buffer_pool.BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var tree = try BTree.init(allocator, &bp);
+    var edge_id_tree = try BTree.init(allocator, &bp);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
+
+    const edge_type: SymbolId = 1000;
+    const props_a = [_]Property{.{ .key_id = 2000, .value = .{ .int_val = 1 } }};
+    const props_b = [_]Property{.{ .key_id = 2000, .value = .{ .int_val = 2 } }};
+
+    try store.create(1, 2, edge_type, &props_a);
+    try store.create(1, 2, edge_type, &props_b);
+
+    var refs_iter = try store.getOutgoingRefs(1);
+
+    const ref1 = (try refs_iter.next()).?;
+    const ref2 = (try refs_iter.next()).?;
+    refs_iter.deinit();
+    try std.testing.expect(ref1.id != ref2.id);
+
+    var edge1 = try store.getById(ref1.id);
+    defer edge1.deinit(allocator);
+    var edge2 = try store.getById(ref2.id);
+    defer edge2.deinit(allocator);
+
+    try std.testing.expectEqual(@as(i64, 1), edge1.properties[0].value.int_val);
+    try std.testing.expectEqual(@as(i64, 2), edge2.properties[0].value.int_val);
+
+    try store.deleteById(ref1.id);
+    try std.testing.expectEqual(@as(u64, 1), try store.countOutgoing(1));
+    try std.testing.expect(store.exists(1, 2, edge_type));
+
+    try store.delete(1, 2, edge_type);
+    try std.testing.expectEqual(@as(u64, 0), try store.countOutgoing(1));
+    try std.testing.expect(!store.exists(1, 2, edge_type));
+}
+
+test "edge id allocator persists across reopen" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const buffer_pool = lattice.storage.buffer_pool;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_edge_id_persist_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var root_edge: types.PageId = types.NULL_PAGE;
+    var root_edge_ids: types.PageId = types.NULL_PAGE;
+
+    {
+        var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+        defer pm.deinit();
+
+        var bp = try buffer_pool.BufferPool.init(allocator, &pm, 64 * 4096);
+        defer bp.deinit();
+
+        var tree = try BTree.init(allocator, &bp);
+        var edge_id_tree = try BTree.init(allocator, &bp);
+        var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
+
+        try store.create(1, 2, 1000, &[_]Property{});
+        try store.create(1, 3, 1000, &[_]Property{});
+
+        root_edge = tree.getRootPage();
+        root_edge_ids = edge_id_tree.getRootPage();
+    }
+
+    {
+        var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{});
+        defer {
+            pm.deinit();
+            vfs_impl.delete(db_path) catch {};
+        }
+
+        var bp = try buffer_pool.BufferPool.init(allocator, &pm, 64 * 4096);
+        defer bp.deinit();
+
+        var tree = BTree.open(allocator, &bp, root_edge);
+        var edge_id_tree = BTree.open(allocator, &bp, root_edge_ids);
+        var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
+
+        try store.create(1, 4, 1000, &[_]Property{});
+
+        var refs_iter = try store.getOutgoingRefs(1);
+        defer refs_iter.deinit();
+
+        var max_id: EdgeId = 0;
+        while (try refs_iter.next()) |ref| {
+            max_id = @max(max_id, ref.id);
+        }
+        try std.testing.expectEqual(@as(EdgeId, 3), max_id);
     }
 }

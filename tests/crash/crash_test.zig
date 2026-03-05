@@ -12,6 +12,7 @@ const DatabaseConfig = lattice.storage.database.DatabaseConfig;
 const OpenOptions = lattice.storage.database.OpenOptions;
 const FileHeader = lattice.storage.page.FileHeader;
 const NodeId = lattice.core.types.NodeId;
+const EdgeId = lattice.core.types.EdgeId;
 const PropertyValue = lattice.core.types.PropertyValue;
 const NULL_PAGE = lattice.core.types.NULL_PAGE;
 
@@ -249,6 +250,97 @@ test "edges recovered with source and target nodes" {
         defer db.close();
         try std.testing.expect(try db.nodeExists(src_id));
         try std.testing.expect(try db.nodeExists(dst_id));
+    }
+}
+
+test "parallel edges recovered with stable edge ids" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_parallel_edges.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var src_id: NodeId = undefined;
+    var dst_id: NodeId = undefined;
+    var edge1: EdgeId = undefined;
+    var edge2: EdgeId = undefined;
+
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+        var txn = try db.beginTransaction(.read_write);
+        src_id = try db.createNode(&txn, &[_][]const u8{});
+        dst_id = try db.createNode(&txn, &[_][]const u8{});
+        edge1 = try db.createEdgeAndGetId(&txn, src_id, dst_id, "KNOWS");
+        edge2 = try db.createEdgeAndGetId(&txn, src_id, dst_id, "KNOWS");
+        try db.commitTransaction(&txn);
+        db.close();
+    }
+
+    try simulateCrash(path);
+
+    {
+        var db = try openCrashTestDb(allocator, path, false);
+        defer db.close();
+
+        try std.testing.expect(try db.nodeExists(src_id));
+        try std.testing.expect(try db.nodeExists(dst_id));
+
+        var restored1 = try db.edge_store.getById(edge1);
+        defer restored1.deinit(allocator);
+        var restored2 = try db.edge_store.getById(edge2);
+        defer restored2.deinit(allocator);
+
+        var iter = try db.getOutgoingEdgeRefs(src_id);
+        defer iter.deinit();
+        var count: usize = 0;
+        var found1 = false;
+        var found2 = false;
+        while (try iter.next()) |edge_ref| {
+            count += 1;
+            if (edge_ref.id == edge1) found1 = true;
+            if (edge_ref.id == edge2) found2 = true;
+        }
+
+        try std.testing.expectEqual(@as(usize, 2), count);
+        try std.testing.expect(found1);
+        try std.testing.expect(found2);
+    }
+}
+
+test "committed deleteEdgeById survives crash recovery with parallel edges" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_delete_edge_id.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var edge1: EdgeId = undefined;
+    var edge2: EdgeId = undefined;
+
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+
+        var create_txn = try db.beginTransaction(.read_write);
+        const src_id = try db.createNode(&create_txn, &[_][]const u8{});
+        const dst_id = try db.createNode(&create_txn, &[_][]const u8{});
+        edge1 = try db.createEdgeAndGetId(&create_txn, src_id, dst_id, "REL");
+        edge2 = try db.createEdgeAndGetId(&create_txn, src_id, dst_id, "REL");
+        try db.commitTransaction(&create_txn);
+
+        var delete_txn = try db.beginTransaction(.read_write);
+        try db.deleteEdgeById(&delete_txn, edge1);
+        try db.commitTransaction(&delete_txn);
+
+        db.close();
+    }
+
+    try simulateCrash(path);
+
+    {
+        var db = try openCrashTestDb(allocator, path, false);
+        defer db.close();
+
+        try std.testing.expectError(lattice.graph.edge.EdgeError.NotFound, db.edge_store.getById(edge1));
+        var kept = try db.edge_store.getById(edge2);
+        defer kept.deinit(allocator);
     }
 }
 

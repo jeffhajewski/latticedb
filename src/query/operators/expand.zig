@@ -15,7 +15,6 @@ const ExecutionContext = executor.ExecutionContext;
 
 const types = @import("../../core/types.zig");
 const NodeId = types.NodeId;
-const EdgeId = types.EdgeId;
 
 const edge_mod = @import("../../graph/edge.zig");
 const EdgeStore = edge_mod.EdgeStore;
@@ -204,9 +203,7 @@ pub const Expand = struct {
 
             // Set edge slot if requested
             if (self.edge_slot) |slot| {
-                // Store edge as a reference (edge ID is source + target + type composite)
-                const edge_id = computeEdgeId(edge.source, edge.target, edge.edge_type);
-                output_row.setSlot(slot, .{ .edge_ref = edge_id });
+                output_row.setSlot(slot, .{ .edge_ref = edge.id });
             }
 
             return output_row;
@@ -296,13 +293,6 @@ pub const Expand = struct {
     }
 };
 
-/// Compute a unique edge ID from source, target, and type
-fn computeEdgeId(source: NodeId, target: NodeId, edge_type: SymbolId) EdgeId {
-    // Combine into a single ID - this is a simplified approach
-    // In production, edges should have their own unique IDs
-    return (source << 32) | (target << 16) | @as(u64, edge_type);
-}
-
 // ============================================================================
 // Tests
 // ============================================================================
@@ -314,14 +304,4 @@ test "Expand basic structure" {
     try std.testing.expect(@TypeOf(vtable.next) != void);
     try std.testing.expect(@TypeOf(vtable.close) != void);
     try std.testing.expect(@TypeOf(vtable.deinit) != void);
-}
-
-test "computeEdgeId produces unique values" {
-    const id1 = computeEdgeId(1, 2, 3);
-    const id2 = computeEdgeId(1, 3, 2);
-    const id3 = computeEdgeId(2, 1, 3);
-
-    try std.testing.expect(id1 != id2);
-    try std.testing.expect(id1 != id3);
-    try std.testing.expect(id2 != id3);
 }

@@ -741,6 +741,7 @@ test "c_api: create edge" {
     // Create edge
     var edge_id: u64 = 0;
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, alice, bob, "KNOWS", &edge_id));
+    try std.testing.expectEqual(@as(u64, 1), edge_id);
 
     _ = c_api.lattice_commit(txn);
 }
@@ -778,7 +779,9 @@ test "c_api: get outgoing edges" {
 
     var edge_id: u64 = 0;
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, alice, bob, "KNOWS", &edge_id));
+    try std.testing.expectEqual(@as(u64, 1), edge_id);
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, alice, charlie, "LIKES", &edge_id));
+    try std.testing.expectEqual(@as(u64, 2), edge_id);
 
     // Get outgoing edges from alice
     var edge_result: ?*c_api.lattice_edge_result = null;

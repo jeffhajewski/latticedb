@@ -240,7 +240,6 @@ pub const RecoveryManager = struct {
         redo_list: *std.ArrayListUnmanaged(RedoEntry),
         stats: *RecoveryStats,
     ) RecoveryError!void {
-
         const start_lsn = if (stats.start_lsn > 0) stats.start_lsn else 1;
         var wal_iter = wal.iterate(start_lsn);
 
@@ -438,7 +437,8 @@ pub const RecoveryManager = struct {
             const edge_payload = wal_payload.deserializeEdgeInsert(payload) catch return;
             // Intern edge type string to get type_id
             const type_id = ctx.symbol_table.intern(edge_payload.edge_type) catch return;
-            ctx.edge_store.create(
+            ctx.edge_store.createWithId(
+                edge_payload.edge_id,
                 edge_payload.source,
                 edge_payload.target,
                 type_id,
@@ -517,11 +517,7 @@ pub const RecoveryManager = struct {
         // Edge delete
         else if (payload_type == @intFromEnum(wal_payload.PayloadType.edge_delete)) {
             const edge_payload = wal_payload.deserializeEdgeDelete(payload) catch return;
-            ctx.edge_store.delete(
-                edge_payload.source,
-                edge_payload.target,
-                edge_payload.type_id,
-            ) catch {};
+            ctx.edge_store.deleteById(edge_payload.edge_id) catch {};
         }
     }
 };

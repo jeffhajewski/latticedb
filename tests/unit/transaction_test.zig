@@ -999,6 +999,103 @@ test "future: uncommitted edge creation rolled back on abort" {
     try std.testing.expect(!db.edgeExists(alice, bob, "KNOWS"));
 }
 
+test "rollback: deleteEdgeById restores deleted parallel edge with same id" {
+    if (!databaseSupportsTransactions()) {
+        return error.SkipZigTest;
+    }
+
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_txn_delete_edge_id_rollback.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = true,
+            .enable_fts = false,
+            .enable_vector = false,
+        },
+    });
+    defer db.close();
+
+    const source = try db.createNode(null, &[_][]const u8{});
+    const target = try db.createNode(null, &[_][]const u8{});
+    const rel_type = try db.symbol_table.intern("REL");
+    const weight_key = try db.symbol_table.intern("w");
+
+    const props1 = [_]lattice.graph.node.Property{
+        .{ .key_id = weight_key, .value = .{ .int_val = 1 } },
+    };
+    const props2 = [_]lattice.graph.node.Property{
+        .{ .key_id = weight_key, .value = .{ .int_val = 2 } },
+    };
+
+    const edge1 = try db.edge_store.createAndGetId(source, target, rel_type, &props1);
+    _ = try db.edge_store.createAndGetId(source, target, rel_type, &props2);
+
+    var txn = try db.beginTransaction(.read_write);
+    try db.deleteEdgeById(&txn, edge1);
+    try std.testing.expectError(lattice.graph.edge.EdgeError.NotFound, db.edge_store.getById(edge1));
+
+    try db.abortTransaction(&txn);
+
+    var restored = try db.edge_store.getById(edge1);
+    defer restored.deinit(allocator);
+    try std.testing.expectEqual(edge1, restored.id);
+    try std.testing.expectEqual(@as(usize, 1), restored.properties.len);
+    try std.testing.expectEqual(@as(i64, 1), restored.properties[0].value.int_val);
+}
+
+test "rollback: deleteEdge(source,target,type) restores the exact deleted edge id" {
+    if (!databaseSupportsTransactions()) {
+        return error.SkipZigTest;
+    }
+
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_txn_delete_edge_endpoint_rollback.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = true,
+            .enable_fts = false,
+            .enable_vector = false,
+        },
+    });
+    defer db.close();
+
+    const source = try db.createNode(null, &[_][]const u8{});
+    const target = try db.createNode(null, &[_][]const u8{});
+    const rel_type = try db.symbol_table.intern("REL");
+
+    const edge1 = try db.edge_store.createAndGetId(source, target, rel_type, &[_]lattice.graph.node.Property{});
+    const edge2 = try db.edge_store.createAndGetId(source, target, rel_type, &[_]lattice.graph.node.Property{});
+
+    var txn = try db.beginTransaction(.read_write);
+    try db.deleteEdge(&txn, source, target, "REL");
+
+    // Endpoint delete should remove the first matching edge (lowest edge_id).
+    try std.testing.expectError(lattice.graph.edge.EdgeError.NotFound, db.edge_store.getById(edge1));
+    var still_present = try db.edge_store.getById(edge2);
+    still_present.deinit(allocator);
+
+    try db.abortTransaction(&txn);
+
+    var restored1 = try db.edge_store.getById(edge1);
+    defer restored1.deinit(allocator);
+    var restored2 = try db.edge_store.getById(edge2);
+    defer restored2.deinit(allocator);
+}
+
 test "future: crash mid-transaction loses graph changes" {
     if (!databaseSupportsTransactions()) {
         return error.SkipZigTest;

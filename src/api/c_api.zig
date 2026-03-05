@@ -1023,12 +1023,11 @@ pub export fn lattice_edge_create(
 
     // Pass transaction if it's a real one (id != 0)
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
-    txn_handle.db_handle.db.createEdge(txn_ptr, source, target, type_slice) catch |err| {
+    const edge_id = txn_handle.db_handle.db.createEdgeAndGetId(txn_ptr, source, target, type_slice) catch |err| {
         return mapAnyError(err);
     };
 
-    // EdgeStore doesn't return edge IDs currently, use composite key
-    edge_out.* = (source << 32) | target;
+    edge_out.* = edge_id;
     return .ok;
 }
 

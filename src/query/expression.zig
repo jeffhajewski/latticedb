@@ -15,23 +15,11 @@ const NodeId = types.NodeId;
 const EdgeId = types.EdgeId;
 const PropertyValue = types.PropertyValue;
 
-const symbols = @import("../graph/symbols.zig");
-const SymbolId = symbols.SymbolId;
 const vector_distance = @import("../vector/distance.zig");
 
 const Row = executor.Row;
 const SlotValue = executor.SlotValue;
 const ExecutionContext = executor.ExecutionContext;
-
-/// Decode an edge ID back to its components.
-/// Note: This encoding assumes target < 65536 and source < 4 billion.
-fn decodeEdgeId(edge_id: EdgeId) struct { source: NodeId, target: NodeId, edge_type: SymbolId } {
-    return .{
-        .source = edge_id >> 32,
-        .target = (edge_id >> 16) & 0xFFFF,
-        .edge_type = @intCast(edge_id & 0xFFFF),
-    };
-}
 
 // ============================================================================
 // Errors
@@ -367,9 +355,6 @@ pub const ExpressionEvaluator = struct {
             const database = ctx.database orelse return .{ .null_val = {} };
             const symbol_table = ctx.symbol_table orelse return .{ .null_val = {} };
 
-            // Decode edge ID to get source, target, and edge type
-            const decoded = decodeEdgeId(edge_id);
-
             // Look up the property key symbol ID
             const key_id = symbol_table.lookup(pa.property) catch {
                 // Property key not found in symbol table
@@ -377,7 +362,7 @@ pub const ExpressionEvaluator = struct {
             };
 
             // Get the edge from storage
-            var edge = database.edge_store.get(decoded.source, decoded.target, decoded.edge_type) catch {
+            var edge = database.edge_store.getById(edge_id) catch {
                 return .{ .null_val = {} };
             };
             defer edge.deinit(ctx.allocator);
@@ -782,9 +767,13 @@ pub const ExpressionEvaluator = struct {
             return switch (arg) {
                 .edge_ref => |edge_id| blk: {
                     const symbol_table = ctx.symbol_table orelse break :blk .{ .null_val = {} };
-                    const decoded = decodeEdgeId(edge_id);
-                    const resolved = symbol_table.resolve(decoded.edge_type) catch break :blk .{ .null_val = {} };
-                    break :blk .{ .string_val = resolved };
+                    const database = ctx.database orelse break :blk .{ .null_val = {} };
+                    var edge = database.edge_store.getById(edge_id) catch break :blk .{ .null_val = {} };
+                    defer edge.deinit(ctx.allocator);
+                    const resolved = symbol_table.resolve(edge.edge_type) catch break :blk .{ .null_val = {} };
+                    defer symbol_table.freeString(resolved);
+                    const owned = self.allocator.dupe(u8, resolved) catch return EvalError.OutOfMemory;
+                    break :blk .{ .string_val = owned };
                 },
                 .null_val => .{ .null_val = {} },
                 else => EvalError.TypeError,
@@ -803,7 +792,9 @@ pub const ExpressionEvaluator = struct {
                     var label_list: std.ArrayListUnmanaged(EvalResult) = .empty;
                     for (node.labels) |label_id| {
                         const resolved = symbol_table.resolve(label_id) catch continue;
-                        label_list.append(self.allocator, .{ .string_val = resolved }) catch return EvalError.OutOfMemory;
+                        defer symbol_table.freeString(resolved);
+                        const owned = self.allocator.dupe(u8, resolved) catch return EvalError.OutOfMemory;
+                        label_list.append(self.allocator, .{ .string_val = owned }) catch return EvalError.OutOfMemory;
                     }
                     break :blk .{ .list_val = label_list.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory };
                 },
@@ -824,8 +815,10 @@ pub const ExpressionEvaluator = struct {
                 var entries: std.ArrayListUnmanaged(EvalResult.MapEntry) = .empty;
                 for (node.properties) |prop| {
                     const key = symbol_table.resolve(prop.key_id) catch continue;
+                    defer symbol_table.freeString(key);
+                    const owned_key = self.allocator.dupe(u8, key) catch return EvalError.OutOfMemory;
                     entries.append(self.allocator, .{
-                        .key = key,
+                        .key = owned_key,
                         .value = EvalResult.fromPropertyValue(prop.value, self.allocator),
                     }) catch return EvalError.OutOfMemory;
                 }
@@ -834,14 +827,15 @@ pub const ExpressionEvaluator = struct {
                 const edge_id = arg.edge_ref;
                 const database = ctx.database orelse return .{ .null_val = {} };
                 const symbol_table = ctx.symbol_table orelse return .{ .null_val = {} };
-                const decoded = decodeEdgeId(edge_id);
-                var edge = database.edge_store.get(decoded.source, decoded.target, decoded.edge_type) catch return .{ .null_val = {} };
+                var edge = database.edge_store.getById(edge_id) catch return .{ .null_val = {} };
                 defer edge.deinit(ctx.allocator);
                 var entries: std.ArrayListUnmanaged(EvalResult.MapEntry) = .empty;
                 for (edge.properties) |prop| {
                     const key = symbol_table.resolve(prop.key_id) catch continue;
+                    defer symbol_table.freeString(key);
+                    const owned_key = self.allocator.dupe(u8, key) catch return EvalError.OutOfMemory;
                     entries.append(self.allocator, .{
-                        .key = key,
+                        .key = owned_key,
                         .value = EvalResult.fromPropertyValue(prop.value, self.allocator),
                     }) catch return EvalError.OutOfMemory;
                 }

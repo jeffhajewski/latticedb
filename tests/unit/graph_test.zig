@@ -368,7 +368,8 @@ test "edges: create stores both directions" {
     defer db.deinit();
 
     var tree = try BTree.init(allocator, db.bp);
-    var store = EdgeStore.init(allocator, &tree);
+    var edge_id_tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     const edge_type: SymbolId = 1000;
     try store.create(1, 2, edge_type, &[_]Property{});
@@ -388,7 +389,8 @@ test "edges: delete removes both directions" {
     defer db.deinit();
 
     var tree = try BTree.init(allocator, db.bp);
-    var store = EdgeStore.init(allocator, &tree);
+    var edge_id_tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     const edge_type: SymbolId = 1000;
     try store.create(1, 2, edge_type, &[_]Property{});
@@ -408,7 +410,8 @@ test "edges: outgoing traversal finds all edges from node" {
     defer db.deinit();
 
     var tree = try BTree.init(allocator, db.bp);
-    var store = EdgeStore.init(allocator, &tree);
+    var edge_id_tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     // Create multiple outgoing edges from node 1
     try store.create(1, 2, 1000, &[_]Property{});
@@ -438,7 +441,8 @@ test "edges: incoming traversal finds all edges to node" {
     defer db.deinit();
 
     var tree = try BTree.init(allocator, db.bp);
-    var store = EdgeStore.init(allocator, &tree);
+    var edge_id_tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     // Create multiple incoming edges to node 5
     try store.create(1, 5, 1000, &[_]Property{});
@@ -468,7 +472,8 @@ test "edges: self-loop works correctly" {
     defer db.deinit();
 
     var tree = try BTree.init(allocator, db.bp);
-    var store = EdgeStore.init(allocator, &tree);
+    var edge_id_tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     // Create self-loop: node 1 -> node 1
     const edge_type: SymbolId = 1000;
@@ -492,7 +497,8 @@ test "edges: properties stored and retrieved" {
     defer db.deinit();
 
     var tree = try BTree.init(allocator, db.bp);
-    var store = EdgeStore.init(allocator, &tree);
+    var edge_id_tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     const properties = [_]Property{
         .{ .key_id = 2000, .value = .{ .int_val = 2020 } },
@@ -515,7 +521,8 @@ test "edges: delete nonexistent returns NotFound" {
     defer db.deinit();
 
     var tree = try BTree.init(allocator, db.bp);
-    var store = EdgeStore.init(allocator, &tree);
+    var edge_id_tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     try std.testing.expectError(EdgeError.NotFound, store.delete(1, 2, 1000));
 }
@@ -526,7 +533,8 @@ test "edges: get nonexistent returns NotFound" {
     defer db.deinit();
 
     var tree = try BTree.init(allocator, db.bp);
-    var store = EdgeStore.init(allocator, &tree);
+    var edge_id_tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     try std.testing.expectError(EdgeError.NotFound, store.get(1, 2, 1000));
 }
@@ -537,7 +545,8 @@ test "edges: filter by type with getOutgoingByType" {
     defer db.deinit();
 
     var tree = try BTree.init(allocator, db.bp);
-    var store = EdgeStore.init(allocator, &tree);
+    var edge_id_tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     // Create edges with different types
     const knows: SymbolId = 1000;
@@ -590,7 +599,8 @@ test "edges: batch fetch matches individual for sparse node IDs" {
     defer db.deinit();
 
     var tree = try BTree.init(allocator, db.bp);
-    var store = EdgeStore.init(allocator, &tree);
+    var edge_id_tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     const type_a: SymbolId = 100;
     const type_b: SymbolId = 200;
@@ -654,7 +664,8 @@ test "edges: batch fetch does not include edges from non-requested nodes" {
     defer db.deinit();
 
     var tree = try BTree.init(allocator, db.bp);
-    var store = EdgeStore.init(allocator, &tree);
+    var edge_id_tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     const edge_type: SymbolId = 42;
 
@@ -696,7 +707,8 @@ test "edges: batch fetch handles nodes with no outgoing edges" {
     defer db.deinit();
 
     var tree = try BTree.init(allocator, db.bp);
-    var store = EdgeStore.init(allocator, &tree);
+    var edge_id_tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     const edge_type: SymbolId = 1;
 
@@ -733,7 +745,8 @@ test "edges: batch fetch single node matches individual fetch" {
     defer db.deinit();
 
     var tree = try BTree.init(allocator, db.bp);
-    var store = EdgeStore.init(allocator, &tree);
+    var edge_id_tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     const type_a: SymbolId = 10;
     const type_b: SymbolId = 20;
@@ -767,7 +780,8 @@ test "edges: batch fetch with many nodes cross-validates against individual" {
     defer db.deinit();
 
     var tree = try BTree.init(allocator, db.bp);
-    var store = EdgeStore.init(allocator, &tree);
+    var edge_id_tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     const edge_type: SymbolId = 1;
 
@@ -825,7 +839,8 @@ test "edges: batch fetch with duplicate node IDs" {
     defer db.deinit();
 
     var tree = try BTree.init(allocator, db.bp);
-    var store = EdgeStore.init(allocator, &tree);
+    var edge_id_tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     try store.create(5, 10, 1, &[_]Property{});
     try store.create(5, 20, 1, &[_]Property{});
@@ -857,7 +872,8 @@ test "edges: batch fetch adjacent nodes (dense IDs)" {
     defer db.deinit();
 
     var tree = try BTree.init(allocator, db.bp);
-    var store = EdgeStore.init(allocator, &tree);
+    var edge_id_tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
 
     const edge_type: SymbolId = 1;
 

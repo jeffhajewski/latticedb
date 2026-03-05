@@ -133,11 +133,11 @@ pub const UndoEntry = struct {
     op_type: UndoOpType,
     /// Type of entity affected
     entity_type: EntityType,
-    /// Primary entity ID (node_id for nodes/properties, source for edges)
+    /// Primary entity ID (node_id for nodes/properties, edge_id for edges)
     entity_id: u64,
-    /// Secondary ID (target node for edges, 0 otherwise)
+    /// Secondary ID (legacy/optional, typically 0)
     secondary_id: u64,
-    /// Type ID for edges, key_id for properties
+    /// Type ID (key_id for properties, legacy/optional for others)
     type_id: u16,
     /// Previous data for restoring on undo (owned, must be freed)
     prev_data: ?[]const u8,

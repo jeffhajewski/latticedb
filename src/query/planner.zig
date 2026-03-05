@@ -1045,19 +1045,11 @@ pub const QueryPlanner = struct {
 
                 op = delete_node.operator();
             } else if (binding.kind == .edge) {
-                // Look up edge metadata for deletion
-                const edge_meta = self.edge_bindings.get(var_name) orelse {
-                    // Edge without metadata - can't delete (need source/target/type)
-                    return PlannerError.InvalidQuery;
-                };
-
                 // Create DeleteEdge operator
                 const delete_edge = mutation_ops.DeleteEdge.init(
                     self.allocator,
                     op,
-                    edge_meta.source_slot,
-                    edge_meta.target_slot,
-                    edge_meta.edge_type,
+                    binding.slot,
                     database,
                 ) catch return PlannerError.OutOfMemory;
 

@@ -10,6 +10,8 @@ const lattice = @import("lattice");
 
 const Database = lattice.storage.database.Database;
 const PropertyValue = lattice.core.types.PropertyValue;
+const SymbolId = lattice.graph.symbols.SymbolId;
+const NodeProperty = lattice.graph.node.Property;
 
 fn openTestDb(path: []const u8, opts: struct {
     enable_vector: bool = false,
@@ -244,6 +246,73 @@ test "query: CREATE node then connect to different label" {
     try expectString(result, 0, 0, "Alice");
     try expectString(result, 0, 1, "Acme");
     try expectString(result, 0, 2, "Tech");
+}
+
+test "query: edge variable resolves properties/type/id with high node ids" {
+    const path = "/tmp/lattice_qm_edge_high_id.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    // Seed data directly to exercise edge identity/path decoding end-to-end.
+    try db.node_store.createWithId(1, &[_]SymbolId{}, &[_]NodeProperty{});
+    try db.node_store.createWithId(70000, &[_]SymbolId{}, &[_]NodeProperty{});
+
+    const rel_type = try db.symbol_table.intern("REL");
+    const weight_key = try db.symbol_table.intern("w");
+    const props = [_]NodeProperty{
+        .{ .key_id = weight_key, .value = .{ .int_val = 42 } },
+    };
+    try db.edge_store.createWithId(1, 1, 70000, rel_type, &props);
+
+    var result = try db.query("MATCH (a)-[r:REL]->(b) RETURN id(b), r.w, type(r), id(r)");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try expectInt(result, 0, 0, 70000);
+    try expectInt(result, 0, 1, 42);
+    try expectString(result, 0, 2, "REL");
+    try expectInt(result, 0, 3, 1);
+}
+
+test "query: DELETE r removes only the matched parallel edge" {
+    const path = "/tmp/lattice_qm_delete_parallel_edge.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    const source = try db.createNode(null, &[_][]const u8{});
+    const target = try db.createNode(null, &[_][]const u8{});
+
+    const rel_type = try db.symbol_table.intern("REL");
+    const weight_key = try db.symbol_table.intern("w");
+    const props1 = [_]NodeProperty{
+        .{ .key_id = weight_key, .value = .{ .int_val = 1 } },
+    };
+    const props2 = [_]NodeProperty{
+        .{ .key_id = weight_key, .value = .{ .int_val = 2 } },
+    };
+    const edge1 = try db.edge_store.createAndGetId(source, target, rel_type, &props1);
+    const edge2 = try db.edge_store.createAndGetId(source, target, rel_type, &props2);
+
+    var before = try db.query("MATCH (a)-[r:REL]->(b) RETURN count(r)");
+    defer before.deinit();
+    try expectInt(before, 0, 0, 2);
+
+    var ids_before = try db.query("MATCH (a)-[r:REL]->(b) RETURN id(r), r.w ORDER BY r.w ASC");
+    defer ids_before.deinit();
+    try std.testing.expectEqual(@as(usize, 2), ids_before.rowCount());
+    try expectInt(ids_before, 0, 0, @intCast(edge1));
+    try expectInt(ids_before, 0, 1, 1);
+    try expectInt(ids_before, 1, 0, @intCast(edge2));
+    try expectInt(ids_before, 1, 1, 2);
+
+    var del = try db.query("MATCH (a)-[r:REL]->(b) WHERE r.w = 1 DELETE r");
+    del.deinit();
+
+    var after = try db.query("MATCH (a)-[r:REL]->(b) RETURN count(r), min(r.w), max(r.w), id(r)");
+    defer after.deinit();
+    try expectInt(after, 0, 0, 1);
+    try expectInt(after, 0, 1, 2);
+    try expectInt(after, 0, 2, 2);
+    try expectInt(after, 0, 3, @intCast(edge2));
 }
 
 // ============================================================================

@@ -331,6 +331,7 @@ pub const Database = struct {
     // B+Trees (8 trees for different stores)
     node_tree: BTree,
     edge_tree: BTree,
+    edge_id_tree: BTree,
     label_tree: BTree,
     symbol_forward_tree: BTree,
     symbol_reverse_tree: BTree,
@@ -440,7 +441,7 @@ pub const Database = struct {
 
         // 7. Initialize Graph Stores
         self.node_store = NodeStore.init(allocator, &self.node_tree);
-        self.edge_store = EdgeStore.init(allocator, &self.edge_tree);
+        self.edge_store = EdgeStore.init(allocator, &self.edge_tree, &self.edge_id_tree);
         self.label_index = LabelIndex.init(allocator, &self.label_tree);
 
         // 7b. Run WAL recovery if needed
@@ -788,27 +789,22 @@ pub const Database = struct {
                 },
             },
             .edge => switch (entry.op_type) {
-                // Undo of insert is delete
+                // Undo of insert is delete by stable edge_id.
                 .insert => {
-                    self.edge_store.delete(entry.entity_id, entry.secondary_id, entry.type_id) catch {};
+                    self.edge_store.deleteById(entry.entity_id) catch {};
                 },
-                // Undo of delete is re-insert with original properties
+                // Undo of delete is re-insert with original edge_id and properties.
                 .delete => {
+                    const data = entry.prev_data orelse return;
+                    const payload = wal_payload.deserializeEdgeDelete(data) catch return;
+
                     var properties: []node_mod.Property = &[_]node_mod.Property{};
                     var owns_properties = false;
-
-                    if (entry.prev_data) |data| {
-                        const payload = wal_payload.deserializeEdgeDelete(data) catch {
-                            // Fallback: create edge without properties
-                            self.edge_store.create(entry.entity_id, entry.secondary_id, entry.type_id, &[_]node_mod.Property{}) catch {};
-                            return;
-                        };
-                        if (payload.properties.len > 0) {
-                            const wal_props = wal_payload.deserializeProperties(self.allocator, payload.properties) catch &[_]wal_payload.Property{};
-                            if (wal_props.len > 0) {
-                                properties = @ptrCast(@constCast(wal_props));
-                                owns_properties = true;
-                            }
+                    if (payload.properties.len > 0) {
+                        const wal_props = wal_payload.deserializeProperties(self.allocator, payload.properties) catch &[_]wal_payload.Property{};
+                        if (wal_props.len > 0) {
+                            properties = @ptrCast(@constCast(wal_props));
+                            owns_properties = true;
                         }
                     }
                     defer if (owns_properties) {
@@ -819,7 +815,13 @@ pub const Database = struct {
                         self.allocator.free(properties);
                     };
 
-                    self.edge_store.create(entry.entity_id, entry.secondary_id, entry.type_id, properties) catch {};
+                    self.edge_store.createWithId(
+                        payload.edge_id,
+                        payload.source,
+                        payload.target,
+                        payload.type_id,
+                        properties,
+                    ) catch {};
                 },
                 .update => {},
             },
@@ -966,6 +968,9 @@ pub const Database = struct {
         self.edge_tree = BTree.init(self.allocator, &self.buffer_pool) catch {
             return DatabaseError.TreeInitFailed;
         };
+        self.edge_id_tree = BTree.init(self.allocator, &self.buffer_pool) catch {
+            return DatabaseError.TreeInitFailed;
+        };
 
         self.label_tree = BTree.init(self.allocator, &self.buffer_pool) catch {
             return DatabaseError.TreeInitFailed;
@@ -1016,6 +1021,19 @@ pub const Database = struct {
             &self.buffer_pool,
             header.getTreeRoot(.edge),
         );
+        const edge_id_root = header.getTreeRoot(.edge_id_index);
+        if (edge_id_root != NULL_PAGE) {
+            self.edge_id_tree = BTree.open(
+                self.allocator,
+                &self.buffer_pool,
+                edge_id_root,
+            );
+        } else {
+            // New index for edge_id -> locator mappings.
+            self.edge_id_tree = BTree.init(self.allocator, &self.buffer_pool) catch {
+                return DatabaseError.TreeInitFailed;
+            };
+        }
 
         self.label_tree = BTree.open(
             self.allocator,
@@ -1075,6 +1093,7 @@ pub const Database = struct {
 
         header.setTreeRoot(.node, self.node_tree.getRootPage());
         header.setTreeRoot(.edge, self.edge_tree.getRootPage());
+        header.setTreeRoot(.edge_id_index, self.edge_id_tree.getRootPage());
         header.setTreeRoot(.label, self.label_tree.getRootPage());
         header.setTreeRoot(.symbol_forward, self.symbol_forward_tree.getRootPage());
         header.setTreeRoot(.symbol_reverse, self.symbol_reverse_tree.getRootPage());
@@ -1838,15 +1857,15 @@ pub const Database = struct {
     // Graph Operations - Edges
     // ========================================================================
 
-    /// Create an edge between two nodes
-    /// If txn is null, the operation is auto-committed
-    pub fn createEdge(
+    /// Create an edge between two nodes and return its stable edge ID.
+    /// If txn is null, the operation is auto-committed.
+    pub fn createEdgeAndGetId(
         self: *Self,
         txn: ?*Transaction,
         source: NodeId,
         target: NodeId,
         edge_type: []const u8,
-    ) !void {
+    ) !EdgeId {
         if (self.read_only) return DatabaseError.PermissionDenied;
 
         // Validate transaction if provided
@@ -1860,8 +1879,8 @@ pub const Database = struct {
             return DatabaseError.IoError;
         };
 
-        // Create edge with no properties
-        self.edge_store.create(source, target, type_id, &[_]node_mod.Property{}) catch {
+        // Create edge with no properties and get stable edge ID.
+        const edge_id = self.edge_store.createAndGetId(source, target, type_id, &[_]node_mod.Property{}) catch {
             return DatabaseError.IoError;
         };
 
@@ -1869,14 +1888,14 @@ pub const Database = struct {
         if (txn) |t| {
             if (self.txn_manager) |*tm| {
                 var buf: [256]u8 = undefined;
-                const payload = wal_payload.serializeEdgeInsert(&buf, source, target, edge_type) catch {
+                const payload = wal_payload.serializeEdgeInsert(&buf, edge_id, source, target, edge_type) catch {
                     return DatabaseError.IoError;
                 };
                 _ = tm.logOperation(t, .insert, payload) catch {
                     return DatabaseError.IoError;
                 };
                 // Undo of insert is delete
-                tm.addUndoEntry(t, .insert, .edge, source, target, type_id, null) catch {
+                tm.addUndoEntry(t, .insert, .edge, edge_id, 0, 0, null) catch {
                     return DatabaseError.IoError;
                 };
             }
@@ -1889,6 +1908,19 @@ pub const Database = struct {
 
         // Invalidate query cache (edge types changed)
         if (self.query_cache) |cache| cache.bumpSchemaVersion();
+        return edge_id;
+    }
+
+    /// Create an edge between two nodes.
+    /// If txn is null, the operation is auto-committed.
+    pub fn createEdge(
+        self: *Self,
+        txn: ?*Transaction,
+        source: NodeId,
+        target: NodeId,
+        edge_type: []const u8,
+    ) !void {
+        _ = try self.createEdgeAndGetId(txn, source, target, edge_type);
     }
 
     /// Delete an edge
@@ -1913,47 +1945,108 @@ pub const Database = struct {
             return DatabaseError.IoError;
         };
 
-        // Log to WAL and add undo entry before deletion
+        var edge = self.edge_store.get(source, target, type_id) catch {
+            return DatabaseError.NotFound;
+        };
+        defer edge.deinit(self.allocator);
+        const edge_id = edge.id;
+
+        // Log to WAL and add undo entry before deletion.
         if (txn) |t| {
             if (self.txn_manager) |*tm| {
-                // Capture edge properties before delete for undo
                 var prop_bytes: []u8 = &[_]u8{};
                 var owns_prop_bytes = false;
-                if (self.edge_store.get(source, target, type_id)) |existing_edge| {
-                    var edge = existing_edge;
-                    defer edge.deinit(self.allocator);
-                    if (edge.properties.len > 0) {
-                        prop_bytes = wal_payload.serializeProperties(self.allocator, @ptrCast(edge.properties)) catch &[_]u8{};
-                        owns_prop_bytes = prop_bytes.len > 0;
-                    }
-                } else |_| {}
+                if (edge.properties.len > 0) {
+                    prop_bytes = wal_payload.serializeProperties(self.allocator, @ptrCast(edge.properties)) catch &[_]u8{};
+                    owns_prop_bytes = prop_bytes.len > 0;
+                }
                 defer if (owns_prop_bytes) self.allocator.free(prop_bytes);
 
                 var buf: [2048]u8 = undefined;
-                // Serialize edge data for WAL (now with properties)
-                const payload = wal_payload.serializeEdgeDelete(&buf, source, target, type_id, prop_bytes) catch {
+                const payload = wal_payload.serializeEdgeDelete(
+                    &buf,
+                    edge_id,
+                    source,
+                    target,
+                    type_id,
+                    prop_bytes,
+                ) catch {
                     return DatabaseError.IoError;
                 };
                 _ = tm.logOperation(t, .delete, payload) catch {
                     return DatabaseError.IoError;
                 };
-                // Undo of delete is re-insert; store serialized edge data for property recovery
-                tm.addUndoEntry(t, .delete, .edge, source, target, type_id, payload) catch {
+                // Undo of delete is re-insert with original edge identity.
+                tm.addUndoEntry(t, .delete, .edge, edge_id, 0, 0, payload) catch {
                     return DatabaseError.IoError;
                 };
             }
         }
 
-        self.edge_store.delete(source, target, type_id) catch {
+        self.edge_store.deleteById(edge_id) catch {
             return DatabaseError.IoError;
         };
 
         // Invalidate adjacency cache for source node
         if (self.adjacency_cache) |*cache| {
             cache.invalidate(source);
+            cache.invalidate(target);
         }
 
         // Invalidate query cache (edge types changed)
+        if (self.query_cache) |cache| cache.bumpSchemaVersion();
+    }
+
+    /// Delete an edge by stable edge ID.
+    /// If txn is null, the operation is auto-committed.
+    pub fn deleteEdgeById(
+        self: *Self,
+        txn: ?*Transaction,
+        edge_id: EdgeId,
+    ) !void {
+        if (self.read_only) return DatabaseError.PermissionDenied;
+
+        if (txn) |t| {
+            if (!t.isActive()) return DatabaseError.TransactionNotActive;
+            if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+        }
+
+        // Resolve edge data before deletion for WAL/undo/cache invalidation.
+        var edge = self.edge_store.getById(edge_id) catch return DatabaseError.NotFound;
+        defer edge.deinit(self.allocator);
+        const source = edge.source;
+        const target = edge.target;
+
+        if (txn) |t| {
+            if (self.txn_manager) |*tm| {
+                var prop_bytes: []u8 = &[_]u8{};
+                var owns_prop_bytes = false;
+                if (edge.properties.len > 0) {
+                    prop_bytes = wal_payload.serializeProperties(self.allocator, @ptrCast(edge.properties)) catch &[_]u8{};
+                    owns_prop_bytes = prop_bytes.len > 0;
+                }
+                defer if (owns_prop_bytes) self.allocator.free(prop_bytes);
+
+                var buf: [2048]u8 = undefined;
+                const payload = wal_payload.serializeEdgeDelete(
+                    &buf,
+                    edge.id,
+                    edge.source,
+                    edge.target,
+                    edge.edge_type,
+                    prop_bytes,
+                ) catch return DatabaseError.IoError;
+                _ = tm.logOperation(t, .delete, payload) catch return DatabaseError.IoError;
+                tm.addUndoEntry(t, .delete, .edge, edge.id, 0, 0, payload) catch return DatabaseError.IoError;
+            }
+        }
+
+        self.edge_store.deleteById(edge_id) catch return DatabaseError.IoError;
+
+        if (self.adjacency_cache) |*cache| {
+            cache.invalidate(source);
+            cache.invalidate(target);
+        }
         if (self.query_cache) |cache| cache.bumpSchemaVersion();
     }
 
@@ -2054,7 +2147,7 @@ pub const Database = struct {
     }
 
     /// Get lightweight iterator for outgoing edges (no property deserialization).
-    /// Returns EdgeRef containing only (source, target, edge_type_id).
+    /// Returns EdgeRef containing (id, source, target, edge_type_id).
     /// Ideal for graph traversal (BFS/DFS) where properties are not needed.
     /// Caller must call iter.deinit() when done.
     pub fn getOutgoingEdgeRefs(self: *Self, node_id: NodeId) !EdgeRefIterator {
@@ -2091,7 +2184,7 @@ pub const Database = struct {
     }
 
     /// Get lightweight iterator for incoming edges (no property deserialization).
-    /// Returns EdgeRef containing only (source, target, edge_type_id).
+    /// Returns EdgeRef containing (id, source, target, edge_type_id).
     /// Caller must call iter.deinit() when done.
     pub fn getIncomingEdgeRefs(self: *Self, node_id: NodeId) !EdgeRefIterator {
         return self.edge_store.getIncomingRefs(node_id) catch {

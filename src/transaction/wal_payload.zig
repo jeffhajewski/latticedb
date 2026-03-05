@@ -207,20 +207,22 @@ pub fn deserializeNodeDelete(payload: []const u8) PayloadError!NodeDeletePayload
 // ============================================================================
 
 /// Serialize an edge insert operation
-/// Format: type(u8) + source(u64) + target(u64) + type_len(u16) + type_str(u8[])
+/// Format: type(u8) + edge_id(u64) + source(u64) + target(u64) + type_len(u16) + type_str(u8[])
 pub fn serializeEdgeInsert(
     buf: []u8,
+    edge_id: u64,
     source: u64,
     target: u64,
     edge_type: []const u8,
 ) PayloadError![]u8 {
-    const required_size = 1 + 8 + 8 + 2 + edge_type.len;
+    const required_size = 1 + 8 + 8 + 8 + 2 + edge_type.len;
     if (buf.len < required_size) return PayloadError.BufferTooSmall;
 
     var stream = std.io.fixedBufferStream(buf);
     const writer = stream.writer();
 
     writer.writeByte(@intFromEnum(PayloadType.edge_insert)) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u64, edge_id, .little) catch return PayloadError.BufferTooSmall;
     writer.writeInt(u64, source, .little) catch return PayloadError.BufferTooSmall;
     writer.writeInt(u64, target, .little) catch return PayloadError.BufferTooSmall;
     writer.writeInt(u16, @intCast(edge_type.len), .little) catch return PayloadError.BufferTooSmall;
@@ -231,6 +233,7 @@ pub fn serializeEdgeInsert(
 
 /// Deserialized edge insert payload
 pub const EdgeInsertPayload = struct {
+    edge_id: u64,
     source: u64,
     target: u64,
     edge_type: []const u8,
@@ -238,19 +241,21 @@ pub const EdgeInsertPayload = struct {
 
 /// Deserialize an edge insert payload
 pub fn deserializeEdgeInsert(payload: []const u8) PayloadError!EdgeInsertPayload {
-    if (payload.len < 19) return PayloadError.InvalidPayload;
+    if (payload.len < 27) return PayloadError.InvalidPayload;
     if (payload[0] != @intFromEnum(PayloadType.edge_insert)) {
         return PayloadError.UnexpectedPayloadType;
     }
 
-    const source = std.mem.readInt(u64, payload[1..9], .little);
-    const target = std.mem.readInt(u64, payload[9..17], .little);
-    const type_len = std.mem.readInt(u16, payload[17..19], .little);
+    const edge_id = std.mem.readInt(u64, payload[1..9], .little);
+    const source = std.mem.readInt(u64, payload[9..17], .little);
+    const target = std.mem.readInt(u64, payload[17..25], .little);
+    const type_len = std.mem.readInt(u16, payload[25..27], .little);
 
-    if (payload.len < 19 + type_len) return PayloadError.InvalidPayload;
-    const edge_type = payload[19..][0..type_len];
+    if (payload.len < 27 + type_len) return PayloadError.InvalidPayload;
+    const edge_type = payload[27..][0..type_len];
 
     return EdgeInsertPayload{
+        .edge_id = edge_id,
         .source = source,
         .target = target,
         .edge_type = edge_type,
@@ -262,21 +267,23 @@ pub fn deserializeEdgeInsert(payload: []const u8) PayloadError!EdgeInsertPayload
 // ============================================================================
 
 /// Serialize an edge delete operation (includes edge data for undo)
-/// Format: type(u8) + source(u64) + target(u64) + type_id(u16) + props_len(u32) + props(u8[])
+/// Format: type(u8) + edge_id(u64) + source(u64) + target(u64) + type_id(u16) + props_len(u32) + props(u8[])
 pub fn serializeEdgeDelete(
     buf: []u8,
+    edge_id: u64,
     source: u64,
     target: u64,
     type_id: u16,
     properties: []const u8,
 ) PayloadError![]u8 {
-    const required_size = 1 + 8 + 8 + 2 + 4 + properties.len;
+    const required_size = 1 + 8 + 8 + 8 + 2 + 4 + properties.len;
     if (buf.len < required_size) return PayloadError.BufferTooSmall;
 
     var stream = std.io.fixedBufferStream(buf);
     const writer = stream.writer();
 
     writer.writeByte(@intFromEnum(PayloadType.edge_delete)) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u64, edge_id, .little) catch return PayloadError.BufferTooSmall;
     writer.writeInt(u64, source, .little) catch return PayloadError.BufferTooSmall;
     writer.writeInt(u64, target, .little) catch return PayloadError.BufferTooSmall;
     writer.writeInt(u16, type_id, .little) catch return PayloadError.BufferTooSmall;
@@ -290,6 +297,7 @@ pub fn serializeEdgeDelete(
 
 /// Deserialized edge delete payload
 pub const EdgeDeletePayload = struct {
+    edge_id: u64,
     source: u64,
     target: u64,
     type_id: u16,
@@ -298,20 +306,22 @@ pub const EdgeDeletePayload = struct {
 
 /// Deserialize an edge delete payload
 pub fn deserializeEdgeDelete(payload: []const u8) PayloadError!EdgeDeletePayload {
-    if (payload.len < 23) return PayloadError.InvalidPayload;
+    if (payload.len < 31) return PayloadError.InvalidPayload;
     if (payload[0] != @intFromEnum(PayloadType.edge_delete)) {
         return PayloadError.UnexpectedPayloadType;
     }
 
-    const source = std.mem.readInt(u64, payload[1..9], .little);
-    const target = std.mem.readInt(u64, payload[9..17], .little);
-    const type_id = std.mem.readInt(u16, payload[17..19], .little);
-    const props_len = std.mem.readInt(u32, payload[19..23], .little);
+    const edge_id = std.mem.readInt(u64, payload[1..9], .little);
+    const source = std.mem.readInt(u64, payload[9..17], .little);
+    const target = std.mem.readInt(u64, payload[17..25], .little);
+    const type_id = std.mem.readInt(u16, payload[25..27], .little);
+    const props_len = std.mem.readInt(u32, payload[27..31], .little);
 
-    if (payload.len < 23 + props_len) return PayloadError.InvalidPayload;
-    const properties = payload[23..][0..props_len];
+    if (payload.len < 31 + props_len) return PayloadError.InvalidPayload;
+    const properties = payload[31..][0..props_len];
 
     return EdgeDeletePayload{
+        .edge_id = edge_id,
         .source = source,
         .target = target,
         .type_id = type_id,
@@ -716,9 +726,10 @@ test "node_delete: empty properties" {
 test "edge_insert: serialize and deserialize" {
     var buf: [256]u8 = undefined;
 
-    const serialized = try serializeEdgeInsert(&buf, 1, 2, "KNOWS");
+    const serialized = try serializeEdgeInsert(&buf, 42, 1, 2, "KNOWS");
     const result = try deserializeEdgeInsert(serialized);
 
+    try std.testing.expectEqual(@as(u64, 42), result.edge_id);
     try std.testing.expectEqual(@as(u64, 1), result.source);
     try std.testing.expectEqual(@as(u64, 2), result.target);
     try std.testing.expectEqualStrings("KNOWS", result.edge_type);
@@ -728,9 +739,10 @@ test "edge_delete: serialize and deserialize with properties" {
     var buf: [256]u8 = undefined;
     const props = "edge_props";
 
-    const serialized = try serializeEdgeDelete(&buf, 10, 20, 5, props);
+    const serialized = try serializeEdgeDelete(&buf, 42, 10, 20, 5, props);
     const result = try deserializeEdgeDelete(serialized);
 
+    try std.testing.expectEqual(@as(u64, 42), result.edge_id);
     try std.testing.expectEqual(@as(u64, 10), result.source);
     try std.testing.expectEqual(@as(u64, 20), result.target);
     try std.testing.expectEqual(@as(u16, 5), result.type_id);
@@ -768,7 +780,7 @@ test "wrong payload type returns error" {
     var buf: [256]u8 = undefined;
 
     // Serialize as edge_insert
-    const serialized = try serializeEdgeInsert(&buf, 1, 2, "KNOWS");
+    const serialized = try serializeEdgeInsert(&buf, 3, 1, 2, "KNOWS");
 
     // Try to deserialize as node_insert (requires different type byte)
     try std.testing.expectError(
@@ -797,7 +809,7 @@ test "node_delete: buffer too small" {
 test "edge_insert: buffer too small" {
     var buf: [10]u8 = undefined;
 
-    const result = serializeEdgeInsert(&buf, 1, 2, "KNOWS");
+    const result = serializeEdgeInsert(&buf, 3, 1, 2, "KNOWS");
     try std.testing.expectError(PayloadError.BufferTooSmall, result);
 }
 
@@ -805,7 +817,7 @@ test "edge_delete: buffer too small" {
     var buf: [15]u8 = undefined;
     const props = "edge_properties";
 
-    const result = serializeEdgeDelete(&buf, 1, 2, 100, props);
+    const result = serializeEdgeDelete(&buf, 3, 1, 2, 100, props);
     try std.testing.expectError(PayloadError.BufferTooSmall, result);
 }
 

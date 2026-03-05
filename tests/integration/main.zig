@@ -10,6 +10,7 @@ const lattice = @import("lattice");
 const database_test = @import("database_test.zig");
 const mvcc_test = @import("mvcc_test.zig");
 const embedding_test = @import("embedding_test.zig");
+const query_mutation_test = @import("query_mutation_test.zig");
 
 // Re-export tests from all modules
 test {
@@ -19,6 +20,8 @@ test {
     _ = mvcc_test;
     // Embedding integration tests
     _ = embedding_test;
+    // Query mutation end-to-end tests
+    _ = query_mutation_test;
 }
 
 test "integration test runner initialized" {

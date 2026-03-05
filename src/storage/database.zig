@@ -731,7 +731,7 @@ pub const Database = struct {
                             const wal_props = wal_payload.deserializeProperties(self.allocator, payload.properties) catch &[_]wal_payload.Property{};
                             if (wal_props.len > 0) {
                                 // Convert wal_payload.Property to node_mod.Property (same layout)
-                                properties = @constCast(@ptrCast(wal_props));
+                                properties = @ptrCast(@constCast(wal_props));
                                 owns_properties = true;
                             }
                         }
@@ -806,7 +806,7 @@ pub const Database = struct {
                         if (payload.properties.len > 0) {
                             const wal_props = wal_payload.deserializeProperties(self.allocator, payload.properties) catch &[_]wal_payload.Property{};
                             if (wal_props.len > 0) {
-                                properties = @constCast(@ptrCast(wal_props));
+                                properties = @ptrCast(@constCast(wal_props));
                                 owns_properties = true;
                             }
                         }
@@ -2593,6 +2593,7 @@ pub const Database = struct {
             .symbol_table = &self.symbol_table,
             .hnsw_index = if (self.hnsw_index) |*hnsw| hnsw else null,
             .fts_index = if (self.fts_index) |*fts| fts else null,
+            .database = self,
         };
 
         // Use an arena for all query execution temporaries (operator structs,
@@ -2617,6 +2618,7 @@ pub const Database = struct {
 
         // Execute
         var exec_ctx = ExecutionContext.initWithStorage(self.allocator, &self.node_store, &self.symbol_table);
+        exec_ctx.database = self;
         defer exec_ctx.deinit();
 
         var binding_iter = planner.bindings.iterator();
@@ -2649,8 +2651,9 @@ pub const Database = struct {
         exec_result: *executor_mod.QueryResult,
         planner: *QueryPlanner,
     ) QueryError!QueryResult {
-        // Build column names from planner bindings
-        const num_cols = planner.next_slot;
+        // Build column names from planner output columns (set by RETURN clause planning)
+        // Use output_columns when available (from RETURN), otherwise fall back to next_slot
+        const num_cols = if (planner.output_columns > 0) planner.output_columns else planner.next_slot;
         var columns = self.allocator.alloc([]const u8, num_cols) catch {
             return QueryError.OutOfMemory;
         };

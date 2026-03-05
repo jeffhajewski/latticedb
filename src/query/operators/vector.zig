@@ -166,12 +166,14 @@ fn mapHnswError(err: HnswError) OperatorError {
 /// Performs k-NN search using HNSW index and filters by distance threshold.
 /// Used for queries like: MATCH (n) WHERE n.embedding <=> $query < 0.5
 pub const VectorSearchWithInput = struct {
-    /// Input operator (not used in current implementation - index is primary source)
+    /// Input operator providing candidate nodes to filter against
     input: Operator,
     /// Slot to output results to
     output_slot: u8,
-    /// Parameter name containing query vector
-    param_name: []const u8,
+    /// Parameter name containing query vector (null for literal vectors)
+    param_name: ?[]const u8,
+    /// Literal query vector (null for parameter-based queries)
+    literal_query: ?[]const f32,
     /// Number of results to return
     k: u32,
     /// Distance threshold (optional)
@@ -184,6 +186,8 @@ pub const VectorSearchWithInput = struct {
     current_index: usize,
     /// Output row
     output_row: ?*Row,
+    /// Set of valid node IDs from input operator (for filtering)
+    valid_nodes: std.AutoHashMapUnmanaged(NodeId, void),
     /// Whether opened
     opened: bool,
     /// Allocator
@@ -206,12 +210,43 @@ pub const VectorSearchWithInput = struct {
             .input = input,
             .output_slot = output_slot,
             .param_name = param_name,
+            .literal_query = null,
             .k = k,
             .distance_threshold = distance_threshold,
             .index = index,
             .results = null,
             .current_index = 0,
             .output_row = null,
+            .valid_nodes = .{},
+            .opened = false,
+            .allocator = allocator,
+        };
+        return self;
+    }
+
+    /// Create a new VectorSearchWithInput operator with literal query vector
+    pub fn initWithLiteral(
+        allocator: Allocator,
+        input: Operator,
+        output_slot: u8,
+        query_vector: []const f32,
+        k: u32,
+        distance_threshold: ?f32,
+        index: *HnswIndex,
+    ) !*Self {
+        const self = try allocator.create(Self);
+        self.* = Self{
+            .input = input,
+            .output_slot = output_slot,
+            .param_name = null,
+            .literal_query = query_vector,
+            .k = k,
+            .distance_threshold = distance_threshold,
+            .index = index,
+            .results = null,
+            .current_index = 0,
+            .output_row = null,
+            .valid_nodes = .{},
             .opened = false,
             .allocator = allocator,
         };
@@ -239,21 +274,33 @@ pub const VectorSearchWithInput = struct {
         // Allocate output row
         self.output_row = ctx.allocRow() catch return OperatorError.OutOfMemory;
 
-        // Open input (we may not use it, but need to maintain lifecycle)
+        // Open input and collect candidate node IDs
         try self.input.open(ctx);
         self.opened = true;
 
-        // Get query vector from parameters
-        const param_value = ctx.getParameter(self.param_name) orelse {
-            // No parameter provided - can't perform search
-            return OperatorError.UnboundVariable;
-        };
+        while (try self.input.next(ctx)) |row| {
+            if (row.getSlot(self.output_slot)) |slot_val| {
+                if (slot_val.asNodeId()) |node_id| {
+                    self.valid_nodes.put(self.allocator, node_id, {}) catch {
+                        return OperatorError.OutOfMemory;
+                    };
+                }
+            }
+        }
 
-        // Extract vector from parameter (expecting array of floats stored as string or special type)
-        // For now, we support vector passed as a property value with float array
-        // In practice, this would need proper vector parameter handling
-        const query_vector = extractVectorFromParam(param_value) orelse {
-            return OperatorError.TypeError;
+        // Get query vector from literal or parameters
+        const query_vector = if (self.literal_query) |literal|
+            literal
+        else if (self.param_name) |param_name| blk: {
+            const param_value = ctx.getParameter(param_name) orelse {
+                return OperatorError.UnboundVariable;
+            };
+
+            break :blk extractVectorFromParam(param_value) orelse {
+                return OperatorError.TypeError;
+            };
+        } else {
+            return OperatorError.UnboundVariable;
         };
 
         // Perform the HNSW search
@@ -282,12 +329,13 @@ pub const VectorSearchWithInput = struct {
                 }
             }
 
-            // Build output row
-            output_row.clear();
-            output_row.setSlot(self.output_slot, .{ .node_ref = result.node_id });
-            output_row.setDistance(self.output_slot, result.distance);
-
-            return output_row;
+            // Only return nodes allowed by input constraints
+            if (self.valid_nodes.contains(result.node_id)) {
+                output_row.clear();
+                output_row.setSlot(self.output_slot, .{ .node_ref = result.node_id });
+                output_row.setDistance(self.output_slot, result.distance);
+                return output_row;
+            }
         }
 
         return null;
@@ -302,6 +350,9 @@ pub const VectorSearchWithInput = struct {
             self.results = null;
         }
 
+        self.valid_nodes.deinit(self.allocator);
+        self.valid_nodes = .{};
+
         if (self.opened) {
             self.input.close(ctx);
             self.opened = false;
@@ -315,6 +366,8 @@ pub const VectorSearchWithInput = struct {
         if (self.results) |results| {
             self.index.freeResults(results);
         }
+
+        self.valid_nodes.deinit(self.allocator);
 
         self.input.deinit(allocator);
         allocator.destroy(self);

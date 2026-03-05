@@ -17,6 +17,7 @@ const PropertyValue = types.PropertyValue;
 
 const symbols = @import("../graph/symbols.zig");
 const SymbolId = symbols.SymbolId;
+const vector_distance = @import("../vector/distance.zig");
 
 const Row = executor.Row;
 const SlotValue = executor.SlotValue;
@@ -314,6 +315,23 @@ pub const ExpressionEvaluator = struct {
         if (obj == .node_ref) {
             const node_id = obj.node_ref;
 
+            // Special pseudo-property for vector embeddings stored outside node properties.
+            if (std.mem.eql(u8, pa.property, "embedding")) {
+                if (ctx.database) |database| {
+                    if (database.hnsw_index) |*hnsw_index| {
+                        if (hnsw_index.getNode(node_id)) |entry| {
+                            if (database.vector_storage) |*vector_storage| {
+                                const borrowed = vector_storage.borrowByLocation(entry.vector_loc) catch return .{ .null_val = {} };
+                                defer borrowed.release();
+
+                                const cloned = self.allocator.dupe(f32, borrowed.data) catch return EvalError.OutOfMemory;
+                                return .{ .vector_val = cloned };
+                            }
+                        }
+                    }
+                }
+            }
+
             // Get the node store and symbol table from context
             const node_store = ctx.node_store orelse return .{ .null_val = {} };
             const symbol_table = ctx.symbol_table orelse return .{ .null_val = {} };
@@ -454,7 +472,8 @@ pub const ExpressionEvaluator = struct {
             .in_ => self.listContains(left, right),
 
             // Special operators (handled by dedicated operators)
-            .vector_distance, .fts_match => .{ .null_val = {} },
+            .vector_distance => self.vectorDistance(left, right),
+            .fts_match => self.ftsMatch(left, right),
         };
     }
 
@@ -1146,7 +1165,76 @@ pub const ExpressionEvaluator = struct {
 
         return .{ .bool_val = false };
     }
+
+    fn vectorDistance(self: *Self, left: EvalResult, right: EvalResult) EvalResult {
+        const left_vec = self.asVector(left) orelse return .{ .null_val = {} };
+        const right_vec = self.asVector(right) orelse return .{ .null_val = {} };
+
+        if (left_vec.len == 0 or right_vec.len == 0) return .{ .null_val = {} };
+        if (left_vec.len != right_vec.len) return .{ .null_val = {} };
+
+        return .{ .float_val = vector_distance.cosineDistance(left_vec, right_vec) };
+    }
+
+    fn asVector(self: *Self, value: EvalResult) ?[]const f32 {
+        return switch (value) {
+            .vector_val => |v| v,
+            .list_val => |items| blk: {
+                const vec = self.allocator.alloc(f32, items.len) catch break :blk null;
+                for (items, 0..) |item, i| {
+                    vec[i] = switch (item) {
+                        .float_val => |f| @floatCast(f),
+                        .int_val => |n| @floatFromInt(n),
+                        else => {
+                            self.allocator.free(vec);
+                            break :blk null;
+                        },
+                    };
+                }
+                break :blk vec;
+            },
+            else => null,
+        };
+    }
+
+    fn ftsMatch(_: *Self, left: EvalResult, right: EvalResult) EvalResult {
+        const text = switch (left) {
+            .string_val => |s| s,
+            else => return .{ .null_val = {} },
+        };
+        const query = switch (right) {
+            .string_val => |s| s,
+            else => return .{ .null_val = {} },
+        };
+
+        return .{ .bool_val = ftsQueryMatches(text, query) };
+    }
 };
+
+fn ftsQueryMatches(text: []const u8, query: []const u8) bool {
+    var saw_token = false;
+    var token_iter = std.mem.tokenizeAny(u8, query, " \t\r\n");
+    while (token_iter.next()) |token| {
+        saw_token = true;
+        if (!containsAsciiInsensitive(text, token)) return false;
+    }
+    return saw_token;
+}
+
+fn containsAsciiInsensitive(haystack: []const u8, needle: []const u8) bool {
+    if (needle.len == 0) return true;
+    if (needle.len > haystack.len) return false;
+
+    var i: usize = 0;
+    while (i + needle.len <= haystack.len) : (i += 1) {
+        var j: usize = 0;
+        while (j < needle.len) : (j += 1) {
+            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(needle[j])) break;
+        }
+        if (j == needle.len) return true;
+    }
+    return false;
+}
 
 // ============================================================================
 // Regex Engine

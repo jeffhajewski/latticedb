@@ -32,6 +32,8 @@ const mutation_ops = @import("operators/mutation.zig");
 const aggregate_ops = @import("operators/aggregate.zig");
 const distinct_ops = @import("operators/distinct.zig");
 const unwind_ops = @import("operators/unwind.zig");
+const materialize_ops = @import("operators/materialize.zig");
+const cross_product_ops = @import("operators/cross_product.zig");
 
 const btree = @import("../storage/btree.zig");
 const BTree = btree.BTree;
@@ -122,6 +124,8 @@ pub const QueryPlanner = struct {
     bindings: std.StringHashMap(VarBinding),
     edge_bindings: std.StringHashMap(EdgeBinding),
     next_slot: u8,
+    /// Number of output columns from the RETURN clause (set during planning)
+    output_columns: u8 = 0,
 
     const Self = @This();
 
@@ -133,6 +137,7 @@ pub const QueryPlanner = struct {
             .bindings = std.StringHashMap(VarBinding).init(allocator),
             .edge_bindings = std.StringHashMap(EdgeBinding).init(allocator),
             .next_slot = 0,
+            .output_columns = 0,
         };
     }
 
@@ -239,21 +244,19 @@ pub const QueryPlanner = struct {
                         }
                         // If no labels, no filter needed - just use the Expand output as-is
                     } else if (node_pattern.labels.len > 0) {
-                        // First node with labels - create a label scan
+                        // Node with labels - create a label scan
                         const label_index_ptr = self.storage.label_index orelse return PlannerError.MissingStorage;
                         const symbol_table = self.storage.symbol_table orelse return PlannerError.MissingStorage;
 
-                        // If label is not found in symbol table, use NULL_SYMBOL (0) which has no nodes
-                        // This will result in an empty scan rather than an error
                         const label_id = symbol_table.lookup(node_pattern.labels[0]) catch |err| switch (err) {
-                            symbols.SymbolError.NotFound => symbols.NULL_SYMBOL, // Label doesn't exist = empty result
+                            symbols.SymbolError.NotFound => symbols.NULL_SYMBOL,
                             else => return PlannerError.InternalError,
                         };
 
                         const label_scan = scan_ops.LabelScan.init(self.allocator, slot, label_id, label_index_ptr) catch {
                             return PlannerError.OutOfMemory;
                         };
-                        op = label_scan.operator();
+                        var new_op: Operator = label_scan.operator();
 
                         // Chain filters for additional labels (AND semantics)
                         for (node_pattern.labels[1..]) |label_name| {
@@ -261,18 +264,68 @@ pub const QueryPlanner = struct {
                                 symbols.SymbolError.NotFound => symbols.NULL_SYMBOL,
                                 else => return PlannerError.InternalError,
                             };
-                            const extra_filter = filter_ops.LabelFilter.init(self.allocator, op.?, slot, extra_id) catch {
+                            const extra_filter = filter_ops.LabelFilter.init(self.allocator, new_op, slot, extra_id) catch {
                                 return PlannerError.OutOfMemory;
                             };
-                            op = extra_filter.operator();
+                            new_op = extra_filter.operator();
+                        }
+
+                        // If there's an existing operator from a previous disconnected pattern, cross join
+                        if (op) |existing_op| {
+                            const cross = cross_product_ops.CrossProduct.init(self.allocator, existing_op, new_op) catch {
+                                return PlannerError.OutOfMemory;
+                            };
+                            op = cross.operator();
+                        } else {
+                            op = new_op;
                         }
                     } else if (op == null) {
-                        // All nodes scan
+                        // All nodes scan (no labels, no previous operator)
                         const node_tree = self.storage.node_tree orelse return PlannerError.MissingStorage;
                         const all_scan = scan_ops.AllNodesScan.init(self.allocator, slot, node_tree) catch {
                             return PlannerError.OutOfMemory;
                         };
                         op = all_scan.operator();
+                    } else {
+                        // No labels but existing operator — cross join with all nodes scan
+                        const node_tree = self.storage.node_tree orelse return PlannerError.MissingStorage;
+                        const all_scan = scan_ops.AllNodesScan.init(self.allocator, slot, node_tree) catch {
+                            return PlannerError.OutOfMemory;
+                        };
+                        const cross = cross_product_ops.CrossProduct.init(self.allocator, op.?, all_scan.operator()) catch {
+                            return PlannerError.OutOfMemory;
+                        };
+                        op = cross.operator();
+                    }
+
+                    // Add property filters for inline properties: {key: value} → Filter(n.key = value)
+                    if (node_pattern.properties) |props| {
+                        for (props) |prop| {
+                            // Synthesize: variable.property = value
+                            const var_name = node_pattern.variable orelse return PlannerError.InvalidQuery;
+                            const loc = node_pattern.location;
+
+                            // Create variable reference expression
+                            const var_expr = self.allocator.create(ast.Expression) catch return PlannerError.OutOfMemory;
+                            var_expr.* = .{ .variable = .{ .name = var_name, .location = loc } };
+
+                            // Create property access expression (var.key)
+                            const prop_access = self.allocator.create(ast.PropertyAccess) catch return PlannerError.OutOfMemory;
+                            prop_access.* = .{ .object = var_expr, .property = prop.key, .location = loc };
+
+                            const prop_expr = self.allocator.create(ast.Expression) catch return PlannerError.OutOfMemory;
+                            prop_expr.* = .{ .property_access = prop_access };
+
+                            // Create binary expression (prop_access = value)
+                            const bin_expr = self.allocator.create(ast.BinaryExpr) catch return PlannerError.OutOfMemory;
+                            bin_expr.* = .{ .left = prop_expr, .operator = .eq, .right = prop.value, .location = loc };
+
+                            const predicate = self.allocator.create(ast.Expression) catch return PlannerError.OutOfMemory;
+                            predicate.* = .{ .binary = bin_expr };
+
+                            const prop_filter = filter_ops.Filter.init(self.allocator, op.?, predicate) catch return PlannerError.OutOfMemory;
+                            op = prop_filter.operator();
+                        }
                     }
 
                     prev_node_slot = slot;
@@ -458,10 +511,12 @@ pub const QueryPlanner = struct {
         // Right side should be parameter: $query
         if (binary.right.* == .parameter) {
             info.param_name = binary.right.parameter.name;
+        } else if (binary.right.* == .list) {
+            info.query_vector = parseVectorLiteral(self.allocator, binary.right.list) orelse null;
         }
 
-        // Must have at least variable and parameter
-        if (info.variable_slot != null and info.param_name != null) {
+        // Must have at least variable and parameter/literal vector
+        if (info.variable_slot != null and (info.param_name != null or info.query_vector != null)) {
             return info;
         }
 
@@ -473,23 +528,55 @@ pub const QueryPlanner = struct {
         const hnsw_index = self.storage.hnsw_index orelse return PlannerError.MissingStorage;
 
         const output_slot = info.variable_slot orelse return PlannerError.InvalidQuery;
-        const param_name = info.param_name orelse return PlannerError.InvalidQuery;
 
-        // Create VectorSearchWithInput operator
         const k: u32 = 100; // Default k for search
-        const vector_search = vector_ops.VectorSearchWithInput.init(
-            self.allocator,
-            input,
-            output_slot,
-            param_name,
-            k,
-            info.threshold,
-            hnsw_index,
-        ) catch {
-            return PlannerError.OutOfMemory;
+        const vector_search = if (info.query_vector) |query_vector|
+            vector_ops.VectorSearchWithInput.initWithLiteral(
+                self.allocator,
+                input,
+                output_slot,
+                query_vector,
+                k,
+                info.threshold,
+                hnsw_index,
+            ) catch return PlannerError.OutOfMemory
+        else blk: {
+            const param_name = info.param_name orelse return PlannerError.InvalidQuery;
+            break :blk vector_ops.VectorSearchWithInput.init(
+                self.allocator,
+                input,
+                output_slot,
+                param_name,
+                k,
+                info.threshold,
+                hnsw_index,
+            ) catch return PlannerError.OutOfMemory;
         };
 
         return vector_search.operator();
+    }
+
+    fn parseVectorLiteral(allocator: Allocator, list: *const ast.ListExpr) ?[]const f32 {
+        const values = allocator.alloc(f32, list.elements.len) catch return null;
+
+        for (list.elements, 0..) |elem, i| {
+            if (elem.* != .literal) {
+                allocator.free(values);
+                return null;
+            }
+
+            const lit = elem.literal;
+            values[i] = switch (lit.value) {
+                .float => |f| @floatCast(f),
+                .integer => |n| @floatFromInt(n),
+                else => {
+                    allocator.free(values);
+                    return null;
+                },
+            };
+        }
+
+        return values;
     }
 
     /// Information extracted from an FTS search pattern
@@ -628,6 +715,8 @@ pub const QueryPlanner = struct {
         };
         errdefer self.allocator.free(items);
 
+        self.output_columns = @intCast(ret.items.len);
+
         for (ret.items, 0..) |item, i| {
             items[i] = .{
                 .expr = item.expression,
@@ -651,6 +740,8 @@ pub const QueryPlanner = struct {
 
     /// Plan a RETURN clause with aggregations
     fn planAggregateReturn(self: *Self, ret: *const ast.ReturnClause, input_op: Operator) PlannerError!Operator {
+        self.output_columns = @intCast(ret.items.len);
+
         // Separate items into grouping keys and aggregates
         var group_keys: std.ArrayList(aggregate_ops.GroupKey) = .empty;
         defer group_keys.deinit(self.allocator);
@@ -811,7 +902,7 @@ pub const QueryPlanner = struct {
     /// Plan a CREATE clause
     fn planCreate(self: *Self, create: *const ast.CreateClause, input: ?Operator) PlannerError!Operator {
         const database = self.storage.database orelse return PlannerError.MissingStorage;
-        var op = input;
+        var op: ?Operator = if (input) |inp| try self.materializeInput(inp) else null;
 
         // Pending edge info for deferred creation
         const PendingEdge = struct {
@@ -930,7 +1021,7 @@ pub const QueryPlanner = struct {
     fn planDelete(self: *Self, delete: *const ast.DeleteClause, input: ?Operator) PlannerError!Operator {
         const database = self.storage.database orelse return PlannerError.MissingStorage;
         const input_op = input orelse return PlannerError.InvalidQuery;
-        var op = input_op;
+        var op = try self.materializeInput(input_op);
 
         // Process each expression to delete
         for (delete.expressions) |expr| {
@@ -980,7 +1071,7 @@ pub const QueryPlanner = struct {
     /// Plan a SET clause
     fn planSet(self: *Self, set_clause: *const ast.SetClause, input: ?Operator) PlannerError!Operator {
         const database = self.storage.database orelse return PlannerError.MissingStorage;
-        var op = input orelse return PlannerError.InvalidQuery;
+        var op = try self.materializeInput(input orelse return PlannerError.InvalidQuery);
 
         for (set_clause.items) |item| {
             switch (item) {
@@ -1056,7 +1147,7 @@ pub const QueryPlanner = struct {
     /// Plan a REMOVE clause
     fn planRemove(self: *Self, remove_clause: *const ast.RemoveClause, input: ?Operator) PlannerError!Operator {
         const database = self.storage.database orelse return PlannerError.MissingStorage;
-        var op = input orelse return PlannerError.InvalidQuery;
+        var op = try self.materializeInput(input orelse return PlannerError.InvalidQuery);
 
         for (remove_clause.items) |item| {
             switch (item) {
@@ -1212,9 +1303,11 @@ pub const QueryPlanner = struct {
             on_match_props = try self.extractSetProperties(items);
         }
 
+        const materialized_input: ?Operator = if (input) |inp| try self.materializeInput(inp) else null;
+
         const merge_op = mutation_ops.MergeNode.init(
             self.allocator,
-            input,
+            materialized_input,
             node_pattern.labels,
             properties,
             slot,
@@ -1224,6 +1317,13 @@ pub const QueryPlanner = struct {
         ) catch return PlannerError.OutOfMemory;
 
         return merge_op.operator();
+    }
+
+    /// Wrap an input operator in a Materialize barrier to release page latches
+    /// before downstream mutation operators write to the same storage pages.
+    fn materializeInput(self: *Self, input: Operator) PlannerError!Operator {
+        const mat = materialize_ops.Materialize.init(self.allocator, input) catch return PlannerError.OutOfMemory;
+        return mat.operator();
     }
 
     /// Extract property key-value pairs from SET items (for MERGE ON CREATE/ON MATCH)

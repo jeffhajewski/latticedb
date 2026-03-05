@@ -204,12 +204,21 @@ pub const SemanticAnalyzer = struct {
     }
 
     fn analyzeCreateClause(self: *Self, clause: *const ast.CreateClause) void {
-        // Register variables from CREATE patterns (creates new nodes/edges)
+        // Register variables from CREATE patterns.
+        // Variables already bound (e.g. from MATCH) are skipped — referencing
+        // an existing variable in CREATE means "use this node/edge", not
+        // "create a new one".
         for (clause.patterns) |pattern| {
             for (pattern.elements) |element| {
                 switch (element) {
                     .node => |n| {
-                        self.registerNodeVariable(n);
+                        if (n.variable) |name| {
+                            if (!self.variables.contains(name)) {
+                                self.registerNodeVariable(n);
+                            }
+                        } else {
+                            self.registerNodeVariable(n);
+                        }
                         // Analyze property expressions
                         if (n.properties) |props| {
                             for (props) |prop| {
@@ -218,7 +227,13 @@ pub const SemanticAnalyzer = struct {
                         }
                     },
                     .edge => |e| {
-                        self.registerEdgeVariable(e);
+                        if (e.variable) |name| {
+                            if (!self.variables.contains(name)) {
+                                self.registerEdgeVariable(e);
+                            }
+                        } else {
+                            self.registerEdgeVariable(e);
+                        }
                         // Analyze property expressions
                         if (e.properties) |props| {
                             for (props) |prop| {

@@ -428,11 +428,17 @@ pub const ExpressionEvaluator = struct {
             .lte => self.compareLessOrEqual(left, right),
             .gt => blk: {
                 const lte = self.compareLessOrEqual(left, right);
-                break :blk .{ .bool_val = !lte.toBool().? };
+                if (lte.toBool()) |lte_val| {
+                    break :blk .{ .bool_val = !lte_val };
+                }
+                break :blk .{ .null_val = {} };
             },
             .gte => blk: {
                 const lt = self.compareLessThan(left, right);
-                break :blk .{ .bool_val = !lt.toBool().? };
+                if (lt.toBool()) |lt_val| {
+                    break :blk .{ .bool_val = !lt_val };
+                }
+                break :blk .{ .null_val = {} };
             },
 
             // Logical operators (already handled above for short-circuit)
@@ -1724,6 +1730,68 @@ test "eval result conversions" {
 
     const bool_result = EvalResult{ .bool_val = true };
     try std.testing.expectEqual(true, bool_result.toBool().?);
+}
+
+test "evaluate gt with incompatible types returns null" {
+    const allocator = std.testing.allocator;
+    var eval = ExpressionEvaluator.init(allocator);
+    var row = Row.init();
+    var ctx = ExecutionContext.init(allocator);
+    defer ctx.deinit();
+
+    var left = ast.Expression{
+        .literal = .{
+            .value = .{ .string = "abc" },
+            .location = .{ .line = 1, .column = 1 },
+        },
+    };
+    var right = ast.Expression{
+        .literal = .{
+            .value = .{ .integer = 1 },
+            .location = .{ .line = 1, .column = 7 },
+        },
+    };
+    var binary = ast.BinaryExpr{
+        .left = &left,
+        .operator = .gt,
+        .right = &right,
+        .location = .{ .line = 1, .column = 5 },
+    };
+    var expr = ast.Expression{ .binary = &binary };
+
+    const result = try eval.evaluate(&expr, &row, &ctx);
+    try std.testing.expect(result.isNull());
+}
+
+test "evaluate gte with incompatible types returns null" {
+    const allocator = std.testing.allocator;
+    var eval = ExpressionEvaluator.init(allocator);
+    var row = Row.init();
+    var ctx = ExecutionContext.init(allocator);
+    defer ctx.deinit();
+
+    var left = ast.Expression{
+        .literal = .{
+            .value = .{ .string = "abc" },
+            .location = .{ .line = 1, .column = 1 },
+        },
+    };
+    var right = ast.Expression{
+        .literal = .{
+            .value = .{ .integer = 1 },
+            .location = .{ .line = 1, .column = 8 },
+        },
+    };
+    var binary = ast.BinaryExpr{
+        .left = &left,
+        .operator = .gte,
+        .right = &right,
+        .location = .{ .line = 1, .column = 5 },
+    };
+    var expr = ast.Expression{ .binary = &binary };
+
+    const result = try eval.evaluate(&expr, &row, &ctx);
+    try std.testing.expect(result.isNull());
 }
 
 test "fromPropertyValue converts list" {

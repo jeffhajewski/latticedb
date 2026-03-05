@@ -1152,6 +1152,23 @@ test "query: WHERE with comparison operators" {
     try expectString(result3, 0, 0, "B");
 }
 
+test "query: incompatible > and >= comparisons evaluate to null (no panic)" {
+    const path = "/tmp/lattice_qm_where_incompatible_comparison.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query("CREATE (n:Person {name: \"Alice\"})");
+    seed.deinit();
+
+    var gt_result = try db.query("MATCH (n:Person) WHERE n.name > 10 RETURN count(n)");
+    defer gt_result.deinit();
+    try expectInt(gt_result, 0, 0, 0);
+
+    var gte_result = try db.query("MATCH (n:Person) WHERE n.name >= 10 RETURN count(n)");
+    defer gte_result.deinit();
+    try expectInt(gte_result, 0, 0, 0);
+}
+
 test "query: WHERE with string matching" {
     const path = "/tmp/lattice_qm_where_string.ltdb";
     var db = try openTestDb(path, .{});

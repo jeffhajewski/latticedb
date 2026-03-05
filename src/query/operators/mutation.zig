@@ -1289,14 +1289,15 @@ pub const MergeNode = struct {
     fn mergeNode(self: *Self, ctx: *ExecutionContext, row: ?*const Row) !NodeId {
         // Try to find an existing node matching the pattern
         if (self.labels.len > 0) {
-            const candidates = self.database.getNodesByLabel(self.labels[0]) catch &[_]NodeId{};
-            defer self.allocator.free(candidates);
+            if (self.database.getNodesByLabel(self.labels[0]) catch null) |candidates| {
+                defer self.database.allocator.free(candidates);
 
-            for (candidates) |candidate_id| {
-                if (self.matchesProperties(candidate_id, ctx, row)) {
-                    // ON MATCH: apply on_match properties
-                    self.applySetItems(candidate_id, self.on_match_props, ctx, row);
-                    return candidate_id;
+                for (candidates) |candidate_id| {
+                    if (self.matchesProperties(candidate_id, ctx, row)) {
+                        // ON MATCH: apply on_match properties
+                        self.applySetItems(candidate_id, self.on_match_props, ctx, row);
+                        return candidate_id;
+                    }
                 }
             }
         }
@@ -1333,17 +1334,12 @@ pub const MergeNode = struct {
             // Get the actual value from the node
             const actual = self.database.getNodeProperty(node_id, prop.key) catch return false;
             if (actual == null) return false;
+            var actual_val = actual.?;
+            defer actual_val.deinit(self.database.allocator);
 
             // Compare values
-            if (!propertyValuesEqual(expected_pv, actual.?)) {
-                // Free allocated string from getNodeProperty if needed
-                if (actual.? == .string_val) {
-                    self.allocator.free(actual.?.string_val);
-                }
+            if (!propertyValuesEqual(expected_pv, actual_val)) {
                 return false;
-            }
-            if (actual.? == .string_val) {
-                self.allocator.free(actual.?.string_val);
             }
         }
         return true;

@@ -29,10 +29,14 @@ const ast = @import("../ast.zig");
 pub const Limit = struct {
     /// Input operator
     input: Operator,
-    /// Maximum rows to return
+    /// Maximum rows to return (resolved at open time if count_expr is set)
     count: u64,
+    /// Optional runtime LIMIT expression (supports parameters)
+    count_expr: ?*const ast.Expression,
     /// Number of rows returned so far
     returned: u64,
+    /// Expression evaluator for count_expr
+    evaluator: ExpressionEvaluator,
     /// Whether opened
     opened: bool,
 
@@ -44,7 +48,23 @@ pub const Limit = struct {
         self.* = Self{
             .input = input,
             .count = count,
+            .count_expr = null,
             .returned = 0,
+            .evaluator = ExpressionEvaluator.init(allocator),
+            .opened = false,
+        };
+        return self;
+    }
+
+    /// Create a new Limit operator with an expression evaluated at open time.
+    pub fn initExpr(allocator: Allocator, input: Operator, count_expr: *const ast.Expression) !*Self {
+        const self = try allocator.create(Self);
+        self.* = Self{
+            .input = input,
+            .count = 0,
+            .count_expr = count_expr,
+            .returned = 0,
+            .evaluator = ExpressionEvaluator.init(allocator),
             .opened = false,
         };
         return self;
@@ -67,6 +87,10 @@ pub const Limit = struct {
 
     fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
+
+        if (self.count_expr) |expr| {
+            self.count = try evaluateCountExpression(&self.evaluator, expr, ctx);
+        }
         try self.input.open(ctx);
         self.returned = 0;
         self.opened = true;
@@ -111,10 +135,14 @@ pub const Limit = struct {
 pub const Skip = struct {
     /// Input operator
     input: Operator,
-    /// Number of rows to skip
+    /// Number of rows to skip (resolved at open time if count_expr is set)
     count: u64,
+    /// Optional runtime SKIP expression (supports parameters)
+    count_expr: ?*const ast.Expression,
     /// Number of rows skipped so far
     skipped: u64,
+    /// Expression evaluator for count_expr
+    evaluator: ExpressionEvaluator,
     /// Whether opened
     opened: bool,
 
@@ -126,7 +154,23 @@ pub const Skip = struct {
         self.* = Self{
             .input = input,
             .count = count,
+            .count_expr = null,
             .skipped = 0,
+            .evaluator = ExpressionEvaluator.init(allocator),
+            .opened = false,
+        };
+        return self;
+    }
+
+    /// Create a new Skip operator with an expression evaluated at open time.
+    pub fn initExpr(allocator: Allocator, input: Operator, count_expr: *const ast.Expression) !*Self {
+        const self = try allocator.create(Self);
+        self.* = Self{
+            .input = input,
+            .count = 0,
+            .count_expr = count_expr,
+            .skipped = 0,
+            .evaluator = ExpressionEvaluator.init(allocator),
             .opened = false,
         };
         return self;
@@ -149,6 +193,10 @@ pub const Skip = struct {
 
     fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
+
+        if (self.count_expr) |expr| {
+            self.count = try evaluateCountExpression(&self.evaluator, expr, ctx);
+        }
         try self.input.open(ctx);
         self.skipped = 0;
         self.opened = true;
@@ -389,6 +437,33 @@ fn compareEvalResults(a: EvalResult, b: EvalResult) i32 {
         },
         else => return 0,
     }
+}
+
+fn evaluateCountExpression(
+    evaluator: *ExpressionEvaluator,
+    expr: *const ast.Expression,
+    ctx: *ExecutionContext,
+) OperatorError!u64 {
+    var dummy_row = Row.init();
+    const result = evaluator.evaluate(expr, &dummy_row, ctx) catch |err| return mapEvalError(err);
+
+    return switch (result) {
+        .int_val => |i| {
+            if (i < 0) return OperatorError.TypeError;
+            return @intCast(i);
+        },
+        else => OperatorError.TypeError,
+    };
+}
+
+fn mapEvalError(err: EvalError) OperatorError {
+    return switch (err) {
+        EvalError.OutOfMemory => OperatorError.OutOfMemory,
+        EvalError.TypeError => OperatorError.TypeError,
+        EvalError.UnboundVariable => OperatorError.UnboundVariable,
+        EvalError.PropertyNotFound => OperatorError.PropertyNotFound,
+        else => OperatorError.EvaluationError,
+    };
 }
 
 // ============================================================================

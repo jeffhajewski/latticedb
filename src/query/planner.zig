@@ -880,16 +880,7 @@ pub const QueryPlanner = struct {
     fn planLimit(self: *Self, lim: *const ast.LimitClause, input: ?Operator) PlannerError!Operator {
         const input_op = input orelse return PlannerError.InvalidQuery;
 
-        // Evaluate limit expression (should be integer literal)
-        const count = switch (lim.count.*) {
-            .literal => |lit| switch (lit.value) {
-                .integer => |i| @as(u64, @intCast(i)),
-                else => return PlannerError.InvalidQuery,
-            },
-            else => return PlannerError.InvalidQuery,
-        };
-
-        const limit = limit_ops.Limit.init(self.allocator, input_op, count) catch {
+        const limit = limit_ops.Limit.initExpr(self.allocator, input_op, lim.count) catch {
             return PlannerError.OutOfMemory;
         };
 
@@ -900,16 +891,7 @@ pub const QueryPlanner = struct {
     fn planSkip(self: *Self, skip_clause: *const ast.SkipClause, input: ?Operator) PlannerError!Operator {
         const input_op = input orelse return PlannerError.InvalidQuery;
 
-        // Evaluate skip expression (should be integer literal)
-        const count = switch (skip_clause.count.*) {
-            .literal => |lit| switch (lit.value) {
-                .integer => |i| @as(u64, @intCast(i)),
-                else => return PlannerError.InvalidQuery,
-            },
-            else => return PlannerError.InvalidQuery,
-        };
-
-        const skip = limit_ops.Skip.init(self.allocator, input_op, count) catch {
+        const skip = limit_ops.Skip.initExpr(self.allocator, input_op, skip_clause.count) catch {
             return PlannerError.OutOfMemory;
         };
 

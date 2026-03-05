@@ -885,6 +885,51 @@ test "query: ORDER BY supports non-returned keys with SKIP and LIMIT" {
     try expectString(result, 0, 0, "Bob");
 }
 
+test "query: LIMIT supports arithmetic expression" {
+    const path = "/tmp/lattice_qm_limit_arithmetic_expr.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var r1 = try db.query("CREATE (n:Person {name: \"Alice\", age: 30})");
+    r1.deinit();
+    var r2 = try db.query("CREATE (n:Person {name: \"Bob\", age: 25})");
+    r2.deinit();
+    var r3 = try db.query("CREATE (n:Person {name: \"Carol\", age: 35})");
+    r3.deinit();
+
+    var result = try db.query("MATCH (n:Person) RETURN n.name ORDER BY n.age LIMIT 1 + 1");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 2), result.rowCount());
+    try expectString(result, 0, 0, "Bob");
+    try expectString(result, 1, 0, "Alice");
+}
+
+test "query: SKIP and LIMIT support parameters" {
+    const path = "/tmp/lattice_qm_skip_limit_params.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var r1 = try db.query("CREATE (n:Person {name: \"Alice\", age: 20})");
+    r1.deinit();
+    var r2 = try db.query("CREATE (n:Person {name: \"Bob\", age: 30})");
+    r2.deinit();
+    var r3 = try db.query("CREATE (n:Person {name: \"Carol\", age: 40})");
+    r3.deinit();
+
+    var params = std.StringHashMap(PropertyValue).init(std.testing.allocator);
+    defer params.deinit();
+    try params.put("skip", .{ .int_val = 1 });
+    try params.put("limit", .{ .int_val = 1 });
+
+    var result = try db.queryWithParams(
+        "MATCH (n:Person) RETURN n.name ORDER BY n.age SKIP $skip LIMIT $limit",
+        &params,
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try expectString(result, 0, 0, "Bob");
+}
+
 test "query: create and query graph cycle" {
     const path = "/tmp/lattice_qm_cycle.ltdb";
     var db = try openTestDb(path, .{});

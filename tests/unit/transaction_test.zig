@@ -1152,6 +1152,51 @@ test "rollback: endpoint delete restores deleted parallel edge properties" {
     try std.testing.expectEqual(@as(i64, 22), restored2.properties[0].value.int_val);
 }
 
+test "rollback: deleting all parallel edges and aborting restores all edge ids" {
+    if (!databaseSupportsTransactions()) {
+        return error.SkipZigTest;
+    }
+
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_txn_delete_all_edges_abort_restore_ids.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = true,
+            .enable_fts = false,
+            .enable_vector = false,
+        },
+    });
+    defer db.close();
+
+    const source = try db.createNode(null, &[_][]const u8{});
+    const target = try db.createNode(null, &[_][]const u8{});
+
+    const edge1 = try db.createEdgeAndGetId(null, source, target, "REL");
+    const edge2 = try db.createEdgeAndGetId(null, source, target, "REL");
+
+    var txn = try db.beginTransaction(.read_write);
+    try db.deleteEdge(&txn, source, target, "REL");
+    try db.deleteEdge(&txn, source, target, "REL");
+
+    var refs_during = try db.getOutgoingEdgeRefs(source);
+    defer refs_during.deinit();
+    try std.testing.expect((try refs_during.next()) == null);
+
+    try db.abortTransaction(&txn);
+
+    var restored1 = try db.edge_store.getById(edge1);
+    defer restored1.deinit(allocator);
+    var restored2 = try db.edge_store.getById(edge2);
+    defer restored2.deinit(allocator);
+}
+
 test "future: crash mid-transaction loses graph changes" {
     if (!databaseSupportsTransactions()) {
         return error.SkipZigTest;

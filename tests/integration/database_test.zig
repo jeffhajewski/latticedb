@@ -423,6 +423,62 @@ test "database: edge type counts persist across reopen after endpoint delete" {
     }
 }
 
+test "database: edge ids are not reused after deleting all edges and reopening" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_edge_id_no_reuse_after_reopen_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var source: u64 = 0;
+    var target: u64 = 0;
+    var old_max: u64 = 0;
+
+    {
+        var db = try Database.open(allocator, path, .{
+            .create = true,
+            .config = .{
+                .enable_wal = true,
+                .enable_fts = false,
+                .enable_vector = false,
+            },
+        });
+
+        source = try db.createNode(null, &[_][]const u8{"N"});
+        target = try db.createNode(null, &[_][]const u8{"N"});
+
+        const edge1 = try db.createEdgeAndGetId(null, source, target, "REL");
+        const edge2 = try db.createEdgeAndGetId(null, source, target, "REL");
+        old_max = edge2;
+
+        try db.deleteEdgeById(null, edge1);
+        try db.deleteEdgeById(null, edge2);
+
+        var refs = try db.getOutgoingEdgeRefs(source);
+        defer refs.deinit();
+        try std.testing.expect((try refs.next()) == null);
+
+        db.close();
+    }
+
+    {
+        var db = try Database.open(allocator, path, .{
+            .create = false,
+            .config = .{
+                .enable_wal = true,
+                .enable_fts = false,
+                .enable_vector = false,
+            },
+        });
+        defer db.close();
+
+        const next = try db.createEdgeAndGetId(null, source, target, "REL");
+        try std.testing.expect(next > old_max);
+    }
+}
+
 test "database: tree roots saved correctly across sessions" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_tree_roots_test.ltdb";

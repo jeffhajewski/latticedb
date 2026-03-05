@@ -315,6 +315,65 @@ test "query: DELETE r removes only the matched parallel edge" {
     try expectInt(after, 0, 3, @intCast(edge2));
 }
 
+test "query: edge variable preserves large edge ids end-to-end" {
+    const path = "/tmp/lattice_qm_large_edge_id.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    try db.node_store.createWithId(1, &[_]SymbolId{}, &[_]NodeProperty{});
+    try db.node_store.createWithId(2, &[_]SymbolId{}, &[_]NodeProperty{});
+
+    const rel_type = try db.symbol_table.intern("REL");
+    const weight_key = try db.symbol_table.intern("w");
+    const props = [_]NodeProperty{
+        .{ .key_id = weight_key, .value = .{ .int_val = 99 } },
+    };
+    const large_edge_id: u64 = (@as(u64, 1) << 40) + 123;
+    try db.edge_store.createWithId(large_edge_id, 1, 2, rel_type, &props);
+
+    var result = try db.query("MATCH (a)-[r:REL]->(b) RETURN id(r), r.w, type(r)");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try expectInt(result, 0, 0, @intCast(large_edge_id));
+    try expectInt(result, 0, 1, 99);
+    try expectString(result, 0, 2, "REL");
+}
+
+test "query: DELETE by id(r) removes exactly one parallel edge" {
+    const path = "/tmp/lattice_qm_delete_by_edge_id.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    const source = try db.createNode(null, &[_][]const u8{});
+    const target = try db.createNode(null, &[_][]const u8{});
+
+    const rel_type = try db.symbol_table.intern("REL");
+    const weight_key = try db.symbol_table.intern("w");
+    const props1 = [_]NodeProperty{
+        .{ .key_id = weight_key, .value = .{ .int_val = 10 } },
+    };
+    const props2 = [_]NodeProperty{
+        .{ .key_id = weight_key, .value = .{ .int_val = 20 } },
+    };
+    const edge1 = try db.edge_store.createAndGetId(source, target, rel_type, &props1);
+    const edge2 = try db.edge_store.createAndGetId(source, target, rel_type, &props2);
+
+    var delete_q_buf: [128]u8 = undefined;
+    const delete_query = try std.fmt.bufPrint(
+        &delete_q_buf,
+        "MATCH (a)-[r:REL]->(b) WHERE id(r) = {d} DELETE r",
+        .{edge1},
+    );
+    var delete_result = try db.query(delete_query);
+    delete_result.deinit();
+
+    var after = try db.query("MATCH (a)-[r:REL]->(b) RETURN count(r), id(r), r.w");
+    defer after.deinit();
+    try expectInt(after, 0, 0, 1);
+    try expectInt(after, 0, 1, @intCast(edge2));
+    try expectInt(after, 0, 2, 20);
+}
+
 // ============================================================================
 // SET Tests
 // ============================================================================

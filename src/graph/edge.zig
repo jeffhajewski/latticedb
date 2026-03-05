@@ -298,8 +298,7 @@ pub const EdgeStore = struct {
         };
 
         self.tree.insert(&incoming_bytes, &[_]u8{}) catch |err| {
-            self.tree.delete(&outgoing_bytes) catch {
-            };
+            self.tree.delete(&outgoing_bytes) catch {};
             return mapBTreeError(err);
         };
 
@@ -479,8 +478,7 @@ pub const EdgeStore = struct {
 
         // Delete incoming entry with rollback on failure
         self.tree.delete(&incoming_bytes) catch |err| {
-            self.tree.insert(&outgoing_bytes, &[_]u8{}) catch {
-            };
+            self.tree.insert(&outgoing_bytes, &[_]u8{}) catch {};
             return mapBTreeError(err);
         };
 
@@ -1412,6 +1410,7 @@ test "edge store double-write" {
     const outgoing_bytes = outgoing_key.toBytes();
     const outgoing_result = tree.get(&outgoing_bytes) catch null;
     try std.testing.expect(outgoing_result != null);
+    try std.testing.expectEqual(@as(usize, 0), outgoing_result.?.len);
 
     // Verify incoming key exists
     const incoming_key = EdgeKey{
@@ -1424,6 +1423,14 @@ test "edge store double-write" {
     const incoming_bytes = incoming_key.toBytes();
     const incoming_result = tree.get(&incoming_bytes) catch null;
     try std.testing.expect(incoming_result != null);
+    try std.testing.expectEqual(@as(usize, 0), incoming_result.?.len);
+
+    // Payload is stored once in edge_id index (space optimization).
+    var id_key: [8]u8 = undefined;
+    std.mem.writeInt(u64, &id_key, 1, .little);
+    const id_result = edge_id_tree.get(&id_key) catch null;
+    try std.testing.expect(id_result != null);
+    try std.testing.expect(id_result.?.len > 0);
 }
 
 test "edge store getOutgoing iteration" {

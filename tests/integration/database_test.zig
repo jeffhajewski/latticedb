@@ -260,6 +260,56 @@ test "database: deleteEdgeById persists exact parallel-edge deletion across reop
     }
 }
 
+test "database: endpoint delete removes one parallel edge and keeps id monotonic" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_endpoint_delete_parallel_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = true,
+            .enable_fts = false,
+            .enable_vector = false,
+        },
+    });
+    defer db.close();
+
+    const source = try db.createNode(null, &[_][]const u8{"N"});
+    const target = try db.createNode(null, &[_][]const u8{"N"});
+
+    const edge1 = try db.createEdgeAndGetId(null, source, target, "REL");
+    const edge2 = try db.createEdgeAndGetId(null, source, target, "REL");
+
+    try db.deleteEdge(null, source, target, "REL");
+
+    // Endpoint delete removes first matching edge (lowest edge_id).
+    try std.testing.expectError(EdgeError.NotFound, db.edge_store.getById(edge1));
+    var kept = try db.edge_store.getById(edge2);
+    defer kept.deinit(allocator);
+
+    const edge3 = try db.createEdgeAndGetId(null, source, target, "REL");
+    try std.testing.expect(edge3 > edge2);
+
+    var refs = try db.getOutgoingEdgeRefs(source);
+    defer refs.deinit();
+    var count: usize = 0;
+    var saw_edge2 = false;
+    var saw_edge3 = false;
+    while (try refs.next()) |edge_ref| {
+        count += 1;
+        if (edge_ref.id == edge2) saw_edge2 = true;
+        if (edge_ref.id == edge3) saw_edge3 = true;
+    }
+    try std.testing.expectEqual(@as(usize, 2), count);
+    try std.testing.expect(saw_edge2);
+    try std.testing.expect(saw_edge3);
+}
+
 test "database: tree roots saved correctly across sessions" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_tree_roots_test.ltdb";

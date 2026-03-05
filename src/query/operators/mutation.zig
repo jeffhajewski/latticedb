@@ -622,10 +622,17 @@ pub const SetProperty = struct {
                     };
                 }
             },
-            .edge_ref => |_| {
-                // Edge property support would go here
-                // For now, edge properties not fully implemented
-                return OperatorError.Unsupported;
+            .edge_ref => |edge_id| {
+                if (value == .null_val) {
+                    self.database.removeEdgePropertyById(null, edge_id, self.property_name) catch {
+                        return OperatorError.StorageError;
+                    };
+                } else {
+                    const prop_value = evalResultToPropertyValue(value, self.evaluator.allocator) orelse return OperatorError.TypeError;
+                    self.database.setEdgePropertyById(null, edge_id, self.property_name, prop_value) catch {
+                        return OperatorError.StorageError;
+                    };
+                }
             },
             else => return OperatorError.TypeError,
         }
@@ -1034,9 +1041,10 @@ pub const RemoveProperty = struct {
                     return OperatorError.StorageError;
                 };
             },
-            .edge_ref => |_| {
-                // Edge property support would go here
-                return OperatorError.Unsupported;
+            .edge_ref => |edge_id| {
+                self.database.removeEdgePropertyById(null, edge_id, self.property_name) catch {
+                    return OperatorError.StorageError;
+                };
             },
             else => return OperatorError.TypeError,
         }

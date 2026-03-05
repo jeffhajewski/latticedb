@@ -499,6 +499,36 @@ pub const RecoveryManager = struct {
                 }
                 ctx.node_store.update(update_payload.node_id, node.labels, new_props.items) catch {};
             }
+        } else if (payload_type == @intFromEnum(wal_payload.PayloadType.edge_delete)) {
+            // Edge update payload is stored as a full edge snapshot.
+            const edge_payload = wal_payload.deserializeEdgeDelete(payload) catch return;
+
+            var properties: []node_mod.Property = &[_]node_mod.Property{};
+            var owns_properties = false;
+            if (edge_payload.properties.len > 0) {
+                const wal_props = wal_payload.deserializeProperties(self.allocator, edge_payload.properties) catch &[_]wal_payload.Property{};
+                if (wal_props.len > 0) {
+                    properties = @ptrCast(@constCast(wal_props));
+                    owns_properties = true;
+                }
+            }
+            defer if (owns_properties) {
+                for (properties) |*prop| {
+                    var val = prop.value;
+                    val.deinit(self.allocator);
+                }
+                self.allocator.free(properties);
+            };
+
+            // Replace edge state with the snapshot from WAL.
+            ctx.edge_store.deleteById(edge_payload.edge_id) catch {};
+            ctx.edge_store.createWithId(
+                edge_payload.edge_id,
+                edge_payload.source,
+                edge_payload.target,
+                edge_payload.type_id,
+                properties,
+            ) catch {};
         }
     }
 

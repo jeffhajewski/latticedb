@@ -663,6 +663,82 @@ test "aborted edge create is not replayed and allocator remains monotonic after 
     }
 }
 
+test "committed edge property update survives crash recovery" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_committed_edge_property_update.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var edge_id: EdgeId = undefined;
+
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+
+        var create_txn = try db.beginTransaction(.read_write);
+        const src_id = try db.createNode(&create_txn, &[_][]const u8{});
+        const dst_id = try db.createNode(&create_txn, &[_][]const u8{});
+        edge_id = try db.createEdgeAndGetId(&create_txn, src_id, dst_id, "REL");
+        try db.setEdgePropertyById(&create_txn, edge_id, "w", .{ .int_val = 1 });
+        try db.commitTransaction(&create_txn);
+
+        var update_txn = try db.beginTransaction(.read_write);
+        try db.setEdgePropertyById(&update_txn, edge_id, "w", .{ .int_val = 7 });
+        try db.commitTransaction(&update_txn);
+
+        db.close();
+    }
+
+    try simulateCrash(path);
+
+    {
+        var db = try openCrashTestDb(allocator, path, false);
+        defer db.close();
+
+        var restored = try db.edge_store.getById(edge_id);
+        defer restored.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), restored.properties.len);
+        try std.testing.expectEqual(@as(i64, 7), restored.properties[0].value.int_val);
+    }
+}
+
+test "aborted edge property update is not replayed after crash" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_aborted_edge_property_update.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var edge_id: EdgeId = undefined;
+
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+
+        var create_txn = try db.beginTransaction(.read_write);
+        const src_id = try db.createNode(&create_txn, &[_][]const u8{});
+        const dst_id = try db.createNode(&create_txn, &[_][]const u8{});
+        edge_id = try db.createEdgeAndGetId(&create_txn, src_id, dst_id, "REL");
+        try db.setEdgePropertyById(&create_txn, edge_id, "w", .{ .int_val = 1 });
+        try db.commitTransaction(&create_txn);
+
+        var update_txn = try db.beginTransaction(.read_write);
+        try db.setEdgePropertyById(&update_txn, edge_id, "w", .{ .int_val = 7 });
+        try db.abortTransaction(&update_txn);
+
+        db.close();
+    }
+
+    try simulateCrash(path);
+
+    {
+        var db = try openCrashTestDb(allocator, path, false);
+        defer db.close();
+
+        var restored = try db.edge_store.getById(edge_id);
+        defer restored.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), restored.properties.len);
+        try std.testing.expectEqual(@as(i64, 1), restored.properties[0].value.int_val);
+    }
+}
+
 test "recovery is idempotent" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_crash_idempotent.ltdb";

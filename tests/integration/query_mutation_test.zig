@@ -375,6 +375,55 @@ test "query: DELETE by id(r) removes exactly one parallel edge" {
     try expectInt(after, 0, 2, 20);
 }
 
+test "query: SET property on edge variable" {
+    const path = "/tmp/lattice_qm_set_edge_property.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query("CREATE (a:Person {name: \"Alice\"})-[:REL]->(b:Person {name: \"Bob\"})");
+    seed.deinit();
+
+    var set_q = try db.query("MATCH (a)-[r:REL]->(b) SET r.since = 2024");
+    set_q.deinit();
+
+    var result = try db.query("MATCH (a)-[r:REL]->(b) RETURN r.since");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try expectInt(result, 0, 0, 2024);
+}
+
+test "query: SET edge property updates only matched parallel edge" {
+    const path = "/tmp/lattice_qm_set_edge_property_parallel_selective.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    const source = try db.createNode(null, &[_][]const u8{});
+    const target = try db.createNode(null, &[_][]const u8{});
+    const rel_type = try db.symbol_table.intern("REL");
+    const weight_key = try db.symbol_table.intern("w");
+
+    const props1 = [_]NodeProperty{
+        .{ .key_id = weight_key, .value = .{ .int_val = 1 } },
+    };
+    const props2 = [_]NodeProperty{
+        .{ .key_id = weight_key, .value = .{ .int_val = 2 } },
+    };
+    _ = try db.edge_store.createAndGetId(source, target, rel_type, &props1);
+    _ = try db.edge_store.createAndGetId(source, target, rel_type, &props2);
+
+    var set_q = try db.query("MATCH (a)-[r:REL]->(b) WHERE r.w = 1 SET r.tag = \"selected\"");
+    set_q.deinit();
+
+    var tagged_count = try db.query("MATCH (a)-[r:REL]->(b) WHERE r.tag = \"selected\" RETURN count(r)");
+    defer tagged_count.deinit();
+    try expectInt(tagged_count, 0, 0, 1);
+
+    var untouched = try db.query("MATCH (a)-[r:REL]->(b) WHERE r.w = 2 RETURN r.tag");
+    defer untouched.deinit();
+    try std.testing.expectEqual(@as(usize, 1), untouched.rowCount());
+    try std.testing.expect(untouched.rows[0].values[0] == .null_val);
+}
+
 test "query: DELETE untyped edge variable removes all matched edges" {
     const path = "/tmp/lattice_qm_delete_untyped_edge_var.ltdb";
     var db = try openTestDb(path, .{});
@@ -660,6 +709,29 @@ test "query: REMOVE property from node" {
     try std.testing.expectEqual(@as(usize, 1), result.rowCount());
     try expectString(result, 0, 0, "Alice");
     try expectInt(result, 0, 1, 30);
+}
+
+test "query: REMOVE property from edge" {
+    const path = "/tmp/lattice_qm_remove_edge_prop.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query("CREATE (a:Person {name: \"Alice\"})-[:REL]->(b:Person {name: \"Bob\"})");
+    seed.deinit();
+
+    var set_q = try db.query("MATCH (a)-[r:REL]->(b) SET r.temp = \"x\"");
+    set_q.deinit();
+
+    var remove_q = try db.query("MATCH (a)-[r:REL]->(b) REMOVE r.temp");
+    remove_q.deinit();
+
+    var still_edges = try db.query("MATCH (a)-[r:REL]->(b) RETURN count(r)");
+    defer still_edges.deinit();
+    try expectInt(still_edges, 0, 0, 1);
+
+    var temp_count = try db.query("MATCH (a)-[r:REL]->(b) WHERE r.temp = \"x\" RETURN count(r)");
+    defer temp_count.deinit();
+    try expectInt(temp_count, 0, 0, 0);
 }
 
 test "query: REMOVE label from node" {

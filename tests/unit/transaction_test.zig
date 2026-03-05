@@ -1243,6 +1243,99 @@ test "rollback: delete and create in same txn preserves monotonic edge ids after
     try std.testing.expect(edge4 > edge3);
 }
 
+test "rollback: edge property update by id restores previous value on abort" {
+    if (!databaseSupportsTransactions()) {
+        return error.SkipZigTest;
+    }
+
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_txn_edge_property_update_abort_restore.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = true,
+            .enable_fts = false,
+            .enable_vector = false,
+        },
+    });
+    defer db.close();
+
+    const source = try db.createNode(null, &[_][]const u8{});
+    const target = try db.createNode(null, &[_][]const u8{});
+    const rel_type = try db.symbol_table.intern("REL");
+    const weight_key = try db.symbol_table.intern("w");
+    const props = [_]lattice.graph.node.Property{
+        .{ .key_id = weight_key, .value = .{ .int_val = 1 } },
+    };
+    const edge_id = try db.edge_store.createAndGetId(source, target, rel_type, &props);
+
+    var txn = try db.beginTransaction(.read_write);
+    try db.setEdgePropertyById(&txn, edge_id, "w", .{ .int_val = 99 });
+
+    var updated = try db.edge_store.getById(edge_id);
+    defer updated.deinit(allocator);
+    try std.testing.expectEqual(@as(i64, 99), updated.properties[0].value.int_val);
+
+    try db.abortTransaction(&txn);
+
+    var restored = try db.edge_store.getById(edge_id);
+    defer restored.deinit(allocator);
+    try std.testing.expectEqual(@as(i64, 1), restored.properties[0].value.int_val);
+}
+
+test "rollback: edge property removal by id restores removed property on abort" {
+    if (!databaseSupportsTransactions()) {
+        return error.SkipZigTest;
+    }
+
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_txn_edge_property_remove_abort_restore.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = true,
+            .enable_fts = false,
+            .enable_vector = false,
+        },
+    });
+    defer db.close();
+
+    const source = try db.createNode(null, &[_][]const u8{});
+    const target = try db.createNode(null, &[_][]const u8{});
+    const rel_type = try db.symbol_table.intern("REL");
+    const temp_key = try db.symbol_table.intern("temp");
+    const props = [_]lattice.graph.node.Property{
+        .{ .key_id = temp_key, .value = .{ .string_val = "x" } },
+    };
+    const edge_id = try db.edge_store.createAndGetId(source, target, rel_type, &props);
+
+    var txn = try db.beginTransaction(.read_write);
+    try db.removeEdgePropertyById(&txn, edge_id, "temp");
+
+    var removed = try db.edge_store.getById(edge_id);
+    defer removed.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 0), removed.properties.len);
+
+    try db.abortTransaction(&txn);
+
+    var restored = try db.edge_store.getById(edge_id);
+    defer restored.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 1), restored.properties.len);
+    try std.testing.expectEqualStrings("x", restored.properties[0].value.string_val);
+}
+
 test "future: crash mid-transaction loses graph changes" {
     if (!databaseSupportsTransactions()) {
         return error.SkipZigTest;

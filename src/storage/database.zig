@@ -823,7 +823,37 @@ pub const Database = struct {
                         properties,
                     ) catch {};
                 },
-                .update => {},
+                .update => {
+                    const data = entry.prev_data orelse return;
+                    const payload = wal_payload.deserializeEdgeDelete(data) catch return;
+
+                    var properties: []node_mod.Property = &[_]node_mod.Property{};
+                    var owns_properties = false;
+                    if (payload.properties.len > 0) {
+                        const wal_props = wal_payload.deserializeProperties(self.allocator, payload.properties) catch &[_]wal_payload.Property{};
+                        if (wal_props.len > 0) {
+                            properties = @ptrCast(@constCast(wal_props));
+                            owns_properties = true;
+                        }
+                    }
+                    defer if (owns_properties) {
+                        for (properties) |*prop| {
+                            var val = prop.value;
+                            val.deinit(self.allocator);
+                        }
+                        self.allocator.free(properties);
+                    };
+
+                    // Replace edge state with the previous snapshot.
+                    self.edge_store.deleteById(entry.entity_id) catch {};
+                    self.edge_store.createWithId(
+                        payload.edge_id,
+                        payload.source,
+                        payload.target,
+                        payload.type_id,
+                        properties,
+                    ) catch {};
+                },
             },
             .property => switch (entry.op_type) {
                 // Undo of property insert is delete the property
@@ -2048,6 +2078,187 @@ pub const Database = struct {
             cache.invalidate(target);
         }
         if (self.query_cache) |cache| cache.bumpSchemaVersion();
+    }
+
+    /// Set a property on an edge by stable edge ID.
+    pub fn setEdgePropertyById(
+        self: *Self,
+        txn: ?*Transaction,
+        edge_id: EdgeId,
+        key: []const u8,
+        value: PropertyValue,
+    ) !void {
+        if (self.read_only) return DatabaseError.PermissionDenied;
+
+        if (txn) |t| {
+            if (!t.isActive()) return DatabaseError.TransactionNotActive;
+            if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+        }
+
+        var edge = self.edge_store.getById(edge_id) catch |err| {
+            return switch (err) {
+                edge_mod.EdgeError.NotFound => DatabaseError.NotFound,
+                else => DatabaseError.IoError,
+            };
+        };
+        defer edge.deinit(self.allocator);
+
+        const key_id = self.symbol_table.intern(key) catch return DatabaseError.IoError;
+
+        var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
+        defer new_props.deinit(self.allocator);
+
+        var found = false;
+        for (edge.properties) |prop| {
+            if (prop.key_id == key_id) {
+                new_props.append(self.allocator, .{ .key_id = key_id, .value = value }) catch return DatabaseError.IoError;
+                found = true;
+            } else {
+                new_props.append(self.allocator, prop) catch return DatabaseError.IoError;
+            }
+        }
+        if (!found) {
+            new_props.append(self.allocator, .{ .key_id = key_id, .value = value }) catch return DatabaseError.IoError;
+        }
+
+        if (txn) |t| {
+            if (self.txn_manager) |*tm| {
+                var old_prop_bytes: []u8 = &[_]u8{};
+                var owns_old_prop_bytes = false;
+                if (edge.properties.len > 0) {
+                    old_prop_bytes = wal_payload.serializeProperties(self.allocator, @ptrCast(edge.properties)) catch &[_]u8{};
+                    owns_old_prop_bytes = old_prop_bytes.len > 0;
+                }
+                defer if (owns_old_prop_bytes) self.allocator.free(old_prop_bytes);
+
+                var new_prop_bytes: []u8 = &[_]u8{};
+                var owns_new_prop_bytes = false;
+                if (new_props.items.len > 0) {
+                    new_prop_bytes = wal_payload.serializeProperties(self.allocator, @ptrCast(new_props.items)) catch &[_]u8{};
+                    owns_new_prop_bytes = new_prop_bytes.len > 0;
+                }
+                defer if (owns_new_prop_bytes) self.allocator.free(new_prop_bytes);
+
+                var old_buf: [4096]u8 = undefined;
+                const old_payload = wal_payload.serializeEdgeDelete(
+                    &old_buf,
+                    edge.id,
+                    edge.source,
+                    edge.target,
+                    edge.edge_type,
+                    old_prop_bytes,
+                ) catch return DatabaseError.IoError;
+
+                var new_buf: [4096]u8 = undefined;
+                const new_payload = wal_payload.serializeEdgeDelete(
+                    &new_buf,
+                    edge.id,
+                    edge.source,
+                    edge.target,
+                    edge.edge_type,
+                    new_prop_bytes,
+                ) catch return DatabaseError.IoError;
+
+                _ = tm.logOperation(t, .update, new_payload) catch return DatabaseError.IoError;
+                tm.addUndoEntry(t, .update, .edge, edge.id, 0, 0, old_payload) catch return DatabaseError.IoError;
+            }
+        }
+
+        self.edge_store.deleteById(edge_id) catch return DatabaseError.IoError;
+        self.edge_store.createWithId(edge_id, edge.source, edge.target, edge.edge_type, new_props.items) catch {
+            // Best-effort restore of previous state.
+            self.edge_store.createWithId(edge_id, edge.source, edge.target, edge.edge_type, edge.properties) catch {};
+            return DatabaseError.IoError;
+        };
+    }
+
+    /// Remove a property from an edge by stable edge ID.
+    pub fn removeEdgePropertyById(
+        self: *Self,
+        txn: ?*Transaction,
+        edge_id: EdgeId,
+        key: []const u8,
+    ) !void {
+        if (self.read_only) return DatabaseError.PermissionDenied;
+
+        if (txn) |t| {
+            if (!t.isActive()) return DatabaseError.TransactionNotActive;
+            if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+        }
+
+        var edge = self.edge_store.getById(edge_id) catch |err| {
+            return switch (err) {
+                edge_mod.EdgeError.NotFound => DatabaseError.NotFound,
+                else => DatabaseError.IoError,
+            };
+        };
+        defer edge.deinit(self.allocator);
+
+        const key_id = self.symbol_table.intern(key) catch return DatabaseError.IoError;
+
+        var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
+        defer new_props.deinit(self.allocator);
+
+        var found = false;
+        for (edge.properties) |prop| {
+            if (prop.key_id == key_id) {
+                found = true;
+            } else {
+                new_props.append(self.allocator, prop) catch return DatabaseError.IoError;
+            }
+        }
+
+        // Property absent: no-op.
+        if (!found) return;
+
+        if (txn) |t| {
+            if (self.txn_manager) |*tm| {
+                var old_prop_bytes: []u8 = &[_]u8{};
+                var owns_old_prop_bytes = false;
+                if (edge.properties.len > 0) {
+                    old_prop_bytes = wal_payload.serializeProperties(self.allocator, @ptrCast(edge.properties)) catch &[_]u8{};
+                    owns_old_prop_bytes = old_prop_bytes.len > 0;
+                }
+                defer if (owns_old_prop_bytes) self.allocator.free(old_prop_bytes);
+
+                var new_prop_bytes: []u8 = &[_]u8{};
+                var owns_new_prop_bytes = false;
+                if (new_props.items.len > 0) {
+                    new_prop_bytes = wal_payload.serializeProperties(self.allocator, @ptrCast(new_props.items)) catch &[_]u8{};
+                    owns_new_prop_bytes = new_prop_bytes.len > 0;
+                }
+                defer if (owns_new_prop_bytes) self.allocator.free(new_prop_bytes);
+
+                var old_buf: [4096]u8 = undefined;
+                const old_payload = wal_payload.serializeEdgeDelete(
+                    &old_buf,
+                    edge.id,
+                    edge.source,
+                    edge.target,
+                    edge.edge_type,
+                    old_prop_bytes,
+                ) catch return DatabaseError.IoError;
+
+                var new_buf: [4096]u8 = undefined;
+                const new_payload = wal_payload.serializeEdgeDelete(
+                    &new_buf,
+                    edge.id,
+                    edge.source,
+                    edge.target,
+                    edge.edge_type,
+                    new_prop_bytes,
+                ) catch return DatabaseError.IoError;
+
+                _ = tm.logOperation(t, .update, new_payload) catch return DatabaseError.IoError;
+                tm.addUndoEntry(t, .update, .edge, edge.id, 0, 0, old_payload) catch return DatabaseError.IoError;
+            }
+        }
+
+        self.edge_store.deleteById(edge_id) catch return DatabaseError.IoError;
+        self.edge_store.createWithId(edge_id, edge.source, edge.target, edge.edge_type, new_props.items) catch {
+            self.edge_store.createWithId(edge_id, edge.source, edge.target, edge.edge_type, edge.properties) catch {};
+            return DatabaseError.IoError;
+        };
     }
 
     /// Check if an edge exists

@@ -14,6 +14,7 @@ const Database = lattice.storage.database.Database;
 const DatabaseConfig = lattice.storage.database.DatabaseConfig;
 const OpenOptions = lattice.storage.database.OpenOptions;
 const PropertyValue = lattice.core.types.PropertyValue;
+const EdgeError = lattice.graph.edge.EdgeError;
 
 // ============================================================================
 // Persistence Tests
@@ -40,15 +41,15 @@ test "database: data persists across close and reopen" {
 
         // Create nodes with properties
         const alice = try db.createNode(null, &[_][]const u8{"Person"});
-        try db.setNodeProperty(null,alice, "name", .{ .string_val = "Alice" });
-        try db.setNodeProperty(null,alice, "age", .{ .int_val = 30 });
+        try db.setNodeProperty(null, alice, "name", .{ .string_val = "Alice" });
+        try db.setNodeProperty(null, alice, "age", .{ .int_val = 30 });
 
         const bob = try db.createNode(null, &[_][]const u8{"Person"});
-        try db.setNodeProperty(null,bob, "name", .{ .string_val = "Bob" });
-        try db.setNodeProperty(null,bob, "age", .{ .int_val = 25 });
+        try db.setNodeProperty(null, bob, "name", .{ .string_val = "Bob" });
+        try db.setNodeProperty(null, bob, "age", .{ .int_val = 25 });
 
         // Create edge
-        try db.createEdge(null,alice, bob, "KNOWS");
+        try db.createEdge(null, alice, bob, "KNOWS");
 
         db.close();
     }
@@ -135,6 +136,130 @@ test "database: labels persist and are queryable after reopen" {
     std.fs.cwd().deleteFile(path) catch {};
 }
 
+test "database: edge IDs remain monotonic across abort and reopen" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_edge_id_monotonic_reopen_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var source: u64 = 0;
+    var target: u64 = 0;
+    var rolled_back_id: u64 = 0;
+    var committed_id: u64 = 0;
+
+    {
+        var db = try Database.open(allocator, path, .{
+            .create = true,
+            .config = .{
+                .enable_wal = true,
+                .enable_fts = false,
+                .enable_vector = false,
+            },
+        });
+
+        source = try db.createNode(null, &[_][]const u8{"N"});
+        target = try db.createNode(null, &[_][]const u8{"N"});
+
+        var txn = try db.beginTransaction(.read_write);
+        rolled_back_id = try db.createEdgeAndGetId(&txn, source, target, "REL");
+        try db.abortTransaction(&txn);
+        try std.testing.expectError(EdgeError.NotFound, db.edge_store.getById(rolled_back_id));
+
+        committed_id = try db.createEdgeAndGetId(null, source, target, "REL");
+        try std.testing.expect(committed_id > rolled_back_id);
+
+        db.close();
+    }
+
+    {
+        var db = try Database.open(allocator, path, .{
+            .create = false,
+            .config = .{
+                .enable_wal = true,
+                .enable_fts = false,
+                .enable_vector = false,
+            },
+        });
+        defer db.close();
+
+        const next_id = try db.createEdgeAndGetId(null, source, target, "REL");
+        try std.testing.expect(next_id > committed_id);
+
+        try std.testing.expectError(EdgeError.NotFound, db.edge_store.getById(rolled_back_id));
+        var kept = try db.edge_store.getById(committed_id);
+        defer kept.deinit(allocator);
+        var newer = try db.edge_store.getById(next_id);
+        defer newer.deinit(allocator);
+    }
+}
+
+test "database: deleteEdgeById persists exact parallel-edge deletion across reopen" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_delete_edge_id_reopen_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    const source: u64 = 1;
+    const target: u64 = 2;
+    var deleted_id: u64 = 0;
+    var kept_id: u64 = 0;
+
+    {
+        var db = try Database.open(allocator, path, .{
+            .create = true,
+            .config = .{
+                .enable_wal = true,
+                .enable_fts = false,
+                .enable_vector = false,
+            },
+        });
+
+        _ = try db.createNode(null, &[_][]const u8{"N"});
+        _ = try db.createNode(null, &[_][]const u8{"N"});
+
+        deleted_id = try db.createEdgeAndGetId(null, source, target, "REL");
+        kept_id = try db.createEdgeAndGetId(null, source, target, "REL");
+        try db.deleteEdgeById(null, deleted_id);
+
+        try std.testing.expectError(EdgeError.NotFound, db.edge_store.getById(deleted_id));
+        var kept = try db.edge_store.getById(kept_id);
+        kept.deinit(allocator);
+
+        db.close();
+    }
+
+    {
+        var db = try Database.open(allocator, path, .{
+            .create = false,
+            .config = .{
+                .enable_wal = true,
+                .enable_fts = false,
+                .enable_vector = false,
+            },
+        });
+        defer db.close();
+
+        try std.testing.expectError(EdgeError.NotFound, db.edge_store.getById(deleted_id));
+        var kept = try db.edge_store.getById(kept_id);
+        defer kept.deinit(allocator);
+
+        var refs = try db.getOutgoingEdgeRefs(source);
+        defer refs.deinit();
+        var count: usize = 0;
+        while (try refs.next()) |edge_ref| {
+            count += 1;
+            try std.testing.expectEqual(kept_id, edge_ref.id);
+        }
+        try std.testing.expectEqual(@as(usize, 1), count);
+    }
+}
+
 test "database: tree roots saved correctly across sessions" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_tree_roots_test.ltdb";
@@ -153,7 +278,7 @@ test "database: tree roots saved correctly across sessions" {
             const node_id = try db.createNode(null, &[_][]const u8{"TestNode"});
             var buf: [32]u8 = undefined;
             const name = std.fmt.bufPrint(&buf, "Node_{d}", .{i}) catch unreachable;
-            try db.setNodeProperty(null,node_id, "name", .{ .string_val = name });
+            try db.setNodeProperty(null, node_id, "name", .{ .string_val = name });
         }
 
         db.close();
@@ -211,7 +336,7 @@ test "database: delete node removes from label index" {
     try std.testing.expectEqual(@as(usize, 3), before.len);
 
     // Delete middle node
-    try db.deleteNode(null,n2);
+    try db.deleteNode(null, n2);
 
     // Verify only 2 nodes remain with label
     const after = try db.getNodesByLabel("ToDelete");
@@ -250,9 +375,9 @@ test "database: edge operations are consistent" {
     const charlie = try db.createNode(null, &[_][]const u8{"Person"});
 
     // Create edges: alice -> bob, alice -> charlie, bob -> charlie
-    try db.createEdge(null,alice, bob, "KNOWS");
-    try db.createEdge(null,alice, charlie, "KNOWS");
-    try db.createEdge(null,bob, charlie, "KNOWS");
+    try db.createEdge(null, alice, bob, "KNOWS");
+    try db.createEdge(null, alice, charlie, "KNOWS");
+    try db.createEdge(null, bob, charlie, "KNOWS");
 
     // Verify outgoing from alice
     const alice_out = try db.getOutgoingEdges(alice);
@@ -265,7 +390,7 @@ test "database: edge operations are consistent" {
     try std.testing.expectEqual(@as(usize, 2), charlie_in.len);
 
     // Delete an edge and verify
-    try db.deleteEdge(null,alice, bob, "KNOWS");
+    try db.deleteEdge(null, alice, bob, "KNOWS");
 
     const alice_out_after = try db.getOutgoingEdges(alice);
     defer db.freeEdgeInfos(alice_out_after);
@@ -291,7 +416,7 @@ test "database: self-loop edge works correctly" {
     const node = try db.createNode(null, &[_][]const u8{"Node"});
 
     // Self-loop: node -> node
-    try db.createEdge(null,node, node, "SELF_REF");
+    try db.createEdge(null, node, node, "SELF_REF");
 
     // Should appear in both outgoing and incoming
     const outgoing = try db.getOutgoingEdges(node);
@@ -326,16 +451,16 @@ test "database: query with property filter" {
 
     // Create test data
     const alice = try db.createNode(null, &[_][]const u8{"Person"});
-    try db.setNodeProperty(null,alice, "name", .{ .string_val = "Alice" });
-    try db.setNodeProperty(null,alice, "age", .{ .int_val = 30 });
+    try db.setNodeProperty(null, alice, "name", .{ .string_val = "Alice" });
+    try db.setNodeProperty(null, alice, "age", .{ .int_val = 30 });
 
     const bob = try db.createNode(null, &[_][]const u8{"Person"});
-    try db.setNodeProperty(null,bob, "name", .{ .string_val = "Bob" });
-    try db.setNodeProperty(null,bob, "age", .{ .int_val = 25 });
+    try db.setNodeProperty(null, bob, "name", .{ .string_val = "Bob" });
+    try db.setNodeProperty(null, bob, "age", .{ .int_val = 25 });
 
     const charlie = try db.createNode(null, &[_][]const u8{"Person"});
-    try db.setNodeProperty(null,charlie, "name", .{ .string_val = "Charlie" });
-    try db.setNodeProperty(null,charlie, "age", .{ .int_val = 35 });
+    try db.setNodeProperty(null, charlie, "name", .{ .string_val = "Charlie" });
+    try db.setNodeProperty(null, charlie, "age", .{ .int_val = 35 });
 
     // Query all Person nodes
     var result = try db.query("MATCH (n:Person) RETURN n");
@@ -913,7 +1038,7 @@ test "database: handles many nodes efficiently" {
     // Create many nodes with properties
     for (0..node_count) |i| {
         const node = try db.createNode(null, &[_][]const u8{"StressNode"});
-        try db.setNodeProperty(null,node, "index", .{ .int_val = @intCast(i) });
+        try db.setNodeProperty(null, node, "index", .{ .int_val = @intCast(i) });
     }
 
     // Verify count
@@ -948,7 +1073,7 @@ test "database: handles many edges efficiently" {
     const spoke_count = 100;
     for (0..spoke_count) |_| {
         const spoke = try db.createNode(null, &[_][]const u8{"Spoke"});
-        try db.createEdge(null,center, spoke, "CONNECTED");
+        try db.createEdge(null, center, spoke, "CONNECTED");
     }
 
     // Verify edges
@@ -1027,10 +1152,10 @@ test "database: property type handling" {
     const node = try db.createNode(null, &[_][]const u8{"TypeTest"});
 
     // Test different property types
-    try db.setNodeProperty(null,node, "string_prop", .{ .string_val = "hello" });
-    try db.setNodeProperty(null,node, "int_prop", .{ .int_val = 42 });
-    try db.setNodeProperty(null,node, "float_prop", .{ .float_val = 3.14 });
-    try db.setNodeProperty(null,node, "bool_prop", .{ .bool_val = true });
+    try db.setNodeProperty(null, node, "string_prop", .{ .string_val = "hello" });
+    try db.setNodeProperty(null, node, "int_prop", .{ .int_val = 42 });
+    try db.setNodeProperty(null, node, "float_prop", .{ .float_val = 3.14 });
+    try db.setNodeProperty(null, node, "bool_prop", .{ .bool_val = true });
 
     // Verify each type
     const str = try db.getNodeProperty(node, "string_prop");

@@ -1890,3 +1890,75 @@ test "edge id allocator persists across reopen" {
         try std.testing.expectEqual(@as(EdgeId, 3), max_id);
     }
 }
+
+test "edge id allocator falls back to max id when metadata key is missing" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const buffer_pool = lattice.storage.buffer_pool;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_edge_id_fallback_meta_missing_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try buffer_pool.BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var tree = try BTree.init(allocator, &bp);
+    var edge_id_tree = try BTree.init(allocator, &bp);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
+
+    try store.createWithId(10, 1, 2, 1000, &[_]Property{});
+    try store.createWithId(25, 1, 3, 1000, &[_]Property{});
+
+    // Simulate metadata loss: remove the allocator metadata key.
+    const meta_key = EdgeStore.edgeIdToKey(EdgeStore.EDGE_ID_META_KEY);
+    try edge_id_tree.delete(&meta_key);
+
+    // Reinitialize store against same trees; allocator should scan max edge_id.
+    var reloaded = EdgeStore.init(allocator, &tree, &edge_id_tree);
+    const next = try reloaded.createAndGetId(1, 4, 1000, &[_]Property{});
+    try std.testing.expectEqual(@as(EdgeId, 26), next);
+}
+
+test "createWithId rejects duplicate edge_id" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const buffer_pool = lattice.storage.buffer_pool;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_edge_duplicate_id_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try buffer_pool.BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var tree = try BTree.init(allocator, &bp);
+    var edge_id_tree = try BTree.init(allocator, &bp);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
+
+    try store.createWithId(7, 1, 2, 1000, &[_]Property{});
+    try std.testing.expectError(
+        EdgeError.AlreadyExists,
+        store.createWithId(7, 1, 3, 1000, &[_]Property{}),
+    );
+}

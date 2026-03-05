@@ -344,6 +344,50 @@ test "committed deleteEdgeById survives crash recovery with parallel edges" {
     }
 }
 
+test "committed endpoint delete survives crash recovery with parallel edges" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_delete_edge_endpoint.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var edge1: EdgeId = undefined;
+    var edge2: EdgeId = undefined;
+    var src_id: NodeId = undefined;
+    var dst_id: NodeId = undefined;
+
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+
+        var create_txn = try db.beginTransaction(.read_write);
+        src_id = try db.createNode(&create_txn, &[_][]const u8{});
+        dst_id = try db.createNode(&create_txn, &[_][]const u8{});
+        edge1 = try db.createEdgeAndGetId(&create_txn, src_id, dst_id, "REL");
+        edge2 = try db.createEdgeAndGetId(&create_txn, src_id, dst_id, "REL");
+        try db.commitTransaction(&create_txn);
+
+        var delete_txn = try db.beginTransaction(.read_write);
+        try db.deleteEdge(&delete_txn, src_id, dst_id, "REL");
+        try db.commitTransaction(&delete_txn);
+
+        db.close();
+    }
+
+    try simulateCrash(path);
+
+    {
+        var db = try openCrashTestDb(allocator, path, false);
+        defer db.close();
+
+        // Endpoint delete should remove first matching edge (lowest edge_id).
+        try std.testing.expectError(lattice.graph.edge.EdgeError.NotFound, db.edge_store.getById(edge1));
+        var kept = try db.edge_store.getById(edge2);
+        defer kept.deinit(allocator);
+
+        const new_edge = try db.createEdgeAndGetId(null, src_id, dst_id, "REL");
+        try std.testing.expect(new_edge > edge2);
+    }
+}
+
 test "edge id allocator stays monotonic after crash replay with deleted max id" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_crash_edge_id_allocator_monotonic.ltdb";

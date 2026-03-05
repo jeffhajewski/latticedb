@@ -621,6 +621,48 @@ test "delete all committed parallel edges then recover keeps allocator monotonic
     }
 }
 
+test "aborted edge create is not replayed and allocator remains monotonic after crash" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_aborted_create_edge_allocator.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var src_id: NodeId = undefined;
+    var dst_id: NodeId = undefined;
+    var committed_edge: EdgeId = undefined;
+    var aborted_edge: EdgeId = undefined;
+
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+
+        var txn1 = try db.beginTransaction(.read_write);
+        src_id = try db.createNode(&txn1, &[_][]const u8{});
+        dst_id = try db.createNode(&txn1, &[_][]const u8{});
+        committed_edge = try db.createEdgeAndGetId(&txn1, src_id, dst_id, "REL");
+        try db.commitTransaction(&txn1);
+
+        var txn2 = try db.beginTransaction(.read_write);
+        aborted_edge = try db.createEdgeAndGetId(&txn2, src_id, dst_id, "REL");
+        try db.abortTransaction(&txn2);
+
+        db.close();
+    }
+
+    try simulateCrash(path);
+
+    {
+        var db = try openCrashTestDb(allocator, path, false);
+        defer db.close();
+
+        var kept = try db.edge_store.getById(committed_edge);
+        defer kept.deinit(allocator);
+        try std.testing.expectError(lattice.graph.edge.EdgeError.NotFound, db.edge_store.getById(aborted_edge));
+
+        const new_edge = try db.createEdgeAndGetId(null, src_id, dst_id, "REL");
+        try std.testing.expect(new_edge > committed_edge);
+    }
+}
+
 test "recovery is idempotent" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_crash_idempotent.ltdb";

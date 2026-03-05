@@ -9,6 +9,7 @@ const std = @import("std");
 const lattice = @import("lattice");
 
 const Database = lattice.storage.database.Database;
+const QueryError = lattice.storage.database.QueryError;
 const PropertyValue = lattice.core.types.PropertyValue;
 const SymbolId = lattice.graph.symbols.SymbolId;
 const NodeProperty = lattice.graph.node.Property;
@@ -372,6 +373,80 @@ test "query: DELETE by id(r) removes exactly one parallel edge" {
     try expectInt(after, 0, 0, 1);
     try expectInt(after, 0, 1, @intCast(edge2));
     try expectInt(after, 0, 2, 20);
+}
+
+test "query: DELETE untyped edge variable removes all matched edges" {
+    const path = "/tmp/lattice_qm_delete_untyped_edge_var.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var n1 = try db.query("CREATE (a:Person {name: \"Alice\"})");
+    n1.deinit();
+    var n2 = try db.query("CREATE (b:Person {name: \"Bob\"})");
+    n2.deinit();
+    var e1 = try db.query("MATCH (a:Person {name: \"Alice\"}), (b:Person {name: \"Bob\"}) CREATE (a)-[:KNOWS]->(b)");
+    e1.deinit();
+    var e2 = try db.query("MATCH (a:Person {name: \"Alice\"}), (b:Person {name: \"Bob\"}) CREATE (a)-[:COLLEAGUE]->(b)");
+    e2.deinit();
+
+    var before = try db.query("MATCH (:Person)-[r]->(:Person) RETURN count(r)");
+    defer before.deinit();
+    try expectInt(before, 0, 0, 2);
+
+    var del = try db.query("MATCH (:Person)-[r]->(:Person) DELETE r");
+    del.deinit();
+
+    var after = try db.query("MATCH (:Person)-[r]->(:Person) RETURN count(r)");
+    defer after.deinit();
+    try expectInt(after, 0, 0, 0);
+}
+
+test "query: WITH pass-through variable remains bound" {
+    const path = "/tmp/lattice_qm_with_passthrough_binding.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var r1 = try db.query("CREATE (n:Person {name: \"Alice\"})");
+    r1.deinit();
+    var r2 = try db.query("CREATE (n:Person {name: \"Bob\"})");
+    r2.deinit();
+
+    var result = try db.query("MATCH (n:Person) WITH n RETURN count(n)");
+    defer result.deinit();
+    try expectInt(result, 0, 0, 2);
+}
+
+test "query: WITH alias is visible in same-clause WHERE" {
+    const path = "/tmp/lattice_qm_with_alias_where.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var r1 = try db.query("CREATE (n:Person {name: \"Alice\", age: 31})");
+    r1.deinit();
+    var r2 = try db.query("CREATE (n:Person {name: \"Bob\", age: 24})");
+    r2.deinit();
+    var r3 = try db.query("CREATE (n:Person {name: \"Carol\", age: 35})");
+    r3.deinit();
+
+    var result = try db.query(
+        "MATCH (n:Person) WITH n AS p WHERE p.age >= 30 RETURN count(p)",
+    );
+    defer result.deinit();
+    try expectInt(result, 0, 0, 2);
+}
+
+test "query: WITH drops variables not projected forward" {
+    const path = "/tmp/lattice_qm_with_scope_drop.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var r1 = try db.query("CREATE (n:Person {name: \"Alice\"})");
+    r1.deinit();
+
+    try std.testing.expectError(
+        QueryError.SemanticError,
+        db.query("MATCH (n:Person) WITH n.name AS name RETURN n"),
+    );
 }
 
 // ============================================================================

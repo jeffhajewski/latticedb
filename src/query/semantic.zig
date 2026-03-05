@@ -335,22 +335,68 @@ pub const SemanticAnalyzer = struct {
     }
 
     fn analyzeWithClause(self: *Self, clause: *const ast.WithClause) void {
-        // Analyze each WITH item expression
+        // Analyze projection expressions in the incoming scope.
         for (clause.items) |item| {
             self.analyzeExpression(item.expression);
         }
-        // Analyze optional WHERE condition
+
+        // WITH introduces a new scope composed only of projected items.
+        var projected = std.ArrayList(VariableInfo).empty;
+        defer projected.deinit(self.allocator);
+
+        for (clause.items) |item| {
+            const name: []const u8 = if (item.alias) |alias|
+                alias
+            else if (item.expression.* == .variable)
+                item.expression.variable.name
+            else
+                continue;
+
+            for (projected.items) |existing| {
+                if (std.mem.eql(u8, existing.name, name)) {
+                    self.addErrorFmt(.duplicate_variable, clause.location, "Variable '{s}' is already defined", .{name});
+                    break;
+                }
+            } else {
+                const kind = self.inferWithItemKind(item);
+                projected.append(self.allocator, .{
+                    .name = name,
+                    .kind = kind,
+                    .location = clause.location,
+                }) catch {
+                    self.addErrorFmt(.internal_error, clause.location, "Failed to track WITH variable '{s}': out of memory", .{name});
+                    return;
+                };
+            }
+        }
+
+        self.variables.clearRetainingCapacity();
+        self.variable_list.clearRetainingCapacity();
+
+        for (projected.items) |info| {
+            self.variables.put(info.name, info) catch {
+                self.addErrorFmt(.internal_error, info.location, "Failed to register WITH variable '{s}': out of memory", .{info.name});
+                return;
+            };
+            self.variable_list.append(self.allocator, info) catch {
+                self.addErrorFmt(.internal_error, info.location, "Failed to track WITH variable '{s}': out of memory", .{info.name});
+                return;
+            };
+        }
+
+        // WHERE after WITH must be validated against projected scope.
         if (clause.where) |condition| {
             self.analyzeExpression(condition);
         }
-        // WITH introduces new scope - re-register variables from aliases
-        for (clause.items) |item| {
-            if (item.alias) |alias| {
-                self.registerVariable(alias, .node, clause.location);
-            } else if (item.expression.* == .variable) {
-                self.registerVariable(item.expression.variable.name, .node, clause.location);
+    }
+
+    fn inferWithItemKind(self: *Self, item: ast.ReturnItem) VariableKind {
+        if (item.expression.* == .variable) {
+            if (self.variables.get(item.expression.variable.name)) |info| {
+                return info.kind;
             }
         }
+        return .alias;
     }
 
     fn analyzeMergeClause(self: *Self, clause: *const ast.MergeClause) void {

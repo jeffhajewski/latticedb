@@ -1185,6 +1185,14 @@ pub const QueryPlanner = struct {
     fn planWith(self: *Self, with_clause: *const ast.WithClause, input: ?Operator) PlannerError!Operator {
         const input_op = input orelse return PlannerError.InvalidQuery;
 
+        // Preserve upstream bindings referenced by WITH expressions so runtime
+        // evaluation can resolve them even after WITH scope rebinding.
+        var required_input_bindings: std.ArrayList(VarBinding) = .empty;
+        defer required_input_bindings.deinit(self.allocator);
+        for (with_clause.items) |item| {
+            try self.collectReferencedBindings(item.expression, &required_input_bindings);
+        }
+
         // Check for aggregates (same logic as RETURN)
         var has_aggregates = false;
         for (with_clause.items) |item| {
@@ -1237,6 +1245,16 @@ pub const QueryPlanner = struct {
             const name = item.alias orelse getExpressionName(item.expression) orelse continue;
             try self.bindVariable(name, @intCast(i), .node);
             self.next_slot = @intCast(i + 1);
+        }
+
+        // Keep upstream bindings used by WITH expressions available for execution.
+        for (required_input_bindings.items) |binding| {
+            if (!self.bindings.contains(binding.name)) {
+                try self.bindVariable(binding.name, binding.slot, binding.kind);
+                if (binding.slot >= self.next_slot) {
+                    self.next_slot = binding.slot + 1;
+                }
+            }
         }
 
         // Add WHERE filter if present
@@ -1355,6 +1373,34 @@ pub const QueryPlanner = struct {
         ) catch return PlannerError.OutOfMemory;
 
         return unwind.operator();
+    }
+
+    fn collectReferencedBindings(self: *Self, expr: *const ast.Expression, out: *std.ArrayList(VarBinding)) PlannerError!void {
+        switch (expr.*) {
+            .variable => |v| {
+                const binding = self.bindings.get(v.name) orelse return PlannerError.InvalidQuery;
+                for (out.items) |existing| {
+                    if (std.mem.eql(u8, existing.name, binding.name)) return;
+                }
+                out.append(self.allocator, binding) catch return PlannerError.OutOfMemory;
+            },
+            .property_access => |pa| try self.collectReferencedBindings(pa.object, out),
+            .binary => |b| {
+                try self.collectReferencedBindings(b.left, out);
+                try self.collectReferencedBindings(b.right, out);
+            },
+            .unary => |u| try self.collectReferencedBindings(u.operand, out),
+            .function_call => |f| {
+                for (f.arguments) |arg| try self.collectReferencedBindings(arg, out);
+            },
+            .list => |l| {
+                for (l.elements) |elem| try self.collectReferencedBindings(elem, out);
+            },
+            .map => |m| {
+                for (m.entries) |entry| try self.collectReferencedBindings(entry.value, out);
+            },
+            .literal, .parameter => {},
+        }
     }
 
     /// Allocate a new variable slot

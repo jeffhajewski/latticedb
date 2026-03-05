@@ -344,6 +344,64 @@ test "committed deleteEdgeById survives crash recovery with parallel edges" {
     }
 }
 
+test "edge id allocator stays monotonic after crash replay with deleted max id" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_edge_id_allocator_monotonic.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var src_id: NodeId = undefined;
+    var dst_id: NodeId = undefined;
+    var edge1: EdgeId = undefined;
+    var edge2: EdgeId = undefined;
+    var deleted_max_edge: EdgeId = undefined;
+
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+
+        var create_txn = try db.beginTransaction(.read_write);
+        src_id = try db.createNode(&create_txn, &[_][]const u8{});
+        dst_id = try db.createNode(&create_txn, &[_][]const u8{});
+        edge1 = try db.createEdgeAndGetId(&create_txn, src_id, dst_id, "REL");
+        edge2 = try db.createEdgeAndGetId(&create_txn, src_id, dst_id, "REL");
+        deleted_max_edge = try db.createEdgeAndGetId(&create_txn, src_id, dst_id, "REL");
+        try db.commitTransaction(&create_txn);
+
+        var delete_txn = try db.beginTransaction(.read_write);
+        try db.deleteEdgeById(&delete_txn, deleted_max_edge);
+        try db.commitTransaction(&delete_txn);
+
+        db.close();
+    }
+
+    try simulateCrash(path);
+
+    {
+        var db = try openCrashTestDb(allocator, path, false);
+        defer db.close();
+
+        // Replay must preserve exact delete and keep lower IDs.
+        var kept1 = try db.edge_store.getById(edge1);
+        defer kept1.deinit(allocator);
+        var kept2 = try db.edge_store.getById(edge2);
+        defer kept2.deinit(allocator);
+        try std.testing.expectError(lattice.graph.edge.EdgeError.NotFound, db.edge_store.getById(deleted_max_edge));
+
+        // New IDs must continue past the highest previously allocated ID,
+        // even when that max ID was deleted before crash.
+        const new_edge = try db.createEdgeAndGetId(null, src_id, dst_id, "REL");
+        try std.testing.expect(new_edge > deleted_max_edge);
+
+        var iter = try db.getOutgoingEdgeRefs(src_id);
+        defer iter.deinit();
+        var count: usize = 0;
+        while (try iter.next()) |_| {
+            count += 1;
+        }
+        try std.testing.expectEqual(@as(usize, 3), count);
+    }
+}
+
 test "recovery is idempotent" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_crash_idempotent.ltdb";

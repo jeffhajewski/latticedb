@@ -794,6 +794,25 @@ test "query: create graph, query with ORDER BY and LIMIT" {
     try expectString(result, 1, 0, "Alice");
 }
 
+test "query: ORDER BY supports non-returned keys with SKIP and LIMIT" {
+    const path = "/tmp/lattice_qm_order_skip_limit_non_returned_key.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var r1 = try db.query("CREATE (n:Person {name: \"Alice\", age: 20})");
+    r1.deinit();
+    var r2 = try db.query("CREATE (n:Person {name: \"Bob\", age: 30})");
+    r2.deinit();
+    var r3 = try db.query("CREATE (n:Person {name: \"Carol\", age: 40})");
+    r3.deinit();
+
+    // Sorted by age: Alice, Bob, Carol -> SKIP 1 LIMIT 1 returns Bob
+    var result = try db.query("MATCH (n:Person) RETURN n.name ORDER BY n.age SKIP 1 LIMIT 1");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try expectString(result, 0, 0, "Bob");
+}
+
 test "query: create and query graph cycle" {
     const path = "/tmp/lattice_qm_cycle.ltdb";
     var db = try openTestDb(path, .{});

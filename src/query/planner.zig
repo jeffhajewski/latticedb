@@ -158,23 +158,40 @@ pub const QueryPlanner = struct {
 
         var current_op: ?Operator = null;
 
-        // Process each clause
-        for (query.clauses) |clause| {
-            current_op = switch (clause) {
-                .match => |m| try self.planMatch(m, current_op),
-                .where => |w| try self.planWhere(w, current_op),
-                .return_ => |r| try self.planReturn(r, current_op),
-                .order_by => |o| try self.planOrderBy(o, current_op),
-                .limit => |l| try self.planLimit(l, current_op),
-                .skip => |s| try self.planSkip(s, current_op),
-                .create => |c| try self.planCreate(c, current_op),
-                .delete => |d| try self.planDelete(d, current_op),
-                .set => |s| try self.planSet(s, current_op),
-                .remove => |r| try self.planRemove(r, current_op),
-                .with => |w| try self.planWith(w, current_op),
-                .merge => |m| try self.planMerge(m, current_op),
-                .unwind => |u| try self.planUnwind(u, current_op),
-            };
+        // Process each clause. RETURN + trailing ORDER BY/SKIP/LIMIT is
+        // planned as sort/window first, then projection, so ORDER BY can
+        // reference non-returned variables (e.g. RETURN n.name ORDER BY n.age).
+        var clause_idx: usize = 0;
+        while (clause_idx < query.clauses.len) : (clause_idx += 1) {
+            const clause = query.clauses[clause_idx];
+            switch (clause) {
+                .match => |m| current_op = try self.planMatch(m, current_op),
+                .where => |w| current_op = try self.planWhere(w, current_op),
+                .return_ => |r| {
+                    var input_for_return = current_op;
+                    var lookahead = clause_idx + 1;
+                    while (lookahead < query.clauses.len) : (lookahead += 1) {
+                        switch (query.clauses[lookahead]) {
+                            .order_by => |o| input_for_return = try self.planOrderBy(o, input_for_return),
+                            .skip => |s| input_for_return = try self.planSkip(s, input_for_return),
+                            .limit => |l| input_for_return = try self.planLimit(l, input_for_return),
+                            else => break,
+                        }
+                    }
+                    current_op = try self.planReturn(r, input_for_return);
+                    clause_idx = lookahead - 1;
+                },
+                .order_by => |o| current_op = try self.planOrderBy(o, current_op),
+                .limit => |l| current_op = try self.planLimit(l, current_op),
+                .skip => |s| current_op = try self.planSkip(s, current_op),
+                .create => |c| current_op = try self.planCreate(c, current_op),
+                .delete => |d| current_op = try self.planDelete(d, current_op),
+                .set => |s| current_op = try self.planSet(s, current_op),
+                .remove => |r| current_op = try self.planRemove(r, current_op),
+                .with => |w| current_op = try self.planWith(w, current_op),
+                .merge => |m| current_op = try self.planMerge(m, current_op),
+                .unwind => |u| current_op = try self.planUnwind(u, current_op),
+            }
         }
 
         return current_op orelse PlannerError.InvalidQuery;

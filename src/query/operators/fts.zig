@@ -186,12 +186,12 @@ pub const FtsSearchWithInput = struct {
     results: ?[]ScoredDoc,
     /// Current result index
     current_index: usize,
-    /// Output row
-    output_row: ?*Row,
+    /// Current row index within the active document group
+    current_doc_row_index: usize,
     /// Whether opened
     opened: bool,
-    /// Set of valid node IDs from input operator (for filtering)
-    valid_nodes: std.AutoHashMapUnmanaged(NodeId, void),
+    /// Candidate input rows grouped by document/node ID
+    rows_by_doc: std.AutoHashMapUnmanaged(NodeId, std.ArrayListUnmanaged(Row)),
     /// Allocator
     allocator: Allocator,
 
@@ -216,9 +216,9 @@ pub const FtsSearchWithInput = struct {
             .index = index,
             .results = null,
             .current_index = 0,
-            .output_row = null,
+            .current_doc_row_index = 0,
             .opened = false,
-            .valid_nodes = .{},
+            .rows_by_doc = .{},
             .allocator = allocator,
         };
         return self;
@@ -243,9 +243,9 @@ pub const FtsSearchWithInput = struct {
             .index = index,
             .results = null,
             .current_index = 0,
-            .output_row = null,
+            .current_doc_row_index = 0,
             .opened = false,
-            .valid_nodes = .{},
+            .rows_by_doc = .{},
             .allocator = allocator,
         };
         return self;
@@ -268,26 +268,23 @@ pub const FtsSearchWithInput = struct {
 
     fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-
-        // Allocate output row
-        self.output_row = ctx.allocRow() catch return OperatorError.OutOfMemory;
-
-        // Open input and collect valid node IDs
         try self.input.open(ctx);
         self.opened = true;
-
-        // Drain input operator to build set of valid node IDs
-        while (try self.input.next(ctx)) |row| {
-            if (row.getSlot(self.output_slot)) |slot_val| {
-                if (slot_val.asNodeId()) |node_id| {
-                    self.valid_nodes.put(self.allocator, node_id, {}) catch {
-                        return OperatorError.OutOfMemory;
-                    };
-                }
+        errdefer {
+            self.clearRowsByDoc();
+            if (self.results) |results| {
+                self.index.freeResults(results);
+                self.results = null;
+            }
+            if (self.opened) {
+                self.input.close(ctx);
+                self.opened = false;
             }
         }
 
-        // Get query text - either from literal or parameter
+        self.clearRowsByDoc();
+
+        // Get query text - either from literal or parameter.
         const query_text = if (self.literal_query) |lit|
             lit
         else if (self.param_name) |pname| blk: {
@@ -305,7 +302,29 @@ pub const FtsSearchWithInput = struct {
         self.results = self.index.search(query_text, self.limit) catch |err| {
             return mapFtsError(err);
         };
+
+        // Keep only input rows whose node IDs are present in FTS results while
+        // preserving full row context and multiplicity.
+        var allowed_docs: std.AutoHashMapUnmanaged(NodeId, void) = .{};
+        defer allowed_docs.deinit(self.allocator);
+        if (self.results) |results| {
+            for (results) |result| {
+                allowed_docs.put(self.allocator, result.doc_id, {}) catch return OperatorError.OutOfMemory;
+            }
+        }
+
+        while (try self.input.next(ctx)) |row| {
+            const slot_val = row.getSlot(self.output_slot) orelse continue;
+            const doc_id = slot_val.asNodeId() orelse continue;
+            if (!allowed_docs.contains(doc_id)) continue;
+
+            const gop = self.rows_by_doc.getOrPut(self.allocator, doc_id) catch return OperatorError.OutOfMemory;
+            if (!gop.found_existing) gop.value_ptr.* = .{};
+            gop.value_ptr.append(self.allocator, row.*) catch return OperatorError.OutOfMemory;
+        }
+
         self.current_index = 0;
+        self.current_doc_row_index = 0;
     }
 
     fn next(ptr: *anyopaque, _: *ExecutionContext) OperatorError!?*Row {
@@ -314,21 +333,20 @@ pub const FtsSearchWithInput = struct {
         if (!self.opened) return OperatorError.NotInitialized;
 
         const results = self.results orelse return null;
-        const output_row = self.output_row orelse return OperatorError.NotInitialized;
-
-        // Find next FTS result that is also in the valid_nodes set
         while (self.current_index < results.len) {
             const result = results[self.current_index];
-            self.current_index += 1;
 
-            // Filter: only return nodes that the input operator produced
-            if (self.valid_nodes.contains(result.doc_id)) {
-                // Build output row
-                output_row.clear();
-                output_row.setSlot(self.output_slot, .{ .node_ref = result.doc_id });
-                output_row.setScore(self.output_slot, result.score);
-                return output_row;
+            if (self.rows_by_doc.getPtr(result.doc_id)) |rows| {
+                if (self.current_doc_row_index < rows.items.len) {
+                    const row = &rows.items[self.current_doc_row_index];
+                    self.current_doc_row_index += 1;
+                    row.setScore(self.output_slot, result.score);
+                    return row;
+                }
             }
+
+            self.current_index += 1;
+            self.current_doc_row_index = 0;
         }
 
         return null;
@@ -343,9 +361,7 @@ pub const FtsSearchWithInput = struct {
             self.results = null;
         }
 
-        // Clear valid nodes set
-        self.valid_nodes.deinit(self.allocator);
-        self.valid_nodes = .{};
+        self.clearRowsByDoc();
 
         if (self.opened) {
             self.input.close(ctx);
@@ -361,11 +377,19 @@ pub const FtsSearchWithInput = struct {
             self.index.freeResults(results);
         }
 
-        // Free valid nodes if not already freed
-        self.valid_nodes.deinit(self.allocator);
+        self.clearRowsByDoc();
 
         self.input.deinit(allocator);
         allocator.destroy(self);
+    }
+
+    fn clearRowsByDoc(self: *Self) void {
+        var iter = self.rows_by_doc.iterator();
+        while (iter.next()) |entry| {
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.rows_by_doc.deinit(self.allocator);
+        self.rows_by_doc = .{};
     }
 };
 

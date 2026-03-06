@@ -184,10 +184,10 @@ pub const VectorSearchWithInput = struct {
     results: ?[]SearchResult,
     /// Current result index
     current_index: usize,
-    /// Output row
-    output_row: ?*Row,
-    /// Set of valid node IDs from input operator (for filtering)
-    valid_nodes: std.AutoHashMapUnmanaged(NodeId, void),
+    /// Current row index within the active node group
+    current_node_row_index: usize,
+    /// Candidate input rows grouped by node ID
+    rows_by_node: std.AutoHashMapUnmanaged(NodeId, std.ArrayListUnmanaged(Row)),
     /// Whether opened
     opened: bool,
     /// Allocator
@@ -216,8 +216,8 @@ pub const VectorSearchWithInput = struct {
             .index = index,
             .results = null,
             .current_index = 0,
-            .output_row = null,
-            .valid_nodes = .{},
+            .current_node_row_index = 0,
+            .rows_by_node = .{},
             .opened = false,
             .allocator = allocator,
         };
@@ -245,8 +245,8 @@ pub const VectorSearchWithInput = struct {
             .index = index,
             .results = null,
             .current_index = 0,
-            .output_row = null,
-            .valid_nodes = .{},
+            .current_node_row_index = 0,
+            .rows_by_node = .{},
             .opened = false,
             .allocator = allocator,
         };
@@ -270,23 +270,21 @@ pub const VectorSearchWithInput = struct {
 
     fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-
-        // Allocate output row
-        self.output_row = ctx.allocRow() catch return OperatorError.OutOfMemory;
-
-        // Open input and collect candidate node IDs
         try self.input.open(ctx);
         self.opened = true;
-
-        while (try self.input.next(ctx)) |row| {
-            if (row.getSlot(self.output_slot)) |slot_val| {
-                if (slot_val.asNodeId()) |node_id| {
-                    self.valid_nodes.put(self.allocator, node_id, {}) catch {
-                        return OperatorError.OutOfMemory;
-                    };
-                }
+        errdefer {
+            self.clearRowsByNode();
+            if (self.results) |results| {
+                self.index.freeResults(results);
+                self.results = null;
+            }
+            if (self.opened) {
+                self.input.close(ctx);
+                self.opened = false;
             }
         }
+
+        self.clearRowsByNode();
 
         // Get query vector from literal or parameters
         const query_vector = if (self.literal_query) |literal|
@@ -307,7 +305,36 @@ pub const VectorSearchWithInput = struct {
         self.results = self.index.search(query_vector, self.k, null) catch |err| {
             return mapHnswError(err);
         };
+
+        // Precompute node IDs that survived vector-side filtering to avoid
+        // storing irrelevant input rows.
+        var allowed_nodes: std.AutoHashMapUnmanaged(NodeId, void) = .{};
+        defer allowed_nodes.deinit(self.allocator);
+        if (self.results) |results| {
+            for (results) |result| {
+                if (self.distance_threshold) |threshold| {
+                    if (result.distance > threshold) continue;
+                }
+                allowed_nodes.put(self.allocator, result.node_id, {}) catch return OperatorError.OutOfMemory;
+            }
+        }
+
+        // Drain input and retain full rows for each candidate node so next()
+        // preserves upstream bindings and row multiplicity.
+        while (try self.input.next(ctx)) |row| {
+            const slot_val = row.getSlot(self.output_slot) orelse continue;
+            const node_id = slot_val.asNodeId() orelse continue;
+            if (!allowed_nodes.contains(node_id)) continue;
+
+            const gop = self.rows_by_node.getOrPut(self.allocator, node_id) catch return OperatorError.OutOfMemory;
+            if (!gop.found_existing) {
+                gop.value_ptr.* = .{};
+            }
+            gop.value_ptr.append(self.allocator, row.*) catch return OperatorError.OutOfMemory;
+        }
+
         self.current_index = 0;
+        self.current_node_row_index = 0;
     }
 
     fn next(ptr: *anyopaque, _: *ExecutionContext) OperatorError!?*Row {
@@ -316,26 +343,30 @@ pub const VectorSearchWithInput = struct {
         if (!self.opened) return OperatorError.NotInitialized;
 
         const results = self.results orelse return null;
-        const output_row = self.output_row orelse return OperatorError.NotInitialized;
 
         while (self.current_index < results.len) {
             const result = results[self.current_index];
-            self.current_index += 1;
 
             // Apply distance threshold if specified
             if (self.distance_threshold) |threshold| {
                 if (result.distance > threshold) {
+                    self.current_index += 1;
+                    self.current_node_row_index = 0;
                     continue;
                 }
             }
 
-            // Only return nodes allowed by input constraints
-            if (self.valid_nodes.contains(result.node_id)) {
-                output_row.clear();
-                output_row.setSlot(self.output_slot, .{ .node_ref = result.node_id });
-                output_row.setDistance(self.output_slot, result.distance);
-                return output_row;
+            if (self.rows_by_node.getPtr(result.node_id)) |rows| {
+                if (self.current_node_row_index < rows.items.len) {
+                    const row = &rows.items[self.current_node_row_index];
+                    self.current_node_row_index += 1;
+                    row.setDistance(self.output_slot, result.distance);
+                    return row;
+                }
             }
+
+            self.current_index += 1;
+            self.current_node_row_index = 0;
         }
 
         return null;
@@ -350,8 +381,7 @@ pub const VectorSearchWithInput = struct {
             self.results = null;
         }
 
-        self.valid_nodes.deinit(self.allocator);
-        self.valid_nodes = .{};
+        self.clearRowsByNode();
 
         if (self.opened) {
             self.input.close(ctx);
@@ -367,10 +397,19 @@ pub const VectorSearchWithInput = struct {
             self.index.freeResults(results);
         }
 
-        self.valid_nodes.deinit(self.allocator);
+        self.clearRowsByNode();
 
         self.input.deinit(allocator);
         allocator.destroy(self);
+    }
+
+    fn clearRowsByNode(self: *Self) void {
+        var iter = self.rows_by_node.iterator();
+        while (iter.next()) |entry| {
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.rows_by_node.deinit(self.allocator);
+        self.rows_by_node = .{};
     }
 };
 

@@ -1548,6 +1548,76 @@ test "query: vector search respects MATCH input constraints" {
     try expectString(result, 0, 0, "Doc Candidate");
 }
 
+test "query: vector search preserves additional MATCH bindings" {
+    const path = "/tmp/lattice_qm_vector_preserve_bindings.ltdb";
+    var db = try openTestDb(path, .{ .enable_vector = true, .vector_dimensions = 4 });
+    defer cleanupTestDb(db, path);
+
+    const topic_db = try db.createNode(null, &[_][]const u8{"Category"});
+    try db.setNodeProperty(null, topic_db, "name", .{ .string_val = "Databases" });
+    const topic_misc = try db.createNode(null, &[_][]const u8{"Category"});
+    try db.setNodeProperty(null, topic_misc, "name", .{ .string_val = "Misc" });
+
+    const doc_near = try db.createNode(null, &[_][]const u8{"Document"});
+    try db.setNodeProperty(null, doc_near, "name", .{ .string_val = "Doc Candidate" });
+    try db.setNodeVector(doc_near, &[_]f32{ 0.99, 0.01, 0.0, 0.0 });
+
+    const doc_far = try db.createNode(null, &[_][]const u8{"Document"});
+    try db.setNodeProperty(null, doc_far, "name", .{ .string_val = "Doc Far" });
+    try db.setNodeVector(doc_far, &[_]f32{ 0.0, 1.0, 0.0, 0.0 });
+
+    try db.createEdge(null, doc_near, topic_db, "TAGGED");
+    try db.createEdge(null, doc_far, topic_misc, "TAGGED");
+
+    var params = std.StringHashMap(PropertyValue).init(std.testing.allocator);
+    defer params.deinit();
+    const query_vec = [_]f32{ 1.0, 0.0, 0.0, 0.0 };
+    try params.put("query", .{ .vector_val = &query_vec });
+
+    var result = try db.queryWithParams(
+        "MATCH (d:Document)-[:TAGGED]->(c:Category) WHERE d.embedding <=> $query RETURN c.name, d.name LIMIT 1",
+        &params,
+    );
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try expectString(result, 0, 0, "Databases");
+    try expectString(result, 0, 1, "Doc Candidate");
+}
+
+test "query: vector search preserves input row multiplicity" {
+    const path = "/tmp/lattice_qm_vector_preserve_multiplicity.ltdb";
+    var db = try openTestDb(path, .{ .enable_vector = true, .vector_dimensions = 4 });
+    defer cleanupTestDb(db, path);
+
+    const topic_a = try db.createNode(null, &[_][]const u8{"Category"});
+    try db.setNodeProperty(null, topic_a, "name", .{ .string_val = "A" });
+    const topic_b = try db.createNode(null, &[_][]const u8{"Category"});
+    try db.setNodeProperty(null, topic_b, "name", .{ .string_val = "B" });
+
+    const doc = try db.createNode(null, &[_][]const u8{"Document"});
+    try db.setNodeProperty(null, doc, "name", .{ .string_val = "Doc Candidate" });
+    try db.setNodeVector(doc, &[_]f32{ 1.0, 0.0, 0.0, 0.0 });
+
+    try db.createEdge(null, doc, topic_a, "TAGGED");
+    try db.createEdge(null, doc, topic_b, "TAGGED");
+
+    var params = std.StringHashMap(PropertyValue).init(std.testing.allocator);
+    defer params.deinit();
+    const query_vec = [_]f32{ 1.0, 0.0, 0.0, 0.0 };
+    try params.put("query", .{ .vector_val = &query_vec });
+
+    var result = try db.queryWithParams(
+        "MATCH (d:Document {name: \"Doc Candidate\"})-[:TAGGED]->(c:Category) WHERE d.embedding <=> $query RETURN c.name ORDER BY c.name",
+        &params,
+    );
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), result.rowCount());
+    try expectString(result, 0, 0, "A");
+    try expectString(result, 1, 0, "B");
+}
+
 // ============================================================================
 // Full-Text Search via Cypher (@@ operator)
 // ============================================================================
@@ -1576,6 +1646,64 @@ test "query: full-text search with @@ operator" {
     // Should find the graph databases article
     try std.testing.expect(result.rowCount() >= 1);
     try expectString(result, 0, 0, "Graph Databases");
+}
+
+test "query: full-text search preserves additional MATCH bindings" {
+    const path = "/tmp/lattice_qm_fts_preserve_bindings.ltdb";
+    var db = try openTestDb(path, .{ .enable_fts = true });
+    defer cleanupTestDb(db, path);
+
+    const topic_db = try db.createNode(null, &[_][]const u8{"Topic"});
+    try db.setNodeProperty(null, topic_db, "name", .{ .string_val = "Databases" });
+    const topic_misc = try db.createNode(null, &[_][]const u8{"Topic"});
+    try db.setNodeProperty(null, topic_misc, "name", .{ .string_val = "Misc" });
+
+    const a1 = try db.createNode(null, &[_][]const u8{"Article"});
+    try db.setNodeProperty(null, a1, "title", .{ .string_val = "Graph 101" });
+    try db.ftsIndexDocument(a1, "Graph databases and traversal");
+
+    const a2 = try db.createNode(null, &[_][]const u8{"Article"});
+    try db.setNodeProperty(null, a2, "title", .{ .string_val = "Cooking 101" });
+    try db.ftsIndexDocument(a2, "Cooking recipes and ingredients");
+
+    try db.createEdge(null, a1, topic_db, "TAGGED");
+    try db.createEdge(null, a2, topic_misc, "TAGGED");
+
+    var result = try db.query(
+        "MATCH (a:Article)-[:TAGGED]->(t:Topic) WHERE a.text @@ \"graph\" RETURN t.name, a.title",
+    );
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try expectString(result, 0, 0, "Databases");
+    try expectString(result, 0, 1, "Graph 101");
+}
+
+test "query: full-text search preserves input row multiplicity" {
+    const path = "/tmp/lattice_qm_fts_preserve_multiplicity.ltdb";
+    var db = try openTestDb(path, .{ .enable_fts = true });
+    defer cleanupTestDb(db, path);
+
+    const topic_a = try db.createNode(null, &[_][]const u8{"Topic"});
+    try db.setNodeProperty(null, topic_a, "name", .{ .string_val = "A" });
+    const topic_b = try db.createNode(null, &[_][]const u8{"Topic"});
+    try db.setNodeProperty(null, topic_b, "name", .{ .string_val = "B" });
+
+    const article = try db.createNode(null, &[_][]const u8{"Article"});
+    try db.setNodeProperty(null, article, "title", .{ .string_val = "Graph Basics" });
+    try db.ftsIndexDocument(article, "Graph databases intro");
+
+    try db.createEdge(null, article, topic_a, "TAGGED");
+    try db.createEdge(null, article, topic_b, "TAGGED");
+
+    var result = try db.query(
+        "MATCH (a:Article {title: \"Graph Basics\"})-[:TAGGED]->(t:Topic) WHERE a.text @@ \"graph\" RETURN t.name ORDER BY t.name",
+    );
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), result.rowCount());
+    try expectString(result, 0, 0, "A");
+    try expectString(result, 1, 0, "B");
 }
 
 test "query: full-text operator works in generic WHERE predicate" {

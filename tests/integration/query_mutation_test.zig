@@ -1179,6 +1179,51 @@ test "query: MERGE with ON MATCH SET" {
     try expectInt(result, 0, 0, 2);
 }
 
+test "query: MERGE anonymous node with ON CREATE SET is rejected" {
+    const path = "/tmp/lattice_qm_merge_anon_oncreate_rejected.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query("CREATE (x:Person {name: \"Seed\", visits: 1})");
+    seed.deinit();
+
+    try std.testing.expectError(
+        QueryError.SemanticError,
+        db.query(
+            "MATCH (x:Person {name: \"Seed\"}) MERGE (:Marker {name: \"Created\"}) ON CREATE SET x.visits = 2",
+        ),
+    );
+}
+
+test "query: MERGE ON CREATE SET labels is rejected" {
+    const path = "/tmp/lattice_qm_merge_oncreate_labels_rejected.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    try std.testing.expectError(
+        QueryError.SemanticError,
+        db.query("MERGE (n:Person {name: \"Alice\"}) ON CREATE SET n:Admin"),
+    );
+}
+
+test "query: MERGE relationship ON CREATE SET without edge variable is rejected" {
+    const path = "/tmp/lattice_qm_merge_rel_oncreate_no_edge_var_rejected.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var a = try db.query("CREATE (a:Person {name: \"Alice\"})");
+    a.deinit();
+    var b = try db.query("CREATE (b:Person {name: \"Bob\"})");
+    b.deinit();
+
+    try std.testing.expectError(
+        QueryError.SemanticError,
+        db.query(
+            "MATCH (a:Person {name: \"Alice\"}), (b:Person {name: \"Bob\"}) MERGE (a)-[:REL]->(b) ON CREATE SET b.tag = \"x\"",
+        ),
+    );
+}
+
 test "query: MERGE fails on non-property pattern value and does not create partial node" {
     const path = "/tmp/lattice_qm_merge_type_error.ltdb";
     var db = try openTestDb(path, .{});

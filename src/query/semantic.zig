@@ -405,6 +405,22 @@ pub const SemanticAnalyzer = struct {
     }
 
     fn analyzeMergeClause(self: *Self, clause: *const ast.MergeClause) void {
+        const merge_set_target: ?[]const u8 = blk: {
+            if (clause.pattern.elements.len == 1) {
+                break :blk switch (clause.pattern.elements[0]) {
+                    .node => |n| n.variable,
+                    .edge => null,
+                };
+            }
+            if (clause.pattern.elements.len == 3) {
+                break :blk switch (clause.pattern.elements[1]) {
+                    .edge => |e| e.variable,
+                    else => null,
+                };
+            }
+            break :blk null;
+        };
+
         // Analyze the pattern (register variables, check expressions)
         for (clause.pattern.elements) |element| {
             switch (element) {
@@ -437,29 +453,12 @@ pub const SemanticAnalyzer = struct {
                 },
             }
         }
-        // Analyze ON CREATE SET items
+
         if (clause.on_create) |items| {
-            for (items) |item| {
-                switch (item) {
-                    .property => |p| {
-                        self.analyzeExpression(p.target);
-                        self.analyzeExpression(p.value);
-                    },
-                    else => {},
-                }
-            }
+            self.analyzeMergeSetItems(items, merge_set_target, "ON CREATE SET");
         }
-        // Analyze ON MATCH SET items
         if (clause.on_match) |items| {
-            for (items) |item| {
-                switch (item) {
-                    .property => |p| {
-                        self.analyzeExpression(p.target);
-                        self.analyzeExpression(p.value);
-                    },
-                    else => {},
-                }
-            }
+            self.analyzeMergeSetItems(items, merge_set_target, "ON MATCH SET");
         }
     }
 
@@ -469,6 +468,81 @@ pub const SemanticAnalyzer = struct {
         // UNWIND can bind scalars, maps, or nodes/edges from list elements.
         // Track as alias/any instead of forcing node semantics.
         self.registerVariable(clause.variable, .alias, clause.location);
+    }
+
+    fn analyzeMergeSetItems(
+        self: *Self,
+        items: []const ast.SetItem,
+        merge_target_var: ?[]const u8,
+        clause_name: []const u8,
+    ) void {
+        if (merge_target_var == null and items.len > 0) {
+            const loc = switch (items[0]) {
+                .property => |p| p.target.getLocation(),
+                .labels => |l| l.target.getLocation(),
+                .replace_properties => |r| r.target.getLocation(),
+                .merge_properties => |m| m.target.getLocation(),
+            };
+            self.addErrorFmt(
+                .unsupported_pattern,
+                loc,
+                "{s} requires a variable on the MERGE target pattern",
+                .{clause_name},
+            );
+        }
+
+        for (items) |item| {
+            switch (item) {
+                .property => |p| {
+                    self.analyzeExpression(p.target);
+                    self.analyzeExpression(p.value);
+
+                    if (merge_target_var) |expected| {
+                        const actual: ?[]const u8 = switch (p.target.*) {
+                            .variable => p.target.variable.name,
+                            else => null,
+                        };
+                        if (actual == null or !std.mem.eql(u8, actual.?, expected)) {
+                            self.addErrorFmt(
+                                .unsupported_pattern,
+                                p.target.getLocation(),
+                                "{s} currently supports only assignments to '{s}.*'",
+                                .{ clause_name, expected },
+                            );
+                        }
+                    }
+                },
+                .labels => |l| {
+                    self.analyzeExpression(l.target);
+                    self.addErrorFmt(
+                        .unsupported_pattern,
+                        l.target.getLocation(),
+                        "{s} currently supports only property assignments",
+                        .{clause_name},
+                    );
+                },
+                .replace_properties => |r| {
+                    self.analyzeExpression(r.target);
+                    self.analyzeExpression(r.map);
+                    self.addErrorFmt(
+                        .unsupported_pattern,
+                        r.target.getLocation(),
+                        "{s} currently supports only property assignments",
+                        .{clause_name},
+                    );
+                },
+                .merge_properties => |m| {
+                    self.analyzeExpression(m.target);
+                    self.analyzeExpression(m.map);
+                    self.addErrorFmt(
+                        .unsupported_pattern,
+                        m.target.getLocation(),
+                        "{s} currently supports only property assignments",
+                        .{clause_name},
+                    );
+                },
+            }
+        }
     }
 
     fn validateEdgePatternQuantifier(
@@ -958,6 +1032,48 @@ test "MATCH variable-length relationship rejects edge variable" {
 test "CREATE variable-length relationship is rejected" {
     const allocator = std.testing.allocator;
     const source = "CREATE (a:Person)-[:REL*2]->(b:Person)";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+    const parse_result = parser.parse();
+
+    if (parse_result.query) |query| {
+        var analyzer = SemanticAnalyzer.init(allocator);
+        defer analyzer.deinit();
+        const result = analyzer.analyze(query);
+
+        try std.testing.expect(!result.success);
+        try std.testing.expect(result.errors.len > 0);
+        try std.testing.expectEqual(ErrorCode.unsupported_pattern, result.errors[0].code);
+    } else {
+        try std.testing.expect(false);
+    }
+}
+
+test "MERGE ON CREATE SET labels is rejected semantically" {
+    const allocator = std.testing.allocator;
+    const source = "MERGE (n:Person {name: \"Alice\"}) ON CREATE SET n:Admin";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+    const parse_result = parser.parse();
+
+    if (parse_result.query) |query| {
+        var analyzer = SemanticAnalyzer.init(allocator);
+        defer analyzer.deinit();
+        const result = analyzer.analyze(query);
+
+        try std.testing.expect(!result.success);
+        try std.testing.expect(result.errors.len > 0);
+        try std.testing.expectEqual(ErrorCode.unsupported_pattern, result.errors[0].code);
+    } else {
+        try std.testing.expect(false);
+    }
+}
+
+test "MERGE anonymous target with ON CREATE SET is rejected semantically" {
+    const allocator = std.testing.allocator;
+    const source = "MATCH (x) MERGE (:Person {name: \"Alice\"}) ON CREATE SET x.flag = true RETURN x";
 
     var parser = Parser.init(allocator, source);
     defer parser.deinit();

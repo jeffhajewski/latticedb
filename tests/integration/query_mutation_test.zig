@@ -253,6 +253,50 @@ test "query: MATCH on unknown relationship type returns empty result" {
     try expectInt(result, 0, 0, 0);
 }
 
+test "query: MATCH variable-length relationship rejects edge variable" {
+    const path = "/tmp/lattice_qm_match_varlen_rejects_edge_var.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    try std.testing.expectError(
+        QueryError.SemanticError,
+        db.query("MATCH (a)-[r:REL*1..2]->(b) RETURN r"),
+    );
+}
+
+test "query: MATCH variable-length relationship rejects inline property map" {
+    const path = "/tmp/lattice_qm_match_varlen_rejects_props.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    try std.testing.expectError(
+        QueryError.SemanticError,
+        db.query("MATCH (a)-[:REL*1..2 {w: 1}]->(b) RETURN b"),
+    );
+}
+
+test "query: CREATE relationship rejects variable-length quantifier" {
+    const path = "/tmp/lattice_qm_create_varlen_rejected.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    try std.testing.expectError(
+        QueryError.SemanticError,
+        db.query("CREATE (a:Person)-[:REL*2]->(b:Person)"),
+    );
+}
+
+test "query: MERGE relationship rejects variable-length quantifier" {
+    const path = "/tmp/lattice_qm_merge_varlen_rejected.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    try std.testing.expectError(
+        QueryError.SemanticError,
+        db.query("MERGE (:Person)-[:REL*1..2]->(:Person)"),
+    );
+}
+
 test "query: MATCH anonymous source node inline property map filters pattern" {
     const path = "/tmp/lattice_qm_match_node_inline_props_anon_source.ltdb";
     var db = try openTestDb(path, .{});

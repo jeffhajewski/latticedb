@@ -43,6 +43,7 @@ pub const ErrorCode = enum {
     invalid_delete_target,
     invalid_set_target,
     invalid_remove_target,
+    unsupported_pattern,
     internal_error,
 };
 
@@ -155,7 +156,10 @@ pub const SemanticAnalyzer = struct {
             for (pattern.elements) |element| {
                 switch (element) {
                     .node => |n| self.registerNodeVariable(n),
-                    .edge => |e| self.registerEdgeVariable(e),
+                    .edge => |e| {
+                        self.validateEdgePatternQuantifier(e, true, "MATCH");
+                        self.registerEdgeVariable(e);
+                    },
                 }
             }
         }
@@ -227,6 +231,7 @@ pub const SemanticAnalyzer = struct {
                         }
                     },
                     .edge => |e| {
+                        self.validateEdgePatternQuantifier(e, false, "CREATE");
                         if (e.variable) |name| {
                             if (!self.variables.contains(name)) {
                                 self.registerEdgeVariable(e);
@@ -417,6 +422,7 @@ pub const SemanticAnalyzer = struct {
                     }
                 },
                 .edge => |e| {
+                    self.validateEdgePatternQuantifier(e, false, "MERGE");
                     if (e.variable) |name| {
                         if (!self.variables.contains(name)) {
                             self.registerEdgeVariable(e);
@@ -463,6 +469,41 @@ pub const SemanticAnalyzer = struct {
         // UNWIND can bind scalars, maps, or nodes/edges from list elements.
         // Track as alias/any instead of forcing node semantics.
         self.registerVariable(clause.variable, .alias, clause.location);
+    }
+
+    fn validateEdgePatternQuantifier(
+        self: *Self,
+        edge: *const ast.EdgePattern,
+        allow_in_clause: bool,
+        clause_name: []const u8,
+    ) void {
+        if (edge.quantifier == null) return;
+
+        if (!allow_in_clause) {
+            self.addErrorFmt(
+                .unsupported_pattern,
+                edge.location,
+                "Variable-length relationships are only supported in MATCH (found in {s})",
+                .{clause_name},
+            );
+            return;
+        }
+
+        if (edge.variable != null) {
+            self.addError(
+                .unsupported_pattern,
+                edge.location,
+                "Variable-length relationships do not support edge variables",
+            );
+        }
+
+        if (edge.properties != null) {
+            self.addError(
+                .unsupported_pattern,
+                edge.location,
+                "Variable-length relationships do not support inline property maps",
+            );
+        }
     }
 
     // ========================================================================
@@ -888,6 +929,48 @@ test "fts match query" {
         const result = analyzer.analyze(query);
 
         try std.testing.expect(result.success);
+    } else {
+        try std.testing.expect(false);
+    }
+}
+
+test "MATCH variable-length relationship rejects edge variable" {
+    const allocator = std.testing.allocator;
+    const source = "MATCH (a)-[r:REL*1..2]->(b) RETURN r";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+    const parse_result = parser.parse();
+
+    if (parse_result.query) |query| {
+        var analyzer = SemanticAnalyzer.init(allocator);
+        defer analyzer.deinit();
+        const result = analyzer.analyze(query);
+
+        try std.testing.expect(!result.success);
+        try std.testing.expect(result.errors.len > 0);
+        try std.testing.expectEqual(ErrorCode.unsupported_pattern, result.errors[0].code);
+    } else {
+        try std.testing.expect(false);
+    }
+}
+
+test "CREATE variable-length relationship is rejected" {
+    const allocator = std.testing.allocator;
+    const source = "CREATE (a:Person)-[:REL*2]->(b:Person)";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+    const parse_result = parser.parse();
+
+    if (parse_result.query) |query| {
+        var analyzer = SemanticAnalyzer.init(allocator);
+        defer analyzer.deinit();
+        const result = analyzer.analyze(query);
+
+        try std.testing.expect(!result.success);
+        try std.testing.expect(result.errors.len > 0);
+        try std.testing.expectEqual(ErrorCode.unsupported_pattern, result.errors[0].code);
     } else {
         try std.testing.expect(false);
     }

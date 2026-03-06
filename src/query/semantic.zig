@@ -551,6 +551,26 @@ pub const SemanticAnalyzer = struct {
         allow_in_clause: bool,
         clause_name: []const u8,
     ) void {
+        if (!std.mem.eql(u8, clause_name, "MATCH")) {
+            if (edge.types.len == 0) {
+                self.addErrorFmt(
+                    .unsupported_pattern,
+                    edge.location,
+                    "{s} relationships require an explicit type",
+                    .{clause_name},
+                );
+            }
+
+            if (edge.direction == .both) {
+                self.addErrorFmt(
+                    .unsupported_pattern,
+                    edge.location,
+                    "{s} does not support undirected relationship patterns (<-[]->)",
+                    .{clause_name},
+                );
+            }
+        }
+
         if (edge.types.len > 1) {
             self.addError(
                 .unsupported_pattern,
@@ -1136,6 +1156,48 @@ test "MATCH variable-length range with min greater than max is rejected semantic
 test "MATCH relationship type alternation is rejected semantically" {
     const allocator = std.testing.allocator;
     const source = "MATCH (a)-[:REL_A|REL_B]->(b) RETURN b";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+    const parse_result = parser.parse();
+
+    if (parse_result.query) |query| {
+        var analyzer = SemanticAnalyzer.init(allocator);
+        defer analyzer.deinit();
+        const result = analyzer.analyze(query);
+
+        try std.testing.expect(!result.success);
+        try std.testing.expect(result.errors.len > 0);
+        try std.testing.expectEqual(ErrorCode.unsupported_pattern, result.errors[0].code);
+    } else {
+        try std.testing.expect(false);
+    }
+}
+
+test "CREATE relationship without type is rejected semantically" {
+    const allocator = std.testing.allocator;
+    const source = "CREATE (:Person)-[]->(:Person)";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+    const parse_result = parser.parse();
+
+    if (parse_result.query) |query| {
+        var analyzer = SemanticAnalyzer.init(allocator);
+        defer analyzer.deinit();
+        const result = analyzer.analyze(query);
+
+        try std.testing.expect(!result.success);
+        try std.testing.expect(result.errors.len > 0);
+        try std.testing.expectEqual(ErrorCode.unsupported_pattern, result.errors[0].code);
+    } else {
+        try std.testing.expect(false);
+    }
+}
+
+test "MERGE undirected relationship pattern is rejected semantically" {
+    const allocator = std.testing.allocator;
+    const source = "MERGE (:Person)<-[:REL]->(:Person)";
 
     var parser = Parser.init(allocator, source);
     defer parser.deinit();

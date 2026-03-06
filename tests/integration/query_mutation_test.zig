@@ -311,6 +311,28 @@ test "query: CREATE relationship type alternation is rejected" {
     );
 }
 
+test "query: CREATE relationship without type is rejected" {
+    const path = "/tmp/lattice_qm_create_missing_type_rejected.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    try std.testing.expectError(
+        QueryError.SemanticError,
+        db.query("CREATE (:Person)-[]->(:Person)"),
+    );
+}
+
+test "query: CREATE undirected relationship pattern is rejected" {
+    const path = "/tmp/lattice_qm_create_undirected_rejected.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    try std.testing.expectError(
+        QueryError.SemanticError,
+        db.query("CREATE (:Person)<-[:REL]->(:Person)"),
+    );
+}
+
 test "query: CREATE relationship rejects variable-length quantifier" {
     const path = "/tmp/lattice_qm_create_varlen_rejected.ltdb";
     var db = try openTestDb(path, .{});
@@ -330,6 +352,28 @@ test "query: MERGE relationship rejects variable-length quantifier" {
     try std.testing.expectError(
         QueryError.SemanticError,
         db.query("MERGE (:Person)-[:REL*1..2]->(:Person)"),
+    );
+}
+
+test "query: MERGE relationship without type is rejected" {
+    const path = "/tmp/lattice_qm_merge_missing_type_rejected.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    try std.testing.expectError(
+        QueryError.SemanticError,
+        db.query("MERGE (:Person)-[]->(:Person)"),
+    );
+}
+
+test "query: MERGE undirected relationship pattern is rejected" {
+    const path = "/tmp/lattice_qm_merge_undirected_rejected.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    try std.testing.expectError(
+        QueryError.SemanticError,
+        db.query("MERGE (:Person)<-[:REL]->(:Person)"),
     );
 }
 

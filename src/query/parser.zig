@@ -1100,7 +1100,7 @@ pub const Parser = struct {
 
             // Optional range quantifier: *min..max
             if (self.match(.star)) {
-                quantifier = self.parseRangeQuantifier();
+                quantifier = self.parseRangeQuantifier() orelse return null;
             }
 
             // Optional properties
@@ -1138,19 +1138,25 @@ pub const Parser = struct {
     }
 
     /// Parse a range quantifier: *, *n, *n..m, *n.., *..m
-    fn parseRangeQuantifier(self: *Self) ast.RangeQuantifier {
+    fn parseRangeQuantifier(self: *Self) ?ast.RangeQuantifier {
         var min_hops: u32 = 1;
         var max_hops: ?u32 = null;
 
         // Check for min value
         if (self.check(.integer)) {
-            min_hops = @intCast(std.fmt.parseInt(u32, self.current.text, 10) catch 1);
+            min_hops = std.fmt.parseInt(u32, self.current.text, 10) catch {
+                self.errorAtCurrent("Relationship hop count is out of range");
+                return null;
+            };
             self.advance();
 
             // Check for range: ..max or just ..
             if (self.match(.dotdot)) {
                 if (self.check(.integer)) {
-                    max_hops = @intCast(std.fmt.parseInt(u32, self.current.text, 10) catch min_hops);
+                    max_hops = std.fmt.parseInt(u32, self.current.text, 10) catch {
+                        self.errorAtCurrent("Relationship hop count is out of range");
+                        return null;
+                    };
                     self.advance();
                 }
                 // else max_hops stays null (unbounded)
@@ -1161,7 +1167,10 @@ pub const Parser = struct {
         } else if (self.match(.dotdot)) {
             // *..max format (min defaults to 1)
             if (self.check(.integer)) {
-                max_hops = @intCast(std.fmt.parseInt(u32, self.current.text, 10) catch 1);
+                max_hops = std.fmt.parseInt(u32, self.current.text, 10) catch {
+                    self.errorAtCurrent("Relationship hop count is out of range");
+                    return null;
+                };
                 self.advance();
             }
             // else unbounded: *.. (same as *)
@@ -1851,6 +1860,16 @@ test "parse relationship pattern" {
 
     // Third element is node
     try std.testing.expect(pattern.elements[2] == .node);
+}
+
+test "parse relationship quantifier overflow reports parse error" {
+    const source = "MATCH (a)-[:REL*4294967296]->(b) RETURN b";
+    var parser = Parser.init(std.testing.allocator, source);
+    defer parser.deinit();
+
+    const result = parser.parse();
+    try std.testing.expect(result.query == null);
+    try std.testing.expect(result.errors.len > 0);
 }
 
 test "parse where clause" {

@@ -286,6 +286,17 @@ test "query: MATCH variable-length relationship rejects invalid hop range" {
     );
 }
 
+test "query: MATCH variable-length relationship rejects overflow hop count" {
+    const path = "/tmp/lattice_qm_match_varlen_overflow_rejected.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    try std.testing.expectError(
+        QueryError.ParseError,
+        db.query("MATCH (a)-[:REL*4294967296]->(b) RETURN b"),
+    );
+}
+
 test "query: MATCH relationship type alternation is rejected" {
     const path = "/tmp/lattice_qm_match_type_alternation_rejected.ltdb";
     var db = try openTestDb(path, .{});

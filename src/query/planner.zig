@@ -124,6 +124,7 @@ pub const QueryPlanner = struct {
     storage: StorageContext,
     bindings: std.StringHashMap(VarBinding),
     edge_bindings: std.StringHashMap(EdgeBinding),
+    hidden_binding_names: std.ArrayList([]u8),
     next_slot: u8,
     /// Number of output columns from the RETURN clause (set during planning)
     output_columns: u8 = 0,
@@ -137,6 +138,7 @@ pub const QueryPlanner = struct {
             .storage = storage,
             .bindings = std.StringHashMap(VarBinding).init(allocator),
             .edge_bindings = std.StringHashMap(EdgeBinding).init(allocator),
+            .hidden_binding_names = .empty,
             .next_slot = 0,
             .output_columns = 0,
         };
@@ -144,6 +146,8 @@ pub const QueryPlanner = struct {
 
     /// Free planner resources
     pub fn deinit(self: *Self) void {
+        self.clearHiddenBindingNames();
+        self.hidden_binding_names.deinit(self.allocator);
         self.bindings.deinit();
         self.edge_bindings.deinit();
     }
@@ -153,6 +157,7 @@ pub const QueryPlanner = struct {
         _ = analysis; // Used for validation, already done
 
         // Reset bindings for this query
+        self.clearHiddenBindingNames();
         self.bindings.clearRetainingCapacity();
         self.edge_bindings.clearRetainingCapacity();
         self.next_slot = 0;
@@ -355,9 +360,11 @@ pub const QueryPlanner = struct {
 
                     // Optional edge variable
                     var edge_slot: ?u8 = null;
+                    var edge_var_name: ?[]const u8 = null;
                     if (edge_pattern.variable) |name| {
                         edge_slot = try self.allocateSlot();
                         try self.bindVariable(name, edge_slot.?, .edge);
+                        edge_var_name = name;
 
                         // Store edge binding metadata for DELETE support
                         if (edge_pattern.types.len > 0) {
@@ -366,6 +373,13 @@ pub const QueryPlanner = struct {
                                 .target_slot = target_slot,
                                 .edge_type = edge_pattern.types[0],
                             }) catch return PlannerError.OutOfMemory;
+                        }
+                    } else if (edge_pattern.properties) |props| {
+                        // Anonymous relationship with inline properties still
+                        // needs an edge slot for property filtering.
+                        if (props.len > 0) {
+                            edge_slot = try self.allocateSlot();
+                            edge_var_name = try self.bindInternalVariable(edge_slot.?, .edge);
                         }
                     }
 
@@ -421,6 +435,32 @@ pub const QueryPlanner = struct {
                             return PlannerError.OutOfMemory;
                         };
                         op = expand.operator();
+                    }
+
+                    // Add relationship property filters for inline maps:
+                    // [:TYPE {k: v}] -> Filter(edge.k = v)
+                    if (edge_pattern.properties) |props| {
+                        const var_name = edge_var_name orelse return PlannerError.InvalidQuery;
+                        const loc = edge_pattern.location;
+                        for (props) |prop| {
+                            const var_expr = self.allocator.create(ast.Expression) catch return PlannerError.OutOfMemory;
+                            var_expr.* = .{ .variable = .{ .name = var_name, .location = loc } };
+
+                            const prop_access = self.allocator.create(ast.PropertyAccess) catch return PlannerError.OutOfMemory;
+                            prop_access.* = .{ .object = var_expr, .property = prop.key, .location = loc };
+
+                            const prop_expr = self.allocator.create(ast.Expression) catch return PlannerError.OutOfMemory;
+                            prop_expr.* = .{ .property_access = prop_access };
+
+                            const bin_expr = self.allocator.create(ast.BinaryExpr) catch return PlannerError.OutOfMemory;
+                            bin_expr.* = .{ .left = prop_expr, .operator = .eq, .right = prop.value, .location = loc };
+
+                            const predicate = self.allocator.create(ast.Expression) catch return PlannerError.OutOfMemory;
+                            predicate.* = .{ .binary = bin_expr };
+
+                            const prop_filter = filter_ops.Filter.init(self.allocator, op.?, predicate) catch return PlannerError.OutOfMemory;
+                            op = prop_filter.operator();
+                        }
                     }
 
                     // Target becomes the new "previous node" for next edge
@@ -1596,6 +1636,32 @@ pub const QueryPlanner = struct {
             },
             .literal, .parameter => {},
         }
+    }
+
+    fn bindInternalVariable(self: *Self, slot: u8, kind: semantic.VariableKind) PlannerError![]const u8 {
+        var attempt: u32 = 0;
+        while (true) : (attempt += 1) {
+            var buf: [48]u8 = undefined;
+            const candidate = std.fmt.bufPrint(&buf, "__edge_prop_{d}_{d}", .{ slot, attempt }) catch {
+                return PlannerError.InternalError;
+            };
+            if (self.bindings.contains(candidate)) continue;
+
+            const owned = self.allocator.dupe(u8, candidate) catch return PlannerError.OutOfMemory;
+            self.hidden_binding_names.append(self.allocator, owned) catch {
+                self.allocator.free(owned);
+                return PlannerError.OutOfMemory;
+            };
+            try self.bindVariable(owned, slot, kind);
+            return owned;
+        }
+    }
+
+    fn clearHiddenBindingNames(self: *Self) void {
+        for (self.hidden_binding_names.items) |name| {
+            self.allocator.free(name);
+        }
+        self.hidden_binding_names.clearRetainingCapacity();
     }
 
     /// Allocate a new variable slot

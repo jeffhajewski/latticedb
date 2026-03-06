@@ -253,6 +253,43 @@ test "query: MATCH on unknown relationship type returns empty result" {
     try expectInt(result, 0, 0, 0);
 }
 
+test "query: MATCH relationship inline property map filters anonymous edge pattern" {
+    const path = "/tmp/lattice_qm_match_rel_inline_props_anon.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query(
+        "CREATE (a:Person {name: \"Alice\"})-[:REL {w: 1}]->(b:Person {name: \"Bob\"}), (a)-[:REL {w: 2}]->(c:Person {name: \"Carol\"})",
+    );
+    seed.deinit();
+
+    var result = try db.query(
+        "MATCH (a:Person {name: \"Alice\"})-[:REL {w: 2}]->(p:Person) RETURN p.name",
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try expectString(result, 0, 0, "Carol");
+}
+
+test "query: MATCH relationship inline property map filters edge variable pattern" {
+    const path = "/tmp/lattice_qm_match_rel_inline_props_var.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query(
+        "CREATE (a:Person {name: \"Alice\"})-[r1:REL {w: 1}]->(b:Person {name: \"Bob\"}), (a)-[r2:REL {w: 2}]->(c:Person {name: \"Carol\"})",
+    );
+    seed.deinit();
+
+    var result = try db.query(
+        "MATCH (a:Person {name: \"Alice\"})-[r:REL {w: 1}]->(p:Person) RETURN p.name, r.w",
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try expectString(result, 0, 0, "Bob");
+    try expectInt(result, 0, 1, 1);
+}
+
 test "query: CREATE reverse direction relationship" {
     const path = "/tmp/lattice_qm_create_rev_rel.ltdb";
     var db = try openTestDb(path, .{});

@@ -228,10 +228,12 @@ pub const QueryPlanner = struct {
                         prev_node_slot.? // Use target slot from preceding edge's Expand
                     else
                         try self.allocateSlot();
+                    var node_var_name: ?[]const u8 = null;
 
                     // Bind variable if present
                     if (node_pattern.variable) |name| {
                         try self.bindVariable(name, slot, .node);
+                        node_var_name = name;
                     }
 
                     // Determine if we need to create a scan or filter
@@ -323,9 +325,14 @@ pub const QueryPlanner = struct {
 
                     // Add property filters for inline properties: {key: value} → Filter(n.key = value)
                     if (node_pattern.properties) |props| {
+                        if (node_var_name == null) {
+                            // Anonymous node with inline properties still
+                            // needs a bound slot for synthesized filters.
+                            node_var_name = try self.bindInternalVariable(slot, .node);
+                        }
+                        const var_name = node_var_name orelse return PlannerError.InvalidQuery;
                         for (props) |prop| {
                             // Synthesize: variable.property = value
-                            const var_name = node_pattern.variable orelse return PlannerError.InvalidQuery;
                             const loc = node_pattern.location;
 
                             // Create variable reference expression

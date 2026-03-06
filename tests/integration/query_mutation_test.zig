@@ -253,6 +253,39 @@ test "query: MATCH on unknown relationship type returns empty result" {
     try expectInt(result, 0, 0, 0);
 }
 
+test "query: MATCH anonymous source node inline property map filters pattern" {
+    const path = "/tmp/lattice_qm_match_node_inline_props_anon_source.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query(
+        "CREATE (a:Person {name: \"Alice\"})-[:REL]->(b:Person {name: \"Bob\"}), (x:Person {name: \"Eve\"})-[:REL]->(y:Person {name: \"Mallory\"})",
+    );
+    seed.deinit();
+
+    var result = try db.query("MATCH (:Person {name: \"Alice\"})-[:REL]->(p:Person) RETURN p.name");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try expectString(result, 0, 0, "Bob");
+}
+
+test "query: MATCH anonymous target node inline property map filters pattern" {
+    const path = "/tmp/lattice_qm_match_node_inline_props_anon_target.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query(
+        "CREATE (a:Person {name: \"Alice\"})-[:REL]->(b:Person {name: \"Bob\"}), (c:Person {name: \"Carol\"})-[:REL]->(b), (d:Person {name: \"Dave\"})-[:REL]->(e:Person {name: \"Eve\"})",
+    );
+    seed.deinit();
+
+    var result = try db.query("MATCH (p:Person)-[:REL]->(:Person {name: \"Bob\"}) RETURN p.name ORDER BY p.name");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 2), result.rowCount());
+    try expectString(result, 0, 0, "Alice");
+    try expectString(result, 1, 0, "Carol");
+}
+
 test "query: MATCH relationship inline property map filters anonymous edge pattern" {
     const path = "/tmp/lattice_qm_match_rel_inline_props_anon.ltdb";
     var db = try openTestDb(path, .{});

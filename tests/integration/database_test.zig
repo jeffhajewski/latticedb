@@ -1118,6 +1118,72 @@ test "database: variable-length path unbounded star" {
     try std.testing.expectEqual(@as(usize, 2), result.rowCount());
 }
 
+test "database: variable-length path supports exact zero hops" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_var_path_zero_exact_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    const root = try db.createNode(null, &[_][]const u8{"Root"});
+    const other = try db.createNode(null, &[_][]const u8{"Root"});
+    _ = try db.createEdge(null, root, other, "NEXT");
+
+    var result = try db.query(
+        \\MATCH (s:Root)-[:NEXT*0..0]->(t:Root)
+        \\RETURN count(t)
+    );
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    const count_val = result.rows[0].values[0];
+    switch (count_val) {
+        .int_val => |v| try std.testing.expectEqual(@as(i64, 2), v),
+        else => return error.UnexpectedValueType,
+    }
+}
+
+test "database: variable-length path zero to one hops includes source and neighbor" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_var_path_zero_to_one_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    const root = try db.createNode(null, &[_][]const u8{ "Root", "Target" });
+    const child = try db.createNode(null, &[_][]const u8{"Target"});
+    _ = try db.createEdge(null, root, child, "NEXT");
+
+    var result = try db.query(
+        \\MATCH (s:Root)-[:NEXT*0..1]->(t:Target)
+        \\RETURN count(t)
+    );
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    const count_val = result.rows[0].values[0];
+    switch (count_val) {
+        .int_val => |v| try std.testing.expectEqual(@as(i64, 2), v),
+        else => return error.UnexpectedValueType,
+    }
+}
+
 // ============================================================================
 // FTS Integration Tests
 // ============================================================================

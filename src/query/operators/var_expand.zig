@@ -117,7 +117,7 @@ pub const VariableLengthExpand = struct {
             .edge_type = edge_type,
             .direction = direction,
             .edge_store = edge_store,
-            .min_hops = if (min_hops == 0) 1 else min_hops,
+            .min_hops = min_hops,
             .max_hops = max_hops,
             .current_input = null,
             .path_stack = .empty,
@@ -215,6 +215,11 @@ pub const VariableLengthExpand = struct {
 
         // Mark source as visited
         self.visited.put(source_id, {}) catch return OperatorError.OutOfMemory;
+
+        // Zero-hop quantifiers include the source node itself.
+        if (self.min_hops == 0) {
+            self.pending_result = source_id;
+        }
 
         // Create initial frame at depth 0 (source node, before first hop)
         const frame = try self.createFrame(source_id, 0);

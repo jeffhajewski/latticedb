@@ -403,8 +403,32 @@ pub const SemanticAnalyzer = struct {
         // Analyze the pattern (register variables, check expressions)
         for (clause.pattern.elements) |element| {
             switch (element) {
-                .node => |n| self.registerNodeVariable(n),
-                .edge => |e| self.registerEdgeVariable(e),
+                .node => |n| {
+                    if (n.variable) |name| {
+                        if (!self.variables.contains(name)) {
+                            self.registerNodeVariable(n);
+                        } else if (n.properties) |props| {
+                            for (props) |prop| {
+                                self.analyzeExpression(prop.value);
+                            }
+                        }
+                    } else {
+                        self.registerNodeVariable(n);
+                    }
+                },
+                .edge => |e| {
+                    if (e.variable) |name| {
+                        if (!self.variables.contains(name)) {
+                            self.registerEdgeVariable(e);
+                        } else if (e.properties) |props| {
+                            for (props) |prop| {
+                                self.analyzeExpression(prop.value);
+                            }
+                        }
+                    } else {
+                        self.registerEdgeVariable(e);
+                    }
+                },
             }
         }
         // Analyze ON CREATE SET items

@@ -957,6 +957,138 @@ test "query: MERGE fails on non-property pattern value and does not create parti
     try expectInt(mirrors, 0, 0, 0);
 }
 
+test "query: MERGE relationship with bound nodes is idempotent" {
+    const path = "/tmp/lattice_qm_merge_rel_bound_idempotent.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var n1 = try db.query("CREATE (n:Person {name: \"Alice\"})");
+    n1.deinit();
+    var n2 = try db.query("CREATE (n:Person {name: \"Bob\"})");
+    n2.deinit();
+
+    var q1 = try db.query(
+        "MATCH (a:Person {name: \"Alice\"}), (b:Person {name: \"Bob\"}) MERGE (a)-[r:REL]->(b) RETURN id(r)",
+    );
+    defer q1.deinit();
+    try std.testing.expectEqual(@as(usize, 1), q1.rowCount());
+    const edge_id = q1.rows[0].values[0].int_val;
+
+    var q2 = try db.query(
+        "MATCH (a:Person {name: \"Alice\"}), (b:Person {name: \"Bob\"}) MERGE (a)-[r:REL]->(b) RETURN id(r)",
+    );
+    defer q2.deinit();
+    try std.testing.expectEqual(@as(usize, 1), q2.rowCount());
+    try expectInt(q2, 0, 0, edge_id);
+
+    var count = try db.query("MATCH (a)-[r:REL]->(b) RETURN count(r)");
+    defer count.deinit();
+    try expectInt(count, 0, 0, 1);
+}
+
+test "query: MERGE relationship supports ON CREATE and ON MATCH set" {
+    const path = "/tmp/lattice_qm_merge_rel_on_create_on_match.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var n1 = try db.query("CREATE (n:Person {name: \"Alice\"})");
+    n1.deinit();
+    var n2 = try db.query("CREATE (n:Person {name: \"Bob\"})");
+    n2.deinit();
+
+    var q1 = try db.query(
+        "MATCH (a:Person {name: \"Alice\"}), (b:Person {name: \"Bob\"}) MERGE (a)-[r:REL]->(b) ON CREATE SET r.since = 2020 ON MATCH SET r.since = 2021 RETURN id(r), r.since",
+    );
+    defer q1.deinit();
+    try std.testing.expectEqual(@as(usize, 1), q1.rowCount());
+    const edge_id = q1.rows[0].values[0].int_val;
+    try expectInt(q1, 0, 1, 2020);
+
+    var q2 = try db.query(
+        "MATCH (a:Person {name: \"Alice\"}), (b:Person {name: \"Bob\"}) MERGE (a)-[r:REL]->(b) ON CREATE SET r.since = 2020 ON MATCH SET r.since = 2021 RETURN id(r), r.since",
+    );
+    defer q2.deinit();
+    try std.testing.expectEqual(@as(usize, 1), q2.rowCount());
+    try expectInt(q2, 0, 0, edge_id);
+    try expectInt(q2, 0, 1, 2021);
+}
+
+test "query: MERGE relationship pattern properties match correct parallel edge" {
+    const path = "/tmp/lattice_qm_merge_rel_pattern_props_parallel.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    const source = try db.createNode(null, &[_][]const u8{"Person"});
+    const target = try db.createNode(null, &[_][]const u8{"Person"});
+    try db.setNodeProperty(null, source, "name", .{ .string_val = "Alice" });
+    try db.setNodeProperty(null, target, "name", .{ .string_val = "Bob" });
+
+    const rel_type = try db.symbol_table.intern("REL");
+    const weight_key = try db.symbol_table.intern("w");
+    const props1 = [_]NodeProperty{
+        .{ .key_id = weight_key, .value = .{ .int_val = 1 } },
+    };
+    const props2 = [_]NodeProperty{
+        .{ .key_id = weight_key, .value = .{ .int_val = 2 } },
+    };
+    const edge1 = try db.edge_store.createAndGetId(source, target, rel_type, &props1);
+    const edge2 = try db.edge_store.createAndGetId(source, target, rel_type, &props2);
+
+    var result = try db.query(
+        "MERGE (a:Person {name: \"Alice\"})-[r:REL {w: 2}]->(b:Person {name: \"Bob\"}) RETURN id(r), r.w",
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try expectInt(result, 0, 0, @intCast(edge2));
+    try expectInt(result, 0, 1, 2);
+
+    var count_after_match = try db.query("MATCH (a)-[r:REL]->(b) RETURN count(r)");
+    defer count_after_match.deinit();
+    try expectInt(count_after_match, 0, 0, 2);
+
+    var created = try db.query(
+        "MERGE (a:Person {name: \"Alice\"})-[r:REL {w: 3}]->(b:Person {name: \"Bob\"}) RETURN id(r), r.w",
+    );
+    defer created.deinit();
+    try std.testing.expectEqual(@as(usize, 1), created.rowCount());
+    try expectInt(created, 0, 1, 3);
+    try std.testing.expect(created.rows[0].values[0].int_val > @as(i64, @intCast(edge2)));
+
+    var count_after_create = try db.query("MATCH (a)-[r:REL]->(b) RETURN count(r)");
+    defer count_after_create.deinit();
+    try expectInt(count_after_create, 0, 0, 3);
+
+    _ = edge1;
+}
+
+test "query: standalone MERGE relationship creates graph once" {
+    const path = "/tmp/lattice_qm_merge_rel_standalone_once.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var q1 = try db.query(
+        "MERGE (a:Person {name: \"Alice\"})-[r:KNOWS]->(b:Person {name: \"Bob\"}) RETURN id(a), id(b), id(r)",
+    );
+    defer q1.deinit();
+    try std.testing.expectEqual(@as(usize, 1), q1.rowCount());
+    const edge_id = q1.rows[0].values[2].int_val;
+
+    var q2 = try db.query(
+        "MERGE (a:Person {name: \"Alice\"})-[r:KNOWS]->(b:Person {name: \"Bob\"}) RETURN id(a), id(b), id(r)",
+    );
+    defer q2.deinit();
+    try std.testing.expectEqual(@as(usize, 1), q2.rowCount());
+    try expectInt(q2, 0, 2, edge_id);
+
+    var node_count = try db.query("MATCH (n:Person) RETURN count(n)");
+    defer node_count.deinit();
+    try expectInt(node_count, 0, 0, 2);
+
+    var edge_count = try db.query("MATCH (:Person)-[r:KNOWS]->(:Person) RETURN count(r)");
+    defer edge_count.deinit();
+    try expectInt(edge_count, 0, 0, 1);
+}
+
 // ============================================================================
 // Combined / Multi-clause Tests
 // ============================================================================

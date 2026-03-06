@@ -1268,28 +1268,188 @@ pub const QueryPlanner = struct {
         return op;
     }
 
-    /// Plan a MERGE clause (find or create a node pattern)
+    /// Plan a MERGE clause (node pattern or simple relationship pattern).
     fn planMerge(self: *Self, merge_clause: *const ast.MergeClause, input: ?Operator) PlannerError!Operator {
         const database = self.storage.database orelse return PlannerError.MissingStorage;
-
-        // Extract node pattern info from the first element
         const pattern = merge_clause.pattern;
         if (pattern.elements.len == 0) return PlannerError.InvalidQuery;
 
-        const node_pattern = switch (pattern.elements[0]) {
-            .node => |n| n,
-            .edge => return PlannerError.InvalidQuery, // MERGE edge not supported yet
-        };
+        // Node MERGE: MERGE (n {...})
+        if (pattern.elements.len == 1) {
+            const node_pattern = switch (pattern.elements[0]) {
+                .node => |n| n,
+                .edge => return PlannerError.InvalidQuery,
+            };
+
+            const slot: u8 = blk: {
+                if (node_pattern.variable) |name| {
+                    if (self.bindings.get(name)) |binding| break :blk binding.slot;
+                }
+                const new_slot = try self.allocateSlot();
+                if (node_pattern.variable) |name| {
+                    try self.bindVariable(name, new_slot, .node);
+                }
+                break :blk new_slot;
+            };
+
+            var properties: []const mutation_ops.CreateNode.PropertyKV = &.{};
+            if (node_pattern.properties) |props| {
+                const kvs = self.allocator.alloc(mutation_ops.CreateNode.PropertyKV, props.len) catch {
+                    return PlannerError.OutOfMemory;
+                };
+                for (props, 0..) |prop, i| {
+                    kvs[i] = .{
+                        .key = prop.key,
+                        .value_expr = prop.value,
+                    };
+                }
+                properties = kvs;
+            }
+
+            var on_create_props: []const mutation_ops.CreateNode.PropertyKV = &.{};
+            if (merge_clause.on_create) |items| {
+                if (node_pattern.variable) |name| {
+                    on_create_props = try self.extractSetPropertiesForTarget(items, name);
+                } else {
+                    on_create_props = try self.extractSetProperties(items);
+                }
+            }
+
+            var on_match_props: []const mutation_ops.CreateNode.PropertyKV = &.{};
+            if (merge_clause.on_match) |items| {
+                if (node_pattern.variable) |name| {
+                    on_match_props = try self.extractSetPropertiesForTarget(items, name);
+                } else {
+                    on_match_props = try self.extractSetProperties(items);
+                }
+            }
+
+            const materialized_input: ?Operator = if (input) |inp| try self.materializeInput(inp) else null;
+
+            const merge_op = mutation_ops.MergeNode.init(
+                self.allocator,
+                materialized_input,
+                node_pattern.labels,
+                properties,
+                slot,
+                database,
+                on_create_props,
+                on_match_props,
+            ) catch return PlannerError.OutOfMemory;
+
+            return merge_op.operator();
+        }
+
+        // Relationship MERGE: MERGE (a)-[r:TYPE]->(b)
+        if (pattern.elements.len == 3) {
+            const left = switch (pattern.elements[0]) {
+                .node => |n| n,
+                else => return PlannerError.InvalidQuery,
+            };
+            const edge = switch (pattern.elements[1]) {
+                .edge => |e| e,
+                else => return PlannerError.InvalidQuery,
+            };
+            const right = switch (pattern.elements[2]) {
+                .node => |n| n,
+                else => return PlannerError.InvalidQuery,
+            };
+
+            if (edge.types.len == 0) return PlannerError.InvalidQuery;
+            if (edge.direction == .both) return PlannerError.InvalidQuery;
+
+            var op: ?Operator = if (input) |inp| try self.materializeInput(inp) else null;
+            const left_slot = try self.resolveMergeNodeSlot(&op, left, database);
+            const right_slot = try self.resolveMergeNodeSlot(&op, right, database);
+
+            var source_slot = left_slot;
+            var target_slot = right_slot;
+            if (edge.direction == .incoming) {
+                source_slot = right_slot;
+                target_slot = left_slot;
+            }
+
+            const edge_slot: ?u8 = blk: {
+                if (edge.variable) |name| {
+                    if (self.bindings.get(name)) |binding| {
+                        if (binding.kind != .edge) return PlannerError.InvalidQuery;
+                        break :blk binding.slot;
+                    }
+                    const slot = try self.allocateSlot();
+                    try self.bindVariable(name, slot, .edge);
+                    break :blk slot;
+                }
+                break :blk null;
+            };
+
+            var edge_props: []const mutation_ops.CreateNode.PropertyKV = &.{};
+            if (edge.properties) |props| {
+                const kvs = self.allocator.alloc(mutation_ops.CreateNode.PropertyKV, props.len) catch {
+                    return PlannerError.OutOfMemory;
+                };
+                for (props, 0..) |prop, i| {
+                    kvs[i] = .{
+                        .key = prop.key,
+                        .value_expr = prop.value,
+                    };
+                }
+                edge_props = kvs;
+            }
+
+            var on_create_props: []const mutation_ops.CreateNode.PropertyKV = &.{};
+            if (merge_clause.on_create) |items| {
+                const edge_name = edge.variable orelse return PlannerError.InvalidQuery;
+                on_create_props = try self.extractSetPropertiesForTarget(items, edge_name);
+            }
+
+            var on_match_props: []const mutation_ops.CreateNode.PropertyKV = &.{};
+            if (merge_clause.on_match) |items| {
+                const edge_name = edge.variable orelse return PlannerError.InvalidQuery;
+                on_match_props = try self.extractSetPropertiesForTarget(items, edge_name);
+            }
+
+            const merge_edge = mutation_ops.MergeEdge.init(
+                self.allocator,
+                op orelse return PlannerError.InvalidQuery,
+                source_slot,
+                target_slot,
+                edge.types[0],
+                edge_slot,
+                database,
+                edge_props,
+                on_create_props,
+                on_match_props,
+            ) catch return PlannerError.OutOfMemory;
+
+            return merge_edge.operator();
+        }
+
+        return PlannerError.InvalidQuery;
+    }
+
+    /// Ensure a MERGE node pattern is bound to a slot, planning a MergeNode
+    /// sub-operator when the variable is not already bound.
+    fn resolveMergeNodeSlot(
+        self: *Self,
+        op: *?Operator,
+        node_pattern: *const ast.NodePattern,
+        database: *Database,
+    ) PlannerError!u8 {
+        if (node_pattern.variable) |name| {
+            if (self.bindings.get(name)) |binding| {
+                if (binding.kind != .node) return PlannerError.InvalidQuery;
+                return binding.slot;
+            }
+        }
 
         const slot = try self.allocateSlot();
         if (node_pattern.variable) |name| {
             try self.bindVariable(name, slot, .node);
         }
 
-        // Extract property KVs from the pattern
         var properties: []const mutation_ops.CreateNode.PropertyKV = &.{};
         if (node_pattern.properties) |props| {
-            var kvs = self.allocator.alloc(mutation_ops.CreateNode.PropertyKV, props.len) catch {
+            const kvs = self.allocator.alloc(mutation_ops.CreateNode.PropertyKV, props.len) catch {
                 return PlannerError.OutOfMemory;
             };
             for (props, 0..) |prop, i| {
@@ -1301,32 +1461,18 @@ pub const QueryPlanner = struct {
             properties = kvs;
         }
 
-        // Extract ON CREATE SET properties
-        var on_create_props: []const mutation_ops.CreateNode.PropertyKV = &.{};
-        if (merge_clause.on_create) |items| {
-            on_create_props = try self.extractSetProperties(items);
-        }
-
-        // Extract ON MATCH SET properties
-        var on_match_props: []const mutation_ops.CreateNode.PropertyKV = &.{};
-        if (merge_clause.on_match) |items| {
-            on_match_props = try self.extractSetProperties(items);
-        }
-
-        const materialized_input: ?Operator = if (input) |inp| try self.materializeInput(inp) else null;
-
-        const merge_op = mutation_ops.MergeNode.init(
+        const merge_node = mutation_ops.MergeNode.init(
             self.allocator,
-            materialized_input,
+            op.*,
             node_pattern.labels,
             properties,
             slot,
             database,
-            on_create_props,
-            on_match_props,
+            &.{},
+            &.{},
         ) catch return PlannerError.OutOfMemory;
-
-        return merge_op.operator();
+        op.* = merge_node.operator();
+        return slot;
     }
 
     /// Wrap an input operator in a Materialize barrier to release page latches
@@ -1350,6 +1496,32 @@ pub const QueryPlanner = struct {
                     }) catch return PlannerError.OutOfMemory;
                 },
                 else => {}, // Labels and map operations not supported in MERGE ON CREATE/MATCH
+            }
+        }
+
+        return kvs.toOwnedSlice(self.allocator) catch return PlannerError.OutOfMemory;
+    }
+
+    /// Extract SET property key/value pairs for a specific target variable.
+    fn extractSetPropertiesForTarget(
+        self: *Self,
+        items: []const ast.SetItem,
+        target_name: []const u8,
+    ) PlannerError![]const mutation_ops.CreateNode.PropertyKV {
+        var kvs: std.ArrayList(mutation_ops.CreateNode.PropertyKV) = .empty;
+        defer kvs.deinit(self.allocator);
+
+        for (items) |item| {
+            switch (item) {
+                .property => |p| {
+                    const var_name = getVariableName(p.target) orelse return PlannerError.InvalidQuery;
+                    if (!std.mem.eql(u8, var_name, target_name)) return PlannerError.InvalidQuery;
+                    kvs.append(self.allocator, .{
+                        .key = p.property_name,
+                        .value_expr = p.value,
+                    }) catch return PlannerError.OutOfMemory;
+                },
+                else => return PlannerError.InvalidQuery,
             }
         }
 

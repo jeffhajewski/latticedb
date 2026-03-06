@@ -26,6 +26,8 @@ const types = lattice.core.types;
 const NodeId = types.NodeId;
 const EdgeId = types.EdgeId;
 const PropertyValue = types.PropertyValue;
+const SymbolError = lattice.graph.symbols.SymbolError;
+const EdgeError = lattice.graph.edge.EdgeError;
 
 const database_mod = lattice.storage.database;
 const Database = database_mod.Database;
@@ -1460,6 +1462,256 @@ pub const MergeNode = struct {
     fn deinit(ptr: *anyopaque, allocator: Allocator) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         if (self.input) |input| input.deinit(allocator);
+        allocator.destroy(self);
+    }
+};
+
+// ============================================================================
+// MergeEdge Operator
+// ============================================================================
+
+/// Operator that implements MERGE for a single relationship pattern.
+/// Finds an existing edge matching source/target/type/(optional properties), or creates one.
+pub const MergeEdge = struct {
+    /// Input operator providing source/target node bindings
+    input: Operator,
+    /// Slot containing source node ID
+    source_slot: u8,
+    /// Slot containing target node ID
+    target_slot: u8,
+    /// Edge type name
+    edge_type: []const u8,
+    /// Optional slot for merged edge ID
+    output_slot: ?u8,
+    /// Database reference
+    database: *Database,
+    /// Pattern properties used for matching and initial create
+    properties: []const CreateNode.PropertyKV,
+    /// ON CREATE SET properties
+    on_create_props: []const CreateNode.PropertyKV,
+    /// ON MATCH SET properties
+    on_match_props: []const CreateNode.PropertyKV,
+    /// Expression evaluator
+    evaluator: ExpressionEvaluator,
+    /// Whether opened
+    opened: bool,
+    /// Allocator
+    allocator: Allocator,
+
+    const Self = @This();
+
+    pub fn init(
+        allocator: Allocator,
+        input: Operator,
+        source_slot: u8,
+        target_slot: u8,
+        edge_type: []const u8,
+        output_slot: ?u8,
+        database: *Database,
+        properties: []const CreateNode.PropertyKV,
+        on_create_props: []const CreateNode.PropertyKV,
+        on_match_props: []const CreateNode.PropertyKV,
+    ) !*Self {
+        const self = try allocator.create(Self);
+        self.* = Self{
+            .input = input,
+            .source_slot = source_slot,
+            .target_slot = target_slot,
+            .edge_type = edge_type,
+            .output_slot = output_slot,
+            .database = database,
+            .properties = properties,
+            .on_create_props = on_create_props,
+            .on_match_props = on_match_props,
+            .evaluator = ExpressionEvaluator.init(allocator),
+            .opened = false,
+            .allocator = allocator,
+        };
+        return self;
+    }
+
+    pub fn operator(self: *Self) Operator {
+        return Operator{
+            .vtable = &vtable,
+            .ptr = self,
+        };
+    }
+
+    const vtable = Operator.VTable{
+        .open = open,
+        .next = next,
+        .close = close,
+        .deinit = deinit,
+    };
+
+    fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        try self.input.open(ctx);
+        self.opened = true;
+    }
+
+    fn next(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!?*Row {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        if (!self.opened) return OperatorError.NotInitialized;
+
+        const row = try self.input.next(ctx) orelse return null;
+
+        const source_val = row.getSlot(self.source_slot) orelse return OperatorError.UnboundVariable;
+        const target_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
+
+        const source_id = source_val.asNodeId() orelse return OperatorError.TypeError;
+        const target_id = target_val.asNodeId() orelse return OperatorError.TypeError;
+
+        const edge_id = try self.mergeEdge(ctx, row, source_id, target_id);
+        if (self.output_slot) |slot| {
+            row.setSlot(slot, .{ .edge_ref = edge_id });
+        }
+
+        return row;
+    }
+
+    fn mergeEdge(
+        self: *Self,
+        ctx: *ExecutionContext,
+        row: *const Row,
+        source_id: NodeId,
+        target_id: NodeId,
+    ) OperatorError!EdgeId {
+        if (try self.findMatchingEdgeId(ctx, row, source_id, target_id)) |edge_id| {
+            try self.applyEdgeSetItems(edge_id, self.on_match_props, ctx, row);
+            return edge_id;
+        }
+
+        const edge_id = self.database.createEdgeAndGetId(null, source_id, target_id, self.edge_type) catch {
+            return OperatorError.StorageError;
+        };
+
+        // MERGE pattern properties initialize newly created relationships.
+        try self.applyEdgeSetItems(edge_id, self.properties, ctx, row);
+        try self.applyEdgeSetItems(edge_id, self.on_create_props, ctx, row);
+
+        return edge_id;
+    }
+
+    fn findMatchingEdgeId(
+        self: *Self,
+        ctx: *ExecutionContext,
+        row: *const Row,
+        source_id: NodeId,
+        target_id: NodeId,
+    ) OperatorError!?EdgeId {
+        const type_id = self.database.symbol_table.lookup(self.edge_type) catch |err| {
+            return switch (err) {
+                SymbolError.NotFound => null,
+                else => OperatorError.StorageError,
+            };
+        };
+
+        if (self.properties.len == 0) {
+            var edge = self.database.edge_store.get(source_id, target_id, type_id) catch |err| {
+                return switch (err) {
+                    EdgeError.NotFound => null,
+                    else => OperatorError.StorageError,
+                };
+            };
+            defer edge.deinit(self.database.allocator);
+            return edge.id;
+        }
+
+        var refs = self.database.edge_store.getOutgoingRefsByType(source_id, type_id) catch {
+            return OperatorError.StorageError;
+        };
+        defer refs.deinit();
+
+        while (true) {
+            const maybe_ref = refs.next() catch return OperatorError.StorageError;
+            const edge_ref = maybe_ref orelse break;
+            if (edge_ref.target != target_id) continue;
+            if (try self.matchesPatternProperties(edge_ref.id, ctx, row)) {
+                return edge_ref.id;
+            }
+        }
+        return null;
+    }
+
+    fn matchesPatternProperties(
+        self: *Self,
+        edge_id: EdgeId,
+        ctx: *ExecutionContext,
+        row: *const Row,
+    ) OperatorError!bool {
+        if (self.properties.len == 0) return true;
+
+        var edge = self.database.edge_store.getById(edge_id) catch {
+            return OperatorError.StorageError;
+        };
+        defer edge.deinit(self.database.allocator);
+
+        for (self.properties) |prop| {
+            const expected = self.evaluator.evaluate(prop.value_expr, row, ctx) catch |err| {
+                return mapEvalError(err);
+            };
+            const expected_pv = evalResultToPropertyValue(expected, self.allocator) orelse return OperatorError.TypeError;
+
+            const key_id = self.database.symbol_table.lookup(prop.key) catch |err| {
+                return switch (err) {
+                    SymbolError.NotFound => false,
+                    else => OperatorError.StorageError,
+                };
+            };
+
+            var found = false;
+            for (edge.properties) |actual_prop| {
+                if (actual_prop.key_id != key_id) continue;
+                if (!propertyValuesEqual(expected_pv, actual_prop.value)) {
+                    return false;
+                }
+                found = true;
+                break;
+            }
+            if (!found) return false;
+        }
+        return true;
+    }
+
+    fn applyEdgeSetItems(
+        self: *Self,
+        edge_id: EdgeId,
+        items: []const CreateNode.PropertyKV,
+        ctx: *ExecutionContext,
+        row: *const Row,
+    ) OperatorError!void {
+        if (items.len == 0) return;
+
+        var evaluated: std.ArrayList(EvaluatedProperty) = .empty;
+        defer evaluated.deinit(self.allocator);
+        try evaluatePropertyExprList(
+            self.allocator,
+            &self.evaluator,
+            items,
+            row,
+            ctx,
+            &evaluated,
+        );
+
+        for (evaluated.items) |item| {
+            self.database.setEdgePropertyById(null, edge_id, item.key, item.value) catch {
+                return OperatorError.StorageError;
+            };
+        }
+    }
+
+    fn close(ptr: *anyopaque, ctx: *ExecutionContext) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        if (self.opened) {
+            self.input.close(ctx);
+            self.opened = false;
+        }
+    }
+
+    fn deinit(ptr: *anyopaque, allocator: Allocator) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.input.deinit(allocator);
         allocator.destroy(self);
     }
 };

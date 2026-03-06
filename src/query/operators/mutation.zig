@@ -216,12 +216,18 @@ pub const CreateEdge = struct {
     target_slot: u8,
     /// Edge type name
     edge_type: []const u8,
+    /// Property expressions
+    properties: []const CreateNode.PropertyKV,
     /// Optional slot for edge variable
     output_slot: ?u8,
     /// Database reference
     database: *Database,
+    /// Expression evaluator
+    evaluator: ExpressionEvaluator,
     /// Whether operator is opened
     opened: bool,
+    /// Allocator
+    allocator: Allocator,
 
     const Self = @This();
 
@@ -232,6 +238,7 @@ pub const CreateEdge = struct {
         source_slot: u8,
         target_slot: u8,
         edge_type: []const u8,
+        properties: []const CreateNode.PropertyKV,
         output_slot: ?u8,
         database: *Database,
     ) !*Self {
@@ -241,9 +248,12 @@ pub const CreateEdge = struct {
             .source_slot = source_slot,
             .target_slot = target_slot,
             .edge_type = edge_type,
+            .properties = properties,
             .output_slot = output_slot,
             .database = database,
+            .evaluator = ExpressionEvaluator.init(allocator),
             .opened = false,
+            .allocator = allocator,
         };
         return self;
     }
@@ -283,13 +293,33 @@ pub const CreateEdge = struct {
         const source_id = source_val.asNodeId() orelse return OperatorError.TypeError;
         const target_id = target_val.asNodeId() orelse return OperatorError.TypeError;
 
-        // Create the edge
-        self.database.createEdge(null, source_id, target_id, self.edge_type) catch {
+        // Evaluate edge properties before mutation to avoid partial writes.
+        var evaluated: std.ArrayList(EvaluatedProperty) = .empty;
+        defer evaluated.deinit(self.allocator);
+        try evaluatePropertyExprList(
+            self.allocator,
+            &self.evaluator,
+            self.properties,
+            row,
+            ctx,
+            &evaluated,
+        );
+
+        const edge_id = self.database.createEdgeAndGetId(null, source_id, target_id, self.edge_type) catch {
             return OperatorError.StorageError;
         };
 
-        // Edge variable currently not tracked (edges don't have simple IDs)
-        // In future, could store edge info in a slot
+        for (evaluated.items) |item| {
+            self.database.setEdgePropertyById(null, edge_id, item.key, item.value) catch {
+                // Best-effort rollback to avoid exposing partially initialized edges.
+                self.database.deleteEdgeById(null, edge_id) catch {};
+                return OperatorError.StorageError;
+            };
+        }
+
+        if (self.output_slot) |slot| {
+            row.setSlot(slot, .{ .edge_ref = edge_id });
+        }
 
         return row;
     }

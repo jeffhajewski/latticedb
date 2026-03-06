@@ -969,9 +969,25 @@ pub const QueryPlanner = struct {
                             }
 
                             // Bind edge variable if present
+                            var edge_slot: ?u8 = null;
                             if (pe.edge_pattern.variable) |edge_name| {
-                                const edge_slot = try self.allocateSlot();
-                                try self.bindVariable(edge_name, edge_slot, .edge);
+                                const edge_var_slot = try self.allocateSlot();
+                                try self.bindVariable(edge_name, edge_var_slot, .edge);
+                                edge_slot = edge_var_slot;
+                            }
+
+                            var edge_properties: []const mutation_ops.CreateNode.PropertyKV = &.{};
+                            if (pe.edge_pattern.properties) |props| {
+                                const kvs = self.allocator.alloc(mutation_ops.CreateNode.PropertyKV, props.len) catch {
+                                    return PlannerError.OutOfMemory;
+                                };
+                                for (props, 0..) |prop, i| {
+                                    kvs[i] = .{
+                                        .key = prop.key,
+                                        .value_expr = prop.value,
+                                    };
+                                }
+                                edge_properties = kvs;
                             }
 
                             // Determine direction and create edge
@@ -985,7 +1001,8 @@ pub const QueryPlanner = struct {
                                 source_slot,
                                 target_slot,
                                 pe.edge_pattern.types[0], // Use first type
-                                null, // Edge slot tracking deferred
+                                edge_properties,
+                                edge_slot,
                                 database,
                             ) catch return PlannerError.OutOfMemory;
 

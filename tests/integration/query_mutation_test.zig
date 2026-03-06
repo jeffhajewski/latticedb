@@ -166,6 +166,40 @@ test "query: CREATE relationship between new nodes" {
     try expectString(result, 0, 1, "Bob");
 }
 
+test "query: CREATE relationship binds edge variable and inline properties" {
+    const path = "/tmp/lattice_qm_create_rel_var_props.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var result = try db.query(
+        "CREATE (a:Person {name: \"Alice\"})-[r:KNOWS {since: 2024}]->(b:Person {name: \"Bob\"}) RETURN id(r), type(r), r.since",
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try std.testing.expect(result.rows[0].values[0].int_val > 0);
+    try expectString(result, 0, 1, "KNOWS");
+    try expectInt(result, 0, 2, 2024);
+}
+
+test "query: CREATE relationship persists multiple inline properties" {
+    const path = "/tmp/lattice_qm_create_rel_multi_props.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query("CREATE (a:Person {name: \"Alice\"})-[:REL {w: 7, note: \"x\"}]->(b:Person {name: \"Bob\"})");
+    seed.deinit();
+
+    var result = try db.query("MATCH (a)-[r:REL]->(b) RETURN r.w, r.note");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try expectInt(result, 0, 0, 7);
+    try expectString(result, 0, 1, "x");
+
+    var count = try db.query("MATCH (:Person)-[r:REL]->(:Person) RETURN count(r)");
+    defer count.deinit();
+    try expectInt(count, 0, 0, 1);
+}
+
 test "query: CREATE relationship between existing nodes via MATCH" {
     const path = "/tmp/lattice_qm_match_create_rel.ltdb";
     var db = try openTestDb(path, .{});
@@ -184,6 +218,26 @@ test "query: CREATE relationship between existing nodes via MATCH" {
     try std.testing.expectEqual(@as(usize, 1), result.rowCount());
     try expectString(result, 0, 0, "Alice");
     try expectString(result, 0, 1, "Bob");
+}
+
+test "query: CREATE relationship fails on non-property value and does not create edge" {
+    const path = "/tmp/lattice_qm_create_rel_type_error.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var n1 = try db.query("CREATE (n:Person {name: \"Alice\"})");
+    n1.deinit();
+    var n2 = try db.query("CREATE (n:Person {name: \"Bob\"})");
+    n2.deinit();
+
+    try std.testing.expectError(
+        QueryError.ExecutionError,
+        db.query("MATCH (a:Person {name: \"Alice\"}), (b:Person {name: \"Bob\"}) CREATE (a)-[:REL {owner: a}]->(b)"),
+    );
+
+    var count = try db.query("MATCH (:Person)-[r]->(:Person) RETURN count(r)");
+    defer count.deinit();
+    try expectInt(count, 0, 0, 0);
 }
 
 test "query: CREATE reverse direction relationship" {

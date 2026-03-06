@@ -2800,6 +2800,10 @@ pub const Database = struct {
         defer {
             if (cache_entry) |entry| entry.unpin();
         }
+        var uncached_cache_arena: ?std.heap.ArenaAllocator = null;
+        defer {
+            if (uncached_cache_arena) |arena| arena.deinit();
+        }
 
         var ast_query: *lattice.query.ast.Query = undefined;
         var analysis_vars: []const VariableInfo = &[_]VariableInfo{};
@@ -2858,15 +2862,16 @@ pub const Database = struct {
                 analysis_vars = analysis.variables;
 
                 // Store in cache (cache takes ownership of the arena)
-                const arena_to_cache = cache_parser.arena;
+                var arena_to_cache = cache_parser.arena;
                 cache_parser.errors.deinit(self.allocator);
-                self.query_cache.?.put(cypher, ast_query, analysis_vars, arena_to_cache);
-
-                // Re-fetch from cache to get a pinned entry
-                cache_entry = self.query_cache.?.get(cypher);
+                cache_entry = self.query_cache.?.put(cypher, ast_query, analysis_vars, &arena_to_cache);
                 if (cache_entry) |entry| {
                     ast_query = entry.query;
                     analysis_vars = entry.variables;
+                } else {
+                    // Cache insertion skipped (e.g., all entries pinned). Keep the
+                    // parser arena alive for this execution path.
+                    uncached_cache_arena = arena_to_cache;
                 }
 
                 sem.deinit();

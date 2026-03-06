@@ -40,7 +40,7 @@ pub const CacheEntry = struct {
     /// Schema version at time of caching (entry is stale if mismatched).
     schema_version: u64,
     /// LRU access counter value at last access.
-    last_access: u64,
+    last_access: std.atomic.Value(u64),
     /// Reference count: pinned during execution to prevent eviction.
     ref_count: std.atomic.Value(u32),
 
@@ -66,10 +66,10 @@ pub const QueryCache = struct {
     entries: []?CacheEntry,
     max_entries: u32,
     count: u32,
-    access_counter: u64,
-    schema_version: u64,
-    stats_hits: u64,
-    stats_misses: u64,
+    access_counter: std.atomic.Value(u64),
+    schema_version: std.atomic.Value(u64),
+    stats_hits: std.atomic.Value(u64),
+    stats_misses: std.atomic.Value(u64),
     latch: RwLatch,
 
     const Self = @This();
@@ -92,10 +92,10 @@ pub const QueryCache = struct {
         self.allocator = allocator;
         self.max_entries = effective_max;
         self.count = 0;
-        self.access_counter = 0;
-        self.schema_version = 0;
-        self.stats_hits = 0;
-        self.stats_misses = 0;
+        self.access_counter = std.atomic.Value(u64).init(0);
+        self.schema_version = std.atomic.Value(u64).init(0);
+        self.stats_hits = std.atomic.Value(u64).init(0);
+        self.stats_misses = std.atomic.Value(u64).init(0);
         self.latch = .{};
 
         return self;
@@ -117,6 +117,7 @@ pub const QueryCache = struct {
     /// Uses shared latch for concurrent reads.
     pub fn get(self: *Self, query_text: []const u8) ?*CacheEntry {
         const hash = hashQuery(query_text);
+        const current_schema = self.schema_version.load(.monotonic);
 
         // Acquire shared latch for read
         while (!self.latch.tryAcquireShared()) {
@@ -128,19 +129,20 @@ pub const QueryCache = struct {
         for (self.entries) |*slot| {
             if (slot.*) |*entry| {
                 if (entry.query_hash == hash and
-                    entry.schema_version == self.schema_version and
+                    entry.schema_version == current_schema and
                     std.mem.eql(u8, entry.query_text, query_text))
                 {
                     // Cache hit - update access counter and pin
-                    entry.last_access = @atomicRmw(u64, &self.access_counter, .Add, 1, .monotonic);
+                    const access = self.access_counter.fetchAdd(1, .monotonic);
+                    entry.last_access.store(access, .monotonic);
                     entry.pin();
-                    _ = @atomicRmw(u64, &self.stats_hits, .Add, 1, .monotonic);
+                    _ = self.stats_hits.fetchAdd(1, .monotonic);
                     return entry;
                 }
             }
         }
 
-        _ = @atomicRmw(u64, &self.stats_misses, .Add, 1, .monotonic);
+        _ = self.stats_misses.fetchAdd(1, .monotonic);
         return null;
     }
 
@@ -151,8 +153,8 @@ pub const QueryCache = struct {
         query_text: []const u8,
         query: *ast.Query,
         variables: []const VariableInfo,
-        arena: std.heap.ArenaAllocator,
-    ) void {
+        arena: *std.heap.ArenaAllocator,
+    ) ?*CacheEntry {
         // Acquire exclusive latch for write
         while (!self.latch.tryAcquireExclusive()) {
             std.atomic.spinLoopHint();
@@ -160,47 +162,53 @@ pub const QueryCache = struct {
         defer self.latch.releaseExclusive();
 
         const hash = hashQuery(query_text);
+        const current_schema = self.schema_version.load(.monotonic);
+        const access = self.access_counter.fetchAdd(1, .monotonic);
 
-        // Check if already cached (race between get miss and put)
+        // If already cached for this schema, pin and return existing entry.
         for (self.entries) |*slot| {
             if (slot.*) |*entry| {
                 if (entry.query_hash == hash and
+                    entry.schema_version == current_schema and
                     std.mem.eql(u8, entry.query_text, query_text))
                 {
-                    // Already cached, update it
-                    entry.arena.deinit();
-                    slot.* = null;
-                    self.count -= 1;
-                    break;
+                    entry.last_access.store(access, .monotonic);
+                    entry.pin();
+
+                    // Parsed arena is not needed; drop it on duplicate hit.
+                    const child = arena.child_allocator;
+                    arena.deinit();
+                    arena.* = std.heap.ArenaAllocator.init(child);
+                    return entry;
                 }
             }
         }
 
         // Find a slot: first empty, or evict LRU
-        const slot_idx = self.findSlot();
-
-        // Make a mutable copy to call allocator()
-        var mutable_arena = arena;
+        const slot_idx = self.findSlot() orelse return null;
 
         // Copy query text into the arena for the entry's own reference
         // (the arena already owns the source text used by the parser)
-        const owned_text = mutable_arena.allocator().dupe(u8, query_text) catch return;
+        const owned_text = arena.allocator().dupe(u8, query_text) catch return null;
 
         // Copy variables into arena
-        const owned_vars = mutable_arena.allocator().dupe(VariableInfo, variables) catch return;
+        const owned_vars = arena.allocator().dupe(VariableInfo, variables) catch return null;
+
+        const owned_arena = arena.*;
+        arena.* = std.heap.ArenaAllocator.init(owned_arena.child_allocator);
 
         self.entries[slot_idx] = .{
-            .arena = mutable_arena,
+            .arena = owned_arena,
             .query = query,
             .variables = owned_vars,
             .query_hash = hash,
             .query_text = owned_text,
-            .schema_version = self.schema_version,
-            .last_access = self.access_counter,
-            .ref_count = std.atomic.Value(u32).init(0),
+            .schema_version = current_schema,
+            .last_access = std.atomic.Value(u64).init(access),
+            .ref_count = std.atomic.Value(u32).init(1),
         };
         self.count += 1;
-        self.access_counter += 1;
+        return &self.entries[slot_idx].?;
     }
 
     /// Clear all entries from the cache.
@@ -224,20 +232,25 @@ pub const QueryCache = struct {
     /// Bump the schema version, invalidating all cached entries.
     /// Entries with stale schema_version will miss on next get().
     pub fn bumpSchemaVersion(self: *Self) void {
-        _ = @atomicRmw(u64, &self.schema_version, .Add, 1, .monotonic);
+        _ = self.schema_version.fetchAdd(1, .monotonic);
     }
 
     /// Get cache statistics.
     pub fn getStats(self: *Self) CacheStats {
+        while (!self.latch.tryAcquireShared()) {
+            std.atomic.spinLoopHint();
+        }
+        defer self.latch.releaseShared();
+
         return .{
             .entries = self.count,
-            .hits = self.stats_hits,
-            .misses = self.stats_misses,
+            .hits = self.stats_hits.load(.monotonic),
+            .misses = self.stats_misses.load(.monotonic),
         };
     }
 
     // Find an empty slot or evict the LRU unpinned entry.
-    fn findSlot(self: *Self) usize {
+    fn findSlot(self: *Self) ?usize {
         // First pass: find empty slot
         for (self.entries, 0..) |*slot, i| {
             if (slot.* == null) return i;
@@ -250,30 +263,25 @@ pub const QueryCache = struct {
 
         for (self.entries, 0..) |*slot, i| {
             if (slot.*) |*entry| {
-                if (!entry.isPinned() and entry.last_access < lru_access) {
-                    lru_access = entry.last_access;
+                const last = entry.last_access.load(.monotonic);
+                if (!entry.isPinned() and last < lru_access) {
+                    lru_access = last;
                     lru_idx = i;
                     found = true;
                 }
             }
         }
 
-        if (found) {
-            // Evict the LRU entry
-            if (self.entries[lru_idx]) |*entry| {
-                entry.arena.deinit();
-                self.entries[lru_idx] = null;
-                self.count -= 1;
-            }
-        } else {
-            // All entries pinned — overwrite slot 0 as last resort
-            // This shouldn't happen in practice
-            lru_idx = 0;
-            if (self.entries[lru_idx]) |*entry| {
-                entry.arena.deinit();
-                self.entries[lru_idx] = null;
-                self.count -= 1;
-            }
+        if (!found) {
+            // All entries pinned: caller must skip caching this query.
+            return null;
+        }
+
+        // Evict the LRU unpinned entry
+        if (self.entries[lru_idx]) |*entry| {
+            entry.arena.deinit();
+            self.entries[lru_idx] = null;
+            self.count -= 1;
         }
 
         return lru_idx;
@@ -300,9 +308,10 @@ test "cache init and deinit" {
     const cache = try QueryCache.init(std.testing.allocator, 16);
     defer cache.deinit();
 
-    try std.testing.expectEqual(@as(u32, 0), cache.count);
-    try std.testing.expectEqual(@as(u64, 0), cache.stats_hits);
-    try std.testing.expectEqual(@as(u64, 0), cache.stats_misses);
+    const stats = cache.getStats();
+    try std.testing.expectEqual(@as(u32, 0), stats.entries);
+    try std.testing.expectEqual(@as(u64, 0), stats.hits);
+    try std.testing.expectEqual(@as(u64, 0), stats.misses);
 }
 
 test "cache miss returns null" {
@@ -311,7 +320,8 @@ test "cache miss returns null" {
 
     const result = cache.get("MATCH (n) RETURN n");
     try std.testing.expect(result == null);
-    try std.testing.expectEqual(@as(u64, 1), cache.stats_misses);
+    const stats = cache.getStats();
+    try std.testing.expectEqual(@as(u64, 1), stats.misses);
 }
 
 test "cache put and get" {
@@ -331,14 +341,17 @@ test "cache put and get" {
     };
 
     const vars = [_]VariableInfo{};
-    cache.put(query_text, query, &vars, arena);
+    const inserted = cache.put(query_text, query, &vars, &arena);
+    try std.testing.expect(inserted != null);
+    inserted.?.unpin();
 
     try std.testing.expectEqual(@as(u32, 1), cache.count);
 
     // Get should hit
     const entry = cache.get(query_text);
     try std.testing.expect(entry != null);
-    try std.testing.expectEqual(@as(u64, 1), cache.stats_hits);
+    const stats = cache.getStats();
+    try std.testing.expectEqual(@as(u64, 1), stats.hits);
 
     // Unpin the entry
     entry.?.unpin();
@@ -357,7 +370,9 @@ test "cache schema version invalidation" {
         .clauses = &[_]ast.Clause{},
         .allocator = arena.allocator(),
     };
-    cache.put(query_text, query, &[_]VariableInfo{}, arena);
+    const inserted = cache.put(query_text, query, &[_]VariableInfo{}, &arena);
+    try std.testing.expect(inserted != null);
+    inserted.?.unpin();
 
     // Should hit before bump
     const hit = cache.get(query_text);
@@ -381,14 +396,18 @@ test "cache LRU eviction" {
         var arena1 = std.heap.ArenaAllocator.init(std.testing.allocator);
         const q1 = try arena1.allocator().create(ast.Query);
         q1.* = .{ .clauses = &[_]ast.Clause{}, .allocator = arena1.allocator() };
-        cache.put("query1", q1, &[_]VariableInfo{}, arena1);
+        const e1 = cache.put("query1", q1, &[_]VariableInfo{}, &arena1);
+        try std.testing.expect(e1 != null);
+        e1.?.unpin();
     }
 
     {
         var arena2 = std.heap.ArenaAllocator.init(std.testing.allocator);
         const q2 = try arena2.allocator().create(ast.Query);
         q2.* = .{ .clauses = &[_]ast.Clause{}, .allocator = arena2.allocator() };
-        cache.put("query2", q2, &[_]VariableInfo{}, arena2);
+        const e2 = cache.put("query2", q2, &[_]VariableInfo{}, &arena2);
+        try std.testing.expect(e2 != null);
+        e2.?.unpin();
     }
 
     try std.testing.expectEqual(@as(u32, 2), cache.count);
@@ -403,7 +422,9 @@ test "cache LRU eviction" {
         var arena3 = std.heap.ArenaAllocator.init(std.testing.allocator);
         const q3 = try arena3.allocator().create(ast.Query);
         q3.* = .{ .clauses = &[_]ast.Clause{}, .allocator = arena3.allocator() };
-        cache.put("query3", q3, &[_]VariableInfo{}, arena3);
+        const e3 = cache.put("query3", q3, &[_]VariableInfo{}, &arena3);
+        try std.testing.expect(e3 != null);
+        e3.?.unpin();
     }
 
     try std.testing.expectEqual(@as(u32, 2), cache.count);
@@ -432,7 +453,9 @@ test "cache clear" {
         .clauses = &[_]ast.Clause{},
         .allocator = arena.allocator(),
     };
-    cache.put("MATCH (n) RETURN n", query, &[_]VariableInfo{}, arena);
+    const inserted = cache.put("MATCH (n) RETURN n", query, &[_]VariableInfo{}, &arena);
+    try std.testing.expect(inserted != null);
+    inserted.?.unpin();
 
     try std.testing.expectEqual(@as(u32, 1), cache.count);
 
@@ -449,25 +472,41 @@ test "cache pinned entries survive eviction" {
         var arena1 = std.heap.ArenaAllocator.init(std.testing.allocator);
         const q1 = try arena1.allocator().create(ast.Query);
         q1.* = .{ .clauses = &[_]ast.Clause{}, .allocator = arena1.allocator() };
-        cache.put("query1", q1, &[_]VariableInfo{}, arena1);
+        const e1 = cache.put("query1", q1, &[_]VariableInfo{}, &arena1);
+        try std.testing.expect(e1 != null);
+        e1.?.unpin();
     }
 
     const pinned = cache.get("query1");
     try std.testing.expect(pinned != null);
     // Keep it pinned (don't unpin)
 
-    // Try to insert another entry - pinned entry can't be evicted
-    // so the cache will force-overwrite slot 0 as last resort
+    // Try to insert another entry - insertion should be skipped while all entries are pinned
     {
         var arena2 = std.heap.ArenaAllocator.init(std.testing.allocator);
         const q2 = try arena2.allocator().create(ast.Query);
         q2.* = .{ .clauses = &[_]ast.Clause{}, .allocator = arena2.allocator() };
-        cache.put("query2", q2, &[_]VariableInfo{}, arena2);
+        const skipped = cache.put("query2", q2, &[_]VariableInfo{}, &arena2);
+        try std.testing.expect(skipped == null);
+        arena2.deinit();
     }
 
-    // After the pinned entry was forcefully evicted, unpin is safe
-    // because the entry memory was freed by the arena deinit in put
-    // The test passes if no crash occurs
+    try std.testing.expectEqual(@as(u32, 1), cache.count);
+    try std.testing.expect(cache.get("query2") == null);
+
+    // Once unpinned, the new entry can be inserted.
+    pinned.?.unpin();
+
+    var arena3 = std.heap.ArenaAllocator.init(std.testing.allocator);
+    const q3 = try arena3.allocator().create(ast.Query);
+    q3.* = .{ .clauses = &[_]ast.Clause{}, .allocator = arena3.allocator() };
+    const inserted = cache.put("query2", q3, &[_]VariableInfo{}, &arena3);
+    try std.testing.expect(inserted != null);
+    inserted.?.unpin();
+
+    const q2_hit = cache.get("query2");
+    try std.testing.expect(q2_hit != null);
+    q2_hit.?.unpin();
 }
 
 test "cache stats tracking" {
@@ -487,7 +526,9 @@ test "cache stats tracking" {
         .clauses = &[_]ast.Clause{},
         .allocator = arena.allocator(),
     };
-    cache.put("test", query, &[_]VariableInfo{}, arena);
+    const inserted = cache.put("test", query, &[_]VariableInfo{}, &arena);
+    try std.testing.expect(inserted != null);
+    inserted.?.unpin();
 
     const entry = cache.get("test");
     try std.testing.expect(entry != null);

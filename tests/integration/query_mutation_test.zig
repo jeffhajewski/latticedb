@@ -240,6 +240,19 @@ test "query: CREATE relationship fails on non-property value and does not create
     try expectInt(count, 0, 0, 0);
 }
 
+test "query: MATCH on unknown relationship type returns empty result" {
+    const path = "/tmp/lattice_qm_match_unknown_rel_type_empty.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query("CREATE (a:Person {name: \"Alice\"})-[:REL]->(b:Person {name: \"Bob\"})");
+    seed.deinit();
+
+    var result = try db.query("MATCH (a)-[r:DOES_NOT_EXIST]->(b) RETURN count(r)");
+    defer result.deinit();
+    try expectInt(result, 0, 0, 0);
+}
+
 test "query: CREATE reverse direction relationship" {
     const path = "/tmp/lattice_qm_create_rev_rel.ltdb";
     var db = try openTestDb(path, .{});

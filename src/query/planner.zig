@@ -373,8 +373,10 @@ pub const QueryPlanner = struct {
                     var edge_type: ?SymbolId = null;
                     if (edge_pattern.types.len > 0) {
                         const symbol_table = self.storage.symbol_table orelse return PlannerError.MissingStorage;
-                        edge_type = symbol_table.lookup(edge_pattern.types[0]) catch {
-                            return PlannerError.UnknownEdgeType;
+                        edge_type = symbol_table.lookup(edge_pattern.types[0]) catch |err| switch (err) {
+                            // Unknown relationship type should behave like an empty match, not a planning error.
+                            symbols.SymbolError.NotFound => symbols.NULL_SYMBOL,
+                            else => return PlannerError.InternalError,
                         };
                     }
 

@@ -611,6 +611,64 @@ test "query: SET merge fails fast on non-property value and preserves row state"
     try expectInt(self_count, 0, 0, 0);
 }
 
+test "query: SET merge accepts parameterized map expression" {
+    const path = "/tmp/lattice_qm_set_merge_param_map.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query("CREATE (n:Person {name: \"Alice\", age: 30})");
+    seed.deinit();
+
+    var map_entries = [_]PropertyValue.MapEntry{
+        .{ .key = "age", .value = .{ .int_val = 31 } },
+        .{ .key = "city", .value = .{ .string_val = "SF" } },
+    };
+    var params = std.StringHashMap(PropertyValue).init(std.testing.allocator);
+    defer params.deinit();
+    try params.put("props", .{ .map_val = &map_entries });
+
+    var set_q = try db.queryWithParams(
+        "MATCH (n:Person {name: \"Alice\"}) SET n += $props",
+        &params,
+    );
+    set_q.deinit();
+
+    var result = try db.query("MATCH (n:Person {name: \"Alice\"}) RETURN n.age, n.city");
+    defer result.deinit();
+    try expectInt(result, 0, 0, 31);
+    try expectString(result, 0, 1, "SF");
+}
+
+test "query: SET replace accepts parameterized map expression" {
+    const path = "/tmp/lattice_qm_set_replace_param_map.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query("CREATE (n:Person {name: \"Alice\", age: 30})");
+    seed.deinit();
+
+    var map_entries = [_]PropertyValue.MapEntry{
+        .{ .key = "city", .value = .{ .string_val = "LA" } },
+    };
+    var params = std.StringHashMap(PropertyValue).init(std.testing.allocator);
+    defer params.deinit();
+    try params.put("props", .{ .map_val = &map_entries });
+
+    var set_q = try db.queryWithParams(
+        "MATCH (n:Person {name: \"Alice\"}) SET n = $props",
+        &params,
+    );
+    set_q.deinit();
+
+    var city_count = try db.query("MATCH (n:Person) WHERE n.city = \"LA\" RETURN count(n)");
+    defer city_count.deinit();
+    try expectInt(city_count, 0, 0, 1);
+
+    var name_count = try db.query("MATCH (n:Person) WHERE n.name IS NOT NULL RETURN count(n)");
+    defer name_count.deinit();
+    try expectInt(name_count, 0, 0, 0);
+}
+
 test "query: SET affects only matched nodes" {
     const path = "/tmp/lattice_qm_set_selective.ltdb";
     var db = try openTestDb(path, .{});

@@ -814,21 +814,14 @@ pub const SetPropertiesReplace = struct {
         const target_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
         const node_id = target_val.asNodeId() orelse return OperatorError.TypeError;
 
-        // Map expression should be a map literal
-        if (self.map_expr.* != .map) {
-            return OperatorError.TypeError;
-        }
-
-        const map = self.map_expr.map;
-
         // Evaluate all updates first so expression/type failures don't clear
         // existing properties or produce partial row-level writes.
         var evaluated: std.ArrayList(EvaluatedProperty) = .empty;
         defer evaluated.deinit(self.evaluator.allocator);
-        try evaluateMapEntries(
+        try evaluateMapExpression(
             self.evaluator.allocator,
             &self.evaluator,
-            map.entries,
+            self.map_expr,
             row,
             ctx,
             &evaluated,
@@ -931,21 +924,14 @@ pub const SetPropertiesMerge = struct {
         const target_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
         const node_id = target_val.asNodeId() orelse return OperatorError.TypeError;
 
-        // Map expression should be a map literal
-        if (self.map_expr.* != .map) {
-            return OperatorError.TypeError;
-        }
-
-        const map = self.map_expr.map;
-
         // Evaluate all updates first so expression/type failures don't produce
         // partial row-level writes.
         var evaluated: std.ArrayList(EvaluatedProperty) = .empty;
         defer evaluated.deinit(self.evaluator.allocator);
-        try evaluateMapEntries(
+        try evaluateMapExpression(
             self.evaluator.allocator,
             &self.evaluator,
-            map.entries,
+            self.map_expr,
             row,
             ctx,
             &evaluated,
@@ -1222,20 +1208,26 @@ fn evaluatePropertyExprList(
     }
 }
 
-fn evaluateMapEntries(
+fn evaluateMapExpression(
     allocator: Allocator,
     evaluator: *ExpressionEvaluator,
-    entries: []const ast.PropertyEntry,
+    map_expr: *const ast.Expression,
     row: *const Row,
     ctx: *ExecutionContext,
     out: *std.ArrayList(EvaluatedProperty),
 ) OperatorError!void {
     out.clearRetainingCapacity();
+    const map_value = evaluator.evaluate(map_expr, row, ctx) catch |err| {
+        return mapEvalError(err);
+    };
+
+    const entries = switch (map_value) {
+        .map_val => |m| m,
+        else => return OperatorError.TypeError,
+    };
+
     for (entries) |entry| {
-        const value = evaluator.evaluate(entry.value, row, ctx) catch |err| {
-            return mapEvalError(err);
-        };
-        const prop_value = evalResultToPropertyValue(value, allocator) orelse return OperatorError.TypeError;
+        const prop_value = evalResultToPropertyValue(entry.value, allocator) orelse return OperatorError.TypeError;
         out.append(allocator, .{
             .key = entry.key,
             .value = prop_value,

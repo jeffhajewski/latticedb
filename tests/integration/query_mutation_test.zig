@@ -286,6 +286,31 @@ test "query: MATCH variable-length relationship rejects invalid hop range" {
     );
 }
 
+test "query: MATCH relationship type alternation is rejected" {
+    const path = "/tmp/lattice_qm_match_type_alternation_rejected.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query("CREATE (a:Person {name: \"Alice\"})-[:REL_A]->(b:Person {name: \"Bob\"})");
+    seed.deinit();
+
+    try std.testing.expectError(
+        QueryError.SemanticError,
+        db.query("MATCH (a)-[:REL_A|REL_B]->(b) RETURN b"),
+    );
+}
+
+test "query: CREATE relationship type alternation is rejected" {
+    const path = "/tmp/lattice_qm_create_type_alternation_rejected.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    try std.testing.expectError(
+        QueryError.SemanticError,
+        db.query("CREATE (:Person)-[:REL_A|REL_B]->(:Person)"),
+    );
+}
+
 test "query: CREATE relationship rejects variable-length quantifier" {
     const path = "/tmp/lattice_qm_create_varlen_rejected.ltdb";
     var db = try openTestDb(path, .{});

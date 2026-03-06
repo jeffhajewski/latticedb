@@ -157,7 +157,7 @@ pub const SemanticAnalyzer = struct {
                 switch (element) {
                     .node => |n| self.registerNodeVariable(n),
                     .edge => |e| {
-                        self.validateEdgePatternQuantifier(e, true, "MATCH");
+                        self.validateEdgePattern(e, true, "MATCH");
                         self.registerEdgeVariable(e);
                     },
                 }
@@ -231,7 +231,7 @@ pub const SemanticAnalyzer = struct {
                         }
                     },
                     .edge => |e| {
-                        self.validateEdgePatternQuantifier(e, false, "CREATE");
+                        self.validateEdgePattern(e, false, "CREATE");
                         if (e.variable) |name| {
                             if (!self.variables.contains(name)) {
                                 self.registerEdgeVariable(e);
@@ -438,7 +438,7 @@ pub const SemanticAnalyzer = struct {
                     }
                 },
                 .edge => |e| {
-                    self.validateEdgePatternQuantifier(e, false, "MERGE");
+                    self.validateEdgePattern(e, false, "MERGE");
                     if (e.variable) |name| {
                         if (!self.variables.contains(name)) {
                             self.registerEdgeVariable(e);
@@ -545,12 +545,20 @@ pub const SemanticAnalyzer = struct {
         }
     }
 
-    fn validateEdgePatternQuantifier(
+    fn validateEdgePattern(
         self: *Self,
         edge: *const ast.EdgePattern,
         allow_in_clause: bool,
         clause_name: []const u8,
     ) void {
+        if (edge.types.len > 1) {
+            self.addError(
+                .unsupported_pattern,
+                edge.location,
+                "Relationship type alternation (|) is not supported yet",
+            );
+        }
+
         const quant = edge.quantifier orelse return;
 
         if (!allow_in_clause) {
@@ -1107,6 +1115,27 @@ test "MERGE anonymous target with ON CREATE SET is rejected semantically" {
 test "MATCH variable-length range with min greater than max is rejected semantically" {
     const allocator = std.testing.allocator;
     const source = "MATCH (a)-[:REL*3..1]->(b) RETURN b";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+    const parse_result = parser.parse();
+
+    if (parse_result.query) |query| {
+        var analyzer = SemanticAnalyzer.init(allocator);
+        defer analyzer.deinit();
+        const result = analyzer.analyze(query);
+
+        try std.testing.expect(!result.success);
+        try std.testing.expect(result.errors.len > 0);
+        try std.testing.expectEqual(ErrorCode.unsupported_pattern, result.errors[0].code);
+    } else {
+        try std.testing.expect(false);
+    }
+}
+
+test "MATCH relationship type alternation is rejected semantically" {
+    const allocator = std.testing.allocator;
+    const source = "MATCH (a)-[:REL_A|REL_B]->(b) RETURN b";
 
     var parser = Parser.init(allocator, source);
     defer parser.deinit();

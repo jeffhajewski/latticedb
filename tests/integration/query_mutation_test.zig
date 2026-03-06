@@ -1241,6 +1241,40 @@ test "query: CREATE many nodes then count" {
     try expectInt(result, 0, 0, count);
 }
 
+test "query: UNWIND binds output variable for RETURN" {
+    const path = "/tmp/lattice_qm_unwind_return_binding.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query("CREATE (n:Seed {id: 1})");
+    seed.deinit();
+
+    var result = try db.query("MATCH (n:Seed) UNWIND [1, 2, 3] AS x RETURN x ORDER BY x");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), result.rowCount());
+    try expectInt(result, 0, 0, 1);
+    try expectInt(result, 1, 0, 2);
+    try expectInt(result, 2, 0, 3);
+}
+
+test "query: UNWIND variable is usable in downstream WHERE" {
+    const path = "/tmp/lattice_qm_unwind_where_binding.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query("CREATE (n:Seed {id: 1})");
+    seed.deinit();
+
+    var result = try db.query("MATCH (n:Seed) UNWIND [1, 2, 3] AS x WITH x AS y WHERE y IS NOT NULL RETURN y ORDER BY y");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), result.rowCount());
+    try expectInt(result, 0, 0, 1);
+    try expectInt(result, 1, 0, 2);
+    try expectInt(result, 2, 0, 3);
+}
+
 // ============================================================================
 // Test Helpers
 // ============================================================================

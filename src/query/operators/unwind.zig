@@ -107,7 +107,7 @@ pub const Unwind = struct {
                     self.output_row = self.current_row.?;
 
                     // Bind the list element to the output slot
-                    self.output_row.slots[self.output_slot] = evalResultToSlot(list[self.list_index]);
+                    self.output_row.setSlot(self.output_slot, evalResultToSlot(list[self.list_index]));
                     self.list_index += 1;
                     return &self.output_row;
                 }
@@ -136,7 +136,7 @@ pub const Unwind = struct {
                     // Not a list — treat as single-element (Cypher behavior)
                     // Produce one row with the value itself
                     self.output_row = self.current_row.?;
-                    self.output_row.slots[self.output_slot] = evalResultToSlot(result);
+                    self.output_row.setSlot(self.output_slot, evalResultToSlot(result));
                     return &self.output_row;
                 },
             }

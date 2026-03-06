@@ -405,6 +405,27 @@ pub const SemanticAnalyzer = struct {
     }
 
     fn analyzeMergeClause(self: *Self, clause: *const ast.MergeClause) void {
+        const elem_count = clause.pattern.elements.len;
+        if (elem_count != 1 and elem_count != 3) {
+            self.addError(
+                .unsupported_pattern,
+                clause.location,
+                "MERGE currently supports only a single node or a single relationship pattern",
+            );
+            return;
+        }
+
+        if (elem_count == 3) {
+            if (clause.pattern.elements[0] != .node or clause.pattern.elements[1] != .edge or clause.pattern.elements[2] != .node) {
+                self.addError(
+                    .unsupported_pattern,
+                    clause.location,
+                    "MERGE relationship pattern must be of the form (node)-[edge]->(node)",
+                );
+                return;
+            }
+        }
+
         const merge_set_target: ?[]const u8 = blk: {
             if (clause.pattern.elements.len == 1) {
                 break :blk switch (clause.pattern.elements[0]) {
@@ -1198,6 +1219,27 @@ test "CREATE relationship without type is rejected semantically" {
 test "MERGE undirected relationship pattern is rejected semantically" {
     const allocator = std.testing.allocator;
     const source = "MERGE (:Person)<-[:REL]->(:Person)";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+    const parse_result = parser.parse();
+
+    if (parse_result.query) |query| {
+        var analyzer = SemanticAnalyzer.init(allocator);
+        defer analyzer.deinit();
+        const result = analyzer.analyze(query);
+
+        try std.testing.expect(!result.success);
+        try std.testing.expect(result.errors.len > 0);
+        try std.testing.expectEqual(ErrorCode.unsupported_pattern, result.errors[0].code);
+    } else {
+        try std.testing.expect(false);
+    }
+}
+
+test "MERGE multi-hop chain pattern is rejected semantically" {
+    const allocator = std.testing.allocator;
+    const source = "MERGE (:Person)-[:REL]->(:Person)-[:REL]->(:Person)";
 
     var parser = Parser.init(allocator, source);
     defer parser.deinit();

@@ -377,6 +377,17 @@ test "query: MERGE undirected relationship pattern is rejected" {
     );
 }
 
+test "query: MERGE multi-hop relationship chain is rejected" {
+    const path = "/tmp/lattice_qm_merge_chain_rejected.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    try std.testing.expectError(
+        QueryError.SemanticError,
+        db.query("MERGE (:Person)-[:REL]->(:Person)-[:REL]->(:Person)"),
+    );
+}
+
 test "query: MATCH anonymous source node inline property map filters pattern" {
     const path = "/tmp/lattice_qm_match_node_inline_props_anon_source.ltdb";
     var db = try openTestDb(path, .{});

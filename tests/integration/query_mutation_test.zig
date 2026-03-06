@@ -275,6 +275,17 @@ test "query: MATCH variable-length relationship rejects inline property map" {
     );
 }
 
+test "query: MATCH variable-length relationship rejects invalid hop range" {
+    const path = "/tmp/lattice_qm_match_varlen_invalid_range_rejected.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    try std.testing.expectError(
+        QueryError.SemanticError,
+        db.query("MATCH (a)-[:REL*3..1]->(b) RETURN b"),
+    );
+}
+
 test "query: CREATE relationship rejects variable-length quantifier" {
     const path = "/tmp/lattice_qm_create_varlen_rejected.ltdb";
     var db = try openTestDb(path, .{});

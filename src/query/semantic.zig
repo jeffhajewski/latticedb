@@ -551,7 +551,7 @@ pub const SemanticAnalyzer = struct {
         allow_in_clause: bool,
         clause_name: []const u8,
     ) void {
-        if (edge.quantifier == null) return;
+        const quant = edge.quantifier orelse return;
 
         if (!allow_in_clause) {
             self.addErrorFmt(
@@ -561,6 +561,18 @@ pub const SemanticAnalyzer = struct {
                 .{clause_name},
             );
             return;
+        }
+
+        if (quant.max_hops) |max_hops| {
+            if (max_hops < quant.min_hops) {
+                self.addErrorFmt(
+                    .unsupported_pattern,
+                    edge.location,
+                    "Invalid variable-length range: min hops ({d}) exceeds max hops ({d})",
+                    .{ quant.min_hops, max_hops },
+                );
+                return;
+            }
         }
 
         if (edge.variable != null) {
@@ -1074,6 +1086,27 @@ test "MERGE ON CREATE SET labels is rejected semantically" {
 test "MERGE anonymous target with ON CREATE SET is rejected semantically" {
     const allocator = std.testing.allocator;
     const source = "MATCH (x) MERGE (:Person {name: \"Alice\"}) ON CREATE SET x.flag = true RETURN x";
+
+    var parser = Parser.init(allocator, source);
+    defer parser.deinit();
+    const parse_result = parser.parse();
+
+    if (parse_result.query) |query| {
+        var analyzer = SemanticAnalyzer.init(allocator);
+        defer analyzer.deinit();
+        const result = analyzer.analyze(query);
+
+        try std.testing.expect(!result.success);
+        try std.testing.expect(result.errors.len > 0);
+        try std.testing.expectEqual(ErrorCode.unsupported_pattern, result.errors[0].code);
+    } else {
+        try std.testing.expect(false);
+    }
+}
+
+test "MATCH variable-length range with min greater than max is rejected semantically" {
+    const allocator = std.testing.allocator;
+    const source = "MATCH (a)-[:REL*3..1]->(b) RETURN b";
 
     var parser = Parser.init(allocator, source);
     defer parser.deinit();

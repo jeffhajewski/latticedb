@@ -17,11 +17,9 @@ const expression = @import("../expression.zig");
 const ExpressionEvaluator = expression.ExpressionEvaluator;
 const EvalResult = expression.EvalResult;
 const EvalError = expression.EvalError;
+const key_encoding = @import("key_encoding.zig");
 
 const ast = @import("../ast.zig");
-
-const types = @import("lattice").core.types;
-const PropertyValue = types.PropertyValue;
 
 // ============================================================================
 // Aggregate Function Types
@@ -96,11 +94,11 @@ const Accumulator = struct {
     fn accumulate(self: *Accumulator, value: EvalResult) !void {
         // If DISTINCT, check for duplicate values
         if (self.distinct and !value.isNull()) {
-            var fp_buf: [1024]u8 = undefined;
-            const fp_len = hashValue(value, &fp_buf);
-            const fp = fp_buf[0..fp_len];
+            var key_buf: std.ArrayList(u8) = .empty;
+            defer key_buf.deinit(self.allocator);
+            try key_encoding.appendEvalResultKey(&key_buf, self.allocator, value);
 
-            const key_copy = self.allocator.dupe(u8, fp) catch return error.OutOfMemory;
+            const key_copy = self.allocator.dupe(u8, key_buf.items) catch return error.OutOfMemory;
             const gop = self.seen_values.getOrPut(key_copy) catch {
                 self.allocator.free(key_copy);
                 return error.OutOfMemory;
@@ -346,8 +344,8 @@ pub const Aggregate = struct {
             }
         } else {
             // Grouped aggregation - compute group key
-            var key_buf: [1024]u8 = undefined;
-            var key_len: usize = 0;
+            var key_buf: std.ArrayList(u8) = .empty;
+            defer key_buf.deinit(self.allocator);
             var key_values = self.allocator.alloc(EvalResult, self.group_keys.len) catch {
                 return OperatorError.OutOfMemory;
             };
@@ -358,15 +356,14 @@ pub const Aggregate = struct {
                     return mapEvalError(err);
                 };
                 key_values[i] = val;
-                key_len += hashValue(val, key_buf[key_len..]);
+                key_encoding.appendEvalResultKey(&key_buf, self.allocator, val) catch return OperatorError.OutOfMemory;
             }
 
-            const key = key_buf[0..key_len];
+            const key_copy = self.allocator.dupe(u8, key_buf.items) catch return OperatorError.OutOfMemory;
 
             // Get or create group
-            const gop = self.groups.getOrPut(self.allocator.dupe(u8, key) catch {
-                return OperatorError.OutOfMemory;
-            }) catch {
+            const gop = self.groups.getOrPut(key_copy) catch {
+                self.allocator.free(key_copy);
                 return OperatorError.OutOfMemory;
             };
 
@@ -378,6 +375,8 @@ pub const Aggregate = struct {
                 for (key_values, 0..) |kv, i| {
                     gop.value_ptr.key_values[i] = kv;
                 }
+            } else {
+                self.allocator.free(key_copy);
             }
 
             // Accumulate values
@@ -476,60 +475,6 @@ pub const Aggregate = struct {
         allocator.destroy(self);
     }
 };
-
-/// Hash a value for group key computation
-fn hashValue(value: EvalResult, buf: []u8) usize {
-    var len: usize = 0;
-    switch (value) {
-        .null_val => {
-            buf[0] = 0;
-            len = 1;
-        },
-        .bool_val => |b| {
-            buf[0] = if (b) 1 else 2;
-            len = 1;
-        },
-        .int_val => |i| {
-            buf[0] = 3;
-            @memcpy(buf[1..9], std.mem.asBytes(&i));
-            len = 9;
-        },
-        .float_val => |f| {
-            buf[0] = 4;
-            @memcpy(buf[1..9], std.mem.asBytes(&f));
-            len = 9;
-        },
-        .string_val => |s| {
-            buf[0] = 5;
-            const copy_len = @min(s.len, buf.len - 1);
-            @memcpy(buf[1 .. 1 + copy_len], s[0..copy_len]);
-            len = 1 + copy_len;
-        },
-        .node_ref => |id| {
-            buf[0] = 6;
-            @memcpy(buf[1..9], std.mem.asBytes(&id));
-            len = 9;
-        },
-        .edge_ref => |id| {
-            buf[0] = 7;
-            @memcpy(buf[1..9], std.mem.asBytes(&id));
-            len = 9;
-        },
-        .list_val => {
-            buf[0] = 8;
-            len = 1;
-        },
-        .vector_val => {
-            buf[0] = 9;
-            len = 1;
-        },
-        .map_val => {
-            buf[0] = 10;
-            len = 1;
-        },
-    }
-    return len;
-}
 
 /// Convert an EvalResult to a SlotValue
 fn resultToSlotValue(result: EvalResult, allocator: Allocator) SlotValue {
@@ -719,6 +664,28 @@ test "Accumulator collect preserves values" {
     try std.testing.expectEqualStrings("hello", result.list_val[1].string_val);
     try std.testing.expectEqual(true, result.list_val[2].bool_val);
     try std.testing.expectApproxEqAbs(@as(f64, 2.5), result.list_val[3].float_val, 0.001);
+}
+
+test "Accumulator DISTINCT keeps long shared-prefix strings distinct" {
+    const allocator = std.testing.allocator;
+    var acc = Accumulator.init(allocator, .count, true);
+    defer acc.deinit();
+
+    const prefix_len: usize = 1300;
+    var s1 = try allocator.alloc(u8, prefix_len + 1);
+    defer allocator.free(s1);
+    var s2 = try allocator.alloc(u8, prefix_len + 1);
+    defer allocator.free(s2);
+    @memset(s1[0..prefix_len], 'a');
+    @memset(s2[0..prefix_len], 'a');
+    s1[prefix_len] = 'x';
+    s2[prefix_len] = 'y';
+
+    try acc.accumulate(.{ .string_val = s1 });
+    try acc.accumulate(.{ .string_val = s2 });
+
+    const result = acc.result();
+    try std.testing.expectEqual(@as(i64, 2), result.int_val);
 }
 
 test "resultToSlotValue converts list" {

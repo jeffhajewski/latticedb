@@ -956,6 +956,90 @@ test "query: create and query graph cycle" {
     try expectInt(result, 0, 0, 3);
 }
 
+test "query: RETURN DISTINCT distinguishes long shared-prefix strings" {
+    const path = "/tmp/lattice_qm_distinct_long_strings.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    const allocator = std.testing.allocator;
+    const prefix_len: usize = 1300;
+    var s1 = try allocator.alloc(u8, prefix_len + 1);
+    defer allocator.free(s1);
+    var s2 = try allocator.alloc(u8, prefix_len + 1);
+    defer allocator.free(s2);
+    @memset(s1[0..prefix_len], 'a');
+    @memset(s2[0..prefix_len], 'a');
+    s1[prefix_len] = 'x';
+    s2[prefix_len] = 'y';
+
+    const n1 = try db.createNode(null, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(null, n1, "name", .{ .string_val = s1 });
+    const n2 = try db.createNode(null, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(null, n2, "name", .{ .string_val = s2 });
+
+    var result = try db.query("MATCH (n:Doc) RETURN DISTINCT n.name ORDER BY n.name");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), result.rowCount());
+    const first = switch (result.rows[0].values[0]) {
+        .string_val => |v| v,
+        else => return error.UnexpectedValueType,
+    };
+    const second = switch (result.rows[1].values[0]) {
+        .string_val => |v| v,
+        else => return error.UnexpectedValueType,
+    };
+    try std.testing.expect(!std.mem.eql(u8, first, second));
+    const saw_s1_s2 = std.mem.eql(u8, first, s1) and std.mem.eql(u8, second, s2);
+    const saw_s2_s1 = std.mem.eql(u8, first, s2) and std.mem.eql(u8, second, s1);
+    try std.testing.expect(saw_s1_s2 or saw_s2_s1);
+}
+
+test "query: GROUP BY and COUNT DISTINCT separate long shared-prefix strings" {
+    const path = "/tmp/lattice_qm_group_long_strings.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    const allocator = std.testing.allocator;
+    const prefix_len: usize = 1300;
+    var s1 = try allocator.alloc(u8, prefix_len + 1);
+    defer allocator.free(s1);
+    var s2 = try allocator.alloc(u8, prefix_len + 1);
+    defer allocator.free(s2);
+    @memset(s1[0..prefix_len], 'a');
+    @memset(s2[0..prefix_len], 'a');
+    s1[prefix_len] = 'x';
+    s2[prefix_len] = 'y';
+
+    const n1 = try db.createNode(null, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(null, n1, "name", .{ .string_val = s1 });
+    const n2 = try db.createNode(null, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(null, n2, "name", .{ .string_val = s2 });
+
+    var grouped = try db.query("MATCH (n:Doc) RETURN n.name, count(n) ORDER BY n.name");
+    defer grouped.deinit();
+
+    try std.testing.expectEqual(@as(usize, 2), grouped.rowCount());
+    const g0 = switch (grouped.rows[0].values[0]) {
+        .string_val => |v| v,
+        else => return error.UnexpectedValueType,
+    };
+    const g1 = switch (grouped.rows[1].values[0]) {
+        .string_val => |v| v,
+        else => return error.UnexpectedValueType,
+    };
+    try std.testing.expect(!std.mem.eql(u8, g0, g1));
+    const grouped_has_both = (std.mem.eql(u8, g0, s1) and std.mem.eql(u8, g1, s2)) or
+        (std.mem.eql(u8, g0, s2) and std.mem.eql(u8, g1, s1));
+    try std.testing.expect(grouped_has_both);
+    try expectInt(grouped, 0, 1, 1);
+    try expectInt(grouped, 1, 1, 1);
+
+    var distinct_count = try db.query("MATCH (n:Doc) RETURN count(DISTINCT n.name)");
+    defer distinct_count.deinit();
+    try expectInt(distinct_count, 0, 0, 2);
+}
+
 test "query: full lifecycle - create, read, update, delete" {
     const path = "/tmp/lattice_qm_lifecycle.ltdb";
     var db = try openTestDb(path, .{});

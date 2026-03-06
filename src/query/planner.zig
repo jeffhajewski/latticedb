@@ -1362,7 +1362,7 @@ pub const QueryPlanner = struct {
         const input_op = input orelse return PlannerError.InvalidQuery;
 
         const slot = try self.allocateSlot();
-        try self.bindVariable(unwind_clause.variable, slot, .node);
+        try self.bindVariable(unwind_clause.variable, slot, .alias);
 
         const unwind = unwind_ops.Unwind.init(
             self.allocator,

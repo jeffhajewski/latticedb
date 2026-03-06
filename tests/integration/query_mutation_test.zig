@@ -1428,13 +1428,12 @@ test "query: UNWIND variable is usable in downstream WHERE" {
     var seed = try db.query("CREATE (n:Seed {id: 1})");
     seed.deinit();
 
-    var result = try db.query("MATCH (n:Seed) UNWIND [1, 2, 3] AS x WITH x AS y WHERE y IS NOT NULL RETURN y ORDER BY y");
+    var result = try db.query("MATCH (n:Seed) UNWIND [1, 2, 3] AS x WHERE x >= 2 RETURN x ORDER BY x");
     defer result.deinit();
 
-    try std.testing.expectEqual(@as(usize, 3), result.rowCount());
-    try expectInt(result, 0, 0, 1);
-    try expectInt(result, 1, 0, 2);
-    try expectInt(result, 2, 0, 3);
+    try std.testing.expectEqual(@as(usize, 2), result.rowCount());
+    try expectInt(result, 0, 0, 2);
+    try expectInt(result, 1, 0, 3);
 }
 
 // ============================================================================

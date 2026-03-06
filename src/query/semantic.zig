@@ -436,8 +436,9 @@ pub const SemanticAnalyzer = struct {
     fn analyzeUnwindClause(self: *Self, clause: *const ast.UnwindClause) void {
         // Analyze the expression
         self.analyzeExpression(clause.expression);
-        // Register the variable
-        self.registerVariable(clause.variable, .node, clause.location);
+        // UNWIND can bind scalars, maps, or nodes/edges from list elements.
+        // Track as alias/any instead of forcing node semantics.
+        self.registerVariable(clause.variable, .alias, clause.location);
     }
 
     // ========================================================================

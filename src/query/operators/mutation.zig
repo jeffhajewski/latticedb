@@ -18,6 +18,7 @@ const SlotValue = executor.SlotValue;
 const expression_mod = @import("../expression.zig");
 const ExpressionEvaluator = expression_mod.ExpressionEvaluator;
 const EvalResult = expression_mod.EvalResult;
+const EvalError = expression_mod.EvalError;
 
 const ast = @import("../ast.zig");
 
@@ -134,9 +135,7 @@ pub const CreateNode = struct {
             output_row.copyFrom(input_row);
 
             // Create node and add to output row
-            const node_id = self.createNodeWithProperties(ctx, input_row) catch {
-                return OperatorError.StorageError;
-            };
+            const node_id = try self.createNodeWithProperties(ctx, input_row);
             output_row.setSlot(self.output_slot, .{ .node_ref = node_id });
 
             return output_row;
@@ -147,43 +146,35 @@ pub const CreateNode = struct {
         self.created = true;
 
         output_row.clear();
-        const node_id = self.createNodeWithProperties(ctx, null) catch {
-            return OperatorError.StorageError;
-        };
+        const node_id = try self.createNodeWithProperties(ctx, null);
         output_row.setSlot(self.output_slot, .{ .node_ref = node_id });
 
         return output_row;
     }
 
-    fn createNodeWithProperties(self: *Self, ctx: *ExecutionContext, row: ?*const Row) !NodeId {
+    fn createNodeWithProperties(self: *Self, ctx: *ExecutionContext, row: ?*const Row) OperatorError!NodeId {
+        var dummy_row = Row.init();
+        const eval_row: *const Row = if (row) |r| r else &dummy_row;
+
+        // Evaluate and type-check all properties before creating a node to avoid
+        // silent skips and reduce partial writes.
+        var evaluated: std.ArrayList(EvaluatedProperty) = .empty;
+        defer evaluated.deinit(self.allocator);
+        try evaluatePropertyExprList(
+            self.allocator,
+            &self.evaluator,
+            self.properties,
+            eval_row,
+            ctx,
+            &evaluated,
+        );
+
         // Create node with labels
-        const node_id = try self.database.createNode(null, self.labels);
+        const node_id = self.database.createNode(null, self.labels) catch {
+            return OperatorError.StorageError;
+        };
 
-        // Set properties (only if we have a row for expression evaluation)
-        if (row) |r| {
-            for (self.properties) |prop| {
-                const value = self.evaluator.evaluate(prop.value_expr, r, ctx) catch {
-                    continue; // Skip property on eval error (expression may reference missing vars)
-                };
-                const prop_value = evalResultToPropertyValue(value, self.evaluator.allocator) orelse continue;
-                self.database.setNodeProperty(null, node_id, prop.key, prop_value) catch {
-                    return OperatorError.StorageError;
-                };
-            }
-        } else {
-            // No row - evaluate properties without context (literals only)
-            var dummy_row = Row.init();
-            for (self.properties) |prop| {
-                const value = self.evaluator.evaluate(prop.value_expr, &dummy_row, ctx) catch {
-                    continue; // Skip property on eval error (expression may reference missing vars)
-                };
-                const prop_value = evalResultToPropertyValue(value, self.evaluator.allocator) orelse continue;
-                self.database.setNodeProperty(null, node_id, prop.key, prop_value) catch {
-                    return OperatorError.StorageError;
-                };
-            }
-        }
-
+        try applyEvaluatedNodeProperties(self.database, node_id, evaluated.items);
         return node_id;
     }
 
@@ -830,17 +821,24 @@ pub const SetPropertiesReplace = struct {
 
         const map = self.map_expr.map;
 
-        // Clear existing properties
+        // Evaluate all updates first so expression/type failures don't clear
+        // existing properties or produce partial row-level writes.
+        var evaluated: std.ArrayList(EvaluatedProperty) = .empty;
+        defer evaluated.deinit(self.evaluator.allocator);
+        try evaluateMapEntries(
+            self.evaluator.allocator,
+            &self.evaluator,
+            map.entries,
+            row,
+            ctx,
+            &evaluated,
+        );
+
+        // Clear existing properties and apply new values.
         self.database.clearNodeProperties(null, node_id) catch {
             return OperatorError.StorageError;
         };
-
-        // Set properties from map
-        for (map.entries) |entry| {
-            const value = self.evaluator.evaluate(entry.value, row, ctx) catch continue;
-            const prop_value = evalResultToPropertyValue(value, self.evaluator.allocator) orelse continue;
-            self.database.setNodeProperty(null, node_id, entry.key, prop_value) catch continue;
-        }
+        try applyEvaluatedNodeProperties(self.database, node_id, evaluated.items);
 
         return row;
     }
@@ -940,12 +938,19 @@ pub const SetPropertiesMerge = struct {
 
         const map = self.map_expr.map;
 
-        // Merge: set properties from map (keeps existing, overwrites on conflict)
-        for (map.entries) |entry| {
-            const value = self.evaluator.evaluate(entry.value, row, ctx) catch continue;
-            const prop_value = evalResultToPropertyValue(value, self.evaluator.allocator) orelse continue;
-            self.database.setNodeProperty(null, node_id, entry.key, prop_value) catch continue;
-        }
+        // Evaluate all updates first so expression/type failures don't produce
+        // partial row-level writes.
+        var evaluated: std.ArrayList(EvaluatedProperty) = .empty;
+        defer evaluated.deinit(self.evaluator.allocator);
+        try evaluateMapEntries(
+            self.evaluator.allocator,
+            &self.evaluator,
+            map.entries,
+            row,
+            ctx,
+            &evaluated,
+        );
+        try applyEvaluatedNodeProperties(self.database, node_id, evaluated.items);
 
         return row;
     }
@@ -1180,6 +1185,76 @@ fn evalResultToPropertyValue(result: EvalResult, allocator: Allocator) ?Property
     };
 }
 
+/// Fully evaluated key/value pair ready for storage writes.
+const EvaluatedProperty = struct {
+    key: []const u8,
+    value: PropertyValue,
+};
+
+fn mapEvalError(err: EvalError) OperatorError {
+    return switch (err) {
+        EvalError.OutOfMemory => OperatorError.OutOfMemory,
+        EvalError.TypeError => OperatorError.TypeError,
+        EvalError.UnboundVariable => OperatorError.UnboundVariable,
+        EvalError.PropertyNotFound => OperatorError.PropertyNotFound,
+        else => OperatorError.EvaluationError,
+    };
+}
+
+fn evaluatePropertyExprList(
+    allocator: Allocator,
+    evaluator: *ExpressionEvaluator,
+    items: []const CreateNode.PropertyKV,
+    row: *const Row,
+    ctx: *ExecutionContext,
+    out: *std.ArrayList(EvaluatedProperty),
+) OperatorError!void {
+    out.clearRetainingCapacity();
+    for (items) |item| {
+        const value = evaluator.evaluate(item.value_expr, row, ctx) catch |err| {
+            return mapEvalError(err);
+        };
+        const prop_value = evalResultToPropertyValue(value, allocator) orelse return OperatorError.TypeError;
+        out.append(allocator, .{
+            .key = item.key,
+            .value = prop_value,
+        }) catch return OperatorError.OutOfMemory;
+    }
+}
+
+fn evaluateMapEntries(
+    allocator: Allocator,
+    evaluator: *ExpressionEvaluator,
+    entries: []const ast.PropertyEntry,
+    row: *const Row,
+    ctx: *ExecutionContext,
+    out: *std.ArrayList(EvaluatedProperty),
+) OperatorError!void {
+    out.clearRetainingCapacity();
+    for (entries) |entry| {
+        const value = evaluator.evaluate(entry.value, row, ctx) catch |err| {
+            return mapEvalError(err);
+        };
+        const prop_value = evalResultToPropertyValue(value, allocator) orelse return OperatorError.TypeError;
+        out.append(allocator, .{
+            .key = entry.key,
+            .value = prop_value,
+        }) catch return OperatorError.OutOfMemory;
+    }
+}
+
+fn applyEvaluatedNodeProperties(
+    database: *Database,
+    node_id: NodeId,
+    items: []const EvaluatedProperty,
+) OperatorError!void {
+    for (items) |item| {
+        database.setNodeProperty(null, node_id, item.key, item.value) catch {
+            return OperatorError.StorageError;
+        };
+    }
+}
+
 // ============================================================================
 // MergeNode Operator
 // ============================================================================
@@ -1275,9 +1350,7 @@ pub const MergeNode = struct {
         if (self.input) |input| {
             const input_row = try input.next(ctx) orelse return null;
             output_row.copyFrom(input_row);
-            const node_id = self.mergeNode(ctx, input_row) catch {
-                return OperatorError.StorageError;
-            };
+            const node_id = try self.mergeNode(ctx, input_row);
             output_row.setSlot(self.output_slot, .{ .node_ref = node_id });
             return output_row;
         }
@@ -1287,48 +1360,59 @@ pub const MergeNode = struct {
         self.merged = true;
 
         output_row.clear();
-        const node_id = self.mergeNode(ctx, null) catch {
-            return OperatorError.StorageError;
-        };
+        const node_id = try self.mergeNode(ctx, null);
         output_row.setSlot(self.output_slot, .{ .node_ref = node_id });
         return output_row;
     }
 
-    fn mergeNode(self: *Self, ctx: *ExecutionContext, row: ?*const Row) !NodeId {
+    fn mergeNode(self: *Self, ctx: *ExecutionContext, row: ?*const Row) OperatorError!NodeId {
         // Try to find an existing node matching the pattern
         if (self.labels.len > 0) {
-            if (self.database.getNodesByLabel(self.labels[0]) catch null) |candidates| {
-                defer self.database.allocator.free(candidates);
+            const candidates = self.database.getNodesByLabel(self.labels[0]) catch {
+                return OperatorError.StorageError;
+            };
+            defer self.database.allocator.free(candidates);
 
-                for (candidates) |candidate_id| {
-                    if (self.matchesProperties(candidate_id, ctx, row)) {
-                        // ON MATCH: apply on_match properties
-                        self.applySetItems(candidate_id, self.on_match_props, ctx, row);
-                        return candidate_id;
-                    }
+            for (candidates) |candidate_id| {
+                if (try self.matchesProperties(candidate_id, ctx, row)) {
+                    // ON MATCH: apply on_match properties
+                    try self.applySetItems(candidate_id, self.on_match_props, ctx, row);
+                    return candidate_id;
                 }
             }
         }
 
-        // Not found — create the node
-        const node_id = try self.database.createNode(null, self.labels);
-
-        // Set the pattern properties on the new node
         var dummy_row = Row.init();
         const eval_row: *const Row = if (row) |r| r else &dummy_row;
-        for (self.properties) |prop| {
-            const value = self.evaluator.evaluate(prop.value_expr, eval_row, ctx) catch continue;
-            const prop_value = evalResultToPropertyValue(value, self.allocator) orelse continue;
-            self.database.setNodeProperty(null, node_id, prop.key, prop_value) catch {};
-        }
+
+        // Evaluate pattern properties before create to avoid silent skips and
+        // accidental creation of partially initialized nodes.
+        var evaluated_pattern: std.ArrayList(EvaluatedProperty) = .empty;
+        defer evaluated_pattern.deinit(self.allocator);
+        try evaluatePropertyExprList(
+            self.allocator,
+            &self.evaluator,
+            self.properties,
+            eval_row,
+            ctx,
+            &evaluated_pattern,
+        );
+
+        // Not found — create the node
+        const node_id = self.database.createNode(null, self.labels) catch {
+            return OperatorError.StorageError;
+        };
+
+        // Set the pattern properties on the new node
+        try applyEvaluatedNodeProperties(self.database, node_id, evaluated_pattern.items);
 
         // ON CREATE: apply on_create properties
-        self.applySetItems(node_id, self.on_create_props, ctx, row);
+        try self.applySetItems(node_id, self.on_create_props, ctx, row);
 
         return node_id;
     }
 
-    fn matchesProperties(self: *Self, node_id: NodeId, ctx: *ExecutionContext, row: ?*const Row) bool {
+    fn matchesProperties(self: *Self, node_id: NodeId, ctx: *ExecutionContext, row: ?*const Row) OperatorError!bool {
         if (self.properties.len == 0) return true;
 
         var dummy_row = Row.init();
@@ -1336,11 +1420,15 @@ pub const MergeNode = struct {
 
         for (self.properties) |prop| {
             // Evaluate the expected value from the pattern
-            const expected = self.evaluator.evaluate(prop.value_expr, eval_row, ctx) catch return false;
-            const expected_pv = evalResultToPropertyValue(expected, self.allocator) orelse return false;
+            const expected = self.evaluator.evaluate(prop.value_expr, eval_row, ctx) catch |err| {
+                return mapEvalError(err);
+            };
+            const expected_pv = evalResultToPropertyValue(expected, self.allocator) orelse return OperatorError.TypeError;
 
             // Get the actual value from the node
-            const actual = self.database.getNodeProperty(node_id, prop.key) catch return false;
+            const actual = self.database.getNodeProperty(node_id, prop.key) catch {
+                return OperatorError.StorageError;
+            };
             if (actual == null) return false;
             var actual_val = actual.?;
             defer actual_val.deinit(self.database.allocator);
@@ -1353,14 +1441,20 @@ pub const MergeNode = struct {
         return true;
     }
 
-    fn applySetItems(self: *Self, node_id: NodeId, items: []const CreateNode.PropertyKV, ctx: *ExecutionContext, row: ?*const Row) void {
+    fn applySetItems(self: *Self, node_id: NodeId, items: []const CreateNode.PropertyKV, ctx: *ExecutionContext, row: ?*const Row) OperatorError!void {
         var dummy_row = Row.init();
         const eval_row: *const Row = if (row) |r| r else &dummy_row;
-        for (items) |prop| {
-            const value = self.evaluator.evaluate(prop.value_expr, eval_row, ctx) catch continue;
-            const prop_value = evalResultToPropertyValue(value, self.allocator) orelse continue;
-            self.database.setNodeProperty(null, node_id, prop.key, prop_value) catch {};
-        }
+        var evaluated: std.ArrayList(EvaluatedProperty) = .empty;
+        defer evaluated.deinit(self.allocator);
+        try evaluatePropertyExprList(
+            self.allocator,
+            &self.evaluator,
+            items,
+            eval_row,
+            ctx,
+            &evaluated,
+        );
+        try applyEvaluatedNodeProperties(self.database, node_id, evaluated.items);
     }
 
     fn close(ptr: *anyopaque, ctx: *ExecutionContext) void {

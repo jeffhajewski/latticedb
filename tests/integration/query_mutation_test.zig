@@ -249,6 +249,24 @@ test "query: CREATE node then connect to different label" {
     try expectString(result, 0, 2, "Tech");
 }
 
+test "query: CREATE fails on non-property value and avoids partial node creation" {
+    const path = "/tmp/lattice_qm_create_type_error.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query("CREATE (p:Person {name: \"Alice\"})");
+    seed.deinit();
+
+    try std.testing.expectError(
+        QueryError.ExecutionError,
+        db.query("MATCH (p:Person {name: \"Alice\"}) CREATE (c:Copy {owner: p})"),
+    );
+
+    var copies = try db.query("MATCH (c:Copy) RETURN count(c)");
+    defer copies.deinit();
+    try expectInt(copies, 0, 0, 0);
+}
+
 test "query: edge variable resolves properties/type/id with high node ids" {
     const path = "/tmp/lattice_qm_edge_high_id.ltdb";
     var db = try openTestDb(path, .{});
@@ -551,6 +569,48 @@ test "query: SET multiple properties in sequence" {
     try expectString(result, 0, 1, "NYC");
 }
 
+test "query: SET replace fails fast on non-property value and preserves existing properties" {
+    const path = "/tmp/lattice_qm_set_replace_type_error.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query("CREATE (n:Person {name: \"Alice\", city: \"NYC\"})");
+    seed.deinit();
+
+    try std.testing.expectError(
+        QueryError.ExecutionError,
+        db.query("MATCH (n:Person {name: \"Alice\"}) SET n = {self: n}"),
+    );
+
+    var result = try db.query("MATCH (n:Person {name: \"Alice\"}) RETURN n.name, n.city");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try expectString(result, 0, 0, "Alice");
+    try expectString(result, 0, 1, "NYC");
+}
+
+test "query: SET merge fails fast on non-property value and preserves row state" {
+    const path = "/tmp/lattice_qm_set_merge_type_error.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query("CREATE (n:Person {name: \"Alice\", age: 30})");
+    seed.deinit();
+
+    try std.testing.expectError(
+        QueryError.ExecutionError,
+        db.query("MATCH (n:Person {name: \"Alice\"}) SET n += {self: n}"),
+    );
+
+    var unchanged = try db.query("MATCH (n:Person {name: \"Alice\"}) RETURN n.age");
+    defer unchanged.deinit();
+    try expectInt(unchanged, 0, 0, 30);
+
+    var self_count = try db.query("MATCH (n:Person {name: \"Alice\"}) WHERE n.self IS NOT NULL RETURN count(n)");
+    defer self_count.deinit();
+    try expectInt(self_count, 0, 0, 0);
+}
+
 test "query: SET affects only matched nodes" {
     const path = "/tmp/lattice_qm_set_selective.ltdb";
     var db = try openTestDb(path, .{});
@@ -819,6 +879,24 @@ test "query: MERGE with ON MATCH SET" {
     var result = try db.query("MATCH (n:Person {name: \"Alice\"}) RETURN n.visits");
     defer result.deinit();
     try expectInt(result, 0, 0, 2);
+}
+
+test "query: MERGE fails on non-property pattern value and does not create partial node" {
+    const path = "/tmp/lattice_qm_merge_type_error.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query("CREATE (p:Person {name: \"Alice\"})");
+    seed.deinit();
+
+    try std.testing.expectError(
+        QueryError.ExecutionError,
+        db.query("MATCH (p:Person {name: \"Alice\"}) MERGE (m:Mirror {owner: p})"),
+    );
+
+    var mirrors = try db.query("MATCH (m:Mirror) RETURN count(m)");
+    defer mirrors.deinit();
+    try expectInt(mirrors, 0, 0, 0);
 }
 
 // ============================================================================

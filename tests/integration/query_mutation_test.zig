@@ -496,6 +496,65 @@ test "query: SET edge property updates only matched parallel edge" {
     try std.testing.expect(untouched.rows[0].values[0] == .null_val);
 }
 
+test "query: SET replace map works on edge variable" {
+    const path = "/tmp/lattice_qm_set_edge_replace_map.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query("CREATE (a:Person {name: \"Alice\"})-[:REL {w: 1, stale: \"x\"}]->(b:Person {name: \"Bob\"})");
+    seed.deinit();
+
+    var set_q = try db.query("MATCH (a)-[r:REL]->(b) SET r = {since: 2025}");
+    set_q.deinit();
+
+    var result = try db.query("MATCH (a)-[r:REL]->(b) RETURN r.since, r.w, r.stale");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try expectInt(result, 0, 0, 2025);
+    try std.testing.expect(result.rows[0].values[1] == .null_val);
+    try std.testing.expect(result.rows[0].values[2] == .null_val);
+}
+
+test "query: SET merge map works on edge variable" {
+    const path = "/tmp/lattice_qm_set_edge_merge_map.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query("CREATE (a:Person {name: \"Alice\"})-[:REL {w: 1}]->(b:Person {name: \"Bob\"})");
+    seed.deinit();
+
+    var set_q = try db.query("MATCH (a)-[r:REL]->(b) SET r += {w: 2, tag: \"updated\"}");
+    set_q.deinit();
+
+    var result = try db.query("MATCH (a)-[r:REL]->(b) RETURN r.w, r.tag");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try expectInt(result, 0, 0, 2);
+    try expectString(result, 0, 1, "updated");
+}
+
+test "query: SET replace map on edge fails fast on non-property value" {
+    const path = "/tmp/lattice_qm_set_edge_replace_type_error.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query("CREATE (a:Person {name: \"Alice\"})-[:REL {w: 1}]->(b:Person {name: \"Bob\"})");
+    seed.deinit();
+
+    try std.testing.expectError(
+        QueryError.ExecutionError,
+        db.query("MATCH (a)-[r:REL]->(b) SET r = {owner: a}"),
+    );
+
+    var unchanged = try db.query("MATCH (a)-[r:REL]->(b) RETURN r.w");
+    defer unchanged.deinit();
+    try expectInt(unchanged, 0, 0, 1);
+
+    var owner_count = try db.query("MATCH (a)-[r:REL]->(b) WHERE r.owner IS NOT NULL RETURN count(r)");
+    defer owner_count.deinit();
+    try expectInt(owner_count, 0, 0, 0);
+}
+
 test "query: DELETE untyped edge variable removes all matched edges" {
     const path = "/tmp/lattice_qm_delete_untyped_edge_var.ltdb";
     var db = try openTestDb(path, .{});

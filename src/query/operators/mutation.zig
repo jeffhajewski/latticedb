@@ -777,11 +777,11 @@ pub const SetLabels = struct {
 // SetPropertiesReplace Operator
 // ============================================================================
 
-/// Operator that replaces all properties on a node (SET n = {map}).
+/// Operator that replaces all properties on a node/edge (SET x = {map}).
 pub const SetPropertiesReplace = struct {
     /// Input operator
     input: Operator,
-    /// Slot containing target node
+    /// Slot containing target node/edge
     target_slot: u8,
     /// Map expression
     map_expr: *const ast.Expression,
@@ -842,9 +842,8 @@ pub const SetPropertiesReplace = struct {
 
         const row = try self.input.next(ctx) orelse return null;
 
-        // Get target node from row
+        // Get target from row
         const target_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
-        const node_id = target_val.asNodeId() orelse return OperatorError.TypeError;
 
         // Evaluate all updates first so expression/type failures don't clear
         // existing properties or produce partial row-level writes.
@@ -859,11 +858,20 @@ pub const SetPropertiesReplace = struct {
             &evaluated,
         );
 
-        // Clear existing properties and apply new values.
-        self.database.clearNodeProperties(null, node_id) catch {
-            return OperatorError.StorageError;
-        };
-        try applyEvaluatedNodeProperties(self.database, node_id, evaluated.items);
+        switch (target_val) {
+            .node_ref => |node_id| {
+                // Clear existing properties and apply new values.
+                self.database.clearNodeProperties(null, node_id) catch {
+                    return OperatorError.StorageError;
+                };
+                try applyEvaluatedNodeProperties(self.database, node_id, evaluated.items);
+            },
+            .edge_ref => |edge_id| {
+                try clearEdgeProperties(self.database, edge_id);
+                try applyEvaluatedEdgeProperties(self.database, edge_id, evaluated.items);
+            },
+            else => return OperatorError.TypeError,
+        }
 
         return row;
     }
@@ -887,11 +895,11 @@ pub const SetPropertiesReplace = struct {
 // SetPropertiesMerge Operator
 // ============================================================================
 
-/// Operator that merges properties on a node (SET n += {map}).
+/// Operator that merges properties on a node/edge (SET x += {map}).
 pub const SetPropertiesMerge = struct {
     /// Input operator
     input: Operator,
-    /// Slot containing target node
+    /// Slot containing target node/edge
     target_slot: u8,
     /// Map expression
     map_expr: *const ast.Expression,
@@ -952,9 +960,8 @@ pub const SetPropertiesMerge = struct {
 
         const row = try self.input.next(ctx) orelse return null;
 
-        // Get target node from row
+        // Get target from row
         const target_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
-        const node_id = target_val.asNodeId() orelse return OperatorError.TypeError;
 
         // Evaluate all updates first so expression/type failures don't produce
         // partial row-level writes.
@@ -968,7 +975,11 @@ pub const SetPropertiesMerge = struct {
             ctx,
             &evaluated,
         );
-        try applyEvaluatedNodeProperties(self.database, node_id, evaluated.items);
+        switch (target_val) {
+            .node_ref => |node_id| try applyEvaluatedNodeProperties(self.database, node_id, evaluated.items),
+            .edge_ref => |edge_id| try applyEvaluatedEdgeProperties(self.database, edge_id, evaluated.items),
+            else => return OperatorError.TypeError,
+        }
 
         return row;
     }
@@ -1276,6 +1287,32 @@ fn applyEvaluatedNodeProperties(
         database.setNodeProperty(null, node_id, item.key, item.value) catch {
             return OperatorError.StorageError;
         };
+    }
+}
+
+fn applyEvaluatedEdgeProperties(
+    database: *Database,
+    edge_id: EdgeId,
+    items: []const EvaluatedProperty,
+) OperatorError!void {
+    for (items) |item| {
+        database.setEdgePropertyById(null, edge_id, item.key, item.value) catch {
+            return OperatorError.StorageError;
+        };
+    }
+}
+
+fn clearEdgeProperties(database: *Database, edge_id: EdgeId) OperatorError!void {
+    var edge = database.edge_store.getById(edge_id) catch return OperatorError.StorageError;
+    defer edge.deinit(database.allocator);
+
+    for (edge.properties) |prop| {
+        const key = database.symbol_table.resolve(prop.key_id) catch return OperatorError.StorageError;
+        database.removeEdgePropertyById(null, edge_id, key) catch {
+            database.symbol_table.freeString(key);
+            return OperatorError.StorageError;
+        };
+        database.symbol_table.freeString(key);
     }
 }
 

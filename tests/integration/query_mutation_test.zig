@@ -1436,6 +1436,43 @@ test "query: UNWIND variable is usable in downstream WHERE" {
     try expectInt(result, 1, 0, 3);
 }
 
+test "query: standalone UNWIND without MATCH produces rows" {
+    const path = "/tmp/lattice_qm_unwind_standalone.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var result = try db.query("UNWIND [1, 2, 3] AS x RETURN x ORDER BY x");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), result.rowCount());
+    try expectInt(result, 0, 0, 1);
+    try expectInt(result, 1, 0, 2);
+    try expectInt(result, 2, 0, 3);
+}
+
+test "query: standalone UNWIND supports list parameter" {
+    const path = "/tmp/lattice_qm_unwind_param_list.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var items = [_]PropertyValue{
+        .{ .int_val = 3 },
+        .{ .int_val = 1 },
+        .{ .int_val = 2 },
+    };
+    var params = std.StringHashMap(PropertyValue).init(std.testing.allocator);
+    defer params.deinit();
+    try params.put("vals", .{ .list_val = &items });
+
+    var result = try db.queryWithParams("UNWIND $vals AS x RETURN x ORDER BY x", &params);
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 3), result.rowCount());
+    try expectInt(result, 0, 0, 1);
+    try expectInt(result, 1, 0, 2);
+    try expectInt(result, 2, 0, 3);
+}
+
 // ============================================================================
 // Test Helpers
 // ============================================================================

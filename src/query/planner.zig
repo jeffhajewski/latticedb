@@ -32,6 +32,7 @@ const mutation_ops = @import("operators/mutation.zig");
 const aggregate_ops = @import("operators/aggregate.zig");
 const distinct_ops = @import("operators/distinct.zig");
 const unwind_ops = @import("operators/unwind.zig");
+const source_ops = @import("operators/source.zig");
 const materialize_ops = @import("operators/materialize.zig");
 const cross_product_ops = @import("operators/cross_product.zig");
 
@@ -1357,9 +1358,13 @@ pub const QueryPlanner = struct {
 
     /// Plan an UNWIND clause (expand list into rows)
     fn planUnwind(self: *Self, unwind_clause: *const ast.UnwindClause, input: ?Operator) PlannerError!Operator {
-        // UNWIND needs an input (even if it's just a single-row source)
-        // If no input, we'd need a "single row" operator. For now, require input.
-        const input_op = input orelse return PlannerError.InvalidQuery;
+        // Standalone UNWIND uses a synthetic single-row input.
+        const input_op = if (input) |op|
+            op
+        else blk: {
+            const single = source_ops.SingleRow.init(self.allocator) catch return PlannerError.OutOfMemory;
+            break :blk single.operator();
+        };
 
         const slot = try self.allocateSlot();
         try self.bindVariable(unwind_clause.variable, slot, .alias);

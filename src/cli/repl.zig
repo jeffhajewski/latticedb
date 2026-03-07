@@ -20,6 +20,82 @@ fn ManagedArrayList(comptime T: type) type {
     return std.array_list.Managed(T);
 }
 
+const LineReadAction = enum {
+    line,
+    canceled,
+    eof,
+};
+
+const RawTerminalMode = struct {
+    enabled: bool = false,
+    original: std.posix.termios = undefined,
+
+    fn enableIfTty() !RawTerminalMode {
+        if (!std.posix.isatty(std.posix.STDIN_FILENO)) {
+            return .{};
+        }
+
+        const original = try std.posix.tcgetattr(std.posix.STDIN_FILENO);
+        var raw = original;
+        raw.lflag.ECHO = false;
+        raw.lflag.ICANON = false;
+        raw.lflag.IEXTEN = false;
+        // Keep ISIG enabled so Ctrl-C still behaves as expected.
+        raw.iflag.ICRNL = false;
+        raw.iflag.IXON = false;
+        raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
+        raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
+
+        try std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, raw);
+        return .{
+            .enabled = true,
+            .original = original,
+        };
+    }
+
+    fn restore(self: *RawTerminalMode) void {
+        if (!self.enabled) return;
+        std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, self.original) catch {};
+        self.enabled = false;
+    }
+};
+
+fn readByte(file: std.fs.File) !?u8 {
+    var buf: [1]u8 = undefined;
+    const n = try file.read(&buf);
+    if (n == 0) return null;
+    return buf[0];
+}
+
+fn setLineBuffer(line_buf: *ManagedArrayList(u8), value: []const u8) !void {
+    line_buf.items.len = 0;
+    try line_buf.appendSlice(value);
+}
+
+fn refreshInputLine(stdout: anytype, prompt: []const u8, line: []const u8, cursor: usize) !void {
+    try stdout.writeAll("\r");
+    try stdout.writeAll(prompt);
+    try stdout.writeAll(line);
+    try stdout.writeAll("\x1b[K");
+
+    if (cursor <= line.len) {
+        const move_left = line.len - cursor;
+        if (move_left > 0) {
+            try stdout.print("\x1b[{d}D", .{move_left});
+        }
+    }
+}
+
+fn moveCursorLeft(stdout: anytype, count: usize) !void {
+    if (count == 0) return;
+    try stdout.print("\x1b[{d}D", .{count});
+}
+
+fn moveCursorRight(stdout: anytype, count: usize) !void {
+    if (count == 0) return;
+    try stdout.print("\x1b[{d}C", .{count});
+}
+
 /// REPL state and configuration
 pub const Repl = struct {
     allocator: std.mem.Allocator,
@@ -59,8 +135,6 @@ pub const Repl = struct {
     pub fn run(self: *Self, stdout: anytype, stderr: anytype) !void {
         defer self.deinit();
 
-        const stdin = std.fs.File.stdin().deprecatedReader();
-
         // Print welcome message
         try stdout.print("LatticeDB v{s}\n", .{lattice.VERSION});
         try stdout.print("Connected to: {s}\n", .{self.db.getPath()});
@@ -75,22 +149,20 @@ pub const Repl = struct {
         var in_multiline = false;
 
         while (self.running) {
-            // Print prompt
-            if (in_multiline) {
-                try stdout.writeAll("     ...> ");
-            } else {
-                try stdout.writeAll("lattice> ");
-            }
-
-            // Read line
-            line_buf.items.len = 0;
-            stdin.readUntilDelimiterArrayList(&line_buf, '\n', 65536) catch |err| {
-                if (err == error.EndOfStream) {
+            const action = try self.readLine(in_multiline, &line_buf, stdout);
+            switch (action) {
+                .eof => {
                     try stdout.writeAll("\nGoodbye!\n");
                     break;
-                }
-                return err;
-            };
+                },
+                .canceled => {
+                    // Ctrl-G cancels the current in-progress input/query.
+                    query_buf.items.len = 0;
+                    in_multiline = false;
+                    continue;
+                },
+                .line => {},
+            }
 
             const line = std.mem.trim(u8, line_buf.items, " \t\r\n");
 
@@ -140,6 +212,153 @@ pub const Repl = struct {
 
             query_buf.items.len = 0;
             in_multiline = false;
+        }
+    }
+
+    fn promptFor(in_multiline: bool) []const u8 {
+        return if (in_multiline) "     ...> " else "lattice> ";
+    }
+
+    fn readLine(self: *Self, in_multiline: bool, line_buf: *ManagedArrayList(u8), stdout: anytype) !LineReadAction {
+        const prompt = promptFor(in_multiline);
+        line_buf.items.len = 0;
+
+        if (!std.posix.isatty(std.posix.STDIN_FILENO)) {
+            const stdin = std.fs.File.stdin().deprecatedReader();
+            try stdout.writeAll(prompt);
+            stdin.readUntilDelimiterArrayList(line_buf, '\n', 65536) catch |err| {
+                if (err == error.EndOfStream) return .eof;
+                return err;
+            };
+            return .line;
+        }
+
+        return self.readLineInteractive(prompt, line_buf, stdout);
+    }
+
+    fn readLineInteractive(self: *Self, prompt: []const u8, line_buf: *ManagedArrayList(u8), stdout: anytype) !LineReadAction {
+        var raw_mode = try RawTerminalMode.enableIfTty();
+        defer raw_mode.restore();
+
+        const stdin_file = std.fs.File.stdin();
+        try stdout.writeAll(prompt);
+
+        self.history.resetPosition();
+        var cursor: usize = 0;
+        var history_scratch: ?[]u8 = null;
+        var browsing_history = false;
+        defer if (history_scratch) |scratch| self.allocator.free(scratch);
+
+        while (true) {
+            const key = (try readByte(stdin_file)) orelse return .eof;
+            switch (key) {
+                '\r', '\n' => {
+                    try stdout.writeAll("\r\n");
+                    return .line;
+                },
+                7 => { // Ctrl-G: cancel current line
+                    line_buf.items.len = 0;
+                    try refreshInputLine(stdout, prompt, line_buf.items, 0);
+                    try stdout.writeAll("\r\n");
+                    return .canceled;
+                },
+                4 => { // Ctrl-D: EOF on empty input, otherwise delete under cursor
+                    if (line_buf.items.len == 0) return .eof;
+                    if (cursor < line_buf.items.len) {
+                        _ = line_buf.orderedRemove(cursor);
+                        try refreshInputLine(stdout, prompt, line_buf.items, cursor);
+                    }
+                },
+                1 => { // Ctrl-A
+                    if (cursor > 0) {
+                        try moveCursorLeft(stdout, cursor);
+                        cursor = 0;
+                    }
+                },
+                5 => { // Ctrl-E
+                    if (cursor < line_buf.items.len) {
+                        try moveCursorRight(stdout, line_buf.items.len - cursor);
+                        cursor = line_buf.items.len;
+                    }
+                },
+                8, 127 => { // Backspace
+                    if (cursor > 0) {
+                        _ = line_buf.orderedRemove(cursor - 1);
+                        cursor -= 1;
+                        if (cursor == line_buf.items.len) {
+                            try stdout.writeByte('\x08');
+                            try stdout.writeAll("\x1b[K");
+                        } else {
+                            try refreshInputLine(stdout, prompt, line_buf.items, cursor);
+                        }
+                    }
+                },
+                27 => { // Escape sequence
+                    const b1 = (try readByte(stdin_file)) orelse continue;
+                    if (b1 != '[') continue;
+                    const b2 = (try readByte(stdin_file)) orelse continue;
+                    switch (b2) {
+                        'A' => { // Up: previous history entry
+                            if (!browsing_history) {
+                                history_scratch = try self.allocator.dupe(u8, line_buf.items);
+                                browsing_history = true;
+                            }
+                            if (self.history.previous()) |entry| {
+                                try setLineBuffer(line_buf, entry);
+                                cursor = line_buf.items.len;
+                                try refreshInputLine(stdout, prompt, line_buf.items, cursor);
+                            }
+                        },
+                        'B' => { // Down: next history entry
+                            if (browsing_history) {
+                                if (self.history.next()) |entry| {
+                                    try setLineBuffer(line_buf, entry);
+                                } else if (history_scratch) |scratch| {
+                                    try setLineBuffer(line_buf, scratch);
+                                    browsing_history = false;
+                                } else {
+                                    line_buf.items.len = 0;
+                                    browsing_history = false;
+                                }
+                                cursor = line_buf.items.len;
+                                try refreshInputLine(stdout, prompt, line_buf.items, cursor);
+                            }
+                        },
+                        'C' => { // Right
+                            if (cursor < line_buf.items.len) {
+                                cursor += 1;
+                                try moveCursorRight(stdout, 1);
+                            }
+                        },
+                        'D' => { // Left
+                            if (cursor > 0) {
+                                cursor -= 1;
+                                try moveCursorLeft(stdout, 1);
+                            }
+                        },
+                        '3' => { // Delete: ESC [ 3 ~
+                            const b3 = (try readByte(stdin_file)) orelse continue;
+                            if (b3 == '~' and cursor < line_buf.items.len) {
+                                _ = line_buf.orderedRemove(cursor);
+                                try refreshInputLine(stdout, prompt, line_buf.items, cursor);
+                            }
+                        },
+                        else => {},
+                    }
+                },
+                else => {
+                    if (key < 32) continue;
+                    if (cursor == line_buf.items.len) {
+                        try line_buf.append(key);
+                        cursor += 1;
+                        try stdout.writeByte(key);
+                    } else {
+                        try line_buf.insert(cursor, key);
+                        cursor += 1;
+                        try refreshInputLine(stdout, prompt, line_buf.items, cursor);
+                    }
+                },
+            }
         }
     }
 
@@ -767,6 +986,13 @@ pub const Repl = struct {
             \\Multi-line Input:
             \\  Queries with unclosed brackets continue on the next line.
             \\  Enter an empty line to execute a multi-line query.
+            \\  Ctrl-G cancels the current input line.
+            \\
+            \\Line Editing:
+            \\  Up/Down arrows      Browse command history
+            \\  Left/Right arrows   Move cursor within the current line
+            \\  Backspace/Delete    Remove characters
+            \\  Ctrl-A / Ctrl-E     Jump to start/end of line
             \\
             \\Cypher Examples:
             \\  CREATE (n:Person {name: "Alice"})

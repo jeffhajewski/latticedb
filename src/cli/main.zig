@@ -356,6 +356,7 @@ fn cmdExec(
 
     // Display result using REPL's display logic
     var repl = Repl.init(allocator, db, parsed_args.format);
+    defer repl.deinit();
     repl.show_timing = false; // No timing for exec command
     defer detailed.success.deinit();
     repl.displayResult(&detailed.success, stdout, 0) catch |err| {

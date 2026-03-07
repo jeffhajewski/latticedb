@@ -2,13 +2,17 @@
 Basic tests for Lattice Python bindings.
 """
 
+import ctypes
 import pytest
 import numpy as np
+from types import SimpleNamespace
 
 from latticedb import Database, Node, Edge, Value
 from latticedb.types import QueryResult, VectorSearchResult
 from latticedb._bindings import library_available
 from latticedb.embedding import EmbeddingApiFormat
+import latticedb._bindings as bindings
+import latticedb.embedding as embedding_mod
 
 
 class TestNode:
@@ -225,3 +229,253 @@ class TestHashEmbed:
         vec256 = hash_embed("test", dimensions=256)
         assert vec64.shape == (64,)
         assert vec256.shape == (256,)
+
+
+class TestErrorMapping:
+    """Tests for mapping C error codes to Python exceptions."""
+
+    @pytest.mark.parametrize(
+        ("code", "expected_exc"),
+        [
+            (bindings.LATTICE_ERROR_IO, bindings.LatticeIOError),
+            (bindings.LATTICE_ERROR_CORRUPTION, bindings.LatticeCorruptionError),
+            (bindings.LATTICE_ERROR_NOT_FOUND, bindings.LatticeNotFoundError),
+            (bindings.LATTICE_ERROR_ALREADY_EXISTS, bindings.LatticeAlreadyExistsError),
+            (bindings.LATTICE_ERROR_INVALID_ARG, bindings.LatticeInvalidArgError),
+            (bindings.LATTICE_ERROR_TXN_ABORTED, bindings.LatticeTxnAbortedError),
+            (bindings.LATTICE_ERROR_LOCK_TIMEOUT, bindings.LatticeLockTimeoutError),
+            (bindings.LATTICE_ERROR_READ_ONLY, bindings.LatticeReadOnlyError),
+            (bindings.LATTICE_ERROR_FULL, bindings.LatticeFullError),
+            (bindings.LATTICE_ERROR_VERSION_MISMATCH, bindings.LatticeVersionMismatchError),
+            (bindings.LATTICE_ERROR_CHECKSUM, bindings.LatticeChecksumError),
+            (bindings.LATTICE_ERROR_OUT_OF_MEMORY, bindings.LatticeOutOfMemoryError),
+        ],
+    )
+    def test_check_error_raises_specific_exception(self, monkeypatch, code, expected_exc):
+        """Each known error code should map to its specific exception class."""
+        fake_lib = SimpleNamespace(
+            _lib=SimpleNamespace(lattice_error_message=lambda _code: b"native error")
+        )
+        monkeypatch.setattr(bindings, "get_lib", lambda: fake_lib)
+
+        with pytest.raises(expected_exc) as exc_info:
+            bindings.check_error(code)
+
+        assert type(exc_info.value) is expected_exc
+        assert exc_info.value.code == code
+        assert "native error" in str(exc_info.value)
+
+    def test_check_error_unknown_code_uses_base_exception(self, monkeypatch):
+        """Unknown error codes should raise LatticeError."""
+        fake_lib = SimpleNamespace(
+            _lib=SimpleNamespace(lattice_error_message=lambda _code: b"unknown native error")
+        )
+        monkeypatch.setattr(bindings, "get_lib", lambda: fake_lib)
+
+        with pytest.raises(bindings.LatticeError) as exc_info:
+            bindings.check_error(-999)
+
+        assert type(exc_info.value) is bindings.LatticeError
+        assert exc_info.value.code == -999
+
+    def test_check_error_falls_back_when_error_message_lookup_fails(self, monkeypatch):
+        """check_error should still raise the mapped exception if message lookup fails."""
+        monkeypatch.setattr(
+            bindings,
+            "get_lib",
+            lambda: (_ for _ in ()).throw(RuntimeError("lib unavailable")),
+        )
+
+        with pytest.raises(bindings.LatticeInvalidArgError) as exc_info:
+            bindings.check_error(bindings.LATTICE_ERROR_INVALID_ARG)
+
+        assert type(exc_info.value) is bindings.LatticeInvalidArgError
+        assert exc_info.value.code == bindings.LATTICE_ERROR_INVALID_ARG
+        assert "Error code" in str(exc_info.value)
+
+    def test_check_query_error_raises_lattice_query_error_with_diagnostics(self, monkeypatch):
+        """Structured diagnostics should produce LatticeQueryError."""
+        fake_native = SimpleNamespace(
+            lattice_query_last_error_stage=lambda _ptr: bindings.LATTICE_QUERY_STAGE_PARSE,
+            lattice_query_last_error_message=lambda _ptr: b"Parse error near RETURN",
+            lattice_query_last_error_code=lambda _ptr: b"E_PARSE",
+            lattice_query_last_error_has_location=lambda _ptr: 1,
+            lattice_query_last_error_line=lambda _ptr: 2,
+            lattice_query_last_error_column=lambda _ptr: 14,
+            lattice_query_last_error_length=lambda _ptr: 6,
+            lattice_error_message=lambda _code: b"fallback error",
+        )
+        fake_lib = SimpleNamespace(_lib=fake_native)
+        monkeypatch.setattr(bindings, "get_lib", lambda: fake_lib)
+
+        with pytest.raises(bindings.LatticeQueryError) as exc_info:
+            bindings.check_query_error(bindings.LATTICE_ERROR_INVALID_ARG, object())
+
+        err = exc_info.value
+        assert err.code == bindings.LATTICE_ERROR_INVALID_ARG
+        assert err.stage == "parse"
+        assert err.diagnostic_code == "E_PARSE"
+        assert err.location == {"line": 2, "column": 14, "length": 6}
+        assert "Parse error near RETURN" in str(err)
+
+    def test_check_query_error_falls_back_to_standard_error_without_diagnostics(self, monkeypatch):
+        """No diagnostics should delegate to regular check_error behavior."""
+        fake_native = SimpleNamespace(
+            lattice_query_last_error_stage=lambda _ptr: bindings.LATTICE_QUERY_STAGE_NONE,
+            lattice_query_last_error_message=lambda _ptr: None,
+            lattice_query_last_error_code=lambda _ptr: None,
+            lattice_query_last_error_has_location=lambda _ptr: 0,
+            lattice_error_message=lambda _code: b"invalid argument",
+        )
+        fake_lib = SimpleNamespace(_lib=fake_native)
+        monkeypatch.setattr(bindings, "get_lib", lambda: fake_lib)
+
+        with pytest.raises(bindings.LatticeInvalidArgError) as exc_info:
+            bindings.check_query_error(bindings.LATTICE_ERROR_INVALID_ARG, object())
+
+        assert type(exc_info.value) is bindings.LatticeInvalidArgError
+        assert exc_info.value.code == bindings.LATTICE_ERROR_INVALID_ARG
+
+
+class TestEmbeddingClientUnit:
+    """Unit tests for EmbeddingClient API behavior using a fake native layer."""
+
+    def _install_fake_embedding_native(self, monkeypatch):
+        class FakeNative:
+            def __init__(self):
+                self.created_configs = []
+                self.embed_texts = []
+                self.freed_embedding_calls = 0
+                self.freed_vector_dims = []
+                self._vector_storage = []
+
+            def lattice_embedding_client_create(self, config_ptr, client_out_ptr):
+                cfg = ctypes.cast(
+                    config_ptr,
+                    ctypes.POINTER(bindings.EmbeddingConfig),
+                ).contents
+
+                self.created_configs.append(
+                    {
+                        "endpoint": cfg.endpoint.decode("utf-8"),
+                        "model": cfg.model.decode("utf-8"),
+                        "api_format": cfg.api_format,
+                        "api_key": cfg.api_key.decode("utf-8") if cfg.api_key else None,
+                        "timeout_ms": cfg.timeout_ms,
+                    }
+                )
+
+                out_ptr = ctypes.cast(client_out_ptr, ctypes.POINTER(ctypes.c_void_p))
+                out_ptr[0] = ctypes.c_void_p(0xCAFE)
+                return bindings.LATTICE_OK
+
+            def lattice_embedding_client_embed(
+                self,
+                _handle,
+                encoded_text,
+                encoded_len,
+                vector_out_ptr,
+                dims_out_ptr,
+            ):
+                length = int(encoded_len.value if hasattr(encoded_len, "value") else encoded_len)
+                self.embed_texts.append(ctypes.string_at(encoded_text, length).decode("utf-8"))
+
+                vector = (ctypes.c_float * 4)(0.5, -1.0, 2.25, 3.0)
+                self._vector_storage.append(vector)
+
+                out_vector = ctypes.cast(
+                    vector_out_ptr,
+                    ctypes.POINTER(ctypes.POINTER(ctypes.c_float)),
+                )
+                out_vector[0] = ctypes.cast(vector, ctypes.POINTER(ctypes.c_float))
+
+                out_dims = ctypes.cast(dims_out_ptr, ctypes.POINTER(ctypes.c_uint32))
+                out_dims[0] = ctypes.c_uint32(4)
+                return bindings.LATTICE_OK
+
+            def lattice_hash_embed_free(self, _ptr, dims):
+                dim_value = int(dims.value if hasattr(dims, "value") else dims)
+                self.freed_vector_dims.append(dim_value)
+
+            def lattice_embedding_client_free(self, _handle):
+                self.freed_embedding_calls += 1
+
+        fake_native = FakeNative()
+        fake_lib = SimpleNamespace(_lib=fake_native)
+        monkeypatch.setattr(embedding_mod, "get_lib", lambda: fake_lib)
+        monkeypatch.setattr(embedding_mod, "check_error", lambda code: bindings.check_error(code))
+        monkeypatch.setattr(bindings, "get_lib", lambda: fake_lib)
+        return fake_native
+
+    def test_embedding_client_init_embed_and_close(self, monkeypatch):
+        """EmbeddingClient should pass config, decode vectors, and close idempotently."""
+        fake_native = self._install_fake_embedding_native(monkeypatch)
+
+        client = embedding_mod.EmbeddingClient(
+            endpoint="http://localhost:11434/api/embeddings",
+            model="custom-model",
+            api_format=embedding_mod.EmbeddingApiFormat.OPENAI,
+            api_key="secret",
+            timeout_ms=1234,
+        )
+        vector = client.embed("hello embeddings")
+        client.close()
+        client.close()
+
+        assert len(fake_native.created_configs) == 1
+        cfg = fake_native.created_configs[0]
+        assert cfg["endpoint"] == "http://localhost:11434/api/embeddings"
+        assert cfg["model"] == "custom-model"
+        assert cfg["api_format"] == int(embedding_mod.EmbeddingApiFormat.OPENAI)
+        assert cfg["api_key"] == "secret"
+        assert cfg["timeout_ms"] == 1234
+        assert fake_native.embed_texts == ["hello embeddings"]
+        assert isinstance(vector, np.ndarray)
+        assert vector.dtype == np.float32
+        assert vector.shape == (4,)
+        np.testing.assert_allclose(vector, np.array([0.5, -1.0, 2.25, 3.0], dtype=np.float32))
+        assert fake_native.freed_vector_dims == [4]
+        assert fake_native.freed_embedding_calls == 1
+
+    def test_embedding_client_context_manager_closes_client(self, monkeypatch):
+        """Context manager usage should call native client free exactly once."""
+        fake_native = self._install_fake_embedding_native(monkeypatch)
+
+        with embedding_mod.EmbeddingClient(endpoint="http://localhost:11434/api/embeddings") as client:
+            _ = client.embed("context manager")
+
+        assert fake_native.freed_embedding_calls == 1
+
+
+class TestPublicApiExports:
+    """Tests for top-level public API exports."""
+
+    def test_top_level_exports_include_error_and_embedding_symbols(self):
+        """`latticedb` should export all documented exception and embedding APIs."""
+        import latticedb
+
+        expected = {
+            "LatticeError",
+            "LatticeIOError",
+            "LatticeCorruptionError",
+            "LatticeNotFoundError",
+            "LatticeAlreadyExistsError",
+            "LatticeInvalidArgError",
+            "LatticeTxnAbortedError",
+            "LatticeLockTimeoutError",
+            "LatticeReadOnlyError",
+            "LatticeFullError",
+            "LatticeVersionMismatchError",
+            "LatticeChecksumError",
+            "LatticeOutOfMemoryError",
+            "LatticeQueryError",
+            "EmbeddingClient",
+            "EmbeddingApiFormat",
+            "hash_embed",
+            "version",
+        }
+
+        exported = set(latticedb.__all__)
+        assert expected.issubset(exported)
+        for symbol in expected:
+            assert hasattr(latticedb, symbol)

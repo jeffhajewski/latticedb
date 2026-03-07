@@ -82,6 +82,19 @@ class TestDatabaseLifecycle:
             with pytest.raises(RuntimeError, match="read-only"):
                 db.write()
 
+    def test_path_property(self, tmp_path):
+        """Database.path should preserve the provided database file path."""
+        db_path = tmp_path / "test.db"
+        db = Database(db_path, create=True)
+        assert db.path == db_path
+
+        db.open()
+        try:
+            assert db.path == db_path
+            assert db.is_open
+        finally:
+            db.close()
+
 
 class TestTransactions:
     """Tests for transaction operations."""
@@ -838,3 +851,46 @@ class TestUtilities:
                 assert txn.node_exists(node_id) is False
 
                 txn.commit()
+
+
+class TestQueryCache:
+    """Tests for query cache management APIs."""
+
+    def test_cache_clear_succeeds_on_empty_cache(self, tmp_path):
+        """cache_clear() should be safe even before any query execution."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            db.cache_clear()
+
+    def test_cache_stats_starts_empty(self, tmp_path):
+        """cache_stats() should return valid zero-initialized counters."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            stats = db.cache_stats()
+            assert set(stats.keys()) == {"entries", "hits", "misses"}
+            assert stats["entries"] == 0
+            assert stats["hits"] == 0
+            assert stats["misses"] == 0
+
+    def test_cache_stats_reflects_query_usage_and_clear(self, tmp_path):
+        """Running identical queries should increase hits after the first miss."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                txn.create_node(labels=["Person"], properties={"name": "Alice"})
+                txn.commit()
+
+            db.query("MATCH (n:Person) RETURN n")
+            stats_after_first = db.cache_stats()
+            assert stats_after_first["misses"] >= 1
+
+            db.query("MATCH (n:Person) RETURN n")
+            stats_after_second = db.cache_stats()
+            assert stats_after_second["hits"] > stats_after_first["hits"]
+
+            db.cache_clear()
+            stats_after_clear = db.cache_stats()
+            assert stats_after_clear["entries"] == 0

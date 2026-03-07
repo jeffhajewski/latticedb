@@ -7,6 +7,7 @@
 
 import { Value, Node, Edge, QueryResult, VectorSearchResult } from '../src/types';
 import { Database } from '../src/database';
+import { EmbeddingClient, LatticeError, LatticeQueryError, QueryErrorStage, hashEmbed, version } from '../src/index';
 import { isLibraryAvailable } from '../src/ffi';
 
 describe('Value', () => {
@@ -122,5 +123,58 @@ describe('Library availability', () => {
     // This test just verifies the function works
     const available = isLibraryAvailable();
     expect(typeof available).toBe('boolean');
+  });
+});
+
+describe('Top-level exports', () => {
+  test('version returns a non-empty string', () => {
+    const v = version();
+    expect(typeof v).toBe('string');
+    expect(v.length).toBeGreaterThan(0);
+  });
+
+  test('LatticeQueryError carries stage and diagnostics', () => {
+    const err = new LatticeQueryError(
+      'parse failed',
+      -1 as any,
+      QueryErrorStage.Parse,
+      'E_PARSE',
+      { line: 1, column: 7, length: 1 }
+    );
+
+    expect(err).toBeInstanceOf(LatticeQueryError);
+    expect(err).toBeInstanceOf(LatticeError);
+    expect(err.stage).toBe(QueryErrorStage.Parse);
+    expect(err.diagnosticCode).toBe('E_PARSE');
+    expect(err.location).toEqual({ line: 1, column: 7, length: 1 });
+  });
+});
+
+describe('Embedding utilities', () => {
+  test('EmbeddingClient.embed throws after close', () => {
+    const client = Object.create(EmbeddingClient.prototype) as { handle: unknown | null; embed: (text: string) => Float32Array };
+    client.handle = null;
+    expect(() => client.embed('hello')).toThrow(/closed/i);
+  });
+
+  test('EmbeddingClient.close is idempotent for a closed client', () => {
+    const client = Object.create(EmbeddingClient.prototype) as { handle: unknown | null; close: () => void };
+    client.handle = null;
+    expect(() => client.close()).not.toThrow();
+    expect(() => client.close()).not.toThrow();
+  });
+
+  const describeIfNative = isLibraryAvailable() ? describe : describe.skip;
+  describeIfNative('hashEmbed native behavior', () => {
+    test('hashEmbed returns deterministic vectors of requested dimensions', () => {
+      const v1 = hashEmbed('hello world', 16);
+      const v2 = hashEmbed('hello world', 16);
+      const v3 = hashEmbed('different text', 16);
+
+      expect(v1).toBeInstanceOf(Float32Array);
+      expect(v1.length).toBe(16);
+      expect(Array.from(v1)).toEqual(Array.from(v2));
+      expect(Array.from(v1)).not.toEqual(Array.from(v3));
+    });
   });
 });

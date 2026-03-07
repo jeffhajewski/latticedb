@@ -9,6 +9,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { Database } from '../src/database';
+import { Transaction } from '../src/transaction';
 import { isLibraryAvailable, LatticeQueryError, QueryErrorStage } from '../src/ffi';
 
 // Skip all tests if native library is not available
@@ -453,6 +454,13 @@ describeIfNative('Database Integration', () => {
       await db.open();
     });
 
+    function beginManualTransaction(readOnly: boolean): Transaction {
+      const internals = db as unknown as { ffi: unknown; dbHandle: unknown };
+      const ffi = internals.ffi as { begin: (dbHandle: unknown, ro: boolean) => unknown };
+      const handle = ffi.begin(internals.dbHandle, readOnly);
+      return new Transaction(internals.ffi as never, handle as never, readOnly);
+    }
+
     test('write transaction commits changes', async () => {
       let nodeId: bigint;
       await db.write(async (txn) => {
@@ -491,6 +499,48 @@ describeIfNative('Database Integration', () => {
         expect(await txn.nodeExists(id1!)).toBe(true);
         expect(await txn.nodeExists(id2!)).toBe(true);
       });
+    });
+
+    test('manual commit marks transaction inactive and prevents reuse', async () => {
+      const txn = beginManualTransaction(false);
+      expect(txn.isReadOnly()).toBe(false);
+      expect(txn.isActive()).toBe(true);
+
+      const node = await txn.createNode({ labels: ['CommittedManual'] });
+      txn.commit();
+
+      expect(txn.isActive()).toBe(false);
+      expect(() => txn.commit()).toThrow(/already committed/i);
+      expect(() => txn.rollback()).toThrow(/already committed/i);
+      await expect(txn.nodeExists(node.id)).rejects.toThrow(/not active/i);
+
+      await db.read(async (readTxn) => {
+        expect(await readTxn.nodeExists(node.id)).toBe(true);
+      });
+    });
+
+    test('manual rollback is idempotent and discards uncommitted writes', async () => {
+      const txn = beginManualTransaction(false);
+      const node = await txn.createNode({ labels: ['RolledBackManual'] });
+
+      txn.rollback();
+      expect(txn.isActive()).toBe(false);
+      expect(() => txn.rollback()).not.toThrow();
+      await expect(txn.nodeExists(node.id)).rejects.toThrow(/not active/i);
+
+      await db.read(async (readTxn) => {
+        expect(await readTxn.nodeExists(node.id)).toBe(false);
+      });
+    });
+
+    test('manual read-only transactions report mode and reject writes', async () => {
+      const txn = beginManualTransaction(true);
+      expect(txn.isReadOnly()).toBe(true);
+      expect(txn.isActive()).toBe(true);
+
+      await expect(txn.createNode({ labels: ['ShouldFail'] })).rejects.toThrow(/read-only/i);
+      txn.rollback();
+      expect(txn.isActive()).toBe(false);
     });
   });
 
@@ -570,6 +620,21 @@ describeIfNative('Database Integration', () => {
       await db.read(async (txn) => {
         expect(await txn.nodeExists(nodeId!)).toBe(true);
       });
+    });
+
+    test('setVector stores embeddings that are discoverable via vector search', async () => {
+      let nodeId: bigint;
+      const vector = new Float32Array([0.5, 0.1, 0.9, 0.2]);
+
+      await db.write(async (txn) => {
+        const node = await txn.createNode({ labels: ['VectorNode'] });
+        nodeId = node.id;
+        await txn.setVector(node.id, 'embedding', vector);
+      });
+
+      const results = await db.vectorSearch(vector, { k: 5 });
+      const resultNodeIds = results.map((r) => r.nodeId);
+      expect(resultNodeIds).toContain(nodeId!);
     });
   });
 

@@ -52,7 +52,7 @@ def _find_library() -> Optional[Path]:
     env_path = os.environ.get("LATTICE_LIB_PATH")
     if env_path:
         path = Path(env_path)
-        if path.exists():
+        if path.is_file():
             return path
         # If env var is a directory, look for lib inside
         if path.is_dir():

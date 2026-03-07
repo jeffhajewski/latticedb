@@ -351,6 +351,8 @@ class Transaction:
 
         vec = np.ascontiguousarray(vectors, dtype=np.float32)
         n, dims = vec.shape
+        if n == 0:
+            return []
         label_bytes = label.encode("utf-8")
 
         # Build C array of NodeWithVector specs

@@ -79,9 +79,17 @@ jobs:
           pip install -e ".[dev]"
 
       - name: Run tests
+        if: ${{ !(matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11') }}
         run: |
           cd bindings/python
           LATTICE_LIB_PATH=$GITHUB_WORKSPACE/zig-out/lib pytest -v
+
+      - name: Run tests with coverage gate
+        if: ${{ matrix.os == 'ubuntu-latest' && matrix.python-version == '3.11' }}
+        run: |
+          cd bindings/python
+          LATTICE_LIB_PATH=$GITHUB_WORKSPACE/zig-out/lib \
+            pytest -v --cov=src/latticedb --cov-report=term --cov-fail-under=85
 
   # ============================================
   # TypeScript tests
@@ -118,8 +126,14 @@ jobs:
         run: npm run build
 
       - name: Run tests
+        if: ${{ !(matrix.os == 'ubuntu-latest' && matrix.node-version == '20') }}
         working-directory: bindings/typescript
         run: npm test
+
+      - name: Run tests with coverage gate
+        if: ${{ matrix.os == 'ubuntu-latest' && matrix.node-version == '20' }}
+        working-directory: bindings/typescript
+        run: npm run test:coverage -- --coverageReporters=text-summary
 
   # ============================================
   # Lint checks

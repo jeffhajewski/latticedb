@@ -143,6 +143,19 @@ class TestTransactions:
 
             assert not txn.is_active
 
+    def test_rollback_discards_uncommitted_writes(self, tmp_path):
+        """Explicit rollback should discard writes when checked from a new transaction."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                node = txn.create_node(labels=["Temp"])
+                node_id = node.id
+                txn.rollback()
+
+            with db.read() as txn:
+                assert txn.node_exists(node_id) is False
+
 
 class TestNodeOperations:
     """Tests for node CRUD operations."""
@@ -379,6 +392,44 @@ class TestEdgeOperations:
                 incoming = txn.get_incoming_edges(node_id)
                 assert len(outgoing) == 0
                 assert len(incoming) == 0
+
+    def test_parallel_edges_same_type_are_distinct_and_delete_one_at_a_time(self, tmp_path):
+        """Parallel edges with identical triplets should both exist and delete incrementally."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                alice = txn.create_node(labels=["Person"])
+                bob = txn.create_node(labels=["Person"])
+                e1 = txn.create_edge(alice.id, bob.id, "KNOWS")
+                e2 = txn.create_edge(alice.id, bob.id, "KNOWS")
+                alice_id = alice.id
+                bob_id = bob.id
+                assert e1.id != e2.id
+                txn.commit()
+
+            with db.read() as txn:
+                edges = txn.get_outgoing_edges(alice_id)
+                parallel = [e for e in edges if e.target_id == bob_id and e.edge_type == "KNOWS"]
+                assert len(parallel) == 2
+
+            with db.write() as txn:
+                txn.delete_edge(alice_id, bob_id, "KNOWS")
+                txn.commit()
+
+            with db.read() as txn:
+                edges = txn.get_outgoing_edges(alice_id)
+                parallel = [e for e in edges if e.target_id == bob_id and e.edge_type == "KNOWS"]
+                assert len(parallel) == 1
+
+            with db.write() as txn:
+                txn.delete_edge(alice_id, bob_id, "KNOWS")
+                txn.commit()
+
+            with db.read() as txn:
+                edges = txn.get_outgoing_edges(alice_id)
+                parallel = [e for e in edges if e.target_id == bob_id and e.edge_type == "KNOWS"]
+                assert len(parallel) == 0
 
 
 class TestQueries:

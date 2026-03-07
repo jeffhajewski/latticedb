@@ -351,6 +351,48 @@ describeIfNative('Database Integration', () => {
         expect(types).toEqual(['KNOWS', 'WORKS_WITH']);
       });
     });
+
+    test('parallel edges with same type keep distinct identities and delete one-at-a-time', async () => {
+      let firstEdgeId: bigint | undefined;
+      let secondEdgeId: bigint | undefined;
+
+      await db.write(async (txn) => {
+        const first = await txn.createEdge(aliceId, bobId, 'KNOWS');
+        const second = await txn.createEdge(aliceId, bobId, 'KNOWS');
+        firstEdgeId = first.id;
+        secondEdgeId = second.id;
+      });
+
+      expect(firstEdgeId).toBeDefined();
+      expect(secondEdgeId).toBeDefined();
+      expect(firstEdgeId).not.toBe(secondEdgeId);
+
+      await db.read(async (txn) => {
+        const edges = await txn.getOutgoingEdges(aliceId);
+        const parallel = edges.filter((e) => e.targetId === bobId && e.type === 'KNOWS');
+        expect(parallel.length).toBe(2);
+      });
+
+      await db.write(async (txn) => {
+        await txn.deleteEdge(aliceId, bobId, 'KNOWS');
+      });
+
+      await db.read(async (txn) => {
+        const edges = await txn.getOutgoingEdges(aliceId);
+        const parallel = edges.filter((e) => e.targetId === bobId && e.type === 'KNOWS');
+        expect(parallel.length).toBe(1);
+      });
+
+      await db.write(async (txn) => {
+        await txn.deleteEdge(aliceId, bobId, 'KNOWS');
+      });
+
+      await db.read(async (txn) => {
+        const edges = await txn.getOutgoingEdges(aliceId);
+        const parallel = edges.filter((e) => e.targetId === bobId && e.type === 'KNOWS');
+        expect(parallel.length).toBe(0);
+      });
+    });
   });
 
   describe('Cypher queries', () => {

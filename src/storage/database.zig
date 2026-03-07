@@ -140,6 +140,57 @@ pub const QueryError = error{
     OutOfMemory,
 };
 
+/// Query pipeline stage where a failure occurred.
+pub const QueryFailureStage = enum {
+    parse,
+    semantic,
+    plan,
+    execution,
+};
+
+/// Source location for query diagnostics.
+pub const QueryFailureLocation = struct {
+    line: u32,
+    column: u32,
+    length: u32,
+};
+
+/// Structured query failure details.
+pub const QueryFailure = struct {
+    allocator: Allocator,
+    stage: QueryFailureStage,
+    message: []const u8,
+    code: ?[]const u8 = null,
+    location: ?QueryFailureLocation = null,
+
+    pub fn deinit(self: *QueryFailure) void {
+        self.allocator.free(self.message);
+        if (self.code) |c| self.allocator.free(c);
+    }
+
+    pub fn toLegacyError(self: QueryFailure) QueryError {
+        return switch (self.stage) {
+            .parse => QueryError.ParseError,
+            .semantic => QueryError.SemanticError,
+            .plan => QueryError.PlanError,
+            .execution => QueryError.ExecutionError,
+        };
+    }
+};
+
+/// Detailed query execution result.
+pub const QueryDetailedResult = union(enum) {
+    success: QueryResult,
+    failure: QueryFailure,
+
+    pub fn deinit(self: *QueryDetailedResult) void {
+        switch (self.*) {
+            .success => |*result| result.deinit(),
+            .failure => |*failure| failure.deinit(),
+        }
+    }
+};
+
 /// A single value in a query result
 pub const ResultValue = union(enum) {
     null_val: void,
@@ -2763,7 +2814,15 @@ pub const Database = struct {
     /// }
     /// ```
     pub fn query(self: *Self, cypher: []const u8) QueryError!QueryResult {
-        return self.executeQuery(cypher, null);
+        var detailed = try self.queryDetailed(cypher);
+        switch (detailed) {
+            .success => |result| return result,
+            .failure => |*failure| {
+                const legacy = failure.toLegacyError();
+                failure.deinit();
+                return legacy;
+            },
+        }
     }
 
     /// Execute a Cypher query with bound parameters.
@@ -2772,7 +2831,29 @@ pub const Database = struct {
         cypher: []const u8,
         params: *const std.StringHashMap(types.PropertyValue),
     ) QueryError!QueryResult {
-        return self.executeQuery(cypher, params);
+        var detailed = try self.queryWithParamsDetailed(cypher, params);
+        switch (detailed) {
+            .success => |result| return result,
+            .failure => |*failure| {
+                const legacy = failure.toLegacyError();
+                failure.deinit();
+                return legacy;
+            },
+        }
+    }
+
+    /// Execute a Cypher query and return either query results or structured failure details.
+    pub fn queryDetailed(self: *Self, cypher: []const u8) QueryError!QueryDetailedResult {
+        return self.executeQueryDetailed(cypher, null);
+    }
+
+    /// Execute a Cypher query with bound parameters and return structured success/failure output.
+    pub fn queryWithParamsDetailed(
+        self: *Self,
+        cypher: []const u8,
+        params: *const std.StringHashMap(types.PropertyValue),
+    ) QueryError!QueryDetailedResult {
+        return self.executeQueryDetailed(cypher, params);
     }
 
     /// Clear the query cache (if enabled).
@@ -2791,11 +2872,13 @@ pub const Database = struct {
     }
 
     /// Internal: Execute a query with optional parameters, using the cache when available.
-    fn executeQuery(
+    fn executeQueryDetailed(
         self: *Self,
         cypher: []const u8,
         params: ?*const std.StringHashMap(types.PropertyValue),
-    ) QueryError!QueryResult {
+    ) QueryError!QueryDetailedResult {
+        const normalized_cypher = normalizeCypher(cypher);
+
         var cache_entry: ?*cache_mod.CacheEntry = null;
         defer {
             if (cache_entry) |entry| entry.unpin();
@@ -2820,7 +2903,7 @@ pub const Database = struct {
 
         // Try the cache first
         if (self.query_cache) |cache| {
-            cache_entry = cache.get(cypher);
+            cache_entry = cache.get(normalized_cypher);
         }
 
         if (cache_entry) |entry| {
@@ -2834,7 +2917,7 @@ pub const Database = struct {
                 var cache_arena = std.heap.ArenaAllocator.init(self.allocator);
 
                 // Copy source into arena so AST slices remain valid
-                const owned_source = cache_arena.allocator().dupe(u8, cypher) catch {
+                const owned_source = cache_arena.allocator().dupe(u8, normalized_cypher) catch {
                     cache_arena.deinit();
                     return QueryError.OutOfMemory;
                 };
@@ -2843,10 +2926,15 @@ pub const Database = struct {
                 const parse_result = cache_parser.parse();
 
                 if (parse_result.query == null) {
+                    const failure = self.makeParseFailure(parse_result) catch |err| {
+                        cache_parser.errors.deinit(self.allocator);
+                        cache_parser.arena.deinit();
+                        return err;
+                    };
                     // Parse failed - clean up and return error
                     cache_parser.errors.deinit(self.allocator);
                     cache_parser.arena.deinit();
-                    return QueryError.ParseError;
+                    return failure;
                 }
                 ast_query = parse_result.query.?;
 
@@ -2854,17 +2942,23 @@ pub const Database = struct {
                 var sem = SemanticAnalyzer.init(self.allocator);
                 const analysis = sem.analyze(ast_query);
                 if (!analysis.success) {
+                    const failure = self.makeSemanticFailure(analysis) catch |err| {
+                        sem.deinit();
+                        cache_parser.errors.deinit(self.allocator);
+                        cache_parser.arena.deinit();
+                        return err;
+                    };
                     sem.deinit();
                     cache_parser.errors.deinit(self.allocator);
                     cache_parser.arena.deinit();
-                    return QueryError.SemanticError;
+                    return failure;
                 }
                 analysis_vars = analysis.variables;
 
                 // Store in cache (cache takes ownership of the arena)
                 var arena_to_cache = cache_parser.arena;
                 cache_parser.errors.deinit(self.allocator);
-                cache_entry = self.query_cache.?.put(cypher, ast_query, analysis_vars, &arena_to_cache);
+                cache_entry = self.query_cache.?.put(normalized_cypher, ast_query, analysis_vars, &arena_to_cache);
                 if (cache_entry) |entry| {
                     ast_query = entry.query;
                     analysis_vars = entry.variables;
@@ -2877,18 +2971,18 @@ pub const Database = struct {
                 sem.deinit();
             } else {
                 // No cache: standard parse path
-                parser = Parser.init(self.allocator, cypher);
+                parser = Parser.init(self.allocator, normalized_cypher);
                 const parse_result = parser.?.parse();
 
                 if (parse_result.query == null) {
-                    return QueryError.ParseError;
+                    return self.makeParseFailure(parse_result);
                 }
                 ast_query = parse_result.query.?;
 
                 analyzer = SemanticAnalyzer.init(self.allocator);
                 const analysis = analyzer.?.analyze(ast_query);
                 if (!analysis.success) {
-                    return QueryError.SemanticError;
+                    return self.makeSemanticFailure(analysis);
                 }
                 analysis_vars = analysis.variables;
             }
@@ -2921,8 +3015,8 @@ pub const Database = struct {
             .errors_dropped = false,
         };
 
-        const root_op = planner.plan(ast_query, &analysis_result) catch {
-            return QueryError.PlanError;
+        const root_op = planner.plan(ast_query, &analysis_result) catch |err| {
+            return self.makePlanFailure(err);
         };
 
         // Execute
@@ -2947,11 +3041,104 @@ pub const Database = struct {
             }
         }
 
-        var exec_result = execute(query_alloc, root_op, &exec_ctx) catch {
-            return QueryError.ExecutionError;
+        var exec_result = execute(query_alloc, root_op, &exec_ctx) catch |err| {
+            return self.makeExecutionFailure(err);
         };
 
-        return self.convertResult(&exec_result, &planner);
+        const converted = try self.convertResult(&exec_result, &planner);
+        return .{ .success = converted };
+    }
+
+    fn normalizeCypher(cypher: []const u8) []const u8 {
+        var trimmed = std.mem.trim(u8, cypher, " \t\r\n");
+        while (trimmed.len > 0 and trimmed[trimmed.len - 1] == ';') {
+            trimmed = std.mem.trimRight(u8, trimmed[0 .. trimmed.len - 1], " \t\r\n");
+        }
+        return trimmed;
+    }
+
+    fn makeParseFailure(self: *Self, parse_result: parser_mod.ParserResult) QueryError!QueryDetailedResult {
+        if (parse_result.errors.len > 0) {
+            const first = parse_result.errors[0];
+            return self.makeFailure(
+                .parse,
+                first.message,
+                null,
+                .{
+                    .line = first.line,
+                    .column = first.column,
+                    .length = first.length,
+                },
+            );
+        }
+        if (parse_result.errors_dropped) {
+            return self.makeFailure(
+                .parse,
+                "Parse failed (errors dropped due to memory pressure)",
+                null,
+                null,
+            );
+        }
+        return self.makeFailure(.parse, "Parse error: invalid Cypher syntax", null, null);
+    }
+
+    fn makeSemanticFailure(self: *Self, analysis: semantic_mod.AnalysisResult) QueryError!QueryDetailedResult {
+        if (analysis.errors.len > 0) {
+            const first = analysis.errors[0];
+            return self.makeFailure(
+                .semantic,
+                first.message,
+                @tagName(first.code),
+                .{
+                    .line = first.location.line,
+                    .column = first.location.column,
+                    .length = first.location.length,
+                },
+            );
+        }
+        if (analysis.errors_dropped) {
+            return self.makeFailure(
+                .semantic,
+                "Semantic analysis failed (errors dropped due to memory pressure)",
+                null,
+                null,
+            );
+        }
+        return self.makeFailure(.semantic, "Semantic error: invalid query structure", null, null);
+    }
+
+    fn makePlanFailure(self: *Self, err: anyerror) QueryError!QueryDetailedResult {
+        return self.makeFailure(.plan, "Plan error: could not create execution plan", @errorName(err), null);
+    }
+
+    fn makeExecutionFailure(self: *Self, err: anyerror) QueryError!QueryDetailedResult {
+        return self.makeFailure(.execution, "Execution error: query failed", @errorName(err), null);
+    }
+
+    fn makeFailure(
+        self: *Self,
+        stage: QueryFailureStage,
+        message: []const u8,
+        code: ?[]const u8,
+        location: ?QueryFailureLocation,
+    ) QueryError!QueryDetailedResult {
+        const owned_message = self.allocator.dupe(u8, message) catch return QueryError.OutOfMemory;
+        errdefer self.allocator.free(owned_message);
+
+        var owned_code: ?[]const u8 = null;
+        if (code) |c| {
+            owned_code = self.allocator.dupe(u8, c) catch return QueryError.OutOfMemory;
+        }
+
+        return .{
+            .failure = .{
+                .allocator = self.allocator,
+                .stage = stage,
+                .message = owned_message,
+                .code = owned_code,
+                .location = location,
+            },
+        };
     }
 
     /// Convert executor result to database-friendly result format

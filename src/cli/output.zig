@@ -1,7 +1,10 @@
 //! Output formatting for Lattice CLI (table, JSON, CSV).
 
 const std = @import("std");
+const lattice = @import("lattice");
 const args = @import("args.zig");
+const QueryFailure = lattice.storage.database.QueryFailure;
+const QueryFailureLocation = lattice.storage.database.QueryFailureLocation;
 
 /// Managed array list for allocator tracking
 fn ManagedArrayList(comptime T: type) type {
@@ -332,6 +335,74 @@ pub fn printSuccess(writer: anytype, comptime fmt: []const u8, fmtArgs: anytype)
 
 pub fn printInfo(writer: anytype, comptime fmt: []const u8, fmtArgs: anytype) void {
     writer.print(fmt ++ "\n", fmtArgs) catch {};
+}
+
+/// Print a query failure with stage, message, and optional source location hint.
+pub fn printQueryFailure(writer: anytype, query: []const u8, failure: QueryFailure) void {
+    const stage_name = switch (failure.stage) {
+        .parse => "Parse",
+        .semantic => "Semantic",
+        .plan => "Plan",
+        .execution => "Execution",
+    };
+
+    if (failure.location) |loc| {
+        if (failure.code) |code| {
+            printError(
+                writer,
+                "{s} error ({s}) at {d}:{d}: {s}",
+                .{ stage_name, code, loc.line, loc.column, failure.message },
+            );
+        } else {
+            printError(
+                writer,
+                "{s} error at {d}:{d}: {s}",
+                .{ stage_name, loc.line, loc.column, failure.message },
+            );
+        }
+        printSourceHint(writer, query, loc);
+        return;
+    }
+
+    if (failure.code) |code| {
+        printError(writer, "{s} error ({s}): {s}", .{ stage_name, code, failure.message });
+    } else {
+        printError(writer, "{s} error: {s}", .{ stage_name, failure.message });
+    }
+}
+
+fn printSourceHint(writer: anytype, query: []const u8, loc: QueryFailureLocation) void {
+    const raw_line = sourceLineAt(query, loc.line) orelse return;
+    const line = std.mem.trimRight(u8, raw_line, "\r");
+
+    writer.print("  {d} | {s}\n", .{ loc.line, line }) catch return;
+    writer.writeAll("    | ") catch return;
+
+    const col: usize = if (loc.column > 0) @intCast(loc.column - 1) else 0;
+    for (0..col) |_| writer.writeByte(' ') catch return;
+
+    const len_raw: usize = if (loc.length > 0) @intCast(loc.length) else 1;
+    const caret_len: usize = @min(len_raw, 80);
+    for (0..caret_len) |_| writer.writeByte('^') catch return;
+    writer.writeByte('\n') catch {};
+}
+
+fn sourceLineAt(query: []const u8, target_line: u32) ?[]const u8 {
+    if (target_line == 0) return null;
+
+    var line: u32 = 1;
+    var start: usize = 0;
+    var i: usize = 0;
+    while (i <= query.len) : (i += 1) {
+        if (i == query.len or query[i] == '\n') {
+            if (line == target_line) {
+                return query[start..i];
+            }
+            line += 1;
+            start = i + 1;
+        }
+    }
+    return null;
 }
 
 test "table formatter" {

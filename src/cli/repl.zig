@@ -318,25 +318,30 @@ pub const Repl = struct {
     fn executeQuery(self: *Self, query_str: []const u8, stdout: anytype, stderr: anytype) void {
         const start_time = std.time.nanoTimestamp();
 
-        var result = self.db.query(query_str) catch |err| {
+        var detailed = self.db.queryDetailed(query_str) catch |err| {
             const err_msg = switch (err) {
+                error.OutOfMemory => "Out of memory",
                 error.ParseError => "Parse error: invalid Cypher syntax",
                 error.SemanticError => "Semantic error: invalid query structure",
                 error.PlanError => "Plan error: could not create execution plan",
                 error.ExecutionError => "Execution error: query failed",
-                error.OutOfMemory => "Out of memory",
             };
             output.printError(stderr, "{s}", .{err_msg});
             return;
         };
-        defer result.deinit();
+        if (detailed == .failure) {
+            output.printQueryFailure(stderr, query_str, detailed.failure);
+            detailed.failure.deinit();
+            return;
+        }
+        defer detailed.success.deinit();
 
         const end_time = std.time.nanoTimestamp();
         const elapsed_ns = @as(u64, @intCast(end_time - start_time));
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
 
         // Display results based on format
-        self.displayResult(&result, stdout, elapsed_ms) catch |err| {
+        self.displayResult(&detailed.success, stdout, elapsed_ms) catch |err| {
             output.printError(stderr, "Failed to display results: {s}", .{@errorName(err)});
         };
     }

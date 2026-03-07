@@ -336,24 +336,29 @@ fn cmdExec(
     };
     defer db.close();
 
-    // Execute query
-    var result = db.query(query_string) catch |err| {
+    var detailed = db.queryDetailed(query_string) catch |err| {
         const err_msg = switch (err) {
+            error.OutOfMemory => "Out of memory",
             error.ParseError => "Parse error: invalid Cypher syntax",
             error.SemanticError => "Semantic error: invalid query structure",
             error.PlanError => "Plan error: could not create execution plan",
             error.ExecutionError => "Execution error: query failed",
-            error.OutOfMemory => "Out of memory",
         };
         output.printError(stderr, "{s}", .{err_msg});
         return;
     };
-    defer result.deinit();
+
+    if (detailed == .failure) {
+        output.printQueryFailure(stderr, query_string, detailed.failure);
+        detailed.failure.deinit();
+        return;
+    }
 
     // Display result using REPL's display logic
     var repl = Repl.init(allocator, db, parsed_args.format);
     repl.show_timing = false; // No timing for exec command
-    repl.displayResult(&result, stdout, 0) catch |err| {
+    defer detailed.success.deinit();
+    repl.displayResult(&detailed.success, stdout, 0) catch |err| {
         output.printError(stderr, "Failed to display results: {s}", .{@errorName(err)});
     };
 }

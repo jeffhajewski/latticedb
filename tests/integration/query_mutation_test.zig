@@ -10,6 +10,7 @@ const lattice = @import("lattice");
 
 const Database = lattice.storage.database.Database;
 const QueryError = lattice.storage.database.QueryError;
+const QueryFailureStage = lattice.storage.database.QueryFailureStage;
 const PropertyValue = lattice.core.types.PropertyValue;
 const SymbolId = lattice.graph.symbols.SymbolId;
 const NodeProperty = lattice.graph.node.Property;
@@ -295,6 +296,52 @@ test "query: MATCH variable-length relationship rejects overflow hop count" {
         QueryError.ParseError,
         db.query("MATCH (a)-[:REL*4294967296]->(b) RETURN b"),
     );
+}
+
+test "query: queryDetailed surfaces parse diagnostics with location" {
+    const path = "/tmp/lattice_qm_query_detailed_parse_error.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var detailed = try db.queryDetailed("MATCH (n RETURN n");
+    defer detailed.deinit();
+
+    try std.testing.expect(detailed == .failure);
+    try std.testing.expectEqual(QueryFailureStage.parse, detailed.failure.stage);
+    try std.testing.expect(detailed.failure.message.len > 0);
+    try std.testing.expect(detailed.failure.location != null);
+    try std.testing.expect(detailed.failure.location.?.line >= 1);
+    try std.testing.expect(detailed.failure.location.?.column >= 1);
+}
+
+test "query: queryDetailed surfaces semantic diagnostics with code" {
+    const path = "/tmp/lattice_qm_query_detailed_semantic_error.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var detailed = try db.queryDetailed("MATCH (a)-[r:REL*1..2]->(b) RETURN r");
+    defer detailed.deinit();
+
+    try std.testing.expect(detailed == .failure);
+    try std.testing.expectEqual(QueryFailureStage.semantic, detailed.failure.stage);
+    try std.testing.expect(detailed.failure.message.len > 0);
+    try std.testing.expect(detailed.failure.code != null);
+    try std.testing.expect(detailed.failure.location != null);
+}
+
+test "query: semicolon-terminated queries execute end-to-end" {
+    const path = "/tmp/lattice_qm_semicolon_terminated_queries.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var create = try db.query("CREATE (a:Person {name: \"Alice\"})-[:REL]->(b:Person {name: \"Bob\"});");
+    create.deinit();
+
+    var result = try db.query("MATCH (a:Person)-[:REL]->(b:Person) RETURN a.name, b.name;");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try expectString(result, 0, 0, "Alice");
+    try expectString(result, 0, 1, "Bob");
 }
 
 test "query: MATCH relationship type alternation is rejected" {

@@ -176,6 +176,18 @@ test "lexer: comments skipped" {
     try std.testing.expectEqual(TokenType.kw_return, lexer.nextToken().token_type);
 }
 
+test "lexer: semicolons are ignored between statements" {
+    var lexer = Lexer.init("MATCH (n); RETURN n;");
+
+    try std.testing.expectEqual(TokenType.kw_match, lexer.nextToken().token_type);
+    try std.testing.expectEqual(TokenType.lparen, lexer.nextToken().token_type);
+    try std.testing.expectEqual(TokenType.identifier, lexer.nextToken().token_type);
+    try std.testing.expectEqual(TokenType.rparen, lexer.nextToken().token_type);
+    try std.testing.expectEqual(TokenType.kw_return, lexer.nextToken().token_type);
+    try std.testing.expectEqual(TokenType.identifier, lexer.nextToken().token_type);
+    try std.testing.expectEqual(TokenType.eof, lexer.nextToken().token_type);
+}
+
 test "lexer: boolean keywords" {
     var lexer = Lexer.init("true false TRUE FALSE");
 

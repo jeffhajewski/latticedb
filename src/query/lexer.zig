@@ -117,7 +117,7 @@ pub const Lexer = struct {
         while (!self.isAtEnd()) {
             const c = self.peek().?;
             switch (c) {
-                ' ', '\t', '\r' => {
+                ' ', '\t', '\r', ';' => {
                     _ = self.advance();
                 },
                 '\n' => {

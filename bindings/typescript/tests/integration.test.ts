@@ -9,7 +9,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { Database } from '../src/database';
-import { isLibraryAvailable } from '../src/ffi';
+import { isLibraryAvailable, LatticeQueryError, QueryErrorStage } from '../src/ffi';
 
 // Skip all tests if native library is not available
 const describeIfNative = isLibraryAvailable() ? describe : describe.skip;
@@ -415,6 +415,35 @@ describeIfNative('Database Integration', () => {
         'MATCH (n:Person) RETURN n'
       );
       expect(result.rows.length).toBe(3);
+    });
+
+    test('query parse errors include stage and location diagnostics', async () => {
+      try {
+        await db.query('MATCH (n RETURN n');
+        throw new Error('expected query to fail');
+      } catch (err) {
+        expect(err).toBeInstanceOf(LatticeQueryError);
+        const queryErr = err as LatticeQueryError;
+        expect(queryErr.stage).toBe(QueryErrorStage.Parse);
+        expect(queryErr.message.length).toBeGreaterThan(0);
+        expect(queryErr.location).toBeDefined();
+        expect(queryErr.location?.line).toBeGreaterThanOrEqual(1);
+        expect(queryErr.location?.column).toBeGreaterThanOrEqual(1);
+      }
+    });
+
+    test('query semantic errors include stage and diagnostic code', async () => {
+      try {
+        await db.query('MATCH (a)-[r:REL*1..2]->(b) RETURN r');
+        throw new Error('expected query to fail');
+      } catch (err) {
+        expect(err).toBeInstanceOf(LatticeQueryError);
+        const queryErr = err as LatticeQueryError;
+        expect(queryErr.stage).toBe(QueryErrorStage.Semantic);
+        expect(queryErr.message.length).toBeGreaterThan(0);
+        expect(queryErr.diagnosticCode).toBeDefined();
+        expect(queryErr.location).toBeDefined();
+      }
     });
   });
 

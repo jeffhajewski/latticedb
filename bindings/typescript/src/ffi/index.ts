@@ -8,12 +8,13 @@ import koffi from 'koffi';
 import { getBindings, LatticeBindings } from './bindings';
 import {
   LatticeErrorCode,
+  QueryErrorStage,
   LatticeTxnMode,
   LatticeValueType,
 } from './types';
 
 export { isLibraryAvailable, getLibraryPath } from './library';
-export { LatticeErrorCode, LatticeTxnMode, LatticeValueType } from './types';
+export { LatticeErrorCode, QueryErrorStage, LatticeTxnMode, LatticeValueType } from './types';
 
 /**
  * Error class for Lattice operations.
@@ -25,6 +26,31 @@ export class LatticeError extends Error {
   ) {
     super(message);
     this.name = 'LatticeError';
+  }
+}
+
+/**
+ * Query error source location.
+ */
+export interface QueryErrorLocation {
+  line: number;
+  column: number;
+  length: number;
+}
+
+/**
+ * Rich query execution error with stage-aware diagnostics.
+ */
+export class LatticeQueryError extends LatticeError {
+  constructor(
+    message: string,
+    code: LatticeErrorCode,
+    public readonly stage: QueryErrorStage,
+    public readonly diagnosticCode?: string,
+    public readonly location?: QueryErrorLocation
+  ) {
+    super(message, code);
+    this.name = 'LatticeQueryError';
   }
 }
 
@@ -98,6 +124,58 @@ export class LatticeFFI {
       const message = this.bindings.lattice_error_message(code);
       throw new LatticeError(message, code as LatticeErrorCode);
     }
+  }
+
+  private normalizeQueryStage(stage: number): QueryErrorStage {
+    switch (stage) {
+      case QueryErrorStage.Parse:
+        return QueryErrorStage.Parse;
+      case QueryErrorStage.Semantic:
+        return QueryErrorStage.Semantic;
+      case QueryErrorStage.Plan:
+        return QueryErrorStage.Plan;
+      case QueryErrorStage.Execution:
+        return QueryErrorStage.Execution;
+      default:
+        return QueryErrorStage.None;
+    }
+  }
+
+  /**
+   * Check an error code for query execution and include detailed diagnostics.
+   */
+  private checkQueryError(code: number, query: QueryHandle): void {
+    if (code === LatticeErrorCode.Ok) {
+      return;
+    }
+
+    const stage = this.normalizeQueryStage(
+      this.bindings.lattice_query_last_error_stage(query)
+    );
+    const detailMessage = this.bindings.lattice_query_last_error_message(query) ?? undefined;
+    const detailCode = this.bindings.lattice_query_last_error_code(query) ?? undefined;
+
+    let location: QueryErrorLocation | undefined;
+    if (this.bindings.lattice_query_last_error_has_location(query)) {
+      location = {
+        line: this.bindings.lattice_query_last_error_line(query),
+        column: this.bindings.lattice_query_last_error_column(query),
+        length: this.bindings.lattice_query_last_error_length(query),
+      };
+    }
+
+    if (stage !== QueryErrorStage.None || detailMessage !== undefined) {
+      const fallbackMessage = this.bindings.lattice_error_message(code);
+      throw new LatticeQueryError(
+        detailMessage ?? fallbackMessage,
+        code as LatticeErrorCode,
+        stage,
+        detailCode,
+        location
+      );
+    }
+
+    this.checkError(code);
   }
 
   /**
@@ -721,7 +799,7 @@ export class LatticeFFI {
   queryExecute(query: QueryHandle, txn: TransactionHandle): ResultHandle {
     const resultOut: unknown[] = [null];
     const err = this.bindings.lattice_query_execute(query, txn, resultOut);
-    this.checkError(err);
+    this.checkQueryError(err, query);
     return resultOut[0];
   }
 

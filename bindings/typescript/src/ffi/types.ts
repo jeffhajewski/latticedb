@@ -49,6 +49,17 @@ export const enum LatticeValueType {
 }
 
 /**
+ * Query diagnostic stages from the C API.
+ */
+export const enum QueryErrorStage {
+  None = 0,
+  Parse = 1,
+  Semantic = 2,
+  Plan = 3,
+  Execution = 4,
+}
+
+/**
  * Default open options matching LATTICE_OPEN_OPTIONS_DEFAULT
  */
 export function defaultOpenOptions(): {

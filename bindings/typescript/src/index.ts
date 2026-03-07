@@ -44,7 +44,13 @@ export {
   EmbeddingConfig,
 } from './types';
 export { hashEmbed, EmbeddingClient } from './embedding';
-export { isLibraryAvailable } from './ffi';
+export {
+  isLibraryAvailable,
+  LatticeError,
+  LatticeQueryError,
+  QueryErrorStage,
+  QueryErrorLocation,
+} from './ffi';
 
 /**
  * Get the library version.

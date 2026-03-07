@@ -11,6 +11,7 @@ from latticedb import (
     Database,
     LatticeError,
     LatticeNotFoundError,
+    LatticeQueryError,
     library_available,
 )
 
@@ -459,6 +460,37 @@ class TestQueries:
             for row in result:
                 count += 1
             assert count >= 3
+
+    def test_query_parse_error_includes_diagnostics(self, tmp_path):
+        """Parse failures surface query stage and source location."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with pytest.raises(LatticeQueryError) as exc_info:
+                db.query("MATCH (n RETURN n")
+
+            err = exc_info.value
+            assert err.stage == "parse"
+            assert err.location is not None
+            assert err.location["line"] >= 1
+            assert err.location["column"] >= 1
+            assert err.location["length"] >= 1
+            assert err.diagnostic_code is None
+
+    def test_query_semantic_error_includes_diagnostic_code(self, tmp_path):
+        """Semantic failures surface stage, code, and source location."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with pytest.raises(LatticeQueryError) as exc_info:
+                db.query("MATCH (a)-[r:REL*1..2]->(b) RETURN r")
+
+            err = exc_info.value
+            assert err.stage == "semantic"
+            assert err.diagnostic_code is not None
+            assert err.location is not None
+            assert err.location["line"] >= 1
+            assert err.location["column"] >= 1
 
 
 class TestBatchInsert:

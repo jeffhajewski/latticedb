@@ -24,7 +24,7 @@ from ctypes import (
     c_void_p,
 )
 from pathlib import Path
-from typing import Optional
+from typing import Any, Dict, Optional
 
 
 def _get_lib_name() -> str:
@@ -188,6 +188,24 @@ class LatticeOutOfMemoryError(LatticeError):
     pass
 
 
+class LatticeQueryError(LatticeError):
+    """Rich query execution error with stage-aware diagnostics."""
+
+    def __init__(
+        self,
+        message: str,
+        code: int = LATTICE_ERROR,
+        *,
+        stage: str = "none",
+        diagnostic_code: Optional[str] = None,
+        location: Optional[Dict[str, int]] = None,
+    ):
+        super().__init__(message, code)
+        self.stage = stage
+        self.diagnostic_code = diagnostic_code
+        self.location = location
+
+
 # Map error codes to exception classes
 _ERROR_MAP = {
     LATTICE_ERROR: LatticeError,
@@ -209,6 +227,21 @@ _ERROR_MAP = {
 # Transaction modes
 LATTICE_TXN_READ_ONLY = 0
 LATTICE_TXN_READ_WRITE = 1
+
+# Query diagnostic stages
+LATTICE_QUERY_STAGE_NONE = 0
+LATTICE_QUERY_STAGE_PARSE = 1
+LATTICE_QUERY_STAGE_SEMANTIC = 2
+LATTICE_QUERY_STAGE_PLAN = 3
+LATTICE_QUERY_STAGE_EXECUTION = 4
+
+_QUERY_STAGE_NAMES = {
+    LATTICE_QUERY_STAGE_NONE: "none",
+    LATTICE_QUERY_STAGE_PARSE: "parse",
+    LATTICE_QUERY_STAGE_SEMANTIC: "semantic",
+    LATTICE_QUERY_STAGE_PLAN: "plan",
+    LATTICE_QUERY_STAGE_EXECUTION: "execution",
+}
 
 # Value types
 LATTICE_VALUE_NULL = 0
@@ -582,6 +615,28 @@ class LatticeLib:
         ]
         self._lib.lattice_query_execute.restype = c_int
 
+        # lattice_query_last_error_*
+        self._lib.lattice_query_last_error_stage.argtypes = [LatticeQuery]
+        self._lib.lattice_query_last_error_stage.restype = c_int
+
+        self._lib.lattice_query_last_error_message.argtypes = [LatticeQuery]
+        self._lib.lattice_query_last_error_message.restype = c_char_p
+
+        self._lib.lattice_query_last_error_code.argtypes = [LatticeQuery]
+        self._lib.lattice_query_last_error_code.restype = c_char_p
+
+        self._lib.lattice_query_last_error_has_location.argtypes = [LatticeQuery]
+        self._lib.lattice_query_last_error_has_location.restype = c_bool
+
+        self._lib.lattice_query_last_error_line.argtypes = [LatticeQuery]
+        self._lib.lattice_query_last_error_line.restype = c_uint32
+
+        self._lib.lattice_query_last_error_column.argtypes = [LatticeQuery]
+        self._lib.lattice_query_last_error_column.restype = c_uint32
+
+        self._lib.lattice_query_last_error_length.argtypes = [LatticeQuery]
+        self._lib.lattice_query_last_error_length.restype = c_uint32
+
         # lattice_query_free
         self._lib.lattice_query_free.argtypes = [LatticeQuery]
         self._lib.lattice_query_free.restype = None
@@ -713,6 +768,73 @@ def check_error(code: int) -> None:
     # Get the appropriate exception class
     exc_class = _ERROR_MAP.get(code, LatticeError)
     raise exc_class(message, code)
+
+
+def check_query_error(code: int, query_ptr: Any) -> None:
+    """Check query error code and raise query diagnostics when available.
+
+    Args:
+        code: Error code returned by lattice_query_execute.
+        query_ptr: Opaque lattice_query* handle used to fetch diagnostics.
+
+    Raises:
+        LatticeQueryError: If query diagnostics are available.
+        LatticeError: Fallback for generic errors.
+    """
+    if code == LATTICE_OK:
+        return
+
+    stage = "none"
+    diagnostic_code: Optional[str] = None
+    location: Optional[Dict[str, int]] = None
+    message: Optional[str] = None
+
+    try:
+        lib = get_lib()
+
+        stage_value = lib._lib.lattice_query_last_error_stage(query_ptr)
+        stage = _QUERY_STAGE_NAMES.get(stage_value, "none")
+
+        msg_ptr = lib._lib.lattice_query_last_error_message(query_ptr)
+        if msg_ptr:
+            message = msg_ptr.decode("utf-8")
+
+        diag_code_ptr = lib._lib.lattice_query_last_error_code(query_ptr)
+        if diag_code_ptr:
+            diagnostic_code = diag_code_ptr.decode("utf-8")
+
+        if bool(lib._lib.lattice_query_last_error_has_location(query_ptr)):
+            location = {
+                "line": int(lib._lib.lattice_query_last_error_line(query_ptr)),
+                "column": int(lib._lib.lattice_query_last_error_column(query_ptr)),
+                "length": int(lib._lib.lattice_query_last_error_length(query_ptr)),
+            }
+    except Exception:
+        # If diagnostics lookup fails, we still surface a normal lattice error below.
+        pass
+
+    if message is None:
+        try:
+            lib = get_lib()
+            msg_ptr = lib._lib.lattice_error_message(code)
+            if msg_ptr:
+                message = msg_ptr.decode("utf-8")
+        except Exception:
+            message = None
+
+    if message is None:
+        message = f"Error code {code}"
+
+    if stage != "none" or diagnostic_code is not None or location is not None:
+        raise LatticeQueryError(
+            message,
+            code,
+            stage=stage,
+            diagnostic_code=diagnostic_code,
+            location=location,
+        )
+
+    check_error(code)
 
 
 def value_to_python(c_value: LatticeValue):

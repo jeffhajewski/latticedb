@@ -1,0 +1,190 @@
+//! End-to-end integration tests for graph export formats.
+//!
+//! Verifies JSON, CSV, JSONL, and DOT exports against real database state.
+
+const std = @import("std");
+const lattice = @import("lattice");
+
+const Database = lattice.storage.database.Database;
+const import_export = @import("import_export");
+
+fn openTestDb(path: []const u8) !*Database {
+    std.fs.cwd().deleteFile(path) catch {};
+    return try Database.open(std.testing.allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = false,
+            .enable_fts = false,
+        },
+    });
+}
+
+fn cleanupTestDb(db: *Database, path: []const u8) void {
+    db.close();
+    std.fs.cwd().deleteFile(path) catch {};
+}
+
+fn seedMultiLabelParallelGraph(db: *Database) !void {
+    const alice = try db.createNode(null, &.{ "Person", "Employee" });
+    const bob = try db.createNode(null, &.{"Person"});
+
+    try db.setNodeProperty(null, alice, "name", .{ .string_val = "Alice" });
+    try db.setNodeProperty(null, bob, "name", .{ .string_val = "Bob" });
+
+    // Parallel edges with the same type must both survive export.
+    try db.createEdge(null, alice, bob, "REL");
+    try db.createEdge(null, alice, bob, "REL");
+}
+
+fn countNonEmptyLines(s: []const u8) usize {
+    var count: usize = 0;
+    var lines = std.mem.splitScalar(u8, s, '\n');
+    while (lines.next()) |line| {
+        if (std.mem.trim(u8, line, " \t\r").len > 0) {
+            count += 1;
+        }
+    }
+    return count;
+}
+
+test "import_export: exportJson deduplicates multi-label nodes and preserves parallel edges" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_export_json_dedup_test.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    try seedMultiLabelParallelGraph(db);
+
+    var buf: [8192]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+
+    const stats = try import_export.exportJson(allocator, db, stream.writer(), null);
+    try std.testing.expectEqual(@as(u64, 2), stats.nodes_exported);
+    try std.testing.expectEqual(@as(u64, 2), stats.edges_exported);
+
+    const output = buf[0..stream.pos];
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, output, .{});
+    defer parsed.deinit();
+
+    const root = parsed.value;
+    try std.testing.expect(root == .object);
+    const nodes = root.object.get("nodes").?.array.items;
+    const edges = root.object.get("edges").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), nodes.len);
+    try std.testing.expectEqual(@as(usize, 2), edges.len);
+}
+
+test "import_export: exportCsv deduplicates multi-label nodes and preserves parallel edges" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_export_csv_dedup_test.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    try seedMultiLabelParallelGraph(db);
+
+    var nodes_buf: [4096]u8 = undefined;
+    var nodes_stream = std.io.fixedBufferStream(&nodes_buf);
+
+    var edges_buf: [4096]u8 = undefined;
+    var edges_stream = std.io.fixedBufferStream(&edges_buf);
+
+    const stats = try import_export.exportCsv(allocator, db, nodes_stream.writer(), edges_stream.writer(), null);
+    try std.testing.expectEqual(@as(u64, 2), stats.nodes_exported);
+    try std.testing.expectEqual(@as(u64, 2), stats.edges_exported);
+
+    const nodes_csv = nodes_buf[0..nodes_stream.pos];
+    const edges_csv = edges_buf[0..edges_stream.pos];
+
+    try std.testing.expectEqual(@as(usize, 3), countNonEmptyLines(nodes_csv)); // header + 2 nodes
+    try std.testing.expectEqual(@as(usize, 3), countNonEmptyLines(edges_csv)); // header + 2 edges
+}
+
+test "import_export: exportJsonl emits node and edge records without duplication" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_export_jsonl_test.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    try seedMultiLabelParallelGraph(db);
+
+    var buf: [8192]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+
+    const stats = try import_export.exportJsonl(allocator, db, stream.writer(), null);
+    try std.testing.expectEqual(@as(u64, 2), stats.nodes_exported);
+    try std.testing.expectEqual(@as(u64, 2), stats.edges_exported);
+
+    const output = buf[0..stream.pos];
+    var node_ids = std.AutoHashMap(u64, void).init(allocator);
+    defer node_ids.deinit();
+
+    var node_count: usize = 0;
+    var edge_count: usize = 0;
+
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{});
+        defer parsed.deinit();
+
+        const root = parsed.value;
+        try std.testing.expect(root == .object);
+        const kind = root.object.get("kind").?.string;
+
+        if (std.mem.eql(u8, kind, "node")) {
+            node_count += 1;
+            const id_str = root.object.get("id").?.string;
+            const id = try std.fmt.parseInt(u64, id_str, 10);
+            _ = try node_ids.getOrPut(id);
+        } else if (std.mem.eql(u8, kind, "edge")) {
+            edge_count += 1;
+            _ = root.object.get("source").?;
+            _ = root.object.get("target").?;
+            _ = root.object.get("type").?;
+        } else {
+            return error.InvalidFormat;
+        }
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), node_count);
+    try std.testing.expectEqual(@as(usize, 2), edge_count);
+    try std.testing.expectEqual(@as(usize, 2), node_ids.count());
+}
+
+test "import_export: exportDot emits valid graph with deduplicated nodes and parallel edges" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_export_dot_test.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    try seedMultiLabelParallelGraph(db);
+
+    var buf: [8192]u8 = undefined;
+    var stream = std.io.fixedBufferStream(&buf);
+
+    const stats = try import_export.exportDot(allocator, db, stream.writer(), null);
+    try std.testing.expectEqual(@as(u64, 2), stats.nodes_exported);
+    try std.testing.expectEqual(@as(u64, 2), stats.edges_exported);
+
+    const output = buf[0..stream.pos];
+    try std.testing.expect(std.mem.startsWith(u8, output, "digraph G {\n"));
+    try std.testing.expect(std.mem.endsWith(u8, output, "}\n"));
+
+    var node_lines: usize = 0;
+    var edge_lines: usize = 0;
+    var lines = std.mem.splitScalar(u8, output, '\n');
+    while (lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+        if (std.mem.indexOf(u8, trimmed, " -> ") != null) {
+            edge_lines += 1;
+        } else if (std.mem.startsWith(u8, trimmed, "n") and std.mem.endsWith(u8, trimmed, "];")) {
+            node_lines += 1;
+        }
+    }
+
+    try std.testing.expectEqual(@as(usize, 2), node_lines);
+    try std.testing.expectEqual(@as(usize, 2), edge_lines);
+}

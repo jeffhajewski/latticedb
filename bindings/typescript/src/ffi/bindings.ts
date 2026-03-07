@@ -248,6 +248,13 @@ export interface LatticeBindings {
     txn: unknown,
     result_out: unknown[]
   ) => number;
+  lattice_query_last_error_stage: (query: unknown) => number;
+  lattice_query_last_error_message: (query: unknown) => string | null;
+  lattice_query_last_error_code: (query: unknown) => string | null;
+  lattice_query_last_error_has_location: (query: unknown) => boolean;
+  lattice_query_last_error_line: (query: unknown) => number;
+  lattice_query_last_error_column: (query: unknown) => number;
+  lattice_query_last_error_length: (query: unknown) => number;
   lattice_query_free: (query: unknown) => void;
   lattice_query_cache_clear: (db: unknown) => number;
   lattice_query_cache_stats: (
@@ -522,6 +529,27 @@ function createBindings(): LatticeBindings {
       QueryPtr,
       TxnPtr,
       koffi.out(ResultPtrPtr), // result_out
+    ]),
+    lattice_query_last_error_stage: lib.func('lattice_query_last_error_stage', 'int', [
+      QueryPtr,
+    ]),
+    lattice_query_last_error_message: lib.func('lattice_query_last_error_message', 'str', [
+      QueryPtr,
+    ]),
+    lattice_query_last_error_code: lib.func('lattice_query_last_error_code', 'str', [
+      QueryPtr,
+    ]),
+    lattice_query_last_error_has_location: lib.func('lattice_query_last_error_has_location', 'bool', [
+      QueryPtr,
+    ]),
+    lattice_query_last_error_line: lib.func('lattice_query_last_error_line', 'uint32', [
+      QueryPtr,
+    ]),
+    lattice_query_last_error_column: lib.func('lattice_query_last_error_column', 'uint32', [
+      QueryPtr,
+    ]),
+    lattice_query_last_error_length: lib.func('lattice_query_last_error_length', 'uint32', [
+      QueryPtr,
     ]),
     lattice_query_free: lib.func('lattice_query_free', 'void', [QueryPtr]),
     lattice_query_cache_clear: lib.func('lattice_query_cache_clear', 'int', [DatabasePtr]),

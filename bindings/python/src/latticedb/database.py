@@ -18,6 +18,7 @@ from latticedb._bindings import (
     LatticeValue,
     OpenOptions,
     check_error,
+    check_query_error,
     get_lib,
     python_to_value,
     value_to_python,
@@ -225,7 +226,7 @@ class Database:
                 txn_ptr,
                 byref(result_ptr),
             )
-            check_error(code)
+            check_query_error(code, query_ptr)
 
             # Collect column names
             column_count = lib._lib.lattice_result_column_count(result_ptr)

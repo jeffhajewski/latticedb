@@ -1,6 +1,6 @@
 //! Import/Export functionality for LatticeDB CLI.
 //!
-//! Supports JSON and CSV formats for importing and exporting graph data.
+//! Supports JSON, JSONL, CSV, and DOT formats for importing/exporting graph data.
 
 const std = @import("std");
 const lattice = @import("lattice");
@@ -138,7 +138,7 @@ fn importNode(
     }
 
     // Create the node
-    const node_id = db.createNode(null,labels_list.items) catch {
+    const node_id = db.createNode(null, labels_list.items) catch {
         return error.DatabaseError;
     };
 
@@ -151,7 +151,7 @@ fn importNode(
             var iter = props_val.object.iterator();
             while (iter.next()) |entry| {
                 const prop_val = jsonToPropertyValue(entry.value_ptr.*) catch continue;
-                db.setNodeProperty(null,node_id, entry.key_ptr.*, prop_val) catch continue;
+                db.setNodeProperty(null, node_id, entry.key_ptr.*, prop_val) catch continue;
             }
         }
     }
@@ -189,7 +189,7 @@ fn importEdge(
     const target_id = id_map.get(target_str) orelse return error.InvalidNodeId;
 
     // Create the edge
-    db.createEdge(null,source_id, target_id, edge_type) catch {
+    db.createEdge(null, source_id, target_id, edge_type) catch {
         return error.DatabaseError;
     };
 
@@ -230,26 +230,29 @@ pub fn exportJson(
 
     try writer.writeAll("{\"nodes\":[");
 
-    // Get all labels or filter
+    // Get all labels or apply filter.
     const labels = db.getAllLabels() catch {
         return ImportExportError.DatabaseError;
     };
     defer db.freeLabelInfos(labels);
 
-    var first_node = true;
+    // Export each node once, even when it has multiple labels.
+    var seen_nodes = std.AutoHashMap(NodeId, void).init(allocator);
+    defer seen_nodes.deinit();
 
-    // Export nodes by label
+    var first_node = true;
     for (labels) |label_info| {
-        // Apply label filter if specified
         if (label_filter) |filter| {
             if (!std.mem.eql(u8, label_info.name, filter)) continue;
         }
 
-        // Get all nodes with this label
         const nodes = db.getNodesByLabel(label_info.name) catch continue;
         defer allocator.free(nodes);
 
         for (nodes) |node_id| {
+            const node_gop = seen_nodes.getOrPut(node_id) catch return ImportExportError.OutOfMemory;
+            if (node_gop.found_existing) continue;
+
             if (!first_node) {
                 try writer.writeAll(",");
             }
@@ -264,8 +267,10 @@ pub fn exportJson(
 
     // Export edges
     var first_edge = true;
+    // Visit each source node once to avoid duplicate edges from multi-label nodes.
+    var seen_sources = std.AutoHashMap(NodeId, void).init(allocator);
+    defer seen_sources.deinit();
 
-    // We need to iterate all nodes and get their outgoing edges
     for (labels) |label_info| {
         if (label_filter) |filter| {
             if (!std.mem.eql(u8, label_info.name, filter)) continue;
@@ -275,6 +280,9 @@ pub fn exportJson(
         defer allocator.free(nodes);
 
         for (nodes) |node_id| {
+            const source_gop = seen_sources.getOrPut(node_id) catch return ImportExportError.OutOfMemory;
+            if (source_gop.found_existing) continue;
+
             const edges = db.getOutgoingEdges(node_id) catch continue;
             defer db.freeEdgeInfos(edges);
 
@@ -293,6 +301,180 @@ pub fn exportJson(
     try writer.writeAll("]}\n");
 
     return stats;
+}
+
+/// Export database to JSONL format (one JSON object per line).
+pub fn exportJsonl(
+    allocator: std.mem.Allocator,
+    db: *Database,
+    writer: anytype,
+    label_filter: ?[]const u8,
+) !ExportStats {
+    var stats = ExportStats{};
+
+    const labels = db.getAllLabels() catch {
+        return ImportExportError.DatabaseError;
+    };
+    defer db.freeLabelInfos(labels);
+
+    // Emit node records first (deduplicated by node ID).
+    var seen_nodes = std.AutoHashMap(NodeId, void).init(allocator);
+    defer seen_nodes.deinit();
+
+    for (labels) |label_info| {
+        if (label_filter) |filter| {
+            if (!std.mem.eql(u8, label_info.name, filter)) continue;
+        }
+
+        const nodes = db.getNodesByLabel(label_info.name) catch continue;
+        defer allocator.free(nodes);
+
+        for (nodes) |node_id| {
+            const node_gop = seen_nodes.getOrPut(node_id) catch return ImportExportError.OutOfMemory;
+            if (node_gop.found_existing) continue;
+
+            try writeNodeJsonlRecord(allocator, db, writer, node_id);
+            try writer.writeByte('\n');
+            stats.nodes_exported += 1;
+        }
+    }
+
+    // Emit edge records once per source node.
+    var seen_sources = std.AutoHashMap(NodeId, void).init(allocator);
+    defer seen_sources.deinit();
+
+    for (labels) |label_info| {
+        if (label_filter) |filter| {
+            if (!std.mem.eql(u8, label_info.name, filter)) continue;
+        }
+
+        const nodes = db.getNodesByLabel(label_info.name) catch continue;
+        defer allocator.free(nodes);
+
+        for (nodes) |node_id| {
+            const source_gop = seen_sources.getOrPut(node_id) catch return ImportExportError.OutOfMemory;
+            if (source_gop.found_existing) continue;
+
+            const edges = db.getOutgoingEdges(node_id) catch continue;
+            defer db.freeEdgeInfos(edges);
+
+            for (edges) |edge| {
+                try writeEdgeJsonlRecord(writer, edge);
+                try writer.writeByte('\n');
+                stats.edges_exported += 1;
+            }
+        }
+    }
+
+    return stats;
+}
+
+/// Export database to Graphviz DOT format.
+pub fn exportDot(
+    allocator: std.mem.Allocator,
+    db: *Database,
+    writer: anytype,
+    label_filter: ?[]const u8,
+) !ExportStats {
+    var stats = ExportStats{};
+    try writer.writeAll("digraph G {\n");
+
+    const labels = db.getAllLabels() catch {
+        return ImportExportError.DatabaseError;
+    };
+    defer db.freeLabelInfos(labels);
+
+    // Emit each node once.
+    var seen_nodes = std.AutoHashMap(NodeId, void).init(allocator);
+    defer seen_nodes.deinit();
+
+    for (labels) |label_info| {
+        if (label_filter) |filter| {
+            if (!std.mem.eql(u8, label_info.name, filter)) continue;
+        }
+
+        const nodes = db.getNodesByLabel(label_info.name) catch continue;
+        defer allocator.free(nodes);
+
+        for (nodes) |node_id| {
+            const node_gop = seen_nodes.getOrPut(node_id) catch return ImportExportError.OutOfMemory;
+            if (node_gop.found_existing) continue;
+
+            try writeNodeDot(allocator, db, writer, node_id);
+            stats.nodes_exported += 1;
+        }
+    }
+
+    // Emit edges once per source node.
+    var seen_sources = std.AutoHashMap(NodeId, void).init(allocator);
+    defer seen_sources.deinit();
+
+    for (labels) |label_info| {
+        if (label_filter) |filter| {
+            if (!std.mem.eql(u8, label_info.name, filter)) continue;
+        }
+
+        const nodes = db.getNodesByLabel(label_info.name) catch continue;
+        defer allocator.free(nodes);
+
+        for (nodes) |node_id| {
+            const source_gop = seen_sources.getOrPut(node_id) catch return ImportExportError.OutOfMemory;
+            if (source_gop.found_existing) continue;
+
+            const edges = db.getOutgoingEdges(node_id) catch continue;
+            defer db.freeEdgeInfos(edges);
+
+            for (edges) |edge| {
+                try writeEdgeDot(writer, edge);
+                stats.edges_exported += 1;
+            }
+        }
+    }
+
+    try writer.writeAll("}\n");
+    return stats;
+}
+
+fn writeJsonStringContent(writer: anytype, s: []const u8) !void {
+    for (s) |c| {
+        switch (c) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            else => {
+                if (c < 0x20) {
+                    try writer.print("\\u00{x:0>2}", .{c});
+                } else {
+                    try writer.writeByte(c);
+                }
+            },
+        }
+    }
+}
+
+fn writeJsonString(writer: anytype, s: []const u8) !void {
+    try writer.writeByte('"');
+    try writeJsonStringContent(writer, s);
+    try writer.writeByte('"');
+}
+
+fn writeDotStringContent(writer: anytype, s: []const u8) !void {
+    for (s) |c| {
+        switch (c) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            else => if (c < 0x20) {
+                try writer.writeByte(' ');
+            } else {
+                try writer.writeByte(c);
+            },
+        }
+    }
 }
 
 fn writeNodeJson(
@@ -314,7 +496,7 @@ fn writeNodeJson(
 
     for (node_labels, 0..) |label, i| {
         if (i > 0) try writer.writeAll(",");
-        try writer.print("\"{s}\"", .{label});
+        try writeJsonString(writer, label);
     }
 
     try writer.writeAll("],\"properties\":{");
@@ -325,7 +507,8 @@ fn writeNodeJson(
 
     for (props, 0..) |prop, i| {
         if (i > 0) try writer.writeAll(",");
-        try writer.print("\"{s}\":", .{prop.key});
+        try writeJsonString(writer, prop.key);
+        try writer.writeByte(':');
         try writePropertyValueJson(writer, prop.value);
     }
 
@@ -333,11 +516,85 @@ fn writeNodeJson(
 }
 
 fn writeEdgeJson(writer: anytype, edge: Database.EdgeInfo) !void {
-    try writer.print("{{\"source\":\"{d}\",\"target\":\"{d}\",\"type\":\"{s}\",\"properties\":{{}}}}", .{
-        edge.source,
-        edge.target,
-        edge.edge_type,
-    });
+    try writer.print("{{\"source\":\"{d}\",\"target\":\"{d}\",\"type\":", .{ edge.source, edge.target });
+    try writeJsonString(writer, edge.edge_type);
+    try writer.writeAll(",\"properties\":{}}");
+}
+
+fn writeNodeJsonlRecord(
+    allocator: std.mem.Allocator,
+    db: *Database,
+    writer: anytype,
+    node_id: NodeId,
+) !void {
+    try writer.writeAll("{\"kind\":\"node\",\"id\":");
+    try writer.print("\"{d}\",\"labels\":[", .{node_id});
+
+    const node_labels = db.getNodeLabels(node_id) catch &[_][]const u8{};
+    defer {
+        for (node_labels) |label| {
+            allocator.free(label);
+        }
+        allocator.free(node_labels);
+    }
+
+    for (node_labels, 0..) |label, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writeJsonString(writer, label);
+    }
+
+    try writer.writeAll("],\"properties\":{");
+
+    const props = db.getNodeProperties(node_id) catch &[_]Database.PropertyEntry{};
+    defer db.freePropertyEntries(@constCast(props));
+
+    for (props, 0..) |prop, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writeJsonString(writer, prop.key);
+        try writer.writeByte(':');
+        try writePropertyValueJson(writer, prop.value);
+    }
+
+    try writer.writeAll("}}");
+}
+
+fn writeEdgeJsonlRecord(writer: anytype, edge: Database.EdgeInfo) !void {
+    try writer.print("{{\"kind\":\"edge\",\"source\":\"{d}\",\"target\":\"{d}\",\"type\":", .{ edge.source, edge.target });
+    try writeJsonString(writer, edge.edge_type);
+    try writer.writeAll(",\"properties\":{}}");
+}
+
+fn writeNodeDot(
+    allocator: std.mem.Allocator,
+    db: *Database,
+    writer: anytype,
+    node_id: NodeId,
+) !void {
+    try writer.print("  n{d} [label=\"{d}", .{ node_id, node_id });
+
+    const node_labels = db.getNodeLabels(node_id) catch &[_][]const u8{};
+    defer {
+        for (node_labels) |label| {
+            allocator.free(label);
+        }
+        allocator.free(node_labels);
+    }
+
+    if (node_labels.len > 0) {
+        try writer.writeAll(" : ");
+        for (node_labels, 0..) |label, i| {
+            if (i > 0) try writer.writeAll(":");
+            try writeDotStringContent(writer, label);
+        }
+    }
+
+    try writer.writeAll("\"];\n");
+}
+
+fn writeEdgeDot(writer: anytype, edge: Database.EdgeInfo) !void {
+    try writer.print("  n{d} -> n{d} [label=\"", .{ edge.source, edge.target });
+    try writeDotStringContent(writer, edge.edge_type);
+    try writer.writeAll("\"];\n");
 }
 
 fn writePropertyValueJson(writer: anytype, val: PropertyValue) !void {
@@ -346,20 +603,7 @@ fn writePropertyValueJson(writer: anytype, val: PropertyValue) !void {
         .bool_val => |b| try writer.writeAll(if (b) "true" else "false"),
         .int_val => |i| try writer.print("{d}", .{i}),
         .float_val => |f| try writer.print("{d}", .{f}),
-        .string_val => |s| {
-            try writer.writeByte('"');
-            for (s) |c| {
-                switch (c) {
-                    '"' => try writer.writeAll("\\\""),
-                    '\\' => try writer.writeAll("\\\\"),
-                    '\n' => try writer.writeAll("\\n"),
-                    '\r' => try writer.writeAll("\\r"),
-                    '\t' => try writer.writeAll("\\t"),
-                    else => try writer.writeByte(c),
-                }
-            }
-            try writer.writeByte('"');
-        },
+        .string_val => |s| try writeJsonString(writer, s),
         .bytes_val => |bytes| {
             // Encode bytes as hex string
             try writer.writeByte('"');
@@ -389,7 +633,8 @@ fn writePropertyValueJson(writer: anytype, val: PropertyValue) !void {
             try writer.writeByte('{');
             for (entries, 0..) |entry, i| {
                 if (i > 0) try writer.writeByte(',');
-                try writer.print("\"{s}\":", .{entry.key});
+                try writeJsonString(writer, entry.key);
+                try writer.writeByte(':');
                 try writePropertyValueJson(writer, entry.value);
             }
             try writer.writeByte('}');
@@ -504,7 +749,7 @@ fn importNodeCsvLine(
     }
 
     // Create node
-    const node_id = db.createNode(null,labels_list.items) catch {
+    const node_id = db.createNode(null, labels_list.items) catch {
         return error.DatabaseError;
     };
 
@@ -520,7 +765,7 @@ fn importNodeCsvLine(
             else |_|
                 .{ .string_val = val };
 
-            db.setNodeProperty(null,node_id, header, prop_val) catch continue;
+            db.setNodeProperty(null, node_id, header, prop_val) catch continue;
         }
     }
 }
@@ -572,7 +817,7 @@ fn importEdgeCsvLine(db: *Database, line: []const u8) !void {
         return error.InvalidNodeId;
     };
 
-    db.createEdge(null,source_id, target_id, edge_type) catch {
+    db.createEdge(null, source_id, target_id, edge_type) catch {
         return error.DatabaseError;
     };
 }
@@ -596,7 +841,10 @@ pub fn exportCsv(
     };
     defer db.freeLabelInfos(labels);
 
-    // Export nodes
+    // Export nodes (deduplicated by node ID).
+    var seen_nodes = std.AutoHashMap(NodeId, void).init(allocator);
+    defer seen_nodes.deinit();
+
     for (labels) |label_info| {
         if (label_filter) |filter| {
             if (!std.mem.eql(u8, label_info.name, filter)) continue;
@@ -606,6 +854,9 @@ pub fn exportCsv(
         defer allocator.free(nodes);
 
         for (nodes) |node_id| {
+            const node_gop = seen_nodes.getOrPut(node_id) catch return ImportExportError.OutOfMemory;
+            if (node_gop.found_existing) continue;
+
             // Get all labels for this node
             const node_labels = db.getNodeLabels(node_id) catch &[_][]const u8{};
             defer {
@@ -628,7 +879,10 @@ pub fn exportCsv(
     // Write edges header
     try edges_writer.writeAll("_source,_target,_type\n");
 
-    // Export edges
+    // Export edges once per source node.
+    var seen_sources = std.AutoHashMap(NodeId, void).init(allocator);
+    defer seen_sources.deinit();
+
     for (labels) |label_info| {
         if (label_filter) |filter| {
             if (!std.mem.eql(u8, label_info.name, filter)) continue;
@@ -638,6 +892,9 @@ pub fn exportCsv(
         defer allocator.free(nodes);
 
         for (nodes) |node_id| {
+            const source_gop = seen_sources.getOrPut(node_id) catch return ImportExportError.OutOfMemory;
+            if (source_gop.found_existing) continue;
+
             const edges = db.getOutgoingEdges(node_id) catch continue;
             defer db.freeEdgeInfos(edges);
 

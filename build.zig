@@ -124,12 +124,22 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_lib_tests.step);
 
     // Integration test module - imports the library module
+    const import_export_module = b.createModule(.{
+        .root_source_file = b.path("src/cli/import_export.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "lattice", .module = lib_module },
+        },
+    });
+
     const integration_test_module = b.createModule(.{
         .root_source_file = b.path("tests/integration/main.zig"),
         .target = target,
         .optimize = optimize,
         .imports = &.{
             .{ .name = "lattice", .module = lib_module },
+            .{ .name = "import_export", .module = import_export_module },
         },
     });
 

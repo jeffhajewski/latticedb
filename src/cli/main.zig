@@ -723,17 +723,18 @@ fn cmdExport(
 
     output.printInfo(stdout, "Exporting {s} to {s}...", .{ path, file });
 
-    // Detect file format by extension
-    const is_json = std.mem.endsWith(u8, file, ".json");
-    const is_csv = std.mem.endsWith(u8, file, ".csv");
-
-    if (!is_json and !is_csv) {
-        output.printError(stderr, "Unknown file format. Use .json or .csv extension.", .{});
+    const ExportKind = enum { json, jsonl, csv, dot };
+    const export_kind: ExportKind = blk: {
+        if (std.mem.endsWith(u8, file, ".json")) break :blk .json;
+        if (std.mem.endsWith(u8, file, ".jsonl")) break :blk .jsonl;
+        if (std.mem.endsWith(u8, file, ".csv")) break :blk .csv;
+        if (std.mem.endsWith(u8, file, ".dot")) break :blk .dot;
+        output.printError(stderr, "Unknown file format. Use .json, .jsonl, .csv, or .dot extension.", .{});
         return;
-    }
+    };
 
-    if (is_json) {
-        // Export to JSON
+    if (export_kind != .csv) {
+        // Single-file exports: JSON, JSONL, DOT.
         const out_file = std.fs.cwd().createFile(file, .{}) catch |err| {
             output.printError(stderr, "Cannot create output file: {s}", .{@errorName(err)});
             return;
@@ -741,8 +742,12 @@ fn cmdExport(
         defer out_file.close();
 
         const writer = out_file.deprecatedWriter();
-
-        const stats = import_export.exportJson(allocator, db, writer, parsed_args.label_filter);
+        const stats = switch (export_kind) {
+            .json => import_export.exportJson(allocator, db, writer, parsed_args.label_filter),
+            .jsonl => import_export.exportJsonl(allocator, db, writer, parsed_args.label_filter),
+            .dot => import_export.exportDot(allocator, db, writer, parsed_args.label_filter),
+            .csv => unreachable,
+        };
 
         if (stats) |s| {
             switch (parsed_args.format) {
@@ -885,7 +890,7 @@ fn printUsage(writer: anytype) void {
         \\
         \\  Import/Export:
         \\    import <path>       Import data from JSON/CSV
-        \\    export <path>       Export data to JSON/CSV
+        \\    export <path>       Export data to JSON/JSONL/CSV/DOT
         \\    dump <path>         Dump full database as JSON
         \\
         \\  Introspection:
@@ -998,16 +1003,18 @@ fn printCommandHelp(writer: anytype, command: Command) void {
         .@"export" => writer.writeAll(
             \\Usage: lattice export <path> --file=<output> [options]
             \\
-            \\Export data to JSON or CSV files.
+            \\Export data to JSON, JSONL, CSV, or DOT files.
             \\
             \\Options:
-            \\  --file=<path>         Output file path
-            \\  --format=<fmt>        Output format: json, csv
+            \\  --file=<path>         Output file path (.json, .jsonl, .csv, .dot)
+            \\  --format=<fmt>        CLI output format: table, json, csv
             \\  --labels=<list>       Filter by labels (comma-separated)
             \\  --query=<cypher>      Export query results instead
             \\
             \\Examples:
             \\  lattice export mydb.lattice --file=backup.json
+            \\  lattice export mydb.lattice --file=graph.jsonl
+            \\  lattice export mydb.lattice --file=graph.dot
             \\  lattice export mydb.lattice --file=people.csv --labels=Person
             \\
         ) catch {},

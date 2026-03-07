@@ -8,75 +8,92 @@
 import koffi from 'koffi';
 import { getLibrary } from './library';
 
+function defineNamedType<T>(name: string, factory: () => T): T {
+  try {
+    return factory();
+  } catch (err) {
+    const message = typeof err === 'object' && err !== null && 'message' in err
+      ? String((err as { message: unknown }).message)
+      : String(err);
+    if (message.includes('Duplicate type name')) {
+      return koffi.resolve(name) as unknown as T;
+    }
+    throw err;
+  }
+}
+
 // Define opaque types for handles
-const LatticeDatabase = koffi.opaque('lattice_database');
-const LatticeTxn = koffi.opaque('lattice_txn');
-const LatticeQuery = koffi.opaque('lattice_query');
-const LatticeResult = koffi.opaque('lattice_result');
-const LatticeVectorResult = koffi.opaque('lattice_vector_result');
-const LatticeFtsResult = koffi.opaque('lattice_fts_result');
-const LatticeEdgeResult = koffi.opaque('lattice_edge_result');
-const LatticeEmbeddingClient = koffi.opaque('lattice_embedding_client');
+const LatticeDatabase = defineNamedType('lattice_database', () => koffi.opaque('lattice_database'));
+const LatticeTxn = defineNamedType('lattice_txn', () => koffi.opaque('lattice_txn'));
+const LatticeQuery = defineNamedType('lattice_query', () => koffi.opaque('lattice_query'));
+const LatticeResult = defineNamedType('lattice_result', () => koffi.opaque('lattice_result'));
+const LatticeVectorResult = defineNamedType('lattice_vector_result', () => koffi.opaque('lattice_vector_result'));
+const LatticeFtsResult = defineNamedType('lattice_fts_result', () => koffi.opaque('lattice_fts_result'));
+const LatticeEdgeResult = defineNamedType('lattice_edge_result', () => koffi.opaque('lattice_edge_result'));
+const LatticeEmbeddingClient = defineNamedType(
+  'lattice_embedding_client',
+  () => koffi.opaque('lattice_embedding_client')
+);
 
 // Define struct for embedding config
-const LatticeEmbeddingConfig = koffi.struct('lattice_embedding_config', {
+const LatticeEmbeddingConfig = defineNamedType('lattice_embedding_config', () => koffi.struct('lattice_embedding_config', {
   endpoint: 'const char*',
   model: 'const char*',
   api_format: 'int',
   api_key: 'const char*',
   timeout_ms: 'uint32',
-});
+}));
 
 // Define struct for batch insert
-const LatticeNodeWithVector = koffi.struct('lattice_node_with_vector', {
+const LatticeNodeWithVector = defineNamedType('lattice_node_with_vector', () => koffi.struct('lattice_node_with_vector', {
   label: 'const char*',
   vector: 'const float*',
   dimensions: 'uint32',
-});
+}));
 
 // Define struct for open options
-const LatticeOpenOptions = koffi.struct('lattice_open_options', {
+const LatticeOpenOptions = defineNamedType('lattice_open_options', () => koffi.struct('lattice_open_options', {
   create: 'bool',
   read_only: 'bool',
   cache_size_mb: 'uint32',
   page_size: 'uint32',
   enable_vector: 'bool',
   vector_dimensions: 'uint16',
-});
+}));
 
 // Define struct for string in value union
-const LatticeStringValue = koffi.struct('lattice_string_value', {
+const LatticeStringValue = defineNamedType('lattice_string_value', () => koffi.struct('lattice_string_value', {
   ptr: 'const char*',
   len: 'uintptr_t', // size_t
-});
+}));
 
 // Define struct for bytes in value union
-const LatticeBytesValue = koffi.struct('lattice_bytes_value', {
+const LatticeBytesValue = defineNamedType('lattice_bytes_value', () => koffi.struct('lattice_bytes_value', {
   ptr: 'const uint8_t*',
   len: 'uintptr_t', // size_t
-});
+}));
 
 // Define struct for vector in value union
-const LatticeVectorValue = koffi.struct('lattice_vector_value', {
+const LatticeVectorValue = defineNamedType('lattice_vector_value', () => koffi.struct('lattice_vector_value', {
   ptr: 'const float*',
   dimensions: 'uint32',
-});
+}));
 
 // Define the value union data
-const LatticeValueData = koffi.union('lattice_value_data', {
+const LatticeValueData = defineNamedType('lattice_value_data', () => koffi.union('lattice_value_data', {
   bool_val: 'bool',
   int_val: 'int64',
   float_val: 'double',
   string_val: LatticeStringValue,
   bytes_val: LatticeBytesValue,
   vector_val: LatticeVectorValue,
-});
+}));
 
 // Define the full value struct
-const LatticeValue = koffi.struct('lattice_value', {
+const LatticeValue = defineNamedType('lattice_value', () => koffi.struct('lattice_value', {
   type: 'int',
   data: LatticeValueData,
-});
+}));
 
 export interface LatticeBindings {
   // Database operations

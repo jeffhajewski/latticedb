@@ -478,6 +478,15 @@ void lattice_edge_result_free(lattice_edge_result* result);
  *   lattice_query_execute(query, txn, &result);
  */
 
+/* Query diagnostic stage returned by lattice_query_last_error_stage() */
+typedef enum {
+    LATTICE_QUERY_STAGE_NONE = 0,
+    LATTICE_QUERY_STAGE_PARSE = 1,
+    LATTICE_QUERY_STAGE_SEMANTIC = 2,
+    LATTICE_QUERY_STAGE_PLAN = 3,
+    LATTICE_QUERY_STAGE_EXECUTION = 4
+} lattice_query_error_stage;
+
 /* Prepare a Cypher query for execution */
 lattice_error lattice_query_prepare(
     lattice_database* db,
@@ -506,6 +515,18 @@ lattice_error lattice_query_execute(
     lattice_txn* txn,
     lattice_result** result_out
 );
+
+/* Last query diagnostics for a prepared query handle.
+ * Populated when lattice_query_execute() fails.
+ * Cleared automatically before each execute call.
+ */
+lattice_query_error_stage lattice_query_last_error_stage(lattice_query* query);
+const char* lattice_query_last_error_message(lattice_query* query);
+const char* lattice_query_last_error_code(lattice_query* query); /* nullable */
+bool lattice_query_last_error_has_location(lattice_query* query);
+uint32_t lattice_query_last_error_line(lattice_query* query);     /* 1-based, 0 if unavailable */
+uint32_t lattice_query_last_error_column(lattice_query* query);   /* 1-based, 0 if unavailable */
+uint32_t lattice_query_last_error_length(lattice_query* query);   /* token span length, 0 if unavailable */
 
 /* Free a prepared query (call after done with results) */
 void lattice_query_free(lattice_query* query);

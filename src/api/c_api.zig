@@ -17,6 +17,8 @@ const DatabaseError = database.DatabaseError;
 const QueryError = database.QueryError;
 const QueryResult = database.QueryResult;
 const ResultValue = database.ResultValue;
+const QueryFailure = database.QueryFailure;
+const QueryFailureStage = database.QueryFailureStage;
 const OpenOptions = database.OpenOptions;
 const DatabaseConfig = database.DatabaseConfig;
 const VectorSearchResult = database.VectorSearchResult;
@@ -59,6 +61,13 @@ const QueryHandle = struct {
     db_handle: *DatabaseHandle,
     /// Bound parameters (name -> value)
     parameters: std.StringHashMap(PropertyValue),
+    last_error_stage: lattice_query_error_stage,
+    last_error_message: ?[:0]u8,
+    last_error_code: ?[:0]u8,
+    last_error_has_location: bool,
+    last_error_line: u32,
+    last_error_column: u32,
+    last_error_length: u32,
 
     fn init(cypher: []const u8, cypher_owned: bool, db_handle: *DatabaseHandle) QueryHandle {
         return .{
@@ -66,10 +75,58 @@ const QueryHandle = struct {
             .cypher_owned = cypher_owned,
             .db_handle = db_handle,
             .parameters = std.StringHashMap(PropertyValue).init(global_allocator),
+            .last_error_stage = .none,
+            .last_error_message = null,
+            .last_error_code = null,
+            .last_error_has_location = false,
+            .last_error_line = 0,
+            .last_error_column = 0,
+            .last_error_length = 0,
         };
     }
 
+    fn clearLastError(self: *QueryHandle) void {
+        if (self.last_error_message) |msg| {
+            global_allocator.free(msg);
+        }
+        if (self.last_error_code) |code| {
+            global_allocator.free(code);
+        }
+
+        self.last_error_stage = .none;
+        self.last_error_message = null;
+        self.last_error_code = null;
+        self.last_error_has_location = false;
+        self.last_error_line = 0;
+        self.last_error_column = 0;
+        self.last_error_length = 0;
+    }
+
+    fn setLastError(self: *QueryHandle, failure: QueryFailure) lattice_error {
+        self.clearLastError();
+        self.last_error_stage = mapQueryFailureStage(failure.stage);
+        self.last_error_message = global_allocator.dupeZ(u8, failure.message) catch return .err_out_of_memory;
+
+        if (failure.code) |code| {
+            self.last_error_code = global_allocator.dupeZ(u8, code) catch {
+                self.clearLastError();
+                return .err_out_of_memory;
+            };
+        }
+
+        if (failure.location) |loc| {
+            self.last_error_has_location = true;
+            self.last_error_line = loc.line;
+            self.last_error_column = loc.column;
+            self.last_error_length = loc.length;
+        }
+
+        return .ok;
+    }
+
     fn deinit(self: *QueryHandle) void {
+        self.clearLastError();
+
         // Free parameter keys and values (we own copies of them)
         var iter = self.parameters.iterator();
         while (iter.next()) |entry| {
@@ -172,6 +229,15 @@ pub const lattice_error = enum(c_int) {
     err_out_of_memory = -13,
 };
 
+/// Query diagnostic stage for prepared query execution failures.
+pub const lattice_query_error_stage = enum(c_int) {
+    none = 0,
+    parse = 1,
+    semantic = 2,
+    plan = 3,
+    execution = 4,
+};
+
 /// Map Zig database errors to C error codes
 fn mapDatabaseError(err: DatabaseError) lattice_error {
     return switch (err) {
@@ -199,6 +265,22 @@ fn mapQueryError(err: QueryError) lattice_error {
         QueryError.PlanError => .err,
         QueryError.ExecutionError => .err,
         QueryError.OutOfMemory => .err_out_of_memory,
+    };
+}
+
+fn mapQueryFailureStage(stage: QueryFailureStage) lattice_query_error_stage {
+    return switch (stage) {
+        .parse => .parse,
+        .semantic => .semantic,
+        .plan => .plan,
+        .execution => .execution,
+    };
+}
+
+fn mapQueryFailureToError(failure: QueryFailure) lattice_error {
+    return switch (failure.stage) {
+        .parse, .semantic => .err_invalid_arg,
+        .plan, .execution => .err,
     };
 }
 
@@ -1251,15 +1333,28 @@ pub export fn lattice_query_execute(
     const query_handle = toHandle(QueryHandle, query) orelse return .err_invalid_arg;
     _ = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    // Execute the query (with or without parameters)
-    const result = if (query_handle.parameters.count() > 0)
-        query_handle.db_handle.db.queryWithParams(query_handle.cypher, &query_handle.parameters) catch |err| {
+    // Clear any diagnostics from previous executions.
+    query_handle.clearLastError();
+
+    // Execute the query (with or without parameters), retaining structured diagnostics.
+    var detailed = if (query_handle.parameters.count() > 0)
+        query_handle.db_handle.db.queryWithParamsDetailed(query_handle.cypher, &query_handle.parameters) catch |err| {
             return mapQueryError(err);
         }
     else
-        query_handle.db_handle.db.query(query_handle.cypher) catch |err| {
+        query_handle.db_handle.db.queryDetailed(query_handle.cypher) catch |err| {
             return mapQueryError(err);
         };
+
+    if (detailed == .failure) {
+        const mapped_err = mapQueryFailureToError(detailed.failure);
+        const set_err = query_handle.setLastError(detailed.failure);
+        detailed.failure.deinit();
+        if (set_err != .ok) return set_err;
+        return mapped_err;
+    }
+
+    const result = detailed.success;
 
     // Create result handle
     const result_handle = global_allocator.create(ResultHandle) catch {
@@ -1276,6 +1371,50 @@ pub export fn lattice_query_execute(
 
     result_out.* = @ptrCast(result_handle);
     return .ok;
+}
+
+/// Get the last query diagnostic stage for a prepared query handle.
+pub export fn lattice_query_last_error_stage(query: ?*lattice_query) lattice_query_error_stage {
+    const query_handle = toHandle(QueryHandle, query) orelse return .none;
+    return query_handle.last_error_stage;
+}
+
+/// Get the last query diagnostic message for a prepared query handle.
+/// Returns null if no error details are available.
+pub export fn lattice_query_last_error_message(query: ?*lattice_query) [*c]const u8 {
+    const query_handle = toHandle(QueryHandle, query) orelse return null;
+    return if (query_handle.last_error_message) |msg| msg.ptr else null;
+}
+
+/// Get the last query diagnostic code for a prepared query handle.
+/// Returns null if no stage-specific code is available.
+pub export fn lattice_query_last_error_code(query: ?*lattice_query) [*c]const u8 {
+    const query_handle = toHandle(QueryHandle, query) orelse return null;
+    return if (query_handle.last_error_code) |code| code.ptr else null;
+}
+
+/// Whether the last query diagnostic includes source location fields.
+pub export fn lattice_query_last_error_has_location(query: ?*lattice_query) bool {
+    const query_handle = toHandle(QueryHandle, query) orelse return false;
+    return query_handle.last_error_has_location;
+}
+
+/// Get last diagnostic line (1-based). Returns 0 when unavailable.
+pub export fn lattice_query_last_error_line(query: ?*lattice_query) u32 {
+    const query_handle = toHandle(QueryHandle, query) orelse return 0;
+    return query_handle.last_error_line;
+}
+
+/// Get last diagnostic column (1-based). Returns 0 when unavailable.
+pub export fn lattice_query_last_error_column(query: ?*lattice_query) u32 {
+    const query_handle = toHandle(QueryHandle, query) orelse return 0;
+    return query_handle.last_error_column;
+}
+
+/// Get last diagnostic token span length. Returns 0 when unavailable.
+pub export fn lattice_query_last_error_length(query: ?*lattice_query) u32 {
+    const query_handle = toHandle(QueryHandle, query) orelse return 0;
+    return query_handle.last_error_length;
 }
 
 /// Free a prepared query

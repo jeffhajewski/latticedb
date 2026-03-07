@@ -25,6 +25,7 @@ const lattice_value_type = c_api.lattice_value_type;
 const lattice_open_options = c_api.lattice_open_options;
 const lattice_txn_mode = c_api.lattice_txn_mode;
 const lattice_node_id = c_api.lattice_node_id;
+const lattice_query_error_stage = c_api.lattice_query_error_stage;
 
 // ============================================================================
 // Database Lifecycle Tests
@@ -1255,6 +1256,10 @@ test "c_api: prepare and execute query" {
     var result: ?*lattice_result = null;
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_execute(query, txn, &result));
     try std.testing.expect(result != null);
+    try std.testing.expectEqual(lattice_query_error_stage.none, c_api.lattice_query_last_error_stage(query));
+    try std.testing.expect(c_api.lattice_query_last_error_message(query) == null);
+    try std.testing.expect(c_api.lattice_query_last_error_code(query) == null);
+    try std.testing.expect(!c_api.lattice_query_last_error_has_location(query));
 
     // Iterate results
     var row_count: usize = 0;
@@ -1304,6 +1309,65 @@ test "c_api: query with invalid syntax returns error" {
     var result: ?*lattice_result = null;
     const exec_result = c_api.lattice_query_execute(query, txn, &result);
     try std.testing.expectEqual(lattice_error.err_invalid_arg, exec_result);
+    try std.testing.expectEqual(lattice_query_error_stage.parse, c_api.lattice_query_last_error_stage(query));
+    try std.testing.expect(c_api.lattice_query_last_error_has_location(query));
+    try std.testing.expect(c_api.lattice_query_last_error_line(query) >= 1);
+    try std.testing.expect(c_api.lattice_query_last_error_column(query) >= 1);
+    try std.testing.expect(c_api.lattice_query_last_error_length(query) >= 1);
+
+    const msg = c_api.lattice_query_last_error_message(query);
+    try std.testing.expect(msg != null);
+    try std.testing.expect(std.mem.sliceTo(msg, 0).len > 0);
+    try std.testing.expect(c_api.lattice_query_last_error_code(query) == null);
+
+    c_api.lattice_query_free(query);
+    _ = c_api.lattice_commit(txn);
+}
+
+test "c_api: semantic query error diagnostics include code and location" {
+    const path = "/tmp/lattice_capi_semantic_diag_test.db";
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+
+    var query: ?*lattice_query = null;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_query_prepare(db, "MATCH (a)-[r:REL*1..2]->(b) RETURN r", &query),
+    );
+
+    var result: ?*lattice_result = null;
+    const exec_result = c_api.lattice_query_execute(query, txn, &result);
+    try std.testing.expectEqual(lattice_error.err_invalid_arg, exec_result);
+    try std.testing.expectEqual(lattice_query_error_stage.semantic, c_api.lattice_query_last_error_stage(query));
+    try std.testing.expect(c_api.lattice_query_last_error_has_location(query));
+    try std.testing.expect(c_api.lattice_query_last_error_line(query) >= 1);
+    try std.testing.expect(c_api.lattice_query_last_error_column(query) >= 1);
+
+    const msg = c_api.lattice_query_last_error_message(query);
+    try std.testing.expect(msg != null);
+    try std.testing.expect(std.mem.sliceTo(msg, 0).len > 0);
+
+    const code = c_api.lattice_query_last_error_code(query);
+    try std.testing.expect(code != null);
+    try std.testing.expect(std.mem.sliceTo(code, 0).len > 0);
 
     c_api.lattice_query_free(query);
     _ = c_api.lattice_commit(txn);

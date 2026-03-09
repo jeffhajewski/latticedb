@@ -115,4 +115,5 @@ await db.close();
 
 - [Core Concepts](./concepts.md) — understand the data model
 - [Cypher Overview](../cypher/overview.md) — learn the query language
+- [Data Export](../guides/data-export.md) — export to JSON, JSONL, CSV, or DOT
 - [Building a RAG System](../guides/rag-system.md) — end-to-end tutorial

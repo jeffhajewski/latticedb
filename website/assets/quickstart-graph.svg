@@ -1,0 +1,74 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 500" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="title desc">
+  <title id="title">Quickstart Knowledge Graph Visualization</title>
+  <desc id="desc">A small graph with two Chunk nodes connected to a Document node, and the Document connected to a Person node via labeled directed edges.</desc>
+
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f8fbff"/>
+      <stop offset="100%" stop-color="#eef4fb"/>
+    </linearGradient>
+    <linearGradient id="chunkFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f7fbff"/>
+      <stop offset="100%" stop-color="#eaf3ff"/>
+    </linearGradient>
+    <linearGradient id="docFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#f1fbf5"/>
+      <stop offset="100%" stop-color="#e3f3ea"/>
+    </linearGradient>
+    <linearGradient id="personFill" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#fffaf2"/>
+      <stop offset="100%" stop-color="#fff1dc"/>
+    </linearGradient>
+    <marker id="arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto" markerUnits="strokeWidth">
+      <path d="M0,0 L8,4 L0,8 Z" fill="#4a90d9"/>
+    </marker>
+    <filter id="cardShadow" x="-10%" y="-10%" width="130%" height="140%">
+      <feDropShadow dx="0" dy="3" stdDeviation="4" flood-color="#9bb3cc" flood-opacity="0.25"/>
+    </filter>
+    <style>
+      .node { stroke-width: 1.4; rx: 12; filter: url(#cardShadow); }
+      .edge { fill: none; stroke: #4a90d9; stroke-width: 2.2; marker-end: url(#arrow); }
+      .edge-label { font: 600 12px "Inter", "Segoe UI", sans-serif; fill: #305c87; letter-spacing: 0.02em; }
+      .title { font: 700 14px "Inter", "Segoe UI", sans-serif; fill: #16324f; }
+      .meta { font: 600 12px "Inter", "Segoe UI", sans-serif; fill: #325777; }
+      .body { font: 500 11px "SFMono-Regular", Menlo, Consolas, monospace; fill: #35516d; }
+      .legend { font: 500 12px "Inter", "Segoe UI", sans-serif; fill: #506d88; }
+    </style>
+  </defs>
+
+  <rect x="0" y="0" width="1060" height="500" fill="url(#bg)"/>
+
+  <path class="edge" d="M370 164 C430 144, 470 170, 500 214"/>
+  <text class="edge-label" x="430" y="154">PART_OF</text>
+
+  <path class="edge" d="M370 336 C430 348, 470 320, 500 278"/>
+  <text class="edge-label" x="430" y="352">PART_OF</text>
+
+  <path class="edge" d="M780 246 C826 234, 860 206, 892 188"/>
+  <text class="edge-label" x="820" y="228" text-anchor="middle">AUTHORED_BY</text>
+
+  <rect class="node" x="90" y="102" width="280" height="132" fill="url(#chunkFill)" stroke="#7fa8d3"/>
+  <text class="title" x="114" y="132">(:Chunk)</text>
+  <text class="meta" x="114" y="154">id: 1001</text>
+  <text class="body" x="114" y="177">text: "Self-attention..."</text>
+  <text class="body" x="114" y="199">embedding: [128d]</text>
+
+  <rect class="node" x="90" y="274" width="280" height="132" fill="url(#chunkFill)" stroke="#7fa8d3"/>
+  <text class="title" x="114" y="304">(:Chunk)</text>
+  <text class="meta" x="114" y="326">id: 1002</text>
+  <text class="body" x="114" y="349">text: "Transformer blocks..."</text>
+  <text class="body" x="114" y="371">embedding: [128d]</text>
+
+  <rect class="node" x="500" y="158" width="280" height="176" fill="url(#docFill)" stroke="#8ebf9f"/>
+  <text class="title" x="524" y="190">(:Document)</text>
+  <text class="meta" x="524" y="214">id: 420</text>
+  <text class="body" x="524" y="238">title: "Attention Is All"</text>
+  <text class="body" x="524" y="260">       "You Need"</text>
+
+  <rect class="node" x="890" y="156" width="140" height="116" fill="url(#personFill)" stroke="#d4b284"/>
+  <text class="title" x="910" y="186">(:Person)</text>
+  <text class="meta" x="910" y="210">id: 7</text>
+  <text class="body" x="910" y="234">name: "Alice"</text>
+
+  <text class="legend" x="530" y="470" text-anchor="middle">Quickstart graph generated from the snippet at left: Chunk -&gt; Document -&gt; Person.</text>
+</svg>

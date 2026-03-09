@@ -1,0 +1,43 @@
+digraph LatticeQuickstart {
+  graph [
+    rankdir=LR,
+    splines=true,
+    overlap=false,
+    bgcolor="transparent",
+    nodesep=0.7,
+    ranksep=1.0,
+    pad=0.25,
+    fontname="Helvetica Neue"
+  ];
+
+  node [
+    shape=box,
+    style="rounded,filled",
+    fillcolor="#F5FAFF",
+    color="#8CB3D9",
+    penwidth=1.3,
+    fontname="Helvetica Neue",
+    fontsize=12,
+    margin="0.14,0.10"
+  ];
+
+  edge [
+    color="#4A90D9",
+    penwidth=1.4,
+    arrowsize=0.7,
+    fontname="Helvetica Neue",
+    fontsize=10,
+    fontcolor="#365E87"
+  ];
+
+  chunk_a [label="(:Chunk)\\ntext: \"Self-attention...\"\\nembedding: [128d]"];
+  chunk_b [label="(:Chunk)\\ntext: \"Transformer blocks...\"\\nembedding: [128d]"];
+  doc [label="(:Document)\\ntitle: \"Attention Is All You Need\"", fillcolor="#EDF7F2", color="#95C8A7"];
+  alice [label="(:Person)\\nname: \"Alice\"", fillcolor="#FFF6EC", color="#E0BC8F"];
+
+  { rank=same; chunk_a; chunk_b; }
+
+  chunk_a -> doc [label="PART_OF"];
+  chunk_b -> doc [label="PART_OF"];
+  doc -> alice [label="AUTHORED_BY"];
+}

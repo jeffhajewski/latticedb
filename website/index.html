@@ -256,6 +256,127 @@ tr.highlight td {
   margin-right: 8px;
 }
 
+/* Release notes */
+.release-notes {
+  padding: 60px 0;
+}
+.release-notes h2 {
+  text-align: center;
+  font-size: 24px;
+  margin-bottom: 8px;
+}
+.release-notes .caption {
+  text-align: center;
+  color: #666;
+  font-size: 15px;
+  max-width: 720px;
+  margin: 0 auto 28px;
+}
+.release-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 24px;
+}
+.release-card {
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid #e8e8e8;
+  padding: 24px;
+}
+.release-card h3 {
+  font-size: 18px;
+  margin-bottom: 12px;
+  color: #1a1a1a;
+}
+.release-card ul {
+  list-style: none;
+  padding: 0;
+}
+.release-card li {
+  font-size: 14px;
+  color: #555;
+  padding: 4px 0;
+}
+.release-card li::before {
+  content: "\2022";
+  color: #4a90d9;
+  font-weight: bold;
+  margin-right: 8px;
+}
+.release-meta {
+  margin-top: 20px;
+  text-align: center;
+  font-size: 14px;
+}
+
+/* Example graph */
+.example-graph {
+  padding: 60px 0;
+  background: #f9f9f9;
+}
+.example-graph h2 {
+  text-align: center;
+  font-size: 24px;
+  margin-bottom: 8px;
+}
+.example-graph .caption {
+  text-align: center;
+  color: #666;
+  font-size: 15px;
+  max-width: 760px;
+  margin: 0 auto 28px;
+}
+.example-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
+  gap: 28px;
+  align-items: center;
+}
+.example-code {
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid #e8e8e8;
+  padding: 20px;
+}
+.example-code h3 {
+  font-size: 18px;
+  margin-bottom: 10px;
+  color: #1a1a1a;
+}
+.example-code p {
+  font-size: 14px;
+  color: #555;
+  margin-bottom: 10px;
+}
+.example-code pre {
+  margin-top: 8px;
+}
+.graph-showcase {
+  background: #fff;
+  border-radius: 8px;
+  border: 1px solid #e8e8e8;
+  padding: 20px;
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+}
+.graph-showcase img {
+  width: min(100%, 720px);
+  height: auto;
+  display: block;
+  margin: 0 auto;
+  border-radius: 8px;
+  border: 1px solid #dce7f3;
+  background: #f4f8fd;
+}
+.graph-showcase figcaption {
+  margin-top: 10px;
+  font-size: 13px;
+  color: #5b6f84;
+  text-align: center;
+}
+
 /* Quick start */
 .quickstart {
   padding: 60px 0;
@@ -300,6 +421,8 @@ footer .footer-links {
   .hero .subhead { font-size: 16px; }
   .stats-grid { grid-template-columns: repeat(2, 1fr); }
   .features-grid { grid-template-columns: 1fr; }
+  .release-grid { grid-template-columns: 1fr; }
+  .example-layout { grid-template-columns: 1fr; }
   .stat-number { font-size: 24px; }
   pre { font-size: 13px; padding: 16px; }
 }
@@ -430,10 +553,10 @@ footer .footer-links {
       <div class="feature-card">
         <h3>Graph</h3>
         <ul>
-          <li>Nodes and edges with labels and properties</li>
-          <li>Multi-hop traversal, variable-length paths</li>
-          <li>ACID transactions with snapshot isolation</li>
-          <li>MERGE, WITH, UNWIND, aggregations</li>
+          <li>Stable edge IDs across CREATE and MERGE paths</li>
+          <li>Multi-hop traversal with validated variable-length patterns</li>
+          <li>ACID transactions with crash-safe recovery</li>
+          <li>MERGE, WITH, UNWIND, expression LIMIT/SKIP, aggregations</li>
         </ul>
       </div>
       <div class="feature-card">
@@ -454,6 +577,75 @@ footer .footer-links {
           <li>300x faster than SQLite FTS5</li>
         </ul>
       </div>
+    </div>
+  </div>
+</section>
+
+<!-- Release Notes -->
+<section class="release-notes">
+  <div class="container">
+    <h2>What's new in v0.3.0</h2>
+    <p class="caption">Major query-engine correctness work and stronger reliability across core and bindings.</p>
+    <div class="release-grid">
+      <div class="release-card">
+        <h3>Query Engine</h3>
+        <ul>
+          <li>Full relationship MERGE support with stable edge IDs and inline properties</li>
+          <li>LIMIT and SKIP now support expressions and parameters</li>
+          <li>Standalone UNWIND support and corrected alias handling</li>
+          <li>Variable-length path semantics tightened, including zero-hop behavior</li>
+        </ul>
+      </div>
+      <div class="release-card">
+        <h3>Planner and Runtime</h3>
+        <ul>
+          <li>ORDER BY / SKIP / LIMIT execution order corrected before RETURN projection</li>
+          <li>Typed MATCH on unknown relationship types returns empty results</li>
+          <li>DISTINCT and GROUP key handling hardened with canonical encoding</li>
+          <li>Null-safe behavior improved for incompatible numeric comparisons</li>
+        </ul>
+      </div>
+      <div class="release-card">
+        <h3>Reliability and Tooling</h3>
+        <ul>
+          <li>Edge ID monotonicity hardened across replay and recovery</li>
+          <li>Expanded rollback and cross-binding intent test coverage</li>
+          <li>TypeScript binding initialization hardened for repeated test runs</li>
+          <li>Release automation now validates version consistency across code and docs</li>
+        </ul>
+      </div>
+    </div>
+    <p class="release-meta">
+      <a href="https://github.com/jeffhajewski/latticedb/compare/v0.2.1...v0.3.0">View the full v0.2.1 to v0.3.0 diff on GitHub</a>
+    </p>
+  </div>
+</section>
+
+<!-- Example Graph -->
+<section class="example-graph">
+  <div class="container">
+    <h2>From Sample Code to Graph</h2>
+    <p class="caption">This graph is rendered from the exact creation/query pattern shown below.</p>
+    <div class="example-layout">
+      <div class="example-code">
+        <h3>Construct and Query</h3>
+        <p>These statements build the graph shown on the right.</p>
+        <pre><span class="kw">CREATE</span> (alice:Person {name: <span class="str">"Alice"</span>})
+<span class="kw">CREATE</span> (doc:Document {title: <span class="str">"Attention Is All You Need"</span>})
+<span class="kw">CREATE</span> (c1:Chunk {text: <span class="str">"Self-attention..."</span>})
+<span class="kw">CREATE</span> (c2:Chunk {text: <span class="str">"Transformer blocks..."</span>})
+
+<span class="kw">CREATE</span> (c1)-[:PART_OF]-&gt;(doc)
+<span class="kw">CREATE</span> (c2)-[:PART_OF]-&gt;(doc)
+<span class="kw">CREATE</span> (doc)-[:AUTHORED_BY]-&gt;(alice)
+
+<span class="kw">MATCH</span> (chunk:Chunk)-[:PART_OF]-&gt;(doc:Document)-[:AUTHORED_BY]-&gt;(author:Person)
+<span class="kw">RETURN</span> doc.title, chunk.text, author.name;</pre>
+      </div>
+      <figure class="graph-showcase">
+        <img src="assets/quickstart-graph.svg" alt="Knowledge graph visualization with Chunk, Document, and Person nodes connected by PART_OF and AUTHORED_BY relationships." loading="lazy">
+        <figcaption>Rendered from the snippet at left. <a href="assets/quickstart-graph.dot">Download DOT source</a>.</figcaption>
+      </figure>
     </div>
   </div>
 </section>

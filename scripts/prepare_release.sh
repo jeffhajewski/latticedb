@@ -116,7 +116,7 @@ echo "Repository: $REPO_ROOT"
 run python3 scripts/bump_version.py "$VERSION"
 
 if [[ "$REFRESH_LOCKFILE" -eq 1 ]]; then
-  run npm --prefix bindings/typescript install --package-lock-only --ignore-scripts
+  run_shell "cd bindings/typescript && npm install --package-lock-only --ignore-scripts"
   # Re-assert expected versions after lockfile refresh.
   run python3 scripts/bump_version.py "$VERSION"
   run python3 scripts/bump_version.py --check "$VERSION" --strict-lockfile
@@ -126,8 +126,14 @@ fi
 
 if [[ "$RUN_TESTS" -eq 1 ]]; then
   run zig build test
-  run_shell "cd bindings/python && python3 -m pytest tests -q"
-  run npm --prefix bindings/typescript test -- --runInBand
+  if command -v uv >/dev/null 2>&1; then
+    run_shell "cd bindings/python && uv sync --extra dev"
+    run_shell "cd bindings/python && uv run --extra dev pytest tests -q"
+  else
+    echo "warning: uv not found; falling back to python3 -m pytest" >&2
+    run_shell "cd bindings/python && python3 -m pytest tests -q"
+  fi
+  run_shell "cd bindings/typescript && npm test -- --runInBand"
 fi
 
 if [[ "$CREATE_TAG" -eq 1 ]]; then

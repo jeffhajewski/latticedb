@@ -1381,7 +1381,7 @@ test "c_api: version returns valid string" {
     const version = c_api.lattice_version();
     try std.testing.expect(version != null);
     const ver_str = std.mem.sliceTo(version, 0);
-    try std.testing.expectEqualStrings("0.1.0", ver_str);
+    try std.testing.expectEqualStrings(lattice.VERSION, ver_str);
 }
 
 test "c_api: error messages are valid" {

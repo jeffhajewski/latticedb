@@ -28,6 +28,13 @@ test {
 }
 
 test "integration test runner initialized" {
-    // Verify we can access the lattice module
-    try std.testing.expectEqualStrings("0.1.0", lattice.VERSION);
+    // Verify the string and split components remain internally consistent.
+    const expected = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{d}.{d}.{d}",
+        .{ lattice.VERSION_MAJOR, lattice.VERSION_MINOR, lattice.VERSION_PATCH },
+    );
+    defer std.testing.allocator.free(expected);
+
+    try std.testing.expectEqualStrings(expected, lattice.VERSION);
 }

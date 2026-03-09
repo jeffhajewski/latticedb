@@ -252,13 +252,23 @@ test "rwlatch: concurrent readers" {
     var latch = RwLatch{};
     var readers_active = std.atomic.Value(u32).init(0);
     var max_concurrent = std.atomic.Value(u32).init(0);
+    var start = std.atomic.Value(bool).init(false);
 
     const num_threads = 4;
     var threads: [num_threads]std.Thread = undefined;
 
     for (&threads) |*t| {
         t.* = std.Thread.spawn(.{}, struct {
-            fn run(l: *RwLatch, active: *std.atomic.Value(u32), max: *std.atomic.Value(u32)) void {
+            fn run(
+                l: *RwLatch,
+                active: *std.atomic.Value(u32),
+                max: *std.atomic.Value(u32),
+                start_signal: *std.atomic.Value(bool),
+            ) void {
+                while (!start_signal.load(.acquire)) {
+                    std.atomic.spinLoopHint();
+                }
+
                 for (0..100) |_| {
                     while (!l.tryAcquireShared()) {
                         std.atomic.spinLoopHint();
@@ -277,17 +287,17 @@ test "rwlatch: concurrent readers" {
                         }
                     }
 
-                    // Longer delay to increase overlap chance
-                    for (0..100) |_| {
-                        std.atomic.spinLoopHint();
-                    }
+                    // Keep the shared lock briefly so peers can overlap more reliably.
+                    std.Thread.sleep(100_000);
 
                     _ = active.fetchSub(1, .seq_cst);
                     l.releaseShared();
                 }
             }
-        }.run, .{ &latch, &readers_active, &max_concurrent }) catch unreachable;
+        }.run, .{ &latch, &readers_active, &max_concurrent, &start }) catch unreachable;
     }
+
+    start.store(true, .release);
 
     for (&threads) |*t| {
         t.join();

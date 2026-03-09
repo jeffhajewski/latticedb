@@ -68,7 +68,14 @@ test {
 }
 
 test "lattice version" {
-    try std.testing.expectEqualStrings("0.1.0", lattice.VERSION);
+    const expected = try std.fmt.allocPrint(
+        std.testing.allocator,
+        "{d}.{d}.{d}",
+        .{ lattice.VERSION_MAJOR, lattice.VERSION_MINOR, lattice.VERSION_PATCH },
+    );
+    defer std.testing.allocator.free(expected);
+
+    try std.testing.expectEqualStrings(expected, lattice.VERSION);
 }
 
 test "magic number" {

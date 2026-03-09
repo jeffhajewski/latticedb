@@ -168,6 +168,15 @@ def _update_ts_index(text: str, version: str, path: Path) -> str:
     )
 
 
+def _update_book_api_c(text: str, version: str, path: Path) -> str:
+    return _replace_exactly_one(
+        text,
+        r'(const char\* version = lattice_version\(\);\s*// e\.g\. )"[^"]+"',
+        rf'\1"{version}"',
+        path,
+    )
+
+
 def _extract_package_json_metadata(path: Path) -> Tuple[str, str, Sequence[str]]:
     data = json.loads(path.read_text(encoding="utf-8"))
     if "name" not in data or not isinstance(data["name"], str):
@@ -424,6 +433,19 @@ def _collect_version_observations(
         VersionObservation("TypeScript fallback version", ts_index_path, ts_fallback_version)
     )
 
+    # Docs example
+    book_api_c_path = root / "book/src/api/c.md"
+    book_api_c = _load(book_api_c_path)
+    docs_c_example_version = _extract_exactly_one(
+        book_api_c,
+        r'const char\* version = lattice_version\(\);\s*// e\.g\. "([^"]+)"',
+        book_api_c_path,
+        "docs C API version example",
+    )
+    observations.append(
+        VersionObservation("Docs C API version example", book_api_c_path, docs_c_example_version)
+    )
+
     for observation in observations:
         if not SEMVER_RE.match(observation.value):
             problems.append(
@@ -522,6 +544,9 @@ def _compute_changes(root: Path, version: str) -> Tuple[FileChange, ...]:
         ),
         root / "bindings/typescript/src/index.ts": lambda t: _update_ts_index(
             t, version, root / "bindings/typescript/src/index.ts"
+        ),
+        root / "book/src/api/c.md": lambda t: _update_book_api_c(
+            t, version, root / "book/src/api/c.md"
         ),
     }
 

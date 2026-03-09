@@ -1,6 +1,6 @@
 {
   "name": "@hajewski/latticedb",
-  "version": "0.2.1",
+  "version": "0.3.0",
   "description": "TypeScript bindings for Lattice embedded knowledge graph database",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -25,13 +25,13 @@
     "hnsw",
     "bm25"
   ],
-  "author": "Jeff Hajewski <jeff@latticedb.dev>",
+  "author": "Jeff Hajewski <jeff.hajewski@gmail.com>",
   "license": "MIT",
   "repository": {
     "type": "git",
     "url": "https://github.com/jeffhajewski/latticedb"
   },
-  "homepage": "https://github.com/jeffhajewski/latticedb#readme",
+  "homepage": "https://latticedb.org",
   "bugs": {
     "url": "https://github.com/jeffhajewski/latticedb/issues"
   },

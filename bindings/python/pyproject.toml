@@ -4,16 +4,16 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "latticedb"
-version = "0.2.1"
+version = "0.3.0"
 description = "Embedded knowledge graph database for AI and RAG applications"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
 authors = [
-    {name = "Jeff Hajewski", email = "jeff@latticedb.dev"},
+    {name = "Jeff Hajewski", email = "jeff.hajewski@gmail.com"},
 ]
 maintainers = [
-    {name = "Jeff Hajewski", email = "jeff@latticedb.dev"},
+    {name = "Jeff Hajewski", email = "jeff.hajewski@gmail.com"},
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
@@ -44,7 +44,7 @@ dev = [
 
 [project.urls]
 Homepage = "https://github.com/jeffhajewski/latticedb"
-Documentation = "https://latticedb.dev"
+Documentation = "https://latticedb.org"
 Repository = "https://github.com/jeffhajewski/latticedb"
 Issues = "https://github.com/jeffhajewski/latticedb/issues"
 

@@ -37,12 +37,13 @@ pub fn build(b: *std.Build) void {
     });
     shared_lib_module.addImport("lattice", shared_lib_module);
 
-    // Shared library
+    // Shared library — link libc for proper TLS and dlopen() compatibility on Linux
     const shared_lib = b.addLibrary(.{
         .name = "lattice",
         .root_module = shared_lib_module,
         .linkage = .dynamic,
     });
+    shared_lib.linkLibC();
 
     // CLI module - imports the library module
     const cli_module = b.createModule(.{

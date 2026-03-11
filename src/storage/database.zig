@@ -1789,7 +1789,7 @@ pub const Database = struct {
             if (prop.key_id == key_id) {
                 // Clone the value to avoid returning a pointer to freed memory
                 return switch (prop.value) {
-                    .string_val => |s| .{ .string_val = self.allocator.dupe(u8, s) catch return DatabaseError.OutOfMemory },
+                    .string_val => |s| .{ .string_val = self.allocator.dupeZ(u8, s) catch return DatabaseError.OutOfMemory },
                     .bytes_val => |b| .{ .bytes_val = self.allocator.dupe(u8, b) catch return DatabaseError.OutOfMemory },
                     else => prop.value, // Primitives are copied by value
                 };

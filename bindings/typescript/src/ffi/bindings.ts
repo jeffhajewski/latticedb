@@ -63,7 +63,7 @@ const LatticeOpenOptions = defineNamedType('lattice_open_options', () => koffi.s
 
 // Define struct for string in value union
 const LatticeStringValue = defineNamedType('lattice_string_value', () => koffi.struct('lattice_string_value', {
-  ptr: 'const char*',
+  ptr: 'void*',
   len: 'uintptr_t', // size_t
 }));
 

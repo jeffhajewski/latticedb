@@ -17,6 +17,7 @@ jobs:
     name: Zig Build & Test
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-14]
         # TODO: Add windows-latest once vfs.zig/database.zig are ported from POSIX APIs
@@ -39,7 +40,7 @@ jobs:
         run: zig build integration-test
 
       - name: Build shared library
-        run: zig build shared
+        run: zig build shared -Doptimize=ReleaseSafe
 
       - name: Upload shared library
         uses: actions/upload-artifact@v4
@@ -55,6 +56,7 @@ jobs:
     needs: zig-build
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-14]
         python-version: ['3.9', '3.11', '3.12']
@@ -99,6 +101,7 @@ jobs:
     needs: zig-build
     runs-on: ${{ matrix.os }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-14]
         node-version: ['18', '20']

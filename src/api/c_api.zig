@@ -365,6 +365,7 @@ fn cStrToSlice(c_str: [*c]const u8) ?[]const u8 {
 
 /// Convert Zig PropertyValue to C lattice_value
 fn zigValueToCValue(zig_val: PropertyValue, c_val: *lattice_value) void {
+    c_val.data = std.mem.zeroes(@TypeOf(c_val.data));
     switch (zig_val) {
         .null_val => c_val.value_type = .null,
         .bool_val => |b| {
@@ -403,6 +404,7 @@ fn zigValueToCValue(zig_val: PropertyValue, c_val: *lattice_value) void {
 
 /// Convert ResultValue to C lattice_value
 fn resultValueToCValue(result_val: ResultValue, c_val: *lattice_value) void {
+    c_val.data = std.mem.zeroes(@TypeOf(c_val.data));
     switch (result_val) {
         .null_val => c_val.value_type = .null,
         .bool_val => |b| {

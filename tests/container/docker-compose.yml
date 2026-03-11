@@ -1,0 +1,60 @@
+services:
+  ubuntu-22.04:
+    build:
+      context: .
+      dockerfile: Dockerfile.ubuntu-22.04
+    volumes:
+      - ../../dist/build/x86_64-linux-gnu:/artifacts:ro
+      - ./scripts:/scripts:ro
+      - ./fixtures:/fixtures:ro
+      - ./c-test:/c-test:ro
+      - ../../bindings:/src/bindings:ro
+      - ../../include:/src/include:ro
+
+  ubuntu-24.04:
+    build:
+      context: .
+      dockerfile: Dockerfile.ubuntu-24.04
+    volumes:
+      - ../../dist/build/x86_64-linux-gnu:/artifacts:ro
+      - ./scripts:/scripts:ro
+      - ./fixtures:/fixtures:ro
+      - ./c-test:/c-test:ro
+      - ../../bindings:/src/bindings:ro
+      - ../../include:/src/include:ro
+
+  debian-bookworm:
+    build:
+      context: .
+      dockerfile: Dockerfile.debian-bookworm
+    volumes:
+      - ../../dist/build/x86_64-linux-gnu:/artifacts:ro
+      - ./scripts:/scripts:ro
+      - ./fixtures:/fixtures:ro
+      - ./c-test:/c-test:ro
+      - ../../bindings:/src/bindings:ro
+      - ../../include:/src/include:ro
+
+  alpine-3.19:
+    build:
+      context: .
+      dockerfile: Dockerfile.alpine-3.19
+    volumes:
+      - ../../dist/build/x86_64-linux-musl:/artifacts:ro
+      - ./scripts:/scripts:ro
+      - ./fixtures:/fixtures:ro
+      - ./c-test:/c-test:ro
+      - ../../bindings:/src/bindings:ro
+      - ../../include:/src/include:ro
+
+  fedora-40:
+    build:
+      context: .
+      dockerfile: Dockerfile.fedora-40
+    volumes:
+      - ../../dist/build/x86_64-linux-gnu:/artifacts:ro
+      - ./scripts:/scripts:ro
+      - ./fixtures:/fixtures:ro
+      - ./c-test:/c-test:ro
+      - ../../bindings:/src/bindings:ro
+      - ../../include:/src/include:ro

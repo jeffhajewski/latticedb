@@ -1,0 +1,23 @@
+FROM fedora:40
+
+RUN dnf install -y --setopt=install_weak_deps=False \
+    bash \
+    gcc \
+    glibc-devel \
+    python3 \
+    python3-pip \
+    nodejs \
+    npm \
+    && dnf clean all
+
+ENV DISTRO="fedora-40"
+ENV ARTIFACTS="/artifacts"
+ENV FIXTURES="/fixtures"
+ENV C_TEST_DIR="/c-test"
+ENV SRC="/src"
+ENV PATH="/artifacts/bin:$PATH"
+ENV LD_LIBRARY_PATH="/artifacts/lib"
+
+WORKDIR /workspace
+
+CMD ["/scripts/run-suite.sh"]

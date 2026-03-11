@@ -1,0 +1,14 @@
+{
+  "nodes": [
+    {"id": "alice", "labels": ["Person"], "properties": {"name": "Alice", "age": 30}},
+    {"id": "bob", "labels": ["Person"], "properties": {"name": "Bob", "age": 25}},
+    {"id": "acme", "labels": ["Company"], "properties": {"name": "Acme Corp", "industry": "Tech"}},
+    {"id": "post1", "labels": ["Post"], "properties": {"title": "Hello World", "body": "First post"}}
+  ],
+  "edges": [
+    {"source": "alice", "target": "bob", "type": "KNOWS", "properties": {"since": 2020}},
+    {"source": "alice", "target": "acme", "type": "WORKS_AT", "properties": {"role": "Engineer"}},
+    {"source": "bob", "target": "acme", "type": "WORKS_AT", "properties": {"role": "Designer"}},
+    {"source": "alice", "target": "post1", "type": "AUTHORED", "properties": {}}
+  ]
+}

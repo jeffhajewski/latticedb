@@ -1,0 +1,25 @@
+FROM alpine:3.19
+
+RUN apk add --no-cache \
+    bash \
+    gcc \
+    musl-dev \
+    python3 \
+    py3-pip \
+    py3-virtualenv \
+    py3-numpy \
+    nodejs \
+    npm \
+    coreutils
+
+ENV DISTRO="alpine-3.19"
+ENV ARTIFACTS="/artifacts"
+ENV FIXTURES="/fixtures"
+ENV C_TEST_DIR="/c-test"
+ENV SRC="/src"
+ENV PATH="/artifacts/bin:$PATH"
+ENV LD_LIBRARY_PATH="/artifacts/lib"
+
+WORKDIR /workspace
+
+CMD ["/scripts/run-suite.sh"]

@@ -1,0 +1,79 @@
+name: Container Integration Tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  ZIG_VERSION: "0.15.2"
+
+jobs:
+  build-linux-binaries:
+    name: Build Linux Binaries
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Build glibc binaries
+        run: |
+          mkdir -p dist/build/x86_64-linux-gnu/{bin,lib,include}
+          zig build cli -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseFast
+          cp zig-out/bin/lattice dist/build/x86_64-linux-gnu/bin/
+          zig build shared -Dtarget=x86_64-linux-gnu -Doptimize=ReleaseFast
+          cp zig-out/lib/liblattice.so dist/build/x86_64-linux-gnu/lib/
+          cp include/lattice.h dist/build/x86_64-linux-gnu/include/
+
+      - name: Build musl binaries
+        run: |
+          mkdir -p dist/build/x86_64-linux-musl/{bin,lib,include}
+          zig build cli -Dtarget=x86_64-linux-musl -Doptimize=ReleaseFast
+          cp zig-out/bin/lattice dist/build/x86_64-linux-musl/bin/
+          zig build shared -Dtarget=x86_64-linux-musl -Doptimize=ReleaseFast
+          cp zig-out/lib/liblattice.so dist/build/x86_64-linux-musl/lib/
+          cp include/lattice.h dist/build/x86_64-linux-musl/include/
+
+      - name: Upload binaries
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-binaries
+          path: dist/build/
+
+  container-test:
+    name: Test (${{ matrix.distro }})
+    needs: build-linux-binaries
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        distro:
+          - ubuntu-22.04
+          - ubuntu-24.04
+          - debian-bookworm
+          - alpine-3.19
+          - fedora-40
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download binaries
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-binaries
+          path: dist/build/
+
+      - name: Fix binary permissions
+        run: |
+          chmod +x dist/build/x86_64-linux-gnu/bin/lattice
+          chmod +x dist/build/x86_64-linux-musl/bin/lattice
+
+      - name: Run container tests
+        run: |
+          cd tests/container
+          docker compose up --build --abort-on-container-exit ${{ matrix.distro }}

@@ -15,6 +15,7 @@ BUILD_DIR="$SCRIPT_DIR/build"
 
 TARGETS=(
     "x86_64-linux-gnu"
+    "x86_64-linux-musl"
     "aarch64-linux-gnu"
     "x86_64-macos"
     "aarch64-macos"

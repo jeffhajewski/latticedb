@@ -327,10 +327,9 @@ tr.highlight td {
   margin: 0 auto 28px;
 }
 .example-layout {
-  display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr);
-  gap: 28px;
-  align-items: center;
+  display: flex;
+  flex-direction: column;
+  gap: 20px;
 }
 .example-code {
   background: #fff;
@@ -350,6 +349,7 @@ tr.highlight td {
 }
 .example-code pre {
   margin-top: 8px;
+  font-size: 13px;
 }
 .graph-showcase {
   background: #fff;
@@ -357,15 +357,11 @@ tr.highlight td {
   border: 1px solid #e8e8e8;
   padding: 20px;
   margin: 0;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
 }
 .graph-showcase img {
-  width: min(100%, 720px);
+  width: 100%;
   height: auto;
   display: block;
-  margin: 0 auto;
   border-radius: 8px;
   border: 1px solid #dce7f3;
   background: #f4f8fd;
@@ -422,7 +418,6 @@ footer .footer-links {
   .stats-grid { grid-template-columns: repeat(2, 1fr); }
   .features-grid { grid-template-columns: 1fr; }
   .release-grid { grid-template-columns: 1fr; }
-  .example-layout { grid-template-columns: 1fr; }
   .stat-number { font-size: 24px; }
   pre { font-size: 13px; padding: 16px; }
 }
@@ -629,7 +624,7 @@ footer .footer-links {
     <div class="example-layout">
       <div class="example-code">
         <h3>Construct and Query</h3>
-        <p>These statements build the graph shown on the right.</p>
+        <p>These statements build the graph shown below.</p>
         <pre><span class="kw">CREATE</span> (alice:Person {name: <span class="str">"Alice"</span>})
 <span class="kw">CREATE</span> (doc:Document {title: <span class="str">"Attention Is All You Need"</span>})
 <span class="kw">CREATE</span> (c1:Chunk {text: <span class="str">"Self-attention..."</span>})
@@ -644,7 +639,7 @@ footer .footer-links {
       </div>
       <figure class="graph-showcase">
         <img src="assets/quickstart-graph.svg" alt="Knowledge graph visualization with Chunk, Document, and Person nodes connected by PART_OF and AUTHORED_BY relationships." loading="lazy">
-        <figcaption>Rendered from the snippet at left. <a href="assets/quickstart-graph.dot">Download DOT source</a>.</figcaption>
+        <figcaption>Rendered from the snippet above. <a href="assets/quickstart-graph.dot">Download DOT source</a>.</figcaption>
       </figure>
     </div>
   </div>

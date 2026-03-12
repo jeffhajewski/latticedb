@@ -1,4 +1,4 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1060 500" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="title desc">
+<svg xmlns="http://www.w3.org/2000/svg" width="1060" height="500" viewBox="0 0 1060 500" preserveAspectRatio="xMidYMid meet" role="img" aria-labelledby="title desc">
   <title id="title">Quickstart Knowledge Graph Visualization</title>
   <desc id="desc">A small graph with two Chunk nodes connected to a Document node, and the Document connected to a Person node via labeled directed edges.</desc>
 

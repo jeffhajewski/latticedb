@@ -1,0 +1,208 @@
+{
+  "papers": [
+    {
+      "key": "A1",
+      "title": "Attention Is All You Need",
+      "year": 2017,
+      "venue": "NeurIPS",
+      "author": "Vaswani",
+      "topics": ["Transformers"],
+      "abstract": "We propose the Transformer, a novel architecture based entirely on attention mechanisms, dispensing with recurrence and convolution. The Transformer achieves state-of-the-art results on machine translation benchmarks while being more parallelizable and requiring significantly less time to train."
+    },
+    {
+      "key": "A2",
+      "title": "BERT: Pre-training of Deep Bidirectional Transformers",
+      "year": 2019,
+      "venue": "NAACL",
+      "author": "Devlin",
+      "topics": ["Pre-training", "Transformers"],
+      "abstract": "We introduce BERT, a method for pre-training deep bidirectional representations from unlabeled text by jointly conditioning on both left and right context. Fine-tuned BERT achieves state-of-the-art results on eleven NLP benchmarks."
+    },
+    {
+      "key": "A3",
+      "title": "Language Models are Unsupervised Multitask Learners",
+      "year": 2019,
+      "venue": "OpenAI",
+      "author": "Radford",
+      "topics": ["Language Models"],
+      "abstract": "We demonstrate that language models trained on a large corpus of web text can perform downstream tasks without explicit supervision. GPT-2 with 1.5 billion parameters achieves state-of-the-art on seven out of eight language modeling benchmarks in a zero-shot setting."
+    },
+    {
+      "key": "A4",
+      "title": "Language Models are Few-Shot Learners",
+      "year": 2020,
+      "venue": "NeurIPS",
+      "author": "Brown",
+      "topics": ["Language Models"],
+      "abstract": "We show that scaling up language models greatly improves task-agnostic few-shot performance. GPT-3 with 175 billion parameters achieves strong performance on many NLP tasks using only a few demonstrations provided in the prompt context."
+    },
+    {
+      "key": "A5",
+      "title": "Scaling Laws for Neural Language Models",
+      "year": 2020,
+      "venue": "arXiv",
+      "author": "Kaplan",
+      "topics": ["Language Models"],
+      "abstract": "We study empirical scaling laws for language model performance on the cross-entropy loss. Performance depends strongly on scale, with smooth power law relationships between model size, dataset size, and the amount of compute used for training."
+    },
+    {
+      "key": "B1",
+      "title": "Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks",
+      "year": 2020,
+      "venue": "NeurIPS",
+      "author": "Lewis",
+      "topics": ["Retrieval"],
+      "abstract": "We introduce RAG, a model that combines pre-trained parametric memory with a non-parametric retrieval component for language generation. RAG models generate more specific, diverse, and factual text than purely parametric seq2seq models."
+    },
+    {
+      "key": "B2",
+      "title": "Dense Passage Retrieval for Open-Domain Question Answering",
+      "year": 2020,
+      "venue": "EMNLP",
+      "author": "Karpukhin",
+      "topics": ["Retrieval", "Vector Search"],
+      "abstract": "We show that retrieval using dense vector representations alone can substantially outperform sparse retrieval methods like TF-IDF and BM25 for open-domain question answering. Our simple dual-encoder framework significantly improves QA accuracy."
+    },
+    {
+      "key": "B3",
+      "title": "REALM: Retrieval-Augmented Language Model Pre-Training",
+      "year": 2020,
+      "venue": "ICML",
+      "author": "Guu",
+      "topics": ["Retrieval", "Pre-training"],
+      "abstract": "We augment language model pre-training with a learned textual knowledge retriever. REALM learns to retrieve documents that help predict masked tokens and achieves state-of-the-art results on open-domain question answering benchmarks."
+    },
+    {
+      "key": "B4",
+      "title": "Self-RAG: Learning to Retrieve, Generate, and Critique",
+      "year": 2023,
+      "venue": "NeurIPS",
+      "author": "Asai",
+      "topics": ["Retrieval"],
+      "abstract": "We introduce Self-RAG, a framework that trains a language model to adaptively retrieve passages and generate text while reflecting on its own output. Self-RAG significantly outperforms existing RAG approaches and LLMs with retrieval on diverse tasks."
+    },
+    {
+      "key": "C1",
+      "title": "From Local to Global: A Graph RAG Approach to Query-Focused Summarization",
+      "year": 2024,
+      "venue": "arXiv",
+      "author": "Edge",
+      "topics": ["Graph RAG", "Knowledge Graphs"],
+      "abstract": "We propose Graph RAG, which uses LLM-generated knowledge graphs to enable both local and global search over large text corpora. Graph RAG substantially improves the comprehensiveness and diversity of generated answers for global sensemaking questions."
+    },
+    {
+      "key": "C2",
+      "title": "Unifying Large Language Models and Knowledge Graphs: A Roadmap",
+      "year": 2024,
+      "venue": "IEEE TKDE",
+      "author": "Pan",
+      "topics": ["Knowledge Graphs", "Language Models"],
+      "abstract": "We present a roadmap for unifying large language models and knowledge graphs, covering KG-enhanced LLMs, LLM-augmented KGs, and synergized LLMs plus KGs. We discuss key challenges and future research directions for this integration."
+    },
+    {
+      "key": "C3",
+      "title": "KG-RAG: Bridging the Gap Between Knowledge and Creativity",
+      "year": 2023,
+      "venue": "arXiv",
+      "author": "Soman",
+      "topics": ["Knowledge Graphs", "Retrieval"],
+      "abstract": "We propose KG-RAG, which integrates biomedical knowledge graphs with retrieval-augmented generation to enhance LLM reasoning about medical questions. KG-RAG improves zero-shot performance on medical QA benchmarks without requiring domain-specific fine-tuning."
+    },
+    {
+      "key": "C4",
+      "title": "Think-on-Graph: Deep and Responsible Reasoning of LLMs on Knowledge Graphs",
+      "year": 2023,
+      "venue": "arXiv",
+      "author": "Sun",
+      "topics": ["Knowledge Graphs"],
+      "abstract": "We propose Think-on-Graph, a framework that enables LLMs to perform beam search on knowledge graphs for faithful and responsible reasoning. The approach grounds LLM reasoning in structured knowledge, significantly reducing hallucination."
+    },
+    {
+      "key": "C5",
+      "title": "Graph RAG: Unlocking LLM Discovery on Narrative Private Data",
+      "year": 2024,
+      "venue": "arXiv",
+      "author": "Edge",
+      "topics": ["Graph RAG"],
+      "abstract": "We explore how graph-based text indexing approaches can help LLMs reason over private narrative datasets. Using community summaries from knowledge graphs enables answering global questions that are impossible with standard vector-based RAG."
+    },
+    {
+      "key": "D1",
+      "title": "Efficient and Robust Approximate Nearest Neighbor Search Using HNSW Graphs",
+      "year": 2018,
+      "venue": "IEEE TPAMI",
+      "author": "Malkov",
+      "topics": ["Vector Search"],
+      "abstract": "We propose HNSW, a graph-based algorithm for approximate nearest neighbor search that uses hierarchical navigable small world graphs. HNSW provides state-of-the-art performance in terms of speed-recall tradeoff across multiple benchmarks."
+    },
+    {
+      "key": "D2",
+      "title": "Sentence-BERT: Sentence Embeddings using Siamese BERT-Networks",
+      "year": 2019,
+      "venue": "EMNLP",
+      "author": "Reimers",
+      "topics": ["Embeddings"],
+      "abstract": "We develop Sentence-BERT, a modification of BERT using siamese and triplet network structures to derive semantically meaningful sentence embeddings. This enables efficient semantic similarity comparison via cosine similarity for large-scale applications."
+    },
+    {
+      "key": "D3",
+      "title": "Text Embeddings by Weakly-Supervised Contrastive Pre-training",
+      "year": 2022,
+      "venue": "arXiv",
+      "author": "Wang",
+      "topics": ["Embeddings"],
+      "abstract": "We present E5, a family of text embedding models trained with contrastive pre-training using weak supervision from large-scale text pairs. E5 achieves strong performance on a wide range of embedding and retrieval benchmarks."
+    },
+    {
+      "key": "D4",
+      "title": "Matryoshka Representation Learning",
+      "year": 2022,
+      "venue": "NeurIPS",
+      "author": "Kusupati",
+      "topics": ["Embeddings"],
+      "abstract": "We propose Matryoshka Representation Learning, which encodes information at different granularities to produce embeddings that are useful at multiple dimensions. This allows flexible deployment without retraining for different resource constraints."
+    }
+  ],
+  "citations": [
+    ["A2", "A1"],
+    ["A3", "A1"],
+    ["A4", "A1"],
+    ["A4", "A3"],
+    ["A4", "A5"],
+    ["B1", "A1"],
+    ["B1", "A2"],
+    ["B1", "B2"],
+    ["B1", "B3"],
+    ["B2", "A2"],
+    ["B2", "D1"],
+    ["B2", "D2"],
+    ["B3", "A2"],
+    ["B3", "B2"],
+    ["B4", "A4"],
+    ["B4", "B1"],
+    ["C1", "A4"],
+    ["C1", "B1"],
+    ["C2", "A4"],
+    ["C2", "B1"],
+    ["C3", "B1"],
+    ["C3", "C2"],
+    ["C4", "C2"],
+    ["C4", "A4"],
+    ["C5", "A4"],
+    ["C5", "C1"],
+    ["D2", "A2"],
+    ["D3", "D2"],
+    ["D4", "D2"],
+    ["D4", "D3"]
+  ],
+  "topics": [
+    "Transformers",
+    "Pre-training",
+    "Language Models",
+    "Retrieval",
+    "Knowledge Graphs",
+    "Graph RAG",
+    "Vector Search",
+    "Embeddings"
+  ]
+}

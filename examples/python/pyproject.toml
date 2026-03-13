@@ -1,0 +1,12 @@
+[project]
+name = "latticedb-examples"
+version = "0.1.0"
+description = "LatticeDB example: Research Paper Graph RAG"
+requires-python = ">=3.9"
+dependencies = [
+    "latticedb",
+    "numpy",
+]
+
+[project.optional-dependencies]
+llm = ["anthropic"]

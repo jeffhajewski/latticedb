@@ -1,0 +1,19 @@
+{
+  "name": "latticedb-examples",
+  "version": "0.1.0",
+  "description": "LatticeDB example: Research Paper Graph RAG",
+  "private": true,
+  "scripts": {
+    "paper-graph-rag": "ts-node paper_graph_rag.ts"
+  },
+  "dependencies": {
+    "@hajewski/latticedb": "^0.3.0"
+  },
+  "optionalDependencies": {
+    "@anthropic-ai/sdk": "^0.39.0"
+  },
+  "devDependencies": {
+    "ts-node": "^10.9.0",
+    "typescript": "^5.0.0"
+  }
+}

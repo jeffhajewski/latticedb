@@ -1764,7 +1764,7 @@ pub const Database = struct {
 
     /// Get a property from a node.
     /// Note: The caller owns the returned PropertyValue and must call deinit on it
-    /// for string/bytes values to avoid memory leaks.
+    /// for any heap-backed value to avoid memory leaks.
     pub fn getNodeProperty(
         self: *Self,
         node_id: NodeId,
@@ -1787,12 +1787,7 @@ pub const Database = struct {
         // Find the property and clone it
         for (existing_node.properties) |prop| {
             if (prop.key_id == key_id) {
-                // Clone the value to avoid returning a pointer to freed memory
-                return switch (prop.value) {
-                    .string_val => |s| .{ .string_val = self.allocator.dupeZ(u8, s) catch return DatabaseError.OutOfMemory },
-                    .bytes_val => |b| .{ .bytes_val = self.allocator.dupe(u8, b) catch return DatabaseError.OutOfMemory },
-                    else => prop.value, // Primitives are copied by value
-                };
+                return prop.value.clone(self.allocator) catch return DatabaseError.OutOfMemory;
             }
         }
 
@@ -3346,11 +3341,9 @@ test "graph crud operations" {
 
     // Test setNodeProperty
     try db.setNodeProperty(null, alice, "name", .{ .string_val = "Alice" });
-    const name_val = try db.getNodeProperty(alice, "name");
-    try std.testing.expect(name_val != null);
-    try std.testing.expectEqualStrings("Alice", name_val.?.string_val);
-    // Free the cloned string
-    allocator.free(name_val.?.string_val);
+    var name_val = (try db.getNodeProperty(alice, "name")).?;
+    defer name_val.deinit(allocator);
+    try std.testing.expectEqualStrings("Alice", name_val.string_val);
 
     // Delete node
     try db.deleteNode(null, alice);

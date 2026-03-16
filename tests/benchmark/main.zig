@@ -130,7 +130,10 @@ const PropertyGetContext = struct {
     fn run(self: *@This()) void {
         const node_id = self.node_ids[self.index % self.node_ids.len];
         // Just do the property lookup - we don't care about the result for timing
-        _ = self.db.getNodeProperty(node_id, "name") catch {};
+        if (self.db.getNodeProperty(node_id, "name") catch null) |value| {
+            var property = value;
+            property.deinit(self.db.allocator);
+        }
         self.index +%= 1;
     }
 };
@@ -154,7 +157,6 @@ const FtsSearchContext = struct {
         self.db.freeFtsSearchResults(results);
     }
 };
-
 
 // ============================================================================
 // Setup Helpers
@@ -199,8 +201,8 @@ fn createNodesWithProperties(db: *Database, count: usize) ![]u64 {
         ids[i] = try db.createNode(null, labels);
         var name_buf: [32]u8 = undefined;
         const name = std.fmt.bufPrint(&name_buf, "Person {d}", .{i}) catch "Unknown";
-        try db.setNodeProperty(null,ids[i], "name", .{ .string_val = name });
-        try db.setNodeProperty(null,ids[i], "age", .{ .int_val = @as(i64, @intCast(i % 100)) });
+        try db.setNodeProperty(null, ids[i], "name", .{ .string_val = name });
+        try db.setNodeProperty(null, ids[i], "age", .{ .int_val = @as(i64, @intCast(i % 100)) });
     }
     return ids;
 }
@@ -212,7 +214,7 @@ fn createEdges(db: *Database, node_ids: []const u64, edges_per_node: usize) !voi
             const target_idx = rng.intRangeAtMost(usize, 0, node_ids.len - 1);
             const target = node_ids[target_idx];
             if (source != target) {
-                _ = db.createEdge(null,source, target, "KNOWS") catch {};
+                _ = db.createEdge(null, source, target, "KNOWS") catch {};
             }
         }
     }

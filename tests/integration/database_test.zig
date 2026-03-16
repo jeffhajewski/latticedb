@@ -71,10 +71,9 @@ test "database: data persists across close and reopen" {
         try std.testing.expect(try db.nodeExists(2));
 
         // Verify properties
-        const alice_name = try db.getNodeProperty(1, "name");
-        try std.testing.expect(alice_name != null);
-        try std.testing.expectEqualStrings("Alice", alice_name.?.string_val);
-        allocator.free(alice_name.?.string_val);
+        var alice_name = (try db.getNodeProperty(1, "name")).?;
+        defer alice_name.deinit(allocator);
+        try std.testing.expectEqualStrings("Alice", alice_name.string_val);
 
         const bob_age = try db.getNodeProperty(2, "age");
         try std.testing.expect(bob_age != null);
@@ -560,9 +559,9 @@ test "database: tree roots saved correctly across sessions" {
         try std.testing.expectEqual(@as(usize, 100), nodes.len);
 
         // Spot check some properties
-        const name42 = try db.getNodeProperty(43, "name"); // ID 43 = Node_42 (0-indexed)
-        if (name42) |n| {
-            allocator.free(n.string_val);
+        if (try db.getNodeProperty(43, "name")) |value| { // ID 43 = Node_42 (0-indexed)
+            var name42 = value;
+            defer name42.deinit(allocator);
         }
     }
 
@@ -1487,9 +1486,9 @@ test "database: property type handling" {
     try db.setNodeProperty(null, node, "bool_prop", .{ .bool_val = true });
 
     // Verify each type
-    const str = try db.getNodeProperty(node, "string_prop");
-    try std.testing.expectEqualStrings("hello", str.?.string_val);
-    allocator.free(str.?.string_val);
+    var str = (try db.getNodeProperty(node, "string_prop")).?;
+    defer str.deinit(allocator);
+    try std.testing.expectEqualStrings("hello", str.string_val);
 
     const int = try db.getNodeProperty(node, "int_prop");
     try std.testing.expectEqual(@as(i64, 42), int.?.int_val);
@@ -1499,6 +1498,61 @@ test "database: property type handling" {
 
     const b = try db.getNodeProperty(node, "bool_prop");
     try std.testing.expectEqual(true, b.?.bool_val);
+}
+
+test "database: getNodeProperty returns owned heap-backed values" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_owned_property_values_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    const node = try db.createNode(null, &[_][]const u8{"OwnedValues"});
+    const blob = [_]u8{ 1, 2, 3, 4 };
+    const embedding = [_]f32{ 0.5, 1.5, 2.5 };
+    var tags = [_]PropertyValue{
+        .{ .string_val = "alpha" },
+        .{ .int_val = 7 },
+    };
+    var address = [_]PropertyValue.MapEntry{
+        .{ .key = "city", .value = .{ .string_val = "Portland" } },
+        .{ .key = "zip", .value = .{ .int_val = 97201 } },
+    };
+
+    try db.setNodeProperty(null, node, "blob", .{ .bytes_val = &blob });
+    try db.setNodeProperty(null, node, "embedding", .{ .vector_val = &embedding });
+    try db.setNodeProperty(null, node, "tags", .{ .list_val = &tags });
+    try db.setNodeProperty(null, node, "address", .{ .map_val = &address });
+
+    var blob_val = (try db.getNodeProperty(node, "blob")).?;
+    defer blob_val.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, blob[0..], blob_val.bytes_val);
+
+    var embedding_val = (try db.getNodeProperty(node, "embedding")).?;
+    defer embedding_val.deinit(allocator);
+    try std.testing.expectEqualSlices(f32, embedding[0..], embedding_val.vector_val);
+
+    var tags_val = (try db.getNodeProperty(node, "tags")).?;
+    defer tags_val.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), tags_val.list_val.len);
+    try std.testing.expectEqualStrings("alpha", tags_val.list_val[0].string_val);
+    try std.testing.expectEqual(@as(i64, 7), tags_val.list_val[1].int_val);
+
+    var address_val = (try db.getNodeProperty(node, "address")).?;
+    defer address_val.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), address_val.map_val.len);
+    try std.testing.expectEqualStrings("city", address_val.map_val[0].key);
+    try std.testing.expectEqualStrings("Portland", address_val.map_val[0].value.string_val);
+    try std.testing.expectEqualStrings("zip", address_val.map_val[1].key);
+    try std.testing.expectEqual(@as(i64, 97201), address_val.map_val[1].value.int_val);
 }
 
 // ============================================================================

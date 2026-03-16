@@ -1566,10 +1566,9 @@ test "rollback: property removal restores property" {
     try db.setNodeProperty(null, node_id, "name", PropertyValue{ .string_val = "Alice" });
 
     // Verify initial property
-    const initial_val = try db.getNodeProperty(node_id, "name");
-    try std.testing.expect(initial_val != null);
-    try std.testing.expectEqualStrings("Alice", initial_val.?.string_val);
-    allocator.free(initial_val.?.string_val);
+    var initial_val = (try db.getNodeProperty(node_id, "name")).?;
+    defer initial_val.deinit(allocator);
+    try std.testing.expectEqualStrings("Alice", initial_val.string_val);
 
     // 2. Begin transaction and remove property
     var txn = try db.beginTransaction(.read_write);
@@ -1583,10 +1582,9 @@ test "rollback: property removal restores property" {
     try db.abortTransaction(&txn);
 
     // 4. Verify property restored
-    const restored_val = try db.getNodeProperty(node_id, "name");
-    try std.testing.expect(restored_val != null);
-    try std.testing.expectEqualStrings("Alice", restored_val.?.string_val);
-    allocator.free(restored_val.?.string_val);
+    var restored_val = (try db.getNodeProperty(node_id, "name")).?;
+    defer restored_val.deinit(allocator);
+    try std.testing.expectEqualStrings("Alice", restored_val.string_val);
 }
 
 test "rollback: new property added in txn is removed on abort" {
@@ -1626,9 +1624,9 @@ test "rollback: new property added in txn is removed on abort" {
     try db.setNodeProperty(&txn, node_id, "email", PropertyValue{ .string_val = "alice@example.com" });
 
     // Verify property added
-    const added_val = try db.getNodeProperty(node_id, "email");
-    try std.testing.expect(added_val != null);
-    allocator.free(added_val.?.string_val);
+    var added_val = (try db.getNodeProperty(node_id, "email")).?;
+    defer added_val.deinit(allocator);
+    try std.testing.expectEqualStrings("alice@example.com", added_val.string_val);
 
     // 3. Abort - should remove the new property
     try db.abortTransaction(&txn);

@@ -124,6 +124,32 @@ const QueryHandle = struct {
         return .ok;
     }
 
+    fn storeOwnedParameter(self: *QueryHandle, name: []const u8, value: PropertyValue) lattice_error {
+        const gop = self.parameters.getOrPut(name) catch {
+            var owned_value = value;
+            owned_value.deinit(global_allocator);
+            return .err_out_of_memory;
+        };
+
+        if (gop.found_existing) {
+            var old_value = gop.value_ptr.*;
+            old_value.deinit(global_allocator);
+            gop.value_ptr.* = value;
+            return .ok;
+        }
+
+        const name_copy = global_allocator.dupe(u8, name) catch {
+            _ = self.parameters.remove(name);
+            var owned_value = value;
+            owned_value.deinit(global_allocator);
+            return .err_out_of_memory;
+        };
+
+        gop.key_ptr.* = name_copy;
+        gop.value_ptr.* = value;
+        return .ok;
+    }
+
     fn deinit(self: *QueryHandle) void {
         self.clearLastError();
 
@@ -131,11 +157,8 @@ const QueryHandle = struct {
         var iter = self.parameters.iterator();
         while (iter.next()) |entry| {
             global_allocator.free(entry.key_ptr.*);
-            // Free vector data if this is a vector parameter
-            switch (entry.value_ptr.*) {
-                .vector_val => |v| global_allocator.free(v),
-                else => {},
-            }
+            var value = entry.value_ptr.*;
+            value.deinit(global_allocator);
         }
         self.parameters.deinit();
     }
@@ -1274,19 +1297,8 @@ pub export fn lattice_query_bind(
     const name_slice = cStrToSlice(name) orelse return .err_invalid_arg;
     const c_value = value orelse return .err_invalid_arg;
 
-    // Convert C value to Zig PropertyValue
-    const zig_value = cValueToZigValue(c_value);
-
-    // Copy the name since we need to own it
-    const name_copy = global_allocator.dupe(u8, name_slice) catch return .err_out_of_memory;
-
-    // Store in parameters map (may overwrite existing)
-    query_handle.parameters.put(name_copy, zig_value) catch {
-        global_allocator.free(name_copy);
-        return .err_out_of_memory;
-    };
-
-    return .ok;
+    const owned_value = cValueToZigValue(c_value).clone(global_allocator) catch return .err_out_of_memory;
+    return query_handle.storeOwnedParameter(name_slice, owned_value);
 }
 
 /// Bind a vector parameter to a prepared query
@@ -1301,27 +1313,8 @@ pub export fn lattice_query_bind_vector(
 
     if (vector == null or dimensions == 0) return .err_invalid_arg;
 
-    // Copy the vector data since we need to own it
-    const vector_copy = global_allocator.alloc(f32, dimensions) catch return .err_out_of_memory;
-    @memcpy(vector_copy, vector[0..dimensions]);
-
-    // Create PropertyValue with vector
-    const zig_value = PropertyValue{ .vector_val = vector_copy };
-
-    // Copy the name since we need to own it
-    const name_copy = global_allocator.dupe(u8, name_slice) catch {
-        global_allocator.free(vector_copy);
-        return .err_out_of_memory;
-    };
-
-    // Store in parameters map (may overwrite existing)
-    query_handle.parameters.put(name_copy, zig_value) catch {
-        global_allocator.free(name_copy);
-        global_allocator.free(vector_copy);
-        return .err_out_of_memory;
-    };
-
-    return .ok;
+    const owned_value = (PropertyValue{ .vector_val = vector[0..dimensions] }).clone(global_allocator) catch return .err_out_of_memory;
+    return query_handle.storeOwnedParameter(name_slice, owned_value);
 }
 
 /// Execute a prepared query

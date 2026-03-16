@@ -1278,6 +1278,115 @@ test "c_api: prepare and execute query" {
     _ = c_api.lattice_commit(txn);
 }
 
+test "c_api: prepared query copies and replaces string parameters" {
+    const path = "/tmp/lattice_capi_query_bind_copy_test.db";
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    {
+        var write_txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &write_txn));
+
+        var alice: lattice_node_id = 0;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(write_txn, "Person", &alice));
+        const alice_name = "Alice";
+        var alice_name_value = lattice_value{
+            .value_type = .string,
+            .data = .{ .string_val = .{ .ptr = alice_name.ptr, .len = alice_name.len } },
+        };
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_property(write_txn, alice, "name", &alice_name_value));
+        var alice_age_value = lattice_value{
+            .value_type = .int,
+            .data = .{ .int_val = 30 },
+        };
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_property(write_txn, alice, "age", &alice_age_value));
+
+        var bob: lattice_node_id = 0;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(write_txn, "Person", &bob));
+        const bob_name = "Bob";
+        var bob_name_value = lattice_value{
+            .value_type = .string,
+            .data = .{ .string_val = .{ .ptr = bob_name.ptr, .len = bob_name.len } },
+        };
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_property(write_txn, bob, "name", &bob_name_value));
+        var bob_age_value = lattice_value{
+            .value_type = .int,
+            .data = .{ .int_val = 25 },
+        };
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_property(write_txn, bob, "age", &bob_age_value));
+
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(write_txn));
+    }
+
+    var read_txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &read_txn));
+    defer _ = c_api.lattice_commit(read_txn);
+
+    var query: ?*lattice_query = null;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_query_prepare(db, "MATCH (n:Person) WHERE n.name = $name RETURN n.age", &query),
+    );
+    defer c_api.lattice_query_free(query);
+
+    var name_buf = [_]u8{ 'A', 'l', 'i', 'c', 'e' };
+    var param = lattice_value{
+        .value_type = .string,
+        .data = .{ .string_val = .{ .ptr = name_buf[0..].ptr, .len = name_buf.len } },
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_bind(query, "name", &param));
+    @memcpy(name_buf[0..], "XXXXX");
+
+    {
+        var result: ?*lattice_result = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_execute(query, read_txn, &result));
+        defer c_api.lattice_result_free(result);
+
+        try std.testing.expect(c_api.lattice_result_next(result));
+        var value: lattice_value = undefined;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_result_get(result, 0, &value));
+        try std.testing.expectEqual(lattice_value_type.int, value.value_type);
+        try std.testing.expectEqual(@as(i64, 30), value.data.int_val);
+        try std.testing.expect(!c_api.lattice_result_next(result));
+    }
+
+    var bob_buf = [_]u8{ 'B', 'o', 'b' };
+    param.data.string_val.ptr = bob_buf[0..].ptr;
+    param.data.string_val.len = bob_buf.len;
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_bind(query, "name", &param));
+    @memcpy(bob_buf[0..], "Tom");
+
+    {
+        var result: ?*lattice_result = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_execute(query, read_txn, &result));
+        defer c_api.lattice_result_free(result);
+
+        try std.testing.expect(c_api.lattice_result_next(result));
+        var value: lattice_value = undefined;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_result_get(result, 0, &value));
+        try std.testing.expectEqual(lattice_value_type.int, value.value_type);
+        try std.testing.expectEqual(@as(i64, 25), value.data.int_val);
+        try std.testing.expect(!c_api.lattice_result_next(result));
+    }
+}
+
 test "c_api: query with invalid syntax returns error" {
     const path = "/tmp/lattice_capi_bad_query_test.db";
     std.fs.cwd().deleteFile(path) catch {};

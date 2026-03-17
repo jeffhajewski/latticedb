@@ -1015,8 +1015,7 @@ test "symbol table recovered - property keys resolve after crash" {
 
         try std.testing.expect(try db.nodeExists(node_id));
 
-        // Test getNodeProperty - this interns the key and looks up the property
-        // If symbol table wasn't recovered, this wouldn't work
+        // Test getNodeProperty by resolving the existing key string through the recovered symbol table
         var name_val = (try db.getNodeProperty(node_id, "name")).?;
         defer name_val.deinit(allocator);
         try std.testing.expectEqualStrings("Alice", name_val.string_val);

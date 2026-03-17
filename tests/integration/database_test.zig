@@ -1462,6 +1462,64 @@ test "database: read-only mode prevents writes" {
     std.fs.cwd().deleteFile(path) catch {};
 }
 
+test "database: unknown read lookups do not intern symbols" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_unknown_lookup_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var alice: u64 = 0;
+    var bob: u64 = 0;
+
+    {
+        var db = try Database.open(allocator, path, .{
+            .create = true,
+            .config = .{ .enable_wal = false, .enable_fts = false },
+        });
+        defer db.close();
+
+        alice = try db.createNode(null, &[_][]const u8{"Person"});
+        bob = try db.createNode(null, &[_][]const u8{"Person"});
+        try db.setNodeProperty(null, alice, "name", .{ .string_val = "Alice" });
+        try db.createEdge(null, alice, bob, "KNOWS");
+
+        const symbol_count_before = db.symbol_table.count();
+
+        const missing_prop = try db.getNodeProperty(alice, "missing_key");
+        try std.testing.expect(missing_prop == null);
+
+        const missing_label_nodes = try db.getNodesByLabel("MissingLabel");
+        defer allocator.free(missing_label_nodes);
+        try std.testing.expectEqual(@as(usize, 0), missing_label_nodes.len);
+
+        try std.testing.expect(!db.edgeExists(alice, bob, "MISSING_EDGE"));
+        try std.testing.expectEqual(symbol_count_before, db.symbol_table.count());
+    }
+
+    {
+        var db = try Database.open(allocator, path, .{
+            .create = false,
+            .read_only = true,
+            .config = .{ .enable_wal = false, .enable_fts = false },
+        });
+        defer db.close();
+
+        const symbol_count_before = db.symbol_table.count();
+
+        const missing_prop = try db.getNodeProperty(alice, "missing_key");
+        try std.testing.expect(missing_prop == null);
+
+        const missing_label_nodes = try db.getNodesByLabel("MissingLabel");
+        defer allocator.free(missing_label_nodes);
+        try std.testing.expectEqual(@as(usize, 0), missing_label_nodes.len);
+
+        try std.testing.expect(!db.edgeExists(alice, bob, "MISSING_EDGE"));
+        try std.testing.expectEqual(symbol_count_before, db.symbol_table.count());
+    }
+
+    std.fs.cwd().deleteFile(path) catch {};
+}
+
 test "database: property type handling" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_property_types_test.ltdb";

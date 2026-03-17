@@ -1430,7 +1430,6 @@ pub const Database = struct {
         };
         defer existing_node.deinit(self.allocator);
 
-        // Intern the property key
         const key_id = self.symbol_table.intern(key) catch {
             return DatabaseError.IoError;
         };
@@ -1779,9 +1778,11 @@ pub const Database = struct {
         };
         defer existing_node.deinit(self.allocator);
 
-        // Intern the property key
-        const key_id = self.symbol_table.intern(key) catch {
-            return DatabaseError.IoError;
+        const key_id = self.symbol_table.lookup(key) catch |err| {
+            return switch (err) {
+                symbols_mod.SymbolError.NotFound => null,
+                else => DatabaseError.IoError,
+            };
         };
 
         // Find the property and clone it
@@ -2314,7 +2315,7 @@ pub const Database = struct {
         target: NodeId,
         edge_type: []const u8,
     ) bool {
-        const type_id = self.symbol_table.intern(edge_type) catch return false;
+        const type_id = self.symbol_table.lookup(edge_type) catch return false;
         return self.edge_store.exists(source, target, type_id);
     }
 
@@ -2782,8 +2783,11 @@ pub const Database = struct {
 
     /// Get all nodes with a specific label
     pub fn getNodesByLabel(self: *Self, label: []const u8) ![]NodeId {
-        const label_id = self.symbol_table.intern(label) catch {
-            return DatabaseError.IoError;
+        const label_id = self.symbol_table.lookup(label) catch |err| {
+            return switch (err) {
+                symbols_mod.SymbolError.NotFound => self.allocator.alloc(NodeId, 0) catch return DatabaseError.OutOfMemory,
+                else => DatabaseError.IoError,
+            };
         };
 
         return self.label_index.getNodesByLabel(label_id) catch {

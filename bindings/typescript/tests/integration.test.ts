@@ -247,6 +247,32 @@ describeIfNative('Database Integration', () => {
       });
     });
 
+    test('set and get bytes property', async () => {
+      await db.write(async (txn) => {
+        await txn.setProperty(nodeId, 'blob', new Uint8Array([1, 2, 3]));
+      });
+
+      await db.read(async (txn) => {
+        const value = await txn.getProperty(nodeId, 'blob');
+        expect(value).toBeInstanceOf(Uint8Array);
+        expect(Array.from(value as Uint8Array)).toEqual([1, 2, 3]);
+      });
+    });
+
+    test('set and get vector property', async () => {
+      await db.write(async (txn) => {
+        await txn.setProperty(nodeId, 'embedding', new Float32Array([0.1, 0.2, 0.3]));
+      });
+
+      await db.read(async (txn) => {
+        const value = await txn.getProperty(nodeId, 'embedding');
+        expect(value).toBeInstanceOf(Float32Array);
+        expect(Array.from(value as Float32Array)).toEqual(
+          expect.arrayContaining([0.1, 0.2, 0.3])
+        );
+      });
+    });
+
     test('update property value', async () => {
       await db.write(async (txn) => {
         await txn.setProperty(nodeId, 'version', 1);

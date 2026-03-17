@@ -377,6 +377,7 @@ test "c_api: rollback undoes property changes" {
         var retrieved: lattice_value = undefined;
         try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_get_property(txn, node_id, "age", &retrieved));
         try std.testing.expectEqual(@as(i64, 30), retrieved.data.int_val);
+        c_api.lattice_value_free(&retrieved);
 
         // Rollback
         try std.testing.expectEqual(lattice_error.ok, c_api.lattice_rollback(txn));
@@ -390,6 +391,7 @@ test "c_api: rollback undoes property changes" {
         var retrieved: lattice_value = undefined;
         try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_get_property(txn, node_id, "age", &retrieved));
         try std.testing.expectEqual(@as(i64, 25), retrieved.data.int_val); // Original value restored
+        c_api.lattice_value_free(&retrieved);
 
         _ = c_api.lattice_commit(txn);
     }
@@ -450,6 +452,7 @@ test "c_api: committed changes persist across transactions" {
         var retrieved: lattice_value = undefined;
         try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_get_property(txn, node_id, "name", &retrieved));
         try std.testing.expectEqual(lattice_value_type.string, retrieved.value_type);
+        c_api.lattice_value_free(&retrieved);
 
         _ = c_api.lattice_commit(txn);
     }
@@ -608,16 +611,48 @@ test "c_api: node properties set and get" {
     };
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_property(txn, node_id, "age", &age_value));
 
+    // Set bytes property
+    const blob = [_]u8{ 1, 2, 3 };
+    var blob_value = lattice_value{
+        .value_type = .bytes,
+        .data = .{ .bytes_val = .{ .ptr = blob[0..].ptr, .len = blob.len } },
+    };
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_property(txn, node_id, "blob", &blob_value));
+
+    // Set vector property
+    const embedding = [_]f32{ 0.1, 0.2, 0.3 };
+    var embedding_value = lattice_value{
+        .value_type = .vector,
+        .data = .{ .vector_val = .{ .ptr = embedding[0..].ptr, .dimensions = embedding.len } },
+    };
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_property(txn, node_id, "embedding", &embedding_value));
+
     // Get string property
     var retrieved_name: lattice_value = undefined;
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_get_property(txn, node_id, "name", &retrieved_name));
     try std.testing.expectEqual(lattice_value_type.string, retrieved_name.value_type);
+    c_api.lattice_value_free(&retrieved_name);
 
     // Get int property
     var retrieved_age: lattice_value = undefined;
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_get_property(txn, node_id, "age", &retrieved_age));
     try std.testing.expectEqual(lattice_value_type.int, retrieved_age.value_type);
     try std.testing.expectEqual(@as(i64, 30), retrieved_age.data.int_val);
+    c_api.lattice_value_free(&retrieved_age);
+
+    // Get bytes property
+    var retrieved_blob: lattice_value = undefined;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_get_property(txn, node_id, "blob", &retrieved_blob));
+    try std.testing.expectEqual(lattice_value_type.bytes, retrieved_blob.value_type);
+    try std.testing.expectEqualSlices(u8, blob[0..], retrieved_blob.data.bytes_val.ptr[0..retrieved_blob.data.bytes_val.len]);
+    c_api.lattice_value_free(&retrieved_blob);
+
+    // Get vector property
+    var retrieved_embedding: lattice_value = undefined;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_get_property(txn, node_id, "embedding", &retrieved_embedding));
+    try std.testing.expectEqual(lattice_value_type.vector, retrieved_embedding.value_type);
+    try std.testing.expectEqualSlices(f32, embedding[0..], retrieved_embedding.data.vector_val.ptr[0..retrieved_embedding.data.vector_val.dimensions]);
+    c_api.lattice_value_free(&retrieved_embedding);
 
     // Get nonexistent property
     var no_prop: lattice_value = undefined;

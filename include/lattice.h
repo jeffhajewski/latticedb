@@ -165,7 +165,10 @@ lattice_error lattice_node_set_property(
     const lattice_value* value
 );
 
-/* Get a property from a node */
+/* Get a property from a node.
+ * For heap-backed values (string/bytes/vector), ownership transfers to the caller.
+ * Release any owned storage with lattice_value_free() after consuming the value.
+ */
 lattice_error lattice_node_get_property(
     lattice_txn* txn,
     lattice_node_id node_id,
@@ -189,6 +192,15 @@ lattice_error lattice_node_get_labels(
 
 /* Free a string allocated by lattice (e.g., from lattice_node_get_labels) */
 void lattice_free_string(char* str);
+
+/* Free heap-backed storage inside a lattice_value returned by an owning API.
+ * Safe to call on null/bool/int/float values.
+ *
+ * Ownership currently transfers from lattice_node_get_property().
+ * Values returned by lattice_result_get() are borrowed from the result handle
+ * and must not be passed to lattice_value_free().
+ */
+void lattice_value_free(lattice_value* value);
 
 /* Set a vector on a node */
 lattice_error lattice_node_set_vector(
@@ -544,7 +556,10 @@ uint32_t lattice_result_column_count(lattice_result* result);
 /* Get column name */
 const char* lattice_result_column_name(lattice_result* result, uint32_t index);
 
-/* Get column value */
+/* Get column value.
+ * Heap-backed pointers in value_out are borrowed from the result handle and stay
+ * valid until lattice_result_free(). Do not pass them to lattice_value_free().
+ */
 lattice_error lattice_result_get(
     lattice_result* result,
     uint32_t index,

@@ -11,6 +11,7 @@ export type PropertyValue =
   | number
   | string
   | Uint8Array
+  | Float32Array
   | PropertyValue[]
   | { [key: string]: PropertyValue };
 
@@ -69,6 +70,10 @@ export class Value {
   }
 
   static bytes(v: Uint8Array): Value {
+    return new Value(v);
+  }
+
+  static vector(v: Float32Array): Value {
     return new Value(v);
   }
 }

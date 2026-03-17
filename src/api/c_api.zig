@@ -723,7 +723,9 @@ pub export fn lattice_node_set_property(
     return .ok;
 }
 
-/// Get a property from a node
+/// Get a property from a node.
+/// Heap-backed values transfer ownership to the caller and must be released
+/// with lattice_value_free().
 pub export fn lattice_node_get_property(
     txn: ?*lattice_txn,
     node_id: lattice_node_id,
@@ -825,6 +827,38 @@ pub export fn lattice_free_string(str: [*c]u8) void {
 
     const slice = str[0 .. len + 1];
     global_allocator.free(slice);
+}
+
+/// Free heap-backed storage inside a lattice_value returned by an owning API.
+/// Values returned by lattice_result_get are borrowed from the result handle and
+/// must not be passed here.
+pub export fn lattice_value_free(value: ?*lattice_value) void {
+    const c_value = value orelse return;
+
+    switch (c_value.value_type) {
+        .string => {
+            const ptr = c_value.data.string_val.ptr;
+            if (ptr != null) {
+                global_allocator.free(ptr[0..c_value.data.string_val.len]);
+            }
+        },
+        .bytes => {
+            const ptr = c_value.data.bytes_val.ptr;
+            if (ptr != null) {
+                global_allocator.free(ptr[0..c_value.data.bytes_val.len]);
+            }
+        },
+        .vector => {
+            const ptr = c_value.data.vector_val.ptr;
+            if (ptr != null) {
+                global_allocator.free(ptr[0..c_value.data.vector_val.dimensions]);
+            }
+        },
+        else => {},
+    }
+
+    c_value.* = std.mem.zeroes(lattice_value);
+    c_value.value_type = .null;
 }
 
 /// Set a vector on a node
@@ -1457,7 +1491,9 @@ pub export fn lattice_result_column_name(result: ?*lattice_result, index: u32) [
     return result_handle.result.columns[index].ptr;
 }
 
-/// Get column value at current row
+/// Get column value at current row.
+/// Heap-backed pointers in value_out are borrowed from the result handle and
+/// remain valid until lattice_result_free().
 pub export fn lattice_result_get(
     result: ?*lattice_result,
     index: u32,

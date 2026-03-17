@@ -288,7 +288,10 @@ class Transaction:
         if code == LATTICE_ERROR_NOT_FOUND:
             return None
         check_error(code)
-        return value_to_python(c_value)
+        try:
+            return value_to_python(c_value)
+        finally:
+            lib._lib.lattice_value_free(byref(c_value))
 
     def set_vector(
         self,

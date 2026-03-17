@@ -432,6 +432,10 @@ class LatticeLib:
         self._lib.lattice_free_string.argtypes = [c_char_p]
         self._lib.lattice_free_string.restype = None
 
+        # lattice_value_free
+        self._lib.lattice_value_free.argtypes = [POINTER(LatticeValue)]
+        self._lib.lattice_value_free.restype = None
+
         # lattice_node_set_vector
         self._lib.lattice_node_set_vector.argtypes = [
             LatticeTxn,

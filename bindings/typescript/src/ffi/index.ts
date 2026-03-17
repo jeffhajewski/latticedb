@@ -398,7 +398,11 @@ export class LatticeFFI {
     const valueOut = this.makeEmptyValue();
     const err = this.bindings.lattice_node_get_property(txn, nodeId, key, valueOut);
     this.checkError(err);
-    return this.latticeValueToJs(valueOut);
+    try {
+      return this.latticeValueToJs(valueOut);
+    } finally {
+      this.bindings.lattice_value_free(valueOut);
+    }
   }
 
   /**
@@ -501,6 +505,20 @@ export class LatticeFFI {
         const len = Number(sv.len);
         if (len === 0) return '';
         return koffi.decode(sv.ptr, 'char', len) as string;
+      }
+      case LatticeValueType.Bytes: {
+        const bv = data.bytes_val as { ptr: unknown; len: number | bigint };
+        const len = Number(bv.len);
+        if (!bv.ptr || len === 0) return new Uint8Array(0);
+        const bytes = koffi.decode(bv.ptr, 'uint8_t', len) as number[];
+        return Uint8Array.from(bytes);
+      }
+      case LatticeValueType.Vector: {
+        const vv = data.vector_val as { ptr: unknown; dimensions: number | bigint };
+        const dims = Number(vv.dimensions);
+        if (!vv.ptr || dims === 0) return new Float32Array(0);
+        const floats = koffi.decode(vv.ptr, 'float', dims) as number[];
+        return new Float32Array(floats);
       }
       default:
         return null;

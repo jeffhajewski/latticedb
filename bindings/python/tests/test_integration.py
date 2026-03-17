@@ -263,6 +263,26 @@ class TestNodeOperations:
                 assert txn.get_property(node_id, "age") == 30
                 assert txn.get_property(node_id, "active") is True
 
+    def test_get_property_bytes_and_vector(self, tmp_path):
+        """Test retrieving bytes and vector properties from a node."""
+        import numpy as np
+
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                node = txn.create_node(labels=["Person"])
+                txn.set_property(node.id, "blob", b"\x01\x02\x03")
+                txn.set_property(node.id, "embedding", np.array([0.1, 0.2, 0.3], dtype=np.float32))
+                node_id = node.id
+                txn.commit()
+
+            with db.read() as txn:
+                assert txn.get_property(node_id, "blob") == b"\x01\x02\x03"
+                vector = txn.get_property(node_id, "embedding")
+                assert isinstance(vector, np.ndarray)
+                np.testing.assert_allclose(vector, np.array([0.1, 0.2, 0.3], dtype=np.float32))
+
     def test_get_property_not_found(self, tmp_path):
         """Test that get_property returns None for nonexistent property."""
         db_path = tmp_path / "test.db"

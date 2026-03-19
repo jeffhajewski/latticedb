@@ -742,6 +742,56 @@ test "c_api: get node labels" {
     _ = c_api.lattice_commit(txn);
 }
 
+test "c_api: unlabeled nodes and multi-label mutation" {
+    const path = "/tmp/lattice_capi_multilabel_test.db";
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+
+    var node_id: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, null, &node_id));
+
+    var labels: [*c]u8 = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_get_labels(txn, node_id, &labels));
+    try std.testing.expect(labels != null);
+    try std.testing.expectEqual(@as(usize, 0), std.mem.sliceTo(labels, 0).len);
+    c_api.lattice_free_string(labels);
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_add_label(txn, node_id, "Person"));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_add_label(txn, node_id, "Employee"));
+
+    labels = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_get_labels(txn, node_id, &labels));
+    try std.testing.expectEqualStrings("Person,Employee", std.mem.sliceTo(labels, 0));
+    c_api.lattice_free_string(labels);
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_remove_label(txn, node_id, "Person"));
+
+    labels = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_get_labels(txn, node_id, &labels));
+    try std.testing.expectEqualStrings("Employee", std.mem.sliceTo(labels, 0));
+    c_api.lattice_free_string(labels);
+
+    _ = c_api.lattice_commit(txn);
+}
+
 // ============================================================================
 // Edge Operations Tests
 // ============================================================================

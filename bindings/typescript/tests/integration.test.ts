@@ -121,15 +121,44 @@ describeIfNative('Database Integration', () => {
       expect(node.properties.age).toBe(30);
     });
 
+    test('create node with multiple labels', async () => {
+      let nodeId!: bigint;
+
+      const node = await db.write(async (txn) => {
+        const created = await txn.createNode({
+          labels: ['Person', 'Employee'],
+        });
+        nodeId = created.id;
+        return created;
+      });
+
+      expect(node.labels).toEqual(['Person', 'Employee']);
+
+      await db.read(async (txn) => {
+        const stored = await txn.getNode(nodeId);
+        expect(stored).not.toBeNull();
+        expect(stored!.labels).toEqual(['Person', 'Employee']);
+      });
+    });
+
     test('create node without labels', async () => {
+      let nodeId!: bigint;
+
       const node = await db.write(async (txn) => {
         return await txn.createNode({
           properties: { key: 'value' },
         });
       });
 
+      nodeId = node.id;
       expect(node.id).toBeDefined();
       expect(node.labels).toEqual([]);
+
+      await db.read(async (txn) => {
+        const stored = await txn.getNode(nodeId);
+        expect(stored).not.toBeNull();
+        expect(stored!.labels).toEqual([]);
+      });
     });
 
     test('node exists check', async () => {

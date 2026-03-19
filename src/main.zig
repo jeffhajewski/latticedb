@@ -102,6 +102,8 @@ comptime {
     _ = &c_api.lattice_commit;
     _ = &c_api.lattice_rollback;
     _ = &c_api.lattice_node_create;
+    _ = &c_api.lattice_node_add_label;
+    _ = &c_api.lattice_node_remove_label;
     _ = &c_api.lattice_node_delete;
     _ = &c_api.lattice_node_set_property;
     _ = &c_api.lattice_node_get_property;

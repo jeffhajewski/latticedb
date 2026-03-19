@@ -390,6 +390,22 @@ class LatticeLib:
         ]
         self._lib.lattice_node_create.restype = c_int
 
+        # lattice_node_add_label
+        self._lib.lattice_node_add_label.argtypes = [
+            LatticeTxn,
+            LatticeNodeId,
+            c_char_p,
+        ]
+        self._lib.lattice_node_add_label.restype = c_int
+
+        # lattice_node_remove_label
+        self._lib.lattice_node_remove_label.argtypes = [
+            LatticeTxn,
+            LatticeNodeId,
+            c_char_p,
+        ]
+        self._lib.lattice_node_remove_label.restype = c_int
+
         # lattice_node_delete
         self._lib.lattice_node_delete.argtypes = [LatticeTxn, LatticeNodeId]
         self._lib.lattice_node_delete.restype = c_int

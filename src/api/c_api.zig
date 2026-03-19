@@ -656,7 +656,8 @@ pub export fn lattice_rollback(txn: ?*lattice_txn) lattice_error {
 // Node Operations
 // ============================================================================
 
-/// Create a node with a label
+/// Create a node with an optional single label.
+/// Passing null or an empty string creates an unlabeled node.
 pub export fn lattice_node_create(
     txn: ?*lattice_txn,
     label: [*c]const u8,
@@ -666,16 +667,61 @@ pub export fn lattice_node_create(
 
     if (txn_handle.txn.mode == .read_only) return .err_read_only;
 
-    const label_slice = cStrToSlice(label) orelse return .err_invalid_arg;
-    const labels = [_][]const u8{label_slice};
+    const maybe_label_slice = cStrToSlice(label);
+    const labels: []const []const u8 = if (maybe_label_slice) |label_slice|
+        if (label_slice.len == 0) &.{} else &.{label_slice}
+    else
+        &.{};
 
     // Pass transaction if it's a real one (id != 0)
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
-    const node_id = txn_handle.db_handle.db.createNode(txn_ptr, &labels) catch |err| {
+    const node_id = txn_handle.db_handle.db.createNode(txn_ptr, labels) catch |err| {
         return mapAnyError(err);
     };
 
     node_out.* = node_id;
+    return .ok;
+}
+
+/// Add a label to an existing node
+pub export fn lattice_node_add_label(
+    txn: ?*lattice_txn,
+    node_id: lattice_node_id,
+    label: [*c]const u8,
+) lattice_error {
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
+
+    const label_slice = cStrToSlice(label) orelse return .err_invalid_arg;
+    if (label_slice.len == 0) return .err_invalid_arg;
+
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+    txn_handle.db_handle.db.addNodeLabel(txn_ptr, node_id, label_slice) catch |err| {
+        return mapDatabaseError(err);
+    };
+
+    return .ok;
+}
+
+/// Remove a label from an existing node
+pub export fn lattice_node_remove_label(
+    txn: ?*lattice_txn,
+    node_id: lattice_node_id,
+    label: [*c]const u8,
+) lattice_error {
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
+
+    const label_slice = cStrToSlice(label) orelse return .err_invalid_arg;
+    if (label_slice.len == 0) return .err_invalid_arg;
+
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+    txn_handle.db_handle.db.removeNodeLabel(txn_ptr, node_id, label_slice) catch |err| {
+        return mapDatabaseError(err);
+    };
+
     return .ok;
 }
 

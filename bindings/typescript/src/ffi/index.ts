@@ -262,6 +262,22 @@ export class LatticeFFI {
   }
 
   /**
+   * Add a label to an existing node.
+   */
+  addNodeLabel(txn: TransactionHandle, nodeId: bigint, label: string): void {
+    const err = this.bindings.lattice_node_add_label(txn, nodeId, label);
+    this.checkError(err);
+  }
+
+  /**
+   * Remove a label from an existing node.
+   */
+  removeNodeLabel(txn: TransactionHandle, nodeId: bigint, label: string): void {
+    const err = this.bindings.lattice_node_remove_label(txn, nodeId, label);
+    this.checkError(err);
+  }
+
+  /**
    * Delete a node.
    */
   deleteNode(txn: TransactionHandle, nodeId: bigint): void {

@@ -144,11 +144,26 @@ lattice_error lattice_rollback(lattice_txn* txn);
  * Node operations
  */
 
-/* Create a node with a label */
+/* Create a node with an optional single label.
+ * Pass NULL or "" to create an unlabeled node. */
 lattice_error lattice_node_create(
     lattice_txn* txn,
     const char* label,
     lattice_node_id* node_out
+);
+
+/* Add a label to an existing node */
+lattice_error lattice_node_add_label(
+    lattice_txn* txn,
+    lattice_node_id node_id,
+    const char* label
+);
+
+/* Remove a label from an existing node */
+lattice_error lattice_node_remove_label(
+    lattice_txn* txn,
+    lattice_node_id node_id,
+    const char* label
 );
 
 /* Delete a node */

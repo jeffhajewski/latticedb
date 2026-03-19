@@ -171,6 +171,38 @@ class TestNodeOperations:
                 assert "Person" in node.labels
                 txn.commit()
 
+    def test_create_node_with_multiple_labels(self, tmp_path):
+        """Test creating a node with multiple labels."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                node = txn.create_node(labels=["Person", "Employee"])
+                node_id = node.id
+                assert node.labels == ["Person", "Employee"]
+                txn.commit()
+
+            with db.read() as txn:
+                stored = txn.get_node(node_id)
+                assert stored is not None
+                assert stored.labels == ["Person", "Employee"]
+
+    def test_create_unlabeled_node(self, tmp_path):
+        """Test creating a node without labels."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                node = txn.create_node()
+                node_id = node.id
+                assert node.labels == []
+                txn.commit()
+
+            with db.read() as txn:
+                stored = txn.get_node(node_id)
+                assert stored is not None
+                assert stored.labels == []
+
     def test_create_node_with_properties(self, tmp_path):
         """Test creating a node with properties."""
         db_path = tmp_path / "test.db"

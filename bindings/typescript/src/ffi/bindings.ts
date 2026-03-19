@@ -119,6 +119,16 @@ export interface LatticeBindings {
     label: string | null,
     node_out: Buffer
   ) => number;
+  lattice_node_add_label: (
+    txn: unknown,
+    node_id: bigint,
+    label: string
+  ) => number;
+  lattice_node_remove_label: (
+    txn: unknown,
+    node_id: bigint,
+    label: string
+  ) => number;
   lattice_node_delete: (txn: unknown, node_id: bigint) => number;
   lattice_node_exists: (
     txn: unknown,
@@ -408,6 +418,16 @@ function createBindings(): LatticeBindings {
       TxnPtr,
       'str', // label
       koffi.out(koffi.pointer('uint64')), // node_out
+    ]),
+    lattice_node_add_label: lib.func('lattice_node_add_label', 'int', [
+      TxnPtr,
+      'uint64', // node_id
+      'str', // label
+    ]),
+    lattice_node_remove_label: lib.func('lattice_node_remove_label', 'int', [
+      TxnPtr,
+      'uint64', // node_id
+      'str', // label
     ]),
     lattice_node_delete: lib.func('lattice_node_delete', 'int', [
       TxnPtr,

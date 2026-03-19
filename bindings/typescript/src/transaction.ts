@@ -82,12 +82,16 @@ export class Transaction {
     const labels = options.labels ?? [];
     const properties = options.properties ?? {};
 
-    if (labels.length > 1) {
-      throw new Error('Multiple labels are not yet supported. Pass at most one label.');
-    }
+    const nodeId =
+      labels.length === 1
+        ? this.ffi.createNode(this.txnHandle!, labels[0])
+        : this.ffi.createNode(this.txnHandle!);
 
-    const firstLabel = labels[0] ?? '';
-    const nodeId = this.ffi.createNode(this.txnHandle!, firstLabel);
+    if (labels.length > 1) {
+      for (const label of labels) {
+        this.ffi.addNodeLabel(this.txnHandle!, nodeId, label);
+      }
+    }
 
     // Set properties
     for (const [key, value] of Object.entries(properties)) {

@@ -132,8 +132,8 @@ Value Types:
   3 = Float64 (8 bytes, IEEE 754)
   4 = String (u32 length + bytes)
   5 = Bytes (u32 length + bytes)
-  6 = List (TODO)
-  7 = Map (TODO)
+  6 = List (supported internally by storage/query layers; not yet exposed by the public C API)
+  7 = Map (supported internally by storage/query layers; not yet exposed by the public C API)
 ```
 
 ### API

@@ -310,6 +310,9 @@ await db.cacheClear();
 - `number` - Integer or float
 - `string` - UTF-8 string
 - `Uint8Array` - Binary data
+- `Float32Array` - Vector embeddings
+
+Nested arrays/objects are not currently exposed by the public bindings/C API.
 
 ## Error Handling
 

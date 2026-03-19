@@ -23,6 +23,7 @@ export const enum LatticeErrorCode {
   VersionMismatch = -11,
   Checksum = -12,
   OutOfMemory = -13,
+  Unsupported = -14,
 }
 
 /**

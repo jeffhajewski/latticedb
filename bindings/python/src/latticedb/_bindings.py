@@ -105,6 +105,7 @@ LATTICE_ERROR_FULL = -10
 LATTICE_ERROR_VERSION_MISMATCH = -11
 LATTICE_ERROR_CHECKSUM = -12
 LATTICE_ERROR_OUT_OF_MEMORY = -13
+LATTICE_ERROR_UNSUPPORTED = -14
 
 
 # Exception classes
@@ -188,6 +189,12 @@ class LatticeOutOfMemoryError(LatticeError):
     pass
 
 
+class LatticeUnsupportedError(LatticeError):
+    """Requested operation or value type is not supported by the public C API."""
+
+    pass
+
+
 class LatticeQueryError(LatticeError):
     """Rich query execution error with stage-aware diagnostics."""
 
@@ -221,6 +228,7 @@ _ERROR_MAP = {
     LATTICE_ERROR_VERSION_MISMATCH: LatticeVersionMismatchError,
     LATTICE_ERROR_CHECKSUM: LatticeChecksumError,
     LATTICE_ERROR_OUT_OF_MEMORY: LatticeOutOfMemoryError,
+    LATTICE_ERROR_UNSUPPORTED: LatticeUnsupportedError,
 }
 
 
@@ -927,9 +935,16 @@ def value_to_python(c_value: LatticeValue):
             # Create numpy array from C float pointer
             return np.ctypeslib.as_array(vector_val.ptr, shape=(vector_val.dimensions,)).copy()
         return np.array([], dtype=np.float32)
+    elif value_type in (LATTICE_VALUE_LIST, LATTICE_VALUE_MAP):
+        raise LatticeUnsupportedError(
+            "LIST and MAP values are not supported by the public C API",
+            LATTICE_ERROR_UNSUPPORTED,
+        )
     else:
-        # LIST and MAP not supported yet
-        return None
+        raise LatticeUnsupportedError(
+            f"Unsupported native value type: {value_type}",
+            LATTICE_ERROR_UNSUPPORTED,
+        )
 
 
 def _is_numpy_array(value) -> bool:
@@ -982,5 +997,7 @@ def python_to_value(py_val, c_value: LatticeValue):
         c_value.data.vector_val.ptr = vec.ctypes.data_as(POINTER(ctypes.c_float))
         c_value.data.vector_val.dimensions = len(vec)
         return vec  # Keep reference alive
+    elif isinstance(py_val, (list, dict)):
+        raise TypeError("LIST and MAP values are not supported by the public C API")
     else:
         raise TypeError(f"Unsupported value type: {type(py_val).__name__}")

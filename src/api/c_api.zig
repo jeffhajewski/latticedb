@@ -250,6 +250,7 @@ pub const lattice_error = enum(c_int) {
     err_version_mismatch = -11,
     err_checksum = -12,
     err_out_of_memory = -13,
+    err_unsupported = -14,
 };
 
 /// Query diagnostic stage for prepared query execution failures.
@@ -366,6 +367,10 @@ pub const lattice_value = extern struct {
     },
 };
 
+const ValueConversionError = error{
+    UnsupportedValueType,
+};
+
 /// Open options for C API
 pub const lattice_open_options = extern struct {
     create: bool = false,
@@ -387,7 +392,7 @@ fn cStrToSlice(c_str: [*c]const u8) ?[]const u8 {
 }
 
 /// Convert Zig PropertyValue to C lattice_value
-fn zigValueToCValue(zig_val: PropertyValue, c_val: *lattice_value) void {
+fn zigValueToCValue(zig_val: PropertyValue, c_val: *lattice_value) ValueConversionError!void {
     c_val.data = std.mem.zeroes(@TypeOf(c_val.data));
     switch (zig_val) {
         .null_val => c_val.value_type = .null,
@@ -418,15 +423,12 @@ fn zigValueToCValue(zig_val: PropertyValue, c_val: *lattice_value) void {
             c_val.data.vector_val.ptr = v.ptr;
             c_val.data.vector_val.dimensions = @intCast(v.len);
         },
-        .list_val, .map_val => {
-            // Complex types not supported in MVP
-            c_val.value_type = .null;
-        },
+        .list_val, .map_val => return error.UnsupportedValueType,
     }
 }
 
 /// Convert ResultValue to C lattice_value
-fn resultValueToCValue(result_val: ResultValue, c_val: *lattice_value) void {
+fn resultValueToCValue(result_val: ResultValue, c_val: *lattice_value) ValueConversionError!void {
     c_val.data = std.mem.zeroes(@TypeOf(c_val.data));
     switch (result_val) {
         .null_val => c_val.value_type = .null,
@@ -465,16 +467,12 @@ fn resultValueToCValue(result_val: ResultValue, c_val: *lattice_value) void {
             c_val.data.vector_val.ptr = v.ptr;
             c_val.data.vector_val.dimensions = @intCast(v.len);
         },
-        .list_val, .map_val => {
-            // Complex nested types require separate iteration API
-            // For now, mark as null in C API
-            c_val.value_type = .null;
-        },
+        .list_val, .map_val => return error.UnsupportedValueType,
     }
 }
 
 /// Convert C lattice_value to Zig PropertyValue
-fn cValueToZigValue(c_val: *const lattice_value) PropertyValue {
+fn cValueToZigValue(c_val: *const lattice_value) ValueConversionError!PropertyValue {
     return switch (c_val.value_type) {
         .null => .{ .null_val = {} },
         .bool => .{ .bool_val = c_val.data.bool_val },
@@ -483,7 +481,13 @@ fn cValueToZigValue(c_val: *const lattice_value) PropertyValue {
         .string => .{ .string_val = c_val.data.string_val.ptr[0..c_val.data.string_val.len] },
         .bytes => .{ .bytes_val = c_val.data.bytes_val.ptr[0..c_val.data.bytes_val.len] },
         .vector => .{ .vector_val = c_val.data.vector_val.ptr[0..c_val.data.vector_val.dimensions] },
-        .list, .map => .{ .null_val = {} },
+        .list, .map => error.UnsupportedValueType,
+    };
+}
+
+fn mapValueConversionError(err: ValueConversionError) lattice_error {
+    return switch (err) {
+        error.UnsupportedValueType => .err_unsupported,
     };
 }
 
@@ -758,7 +762,7 @@ pub export fn lattice_node_set_property(
     const c_val = value orelse return .err_invalid_arg;
 
     // Convert C value to Zig PropertyValue
-    const zig_value = cValueToZigValue(c_val);
+    const zig_value = cValueToZigValue(c_val) catch |err| return mapValueConversionError(err);
 
     // Pass transaction if it's a real one (id != 0)
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
@@ -787,7 +791,11 @@ pub export fn lattice_node_get_property(
     };
 
     if (maybe_value) |zig_value| {
-        zigValueToCValue(zig_value, value_out);
+        zigValueToCValue(zig_value, value_out) catch |err| {
+            var owned_value = zig_value;
+            owned_value.deinit(global_allocator);
+            return mapValueConversionError(err);
+        };
         return .ok;
     } else {
         return .err_not_found;
@@ -1253,7 +1261,7 @@ pub export fn lattice_edge_set_property(
 
     const key_slice = cStrToSlice(key) orelse return .err_invalid_arg;
     const c_val = value orelse return .err_invalid_arg;
-    const zig_value = cValueToZigValue(c_val);
+    const zig_value = cValueToZigValue(c_val) catch |err| return mapValueConversionError(err);
 
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
     txn_handle.db_handle.db.setEdgePropertyById(txn_ptr, edge_id, key_slice, zig_value) catch |err| {
@@ -1278,7 +1286,11 @@ pub export fn lattice_edge_get_property(
     };
 
     if (maybe_value) |zig_value| {
-        zigValueToCValue(zig_value, value_out);
+        zigValueToCValue(zig_value, value_out) catch |err| {
+            var owned_value = zig_value;
+            owned_value.deinit(global_allocator);
+            return mapValueConversionError(err);
+        };
         return .ok;
     }
 
@@ -1456,7 +1468,8 @@ pub export fn lattice_query_bind(
     const name_slice = cStrToSlice(name) orelse return .err_invalid_arg;
     const c_value = value orelse return .err_invalid_arg;
 
-    const owned_value = cValueToZigValue(c_value).clone(global_allocator) catch return .err_out_of_memory;
+    const parsed_value = cValueToZigValue(c_value) catch |err| return mapValueConversionError(err);
+    const owned_value = parsed_value.clone(global_allocator) catch return .err_out_of_memory;
     return query_handle.storeOwnedParameter(name_slice, owned_value);
 }
 
@@ -1632,7 +1645,7 @@ pub export fn lattice_result_get(
     const row = result_handle.result.rows[result_handle.current_row];
     if (index >= row.values.len) return .err_invalid_arg;
 
-    resultValueToCValue(row.values[index], value_out);
+    resultValueToCValue(row.values[index], value_out) catch |err| return mapValueConversionError(err);
     return .ok;
 }
 
@@ -1703,6 +1716,7 @@ pub export fn lattice_error_message(code: lattice_error) [*c]const u8 {
         .err_version_mismatch => "Version mismatch",
         .err_checksum => "Checksum error",
         .err_out_of_memory => "Out of memory",
+        .err_unsupported => "Unsupported operation or value type",
     };
 }
 
@@ -1861,6 +1875,7 @@ test "error code values match header" {
     try std.testing.expectEqual(@as(c_int, 0), @intFromEnum(lattice_error.ok));
     try std.testing.expectEqual(@as(c_int, -1), @intFromEnum(lattice_error.err));
     try std.testing.expectEqual(@as(c_int, -13), @intFromEnum(lattice_error.err_out_of_memory));
+    try std.testing.expectEqual(@as(c_int, -14), @intFromEnum(lattice_error.err_unsupported));
 }
 
 test "value type tags match header" {
@@ -1880,6 +1895,10 @@ test "error message returns valid strings" {
     const msg = lattice_error_message(.ok);
     try std.testing.expect(msg != null);
     try std.testing.expectEqualStrings("Success", std.mem.sliceTo(msg, 0));
+
+    const unsupported = lattice_error_message(.err_unsupported);
+    try std.testing.expect(unsupported != null);
+    try std.testing.expectEqualStrings("Unsupported operation or value type", std.mem.sliceTo(unsupported, 0));
 }
 
 test "null handle returns error" {
@@ -1901,7 +1920,7 @@ test "vector value conversion" {
     const zig_val = PropertyValue{ .vector_val = &zig_vector };
 
     var c_val: lattice_value = undefined;
-    zigValueToCValue(zig_val, &c_val);
+    try zigValueToCValue(zig_val, &c_val);
 
     try std.testing.expectEqual(lattice_value_type.vector, c_val.value_type);
     try std.testing.expectEqual(@as(u32, 3), c_val.data.vector_val.dimensions);
@@ -1910,9 +1929,20 @@ test "vector value conversion" {
     try std.testing.expectApproxEqAbs(@as(f32, 3.0), c_val.data.vector_val.ptr[2], 0.001);
 
     // Test C to Zig conversion
-    const back_to_zig = cValueToZigValue(&c_val);
+    const back_to_zig = try cValueToZigValue(&c_val);
     try std.testing.expectEqual(@as(usize, 3), back_to_zig.vector_val.len);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), back_to_zig.vector_val[0], 0.001);
+}
+
+test "unsupported value conversion returns explicit error" {
+    var c_val = std.mem.zeroes(lattice_value);
+    c_val.value_type = .list;
+
+    try std.testing.expectError(error.UnsupportedValueType, cValueToZigValue(&c_val));
+
+    var list_items = [_]PropertyValue{.{ .int_val = 1 }};
+    const zig_val = PropertyValue{ .list_val = &list_items };
+    try std.testing.expectError(error.UnsupportedValueType, zigValueToCValue(zig_val, &c_val));
 }
 
 test "vector parameter binding validation" {

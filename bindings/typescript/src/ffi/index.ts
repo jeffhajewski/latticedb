@@ -488,10 +488,10 @@ export class LatticeFFI {
     if (value instanceof Uint8Array) {
       return { type: LatticeValueType.Bytes, data: { bytes_val: { ptr: value, len: value.length } } };
     }
-    // Default: convert to string
-    const str = String(value);
-    const strBuf = Buffer.from(str, 'utf8');
-    return { type: LatticeValueType.String, data: { string_val: { ptr: strBuf, len: strBuf.length } } };
+    if (Array.isArray(value) || (value !== null && typeof value === 'object')) {
+      throw new TypeError('LIST and MAP values are not supported by the public C API');
+    }
+    throw new TypeError(`Unsupported value type: ${typeof value}`);
   }
 
   /**
@@ -536,8 +536,17 @@ export class LatticeFFI {
         const floats = koffi.decode(vv.ptr, 'float', dims) as number[];
         return new Float32Array(floats);
       }
+      case LatticeValueType.List:
+      case LatticeValueType.Map:
+        throw new LatticeError(
+          'LIST and MAP values are not supported by the public C API',
+          LatticeErrorCode.Unsupported
+        );
       default:
-        return null;
+        throw new LatticeError(
+          `Unsupported native value type: ${type}`,
+          LatticeErrorCode.Unsupported
+        );
     }
   }
 

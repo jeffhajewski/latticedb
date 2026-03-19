@@ -9,11 +9,10 @@ export type PropertyValue =
   | null
   | boolean
   | number
+  | bigint
   | string
   | Uint8Array
-  | Float32Array
-  | PropertyValue[]
-  | { [key: string]: PropertyValue };
+  | Float32Array;
 
 /**
  * A node in the graph.

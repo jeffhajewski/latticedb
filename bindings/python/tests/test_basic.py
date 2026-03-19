@@ -249,6 +249,7 @@ class TestErrorMapping:
             (bindings.LATTICE_ERROR_VERSION_MISMATCH, bindings.LatticeVersionMismatchError),
             (bindings.LATTICE_ERROR_CHECKSUM, bindings.LatticeChecksumError),
             (bindings.LATTICE_ERROR_OUT_OF_MEMORY, bindings.LatticeOutOfMemoryError),
+            (bindings.LATTICE_ERROR_UNSUPPORTED, bindings.LatticeUnsupportedError),
         ],
     )
     def test_check_error_raises_specific_exception(self, monkeypatch, code, expected_exc):
@@ -264,6 +265,26 @@ class TestErrorMapping:
         assert type(exc_info.value) is expected_exc
         assert exc_info.value.code == code
         assert "native error" in str(exc_info.value)
+
+    def test_python_to_value_rejects_nested_values(self) -> None:
+        """Lists and dicts should fail explicitly instead of degrading."""
+        c_value = bindings.LatticeValue()
+
+        with pytest.raises(TypeError, match="LIST and MAP values are not supported"):
+            bindings.python_to_value([1, 2, 3], c_value)
+
+        with pytest.raises(TypeError, match="LIST and MAP values are not supported"):
+            bindings.python_to_value({"city": "Portland"}, c_value)
+
+    def test_value_to_python_rejects_nested_value_tags(self) -> None:
+        """Unsupported native LIST/MAP tags should raise a specific binding error."""
+        c_value = bindings.LatticeValue()
+        c_value.type = bindings.LATTICE_VALUE_LIST
+
+        with pytest.raises(bindings.LatticeUnsupportedError) as exc_info:
+            bindings.value_to_python(c_value)
+
+        assert exc_info.value.code == bindings.LATTICE_ERROR_UNSUPPORTED
 
     def test_check_error_unknown_code_uses_base_exception(self, monkeypatch):
         """Unknown error codes should raise LatticeError."""

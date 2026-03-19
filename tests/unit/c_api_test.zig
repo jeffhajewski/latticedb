@@ -13,6 +13,8 @@ const std = @import("std");
 const lattice = @import("lattice");
 
 const c_api = lattice.c_api;
+const CoreDatabase = lattice.storage.database.Database;
+const CorePropertyValue = lattice.PropertyValue;
 
 // Import C API types
 const lattice_database = c_api.lattice_database;
@@ -1539,6 +1541,118 @@ test "c_api: prepared query copies and replaces string parameters" {
         try std.testing.expectEqual(@as(i64, 25), value.data.int_val);
         try std.testing.expect(!c_api.lattice_result_next(result));
     }
+}
+
+test "c_api: unsupported nested values fail explicitly on input" {
+    const path = "/tmp/lattice_capi_unsupported_input_test.db";
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+    defer _ = c_api.lattice_rollback(txn);
+
+    var node_id: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Thing", &node_id));
+
+    var unsupported_value = std.mem.zeroes(lattice_value);
+    unsupported_value.value_type = .list;
+
+    try std.testing.expectEqual(
+        lattice_error.err_unsupported,
+        c_api.lattice_node_set_property(txn, node_id, "tags", &unsupported_value),
+    );
+
+    var query: ?*lattice_query = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_prepare(db, "MATCH (n) RETURN $vals", &query));
+    defer c_api.lattice_query_free(query);
+
+    try std.testing.expectEqual(
+        lattice_error.err_unsupported,
+        c_api.lattice_query_bind(query, "vals", &unsupported_value),
+    );
+}
+
+test "c_api: unsupported nested values fail explicitly on output" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_capi_unsupported_output_test.db";
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    {
+        var core_db = try CoreDatabase.open(allocator, path, .{
+            .create = true,
+            .config = .{
+                .enable_wal = false,
+                .enable_fts = false,
+                .enable_vector = false,
+            },
+        });
+        defer core_db.close();
+
+        const node_id = try core_db.createNode(null, &[_][]const u8{"Thing"});
+        var tags = [_]CorePropertyValue{
+            .{ .string_val = "alpha" },
+            .{ .int_val = 7 },
+        };
+        try core_db.setNodeProperty(null, node_id, "tags", .{ .list_val = &tags });
+    }
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = false,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        std.fs.cwd().deleteFile(path) catch {};
+        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &txn));
+    defer _ = c_api.lattice_commit(txn);
+
+    var value: lattice_value = undefined;
+    try std.testing.expectEqual(
+        lattice_error.err_unsupported,
+        c_api.lattice_node_get_property(txn, 1, "tags", &value),
+    );
+
+    var query: ?*lattice_query = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_prepare(db, "MATCH (n:Thing) RETURN n.tags", &query));
+    defer c_api.lattice_query_free(query);
+
+    var result: ?*lattice_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_execute(query, txn, &result));
+    defer c_api.lattice_result_free(result);
+
+    try std.testing.expect(c_api.lattice_result_next(result));
+    try std.testing.expectEqual(
+        lattice_error.err_unsupported,
+        c_api.lattice_result_get(result, 0, &value),
+    );
 }
 
 test "c_api: query with invalid syntax returns error" {

@@ -246,10 +246,8 @@ class Database:
                     c_value = LatticeValue()
                     c_value.type = LATTICE_VALUE_NULL
                     code = lib._lib.lattice_result_get(result_ptr, i, byref(c_value))
-                    if code == 0:  # LATTICE_OK
-                        row[col_name] = value_to_python(c_value)
-                    else:
-                        row[col_name] = None
+                    check_error(code)
+                    row[col_name] = value_to_python(c_value)
                 rows.append(row)
 
             return QueryResult(columns=columns, _rows=rows)

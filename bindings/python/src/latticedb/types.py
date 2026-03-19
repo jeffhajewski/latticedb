@@ -3,14 +3,14 @@ Type definitions for Lattice Python bindings.
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, Iterator, List, Optional, Union
+from typing import Dict, Iterator, List, Optional, Union
 
 import numpy as np
 from numpy.typing import NDArray
 
 
 # Type alias for property values
-PropertyValue = Union[None, bool, int, float, str, bytes, List[Any], Dict[str, Any]]
+PropertyValue = Union[None, bool, int, float, str, bytes, NDArray[np.float32]]
 
 
 @dataclass

@@ -8,7 +8,7 @@
 import { Value, Node, Edge, QueryResult, VectorSearchResult } from '../src/types';
 import { Database } from '../src/database';
 import { EmbeddingClient, LatticeError, LatticeQueryError, QueryErrorStage, hashEmbed, version } from '../src/index';
-import { isLibraryAvailable } from '../src/ffi';
+import { isLibraryAvailable, LatticeErrorCode, LatticeFFI, LatticeValueType } from '../src/ffi';
 
 describe('Value', () => {
   test('null value', () => {
@@ -147,6 +147,37 @@ describe('Top-level exports', () => {
     expect(err.stage).toBe(QueryErrorStage.Parse);
     expect(err.diagnosticCode).toBe('E_PARSE');
     expect(err.location).toEqual({ line: 1, column: 7, length: 1 });
+  });
+});
+
+describe('FFI value conversion guards', () => {
+  test('rejects array input instead of stringifying it', () => {
+    const ffi = Object.create(LatticeFFI.prototype) as LatticeFFI;
+    expect(() => (ffi as any).jsToLatticeValue([1, 2, 3])).toThrow(
+      /LIST and MAP values are not supported/i
+    );
+  });
+
+  test('rejects object input instead of stringifying it', () => {
+    const ffi = Object.create(LatticeFFI.prototype) as LatticeFFI;
+    expect(() => (ffi as any).jsToLatticeValue({ city: 'Portland' })).toThrow(
+      /LIST and MAP values are not supported/i
+    );
+  });
+
+  test('rejects unsupported native LIST output explicitly', () => {
+    const ffi = Object.create(LatticeFFI.prototype) as LatticeFFI;
+
+    try {
+      (ffi as any).latticeValueToJs({
+        type: LatticeValueType.List,
+        data: { int_val: BigInt(0) },
+      });
+      throw new Error('expected unsupported value error');
+    } catch (error) {
+      expect(error).toBeInstanceOf(LatticeError);
+      expect((error as LatticeError).code).toBe(LatticeErrorCode.Unsupported);
+    }
   });
 });
 

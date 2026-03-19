@@ -249,6 +249,9 @@ db.cache_clear()
 - `float` - 64-bit float
 - `str` - UTF-8 string
 - `bytes` - Binary data
+- NumPy `ndarray` (`float32`) - Vector embeddings
+
+Nested `list` and `dict` values are not currently exposed by the public bindings/C API.
 
 ## Error Handling
 

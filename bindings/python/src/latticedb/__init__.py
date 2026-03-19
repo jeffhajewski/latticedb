@@ -23,6 +23,7 @@ from latticedb._bindings import (
     LatticeVersionMismatchError,
     LatticeChecksumError,
     LatticeOutOfMemoryError,
+    LatticeUnsupportedError,
     LatticeQueryError,
     library_available,
     get_lib,
@@ -66,6 +67,7 @@ __all__ = [
     "LatticeVersionMismatchError",
     "LatticeChecksumError",
     "LatticeOutOfMemoryError",
+    "LatticeUnsupportedError",
     "LatticeQueryError",
     # Embedding
     "hash_embed",

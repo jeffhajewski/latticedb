@@ -52,7 +52,8 @@ typedef enum {
     LATTICE_ERROR_FULL = -10,
     LATTICE_ERROR_VERSION_MISMATCH = -11,
     LATTICE_ERROR_CHECKSUM = -12,
-    LATTICE_ERROR_OUT_OF_MEMORY = -13
+    LATTICE_ERROR_OUT_OF_MEMORY = -13,
+    LATTICE_ERROR_UNSUPPORTED = -14
 } lattice_error;
 
 /* Transaction modes */
@@ -61,7 +62,10 @@ typedef enum {
     LATTICE_TXN_READ_WRITE = 1
 } lattice_txn_mode;
 
-/* Value types */
+/* Value types.
+ * LIST and MAP are reserved for future nested-value support.
+ * Current public C APIs return LATTICE_ERROR_UNSUPPORTED when asked to
+ * send or receive these value types. */
 typedef enum {
     LATTICE_VALUE_NULL = 0,
     LATTICE_VALUE_BOOL = 1,
@@ -172,7 +176,8 @@ lattice_error lattice_node_delete(
     lattice_node_id node_id
 );
 
-/* Set a property on a node */
+/* Set a property on a node.
+ * LIST and MAP values currently return LATTICE_ERROR_UNSUPPORTED. */
 lattice_error lattice_node_set_property(
     lattice_txn* txn,
     lattice_node_id node_id,
@@ -183,6 +188,7 @@ lattice_error lattice_node_set_property(
 /* Get a property from a node.
  * For heap-backed values (string/bytes/vector), ownership transfers to the caller.
  * Release any owned storage with lattice_value_free() after consuming the value.
+ * LIST and MAP values currently return LATTICE_ERROR_UNSUPPORTED.
  */
 lattice_error lattice_node_get_property(
     lattice_txn* txn,
@@ -435,7 +441,8 @@ lattice_error lattice_edge_delete(
     const char* edge_type
 );
 
-/* Set a property on an edge by stable edge ID */
+/* Set a property on an edge by stable edge ID.
+ * LIST and MAP values currently return LATTICE_ERROR_UNSUPPORTED. */
 lattice_error lattice_edge_set_property(
     lattice_txn* txn,
     lattice_edge_id edge_id,
@@ -446,6 +453,7 @@ lattice_error lattice_edge_set_property(
 /* Get a property from an edge by stable edge ID.
  * For heap-backed values (string/bytes/vector), ownership transfers to the caller.
  * Release any owned storage with lattice_value_free() after consuming the value.
+ * LIST and MAP values currently return LATTICE_ERROR_UNSUPPORTED.
  */
 lattice_error lattice_edge_get_property(
     lattice_txn* txn,
@@ -554,7 +562,8 @@ lattice_error lattice_query_prepare(
     lattice_query** query_out
 );
 
-/* Bind a parameter to a prepared query (use $name in Cypher) */
+/* Bind a parameter to a prepared query (use $name in Cypher).
+ * LIST and MAP values currently return LATTICE_ERROR_UNSUPPORTED. */
 lattice_error lattice_query_bind(
     lattice_query* query,
     const char* name,       /* Parameter name without $ prefix */
@@ -607,6 +616,7 @@ const char* lattice_result_column_name(lattice_result* result, uint32_t index);
 /* Get column value.
  * Heap-backed pointers in value_out are borrowed from the result handle and stay
  * valid until lattice_result_free(). Do not pass them to lattice_value_free().
+ * LIST and MAP values currently return LATTICE_ERROR_UNSUPPORTED.
  */
 lattice_error lattice_result_get(
     lattice_result* result,

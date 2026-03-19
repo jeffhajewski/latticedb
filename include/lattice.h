@@ -420,6 +420,32 @@ lattice_error lattice_edge_delete(
     const char* edge_type
 );
 
+/* Set a property on an edge by stable edge ID */
+lattice_error lattice_edge_set_property(
+    lattice_txn* txn,
+    lattice_edge_id edge_id,
+    const char* key,
+    const lattice_value* value
+);
+
+/* Get a property from an edge by stable edge ID.
+ * For heap-backed values (string/bytes/vector), ownership transfers to the caller.
+ * Release any owned storage with lattice_value_free() after consuming the value.
+ */
+lattice_error lattice_edge_get_property(
+    lattice_txn* txn,
+    lattice_edge_id edge_id,
+    const char* key,
+    lattice_value* value_out
+);
+
+/* Remove a property from an edge by stable edge ID */
+lattice_error lattice_edge_remove_property(
+    lattice_txn* txn,
+    lattice_edge_id edge_id,
+    const char* key
+);
+
 /*
  * Edge traversal operations
  *
@@ -458,6 +484,13 @@ lattice_error lattice_edge_get_incoming(
 
 /* Get the number of edges in a result set */
 uint32_t lattice_edge_result_count(lattice_edge_result* result);
+
+/* Get the stable edge ID for a result by index */
+lattice_error lattice_edge_result_get_id(
+    lattice_edge_result* result,
+    uint32_t index,
+    lattice_edge_id* edge_id_out
+);
 
 /* Get an edge from a result set by index */
 lattice_error lattice_edge_result_get(

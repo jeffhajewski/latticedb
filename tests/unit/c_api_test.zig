@@ -25,6 +25,7 @@ const lattice_value_type = c_api.lattice_value_type;
 const lattice_open_options = c_api.lattice_open_options;
 const lattice_txn_mode = c_api.lattice_txn_mode;
 const lattice_node_id = c_api.lattice_node_id;
+const lattice_edge_id = c_api.lattice_edge_id;
 const lattice_query_error_stage = c_api.lattice_query_error_stage;
 
 // ============================================================================
@@ -778,6 +779,74 @@ test "c_api: create edge" {
     var edge_id: u64 = 0;
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, alice, bob, "KNOWS", &edge_id));
     try std.testing.expectEqual(@as(u64, 1), edge_id);
+
+    _ = c_api.lattice_commit(txn);
+}
+
+test "c_api: edge property CRUD and traversal exposes stable edge IDs" {
+    const path = "/tmp/lattice_capi_edge_props_test.db";
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+
+    var alice: lattice_node_id = 0;
+    var bob: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &alice));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &bob));
+
+    var edge_id: lattice_edge_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, alice, bob, "KNOWS", &edge_id));
+
+    var since_value = lattice_value{
+        .value_type = .int,
+        .data = .{ .int_val = 2020 },
+    };
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_set_property(txn, edge_id, "since", &since_value));
+
+    const status = "active";
+    var status_value = lattice_value{
+        .value_type = .string,
+        .data = .{ .string_val = .{ .ptr = status.ptr, .len = status.len } },
+    };
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_set_property(txn, edge_id, "status", &status_value));
+
+    var retrieved_since: lattice_value = undefined;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_get_property(txn, edge_id, "since", &retrieved_since));
+    try std.testing.expectEqual(lattice_value_type.int, retrieved_since.value_type);
+    try std.testing.expectEqual(@as(i64, 2020), retrieved_since.data.int_val);
+    c_api.lattice_value_free(&retrieved_since);
+
+    var edge_result: ?*c_api.lattice_edge_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_get_outgoing(txn, alice, &edge_result));
+    defer c_api.lattice_edge_result_free(edge_result);
+
+    try std.testing.expectEqual(@as(u32, 1), c_api.lattice_edge_result_count(edge_result));
+
+    var traversed_edge_id: lattice_edge_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_result_get_id(edge_result, 0, &traversed_edge_id));
+    try std.testing.expectEqual(edge_id, traversed_edge_id);
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_remove_property(txn, edge_id, "status"));
+
+    var missing_status: lattice_value = undefined;
+    try std.testing.expectEqual(lattice_error.err_not_found, c_api.lattice_edge_get_property(txn, edge_id, "status", &missing_status));
 
     _ = c_api.lattice_commit(txn);
 }

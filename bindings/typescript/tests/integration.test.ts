@@ -317,9 +317,43 @@ describeIfNative('Database Integration', () => {
         return await txn.createEdge(aliceId, bobId, 'KNOWS');
       });
 
+      expect(edge.id).toBeDefined();
       expect(edge.sourceId).toBe(aliceId);
       expect(edge.targetId).toBe(bobId);
       expect(edge.type).toBe('KNOWS');
+    });
+
+    test('edge property CRUD by stable edge ID', async () => {
+      let edgeId!: bigint;
+
+      await db.write(async (txn) => {
+        const edge = await txn.createEdge(aliceId, bobId, 'KNOWS', {
+          properties: { since: 2020, strength: 0.9 },
+        });
+        edgeId = edge.id;
+        expect(edge.properties).toEqual({ since: 2020, strength: 0.9 });
+      });
+
+      await db.read(async (txn) => {
+        expect(await txn.getEdgeProperty(edgeId, 'since')).toBe(BigInt(2020));
+        expect(await txn.getEdgeProperty(edgeId, 'strength')).toBeCloseTo(0.9);
+      });
+
+      await db.write(async (txn) => {
+        await txn.setEdgeProperty(edgeId, 'status', 'active');
+      });
+
+      await db.read(async (txn) => {
+        expect(await txn.getEdgeProperty(edgeId, 'status')).toBe('active');
+      });
+
+      await db.write(async (txn) => {
+        await txn.removeEdgeProperty(edgeId, 'status');
+      });
+
+      await db.read(async (txn) => {
+        expect(await txn.getEdgeProperty(edgeId, 'status')).toBeNull();
+      });
     });
 
     test('get outgoing edges', async () => {
@@ -330,6 +364,7 @@ describeIfNative('Database Integration', () => {
       await db.read(async (txn) => {
         const edges = await txn.getOutgoingEdges(aliceId);
         expect(edges.length).toBe(1);
+        expect(edges[0]!.id).toBeDefined();
         expect(edges[0]!.sourceId).toBe(aliceId);
         expect(edges[0]!.targetId).toBe(bobId);
         expect(edges[0]!.type).toBe('KNOWS');
@@ -344,6 +379,7 @@ describeIfNative('Database Integration', () => {
       await db.read(async (txn) => {
         const edges = await txn.getIncomingEdges(bobId);
         expect(edges.length).toBe(1);
+        expect(edges[0]!.id).toBeDefined();
         expect(edges[0]!.sourceId).toBe(aliceId);
         expect(edges[0]!.targetId).toBe(bobId);
       });

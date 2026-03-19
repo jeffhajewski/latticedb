@@ -111,6 +111,15 @@ comptime {
     _ = &c_api.lattice_node_set_vector;
     _ = &c_api.lattice_edge_create;
     _ = &c_api.lattice_edge_delete;
+    _ = &c_api.lattice_edge_set_property;
+    _ = &c_api.lattice_edge_get_property;
+    _ = &c_api.lattice_edge_remove_property;
+    _ = &c_api.lattice_edge_get_outgoing;
+    _ = &c_api.lattice_edge_get_incoming;
+    _ = &c_api.lattice_edge_result_count;
+    _ = &c_api.lattice_edge_result_get_id;
+    _ = &c_api.lattice_edge_result_get;
+    _ = &c_api.lattice_edge_result_free;
     _ = &c_api.lattice_query_prepare;
     _ = &c_api.lattice_query_bind;
     _ = &c_api.lattice_query_bind_vector;

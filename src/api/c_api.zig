@@ -1194,6 +1194,71 @@ pub export fn lattice_edge_delete(
     return .ok;
 }
 
+/// Set a property on an edge by stable edge ID
+pub export fn lattice_edge_set_property(
+    txn: ?*lattice_txn,
+    edge_id: lattice_edge_id,
+    key: [*c]const u8,
+    value: ?*const lattice_value,
+) lattice_error {
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
+
+    const key_slice = cStrToSlice(key) orelse return .err_invalid_arg;
+    const c_val = value orelse return .err_invalid_arg;
+    const zig_value = cValueToZigValue(c_val);
+
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+    txn_handle.db_handle.db.setEdgePropertyById(txn_ptr, edge_id, key_slice, zig_value) catch |err| {
+        return mapDatabaseError(err);
+    };
+
+    return .ok;
+}
+
+/// Get a property from an edge by stable edge ID
+pub export fn lattice_edge_get_property(
+    txn: ?*lattice_txn,
+    edge_id: lattice_edge_id,
+    key: [*c]const u8,
+    value_out: *lattice_value,
+) lattice_error {
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const key_slice = cStrToSlice(key) orelse return .err_invalid_arg;
+
+    const maybe_value = txn_handle.db_handle.db.getEdgePropertyById(edge_id, key_slice) catch |err| {
+        return mapDatabaseError(err);
+    };
+
+    if (maybe_value) |zig_value| {
+        zigValueToCValue(zig_value, value_out);
+        return .ok;
+    }
+
+    return .err_not_found;
+}
+
+/// Remove a property from an edge by stable edge ID
+pub export fn lattice_edge_remove_property(
+    txn: ?*lattice_txn,
+    edge_id: lattice_edge_id,
+    key: [*c]const u8,
+) lattice_error {
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
+
+    const key_slice = cStrToSlice(key) orelse return .err_invalid_arg;
+
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+    txn_handle.db_handle.db.removeEdgePropertyById(txn_ptr, edge_id, key_slice) catch |err| {
+        return mapDatabaseError(err);
+    };
+
+    return .ok;
+}
+
 /// Get all outgoing edges from a node
 pub export fn lattice_edge_get_outgoing(
     txn: ?*lattice_txn,
@@ -1256,6 +1321,20 @@ pub export fn lattice_edge_get_incoming(
 pub export fn lattice_edge_result_count(result: ?*lattice_edge_result) u32 {
     const result_handle = toHandle(EdgeResultHandle, result) orelse return 0;
     return @intCast(result_handle.count);
+}
+
+/// Get the stable edge ID for an edge result by index
+pub export fn lattice_edge_result_get_id(
+    result: ?*lattice_edge_result,
+    index: u32,
+    edge_id_out: *lattice_edge_id,
+) lattice_error {
+    const result_handle = toHandle(EdgeResultHandle, result) orelse return .err_invalid_arg;
+
+    if (index >= result_handle.count) return .err_invalid_arg;
+
+    edge_id_out.* = result_handle.edges[index].id;
+    return .ok;
 }
 
 /// Get an edge from an edge result set by index

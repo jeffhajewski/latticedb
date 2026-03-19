@@ -235,18 +235,19 @@ export class Transaction {
   ): Promise<Edge> {
     this.ensureWritable();
 
-    if (options.properties && Object.keys(options.properties).length > 0) {
-      throw new Error('Edge properties are not yet supported');
-    }
-
     const edgeId = this.ffi.createEdge(this.txnHandle!, sourceId, targetId, edgeType);
+
+    const properties = options.properties ?? {};
+    for (const [key, value] of Object.entries(properties)) {
+      this.ffi.setEdgeProperty(this.txnHandle!, edgeId, key, value);
+    }
 
     return {
       id: edgeId,
       sourceId,
       targetId,
       type: edgeType,
-      properties: {},
+      properties,
     };
   }
 
@@ -267,6 +268,51 @@ export class Transaction {
   }
 
   /**
+   * Set a property on an edge.
+   *
+   * @param edgeId - The stable edge ID
+   * @param key - Property key
+   * @param value - Property value
+   */
+  async setEdgeProperty(
+    edgeId: bigint,
+    key: string,
+    value: PropertyValue
+  ): Promise<void> {
+    this.ensureWritable();
+    this.ffi.setEdgeProperty(this.txnHandle!, edgeId, key, value);
+  }
+
+  /**
+   * Get a property from an edge.
+   *
+   * @param edgeId - The stable edge ID
+   * @param key - Property key
+   * @returns The property value, or null if not found
+   */
+  async getEdgeProperty(
+    edgeId: bigint,
+    key: string
+  ): Promise<PropertyValue | null> {
+    this.ensureActive();
+    return this.ffi.getEdgeProperty(this.txnHandle!, edgeId, key) as PropertyValue | null;
+  }
+
+  /**
+   * Remove a property from an edge.
+   *
+   * @param edgeId - The stable edge ID
+   * @param key - Property key
+   */
+  async removeEdgeProperty(
+    edgeId: bigint,
+    key: string
+  ): Promise<void> {
+    this.ensureWritable();
+    this.ffi.removeEdgeProperty(this.txnHandle!, edgeId, key);
+  }
+
+  /**
    * Get outgoing edges from a node.
    *
    * @param nodeId - The node ID
@@ -279,8 +325,10 @@ export class Transaction {
       const count = this.ffi.edgeResultCount(resultHandle);
       const edges: Edge[] = [];
       for (let i = 0; i < count; i++) {
+        const edgeId = this.ffi.edgeResultGetId(resultHandle, i);
         const e = this.ffi.edgeResultGet(resultHandle, i);
         edges.push({
+          id: edgeId,
           sourceId: e.source,
           targetId: e.target,
           type: e.edgeType,
@@ -306,8 +354,10 @@ export class Transaction {
       const count = this.ffi.edgeResultCount(resultHandle);
       const edges: Edge[] = [];
       for (let i = 0; i < count; i++) {
+        const edgeId = this.ffi.edgeResultGetId(resultHandle, i);
         const e = this.ffi.edgeResultGet(resultHandle, i);
         edges.push({
+          id: edgeId,
           sourceId: e.source,
           targetId: e.target,
           type: e.edgeType,

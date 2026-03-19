@@ -223,6 +223,23 @@ export interface LatticeBindings {
     target: bigint,
     edge_type: string
   ) => number;
+  lattice_edge_set_property: (
+    txn: unknown,
+    edge_id: bigint,
+    key: string,
+    value: unknown
+  ) => number;
+  lattice_edge_get_property: (
+    txn: unknown,
+    edge_id: bigint,
+    key: string,
+    value_out: Buffer
+  ) => number;
+  lattice_edge_remove_property: (
+    txn: unknown,
+    edge_id: bigint,
+    key: string
+  ) => number;
   lattice_edge_get_outgoing: (
     txn: unknown,
     node_id: bigint,
@@ -234,6 +251,11 @@ export interface LatticeBindings {
     result_out: unknown[]
   ) => number;
   lattice_edge_result_count: (result: unknown) => number;
+  lattice_edge_result_get_id: (
+    result: unknown,
+    index: number,
+    edge_id_out: Buffer
+  ) => number;
   lattice_edge_result_get: (
     result: unknown,
     index: number,
@@ -502,6 +524,23 @@ function createBindings(): LatticeBindings {
       'uint64', // target
       'str', // edge_type
     ]),
+    lattice_edge_set_property: lib.func('lattice_edge_set_property', 'int', [
+      TxnPtr,
+      'uint64', // edge_id
+      'str', // key
+      ValuePtr, // value
+    ]),
+    lattice_edge_get_property: lib.func('lattice_edge_get_property', 'int', [
+      TxnPtr,
+      'uint64', // edge_id
+      'str', // key
+      ValuePtr, // value_out
+    ]),
+    lattice_edge_remove_property: lib.func('lattice_edge_remove_property', 'int', [
+      TxnPtr,
+      'uint64', // edge_id
+      'str', // key
+    ]),
     lattice_edge_get_outgoing: lib.func('lattice_edge_get_outgoing', 'int', [
       TxnPtr,
       'uint64', // node_id
@@ -514,6 +553,11 @@ function createBindings(): LatticeBindings {
     ]),
     lattice_edge_result_count: lib.func('lattice_edge_result_count', 'uint32', [
       EdgeResultPtr,
+    ]),
+    lattice_edge_result_get_id: lib.func('lattice_edge_result_get_id', 'int', [
+      EdgeResultPtr,
+      'uint32', // index
+      koffi.out(koffi.pointer('uint64')), // edge_id_out
     ]),
     lattice_edge_result_get: lib.func('lattice_edge_result_get', 'int', [
       EdgeResultPtr,

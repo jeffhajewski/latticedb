@@ -316,6 +316,34 @@ class TestEdgeOperations:
                 assert edge.edge_type == "KNOWS"
                 txn.commit()
 
+    def test_edge_properties(self, tmp_path):
+        """Test edge property CRUD by stable edge ID."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                alice = txn.create_node(labels=["Person"])
+                bob = txn.create_node(labels=["Person"])
+
+                edge = txn.create_edge(
+                    alice.id,
+                    bob.id,
+                    "KNOWS",
+                    properties={"since": 2020, "strength": 0.9},
+                )
+                assert edge.properties["since"] == 2020
+                assert edge.properties["strength"] == 0.9
+
+                assert txn.get_edge_property(edge.id, "since") == 2020
+                assert txn.get_edge_property(edge.id, "strength") == 0.9
+
+                txn.set_edge_property(edge.id, "status", "active")
+                assert txn.get_edge_property(edge.id, "status") == "active"
+
+                txn.remove_edge_property(edge.id, "status")
+                assert txn.get_edge_property(edge.id, "status") is None
+                txn.commit()
+
     def test_delete_edge(self, tmp_path):
         """Test deleting an edge."""
         db_path = tmp_path / "test.db"
@@ -361,6 +389,7 @@ class TestEdgeOperations:
 
                 # All edges should have alice as source
                 for edge in edges:
+                    assert edge.id > 0
                     assert edge.source_id == alice_id
 
     def test_get_incoming_edges(self, tmp_path):
@@ -395,6 +424,7 @@ class TestEdgeOperations:
 
                 # All edges should have charlie as target
                 for edge in edges:
+                    assert edge.id > 0
                     assert edge.target_id == charlie_id
 
     def test_get_edges_empty(self, tmp_path):

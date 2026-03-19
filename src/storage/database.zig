@@ -2321,6 +2321,7 @@ pub const Database = struct {
 
     /// Edge info for traversal results
     pub const EdgeInfo = struct {
+        id: EdgeId,
         source: NodeId,
         target: NodeId,
         edge_type: []const u8,
@@ -2349,6 +2350,7 @@ pub const Database = struct {
                 continue;
             };
             edges.append(self.allocator, .{
+                .id = edge.id,
                 .source = edge.source,
                 .target = edge.target,
                 .edge_type = edge_type_str,
@@ -2384,6 +2386,7 @@ pub const Database = struct {
                 continue;
             };
             edges.append(self.allocator, .{
+                .id = edge.id,
                 .source = edge.source,
                 .target = edge.target,
                 .edge_type = edge_type_str,
@@ -2402,6 +2405,84 @@ pub const Database = struct {
             self.allocator.free(edge.edge_type);
         }
         self.allocator.free(edges);
+    }
+
+    /// Get a property from an edge by stable edge ID.
+    pub fn getEdgePropertyById(
+        self: *Self,
+        edge_id: EdgeId,
+        key: []const u8,
+    ) DatabaseError!?PropertyValue {
+        var edge = self.edge_store.getById(edge_id) catch |err| {
+            return switch (err) {
+                edge_mod.EdgeError.NotFound => DatabaseError.NotFound,
+                else => DatabaseError.IoError,
+            };
+        };
+        defer edge.deinit(self.allocator);
+
+        const key_id = self.symbol_table.lookup(key) catch |err| {
+            return switch (err) {
+                symbols_mod.SymbolError.NotFound => null,
+                else => DatabaseError.IoError,
+            };
+        };
+
+        for (edge.properties) |prop| {
+            if (prop.key_id == key_id) {
+                return prop.value.clone(self.allocator) catch return DatabaseError.OutOfMemory;
+            }
+        }
+
+        return null;
+    }
+
+    /// Get all properties for an edge by stable edge ID.
+    /// Returns an allocated slice that the caller must free with freePropertyEntries.
+    pub fn getEdgeProperties(self: *Self, edge_id: EdgeId) DatabaseError![]PropertyEntry {
+        var edge = self.edge_store.getById(edge_id) catch |err| {
+            return switch (err) {
+                edge_mod.EdgeError.NotFound => DatabaseError.NotFound,
+                else => DatabaseError.IoError,
+            };
+        };
+        defer edge.deinit(self.allocator);
+
+        var props: std.ArrayListUnmanaged(PropertyEntry) = .empty;
+        errdefer {
+            for (props.items) |prop| {
+                self.allocator.free(prop.key);
+                var value = prop.value;
+                value.deinit(self.allocator);
+            }
+            props.deinit(self.allocator);
+        }
+
+        for (edge.properties) |prop| {
+            const key_name = self.symbol_table.resolve(prop.key_id) catch continue;
+            errdefer self.allocator.free(key_name);
+
+            const value = prop.value.clone(self.allocator) catch {
+                self.allocator.free(key_name);
+                return DatabaseError.OutOfMemory;
+            };
+            errdefer {
+                var owned_value = value;
+                owned_value.deinit(self.allocator);
+            }
+
+            props.append(self.allocator, .{
+                .key = key_name,
+                .value = value,
+            }) catch {
+                self.allocator.free(key_name);
+                var owned_value = value;
+                owned_value.deinit(self.allocator);
+                return DatabaseError.OutOfMemory;
+            };
+        }
+
+        return props.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
     }
 
     /// Get lightweight iterator for outgoing edges (no property deserialization).
@@ -2702,9 +2783,8 @@ pub const Database = struct {
     pub fn freePropertyEntries(self: *Self, props: []PropertyEntry) void {
         for (props) |prop| {
             self.allocator.free(prop.key);
-            if (prop.value == .string_val) {
-                self.allocator.free(prop.value.string_val);
-            }
+            var value = prop.value;
+            value.deinit(self.allocator);
         }
         self.allocator.free(props);
     }

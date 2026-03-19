@@ -718,6 +718,53 @@ export class LatticeFFI {
   }
 
   /**
+   * Set a property on an edge.
+   */
+  setEdgeProperty(
+    txn: TransactionHandle,
+    edgeId: bigint,
+    key: string,
+    value: unknown
+  ): void {
+    const latticeValue = this.jsToLatticeValue(value);
+    const err = this.bindings.lattice_edge_set_property(txn, edgeId, key, latticeValue);
+    this.checkError(err);
+  }
+
+  /**
+   * Get a property from an edge.
+   */
+  getEdgeProperty(
+    txn: TransactionHandle,
+    edgeId: bigint,
+    key: string
+  ): unknown {
+    const valueOut = this.makeEmptyValue();
+    const err = this.bindings.lattice_edge_get_property(txn, edgeId, key, valueOut);
+    if (err === LatticeErrorCode.NotFound) {
+      return null;
+    }
+    this.checkError(err);
+    try {
+      return this.latticeValueToJs(valueOut);
+    } finally {
+      this.bindings.lattice_value_free(valueOut);
+    }
+  }
+
+  /**
+   * Remove a property from an edge.
+   */
+  removeEdgeProperty(
+    txn: TransactionHandle,
+    edgeId: bigint,
+    key: string
+  ): void {
+    const err = this.bindings.lattice_edge_remove_property(txn, edgeId, key);
+    this.checkError(err);
+  }
+
+  /**
    * Get outgoing edges from a node.
    */
   getOutgoingEdges(txn: TransactionHandle, nodeId: bigint): EdgeResultHandle {
@@ -742,6 +789,19 @@ export class LatticeFFI {
    */
   edgeResultCount(result: EdgeResultHandle): number {
     return this.bindings.lattice_edge_result_count(result);
+  }
+
+  /**
+   * Get an edge result ID by index.
+   */
+  edgeResultGetId(
+    result: EdgeResultHandle,
+    index: number
+  ): bigint {
+    const edgeIdOut = Buffer.alloc(8);
+    const err = this.bindings.lattice_edge_result_get_id(result, index, edgeIdOut);
+    this.checkError(err);
+    return edgeIdOut.readBigUInt64LE();
   }
 
   /**

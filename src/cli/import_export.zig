@@ -188,12 +188,20 @@ fn importEdge(
     const source_id = id_map.get(source_str) orelse return error.InvalidNodeId;
     const target_id = id_map.get(target_str) orelse return error.InvalidNodeId;
 
-    // Create the edge
-    db.createEdge(null, source_id, target_id, edge_type) catch {
+    // Create the edge and retain its stable ID so properties can be applied.
+    const edge_id = db.createEdgeAndGetId(null, source_id, target_id, edge_type) catch {
         return error.DatabaseError;
     };
 
-    // TODO: Set edge properties when supported
+    if (obj.get("properties")) |props_val| {
+        if (props_val == .object) {
+            var iter = props_val.object.iterator();
+            while (iter.next()) |entry| {
+                const prop_val = jsonToPropertyValue(entry.value_ptr.*) catch continue;
+                db.setEdgePropertyById(null, edge_id, entry.key_ptr.*, prop_val) catch continue;
+            }
+        }
+    }
 }
 
 fn jsonToPropertyValue(val: std.json.Value) !PropertyValue {
@@ -292,7 +300,7 @@ pub fn exportJson(
                 }
                 first_edge = false;
 
-                try writeEdgeJson(writer, edge);
+                try writeEdgeJson(db, writer, edge);
                 stats.edges_exported += 1;
             }
         }
@@ -359,7 +367,7 @@ pub fn exportJsonl(
             defer db.freeEdgeInfos(edges);
 
             for (edges) |edge| {
-                try writeEdgeJsonlRecord(writer, edge);
+                try writeEdgeJsonlRecord(db, writer, edge);
                 try writer.writeByte('\n');
                 stats.edges_exported += 1;
             }
@@ -515,10 +523,24 @@ fn writeNodeJson(
     try writer.writeAll("}}");
 }
 
-fn writeEdgeJson(writer: anytype, edge: Database.EdgeInfo) !void {
+fn writeEdgeJson(db: *Database, writer: anytype, edge: Database.EdgeInfo) !void {
     try writer.print("{{\"source\":\"{d}\",\"target\":\"{d}\",\"type\":", .{ edge.source, edge.target });
     try writeJsonString(writer, edge.edge_type);
-    try writer.writeAll(",\"properties\":{}}");
+    try writer.writeAll(",\"properties\":{");
+
+    const maybe_props = db.getEdgeProperties(edge.id) catch null;
+    defer if (maybe_props) |props| db.freePropertyEntries(props);
+
+    if (maybe_props) |props| {
+        for (props, 0..) |prop, i| {
+            if (i > 0) try writer.writeAll(",");
+            try writeJsonString(writer, prop.key);
+            try writer.writeByte(':');
+            try writePropertyValueJson(writer, prop.value);
+        }
+    }
+
+    try writer.writeAll("}}");
 }
 
 fn writeNodeJsonlRecord(
@@ -558,10 +580,24 @@ fn writeNodeJsonlRecord(
     try writer.writeAll("}}");
 }
 
-fn writeEdgeJsonlRecord(writer: anytype, edge: Database.EdgeInfo) !void {
+fn writeEdgeJsonlRecord(db: *Database, writer: anytype, edge: Database.EdgeInfo) !void {
     try writer.print("{{\"kind\":\"edge\",\"source\":\"{d}\",\"target\":\"{d}\",\"type\":", .{ edge.source, edge.target });
     try writeJsonString(writer, edge.edge_type);
-    try writer.writeAll(",\"properties\":{}}");
+    try writer.writeAll(",\"properties\":{");
+
+    const maybe_props = db.getEdgeProperties(edge.id) catch null;
+    defer if (maybe_props) |props| db.freePropertyEntries(props);
+
+    if (maybe_props) |props| {
+        for (props, 0..) |prop, i| {
+            if (i > 0) try writer.writeAll(",");
+            try writeJsonString(writer, prop.key);
+            try writer.writeByte(':');
+            try writePropertyValueJson(writer, prop.value);
+        }
+    }
+
+    try writer.writeAll("}}");
 }
 
 fn writeNodeDot(
@@ -949,7 +985,7 @@ test "import/export JSON roundtrip" {
         \\  {"id":"n1","labels":["Person"],"properties":{"name":"Alice","age":30}},
         \\  {"id":"n2","labels":["Person"],"properties":{"name":"Bob","age":25}}
         \\],"edges":[
-        \\  {"source":"n1","target":"n2","type":"KNOWS","properties":{}}
+        \\  {"source":"n1","target":"n2","type":"KNOWS","properties":{"since":2020,"status":"active"}}
         \\]}
     ;
 
@@ -960,4 +996,20 @@ test "import/export JSON roundtrip" {
     // Verify data
     try std.testing.expectEqual(@as(u64, 2), db.nodeCount());
     try std.testing.expectEqual(@as(u64, 1), db.edgeCount());
+
+    const edges = try db.getOutgoingEdges(1);
+    defer db.freeEdgeInfos(edges);
+    try std.testing.expectEqual(@as(usize, 1), edges.len);
+
+    const since = try db.getEdgePropertyById(edges[0].id, "since");
+    try std.testing.expect(since != null);
+    try std.testing.expectEqual(@as(i64, 2020), since.?.int_val);
+    var owned_since = since.?;
+    owned_since.deinit(allocator);
+
+    const status = try db.getEdgePropertyById(edges[0].id, "status");
+    try std.testing.expect(status != null);
+    try std.testing.expectEqualStrings("active", status.?.string_val);
+    var owned_status = status.?;
+    owned_status.deinit(allocator);
 }

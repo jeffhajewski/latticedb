@@ -105,8 +105,11 @@ Database(
 - `set_vector(node_id, key, vector)` - Set a vector embedding
 - `batch_insert(label, vectors)` - Batch insert nodes with vectors (see below)
 - `fts_index(node_id, text)` - Index text for full-text search
-- `create_edge(source_id, target_id, edge_type)` - Create an edge
+- `create_edge(source_id, target_id, edge_type, properties=None)` - Create an edge
 - `delete_edge(source_id, target_id, edge_type)` - Delete an edge
+- `set_edge_property(edge_id, key, value)` - Set an edge property by stable edge ID
+- `get_edge_property(edge_id, key)` - Get an edge property by stable edge ID
+- `remove_edge_property(edge_id, key)` - Remove an edge property by stable edge ID
 - `commit()` / `rollback()` - Commit or rollback the transaction
 
 ### Batch Insert

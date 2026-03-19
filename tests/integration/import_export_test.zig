@@ -32,8 +32,11 @@ fn seedMultiLabelParallelGraph(db: *Database) !void {
     try db.setNodeProperty(null, bob, "name", .{ .string_val = "Bob" });
 
     // Parallel edges with the same type must both survive export.
-    try db.createEdge(null, alice, bob, "REL");
-    try db.createEdge(null, alice, bob, "REL");
+    const first = try db.createEdgeAndGetId(null, alice, bob, "REL");
+    const second = try db.createEdgeAndGetId(null, alice, bob, "REL");
+    try db.setEdgePropertyById(null, first, "since", .{ .int_val = 2020 });
+    try db.setEdgePropertyById(null, first, "status", .{ .string_val = "active" });
+    try db.setEdgePropertyById(null, second, "since", .{ .int_val = 2021 });
 }
 
 fn countNonEmptyLines(s: []const u8) usize {
@@ -72,6 +75,21 @@ test "import_export: exportJson deduplicates multi-label nodes and preserves par
     const edges = root.object.get("edges").?.array.items;
     try std.testing.expectEqual(@as(usize, 2), nodes.len);
     try std.testing.expectEqual(@as(usize, 2), edges.len);
+
+    var found_2020 = false;
+    var found_2021 = false;
+    for (edges) |edge| {
+        const props = edge.object.get("properties").?.object;
+        const since = props.get("since").?.integer;
+        if (since == 2020) {
+            found_2020 = true;
+            try std.testing.expectEqualStrings("active", props.get("status").?.string);
+        } else if (since == 2021) {
+            found_2021 = true;
+        }
+    }
+    try std.testing.expect(found_2020);
+    try std.testing.expect(found_2021);
 }
 
 test "import_export: exportCsv deduplicates multi-label nodes and preserves parallel edges" {
@@ -143,6 +161,8 @@ test "import_export: exportJsonl emits node and edge records without duplication
             _ = root.object.get("source").?;
             _ = root.object.get("target").?;
             _ = root.object.get("type").?;
+            const props = root.object.get("properties").?.object;
+            try std.testing.expect(props.get("since") != null);
         } else {
             return error.InvalidFormat;
         }

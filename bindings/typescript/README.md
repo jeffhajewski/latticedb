@@ -148,8 +148,11 @@ interface DatabaseOptions {
 - `await txn.setVector(nodeId, key, vector)` - Set a vector embedding
 - `await txn.batchInsert(label, vectors)` - Batch insert nodes with vectors
 - `await txn.ftsIndex(nodeId, text)` - Index text for full-text search
-- `await txn.createEdge(sourceId, targetId, edgeType)` - Create an edge
+- `await txn.createEdge(sourceId, targetId, edgeType, options?)` - Create an edge
 - `await txn.deleteEdge(sourceId, targetId, edgeType)` - Delete an edge
+- `await txn.setEdgeProperty(edgeId, key, value)` - Set an edge property by stable edge ID
+- `await txn.getEdgeProperty(edgeId, key)` - Get an edge property by stable edge ID
+- `await txn.removeEdgeProperty(edgeId, key)` - Remove an edge property by stable edge ID
 - `txn.commit()` / `txn.rollback()` - Commit or rollback
 
 ### Batch Insert

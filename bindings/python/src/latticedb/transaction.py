@@ -430,7 +430,7 @@ class Transaction:
             source_id: Source node ID.
             target_id: Target node ID.
             edge_type: Edge type/label.
-            properties: Edge properties (not yet supported).
+            properties: Edge properties.
 
         Returns:
             The created edge.
@@ -439,8 +439,6 @@ class Transaction:
             raise RuntimeError("Cannot create edge in read-only transaction")
         if self._handle is None:
             raise RuntimeError("Transaction not started")
-        if properties:
-            raise NotImplementedError("Edge properties are not yet supported")
 
         lib = get_lib()
         edge_id = c_uint64()
@@ -453,13 +451,20 @@ class Transaction:
         )
         check_error(code)
 
-        return Edge(
+        edge = Edge(
             id=edge_id.value,
             source_id=source_id,
             target_id=target_id,
             edge_type=edge_type,
             properties={},
         )
+
+        if properties:
+            for key, value in properties.items():
+                self.set_edge_property(edge.id, key, value)
+                edge.properties[key] = value
+
+        return edge
 
     def delete_edge(self, source_id: int, target_id: int, edge_type: str) -> None:
         """
@@ -478,6 +483,93 @@ class Transaction:
         lib = get_lib()
         code = lib._lib.lattice_edge_delete(
             self._handle, source_id, target_id, edge_type.encode("utf-8")
+        )
+        check_error(code)
+
+    def set_edge_property(
+        self,
+        edge_id: int,
+        key: str,
+        value: PropertyValue,
+    ) -> None:
+        """
+        Set a property on an edge.
+
+        Args:
+            edge_id: The stable edge ID.
+            key: Property key.
+            value: Property value.
+        """
+        if self._read_only:
+            raise RuntimeError("Cannot set edge property in read-only transaction")
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        c_value = LatticeValue()
+        _ref = python_to_value(value, c_value)
+        code = lib._lib.lattice_edge_set_property(
+            self._handle,
+            edge_id,
+            key.encode("utf-8"),
+            byref(c_value),
+        )
+        del _ref
+        check_error(code)
+
+    def get_edge_property(
+        self,
+        edge_id: int,
+        key: str,
+    ) -> Optional[PropertyValue]:
+        """
+        Get a property from an edge.
+
+        Args:
+            edge_id: The stable edge ID.
+            key: Property key.
+
+        Returns:
+            The property value, or None if not found.
+        """
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        c_value = LatticeValue()
+        code = lib._lib.lattice_edge_get_property(
+            self._handle,
+            edge_id,
+            key.encode("utf-8"),
+            byref(c_value),
+        )
+
+        if code == LATTICE_ERROR_NOT_FOUND:
+            return None
+        check_error(code)
+        try:
+            return value_to_python(c_value)
+        finally:
+            lib._lib.lattice_value_free(byref(c_value))
+
+    def remove_edge_property(self, edge_id: int, key: str) -> None:
+        """
+        Remove a property from an edge.
+
+        Args:
+            edge_id: The stable edge ID.
+            key: Property key.
+        """
+        if self._read_only:
+            raise RuntimeError("Cannot remove edge property in read-only transaction")
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        code = lib._lib.lattice_edge_remove_property(
+            self._handle,
+            edge_id,
+            key.encode("utf-8"),
         )
         check_error(code)
 
@@ -544,6 +636,14 @@ class Transaction:
         try:
             count = lib._lib.lattice_edge_result_count(result_ptr)
             for i in range(count):
+                edge_id = c_uint64()
+                code = lib._lib.lattice_edge_result_get_id(
+                    result_ptr,
+                    i,
+                    byref(edge_id),
+                )
+                check_error(code)
+
                 source = c_uint64()
                 target = c_uint64()
                 edge_type_ptr = ctypes.c_char_p()
@@ -559,7 +659,7 @@ class Transaction:
                 check_error(code)
                 edge_type = edge_type_ptr.value[:edge_type_len.value].decode("utf-8") if edge_type_ptr.value else ""
                 edges.append(Edge(
-                    id=0,  # Edge ID not available from traversal
+                    id=edge_id.value,
                     source_id=source.value,
                     target_id=target.value,
                     edge_type=edge_type,

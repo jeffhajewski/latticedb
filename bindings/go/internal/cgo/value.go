@@ -40,6 +40,15 @@ func (a *cAlloc) bytes(data []byte) (unsafe.Pointer, error) {
 	return ptr, nil
 }
 
+func (a *cAlloc) cString(value string) (*C.char, error) {
+	ptr := C.CString(value)
+	if ptr == nil {
+		return nil, &Error{Code: ErrorOutOfMemory, Message: "out of memory"}
+	}
+	a.ptrs = append(a.ptrs, unsafe.Pointer(ptr))
+	return ptr, nil
+}
+
 func (a *cAlloc) freeAll() {
 	for i := len(a.ptrs) - 1; i >= 0; i-- {
 		C.free(a.ptrs[i])

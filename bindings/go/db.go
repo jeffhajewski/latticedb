@@ -128,3 +128,61 @@ func (db *DB) Query(cypher string, params map[string]Value) (QueryResult, error)
 	})
 	return result, err
 }
+
+func (db *DB) VectorSearch(vector []float32, opts VectorSearchOptions) ([]VectorSearchResult, error) {
+	if db == nil || db.raw == nil {
+		return nil, ErrDatabaseClosed
+	}
+	opts = opts.withDefaults()
+
+	results, err := db.raw.VectorSearch(vector, opts.K, opts.EfSearch)
+	if err != nil {
+		return nil, wrapError(err)
+	}
+
+	out := make([]VectorSearchResult, 0, len(results))
+	for _, result := range results {
+		out = append(out, VectorSearchResult{
+			NodeID:   NodeID(result.NodeID),
+			Distance: result.Distance,
+		})
+	}
+	return out, nil
+}
+
+func (db *DB) FTSSearch(query string, opts FTSSearchOptions) ([]FTSSearchResult, error) {
+	if db == nil || db.raw == nil {
+		return nil, ErrDatabaseClosed
+	}
+	opts = opts.withDefaults()
+
+	results, err := db.raw.FTSSearch(query, opts.Limit)
+	if err != nil {
+		return nil, wrapError(err)
+	}
+	return convertFTSResults(results), nil
+}
+
+func (db *DB) FTSSearchFuzzy(query string, opts FTSSearchOptions) ([]FTSSearchResult, error) {
+	if db == nil || db.raw == nil {
+		return nil, ErrDatabaseClosed
+	}
+	opts = opts.withDefaults()
+
+	results, err := db.raw.FTSSearchFuzzy(query, opts.Limit, opts.MaxDistance, opts.MinTermLength)
+	if err != nil {
+		return nil, wrapError(err)
+	}
+	return convertFTSResults(results), nil
+}
+
+func convertFTSResults(results []cgobridge.FTSSearchResult) []FTSSearchResult {
+	out := make([]FTSSearchResult, 0, len(results))
+	for _, result := range results {
+		out = append(out, FTSSearchResult{
+			NodeID: NodeID(result.NodeID),
+			Score:  result.Score,
+		})
+	}
+	return out
+}

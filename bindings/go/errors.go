@@ -42,6 +42,7 @@ var (
 	ErrReadOnlyDatabase = errors.New("cannot write to a read-only database")
 	ErrReadOnlyTx       = errors.New("cannot write in a read-only transaction")
 	ErrInactiveTx       = errors.New("transaction is not active")
+	ErrEmbeddingClosed  = errors.New("embedding client is closed")
 )
 
 type Error struct {

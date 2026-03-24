@@ -1,5 +1,7 @@
 package latticedb
 
+import cgobridge "github.com/jeffhajewski/latticedb/bindings/go/internal/cgo"
+
 type Value = any
 
 type NodeID uint64
@@ -42,6 +44,42 @@ type QueryResult struct {
 	Rows    []map[string]Value
 }
 
+type VectorSearchOptions struct {
+	K        uint32
+	EfSearch uint16
+}
+
+type FTSSearchOptions struct {
+	Limit         uint32
+	MaxDistance   uint32
+	MinTermLength uint32
+}
+
+type VectorSearchResult struct {
+	NodeID   NodeID
+	Distance float32
+}
+
+type FTSSearchResult struct {
+	NodeID NodeID
+	Score  float32
+}
+
+type EmbeddingAPIFormat int
+
+const (
+	EmbeddingAPIFormatOllama EmbeddingAPIFormat = EmbeddingAPIFormat(cgobridge.EmbeddingAPIFormatOllama)
+	EmbeddingAPIFormatOpenAI EmbeddingAPIFormat = EmbeddingAPIFormat(cgobridge.EmbeddingAPIFormatOpenAI)
+)
+
+type EmbeddingConfig struct {
+	Endpoint  string
+	Model     string
+	APIFormat EmbeddingAPIFormat
+	APIKey    string
+	TimeoutMS uint32
+}
+
 func (o OpenOptions) withDefaults() OpenOptions {
 	if o.CacheSizeMB == 0 {
 		o.CacheSizeMB = 100
@@ -51,6 +89,20 @@ func (o OpenOptions) withDefaults() OpenOptions {
 	}
 	if o.VectorDimensions == 0 {
 		o.VectorDimensions = 128
+	}
+	return o
+}
+
+func (o VectorSearchOptions) withDefaults() VectorSearchOptions {
+	if o.K == 0 {
+		o.K = 10
+	}
+	return o
+}
+
+func (o FTSSearchOptions) withDefaults() FTSSearchOptions {
+	if o.Limit == 0 {
+		o.Limit = 10
 	}
 	return o
 }

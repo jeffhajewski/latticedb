@@ -214,3 +214,128 @@ func TestEdgePropertiesAndQueryRoundTrip(t *testing.T) {
 		t.Fatalf("view db: %v", err)
 	}
 }
+
+func TestBatchInsertVectorSearchAndFTS(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "search.db")
+
+	db, err := Open(dbPath, OpenOptions{
+		Create:           true,
+		EnableVector:     true,
+		VectorDimensions: 4,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			t.Fatalf("close db: %v", closeErr)
+		}
+	}()
+
+	var nodeIDs []NodeID
+	err = db.Update(func(tx *Tx) error {
+		ids, err := tx.BatchInsert("Document", [][]float32{
+			{1.0, 0.0, 0.0, 0.0},
+			{0.0, 1.0, 0.0, 0.0},
+			{0.9, 0.1, 0.0, 0.0},
+		})
+		if err != nil {
+			return err
+		}
+		nodeIDs = ids
+
+		if err := tx.SetProperty(ids[0], "title", "Attention Is All You Need"); err != nil {
+			return err
+		}
+		if err := tx.FTSIndex(ids[0], "transformer self attention neural networks"); err != nil {
+			return err
+		}
+		if err := tx.SetProperty(ids[1], "title", "LSM Trees"); err != nil {
+			return err
+		}
+		if err := tx.FTSIndex(ids[1], "log structured merge trees storage engines"); err != nil {
+			return err
+		}
+
+		node, err := tx.CreateNode(CreateNodeOptions{Labels: []string{"Document"}})
+		if err != nil {
+			return err
+		}
+		if err := tx.SetVector(node.ID, "embedding", []float32{0.0, 0.0, 1.0, 0.0}); err != nil {
+			return err
+		}
+		if err := tx.FTSIndex(node.ID, "graph databases for ai agents"); err != nil {
+			return err
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed search data: %v", err)
+	}
+
+	results, err := db.VectorSearch([]float32{1.0, 0.0, 0.0, 0.0}, VectorSearchOptions{K: 2})
+	if err != nil {
+		t.Fatalf("vector search: %v", err)
+	}
+	if len(results) < 2 {
+		t.Fatalf("expected at least 2 vector results, got %d", len(results))
+	}
+	if results[0].NodeID != nodeIDs[0] {
+		t.Fatalf("expected exact match first, got %d", results[0].NodeID)
+	}
+
+	ftsResults, err := db.FTSSearch("transformer attention", FTSSearchOptions{Limit: 5})
+	if err != nil {
+		t.Fatalf("fts search: %v", err)
+	}
+	if len(ftsResults) == 0 {
+		t.Fatalf("expected fts results")
+	}
+	if ftsResults[0].NodeID != nodeIDs[0] {
+		t.Fatalf("expected transformer document first, got %d", ftsResults[0].NodeID)
+	}
+
+	fuzzyResults, err := db.FTSSearchFuzzy("transfomer attentin", FTSSearchOptions{
+		Limit:       5,
+		MaxDistance: 2,
+	})
+	if err != nil {
+		t.Fatalf("fts fuzzy search: %v", err)
+	}
+	if len(fuzzyResults) == 0 {
+		t.Fatalf("expected fuzzy fts results")
+	}
+}
+
+func TestHashEmbedAndEmbeddingClientLifecycle(t *testing.T) {
+	v1, err := HashEmbed("hello world", 16)
+	if err != nil {
+		t.Fatalf("hash embed v1: %v", err)
+	}
+	v2, err := HashEmbed("hello world", 16)
+	if err != nil {
+		t.Fatalf("hash embed v2: %v", err)
+	}
+	v3, err := HashEmbed("different text", 16)
+	if err != nil {
+		t.Fatalf("hash embed v3: %v", err)
+	}
+
+	if len(v1) != 16 {
+		t.Fatalf("unexpected embedding length: %d", len(v1))
+	}
+	if !reflect.DeepEqual(v1, v2) {
+		t.Fatalf("expected deterministic hash embeddings")
+	}
+	if reflect.DeepEqual(v1, v3) {
+		t.Fatalf("expected different inputs to produce different embeddings")
+	}
+
+	var client EmbeddingClient
+	if err := client.Close(); err != nil {
+		t.Fatalf("close zero client: %v", err)
+	}
+	if _, err := client.Embed("hello"); err == nil {
+		t.Fatalf("expected embed on closed client to fail")
+	}
+}

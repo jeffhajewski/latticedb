@@ -38,6 +38,10 @@ pip install latticedb
 npm install @hajewski/latticedb
 ```
 
+**Go**
+
+Source-first for now. See [bindings/go/README.md](bindings/go/README.md) for the current cgo workflow.
+
 ## Example
 
 A complete example: create a small knowledge graph with documents and authors, store embeddings, index text, then query across all three search modes.
@@ -149,6 +153,37 @@ for (const row of results.rows) {
 }
 
 await db.close();
+```
+
+### Go
+
+```go
+db, err := latticedb.Open("knowledge.db", latticedb.OpenOptions{
+    Create: true,
+    EnableVector: true,
+    VectorDimensions: 128,
+})
+if err != nil {
+    log.Fatal(err)
+}
+defer db.Close()
+
+err = db.Update(func(tx *latticedb.Tx) error {
+    node, err := tx.CreateNode(latticedb.CreateNodeOptions{
+        Labels: []string{"Chunk"},
+        Properties: map[string]latticedb.Value{"text": "The transformer architecture uses self-attention..."},
+    })
+    if err != nil {
+        return err
+    }
+    if err := tx.SetVector(node.ID, "embedding", []float32{1, 0, 0, 0}); err != nil {
+        return err
+    }
+    return tx.FTSIndex(node.ID, "The transformer architecture uses self-attention...")
+})
+if err != nil {
+    log.Fatal(err)
+}
 ```
 
 ## Performance
@@ -342,6 +377,7 @@ zig build -Doptimize=ReleaseFast   # optimized build
 - [Architecture Specification](ARCHITECTURE_SPEC.md)
 - [Python API Reference](bindings/python/README.md)
 - [TypeScript API Reference](bindings/typescript/README.md)
+- [Go API Reference](bindings/go/README.md)
 - [C API Header](include/lattice.h)
 
 ## License

@@ -10,6 +10,7 @@ package cgobridge
 import "C"
 
 import (
+	"fmt"
 	"strings"
 	"unsafe"
 )
@@ -82,6 +83,16 @@ type QueryResult struct {
 	Rows    []map[string]any
 }
 
+type VectorSearchResult struct {
+	NodeID   uint64
+	Distance float32
+}
+
+type FTSSearchResult struct {
+	NodeID uint64
+	Score  float32
+}
+
 type EdgeRecord struct {
 	ID       uint64
 	SourceID uint64
@@ -104,6 +115,26 @@ type queryHandle struct {
 
 type resultHandle struct {
 	ptr *C.lattice_result
+}
+
+type EmbeddingAPIFormat int
+
+const (
+	EmbeddingAPIFormatOllama EmbeddingAPIFormat = 0
+	EmbeddingAPIFormatOpenAI EmbeddingAPIFormat = 1
+)
+
+type EmbeddingConfig struct {
+	Endpoint  string
+	Model     string
+	APIFormat EmbeddingAPIFormat
+	APIKey    string
+	TimeoutMS uint32
+}
+
+type EmbeddingClient struct {
+	ptr   *C.lattice_embedding_client
+	alloc *cAlloc
 }
 
 func Version() string {
@@ -227,6 +258,97 @@ func (tx *Tx) GetNodeLabels(nodeID uint64) ([]string, error) {
 		return []string{}, nil
 	}
 	return strings.Split(raw, ","), nil
+}
+
+func (tx *Tx) SetNodeVector(nodeID uint64, key string, vector []float32) error {
+	cKey := C.CString(key)
+	defer C.free(unsafe.Pointer(cKey))
+
+	var vectorPtr *C.float
+	if len(vector) > 0 {
+		vectorPtr = (*C.float)(unsafe.Pointer(&vector[0]))
+	}
+
+	return errorFromCode(ErrorCode(C.lattice_node_set_vector(
+		tx.ptr,
+		C.lattice_node_id(nodeID),
+		cKey,
+		vectorPtr,
+		C.uint32_t(len(vector)),
+	)))
+}
+
+func (tx *Tx) BatchInsert(label string, vectors [][]float32) ([]uint64, error) {
+	if len(vectors) == 0 {
+		return []uint64{}, nil
+	}
+
+	alloc := &cAlloc{}
+	defer alloc.freeAll()
+
+	labelPtr, err := alloc.cString(label)
+	if err != nil {
+		return nil, err
+	}
+
+	specsPtr, err := alloc.malloc(uintptr(len(vectors)) * C.sizeof_lattice_node_with_vector)
+	if err != nil {
+		return nil, err
+	}
+	specs := unsafe.Slice((*C.lattice_node_with_vector)(specsPtr), len(vectors))
+
+	for i, vector := range vectors {
+		specs[i].label = labelPtr
+		specs[i].dimensions = C.uint32_t(len(vector))
+
+		if len(vector) > 0 {
+			vectorPtr, allocErr := alloc.malloc(uintptr(len(vector)) * unsafe.Sizeof(float32(0)))
+			if allocErr != nil {
+				return nil, allocErr
+			}
+			copy(unsafe.Slice((*float32)(vectorPtr), len(vector)), vector)
+			specs[i].vector = (*C.float)(vectorPtr)
+		}
+	}
+
+	nodeIDs := make([]C.lattice_node_id, len(vectors))
+	var created C.uint32_t
+	if err := errorFromCode(ErrorCode(C.lattice_batch_insert(
+		tx.ptr,
+		(*C.lattice_node_with_vector)(specsPtr),
+		C.uint32_t(len(vectors)),
+		(*C.lattice_node_id)(unsafe.Pointer(&nodeIDs[0])),
+		&created,
+	))); err != nil {
+		return nil, err
+	}
+	if int(created) < len(vectors) {
+		return nil, &Error{
+			Code:    ErrorGeneric,
+			Message: fmt.Sprintf("batch insert partially failed: %d/%d nodes created; rollback the transaction", int(created), len(vectors)),
+		}
+	}
+
+	out := make([]uint64, len(vectors))
+	for i, nodeID := range nodeIDs {
+		out[i] = uint64(nodeID)
+	}
+	return out, nil
+}
+
+func (tx *Tx) FTSIndex(nodeID uint64, text string) error {
+	var textPtr unsafe.Pointer
+	if len(text) > 0 {
+		textPtr = C.CBytes([]byte(text))
+		defer C.free(textPtr)
+	}
+
+	return errorFromCode(ErrorCode(C.lattice_fts_index(
+		tx.ptr,
+		C.lattice_node_id(nodeID),
+		(*C.char)(textPtr),
+		C.size_t(len(text)),
+	)))
 }
 
 func (tx *Tx) SetNodeProperty(nodeID uint64, key string, value any) error {
@@ -380,6 +502,231 @@ func (tx *Tx) Query(cypher string, params map[string]any) (QueryResult, error) {
 	defer result.free()
 
 	return result.materialize()
+}
+
+func (db *DB) VectorSearch(vector []float32, k uint32, efSearch uint16) ([]VectorSearchResult, error) {
+	var vectorPtr *C.float
+	if len(vector) > 0 {
+		vectorPtr = (*C.float)(unsafe.Pointer(&vector[0]))
+	}
+
+	var result *C.lattice_vector_result
+	if err := errorFromCode(ErrorCode(C.lattice_vector_search(
+		db.ptr,
+		vectorPtr,
+		C.uint32_t(len(vector)),
+		C.uint32_t(k),
+		C.uint16_t(efSearch),
+		&result,
+	))); err != nil {
+		return nil, err
+	}
+	defer C.lattice_vector_result_free(result)
+
+	count := int(C.lattice_vector_result_count(result))
+	out := make([]VectorSearchResult, 0, count)
+	for i := 0; i < count; i++ {
+		var nodeID C.lattice_node_id
+		var distance C.float
+		if err := errorFromCode(ErrorCode(C.lattice_vector_result_get(
+			result,
+			C.uint32_t(i),
+			&nodeID,
+			&distance,
+		))); err != nil {
+			return nil, err
+		}
+		out = append(out, VectorSearchResult{
+			NodeID:   uint64(nodeID),
+			Distance: float32(distance),
+		})
+	}
+
+	return out, nil
+}
+
+func (db *DB) FTSSearch(query string, limit uint32) ([]FTSSearchResult, error) {
+	return db.ftsSearch(query, limit, 0, 0, false)
+}
+
+func (db *DB) FTSSearchFuzzy(query string, limit, maxDistance, minTermLength uint32) ([]FTSSearchResult, error) {
+	return db.ftsSearch(query, limit, maxDistance, minTermLength, true)
+}
+
+func (db *DB) ftsSearch(query string, limit, maxDistance, minTermLength uint32, fuzzy bool) ([]FTSSearchResult, error) {
+	var queryPtr unsafe.Pointer
+	if len(query) > 0 {
+		queryPtr = C.CBytes([]byte(query))
+		defer C.free(queryPtr)
+	}
+
+	var result *C.lattice_fts_result
+	var rc C.lattice_error
+	if fuzzy {
+		rc = C.lattice_fts_search_fuzzy(
+			db.ptr,
+			(*C.char)(queryPtr),
+			C.size_t(len(query)),
+			C.uint32_t(limit),
+			C.uint32_t(maxDistance),
+			C.uint32_t(minTermLength),
+			&result,
+		)
+	} else {
+		rc = C.lattice_fts_search(
+			db.ptr,
+			(*C.char)(queryPtr),
+			C.size_t(len(query)),
+			C.uint32_t(limit),
+			&result,
+		)
+	}
+
+	if err := errorFromCode(ErrorCode(rc)); err != nil {
+		return nil, err
+	}
+	defer C.lattice_fts_result_free(result)
+
+	count := int(C.lattice_fts_result_count(result))
+	out := make([]FTSSearchResult, 0, count)
+	for i := 0; i < count; i++ {
+		var nodeID C.lattice_node_id
+		var score C.float
+		if err := errorFromCode(ErrorCode(C.lattice_fts_result_get(
+			result,
+			C.uint32_t(i),
+			&nodeID,
+			&score,
+		))); err != nil {
+			return nil, err
+		}
+		out = append(out, FTSSearchResult{
+			NodeID: uint64(nodeID),
+			Score:  float32(score),
+		})
+	}
+
+	return out, nil
+}
+
+func HashEmbed(text string, dimensions uint16) ([]float32, error) {
+	if dimensions == 0 {
+		dimensions = 128
+	}
+
+	var textPtr unsafe.Pointer
+	if len(text) > 0 {
+		textPtr = C.CBytes([]byte(text))
+		defer C.free(textPtr)
+	}
+
+	var vectorOut *C.float
+	var dimsOut C.uint32_t
+	if err := errorFromCode(ErrorCode(C.lattice_hash_embed(
+		(*C.char)(textPtr),
+		C.size_t(len(text)),
+		C.uint16_t(dimensions),
+		&vectorOut,
+		&dimsOut,
+	))); err != nil {
+		return nil, err
+	}
+	defer C.lattice_hash_embed_free(vectorOut, dimsOut)
+
+	out := make([]float32, int(dimsOut))
+	if len(out) > 0 {
+		copy(out, unsafe.Slice((*float32)(unsafe.Pointer(vectorOut)), len(out)))
+	}
+	return out, nil
+}
+
+func NewEmbeddingClient(config EmbeddingConfig) (*EmbeddingClient, error) {
+	if config.Model == "" {
+		config.Model = "nomic-embed-text"
+	}
+
+	alloc := &cAlloc{}
+	endpointPtr, err := alloc.cString(config.Endpoint)
+	if err != nil {
+		return nil, err
+	}
+	modelPtr, err := alloc.cString(config.Model)
+	if err != nil {
+		alloc.freeAll()
+		return nil, err
+	}
+
+	var apiKeyPtr *C.char
+	if config.APIKey != "" {
+		apiKeyPtr, err = alloc.cString(config.APIKey)
+		if err != nil {
+			alloc.freeAll()
+			return nil, err
+		}
+	}
+
+	cConfig := C.lattice_embedding_config{
+		endpoint:   endpointPtr,
+		model:      modelPtr,
+		api_format: C.lattice_embedding_api_format(config.APIFormat),
+		api_key:    apiKeyPtr,
+		timeout_ms: C.uint32_t(config.TimeoutMS),
+	}
+
+	var client *C.lattice_embedding_client
+	if err := errorFromCode(ErrorCode(C.lattice_embedding_client_create(&cConfig, &client))); err != nil {
+		alloc.freeAll()
+		return nil, err
+	}
+
+	return &EmbeddingClient{
+		ptr:   client,
+		alloc: alloc,
+	}, nil
+}
+
+func (client *EmbeddingClient) Embed(text string) ([]float32, error) {
+	if client == nil || client.ptr == nil {
+		return nil, &Error{Code: ErrorInvalidArg, Message: "embedding client is closed"}
+	}
+
+	var textPtr unsafe.Pointer
+	if len(text) > 0 {
+		textPtr = C.CBytes([]byte(text))
+		defer C.free(textPtr)
+	}
+
+	var vectorOut *C.float
+	var dimsOut C.uint32_t
+	if err := errorFromCode(ErrorCode(C.lattice_embedding_client_embed(
+		client.ptr,
+		(*C.char)(textPtr),
+		C.size_t(len(text)),
+		&vectorOut,
+		&dimsOut,
+	))); err != nil {
+		return nil, err
+	}
+	defer C.lattice_hash_embed_free(vectorOut, dimsOut)
+
+	out := make([]float32, int(dimsOut))
+	if len(out) > 0 {
+		copy(out, unsafe.Slice((*float32)(unsafe.Pointer(vectorOut)), len(out)))
+	}
+	return out, nil
+}
+
+func (client *EmbeddingClient) Close() error {
+	if client == nil || client.ptr == nil {
+		return nil
+	}
+	C.lattice_embedding_client_free(client.ptr)
+	client.ptr = nil
+	if client.alloc != nil {
+		client.alloc.freeAll()
+		client.alloc = nil
+	}
+	return nil
 }
 
 func (tx *Tx) readEdgeResults(fetch func(resultOut **C.lattice_edge_result) C.lattice_error) ([]EdgeRecord, error) {

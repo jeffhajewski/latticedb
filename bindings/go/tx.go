@@ -123,6 +123,13 @@ func (tx *Tx) SetProperty(nodeID NodeID, key string, value Value) error {
 	return wrapError(tx.raw.SetNodeProperty(uint64(nodeID), key, value))
 }
 
+func (tx *Tx) SetVector(nodeID NodeID, key string, vector []float32) error {
+	if err := tx.ensureWritable(); err != nil {
+		return err
+	}
+	return wrapError(tx.raw.SetNodeVector(uint64(nodeID), key, vector))
+}
+
 func (tx *Tx) GetProperty(nodeID NodeID, key string) (Value, bool, error) {
 	if err := tx.ensureActive(); err != nil {
 		return nil, false, err
@@ -205,6 +212,28 @@ func (tx *Tx) GetIncomingEdges(nodeID NodeID) ([]Edge, error) {
 		return nil, wrapError(err)
 	}
 	return edgeRecordsToEdges(records), nil
+}
+
+func (tx *Tx) BatchInsert(label string, vectors [][]float32) ([]NodeID, error) {
+	if err := tx.ensureWritable(); err != nil {
+		return nil, err
+	}
+	nodeIDs, err := tx.raw.BatchInsert(label, vectors)
+	if err != nil {
+		return nil, wrapError(err)
+	}
+	out := make([]NodeID, len(nodeIDs))
+	for i, nodeID := range nodeIDs {
+		out[i] = NodeID(nodeID)
+	}
+	return out, nil
+}
+
+func (tx *Tx) FTSIndex(nodeID NodeID, text string) error {
+	if err := tx.ensureWritable(); err != nil {
+		return err
+	}
+	return wrapError(tx.raw.FTSIndex(uint64(nodeID), text))
 }
 
 func (tx *Tx) Query(cypher string, params map[string]Value) (QueryResult, error) {

@@ -3245,10 +3245,20 @@ pub const Database = struct {
         var binding_iter = planner.bindings.iterator();
         while (binding_iter.next()) |entry| {
             const slot = entry.value_ptr.slot;
-            if (slot < num_cols) {
+            if (slot < num_cols and planner.output_column_names[slot] == null) {
                 // Free default name and use actual variable name
                 self.allocator.free(columns[slot]);
                 columns[slot] = self.allocator.dupe(u8, entry.key_ptr.*) catch {
+                    return QueryError.OutOfMemory;
+                };
+            }
+        }
+
+        // Explicit aliases from RETURN take precedence over inferred binding names.
+        for (0..num_cols) |i| {
+            if (planner.output_column_names[i]) |name| {
+                self.allocator.free(columns[i]);
+                columns[i] = self.allocator.dupe(u8, name) catch {
                     return QueryError.OutOfMemory;
                 };
             }

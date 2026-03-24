@@ -167,6 +167,7 @@ const QueryHandle = struct {
 /// Internal result handle wrapping query results
 const ResultHandle = struct {
     result: QueryResult,
+    column_names_z: []const [:0]u8,
     current_row: usize,
     started: bool,
     borrowed_value_arena: std.heap.ArenaAllocator,
@@ -759,6 +760,24 @@ fn mapValueConversionError(err: ValueConversionError) lattice_error {
         error.InvalidValue, error.DuplicateMapKey => .err_invalid_arg,
         error.OutOfMemory => .err_out_of_memory,
     };
+}
+
+fn duplicateColumnNamesZ(columns: [][]const u8) ![][:0]u8 {
+    const owned = try global_allocator.alloc([:0]u8, columns.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (owned[0..initialized]) |name| {
+            global_allocator.free(name);
+        }
+        global_allocator.free(owned);
+    }
+
+    for (columns, 0..) |column, i| {
+        owned[i] = try global_allocator.dupeZ(u8, column);
+        initialized += 1;
+    }
+
+    return owned;
 }
 
 /// Cast opaque C pointer to internal handle
@@ -1774,9 +1793,18 @@ pub export fn lattice_query_execute(
     }
 
     const result = detailed.success;
+    const column_names_z = duplicateColumnNamesZ(result.columns) catch {
+        var mutable_result = result;
+        mutable_result.deinit();
+        return .err_out_of_memory;
+    };
 
     // Create result handle
     const result_handle = global_allocator.create(ResultHandle) catch {
+        for (column_names_z) |name| {
+            global_allocator.free(name);
+        }
+        global_allocator.free(column_names_z);
         var mutable_result = result;
         mutable_result.deinit();
         return .err_out_of_memory;
@@ -1784,6 +1812,7 @@ pub export fn lattice_query_execute(
 
     result_handle.* = .{
         .result = result,
+        .column_names_z = column_names_z,
         .current_row = 0,
         .started = false,
         .borrowed_value_arena = std.heap.ArenaAllocator.init(global_allocator),
@@ -1877,9 +1906,9 @@ pub export fn lattice_result_column_count(result: ?*lattice_result) u32 {
 pub export fn lattice_result_column_name(result: ?*lattice_result, index: u32) [*c]const u8 {
     const result_handle = toHandle(ResultHandle, result) orelse return null;
 
-    if (index >= result_handle.result.columns.len) return null;
+    if (index >= result_handle.column_names_z.len) return null;
 
-    return result_handle.result.columns[index].ptr;
+    return result_handle.column_names_z[index].ptr;
 }
 
 /// Get column value at current row.
@@ -1909,6 +1938,10 @@ pub export fn lattice_result_free(result: ?*lattice_result) void {
     const result_handle = toHandle(ResultHandle, result) orelse return;
 
     result_handle.borrowed_value_arena.deinit();
+    for (result_handle.column_names_z) |name| {
+        global_allocator.free(name);
+    }
+    global_allocator.free(result_handle.column_names_z);
     result_handle.result.deinit();
     global_allocator.destroy(result_handle);
 }

@@ -296,9 +296,11 @@ describeIfNative('Database Integration', () => {
       await db.read(async (txn) => {
         const value = await txn.getProperty(nodeId, 'embedding');
         expect(value).toBeInstanceOf(Float32Array);
-        expect(Array.from(value as Float32Array)).toEqual(
-          expect.arrayContaining([0.1, 0.2, 0.3])
-        );
+        const floats = Array.from(value as Float32Array);
+        expect(floats).toHaveLength(3);
+        expect(floats[0]).toBeCloseTo(0.1, 6);
+        expect(floats[1]).toBeCloseTo(0.2, 6);
+        expect(floats[2]).toBeCloseTo(0.3, 6);
       });
     });
 

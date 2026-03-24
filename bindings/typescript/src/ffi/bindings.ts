@@ -22,6 +22,20 @@ function defineNamedType<T>(name: string, factory: () => T): T {
   }
 }
 
+function defineStructBody<T>(name: string, ref: T, factory: () => void): T {
+  try {
+    factory();
+  } catch (err) {
+    const message = typeof err === 'object' && err !== null && 'message' in err
+      ? String((err as { message: unknown }).message)
+      : String(err);
+    if (!message.includes('Cannot redefine non-opaque type')) {
+      throw err;
+    }
+  }
+  return ref;
+}
+
 // Define opaque types for handles
 const LatticeDatabase = defineNamedType('lattice_database', () => koffi.opaque('lattice_database'));
 const LatticeTxn = defineNamedType('lattice_txn', () => koffi.opaque('lattice_txn'));
@@ -79,14 +93,18 @@ const LatticeVectorValue = defineNamedType('lattice_vector_value', () => koffi.s
   dimensions: 'uint32',
 }));
 
+// Forward declarations for recursive nested value types
+const LatticeValue = defineNamedType('lattice_value', () => koffi.opaque('lattice_value'));
+const LatticeMapEntry = defineNamedType('lattice_map_entry', () => koffi.opaque('lattice_map_entry'));
+
 // Recursive list/map containers for nested values
 const LatticeList = defineNamedType('lattice_list', () => koffi.struct('lattice_list', {
-  items: koffi.pointer('lattice_value'),
+  items: koffi.pointer(LatticeValue),
   len: 'uintptr_t',
 }));
 
 const LatticeMap = defineNamedType('lattice_map', () => koffi.struct('lattice_map', {
-  entries: koffi.pointer('lattice_map_entry'),
+  entries: koffi.pointer(LatticeMapEntry),
   len: 'uintptr_t',
 }));
 
@@ -98,21 +116,25 @@ const LatticeValueData = defineNamedType('lattice_value_data', () => koffi.union
   string_val: LatticeStringValue,
   bytes_val: LatticeBytesValue,
   vector_val: LatticeVectorValue,
-  list_val: koffi.pointer('lattice_list'),
-  map_val: koffi.pointer('lattice_map'),
+  list_val: koffi.pointer(LatticeList),
+  map_val: koffi.pointer(LatticeMap),
 }));
 
 // Define the full value struct
-const LatticeValue = defineNamedType('lattice_value', () => koffi.struct('lattice_value', {
-  type: 'int',
-  data: LatticeValueData,
-}));
+defineStructBody('lattice_value', LatticeValue, () => {
+  koffi.struct(LatticeValue, {
+    type: 'int',
+    data: LatticeValueData,
+  });
+});
 
-const LatticeMapEntry = defineNamedType('lattice_map_entry', () => koffi.struct('lattice_map_entry', {
-  key: 'void*',
-  key_len: 'uintptr_t',
-  value: LatticeValue,
-}));
+defineStructBody('lattice_map_entry', LatticeMapEntry, () => {
+  koffi.struct(LatticeMapEntry, {
+    key: 'void*',
+    key_len: 'uintptr_t',
+    value: LatticeValue,
+  });
+});
 
 export interface LatticeBindings {
   // Database operations
@@ -262,7 +284,7 @@ export interface LatticeBindings {
     txn: unknown,
     edge_id: bigint,
     key: string,
-    value_out: Buffer
+    value_out: unknown
   ) => number;
   lattice_edge_remove_property: (
     txn: unknown,
@@ -573,7 +595,7 @@ function createBindings(): LatticeBindings {
       TxnPtr,
       'uint64', // edge_id
       'str', // key
-      ValuePtr, // value_out
+      koffi.out(ValuePtr), // value_out
     ]),
     lattice_edge_remove_property: lib.func('lattice_edge_remove_property', 'int', [
       TxnPtr,

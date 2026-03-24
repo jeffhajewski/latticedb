@@ -2225,6 +2225,22 @@ test "query: standalone UNWIND supports list parameter" {
     try expectInt(result, 2, 0, 3);
 }
 
+test "query: RETURN alias controls output column name" {
+    const path = "/tmp/lattice_qm_return_alias.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    var seed = try db.query("CREATE (n:Person {metadata: {city: \"Portland\"}})");
+    seed.deinit();
+
+    var result = try db.query("MATCH (n:Person) RETURN n.metadata AS metadata");
+    defer result.deinit();
+
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try std.testing.expectEqual(@as(usize, 1), result.columns.len);
+    try std.testing.expectEqualStrings("metadata", result.columns[0]);
+}
+
 // ============================================================================
 // Test Helpers
 // ============================================================================

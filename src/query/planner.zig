@@ -128,6 +128,8 @@ pub const QueryPlanner = struct {
     next_slot: u8,
     /// Number of output columns from the RETURN clause (set during planning)
     output_columns: u8 = 0,
+    /// Explicit output column names from RETURN aliases.
+    output_column_names: [MAX_SLOTS]?[]const u8,
 
     const Self = @This();
 
@@ -141,6 +143,7 @@ pub const QueryPlanner = struct {
             .hidden_binding_names = .empty,
             .next_slot = 0,
             .output_columns = 0,
+            .output_column_names = [_]?[]const u8{null} ** MAX_SLOTS,
         };
     }
 
@@ -161,6 +164,8 @@ pub const QueryPlanner = struct {
         self.bindings.clearRetainingCapacity();
         self.edge_bindings.clearRetainingCapacity();
         self.next_slot = 0;
+        self.output_columns = 0;
+        self.output_column_names = [_]?[]const u8{null} ** MAX_SLOTS;
 
         var current_op: ?Operator = null;
 
@@ -789,6 +794,7 @@ pub const QueryPlanner = struct {
                 .expr = item.expression,
                 .output_slot = @intCast(i),
             };
+            self.output_column_names[i] = item.alias;
         }
 
         const project = project_ops.Project.init(self.allocator, input_op, items) catch {
@@ -822,6 +828,7 @@ pub const QueryPlanner = struct {
 
         for (ret.items, 0..) |item, i| {
             const slot: u8 = @intCast(i);
+            self.output_column_names[i] = item.alias;
 
             if (self.isDirectAggregate(item.expression)) |agg_info| {
                 // Direct aggregate function call: count(n), sum(n.val), etc.

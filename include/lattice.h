@@ -86,13 +86,6 @@ struct lattice_list {
     size_t len;
 };
 
-/* A single map entry (key/value pair) for nested values. */
-struct lattice_map_entry {
-    const char* key; /* nullable when key_len == 0 */
-    size_t key_len;
-    lattice_value value;
-};
-
 /* Recursive map container for nested values. */
 struct lattice_map {
     lattice_map_entry* entries; /* nullable when len == 0 */
@@ -122,6 +115,13 @@ struct lattice_value {
         lattice_list* list_val;
         lattice_map* map_val;
     } data;
+};
+
+/* A single map entry (key/value pair) for nested values. */
+struct lattice_map_entry {
+    const char* key; /* nullable when key_len == 0 */
+    size_t key_len;
+    lattice_value value;
 };
 
 /* Open options */

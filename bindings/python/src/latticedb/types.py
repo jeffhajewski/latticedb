@@ -10,7 +10,17 @@ from numpy.typing import NDArray
 
 
 # Type alias for property values
-PropertyValue = Union[None, bool, int, float, str, bytes, NDArray[np.float32]]
+PropertyValue = Union[
+    None,
+    bool,
+    int,
+    float,
+    str,
+    bytes,
+    NDArray[np.float32],
+    List["PropertyValue"],
+    Dict[str, "PropertyValue"],
+]
 
 
 @dataclass

@@ -196,6 +196,10 @@ fn compareValues(a: EvalResult, b: EvalResult) std.math.Order {
             .string_val => |bs| std.mem.order(u8, as, bs),
             else => .eq,
         },
+        .bytes_val => |ab| switch (b) {
+            .bytes_val => |bb| std.mem.order(u8, ab, bb),
+            else => .eq,
+        },
         else => .eq,
     };
 }
@@ -486,6 +490,7 @@ fn resultToSlotValue(result: EvalResult, allocator: Allocator) SlotValue {
         .int_val => |i| .{ .property = .{ .int_val = i } },
         .float_val => |f| .{ .property = .{ .float_val = f } },
         .string_val => |s| .{ .property = .{ .string_val = s } },
+        .bytes_val => |b| .{ .property = .{ .bytes_val = b } },
         .vector_val => |v| .{ .property = .{ .vector_val = v } },
         .list_val => .{ .property = result.toPropertyValue(allocator) },
         .map_val => .{ .property = result.toPropertyValue(allocator) },

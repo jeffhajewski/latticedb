@@ -146,8 +146,8 @@ class Database:
 
         Args:
             cypher: The Cypher query string.
-            parameters: Query parameters. Supports scalar types (None, bool, int,
-                float, str, bytes) and numpy arrays for vector parameters.
+            parameters: Query parameters. Supports scalar types, bytes, numpy
+                vectors, nested lists, and string-keyed dicts.
 
         Returns:
             Query results.

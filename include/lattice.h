@@ -19,9 +19,9 @@ extern "C" {
 #endif
 
 /* Version information */
-#define LATTICE_VERSION "0.3.0"
+#define LATTICE_VERSION "0.4.0"
 #define LATTICE_VERSION_MAJOR 0
-#define LATTICE_VERSION_MINOR 3
+#define LATTICE_VERSION_MINOR 4
 #define LATTICE_VERSION_PATCH 0
 
 /* Opaque handle types */
@@ -62,10 +62,7 @@ typedef enum {
     LATTICE_TXN_READ_WRITE = 1
 } lattice_txn_mode;
 
-/* Value types.
- * LIST and MAP are reserved for future nested-value support.
- * Current public C APIs return LATTICE_ERROR_UNSUPPORTED when asked to
- * send or receive these value types. */
+/* Value types. */
 typedef enum {
     LATTICE_VALUE_NULL = 0,
     LATTICE_VALUE_BOOL = 1,
@@ -78,8 +75,33 @@ typedef enum {
     LATTICE_VALUE_MAP = 8
 } lattice_value_type;
 
-/* Property value */
-typedef struct {
+typedef struct lattice_value lattice_value;
+typedef struct lattice_list lattice_list;
+typedef struct lattice_map_entry lattice_map_entry;
+typedef struct lattice_map lattice_map;
+
+/* Recursive list container for nested values. */
+struct lattice_list {
+    lattice_value* items; /* nullable when len == 0 */
+    size_t len;
+};
+
+/* A single map entry (key/value pair) for nested values. */
+struct lattice_map_entry {
+    const char* key; /* nullable when key_len == 0 */
+    size_t key_len;
+    lattice_value value;
+};
+
+/* Recursive map container for nested values. */
+struct lattice_map {
+    lattice_map_entry* entries; /* nullable when len == 0 */
+    size_t len;
+};
+
+/* Property value. LIST and MAP use pointer-indirected containers so values can
+ * nest recursively. */
+struct lattice_value {
     lattice_value_type type;
     union {
         bool bool_val;
@@ -97,8 +119,10 @@ typedef struct {
             const float* ptr;
             uint32_t dimensions;
         } vector_val;
+        lattice_list* list_val;
+        lattice_map* map_val;
     } data;
-} lattice_value;
+};
 
 /* Open options */
 typedef struct {
@@ -177,7 +201,9 @@ lattice_error lattice_node_delete(
 );
 
 /* Set a property on a node.
- * LIST and MAP values currently return LATTICE_ERROR_UNSUPPORTED. */
+ * The value tree is borrowed for the duration of the call only.
+ * STRING/BYTES/VECTOR pointers may be NULL only when their lengths are zero.
+ * LIST/MAP container pointers must be non-NULL; empty containers use len=0. */
 lattice_error lattice_node_set_property(
     lattice_txn* txn,
     lattice_node_id node_id,
@@ -186,10 +212,8 @@ lattice_error lattice_node_set_property(
 );
 
 /* Get a property from a node.
- * For heap-backed values (string/bytes/vector), ownership transfers to the caller.
- * Release any owned storage with lattice_value_free() after consuming the value.
- * LIST and MAP values currently return LATTICE_ERROR_UNSUPPORTED.
- */
+ * Ownership of the full returned value tree transfers to the caller.
+ * Release any owned storage with lattice_value_free() after consuming it. */
 lattice_error lattice_node_get_property(
     lattice_txn* txn,
     lattice_node_id node_id,
@@ -215,9 +239,11 @@ lattice_error lattice_node_get_labels(
 void lattice_free_string(char* str);
 
 /* Free heap-backed storage inside a lattice_value returned by an owning API.
+ * LIST/MAP values are released recursively.
  * Safe to call on null/bool/int/float values.
  *
- * Ownership currently transfers from lattice_node_get_property().
+ * Ownership currently transfers from lattice_node_get_property() and
+ * lattice_edge_get_property().
  * Values returned by lattice_result_get() are borrowed from the result handle
  * and must not be passed to lattice_value_free().
  */
@@ -442,7 +468,7 @@ lattice_error lattice_edge_delete(
 );
 
 /* Set a property on an edge by stable edge ID.
- * LIST and MAP values currently return LATTICE_ERROR_UNSUPPORTED. */
+ * The value tree is borrowed for the duration of the call only. */
 lattice_error lattice_edge_set_property(
     lattice_txn* txn,
     lattice_edge_id edge_id,
@@ -451,10 +477,8 @@ lattice_error lattice_edge_set_property(
 );
 
 /* Get a property from an edge by stable edge ID.
- * For heap-backed values (string/bytes/vector), ownership transfers to the caller.
- * Release any owned storage with lattice_value_free() after consuming the value.
- * LIST and MAP values currently return LATTICE_ERROR_UNSUPPORTED.
- */
+ * Ownership of the full returned value tree transfers to the caller.
+ * Release any owned storage with lattice_value_free() after consuming it. */
 lattice_error lattice_edge_get_property(
     lattice_txn* txn,
     lattice_edge_id edge_id,
@@ -563,7 +587,7 @@ lattice_error lattice_query_prepare(
 );
 
 /* Bind a parameter to a prepared query (use $name in Cypher).
- * LIST and MAP values currently return LATTICE_ERROR_UNSUPPORTED. */
+ * The value tree is borrowed for the duration of the call only. */
 lattice_error lattice_query_bind(
     lattice_query* query,
     const char* name,       /* Parameter name without $ prefix */
@@ -614,9 +638,8 @@ uint32_t lattice_result_column_count(lattice_result* result);
 const char* lattice_result_column_name(lattice_result* result, uint32_t index);
 
 /* Get column value.
- * Heap-backed pointers in value_out are borrowed from the result handle and stay
- * valid until lattice_result_free(). Do not pass them to lattice_value_free().
- * LIST and MAP values currently return LATTICE_ERROR_UNSUPPORTED.
+ * The full returned value tree is borrowed from the result handle and stays
+ * valid until lattice_result_free(). Do not pass it to lattice_value_free().
  */
 lattice_error lattice_result_get(
     lattice_result* result,

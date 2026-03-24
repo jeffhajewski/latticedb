@@ -454,8 +454,52 @@ export class LatticeFFI {
         string_val: { ptr: null, len: 0 },
         bytes_val: { ptr: null, len: 0 },
         vector_val: { ptr: null, dimensions: 0 },
+        list_val: null,
+        map_val: null,
       },
     };
+  }
+
+  private isPlainObject(value: unknown): value is Record<string, unknown> {
+    if (value === null || typeof value !== 'object') {
+      return false;
+    }
+    const proto = Object.getPrototypeOf(value);
+    return proto === Object.prototype || proto === null;
+  }
+
+  private decodeListStruct(value: unknown): { items: unknown; len: number | bigint } {
+    if (this.isPlainObject(value) && 'items' in value && 'len' in value) {
+      return value as { items: unknown; len: number | bigint };
+    }
+    return koffi.decode(value as never, 'lattice_list') as { items: unknown; len: number | bigint };
+  }
+
+  private decodeMapStruct(value: unknown): { entries: unknown; len: number | bigint } {
+    if (this.isPlainObject(value) && 'entries' in value && 'len' in value) {
+      return value as { entries: unknown; len: number | bigint };
+    }
+    return koffi.decode(value as never, 'lattice_map') as { entries: unknown; len: number | bigint };
+  }
+
+  private decodeValueArray(value: unknown, len: number): Record<string, unknown>[] {
+    if (Array.isArray(value)) {
+      return value as Record<string, unknown>[];
+    }
+    if (!value || len === 0) {
+      return [];
+    }
+    return koffi.decode(value as never, 'lattice_value', len) as Record<string, unknown>[];
+  }
+
+  private decodeMapEntryArray(value: unknown, len: number): Record<string, unknown>[] {
+    if (Array.isArray(value)) {
+      return value as Record<string, unknown>[];
+    }
+    if (!value || len === 0) {
+      return [];
+    }
+    return koffi.decode(value as never, 'lattice_map_entry', len) as Record<string, unknown>[];
   }
 
   /**
@@ -476,7 +520,7 @@ export class LatticeFFI {
       return { type: LatticeValueType.Float, data: { float_val: value } };
     }
     if (typeof value === 'bigint') {
-      return { type: LatticeValueType.Int, data: { int_val: Number(value) } };
+      return { type: LatticeValueType.Int, data: { int_val: value } };
     }
     if (typeof value === 'string') {
       const buf = Buffer.from(value, 'utf8');
@@ -488,8 +532,36 @@ export class LatticeFFI {
     if (value instanceof Uint8Array) {
       return { type: LatticeValueType.Bytes, data: { bytes_val: { ptr: value, len: value.length } } };
     }
-    if (Array.isArray(value) || (value !== null && typeof value === 'object')) {
-      throw new TypeError('LIST and MAP values are not supported by the public C API');
+    if (Array.isArray(value)) {
+      const items = value.map((item) => this.jsToLatticeValue(item));
+      return {
+        type: LatticeValueType.List,
+        data: {
+          list_val: {
+            items,
+            len: items.length,
+          },
+        },
+      };
+    }
+    if (this.isPlainObject(value)) {
+      const entries = Object.entries(value).map(([key, entryValue]) => {
+        const keyBuffer = Buffer.from(key, 'utf8');
+        return {
+          key: keyBuffer,
+          key_len: keyBuffer.length,
+          value: this.jsToLatticeValue(entryValue),
+        };
+      });
+      return {
+        type: LatticeValueType.Map,
+        data: {
+          map_val: {
+            entries,
+            len: entries.length,
+          },
+        },
+      };
     }
     throw new TypeError(`Unsupported value type: ${typeof value}`);
   }
@@ -515,7 +587,7 @@ export class LatticeFFI {
         return data.float_val as number;
       case LatticeValueType.String: {
         const sv = data.string_val as { ptr: unknown; len: number | bigint };
-        if (!sv.ptr) return null;
+        if (!sv.ptr) return '';
         // koffi may decode const char* directly as a JS string
         if (typeof sv.ptr === 'string') return sv.ptr;
         const len = Number(sv.len);
@@ -536,12 +608,27 @@ export class LatticeFFI {
         const floats = koffi.decode(vv.ptr, 'float', dims) as number[];
         return new Float32Array(floats);
       }
-      case LatticeValueType.List:
-      case LatticeValueType.Map:
-        throw new LatticeError(
-          'LIST and MAP values are not supported by the public C API',
-          LatticeErrorCode.Unsupported
-        );
+      case LatticeValueType.List: {
+        const listVal = this.decodeListStruct(data.list_val);
+        const len = Number(listVal.len);
+        const items = this.decodeValueArray(listVal.items, len);
+        return items.map((item) => this.latticeValueToJs(item));
+      }
+      case LatticeValueType.Map: {
+        const mapVal = this.decodeMapStruct(data.map_val);
+        const len = Number(mapVal.len);
+        const entries = this.decodeMapEntryArray(mapVal.entries, len);
+        const result: Record<string, unknown> = {};
+        for (const entry of entries) {
+          const keyPtr = entry.key;
+          const keyLen = Number(entry.key_len as number | bigint);
+          const key = !keyPtr || keyLen === 0
+            ? ''
+            : koffi.decode(keyPtr as never, 'char', keyLen) as string;
+          result[key] = this.latticeValueToJs(entry.value as Record<string, unknown>);
+        }
+        return result;
+      }
       default:
         throw new LatticeError(
           `Unsupported native value type: ${type}`,

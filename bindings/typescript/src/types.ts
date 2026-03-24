@@ -12,7 +12,9 @@ export type PropertyValue =
   | bigint
   | string
   | Uint8Array
-  | Float32Array;
+  | Float32Array
+  | PropertyValue[]
+  | { [key: string]: PropertyValue };
 
 /**
  * A node in the graph.

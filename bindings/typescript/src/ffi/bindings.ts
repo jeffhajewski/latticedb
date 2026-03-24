@@ -79,6 +79,17 @@ const LatticeVectorValue = defineNamedType('lattice_vector_value', () => koffi.s
   dimensions: 'uint32',
 }));
 
+// Recursive list/map containers for nested values
+const LatticeList = defineNamedType('lattice_list', () => koffi.struct('lattice_list', {
+  items: koffi.pointer('lattice_value'),
+  len: 'uintptr_t',
+}));
+
+const LatticeMap = defineNamedType('lattice_map', () => koffi.struct('lattice_map', {
+  entries: koffi.pointer('lattice_map_entry'),
+  len: 'uintptr_t',
+}));
+
 // Define the value union data
 const LatticeValueData = defineNamedType('lattice_value_data', () => koffi.union('lattice_value_data', {
   bool_val: 'bool',
@@ -87,12 +98,20 @@ const LatticeValueData = defineNamedType('lattice_value_data', () => koffi.union
   string_val: LatticeStringValue,
   bytes_val: LatticeBytesValue,
   vector_val: LatticeVectorValue,
+  list_val: koffi.pointer('lattice_list'),
+  map_val: koffi.pointer('lattice_map'),
 }));
 
 // Define the full value struct
 const LatticeValue = defineNamedType('lattice_value', () => koffi.struct('lattice_value', {
   type: 'int',
   data: LatticeValueData,
+}));
+
+const LatticeMapEntry = defineNamedType('lattice_map_entry', () => koffi.struct('lattice_map_entry', {
+  key: 'void*',
+  key_len: 'uintptr_t',
+  value: LatticeValue,
 }));
 
 export interface LatticeBindings {

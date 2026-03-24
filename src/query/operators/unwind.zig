@@ -107,7 +107,7 @@ pub const Unwind = struct {
                     self.output_row = self.current_row.?;
 
                     // Bind the list element to the output slot
-                    self.output_row.setSlot(self.output_slot, evalResultToSlot(list[self.list_index]));
+                    self.output_row.setSlot(self.output_slot, evalResultToSlot(list[self.list_index], self.allocator));
                     self.list_index += 1;
                     return &self.output_row;
                 }
@@ -136,7 +136,7 @@ pub const Unwind = struct {
                     // Not a list — treat as single-element (Cypher behavior)
                     // Produce one row with the value itself
                     self.output_row = self.current_row.?;
-                    self.output_row.setSlot(self.output_slot, evalResultToSlot(result));
+                    self.output_row.setSlot(self.output_slot, evalResultToSlot(result, self.allocator));
                     return &self.output_row;
                 },
             }
@@ -159,17 +159,16 @@ pub const Unwind = struct {
 };
 
 /// Convert an EvalResult to a SlotValue
-fn evalResultToSlot(result: EvalResult) SlotValue {
+fn evalResultToSlot(result: EvalResult, allocator: Allocator) SlotValue {
     return switch (result) {
         .node_ref => |id| .{ .node_ref = id },
         .edge_ref => |id| .{ .edge_ref = id },
         .int_val => |v| .{ .property = .{ .int_val = v } },
         .float_val => |v| .{ .property = .{ .float_val = v } },
         .string_val => |v| .{ .property = .{ .string_val = v } },
+        .bytes_val => |v| .{ .property = .{ .bytes_val = v } },
         .bool_val => |v| .{ .property = .{ .bool_val = v } },
         .null_val => .empty,
-        .list_val => .empty, // Nested lists not supported in slots
-        .vector_val => .empty, // Vectors not supported in slots
-        .map_val => .empty, // Maps not supported in slots
+        .list_val, .vector_val, .map_val => .{ .property = result.toPropertyValue(allocator) },
     };
 }

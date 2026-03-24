@@ -315,6 +315,29 @@ class TestNodeOperations:
                 assert isinstance(vector, np.ndarray)
                 np.testing.assert_allclose(vector, np.array([0.1, 0.2, 0.3], dtype=np.float32))
 
+    def test_get_property_nested_list_and_map(self, tmp_path):
+        """Test retrieving nested list/map properties from a node."""
+        db_path = tmp_path / "test.db"
+
+        profile = {
+            "name": "Alice",
+            "tags": ["graph", "go"],
+            "flags": {"active": True, "score": 3.5},
+        }
+        history = [1, {"city": "Portland"}, [True, False]]
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                node = txn.create_node(labels=["Person"])
+                txn.set_property(node.id, "profile", profile)
+                txn.set_property(node.id, "history", history)
+                node_id = node.id
+                txn.commit()
+
+            with db.read() as txn:
+                assert txn.get_property(node_id, "profile") == profile
+                assert txn.get_property(node_id, "history") == history
+
     def test_get_property_not_found(self, tmp_path):
         """Test that get_property returns None for nonexistent property."""
         db_path = tmp_path / "test.db"
@@ -590,6 +613,38 @@ class TestQueries:
             rows = list(result)
             assert len(rows) == 1
             assert rows[0]["n"] == "Bob"
+
+    def test_query_with_nested_list_and_map_parameters(self, tmp_path):
+        """Nested query parameters and result values should round-trip."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            result = db.query(
+                "UNWIND $items AS item RETURN item",
+                parameters={"items": [1, {"city": "Portland", "tags": ["graph", "go"]}]},
+            )
+
+            rows = list(result)
+            assert rows == [
+                {"item": 1},
+                {"item": {"city": "Portland", "tags": ["graph", "go"]}},
+            ]
+
+    def test_query_returns_nested_property_values(self, tmp_path):
+        """Nested properties returned through query results should decode correctly."""
+        db_path = tmp_path / "test.db"
+
+        metadata = {"city": "Portland", "tags": ["graph", "zig"]}
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                txn.create_node(labels=["Person"], properties={"metadata": metadata})
+                txn.commit()
+
+            result = db.query("MATCH (n:Person) RETURN n.metadata AS metadata")
+            rows = list(result)
+            assert len(rows) == 1
+            assert rows[0]["metadata"] == metadata
 
     def test_query_result_iteration(self, tmp_path):
         """Test iterating over query results."""

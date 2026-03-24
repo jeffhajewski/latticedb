@@ -150,6 +150,7 @@ fn resultToSlotValue(result: EvalResult, allocator: Allocator) SlotValue {
         .int_val => |i| .{ .property = .{ .int_val = i } },
         .float_val => |f| .{ .property = .{ .float_val = f } },
         .string_val => |s| .{ .property = .{ .string_val = s } },
+        .bytes_val => |b| .{ .property = .{ .bytes_val = b } },
         .vector_val => |v| .{ .property = .{ .vector_val = v } },
         .list_val => .{ .property = result.toPropertyValue(allocator) },
         .map_val => .{ .property = result.toPropertyValue(allocator) },

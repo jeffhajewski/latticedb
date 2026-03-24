@@ -169,6 +169,7 @@ const ResultHandle = struct {
     result: QueryResult,
     current_row: usize,
     started: bool,
+    borrowed_value_arena: std.heap.ArenaAllocator,
 };
 
 /// Internal vector search result handle
@@ -345,7 +346,11 @@ pub const lattice_value_type = enum(c_int) {
     map = 8,
 };
 
-/// Property value for C API
+pub const lattice_list = extern struct {
+    items: [*c]lattice_value,
+    len: usize,
+};
+
 pub const lattice_value = extern struct {
     value_type: lattice_value_type,
     data: extern union {
@@ -364,11 +369,26 @@ pub const lattice_value = extern struct {
             ptr: [*c]const f32,
             dimensions: u32,
         },
+        list_val: ?*lattice_list,
+        map_val: ?*lattice_map,
     },
 };
 
+pub const lattice_map_entry = extern struct {
+    key: [*c]const u8,
+    key_len: usize,
+    value: lattice_value,
+};
+
+pub const lattice_map = extern struct {
+    entries: [*c]lattice_map_entry,
+    len: usize,
+};
+
 const ValueConversionError = error{
-    UnsupportedValueType,
+    InvalidValue,
+    DuplicateMapKey,
+    OutOfMemory,
 };
 
 /// Open options for C API
@@ -391,9 +411,86 @@ fn cStrToSlice(c_str: [*c]const u8) ?[]const u8 {
     return std.mem.sliceTo(c_str, 0);
 }
 
-/// Convert Zig PropertyValue to C lattice_value
-fn zigValueToCValue(zig_val: PropertyValue, c_val: *lattice_value) ValueConversionError!void {
-    c_val.data = std.mem.zeroes(@TypeOf(c_val.data));
+fn emptyCValue(c_val: *lattice_value) void {
+    c_val.* = std.mem.zeroes(lattice_value);
+    c_val.value_type = .null;
+}
+
+fn byteSlicePtrOrNull(slice: []const u8) [*c]const u8 {
+    return if (slice.len == 0) null else slice.ptr;
+}
+
+fn floatSlicePtrOrNull(slice: []const f32) [*c]const f32 {
+    return if (slice.len == 0) null else slice.ptr;
+}
+
+fn cBytesToSlice(ptr: [*c]const u8, len: usize) ValueConversionError![]const u8 {
+    if (len == 0) return &[_]u8{};
+    if (ptr == null) return error.InvalidValue;
+    return ptr[0..len];
+}
+
+fn cVectorToSlice(ptr: [*c]const f32, dimensions: u32) ValueConversionError![]const f32 {
+    if (dimensions == 0) return &[_]f32{};
+    if (ptr == null) return error.InvalidValue;
+    return ptr[0..dimensions];
+}
+
+fn freeOwnedCValue(c_val: *lattice_value) void {
+    switch (c_val.value_type) {
+        .string => {
+            if (c_val.data.string_val.ptr != null and c_val.data.string_val.len > 0) {
+                global_allocator.free(c_val.data.string_val.ptr[0..c_val.data.string_val.len]);
+            }
+        },
+        .bytes => {
+            if (c_val.data.bytes_val.ptr != null and c_val.data.bytes_val.len > 0) {
+                global_allocator.free(c_val.data.bytes_val.ptr[0..c_val.data.bytes_val.len]);
+            }
+        },
+        .vector => {
+            if (c_val.data.vector_val.ptr != null and c_val.data.vector_val.dimensions > 0) {
+                global_allocator.free(c_val.data.vector_val.ptr[0..c_val.data.vector_val.dimensions]);
+            }
+        },
+        .list => {
+            if (c_val.data.list_val) |list_ptr| {
+                if (list_ptr.items != null and list_ptr.len > 0) {
+                    const items = list_ptr.items[0..list_ptr.len];
+                    for (items) |*item| {
+                        freeOwnedCValue(item);
+                    }
+                    global_allocator.free(items);
+                }
+                global_allocator.destroy(list_ptr);
+            }
+        },
+        .map => {
+            if (c_val.data.map_val) |map_ptr| {
+                if (map_ptr.entries != null and map_ptr.len > 0) {
+                    const entries = map_ptr.entries[0..map_ptr.len];
+                    for (entries) |*entry| {
+                        if (entry.key != null and entry.key_len > 0) {
+                            global_allocator.free(entry.key[0..entry.key_len]);
+                        }
+                        freeOwnedCValue(&entry.value);
+                    }
+                    global_allocator.free(entries);
+                }
+                global_allocator.destroy(map_ptr);
+            }
+        },
+        else => {},
+    }
+}
+
+fn zigValueToOwnedCValue(zig_val: PropertyValue, c_val: *lattice_value) ValueConversionError!void {
+    emptyCValue(c_val);
+    errdefer {
+        freeOwnedCValue(c_val);
+        emptyCValue(c_val);
+    }
+
     switch (zig_val) {
         .null_val => c_val.value_type = .null,
         .bool_val => |b| {
@@ -410,26 +507,92 @@ fn zigValueToCValue(zig_val: PropertyValue, c_val: *lattice_value) ValueConversi
         },
         .string_val => |s| {
             c_val.value_type = .string;
-            c_val.data.string_val.ptr = s.ptr;
-            c_val.data.string_val.len = s.len;
+            if (s.len == 0) {
+                c_val.data.string_val.ptr = null;
+                c_val.data.string_val.len = 0;
+            } else {
+                const owned = global_allocator.dupe(u8, s) catch return error.OutOfMemory;
+                c_val.data.string_val.ptr = owned.ptr;
+                c_val.data.string_val.len = owned.len;
+            }
         },
         .bytes_val => |b| {
             c_val.value_type = .bytes;
-            c_val.data.bytes_val.ptr = b.ptr;
-            c_val.data.bytes_val.len = b.len;
+            if (b.len == 0) {
+                c_val.data.bytes_val.ptr = null;
+                c_val.data.bytes_val.len = 0;
+            } else {
+                const owned = global_allocator.dupe(u8, b) catch return error.OutOfMemory;
+                c_val.data.bytes_val.ptr = owned.ptr;
+                c_val.data.bytes_val.len = owned.len;
+            }
         },
         .vector_val => |v| {
             c_val.value_type = .vector;
-            c_val.data.vector_val.ptr = v.ptr;
-            c_val.data.vector_val.dimensions = @intCast(v.len);
+            if (v.len == 0) {
+                c_val.data.vector_val.ptr = null;
+                c_val.data.vector_val.dimensions = 0;
+            } else {
+                const owned = global_allocator.dupe(f32, v) catch return error.OutOfMemory;
+                c_val.data.vector_val.ptr = owned.ptr;
+                c_val.data.vector_val.dimensions = @intCast(owned.len);
+            }
         },
-        .list_val, .map_val => return error.UnsupportedValueType,
+        .list_val => |list| {
+            c_val.value_type = .list;
+            const list_ptr = global_allocator.create(lattice_list) catch return error.OutOfMemory;
+            list_ptr.* = .{
+                .items = null,
+                .len = list.len,
+            };
+            c_val.data.list_val = list_ptr;
+
+            if (list.len > 0) {
+                const items = global_allocator.alloc(lattice_value, list.len) catch return error.OutOfMemory;
+                list_ptr.items = items.ptr;
+                for (items) |*item| emptyCValue(item);
+
+                for (list, 0..) |item, i| {
+                    try zigValueToOwnedCValue(item, &items[i]);
+                }
+            }
+        },
+        .map_val => |map| {
+            c_val.value_type = .map;
+            const map_ptr = global_allocator.create(lattice_map) catch return error.OutOfMemory;
+            map_ptr.* = .{
+                .entries = null,
+                .len = map.len,
+            };
+            c_val.data.map_val = map_ptr;
+
+            if (map.len > 0) {
+                const entries = global_allocator.alloc(lattice_map_entry, map.len) catch return error.OutOfMemory;
+                map_ptr.entries = entries.ptr;
+                for (entries) |*entry| {
+                    entry.* = std.mem.zeroes(lattice_map_entry);
+                    emptyCValue(&entry.value);
+                }
+
+                for (map, 0..) |entry, i| {
+                    if (entry.key.len == 0) {
+                        entries[i].key = null;
+                        entries[i].key_len = 0;
+                    } else {
+                        const owned_key = global_allocator.dupe(u8, entry.key) catch return error.OutOfMemory;
+                        entries[i].key = owned_key.ptr;
+                        entries[i].key_len = owned_key.len;
+                    }
+                    try zigValueToOwnedCValue(entry.value, &entries[i].value);
+                }
+            }
+        },
     }
 }
 
-/// Convert ResultValue to C lattice_value
-fn resultValueToCValue(result_val: ResultValue, c_val: *lattice_value) ValueConversionError!void {
-    c_val.data = std.mem.zeroes(@TypeOf(c_val.data));
+fn resultValueToBorrowedCValue(result_val: ResultValue, c_val: *lattice_value, allocator: Allocator) ValueConversionError!void {
+    emptyCValue(c_val);
+
     switch (result_val) {
         .null_val => c_val.value_type = .null,
         .bool_val => |b| {
@@ -446,7 +609,7 @@ fn resultValueToCValue(result_val: ResultValue, c_val: *lattice_value) ValueConv
         },
         .string_val => |s| {
             c_val.value_type = .string;
-            c_val.data.string_val.ptr = s.ptr;
+            c_val.data.string_val.ptr = byteSlicePtrOrNull(s);
             c_val.data.string_val.len = s.len;
         },
         .node_id => |id| {
@@ -459,35 +622,142 @@ fn resultValueToCValue(result_val: ResultValue, c_val: *lattice_value) ValueConv
         },
         .bytes_val => |b| {
             c_val.value_type = .bytes;
-            c_val.data.bytes_val.ptr = b.ptr;
+            c_val.data.bytes_val.ptr = byteSlicePtrOrNull(b);
             c_val.data.bytes_val.len = b.len;
         },
         .vector_val => |v| {
             c_val.value_type = .vector;
-            c_val.data.vector_val.ptr = v.ptr;
+            c_val.data.vector_val.ptr = floatSlicePtrOrNull(v);
             c_val.data.vector_val.dimensions = @intCast(v.len);
         },
-        .list_val, .map_val => return error.UnsupportedValueType,
+        .list_val => |list| {
+            c_val.value_type = .list;
+            const list_ptr = allocator.create(lattice_list) catch return error.OutOfMemory;
+            list_ptr.* = .{
+                .items = null,
+                .len = list.len,
+            };
+            c_val.data.list_val = list_ptr;
+
+            if (list.len > 0) {
+                const items = allocator.alloc(lattice_value, list.len) catch return error.OutOfMemory;
+                list_ptr.items = items.ptr;
+                for (list, 0..) |item, i| {
+                    try resultValueToBorrowedCValue(item, &items[i], allocator);
+                }
+            }
+        },
+        .map_val => |map| {
+            c_val.value_type = .map;
+            const map_ptr = allocator.create(lattice_map) catch return error.OutOfMemory;
+            map_ptr.* = .{
+                .entries = null,
+                .len = map.len,
+            };
+            c_val.data.map_val = map_ptr;
+
+            if (map.len > 0) {
+                const entries = allocator.alloc(lattice_map_entry, map.len) catch return error.OutOfMemory;
+                map_ptr.entries = entries.ptr;
+
+                for (map, 0..) |entry, i| {
+                    entries[i].key = byteSlicePtrOrNull(entry.key);
+                    entries[i].key_len = entry.key.len;
+                    try resultValueToBorrowedCValue(entry.value, &entries[i].value, allocator);
+                }
+            }
+        },
     }
 }
 
-/// Convert C lattice_value to Zig PropertyValue
-fn cValueToZigValue(c_val: *const lattice_value) ValueConversionError!PropertyValue {
+fn cValueToOwnedZigValue(c_val: *const lattice_value, allocator: Allocator) ValueConversionError!PropertyValue {
     return switch (c_val.value_type) {
         .null => .{ .null_val = {} },
         .bool => .{ .bool_val = c_val.data.bool_val },
         .int => .{ .int_val = c_val.data.int_val },
         .float => .{ .float_val = c_val.data.float_val },
-        .string => .{ .string_val = c_val.data.string_val.ptr[0..c_val.data.string_val.len] },
-        .bytes => .{ .bytes_val = c_val.data.bytes_val.ptr[0..c_val.data.bytes_val.len] },
-        .vector => .{ .vector_val = c_val.data.vector_val.ptr[0..c_val.data.vector_val.dimensions] },
-        .list, .map => error.UnsupportedValueType,
+        .string => blk: {
+            const slice = try cBytesToSlice(c_val.data.string_val.ptr, c_val.data.string_val.len);
+            break :blk .{ .string_val = allocator.dupe(u8, slice) catch return error.OutOfMemory };
+        },
+        .bytes => blk: {
+            const slice = try cBytesToSlice(c_val.data.bytes_val.ptr, c_val.data.bytes_val.len);
+            break :blk .{ .bytes_val = allocator.dupe(u8, slice) catch return error.OutOfMemory };
+        },
+        .vector => blk: {
+            const slice = try cVectorToSlice(c_val.data.vector_val.ptr, c_val.data.vector_val.dimensions);
+            break :blk .{ .vector_val = allocator.dupe(f32, slice) catch return error.OutOfMemory };
+        },
+        .list => blk: {
+            const list_ptr = c_val.data.list_val orelse return error.InvalidValue;
+            if (list_ptr.len == 0) break :blk .{ .list_val = &[_]PropertyValue{} };
+            if (list_ptr.items == null) return error.InvalidValue;
+
+            const items = allocator.alloc(PropertyValue, list_ptr.len) catch return error.OutOfMemory;
+            var initialized: usize = 0;
+            errdefer {
+                for (items[0..initialized]) |*item| {
+                    item.deinit(allocator);
+                }
+                allocator.free(items);
+            }
+
+            for (list_ptr.items[0..list_ptr.len], 0..) |item, i| {
+                items[i] = try cValueToOwnedZigValue(&item, allocator);
+                initialized += 1;
+            }
+
+            break :blk .{ .list_val = items };
+        },
+        .map => blk: {
+            const map_ptr = c_val.data.map_val orelse return error.InvalidValue;
+            if (map_ptr.len == 0) break :blk .{ .map_val = &[_]PropertyValue.MapEntry{} };
+            if (map_ptr.entries == null) return error.InvalidValue;
+
+            const entries = allocator.alloc(PropertyValue.MapEntry, map_ptr.len) catch return error.OutOfMemory;
+            var initialized: usize = 0;
+            errdefer {
+                for (entries[0..initialized]) |*entry| {
+                    allocator.free(entry.key);
+                    var value = entry.value;
+                    value.deinit(allocator);
+                }
+                allocator.free(entries);
+            }
+
+            for (map_ptr.entries[0..map_ptr.len], 0..) |entry, i| {
+                const key_slice = try cBytesToSlice(entry.key, entry.key_len);
+                for (entries[0..initialized]) |existing| {
+                    if (std.mem.eql(u8, existing.key, key_slice)) {
+                        return error.DuplicateMapKey;
+                    }
+                }
+
+                const key = allocator.dupe(u8, key_slice) catch return error.OutOfMemory;
+                errdefer allocator.free(key);
+
+                const value = try cValueToOwnedZigValue(&entry.value, allocator);
+                errdefer {
+                    var owned_value = value;
+                    owned_value.deinit(allocator);
+                }
+
+                entries[i] = .{
+                    .key = key,
+                    .value = value,
+                };
+                initialized += 1;
+            }
+
+            break :blk .{ .map_val = entries };
+        },
     };
 }
 
 fn mapValueConversionError(err: ValueConversionError) lattice_error {
     return switch (err) {
-        error.UnsupportedValueType => .err_unsupported,
+        error.InvalidValue, error.DuplicateMapKey => .err_invalid_arg,
+        error.OutOfMemory => .err_out_of_memory,
     };
 }
 
@@ -761,8 +1031,9 @@ pub export fn lattice_node_set_property(
     const key_slice = cStrToSlice(key) orelse return .err_invalid_arg;
     const c_val = value orelse return .err_invalid_arg;
 
-    // Convert C value to Zig PropertyValue
-    const zig_value = cValueToZigValue(c_val) catch |err| return mapValueConversionError(err);
+    // Convert C value to an owned Zig PropertyValue for the duration of this call.
+    var zig_value = cValueToOwnedZigValue(c_val, global_allocator) catch |err| return mapValueConversionError(err);
+    defer zig_value.deinit(global_allocator);
 
     // Pass transaction if it's a real one (id != 0)
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
@@ -791,11 +1062,13 @@ pub export fn lattice_node_get_property(
     };
 
     if (maybe_value) |zig_value| {
-        zigValueToCValue(zig_value, value_out) catch |err| {
+        zigValueToOwnedCValue(zig_value, value_out) catch |err| {
             var owned_value = zig_value;
-            owned_value.deinit(global_allocator);
+            owned_value.deinit(txn_handle.db_handle.db.allocator);
             return mapValueConversionError(err);
         };
+        var owned_value = zig_value;
+        owned_value.deinit(txn_handle.db_handle.db.allocator);
         return .ok;
     } else {
         return .err_not_found;
@@ -888,31 +1161,8 @@ pub export fn lattice_free_string(str: [*c]u8) void {
 /// must not be passed here.
 pub export fn lattice_value_free(value: ?*lattice_value) void {
     const c_value = value orelse return;
-
-    switch (c_value.value_type) {
-        .string => {
-            const ptr = c_value.data.string_val.ptr;
-            if (ptr != null) {
-                global_allocator.free(ptr[0..c_value.data.string_val.len]);
-            }
-        },
-        .bytes => {
-            const ptr = c_value.data.bytes_val.ptr;
-            if (ptr != null) {
-                global_allocator.free(ptr[0..c_value.data.bytes_val.len]);
-            }
-        },
-        .vector => {
-            const ptr = c_value.data.vector_val.ptr;
-            if (ptr != null) {
-                global_allocator.free(ptr[0..c_value.data.vector_val.dimensions]);
-            }
-        },
-        else => {},
-    }
-
-    c_value.* = std.mem.zeroes(lattice_value);
-    c_value.value_type = .null;
+    freeOwnedCValue(c_value);
+    emptyCValue(c_value);
 }
 
 /// Set a vector on a node
@@ -1261,7 +1511,8 @@ pub export fn lattice_edge_set_property(
 
     const key_slice = cStrToSlice(key) orelse return .err_invalid_arg;
     const c_val = value orelse return .err_invalid_arg;
-    const zig_value = cValueToZigValue(c_val) catch |err| return mapValueConversionError(err);
+    var zig_value = cValueToOwnedZigValue(c_val, global_allocator) catch |err| return mapValueConversionError(err);
+    defer zig_value.deinit(global_allocator);
 
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
     txn_handle.db_handle.db.setEdgePropertyById(txn_ptr, edge_id, key_slice, zig_value) catch |err| {
@@ -1286,11 +1537,13 @@ pub export fn lattice_edge_get_property(
     };
 
     if (maybe_value) |zig_value| {
-        zigValueToCValue(zig_value, value_out) catch |err| {
+        zigValueToOwnedCValue(zig_value, value_out) catch |err| {
             var owned_value = zig_value;
-            owned_value.deinit(global_allocator);
+            owned_value.deinit(txn_handle.db_handle.db.allocator);
             return mapValueConversionError(err);
         };
+        var owned_value = zig_value;
+        owned_value.deinit(txn_handle.db_handle.db.allocator);
         return .ok;
     }
 
@@ -1468,8 +1721,7 @@ pub export fn lattice_query_bind(
     const name_slice = cStrToSlice(name) orelse return .err_invalid_arg;
     const c_value = value orelse return .err_invalid_arg;
 
-    const parsed_value = cValueToZigValue(c_value) catch |err| return mapValueConversionError(err);
-    const owned_value = parsed_value.clone(global_allocator) catch return .err_out_of_memory;
+    const owned_value = cValueToOwnedZigValue(c_value, global_allocator) catch |err| return mapValueConversionError(err);
     return query_handle.storeOwnedParameter(name_slice, owned_value);
 }
 
@@ -1534,6 +1786,7 @@ pub export fn lattice_query_execute(
         .result = result,
         .current_row = 0,
         .started = false,
+        .borrowed_value_arena = std.heap.ArenaAllocator.init(global_allocator),
     };
 
     result_out.* = @ptrCast(result_handle);
@@ -1645,7 +1898,9 @@ pub export fn lattice_result_get(
     const row = result_handle.result.rows[result_handle.current_row];
     if (index >= row.values.len) return .err_invalid_arg;
 
-    resultValueToCValue(row.values[index], value_out) catch |err| return mapValueConversionError(err);
+    resultValueToBorrowedCValue(row.values[index], value_out, result_handle.borrowed_value_arena.allocator()) catch |err| {
+        return mapValueConversionError(err);
+    };
     return .ok;
 }
 
@@ -1653,6 +1908,7 @@ pub export fn lattice_result_get(
 pub export fn lattice_result_free(result: ?*lattice_result) void {
     const result_handle = toHandle(ResultHandle, result) orelse return;
 
+    result_handle.borrowed_value_arena.deinit();
     result_handle.result.deinit();
     global_allocator.destroy(result_handle);
 }
@@ -1696,7 +1952,7 @@ pub export fn lattice_query_cache_stats(
 
 /// Get version string
 pub export fn lattice_version() [*c]const u8 {
-    return "0.3.0";
+    return "0.4.0";
 }
 
 /// Get error message for error code
@@ -1888,7 +2144,7 @@ test "value type tags match header" {
 test "version returns expected string" {
     const version = lattice_version();
     try std.testing.expect(version != null);
-    try std.testing.expectEqualStrings("0.3.0", std.mem.sliceTo(version, 0));
+    try std.testing.expectEqualStrings("0.4.0", std.mem.sliceTo(version, 0));
 }
 
 test "error message returns valid strings" {
@@ -1920,7 +2176,8 @@ test "vector value conversion" {
     const zig_val = PropertyValue{ .vector_val = &zig_vector };
 
     var c_val: lattice_value = undefined;
-    try zigValueToCValue(zig_val, &c_val);
+    try zigValueToOwnedCValue(zig_val, &c_val);
+    defer lattice_value_free(&c_val);
 
     try std.testing.expectEqual(lattice_value_type.vector, c_val.value_type);
     try std.testing.expectEqual(@as(u32, 3), c_val.data.vector_val.dimensions);
@@ -1929,20 +2186,76 @@ test "vector value conversion" {
     try std.testing.expectApproxEqAbs(@as(f32, 3.0), c_val.data.vector_val.ptr[2], 0.001);
 
     // Test C to Zig conversion
-    const back_to_zig = try cValueToZigValue(&c_val);
+    var back_to_zig = try cValueToOwnedZigValue(&c_val, std.testing.allocator);
+    defer back_to_zig.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 3), back_to_zig.vector_val.len);
     try std.testing.expectApproxEqAbs(@as(f32, 1.0), back_to_zig.vector_val[0], 0.001);
 }
 
-test "unsupported value conversion returns explicit error" {
+test "nested value conversion round-trips" {
+    const allocator = std.testing.allocator;
+
+    var inner_list = [_]PropertyValue{
+        .{ .string_val = "graph" },
+        .{ .int_val = 7 },
+    };
+    var entries = [_]PropertyValue.MapEntry{
+        .{ .key = "tags", .value = .{ .list_val = &inner_list } },
+        .{ .key = "enabled", .value = .{ .bool_val = true } },
+    };
+
+    const zig_val = PropertyValue{ .map_val = &entries };
+    var c_val: lattice_value = undefined;
+    try zigValueToOwnedCValue(zig_val, &c_val);
+    defer lattice_value_free(&c_val);
+
+    try std.testing.expectEqual(lattice_value_type.map, c_val.value_type);
+    try std.testing.expect(c_val.data.map_val != null);
+    try std.testing.expectEqual(@as(usize, 2), c_val.data.map_val.?.len);
+
+    var back_to_zig = try cValueToOwnedZigValue(&c_val, allocator);
+    defer back_to_zig.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 2), back_to_zig.map_val.len);
+    try std.testing.expectEqualStrings("tags", back_to_zig.map_val[0].key);
+    try std.testing.expectEqual(@as(usize, 2), back_to_zig.map_val[0].value.list_val.len);
+    try std.testing.expectEqualStrings("graph", back_to_zig.map_val[0].value.list_val[0].string_val);
+    try std.testing.expectEqual(@as(i64, 7), back_to_zig.map_val[0].value.list_val[1].int_val);
+}
+
+test "invalid nested value conversion returns explicit error" {
     var c_val = std.mem.zeroes(lattice_value);
     c_val.value_type = .list;
+    c_val.data.list_val = null;
+    try std.testing.expectError(error.InvalidValue, cValueToOwnedZigValue(&c_val, std.testing.allocator));
 
-    try std.testing.expectError(error.UnsupportedValueType, cValueToZigValue(&c_val));
+    const dup_key = "city";
+    var dup_entries = [_]lattice_map_entry{
+        .{
+            .key = dup_key.ptr,
+            .key_len = dup_key.len,
+            .value = .{
+                .value_type = .string,
+                .data = .{ .string_val = .{ .ptr = "Portland".ptr, .len = "Portland".len } },
+            },
+        },
+        .{
+            .key = dup_key.ptr,
+            .key_len = dup_key.len,
+            .value = .{
+                .value_type = .int,
+                .data = .{ .int_val = 97201 },
+            },
+        },
+    };
+    var map_value = std.mem.zeroes(lattice_value);
+    map_value.value_type = .map;
+    var map_container = lattice_map{
+        .entries = dup_entries[0..].ptr,
+        .len = dup_entries.len,
+    };
+    map_value.data.map_val = &map_container;
 
-    var list_items = [_]PropertyValue{.{ .int_val = 1 }};
-    const zig_val = PropertyValue{ .list_val = &list_items };
-    try std.testing.expectError(error.UnsupportedValueType, zigValueToCValue(zig_val, &c_val));
+    try std.testing.expectError(error.DuplicateMapKey, cValueToOwnedZigValue(&map_value, std.testing.allocator));
 }
 
 test "vector parameter binding validation" {

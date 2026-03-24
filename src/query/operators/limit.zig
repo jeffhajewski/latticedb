@@ -425,6 +425,18 @@ fn compareEvalResults(a: EvalResult, b: EvalResult) i32 {
                 else => return 0,
             }
         },
+        .bytes_val => |av| {
+            switch (b) {
+                .bytes_val => |bv| {
+                    return switch (std.mem.order(u8, av, bv)) {
+                        .lt => -1,
+                        .gt => 1,
+                        .eq => 0,
+                    };
+                },
+                else => return 0,
+            }
+        },
         .bool_val => |av| {
             switch (b) {
                 .bool_val => |bv| {

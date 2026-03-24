@@ -109,28 +109,32 @@ pub fn appendEvalResultKey(buf: *std.ArrayList(u8), allocator: Allocator, value:
             try buf.append(allocator, 4);
             try appendBytes(buf, allocator, s);
         },
-        .node_ref => |id| {
+        .bytes_val => |b| {
             try buf.append(allocator, 5);
-            try appendU64(buf, allocator, id);
+            try appendBytes(buf, allocator, b);
         },
-        .edge_ref => |id| {
+        .node_ref => |id| {
             try buf.append(allocator, 6);
             try appendU64(buf, allocator, id);
         },
-        .list_val => |list| {
+        .edge_ref => |id| {
             try buf.append(allocator, 7);
+            try appendU64(buf, allocator, id);
+        },
+        .list_val => |list| {
+            try buf.append(allocator, 8);
             try appendLen(buf, allocator, list.len);
             for (list) |item| {
                 try appendEvalResultKey(buf, allocator, item);
             }
         },
         .vector_val => |v| {
-            try buf.append(allocator, 8);
+            try buf.append(allocator, 9);
             try appendLen(buf, allocator, v.len);
             try appendBytes(buf, allocator, std.mem.sliceAsBytes(v));
         },
         .map_val => |entries| {
-            try buf.append(allocator, 9);
+            try buf.append(allocator, 10);
             try appendLen(buf, allocator, entries.len);
             for (entries) |entry| {
                 try appendBytes(buf, allocator, entry.key);

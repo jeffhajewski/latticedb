@@ -13,6 +13,7 @@ from ctypes import (
     Structure,
     Union,
     c_bool,
+    c_char,
     c_char_p,
     c_double,
     c_int,
@@ -265,7 +266,7 @@ LATTICE_VALUE_MAP = 8
 
 class StringValue(Structure):
     _fields_ = [
-        ("ptr", c_char_p),
+        ("ptr", POINTER(c_char)),
         ("len", c_size_t),
     ]
 
@@ -284,22 +285,57 @@ class VectorValue(Structure):
     ]
 
 
+class LatticeList(Structure):
+    pass
+
+
+class LatticeMapEntry(Structure):
+    pass
+
+
+class LatticeMap(Structure):
+    pass
+
+
 class ValueData(Union):
-    _fields_ = [
-        ("bool_val", c_bool),
-        ("int_val", c_int64),
-        ("float_val", c_double),
-        ("string_val", StringValue),
-        ("bytes_val", BytesValue),
-        ("vector_val", VectorValue),
-    ]
+    pass
 
 
 class LatticeValue(Structure):
-    _fields_ = [
-        ("type", c_int),
-        ("data", ValueData),
-    ]
+    pass
+
+
+LatticeList._fields_ = [
+    ("items", POINTER(LatticeValue)),
+    ("len", c_size_t),
+]
+
+ValueData._fields_ = [
+    ("bool_val", c_bool),
+    ("int_val", c_int64),
+    ("float_val", c_double),
+    ("string_val", StringValue),
+    ("bytes_val", BytesValue),
+    ("vector_val", VectorValue),
+    ("list_val", POINTER(LatticeList)),
+    ("map_val", POINTER(LatticeMap)),
+]
+
+LatticeValue._fields_ = [
+    ("type", c_int),
+    ("data", ValueData),
+]
+
+LatticeMapEntry._fields_ = [
+    ("key", POINTER(c_char)),
+    ("key_len", c_size_t),
+    ("value", LatticeValue),
+]
+
+LatticeMap._fields_ = [
+    ("entries", POINTER(LatticeMapEntry)),
+    ("len", c_size_t),
+]
 
 
 class NodeWithVector(Structure):
@@ -906,7 +942,7 @@ def value_to_python(c_value: LatticeValue):
         c_value: The C value structure.
 
     Returns:
-        The corresponding Python value (None, bool, int, float, str, bytes, or numpy array).
+        The corresponding Python value.
     """
     value_type = c_value.type
 
@@ -921,12 +957,12 @@ def value_to_python(c_value: LatticeValue):
     elif value_type == LATTICE_VALUE_STRING:
         string_val = c_value.data.string_val
         if string_val.ptr and string_val.len > 0:
-            return string_val.ptr[:string_val.len].decode("utf-8")
+            return ctypes.string_at(string_val.ptr, string_val.len).decode("utf-8")
         return ""
     elif value_type == LATTICE_VALUE_BYTES:
         bytes_val = c_value.data.bytes_val
         if bytes_val.ptr and bytes_val.len > 0:
-            return bytes(bytes_val.ptr[:bytes_val.len])
+            return ctypes.string_at(bytes_val.ptr, bytes_val.len)
         return b""
     elif value_type == LATTICE_VALUE_VECTOR:
         import numpy as np
@@ -935,11 +971,23 @@ def value_to_python(c_value: LatticeValue):
             # Create numpy array from C float pointer
             return np.ctypeslib.as_array(vector_val.ptr, shape=(vector_val.dimensions,)).copy()
         return np.array([], dtype=np.float32)
-    elif value_type in (LATTICE_VALUE_LIST, LATTICE_VALUE_MAP):
-        raise LatticeUnsupportedError(
-            "LIST and MAP values are not supported by the public C API",
-            LATTICE_ERROR_UNSUPPORTED,
-        )
+    elif value_type == LATTICE_VALUE_LIST:
+        list_ptr = c_value.data.list_val
+        if not list_ptr:
+            raise LatticeInvalidArgError("Invalid native LIST value", LATTICE_ERROR_INVALID_ARG)
+        list_val = list_ptr.contents
+        return [value_to_python(list_val.items[i]) for i in range(list_val.len)]
+    elif value_type == LATTICE_VALUE_MAP:
+        map_ptr = c_value.data.map_val
+        if not map_ptr:
+            raise LatticeInvalidArgError("Invalid native MAP value", LATTICE_ERROR_INVALID_ARG)
+        map_val = map_ptr.contents
+        result: Dict[str, Any] = {}
+        for i in range(map_val.len):
+            entry = map_val.entries[i]
+            key = ctypes.string_at(entry.key, entry.key_len).decode("utf-8") if entry.key_len > 0 else ""
+            result[key] = value_to_python(entry.value)
+        return result
     else:
         raise LatticeUnsupportedError(
             f"Unsupported native value type: {value_type}",
@@ -960,44 +1008,93 @@ def python_to_value(py_val, c_value: LatticeValue):
         c_value: The C value structure to fill.
 
     Returns:
-        Any references that need to be kept alive during the C call,
-        or None if no references need to be kept.
+        References that need to be kept alive during the C call.
     """
+    refs: list[Any] = []
+    _python_to_value(py_val, c_value, refs)
+    return refs
+
+
+def _python_to_value(py_val: Any, c_value: LatticeValue, refs: list[Any]) -> None:
     if py_val is None:
         c_value.type = LATTICE_VALUE_NULL
-        return None
     elif isinstance(py_val, bool):
         c_value.type = LATTICE_VALUE_BOOL
         c_value.data.bool_val = py_val
-        return None
     elif isinstance(py_val, int):
         c_value.type = LATTICE_VALUE_INT
         c_value.data.int_val = py_val
-        return None
     elif isinstance(py_val, float):
         c_value.type = LATTICE_VALUE_FLOAT
         c_value.data.float_val = py_val
-        return None
     elif isinstance(py_val, str):
         c_value.type = LATTICE_VALUE_STRING
         encoded = py_val.encode("utf-8")
-        c_value.data.string_val.ptr = encoded
-        c_value.data.string_val.len = len(encoded)
-        return encoded  # Keep reference alive
+        if encoded:
+            buf = (c_char * len(encoded)).from_buffer_copy(encoded)
+            refs.append(buf)
+            c_value.data.string_val.ptr = ctypes.cast(buf, POINTER(c_char))
+            c_value.data.string_val.len = len(encoded)
+        else:
+            c_value.data.string_val.ptr = POINTER(c_char)()
+            c_value.data.string_val.len = 0
     elif isinstance(py_val, bytes):
         c_value.type = LATTICE_VALUE_BYTES
-        c_value.data.bytes_val.ptr = ctypes.cast(py_val, POINTER(ctypes.c_uint8))
-        c_value.data.bytes_val.len = len(py_val)
-        return py_val  # Keep reference alive
+        if py_val:
+            buf = (ctypes.c_uint8 * len(py_val)).from_buffer_copy(py_val)
+            refs.append(buf)
+            c_value.data.bytes_val.ptr = ctypes.cast(buf, POINTER(ctypes.c_uint8))
+            c_value.data.bytes_val.len = len(py_val)
+        else:
+            c_value.data.bytes_val.ptr = POINTER(ctypes.c_uint8)()
+            c_value.data.bytes_val.len = 0
     elif _is_numpy_array(py_val):
         import numpy as np
-        # Ensure vector is float32 and contiguous
         vec = np.ascontiguousarray(py_val, dtype=np.float32)
+        refs.append(vec)
         c_value.type = LATTICE_VALUE_VECTOR
         c_value.data.vector_val.ptr = vec.ctypes.data_as(POINTER(ctypes.c_float))
         c_value.data.vector_val.dimensions = len(vec)
-        return vec  # Keep reference alive
-    elif isinstance(py_val, (list, dict)):
-        raise TypeError("LIST and MAP values are not supported by the public C API")
+    elif isinstance(py_val, list):
+        c_value.type = LATTICE_VALUE_LIST
+        list_struct = LatticeList()
+        refs.append(list_struct)
+        if py_val:
+            items = (LatticeValue * len(py_val))()
+            refs.append(items)
+            for i, item in enumerate(py_val):
+                _python_to_value(item, items[i], refs)
+            list_struct.items = ctypes.cast(items, POINTER(LatticeValue))
+            list_struct.len = len(py_val)
+        else:
+            list_struct.items = POINTER(LatticeValue)()
+            list_struct.len = 0
+        c_value.data.list_val = ctypes.pointer(list_struct)
+    elif isinstance(py_val, dict):
+        c_value.type = LATTICE_VALUE_MAP
+        map_struct = LatticeMap()
+        refs.append(map_struct)
+        if py_val:
+            entries = (LatticeMapEntry * len(py_val))()
+            refs.append(entries)
+            for i, (key, value) in enumerate(py_val.items()):
+                if not isinstance(key, str):
+                    raise TypeError("MAP keys must be strings")
+                encoded_key = key.encode("utf-8")
+                if encoded_key:
+                    key_buf = (c_char * len(encoded_key)).from_buffer_copy(encoded_key)
+                    refs.append(key_buf)
+                    entries[i].key = ctypes.cast(key_buf, POINTER(c_char))
+                    entries[i].key_len = len(encoded_key)
+                else:
+                    entries[i].key = POINTER(c_char)()
+                    entries[i].key_len = 0
+                _python_to_value(value, entries[i].value, refs)
+            map_struct.entries = ctypes.cast(entries, POINTER(LatticeMapEntry))
+            map_struct.len = len(py_val)
+        else:
+            map_struct.entries = POINTER(LatticeMapEntry)()
+            map_struct.len = 0
+        c_value.data.map_val = ctypes.pointer(map_struct)
     else:
         raise TypeError(f"Unsupported value type: {type(py_val).__name__}")

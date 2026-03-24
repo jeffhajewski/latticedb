@@ -302,6 +302,29 @@ describeIfNative('Database Integration', () => {
       });
     });
 
+    test('set and get nested list/map property', async () => {
+      const profile = {
+        name: 'Alice',
+        tags: ['graph', 'go'],
+        flags: { active: true, score: 3.5 },
+      };
+      const history = [1, { city: 'Portland' }, [true, false]];
+
+      await db.write(async (txn) => {
+        await txn.setProperty(nodeId, 'profile', profile);
+        await txn.setProperty(nodeId, 'history', history);
+      });
+
+      await db.read(async (txn) => {
+        expect(await txn.getProperty(nodeId, 'profile')).toEqual(profile);
+        expect(await txn.getProperty(nodeId, 'history')).toEqual([
+          BigInt(1),
+          { city: 'Portland' },
+          [true, false],
+        ]);
+      });
+    });
+
     test('update property value', async () => {
       await db.write(async (txn) => {
         await txn.setProperty(nodeId, 'version', 1);
@@ -549,6 +572,34 @@ describeIfNative('Database Integration', () => {
         'MATCH (n:Person) RETURN n'
       );
       expect(result.rows.length).toBe(3);
+    });
+
+    test('query with nested list/map parameters', async () => {
+      const result = await db.query(
+        'UNWIND $items AS item RETURN item',
+        { items: [1, { city: 'Portland', tags: ['graph', 'go'] }] }
+      );
+
+      expect(result.rows).toEqual([
+        { item: BigInt(1) },
+        { item: { city: 'Portland', tags: ['graph', 'go'] } },
+      ]);
+    });
+
+    test('query returns nested property values', async () => {
+      await db.write(async (txn) => {
+        await txn.createNode({
+          labels: ['Profile'],
+          properties: {
+            metadata: { city: 'Portland', tags: ['graph', 'zig'] },
+          },
+        });
+      });
+
+      const result = await db.query('MATCH (n:Profile) RETURN n.metadata AS metadata');
+      expect(result.rows).toEqual([
+        { metadata: { city: 'Portland', tags: ['graph', 'zig'] } },
+      ]);
     });
 
     test('query parse errors include stage and location diagnostics', async () => {

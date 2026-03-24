@@ -151,33 +151,63 @@ describe('Top-level exports', () => {
 });
 
 describe('FFI value conversion guards', () => {
-  test('rejects array input instead of stringifying it', () => {
+  test('supports array input as LIST', () => {
     const ffi = Object.create(LatticeFFI.prototype) as LatticeFFI;
-    expect(() => (ffi as any).jsToLatticeValue([1, 2, 3])).toThrow(
-      /LIST and MAP values are not supported/i
-    );
+    expect((ffi as any).jsToLatticeValue([1, 2, 3])).toEqual({
+      type: LatticeValueType.List,
+      data: {
+        list_val: {
+          items: [
+            { type: LatticeValueType.Int, data: { int_val: 1 } },
+            { type: LatticeValueType.Int, data: { int_val: 2 } },
+            { type: LatticeValueType.Int, data: { int_val: 3 } },
+          ],
+          len: 3,
+        },
+      },
+    });
   });
 
-  test('rejects object input instead of stringifying it', () => {
+  test('supports object input as MAP', () => {
     const ffi = Object.create(LatticeFFI.prototype) as LatticeFFI;
-    expect(() => (ffi as any).jsToLatticeValue({ city: 'Portland' })).toThrow(
-      /LIST and MAP values are not supported/i
-    );
+    const result = (ffi as any).jsToLatticeValue({ city: 'Portland' });
+    expect(result.type).toBe(LatticeValueType.Map);
+    expect(result.data.map_val.len).toBe(1);
+    expect(result.data.map_val.entries[0].key_len).toBe(4);
+    expect(result.data.map_val.entries[0].value).toEqual({
+      type: LatticeValueType.String,
+      data: { string_val: { ptr: Buffer.from('Portland', 'utf8'), len: 8 } },
+    });
   });
 
-  test('rejects unsupported native LIST output explicitly', () => {
+  test('decodes native LIST output explicitly', () => {
     const ffi = Object.create(LatticeFFI.prototype) as LatticeFFI;
-
-    try {
-      (ffi as any).latticeValueToJs({
-        type: LatticeValueType.List,
-        data: { int_val: BigInt(0) },
-      });
-      throw new Error('expected unsupported value error');
-    } catch (error) {
-      expect(error).toBeInstanceOf(LatticeError);
-      expect((error as LatticeError).code).toBe(LatticeErrorCode.Unsupported);
-    }
+    expect((ffi as any).latticeValueToJs({
+      type: LatticeValueType.List,
+      data: {
+        list_val: {
+          items: [
+            { type: LatticeValueType.Int, data: { int_val: BigInt(7) } },
+            {
+              type: LatticeValueType.Map,
+              data: {
+                map_val: {
+                  entries: [
+                    {
+                      key: Buffer.from('city', 'utf8'),
+                      key_len: 4,
+                      value: { type: LatticeValueType.String, data: { string_val: { ptr: Buffer.from('Portland', 'utf8'), len: 8 } } },
+                    },
+                  ],
+                  len: 1,
+                },
+              },
+            },
+          ],
+          len: 2,
+        },
+      },
+    })).toEqual([BigInt(7), { city: 'Portland' }]);
   });
 });
 

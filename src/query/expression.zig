@@ -67,6 +67,8 @@ pub const EvalResult = union(enum) {
     float_val: f64,
     /// String result (borrowed, valid for query lifetime)
     string_val: []const u8,
+    /// Bytes result (borrowed, valid for query lifetime)
+    bytes_val: []const u8,
     /// Node reference
     node_ref: NodeId,
     /// Edge reference
@@ -98,6 +100,7 @@ pub const EvalResult = union(enum) {
             .int_val => |i| i != 0,
             .float_val => |f| f != 0.0,
             .string_val => |s| s.len > 0,
+            .bytes_val => |b| b.len > 0,
             .node_ref => true,
             .edge_ref => true,
             .list_val => |l| l.len > 0,
@@ -147,7 +150,7 @@ pub const EvalResult = union(enum) {
             },
             .bytes_val => |b| blk: {
                 const cloned = allocator.dupe(u8, b) catch break :blk .{ .null_val = {} };
-                break :blk .{ .string_val = cloned };
+                break :blk .{ .bytes_val = cloned };
             },
             .vector_val => |v| blk: {
                 const cloned = allocator.dupe(f32, v) catch break :blk .{ .null_val = {} };
@@ -183,6 +186,7 @@ pub const EvalResult = union(enum) {
             .int_val => |i| .{ .int_val = i },
             .float_val => |f| .{ .float_val = f },
             .string_val => |s| .{ .string_val = s },
+            .bytes_val => |b| .{ .bytes_val = b },
             .node_ref => |id| .{ .int_val = @intCast(id) },
             .edge_ref => |id| .{ .int_val = @intCast(id) },
             .vector_val => |v| .{ .vector_val = v },
@@ -530,6 +534,7 @@ pub const ExpressionEvaluator = struct {
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             return switch (arg) {
                 .string_val => |s| .{ .int_val = @intCast(s.len) },
+                .bytes_val => |b| .{ .int_val = @intCast(b.len) },
                 .list_val => |l| .{ .int_val = @intCast(l.len) },
                 else => EvalError.TypeError,
             };
@@ -916,6 +921,10 @@ pub const ExpressionEvaluator = struct {
                 .string_val => |r| std.mem.eql(u8, l, r),
                 else => false,
             },
+            .bytes_val => |l| switch (right) {
+                .bytes_val => |r| std.mem.eql(u8, l, r),
+                else => false,
+            },
             .node_ref => |l| switch (right) {
                 .node_ref => |r| l == r,
                 else => false,
@@ -943,6 +952,10 @@ pub const ExpressionEvaluator = struct {
             },
             .string_val => |l| switch (right) {
                 .string_val => |r| std.mem.order(u8, l, r) == .lt,
+                else => null,
+            },
+            .bytes_val => |l| switch (right) {
+                .bytes_val => |r| std.mem.order(u8, l, r) == .lt,
                 else => null,
             },
             else => null,

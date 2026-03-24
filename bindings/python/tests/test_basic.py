@@ -266,25 +266,51 @@ class TestErrorMapping:
         assert exc_info.value.code == code
         assert "native error" in str(exc_info.value)
 
-    def test_python_to_value_rejects_nested_values(self) -> None:
-        """Lists and dicts should fail explicitly instead of degrading."""
+    def test_python_to_value_supports_nested_values(self) -> None:
+        """Lists and dicts should convert into recursive native values."""
         c_value = bindings.LatticeValue()
+        refs = bindings.python_to_value([1, {"city": "Portland"}], c_value)
 
-        with pytest.raises(TypeError, match="LIST and MAP values are not supported"):
-            bindings.python_to_value([1, 2, 3], c_value)
+        assert c_value.type == bindings.LATTICE_VALUE_LIST
+        assert c_value.data.list_val
+        assert c_value.data.list_val.contents.len == 2
+        assert refs
 
-        with pytest.raises(TypeError, match="LIST and MAP values are not supported"):
-            bindings.python_to_value({"city": "Portland"}, c_value)
+    def test_value_to_python_supports_nested_value_tags(self) -> None:
+        """Nested native values should decode to Python lists and dicts."""
+        value_buf = ctypes.create_string_buffer(b"Portland", len(b"Portland"))
+        inner_value = bindings.LatticeValue()
+        inner_value.type = bindings.LATTICE_VALUE_STRING
+        inner_value.data.string_val.ptr = ctypes.cast(value_buf, ctypes.POINTER(ctypes.c_char))
+        inner_value.data.string_val.len = len(b"Portland")
 
-    def test_value_to_python_rejects_nested_value_tags(self) -> None:
-        """Unsupported native LIST/MAP tags should raise a specific binding error."""
+        key_buf = ctypes.create_string_buffer(b"city", len(b"city"))
+        entry = bindings.LatticeMapEntry()
+        entry.key = ctypes.cast(key_buf, ctypes.POINTER(ctypes.c_char))
+        entry.key_len = len(b"city")
+        entry.value = inner_value
+
+        entries = (bindings.LatticeMapEntry * 1)()
+        entries[0] = entry
+        map_value = bindings.LatticeValue()
+        map_value.type = bindings.LATTICE_VALUE_MAP
+        map_struct = bindings.LatticeMap()
+        map_struct.entries = ctypes.cast(entries, ctypes.POINTER(bindings.LatticeMapEntry))
+        map_struct.len = 1
+        map_value.data.map_val = ctypes.pointer(map_struct)
+
         c_value = bindings.LatticeValue()
         c_value.type = bindings.LATTICE_VALUE_LIST
+        items = (bindings.LatticeValue * 2)()
+        items[0].type = bindings.LATTICE_VALUE_INT
+        items[0].data.int_val = 7
+        items[1] = map_value
+        list_struct = bindings.LatticeList()
+        list_struct.items = ctypes.cast(items, ctypes.POINTER(bindings.LatticeValue))
+        list_struct.len = 2
+        c_value.data.list_val = ctypes.pointer(list_struct)
 
-        with pytest.raises(bindings.LatticeUnsupportedError) as exc_info:
-            bindings.value_to_python(c_value)
-
-        assert exc_info.value.code == bindings.LATTICE_ERROR_UNSUPPORTED
+        assert bindings.value_to_python(c_value) == [7, {"city": "Portland"}]
 
     def test_check_error_unknown_code_uses_base_exception(self, monkeypatch):
         """Unknown error codes should raise LatticeError."""

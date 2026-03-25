@@ -7,6 +7,7 @@ Users should use the high-level Python API instead.
 
 import ctypes
 import os
+import subprocess
 import sys
 from ctypes import (
     POINTER,
@@ -43,9 +44,10 @@ def _find_library() -> Optional[Path]:
     Search order:
     1. LATTICE_LIB_PATH environment variable (explicit path)
     2. Package lib directory (bundled in wheel)
-    3. Development build directory (zig-out/lib)
-    4. Homebrew paths (macOS)
-    5. System library paths
+    3. LATTICE_PREFIX environment variable (installed prefix)
+    4. pkg-config lattice libdir
+    5. Homebrew/system library paths
+    6. Development build directory (zig-out/lib)
     """
     lib_name = _get_lib_name()
 
@@ -66,12 +68,29 @@ def _find_library() -> Optional[Path]:
     if package_lib.exists():
         return package_lib
 
-    # 3. Development: relative to bindings (zig-out/lib)
-    dev_path = Path(__file__).parent.parent.parent.parent.parent / "zig-out" / "lib" / lib_name
-    if dev_path.exists():
-        return dev_path
+    # 3. Installed prefix override
+    prefix = os.environ.get("LATTICE_PREFIX")
+    if prefix:
+        prefix_lib = Path(prefix) / "lib" / lib_name
+        if prefix_lib.exists():
+            return prefix_lib
 
-    # 4. System paths
+    # 4. pkg-config metadata
+    try:
+        libdir = subprocess.run(
+            ["pkg-config", "--variable=libdir", "lattice"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        if libdir:
+            pkg_config_path = Path(libdir) / lib_name
+            if pkg_config_path.exists():
+                return pkg_config_path
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        pass
+
+    # 5. System paths
     system_paths = [
         Path("/usr/local/lib"),
         Path("/usr/lib"),
@@ -87,6 +106,11 @@ def _find_library() -> Optional[Path]:
         lib_path = path / lib_name
         if lib_path.exists():
             return lib_path
+
+    # 6. Development: relative to bindings (zig-out/lib)
+    dev_path = Path(__file__).parent.parent.parent.parent.parent / "zig-out" / "lib" / lib_name
+    if dev_path.exists():
+        return dev_path
 
     return None
 
@@ -390,7 +414,9 @@ class LatticeLib:
         if lib_path is None:
             raise RuntimeError(
                 "Could not find liblattice. "
-                "Make sure it is built and in the library search path."
+                "Set LATTICE_LIB_PATH or LATTICE_PREFIX, "
+                "configure PKG_CONFIG_PATH for an installed build, "
+                "or build from source with 'zig build shared'."
             )
 
         self._lib = ctypes.CDLL(str(lib_path))

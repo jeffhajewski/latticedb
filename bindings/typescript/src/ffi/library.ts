@@ -4,10 +4,13 @@
  * Search order mirrors Python bindings:
  * 1. LATTICE_LIB_PATH environment variable
  * 2. Bundled in package (lib/<platform>/)
- * 3. Development build (zig-out/lib/)
- * 4. System paths
+ * 3. LATTICE_PREFIX environment variable
+ * 4. pkg-config lattice libdir
+ * 5. System paths
+ * 6. Development build (zig-out/lib)
  */
 
+import { execFileSync } from 'child_process';
 import koffi from 'koffi';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -69,14 +72,32 @@ function findLibrary(): string | null {
     return bundledPath;
   }
 
-  // 3. Development build (zig-out/lib)
-  // Goes up from bindings/typescript/src/ffi/ to repo root
-  const devPath = path.join(__dirname, '../../../../zig-out/lib', libName);
-  if (fs.existsSync(devPath)) {
-    return devPath;
+  // 3. Installed prefix override
+  const prefix = process.env.LATTICE_PREFIX;
+  if (prefix) {
+    const prefixedPath = path.join(prefix, 'lib', libName);
+    if (fs.existsSync(prefixedPath)) {
+      return prefixedPath;
+    }
   }
 
-  // 4. System paths
+  // 4. pkg-config metadata
+  try {
+    const libDir = execFileSync('pkg-config', ['--variable=libdir', 'lattice'], {
+      encoding: 'utf8',
+      stdio: ['ignore', 'pipe', 'ignore'],
+    }).trim();
+    if (libDir) {
+      const pkgConfigPath = path.join(libDir, libName);
+      if (fs.existsSync(pkgConfigPath)) {
+        return pkgConfigPath;
+      }
+    }
+  } catch {
+    // pkg-config unavailable or lattice.pc not present
+  }
+
+  // 5. System paths
   const systemPaths: string[] = [
     '/usr/local/lib',
     '/usr/lib',
@@ -94,6 +115,13 @@ function findLibrary(): string | null {
     if (fs.existsSync(libPath)) {
       return libPath;
     }
+  }
+
+  // 6. Development build (zig-out/lib)
+  // Goes up from bindings/typescript/src/ffi/ to repo root
+  const devPath = path.join(__dirname, '../../../../zig-out/lib', libName);
+  if (fs.existsSync(devPath)) {
+    return devPath;
   }
 
   return null;
@@ -117,7 +145,8 @@ export function getLibrary(): koffi.IKoffiLib {
   if (!libPath) {
     throw new Error(
       'Could not find liblattice shared library. ' +
-        'Set LATTICE_LIB_PATH environment variable, ' +
+        'Set LATTICE_LIB_PATH or LATTICE_PREFIX, ' +
+        'configure PKG_CONFIG_PATH for an installed build, ' +
         'or install lattice-db with bundled binaries, ' +
         'or build from source with "zig build shared".'
     );

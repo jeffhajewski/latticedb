@@ -10,6 +10,19 @@ npm install @hajewski/latticedb
 
 The native shared library (`liblattice.dylib` / `liblattice.so`) must be available on the system. Install it via the [install script](https://github.com/jeffhajewski/latticedb#installation) or build from source with `zig build shared`.
 
+Installed-prefix workflow:
+
+```bash
+zig build install --prefix /tmp/lattice-install
+export LATTICE_PREFIX=/tmp/lattice-install
+```
+
+Alternatively, discovery can use `pkg-config`:
+
+```bash
+export PKG_CONFIG_PATH=/tmp/lattice-install/lib/pkgconfig
+```
+
 ## Quick Start
 
 ```typescript

@@ -3,6 +3,7 @@ Basic tests for Lattice Python bindings.
 """
 
 import ctypes
+import os
 import pytest
 import numpy as np
 from types import SimpleNamespace
@@ -13,6 +14,39 @@ from latticedb._bindings import library_available
 from latticedb.embedding import EmbeddingApiFormat
 import latticedb._bindings as bindings
 import latticedb.embedding as embedding_mod
+
+
+class TestLibraryDiscovery:
+    """Tests for native library path discovery."""
+
+    def test_find_library_uses_lattice_prefix(self, monkeypatch, tmp_path) -> None:
+        """LATTICE_PREFIX should resolve to prefix/lib/<library>."""
+        lib_dir = tmp_path / "lib"
+        lib_dir.mkdir()
+        lib_path = lib_dir / bindings._get_lib_name()
+        lib_path.write_bytes(b"")
+
+        monkeypatch.delenv("LATTICE_LIB_PATH", raising=False)
+        monkeypatch.setenv("LATTICE_PREFIX", str(tmp_path))
+
+        assert bindings._find_library() == lib_path
+
+    def test_find_library_uses_pkg_config_libdir(self, monkeypatch, tmp_path) -> None:
+        """pkg-config libdir should be used when present."""
+        lib_dir = tmp_path / "pkg-lib"
+        lib_dir.mkdir()
+        lib_path = lib_dir / bindings._get_lib_name()
+        lib_path.write_bytes(b"")
+
+        monkeypatch.delenv("LATTICE_LIB_PATH", raising=False)
+        monkeypatch.delenv("LATTICE_PREFIX", raising=False)
+
+        def fake_run(*args, **kwargs):
+            return SimpleNamespace(stdout=f"{lib_dir}{os.linesep}")
+
+        monkeypatch.setattr(bindings.subprocess, "run", fake_run)
+
+        assert bindings._find_library() == lib_path
 
 
 class TestNode:

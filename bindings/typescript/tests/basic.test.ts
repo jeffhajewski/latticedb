@@ -9,6 +9,9 @@ import { Value, Node, Edge, QueryResult, VectorSearchResult } from '../src/types
 import { Database } from '../src/database';
 import { EmbeddingClient, LatticeError, LatticeQueryError, QueryErrorStage, hashEmbed, version } from '../src/index';
 import { isLibraryAvailable, LatticeErrorCode, LatticeFFI, LatticeValueType } from '../src/ffi';
+import * as fs from 'fs';
+import * as os from 'os';
+import * as path from 'path';
 
 describe('Value', () => {
   test('null value', () => {
@@ -123,6 +126,45 @@ describe('Library availability', () => {
     // This test just verifies the function works
     const available = isLibraryAvailable();
     expect(typeof available).toBe('boolean');
+  });
+
+  test('LATTICE_PREFIX is used before repo-local fallback', async () => {
+    const tempPrefix = fs.mkdtempSync(path.join(os.tmpdir(), 'lattice-prefix-'));
+    const libDir = path.join(tempPrefix, 'lib');
+    fs.mkdirSync(libDir, { recursive: true });
+
+    const libName = process.platform === 'darwin'
+      ? 'liblattice.dylib'
+      : process.platform === 'win32'
+        ? 'lattice.dll'
+        : 'liblattice.so';
+    const fakeLibrary = path.join(libDir, libName);
+    fs.writeFileSync(fakeLibrary, '');
+
+    const previousPrefix = process.env.LATTICE_PREFIX;
+    const previousLibPath = process.env.LATTICE_LIB_PATH;
+
+    try {
+      delete process.env.LATTICE_LIB_PATH;
+      process.env.LATTICE_PREFIX = tempPrefix;
+      jest.resetModules();
+
+      const library = await import('../src/ffi/library');
+      expect(() => library.getLibrary()).toThrow(new RegExp(fakeLibrary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+      expect(library.getLibraryPath()).toBeNull();
+    } finally {
+      if (previousPrefix === undefined) {
+        delete process.env.LATTICE_PREFIX;
+      } else {
+        process.env.LATTICE_PREFIX = previousPrefix;
+      }
+      if (previousLibPath === undefined) {
+        delete process.env.LATTICE_LIB_PATH;
+      } else {
+        process.env.LATTICE_LIB_PATH = previousLibPath;
+      }
+      fs.rmSync(tempPrefix, { recursive: true, force: true });
+    }
   });
 });
 

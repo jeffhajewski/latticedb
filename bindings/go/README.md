@@ -139,6 +139,8 @@ func main() {
 }
 ```
 
+For a larger end-to-end example, see [examples/go](../../examples/go).
+
 ## API Notes
 
 - Property getters return `(value, ok, error)` so stored `NULL` is distinguishable from a missing property.

@@ -27,6 +27,16 @@ npm install
 npm run paper-graph-rag
 ```
 
+### Go
+
+Build the shared library from the repo root first:
+
+```bash
+zig build shared
+cd examples/go
+go run .
+```
+
 ### With LLM Answers (Optional)
 
 Set `ANTHROPIC_API_KEY` to compare LLM answers using vector-only vs Graph RAG context:

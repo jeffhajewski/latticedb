@@ -23,6 +23,8 @@ The Go client now supports two native-library workflows:
 
 ## Prerequisites
 
+Use Go 1.22 or newer.
+
 Build the native shared library from the repo root:
 
 ```bash
@@ -56,6 +58,11 @@ go test -tags pkgconfig ./...
 ```
 
 On Linux, use `LD_LIBRARY_PATH` instead of `DYLD_LIBRARY_PATH`.
+
+CI validates both workflows:
+
+- repo-local testing against `zig-out/lib`
+- installed-prefix testing with `pkg-config`
 
 ## Quick Start
 

@@ -139,6 +139,66 @@ jobs:
         run: npm run test:coverage -- --coverageReporters=text-summary
 
   # ============================================
+  # Go tests
+  # ============================================
+  go-test:
+    name: Go Tests
+    needs: zig-build
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-14]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download shared library
+        uses: actions/download-artifact@v4
+        with:
+          name: shared-lib-${{ matrix.os }}
+          path: zig-out/lib
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: bindings/go/go.mod
+
+      - name: Run tests
+        working-directory: bindings/go
+        run: go test ./...
+
+  # ============================================
+  # Go installed workflow smoke test
+  # ============================================
+  go-pkgconfig-test:
+    name: Go Installed Workflow
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: bindings/go/go.mod
+
+      - name: Build installed development layout
+        run: zig build install --prefix /tmp/lattice-install -Doptimize=ReleaseSafe
+
+      - name: Run pkg-config tests
+        working-directory: bindings/go
+        env:
+          PKG_CONFIG_PATH: /tmp/lattice-install/lib/pkgconfig
+          LD_LIBRARY_PATH: /tmp/lattice-install/lib
+        run: go test -tags pkgconfig ./...
+
+  # ============================================
   # Lint checks
   # ============================================
   lint:

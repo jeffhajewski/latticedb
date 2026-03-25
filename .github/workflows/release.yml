@@ -51,6 +51,7 @@ jobs:
       - name: Build shared library
         run: |
           mkdir -p dist/build/${{ matrix.target }}/{bin,lib,include}
+          mkdir -p dist/build/${{ matrix.target }}/lib/pkgconfig
 
           zig build shared \
             -Dtarget=${{ matrix.target }} \
@@ -59,6 +60,7 @@ jobs:
           # Copy to target directory
           cp zig-out/lib/liblattice.* dist/build/${{ matrix.target }}/lib/ || true
           cp zig-out/lib/lattice.* dist/build/${{ matrix.target }}/lib/ || true
+          cp zig-out/lib/pkgconfig/lattice.pc dist/build/${{ matrix.target }}/lib/pkgconfig/ || true
 
       - name: Build CLI
         run: |
@@ -79,11 +81,43 @@ jobs:
           path: dist/build/${{ matrix.target }}
 
   # ============================================
+  # Smoke test Go binding against packaged native artifact
+  # ============================================
+  smoke-test-go:
+    name: Go Smoke Test
+    needs: build-native
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download Linux x86_64 native library
+        uses: actions/download-artifact@v4
+        with:
+          name: native-x86_64-linux-gnu
+          path: native-lib
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: bindings/go/go.mod
+
+      - name: Verify pkg-config metadata exists
+        run: test -f native-lib/lib/pkgconfig/lattice.pc
+
+      - name: Run Go smoke test
+        working-directory: bindings/go
+        env:
+          PKG_CONFIG_PATH: ${{ github.workspace }}/native-lib/lib/pkgconfig
+          LD_LIBRARY_PATH: ${{ github.workspace }}/native-lib/lib
+        run: go test -tags pkgconfig ./...
+
+  # ============================================
   # Create GitHub Release with tarballs
   # ============================================
   release-github:
     name: GitHub Release
-    needs: build-native
+    needs: [build-native, smoke-test-go]
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -190,7 +224,7 @@ jobs:
       - name: Copy native library to package
         run: |
           mkdir -p bindings/python/src/latticedb/lib
-          cp native-lib/lib/* bindings/python/src/latticedb/lib/
+          find native-lib/lib -maxdepth 1 -type f -exec cp {} bindings/python/src/latticedb/lib/ \;
           ls -la bindings/python/src/latticedb/lib/
 
       - name: Build wheel

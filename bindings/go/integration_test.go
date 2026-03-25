@@ -339,3 +339,75 @@ func TestHashEmbedAndEmbeddingClientLifecycle(t *testing.T) {
 		t.Fatalf("expected embed on closed client to fail")
 	}
 }
+
+func TestQueryCache(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "cache.db")
+
+	db, err := Open(dbPath, OpenOptions{Create: true})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			t.Fatalf("close db: %v", closeErr)
+		}
+	}()
+
+	if err := db.CacheClear(); err != nil {
+		t.Fatalf("cache clear on empty cache: %v", err)
+	}
+
+	stats, err := db.CacheStats()
+	if err != nil {
+		t.Fatalf("cache stats initially: %v", err)
+	}
+	if stats.Entries != 0 || stats.Hits != 0 || stats.Misses != 0 {
+		t.Fatalf("unexpected initial cache stats: %#v", stats)
+	}
+
+	err = db.Update(func(tx *Tx) error {
+		_, err := tx.CreateNode(CreateNodeOptions{
+			Labels: []string{"Person"},
+			Properties: map[string]Value{
+				"name": "Alice",
+			},
+		})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("seed cache test data: %v", err)
+	}
+
+	if _, err := db.Query("MATCH (n:Person) RETURN n", nil); err != nil {
+		t.Fatalf("first query: %v", err)
+	}
+	statsAfterFirst, err := db.CacheStats()
+	if err != nil {
+		t.Fatalf("cache stats after first query: %v", err)
+	}
+	if statsAfterFirst.Misses < 1 {
+		t.Fatalf("expected at least one cache miss, got %#v", statsAfterFirst)
+	}
+
+	if _, err := db.Query("MATCH (n:Person) RETURN n", nil); err != nil {
+		t.Fatalf("second query: %v", err)
+	}
+	statsAfterSecond, err := db.CacheStats()
+	if err != nil {
+		t.Fatalf("cache stats after second query: %v", err)
+	}
+	if statsAfterSecond.Hits <= statsAfterFirst.Hits {
+		t.Fatalf("expected cache hits to increase, got %#v then %#v", statsAfterFirst, statsAfterSecond)
+	}
+
+	if err := db.CacheClear(); err != nil {
+		t.Fatalf("cache clear after queries: %v", err)
+	}
+	statsAfterClear, err := db.CacheStats()
+	if err != nil {
+		t.Fatalf("cache stats after clear: %v", err)
+	}
+	if statsAfterClear.Entries != 0 {
+		t.Fatalf("expected cache entries to reset, got %#v", statsAfterClear)
+	}
+}

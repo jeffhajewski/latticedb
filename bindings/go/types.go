@@ -44,6 +44,12 @@ type QueryResult struct {
 	Rows    []map[string]Value
 }
 
+type QueryCacheStats struct {
+	Entries uint32
+	Hits    uint64
+	Misses  uint64
+}
+
 type VectorSearchOptions struct {
 	K        uint32
 	EfSearch uint16

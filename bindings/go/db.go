@@ -129,6 +129,28 @@ func (db *DB) Query(cypher string, params map[string]Value) (QueryResult, error)
 	return result, err
 }
 
+func (db *DB) CacheClear() error {
+	if db == nil || db.raw == nil {
+		return ErrDatabaseClosed
+	}
+	return wrapError(db.raw.CacheClear())
+}
+
+func (db *DB) CacheStats() (QueryCacheStats, error) {
+	if db == nil || db.raw == nil {
+		return QueryCacheStats{}, ErrDatabaseClosed
+	}
+	stats, err := db.raw.CacheStats()
+	if err != nil {
+		return QueryCacheStats{}, wrapError(err)
+	}
+	return QueryCacheStats{
+		Entries: stats.Entries,
+		Hits:    stats.Hits,
+		Misses:  stats.Misses,
+	}, nil
+}
+
 func (db *DB) VectorSearch(vector []float32, opts VectorSearchOptions) ([]VectorSearchResult, error) {
 	if db == nil || db.raw == nil {
 		return nil, ErrDatabaseClosed

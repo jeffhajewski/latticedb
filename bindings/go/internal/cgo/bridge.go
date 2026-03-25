@@ -79,6 +79,12 @@ type QueryResult struct {
 	Rows    []map[string]any
 }
 
+type QueryCacheStats struct {
+	Entries uint32
+	Hits    uint64
+	Misses  uint64
+}
+
 type VectorSearchResult struct {
 	NodeID   uint64
 	Distance float32
@@ -185,6 +191,37 @@ func (db *DB) Begin(readOnly bool) (*Tx, error) {
 	}
 
 	return &Tx{ptr: txn, db: db}, nil
+}
+
+func (db *DB) CacheClear() error {
+	if db == nil || db.ptr == nil {
+		return &Error{Code: ErrorInvalidArg, Message: "database is not open"}
+	}
+	return errorFromCode(ErrorCode(C.lattice_query_cache_clear(db.ptr)))
+}
+
+func (db *DB) CacheStats() (QueryCacheStats, error) {
+	if db == nil || db.ptr == nil {
+		return QueryCacheStats{}, &Error{Code: ErrorInvalidArg, Message: "database is not open"}
+	}
+
+	var entries C.uint32_t
+	var hits C.uint64_t
+	var misses C.uint64_t
+	if err := errorFromCode(ErrorCode(C.lattice_query_cache_stats(
+		db.ptr,
+		&entries,
+		&hits,
+		&misses,
+	))); err != nil {
+		return QueryCacheStats{}, err
+	}
+
+	return QueryCacheStats{
+		Entries: uint32(entries),
+		Hits:    uint64(hits),
+		Misses:  uint64(misses),
+	}, nil
 }
 
 func (tx *Tx) Commit() error {

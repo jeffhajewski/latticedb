@@ -40,7 +40,7 @@ npm install @hajewski/latticedb
 
 **Go**
 
-Source-first for now. See [bindings/go/README.md](bindings/go/README.md) for the current cgo workflow.
+See [bindings/go/README.md](bindings/go/README.md) for the current cgo workflow. The repo-local path uses `zig-out/lib`; installed builds can also use `pkg-config`.
 
 ## Example
 

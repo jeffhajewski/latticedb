@@ -16,7 +16,10 @@ This is a cgo-backed client built on the stable C ABI. The current API supports:
 - built-in hash embeddings
 - HTTP embedding client
 
-The packaging story is still source-first. Today the easiest way to use it is from this repository while the install/release flow is finalized.
+The Go client now supports two native-library workflows:
+
+- repo-local development: default, links against `zig-out/lib` in this repository
+- installed development: use `pkg-config` via the `pkgconfig` build tag
 
 ## Prerequisites
 
@@ -34,6 +37,25 @@ go test ./...
 ```
 
 The cgo bridge links against `zig-out/lib/liblattice` in this repository.
+
+## Installed Workflow
+
+Install the shared library, public header, and `pkg-config` metadata into a prefix:
+
+```bash
+zig build install --prefix /tmp/lattice-install
+```
+
+Then point `pkg-config` at that prefix and build with the `pkgconfig` tag:
+
+```bash
+export PKG_CONFIG_PATH=/tmp/lattice-install/lib/pkgconfig
+export DYLD_LIBRARY_PATH=/tmp/lattice-install/lib
+cd bindings/go
+go test -tags pkgconfig ./...
+```
+
+On Linux, use `LD_LIBRARY_PATH` instead of `DYLD_LIBRARY_PATH`.
 
 ## Quick Start
 

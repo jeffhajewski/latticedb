@@ -1,4 +1,5 @@
 const std = @import("std");
+const version = "0.4.2";
 
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
@@ -108,6 +109,31 @@ pub fn build(b: *std.Build) void {
     b.installArtifact(shared_lib);
     b.installArtifact(cli);
 
+    const install_header = b.addInstallHeaderFile(b.path("include/lattice.h"), "lattice.h");
+    b.getInstallStep().dependOn(&install_header.step);
+
+    const pkg_config_libs = switch (target.result.os.tag) {
+        .linux, .macos => "-L${libdir} -llattice -Wl,-rpath,${libdir}",
+        else => "-L${libdir} -llattice",
+    };
+    const pkg_config_contents = b.fmt(
+        \\prefix=${{pcfiledir}}/../..
+        \\exec_prefix=${{prefix}}
+        \\libdir=${{exec_prefix}}/lib
+        \\includedir=${{prefix}}/include
+        \\
+        \\Name: lattice
+        \\Description: Embedded knowledge graph database for AI and RAG applications
+        \\Version: {s}
+        \\Libs: {s}
+        \\Cflags: -I${{includedir}}
+        \\
+    , .{ version, pkg_config_libs });
+    const write_files = b.addWriteFiles();
+    const lattice_pc = write_files.add("lattice.pc", pkg_config_contents);
+    const install_pkg_config = b.addInstallLibFile(lattice_pc, "pkgconfig/lattice.pc");
+    b.getInstallStep().dependOn(&install_pkg_config.step);
+
     // Build steps
     const lib_step = b.step("lib", "Build static library only");
     lib_step.dependOn(&lib.step);
@@ -115,6 +141,8 @@ pub fn build(b: *std.Build) void {
     const shared_step = b.step("shared", "Build shared library (for Python bindings)");
     const install_shared = b.addInstallArtifact(shared_lib, .{});
     shared_step.dependOn(&install_shared.step);
+    shared_step.dependOn(&install_header.step);
+    shared_step.dependOn(&install_pkg_config.step);
 
     const cli_step = b.step("cli", "Build CLI executable only");
     const install_cli = b.addInstallArtifact(cli, .{});

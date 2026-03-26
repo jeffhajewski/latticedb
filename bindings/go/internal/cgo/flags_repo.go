@@ -1,4 +1,4 @@
-//go:build !pkgconfig
+//go:build repolocal
 
 package cgobridge
 

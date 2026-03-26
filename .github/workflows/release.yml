@@ -110,7 +110,7 @@ jobs:
         env:
           PKG_CONFIG_PATH: ${{ github.workspace }}/native-lib/lib/pkgconfig
           LD_LIBRARY_PATH: ${{ github.workspace }}/native-lib/lib
-        run: go test -tags pkgconfig ./...
+        run: go test ./...
 
   # ============================================
   # Create GitHub Release with tarballs

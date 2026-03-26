@@ -142,7 +142,7 @@ jobs:
   # Go tests
   # ============================================
   go-test:
-    name: Go Tests
+    name: Go Repo-Local Tests
     needs: zig-build
     runs-on: ${{ matrix.os }}
     strategy:
@@ -166,7 +166,7 @@ jobs:
 
       - name: Run tests
         working-directory: bindings/go
-        run: go test ./...
+        run: go test -tags repolocal ./...
 
   # ============================================
   # Go installed workflow smoke test
@@ -191,12 +191,12 @@ jobs:
       - name: Build installed development layout
         run: zig build install --prefix /tmp/lattice-install -Doptimize=ReleaseSafe
 
-      - name: Run pkg-config tests
+      - name: Run installed-workflow tests
         working-directory: bindings/go
         env:
           PKG_CONFIG_PATH: /tmp/lattice-install/lib/pkgconfig
           LD_LIBRARY_PATH: /tmp/lattice-install/lib
-        run: go test -tags pkgconfig ./...
+        run: go test ./...
 
   # ============================================
   # Lint checks

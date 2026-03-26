@@ -18,29 +18,16 @@ This is a cgo-backed client built on the stable C ABI. The current API supports:
 
 The Go client now supports two native-library workflows:
 
-- repo-local development: default, links against `zig-out/lib` in this repository
-- installed development: use `pkg-config` via the `pkgconfig` build tag
+- installed development: default, resolves `lattice` through `pkg-config`
+- repo-local development: use the `repolocal` build tag to link against `zig-out/lib` in this repository
 
 ## Prerequisites
 
 Use Go 1.22 or newer.
 
-Build the native shared library from the repo root:
-
-```bash
-zig build shared
-```
-
-Then run Go commands from `bindings/go`:
-
-```bash
-cd bindings/go
-go test ./...
-```
-
-The cgo bridge links against `zig-out/lib/liblattice` in this repository.
-
 ## Installed Workflow
+
+This is the default workflow for published-module consumers.
 
 Install the shared library, public header, and `pkg-config` metadata into a prefix:
 
@@ -48,21 +35,40 @@ Install the shared library, public header, and `pkg-config` metadata into a pref
 zig build install --prefix /tmp/lattice-install
 ```
 
-Then point `pkg-config` at that prefix and build with the `pkgconfig` tag:
+Then point `pkg-config` at that prefix and run Go commands from `bindings/go`:
 
 ```bash
 export PKG_CONFIG_PATH=/tmp/lattice-install/lib/pkgconfig
 export DYLD_LIBRARY_PATH=/tmp/lattice-install/lib
 cd bindings/go
-go test -tags pkgconfig ./...
+go test ./...
 ```
 
 On Linux, use `LD_LIBRARY_PATH` instead of `DYLD_LIBRARY_PATH`.
 
+The default cgo path expects `pkg-config` to resolve `lattice.h` and `liblattice`.
+
+## Repo-Local Workflow
+
+For development inside this repository, you can still link directly against `zig-out/lib`.
+
+Build the native shared library from the repo root:
+
+```bash
+zig build shared
+```
+
+Then run the Go binding with the explicit `repolocal` build tag:
+
+```bash
+cd bindings/go
+go test -tags repolocal ./...
+```
+
 CI validates both workflows:
 
-- repo-local testing against `zig-out/lib`
-- installed-prefix testing with `pkg-config`
+- installed-prefix testing with the default `pkg-config` path
+- repo-local testing against `zig-out/lib` via `-tags repolocal`
 
 ## Quick Start
 

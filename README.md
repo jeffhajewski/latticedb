@@ -40,7 +40,7 @@ npm install @hajewski/latticedb
 
 **Go**
 
-See [bindings/go/README.md](bindings/go/README.md) for the current cgo workflow. The repo-local path uses `zig-out/lib`; installed builds can also use `pkg-config`.
+See [bindings/go/README.md](bindings/go/README.md) for the current cgo workflow. The default consumer path uses installed `pkg-config` metadata; in-repo development can use `-tags repolocal` against `zig-out/lib`.
 There is also a runnable Graph RAG example in [examples/go](examples/go).
 
 ## Example

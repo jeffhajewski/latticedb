@@ -199,6 +199,36 @@ jobs:
         run: go test ./...
 
   # ============================================
+  # Go conformance suite
+  # ============================================
+  conformance-go-test:
+    name: Go Conformance Suite
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: goto-bus-stop/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: conformance/go/go.mod
+
+      - name: Build installed development layout
+        run: zig build install --prefix /tmp/lattice-install -Doptimize=ReleaseSafe
+
+      - name: Run conformance suite
+        working-directory: conformance/go
+        env:
+          PKG_CONFIG_PATH: /tmp/lattice-install/lib/pkgconfig
+          LD_LIBRARY_PATH: /tmp/lattice-install/lib
+        run: go test ./...
+
+  # ============================================
   # Lint checks
   # ============================================
   lint:

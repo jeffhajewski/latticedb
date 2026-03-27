@@ -225,6 +225,124 @@ func TestConformanceCrashRecoveryCommittedNodePropertyUpdateWinsOverAbortedUpdat
 	}
 }
 
+func TestConformanceCrashRecoverySecondaryLabelsAndEdgeProperties(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "crash_secondary_labels_edge_props.ltdb")
+	db := openDB(t, dbPath, OpenOptions{Create: true})
+
+	var aliceID uint64
+	var bobID uint64
+	var edgeID uint64
+
+	err := db.Update(func(tx Tx) error {
+		alice, err := tx.CreateNode(CreateNodeOptions{
+			Labels: []string{"Person", "Employee"},
+			Properties: map[string]Value{
+				"name": "Alice",
+			},
+		})
+		if err != nil {
+			return err
+		}
+		bob, err := tx.CreateNode(CreateNodeOptions{
+			Labels:     []string{"Person"},
+			Properties: map[string]Value{"name": "Bob"},
+		})
+		if err != nil {
+			return err
+		}
+		edge, err := tx.CreateEdge(alice.ID, bob.ID, "KNOWS", CreateEdgeOptions{
+			Properties: map[string]Value{
+				"since": int64(2026),
+				"note":  "stable",
+			},
+		})
+		if err != nil {
+			return err
+		}
+
+		aliceID = alice.ID
+		bobID = bob.ID
+		edgeID = edge.ID
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed crash graph with secondary labels and edge properties: %v", err)
+	}
+	closeDB(t, db)
+
+	if err := testRecoveryHarness.SimulateCrash(dbPath); err != nil {
+		t.Fatalf("simulate crash: %v", err)
+	}
+
+	db = openDB(t, dbPath, OpenOptions{})
+	defer closeDB(t, db)
+
+	err = db.View(func(tx Tx) error {
+		requireNodeExists(t, tx, aliceID, true)
+		requireNodeExists(t, tx, bobID, true)
+
+		alice, err := tx.GetNode(aliceID)
+		if err != nil {
+			return err
+		}
+		if alice == nil {
+			t.Fatalf("expected recovered alice node")
+		}
+		if !reflect.DeepEqual(alice.Labels, []string{"Person", "Employee"}) {
+			t.Fatalf("unexpected recovered alice labels: %#v", alice.Labels)
+		}
+
+		since, ok, err := tx.GetEdgeProperty(edgeID, "since")
+		if err != nil {
+			return err
+		}
+		if !ok || since != int64(2026) {
+			t.Fatalf("unexpected recovered edge property since: ok=%v value=%#v", ok, since)
+		}
+
+		note, ok, err := tx.GetEdgeProperty(edgeID, "note")
+		if err != nil {
+			return err
+		}
+		if !ok || note != "stable" {
+			t.Fatalf("unexpected recovered edge property note: ok=%v value=%#v", ok, note)
+		}
+
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("validate recovered secondary labels and edge properties: %v", err)
+	}
+
+	labelQuery, err := db.Query(
+		"MATCH (n:Employee) RETURN id(n) AS id",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("query recovered secondary label: %v", err)
+	}
+	if len(labelQuery.Rows) != 1 {
+		t.Fatalf("expected 1 recovered Employee row, got %d", len(labelQuery.Rows))
+	}
+	if labelQuery.Rows[0]["id"] != int64(aliceID) {
+		t.Fatalf("unexpected recovered Employee id: %#v", labelQuery.Rows[0]["id"])
+	}
+
+	edgeQuery, err := db.Query(
+		"MATCH (:Person)-[r:KNOWS]->(:Person) RETURN r.since AS since, r.note AS note",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("query recovered edge properties: %v", err)
+	}
+	if len(edgeQuery.Rows) != 1 {
+		t.Fatalf("expected 1 recovered edge row, got %d", len(edgeQuery.Rows))
+	}
+	if edgeQuery.Rows[0]["since"] != int64(2026) || edgeQuery.Rows[0]["note"] != "stable" {
+		t.Fatalf("unexpected recovered edge query row: %#v", edgeQuery.Rows[0])
+	}
+}
+
 func TestConformanceExportAndDumpInvariants(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "export.ltdb")
 	db := openDB(t, dbPath, OpenOptions{Create: true})

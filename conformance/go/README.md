@@ -20,23 +20,29 @@ The initial suite covers:
 - direct vector search and full-text search
 - vector and full-text query operators preserving additional `MATCH` bindings
 - query cache management behavior
-- crash recovery for committed graph state, committed node-property updates, and aborted tail inserts through an adapter-provided recovery harness
+- crash recovery for committed graph state, secondary labels, committed node-property updates, committed edge-property updates, and aborted tail inserts through an adapter-provided recovery harness
 - export and dump invariants through the public CLI surface
 
 ## Running
 
-Build the shared library from the repo root first:
+Install the shared library, public header, and `pkg-config` metadata from the repo root:
 
 ```bash
-zig build shared
+zig build install --prefix /tmp/lattice-install -Doptimize=ReleaseSafe
 ```
 
-Then run the suite:
+Then point `pkg-config` at that prefix and run the suite:
 
 ```bash
+export PKG_CONFIG_PATH=/tmp/lattice-install/lib/pkgconfig
+export DYLD_LIBRARY_PATH=/tmp/lattice-install/lib
 cd conformance/go
 go test ./...
 ```
+
+On Linux, use `LD_LIBRARY_PATH` instead of `DYLD_LIBRARY_PATH`.
+
+The module still uses a local `replace` to point at `../../bindings/go` so the suite exercises the binding code in this checkout, but native linking follows the installed `pkg-config` workflow rather than the repo-local `zig-out/lib` path.
 
 The export and dump cases build the `lattice` CLI on demand during the test run.
 The crash cases use a recovery harness adapter; the current `lattice` adapter simulates a crash by resetting the main database file and replaying the WAL on reopen.

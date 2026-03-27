@@ -253,6 +253,120 @@ test "edges recovered with source and target nodes" {
     }
 }
 
+test "multi-label nodes recover secondary label index after crash" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_secondary_labels.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var node_id: NodeId = undefined;
+
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+        var txn = try db.beginTransaction(.read_write);
+        node_id = try db.createNode(&txn, &[_][]const u8{ "Person", "Employee" });
+        try db.commitTransaction(&txn);
+        db.close();
+    }
+
+    try simulateCrash(path);
+
+    {
+        var db = try openCrashTestDb(allocator, path, false);
+        defer db.close();
+
+        try std.testing.expect(try db.nodeExists(node_id));
+
+        var node = (try db.getNode(node_id)).?;
+        defer node.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 2), node.labels.len);
+
+        const employee_nodes = try db.getNodesByLabel("Employee");
+        defer allocator.free(employee_nodes);
+        try std.testing.expectEqual(@as(usize, 1), employee_nodes.len);
+        try std.testing.expectEqual(node_id, employee_nodes[0]);
+    }
+}
+
+test "label additions recovered after crash" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_label_addition.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var node_id: NodeId = undefined;
+
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+        var txn = try db.beginTransaction(.read_write);
+        node_id = try db.createNode(&txn, &[_][]const u8{"Person"});
+        try db.addNodeLabel(&txn, node_id, "Employee");
+        try db.commitTransaction(&txn);
+        db.close();
+    }
+
+    try simulateCrash(path);
+
+    {
+        var db = try openCrashTestDb(allocator, path, false);
+        defer db.close();
+
+        const employee_nodes = try db.getNodesByLabel("Employee");
+        defer allocator.free(employee_nodes);
+        try std.testing.expectEqual(@as(usize, 1), employee_nodes.len);
+        try std.testing.expectEqual(node_id, employee_nodes[0]);
+    }
+}
+
+test "edge properties recovered after crash" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_edge_properties.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var src_id: NodeId = undefined;
+    var dst_id: NodeId = undefined;
+    var edge_id: EdgeId = undefined;
+
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+        var txn = try db.beginTransaction(.read_write);
+        src_id = try db.createNode(&txn, &[_][]const u8{});
+        dst_id = try db.createNode(&txn, &[_][]const u8{});
+        edge_id = try db.createEdgeAndGetId(&txn, src_id, dst_id, "KNOWS");
+        try db.setEdgePropertyById(&txn, edge_id, "since", .{ .int_val = 2026 });
+        try db.setEdgePropertyById(&txn, edge_id, "note", .{ .string_val = "stable" });
+        try db.commitTransaction(&txn);
+        db.close();
+    }
+
+    try simulateCrash(path);
+
+    {
+        var db = try openCrashTestDb(allocator, path, false);
+        defer db.close();
+
+        try std.testing.expect(try db.nodeExists(src_id));
+        try std.testing.expect(try db.nodeExists(dst_id));
+
+        const since = (try db.getEdgePropertyById(edge_id, "since")).?;
+        switch (since) {
+            .int_val => |value| try std.testing.expectEqual(@as(i64, 2026), value),
+            else => return error.UnexpectedPropertyValue,
+        }
+
+        const note = (try db.getEdgePropertyById(edge_id, "note")).?;
+        defer {
+            var owned_note = note;
+            owned_note.deinit(allocator);
+        }
+        switch (note) {
+            .string_val => |value| try std.testing.expectEqualStrings("stable", value),
+            else => return error.UnexpectedPropertyValue,
+        }
+    }
+}
+
 test "parallel edges recovered with stable edge ids" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_crash_parallel_edges.ltdb";

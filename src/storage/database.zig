@@ -501,6 +501,7 @@ pub const Database = struct {
                 .node_store = &self.node_store,
                 .edge_store = &self.edge_store,
                 .symbol_table = &self.symbol_table,
+                .label_index = &self.label_index,
             });
             const stats = rm.recover(wal, &self.page_manager) catch |err| switch (err) {
                 error.MidLogCorruption => return DatabaseError.InvalidDatabase,
@@ -1652,6 +1653,20 @@ pub const Database = struct {
         // Log undo entry for transaction rollback
         if (txn) |t| {
             if (self.txn_manager) |*tm| {
+                var payload_buf: [512]u8 = undefined;
+                const payload = wal_payload.serializeLabelAdd(&payload_buf, node_id, label) catch {
+                    self.label_index.remove(label_id, node_id) catch {};
+                    self.node_store.update(node_id, existing_node.labels, existing_node.properties) catch {};
+                    return DatabaseError.IoError;
+                };
+                _ = tm.logOperation(t, .update, payload) catch |err| {
+                    self.label_index.remove(label_id, node_id) catch {};
+                    self.node_store.update(node_id, existing_node.labels, existing_node.properties) catch {};
+                    return switch (err) {
+                        TxnError.OutOfMemory => DatabaseError.OutOfMemory,
+                        else => DatabaseError.IoError,
+                    };
+                };
                 tm.addUndoEntry(t, .insert, .label, node_id, 0, label_id, null) catch |err| {
                     // Rollback: remove label from index and restore node
                     self.label_index.remove(label_id, node_id) catch {};
@@ -1721,6 +1736,20 @@ pub const Database = struct {
         // Log undo entry for transaction rollback
         if (txn) |t| {
             if (self.txn_manager) |*tm| {
+                var payload_buf: [512]u8 = undefined;
+                const payload = wal_payload.serializeLabelRemove(&payload_buf, node_id, label) catch {
+                    self.label_index.add(label_id, node_id) catch {};
+                    self.node_store.update(node_id, existing_node.labels, existing_node.properties) catch {};
+                    return DatabaseError.IoError;
+                };
+                _ = tm.logOperation(t, .update, payload) catch |err| {
+                    self.label_index.add(label_id, node_id) catch {};
+                    self.node_store.update(node_id, existing_node.labels, existing_node.properties) catch {};
+                    return switch (err) {
+                        TxnError.OutOfMemory => DatabaseError.OutOfMemory,
+                        else => DatabaseError.IoError,
+                    };
+                };
                 tm.addUndoEntry(t, .delete, .label, node_id, 0, label_id, null) catch |err| {
                     // Rollback: re-add label to index and restore node
                     self.label_index.add(label_id, node_id) catch {};
@@ -2156,8 +2185,10 @@ pub const Database = struct {
         defer new_props.deinit(self.allocator);
 
         var found = false;
+        var old_value: ?PropertyValue = null;
         for (edge.properties) |prop| {
             if (prop.key_id == key_id) {
+                old_value = prop.value;
                 new_props.append(self.allocator, .{ .key_id = key_id, .value = value }) catch return DatabaseError.IoError;
                 found = true;
             } else {
@@ -2170,6 +2201,18 @@ pub const Database = struct {
 
         if (txn) |t| {
             if (self.txn_manager) |*tm| {
+                var old_value_bytes: ?[]u8 = null;
+                var owns_old_value_bytes = false;
+                if (old_value) |ov| {
+                    var old_value_buf: [512]u8 = undefined;
+                    const old_value_size = wal_payload.serializePropertyValueToBuf(&old_value_buf, ov) catch null;
+                    if (old_value_size) |sz| {
+                        old_value_bytes = self.allocator.dupe(u8, old_value_buf[0..sz]) catch null;
+                        owns_old_value_bytes = old_value_bytes != null;
+                    }
+                }
+                defer if (owns_old_value_bytes) self.allocator.free(old_value_bytes.?);
+
                 var old_prop_bytes: []u8 = &[_]u8{};
                 var owns_old_prop_bytes = false;
                 if (edge.properties.len > 0) {
@@ -2177,14 +2220,6 @@ pub const Database = struct {
                     owns_old_prop_bytes = old_prop_bytes.len > 0;
                 }
                 defer if (owns_old_prop_bytes) self.allocator.free(old_prop_bytes);
-
-                var new_prop_bytes: []u8 = &[_]u8{};
-                var owns_new_prop_bytes = false;
-                if (new_props.items.len > 0) {
-                    new_prop_bytes = wal_payload.serializeProperties(self.allocator, @ptrCast(new_props.items)) catch &[_]u8{};
-                    owns_new_prop_bytes = new_prop_bytes.len > 0;
-                }
-                defer if (owns_new_prop_bytes) self.allocator.free(new_prop_bytes);
 
                 var old_buf: [4096]u8 = undefined;
                 const old_payload = wal_payload.serializeEdgeDelete(
@@ -2196,17 +2231,21 @@ pub const Database = struct {
                     old_prop_bytes,
                 ) catch return DatabaseError.IoError;
 
-                var new_buf: [4096]u8 = undefined;
-                const new_payload = wal_payload.serializeEdgeDelete(
-                    &new_buf,
+                var value_buf: [512]u8 = undefined;
+                const value_size = wal_payload.serializePropertyValueToBuf(&value_buf, value) catch {
+                    return DatabaseError.IoError;
+                };
+
+                var wal_buf: [2048]u8 = undefined;
+                const wal_payload_bytes = wal_payload.serializeEdgePropertyUpdate(
+                    &wal_buf,
                     edge.id,
-                    edge.source,
-                    edge.target,
-                    edge.edge_type,
-                    new_prop_bytes,
+                    key,
+                    old_value_bytes,
+                    value_buf[0..value_size],
                 ) catch return DatabaseError.IoError;
 
-                _ = tm.logOperation(t, .update, new_payload) catch return DatabaseError.IoError;
+                _ = tm.logOperation(t, .update, wal_payload_bytes) catch return DatabaseError.IoError;
                 tm.addUndoEntry(t, .update, .edge, edge.id, 0, 0, old_payload) catch return DatabaseError.IoError;
             }
         }
@@ -2247,9 +2286,11 @@ pub const Database = struct {
         defer new_props.deinit(self.allocator);
 
         var found = false;
+        var old_value: ?PropertyValue = null;
         for (edge.properties) |prop| {
             if (prop.key_id == key_id) {
                 found = true;
+                old_value = prop.value;
             } else {
                 new_props.append(self.allocator, prop) catch return DatabaseError.IoError;
             }
@@ -2260,6 +2301,18 @@ pub const Database = struct {
 
         if (txn) |t| {
             if (self.txn_manager) |*tm| {
+                var old_value_bytes: ?[]u8 = null;
+                var owns_old_value_bytes = false;
+                if (old_value) |ov| {
+                    var old_value_buf: [512]u8 = undefined;
+                    const old_value_size = wal_payload.serializePropertyValueToBuf(&old_value_buf, ov) catch null;
+                    if (old_value_size) |sz| {
+                        old_value_bytes = self.allocator.dupe(u8, old_value_buf[0..sz]) catch null;
+                        owns_old_value_bytes = old_value_bytes != null;
+                    }
+                }
+                defer if (owns_old_value_bytes) self.allocator.free(old_value_bytes.?);
+
                 var old_prop_bytes: []u8 = &[_]u8{};
                 var owns_old_prop_bytes = false;
                 if (edge.properties.len > 0) {
@@ -2267,14 +2320,6 @@ pub const Database = struct {
                     owns_old_prop_bytes = old_prop_bytes.len > 0;
                 }
                 defer if (owns_old_prop_bytes) self.allocator.free(old_prop_bytes);
-
-                var new_prop_bytes: []u8 = &[_]u8{};
-                var owns_new_prop_bytes = false;
-                if (new_props.items.len > 0) {
-                    new_prop_bytes = wal_payload.serializeProperties(self.allocator, @ptrCast(new_props.items)) catch &[_]u8{};
-                    owns_new_prop_bytes = new_prop_bytes.len > 0;
-                }
-                defer if (owns_new_prop_bytes) self.allocator.free(new_prop_bytes);
 
                 var old_buf: [4096]u8 = undefined;
                 const old_payload = wal_payload.serializeEdgeDelete(
@@ -2286,17 +2331,16 @@ pub const Database = struct {
                     old_prop_bytes,
                 ) catch return DatabaseError.IoError;
 
-                var new_buf: [4096]u8 = undefined;
-                const new_payload = wal_payload.serializeEdgeDelete(
-                    &new_buf,
+                var wal_buf: [2048]u8 = undefined;
+                const wal_payload_bytes = wal_payload.serializeEdgePropertyUpdate(
+                    &wal_buf,
                     edge.id,
-                    edge.source,
-                    edge.target,
-                    edge.edge_type,
-                    new_prop_bytes,
+                    key,
+                    old_value_bytes,
+                    &[_]u8{},
                 ) catch return DatabaseError.IoError;
 
-                _ = tm.logOperation(t, .update, new_payload) catch return DatabaseError.IoError;
+                _ = tm.logOperation(t, .update, wal_payload_bytes) catch return DatabaseError.IoError;
                 tm.addUndoEntry(t, .update, .edge, edge.id, 0, 0, old_payload) catch return DatabaseError.IoError;
             }
         }

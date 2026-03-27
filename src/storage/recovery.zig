@@ -27,9 +27,11 @@ const PageHeader = page.PageHeader;
 const node_mod = lattice.graph.node;
 const edge_mod = lattice.graph.edge;
 const symbols_mod = lattice.graph.symbols;
+const label_index_mod = lattice.graph.label_index;
 const NodeStore = node_mod.NodeStore;
 const EdgeStore = edge_mod.EdgeStore;
 const SymbolTable = symbols_mod.SymbolTable;
+const LabelIndex = label_index_mod.LabelIndex;
 
 // WAL payload deserialization
 const wal_payload = lattice.transaction.wal_payload;
@@ -105,6 +107,7 @@ pub const LogicalRecoveryContext = struct {
     node_store: *NodeStore,
     edge_store: *EdgeStore,
     symbol_table: *SymbolTable,
+    label_index: *LabelIndex,
 };
 
 // ============================================================================
@@ -431,6 +434,7 @@ pub const RecoveryManager = struct {
                 label_ids.items,
                 &[_]node_mod.Property{},
             ) catch {};
+            ctx.label_index.addLabels(label_ids.items, node_payload.node_id) catch {};
         }
         // Edge insert
         else if (payload_type == @intFromEnum(wal_payload.PayloadType.edge_insert)) {
@@ -499,6 +503,105 @@ pub const RecoveryManager = struct {
                 }
                 ctx.node_store.update(update_payload.node_id, node.labels, new_props.items) catch {};
             }
+        } else if (payload_type == @intFromEnum(wal_payload.PayloadType.edge_property_update)) {
+            const update_payload = wal_payload.deserializeEdgePropertyUpdate(payload) catch return;
+
+            var edge = ctx.edge_store.getById(update_payload.edge_id) catch return;
+            defer edge.deinit(self.allocator);
+
+            const key_id = ctx.symbol_table.intern(update_payload.key) catch return;
+
+            var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
+            defer {
+                for (new_props.items) |*prop| {
+                    var value = prop.value;
+                    value.deinit(self.allocator);
+                }
+                new_props.deinit(self.allocator);
+            }
+
+            if (update_payload.new_value.len == 0) {
+                for (edge.properties) |prop| {
+                    if (prop.key_id != key_id) {
+                        const cloned = prop.value.clone(self.allocator) catch return;
+                        new_props.append(self.allocator, .{ .key_id = prop.key_id, .value = cloned }) catch return;
+                    }
+                }
+            } else {
+                var new_value = wal_payload.deserializePropertyValueFromBytes(
+                    self.allocator,
+                    update_payload.new_value,
+                ) catch return;
+                defer new_value.deinit(self.allocator);
+
+                var found = false;
+                for (edge.properties) |prop| {
+                    if (prop.key_id == key_id) {
+                        const cloned = new_value.clone(self.allocator) catch return;
+                        new_props.append(self.allocator, .{ .key_id = key_id, .value = cloned }) catch return;
+                        found = true;
+                    } else {
+                        const cloned = prop.value.clone(self.allocator) catch return;
+                        new_props.append(self.allocator, .{ .key_id = prop.key_id, .value = cloned }) catch return;
+                    }
+                }
+                if (!found) {
+                    const cloned = new_value.clone(self.allocator) catch return;
+                    new_props.append(self.allocator, .{ .key_id = key_id, .value = cloned }) catch return;
+                }
+            }
+
+            ctx.edge_store.deleteById(update_payload.edge_id) catch {};
+            ctx.edge_store.createWithId(
+                update_payload.edge_id,
+                edge.source,
+                edge.target,
+                edge.edge_type,
+                new_props.items,
+            ) catch {};
+        } else if (payload_type == @intFromEnum(wal_payload.PayloadType.label_add)) {
+            const label_payload = wal_payload.deserializeLabelAdd(payload) catch return;
+            const label_id = ctx.symbol_table.intern(label_payload.label) catch return;
+
+            var node = ctx.node_store.get(label_payload.node_id) catch return;
+            defer node.deinit(self.allocator);
+
+            for (node.labels) |existing_label_id| {
+                if (existing_label_id == label_id) return;
+            }
+
+            var new_labels: std.ArrayListUnmanaged(symbols_mod.SymbolId) = .empty;
+            defer new_labels.deinit(self.allocator);
+
+            for (node.labels) |existing_label_id| {
+                new_labels.append(self.allocator, existing_label_id) catch return;
+            }
+            new_labels.append(self.allocator, label_id) catch return;
+
+            ctx.node_store.update(label_payload.node_id, new_labels.items, node.properties) catch {};
+            ctx.label_index.add(label_id, label_payload.node_id) catch {};
+        } else if (payload_type == @intFromEnum(wal_payload.PayloadType.label_remove)) {
+            const label_payload = wal_payload.deserializeLabelRemove(payload) catch return;
+            const label_id = ctx.symbol_table.lookup(label_payload.label) catch return;
+
+            var node = ctx.node_store.get(label_payload.node_id) catch return;
+            defer node.deinit(self.allocator);
+
+            var new_labels: std.ArrayListUnmanaged(symbols_mod.SymbolId) = .empty;
+            defer new_labels.deinit(self.allocator);
+
+            var found = false;
+            for (node.labels) |existing_label_id| {
+                if (existing_label_id == label_id) {
+                    found = true;
+                } else {
+                    new_labels.append(self.allocator, existing_label_id) catch return;
+                }
+            }
+            if (!found) return;
+
+            ctx.node_store.update(label_payload.node_id, new_labels.items, node.properties) catch {};
+            ctx.label_index.remove(label_id, label_payload.node_id) catch {};
         } else if (payload_type == @intFromEnum(wal_payload.PayloadType.edge_delete)) {
             // Edge update payload is stored as a full edge snapshot.
             const edge_payload = wal_payload.deserializeEdgeDelete(payload) catch return;
@@ -534,7 +637,6 @@ pub const RecoveryManager = struct {
 
     /// Redo a delete operation
     fn redoDelete(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) !void {
-        _ = self;
         if (payload.len == 0) return;
 
         const payload_type = payload[0];
@@ -542,6 +644,11 @@ pub const RecoveryManager = struct {
         // Node delete
         if (payload_type == @intFromEnum(wal_payload.PayloadType.node_delete)) {
             const node_payload = wal_payload.deserializeNodeDelete(payload) catch return;
+            if (ctx.node_store.get(node_payload.node_id)) |existing| {
+                var node = existing;
+                defer node.deinit(self.allocator);
+                ctx.label_index.removeLabels(node.labels, node_payload.node_id) catch {};
+            } else |_| {}
             ctx.node_store.delete(node_payload.node_id) catch {};
         }
         // Edge delete

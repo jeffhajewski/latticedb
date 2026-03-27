@@ -26,6 +26,7 @@ pub const PayloadType = enum(u8) {
     edge_delete = 0x05,
     label_add = 0x06,
     label_remove = 0x07,
+    edge_property_update = 0x08,
 };
 
 /// Errors that can occur during payload serialization/deserialization
@@ -415,6 +416,151 @@ pub fn deserializePropertyUpdate(payload: []const u8) PayloadError!PropertyUpdat
 }
 
 // ============================================================================
+// Edge Property Update Payload
+// ============================================================================
+
+/// Serialize an edge property update operation.
+/// Format: type(u8) + edge_id(u64) + key_len(u16) + key(u8[]) + old_len(u32) + old(u8[]) + new_len(u32) + new(u8[])
+pub fn serializeEdgePropertyUpdate(
+    buf: []u8,
+    edge_id: u64,
+    key: []const u8,
+    old_value: ?[]const u8,
+    new_value: []const u8,
+) PayloadError![]u8 {
+    const old_len = if (old_value) |ov| ov.len else 0;
+    const required_size = 1 + 8 + 2 + key.len + 4 + old_len + 4 + new_value.len;
+    if (buf.len < required_size) return PayloadError.BufferTooSmall;
+
+    var stream = std.io.fixedBufferStream(buf);
+    const writer = stream.writer();
+
+    writer.writeByte(@intFromEnum(PayloadType.edge_property_update)) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u64, edge_id, .little) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u16, @intCast(key.len), .little) catch return PayloadError.BufferTooSmall;
+    writer.writeAll(key) catch return PayloadError.BufferTooSmall;
+
+    writer.writeInt(u32, @intCast(old_len), .little) catch return PayloadError.BufferTooSmall;
+    if (old_value) |ov| {
+        writer.writeAll(ov) catch return PayloadError.BufferTooSmall;
+    }
+
+    writer.writeInt(u32, @intCast(new_value.len), .little) catch return PayloadError.BufferTooSmall;
+    writer.writeAll(new_value) catch return PayloadError.BufferTooSmall;
+
+    return buf[0..stream.pos];
+}
+
+/// Deserialized edge property update payload
+pub const EdgePropertyUpdatePayload = struct {
+    edge_id: u64,
+    key: []const u8,
+    old_value: ?[]const u8,
+    new_value: []const u8,
+};
+
+/// Deserialize an edge property update payload
+pub fn deserializeEdgePropertyUpdate(payload: []const u8) PayloadError!EdgePropertyUpdatePayload {
+    if (payload.len < 15) return PayloadError.InvalidPayload;
+    if (payload[0] != @intFromEnum(PayloadType.edge_property_update)) {
+        return PayloadError.UnexpectedPayloadType;
+    }
+
+    const edge_id = std.mem.readInt(u64, payload[1..9], .little);
+    const key_len = std.mem.readInt(u16, payload[9..11], .little);
+
+    var offset: usize = 11;
+    if (payload.len < offset + key_len + 8) return PayloadError.InvalidPayload;
+
+    const key = payload[offset..][0..key_len];
+    offset += key_len;
+
+    const old_len = std.mem.readInt(u32, payload[offset..][0..4], .little);
+    offset += 4;
+    if (payload.len < offset + old_len + 4) return PayloadError.InvalidPayload;
+
+    const old_value: ?[]const u8 = if (old_len > 0) payload[offset..][0..old_len] else null;
+    offset += old_len;
+
+    const new_len = std.mem.readInt(u32, payload[offset..][0..4], .little);
+    offset += 4;
+    if (payload.len < offset + new_len) return PayloadError.InvalidPayload;
+
+    const new_value = payload[offset..][0..new_len];
+
+    return EdgePropertyUpdatePayload{
+        .edge_id = edge_id,
+        .key = key,
+        .old_value = old_value,
+        .new_value = new_value,
+    };
+}
+
+// ============================================================================
+// Label Mutation Payloads
+// ============================================================================
+
+pub const LabelMutationPayload = struct {
+    node_id: u64,
+    label: []const u8,
+};
+
+fn serializeLabelMutation(
+    buf: []u8,
+    payload_type: PayloadType,
+    node_id: u64,
+    label: []const u8,
+) PayloadError![]u8 {
+    const required_size = 1 + 8 + 2 + label.len;
+    if (buf.len < required_size) return PayloadError.BufferTooSmall;
+
+    var stream = std.io.fixedBufferStream(buf);
+    const writer = stream.writer();
+
+    writer.writeByte(@intFromEnum(payload_type)) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u64, node_id, .little) catch return PayloadError.BufferTooSmall;
+    writer.writeInt(u16, @intCast(label.len), .little) catch return PayloadError.BufferTooSmall;
+    writer.writeAll(label) catch return PayloadError.BufferTooSmall;
+
+    return buf[0..stream.pos];
+}
+
+fn deserializeLabelMutation(
+    payload: []const u8,
+    expected_type: PayloadType,
+) PayloadError!LabelMutationPayload {
+    if (payload.len < 11) return PayloadError.InvalidPayload;
+    if (payload[0] != @intFromEnum(expected_type)) {
+        return PayloadError.UnexpectedPayloadType;
+    }
+
+    const node_id = std.mem.readInt(u64, payload[1..9], .little);
+    const label_len = std.mem.readInt(u16, payload[9..11], .little);
+    if (payload.len < 11 + label_len) return PayloadError.InvalidPayload;
+
+    return LabelMutationPayload{
+        .node_id = node_id,
+        .label = payload[11..][0..label_len],
+    };
+}
+
+pub fn serializeLabelAdd(buf: []u8, node_id: u64, label: []const u8) PayloadError![]u8 {
+    return serializeLabelMutation(buf, .label_add, node_id, label);
+}
+
+pub fn deserializeLabelAdd(payload: []const u8) PayloadError!LabelMutationPayload {
+    return deserializeLabelMutation(payload, .label_add);
+}
+
+pub fn serializeLabelRemove(buf: []u8, node_id: u64, label: []const u8) PayloadError![]u8 {
+    return serializeLabelMutation(buf, .label_remove, node_id, label);
+}
+
+pub fn deserializeLabelRemove(payload: []const u8) PayloadError!LabelMutationPayload {
+    return deserializeLabelMutation(payload, .label_remove);
+}
+
+// ============================================================================
 // Property Serialization for Undo
 // ============================================================================
 
@@ -776,6 +922,53 @@ test "property_update: serialize and deserialize without old value" {
     try std.testing.expectEqualStrings(new_val, result.new_value);
 }
 
+test "edge_property_update: serialize and deserialize with old value" {
+    var buf: [256]u8 = undefined;
+    const old_val = "old";
+    const new_val = "new_value";
+
+    const serialized = try serializeEdgePropertyUpdate(&buf, 7, "since", old_val, new_val);
+    const result = try deserializeEdgePropertyUpdate(serialized);
+
+    try std.testing.expectEqual(@as(u64, 7), result.edge_id);
+    try std.testing.expectEqualStrings("since", result.key);
+    try std.testing.expectEqualStrings(old_val, result.old_value.?);
+    try std.testing.expectEqualStrings(new_val, result.new_value);
+}
+
+test "edge_property_update: serialize and deserialize without old value" {
+    var buf: [256]u8 = undefined;
+    const new_val = "created";
+
+    const serialized = try serializeEdgePropertyUpdate(&buf, 8, "status", null, new_val);
+    const result = try deserializeEdgePropertyUpdate(serialized);
+
+    try std.testing.expectEqual(@as(u64, 8), result.edge_id);
+    try std.testing.expectEqualStrings("status", result.key);
+    try std.testing.expect(result.old_value == null);
+    try std.testing.expectEqualStrings(new_val, result.new_value);
+}
+
+test "label_add: serialize and deserialize" {
+    var buf: [256]u8 = undefined;
+
+    const serialized = try serializeLabelAdd(&buf, 42, "Employee");
+    const result = try deserializeLabelAdd(serialized);
+
+    try std.testing.expectEqual(@as(u64, 42), result.node_id);
+    try std.testing.expectEqualStrings("Employee", result.label);
+}
+
+test "label_remove: serialize and deserialize" {
+    var buf: [256]u8 = undefined;
+
+    const serialized = try serializeLabelRemove(&buf, 55, "Manager");
+    const result = try deserializeLabelRemove(serialized);
+
+    try std.testing.expectEqual(@as(u64, 55), result.node_id);
+    try std.testing.expectEqualStrings("Manager", result.label);
+}
+
 test "wrong payload type returns error" {
     var buf: [256]u8 = undefined;
 
@@ -827,5 +1020,21 @@ test "property_update: buffer too small" {
     const new_val = "new_value";
 
     const result = serializePropertyUpdate(&buf, 42, "name", old_val, new_val);
+    try std.testing.expectError(PayloadError.BufferTooSmall, result);
+}
+
+test "edge_property_update: buffer too small" {
+    var buf: [10]u8 = undefined;
+    const old_val = "old_value";
+    const new_val = "new_value";
+
+    const result = serializeEdgePropertyUpdate(&buf, 42, "name", old_val, new_val);
+    try std.testing.expectError(PayloadError.BufferTooSmall, result);
+}
+
+test "label_add: buffer too small" {
+    var buf: [10]u8 = undefined;
+
+    const result = serializeLabelAdd(&buf, 42, "Employee");
     try std.testing.expectError(PayloadError.BufferTooSmall, result);
 }

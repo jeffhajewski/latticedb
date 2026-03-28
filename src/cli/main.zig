@@ -850,8 +850,8 @@ fn cmdDump(
     };
     defer db.close();
 
-    // Dump to stdout as JSON
-    const stats = import_export.exportJson(allocator, db, stdout, parsed_args.label_filter);
+    // Dump to stdout as canonical JSON
+    const stats = import_export.dumpCanonicalJson(allocator, db, stdout, parsed_args.label_filter);
 
     if (stats) |s| {
         // Print stats to stderr so they don't mix with JSON output
@@ -891,7 +891,7 @@ fn printUsage(writer: anytype) void {
         \\  Import/Export:
         \\    import <path>       Import data from JSON/CSV
         \\    export <path>       Export data to JSON/JSONL/CSV/DOT
-        \\    dump <path>         Dump full database as JSON
+        \\    dump <path>         Dump full database as canonical JSON
         \\
         \\  Introspection:
         \\    labels <path>       List all node labels

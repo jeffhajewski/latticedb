@@ -8,6 +8,7 @@ const lattice = @import("lattice");
 const Database = lattice.storage.database.Database;
 const PropertyValue = lattice.core.types.PropertyValue;
 const NodeId = lattice.core.types.NodeId;
+const EdgeId = lattice.core.types.EdgeId;
 
 /// Managed array list for allocator tracking
 fn ManagedArrayList(comptime T: type) type {
@@ -311,6 +312,62 @@ pub fn exportJson(
     return stats;
 }
 
+/// Dump database to canonical JSON format for cross-engine state comparison.
+///
+/// Canonical guarantees:
+/// - includes unlabeled nodes
+/// - nodes sorted by node ID ascending
+/// - edges sorted by source ID, target ID, type name, then edge ID
+/// - labels sorted lexicographically
+/// - property keys sorted lexicographically
+/// - nested MAP keys sorted lexicographically
+/// - stable edge IDs included in the output
+pub fn dumpCanonicalJson(
+    allocator: std.mem.Allocator,
+    db: *Database,
+    writer: anytype,
+    label_filter: ?[]const u8,
+) !ExportStats {
+    var stats = ExportStats{};
+
+    const node_ids = try collectCanonicalNodeIds(allocator, db, label_filter);
+    defer allocator.free(node_ids);
+
+    try writer.writeAll("{\"nodes\":[");
+    for (node_ids, 0..) |node_id, i| {
+        if (i > 0) try writer.writeByte(',');
+        try writeNodeJsonCanonical(allocator, db, writer, node_id);
+        stats.nodes_exported += 1;
+    }
+    try writer.writeAll("],\"edges\":[");
+
+    var first_edge = true;
+    for (node_ids) |node_id| {
+        const edges = db.getOutgoingEdges(node_id) catch continue;
+        defer db.freeEdgeInfos(edges);
+
+        std.mem.sort(Database.EdgeInfo, edges, {}, struct {
+            fn lessThan(_: void, a: Database.EdgeInfo, b: Database.EdgeInfo) bool {
+                if (a.source != b.source) return a.source < b.source;
+                if (a.target != b.target) return a.target < b.target;
+                const type_order = std.mem.order(u8, a.edge_type, b.edge_type);
+                if (type_order != .eq) return type_order == .lt;
+                return a.id < b.id;
+            }
+        }.lessThan);
+
+        for (edges) |edge| {
+            if (!first_edge) try writer.writeByte(',');
+            first_edge = false;
+            try writeEdgeJsonCanonical(allocator, db, writer, edge);
+            stats.edges_exported += 1;
+        }
+    }
+
+    try writer.writeAll("]}\n");
+    return stats;
+}
+
 /// Export database to JSONL format (one JSON object per line).
 pub fn exportJsonl(
     allocator: std.mem.Allocator,
@@ -523,6 +580,41 @@ fn writeNodeJson(
     try writer.writeAll("}}");
 }
 
+fn writeNodeJsonCanonical(
+    allocator: std.mem.Allocator,
+    db: *Database,
+    writer: anytype,
+    node_id: NodeId,
+) !void {
+    try writer.print("{{\"id\":\"{d}\",\"labels\":[", .{node_id});
+
+    const node_labels = db.getNodeLabels(node_id) catch &[_][]const u8{};
+    defer {
+        for (node_labels) |label| allocator.free(label);
+        allocator.free(node_labels);
+    }
+
+    const sorted_labels = try allocator.dupe([]const u8, node_labels);
+    defer allocator.free(sorted_labels);
+    std.mem.sort([]const u8, sorted_labels, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lessThan);
+
+    for (sorted_labels, 0..) |label, i| {
+        if (i > 0) try writer.writeByte(',');
+        try writeJsonString(writer, label);
+    }
+
+    try writer.writeAll("],\"properties\":{");
+
+    const props = db.getNodeProperties(node_id) catch &[_]Database.PropertyEntry{};
+    defer db.freePropertyEntries(@constCast(props));
+    try writeSortedPropertyEntriesJson(allocator, writer, props);
+    try writer.writeAll("}}");
+}
+
 fn writeEdgeJson(db: *Database, writer: anytype, edge: Database.EdgeInfo) !void {
     try writer.print("{{\"source\":\"{d}\",\"target\":\"{d}\",\"type\":", .{ edge.source, edge.target });
     try writeJsonString(writer, edge.edge_type);
@@ -538,6 +630,29 @@ fn writeEdgeJson(db: *Database, writer: anytype, edge: Database.EdgeInfo) !void 
             try writer.writeByte(':');
             try writePropertyValueJson(writer, prop.value);
         }
+    }
+
+    try writer.writeAll("}}");
+}
+
+fn writeEdgeJsonCanonical(
+    allocator: std.mem.Allocator,
+    db: *Database,
+    writer: anytype,
+    edge: Database.EdgeInfo,
+) !void {
+    try writer.print(
+        "{{\"id\":\"{d}\",\"source\":\"{d}\",\"target\":\"{d}\",\"type\":",
+        .{ edge.id, edge.source, edge.target },
+    );
+    try writeJsonString(writer, edge.edge_type);
+    try writer.writeAll(",\"properties\":{");
+
+    const maybe_props = db.getEdgeProperties(edge.id) catch null;
+    defer if (maybe_props) |props| db.freePropertyEntries(props);
+
+    if (maybe_props) |props| {
+        try writeSortedPropertyEntriesJson(allocator, writer, props);
     }
 
     try writer.writeAll("}}");
@@ -676,6 +791,113 @@ fn writePropertyValueJson(writer: anytype, val: PropertyValue) !void {
             try writer.writeByte('}');
         },
     }
+}
+
+fn writePropertyValueJsonCanonical(
+    allocator: std.mem.Allocator,
+    writer: anytype,
+    val: PropertyValue,
+) !void {
+    switch (val) {
+        .null_val => try writer.writeAll("null"),
+        .bool_val => |b| try writer.writeAll(if (b) "true" else "false"),
+        .int_val => |i| try writer.print("{d}", .{i}),
+        .float_val => |f| try writer.print("{d}", .{f}),
+        .string_val => |s| try writeJsonString(writer, s),
+        .bytes_val => |bytes| {
+            try writer.writeByte('"');
+            for (bytes) |b| try writer.print("{x:0>2}", .{b});
+            try writer.writeByte('"');
+        },
+        .vector_val => |vec| {
+            try writer.writeByte('[');
+            for (vec, 0..) |f, i| {
+                if (i > 0) try writer.writeByte(',');
+                try writer.print("{d}", .{f});
+            }
+            try writer.writeByte(']');
+        },
+        .list_val => |list| {
+            try writer.writeByte('[');
+            for (list, 0..) |item, i| {
+                if (i > 0) try writer.writeByte(',');
+                try writePropertyValueJsonCanonical(allocator, writer, item);
+            }
+            try writer.writeByte(']');
+        },
+        .map_val => |entries| {
+            const sorted_entries = try allocator.dupe(PropertyValue.MapEntry, entries);
+            defer allocator.free(sorted_entries);
+            std.mem.sort(PropertyValue.MapEntry, sorted_entries, {}, struct {
+                fn lessThan(_: void, a: PropertyValue.MapEntry, b: PropertyValue.MapEntry) bool {
+                    return std.mem.order(u8, a.key, b.key) == .lt;
+                }
+            }.lessThan);
+
+            try writer.writeByte('{');
+            for (sorted_entries, 0..) |entry, i| {
+                if (i > 0) try writer.writeByte(',');
+                try writeJsonString(writer, entry.key);
+                try writer.writeByte(':');
+                try writePropertyValueJsonCanonical(allocator, writer, entry.value);
+            }
+            try writer.writeByte('}');
+        },
+    }
+}
+
+fn writeSortedPropertyEntriesJson(
+    allocator: std.mem.Allocator,
+    writer: anytype,
+    props: []const Database.PropertyEntry,
+) !void {
+    const sorted_props = try allocator.dupe(Database.PropertyEntry, props);
+    defer allocator.free(sorted_props);
+    std.mem.sort(Database.PropertyEntry, sorted_props, {}, struct {
+        fn lessThan(_: void, a: Database.PropertyEntry, b: Database.PropertyEntry) bool {
+            return std.mem.order(u8, a.key, b.key) == .lt;
+        }
+    }.lessThan);
+
+    for (sorted_props, 0..) |prop, i| {
+        if (i > 0) try writer.writeByte(',');
+        try writeJsonString(writer, prop.key);
+        try writer.writeByte(':');
+        try writePropertyValueJsonCanonical(allocator, writer, prop.value);
+    }
+}
+
+fn collectCanonicalNodeIds(
+    allocator: std.mem.Allocator,
+    db: *Database,
+    label_filter: ?[]const u8,
+) ![]NodeId {
+    var node_ids: std.ArrayList(NodeId) = .empty;
+    errdefer node_ids.deinit(allocator);
+
+    if (label_filter) |filter| {
+        const filtered = db.getNodesByLabel(filter) catch return &[_]NodeId{};
+        defer allocator.free(filtered);
+        try node_ids.appendSlice(allocator, filtered);
+    } else {
+        var iter = db.node_tree.range(null, null) catch return ImportExportError.DatabaseError;
+        defer iter.deinit();
+
+        while (true) {
+            const entry = iter.next() catch return ImportExportError.DatabaseError;
+            if (entry) |e| {
+                if (e.key.len == 8) {
+                    try node_ids.append(allocator, std.mem.readInt(u64, e.key[0..8], .little));
+                }
+            } else {
+                break;
+            }
+        }
+    }
+
+    const owned = try node_ids.toOwnedSlice(allocator);
+    std.mem.sort(NodeId, owned, {}, std.sort.asc(NodeId));
+    return owned;
 }
 
 /// Import data from a CSV file.
@@ -1012,4 +1234,78 @@ test "import/export JSON roundtrip" {
     try std.testing.expectEqualStrings("active", status.?.string_val);
     var owned_status = status.?;
     owned_status.deinit(allocator);
+}
+
+test "import_export: dumpCanonicalJson is deterministic and includes unlabeled nodes" {
+    const allocator = std.testing.allocator;
+    const path_a = "/tmp/lattice_dump_canonical_a.ltdb";
+    const path_b = "/tmp/lattice_dump_canonical_b.ltdb";
+
+    std.fs.cwd().deleteFile(path_a) catch {};
+    std.fs.cwd().deleteFile(path_b) catch {};
+
+    var db_a = try Database.open(allocator, path_a, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false },
+    });
+    defer {
+        db_a.close();
+        std.fs.cwd().deleteFile(path_a) catch {};
+    }
+
+    var db_b = try Database.open(allocator, path_b, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false },
+    });
+    defer {
+        db_b.close();
+        std.fs.cwd().deleteFile(path_b) catch {};
+    }
+
+    const alice_a = try db_a.createNode(null, &.{ "Person", "Employee" });
+    const unlabeled_a = try db_a.createNode(null, &.{});
+    try db_a.setNodeProperty(null, alice_a, "zeta", .{ .int_val = 1 });
+    try db_a.setNodeProperty(null, alice_a, "alpha", .{ .string_val = "A" });
+    try db_a.setNodeProperty(null, unlabeled_a, "meta", .{
+        .map_val = &.{
+            .{ .key = "z", .value = .{ .int_val = 2 } },
+            .{ .key = "a", .value = .{ .string_val = "x" } },
+        },
+    });
+    const edge_a = try db_a.createEdgeAndGetId(null, alice_a, unlabeled_a, "REL");
+    try db_a.setEdgePropertyById(null, edge_a, "status", .{ .string_val = "active" });
+    try db_a.setEdgePropertyById(null, edge_a, "since", .{ .int_val = 2020 });
+
+    const alice_b = try db_b.createNode(null, &.{ "Employee", "Person" });
+    const unlabeled_b = try db_b.createNode(null, &.{});
+    try db_b.setNodeProperty(null, alice_b, "alpha", .{ .string_val = "A" });
+    try db_b.setNodeProperty(null, alice_b, "zeta", .{ .int_val = 1 });
+    try db_b.setNodeProperty(null, unlabeled_b, "meta", .{
+        .map_val = &.{
+            .{ .key = "a", .value = .{ .string_val = "x" } },
+            .{ .key = "z", .value = .{ .int_val = 2 } },
+        },
+    });
+    const edge_b = try db_b.createEdgeAndGetId(null, alice_b, unlabeled_b, "REL");
+    try db_b.setEdgePropertyById(null, edge_b, "since", .{ .int_val = 2020 });
+    try db_b.setEdgePropertyById(null, edge_b, "status", .{ .string_val = "active" });
+
+    var buf_a: [8192]u8 = undefined;
+    var stream_a = std.io.fixedBufferStream(&buf_a);
+    const stats_a = try dumpCanonicalJson(allocator, db_a, stream_a.writer(), null);
+    try std.testing.expectEqual(@as(u64, 2), stats_a.nodes_exported);
+    try std.testing.expectEqual(@as(u64, 1), stats_a.edges_exported);
+
+    var buf_b: [8192]u8 = undefined;
+    var stream_b = std.io.fixedBufferStream(&buf_b);
+    const stats_b = try dumpCanonicalJson(allocator, db_b, stream_b.writer(), null);
+    try std.testing.expectEqual(@as(u64, 2), stats_b.nodes_exported);
+    try std.testing.expectEqual(@as(u64, 1), stats_b.edges_exported);
+
+    const out_a = buf_a[0..stream_a.pos];
+    const out_b = buf_b[0..stream_b.pos];
+    try std.testing.expectEqualStrings(out_a, out_b);
+    try std.testing.expect(std.mem.indexOf(u8, out_a, "\"labels\":[]") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_a, "\"id\":\"1\"") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out_a, "\"id\":\"1\",\"source\":\"1\",\"target\":\"2\"") != null);
 }

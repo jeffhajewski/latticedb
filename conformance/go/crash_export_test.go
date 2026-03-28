@@ -421,9 +421,16 @@ func TestConformanceExportAndDumpInvariants(t *testing.T) {
 	}
 	validateDOTExport(t, dotPath)
 
-	dumpGraph := readJSONGraphBytes(t, mustDump(t, dbPath))
+	dumpBytes := mustDump(t, dbPath)
+	dumpGraph := readJSONGraphBytes(t, dumpBytes)
 	requireGraphCounts(t, dumpGraph, 2, 2)
 	requireExportEdgeProperties(t, dumpGraph)
+	requireCanonicalDump(t, dumpBytes, dumpGraph, aliceID, bobID)
+
+	secondDump := mustDump(t, dbPath)
+	if string(dumpBytes) != string(secondDump) {
+		t.Fatalf("expected canonical dump output to be byte-stable across repeated runs")
+	}
 }
 
 type exportedGraph struct {
@@ -629,6 +636,33 @@ func requireSingleNodeID(t *testing.T, graph exportedGraph, wantID string) {
 	}
 	if count != 1 {
 		t.Fatalf("expected node id %s exactly once in export, got %d matches", wantID, count)
+	}
+}
+
+func requireCanonicalDump(t *testing.T, dumpBytes []byte, graph exportedGraph, aliceID, bobID uint64) {
+	t.Helper()
+
+	if len(graph.Nodes) != 2 || len(graph.Edges) != 2 {
+		t.Fatalf("canonical dump requires 2 nodes and 2 edges, got nodes=%d edges=%d", len(graph.Nodes), len(graph.Edges))
+	}
+
+	if graph.Nodes[0].ID != fmt.Sprintf("%d", aliceID) || graph.Nodes[1].ID != fmt.Sprintf("%d", bobID) {
+		t.Fatalf("expected canonical dump nodes sorted by id, got %#v", graph.Nodes)
+	}
+
+	if !reflect.DeepEqual(graph.Nodes[0].Labels, []string{"Employee", "Person"}) {
+		t.Fatalf("expected canonical dump labels sorted lexicographically, got %#v", graph.Nodes[0].Labels)
+	}
+
+	if graph.Edges[0].ID == "" || graph.Edges[1].ID == "" {
+		t.Fatalf("expected canonical dump edges to include stable ids, got %#v", graph.Edges)
+	}
+	if jsonIntValue(t, graph.Edges[0].Properties["since"]) != 2020 || jsonIntValue(t, graph.Edges[1].Properties["since"]) != 2021 {
+		t.Fatalf("expected canonical dump edges sorted deterministically, got %#v", graph.Edges)
+	}
+
+	if !strings.Contains(string(dumpBytes), "\"edges\":[{\"id\":\"") {
+		t.Fatalf("expected canonical dump raw JSON to include edge ids:\n%s", dumpBytes)
 	}
 }
 

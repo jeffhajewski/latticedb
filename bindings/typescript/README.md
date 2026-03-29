@@ -30,7 +30,7 @@ import { Database } from "@hajewski/latticedb";
 
 const db = new Database("knowledge.db", {
   create: true,
-  enableVector: true,
+  enableVectors: true,
   vectorDimensions: 4,
 });
 await db.open();
@@ -122,7 +122,8 @@ interface DatabaseOptions {
   create?: boolean;          // Create if not exists (default: false)
   readOnly?: boolean;        // Open read-only (default: false)
   cacheSizeMb?: number;      // Cache size in MB (default: 100)
-  enableVector?: boolean;    // Enable vector storage (default: false)
+  enableVectors?: boolean;   // Preferred vector config flag
+  enableVector?: boolean;    // Compatibility alias
   vectorDimensions?: number; // Vector dimensions (default: 128)
 }
 ```
@@ -178,7 +179,7 @@ import { Database } from "@hajewski/latticedb";
 
 const db = new Database("vectors.db", {
   create: true,
-  enableVector: true,
+  enableVectors: true,
   vectorDimensions: 128,
 });
 await db.open();

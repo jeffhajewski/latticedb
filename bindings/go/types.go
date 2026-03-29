@@ -8,10 +8,13 @@ type NodeID uint64
 type EdgeID uint64
 
 type OpenOptions struct {
-	Create           bool
-	ReadOnly         bool
-	CacheSizeMB      uint32
-	PageSize         uint32
+	Create      bool
+	ReadOnly    bool
+	CacheSizeMB uint32
+	PageSize    uint32
+	// Preferred public option name.
+	EnableVectors bool
+	// Compatibility alias for EnableVectors.
 	EnableVector     bool
 	VectorDimensions uint16
 }
@@ -97,6 +100,10 @@ func (o OpenOptions) withDefaults() OpenOptions {
 		o.VectorDimensions = 128
 	}
 	return o
+}
+
+func (o OpenOptions) vectorsEnabled() bool {
+	return o.EnableVectors || o.EnableVector
 }
 
 func (o VectorSearchOptions) withDefaults() VectorSearchOptions {

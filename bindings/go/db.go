@@ -24,7 +24,7 @@ func Open(path string, opts OpenOptions) (*DB, error) {
 		ReadOnly:         opts.ReadOnly,
 		CacheSizeMB:      opts.CacheSizeMB,
 		PageSize:         opts.PageSize,
-		EnableVector:     opts.EnableVector,
+		EnableVector:     opts.vectorsEnabled(),
 		VectorDimensions: opts.VectorDimensions,
 	})
 	if err != nil {

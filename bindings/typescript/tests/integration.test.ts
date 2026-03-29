@@ -732,7 +732,7 @@ describeIfNative('Database Integration', () => {
 
   describe('Batch insert', () => {
     beforeEach(async () => {
-      db = new Database(dbPath, { create: true, enableVector: true, vectorDimensions: 4 });
+      db = new Database(dbPath, { create: true, enableVectors: true, vectorDimensions: 4 });
       await db.open();
     });
 
@@ -802,8 +802,19 @@ describeIfNative('Database Integration', () => {
   // These tests are informational - they may skip if vector storage isn't configured
   describe('Vector operations', () => {
     beforeEach(async () => {
+      db = new Database(dbPath, { create: true, enableVectors: true, vectorDimensions: 4 });
+      await db.open();
+    });
+
+    test('enableVector remains available as a compatibility alias', async () => {
+      await db.close();
       db = new Database(dbPath, { create: true, enableVector: true, vectorDimensions: 4 });
       await db.open();
+
+      await db.write(async (txn) => {
+        const node = await txn.createNode({ labels: ['Doc'] });
+        await txn.setVector(node.id, 'embedding', new Float32Array([1.0, 0.0, 0.0, 0.0]));
+      });
     });
 
     test('basic node creation still works with vector enabled', async () => {

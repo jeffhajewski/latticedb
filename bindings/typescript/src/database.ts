@@ -26,7 +26,9 @@ export interface DatabaseOptions {
   readOnly?: boolean;
   /** Cache size in megabytes */
   cacheSizeMb?: number;
-  /** Enable vector storage */
+  /** Enable vector storage and indexing */
+  enableVectors?: boolean;
+  /** Compatibility alias for enableVectors */
   enableVector?: boolean;
   /** Vector dimensions (default: 128) */
   vectorDimensions?: number;
@@ -88,6 +90,7 @@ export class Database {
       create: this.options.create,
       readOnly: this.options.readOnly,
       cacheSizeMb: this.options.cacheSizeMb,
+      enableVectors: this.options.enableVectors,
       enableVector: this.options.enableVector,
       vectorDimensions: this.options.vectorDimensions,
     });

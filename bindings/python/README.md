@@ -29,7 +29,7 @@ export PKG_CONFIG_PATH=/tmp/lattice-install/lib/pkgconfig
 import numpy as np
 from latticedb import Database
 
-with Database("knowledge.db", create=True, enable_vector=True, vector_dimensions=4) as db:
+with Database("knowledge.db", create=True, enable_vectors=True, vector_dimensions=4) as db:
     # Create nodes, edges, and index content
     with db.write() as txn:
         alice = txn.create_node(
@@ -82,7 +82,8 @@ Database(
     create: bool = False,        # Create if doesn't exist
     read_only: bool = False,     # Open in read-only mode
     cache_size_mb: int = 100,    # Page cache size
-    enable_vector: bool = False, # Enable vector storage
+    enable_vectors: bool | None = None, # Preferred vector config flag
+    enable_vector: bool | None = None,  # Compatibility alias
     vector_dimensions: int = 128 # Vector dimensions
 )
 ```
@@ -133,7 +134,7 @@ Insert many nodes with vectors in a single efficient call:
 ```python
 import numpy as np
 
-with Database("vectors.db", create=True, enable_vector=True, vector_dimensions=128) as db:
+with Database("vectors.db", create=True, enable_vectors=True, vector_dimensions=128) as db:
     with db.write() as txn:
         vectors = np.random.rand(1000, 128).astype(np.float32)
         node_ids = txn.batch_insert_vectors("Document", vectors)

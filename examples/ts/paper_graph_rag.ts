@@ -430,7 +430,7 @@ async function main(): Promise<void> {
   try {
     const db = new Database(dbPath, {
       create: true,
-      enableVector: true,
+      enableVectors: true,
       vectorDimensions: 128,
     });
     await db.open();

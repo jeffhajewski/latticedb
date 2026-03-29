@@ -370,7 +370,7 @@ def main():
         with Database(
             db_path,
             create=True,
-            enable_vector=True,
+            enable_vectors=True,
             vector_dimensions=128,
         ) as db:
 

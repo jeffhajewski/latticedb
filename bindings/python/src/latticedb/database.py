@@ -50,7 +50,8 @@ class Database:
         create: bool = False,
         read_only: bool = False,
         cache_size_mb: int = 100,
-        enable_vector: bool = False,
+        enable_vectors: Optional[bool] = None,
+        enable_vector: Optional[bool] = None,
         vector_dimensions: int = 128,
     ) -> None:
         """
@@ -61,14 +62,17 @@ class Database:
             create: Create the database if it doesn't exist.
             read_only: Open in read-only mode.
             cache_size_mb: Size of the page cache in megabytes.
-            enable_vector: Enable vector storage for embeddings.
-            vector_dimensions: Dimension of vectors (required if enable_vector=True).
+            enable_vectors: Enable vector storage and indexing.
+            enable_vector: Compatibility alias for ``enable_vectors``.
+            vector_dimensions: Dimension of vectors when vector support is enabled.
         """
         self._path = Path(path)
         self._create = create
         self._read_only = read_only
         self._cache_size_mb = cache_size_mb
-        self._enable_vector = enable_vector
+        self._enable_vectors = (
+            enable_vectors if enable_vectors is not None else bool(enable_vector)
+        )
         self._vector_dimensions = vector_dimensions
         self._handle: Optional[Any] = None
         self._closed = False
@@ -93,7 +97,7 @@ class Database:
             read_only=self._read_only,
             cache_size_mb=self._cache_size_mb,
             page_size=4096,
-            enable_vector=self._enable_vector,
+            enable_vector=self._enable_vectors,
             vector_dimensions=self._vector_dimensions,
         )
         db_ptr = c_void_p()

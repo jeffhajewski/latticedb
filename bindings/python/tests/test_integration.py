@@ -704,7 +704,7 @@ class TestBatchInsert:
 
         db_path = tmp_path / "test.db"
 
-        with Database(db_path, create=True, enable_vector=True, vector_dimensions=4) as db:
+        with Database(db_path, create=True, enable_vectors=True, vector_dimensions=4) as db:
             with db.write() as txn:
                 vectors = np.array(
                     [[float(i + j) for j in range(4)] for i in range(10)],
@@ -731,7 +731,7 @@ class TestBatchInsert:
 
         db_path = tmp_path / "test.db"
 
-        with Database(db_path, create=True, enable_vector=True, vector_dimensions=4) as db:
+        with Database(db_path, create=True, enable_vectors=True, vector_dimensions=4) as db:
             with db.write() as txn:
                 vectors = np.array(
                     [
@@ -762,7 +762,7 @@ class TestBatchInsert:
 
         db_path = tmp_path / "test.db"
 
-        with Database(db_path, create=True, enable_vector=True, vector_dimensions=4) as db:
+        with Database(db_path, create=True, enable_vectors=True, vector_dimensions=4) as db:
             with db.write() as txn:
                 vectors = np.empty((0, 4), dtype=np.float32)
                 node_ids = txn.batch_insert_vectors("Document", vectors)
@@ -776,7 +776,7 @@ class TestBatchInsert:
 
         db_path = tmp_path / "test.db"
 
-        with Database(db_path, create=True, enable_vector=True, vector_dimensions=2) as db:
+        with Database(db_path, create=True, enable_vectors=True, vector_dimensions=2) as db:
             with db.write() as txn:
                 vectors = np.array(
                     [
@@ -793,6 +793,19 @@ class TestBatchInsert:
 class TestVectorOperations:
     """Tests for vector operations."""
 
+    def test_enable_vector_alias_still_works(self, tmp_path):
+        """Test compatibility alias for enable_vectors."""
+        pytest.importorskip("numpy")
+        import numpy as np
+
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True, enable_vector=True, vector_dimensions=2) as db:
+            with db.write() as txn:
+                node = txn.create_node(labels=["Doc"])
+                txn.set_vector(node.id, "embedding", np.array([1.0, 0.0], dtype=np.float32))
+                txn.commit()
+
     def test_set_vector(self, tmp_path):
         """Test setting a vector on a node."""
         pytest.importorskip("numpy")
@@ -801,7 +814,7 @@ class TestVectorOperations:
         db_path = tmp_path / "test.db"
 
         # Must enable vector storage with correct dimensions
-        with Database(db_path, create=True, enable_vector=True, vector_dimensions=4) as db:
+        with Database(db_path, create=True, enable_vectors=True, vector_dimensions=4) as db:
             with db.write() as txn:
                 node = txn.create_node(labels=["Document"])
                 vector = np.array([0.1, 0.2, 0.3, 0.4], dtype=np.float32)
@@ -815,7 +828,7 @@ class TestVectorOperations:
 
         db_path = tmp_path / "test.db"
 
-        with Database(db_path, create=True, enable_vector=True, vector_dimensions=4) as db:
+        with Database(db_path, create=True, enable_vectors=True, vector_dimensions=4) as db:
             # Create nodes with vectors
             with db.write() as txn:
                 node1 = txn.create_node(labels=["Document"])
@@ -853,7 +866,7 @@ class TestVectorOperations:
 
         db_path = tmp_path / "test.db"
 
-        with Database(db_path, create=True, enable_vector=True, vector_dimensions=4) as db:
+        with Database(db_path, create=True, enable_vectors=True, vector_dimensions=4) as db:
             query = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
             results = db.vector_search(query, k=10)
 
@@ -867,7 +880,7 @@ class TestVectorOperations:
 
         db_path = tmp_path / "test.db"
 
-        with Database(db_path, create=True, enable_vector=True, vector_dimensions=4) as db:
+        with Database(db_path, create=True, enable_vectors=True, vector_dimensions=4) as db:
             # Create nodes with vectors
             with db.write() as txn:
                 node1 = txn.create_node(labels=["Document"])

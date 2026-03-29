@@ -58,7 +58,7 @@ func main() {
 
 	db, err := latticedb.Open(dbPath, latticedb.OpenOptions{
 		Create:           true,
-		EnableVector:     true,
+		EnableVectors:    true,
 		VectorDimensions: 128,
 	})
 	if err != nil {

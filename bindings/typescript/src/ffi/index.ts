@@ -102,6 +102,7 @@ export interface OpenOptions {
   readOnly?: boolean;
   cacheSizeMb?: number;
   pageSize?: number;
+  enableVectors?: boolean;
   enableVector?: boolean;
   vectorDimensions?: number;
 }
@@ -198,7 +199,7 @@ export class LatticeFFI {
       read_only: options.readOnly ?? false,
       cache_size_mb: options.cacheSizeMb ?? 100,
       page_size: options.pageSize ?? 4096,
-      enable_vector: options.enableVector ?? false,
+      enable_vector: options.enableVectors ?? options.enableVector ?? false,
       vector_dimensions: options.vectorDimensions ?? 128,
     };
 

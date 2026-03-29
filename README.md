@@ -55,7 +55,7 @@ A complete example: create a small knowledge graph with documents and authors, s
 ```python
 from latticedb import Database, hash_embed
 
-with Database("knowledge.db", create=True, enable_vector=True, vector_dimensions=128) as db:
+with Database("knowledge.db", create=True, enable_vectors=True, vector_dimensions=128) as db:
 
     # --- Build the graph ---
     with db.write() as txn:
@@ -115,7 +115,7 @@ import { Database, hashEmbed } from "@hajewski/latticedb";
 
 const db = new Database("knowledge.db", {
   create: true,
-  enableVector: true,
+  enableVectors: true,
   vectorDimensions: 128,
 });
 await db.open();
@@ -164,7 +164,7 @@ await db.close();
 ```go
 db, err := latticedb.Open("knowledge.db", latticedb.OpenOptions{
     Create: true,
-    EnableVector: true,
+    EnableVectors: true,
     VectorDimensions: 128,
 })
 if err != nil {

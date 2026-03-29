@@ -220,7 +220,7 @@ func TestBatchInsertVectorsVectorSearchAndFTS(t *testing.T) {
 
 	db, err := Open(dbPath, OpenOptions{
 		Create:           true,
-		EnableVector:     true,
+		EnableVectors:    true,
 		VectorDimensions: 4,
 	})
 	if err != nil {
@@ -312,7 +312,7 @@ func TestBatchInsertCompatibilityAlias(t *testing.T) {
 
 	db, err := Open(dbPath, OpenOptions{
 		Create:           true,
-		EnableVector:     true,
+		EnableVectors:    true,
 		VectorDimensions: 2,
 	})
 	if err != nil {
@@ -339,6 +339,35 @@ func TestBatchInsertCompatibilityAlias(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("compat batch insert: %v", err)
+	}
+}
+
+func TestOpenOptionsEnableVectorCompatibilityAlias(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "compat-open.db")
+
+	db, err := Open(dbPath, OpenOptions{
+		Create:           true,
+		EnableVector:     true,
+		VectorDimensions: 2,
+	})
+	if err != nil {
+		t.Fatalf("open db with compatibility alias: %v", err)
+	}
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			t.Fatalf("close db: %v", closeErr)
+		}
+	}()
+
+	err = db.Update(func(tx *Tx) error {
+		node, err := tx.CreateNode(CreateNodeOptions{Labels: []string{"Doc"}})
+		if err != nil {
+			return err
+		}
+		return tx.SetVector(node.ID, "embedding", []float32{1.0, 0.0})
+	})
+	if err != nil {
+		t.Fatalf("set vector with compatibility alias: %v", err)
 	}
 }
 

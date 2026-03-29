@@ -85,7 +85,7 @@ import (
 func main() {
 	db, err := latticedb.Open("knowledge.db", latticedb.OpenOptions{
 		Create:           true,
-		EnableVector:     true,
+		EnableVectors:    true,
 		VectorDimensions: 4,
 	})
 	if err != nil {

@@ -8,6 +8,8 @@
 import { getFFI, EmbeddingClientHandle } from './ffi';
 import { EmbeddingConfig } from './types';
 
+export { EmbeddingApiFormat, EmbeddingConfig } from './types';
+
 /**
  * Generate a hash embedding for text (built-in, no external service).
  *

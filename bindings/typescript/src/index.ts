@@ -1,7 +1,9 @@
 /**
- * Lattice: Embedded Knowledge Graph Database
+ * Lattice: Embedded Property-Graph Database
  *
  * TypeScript bindings for the Lattice database.
+ * Embedding helpers are also available from the dedicated
+ * `@hajewski/latticedb/embedding` entrypoint.
  *
  * @example
  * ```typescript

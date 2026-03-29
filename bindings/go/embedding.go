@@ -2,14 +2,25 @@ package latticedb
 
 import cgobridge "github.com/jeffhajewski/latticedb/bindings/go/internal/cgo"
 
+// EmbeddingClient is a compatibility-root export for the optional embedding
+// helpers. Prefer package github.com/jeffhajewski/latticedb/bindings/go/embedding
+// in new code.
 type EmbeddingClient struct {
 	raw *cgobridge.EmbeddingClient
 }
 
+// HashEmbed generates a deterministic built-in embedding.
+//
+// Prefer package github.com/jeffhajewski/latticedb/bindings/go/embedding in
+// new code.
 func HashEmbed(text string, dimensions uint16) ([]float32, error) {
 	return cgobridge.HashEmbed(text, dimensions)
 }
 
+// NewEmbeddingClient constructs an HTTP embedding client.
+//
+// Prefer package github.com/jeffhajewski/latticedb/bindings/go/embedding in
+// new code.
 func NewEmbeddingClient(config EmbeddingConfig) (*EmbeddingClient, error) {
 	raw, err := cgobridge.NewEmbeddingClient(cgobridge.EmbeddingConfig{
 		Endpoint:  config.Endpoint,

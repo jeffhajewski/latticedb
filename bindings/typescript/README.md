@@ -220,14 +220,14 @@ const precise = await db.ftsSearchFuzzy("machne", {
 
 ### Embeddings
 
-LatticeDB includes a built-in hash embedding function and an HTTP client for external embedding services.
+LatticeDB includes a built-in hash embedding function and an HTTP client for external embedding services. For new code, prefer the dedicated `@hajewski/latticedb/embedding` entrypoint. The package root still re-exports these helpers for compatibility.
 
 #### Hash Embeddings (Built-in)
 
 Deterministic, no external service needed. Useful for testing or simple keyword-based similarity:
 
 ```typescript
-import { hashEmbed } from "@hajewski/latticedb";
+import { hashEmbed } from "@hajewski/latticedb/embedding";
 
 const vec = hashEmbed("hello world", 128);
 console.log(vec.length); // 128
@@ -238,7 +238,7 @@ console.log(vec.length); // 128
 Connect to Ollama, OpenAI, or compatible APIs:
 
 ```typescript
-import { EmbeddingClient, EmbeddingApiFormat } from "@hajewski/latticedb";
+import { EmbeddingClient, EmbeddingApiFormat } from "@hajewski/latticedb/embedding";
 
 // Ollama (default)
 const client = new EmbeddingClient({

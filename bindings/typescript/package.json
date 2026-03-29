@@ -4,6 +4,18 @@
   "description": "TypeScript bindings for Lattice embedded property-graph database with vector and BM25 full-text search",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "require": "./dist/index.js",
+      "default": "./dist/index.js"
+    },
+    "./embedding": {
+      "types": "./dist/embedding.d.ts",
+      "require": "./dist/embedding.js",
+      "default": "./dist/embedding.js"
+    }
+  },
   "scripts": {
     "build": "tsc",
     "test": "jest",

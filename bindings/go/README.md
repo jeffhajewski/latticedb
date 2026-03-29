@@ -164,19 +164,25 @@ For a larger end-to-end example, see [examples/go](../../examples/go).
 
 ## Embeddings
 
+Embedding helpers are available from the dedicated package `github.com/jeffhajewski/latticedb/bindings/go/embedding`. The root `latticedb` package still re-exports them for compatibility, but new code should prefer the subpackage.
+
 Built-in deterministic embeddings:
 
 ```go
-vec, err := latticedb.HashEmbed("hello world", 128)
+import latticeembedding "github.com/jeffhajewski/latticedb/bindings/go/embedding"
+
+vec, err := latticeembedding.Hash("hello world", 128)
 ```
 
 HTTP embedding client:
 
 ```go
-client, err := latticedb.NewEmbeddingClient(latticedb.EmbeddingConfig{
+import latticeembedding "github.com/jeffhajewski/latticedb/bindings/go/embedding"
+
+client, err := latticeembedding.NewClient(latticeembedding.Config{
 	Endpoint:  "http://localhost:11434/api/embeddings",
 	Model:     "nomic-embed-text",
-	APIFormat: latticedb.EmbeddingAPIFormatOllama,
+	APIFormat: latticeembedding.APIFormatOllama,
 })
 if err != nil {
 	log.Fatal(err)

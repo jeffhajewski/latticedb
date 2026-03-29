@@ -167,14 +167,14 @@ results = db.fts_search_fuzzy(
 
 ### Embeddings
 
-LatticeDB includes a built-in hash embedding function and an HTTP client for external embedding services.
+LatticeDB includes a built-in hash embedding function and an HTTP client for external embedding services. For new code, prefer the dedicated `latticedb.embedding` module. The package root still re-exports these helpers for compatibility.
 
 #### Hash Embeddings (Built-in)
 
 Deterministic, no external service needed. Useful for testing or simple keyword-based similarity:
 
 ```python
-from latticedb import hash_embed
+from latticedb.embedding import hash_embed
 
 vec = hash_embed("hello world", dimensions=128)
 print(vec.shape)  # (128,)
@@ -185,7 +185,7 @@ print(vec.shape)  # (128,)
 Connect to Ollama, OpenAI, or compatible APIs:
 
 ```python
-from latticedb import EmbeddingClient, EmbeddingApiFormat
+from latticedb.embedding import EmbeddingClient, EmbeddingApiFormat
 
 # Ollama (default)
 with EmbeddingClient("http://localhost:11434") as client:

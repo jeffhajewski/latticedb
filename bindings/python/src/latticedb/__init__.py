@@ -1,7 +1,7 @@
 """
-Lattice: Embedded Knowledge Graph Database
+Lattice: Embedded Property-Graph Database
 
-A single-file knowledge graph database for AI/RAG applications.
+A single-file local database for connected, semantic, and textual data.
 Combines property graph storage, HNSW vector search, and BM25 full-text search.
 """
 

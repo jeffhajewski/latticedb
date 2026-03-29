@@ -1,12 +1,15 @@
 # LatticeDB
 
-**The embedded knowledge graph for AI.**
+**Embedded property-graph database with native vector and full-text indexing.**
 
-LatticeDB is a single-file database that combines a property graph, vector search, and full-text search. It's built for RAG, agents, and any application where relationships between data matter as much as the data itself.
+LatticeDB is a single-file local database for connected, semantic, and textual data. It lets you traverse relationships, run vector similarity search, and do BM25 full-text search over the same dataset in one engine and one query layer. It is designed for relationship-heavy workloads on a single machine, with zero-config operation and an embedded single-writer model.
+
+LatticeDB is an embedded, single-file graph database that lets local applications query the same data by relationship, semantics, and text. Workloads like Graph RAG, agent memory, and local knowledge tools are examples built on those primitives, not the definition of the engine.
 
 - **One file.** Your entire database is a single portable file. No server, no configuration.
-- **Three search modes.** Graph traversal, HNSW vector similarity, and BM25 full-text — in one query.
-- **Sub-millisecond.** 0.13 μs node lookups. 0.83 ms vector search at 1M vectors with 100% recall.
+- **One query layer.** Graph traversal, HNSW vector similarity, and BM25 full-text — in the same query language.
+- **Local-first.** Designed for one owning process on one machine, with WAL-backed durability.
+- **Fast.** 0.13 μs node lookups. 0.83 ms vector search at 1M vectors with 100% recall.
 
 ```cypher
 -- Find chunks similar to a query, traverse to their document, then to the author
@@ -41,7 +44,7 @@ npm install @hajewski/latticedb
 **Go**
 
 See [bindings/go/README.md](bindings/go/README.md) for the current cgo workflow. The default consumer path uses installed `pkg-config` metadata; in-repo development can use `-tags repolocal` against `zig-out/lib`.
-There is also a runnable Graph RAG example in [examples/go](examples/go).
+There is also a runnable graph/vector/text retrieval example in [examples/go](examples/go).
 
 ## Example
 
@@ -311,7 +314,7 @@ LatticeDB's inverted index with BM25 scoring is ~300x faster than SQLite FTS5 an
 **Graph**
 - Nodes and edges with labels and arbitrary properties
 - Multi-hop traversal, variable-length paths (`*1..3`)
-- ACID transactions with snapshot isolation
+- ACID transactions with commit/rollback and crash recovery
 - MERGE, WITH, UNWIND, aggregations (`count`, `sum`, `avg`, `min`, `max`, `collect`)
 
 **Vector Search**
@@ -333,14 +336,16 @@ LatticeDB's inverted index with BM25 scoring is ~300x faster than SQLite FTS5 an
 **Operations**
 - Single-file storage with write-ahead log for crash recovery
 - Zero configuration — open a file and start working
-- Clean C API; Python and TypeScript bindings wrap it
+- Embedded single-writer model for local applications
+- Clean C API; Python, TypeScript, and Go bindings wrap it
 
 ## Use Cases
 
-- **RAG Systems** — Vector search finds relevant chunks, graph traversal gathers context
-- **Knowledge Graphs** — Linked notes and documents with semantic search
-- **AI Agents** — Persistent memory with relationship awareness
-- **Local Development** — Lightweight alternative to Neo4j or Weaviate for prototyping
+- **Connected local data** — Notes, documents, catalogs, citation graphs, and entity graphs
+- **Graph plus retrieval** — Relationship traversal, semantic search, and lexical search over the same dataset
+- **Local knowledge tools** — Embedded apps that need graph structure without running a separate server
+- **Agent memory and RAG pipelines** — One example class of workload built on the graph/vector/text substrate
+- **Local development** — Lightweight alternative to Neo4j or Weaviate for prototyping on one machine
 
 ## When to Use Something Else
 

@@ -1,8 +1,14 @@
-# Lattice: How It Works
+# LatticeDB: How It Works
 
 This documentation explains how Lattice's storage engine works, from the ground
 up. Each chapter builds on the previous, showing how simple primitives combine
 to create a durable, transactional database.
+
+LatticeDB is an embedded, single-file property-graph database with native
+vector and BM25 full-text indexing. These docs explain that substrate: local
+storage, graph layout, vector search, full-text search, and the shared query
+layer over all three. Workloads like Graph RAG or agent memory are examples of
+what the engine enables, not the definition of the engine itself.
 
 ## The Stack
 

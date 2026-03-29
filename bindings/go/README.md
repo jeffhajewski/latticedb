@@ -1,6 +1,6 @@
 # LatticeDB Go Bindings
 
-Go bindings for [LatticeDB](https://github.com/jeffhajewski/latticedb), the embedded knowledge graph database for AI and RAG applications.
+Go bindings for [LatticeDB](https://github.com/jeffhajewski/latticedb), an embedded single-file property-graph database with native vector and BM25 full-text search.
 
 ## Status
 

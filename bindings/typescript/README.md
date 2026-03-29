@@ -1,6 +1,6 @@
 # LatticeDB TypeScript Bindings
 
-TypeScript/Node.js bindings for [LatticeDB](https://github.com/jeffhajewski/latticedb), an embedded knowledge graph database for AI/RAG applications.
+TypeScript/Node.js bindings for [LatticeDB](https://github.com/jeffhajewski/latticedb), an embedded single-file property-graph database with native vector and BM25 full-text search.
 
 ## Installation
 

@@ -2,7 +2,7 @@
 
 ## Overview
 
-Lattice provides approximate nearest neighbor (ANN) search using the HNSW (Hierarchical Navigable Small World) algorithm. This enables semantic search over high-dimensional embedding vectors—a core requirement for AI/RAG applications.
+Lattice provides approximate nearest neighbor (ANN) search using the HNSW (Hierarchical Navigable Small World) algorithm. This enables semantic search over high-dimensional embedding vectors for local similarity-search workloads such as retrieval, recommendation, clustering, and semantic lookup.
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐

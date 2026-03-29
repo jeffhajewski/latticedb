@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "latticedb"
 version = "0.4.2"
-description = "Embedded knowledge graph database for AI and RAG applications"
+description = "Embedded single-file property-graph database with vector and BM25 full-text search"
 readme = "README.md"
 license = {text = "MIT"}
 requires-python = ">=3.9"
@@ -28,7 +28,7 @@ classifiers = [
     "Topic :: Database",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
-keywords = ["database", "graph", "vector", "embeddings", "rag", "ai", "knowledge-graph"]
+keywords = ["database", "graph", "property-graph", "vector", "full-text", "embedded", "cypher", "hnsw", "bm25"]
 
 dependencies = [
     "numpy>=1.20.0",

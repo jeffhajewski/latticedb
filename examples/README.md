@@ -1,13 +1,13 @@
-# Research Paper Graph RAG
+# Graph, Vector, and Full-Text Retrieval Example
 
-Demonstrates why **Graph RAG** finds more relevant context than plain vector search, using a citation knowledge graph of 18 real AI/ML papers.
+This example uses a research-paper citation graph to show how graph traversal, vector similarity, and BM25 full-text search complement each other in one local database. The workflow happens to be Graph RAG, but the point of the demo is to illustrate LatticeDB's underlying graph/vector/text primitives rather than define the database as a RAG product.
 
 ## What This Shows
 
 1. **Vector Search** finds semantically similar papers — but misses foundational works and the broader research landscape
 2. **Graph Traversal** follows citations, co-authorship, and topic links to discover papers that vector similarity alone cannot surface
 3. **Full-Text Search** adds keyword precision for exact terminology
-4. **Graph RAG** combines all three to build richer context for an LLM
+4. **Graph RAG** is one way to combine those primitives to build richer context for an LLM
 
 ## Running the Examples
 
@@ -39,7 +39,7 @@ go run .
 
 ### With LLM Answers (Optional)
 
-Set `ANTHROPIC_API_KEY` to compare LLM answers using vector-only vs Graph RAG context:
+Set `ANTHROPIC_API_KEY` to compare LLM answers using vector-only vs graph-expanded context:
 
 ```bash
 # Python
@@ -62,6 +62,6 @@ python paper_graph_rag.py --ollama
 
 ## The Key Insight
 
-Vector search finds 5 papers directly relevant to "How can retrieval improve large language model accuracy?" — but by traversing the citation graph, author connections, and full-text keyword matches, Graph RAG discovers 9 additional papers (14 total) including foundational works like "Attention Is All You Need" and the latest Graph RAG research. These are papers that vector similarity misses because their abstracts use different vocabulary, but the citation graph reveals they are deeply connected to the query topic.
+Vector search finds 5 papers directly relevant to "How can retrieval improve large language model accuracy?" — but by traversing the citation graph, author connections, and full-text keyword matches, the graph-expanded workflow discovers 9 additional papers (14 total) including foundational works like "Attention Is All You Need" and the latest Graph RAG research. These are papers that vector similarity misses because their abstracts use different vocabulary, but the citation graph reveals they are deeply connected to the query topic.
 
-When both sets of context are sent to an LLM, the Graph RAG answer is noticeably more comprehensive — it can trace the evolution from transformers through RAG to Graph RAG, cite foundational papers, and identify the current research frontier.
+When both sets of context are sent to an LLM, the graph-expanded answer is noticeably more comprehensive — it can trace the evolution from transformers through RAG to Graph RAG, cite foundational papers, and identify the current research frontier. The broader point is that LatticeDB lets one local application combine relationship, semantic, and text retrieval over the same data without splitting the workload across separate systems.

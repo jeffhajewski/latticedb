@@ -1,7 +1,7 @@
 {
   "name": "@hajewski/latticedb",
   "version": "0.4.2",
-  "description": "TypeScript bindings for Lattice embedded knowledge graph database",
+  "description": "TypeScript bindings for Lattice embedded property-graph database with vector and BM25 full-text search",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "scripts": {
@@ -16,11 +16,10 @@
   "keywords": [
     "database",
     "graph",
+    "property-graph",
     "vector",
-    "embeddings",
-    "rag",
-    "ai",
-    "knowledge-graph",
+    "full-text",
+    "embedded",
     "cypher",
     "hnsw",
     "bm25"

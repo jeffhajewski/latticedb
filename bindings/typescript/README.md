@@ -104,7 +104,7 @@ await db.close();
 - **Vector Search** - HNSW-based k-NN search for embeddings
 - **Full-Text Search** - BM25-ranked search with tokenization
 - **Fuzzy Search** - Typo-tolerant full-text search with configurable edit distance
-- **Batch Insert** - Efficient bulk insertion of nodes with vectors
+- **Bulk Vector Insertion** - Efficient insertion of vector-bearing nodes
 - **Embeddings** - Built-in hash embeddings and HTTP client for external services
 - **Cypher Queries** - Pattern matching with `<=>` (vector) and `@@` (FTS) extensions
 - **Transactions** - ACID-compliant read/write transactions
@@ -159,7 +159,8 @@ interface DatabaseOptions {
 - `await txn.deleteNode(nodeId)` - Delete a node
 - `await txn.setProperty(nodeId, key, value)` - Set a property
 - `await txn.setVector(nodeId, key, vector)` - Set a vector embedding
-- `await txn.batchInsert(label, vectors)` - Batch insert nodes with vectors
+- `await txn.batchInsertVectors(label, vectors)` - Insert vector-bearing nodes in one call
+- `await txn.batchInsert(label, vectors)` - Compatibility alias for `batchInsertVectors`
 - `await txn.ftsIndex(nodeId, text)` - Index text for full-text search
 - `await txn.createEdge(sourceId, targetId, edgeType, options?)` - Create an edge
 - `await txn.deleteEdge(sourceId, targetId, edgeType)` - Delete an edge
@@ -168,7 +169,7 @@ interface DatabaseOptions {
 - `await txn.removeEdgeProperty(edgeId, key)` - Remove an edge property by stable edge ID
 - `txn.commit()` / `txn.rollback()` - Commit or rollback
 
-### Batch Insert
+### Bulk Vector Insertion
 
 Insert many nodes with vectors in a single efficient call:
 
@@ -186,7 +187,7 @@ await db.write(async (txn) => {
   const vectors = Array.from({ length: 1000 }, () =>
     Float32Array.from({ length: 128 }, () => Math.random())
   );
-  const nodeIds = await txn.batchInsert("Document", vectors);
+  const nodeIds = await txn.batchInsertVectors("Document", vectors);
   console.log(`Created ${nodeIds.length} nodes`);
 });
 

@@ -116,7 +116,8 @@ Database(
 - `delete_node(node_id)` - Delete a node
 - `set_property(node_id, key, value)` - Set a property on a node
 - `set_vector(node_id, key, vector)` - Set a vector embedding
-- `batch_insert(label, vectors)` - Batch insert nodes with vectors (see below)
+- `batch_insert_vectors(label, vectors)` - Insert vector-bearing nodes in one call
+- `batch_insert(label, vectors)` - Compatibility alias for `batch_insert_vectors`
 - `fts_index(node_id, text)` - Index text for full-text search
 - `create_edge(source_id, target_id, edge_type, properties=None)` - Create an edge
 - `delete_edge(source_id, target_id, edge_type)` - Delete an edge
@@ -125,7 +126,7 @@ Database(
 - `remove_edge_property(edge_id, key)` - Remove an edge property by stable edge ID
 - `commit()` / `rollback()` - Commit or rollback the transaction
 
-### Batch Insert
+### Bulk Vector Insertion
 
 Insert many nodes with vectors in a single efficient call:
 
@@ -135,7 +136,7 @@ import numpy as np
 with Database("vectors.db", create=True, enable_vector=True, vector_dimensions=128) as db:
     with db.write() as txn:
         vectors = np.random.rand(1000, 128).astype(np.float32)
-        node_ids = txn.batch_insert("Document", vectors)
+        node_ids = txn.batch_insert_vectors("Document", vectors)
         print(f"Created {len(node_ids)} nodes")
         txn.commit()
 ```

@@ -326,12 +326,12 @@ class Transaction:
         )
         check_error(code)
 
-    def batch_insert(
+    def batch_insert_vectors(
         self,
         label: str,
         vectors: "NDArray[np.float32]",
     ) -> List[int]:
-        """Insert N nodes with vectors in a single FFI call.
+        """Insert N vector-bearing nodes in a single FFI call.
 
         Args:
             label: Label for all nodes.
@@ -386,6 +386,14 @@ class Transaction:
             )
 
         return [node_ids[i] for i in range(created)]
+
+    def batch_insert(
+        self,
+        label: str,
+        vectors: "NDArray[np.float32]",
+    ) -> List[int]:
+        """Compatibility alias for :meth:`batch_insert_vectors`."""
+        return self.batch_insert_vectors(label, vectors)
 
     def fts_index(
         self,

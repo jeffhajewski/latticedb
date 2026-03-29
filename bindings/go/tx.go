@@ -214,7 +214,8 @@ func (tx *Tx) GetIncomingEdges(nodeID NodeID) ([]Edge, error) {
 	return edgeRecordsToEdges(records), nil
 }
 
-func (tx *Tx) BatchInsert(label string, vectors [][]float32) ([]NodeID, error) {
+// BatchInsertVectors inserts multiple vector-bearing nodes in a single call.
+func (tx *Tx) BatchInsertVectors(label string, vectors [][]float32) ([]NodeID, error) {
 	if err := tx.ensureWritable(); err != nil {
 		return nil, err
 	}
@@ -227,6 +228,11 @@ func (tx *Tx) BatchInsert(label string, vectors [][]float32) ([]NodeID, error) {
 		out[i] = NodeID(nodeID)
 	}
 	return out, nil
+}
+
+// BatchInsert is a compatibility alias for BatchInsertVectors.
+func (tx *Tx) BatchInsert(label string, vectors [][]float32) ([]NodeID, error) {
+	return tx.BatchInsertVectors(label, vectors)
 }
 
 func (tx *Tx) FTSIndex(nodeID NodeID, text string) error {

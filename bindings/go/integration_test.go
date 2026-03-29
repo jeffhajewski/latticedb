@@ -215,7 +215,7 @@ func TestEdgePropertiesAndQueryRoundTrip(t *testing.T) {
 	}
 }
 
-func TestBatchInsertVectorSearchAndFTS(t *testing.T) {
+func TestBatchInsertVectorsVectorSearchAndFTS(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "search.db")
 
 	db, err := Open(dbPath, OpenOptions{
@@ -234,7 +234,7 @@ func TestBatchInsertVectorSearchAndFTS(t *testing.T) {
 
 	var nodeIDs []NodeID
 	err = db.Update(func(tx *Tx) error {
-		ids, err := tx.BatchInsert("Document", [][]float32{
+		ids, err := tx.BatchInsertVectors("Document", [][]float32{
 			{1.0, 0.0, 0.0, 0.0},
 			{0.0, 1.0, 0.0, 0.0},
 			{0.9, 0.1, 0.0, 0.0},
@@ -304,6 +304,41 @@ func TestBatchInsertVectorSearchAndFTS(t *testing.T) {
 	}
 	if len(fuzzyResults) == 0 {
 		t.Fatalf("expected fuzzy fts results")
+	}
+}
+
+func TestBatchInsertCompatibilityAlias(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "compat.db")
+
+	db, err := Open(dbPath, OpenOptions{
+		Create:           true,
+		EnableVector:     true,
+		VectorDimensions: 2,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			t.Fatalf("close db: %v", closeErr)
+		}
+	}()
+
+	err = db.Update(func(tx *Tx) error {
+		ids, err := tx.BatchInsert("Document", [][]float32{
+			{1.0, 0.0},
+			{0.0, 1.0},
+		})
+		if err != nil {
+			return err
+		}
+		if len(ids) != 2 {
+			t.Fatalf("expected 2 ids, got %d", len(ids))
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("compat batch insert: %v", err)
 	}
 }
 

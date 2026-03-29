@@ -196,19 +196,29 @@ export class Transaction {
   }
 
   /**
-   * Batch insert multiple nodes with vectors in a single call.
+   * Insert multiple vector-bearing nodes in a single call.
    *
    * @param label - Label for all nodes
    * @param vectors - Array of vectors (one per node)
    * @returns Array of created node IDs
    */
-  async batchInsert(
+  async batchInsertVectors(
     label: string,
     vectors: Float32Array[]
   ): Promise<bigint[]> {
     this.ensureWritable();
     const nodes = vectors.map((v) => ({ label, vector: v }));
     return this.ffi.batchInsert(this.txnHandle!, nodes);
+  }
+
+  /**
+   * Compatibility alias for batchInsertVectors().
+   */
+  async batchInsert(
+    label: string,
+    vectors: Float32Array[]
+  ): Promise<bigint[]> {
+    return this.batchInsertVectors(label, vectors);
   }
 
   /**

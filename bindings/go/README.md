@@ -12,7 +12,7 @@ This is a cgo-backed client built on the stable C ABI. The current API supports:
 - Cypher queries with nested parameters and materialized results
 - vector storage and search
 - full-text search and fuzzy search
-- batch insert of nodes with vectors
+- bulk insertion of vector-bearing nodes
 - built-in hash embeddings
 - HTTP embedding client
 

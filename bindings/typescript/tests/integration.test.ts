@@ -736,13 +736,13 @@ describeIfNative('Database Integration', () => {
       await db.open();
     });
 
-    test('batch insert returns correct node IDs', async () => {
+    test('batch insert vectors returns correct node IDs', async () => {
       const nodeIds = await db.write(async (txn) => {
         const vectors: Float32Array[] = [];
         for (let i = 0; i < 10; i++) {
           vectors.push(new Float32Array([i, i + 1, i + 2, i + 3]));
         }
-        return await txn.batchInsert('Document', vectors);
+        return await txn.batchInsertVectors('Document', vectors);
       });
 
       expect(nodeIds.length).toBe(10);
@@ -766,7 +766,7 @@ describeIfNative('Database Integration', () => {
           new Float32Array([0.0, 0.0, 1.0, 0.0]),
           new Float32Array([0.9, 0.1, 0.0, 0.0]),
         ];
-        return await txn.batchInsert('Document', vectors);
+        return await txn.batchInsertVectors('Document', vectors);
       });
 
       expect(nodeIds.length).toBe(4);
@@ -780,10 +780,21 @@ describeIfNative('Database Integration', () => {
 
     test('batch insert with empty array', async () => {
       const nodeIds = await db.write(async (txn) => {
-        return await txn.batchInsert('Document', []);
+        return await txn.batchInsertVectors('Document', []);
       });
 
       expect(nodeIds.length).toBe(0);
+    });
+
+    test('batchInsert remains available as a compatibility alias', async () => {
+      const nodeIds = await db.write(async (txn) => {
+        return await txn.batchInsert('Document', [
+          new Float32Array([1.0, 0.0, 0.0, 0.0]),
+          new Float32Array([0.0, 1.0, 0.0, 0.0]),
+        ]);
+      });
+
+      expect(nodeIds.length).toBe(2);
     });
   });
 

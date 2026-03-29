@@ -697,8 +697,8 @@ class TestQueries:
 class TestBatchInsert:
     """Tests for batch insert operations."""
 
-    def test_batch_insert_basic(self, tmp_path):
-        """Test batch inserting nodes with vectors."""
+    def test_batch_insert_vectors_basic(self, tmp_path):
+        """Test bulk inserting vector-bearing nodes."""
         pytest.importorskip("numpy")
         import numpy as np
 
@@ -710,7 +710,7 @@ class TestBatchInsert:
                     [[float(i + j) for j in range(4)] for i in range(10)],
                     dtype=np.float32,
                 )
-                node_ids = txn.batch_insert("Document", vectors)
+                node_ids = txn.batch_insert_vectors("Document", vectors)
 
                 assert len(node_ids) == 10
                 # All IDs should be unique and positive
@@ -743,7 +743,7 @@ class TestBatchInsert:
                     ],
                     dtype=np.float32,
                 )
-                node_ids = txn.batch_insert("Document", vectors)
+                node_ids = txn.batch_insert_vectors("Document", vectors)
                 assert len(node_ids) == 5
                 txn.commit()
 
@@ -765,8 +765,28 @@ class TestBatchInsert:
         with Database(db_path, create=True, enable_vector=True, vector_dimensions=4) as db:
             with db.write() as txn:
                 vectors = np.empty((0, 4), dtype=np.float32)
-                node_ids = txn.batch_insert("Document", vectors)
+                node_ids = txn.batch_insert_vectors("Document", vectors)
                 assert len(node_ids) == 0
+                txn.commit()
+
+    def test_batch_insert_alias_still_works(self, tmp_path):
+        """Test compatibility alias for batch_insert_vectors."""
+        pytest.importorskip("numpy")
+        import numpy as np
+
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True, enable_vector=True, vector_dimensions=2) as db:
+            with db.write() as txn:
+                vectors = np.array(
+                    [
+                        [1.0, 0.0],
+                        [0.0, 1.0],
+                    ],
+                    dtype=np.float32,
+                )
+                node_ids = txn.batch_insert("Document", vectors)
+                assert len(node_ids) == 2
                 txn.commit()
 
 

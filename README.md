@@ -320,7 +320,7 @@ LatticeDB's inverted index with BM25 scoring is ~300x faster than SQLite FTS5 an
 **Vector Search**
 - HNSW approximate nearest neighbor with configurable M, ef
 - Built-in hash embeddings or HTTP client for Ollama/OpenAI
-- Batch insert for bulk loading
+- Bulk vector node insertion for fast ingestion
 
 **Full-Text Search**
 - BM25-ranked inverted index with tokenization and stemming

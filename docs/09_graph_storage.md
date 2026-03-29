@@ -132,8 +132,8 @@ Value Types:
   3 = Float64 (8 bytes, IEEE 754)
   4 = String (u32 length + bytes)
   5 = Bytes (u32 length + bytes)
-  6 = List (supported internally by storage/query layers; not yet exposed by the public C API)
-  7 = Map (supported internally by storage/query layers; not yet exposed by the public C API)
+  6 = List
+  7 = Map
 ```
 
 ### API
@@ -367,9 +367,10 @@ Where n = total items in the respective B+Tree.
 
 ## Current Limitations
 
-1. **No MVCC**: All operations see latest data (no snapshot isolation yet)
-2. **Property updates overwrite**: No partial property updates
-3. **No underflow handling**: Deleted entries leave wasted space until compaction
+The public database API is not yet fully transaction-isolated end-to-end. The transaction manager contains snapshot-oriented MVCC machinery above this layer, but this chapter only describes the underlying graph-storage structures.
+
+1. **Property updates overwrite**: No partial property updates at the storage-record level
+2. **No underflow handling**: Deleted entries leave wasted space until compaction
 
 ## Future Enhancements
 

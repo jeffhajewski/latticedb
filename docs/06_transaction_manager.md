@@ -4,6 +4,8 @@
 
 A transaction is a **logical unit of work** - a group of operations that should either all succeed or all fail together.
 
+This document explains the internal transaction machinery. It is not, by itself, the end-to-end public database contract: not every database API operation is fully wired through these stronger semantics yet. For the current public engine-level guarantee that a future `latticedb-go` implementation should match, see [13_engine_conformance.md](13_engine_conformance.md).
+
 ```
 Without transactions:                With transactions:
 
@@ -24,8 +26,10 @@ Transactions guarantee four properties:
 |----------|---------|-------------------|
 | **A**tomicity | All or nothing | WAL + rollback |
 | **C**onsistency | Valid state to valid state | Application logic |
-| **I**solation | Transactions don't interfere | Timestamps + MVCC |
+| **I**solation | Internal target: transactions don't interfere | Timestamps + MVCC |
 | **D**urability | Committed = permanent | WAL + fsync |
+
+The isolation row describes the transaction manager's intended machinery, not a stronger public guarantee than the engine currently exposes end-to-end. In particular, overlapping live write transactions are still outside the portable compatibility contract; see [13_engine_conformance.md](13_engine_conformance.md).
 
 ## The Core Data Structures
 
@@ -271,6 +275,8 @@ commit_ts: Assigned at COMMIT - marks when changes become visible to others
 ```
 
 ### Snapshot Isolation Example
+
+This example describes the transaction manager's intended MVCC behavior. It should not be read as a stronger end-to-end promise than the public engine contract currently makes for long-lived concurrent transactions.
 
 ```
 Timeline:

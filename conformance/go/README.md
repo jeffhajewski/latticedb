@@ -12,7 +12,7 @@ The initial suite covers:
 - stable monotonic edge identity across rollback and reopen
 - nested value round-trips
 - missing versus stored `NULL` semantics in direct property APIs
-- read-only rejection, own-write visibility, commit visibility to new transactions, and rollback cleanup
+- read-only rejection, own-write visibility, commit visibility to newly started transactions, and rollback cleanup
 - rollback behavior
 - query mutation atomicity
 - query `SET ... = null` removal semantics
@@ -21,7 +21,9 @@ The initial suite covers:
 - vector and full-text query operators preserving additional `MATCH` bindings
 - query cache management behavior
 - crash recovery for committed graph state, secondary labels, committed node-property updates, committed edge-property updates, and aborted tail inserts through an adapter-provided recovery harness
-- export and dump invariants through the public CLI surface
+- canonical dump/export invariants through the public CLI surface
+
+The suite intentionally does not freeze overlapping live writer behavior. Portable callers should serialize write transactions that may touch the same logical record, and future engines are free to provide stronger conflict detection or isolation than the current reference engine exposes publicly.
 
 ## Running
 

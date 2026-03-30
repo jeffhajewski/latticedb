@@ -42,12 +42,12 @@ export {
   CreateEdgeOptions,
   VectorSearchOptions,
   FtsSearchOptions,
-  EmbeddingApiFormat,
-  EmbeddingConfig,
 } from './types';
 import {
   hashEmbed as embeddingHashEmbed,
   EmbeddingClient as EmbeddingClientClass,
+  EmbeddingApiFormat as embeddingApiFormat,
+  type EmbeddingConfig as EmbeddingConfigType,
 } from './embedding';
 export {
   isLibraryAvailable,
@@ -66,6 +66,16 @@ export const hashEmbed: typeof embeddingHashEmbed = embeddingHashEmbed;
  * @deprecated Use `@hajewski/latticedb/embedding` instead.
  */
 export const EmbeddingClient: typeof EmbeddingClientClass = EmbeddingClientClass;
+
+/**
+ * @deprecated Use `@hajewski/latticedb/embedding` instead.
+ */
+export const EmbeddingApiFormat: typeof embeddingApiFormat = embeddingApiFormat;
+
+/**
+ * @deprecated Use `@hajewski/latticedb/embedding` instead.
+ */
+export type EmbeddingConfig = EmbeddingConfigType;
 
 /**
  * Get the library version.

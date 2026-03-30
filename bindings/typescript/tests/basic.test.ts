@@ -9,13 +9,14 @@ import { Value, Node, Edge, QueryResult, VectorSearchResult } from '../src/types
 import { Database } from '../src/database';
 import {
   EmbeddingClient as RootEmbeddingClient,
+  EmbeddingApiFormat as RootEmbeddingApiFormat,
   LatticeError,
   LatticeQueryError,
   QueryErrorStage,
   hashEmbed as rootHashEmbed,
   version,
 } from '../src/index';
-import { EmbeddingClient, hashEmbed } from '../src/embedding';
+import { EmbeddingClient, EmbeddingApiFormat, hashEmbed } from '../src/embedding';
 import { isLibraryAvailable, LatticeErrorCode, LatticeFFI, LatticeValueType } from '../src/ffi';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -265,6 +266,15 @@ describe('Embedding utilities', () => {
   test('root embedding exports remain compatibility aliases', () => {
     expect(rootHashEmbed).toBe(hashEmbed);
     expect(RootEmbeddingClient).toBe(EmbeddingClient);
+    expect(RootEmbeddingApiFormat).toBe(EmbeddingApiFormat);
+
+    const rootConfig: import('../src/index').EmbeddingConfig = {
+      endpoint: 'http://localhost:11434',
+      apiFormat: RootEmbeddingApiFormat.Ollama,
+    };
+    const preferredConfig: import('../src/embedding').EmbeddingConfig = rootConfig;
+    expect(preferredConfig.endpoint).toBe('http://localhost:11434');
+    expect(preferredConfig.apiFormat).toBe(EmbeddingApiFormat.Ollama);
   });
 
   test('EmbeddingClient.embed throws after close', () => {

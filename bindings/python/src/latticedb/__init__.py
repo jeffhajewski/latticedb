@@ -15,7 +15,7 @@ from latticedb.types import Node, Edge, QueryResult, Value, VectorSearchResult, 
 from latticedb.embedding import (
     hash_embed as _hash_embed,
     EmbeddingClient as _EmbeddingClient,
-    EmbeddingApiFormat,
+    EmbeddingApiFormat as _EmbeddingApiFormat,
 )
 from latticedb._bindings import (
     LatticeError,
@@ -51,6 +51,9 @@ def version() -> str:
     return __version__
 
 __version__ = "0.4.2"
+
+# Deprecated compatibility alias for latticedb.embedding.EmbeddingApiFormat.
+EmbeddingApiFormat = _EmbeddingApiFormat
 
 
 def hash_embed(text: str, dimensions: int = 128):

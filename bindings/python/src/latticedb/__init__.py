@@ -5,11 +5,18 @@ A single-file local database for connected, semantic, and textual data.
 Combines property graph storage, HNSW vector search, and BM25 full-text search.
 """
 
+from __future__ import annotations
+
+import warnings
+
 from latticedb.database import Database
 from latticedb.transaction import Transaction
 from latticedb.types import Node, Edge, QueryResult, Value, VectorSearchResult, FtsSearchResult
-# Compatibility re-exports; prefer `latticedb.embedding` in new code.
-from latticedb.embedding import hash_embed, EmbeddingClient, EmbeddingApiFormat
+from latticedb.embedding import (
+    hash_embed as _hash_embed,
+    EmbeddingClient as _EmbeddingClient,
+    EmbeddingApiFormat,
+)
 from latticedb._bindings import (
     LatticeError,
     LatticeIOError,
@@ -44,6 +51,30 @@ def version() -> str:
     return __version__
 
 __version__ = "0.4.2"
+
+
+def hash_embed(text: str, dimensions: int = 128):
+    """Deprecated compatibility wrapper for :func:`latticedb.embedding.hash_embed`."""
+    warnings.warn(
+        "latticedb.hash_embed is deprecated; use latticedb.embedding.hash_embed",
+        DeprecationWarning,
+        stacklevel=2,
+    )
+    return _hash_embed(text, dimensions=dimensions)
+
+
+class EmbeddingClient(_EmbeddingClient):
+    """Deprecated compatibility wrapper for :class:`latticedb.embedding.EmbeddingClient`."""
+
+    def __init__(self, *args, **kwargs):
+        warnings.warn(
+            "latticedb.EmbeddingClient is deprecated; use latticedb.embedding.EmbeddingClient",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(*args, **kwargs)
+
+
 __all__ = [
     # Core classes
     "Database",
@@ -70,7 +101,7 @@ __all__ = [
     "LatticeOutOfMemoryError",
     "LatticeUnsupportedError",
     "LatticeQueryError",
-    # Embedding compatibility re-exports
+    # Deprecated embedding compatibility re-exports
     "hash_embed",
     "EmbeddingClient",
     "EmbeddingApiFormat",

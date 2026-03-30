@@ -222,7 +222,7 @@ const precise = await db.ftsSearchFuzzy("machne", {
 
 ### Embeddings
 
-LatticeDB includes a built-in hash embedding function and an HTTP client for external embedding services. For new code, prefer the dedicated `@hajewski/latticedb/embedding` entrypoint. The package root still re-exports these helpers for compatibility.
+LatticeDB includes a built-in hash embedding function and an HTTP client for external embedding services. For new code, prefer the dedicated `@hajewski/latticedb/embedding` entrypoint. The package root still exposes deprecated compatibility aliases.
 
 #### Hash Embeddings (Built-in)
 

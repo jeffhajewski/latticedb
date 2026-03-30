@@ -232,37 +232,41 @@ class TestHashEmbed:
 
     def test_basic(self) -> None:
         """Test basic hash embedding."""
-        from latticedb import hash_embed
-
-        vec = hash_embed("hello world", dimensions=128)
+        vec = embedding_mod.hash_embed("hello world", dimensions=128)
         assert isinstance(vec, np.ndarray)
         assert vec.dtype == np.float32
         assert vec.shape == (128,)
 
     def test_deterministic(self) -> None:
         """Test that same text produces same embedding."""
-        from latticedb import hash_embed
-
-        vec1 = hash_embed("test input", dimensions=64)
-        vec2 = hash_embed("test input", dimensions=64)
+        vec1 = embedding_mod.hash_embed("test input", dimensions=64)
+        vec2 = embedding_mod.hash_embed("test input", dimensions=64)
         np.testing.assert_array_equal(vec1, vec2)
 
     def test_different_text(self) -> None:
         """Test that different text produces different embeddings."""
-        from latticedb import hash_embed
-
-        vec1 = hash_embed("hello", dimensions=64)
-        vec2 = hash_embed("world", dimensions=64)
+        vec1 = embedding_mod.hash_embed("hello", dimensions=64)
+        vec2 = embedding_mod.hash_embed("world", dimensions=64)
         assert not np.array_equal(vec1, vec2)
 
     def test_different_dimensions(self) -> None:
         """Test different dimension sizes."""
-        from latticedb import hash_embed
-
-        vec64 = hash_embed("test", dimensions=64)
-        vec256 = hash_embed("test", dimensions=256)
+        vec64 = embedding_mod.hash_embed("test", dimensions=64)
+        vec256 = embedding_mod.hash_embed("test", dimensions=256)
         assert vec64.shape == (64,)
         assert vec256.shape == (256,)
+
+    def test_root_hash_embed_alias_warns(self) -> None:
+        """Deprecated root alias should still work with a warning."""
+        import latticedb
+
+        with pytest.deprecated_call(
+            match=r"latticedb\.hash_embed is deprecated; use latticedb\.embedding\.hash_embed"
+        ):
+            vec = latticedb.hash_embed("hello world", dimensions=32)
+
+        assert isinstance(vec, np.ndarray)
+        assert vec.shape == (32,)
 
 
 class TestErrorMapping:
@@ -526,6 +530,23 @@ class TestEmbeddingClientUnit:
             _ = client.embed("context manager")
 
         assert fake_native.freed_embedding_calls == 1
+
+    def test_root_embedding_client_alias_warns(self, monkeypatch):
+        """Deprecated root alias should still construct and close correctly."""
+        import latticedb
+
+        fake_native = self._install_fake_embedding_native(monkeypatch)
+
+        with pytest.deprecated_call(
+            match=r"latticedb\.EmbeddingClient is deprecated; use latticedb\.embedding\.EmbeddingClient"
+        ):
+            client = latticedb.EmbeddingClient(endpoint="http://localhost:11434/api/embeddings")
+
+        vector = client.embed("deprecated alias")
+        client.close()
+
+        assert fake_native.embed_texts == ["deprecated alias"]
+        assert vector.shape == (4,)
 
 
 class TestPublicApiExports:

@@ -74,6 +74,7 @@ type FTSSearchResult struct {
 	Score  float32
 }
 
+// Deprecated: use package github.com/jeffhajewski/latticedb/bindings/go/embedding.
 type EmbeddingAPIFormat int
 
 const (
@@ -81,6 +82,7 @@ const (
 	EmbeddingAPIFormatOpenAI EmbeddingAPIFormat = EmbeddingAPIFormat(cgobridge.EmbeddingAPIFormatOpenAI)
 )
 
+// Deprecated: use package github.com/jeffhajewski/latticedb/bindings/go/embedding.
 type EmbeddingConfig struct {
 	Endpoint  string
 	Model     string

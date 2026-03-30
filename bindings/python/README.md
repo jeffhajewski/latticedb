@@ -169,7 +169,7 @@ results = db.fts_search_fuzzy(
 
 ### Embeddings
 
-LatticeDB includes a built-in hash embedding function and an HTTP client for external embedding services. For new code, prefer the dedicated `latticedb.embedding` module. The package root still re-exports these helpers for compatibility.
+LatticeDB includes a built-in hash embedding function and an HTTP client for external embedding services. For new code, prefer the dedicated `latticedb.embedding` module. The package root still exposes deprecated compatibility aliases.
 
 #### Hash Embeddings (Built-in)
 

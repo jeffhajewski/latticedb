@@ -7,7 +7,15 @@
 
 import { Value, Node, Edge, QueryResult, VectorSearchResult } from '../src/types';
 import { Database } from '../src/database';
-import { EmbeddingClient, LatticeError, LatticeQueryError, QueryErrorStage, hashEmbed, version } from '../src/index';
+import {
+  EmbeddingClient as RootEmbeddingClient,
+  LatticeError,
+  LatticeQueryError,
+  QueryErrorStage,
+  hashEmbed as rootHashEmbed,
+  version,
+} from '../src/index';
+import { EmbeddingClient, hashEmbed } from '../src/embedding';
 import { isLibraryAvailable, LatticeErrorCode, LatticeFFI, LatticeValueType } from '../src/ffi';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -254,6 +262,11 @@ describe('FFI value conversion guards', () => {
 });
 
 describe('Embedding utilities', () => {
+  test('root embedding exports remain compatibility aliases', () => {
+    expect(rootHashEmbed).toBe(hashEmbed);
+    expect(RootEmbeddingClient).toBe(EmbeddingClient);
+  });
+
   test('EmbeddingClient.embed throws after close', () => {
     const client = Object.create(EmbeddingClient.prototype) as { handle: unknown | null; embed: (text: string) => Float32Array };
     client.handle = null;

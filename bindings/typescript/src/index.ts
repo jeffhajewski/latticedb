@@ -2,7 +2,7 @@
  * Lattice: Embedded Property-Graph Database
  *
  * TypeScript bindings for the Lattice database.
- * Embedding helpers are also available from the dedicated
+ * Root embedding helpers are deprecated. Prefer the dedicated
  * `@hajewski/latticedb/embedding` entrypoint.
  *
  * @example
@@ -45,7 +45,10 @@ export {
   EmbeddingApiFormat,
   EmbeddingConfig,
 } from './types';
-export { hashEmbed, EmbeddingClient } from './embedding';
+import {
+  hashEmbed as embeddingHashEmbed,
+  EmbeddingClient as EmbeddingClientClass,
+} from './embedding';
 export {
   isLibraryAvailable,
   LatticeError,
@@ -53,6 +56,16 @@ export {
   QueryErrorStage,
   QueryErrorLocation,
 } from './ffi';
+
+/**
+ * @deprecated Use `@hajewski/latticedb/embedding` instead.
+ */
+export const hashEmbed: typeof embeddingHashEmbed = embeddingHashEmbed;
+
+/**
+ * @deprecated Use `@hajewski/latticedb/embedding` instead.
+ */
+export const EmbeddingClient: typeof EmbeddingClientClass = EmbeddingClientClass;
 
 /**
  * Get the library version.

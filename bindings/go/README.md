@@ -164,7 +164,7 @@ For a larger end-to-end example, see [examples/go](../../examples/go).
 
 ## Embeddings
 
-Embedding helpers are available from the dedicated package `github.com/jeffhajewski/latticedb/bindings/go/embedding`. The root `latticedb` package still re-exports them for compatibility, but new code should prefer the subpackage.
+Embedding helpers are available from the dedicated package `github.com/jeffhajewski/latticedb/bindings/go/embedding`. The root `latticedb` package still exposes deprecated compatibility aliases, but new code should prefer the subpackage.
 
 Built-in deterministic embeddings:
 

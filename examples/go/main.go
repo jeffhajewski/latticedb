@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	latticedb "github.com/jeffhajewski/latticedb/bindings/go"
+	latticeembedding "github.com/jeffhajewski/latticedb/bindings/go/embedding"
 )
 
 type dataset struct {
@@ -71,7 +72,7 @@ func main() {
 	}()
 
 	embed := func(text string) ([]float32, error) {
-		return latticedb.HashEmbed(text, 128)
+		return latticeembedding.Hash(text, 128)
 	}
 
 	printSection("Act 0: Build The Knowledge Graph")

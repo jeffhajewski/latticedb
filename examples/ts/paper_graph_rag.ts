@@ -12,7 +12,8 @@
  *     ANTHROPIC_API_KEY=sk-... npm run paper-graph-rag
  */
 
-import { Database, hashEmbed, EmbeddingClient } from "@hajewski/latticedb";
+import { Database } from "@hajewski/latticedb";
+import { EmbeddingClient, hashEmbed } from "@hajewski/latticedb/embedding";
 import * as fs from "fs";
 import * as path from "path";
 

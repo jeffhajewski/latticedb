@@ -53,7 +53,8 @@ A complete example: create a small knowledge graph with documents and authors, s
 ### Python
 
 ```python
-from latticedb import Database, hash_embed
+from latticedb import Database
+from latticedb.embedding import hash_embed
 
 with Database("knowledge.db", create=True, enable_vectors=True, vector_dimensions=128) as db:
 
@@ -111,7 +112,8 @@ with Database("knowledge.db", create=True, enable_vectors=True, vector_dimension
 ### TypeScript
 
 ```typescript
-import { Database, hashEmbed } from "@hajewski/latticedb";
+import { Database } from "@hajewski/latticedb";
+import { hashEmbed } from "@hajewski/latticedb/embedding";
 
 const db = new Database("knowledge.db", {
   create: true,

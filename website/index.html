@@ -653,9 +653,10 @@ footer .footer-links {
     <div class="quickstart-block">
       <h3>Python</h3>
       <div class="install-cmd" style="margin-bottom:12px"><code class="active">pip install latticedb</code></div>
-      <pre><span class="kw">from</span> latticedb <span class="kw">import</span> Database, hash_embed
+      <pre><span class="kw">from</span> latticedb <span class="kw">import</span> Database
+<span class="kw">from</span> latticedb.embedding <span class="kw">import</span> hash_embed
 
-<span class="kw">with</span> Database(<span class="str">"knowledge.db"</span>, create=<span class="var">True</span>, enable_vector=<span class="var">True</span>, vector_dimensions=<span class="str">128</span>) <span class="kw">as</span> db:
+<span class="kw">with</span> Database(<span class="str">"knowledge.db"</span>, create=<span class="var">True</span>, enable_vectors=<span class="var">True</span>, vector_dimensions=<span class="str">128</span>) <span class="kw">as</span> db:
     <span class="kw">with</span> db.write() <span class="kw">as</span> txn:
         alice = txn.create_node(labels=[<span class="str">"Person"</span>], properties={<span class="str">"name"</span>: <span class="str">"Alice"</span>})
         doc = txn.create_node(labels=[<span class="str">"Document"</span>], properties={<span class="str">"title"</span>: <span class="str">"Attention Is All You Need"</span>})
@@ -681,10 +682,11 @@ footer .footer-links {
     <div class="quickstart-block">
       <h3>TypeScript</h3>
       <div class="install-cmd" style="margin-bottom:12px"><code class="active">npm install @hajewski/latticedb</code></div>
-      <pre><span class="kw">import</span> { Database, hashEmbed } <span class="kw">from</span> <span class="str">"@hajewski/latticedb"</span>;
+      <pre><span class="kw">import</span> { Database } <span class="kw">from</span> <span class="str">"@hajewski/latticedb"</span>;
+<span class="kw">import</span> { hashEmbed } <span class="kw">from</span> <span class="str">"@hajewski/latticedb/embedding"</span>;
 
 <span class="kw">const</span> db = <span class="kw">new</span> Database(<span class="str">"knowledge.db"</span>, {
-  create: <span class="var">true</span>, enableVector: <span class="var">true</span>, vectorDimensions: <span class="str">128</span>,
+  create: <span class="var">true</span>, enableVectors: <span class="var">true</span>, vectorDimensions: <span class="str">128</span>,
 });
 <span class="kw">await</span> db.open();
 

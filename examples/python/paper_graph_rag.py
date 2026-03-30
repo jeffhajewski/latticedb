@@ -17,7 +17,8 @@ import os
 from collections import Counter
 from pathlib import Path
 
-from latticedb import Database, hash_embed
+from latticedb import Database
+from latticedb.embedding import hash_embed
 
 try:
     from anthropic import Anthropic
@@ -350,7 +351,7 @@ def main():
 
     # Choose embedding function
     if args.ollama:
-        from latticedb import EmbeddingClient
+        from latticedb.embedding import EmbeddingClient
 
         print("Connecting to Ollama for embeddings...")
         embed_client = EmbeddingClient("http://localhost:11434")

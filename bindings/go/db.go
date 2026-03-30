@@ -60,7 +60,7 @@ func (db *DB) Path() string {
 	return db.path
 }
 
-func (db *DB) Begin(readOnly bool) (*Tx, error) {
+func (db *DB) begin(readOnly bool) (*Tx, error) {
 	if db == nil || db.raw == nil {
 		return nil, ErrDatabaseClosed
 	}
@@ -81,8 +81,24 @@ func (db *DB) Begin(readOnly bool) (*Tx, error) {
 	}, nil
 }
 
+func (db *DB) BeginRead() (*Tx, error) {
+	return db.begin(true)
+}
+
+func (db *DB) BeginWrite() (*Tx, error) {
+	return db.begin(false)
+}
+
+// Deprecated: use BeginRead or BeginWrite.
+func (db *DB) Begin(readOnly bool) (*Tx, error) {
+	if readOnly {
+		return db.BeginRead()
+	}
+	return db.BeginWrite()
+}
+
 func (db *DB) View(fn func(*Tx) error) error {
-	tx, err := db.Begin(true)
+	tx, err := db.BeginRead()
 	if err != nil {
 		return err
 	}
@@ -99,7 +115,7 @@ func (db *DB) View(fn func(*Tx) error) error {
 }
 
 func (db *DB) Update(fn func(*Tx) error) error {
-	tx, err := db.Begin(false)
+	tx, err := db.BeginWrite()
 	if err != nil {
 		return err
 	}

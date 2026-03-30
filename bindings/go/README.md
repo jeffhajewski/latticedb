@@ -149,6 +149,7 @@ For a larger end-to-end example, see [examples/go](../../examples/go).
 
 ## API Notes
 
+- Prefer `BeginRead()` and `BeginWrite()` for manual transaction control. `Begin(readOnly bool)` remains as a deprecated compatibility alias.
 - Property getters return `(value, ok, error)` so stored `NULL` is distinguishable from a missing property.
 - Nested values use ordinary Go shapes:
   - `nil`

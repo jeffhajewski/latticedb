@@ -442,3 +442,112 @@ func TestQueryCache(t *testing.T) {
 		t.Fatalf("expected cache entries to reset, got %#v", statsAfterClear)
 	}
 }
+
+func TestBeginReadAndBeginWrite(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "tx-open.db")
+
+	db, err := Open(dbPath, OpenOptions{Create: true})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			t.Fatalf("close db: %v", closeErr)
+		}
+	}()
+
+	writeTx, err := db.BeginWrite()
+	if err != nil {
+		t.Fatalf("begin write: %v", err)
+	}
+	if writeTx.IsReadOnly() {
+		t.Fatalf("begin write returned read-only transaction")
+	}
+	node, err := writeTx.CreateNode(CreateNodeOptions{Labels: []string{"Doc"}})
+	if err != nil {
+		t.Fatalf("create node in begin write: %v", err)
+	}
+	if err := writeTx.Commit(); err != nil {
+		t.Fatalf("commit write tx: %v", err)
+	}
+
+	readTx, err := db.BeginRead()
+	if err != nil {
+		t.Fatalf("begin read: %v", err)
+	}
+	if !readTx.IsReadOnly() {
+		t.Fatalf("begin read returned writable transaction")
+	}
+	readNode, err := readTx.GetNode(node.ID)
+	if err != nil {
+		t.Fatalf("get node in begin read: %v", err)
+	}
+	if readNode == nil {
+		t.Fatalf("expected committed node to be visible in begin read")
+	}
+	if err := readTx.Rollback(); err != nil {
+		t.Fatalf("rollback read tx: %v", err)
+	}
+}
+
+func TestBeginCompatibilityAlias(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "begin-compat.db")
+
+	db, err := Open(dbPath, OpenOptions{Create: true})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			t.Fatalf("close db: %v", closeErr)
+		}
+	}()
+
+	readTx, err := db.Begin(true)
+	if err != nil {
+		t.Fatalf("begin read via compatibility alias: %v", err)
+	}
+	if !readTx.IsReadOnly() {
+		t.Fatalf("expected compatibility begin(true) to return read-only transaction")
+	}
+	if err := readTx.Rollback(); err != nil {
+		t.Fatalf("rollback compatibility read tx: %v", err)
+	}
+
+	writeTx, err := db.Begin(false)
+	if err != nil {
+		t.Fatalf("begin write via compatibility alias: %v", err)
+	}
+	if writeTx.IsReadOnly() {
+		t.Fatalf("expected compatibility begin(false) to return writable transaction")
+	}
+	if err := writeTx.Rollback(); err != nil {
+		t.Fatalf("rollback compatibility write tx: %v", err)
+	}
+
+	readOnlyDBPath := filepath.Join(t.TempDir(), "readonly.db")
+	readOnlySeed, err := Open(readOnlyDBPath, OpenOptions{Create: true})
+	if err != nil {
+		t.Fatalf("seed read-only db: %v", err)
+	}
+	if err := readOnlySeed.Close(); err != nil {
+		t.Fatalf("close seeded db: %v", err)
+	}
+
+	readOnlyDB, err := Open(readOnlyDBPath, OpenOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatalf("open read-only db: %v", err)
+	}
+	defer func() {
+		if closeErr := readOnlyDB.Close(); closeErr != nil {
+			t.Fatalf("close read-only db: %v", closeErr)
+		}
+	}()
+
+	if _, err := readOnlyDB.BeginWrite(); err != ErrReadOnlyDatabase {
+		t.Fatalf("expected BeginWrite on read-only db to fail with ErrReadOnlyDatabase, got %v", err)
+	}
+	if _, err := readOnlyDB.Begin(false); err != ErrReadOnlyDatabase {
+		t.Fatalf("expected Begin(false) on read-only db to fail with ErrReadOnlyDatabase, got %v", err)
+	}
+}

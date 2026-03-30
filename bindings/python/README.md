@@ -85,7 +85,7 @@ Database(
     read_only: bool = False,     # Open in read-only mode
     cache_size_mb: int = 100,    # Page cache size
     enable_vectors: bool | None = None, # Preferred vector config flag
-    enable_vector: bool | None = None,  # Compatibility alias
+    enable_vector: bool | None = None,  # Deprecated compatibility alias
     vector_dimensions: int = 128 # Vector dimensions
 )
 ```
@@ -120,7 +120,7 @@ Database(
 - `set_property(node_id, key, value)` - Set a property on a node
 - `set_vector(node_id, key, vector)` - Set a vector embedding
 - `batch_insert_vectors(label, vectors)` - Insert vector-bearing nodes in one call
-- `batch_insert(label, vectors)` - Compatibility alias for `batch_insert_vectors`
+- `batch_insert(label, vectors)` - Deprecated compatibility alias for `batch_insert_vectors`
 - `fts_index(node_id, text)` - Index text for full-text search
 - `create_edge(source_id, target_id, edge_type, properties=None)` - Create an edge
 - `delete_edge(source_id, target_id, edge_type)` - Delete an edge

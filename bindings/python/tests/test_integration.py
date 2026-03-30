@@ -785,7 +785,10 @@ class TestBatchInsert:
                     ],
                     dtype=np.float32,
                 )
-                node_ids = txn.batch_insert("Document", vectors)
+                with pytest.deprecated_call(
+                    match=r"Transaction\.batch_insert\(\.\.\.\) is deprecated; use batch_insert_vectors\(\.\.\.\)"
+                ):
+                    node_ids = txn.batch_insert("Document", vectors)
                 assert len(node_ids) == 2
                 txn.commit()
 
@@ -800,7 +803,12 @@ class TestVectorOperations:
 
         db_path = tmp_path / "test.db"
 
-        with Database(db_path, create=True, enable_vector=True, vector_dimensions=2) as db:
+        with pytest.deprecated_call(
+            match=r"Database\(\.\.\., enable_vector=\.\.\.\) is deprecated; use enable_vectors=\.\.\."
+        ):
+            db = Database(db_path, create=True, enable_vector=True, vector_dimensions=2)
+
+        with db:
             with db.write() as txn:
                 node = txn.create_node(labels=["Doc"])
                 txn.set_vector(node.id, "embedding", np.array([1.0, 0.0], dtype=np.float32))

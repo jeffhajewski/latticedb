@@ -212,7 +212,7 @@ export class Transaction {
   }
 
   /**
-   * Compatibility alias for batchInsertVectors().
+   * @deprecated Use batchInsertVectors().
    */
   async batchInsert(
     label: string,

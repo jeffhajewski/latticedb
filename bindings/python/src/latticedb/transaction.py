@@ -3,6 +3,7 @@ Transaction class for Lattice Python bindings.
 """
 
 import ctypes
+import warnings
 from ctypes import byref, c_uint64, c_void_p
 from typing import TYPE_CHECKING, Any, Dict, List, Optional
 
@@ -392,7 +393,12 @@ class Transaction:
         label: str,
         vectors: "NDArray[np.float32]",
     ) -> List[int]:
-        """Compatibility alias for :meth:`batch_insert_vectors`."""
+        """Deprecated compatibility alias for :meth:`batch_insert_vectors`."""
+        warnings.warn(
+            "Transaction.batch_insert(...) is deprecated; use batch_insert_vectors(...)",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return self.batch_insert_vectors(label, vectors)
 
     def fts_index(

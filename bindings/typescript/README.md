@@ -125,7 +125,7 @@ interface DatabaseOptions {
   readOnly?: boolean;        // Open read-only (default: false)
   cacheSizeMb?: number;      // Cache size in MB (default: 100)
   enableVectors?: boolean;   // Preferred vector config flag
-  enableVector?: boolean;    // Compatibility alias
+  enableVector?: boolean;    // Deprecated compatibility alias
   vectorDimensions?: number; // Vector dimensions (default: 128)
 }
 ```
@@ -163,7 +163,7 @@ interface DatabaseOptions {
 - `await txn.setProperty(nodeId, key, value)` - Set a property
 - `await txn.setVector(nodeId, key, vector)` - Set a vector embedding
 - `await txn.batchInsertVectors(label, vectors)` - Insert vector-bearing nodes in one call
-- `await txn.batchInsert(label, vectors)` - Compatibility alias for `batchInsertVectors`
+- `await txn.batchInsert(label, vectors)` - Deprecated compatibility alias for `batchInsertVectors`
 - `await txn.ftsIndex(nodeId, text)` - Index text for full-text search
 - `await txn.createEdge(sourceId, targetId, edgeType, options?)` - Create an edge
 - `await txn.deleteEdge(sourceId, targetId, edgeType)` - Delete an edge

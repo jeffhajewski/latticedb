@@ -230,7 +230,7 @@ func (tx *Tx) BatchInsertVectors(label string, vectors [][]float32) ([]NodeID, e
 	return out, nil
 }
 
-// BatchInsert is a compatibility alias for BatchInsertVectors.
+// Deprecated: use BatchInsertVectors.
 func (tx *Tx) BatchInsert(label string, vectors [][]float32) ([]NodeID, error) {
 	return tx.BatchInsertVectors(label, vectors)
 }

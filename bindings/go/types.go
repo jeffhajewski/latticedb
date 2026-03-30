@@ -14,7 +14,7 @@ type OpenOptions struct {
 	PageSize    uint32
 	// Preferred public option name.
 	EnableVectors bool
-	// Compatibility alias for EnableVectors.
+	// Deprecated: use EnableVectors.
 	EnableVector     bool
 	VectorDimensions uint16
 }

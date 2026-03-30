@@ -3,6 +3,7 @@ Database class for Lattice Python bindings.
 """
 
 import ctypes
+import warnings
 from ctypes import byref, c_void_p
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
@@ -70,6 +71,12 @@ class Database:
         self._create = create
         self._read_only = read_only
         self._cache_size_mb = cache_size_mb
+        if enable_vector is not None:
+            warnings.warn(
+                "Database(..., enable_vector=...) is deprecated; use enable_vectors=...",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self._enable_vectors = (
             enable_vectors if enable_vectors is not None else bool(enable_vector)
         )

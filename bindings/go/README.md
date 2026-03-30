@@ -2,6 +2,8 @@
 
 Go bindings for [LatticeDB](https://github.com/jeffhajewski/latticedb), an embedded single-file property-graph database with native vector and BM25 full-text search.
 
+Migration note: embedding helpers now live in the dedicated Go embedding subpackage, and explicit transaction entrypoints now prefer `BeginRead()` / `BeginWrite()`. See [../../docs/client_api_migration.md](../../docs/client_api_migration.md) for the preferred API names and deprecated compatibility aliases.
+
 ## Status
 
 This is a cgo-backed client built on the stable C ABI. The current API supports:

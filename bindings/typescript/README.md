@@ -10,6 +10,8 @@ npm install @hajewski/latticedb
 
 The native shared library (`liblattice.dylib` / `liblattice.so`) must be available on the system. Install it via the [install script](https://github.com/jeffhajewski/latticedb#installation) or build from source with `zig build shared`.
 
+Migration note: embedding helpers now live in the dedicated `@hajewski/latticedb/embedding` entrypoint. See [../../docs/client_api_migration.md](../../docs/client_api_migration.md) for the preferred API names and deprecated compatibility aliases.
+
 Installed-prefix workflow:
 
 ```bash

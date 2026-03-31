@@ -14,7 +14,7 @@ type OpenOptions struct {
 	PageSize    uint32
 	// Preferred public option name.
 	EnableVectors bool
-	// Deprecated: use EnableVectors.
+	// Deprecated: use EnableVectors. Earliest removal is v0.6.0.
 	EnableVector     bool
 	VectorDimensions uint16
 }
@@ -74,7 +74,7 @@ type FTSSearchResult struct {
 	Score  float32
 }
 
-// Deprecated: use package github.com/jeffhajewski/latticedb/bindings/go/embedding.
+// Deprecated: use package github.com/jeffhajewski/latticedb/bindings/go/embedding. Earliest removal is v0.6.0.
 type EmbeddingAPIFormat int
 
 const (
@@ -82,7 +82,7 @@ const (
 	EmbeddingAPIFormatOpenAI EmbeddingAPIFormat = EmbeddingAPIFormat(cgobridge.EmbeddingAPIFormatOpenAI)
 )
 
-// Deprecated: use package github.com/jeffhajewski/latticedb/bindings/go/embedding.
+// Deprecated: use package github.com/jeffhajewski/latticedb/bindings/go/embedding. Earliest removal is v0.6.0.
 type EmbeddingConfig struct {
 	Endpoint  string
 	Model     string

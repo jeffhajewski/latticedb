@@ -2,17 +2,17 @@ package latticedb
 
 import cgobridge "github.com/jeffhajewski/latticedb/bindings/go/internal/cgo"
 
-// Deprecated: use package github.com/jeffhajewski/latticedb/bindings/go/embedding.
+// Deprecated: use package github.com/jeffhajewski/latticedb/bindings/go/embedding. Earliest removal is v0.6.0.
 type EmbeddingClient struct {
 	raw *cgobridge.EmbeddingClient
 }
 
-// Deprecated: use package github.com/jeffhajewski/latticedb/bindings/go/embedding.
+// Deprecated: use package github.com/jeffhajewski/latticedb/bindings/go/embedding. Earliest removal is v0.6.0.
 func HashEmbed(text string, dimensions uint16) ([]float32, error) {
 	return cgobridge.HashEmbed(text, dimensions)
 }
 
-// Deprecated: use package github.com/jeffhajewski/latticedb/bindings/go/embedding.
+// Deprecated: use package github.com/jeffhajewski/latticedb/bindings/go/embedding. Earliest removal is v0.6.0.
 func NewEmbeddingClient(config EmbeddingConfig) (*EmbeddingClient, error) {
 	raw, err := cgobridge.NewEmbeddingClient(cgobridge.EmbeddingConfig{
 		Endpoint:  config.Endpoint,

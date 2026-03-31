@@ -212,7 +212,7 @@ export class Transaction {
   }
 
   /**
-   * @deprecated Use batchInsertVectors().
+   * @deprecated Use batchInsertVectors(). Earliest removal is v0.6.0.
    */
   async batchInsert(
     label: string,

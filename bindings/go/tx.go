@@ -230,7 +230,7 @@ func (tx *Tx) BatchInsertVectors(label string, vectors [][]float32) ([]NodeID, e
 	return out, nil
 }
 
-// Deprecated: use BatchInsertVectors.
+// Deprecated: use BatchInsertVectors. Earliest removal is v0.6.0.
 func (tx *Tx) BatchInsert(label string, vectors [][]float32) ([]NodeID, error) {
 	return tx.BatchInsertVectors(label, vectors)
 }

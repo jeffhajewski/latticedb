@@ -786,7 +786,7 @@ class TestBatchInsert:
                     dtype=np.float32,
                 )
                 with pytest.deprecated_call(
-                    match=r"Transaction\.batch_insert\(\.\.\.\) is deprecated; use batch_insert_vectors\(\.\.\.\)"
+                    match=r"Transaction\.batch_insert\(\.\.\.\) is deprecated; use batch_insert_vectors\(\.\.\.\)\. Earliest removal is v0\.6\.0\."
                 ):
                     node_ids = txn.batch_insert("Document", vectors)
                 assert len(node_ids) == 2
@@ -804,7 +804,7 @@ class TestVectorOperations:
         db_path = tmp_path / "test.db"
 
         with pytest.deprecated_call(
-            match=r"Database\(\.\.\., enable_vector=\.\.\.\) is deprecated; use enable_vectors=\.\.\."
+            match=r"Database\(\.\.\., enable_vector=\.\.\.\) is deprecated; use enable_vectors=\.\.\.\. Earliest removal is v0\.6\.0\."
         ):
             db = Database(db_path, create=True, enable_vector=True, vector_dimensions=2)
 

@@ -28,7 +28,7 @@ export interface DatabaseOptions {
   cacheSizeMb?: number;
   /** Enable vector storage and indexing */
   enableVectors?: boolean;
-  /** @deprecated Use enableVectors instead. */
+  /** @deprecated Use enableVectors instead. Earliest removal is v0.6.0. */
   enableVector?: boolean;
   /** Vector dimensions (default: 128) */
   vectorDimensions?: number;

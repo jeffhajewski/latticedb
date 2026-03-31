@@ -73,7 +73,7 @@ class Database:
         self._cache_size_mb = cache_size_mb
         if enable_vector is not None:
             warnings.warn(
-                "Database(..., enable_vector=...) is deprecated; use enable_vectors=...",
+                "Database(..., enable_vector=...) is deprecated; use enable_vectors=.... Earliest removal is v0.6.0.",
                 DeprecationWarning,
                 stacklevel=2,
             )

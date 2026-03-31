@@ -89,7 +89,7 @@ func (db *DB) BeginWrite() (*Tx, error) {
 	return db.begin(false)
 }
 
-// Deprecated: use BeginRead or BeginWrite.
+// Deprecated: use BeginRead or BeginWrite. Earliest removal is v0.6.0.
 func (db *DB) Begin(readOnly bool) (*Tx, error) {
 	if readOnly {
 		return db.BeginRead()

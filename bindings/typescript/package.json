@@ -1,6 +1,6 @@
 {
   "name": "@hajewski/latticedb",
-  "version": "0.4.2",
+  "version": "0.5.0",
   "description": "TypeScript bindings for Lattice embedded property-graph database with vector and BM25 full-text search",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",

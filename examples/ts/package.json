@@ -7,7 +7,7 @@
     "paper-graph-rag": "ts-node paper_graph_rag.ts"
   },
   "dependencies": {
-    "@hajewski/latticedb": "^0.4.2"
+    "@hajewski/latticedb": "^0.5.0"
   },
   "optionalDependencies": {
     "@anthropic-ai/sdk": "^0.39.0"

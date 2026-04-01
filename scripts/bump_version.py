@@ -125,6 +125,15 @@ def _update_main_zig(text: str, version: str, major: str, minor: str, patch: str
     return text
 
 
+def _update_build_zig(text: str, version: str, path: Path) -> str:
+    return _replace_exactly_one(
+        text,
+        r'^const version = ".*";$',
+        f'const version = "{version}";',
+        path,
+    )
+
+
 def _update_c_api_zig(text: str, version: str, path: Path) -> str:
     text = _replace_exactly_one(
         text,
@@ -222,6 +231,55 @@ def _update_package_lock(text: str, version: str, package_name: str, path: Path)
     return json.dumps(data, indent=2) + "\n"
 
 
+def _update_go_mod_dependency(text: str, version: str, module_path: str, path: Path) -> str:
+    return _replace_exactly_one(
+        text,
+        rf'^(require {re.escape(module_path)} )v\d+\.\d+\.\d+$',
+        rf'\1v{version}',
+        path,
+    )
+
+
+def _update_example_ts_package_json(text: str, version: str, path: Path) -> str:
+    data = json.loads(text)
+    dependencies = data.get("dependencies")
+    if not isinstance(dependencies, dict):
+        raise ValueError(f"{path}: missing object 'dependencies'")
+    current = dependencies.get("@hajewski/latticedb")
+    if not isinstance(current, str):
+        raise ValueError(f"{path}: dependencies missing string '@hajewski/latticedb'")
+    dependencies["@hajewski/latticedb"] = f"^{version}"
+    return json.dumps(data, indent=2) + "\n"
+
+
+def _update_example_ts_package_lock(text: str, version: str, path: Path) -> str:
+    data = json.loads(text)
+    packages = data.get("packages")
+    if not isinstance(packages, dict):
+        raise ValueError(f"{path}: missing top-level object 'packages'")
+
+    root_pkg = packages.get("")
+    if not isinstance(root_pkg, dict):
+        raise ValueError(f"{path}: missing packages[''] object")
+
+    root_deps = root_pkg.get("dependencies")
+    if not isinstance(root_deps, dict):
+        raise ValueError(f"{path}: packages[''] missing object 'dependencies'")
+    if "@hajewski/latticedb" not in root_deps or not isinstance(root_deps["@hajewski/latticedb"], str):
+        raise ValueError(f"{path}: packages[''].dependencies missing string '@hajewski/latticedb'")
+    root_deps["@hajewski/latticedb"] = f"^{version}"
+
+    linked_pkg = packages.get("../../bindings/typescript")
+    if not isinstance(linked_pkg, dict):
+        raise ValueError(f"{path}: missing packages['../../bindings/typescript'] object")
+    linked_version = linked_pkg.get("version")
+    if not isinstance(linked_version, str):
+        raise ValueError(f"{path}: packages['../../bindings/typescript'] missing string 'version'")
+    linked_pkg["version"] = version
+
+    return json.dumps(data, indent=2) + "\n"
+
+
 def _load(path: Path) -> str:
     return path.read_text(encoding="utf-8")
 
@@ -312,6 +370,16 @@ def _collect_version_observations(
     )
     observations.append(
         VersionObservation("Core/CLI version", main_zig_path, main_version)
+    )
+
+    # build.zig
+    build_zig_path = root / "build.zig"
+    build_zig = _load(build_zig_path)
+    build_version = _extract_exactly_one(
+        build_zig, r'^const version = "([^"]+)";$', build_zig_path, "build.zig version constant"
+    )
+    observations.append(
+        VersionObservation("Build script version", build_zig_path, build_version)
     )
 
     # src/api/c_api.zig
@@ -433,6 +501,107 @@ def _collect_version_observations(
         VersionObservation("TypeScript fallback version", ts_index_path, ts_fallback_version)
     )
 
+    # Go module refs
+    conformance_go_mod_path = root / "conformance/go/go.mod"
+    conformance_go_mod = _load(conformance_go_mod_path)
+    conformance_go_version = _extract_exactly_one(
+        conformance_go_mod,
+        r'^require github\.com/jeffhajewski/latticedb/bindings/go (v\d+\.\d+\.\d+)$',
+        conformance_go_mod_path,
+        "conformance go binding require",
+    )
+    observations.append(
+        VersionObservation("Conformance Go binding ref", conformance_go_mod_path, conformance_go_version[1:])
+    )
+
+    examples_go_mod_path = root / "examples/go/go.mod"
+    examples_go_mod = _load(examples_go_mod_path)
+    examples_go_version = _extract_exactly_one(
+        examples_go_mod,
+        r'^require github\.com/jeffhajewski/latticedb/bindings/go (v\d+\.\d+\.\d+)$',
+        examples_go_mod_path,
+        "examples go binding require",
+    )
+    observations.append(
+        VersionObservation("Examples Go binding ref", examples_go_mod_path, examples_go_version[1:])
+    )
+
+    # TypeScript example dependency refs
+    example_ts_package_json_path = root / "examples/ts/package.json"
+    example_ts_package = json.loads(_load(example_ts_package_json_path))
+    example_ts_deps = example_ts_package.get("dependencies", {})
+    example_ts_dep_version = (
+        example_ts_deps.get("@hajewski/latticedb") if isinstance(example_ts_deps, dict) else None
+    )
+    if not isinstance(example_ts_dep_version, str):
+        problems.append(
+            f"{example_ts_package_json_path}: dependencies missing string '@hajewski/latticedb'"
+        )
+    else:
+        match = re.fullmatch(r"\^(\d+\.\d+\.\d+)", example_ts_dep_version)
+        if not match:
+            problems.append(
+                f"{example_ts_package_json_path}: expected '@hajewski/latticedb' dependency in ^MAJOR.MINOR.PATCH form, got '{example_ts_dep_version}'"
+            )
+        else:
+            observations.append(
+                VersionObservation(
+                    "Examples TypeScript dependency ref",
+                    example_ts_package_json_path,
+                    match.group(1),
+                )
+            )
+
+    example_ts_package_lock_path = root / "examples/ts/package-lock.json"
+    example_ts_lock = json.loads(_load(example_ts_package_lock_path))
+    example_ts_packages = example_ts_lock.get("packages")
+    example_ts_root_pkg = example_ts_packages.get("") if isinstance(example_ts_packages, dict) else None
+    if not isinstance(example_ts_root_pkg, dict):
+        problems.append(f"{example_ts_package_lock_path}: missing packages[''] object")
+    else:
+        example_ts_root_deps = example_ts_root_pkg.get("dependencies", {})
+        example_ts_root_dep = (
+            example_ts_root_deps.get("@hajewski/latticedb")
+            if isinstance(example_ts_root_deps, dict)
+            else None
+        )
+        if not isinstance(example_ts_root_dep, str):
+            problems.append(
+                f"{example_ts_package_lock_path}: packages[''].dependencies missing string '@hajewski/latticedb'"
+            )
+        else:
+            match = re.fullmatch(r"\^(\d+\.\d+\.\d+)", example_ts_root_dep)
+            if not match:
+                problems.append(
+                    f"{example_ts_package_lock_path}: expected packages[''].dependencies['@hajewski/latticedb'] in ^MAJOR.MINOR.PATCH form, got '{example_ts_root_dep}'"
+                )
+            else:
+                observations.append(
+                    VersionObservation(
+                        "Examples TypeScript lock dependency ref",
+                        example_ts_package_lock_path,
+                        match.group(1),
+                    )
+                )
+
+    linked_pkg = example_ts_packages.get("../../bindings/typescript") if isinstance(example_ts_packages, dict) else None
+    if not isinstance(linked_pkg, dict):
+        problems.append(f"{example_ts_package_lock_path}: missing packages['../../bindings/typescript'] object")
+    else:
+        linked_version = linked_pkg.get("version")
+        if not isinstance(linked_version, str):
+            problems.append(
+                f"{example_ts_package_lock_path}: packages['../../bindings/typescript'] missing string 'version'"
+            )
+        else:
+            observations.append(
+                VersionObservation(
+                    "Examples TypeScript linked package version",
+                    example_ts_package_lock_path,
+                    linked_version,
+                )
+            )
+
     # Docs example
     book_api_c_path = root / "book/src/api/c.md"
     book_api_c = _load(book_api_c_path)
@@ -521,6 +690,9 @@ def _compute_changes(root: Path, version: str) -> Tuple[FileChange, ...]:
         root / "include/lattice.h": lambda t: _update_lattice_h(
             t, version, major, minor, patch, root / "include/lattice.h"
         ),
+        root / "build.zig": lambda t: _update_build_zig(
+            t, version, root / "build.zig"
+        ),
         root / "src/main.zig": lambda t: _update_main_zig(
             t, version, major, minor, patch, root / "src/main.zig"
         ),
@@ -544,6 +716,24 @@ def _compute_changes(root: Path, version: str) -> Tuple[FileChange, ...]:
         ),
         root / "bindings/typescript/src/index.ts": lambda t: _update_ts_index(
             t, version, root / "bindings/typescript/src/index.ts"
+        ),
+        root / "conformance/go/go.mod": lambda t: _update_go_mod_dependency(
+            t,
+            version,
+            "github.com/jeffhajewski/latticedb/bindings/go",
+            root / "conformance/go/go.mod",
+        ),
+        root / "examples/go/go.mod": lambda t: _update_go_mod_dependency(
+            t,
+            version,
+            "github.com/jeffhajewski/latticedb/bindings/go",
+            root / "examples/go/go.mod",
+        ),
+        root / "examples/ts/package.json": lambda t: _update_example_ts_package_json(
+            t, version, root / "examples/ts/package.json"
+        ),
+        root / "examples/ts/package-lock.json": lambda t: _update_example_ts_package_lock(
+            t, version, root / "examples/ts/package-lock.json"
         ),
         root / "book/src/api/c.md": lambda t: _update_book_api_c(
             t, version, root / "book/src/api/c.md"

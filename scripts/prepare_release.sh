@@ -117,6 +117,7 @@ run python3 scripts/bump_version.py "$VERSION"
 
 if [[ "$REFRESH_LOCKFILE" -eq 1 ]]; then
   run_shell "cd bindings/typescript && npm install --package-lock-only --ignore-scripts"
+  run_shell "cd examples/ts && npm install --package-lock-only --ignore-scripts"
   # Re-assert expected versions after lockfile refresh.
   run python3 scripts/bump_version.py "$VERSION"
   run python3 scripts/bump_version.py --check "$VERSION" --strict-lockfile

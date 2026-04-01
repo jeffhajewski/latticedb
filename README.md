@@ -385,6 +385,7 @@ zig build -Doptimize=ReleaseFast   # optimized build
 ## Documentation
 
 - [Architecture Specification](ARCHITECTURE_SPEC.md)
+- [Upcoming Release Notes](docs/release_notes_next.md)
 - [Client API Migration Notes](docs/client_api_migration.md)
 - [Python API Reference](bindings/python/README.md)
 - [TypeScript API Reference](bindings/typescript/README.md)

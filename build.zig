@@ -246,6 +246,31 @@ pub fn build(b: *std.Build) void {
     const stress_step = b.step("stress", "Run stress tests to find performance limits");
     stress_step.dependOn(&run_stress.step);
 
+    // FTS indexing benchmark module
+    const fts_bench_module = b.createModule(.{
+        .root_source_file = b.path("tests/benchmark/fts_index_benchmark.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .imports = &.{
+            .{ .name = "lattice", .module = lib_module },
+        },
+    });
+
+    const fts_bench_exe = b.addExecutable(.{
+        .name = "fts-benchmark",
+        .root_module = fts_bench_module,
+    });
+    fts_bench_exe.linkLibrary(lib);
+
+    const run_fts_bench = b.addRunArtifact(fts_bench_exe);
+    run_fts_bench.step.dependOn(&fts_bench_exe.step);
+    if (b.args) |args| {
+        run_fts_bench.addArgs(args);
+    }
+
+    const fts_bench_step = b.step("fts-benchmark", "Run repeated-term FTS indexing benchmarks");
+    fts_bench_step.dependOn(&run_fts_bench.step);
+
     // Vector benchmark module
     const vector_bench_module = b.createModule(.{
         .root_source_file = b.path("tests/benchmark/vector_benchmark.zig"),

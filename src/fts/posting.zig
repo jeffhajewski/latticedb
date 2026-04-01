@@ -32,6 +32,15 @@ pub const DocId = NodeId;
 /// Skip pointer interval (create skip pointer every N entries)
 pub const SKIP_INTERVAL: u32 = 128;
 
+/// Posting page flag in the shared PageHeader indicating the v2 on-disk layout.
+const POSTING_PAGE_FLAG_V2_LAYOUT: u8 = 0x01;
+
+/// Posting entry flags stored inside posting-page headers.
+const POSTING_ENTRY_FLAG_HAS_POSITIONS: u16 = 0x01;
+
+/// File format version required for v2 posting pages.
+const POSTING_PAGE_FORMAT_VERSION_V2: u16 = 2;
+
 /// Page size
 const PAGE_SIZE: usize = 4096;
 
@@ -80,8 +89,8 @@ pub const SkipPointer = extern struct {
     }
 };
 
-/// Posting page header (follows base PageHeader)
-pub const PostingPageHeader = extern struct {
+/// Legacy posting page header (follows base PageHeader).
+pub const PostingPageHeaderV1 = extern struct {
     /// Which token this posting list belongs to
     token_id: TokenId,
     /// Number of posting entries in this page
@@ -98,33 +107,169 @@ pub const PostingPageHeader = extern struct {
     pub const OFFSET: usize = @sizeOf(PageHeader);
 
     comptime {
-        std.debug.assert(@sizeOf(PostingPageHeader) == 20);
+        std.debug.assert(@sizeOf(PostingPageHeaderV1) == 20);
     }
 
-    pub fn read(data: []const u8) PostingPageHeader {
+    pub fn read(data: []const u8) PostingPageHeaderV1 {
         return std.mem.bytesAsValue(
-            PostingPageHeader,
-            data[OFFSET..][0..@sizeOf(PostingPageHeader)],
+            PostingPageHeaderV1,
+            data[OFFSET..][0..@sizeOf(PostingPageHeaderV1)],
         ).*;
     }
 
-    pub fn write(self: *const PostingPageHeader, data: []u8) void {
-        const dest = data[OFFSET..][0..@sizeOf(PostingPageHeader)];
+    pub fn write(self: *const PostingPageHeaderV1, data: []u8) void {
+        const dest = data[OFFSET..][0..@sizeOf(PostingPageHeaderV1)];
         @memcpy(dest, std.mem.asBytes(self));
     }
 };
 
-/// Data offset after headers (before skip pointers)
-const HEADER_END: usize = @sizeOf(PageHeader) + @sizeOf(PostingPageHeader);
+/// Posting page header v2 (follows base PageHeader).
+pub const PostingPageHeaderV2 = extern struct {
+    /// Which token this posting list belongs to
+    token_id: TokenId,
+    /// Number of posting entries in this page
+    num_entries: u32,
+    /// Next overflow page (0 = none)
+    next_page: PageId,
+    /// Number of skip pointers (for fast seeking)
+    num_skip_pointers: u16,
+    /// Flags: 0x01 = has positions for phrase queries
+    flags: u16,
+    /// Byte offset where posting data starts (after skip pointers)
+    data_start: u32,
+    /// Byte offset where posting data currently ends
+    data_end: u32,
 
-/// Maximum skip pointers per page (reserves 256 bytes)
-const MAX_SKIP_POINTERS: usize = 16;
+    pub const OFFSET: usize = @sizeOf(PageHeader);
 
-/// Reserved space for skip pointers
-const SKIP_POINTER_AREA_SIZE: usize = MAX_SKIP_POINTERS * @sizeOf(SkipPointer);
+    comptime {
+        std.debug.assert(@sizeOf(PostingPageHeaderV2) == 24);
+    }
 
-/// Data offset after headers and skip pointer area
-const DATA_OFFSET: usize = HEADER_END + SKIP_POINTER_AREA_SIZE;
+    pub fn read(data: []const u8) PostingPageHeaderV2 {
+        return std.mem.bytesAsValue(
+            PostingPageHeaderV2,
+            data[OFFSET..][0..@sizeOf(PostingPageHeaderV2)],
+        ).*;
+    }
+
+    pub fn write(self: *const PostingPageHeaderV2, data: []u8) void {
+        const dest = data[OFFSET..][0..@sizeOf(PostingPageHeaderV2)];
+        @memcpy(dest, std.mem.asBytes(self));
+    }
+};
+
+/// Public posting-page header alias now points at the v2 layout.
+pub const PostingPageHeader = PostingPageHeaderV2;
+
+const PostingPageLayout = enum {
+    v1,
+    v2,
+};
+
+const PostingPageMeta = struct {
+    layout: PostingPageLayout,
+    token_id: TokenId,
+    num_entries: u32,
+    next_page: PageId,
+    num_skip_pointers: u16,
+    flags: u16,
+    data_start: u32,
+    data_end: u32,
+
+    fn hasPositions(self: PostingPageMeta) bool {
+        return (self.flags & POSTING_ENTRY_FLAG_HAS_POSITIONS) != 0;
+    }
+
+    fn headerEnd(self: PostingPageMeta) usize {
+        return switch (self.layout) {
+            .v1 => HEADER_END_V1,
+            .v2 => HEADER_END_V2,
+        };
+    }
+
+    fn maxSkipPointers(self: PostingPageMeta) usize {
+        return switch (self.layout) {
+            .v1 => MAX_SKIP_POINTERS_V1,
+            .v2 => MAX_SKIP_POINTERS_V2,
+        };
+    }
+
+    fn skipPointerOffset(self: PostingPageMeta, index: usize) usize {
+        return self.headerEnd() + index * @sizeOf(SkipPointer);
+    }
+
+    fn write(self: PostingPageMeta, data: []u8) void {
+        setPostingPageLayout(data, self.layout);
+        switch (self.layout) {
+            .v1 => {
+                (PostingPageHeaderV1{
+                    .token_id = self.token_id,
+                    .num_entries = self.num_entries,
+                    .next_page = self.next_page,
+                    .num_skip_pointers = self.num_skip_pointers,
+                    .flags = self.flags,
+                    .data_start = self.data_start,
+                }).write(data);
+            },
+            .v2 => {
+                (PostingPageHeaderV2{
+                    .token_id = self.token_id,
+                    .num_entries = self.num_entries,
+                    .next_page = self.next_page,
+                    .num_skip_pointers = self.num_skip_pointers,
+                    .flags = self.flags,
+                    .data_start = self.data_start,
+                    .data_end = self.data_end,
+                }).write(data);
+            },
+        }
+    }
+};
+
+fn pageHeader(data: []u8) *PageHeader {
+    return @ptrCast(@alignCast(data.ptr));
+}
+
+fn pageHeaderConst(data: []const u8) *const PageHeader {
+    return @ptrCast(@alignCast(data.ptr));
+}
+
+fn getPostingPageLayout(data: []const u8) PostingPageLayout {
+    return if ((pageHeaderConst(data).flags & POSTING_PAGE_FLAG_V2_LAYOUT) != 0) .v2 else .v1;
+}
+
+fn setPostingPageLayout(data: []u8, layout: PostingPageLayout) void {
+    const header = pageHeader(data);
+    switch (layout) {
+        .v1 => header.flags &= ~POSTING_PAGE_FLAG_V2_LAYOUT,
+        .v2 => header.flags |= POSTING_PAGE_FLAG_V2_LAYOUT,
+    }
+}
+
+/// Data offset after headers (before skip pointers).
+const HEADER_END_V1: usize = @sizeOf(PageHeader) + @sizeOf(PostingPageHeaderV1);
+const HEADER_END_V2: usize = @sizeOf(PageHeader) + @sizeOf(PostingPageHeaderV2);
+
+/// Maximum skip pointers reserved in the v1 layout (256 bytes).
+const MAX_SKIP_POINTERS_V1: usize = 16;
+
+/// Reserved space for skip pointers in the v1 layout.
+const SKIP_POINTER_AREA_SIZE_V1: usize = MAX_SKIP_POINTERS_V1 * @sizeOf(SkipPointer);
+
+/// Data offset after headers and skip pointer area. This remains stable across
+/// v1 and v2 so lazy page upgrades do not need to move posting payload bytes.
+const DATA_OFFSET: usize = HEADER_END_V1 + SKIP_POINTER_AREA_SIZE_V1;
+
+/// Reserved space for skip pointers in the v2 layout. The v2 header is 4 bytes
+/// larger, so the skip reserve shrinks by 4 bytes while keeping DATA_OFFSET
+/// unchanged.
+const SKIP_POINTER_AREA_SIZE_V2: usize = DATA_OFFSET - HEADER_END_V2;
+const MAX_SKIP_POINTERS_V2: usize = SKIP_POINTER_AREA_SIZE_V2 / @sizeOf(SkipPointer);
+
+comptime {
+    std.debug.assert(DATA_OFFSET == HEADER_END_V2 + SKIP_POINTER_AREA_SIZE_V2);
+}
 
 /// Posting list storage manager
 pub const PostingStore = struct {
@@ -141,8 +286,157 @@ pub const PostingStore = struct {
         };
     }
 
+    fn ensureFormatV2(self: *Self) PostingError!void {
+        var header = self.bp.pm.getHeader().*;
+        if (header.format_version >= POSTING_PAGE_FORMAT_VERSION_V2 and
+            header.min_reader_version >= POSTING_PAGE_FORMAT_VERSION_V2)
+        {
+            return;
+        }
+
+        header.format_version = POSTING_PAGE_FORMAT_VERSION_V2;
+        header.min_reader_version = POSTING_PAGE_FORMAT_VERSION_V2;
+        self.bp.pm.updateHeader(&header) catch {
+            return PostingError.IoError;
+        };
+    }
+
+    fn scanDataEnd(self: *Self, data: []const u8, num_entries: u32, data_start: u32, has_positions: bool) usize {
+        _ = self;
+
+        var offset: usize = data_start;
+        var entries_read: u32 = 0;
+
+        while (entries_read < num_entries and offset < PAGE_SIZE) {
+            const doc_result = decodeVarint(data[offset..]);
+            offset += doc_result.bytes;
+
+            const freq_result = decodeVarint(data[offset..]);
+            offset += freq_result.bytes;
+
+            if (has_positions) {
+                const pos_count_result = decodeVarint(data[offset..]);
+                offset += pos_count_result.bytes;
+                var pos_idx: usize = 0;
+                while (pos_idx < pos_count_result.value) : (pos_idx += 1) {
+                    const pos_result = decodeVarint(data[offset..]);
+                    offset += pos_result.bytes;
+                }
+            }
+
+            entries_read += 1;
+        }
+
+        return offset;
+    }
+
+    fn readPageMeta(self: *Self, data: []const u8, include_data_end: bool) PostingPageMeta {
+        return switch (getPostingPageLayout(data)) {
+            .v1 => blk: {
+                const header = PostingPageHeaderV1.read(data);
+                break :blk .{
+                    .layout = .v1,
+                    .token_id = header.token_id,
+                    .num_entries = header.num_entries,
+                    .next_page = header.next_page,
+                    .num_skip_pointers = header.num_skip_pointers,
+                    .flags = header.flags,
+                    .data_start = header.data_start,
+                    .data_end = if (include_data_end)
+                        @intCast(self.scanDataEnd(data, header.num_entries, header.data_start, (header.flags & POSTING_ENTRY_FLAG_HAS_POSITIONS) != 0))
+                    else
+                        header.data_start,
+                };
+            },
+            .v2 => blk: {
+                const header = PostingPageHeaderV2.read(data);
+                break :blk .{
+                    .layout = .v2,
+                    .token_id = header.token_id,
+                    .num_entries = header.num_entries,
+                    .next_page = header.next_page,
+                    .num_skip_pointers = header.num_skip_pointers,
+                    .flags = header.flags,
+                    .data_start = header.data_start,
+                    .data_end = header.data_end,
+                };
+            },
+        };
+    }
+
+    fn clearSkipPointers(self: *Self, data: []u8, meta: PostingPageMeta) void {
+        _ = self;
+        @memset(data[meta.headerEnd()..@as(usize, meta.data_start)], 0);
+    }
+
+    fn rebuildSkipPointersFromEncoded(self: *Self, data: []u8, meta: *PostingPageMeta) void {
+        self.clearSkipPointers(data, meta.*);
+        meta.num_skip_pointers = 0;
+
+        if (meta.num_entries < SKIP_INTERVAL) return;
+
+        var offset: usize = meta.data_start;
+        var entries_read: u32 = 0;
+        var skip_count: usize = 0;
+
+        while (entries_read < meta.num_entries and offset < meta.data_end) {
+            const entry_offset = offset;
+            const doc_result = decodeVarint(data[offset..]);
+            offset += doc_result.bytes;
+
+            if (entries_read > 0 and entries_read % SKIP_INTERVAL == 0 and skip_count < meta.maxSkipPointers()) {
+                const skip_ptr = SkipPointer{
+                    .doc_id = doc_result.value,
+                    .byte_offset = @intCast(entry_offset - meta.data_start),
+                    .entry_count = entries_read,
+                };
+                const skip_offset = meta.skipPointerOffset(skip_count);
+                var skip_buf: [@sizeOf(SkipPointer)]u8 = undefined;
+                skip_ptr.serialize(&skip_buf);
+                @memcpy(data[skip_offset..][0..@sizeOf(SkipPointer)], &skip_buf);
+                skip_count += 1;
+            }
+
+            const freq_result = decodeVarint(data[offset..]);
+            offset += freq_result.bytes;
+
+            if (meta.hasPositions()) {
+                const pos_count_result = decodeVarint(data[offset..]);
+                offset += pos_count_result.bytes;
+                var pos_idx: usize = 0;
+                while (pos_idx < pos_count_result.value) : (pos_idx += 1) {
+                    const pos_result = decodeVarint(data[offset..]);
+                    offset += pos_result.bytes;
+                }
+            }
+
+            entries_read += 1;
+        }
+
+        meta.num_skip_pointers = @intCast(skip_count);
+    }
+
+    fn upgradePageToV2(self: *Self, data: []u8, meta: *PostingPageMeta) PostingError!void {
+        if (meta.layout == .v2) return;
+
+        try self.ensureFormatV2();
+
+        var upgraded = meta.*;
+        upgraded.layout = .v2;
+        upgraded.data_start = @intCast(DATA_OFFSET);
+        if (upgraded.data_end < upgraded.data_start) {
+            upgraded.data_end = upgraded.data_start;
+        }
+
+        self.rebuildSkipPointersFromEncoded(data, &upgraded);
+        upgraded.write(data);
+        meta.* = upgraded;
+    }
+
     /// Create a new posting list, returns first page ID
     pub fn create(self: *Self, token_id: TokenId) PostingError!PageId {
+        try self.ensureFormatV2();
+
         const page_id = self.bp.pm.allocatePage() catch {
             return PostingError.BufferPoolError;
         };
@@ -155,7 +449,8 @@ pub const PostingStore = struct {
         const data = frame.data;
 
         // Initialize page header
-        const header = PageHeader.init(.fts_posting);
+        var header = PageHeader.init(.fts_posting);
+        header.flags |= POSTING_PAGE_FLAG_V2_LAYOUT;
         @memcpy(data[0..@sizeOf(PageHeader)], std.mem.asBytes(&header));
 
         // Initialize posting page header
@@ -166,6 +461,7 @@ pub const PostingStore = struct {
             .num_skip_pointers = 0,
             .flags = 0,
             .data_start = @intCast(DATA_OFFSET),
+            .data_end = @intCast(DATA_OFFSET),
         };
         posting_header.write(data);
 
@@ -188,7 +484,11 @@ pub const PostingStore = struct {
         defer self.bp.unpinPage(frame, true);
 
         const data = frame.data;
-        var posting_header = PostingPageHeader.read(data);
+        var posting_header = self.readPageMeta(data, true);
+
+        if (posting_header.layout == .v1) {
+            try self.upgradePageToV2(data, &posting_header);
+        }
 
         // Encode the entry - use larger buffer for positions
         var encode_buf: [512]u8 = undefined;
@@ -209,12 +509,16 @@ pub const PostingStore = struct {
                 encode_len += encodeVarint(pos, encode_buf[encode_len..]);
             }
             // Set has_positions flag
-            posting_header.flags |= 0x01;
+            posting_header.flags |= POSTING_ENTRY_FLAG_HAS_POSITIONS;
         }
 
         // Check if there's space
-        const current_end = posting_header.data_start + self.getDataSize(data, posting_header);
+        const current_end: usize = posting_header.data_end;
         if (current_end + encode_len > PAGE_SIZE) {
+            if (posting_header.next_page != 0) {
+                return self.appendWithPositions(posting_header.next_page, entry, store_positions);
+            }
+
             // Need to allocate overflow page
             const new_page_id = try self.create(posting_header.token_id);
 
@@ -227,10 +531,10 @@ pub const PostingStore = struct {
             const new_frame = self.bp.fetchPage(new_page_id, .exclusive) catch {
                 return PostingError.BufferPoolError;
             };
-            defer self.bp.unpinPage(new_frame, true);
-            var new_header = PostingPageHeader.read(new_frame.data);
+            var new_header = self.readPageMeta(new_frame.data, false);
             new_header.flags = new_flags;
             new_header.write(new_frame.data);
+            self.bp.unpinPage(new_frame, true);
 
             // Recursively append to new page
             return self.appendWithPositions(new_page_id, entry, store_positions);
@@ -241,13 +545,13 @@ pub const PostingStore = struct {
         const entry_index = posting_header.num_entries;
         if (entry_index > 0 and entry_index % SKIP_INTERVAL == 0) {
             const skip_index = entry_index / SKIP_INTERVAL - 1;
-            if (skip_index < MAX_SKIP_POINTERS) {
+            if (skip_index < posting_header.maxSkipPointers()) {
                 const skip_ptr = SkipPointer{
                     .doc_id = entry.doc_id,
                     .byte_offset = @intCast(current_end - posting_header.data_start),
                     .entry_count = entry_index,
                 };
-                const skip_offset = HEADER_END + skip_index * @sizeOf(SkipPointer);
+                const skip_offset = posting_header.skipPointerOffset(skip_index);
                 var skip_buf: [@sizeOf(SkipPointer)]u8 = undefined;
                 skip_ptr.serialize(&skip_buf);
                 @memcpy(data[skip_offset..][0..@sizeOf(SkipPointer)], &skip_buf);
@@ -260,44 +564,10 @@ pub const PostingStore = struct {
 
         // Update header
         posting_header.num_entries += 1;
+        posting_header.data_end = @intCast(current_end + encode_len);
         posting_header.write(data);
 
         return page_id;
-    }
-
-    /// Get the size of posting data in a page
-    fn getDataSize(self: *Self, data: []const u8, header: PostingPageHeader) usize {
-        _ = self;
-        const has_positions = (header.flags & 0x01) != 0;
-
-        // Scan through entries to find the end
-        var offset: usize = header.data_start;
-        var entries_read: u32 = 0;
-
-        while (entries_read < header.num_entries and offset < PAGE_SIZE) {
-            // Decode doc_id
-            const doc_result = decodeVarint(data[offset..]);
-            offset += doc_result.bytes;
-
-            // Decode term_freq
-            const freq_result = decodeVarint(data[offset..]);
-            offset += freq_result.bytes;
-
-            // Skip positions if present
-            if (has_positions) {
-                const pos_count_result = decodeVarint(data[offset..]);
-                offset += pos_count_result.bytes;
-                var pos_idx: usize = 0;
-                while (pos_idx < pos_count_result.value) : (pos_idx += 1) {
-                    const pos_result = decodeVarint(data[offset..]);
-                    offset += pos_result.bytes;
-                }
-            }
-
-            entries_read += 1;
-        }
-
-        return offset - header.data_start;
     }
 
     /// Get iterator for reading posting list
@@ -322,8 +592,8 @@ pub const PostingStore = struct {
             };
 
             const data = frame.data;
-            var header = PostingPageHeader.read(data);
-            const has_positions = (header.flags & 0x01) != 0;
+            var header = self.readPageMeta(data, false);
+            const has_positions = header.hasPositions();
 
             // Collect all entries except the target
             var kept_entries: std.ArrayList(StoredEntry) = .empty;
@@ -383,8 +653,13 @@ pub const PostingStore = struct {
             }
 
             if (found_entry) |removed| {
+                if (header.layout == .v1) {
+                    try self.ensureFormatV2();
+                    header.layout = .v2;
+                }
+
                 // Rebuild page with remaining entries
-                self.rebuildPage(data, &header, kept_entries.items, has_positions);
+                header.data_end = self.rebuildPage(data, &header, kept_entries.items, has_positions);
 
                 // Update header
                 header.num_entries = @intCast(kept_entries.items.len);
@@ -420,7 +695,7 @@ pub const PostingStore = struct {
     };
 
     /// Rebuild page data from entries
-    fn rebuildPage(self: *Self, data: []u8, header: *PostingPageHeader, entries: []const StoredEntry, has_positions: bool) void {
+    fn rebuildPage(self: *Self, data: []u8, header: *PostingPageMeta, entries: []const StoredEntry, has_positions: bool) u32 {
         _ = self;
         var offset: usize = header.data_start;
 
@@ -448,12 +723,14 @@ pub const PostingStore = struct {
         if (offset < PAGE_SIZE) {
             @memset(data[offset..PAGE_SIZE], 0);
         }
+
+        return @intCast(offset);
     }
 
     /// Rebuild skip pointers after page modification
-    fn rebuildSkipPointers(self: *Self, data: []u8, header: *PostingPageHeader, entries: []const StoredEntry, has_positions: bool) void {
-        _ = self;
+    fn rebuildSkipPointers(self: *Self, data: []u8, header: *PostingPageMeta, entries: []const StoredEntry, has_positions: bool) void {
         // Clear existing skip pointers
+        self.clearSkipPointers(data, header.*);
         header.num_skip_pointers = 0;
 
         if (entries.len < SKIP_INTERVAL) {
@@ -466,13 +743,13 @@ pub const PostingStore = struct {
 
         for (entries, 0..) |entry, idx| {
             // Create skip pointer at SKIP_INTERVAL boundaries (e.g., at entry 128, 256, etc.)
-            if (idx > 0 and idx % SKIP_INTERVAL == 0 and skip_count < MAX_SKIP_POINTERS) {
+            if (idx > 0 and idx % SKIP_INTERVAL == 0 and skip_count < header.maxSkipPointers()) {
                 const skip_ptr = SkipPointer{
                     .doc_id = entry.doc_id,
                     .byte_offset = @intCast(offset - header.data_start),
                     .entry_count = @intCast(idx),
                 };
-                const skip_offset = HEADER_END + skip_count * @sizeOf(SkipPointer);
+                const skip_offset = header.skipPointerOffset(skip_count);
                 var skip_buf: [@sizeOf(SkipPointer)]u8 = undefined;
                 skip_ptr.serialize(&skip_buf);
                 @memcpy(data[skip_offset..][0..@sizeOf(SkipPointer)], &skip_buf);
@@ -508,8 +785,9 @@ pub const PostingIterator = struct {
     current_offset: usize,
     entries_read: u32,
     total_entries: u32,
-    data_start: u32, // Start of posting data (after skip pointers)
+    data_start: usize, // Start of posting data (after skip pointers)
     num_skip_pointers: u16,
+    skip_pointer_base: usize,
     last_doc_id: DocId, // For delta decoding (not used in simplified version)
     has_positions: bool,
     done: bool,
@@ -523,7 +801,7 @@ pub const PostingIterator = struct {
         };
         defer store.bp.unpinPage(frame, false);
 
-        const header = PostingPageHeader.read(frame.data);
+        const header = store.readPageMeta(frame.data, false);
 
         return Self{
             .store = store,
@@ -533,8 +811,9 @@ pub const PostingIterator = struct {
             .total_entries = header.num_entries,
             .data_start = header.data_start,
             .num_skip_pointers = header.num_skip_pointers,
+            .skip_pointer_base = header.headerEnd(),
             .last_doc_id = 0,
-            .has_positions = (header.flags & 0x01) != 0,
+            .has_positions = header.hasPositions(),
             .done = header.num_entries == 0,
         };
     }
@@ -558,7 +837,7 @@ pub const PostingIterator = struct {
 
             while (low < high) {
                 const mid = low + (high - low) / 2;
-                const skip_offset = HEADER_END + mid * @sizeOf(SkipPointer);
+                const skip_offset = self.skip_pointer_base + mid * @sizeOf(SkipPointer);
                 const skip_ptr = SkipPointer.deserialize(frame.data[skip_offset..]);
 
                 if (skip_ptr.doc_id < target) {
@@ -607,7 +886,7 @@ pub const PostingIterator = struct {
 
             while (low < high) {
                 const mid = low + (high - low) / 2;
-                const skip_offset = HEADER_END + mid * @sizeOf(SkipPointer);
+                const skip_offset = self.skip_pointer_base + mid * @sizeOf(SkipPointer);
                 const skip_ptr = SkipPointer.deserialize(frame.data[skip_offset..]);
 
                 if (skip_ptr.doc_id < target) {
@@ -654,14 +933,13 @@ pub const PostingIterator = struct {
         defer self.store.bp.unpinPage(frame, false);
 
         const data = frame.data;
-        const header = PostingPageHeader.read(data);
-        const page_has_positions = (header.flags & 0x01) != 0;
+        const header = self.store.readPageMeta(data, false);
+        const page_has_positions = header.hasPositions();
 
         if (self.entries_read >= header.num_entries) {
             // Check for next page
             if (header.next_page != 0) {
                 self.current_page = header.next_page;
-                self.current_offset = DATA_OFFSET;
                 self.entries_read = 0;
 
                 // Update has_positions for new page
@@ -669,8 +947,13 @@ pub const PostingIterator = struct {
                     return PostingError.BufferPoolError;
                 };
                 defer self.store.bp.unpinPage(next_frame, false);
-                const next_header = PostingPageHeader.read(next_frame.data);
-                self.has_positions = (next_header.flags & 0x01) != 0;
+                const next_header = self.store.readPageMeta(next_frame.data, false);
+                self.current_offset = next_header.data_start;
+                self.total_entries = next_header.num_entries;
+                self.data_start = next_header.data_start;
+                self.num_skip_pointers = next_header.num_skip_pointers;
+                self.skip_pointer_base = next_header.headerEnd();
+                self.has_positions = next_header.hasPositions();
 
                 // Recursively get from next page
                 return self.nextInternal(allocator);
@@ -929,4 +1212,139 @@ test "skip pointers and skipTo" {
     const exact = try iter3.skipTo(500);
     try std.testing.expect(exact != null);
     try std.testing.expectEqual(@as(DocId, 500), exact.?.doc_id);
+}
+
+test "posting store lazily upgrades legacy v1 pages on append" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_posting_upgrade_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var store = PostingStore.init(allocator, &bp);
+
+    var file_header = pm.getHeader().*;
+    file_header.format_version = 1;
+    file_header.min_reader_version = 1;
+    try pm.updateHeader(&file_header);
+
+    const page_id = try pm.allocatePage();
+    const frame = try bp.fetchPage(page_id, .exclusive);
+    {
+        const data = frame.data;
+        const header = PageHeader.init(.fts_posting);
+        @memcpy(data[0..@sizeOf(PageHeader)], std.mem.asBytes(&header));
+
+        var legacy_header = PostingPageHeaderV1{
+            .token_id = 1,
+            .num_entries = 0,
+            .next_page = 0,
+            .num_skip_pointers = 0,
+            .flags = 0,
+            .data_start = @intCast(DATA_OFFSET),
+        };
+
+        var offset: usize = DATA_OFFSET;
+        offset += encodeVarint(10, data[offset..]);
+        offset += encodeVarint(1, data[offset..]);
+        offset += encodeVarint(20, data[offset..]);
+        offset += encodeVarint(2, data[offset..]);
+        legacy_header.num_entries = 2;
+        legacy_header.write(data);
+    }
+    bp.unpinPage(frame, true);
+
+    _ = try store.append(page_id, .{ .doc_id = 30, .term_freq = 3, .positions = null });
+
+    const upgraded_file_header = pm.getHeader().*;
+    try std.testing.expectEqual(@as(u16, 2), upgraded_file_header.format_version);
+    try std.testing.expectEqual(@as(u16, 2), upgraded_file_header.min_reader_version);
+
+    const upgraded_frame = try bp.fetchPage(page_id, .shared);
+    defer bp.unpinPage(upgraded_frame, false);
+
+    try std.testing.expect((pageHeaderConst(upgraded_frame.data).flags & POSTING_PAGE_FLAG_V2_LAYOUT) != 0);
+
+    const upgraded_header = PostingPageHeader.read(upgraded_frame.data);
+    try std.testing.expectEqual(@as(u32, 3), upgraded_header.num_entries);
+    try std.testing.expectEqual(@as(u32, DATA_OFFSET), upgraded_header.data_start);
+    try std.testing.expect(upgraded_header.data_end > upgraded_header.data_start);
+
+    var iter = try store.iterate(page_id);
+    defer iter.deinit();
+
+    const e1 = try iter.next();
+    try std.testing.expect(e1 != null);
+    try std.testing.expectEqual(@as(DocId, 10), e1.?.doc_id);
+    try std.testing.expectEqual(@as(u32, 1), e1.?.term_freq);
+
+    const e2 = try iter.next();
+    try std.testing.expect(e2 != null);
+    try std.testing.expectEqual(@as(DocId, 20), e2.?.doc_id);
+    try std.testing.expectEqual(@as(u32, 2), e2.?.term_freq);
+
+    const e3 = try iter.next();
+    try std.testing.expect(e3 != null);
+    try std.testing.expectEqual(@as(DocId, 30), e3.?.doc_id);
+    try std.testing.expectEqual(@as(u32, 3), e3.?.term_freq);
+}
+
+test "posting store appends thousands of entries without stalling" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_posting_stress_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 128 * 4096);
+    defer bp.deinit();
+
+    var store = PostingStore.init(allocator, &bp);
+    const page_id = try store.create(1);
+
+    for (1..3001) |i| {
+        _ = try store.append(page_id, .{
+            .doc_id = @intCast(i),
+            .term_freq = 1,
+            .positions = null,
+        });
+    }
+
+    var iter = try store.iterate(page_id);
+    defer iter.deinit();
+
+    var count: usize = 0;
+    var last_doc: DocId = 0;
+    while (try iter.next()) |entry| {
+        count += 1;
+        last_doc = entry.doc_id;
+    }
+
+    try std.testing.expectEqual(@as(usize, 3000), count);
+    try std.testing.expectEqual(@as(DocId, 3000), last_doc);
 }

@@ -197,6 +197,7 @@ if err != nil {
 ## Performance
 
 Benchmarked on Apple M1, single-threaded, with auto-scaled buffer pool. Run `zig build benchmark` to reproduce.
+For the repeated-term FTS indexing workload that previously exposed quadratic append behavior, run `zig build fts-benchmark`.
 
 ### Core Operations
 

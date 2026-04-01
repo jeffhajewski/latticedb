@@ -39,7 +39,7 @@ pub const WAL_MAGIC_NUMBER: u32 = 0x574C4F47;
 pub const DEFAULT_PAGE_SIZE: u32 = 4096;
 
 /// File format version
-pub const FORMAT_VERSION: u16 = 1;
+pub const FORMAT_VERSION: u16 = 2;
 
 /// Property value - a tagged union supporting multiple types
 pub const PropertyValue = union(enum) {

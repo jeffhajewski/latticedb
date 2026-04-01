@@ -631,6 +631,35 @@ test "fts: limit caps results correctly" {
     try std.testing.expectEqual(@as(usize, 5), results.len);
 }
 
+test "fts: indexing thousands of repeated terms remains responsive" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.initWithPoolSize(allocator, "fts_many_repeated_terms", 1024 * 1024);
+    defer db.deinit();
+
+    var dict_tree = try BTree.init(allocator, db.bp);
+    var lengths_tree = try BTree.init(allocator, db.bp);
+
+    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, null, .{});
+
+    for (1..3001) |i| {
+        var buf: [256]u8 = undefined;
+        const text = std.fmt.bufPrint(
+            &buf,
+            "ticket {d} internet connection drops every few minutes randomly on my network causing timeouts",
+            .{i},
+        ) catch unreachable;
+        _ = try index.indexDocument(@intCast(i), text);
+    }
+
+    const results = try index.search("connection", 10);
+    defer index.freeResults(results);
+
+    try std.testing.expectEqual(@as(usize, 10), results.len);
+
+    const stats = index.getStats();
+    try std.testing.expectEqual(@as(u64, 3000), stats.total_docs);
+}
+
 test "fts: reindex same document updates content" {
     const allocator = std.testing.allocator;
     var db = try helpers.TempDb.init(allocator, "fts_reindex");

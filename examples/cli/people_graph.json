@@ -1,0 +1,62 @@
+{
+  "nodes": [
+    {
+      "id": "alice",
+      "labels": ["Person"],
+      "properties": {
+        "name": "Alice",
+        "role": "Researcher"
+      }
+    },
+    {
+      "id": "bob",
+      "labels": ["Person"],
+      "properties": {
+        "name": "Bob",
+        "role": "Engineer"
+      }
+    },
+    {
+      "id": "doc-graph",
+      "labels": ["Document"],
+      "properties": {
+        "title": "Graph Retrieval Patterns",
+        "year": 2024
+      }
+    },
+    {
+      "id": "doc-vector",
+      "labels": ["Document"],
+      "properties": {
+        "title": "Vector Search Notes",
+        "year": 2023
+      }
+    }
+  ],
+  "edges": [
+    {
+      "source": "alice",
+      "target": "doc-graph",
+      "type": "AUTHORED",
+      "properties": {
+        "role": "lead"
+      }
+    },
+    {
+      "source": "bob",
+      "target": "doc-vector",
+      "type": "AUTHORED",
+      "properties": {
+        "role": "lead"
+      }
+    },
+    {
+      "source": "alice",
+      "target": "bob",
+      "type": "COLLABORATES_WITH",
+      "properties": {
+        "since": 2022
+      }
+    }
+  ]
+}

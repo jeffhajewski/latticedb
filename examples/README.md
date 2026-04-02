@@ -1,4 +1,13 @@
-# Graph, Vector, and Full-Text Retrieval Example
+# Examples
+
+## Start Here
+
+If you want the fastest possible first run:
+
+- use [cli/README.md](cli/README.md) for a copy-paste CLI walkthrough
+- use [../docs/getting_started.md](../docs/getting_started.md) for the shortest path by language
+
+## Graph, Vector, and Full-Text Retrieval Demo
 
 This example uses a research-paper citation graph to show how graph traversal, vector similarity, and BM25 full-text search complement each other in one local database. The workflow happens to be Graph RAG, but the point of the demo is to illustrate LatticeDB's underlying graph/vector/text primitives rather than define the database as a RAG product.
 
@@ -9,7 +18,7 @@ This example uses a research-paper citation graph to show how graph traversal, v
 3. **Full-Text Search** adds keyword precision for exact terminology
 4. **Graph RAG** is one way to combine those primitives to build richer context for an LLM
 
-## Running the Examples
+## Running the Retrieval Demos
 
 ### Python
 

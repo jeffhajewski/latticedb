@@ -52,6 +52,12 @@ There is also a runnable graph/vector/text retrieval example in [examples/go](ex
 
 Recent binding-surface cleanups moved embedding helpers into dedicated modules and subpackages. See [docs/client_api_migration.md](docs/client_api_migration.md) for the preferred imports and current compatibility aliases.
 
+## Start Here
+
+- [Getting Started](docs/getting_started.md) maps the shortest path for CLI, Python, TypeScript, and Go.
+- [CLI Quickstart](examples/cli/README.md) is the smallest copy-paste example in the repo.
+- [Examples Overview](examples/README.md) covers the larger graph/vector/text retrieval demos.
+
 ## Example
 
 A complete example: create a small knowledge graph with documents and authors, store embeddings, index text, then query across all three search modes.
@@ -389,6 +395,9 @@ zig build -Doptimize=ReleaseFast   # optimized build
 
 ## Documentation
 
+- [Getting Started](docs/getting_started.md)
+- [Examples Overview](examples/README.md)
+- [CLI Quickstart](examples/cli/README.md)
 - [Architecture Specification](ARCHITECTURE_SPEC.md)
 - [0.5.0 Release Notes Draft](docs/release_notes_next.md)
 - [Client API Migration Notes](docs/client_api_migration.md)

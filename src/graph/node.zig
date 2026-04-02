@@ -78,11 +78,31 @@ pub const NodeStore = struct {
 
     /// Initialize node store with a B+Tree
     pub fn init(allocator: Allocator, tree: *BTree) Self {
-        return Self{
+        var self = Self{
             .allocator = allocator,
             .tree = tree,
             .next_id = 1, // Start from 1, 0 is reserved for NULL
         };
+        self.next_id = self.loadNextId() catch 1;
+        return self;
+    }
+
+    fn loadNextId(self: *Self) NodeError!NodeId {
+        var max_id: NodeId = 0;
+        var iter = self.tree.range(null, null) catch |err| {
+            return mapBTreeError(err);
+        };
+        defer iter.deinit();
+
+        while (iter.next() catch |err| {
+            return mapBTreeError(err);
+        }) |entry| {
+            if (entry.key.len != 8) continue;
+            const node_id = std.mem.readInt(u64, entry.key[0..8], .little);
+            if (node_id > max_id) max_id = node_id;
+        }
+
+        return max_id + 1;
     }
 
     /// Create a new node with labels and properties
@@ -595,6 +615,37 @@ test "node store delete" {
 
     // Deleting again should fail with NotFound
     try std.testing.expectError(NodeError.NotFound, store.delete(node_id));
+}
+
+test "node store reload continues monotonic ids" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const buffer_pool = lattice.storage.buffer_pool;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_node_reload_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try buffer_pool.BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var tree = try BTree.init(allocator, &bp);
+
+    var store = NodeStore.init(allocator, &tree);
+    try std.testing.expectEqual(@as(NodeId, 1), try store.create(&[_]SymbolId{1000}, &[_]Property{}));
+
+    var reopened = NodeStore.init(allocator, &tree);
+    try std.testing.expectEqual(@as(NodeId, 2), try reopened.create(&[_]SymbolId{1000}, &[_]Property{}));
 }
 
 test "property value list serialization round-trip" {

@@ -7,6 +7,7 @@ source "$SCRIPT_DIR/helpers.sh"
 
 ARTIFACTS="${ARTIFACTS:-/artifacts}"
 SRC="${SRC:-/src}"
+PY_WORK="/tmp/py-build"
 
 # Check if python3 is available
 if ! command -v python3 &> /dev/null; then
@@ -30,8 +31,12 @@ assert_exit_code "$EXIT_CODE" 0
 # Activate venv
 source /tmp/pytest-venv/bin/activate
 
+# Copy Python source to a writable location (source is mounted read-only)
+rm -rf "$PY_WORK"
+cp -r "$SRC/bindings/python" "$PY_WORK"
+
 test_begin "install latticedb from source"
-run pip install --quiet "$SRC/bindings/python"
+run pip install --quiet "$PY_WORK"
 assert_exit_code "$EXIT_CODE" 0
 
 test_begin "python smoke test: import, create, query"
@@ -49,8 +54,8 @@ with db.write() as txn:
 
 # Query the data
 result = db.query('MATCH (n:Person) RETURN n.name')
-assert len(result.rows) > 0, f'Expected rows, got {len(result.rows)}'
-print(f'Query returned {len(result.rows)} row(s)')
+assert len(result) > 0, f'Expected rows, got {len(result)}'
+print(f'Query returned {len(result)} row(s)')
 
 db.close()
 print('Python smoke test passed')
@@ -63,5 +68,6 @@ assert_contains "$STDOUT" "Python smoke test passed"
 # Cleanup
 rm -f /tmp/pytest-smoke.lattice /tmp/pytest-smoke.lattice-wal
 rm -rf /tmp/pytest-venv
+rm -rf "$PY_WORK"
 
 test_summary

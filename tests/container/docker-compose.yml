@@ -1,5 +1,6 @@
 services:
   ubuntu-22.04:
+    platform: linux/amd64
     build:
       context: .
       dockerfile: Dockerfile.ubuntu-22.04
@@ -12,6 +13,7 @@ services:
       - ../../include:/src/include:ro
 
   ubuntu-24.04:
+    platform: linux/amd64
     build:
       context: .
       dockerfile: Dockerfile.ubuntu-24.04
@@ -24,6 +26,7 @@ services:
       - ../../include:/src/include:ro
 
   debian-bookworm:
+    platform: linux/amd64
     build:
       context: .
       dockerfile: Dockerfile.debian-bookworm
@@ -36,6 +39,7 @@ services:
       - ../../include:/src/include:ro
 
   alpine-3.19:
+    platform: linux/amd64
     build:
       context: .
       dockerfile: Dockerfile.alpine-3.19
@@ -48,6 +52,7 @@ services:
       - ../../include:/src/include:ro
 
   fedora-40:
+    platform: linux/amd64
     build:
       context: .
       dockerfile: Dockerfile.fedora-40

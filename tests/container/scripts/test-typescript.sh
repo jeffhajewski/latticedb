@@ -7,6 +7,7 @@ source "$SCRIPT_DIR/helpers.sh"
 
 ARTIFACTS="${ARTIFACTS:-/artifacts}"
 SRC="${SRC:-/src}"
+export LATTICE_LIB_PATH="${LATTICE_LIB_PATH:-$ARTIFACTS/lib}"
 
 # Check if node is available
 if ! command -v node &> /dev/null; then
@@ -23,7 +24,7 @@ rm -rf "$TS_WORK"
 cp -r "$SRC/bindings/typescript" "$TS_WORK"
 
 test_begin "install npm dependencies"
-run bash -c "cd '$TS_WORK' && npm ci --ignore-scripts 2>&1"
+run bash -c "cd '$TS_WORK' && if [ -d node_modules ]; then echo 'Reusing copied node_modules'; else npm ci --ignore-scripts --no-audit --no-fund 2>&1; fi"
 assert_exit_code "$EXIT_CODE" 0
 
 test_begin "build TypeScript"
@@ -31,7 +32,7 @@ run bash -c "cd '$TS_WORK' && npm run build 2>&1"
 assert_exit_code "$EXIT_CODE" 0
 
 test_begin "node smoke test: require, create, query"
-run env LATTICE_LIB_PATH="$ARTIFACTS/lib" node -e "
+run node -e "
 const { Database } = require('$TS_WORK/dist');
 
 async function main() {

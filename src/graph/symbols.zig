@@ -61,12 +61,35 @@ pub const SymbolTable = struct {
 
     /// Initialize symbol table with existing B+Trees
     pub fn init(allocator: Allocator, forward: *BTree, reverse: *BTree) Self {
-        return Self{
+        var self = Self{
             .allocator = allocator,
             .forward = forward,
             .reverse = reverse,
             .next_id = USER_SYMBOL_START,
         };
+        self.next_id = self.loadNextId() catch USER_SYMBOL_START;
+        return self;
+    }
+
+    fn loadNextId(self: *Self) SymbolError!SymbolId {
+        var max_id: SymbolId = USER_SYMBOL_START - 1;
+        var iter = self.reverse.range(null, null) catch |err| {
+            return mapBTreeError(err);
+        };
+        defer iter.deinit();
+
+        while (iter.next() catch |err| {
+            return mapBTreeError(err);
+        }) |entry| {
+            if (entry.key.len != 2) continue;
+            const symbol_id = std.mem.readInt(u16, entry.key[0..2], .little);
+            if (symbol_id >= USER_SYMBOL_START and symbol_id > max_id) {
+                max_id = symbol_id;
+            }
+        }
+
+        if (max_id < USER_SYMBOL_START) return USER_SYMBOL_START;
+        return max_id + 1;
     }
 
     /// Get or create a symbol ID for a string
@@ -264,4 +287,36 @@ test "symbol table not found" {
     // Resolve invalid symbol
     try std.testing.expectError(SymbolError.InvalidSymbol, symbols.resolve(NULL_SYMBOL));
     try std.testing.expectError(SymbolError.NotFound, symbols.resolve(12345));
+}
+
+test "symbol table reload continues symbol ids" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const buffer_pool = lattice.storage.buffer_pool;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_symbol_reload_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try buffer_pool.BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var forward_tree = try BTree.init(allocator, &bp);
+    var reverse_tree = try BTree.init(allocator, &bp);
+
+    var symbols = SymbolTable.init(allocator, &forward_tree, &reverse_tree);
+    try std.testing.expectEqual(USER_SYMBOL_START, try symbols.intern("Person"));
+
+    var reopened = SymbolTable.init(allocator, &forward_tree, &reverse_tree);
+    try std.testing.expectEqual(USER_SYMBOL_START + 1, try reopened.intern("Company"));
 }

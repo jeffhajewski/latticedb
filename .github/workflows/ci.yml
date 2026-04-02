@@ -131,12 +131,16 @@ jobs:
       - name: Run tests
         if: ${{ !(matrix.os == 'ubuntu-latest' && matrix.node-version == '20') }}
         working-directory: bindings/typescript
-        run: npm test
+        env:
+          LATTICE_LIB_PATH: ${{ github.workspace }}/zig-out/lib
+        run: npm test -- --runInBand
 
       - name: Run tests with coverage gate
         if: ${{ matrix.os == 'ubuntu-latest' && matrix.node-version == '20' }}
         working-directory: bindings/typescript
-        run: npm run test:coverage -- --coverageReporters=text-summary
+        env:
+          LATTICE_LIB_PATH: ${{ github.workspace }}/zig-out/lib
+        run: npm run test:coverage -- --runInBand --coverageReporters=text-summary
 
   # ============================================
   # Go tests

@@ -1230,13 +1230,38 @@ pub const Database = struct {
     // ========================================================================
 
     /// Get the number of nodes in the database
-    pub fn nodeCount(self: *const Self) u64 {
-        return self.page_manager.getHeader().node_count;
+    pub fn nodeCount(self: *Self) u64 {
+        var iter = self.node_tree.range(null, null) catch return 0;
+        defer iter.deinit();
+
+        var count: u64 = 0;
+        while (true) {
+            const entry = iter.next() catch break;
+            if (entry == null) break;
+            count += 1;
+        }
+
+        return count;
     }
 
     /// Get the number of edges in the database
-    pub fn edgeCount(self: *const Self) u64 {
-        return self.page_manager.getHeader().edge_count;
+    pub fn edgeCount(self: *Self) u64 {
+        var iter = self.edge_tree.range(null, null) catch return 0;
+        defer iter.deinit();
+
+        var count: u64 = 0;
+        while (true) {
+            const entry = iter.next() catch break;
+            if (entry) |e| {
+                if (e.key.len >= 11 and e.key[8] == 0) {
+                    count += 1;
+                }
+            } else {
+                break;
+            }
+        }
+
+        return count;
     }
 
     /// Get database file path

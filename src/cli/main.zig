@@ -21,6 +21,15 @@ const OpenOptions = lattice.storage.database.OpenOptions;
 
 pub const VERSION = lattice.VERSION;
 
+const CliError = error{
+    CommandFailed,
+};
+
+fn failCommand(stderr: anytype, comptime fmt: []const u8, args: anytype) CliError {
+    output.printError(stderr, fmt, args);
+    return error.CommandFailed;
+}
+
 pub fn main() !void {
     var gpa = std.heap.GeneralPurposeAllocator(.{}){};
     defer _ = gpa.deinit();
@@ -41,7 +50,7 @@ pub fn main() !void {
             error.InvalidBatchSize => output.printError(stderr, "Invalid batch size. Must be a positive integer.", .{}),
             else => output.printError(stderr, "Failed to parse arguments", .{}),
         }
-        return;
+        std.process.exit(1);
     };
     defer parsed_args.deinit(allocator);
 
@@ -67,12 +76,15 @@ pub fn main() !void {
     if (command.requiresPath() and parsed_args.path == null) {
         output.printError(stderr, "Missing database path", .{});
         try stderr.print("Usage: lattice {s} <path>\n", .{@tagName(command)});
-        return;
+        std.process.exit(1);
     }
 
     // Dispatch to command handler
     runCommand(allocator, stdout, stderr, command, &parsed_args) catch |err| {
-        output.printError(stderr, "Command failed: {s}", .{@errorName(err)});
+        if (err != error.CommandFailed) {
+            output.printError(stderr, "Command failed: {s}", .{@errorName(err)});
+        }
+        std.process.exit(1);
     };
 }
 
@@ -116,8 +128,7 @@ fn cmdCreate(
 
     // Check if file already exists
     if (std.fs.cwd().access(path, .{})) |_| {
-        output.printError(stderr, "Database already exists: {s}", .{path});
-        return;
+        return failCommand(stderr, "Database already exists: {s}", .{path});
     } else |_| {
         // File doesn't exist, which is what we want for create
     }
@@ -135,8 +146,7 @@ fn cmdCreate(
         .create = true,
         .config = config,
     }) catch |err| {
-        output.printError(stderr, "Failed to create database: {s}", .{@errorName(err)});
-        return;
+        return failCommand(stderr, "Failed to create database: {s}", .{@errorName(err)});
     };
     db.close();
 
@@ -162,8 +172,7 @@ fn cmdInfo(
     const db = Database.open(allocator, path, .{
         .read_only = true,
     }) catch |err| {
-        output.printError(stderr, "Failed to open database: {s}", .{@errorName(err)});
-        return;
+        return failCommand(stderr, "Failed to open database: {s}", .{@errorName(err)});
     };
     defer db.close();
 
@@ -172,13 +181,11 @@ fn cmdInfo(
 
     // Get file size
     const file = std.fs.cwd().openFile(path, .{}) catch {
-        output.printError(stderr, "Cannot read file info", .{});
-        return;
+        return failCommand(stderr, "Cannot read file info", .{});
     };
     defer file.close();
     const stat = file.stat() catch {
-        output.printError(stderr, "Cannot stat file", .{});
-        return;
+        return failCommand(stderr, "Cannot stat file", .{});
     };
     const size_kb = stat.size / 1024;
 
@@ -229,8 +236,7 @@ fn cmdCount(
     var db = Database.open(allocator, path, .{
         .read_only = true,
     }) catch |err| {
-        output.printError(stderr, "Failed to open database: {s}", .{@errorName(err)});
-        return;
+        return failCommand(stderr, "Failed to open database: {s}", .{@errorName(err)});
     };
     defer db.close();
 
@@ -286,8 +292,7 @@ fn cmdQuery(
 
     // Open database
     const db = Database.open(allocator, path, .{}) catch |err| {
-        output.printError(stderr, "Failed to open database: {s}", .{@errorName(err)});
-        return;
+        return failCommand(stderr, "Failed to open database: {s}", .{@errorName(err)});
     };
     defer db.close();
 
@@ -313,26 +318,22 @@ fn cmdExec(
     } else if (parsed_args.file) |file_path| {
         // Read query from file
         const file = std.fs.cwd().openFile(file_path, .{}) catch |err| {
-            output.printError(stderr, "Cannot open query file: {s}", .{@errorName(err)});
-            return;
+            return failCommand(stderr, "Cannot open query file: {s}", .{@errorName(err)});
         };
         defer file.close();
 
         query_string = file.readToEndAlloc(allocator, 1024 * 1024) catch |err| {
-            output.printError(stderr, "Cannot read query file: {s}", .{@errorName(err)});
-            return;
+            return failCommand(stderr, "Cannot read query file: {s}", .{@errorName(err)});
         };
         query_owned = true;
     } else {
-        output.printError(stderr, "No query provided. Use --query=\"...\" or --file=<path>", .{});
-        return;
+        return failCommand(stderr, "No query provided. Use --query=\"...\" or --file=<path>", .{});
     }
     defer if (query_owned) allocator.free(query_string);
 
     // Open database
     const db = Database.open(allocator, path, .{}) catch |err| {
-        output.printError(stderr, "Failed to open database: {s}", .{@errorName(err)});
-        return;
+        return failCommand(stderr, "Failed to open database: {s}", .{@errorName(err)});
     };
     defer db.close();
 
@@ -344,14 +345,13 @@ fn cmdExec(
             error.PlanError => "Plan error: could not create execution plan",
             error.ExecutionError => "Execution error: query failed",
         };
-        output.printError(stderr, "{s}", .{err_msg});
-        return;
+        return failCommand(stderr, "{s}", .{err_msg});
     };
 
     if (detailed == .failure) {
         output.printQueryFailure(stderr, query_string, detailed.failure);
         detailed.failure.deinit();
-        return;
+        return error.CommandFailed;
     }
 
     // Display result using REPL's display logic
@@ -360,7 +360,7 @@ fn cmdExec(
     repl.show_timing = false; // No timing for exec command
     defer detailed.success.deinit();
     repl.displayResult(&detailed.success, stdout, 0) catch |err| {
-        output.printError(stderr, "Failed to display results: {s}", .{@errorName(err)});
+        return failCommand(stderr, "Failed to display results: {s}", .{@errorName(err)});
     };
 }
 
@@ -376,15 +376,13 @@ fn cmdLabels(
     var db = Database.open(allocator, path, .{
         .read_only = true,
     }) catch |err| {
-        output.printError(stderr, "Failed to open database: {s}", .{@errorName(err)});
-        return;
+        return failCommand(stderr, "Failed to open database: {s}", .{@errorName(err)});
     };
     defer db.close();
 
     // Get all labels
     const labels = db.getAllLabels() catch |err| {
-        output.printError(stderr, "Failed to get labels: {s}", .{@errorName(err)});
-        return;
+        return failCommand(stderr, "Failed to get labels: {s}", .{@errorName(err)});
     };
     defer db.freeLabelInfos(labels);
 
@@ -458,15 +456,13 @@ fn cmdTypes(
     var db = Database.open(allocator, path, .{
         .read_only = true,
     }) catch |err| {
-        output.printError(stderr, "Failed to open database: {s}", .{@errorName(err)});
-        return;
+        return failCommand(stderr, "Failed to open database: {s}", .{@errorName(err)});
     };
     defer db.close();
 
     // Get all edge types
     const types = db.getAllEdgeTypes() catch |err| {
-        output.printError(stderr, "Failed to get edge types: {s}", .{@errorName(err)});
-        return;
+        return failCommand(stderr, "Failed to get edge types: {s}", .{@errorName(err)});
     };
     defer db.freeEdgeTypeInfos(types);
 
@@ -540,22 +536,19 @@ fn cmdSchema(
     var db = Database.open(allocator, path, .{
         .read_only = true,
     }) catch |err| {
-        output.printError(stderr, "Failed to open database: {s}", .{@errorName(err)});
-        return;
+        return failCommand(stderr, "Failed to open database: {s}", .{@errorName(err)});
     };
     defer db.close();
 
     // Get all labels
     const labels = db.getAllLabels() catch |err| {
-        output.printError(stderr, "Failed to get labels: {s}", .{@errorName(err)});
-        return;
+        return failCommand(stderr, "Failed to get labels: {s}", .{@errorName(err)});
     };
     defer db.freeLabelInfos(labels);
 
     // Get all edge types
     const edge_types = db.getAllEdgeTypes() catch |err| {
-        output.printError(stderr, "Failed to get edge types: {s}", .{@errorName(err)});
-        return;
+        return failCommand(stderr, "Failed to get edge types: {s}", .{@errorName(err)});
     };
     defer db.freeEdgeTypeInfos(edge_types);
 
@@ -639,14 +632,12 @@ fn cmdImport(
 ) !void {
     const path = parsed_args.path.?;
     const file = parsed_args.file orelse {
-        output.printError(stderr, "No import file specified. Use --file=<path>", .{});
-        return;
+        return failCommand(stderr, "No import file specified. Use --file=<path>", .{});
     };
 
     // Open database
     var db = Database.open(allocator, path, .{}) catch |err| {
-        output.printError(stderr, "Failed to open database: {s}", .{@errorName(err)});
-        return;
+        return failCommand(stderr, "Failed to open database: {s}", .{@errorName(err)});
     };
     defer db.close();
 
@@ -657,8 +648,7 @@ fn cmdImport(
     const is_csv = std.mem.endsWith(u8, file, ".csv");
 
     if (!is_json and !is_csv) {
-        output.printError(stderr, "Unknown file format. Use .json or .csv extension.", .{});
-        return;
+        return failCommand(stderr, "Unknown file format. Use .json or .csv extension.", .{});
     }
 
     const stats = if (is_json)
@@ -696,7 +686,7 @@ fn cmdImport(
             },
         }
     } else |err| {
-        output.printError(stderr, "Import failed: {s}", .{@errorName(err)});
+        return failCommand(stderr, "Import failed: {s}", .{@errorName(err)});
     }
 }
 
@@ -708,16 +698,14 @@ fn cmdExport(
 ) !void {
     const path = parsed_args.path.?;
     const file = parsed_args.file orelse {
-        output.printError(stderr, "No export file specified. Use --file=<path>", .{});
-        return;
+        return failCommand(stderr, "No export file specified. Use --file=<path>", .{});
     };
 
     // Open database
     var db = Database.open(allocator, path, .{
         .read_only = true,
     }) catch |err| {
-        output.printError(stderr, "Failed to open database: {s}", .{@errorName(err)});
-        return;
+        return failCommand(stderr, "Failed to open database: {s}", .{@errorName(err)});
     };
     defer db.close();
 
@@ -729,15 +717,13 @@ fn cmdExport(
         if (std.mem.endsWith(u8, file, ".jsonl")) break :blk .jsonl;
         if (std.mem.endsWith(u8, file, ".csv")) break :blk .csv;
         if (std.mem.endsWith(u8, file, ".dot")) break :blk .dot;
-        output.printError(stderr, "Unknown file format. Use .json, .jsonl, .csv, or .dot extension.", .{});
-        return;
+        return failCommand(stderr, "Unknown file format. Use .json, .jsonl, .csv, or .dot extension.", .{});
     };
 
     if (export_kind != .csv) {
         // Single-file exports: JSON, JSONL, DOT.
         const out_file = std.fs.cwd().createFile(file, .{}) catch |err| {
-            output.printError(stderr, "Cannot create output file: {s}", .{@errorName(err)});
-            return;
+            return failCommand(stderr, "Cannot create output file: {s}", .{@errorName(err)});
         };
         defer out_file.close();
 
@@ -769,7 +755,7 @@ fn cmdExport(
                 },
             }
         } else |err| {
-            output.printError(stderr, "Export failed: {s}", .{@errorName(err)});
+            return failCommand(stderr, "Export failed: {s}", .{@errorName(err)});
         }
     } else {
         // Export to CSV - creates two files: file_nodes.csv and file_edges.csv
@@ -777,25 +763,21 @@ fn cmdExport(
 
         var nodes_path_buf: [1024]u8 = undefined;
         const nodes_path = std.fmt.bufPrint(&nodes_path_buf, "{s}_nodes.csv", .{base_name}) catch {
-            output.printError(stderr, "Path too long", .{});
-            return;
+            return failCommand(stderr, "Path too long", .{});
         };
 
         var edges_path_buf: [1024]u8 = undefined;
         const edges_path = std.fmt.bufPrint(&edges_path_buf, "{s}_edges.csv", .{base_name}) catch {
-            output.printError(stderr, "Path too long", .{});
-            return;
+            return failCommand(stderr, "Path too long", .{});
         };
 
         const nodes_file = std.fs.cwd().createFile(nodes_path, .{}) catch |err| {
-            output.printError(stderr, "Cannot create nodes file: {s}", .{@errorName(err)});
-            return;
+            return failCommand(stderr, "Cannot create nodes file: {s}", .{@errorName(err)});
         };
         defer nodes_file.close();
 
         const edges_file = std.fs.cwd().createFile(edges_path, .{}) catch |err| {
-            output.printError(stderr, "Cannot create edges file: {s}", .{@errorName(err)});
-            return;
+            return failCommand(stderr, "Cannot create edges file: {s}", .{@errorName(err)});
         };
         defer edges_file.close();
 
@@ -828,7 +810,7 @@ fn cmdExport(
                 },
             }
         } else |err| {
-            output.printError(stderr, "Export failed: {s}", .{@errorName(err)});
+            return failCommand(stderr, "Export failed: {s}", .{@errorName(err)});
         }
     }
 }
@@ -845,8 +827,7 @@ fn cmdDump(
     var db = Database.open(allocator, path, .{
         .read_only = true,
     }) catch |err| {
-        output.printError(stderr, "Failed to open database: {s}", .{@errorName(err)});
-        return;
+        return failCommand(stderr, "Failed to open database: {s}", .{@errorName(err)});
     };
     defer db.close();
 
@@ -858,7 +839,7 @@ fn cmdDump(
         const stderr_writer = std.fs.File.stderr().deprecatedWriter();
         try stderr_writer.print("Dumped {d} nodes, {d} edges\n", .{ s.nodes_exported, s.edges_exported });
     } else |err| {
-        output.printError(stderr, "Dump failed: {s}", .{@errorName(err)});
+        return failCommand(stderr, "Dump failed: {s}", .{@errorName(err)});
     }
 }
 

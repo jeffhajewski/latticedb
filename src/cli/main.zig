@@ -18,11 +18,29 @@ const Repl = repl_mod.Repl;
 const Database = lattice.storage.database.Database;
 const DatabaseConfig = lattice.storage.database.DatabaseConfig;
 const OpenOptions = lattice.storage.database.OpenOptions;
+const PageHeader = lattice.storage.page.PageHeader;
+const PageManager = lattice.storage.page_manager.PageManager;
+const PageManagerError = lattice.storage.page_manager.PageManagerError;
+const PosixVfs = lattice.storage.vfs.PosixVfs;
 
 pub const VERSION = lattice.VERSION;
 
 const CliError = error{
     CommandFailed,
+};
+
+const CheckError = error{
+    FileNotFound,
+    PermissionDenied,
+    InvalidDatabase,
+    ChecksumMismatch,
+    IoError,
+    OutOfMemory,
+};
+
+const CheckStats = struct {
+    pages_checked: u32,
+    wal_present: bool,
 };
 
 fn failCommand(stderr: anytype, comptime fmt: []const u8, args: anytype) CliError {
@@ -107,7 +125,7 @@ fn runCommand(
         .types => try cmdTypes(allocator, stdout, stderr, parsed_args),
         .schema => try cmdSchema(allocator, stdout, stderr, parsed_args),
         .compact => try cmdCompact(stdout, stderr, parsed_args),
-        .check => try cmdCheck(stdout, stderr, parsed_args),
+        .check => try cmdCheck(allocator, stdout, stderr, parsed_args),
         .import => try cmdImport(allocator, stdout, stderr, parsed_args),
         .@"export" => try cmdExport(allocator, stdout, stderr, parsed_args),
         .dump => try cmdDump(allocator, stdout, stderr, parsed_args),
@@ -607,21 +625,95 @@ fn cmdSchema(
 }
 
 fn cmdCompact(stdout: anytype, stderr: anytype, parsed_args: *const Args) !void {
-    _ = stderr;
-    const path = parsed_args.path.?;
-
-    // TODO: Compact database
-    output.printInfo(stdout, "Compacting {s}...", .{path});
-    output.printInfo(stdout, "Compaction not yet implemented", .{});
+    _ = stdout;
+    _ = parsed_args;
+    return failCommand(stderr, "The 'compact' command is reserved but not currently supported.", .{});
 }
 
-fn cmdCheck(stdout: anytype, stderr: anytype, parsed_args: *const Args) !void {
-    _ = stderr;
+fn cmdCheck(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    stderr: anytype,
+    parsed_args: *const Args,
+) !void {
     const path = parsed_args.path.?;
+    const stats = checkDatabaseFile(allocator, path) catch |err| switch (err) {
+        error.FileNotFound => return failCommand(stderr, "Database file not found: {s}", .{path}),
+        error.PermissionDenied => return failCommand(stderr, "Permission denied while checking: {s}", .{path}),
+        error.InvalidDatabase => return failCommand(stderr, "Invalid database file: {s}", .{path}),
+        error.ChecksumMismatch => return failCommand(stderr, "Checksum mismatch detected in database file: {s}", .{path}),
+        error.OutOfMemory => return err,
+        else => return failCommand(stderr, "Failed to check database file: {s}", .{@errorName(err)}),
+    };
 
-    // TODO: Check database integrity
-    output.printInfo(stdout, "Checking {s}...", .{path});
-    output.printInfo(stdout, "Integrity check not yet implemented", .{});
+    switch (parsed_args.format) {
+        .table => {
+            output.printSuccess(stdout, "Database file checks passed", .{});
+            try stdout.print("  Pages checked: {d}\n", .{stats.pages_checked});
+            if (stats.wal_present) {
+                try stdout.writeAll("  Note: sibling WAL file exists but was not validated\n");
+            }
+        },
+        .json => {
+            try stdout.print("{{\"path\":\"{s}\",\"pages_checked\":{d},\"wal_present\":{},\"wal_validated\":false}}\n", .{
+                path,
+                stats.pages_checked,
+                stats.wal_present,
+            });
+        },
+        .csv => {
+            try stdout.writeAll("property,value\n");
+            try stdout.print("path,{s}\n", .{path});
+            try stdout.print("pages_checked,{d}\n", .{stats.pages_checked});
+            try stdout.print("wal_present,{}\n", .{stats.wal_present});
+            try stdout.writeAll("wal_validated,false\n");
+        },
+    }
+}
+
+fn checkDatabaseFile(allocator: std.mem.Allocator, path: []const u8) CheckError!CheckStats {
+    var posix_vfs = PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    var page_manager = PageManager.init(allocator, vfs_impl, path, .{
+        .read_only = true,
+    }) catch |err| return mapPageManagerCheckError(err);
+    defer page_manager.deinit();
+
+    const page_size: usize = @intCast(page_manager.getPageSize());
+    const page_alignment = comptime std.mem.Alignment.fromByteUnits(@alignOf(PageHeader));
+    const page_buf = allocator.alignedAlloc(u8, page_alignment, page_size) catch {
+        return CheckError.OutOfMemory;
+    };
+    defer allocator.free(page_buf);
+
+    const page_count = page_manager.pageCount();
+    var page_id: u32 = 1;
+    while (page_id < page_count) : (page_id += 1) {
+        page_manager.readPage(page_id, page_buf) catch |err| return mapPageManagerCheckError(err);
+    }
+
+    return .{
+        .pages_checked = page_count -| 1,
+        .wal_present = hasWalSibling(path),
+    };
+}
+
+fn mapPageManagerCheckError(err: PageManagerError) CheckError {
+    return switch (err) {
+        error.FileNotFound => CheckError.FileNotFound,
+        error.PermissionDenied => CheckError.PermissionDenied,
+        error.ChecksumMismatch => CheckError.ChecksumMismatch,
+        error.InvalidHeader, error.InvalidMagic, error.VersionTooNew, error.InvalidPageId, error.PageNotAllocated => CheckError.InvalidDatabase,
+        else => CheckError.IoError,
+    };
+}
+
+fn hasWalSibling(path: []const u8) bool {
+    var wal_path_buf: [512]u8 = undefined;
+    const wal_path = std.fmt.bufPrint(&wal_path_buf, "{s}-wal", .{path}) catch return false;
+    std.fs.cwd().access(wal_path, .{}) catch return false;
+    return true;
 }
 
 fn cmdImport(
@@ -862,8 +954,7 @@ fn printUsage(writer: anytype) void {
         \\  Database:
         \\    create <path>       Create a new database
         \\    info <path>         Show database information
-        \\    compact <path>      Compact database (reclaim space)
-        \\    check <path>        Verify database integrity
+        \\    check <path>        Verify main database file checksums
         \\
         \\  Query:
         \\    query <path>        Interactive Cypher REPL
@@ -901,6 +992,7 @@ fn printUsage(writer: anytype) void {
         \\  lattice query mydb.lattice
         \\  lattice exec mydb.lattice --query="MATCH (n) RETURN n LIMIT 10"
         \\  lattice count mydb.lattice --format=json
+        \\  lattice check mydb.lattice
         \\  lattice export mydb.lattice --file=backup.json
         \\
     ) catch {};
@@ -944,6 +1036,29 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\  lattice query mydb.lattice
             \\
         ) catch {},
+        .check => writer.writeAll(
+            \\Usage: lattice check <path> [options]
+            \\
+            \\Open the main database file read-only and verify the stored
+            \\ per-page checksums.
+            \\
+            \\Options:
+            \\  --format=<fmt>        Output format: table, json, csv
+            \\
+            \\Notes:
+            \\  A sibling <path>-wal file is reported if present, but WAL
+            \\  frames are not currently validated by this command.
+            \\
+            \\Example:
+            \\  lattice check mydb.lattice
+            \\
+        ) catch {},
+        .compact => writer.writeAll(
+            \\Usage: lattice compact <path>
+            \\
+            \\This command name is reserved but not currently supported.
+            \\
+        ) catch {},
         .exec => writer.writeAll(
             \\Usage: lattice exec <path> --query="<cypher>" [options]
             \\
@@ -968,6 +1083,9 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\  --file=<path>         Input file (JSON or CSV)
             \\  --batch-size=<n>      Commit every N items (default: 1000)
             \\  --on-error=skip       Skip invalid records instead of aborting
+            \\
+            \\When --on-error=skip is set, records are applied individually so
+            \\ successful rows are preserved.
             \\
             \\JSON format:
             \\  {"nodes": [...], "edges": [...]}
@@ -1004,6 +1122,60 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             writer.print("{s}\n", .{command.description()}) catch {};
         },
     }
+}
+
+fn cleanupTestDatabaseFiles(path: []const u8) void {
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var wal_path_buf: [512]u8 = undefined;
+    const wal_path = std.fmt.bufPrint(&wal_path_buf, "{s}-wal", .{path}) catch return;
+    std.fs.cwd().deleteFile(wal_path) catch {};
+}
+
+test "checkDatabaseFile validates database pages" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_cli_check_ok.ltdb";
+    cleanupTestDatabaseFiles(path);
+    defer cleanupTestDatabaseFiles(path);
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = false,
+            .enable_fts = false,
+        },
+    });
+
+    _ = try db.createNode(null, &[_][]const u8{"Person"});
+    db.close();
+
+    const stats = try checkDatabaseFile(allocator, path);
+    try std.testing.expect(stats.pages_checked > 0);
+    try std.testing.expect(!stats.wal_present);
+}
+
+test "checkDatabaseFile detects checksum mismatches" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_cli_check_corrupt.ltdb";
+    cleanupTestDatabaseFiles(path);
+    defer cleanupTestDatabaseFiles(path);
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = false,
+            .enable_fts = false,
+        },
+    });
+
+    _ = try db.createNode(null, &[_][]const u8{"Person"});
+    db.close();
+
+    var file = try std.fs.cwd().openFile(path, .{ .mode = .read_write });
+    defer file.close();
+    try file.pwriteAll(&[_]u8{0xFF}, 4096 + 16);
+
+    try std.testing.expectError(CheckError.ChecksumMismatch, checkDatabaseFile(allocator, path));
 }
 
 test "parse and run version" {

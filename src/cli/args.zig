@@ -76,8 +76,8 @@ pub const Command = enum {
         return switch (self) {
             .create => "Create a new database",
             .info => "Show database information",
-            .compact => "Compact database (reclaim space)",
-            .check => "Verify database integrity",
+            .compact => "Reserved command (not currently available)",
+            .check => "Verify main database file checksums",
             .query => "Interactive Cypher REPL",
             .exec => "Execute a single query",
             .import => "Import data from JSON/CSV",

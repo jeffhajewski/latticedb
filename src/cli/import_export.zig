@@ -9,10 +9,132 @@ const Database = lattice.storage.database.Database;
 const PropertyValue = lattice.core.types.PropertyValue;
 const NodeId = lattice.core.types.NodeId;
 const EdgeId = lattice.core.types.EdgeId;
+const Transaction = lattice.Transaction;
+const TxnMode = lattice.TxnMode;
 
 /// Managed array list for allocator tracking
 fn ManagedArrayList(comptime T: type) type {
     return std.array_list.Managed(T);
+}
+
+const ImportItemKind = enum {
+    node,
+    edge,
+};
+
+const ImportBatcher = struct {
+    db: *Database,
+    batch_size: u32,
+    batching_enabled: bool,
+    txn_active: bool = false,
+    txn: Transaction = undefined,
+    pending_count: u32 = 0,
+    pending_stats: ImportStats = .{},
+
+    const Self = @This();
+
+    fn init(db: *Database, batch_size: u32, on_error_skip: bool) Self {
+        return .{
+            .db = db,
+            .batch_size = @max(batch_size, 1),
+            // Preserve row-level skip semantics by only batching when failures abort.
+            .batching_enabled = batch_size > 1 and !on_error_skip,
+        };
+    }
+
+    fn transaction(self: *Self) ImportExportError!?*Transaction {
+        if (!self.batching_enabled) return null;
+
+        if (!self.txn_active) {
+            self.txn = self.db.beginTransaction(TxnMode.read_write) catch |err| switch (err) {
+                error.TransactionsNotEnabled => {
+                    self.batching_enabled = false;
+                    return null;
+                },
+                else => return mapDatabaseError(err),
+            };
+            self.txn_active = true;
+        }
+
+        return &self.txn;
+    }
+
+    fn recordSuccess(self: *Self, stats: *ImportStats, kind: ImportItemKind) ImportExportError!void {
+        if (!self.txn_active) {
+            incrementImported(stats, kind);
+            return;
+        }
+
+        incrementImported(&self.pending_stats, kind);
+        self.pending_count += 1;
+        if (self.pending_count >= self.batch_size) {
+            try self.commit(stats);
+        }
+    }
+
+    fn recordFailure(self: *Self, stats: *ImportStats, kind: ImportItemKind) ImportExportError!void {
+        if (self.txn_active) {
+            try self.abort();
+        }
+        incrementFailed(stats, kind);
+    }
+
+    fn flush(self: *Self, stats: *ImportStats) ImportExportError!void {
+        if (self.txn_active and self.pending_count > 0) {
+            try self.commit(stats);
+        }
+    }
+
+    fn hasPendingTransaction(self: *const Self) bool {
+        return self.txn_active;
+    }
+
+    fn commit(self: *Self, stats: *ImportStats) ImportExportError!void {
+        if (!self.txn_active) return;
+
+        self.db.commitTransaction(&self.txn) catch |err| return mapDatabaseError(err);
+        mergeImportStats(stats, self.pending_stats);
+        self.txn_active = false;
+        self.pending_count = 0;
+        self.pending_stats = .{};
+    }
+
+    fn abort(self: *Self) ImportExportError!void {
+        if (!self.txn_active) return;
+
+        self.db.abortTransaction(&self.txn) catch |err| return mapDatabaseError(err);
+        self.txn_active = false;
+        self.pending_count = 0;
+        self.pending_stats = .{};
+    }
+};
+
+fn incrementImported(stats: *ImportStats, kind: ImportItemKind) void {
+    switch (kind) {
+        .node => stats.nodes_imported += 1,
+        .edge => stats.edges_imported += 1,
+    }
+}
+
+fn incrementFailed(stats: *ImportStats, kind: ImportItemKind) void {
+    switch (kind) {
+        .node => stats.nodes_failed += 1,
+        .edge => stats.edges_failed += 1,
+    }
+}
+
+fn mergeImportStats(stats: *ImportStats, pending: ImportStats) void {
+    stats.nodes_imported += pending.nodes_imported;
+    stats.nodes_failed += pending.nodes_failed;
+    stats.edges_imported += pending.edges_imported;
+    stats.edges_failed += pending.edges_failed;
+}
+
+fn mapDatabaseError(err: anyerror) ImportExportError {
+    return switch (err) {
+        error.OutOfMemory => ImportExportError.OutOfMemory,
+        else => ImportExportError.DatabaseError,
+    };
 }
 
 /// Import data from a JSON file into the database.
@@ -34,8 +156,6 @@ pub fn importJson(
     batch_size: u32,
     on_error_skip: bool,
 ) ImportExportError!ImportStats {
-    _ = batch_size; // TODO: implement batching
-
     const file = std.fs.cwd().openFile(file_path, .{}) catch {
         return ImportExportError.IoError;
     };
@@ -46,7 +166,7 @@ pub fn importJson(
     };
     defer allocator.free(content);
 
-    return importJsonContent(allocator, db, content, on_error_skip);
+    return importJsonContent(allocator, db, content, batch_size, on_error_skip);
 }
 
 /// Import JSON from a string content
@@ -54,9 +174,12 @@ pub fn importJsonContent(
     allocator: std.mem.Allocator,
     db: *Database,
     content: []const u8,
+    batch_size: u32,
     on_error_skip: bool,
 ) ImportExportError!ImportStats {
     var stats = ImportStats{};
+    var batcher = ImportBatcher.init(db, batch_size, on_error_skip);
+    errdefer if (batcher.hasPendingTransaction()) batcher.abort() catch {};
 
     // Parse JSON
     const parsed = std.json.parseFromSlice(std.json.Value, allocator, content, .{}) catch {
@@ -77,10 +200,11 @@ pub fn importJsonContent(
     if (root.object.get("nodes")) |nodes_val| {
         if (nodes_val == .array) {
             for (nodes_val.array.items) |node_val| {
-                if (importNode(allocator, db, node_val, &id_map)) |_| {
-                    stats.nodes_imported += 1;
+                const txn = try batcher.transaction();
+                if (importNode(allocator, db, txn, node_val, &id_map)) |_| {
+                    try batcher.recordSuccess(&stats, .node);
                 } else |_| {
-                    stats.nodes_failed += 1;
+                    try batcher.recordFailure(&stats, .node);
                     if (!on_error_skip) {
                         return ImportExportError.DatabaseError;
                     }
@@ -88,15 +212,18 @@ pub fn importJsonContent(
             }
         }
     }
+
+    try batcher.flush(&stats);
 
     // Import edges
     if (root.object.get("edges")) |edges_val| {
         if (edges_val == .array) {
             for (edges_val.array.items) |edge_val| {
-                if (importEdge(db, edge_val, &id_map)) |_| {
-                    stats.edges_imported += 1;
+                const txn = try batcher.transaction();
+                if (importEdge(db, txn, edge_val, &id_map)) |_| {
+                    try batcher.recordSuccess(&stats, .edge);
                 } else |_| {
-                    stats.edges_failed += 1;
+                    try batcher.recordFailure(&stats, .edge);
                     if (!on_error_skip) {
                         return ImportExportError.DatabaseError;
                     }
@@ -105,12 +232,14 @@ pub fn importJsonContent(
         }
     }
 
+    try batcher.flush(&stats);
     return stats;
 }
 
 fn importNode(
     allocator: std.mem.Allocator,
     db: *Database,
+    txn: ?*Transaction,
     node_val: std.json.Value,
     id_map: *std.StringHashMap(NodeId),
 ) !void {
@@ -139,7 +268,7 @@ fn importNode(
     }
 
     // Create the node
-    const node_id = db.createNode(null, labels_list.items) catch {
+    const node_id = db.createNode(txn, labels_list.items) catch {
         return error.DatabaseError;
     };
 
@@ -152,7 +281,7 @@ fn importNode(
             var iter = props_val.object.iterator();
             while (iter.next()) |entry| {
                 const prop_val = jsonToPropertyValue(entry.value_ptr.*) catch continue;
-                db.setNodeProperty(null, node_id, entry.key_ptr.*, prop_val) catch continue;
+                db.setNodeProperty(txn, node_id, entry.key_ptr.*, prop_val) catch continue;
             }
         }
     }
@@ -160,6 +289,7 @@ fn importNode(
 
 fn importEdge(
     db: *Database,
+    txn: ?*Transaction,
     edge_val: std.json.Value,
     id_map: *const std.StringHashMap(NodeId),
 ) !void {
@@ -190,7 +320,7 @@ fn importEdge(
     const target_id = id_map.get(target_str) orelse return error.InvalidNodeId;
 
     // Create the edge and retain its stable ID so properties can be applied.
-    const edge_id = db.createEdgeAndGetId(null, source_id, target_id, edge_type) catch {
+    const edge_id = db.createEdgeAndGetId(txn, source_id, target_id, edge_type) catch {
         return error.DatabaseError;
     };
 
@@ -199,7 +329,7 @@ fn importEdge(
             var iter = props_val.object.iterator();
             while (iter.next()) |entry| {
                 const prop_val = jsonToPropertyValue(entry.value_ptr.*) catch continue;
-                db.setEdgePropertyById(null, edge_id, entry.key_ptr.*, prop_val) catch continue;
+                db.setEdgePropertyById(txn, edge_id, entry.key_ptr.*, prop_val) catch continue;
             }
         }
     }
@@ -910,8 +1040,6 @@ pub fn importCsv(
     batch_size: u32,
     on_error_skip: bool,
 ) ImportExportError!ImportStats {
-    _ = batch_size;
-
     const file = std.fs.cwd().openFile(file_path, .{}) catch {
         return ImportExportError.IoError;
     };
@@ -927,9 +1055,9 @@ pub fn importCsv(
     const header_line = lines.next() orelse return ImportExportError.ParseError;
 
     if (std.mem.startsWith(u8, header_line, "_id,_labels")) {
-        return importNodesCsv(allocator, db, content, on_error_skip);
+        return importNodesCsv(allocator, db, content, batch_size, on_error_skip);
     } else if (std.mem.startsWith(u8, header_line, "_source,_target,_type")) {
-        return importEdgesCsv(allocator, db, content, on_error_skip);
+        return importEdgesCsv(db, content, batch_size, on_error_skip);
     } else {
         return ImportExportError.InvalidFormat;
     }
@@ -939,9 +1067,12 @@ fn importNodesCsv(
     allocator: std.mem.Allocator,
     db: *Database,
     content: []const u8,
+    batch_size: u32,
     on_error_skip: bool,
 ) ImportExportError!ImportStats {
     var stats = ImportStats{};
+    var batcher = ImportBatcher.init(db, batch_size, on_error_skip);
+    errdefer if (batcher.hasPendingTransaction()) batcher.abort() catch {};
 
     var lines = std.mem.splitScalar(u8, content, '\n');
 
@@ -962,22 +1093,25 @@ fn importNodesCsv(
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0) continue;
 
-        if (importNodeCsvLine(allocator, db, trimmed, headers.items)) |_| {
-            stats.nodes_imported += 1;
+        const txn = try batcher.transaction();
+        if (importNodeCsvLine(allocator, db, txn, trimmed, headers.items)) |_| {
+            try batcher.recordSuccess(&stats, .node);
         } else |_| {
-            stats.nodes_failed += 1;
+            try batcher.recordFailure(&stats, .node);
             if (!on_error_skip) {
                 return ImportExportError.DatabaseError;
             }
         }
     }
 
+    try batcher.flush(&stats);
     return stats;
 }
 
 fn importNodeCsvLine(
     allocator: std.mem.Allocator,
     db: *Database,
+    txn: ?*Transaction,
     line: []const u8,
     headers: []const []const u8,
 ) !void {
@@ -1007,7 +1141,7 @@ fn importNodeCsvLine(
     }
 
     // Create node
-    const node_id = db.createNode(null, labels_list.items) catch {
+    const node_id = db.createNode(txn, labels_list.items) catch {
         return error.DatabaseError;
     };
 
@@ -1023,19 +1157,20 @@ fn importNodeCsvLine(
             else |_|
                 .{ .string_val = val };
 
-            db.setNodeProperty(null, node_id, header, prop_val) catch continue;
+            db.setNodeProperty(txn, node_id, header, prop_val) catch continue;
         }
     }
 }
 
 fn importEdgesCsv(
-    allocator: std.mem.Allocator,
     db: *Database,
     content: []const u8,
+    batch_size: u32,
     on_error_skip: bool,
 ) ImportExportError!ImportStats {
-    _ = allocator;
     var stats = ImportStats{};
+    var batcher = ImportBatcher.init(db, batch_size, on_error_skip);
+    errdefer if (batcher.hasPendingTransaction()) batcher.abort() catch {};
 
     var lines = std.mem.splitScalar(u8, content, '\n');
 
@@ -1047,20 +1182,22 @@ fn importEdgesCsv(
         const trimmed = std.mem.trim(u8, line, " \t\r");
         if (trimmed.len == 0) continue;
 
-        if (importEdgeCsvLine(db, trimmed)) |_| {
-            stats.edges_imported += 1;
+        const txn = try batcher.transaction();
+        if (importEdgeCsvLine(db, txn, trimmed)) |_| {
+            try batcher.recordSuccess(&stats, .edge);
         } else |_| {
-            stats.edges_failed += 1;
+            try batcher.recordFailure(&stats, .edge);
             if (!on_error_skip) {
                 return ImportExportError.DatabaseError;
             }
         }
     }
 
+    try batcher.flush(&stats);
     return stats;
 }
 
-fn importEdgeCsvLine(db: *Database, line: []const u8) !void {
+fn importEdgeCsvLine(db: *Database, txn: ?*Transaction, line: []const u8) !void {
     var parts = std.mem.splitScalar(u8, line, ',');
 
     const source_str = std.mem.trim(u8, parts.next() orelse return error.InvalidFormat, " \t\r\"");
@@ -1075,7 +1212,7 @@ fn importEdgeCsvLine(db: *Database, line: []const u8) !void {
         return error.InvalidNodeId;
     };
 
-    db.createEdge(null, source_id, target_id, edge_type) catch {
+    db.createEdge(txn, source_id, target_id, edge_type) catch {
         return error.DatabaseError;
     };
 }
@@ -1184,6 +1321,103 @@ pub const ExportStats = struct {
     edges_exported: u64 = 0,
 };
 
+fn cleanupTestDatabaseFiles(path: []const u8) void {
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var wal_path_buf: [512]u8 = undefined;
+    const wal_path = std.fmt.bufPrint(&wal_path_buf, "{s}-wal", .{path}) catch return;
+    std.fs.cwd().deleteFile(wal_path) catch {};
+}
+
+test "import/export JSON batching rolls back failed batch" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_import_json_batch_rollback.ltdb";
+    cleanupTestDatabaseFiles(path);
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_fts = false,
+        },
+    });
+    defer {
+        db.close();
+        cleanupTestDatabaseFiles(path);
+    }
+
+    const json_content =
+        \\{"nodes":[
+        \\  {"id":"n1","labels":["Person"],"properties":{"name":"Alice"}},
+        \\  {"labels":["Person"],"properties":{"name":"Broken"}}
+        \\]}
+    ;
+
+    try std.testing.expectError(
+        ImportExportError.DatabaseError,
+        importJsonContent(allocator, &db, json_content, 2, false),
+    );
+    try std.testing.expectEqual(@as(u64, 0), db.nodeCount());
+}
+
+test "import/export JSON skip preserves valid records" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_import_json_skip.ltdb";
+    cleanupTestDatabaseFiles(path);
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_fts = false,
+        },
+    });
+    defer {
+        db.close();
+        cleanupTestDatabaseFiles(path);
+    }
+
+    const json_content =
+        \\{"nodes":[
+        \\  {"id":"n1","labels":["Person"],"properties":{"name":"Alice"}},
+        \\  {"labels":["Person"],"properties":{"name":"Broken"}},
+        \\  {"id":"n2","labels":["Person"],"properties":{"name":"Bob"}}
+        \\]}
+    ;
+
+    const stats = try importJsonContent(allocator, &db, json_content, 2, true);
+    try std.testing.expectEqual(@as(u64, 2), stats.nodes_imported);
+    try std.testing.expectEqual(@as(u64, 1), stats.nodes_failed);
+    try std.testing.expectEqual(@as(u64, 2), db.nodeCount());
+}
+
+test "import/export CSV batching rolls back failed batch" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_import_csv_batch_rollback.ltdb";
+    cleanupTestDatabaseFiles(path);
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_fts = false,
+        },
+    });
+    defer {
+        db.close();
+        cleanupTestDatabaseFiles(path);
+    }
+
+    const csv_content =
+        \\_id,_labels,name
+        \\n1,Person,Alice
+        \\bad
+    ;
+
+    try std.testing.expectError(
+        ImportExportError.DatabaseError,
+        importNodesCsv(allocator, &db, csv_content, 2, false),
+    );
+    try std.testing.expectEqual(@as(u64, 0), db.nodeCount());
+}
+
 test "import/export JSON roundtrip" {
     const allocator = std.testing.allocator;
 
@@ -1211,7 +1445,7 @@ test "import/export JSON roundtrip" {
         \\]}
     ;
 
-    const import_stats = try importJsonContent(allocator, &db, json_content, false);
+    const import_stats = try importJsonContent(allocator, &db, json_content, 1000, false);
     try std.testing.expectEqual(@as(u64, 2), import_stats.nodes_imported);
     try std.testing.expectEqual(@as(u64, 1), import_stats.edges_imported);
 

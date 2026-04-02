@@ -63,6 +63,15 @@ pub fn build(b: *std.Build) void {
     });
     cli.linkLibrary(lib);
 
+    const cli_main_test_module = b.createModule(.{
+        .root_source_file = b.path("src/cli/main.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "lattice", .module = lib_module },
+        },
+    });
+
     // Unit test module - imports the library module
     const unit_test_module = b.createModule(.{
         .root_source_file = b.path("tests/unit/main.zig"),
@@ -72,6 +81,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "lattice", .module = lib_module },
         },
     });
+    unit_test_module.addImport("cli_main", cli_main_test_module);
 
     // Unit tests
     const unit_tests = b.addTest(.{

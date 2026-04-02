@@ -8,7 +8,22 @@ Python bindings for [LatticeDB](https://github.com/jeffhajewski/latticedb), an e
 pip install latticedb
 ```
 
-The native shared library (`liblattice.dylib` / `liblattice.so`) must be available on the system. Install it via the [install script](https://github.com/jeffhajewski/latticedb#installation) or build from source with `zig build shared`.
+Published wheels are expected to bundle the native shared library on supported platforms.
+
+If you are installing from a source checkout, the package build can either:
+
+- bundle a prebuilt `liblattice` from `LATTICE_BUNDLE_LIB_DIR` / `LATTICE_BUNDLE_LIB_PATH`, or
+- build `liblattice` with Zig during the wheel build
+
+For example, to bundle a staged installed library into a locally built wheel:
+
+```bash
+export LATTICE_BUNDLE_LIB_DIR=/tmp/lattice-install/lib
+pip wheel . -w dist
+pip install dist/latticedb-*.whl
+```
+
+At runtime, explicit library discovery overrides still work via `LATTICE_LIB_PATH`, `LATTICE_PREFIX`, and `pkg-config`.
 
 Migration note: embedding helpers now live in the dedicated `latticedb.embedding` module. See [../../docs/client_api_migration.md](../../docs/client_api_migration.md) for the preferred API names and deprecated compatibility aliases.
 

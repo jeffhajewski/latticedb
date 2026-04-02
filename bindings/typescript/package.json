@@ -21,8 +21,13 @@
     "test": "jest",
     "test:coverage": "jest --coverage",
     "lint": "eslint src --ext .ts",
-    "clean": "rm -rf dist",
+    "bundle:native": "node scripts/bundle-native.js --current",
+    "bundle:native:all": "node scripts/bundle-native.js --all",
+    "clean:native": "node scripts/clean-native.js",
+    "clean": "rm -rf dist lib",
     "prepare": "npm run build",
+    "prepack": "npm run build && npm run bundle:native:all",
+    "postpack": "npm run clean:native",
     "prepublishOnly": "npm test"
   },
   "keywords": [
@@ -48,8 +53,7 @@
   },
   "files": [
     "dist",
-    "lib",
-    "include"
+    "lib"
   ],
   "engines": {
     "node": ">=18.0.0"

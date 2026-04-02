@@ -20,6 +20,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from typing import Optional
 
 # Paths
 SCRIPT_DIR = Path(__file__).parent
@@ -98,15 +99,42 @@ def build_library(target: str) -> Path:
     return lib_path
 
 
-def copy_library(lib_path: Path, target: str) -> None:
+def resolve_library_source(
+    target: str,
+    bundle_lib_path: Optional[str] = None,
+    bundle_lib_dir: Optional[str] = None,
+) -> Path:
+    """Resolve the native library to bundle for the given target."""
+    lib_name = get_lib_name(target)
+
+    if bundle_lib_path:
+        explicit_path = Path(bundle_lib_path)
+        if explicit_path.is_dir():
+            explicit_path = explicit_path / lib_name
+        if not explicit_path.exists():
+            raise FileNotFoundError(f"Bundled library not found: {explicit_path}")
+        return explicit_path
+
+    if bundle_lib_dir:
+        explicit_dir = Path(bundle_lib_dir)
+        explicit_path = explicit_dir / lib_name
+        if not explicit_path.exists():
+            raise FileNotFoundError(f"Bundled library not found: {explicit_path}")
+        return explicit_path
+
+    return build_library(target)
+
+
+def copy_library(lib_path: Path, target: str, output_dir: Path = LIB_DIR) -> Path:
     """Copy library to package directory."""
-    LIB_DIR.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
 
     lib_name = get_lib_name(target)
-    dest = LIB_DIR / lib_name
+    dest = output_dir / lib_name
 
     shutil.copy2(lib_path, dest)
     print(f"Copied {lib_path} -> {dest}")
+    return dest
 
 
 def main() -> None:
@@ -121,21 +149,42 @@ def main() -> None:
         action="store_true",
         help="Clean lib directory before building",
     )
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        help="Directory to copy the bundled library into",
+    )
+    parser.add_argument(
+        "--bundle-lib-path",
+        type=str,
+        help="Path to a prebuilt native library to copy instead of building with Zig",
+    )
+    parser.add_argument(
+        "--bundle-lib-dir",
+        type=str,
+        help="Directory containing a prebuilt native library to copy instead of building with Zig",
+    )
     args = parser.parse_args()
 
-    if args.clean and LIB_DIR.exists():
-        print(f"Cleaning {LIB_DIR}...")
-        shutil.rmtree(LIB_DIR)
+    output_dir = Path(args.output_dir) if args.output_dir else LIB_DIR
+
+    if args.clean and output_dir.exists():
+        print(f"Cleaning {output_dir}...")
+        shutil.rmtree(output_dir)
 
     target = args.target or get_current_platform()
     print(f"Target platform: {target}")
 
-    lib_path = build_library(target)
-    copy_library(lib_path, target)
+    lib_path = resolve_library_source(
+        target,
+        bundle_lib_path=args.bundle_lib_path,
+        bundle_lib_dir=args.bundle_lib_dir,
+    )
+    copy_library(lib_path, target, output_dir=output_dir)
 
     print("\nBuild complete!")
-    print(f"Library location: {LIB_DIR}")
-    for f in LIB_DIR.iterdir():
+    print(f"Library location: {output_dir}")
+    for f in output_dir.iterdir():
         if f.name != ".gitkeep":
             print(f"  {f.name} ({f.stat().st_size / 1024:.1f} KB)")
 

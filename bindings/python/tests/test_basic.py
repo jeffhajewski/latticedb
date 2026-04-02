@@ -19,6 +19,29 @@ import latticedb.embedding as embedding_mod
 class TestLibraryDiscovery:
     """Tests for native library path discovery."""
 
+    def test_find_library_uses_package_lib_before_lattice_prefix(
+        self, monkeypatch, tmp_path
+    ) -> None:
+        """A bundled wheel library should win before prefix-based discovery."""
+        package_root = tmp_path / "site-packages" / "latticedb"
+        package_root.mkdir(parents=True)
+        bundled_lib_dir = package_root / "lib"
+        bundled_lib_dir.mkdir()
+        bundled_lib = bundled_lib_dir / bindings._get_lib_name()
+        bundled_lib.write_bytes(b"")
+
+        prefix_root = tmp_path / "prefix"
+        prefix_lib_dir = prefix_root / "lib"
+        prefix_lib_dir.mkdir(parents=True)
+        prefix_lib = prefix_lib_dir / bindings._get_lib_name()
+        prefix_lib.write_bytes(b"")
+
+        monkeypatch.setattr(bindings, "__file__", str(package_root / "_bindings.py"))
+        monkeypatch.delenv("LATTICE_LIB_PATH", raising=False)
+        monkeypatch.setenv("LATTICE_PREFIX", str(prefix_root))
+
+        assert bindings._find_library() == bundled_lib
+
     def test_find_library_uses_lattice_prefix(self, monkeypatch, tmp_path) -> None:
         """LATTICE_PREFIX should resolve to prefix/lib/<library>."""
         lib_dir = tmp_path / "lib"

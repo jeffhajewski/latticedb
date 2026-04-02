@@ -8,6 +8,7 @@ source "$SCRIPT_DIR/helpers.sh"
 ARTIFACTS="${ARTIFACTS:-/artifacts}"
 SRC="${SRC:-/src}"
 PY_WORK="/tmp/py-build"
+PY_WHEELHOUSE="/tmp/py-wheelhouse"
 
 # Check if python3 is available
 if ! command -v python3 &> /dev/null; then
@@ -35,13 +36,25 @@ source /tmp/pytest-venv/bin/activate
 rm -rf "$PY_WORK"
 cp -r "$SRC/bindings/python" "$PY_WORK"
 
-test_begin "install latticedb from source"
-run pip install --quiet "$PY_WORK"
+test_begin "build latticedb wheel with bundled native library"
+run env LATTICE_BUNDLE_LIB_DIR="$ARTIFACTS/lib" pip wheel --quiet --no-deps "$PY_WORK" -w "$PY_WHEELHOUSE"
 assert_exit_code "$EXIT_CODE" 0
 
-test_begin "python smoke test: import, create, query"
-run env LATTICE_LIB_PATH="$ARTIFACTS/lib" python3 -c "
+test_begin "install latticedb wheel"
+run pip install --quiet "$PY_WHEELHOUSE"/latticedb-*.whl
+assert_exit_code "$EXIT_CODE" 0
+
+test_begin "python smoke test: import, resolve bundled lib, create, query"
+run env -u LATTICE_LIB_PATH -u LATTICE_PREFIX -u LD_LIBRARY_PATH python3 -c "
 from latticedb import Database
+from latticedb._bindings import _find_library
+
+lib_path = _find_library()
+assert lib_path is not None, 'Expected bundled liblattice path'
+resolved = str(lib_path).replace('\\\\', '/')
+assert '/latticedb/lib/' in resolved, resolved
+assert '/artifacts/lib/' not in resolved, resolved
+print('Bundled library path:', resolved)
 
 # Open and create a database
 db = Database('/tmp/pytest-smoke.lattice', create=True)
@@ -62,6 +75,9 @@ print('Python smoke test passed')
 "
 assert_exit_code "$EXIT_CODE" 0
 
+test_begin "smoke test output confirms bundled library path"
+assert_contains "$STDOUT" "/latticedb/lib/"
+
 test_begin "smoke test output confirms success"
 assert_contains "$STDOUT" "Python smoke test passed"
 
@@ -69,5 +85,6 @@ assert_contains "$STDOUT" "Python smoke test passed"
 rm -f /tmp/pytest-smoke.lattice /tmp/pytest-smoke.lattice-wal
 rm -rf /tmp/pytest-venv
 rm -rf "$PY_WORK"
+rm -rf "$PY_WHEELHOUSE"
 
 test_summary

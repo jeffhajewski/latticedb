@@ -35,11 +35,15 @@ curl -fsSL https://raw.githubusercontent.com/jeffhajewski/latticedb/main/dist/in
 pip install latticedb
 ```
 
+Published wheels are expected to bundle `liblattice` on supported platforms. Source installs can also bundle a staged native library during wheel builds with `LATTICE_BUNDLE_LIB_DIR=/path/to/lib`.
+
 **TypeScript / Node.js**
 
 ```bash
 npm install @hajewski/latticedb
 ```
+
+Published package tarballs are expected to bundle `liblattice` on supported platforms. Source checkouts can stage the native library into the package with `LATTICE_BUNDLE_LIB_DIR=/path/to/lib npm run bundle:native`.
 
 **Go**
 

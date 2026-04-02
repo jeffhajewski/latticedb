@@ -137,6 +137,51 @@ describe('Library availability', () => {
     expect(typeof available).toBe('boolean');
   });
 
+  test('bundled package library is used before repo-local fallback', async () => {
+    const previousPrefix = process.env.LATTICE_PREFIX;
+    const previousLibPath = process.env.LATTICE_LIB_PATH;
+
+    try {
+      delete process.env.LATTICE_LIB_PATH;
+      delete process.env.LATTICE_PREFIX;
+      jest.resetModules();
+
+      const library = await import('../src/ffi/library');
+      const candidates = library.getBundledLibraryCandidates();
+      expect(candidates.length).toBeGreaterThan(0);
+      const fakeLibrary = candidates[0]!;
+      const hadExisting = fs.existsSync(fakeLibrary);
+      const existingContents = hadExisting ? fs.readFileSync(fakeLibrary) : null;
+
+      fs.mkdirSync(path.dirname(fakeLibrary), { recursive: true });
+      fs.writeFileSync(fakeLibrary, '');
+
+      try {
+        expect(() => library.getLibrary()).toThrow(
+          new RegExp(fakeLibrary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+        );
+        expect(library.getLibraryPath()).toBeNull();
+      } finally {
+        if (hadExisting && existingContents !== null) {
+          fs.writeFileSync(fakeLibrary, existingContents);
+        } else {
+          fs.rmSync(fakeLibrary, { force: true });
+        }
+      }
+    } finally {
+      if (previousPrefix === undefined) {
+        delete process.env.LATTICE_PREFIX;
+      } else {
+        process.env.LATTICE_PREFIX = previousPrefix;
+      }
+      if (previousLibPath === undefined) {
+        delete process.env.LATTICE_LIB_PATH;
+      } else {
+        process.env.LATTICE_LIB_PATH = previousLibPath;
+      }
+    }
+  });
+
   test('LATTICE_PREFIX is used before repo-local fallback', async () => {
     const tempPrefix = fs.mkdtempSync(path.join(os.tmpdir(), 'lattice-prefix-'));
     const libDir = path.join(tempPrefix, 'lib');

@@ -3,14 +3,14 @@
  *
  * Search order mirrors Python bindings:
  * 1. LATTICE_LIB_PATH environment variable
- * 2. Bundled in package (lib/<platform>/)
+ * 2. Bundled in package (lib/<platform>/ or libc-aware linux variants)
  * 3. LATTICE_PREFIX environment variable
  * 4. pkg-config lattice libdir
  * 5. System paths
  * 6. Development build (zig-out/lib)
  */
 
-import { execFileSync } from 'child_process';
+import { execFileSync, spawnSync } from 'child_process';
 import koffi from 'koffi';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -31,12 +31,67 @@ function getLibName(): string {
 }
 
 /**
- * Get the platform-architecture directory name.
+ * Detect the libc variant for Linux package bundles.
  */
-function getPlatformDir(): string {
+function detectLinuxLibc(): 'gnu' | 'musl' | null {
+  if (process.platform !== 'linux') {
+    return null;
+  }
+
+  const report = process.report?.getReport?.() as
+    | { header?: { glibcVersionRuntime?: string } }
+    | undefined;
+  if (report?.header?.glibcVersionRuntime) {
+    return 'gnu';
+  }
+
+  const ldd = spawnSync('ldd', ['--version'], {
+    encoding: 'utf8',
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+  const lddOutput = `${ldd.stdout ?? ''}\n${ldd.stderr ?? ''}`.toLowerCase();
+  if (lddOutput.includes('musl')) {
+    return 'musl';
+  }
+  if (lddOutput.includes('glibc') || lddOutput.includes('gnu libc')) {
+    return 'gnu';
+  }
+
+  if (fs.existsSync('/etc/alpine-release')) {
+    return 'musl';
+  }
+
+  return null;
+}
+
+/**
+ * Get package bundle directory candidates for the current platform.
+ *
+ * Linux distinguishes glibc and musl builds for packaged shared libraries.
+ * The legacy linux-<arch> layout remains as a compatibility fallback.
+ */
+export function getBundledPlatformDirs(): string[] {
   const platform = process.platform;
   const arch = process.arch; // 'x64', 'arm64', etc.
-  return `${platform}-${arch}`;
+
+  if (platform === 'linux') {
+    const libc = detectLinuxLibc();
+    const dirs = libc ? [`linux-${arch}-${libc}`] : [];
+    dirs.push(`linux-${arch}`);
+    return dirs;
+  }
+
+  return [`${platform}-${arch}`];
+}
+
+/**
+ * Get bundled package library candidates for the current platform.
+ */
+export function getBundledLibraryCandidates(baseDir: string = __dirname): string[] {
+  const libName = getLibName();
+  return getBundledPlatformDirs().map((platformDir) =>
+    path.join(baseDir, '../../lib', platformDir, libName)
+  );
 }
 
 /**
@@ -67,9 +122,10 @@ function findLibrary(): string | null {
 
   // 2. Bundled in package (for npm installs)
   // Goes up from src/ffi/ to package root, then into lib/
-  const bundledPath = path.join(__dirname, '../../lib', getPlatformDir(), libName);
-  if (fs.existsSync(bundledPath)) {
-    return bundledPath;
+  for (const bundledPath of getBundledLibraryCandidates()) {
+    if (fs.existsSync(bundledPath)) {
+      return bundledPath;
+    }
   }
 
   // 3. Installed prefix override

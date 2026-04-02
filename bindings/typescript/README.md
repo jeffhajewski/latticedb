@@ -8,7 +8,18 @@ TypeScript/Node.js bindings for [LatticeDB](https://github.com/jeffhajewski/latt
 npm install @hajewski/latticedb
 ```
 
-The native shared library (`liblattice.dylib` / `liblattice.so`) must be available on the system. Install it via the [install script](https://github.com/jeffhajewski/latticedb#installation) or build from source with `zig build shared`.
+Published package tarballs are expected to bundle the native shared library for supported platforms.
+
+If you are working from a source checkout, stage the native library into the package with:
+
+```bash
+export LATTICE_BUNDLE_LIB_DIR=/tmp/lattice-install/lib
+npm run bundle:native
+```
+
+If `LATTICE_BUNDLE_LIB_DIR` / `LATTICE_BUNDLE_LIB_PATH` is not set, `npm run bundle:native` will build the current platform library with Zig.
+
+At runtime, explicit library discovery overrides still work via `LATTICE_LIB_PATH`, `LATTICE_PREFIX`, and `pkg-config`.
 
 Migration note: embedding helpers now live in the dedicated `@hajewski/latticedb/embedding` entrypoint. See [../../docs/client_api_migration.md](../../docs/client_api_migration.md) for the preferred API names and deprecated compatibility aliases.
 

@@ -10,16 +10,13 @@ const executor = @import("../executor.zig");
 const Operator = executor.Operator;
 const OperatorError = executor.OperatorError;
 const Row = executor.Row;
-const SlotValue = executor.SlotValue;
 const ExecutionContext = executor.ExecutionContext;
 
 const types = @import("../../core/types.zig");
 const NodeId = types.NodeId;
-const EdgeId = types.EdgeId;
 
 const edge_mod = @import("../../graph/edge.zig");
 const EdgeStore = edge_mod.EdgeStore;
-const Edge = edge_mod.Edge;
 
 const symbols = @import("../../graph/symbols.zig");
 const SymbolId = symbols.SymbolId;
@@ -38,9 +35,9 @@ const PathFrame = struct {
     /// Current depth (1 = first hop)
     depth: u32,
     /// Iterator for outgoing edges
-    outgoing_iter: ?EdgeStore.EdgeIterator,
+    outgoing_iter: ?EdgeStore.EdgeRefIterator,
     /// Iterator for incoming edges (used when direction is .both)
-    incoming_iter: ?EdgeStore.EdgeIterator,
+    incoming_iter: ?EdgeStore.EdgeRefIterator,
     /// Whether we're in the incoming phase
     in_incoming_phase: bool,
 
@@ -239,16 +236,16 @@ pub const VariableLengthExpand = struct {
         switch (self.direction) {
             .outgoing, .both => {
                 if (self.edge_type) |edge_type| {
-                    frame.outgoing_iter = self.edge_store.getOutgoingByType(node_id, edge_type) catch return OperatorError.StorageError;
+                    frame.outgoing_iter = self.edge_store.getOutgoingRefsByType(node_id, edge_type) catch return OperatorError.StorageError;
                 } else {
-                    frame.outgoing_iter = self.edge_store.getOutgoing(node_id) catch return OperatorError.StorageError;
+                    frame.outgoing_iter = self.edge_store.getOutgoingRefs(node_id) catch return OperatorError.StorageError;
                 }
             },
             .incoming => {
                 if (self.edge_type) |edge_type| {
-                    frame.incoming_iter = self.edge_store.getIncomingByType(node_id, edge_type) catch return OperatorError.StorageError;
+                    frame.incoming_iter = self.edge_store.getIncomingRefsByType(node_id, edge_type) catch return OperatorError.StorageError;
                 } else {
-                    frame.incoming_iter = self.edge_store.getIncoming(node_id) catch return OperatorError.StorageError;
+                    frame.incoming_iter = self.edge_store.getIncomingRefs(node_id) catch return OperatorError.StorageError;
                 }
                 frame.in_incoming_phase = true;
             },
@@ -274,7 +271,7 @@ pub const VariableLengthExpand = struct {
 
         while (true) {
             // Get next edge from current iterator
-            var iter_ptr: *?EdgeStore.EdgeIterator = undefined;
+            var iter_ptr: *?EdgeStore.EdgeRefIterator = undefined;
             if (frame.in_incoming_phase) {
                 iter_ptr = &frame.incoming_iter;
             } else {
@@ -286,9 +283,9 @@ pub const VariableLengthExpand = struct {
                 if (self.direction == .both and !frame.in_incoming_phase) {
                     frame.in_incoming_phase = true;
                     if (self.edge_type) |edge_type| {
-                        frame.incoming_iter = self.edge_store.getIncomingByType(frame.node_id, edge_type) catch return OperatorError.StorageError;
+                        frame.incoming_iter = self.edge_store.getIncomingRefsByType(frame.node_id, edge_type) catch return OperatorError.StorageError;
                     } else {
-                        frame.incoming_iter = self.edge_store.getIncoming(frame.node_id) catch return OperatorError.StorageError;
+                        frame.incoming_iter = self.edge_store.getIncomingRefs(frame.node_id) catch return OperatorError.StorageError;
                     }
                     continue;
                 }
@@ -299,11 +296,6 @@ pub const VariableLengthExpand = struct {
             iter_ptr.* = iter; // Update iterator state
 
             if (edge_opt) |edge| {
-                defer {
-                    var e = edge;
-                    e.deinit(self.edge_store.allocator);
-                }
-
                 // Get target node based on direction
                 const target_id = if (frame.in_incoming_phase) edge.source else edge.target;
 
@@ -332,9 +324,9 @@ pub const VariableLengthExpand = struct {
                 if (self.direction == .both and !frame.in_incoming_phase) {
                     frame.in_incoming_phase = true;
                     if (self.edge_type) |edge_type| {
-                        frame.incoming_iter = self.edge_store.getIncomingByType(frame.node_id, edge_type) catch return OperatorError.StorageError;
+                        frame.incoming_iter = self.edge_store.getIncomingRefsByType(frame.node_id, edge_type) catch return OperatorError.StorageError;
                     } else {
-                        frame.incoming_iter = self.edge_store.getIncoming(frame.node_id) catch return OperatorError.StorageError;
+                        frame.incoming_iter = self.edge_store.getIncomingRefs(frame.node_id) catch return OperatorError.StorageError;
                     }
                     continue;
                 }

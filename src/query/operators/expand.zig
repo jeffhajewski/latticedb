@@ -10,16 +10,10 @@ const executor = @import("../executor.zig");
 const Operator = executor.Operator;
 const OperatorError = executor.OperatorError;
 const Row = executor.Row;
-const SlotValue = executor.SlotValue;
 const ExecutionContext = executor.ExecutionContext;
-
-const types = @import("../../core/types.zig");
-const NodeId = types.NodeId;
 
 const edge_mod = @import("../../graph/edge.zig");
 const EdgeStore = edge_mod.EdgeStore;
-const Edge = edge_mod.Edge;
-const EdgeError = edge_mod.EdgeError;
 
 const symbols = @import("../../graph/symbols.zig");
 const SymbolId = symbols.SymbolId;
@@ -61,9 +55,9 @@ pub const Expand = struct {
     /// Current input row
     current_input: ?*Row,
     /// Current edge iterator (for outgoing)
-    outgoing_iter: ?EdgeStore.EdgeIterator,
+    outgoing_iter: ?EdgeStore.EdgeRefIterator,
     /// Current edge iterator (for incoming, when doing both)
-    incoming_iter: ?EdgeStore.EdgeIterator,
+    incoming_iter: ?EdgeStore.EdgeRefIterator,
     /// Output row
     output_row: ?*Row,
     /// Whether doing incoming phase (for both direction)
@@ -166,7 +160,7 @@ pub const Expand = struct {
         const input_row = self.current_input orelse return null;
 
         // Determine which iterator to use
-        var iter_ptr: *?EdgeStore.EdgeIterator = undefined;
+        var iter_ptr: *?EdgeStore.EdgeRefIterator = undefined;
         if (self.in_incoming_phase) {
             iter_ptr = &self.incoming_iter;
         } else {
@@ -180,19 +174,6 @@ pub const Expand = struct {
         iter_ptr.* = iter; // Update iterator state
 
         if (edge_opt) |edge| {
-            defer {
-                var e = edge;
-                e.deinit(self.edge_store.allocator);
-            }
-
-            // Filter by edge type if specified
-            if (self.edge_type) |expected_type| {
-                if (edge.edge_type != expected_type) {
-                    // Skip this edge, try next
-                    return self.nextFromCurrentIterator();
-                }
-            }
-
             // Build output row - copy ALL populated slots from input
             output_row.clear();
             output_row.copyFrom(input_row);
@@ -222,24 +203,24 @@ pub const Expand = struct {
         switch (self.direction) {
             .outgoing => {
                 if (self.edge_type) |edge_type| {
-                    self.outgoing_iter = self.edge_store.getOutgoingByType(node_id, edge_type) catch return OperatorError.StorageError;
+                    self.outgoing_iter = self.edge_store.getOutgoingRefsByType(node_id, edge_type) catch return OperatorError.StorageError;
                 } else {
-                    self.outgoing_iter = self.edge_store.getOutgoing(node_id) catch return OperatorError.StorageError;
+                    self.outgoing_iter = self.edge_store.getOutgoingRefs(node_id) catch return OperatorError.StorageError;
                 }
             },
             .incoming => {
                 if (self.edge_type) |edge_type| {
-                    self.incoming_iter = self.edge_store.getIncomingByType(node_id, edge_type) catch return OperatorError.StorageError;
+                    self.incoming_iter = self.edge_store.getIncomingRefsByType(node_id, edge_type) catch return OperatorError.StorageError;
                 } else {
-                    self.incoming_iter = self.edge_store.getIncoming(node_id) catch return OperatorError.StorageError;
+                    self.incoming_iter = self.edge_store.getIncomingRefs(node_id) catch return OperatorError.StorageError;
                 }
             },
             .both => {
                 // Start with outgoing
                 if (self.edge_type) |edge_type| {
-                    self.outgoing_iter = self.edge_store.getOutgoingByType(node_id, edge_type) catch return OperatorError.StorageError;
+                    self.outgoing_iter = self.edge_store.getOutgoingRefsByType(node_id, edge_type) catch return OperatorError.StorageError;
                 } else {
-                    self.outgoing_iter = self.edge_store.getOutgoing(node_id) catch return OperatorError.StorageError;
+                    self.outgoing_iter = self.edge_store.getOutgoingRefs(node_id) catch return OperatorError.StorageError;
                 }
             },
         }
@@ -252,9 +233,9 @@ pub const Expand = struct {
         const node_id = source_val.asNodeId() orelse return;
 
         if (self.edge_type) |edge_type| {
-            self.incoming_iter = self.edge_store.getIncomingByType(node_id, edge_type) catch return OperatorError.StorageError;
+            self.incoming_iter = self.edge_store.getIncomingRefsByType(node_id, edge_type) catch return OperatorError.StorageError;
         } else {
-            self.incoming_iter = self.edge_store.getIncoming(node_id) catch return OperatorError.StorageError;
+            self.incoming_iter = self.edge_store.getIncomingRefs(node_id) catch return OperatorError.StorageError;
         }
     }
 

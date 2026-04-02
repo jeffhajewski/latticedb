@@ -15,6 +15,13 @@ const PropertyValue = lattice.core.types.PropertyValue;
 const SymbolId = lattice.graph.symbols.SymbolId;
 const NodeProperty = lattice.graph.node.Property;
 
+fn overwriteEdgePayloadWithInvalidData(db: *Database, edge_id: u64) !void {
+    var id_key: [8]u8 = undefined;
+    std.mem.writeInt(u64, &id_key, edge_id, .little);
+    try db.edge_store.edge_id_index.delete(&id_key);
+    try db.edge_store.edge_id_index.insert(&id_key, "bad");
+}
+
 fn openTestDb(path: []const u8, opts: struct {
     enable_vector: bool = false,
     vector_dimensions: u16 = 0,
@@ -556,6 +563,36 @@ test "query: CREATE multiple relationships forming a chain" {
     try expectString(result, 0, 0, "Alice");
     try expectString(result, 0, 1, "Bob");
     try expectString(result, 0, 2, "Carol");
+}
+
+test "query: multi-hop expand does not depend on edge payload deserialization" {
+    const path = "/tmp/lattice_qm_expand_refs_regression.ltdb";
+    var db = try openTestDb(path, .{});
+    defer cleanupTestDb(db, path);
+
+    const alice = try db.createNode(null, &[_][]const u8{"Person"});
+    try db.setNodeProperty(null, alice, "name", .{ .string_val = "Alice" });
+
+    const bob = try db.createNode(null, &[_][]const u8{"Person"});
+    try db.setNodeProperty(null, bob, "name", .{ .string_val = "Bob" });
+
+    const carol = try db.createNode(null, &[_][]const u8{"Person"});
+    try db.setNodeProperty(null, carol, "name", .{ .string_val = "Carol" });
+
+    const first = try db.createEdgeAndGetId(null, alice, bob, "KNOWS");
+    try db.setEdgePropertyById(null, first, "edge_id", .{ .int_val = 1 });
+
+    const second = try db.createEdgeAndGetId(null, bob, carol, "KNOWS");
+    try db.setEdgePropertyById(null, second, "edge_id", .{ .int_val = 2 });
+
+    try overwriteEdgePayloadWithInvalidData(db, second);
+
+    var result = try db.query(
+        "MATCH (a:Person {name: \"Alice\"})-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) RETURN c.name",
+    );
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try expectString(result, 0, 0, "Carol");
 }
 
 test "query: CREATE node then connect to different label" {

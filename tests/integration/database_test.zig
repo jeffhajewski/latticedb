@@ -16,6 +16,13 @@ const OpenOptions = lattice.storage.database.OpenOptions;
 const PropertyValue = lattice.core.types.PropertyValue;
 const EdgeError = lattice.graph.edge.EdgeError;
 
+fn overwriteEdgePayloadWithInvalidData(db: *Database, edge_id: u64) !void {
+    var id_key: [8]u8 = undefined;
+    std.mem.writeInt(u64, &id_key, edge_id, .little);
+    try db.edge_store.edge_id_index.delete(&id_key);
+    try db.edge_store.edge_id_index.insert(&id_key, "bad");
+}
+
 // ============================================================================
 // Persistence Tests
 // ============================================================================
@@ -1414,6 +1421,59 @@ test "database: handles many edges efficiently" {
     defer db.freeEdgeTypeInfos(edge_types);
     try std.testing.expectEqual(@as(usize, 1), edge_types.len);
     try std.testing.expectEqual(@as(u64, spoke_count), edge_types[0].count);
+}
+
+test "database: outgoing traversal does not depend on edge payload deserialization" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_outgoing_refs_regression.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    {
+        var db = try Database.open(allocator, path, .{
+            .create = true,
+            .config = .{ .enable_wal = false, .enable_fts = false, .enable_vector = false },
+        });
+
+        const root = try db.createNode(null, &[_][]const u8{"Node"});
+        const mid = try db.createNode(null, &[_][]const u8{"Node"});
+        const leaf = try db.createNode(null, &[_][]const u8{"Node"});
+
+        const first = try db.createEdgeAndGetId(null, root, mid, "REL");
+        try db.setEdgePropertyById(null, first, "edge_id", .{ .int_val = 1 });
+
+        const second = try db.createEdgeAndGetId(null, mid, leaf, "REL");
+        try db.setEdgePropertyById(null, second, "edge_id", .{ .int_val = 2 });
+
+        // Simulate a broken edge payload entry. Adjacency traversal only needs
+        // the traversal key, so expanding outgoing edges should still work.
+        try overwriteEdgePayloadWithInvalidData(db, second);
+
+        db.close();
+    }
+
+    {
+        var db = try Database.open(allocator, path, .{
+            .read_only = true,
+            .config = .{ .enable_wal = false, .enable_fts = false, .enable_vector = false },
+        });
+        defer {
+            db.close();
+            std.fs.cwd().deleteFile(path) catch {};
+        }
+
+        const first_hop = try db.getOutgoingEdges(1);
+        defer db.freeEdgeInfos(first_hop);
+        try std.testing.expectEqual(@as(usize, 1), first_hop.len);
+        try std.testing.expectEqual(@as(u64, 2), first_hop[0].target);
+        try std.testing.expectEqualStrings("REL", first_hop[0].edge_type);
+
+        const second_hop = try db.getOutgoingEdges(2);
+        defer db.freeEdgeInfos(second_hop);
+        try std.testing.expectEqual(@as(usize, 1), second_hop.len);
+        try std.testing.expectEqual(@as(u64, 3), second_hop[0].target);
+        try std.testing.expectEqualStrings("REL", second_hop[0].edge_type);
+    }
 }
 
 // ============================================================================

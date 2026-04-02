@@ -2399,7 +2399,7 @@ pub const Database = struct {
     /// Get all outgoing edges from a node.
     /// Caller owns the returned slice and must free it with freeEdgeInfos.
     pub fn getOutgoingEdges(self: *Self, node_id: NodeId) ![]EdgeInfo {
-        var iter = self.edge_store.getOutgoing(node_id) catch {
+        var iter = self.edge_store.getOutgoingRefs(node_id) catch {
             return DatabaseError.IoError;
         };
         defer iter.deinit();
@@ -2408,13 +2408,6 @@ pub const Database = struct {
         errdefer edges.deinit(self.allocator);
 
         while (try iter.next()) |edge| {
-            // Free the edge's owned memory after extracting info
-            defer {
-                var e = edge;
-                e.deinit(self.allocator);
-            }
-
-            // resolve() returns an allocated string - use it directly, no need to dupe
             const edge_type_str = self.symbol_table.resolve(edge.edge_type) catch {
                 continue;
             };
@@ -2435,7 +2428,7 @@ pub const Database = struct {
     /// Get all incoming edges to a node.
     /// Caller owns the returned slice and must free it with freeEdgeInfos.
     pub fn getIncomingEdges(self: *Self, node_id: NodeId) ![]EdgeInfo {
-        var iter = self.edge_store.getIncoming(node_id) catch {
+        var iter = self.edge_store.getIncomingRefs(node_id) catch {
             return DatabaseError.IoError;
         };
         defer iter.deinit();
@@ -2444,13 +2437,6 @@ pub const Database = struct {
         errdefer edges.deinit(self.allocator);
 
         while (try iter.next()) |edge| {
-            // Free the edge's owned memory after extracting info
-            defer {
-                var e = edge;
-                e.deinit(self.allocator);
-            }
-
-            // resolve() returns an allocated string - use it directly, no need to dupe
             const edge_type_str = self.symbol_table.resolve(edge.edge_type) catch {
                 continue;
             };

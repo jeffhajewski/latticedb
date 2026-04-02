@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import importlib.util
 import os
 from pathlib import Path
 
@@ -7,7 +8,19 @@ from distutils.errors import DistutilsExecError
 from setuptools import setup
 from setuptools.command.build_py import build_py as _build_py
 
-import build_native
+
+def _load_build_native():
+    module_path = Path(__file__).with_name("build_native.py")
+    spec = importlib.util.spec_from_file_location("latticedb_build_native", module_path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load build helper from {module_path}")
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+build_native = _load_build_native()
 
 
 class build_py(_build_py):

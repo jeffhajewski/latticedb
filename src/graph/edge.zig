@@ -182,6 +182,7 @@ pub const EdgeStore = struct {
             return mapBTreeError(err);
         };
         if (meta) |data| {
+            defer self.edge_id_index.freeValue(data);
             if (data.len == 8) {
                 const next = std.mem.readInt(u64, data[0..8], .little);
                 return if (next == 0) 1 else next;
@@ -418,6 +419,7 @@ pub const EdgeStore = struct {
         if (edge_data == null or edge_data.?.len == 0) {
             return EdgeError.NotFound;
         }
+        defer self.edge_id_index.freeValue(edge_data.?);
         return deserializeEdge(self.allocator, edge_id, edge_data.?) catch {
             return EdgeError.InvalidData;
         };
@@ -447,6 +449,7 @@ pub const EdgeStore = struct {
         if (edge_data == null or edge_data.?.len == 0) {
             return EdgeError.NotFound;
         }
+        defer self.edge_id_index.freeValue(edge_data.?);
         var edge = deserializeEdge(self.allocator, edge_id, edge_data.?) catch {
             return EdgeError.InvalidData;
         };
@@ -1410,6 +1413,7 @@ test "edge store double-write" {
     const outgoing_bytes = outgoing_key.toBytes();
     const outgoing_result = tree.get(&outgoing_bytes) catch null;
     try std.testing.expect(outgoing_result != null);
+    defer if (outgoing_result) |owned| tree.freeValue(owned);
     try std.testing.expectEqual(@as(usize, 0), outgoing_result.?.len);
 
     // Verify incoming key exists
@@ -1423,6 +1427,7 @@ test "edge store double-write" {
     const incoming_bytes = incoming_key.toBytes();
     const incoming_result = tree.get(&incoming_bytes) catch null;
     try std.testing.expect(incoming_result != null);
+    defer if (incoming_result) |owned| tree.freeValue(owned);
     try std.testing.expectEqual(@as(usize, 0), incoming_result.?.len);
 
     // Payload is stored once in edge_id index (space optimization).
@@ -1430,6 +1435,7 @@ test "edge store double-write" {
     std.mem.writeInt(u64, &id_key, 1, .little);
     const id_result = edge_id_tree.get(&id_key) catch null;
     try std.testing.expect(id_result != null);
+    defer if (id_result) |owned| edge_id_tree.freeValue(owned);
     try std.testing.expect(id_result.?.len > 0);
 }
 
@@ -1575,16 +1581,16 @@ test "edge store delete" {
     // Verify both outgoing and incoming keys exist
     const outgoing_key = EdgeKey{ .source = 1, .direction = .outgoing, .edge_type = edge_type, .target = 2, .edge_id = 1 };
     const incoming_key = EdgeKey{ .source = 2, .direction = .incoming, .edge_type = edge_type, .target = 1, .edge_id = 1 };
-    try std.testing.expect((try tree.get(&outgoing_key.toBytes())) != null);
-    try std.testing.expect((try tree.get(&incoming_key.toBytes())) != null);
+    try std.testing.expect(try tree.contains(&outgoing_key.toBytes()));
+    try std.testing.expect(try tree.contains(&incoming_key.toBytes()));
 
     // Delete the edge
     try store.delete(1, 2, edge_type);
     try std.testing.expect(!store.exists(1, 2, edge_type));
 
     // Verify both keys are removed (double-delete)
-    try std.testing.expect((try tree.get(&outgoing_key.toBytes())) == null);
-    try std.testing.expect((try tree.get(&incoming_key.toBytes())) == null);
+    try std.testing.expect(!(try tree.contains(&outgoing_key.toBytes())));
+    try std.testing.expect(!(try tree.contains(&incoming_key.toBytes())));
 
     // Deleting again should fail with NotFound
     try std.testing.expectError(EdgeError.NotFound, store.delete(1, 2, edge_type));

@@ -132,7 +132,10 @@ pub fn fuzzBTreeOperations(allocator: Allocator, input: []const u8) !void {
                 const key = input[i..][0..key_len];
                 i += key_len;
 
-                _ = tree.get(key) catch continue;
+                const result = tree.get(key) catch continue;
+                if (result) |value| {
+                    tree.freeValue(value);
+                }
             },
             2 => {
                 // Delete: next bytes are key
@@ -177,6 +180,7 @@ pub fn fuzzBTreeKeys(allocator: Allocator, input: []const u8) !void {
     // Verify we can retrieve it
     const retrieved = tree.get(input) catch return;
     if (retrieved) |val| {
+        defer tree.freeValue(val);
         std.debug.assert(std.mem.eql(u8, val, value));
     }
 

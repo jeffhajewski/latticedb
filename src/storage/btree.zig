@@ -351,8 +351,8 @@ pub const BTree = struct {
     // Point Lookup
     // ========================================================================
 
-    /// Look up a key and return its value (if found)
-    /// Caller must copy the value before unpinning if needed
+    /// Look up a key and return an owned copy of its value (if found).
+    /// Caller must free the returned slice with freeValue().
     pub fn get(self: *Self, key: []const u8) BTreeError!?[]const u8 {
         var page_id = self.root_page;
 
@@ -367,7 +367,8 @@ pub const BTree = struct {
                 // Search in leaf
                 const result = LeafNode.searchSlot(frame.data, key, self.comparator);
                 if (result.found) {
-                    return LeafNode.getValue(frame.data, result.slot);
+                    const value = LeafNode.getValue(frame.data, result.slot);
+                    return self.allocator.dupe(u8, value) catch return BTreeError.OutOfMemory;
                 }
                 return null;
             }
@@ -375,6 +376,28 @@ pub const BTree = struct {
             // Internal node - find child to descend into
             page_id = self.findChild(frame.data, key);
         }
+    }
+
+    /// Check whether a key exists without materializing its value.
+    pub fn contains(self: *Self, key: []const u8) BTreeError!bool {
+        var page_id = self.root_page;
+
+        while (true) {
+            const frame = self.bp.fetchPage(page_id, .shared) catch return BTreeError.BufferPoolFull;
+            defer self.bp.unpinPage(frame, false);
+
+            const header: *const PageHeader = @ptrCast(@alignCast(frame.data.ptr));
+            if (header.page_type == .btree_leaf) {
+                return LeafNode.searchSlot(frame.data, key, self.comparator).found;
+            }
+
+            page_id = self.findChild(frame.data, key);
+        }
+    }
+
+    /// Free a value returned by get().
+    pub fn freeValue(self: *Self, value: []const u8) void {
+        self.allocator.free(@constCast(value));
     }
 
     /// Find the child page to descend into for a given key
@@ -968,7 +991,7 @@ pub const BTree = struct {
             const slots_start = LEAF_SLOTS_OFFSET + slot * LEAF_SLOT_SIZE;
             const next_slot_start = LEAF_SLOTS_OFFSET + (slot + 1) * LEAF_SLOT_SIZE;
             const slots_end = LEAF_SLOTS_OFFSET + num_entries * LEAF_SLOT_SIZE;
-            std.mem.copyForwards(u8, buf[slots_start..slots_end - LEAF_SLOT_SIZE], buf[next_slot_start..slots_end]);
+            std.mem.copyForwards(u8, buf[slots_start .. slots_end - LEAF_SLOT_SIZE], buf[next_slot_start..slots_end]);
         }
 
         // Decrement entry count
@@ -1179,11 +1202,50 @@ test "btree insert and get" {
     // Look it up
     const value = try tree.get("hello");
     try std.testing.expect(value != null);
+    defer if (value) |owned| tree.freeValue(owned);
     try std.testing.expectEqualStrings("world", value.?);
 
     // Look up non-existent key
     const missing = try tree.get("missing");
     try std.testing.expect(missing == null);
+}
+
+test "btree get returns owned value outside page buffer" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const path = "/tmp/lattice_btree_test_owned_get.db";
+    vfs_impl.delete(path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 65536);
+    defer bp.deinit();
+
+    var tree = try BTree.init(allocator, &bp);
+    try tree.insert("key", "value");
+
+    const value = (try tree.get("key")).?;
+    defer tree.freeValue(value);
+
+    const leaf_page = try tree.findLeafForKey("key");
+    const frame = try bp.fetchPage(leaf_page, .shared);
+    defer bp.unpinPage(frame, false);
+
+    const page_start = @intFromPtr(frame.data.ptr);
+    const page_end = page_start + frame.data.len;
+    const value_start = @intFromPtr(value.ptr);
+
+    try std.testing.expect(value_start < page_start or value_start >= page_end);
+    try std.testing.expectEqualStrings("value", value);
 }
 
 test "btree multiple inserts" {
@@ -1215,10 +1277,21 @@ test "btree multiple inserts" {
     try tree.insert("date", "brown");
 
     // Verify all
-    try std.testing.expectEqualStrings("red", (try tree.get("apple")).?);
-    try std.testing.expectEqualStrings("yellow", (try tree.get("banana")).?);
-    try std.testing.expectEqualStrings("red", (try tree.get("cherry")).?);
-    try std.testing.expectEqualStrings("brown", (try tree.get("date")).?);
+    const apple = (try tree.get("apple")).?;
+    defer tree.freeValue(apple);
+    try std.testing.expectEqualStrings("red", apple);
+
+    const banana = (try tree.get("banana")).?;
+    defer tree.freeValue(banana);
+    try std.testing.expectEqualStrings("yellow", banana);
+
+    const cherry = (try tree.get("cherry")).?;
+    defer tree.freeValue(cherry);
+    try std.testing.expectEqualStrings("red", cherry);
+
+    const date = (try tree.get("date")).?;
+    defer tree.freeValue(date);
+    try std.testing.expectEqualStrings("brown", date);
 }
 
 test "btree duplicate key error" {
@@ -1320,6 +1393,7 @@ test "btree leaf split" {
         const key = std.fmt.bufPrint(&buf, "key{d:05}", .{i}) catch unreachable;
         const val = try tree.get(key);
         try std.testing.expect(val != null);
+        if (val) |owned| tree.freeValue(owned);
     }
 }
 
@@ -1353,6 +1427,7 @@ test "btree delete single key" {
     // Verify key2 exists
     const val = try tree.get("key2");
     try std.testing.expect(val != null);
+    if (val) |owned| tree.freeValue(owned);
 
     // Delete key2
     try tree.delete("key2");
@@ -1362,8 +1437,8 @@ test "btree delete single key" {
     try std.testing.expect(val_after == null);
 
     // Verify other keys still exist
-    try std.testing.expect((try tree.get("key1")) != null);
-    try std.testing.expect((try tree.get("key3")) != null);
+    try std.testing.expect(try tree.contains("key1"));
+    try std.testing.expect(try tree.contains("key3"));
 }
 
 test "btree delete non-existent key" {
@@ -1395,7 +1470,7 @@ test "btree delete non-existent key" {
     try std.testing.expectError(BTreeError.KeyNotFound, tree.delete("nonexistent"));
 
     // Original key should still exist
-    try std.testing.expect((try tree.get("key1")) != null);
+    try std.testing.expect(try tree.contains("key1"));
 }
 
 test "btree delete multiple keys" {
@@ -1445,6 +1520,7 @@ test "btree delete multiple keys" {
         const key = std.fmt.bufPrint(&buf, "key{d:03}", .{i * 2 + 1}) catch unreachable;
         const val = try tree.get(key);
         try std.testing.expect(val != null);
+        if (val) |owned| tree.freeValue(owned);
     }
 }
 
@@ -1472,15 +1548,16 @@ test "btree delete and reinsert" {
 
     // Insert key
     try tree.insert("key1", "value1");
-    try std.testing.expect((try tree.get("key1")) != null);
+    try std.testing.expect(try tree.contains("key1"));
 
     // Delete key
     try tree.delete("key1");
-    try std.testing.expect((try tree.get("key1")) == null);
+    try std.testing.expect(!(try tree.contains("key1")));
 
     // Reinsert with different value
     try tree.insert("key1", "value2");
     const val = try tree.get("key1");
     try std.testing.expect(val != null);
+    defer if (val) |owned| tree.freeValue(owned);
     try std.testing.expectEqualStrings("value2", val.?);
 }

@@ -1220,8 +1220,9 @@ pub const HnswIndex = struct {
         // 1. Look up metadata sentinel
         const meta_val = tree.get(&METADATA_KEY) catch return HnswError.StorageError;
         if (meta_val == null) return false;
+        defer tree.freeValue(meta_val.?);
 
-        // Copy metadata before B+Tree page is unpinned by subsequent operations
+        // Copy metadata before scanning the rest of the tree mutates iteration state.
         var meta_copy: [1300]u8 = undefined;
         const meta_len = meta_val.?.len;
         @memcpy(meta_copy[0..meta_len], meta_val.?);

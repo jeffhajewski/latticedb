@@ -104,8 +104,7 @@ pub const LabelIndex = struct {
         const key = LabelKey{ .label_id = label_id, .node_id = node_id };
         const key_bytes = key.toBytes();
 
-        const result = self.tree.get(&key_bytes) catch return false;
-        return result != null;
+        return self.tree.contains(&key_bytes) catch false;
     }
 
     /// Add multiple labels to a node

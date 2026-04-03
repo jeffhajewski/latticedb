@@ -118,6 +118,7 @@ pub const ReverseIndex = struct {
         };
 
         if (result) |value| {
+            defer self.tree.freeValue(value);
             return try self.deserializeTerms(value);
         }
 
@@ -141,11 +142,7 @@ pub const ReverseIndex = struct {
         var key_buf: [8]u8 = undefined;
         std.mem.writeInt(u64, &key_buf, doc_id, .little);
 
-        const result = self.tree.get(&key_buf) catch {
-            return false;
-        };
-
-        return result != null;
+        return self.tree.contains(&key_buf) catch false;
     }
 
     /// Deserialize terms from stored value

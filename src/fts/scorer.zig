@@ -105,6 +105,7 @@ pub const DocLengthStore = struct {
             return mapBTreeError(err);
         };
         if (existing) |old_value| {
+            defer self.tree.freeValue(old_value);
             const old_entry = DocLengthEntry.deserialize(old_value);
             old_length = old_entry.length;
         }
@@ -150,6 +151,7 @@ pub const DocLengthStore = struct {
         };
 
         if (result) |value| {
+            defer self.tree.freeValue(value);
             const entry = DocLengthEntry.deserialize(value);
             return entry.length;
         }
@@ -168,6 +170,7 @@ pub const DocLengthStore = struct {
         };
 
         if (result) |value| {
+            defer self.tree.freeValue(value);
             const entry = DocLengthEntry.deserialize(value);
 
             self.tree.delete(&key_buf) catch |err| {
@@ -186,8 +189,7 @@ pub const DocLengthStore = struct {
         var key_buf: [8]u8 = undefined;
         std.mem.writeInt(u64, &key_buf, doc_id, .little);
 
-        const result = self.tree.get(&key_buf) catch return false;
-        return result != null;
+        return self.tree.contains(&key_buf) catch false;
     }
 
     /// Get document statistics

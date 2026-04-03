@@ -109,6 +109,7 @@ test "btree: duplicate key rejected with error" {
 
     // Original value should be unchanged
     const value = try tree.get("mykey");
+    defer if (value) |owned| tree.freeValue(owned);
     try std.testing.expectEqualStrings("value1", value.?);
 }
 
@@ -145,11 +146,11 @@ test "btree: deleted key returns null on get" {
 
     // Insert and verify
     try tree.insert("target", "value");
-    try std.testing.expect((try tree.get("target")) != null);
+    try std.testing.expect(try tree.contains("target"));
 
     // Delete and verify gone
     try tree.delete("target");
-    try std.testing.expect((try tree.get("target")) == null);
+    try std.testing.expect(!(try tree.contains("target")));
 }
 
 test "btree: deleted key not in range scan" {
@@ -405,15 +406,19 @@ test "btree: can reinsert deleted key" {
 
     // Insert
     try tree.insert("key", "value1");
-    try std.testing.expectEqualStrings("value1", (try tree.get("key")).?);
+    const first_value = (try tree.get("key")).?;
+    defer tree.freeValue(first_value);
+    try std.testing.expectEqualStrings("value1", first_value);
 
     // Delete
     try tree.delete("key");
-    try std.testing.expect((try tree.get("key")) == null);
+    try std.testing.expect(!(try tree.contains("key")));
 
     // Reinsert with different value
     try tree.insert("key", "value2");
-    try std.testing.expectEqualStrings("value2", (try tree.get("key")).?);
+    const second_value = (try tree.get("key")).?;
+    defer tree.freeValue(second_value);
+    try std.testing.expectEqualStrings("value2", second_value);
 }
 
 // ============================================================================
@@ -446,6 +451,7 @@ test "btree: handles large values" {
         try std.testing.expect(value != null);
         try std.testing.expectEqual(@as(usize, 1024), value.?.len);
         try std.testing.expectEqual(@as(u8, 'x'), value.?[0]);
+        if (value) |owned| tree.freeValue(owned);
     }
 }
 
@@ -489,21 +495,21 @@ test "btree: interleaved insert and delete maintains consistency" {
     for (0..50) |i| {
         var buf: [32]u8 = undefined;
         const key = std.fmt.bufPrint(&buf, "key{d:05}", .{i * 2}) catch unreachable;
-        try std.testing.expect((try tree.get(key)) == null);
+        try std.testing.expect(!(try tree.contains(key)));
     }
 
     // Verify odd keys (1-99) exist
     for (0..50) |i| {
         var buf: [32]u8 = undefined;
         const key = std.fmt.bufPrint(&buf, "key{d:05}", .{i * 2 + 1}) catch unreachable;
-        try std.testing.expect((try tree.get(key)) != null);
+        try std.testing.expect(try tree.contains(key));
     }
 
     // Verify new keys (100-149) exist
     for (100..150) |i| {
         var buf: [32]u8 = undefined;
         const key = std.fmt.bufPrint(&buf, "key{d:05}", .{i}) catch unreachable;
-        try std.testing.expect((try tree.get(key)) != null);
+        try std.testing.expect(try tree.contains(key));
     }
 
     // Verify sorted order
@@ -583,6 +589,7 @@ test "btree: internal node contains correct separator keys" {
         const key = std.fmt.bufPrint(&buf, "key{d:08}", .{i}) catch unreachable;
         const value = try tree.get(key);
         try std.testing.expect(value != null);
+        if (value) |owned| tree.freeValue(owned);
     }
 }
 

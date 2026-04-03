@@ -271,8 +271,7 @@ pub fn countBTreeEntries(tree: *BTree) !usize {
 /// Test that all keys in the list exist in the tree.
 pub fn assertAllKeysExist(tree: *BTree, keys: []const []const u8) !void {
     for (keys, 0..) |key, i| {
-        const value = try tree.get(key);
-        if (value == null) {
+        if (!(try tree.contains(key))) {
             std.debug.print("Key at index {d} not found: '{s}'\n", .{ i, key });
             return error.KeyNotFound;
         }
@@ -282,8 +281,7 @@ pub fn assertAllKeysExist(tree: *BTree, keys: []const []const u8) !void {
 /// Test that none of the keys exist in the tree.
 pub fn assertNoKeysExist(tree: *BTree, keys: []const []const u8) !void {
     for (keys, 0..) |key, i| {
-        const value = try tree.get(key);
-        if (value != null) {
+        if (try tree.contains(key)) {
             std.debug.print("Key at index {d} should not exist: '{s}'\n", .{ i, key });
             return error.KeyShouldNotExist;
         }

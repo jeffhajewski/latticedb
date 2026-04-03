@@ -167,6 +167,7 @@ pub const NodeStore = struct {
         };
 
         if (data) |serialized| {
+            defer self.tree.freeValue(serialized);
             return deserializeNode(self.allocator, node_id, serialized) catch {
                 return NodeError.InvalidData;
             };
@@ -181,11 +182,11 @@ pub const NodeStore = struct {
         var key_buf: [8]u8 = undefined;
         std.mem.writeInt(u64, &key_buf, node_id, .little);
 
-        const existing = self.tree.get(&key_buf) catch |err| {
+        const node_exists = self.tree.contains(&key_buf) catch |err| {
             return mapBTreeError(err);
         };
 
-        if (existing == null) {
+        if (!node_exists) {
             return NodeError.NotFound;
         }
 
@@ -221,13 +222,12 @@ pub const NodeStore = struct {
         var key_buf: [8]u8 = undefined;
         std.mem.writeInt(u64, &key_buf, node_id, .little);
 
-        const result = self.tree.get(&key_buf) catch |err| {
+        return self.tree.contains(&key_buf) catch |err| {
             return switch (err) {
                 BTreeError.BufferPoolFull => NodeError.BufferPoolFull,
                 else => NodeError.BTreeError,
             };
         };
-        return result != null;
     }
 };
 

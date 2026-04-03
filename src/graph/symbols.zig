@@ -134,6 +134,7 @@ pub const SymbolTable = struct {
         };
 
         if (result) |value| {
+            defer self.forward.freeValue(value);
             if (value.len == 2) {
                 return std.mem.readInt(u16, value[0..2], .little);
             }
@@ -156,6 +157,7 @@ pub const SymbolTable = struct {
         };
 
         if (result) |value| {
+            defer self.reverse.freeValue(value);
             // Copy to allocated memory since btree buffer is temporary
             const copy = self.allocator.alloc(u8, value.len) catch {
                 return SymbolError.OutOfMemory;
@@ -169,7 +171,7 @@ pub const SymbolTable = struct {
 
     /// Check if a string is already interned
     pub fn contains(self: *Self, string: []const u8) bool {
-        return if (self.lookup(string)) |_| true else |_| false;
+        return self.forward.contains(string) catch false;
     }
 
     /// Get the number of interned symbols

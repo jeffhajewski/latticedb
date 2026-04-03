@@ -2746,7 +2746,7 @@ pub const Database = struct {
         }
 
         const data = node_data.?;
-        defer self.allocator.free(data);
+        defer self.node_tree.freeValue(data);
 
         // Parse node data to extract properties
         // Node format: label_count(2) + labels(2*count) + prop_count(2) + properties...

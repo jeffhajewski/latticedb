@@ -121,6 +121,7 @@ pub const Dictionary = struct {
         };
 
         if (result) |value| {
+            defer self.tree.freeValue(value);
             if (value.len < @sizeOf(DictionaryEntry)) {
                 return DictionaryError.InvalidData;
             }

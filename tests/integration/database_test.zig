@@ -23,6 +23,13 @@ fn overwriteEdgePayloadWithInvalidData(db: *Database, edge_id: u64) !void {
     try db.edge_store.edge_id_index.insert(&id_key, "bad");
 }
 
+fn findPropertyEntry(props: []const Database.PropertyEntry, key: []const u8) ?*const Database.PropertyEntry {
+    for (props) |*prop| {
+        if (std.mem.eql(u8, prop.key, key)) return prop;
+    }
+    return null;
+}
+
 // ============================================================================
 // Persistence Tests
 // ============================================================================
@@ -1671,6 +1678,78 @@ test "database: getNodeProperty returns owned heap-backed values" {
     try std.testing.expectEqualStrings("Portland", address_val.map_val[0].value.string_val);
     try std.testing.expectEqualStrings("zip", address_val.map_val[1].key);
     try std.testing.expectEqual(@as(i64, 97201), address_val.map_val[1].value.int_val);
+}
+
+test "database: getNodeProperties returns owned decoded values" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_node_properties_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    const empty_node = try db.createNode(null, &[_][]const u8{"Empty"});
+    const empty_props = try db.getNodeProperties(empty_node);
+    defer db.freePropertyEntries(empty_props);
+    try std.testing.expectEqual(@as(usize, 0), empty_props.len);
+
+    const node = try db.createNode(null, &[_][]const u8{"Props"});
+    const blob = [_]u8{ 0xAB, 0xCD };
+    const embedding = [_]f32{ 0.25, 0.5, 0.75 };
+    var tags = [_]PropertyValue{
+        .{ .string_val = "graph" },
+        .{ .int_val = 7 },
+    };
+    var meta = [_]PropertyValue.MapEntry{
+        .{ .key = "city", .value = .{ .string_val = "Portland" } },
+        .{ .key = "zip", .value = .{ .int_val = 97201 } },
+    };
+
+    try db.setNodeProperty(null, node, "name", .{ .string_val = "Alice" });
+    try db.setNodeProperty(null, node, "age", .{ .int_val = 30 });
+    try db.setNodeProperty(null, node, "active", .{ .bool_val = true });
+    try db.setNodeProperty(null, node, "blob", .{ .bytes_val = &blob });
+    try db.setNodeProperty(null, node, "embedding", .{ .vector_val = &embedding });
+    try db.setNodeProperty(null, node, "tags", .{ .list_val = &tags });
+    try db.setNodeProperty(null, node, "meta", .{ .map_val = &meta });
+
+    const props = try db.getNodeProperties(node);
+    defer db.freePropertyEntries(props);
+    try std.testing.expectEqual(@as(usize, 7), props.len);
+
+    const name = findPropertyEntry(props, "name").?;
+    try std.testing.expectEqualStrings("Alice", name.value.string_val);
+
+    const age = findPropertyEntry(props, "age").?;
+    try std.testing.expectEqual(@as(i64, 30), age.value.int_val);
+
+    const active = findPropertyEntry(props, "active").?;
+    try std.testing.expectEqual(true, active.value.bool_val);
+
+    const blob_prop = findPropertyEntry(props, "blob").?;
+    try std.testing.expectEqualSlices(u8, blob[0..], blob_prop.value.bytes_val);
+
+    const embedding_prop = findPropertyEntry(props, "embedding").?;
+    try std.testing.expectEqualSlices(f32, embedding[0..], embedding_prop.value.vector_val);
+
+    const tags_prop = findPropertyEntry(props, "tags").?;
+    try std.testing.expectEqual(@as(usize, 2), tags_prop.value.list_val.len);
+    try std.testing.expectEqualStrings("graph", tags_prop.value.list_val[0].string_val);
+    try std.testing.expectEqual(@as(i64, 7), tags_prop.value.list_val[1].int_val);
+
+    const meta_prop = findPropertyEntry(props, "meta").?;
+    try std.testing.expectEqual(@as(usize, 2), meta_prop.value.map_val.len);
+    try std.testing.expectEqualStrings("city", meta_prop.value.map_val[0].key);
+    try std.testing.expectEqualStrings("Portland", meta_prop.value.map_val[0].value.string_val);
+    try std.testing.expectEqualStrings("zip", meta_prop.value.map_val[1].key);
+    try std.testing.expectEqual(@as(i64, 97201), meta_prop.value.map_val[1].value.int_val);
 }
 
 // ============================================================================

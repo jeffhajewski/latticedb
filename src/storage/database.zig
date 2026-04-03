@@ -2733,100 +2733,38 @@ pub const Database = struct {
     /// Get all properties for a node.
     /// Returns an allocated slice that the caller must free with freePropertyEntries.
     pub fn getNodeProperties(self: *Self, node_id: NodeId) DatabaseError![]PropertyEntry {
-        // Get the node data
-        var key_buf: [8]u8 = undefined;
-        std.mem.writeInt(u64, &key_buf, node_id, .big);
-
-        const node_data = self.node_tree.get(&key_buf) catch {
-            return DatabaseError.IoError;
+        var node = (try self.getNode(node_id)) orelse {
+            return self.allocator.alloc(PropertyEntry, 0) catch return DatabaseError.OutOfMemory;
         };
-
-        if (node_data == null) {
-            return &[_]PropertyEntry{};
-        }
-
-        const data = node_data.?;
-        defer self.node_tree.freeValue(data);
-
-        // Parse node data to extract properties
-        // Node format: label_count(2) + labels(2*count) + prop_count(2) + properties...
-        if (data.len < 2) return &[_]PropertyEntry{};
-
-        const label_count = std.mem.readInt(u16, data[0..2], .little);
-        var offset: usize = 2 + @as(usize, label_count) * 2;
-
-        if (offset + 2 > data.len) return &[_]PropertyEntry{};
-
-        const prop_count = std.mem.readInt(u16, data[offset..][0..2], .little);
-        offset += 2;
+        defer node.deinit(self.allocator);
 
         var props: std.ArrayListUnmanaged(PropertyEntry) = .empty;
         errdefer {
             for (props.items) |prop| {
                 self.allocator.free(prop.key);
-                if (prop.value == .string_val) {
-                    self.allocator.free(prop.value.string_val);
-                }
+                var value = prop.value;
+                value.deinit(self.allocator);
             }
             props.deinit(self.allocator);
         }
 
-        for (0..prop_count) |_| {
-            if (offset + 4 > data.len) break;
-
-            // Read key symbol ID
-            const key_id = std.mem.readInt(u16, data[offset..][0..2], .little);
-            offset += 2;
-
-            // Read value type
-            const value_type = data[offset];
-            offset += 1;
-
-            // Resolve key name
-            const key_name = self.symbol_table.resolve(key_id) catch continue;
+        for (node.properties) |prop| {
+            const key_name = self.symbol_table.resolve(prop.key_id) catch continue;
             errdefer self.allocator.free(key_name);
 
-            // Parse value based on type
-            const value: PropertyValue = switch (value_type) {
-                0 => .{ .null_val = {} },
-                1 => blk: {
-                    if (offset >= data.len) break :blk .{ .null_val = {} };
-                    const b = data[offset] != 0;
-                    offset += 1;
-                    break :blk .{ .bool_val = b };
-                },
-                2 => blk: {
-                    if (offset + 8 > data.len) break :blk .{ .null_val = {} };
-                    const i = std.mem.readInt(i64, data[offset..][0..8], .little);
-                    offset += 8;
-                    break :blk .{ .int_val = i };
-                },
-                3 => blk: {
-                    if (offset + 8 > data.len) break :blk .{ .null_val = {} };
-                    const f: f64 = @bitCast(std.mem.readInt(u64, data[offset..][0..8], .little));
-                    offset += 8;
-                    break :blk .{ .float_val = f };
-                },
-                4 => blk: {
-                    if (offset + 2 > data.len) break :blk .{ .null_val = {} };
-                    const str_len = std.mem.readInt(u16, data[offset..][0..2], .little);
-                    offset += 2;
-                    if (offset + str_len > data.len) break :blk .{ .null_val = {} };
-                    const str = self.allocator.dupe(u8, data[offset..][0..str_len]) catch {
-                        self.allocator.free(key_name);
-                        return DatabaseError.OutOfMemory;
-                    };
-                    offset += str_len;
-                    break :blk .{ .string_val = str };
-                },
-                else => .{ .null_val = {} },
+            const value = prop.value.clone(self.allocator) catch {
+                self.allocator.free(key_name);
+                return DatabaseError.OutOfMemory;
             };
+            errdefer {
+                var owned_value = value;
+                owned_value.deinit(self.allocator);
+            }
 
             props.append(self.allocator, .{ .key = key_name, .value = value }) catch {
                 self.allocator.free(key_name);
-                if (value == .string_val) {
-                    self.allocator.free(value.string_val);
-                }
+                var owned_value = value;
+                owned_value.deinit(self.allocator);
                 return DatabaseError.OutOfMemory;
             };
         }

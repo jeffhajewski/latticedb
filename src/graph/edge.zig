@@ -1069,32 +1069,24 @@ pub const EdgeStore = struct {
 
     /// Count outgoing edges from a node
     pub fn countOutgoing(self: *Self, node_id: NodeId) EdgeError!u64 {
-        var iter = try self.getOutgoing(node_id);
+        var iter = try self.getOutgoingRefs(node_id);
         defer iter.deinit();
 
         var count: u64 = 0;
-        while (true) {
-            if (try iter.next()) |edge| {
-                var e = edge;
-                e.deinit(self.allocator);
-                count += 1;
-            } else break;
+        while (try iter.next()) |_| {
+            count += 1;
         }
         return count;
     }
 
     /// Count incoming edges to a node
     pub fn countIncoming(self: *Self, node_id: NodeId) EdgeError!u64 {
-        var iter = try self.getIncoming(node_id);
+        var iter = try self.getIncomingRefs(node_id);
         defer iter.deinit();
 
         var count: u64 = 0;
-        while (true) {
-            if (try iter.next()) |edge| {
-                var e = edge;
-                e.deinit(self.allocator);
-                count += 1;
-            } else break;
+        while (try iter.next()) |_| {
+            count += 1;
         }
         return count;
     }

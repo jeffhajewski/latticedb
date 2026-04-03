@@ -131,10 +131,10 @@ test "symbols: unicode strings interned correctly" {
     var table = SymbolTable.init(allocator, &forward_tree, &reverse_tree);
 
     const unicode_strings = [_][]const u8{
-        "日本語",      // Japanese
-        "Ελληνικά",  // Greek
-        "العربية",     // Arabic
-        "emoji🎉",   // Emoji
+        "日本語", // Japanese
+        "Ελληνικά", // Greek
+        "العربية", // Arabic
+        "emoji🎉", // Emoji
     };
 
     for (unicode_strings) |s| {
@@ -381,6 +381,28 @@ test "edges: create stores both directions" {
     // Incoming to node 2
     const in_count = try store.countIncoming(2);
     try std.testing.expectEqual(@as(u64, 1), in_count);
+}
+
+test "edges: counting does not depend on payload deserialization" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "edge_count_refs");
+    defer db.deinit();
+
+    var tree = try BTree.init(allocator, db.bp);
+    var edge_id_tree = try BTree.init(allocator, db.bp);
+    var store = EdgeStore.init(allocator, &tree, &edge_id_tree);
+
+    const edge_id = try store.createAndGetId(1, 2, 1000, &[_]Property{
+        .{ .key_id = 2000, .value = .{ .int_val = 42 } },
+    });
+
+    var id_key: [8]u8 = undefined;
+    std.mem.writeInt(u64, &id_key, edge_id, .little);
+    try store.edge_id_index.delete(&id_key);
+    try store.edge_id_index.insert(&id_key, "bad");
+
+    try std.testing.expectEqual(@as(u64, 1), try store.countOutgoing(1));
+    try std.testing.expectEqual(@as(u64, 1), try store.countIncoming(2));
 }
 
 test "edges: delete removes both directions" {

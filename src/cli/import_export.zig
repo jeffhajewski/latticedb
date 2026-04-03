@@ -366,74 +366,37 @@ pub fn exportJson(
     label_filter: ?[]const u8,
 ) !ExportStats {
     var stats = ExportStats{};
+    const node_ids = try collectCanonicalNodeIds(allocator, db, label_filter);
+    defer allocator.free(node_ids);
 
     try writer.writeAll("{\"nodes\":[");
 
-    // Get all labels or apply filter.
-    const labels = db.getAllLabels() catch {
-        return ImportExportError.DatabaseError;
-    };
-    defer db.freeLabelInfos(labels);
-
-    // Export each node once, even when it has multiple labels.
-    var seen_nodes = std.AutoHashMap(NodeId, void).init(allocator);
-    defer seen_nodes.deinit();
-
     var first_node = true;
-    for (labels) |label_info| {
-        if (label_filter) |filter| {
-            if (!std.mem.eql(u8, label_info.name, filter)) continue;
+    for (node_ids) |node_id| {
+        if (!first_node) {
+            try writer.writeAll(",");
         }
+        first_node = false;
 
-        const nodes = db.getNodesByLabel(label_info.name) catch continue;
-        defer allocator.free(nodes);
-
-        for (nodes) |node_id| {
-            const node_gop = seen_nodes.getOrPut(node_id) catch return ImportExportError.OutOfMemory;
-            if (node_gop.found_existing) continue;
-
-            if (!first_node) {
-                try writer.writeAll(",");
-            }
-            first_node = false;
-
-            try writeNodeJson(allocator, db, writer, node_id);
-            stats.nodes_exported += 1;
-        }
+        try writeNodeJson(allocator, db, writer, node_id);
+        stats.nodes_exported += 1;
     }
 
     try writer.writeAll("],\"edges\":[");
 
-    // Export edges
     var first_edge = true;
-    // Visit each source node once to avoid duplicate edges from multi-label nodes.
-    var seen_sources = std.AutoHashMap(NodeId, void).init(allocator);
-    defer seen_sources.deinit();
+    for (node_ids) |node_id| {
+        const edges = db.getOutgoingEdges(node_id) catch continue;
+        defer db.freeEdgeInfos(edges);
 
-    for (labels) |label_info| {
-        if (label_filter) |filter| {
-            if (!std.mem.eql(u8, label_info.name, filter)) continue;
-        }
-
-        const nodes = db.getNodesByLabel(label_info.name) catch continue;
-        defer allocator.free(nodes);
-
-        for (nodes) |node_id| {
-            const source_gop = seen_sources.getOrPut(node_id) catch return ImportExportError.OutOfMemory;
-            if (source_gop.found_existing) continue;
-
-            const edges = db.getOutgoingEdges(node_id) catch continue;
-            defer db.freeEdgeInfos(edges);
-
-            for (edges) |edge| {
-                if (!first_edge) {
-                    try writer.writeAll(",");
-                }
-                first_edge = false;
-
-                try writeEdgeJson(db, writer, edge);
-                stats.edges_exported += 1;
+        for (edges) |edge| {
+            if (!first_edge) {
+                try writer.writeAll(",");
             }
+            first_edge = false;
+
+            try writeEdgeJson(db, writer, edge);
+            stats.edges_exported += 1;
         }
     }
 
@@ -506,58 +469,23 @@ pub fn exportJsonl(
     label_filter: ?[]const u8,
 ) !ExportStats {
     var stats = ExportStats{};
+    const node_ids = try collectCanonicalNodeIds(allocator, db, label_filter);
+    defer allocator.free(node_ids);
 
-    const labels = db.getAllLabels() catch {
-        return ImportExportError.DatabaseError;
-    };
-    defer db.freeLabelInfos(labels);
-
-    // Emit node records first (deduplicated by node ID).
-    var seen_nodes = std.AutoHashMap(NodeId, void).init(allocator);
-    defer seen_nodes.deinit();
-
-    for (labels) |label_info| {
-        if (label_filter) |filter| {
-            if (!std.mem.eql(u8, label_info.name, filter)) continue;
-        }
-
-        const nodes = db.getNodesByLabel(label_info.name) catch continue;
-        defer allocator.free(nodes);
-
-        for (nodes) |node_id| {
-            const node_gop = seen_nodes.getOrPut(node_id) catch return ImportExportError.OutOfMemory;
-            if (node_gop.found_existing) continue;
-
-            try writeNodeJsonlRecord(allocator, db, writer, node_id);
-            try writer.writeByte('\n');
-            stats.nodes_exported += 1;
-        }
+    for (node_ids) |node_id| {
+        try writeNodeJsonlRecord(allocator, db, writer, node_id);
+        try writer.writeByte('\n');
+        stats.nodes_exported += 1;
     }
 
-    // Emit edge records once per source node.
-    var seen_sources = std.AutoHashMap(NodeId, void).init(allocator);
-    defer seen_sources.deinit();
+    for (node_ids) |node_id| {
+        const edges = db.getOutgoingEdges(node_id) catch continue;
+        defer db.freeEdgeInfos(edges);
 
-    for (labels) |label_info| {
-        if (label_filter) |filter| {
-            if (!std.mem.eql(u8, label_info.name, filter)) continue;
-        }
-
-        const nodes = db.getNodesByLabel(label_info.name) catch continue;
-        defer allocator.free(nodes);
-
-        for (nodes) |node_id| {
-            const source_gop = seen_sources.getOrPut(node_id) catch return ImportExportError.OutOfMemory;
-            if (source_gop.found_existing) continue;
-
-            const edges = db.getOutgoingEdges(node_id) catch continue;
-            defer db.freeEdgeInfos(edges);
-
-            for (edges) |edge| {
-                try writeEdgeJsonlRecord(db, writer, edge);
-                try writer.writeByte('\n');
-                stats.edges_exported += 1;
-            }
+        for (edges) |edge| {
+            try writeEdgeJsonlRecord(db, writer, edge);
+            try writer.writeByte('\n');
+            stats.edges_exported += 1;
         }
     }
 
@@ -572,57 +500,22 @@ pub fn exportDot(
     label_filter: ?[]const u8,
 ) !ExportStats {
     var stats = ExportStats{};
+    const node_ids = try collectCanonicalNodeIds(allocator, db, label_filter);
+    defer allocator.free(node_ids);
     try writer.writeAll("digraph G {\n");
 
-    const labels = db.getAllLabels() catch {
-        return ImportExportError.DatabaseError;
-    };
-    defer db.freeLabelInfos(labels);
-
-    // Emit each node once.
-    var seen_nodes = std.AutoHashMap(NodeId, void).init(allocator);
-    defer seen_nodes.deinit();
-
-    for (labels) |label_info| {
-        if (label_filter) |filter| {
-            if (!std.mem.eql(u8, label_info.name, filter)) continue;
-        }
-
-        const nodes = db.getNodesByLabel(label_info.name) catch continue;
-        defer allocator.free(nodes);
-
-        for (nodes) |node_id| {
-            const node_gop = seen_nodes.getOrPut(node_id) catch return ImportExportError.OutOfMemory;
-            if (node_gop.found_existing) continue;
-
-            try writeNodeDot(allocator, db, writer, node_id);
-            stats.nodes_exported += 1;
-        }
+    for (node_ids) |node_id| {
+        try writeNodeDot(allocator, db, writer, node_id);
+        stats.nodes_exported += 1;
     }
 
-    // Emit edges once per source node.
-    var seen_sources = std.AutoHashMap(NodeId, void).init(allocator);
-    defer seen_sources.deinit();
+    for (node_ids) |node_id| {
+        const edges = db.getOutgoingEdges(node_id) catch continue;
+        defer db.freeEdgeInfos(edges);
 
-    for (labels) |label_info| {
-        if (label_filter) |filter| {
-            if (!std.mem.eql(u8, label_info.name, filter)) continue;
-        }
-
-        const nodes = db.getNodesByLabel(label_info.name) catch continue;
-        defer allocator.free(nodes);
-
-        for (nodes) |node_id| {
-            const source_gop = seen_sources.getOrPut(node_id) catch return ImportExportError.OutOfMemory;
-            if (source_gop.found_existing) continue;
-
-            const edges = db.getOutgoingEdges(node_id) catch continue;
-            defer db.freeEdgeInfos(edges);
-
-            for (edges) |edge| {
-                try writeEdgeDot(writer, edge);
-                stats.edges_exported += 1;
-            }
+        for (edges) |edge| {
+            try writeEdgeDot(writer, edge);
+            stats.edges_exported += 1;
         }
     }
 
@@ -1220,81 +1113,44 @@ pub fn exportCsv(
     label_filter: ?[]const u8,
 ) !ExportStats {
     var stats = ExportStats{};
+    const node_ids = try collectCanonicalNodeIds(allocator, db, label_filter);
+    defer allocator.free(node_ids);
 
     // Write nodes header
     try nodes_writer.writeAll("_id,_labels\n");
 
-    // Get all labels
-    const labels = db.getAllLabels() catch {
-        return ImportExportError.DatabaseError;
-    };
-    defer db.freeLabelInfos(labels);
-
-    // Export nodes (deduplicated by node ID).
-    var seen_nodes = std.AutoHashMap(NodeId, void).init(allocator);
-    defer seen_nodes.deinit();
-
-    for (labels) |label_info| {
-        if (label_filter) |filter| {
-            if (!std.mem.eql(u8, label_info.name, filter)) continue;
+    for (node_ids) |node_id| {
+        const node_labels = db.getNodeLabels(node_id) catch |err| return mapDatabaseError(err);
+        defer {
+            for (node_labels) |label| {
+                allocator.free(label);
+            }
+            allocator.free(node_labels);
         }
 
-        const nodes = db.getNodesByLabel(label_info.name) catch continue;
-        defer allocator.free(nodes);
-
-        for (nodes) |node_id| {
-            const node_gop = seen_nodes.getOrPut(node_id) catch return ImportExportError.OutOfMemory;
-            if (node_gop.found_existing) continue;
-
-            // Get all labels for this node
-            const node_labels = db.getNodeLabels(node_id) catch |err| return mapDatabaseError(err);
-            defer {
-                for (node_labels) |label| {
-                    allocator.free(label);
-                }
-                allocator.free(node_labels);
-            }
-
-            try nodes_writer.print("{d},\"", .{node_id});
-            for (node_labels, 0..) |label, i| {
-                if (i > 0) try nodes_writer.writeAll(";");
-                try nodes_writer.writeAll(label);
-            }
-            try nodes_writer.writeAll("\"\n");
-            stats.nodes_exported += 1;
+        try nodes_writer.print("{d},\"", .{node_id});
+        for (node_labels, 0..) |label, i| {
+            if (i > 0) try nodes_writer.writeAll(";");
+            try nodes_writer.writeAll(label);
         }
+        try nodes_writer.writeAll("\"\n");
+        stats.nodes_exported += 1;
     }
 
     // Write edges header
     try edges_writer.writeAll("_source,_target,_type\n");
 
-    // Export edges once per source node.
-    var seen_sources = std.AutoHashMap(NodeId, void).init(allocator);
-    defer seen_sources.deinit();
+    for (node_ids) |node_id| {
+        const edges = db.getOutgoingEdges(node_id) catch continue;
+        defer db.freeEdgeInfos(edges);
 
-    for (labels) |label_info| {
-        if (label_filter) |filter| {
-            if (!std.mem.eql(u8, label_info.name, filter)) continue;
-        }
-
-        const nodes = db.getNodesByLabel(label_info.name) catch continue;
-        defer allocator.free(nodes);
-
-        for (nodes) |node_id| {
-            const source_gop = seen_sources.getOrPut(node_id) catch return ImportExportError.OutOfMemory;
-            if (source_gop.found_existing) continue;
-
-            const edges = db.getOutgoingEdges(node_id) catch continue;
-            defer db.freeEdgeInfos(edges);
-
-            for (edges) |edge| {
-                try edges_writer.print("{d},{d},{s}\n", .{
-                    edge.source,
-                    edge.target,
-                    edge.edge_type,
-                });
-                stats.edges_exported += 1;
-            }
+        for (edges) |edge| {
+            try edges_writer.print("{d},{d},{s}\n", .{
+                edge.source,
+                edge.target,
+                edge.edge_type,
+            });
+            stats.edges_exported += 1;
         }
     }
 

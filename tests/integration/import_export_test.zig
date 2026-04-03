@@ -53,6 +53,15 @@ fn seedMultiLabelParallelGraph(db: *Database) !void {
     try db.setEdgePropertyById(null, second, "since", .{ .int_val = 2021 });
 }
 
+fn seedGraphWithUnlabeledNode(db: *Database) !void {
+    const labeled = try db.createNode(null, &.{"Person"});
+    const unlabeled = try db.createNode(null, &.{});
+
+    try db.setNodeProperty(null, labeled, "name", .{ .string_val = "Alice" });
+    try db.setNodeProperty(null, unlabeled, "name", .{ .string_val = "Mystery" });
+    _ = try db.createEdgeAndGetId(null, labeled, unlabeled, "REL");
+}
+
 fn countNonEmptyLines(s: []const u8) usize {
     var count: usize = 0;
     var lines = std.mem.splitScalar(u8, s, '\n');
@@ -221,6 +230,79 @@ test "import_export: exportDot emits valid graph with deduplicated nodes and par
 
     try std.testing.expectEqual(@as(usize, 2), node_lines);
     try std.testing.expectEqual(@as(usize, 2), edge_lines);
+}
+
+test "import_export: all export formats include unlabeled nodes" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_export_unlabeled_test.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    try seedGraphWithUnlabeledNode(db);
+
+    var json_buf: [4096]u8 = undefined;
+    var json_stream = std.io.fixedBufferStream(&json_buf);
+    const json_stats = try import_export.exportJson(allocator, db, json_stream.writer(), null);
+    try std.testing.expectEqual(@as(u64, 2), json_stats.nodes_exported);
+    try std.testing.expectEqual(@as(u64, 1), json_stats.edges_exported);
+
+    const json_output = json_buf[0..json_stream.pos];
+    const json_parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_output, .{});
+    defer json_parsed.deinit();
+    const json_nodes = json_parsed.value.object.get("nodes").?.array.items;
+    try std.testing.expectEqual(@as(usize, 2), json_nodes.len);
+    var found_empty_labels_json = false;
+    for (json_nodes) |node| {
+        const labels = node.object.get("labels").?.array.items;
+        if (labels.len == 0) found_empty_labels_json = true;
+    }
+    try std.testing.expect(found_empty_labels_json);
+
+    var jsonl_buf: [4096]u8 = undefined;
+    var jsonl_stream = std.io.fixedBufferStream(&jsonl_buf);
+    const jsonl_stats = try import_export.exportJsonl(allocator, db, jsonl_stream.writer(), null);
+    try std.testing.expectEqual(@as(u64, 2), jsonl_stats.nodes_exported);
+    try std.testing.expectEqual(@as(u64, 1), jsonl_stats.edges_exported);
+
+    var found_empty_labels_jsonl = false;
+    var jsonl_lines = std.mem.splitScalar(u8, jsonl_buf[0..jsonl_stream.pos], '\n');
+    while (jsonl_lines.next()) |line| {
+        const trimmed = std.mem.trim(u8, line, " \t\r");
+        if (trimmed.len == 0) continue;
+
+        const parsed = try std.json.parseFromSlice(std.json.Value, allocator, trimmed, .{});
+        defer parsed.deinit();
+
+        if (std.mem.eql(u8, parsed.value.object.get("kind").?.string, "node")) {
+            const labels = parsed.value.object.get("labels").?.array.items;
+            if (labels.len == 0) found_empty_labels_jsonl = true;
+        }
+    }
+    try std.testing.expect(found_empty_labels_jsonl);
+
+    var nodes_csv_buf: [4096]u8 = undefined;
+    var nodes_csv_stream = std.io.fixedBufferStream(&nodes_csv_buf);
+    var edges_csv_buf: [4096]u8 = undefined;
+    var edges_csv_stream = std.io.fixedBufferStream(&edges_csv_buf);
+    const csv_stats = try import_export.exportCsv(
+        allocator,
+        db,
+        nodes_csv_stream.writer(),
+        edges_csv_stream.writer(),
+        null,
+    );
+    try std.testing.expectEqual(@as(u64, 2), csv_stats.nodes_exported);
+    try std.testing.expectEqual(@as(u64, 1), csv_stats.edges_exported);
+    try std.testing.expect(std.mem.indexOf(u8, nodes_csv_buf[0..nodes_csv_stream.pos], "2,\"\"") != null);
+
+    var dot_buf: [4096]u8 = undefined;
+    var dot_stream = std.io.fixedBufferStream(&dot_buf);
+    const dot_stats = try import_export.exportDot(allocator, db, dot_stream.writer(), null);
+    try std.testing.expectEqual(@as(u64, 2), dot_stats.nodes_exported);
+    try std.testing.expectEqual(@as(u64, 1), dot_stats.edges_exported);
+    const dot_output = dot_buf[0..dot_stream.pos];
+    try std.testing.expect(std.mem.indexOf(u8, dot_output, "n2 [label=\"2\"];\n") != null);
+    try std.testing.expect(std.mem.indexOf(u8, dot_output, "n1 -> n2 [label=\"REL\"];\n") != null);
 }
 
 test "import_export: JSON-family exports fail on unreadable node properties" {

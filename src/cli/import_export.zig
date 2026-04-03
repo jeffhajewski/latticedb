@@ -681,7 +681,7 @@ fn writeNodeJson(
     try writer.print("{{\"id\":\"{d}\",\"labels\":[", .{node_id});
 
     // Get labels for this node
-    const node_labels = db.getNodeLabels(node_id) catch &[_][]const u8{};
+    const node_labels = db.getNodeLabels(node_id) catch |err| return mapDatabaseError(err);
     defer {
         for (node_labels) |label| {
             allocator.free(label);
@@ -697,8 +697,8 @@ fn writeNodeJson(
     try writer.writeAll("],\"properties\":{");
 
     // Get properties
-    const props = db.getNodeProperties(node_id) catch &[_]Database.PropertyEntry{};
-    defer db.freePropertyEntries(@constCast(props));
+    const props = db.getNodeProperties(node_id) catch |err| return mapDatabaseError(err);
+    defer db.freePropertyEntries(props);
 
     for (props, 0..) |prop, i| {
         if (i > 0) try writer.writeAll(",");
@@ -718,7 +718,7 @@ fn writeNodeJsonCanonical(
 ) !void {
     try writer.print("{{\"id\":\"{d}\",\"labels\":[", .{node_id});
 
-    const node_labels = db.getNodeLabels(node_id) catch &[_][]const u8{};
+    const node_labels = db.getNodeLabels(node_id) catch |err| return mapDatabaseError(err);
     defer {
         for (node_labels) |label| allocator.free(label);
         allocator.free(node_labels);
@@ -739,8 +739,8 @@ fn writeNodeJsonCanonical(
 
     try writer.writeAll("],\"properties\":{");
 
-    const props = db.getNodeProperties(node_id) catch &[_]Database.PropertyEntry{};
-    defer db.freePropertyEntries(@constCast(props));
+    const props = db.getNodeProperties(node_id) catch |err| return mapDatabaseError(err);
+    defer db.freePropertyEntries(props);
     try writeSortedPropertyEntriesJson(allocator, writer, props);
     try writer.writeAll("}}");
 }
@@ -750,16 +750,14 @@ fn writeEdgeJson(db: *Database, writer: anytype, edge: Database.EdgeInfo) !void 
     try writeJsonString(writer, edge.edge_type);
     try writer.writeAll(",\"properties\":{");
 
-    const maybe_props = db.getEdgeProperties(edge.id) catch null;
-    defer if (maybe_props) |props| db.freePropertyEntries(props);
+    const props = db.getEdgeProperties(edge.id) catch |err| return mapDatabaseError(err);
+    defer db.freePropertyEntries(props);
 
-    if (maybe_props) |props| {
-        for (props, 0..) |prop, i| {
-            if (i > 0) try writer.writeAll(",");
-            try writeJsonString(writer, prop.key);
-            try writer.writeByte(':');
-            try writePropertyValueJson(writer, prop.value);
-        }
+    for (props, 0..) |prop, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writeJsonString(writer, prop.key);
+        try writer.writeByte(':');
+        try writePropertyValueJson(writer, prop.value);
     }
 
     try writer.writeAll("}}");
@@ -778,12 +776,10 @@ fn writeEdgeJsonCanonical(
     try writeJsonString(writer, edge.edge_type);
     try writer.writeAll(",\"properties\":{");
 
-    const maybe_props = db.getEdgeProperties(edge.id) catch null;
-    defer if (maybe_props) |props| db.freePropertyEntries(props);
+    const props = db.getEdgeProperties(edge.id) catch |err| return mapDatabaseError(err);
+    defer db.freePropertyEntries(props);
 
-    if (maybe_props) |props| {
-        try writeSortedPropertyEntriesJson(allocator, writer, props);
-    }
+    try writeSortedPropertyEntriesJson(allocator, writer, props);
 
     try writer.writeAll("}}");
 }
@@ -797,7 +793,7 @@ fn writeNodeJsonlRecord(
     try writer.writeAll("{\"kind\":\"node\",\"id\":");
     try writer.print("\"{d}\",\"labels\":[", .{node_id});
 
-    const node_labels = db.getNodeLabels(node_id) catch &[_][]const u8{};
+    const node_labels = db.getNodeLabels(node_id) catch |err| return mapDatabaseError(err);
     defer {
         for (node_labels) |label| {
             allocator.free(label);
@@ -812,8 +808,8 @@ fn writeNodeJsonlRecord(
 
     try writer.writeAll("],\"properties\":{");
 
-    const props = db.getNodeProperties(node_id) catch &[_]Database.PropertyEntry{};
-    defer db.freePropertyEntries(@constCast(props));
+    const props = db.getNodeProperties(node_id) catch |err| return mapDatabaseError(err);
+    defer db.freePropertyEntries(props);
 
     for (props, 0..) |prop, i| {
         if (i > 0) try writer.writeAll(",");
@@ -830,16 +826,14 @@ fn writeEdgeJsonlRecord(db: *Database, writer: anytype, edge: Database.EdgeInfo)
     try writeJsonString(writer, edge.edge_type);
     try writer.writeAll(",\"properties\":{");
 
-    const maybe_props = db.getEdgeProperties(edge.id) catch null;
-    defer if (maybe_props) |props| db.freePropertyEntries(props);
+    const props = db.getEdgeProperties(edge.id) catch |err| return mapDatabaseError(err);
+    defer db.freePropertyEntries(props);
 
-    if (maybe_props) |props| {
-        for (props, 0..) |prop, i| {
-            if (i > 0) try writer.writeAll(",");
-            try writeJsonString(writer, prop.key);
-            try writer.writeByte(':');
-            try writePropertyValueJson(writer, prop.value);
-        }
+    for (props, 0..) |prop, i| {
+        if (i > 0) try writer.writeAll(",");
+        try writeJsonString(writer, prop.key);
+        try writer.writeByte(':');
+        try writePropertyValueJson(writer, prop.value);
     }
 
     try writer.writeAll("}}");
@@ -853,7 +847,7 @@ fn writeNodeDot(
 ) !void {
     try writer.print("  n{d} [label=\"{d}", .{ node_id, node_id });
 
-    const node_labels = db.getNodeLabels(node_id) catch &[_][]const u8{};
+    const node_labels = db.getNodeLabels(node_id) catch |err| return mapDatabaseError(err);
     defer {
         for (node_labels) |label| {
             allocator.free(label);
@@ -1006,7 +1000,7 @@ fn collectCanonicalNodeIds(
     errdefer node_ids.deinit(allocator);
 
     if (label_filter) |filter| {
-        const filtered = db.getNodesByLabel(filter) catch return &[_]NodeId{};
+        const filtered = db.getNodesByLabel(filter) catch |err| return mapDatabaseError(err);
         defer allocator.free(filtered);
         try node_ids.appendSlice(allocator, filtered);
     } else {
@@ -1253,7 +1247,7 @@ pub fn exportCsv(
             if (node_gop.found_existing) continue;
 
             // Get all labels for this node
-            const node_labels = db.getNodeLabels(node_id) catch &[_][]const u8{};
+            const node_labels = db.getNodeLabels(node_id) catch |err| return mapDatabaseError(err);
             defer {
                 for (node_labels) |label| {
                     allocator.free(label);

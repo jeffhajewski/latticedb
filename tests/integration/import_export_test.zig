@@ -24,6 +24,20 @@ fn cleanupTestDb(db: *Database, path: []const u8) void {
     std.fs.cwd().deleteFile(path) catch {};
 }
 
+fn overwriteNodePayloadWithInvalidData(db: *Database, node_id: u64) !void {
+    var key: [8]u8 = undefined;
+    std.mem.writeInt(u64, &key, node_id, .little);
+    try db.node_tree.delete(&key);
+    try db.node_tree.insert(&key, "bad");
+}
+
+fn overwriteEdgePayloadWithInvalidData(db: *Database, edge_id: u64) !void {
+    var key: [8]u8 = undefined;
+    std.mem.writeInt(u64, &key, edge_id, .little);
+    try db.edge_store.edge_id_index.delete(&key);
+    try db.edge_store.edge_id_index.insert(&key, "bad");
+}
+
 fn seedMultiLabelParallelGraph(db: *Database) !void {
     const alice = try db.createNode(null, &.{ "Person", "Employee" });
     const bob = try db.createNode(null, &.{"Person"});
@@ -207,4 +221,70 @@ test "import_export: exportDot emits valid graph with deduplicated nodes and par
 
     try std.testing.expectEqual(@as(usize, 2), node_lines);
     try std.testing.expectEqual(@as(usize, 2), edge_lines);
+}
+
+test "import_export: JSON-family exports fail on unreadable node properties" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_export_json_node_error_test.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    const node = try db.createNode(null, &.{"Person"});
+    try db.setNodeProperty(null, node, "name", .{ .string_val = "Alice" });
+    try overwriteNodePayloadWithInvalidData(db, node);
+
+    var json_buf: [4096]u8 = undefined;
+    var json_stream = std.io.fixedBufferStream(&json_buf);
+    try std.testing.expectError(
+        import_export.ImportExportError.DatabaseError,
+        import_export.exportJson(allocator, db, json_stream.writer(), null),
+    );
+
+    var jsonl_buf: [4096]u8 = undefined;
+    var jsonl_stream = std.io.fixedBufferStream(&jsonl_buf);
+    try std.testing.expectError(
+        import_export.ImportExportError.DatabaseError,
+        import_export.exportJsonl(allocator, db, jsonl_stream.writer(), null),
+    );
+
+    var canonical_buf: [4096]u8 = undefined;
+    var canonical_stream = std.io.fixedBufferStream(&canonical_buf);
+    try std.testing.expectError(
+        import_export.ImportExportError.DatabaseError,
+        import_export.dumpCanonicalJson(allocator, db, canonical_stream.writer(), null),
+    );
+}
+
+test "import_export: JSON-family exports fail on unreadable edge properties" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_export_json_edge_error_test.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    const alice = try db.createNode(null, &.{"Person"});
+    const bob = try db.createNode(null, &.{"Person"});
+    const edge_id = try db.createEdgeAndGetId(null, alice, bob, "REL");
+    try db.setEdgePropertyById(null, edge_id, "since", .{ .int_val = 2020 });
+    try overwriteEdgePayloadWithInvalidData(db, edge_id);
+
+    var json_buf: [4096]u8 = undefined;
+    var json_stream = std.io.fixedBufferStream(&json_buf);
+    try std.testing.expectError(
+        import_export.ImportExportError.DatabaseError,
+        import_export.exportJson(allocator, db, json_stream.writer(), null),
+    );
+
+    var jsonl_buf: [4096]u8 = undefined;
+    var jsonl_stream = std.io.fixedBufferStream(&jsonl_buf);
+    try std.testing.expectError(
+        import_export.ImportExportError.DatabaseError,
+        import_export.exportJsonl(allocator, db, jsonl_stream.writer(), null),
+    );
+
+    var canonical_buf: [4096]u8 = undefined;
+    var canonical_stream = std.io.fixedBufferStream(&canonical_buf);
+    try std.testing.expectError(
+        import_export.ImportExportError.DatabaseError,
+        import_export.dumpCanonicalJson(allocator, db, canonical_stream.writer(), null),
+    );
 }

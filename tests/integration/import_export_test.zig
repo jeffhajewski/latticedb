@@ -62,6 +62,19 @@ fn seedGraphWithUnlabeledNode(db: *Database) !void {
     _ = try db.createEdgeAndGetId(null, labeled, unlabeled, "REL");
 }
 
+fn seedGraphForMultiLabelFilter(db: *Database) !void {
+    const alice = try db.createNode(null, &.{ "Person", "Employee" });
+    const bob = try db.createNode(null, &.{"Person"});
+    const carol = try db.createNode(null, &.{"Employee"});
+
+    try db.setNodeProperty(null, alice, "name", .{ .string_val = "Alice" });
+    try db.setNodeProperty(null, bob, "name", .{ .string_val = "Bob" });
+    try db.setNodeProperty(null, carol, "name", .{ .string_val = "Carol" });
+
+    _ = try db.createEdgeAndGetId(null, alice, bob, "REL");
+    _ = try db.createEdgeAndGetId(null, carol, bob, "REL");
+}
+
 fn countNonEmptyLines(s: []const u8) usize {
     var count: usize = 0;
     var lines = std.mem.splitScalar(u8, s, '\n');
@@ -303,6 +316,43 @@ test "import_export: all export formats include unlabeled nodes" {
     const dot_output = dot_buf[0..dot_stream.pos];
     try std.testing.expect(std.mem.indexOf(u8, dot_output, "n2 [label=\"2\"];\n") != null);
     try std.testing.expect(std.mem.indexOf(u8, dot_output, "n1 -> n2 [label=\"REL\"];\n") != null);
+}
+
+test "import_export: comma-separated label filter unions matching nodes without duplicates" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_export_multilabel_filter_test.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    try seedGraphForMultiLabelFilter(db);
+
+    var json_buf: [4096]u8 = undefined;
+    var json_stream = std.io.fixedBufferStream(&json_buf);
+    const json_stats = try import_export.exportJson(allocator, db, json_stream.writer(), "Person, Employee");
+    try std.testing.expectEqual(@as(u64, 3), json_stats.nodes_exported);
+    try std.testing.expectEqual(@as(u64, 2), json_stats.edges_exported);
+
+    const parsed = try std.json.parseFromSlice(std.json.Value, allocator, json_buf[0..json_stream.pos], .{});
+    defer parsed.deinit();
+
+    const nodes = parsed.value.object.get("nodes").?.array.items;
+    const edges = parsed.value.object.get("edges").?.array.items;
+    try std.testing.expectEqual(@as(usize, 3), nodes.len);
+    try std.testing.expectEqual(@as(usize, 2), edges.len);
+
+    var ids = std.AutoHashMap(u64, void).init(allocator);
+    defer ids.deinit();
+    for (nodes) |node| {
+        const id = try std.fmt.parseInt(u64, node.object.get("id").?.string, 10);
+        _ = try ids.getOrPut(id);
+    }
+    try std.testing.expectEqual(@as(usize, 3), ids.count());
+
+    var dump_buf: [4096]u8 = undefined;
+    var dump_stream = std.io.fixedBufferStream(&dump_buf);
+    const dump_stats = try import_export.dumpCanonicalJson(allocator, db, dump_stream.writer(), "Person,Employee");
+    try std.testing.expectEqual(@as(u64, 3), dump_stats.nodes_exported);
+    try std.testing.expectEqual(@as(u64, 2), dump_stats.edges_exported);
 }
 
 test "import_export: JSON-family exports fail on unreadable node properties" {

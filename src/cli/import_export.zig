@@ -893,9 +893,23 @@ fn collectCanonicalNodeIds(
     errdefer node_ids.deinit(allocator);
 
     if (label_filter) |filter| {
-        const filtered = db.getNodesByLabel(filter) catch |err| return mapDatabaseError(err);
-        defer allocator.free(filtered);
-        try node_ids.appendSlice(allocator, filtered);
+        var seen = std.AutoHashMap(NodeId, void).init(allocator);
+        defer seen.deinit();
+
+        var filters = std.mem.splitScalar(u8, filter, ',');
+        while (filters.next()) |raw_label| {
+            const label = std.mem.trim(u8, raw_label, " \t\r");
+            if (label.len == 0) continue;
+
+            const filtered = db.getNodesByLabel(label) catch |err| return mapDatabaseError(err);
+            defer allocator.free(filtered);
+
+            for (filtered) |node_id| {
+                const gop = seen.getOrPut(node_id) catch return ImportExportError.OutOfMemory;
+                if (gop.found_existing) continue;
+                try node_ids.append(allocator, node_id);
+            }
+        }
     } else {
         var iter = db.node_tree.range(null, null) catch return ImportExportError.DatabaseError;
         defer iter.deinit();

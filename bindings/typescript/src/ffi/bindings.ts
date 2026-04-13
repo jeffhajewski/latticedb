@@ -181,6 +181,14 @@ export interface LatticeBindings {
     node_id: bigint,
     labels_out: unknown[]
   ) => number;
+  lattice_get_nodes_by_label: (
+    db: unknown,
+    label: string | null,
+    label_len: number,
+    node_ids_out: unknown[],
+    count_out: number[]
+  ) => number;
+  lattice_free_node_ids: (node_ids: unknown, count: number) => void;
   lattice_free_string: (str: unknown) => void;
   lattice_value_free: (value: unknown) => void;
   lattice_node_set_property: (
@@ -483,6 +491,17 @@ function createBindings(): LatticeBindings {
       TxnPtr,
       'uint64', // node_id
       koffi.out(koffi.pointer('void*')), // labels_out - raw pointer for manual free
+    ]),
+    lattice_get_nodes_by_label: lib.func('lattice_get_nodes_by_label', 'int', [
+      DatabasePtr,
+      'str', // label
+      'size_t', // label_len
+      koffi.out(koffi.pointer('void*')), // node_ids_out - raw pointer for manual free
+      koffi.out(koffi.pointer('size_t')), // count_out
+    ]),
+    lattice_free_node_ids: lib.func('lattice_free_node_ids', 'void', [
+      'void*',
+      'size_t',
     ]),
     lattice_free_string: lib.func('lattice_free_string', 'void', ['void*']),
     lattice_value_free: lib.func('lattice_value_free', 'void', [ValuePtr]),

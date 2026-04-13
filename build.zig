@@ -5,8 +5,10 @@ pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
 
-    // Create the main library module
-    const lib_module = b.createModule(.{
+    // Create the main library module — exposed publicly via b.addModule so
+    // sibling Zig packages can consume it as `dep.module("lattice")` without
+    // going through the C ABI header.
+    const lib_module = b.addModule("lattice", .{
         .root_source_file = b.path("src/main.zig"),
         .target = target,
         .optimize = optimize,

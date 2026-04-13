@@ -110,11 +110,8 @@ pub const NodeStore = struct {
         const node_id = self.next_id;
         self.next_id += 1;
 
-        // Serialize node data
-        var buf: [4096]u8 = undefined;
-        const serialized = serializeNode(labels, properties, &buf) catch {
-            return NodeError.BufferTooSmall;
-        };
+        const serialized = try self.serializeNodeAlloc(labels, properties);
+        defer self.allocator.free(serialized);
 
         // Create key from node_id
         var key_buf: [8]u8 = undefined;
@@ -141,11 +138,8 @@ pub const NodeStore = struct {
             self.next_id = node_id + 1;
         }
 
-        // Serialize node data
-        var buf: [4096]u8 = undefined;
-        const serialized = serializeNode(labels, properties, &buf) catch {
-            return NodeError.BufferTooSmall;
-        };
+        const serialized = try self.serializeNodeAlloc(labels, properties);
+        defer self.allocator.free(serialized);
 
         // Create key from node_id
         var key_buf: [8]u8 = undefined;
@@ -155,6 +149,26 @@ pub const NodeStore = struct {
         self.tree.insert(&key_buf, serialized) catch |err| {
             return mapBTreeError(err);
         };
+    }
+
+    /// Heap-allocate and serialize a node's labels + properties.
+    /// Replaces the previous fixed 4 KiB stack buffer, which capped the
+    /// total serialized node size (and therefore also limited how much
+    /// content a single STRING/BYTES property could carry). Caller owns
+    /// the returned slice.
+    fn serializeNodeAlloc(
+        self: *Self,
+        labels: []const SymbolId,
+        properties: []const Property,
+    ) NodeError![]u8 {
+        const size = serializedNodeSize(labels, properties);
+        const buf = self.allocator.alloc(u8, size) catch return NodeError.OutOfMemory;
+        errdefer self.allocator.free(buf);
+        const written = serializeNode(labels, properties, buf) catch {
+            return NodeError.BufferTooSmall;
+        };
+        if (written.len != size) return NodeError.InvalidData;
+        return buf;
     }
 
     /// Get a node by ID
@@ -190,18 +204,20 @@ pub const NodeStore = struct {
             return NodeError.NotFound;
         }
 
-        // Delete the old entry
+        // Serialize new data AND bail out up-front if it is too big for
+        // a single btree leaf page. Doing the size check before the
+        // delete keeps the store consistent if an oversized update is
+        // rejected: the existing node is still reachable and callers see
+        // a clean `BufferTooSmall` error.
+        const serialized = try self.serializeNodeAlloc(labels, properties);
+        defer self.allocator.free(serialized);
+        if (!self.tree.canFitLeafEntry(&key_buf, serialized.len)) {
+            return NodeError.BufferTooSmall;
+        }
+
         self.tree.delete(&key_buf) catch |err| {
             return mapBTreeError(err);
         };
-
-        // Serialize new data
-        var buf: [4096]u8 = undefined;
-        const serialized = serializeNode(labels, properties, &buf) catch {
-            return NodeError.BufferTooSmall;
-        };
-
-        // Insert the new data
         self.tree.insert(&key_buf, serialized) catch |err| {
             return mapBTreeError(err);
         };
@@ -234,6 +250,42 @@ pub const NodeStore = struct {
 // ============================================================================
 // Serialization
 // ============================================================================
+
+/// Exact byte count that `serializeNode` will emit for the given inputs.
+/// Mirrors the wire format below so callers can allocate exact-fit
+/// buffers instead of guessing with a fixed stack array.
+fn serializedNodeSize(labels: []const SymbolId, properties: []const Property) usize {
+    // 2 (labels.len) + labels.len * 2 + 2 (properties.len)
+    var size: usize = 2 + labels.len * 2 + 2;
+    for (properties) |prop| {
+        size += 2; // key_id u16
+        size += serializedValueSize(prop.value);
+    }
+    return size;
+}
+
+/// Exact byte count that `serializeValue` will emit for a PropertyValue.
+fn serializedValueSize(value: PropertyValue) usize {
+    return switch (value) {
+        .null_val => 1,
+        .bool_val => 2,
+        .int_val => 9,
+        .float_val => 9,
+        .string_val => |s| 5 + s.len,
+        .bytes_val => |b| 5 + b.len,
+        .vector_val => |v| 5 + v.len * 4,
+        .list_val => |list| blk: {
+            var s: usize = 5;
+            for (list) |item| s += serializedValueSize(item);
+            break :blk s;
+        },
+        .map_val => |map| blk: {
+            var s: usize = 5;
+            for (map) |entry| s += 4 + entry.key.len + serializedValueSize(entry.value);
+            break :blk s;
+        },
+    };
+}
 
 /// Serialize node data to bytes
 fn serializeNode(labels: []const SymbolId, properties: []const Property, buf: []u8) ![]u8 {
@@ -461,6 +513,11 @@ fn mapBTreeError(err: BTreeError) NodeError {
     return switch (err) {
         BTreeError.KeyNotFound => NodeError.NotFound,
         BTreeError.OutOfMemory => NodeError.OutOfMemory,
+        // PageFull from the leaf layer surfaces when a single node's
+        // serialized payload would not fit inside one btree leaf page.
+        // Translate it into BufferTooSmall so callers see a clear "value
+        // too large for page_size" signal instead of a generic BTreeError.
+        BTreeError.PageFull => NodeError.BufferTooSmall,
         else => NodeError.BTreeError,
     };
 }

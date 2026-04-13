@@ -235,6 +235,21 @@ lattice_error lattice_node_get_labels(
     char** labels_out
 );
 
+/* Return every node id that currently carries `label`. On success the
+ * caller owns `*node_ids_out` and must release it with
+ * lattice_free_node_ids(ids, count). An unknown label is not an error
+ * and yields count=0 with node_ids_out=NULL. */
+lattice_error lattice_get_nodes_by_label(
+    lattice_database* db,
+    const char* label,
+    size_t label_len,
+    lattice_node_id** node_ids_out,
+    size_t* count_out
+);
+
+/* Free an array returned by lattice_get_nodes_by_label. */
+void lattice_free_node_ids(lattice_node_id* node_ids, size_t count);
+
 /* Free a string allocated by lattice (e.g., from lattice_node_get_labels) */
 void lattice_free_string(char* str);
 

@@ -212,6 +212,16 @@ export class Database {
   }
 
   /**
+   * Return every node id that currently carries `label`.
+   *
+   * An unknown label is not an error and yields an empty array.
+   */
+  async getNodesByLabel(label: string): Promise<bigint[]> {
+    this.ensureOpen();
+    return this.ffi!.getNodesByLabel(this.dbHandle!, label);
+  }
+
+  /**
    * Search for similar vectors.
    *
    * @param vector - Query vector

@@ -480,9 +480,22 @@ pub const BTree = struct {
             return BTreeError.DuplicateKey;
         }
 
-        // Calculate space needed: slot(2) + key_len(2) + val_len(2) + key + value
-        const entry_size: u16 = @intCast(4 + key.len + value.len);
-        const space_needed: u16 = LEAF_SLOT_SIZE + entry_size;
+        // Calculate space needed: slot(2) + key_len(2) + val_len(2) + key + value.
+        // Use usize for the math so comically large values do not wrap u16
+        // before we compare against the per-page upper bound; a key/value
+        // pair that cannot physically fit in an empty page is rejected
+        // with `PageFull` instead of panicking inside `insertLeafEntry`.
+        const entry_size_usize: usize = 4 + key.len + value.len;
+        const space_needed_usize: usize = LEAF_SLOT_SIZE + entry_size_usize;
+        const max_leaf_entry = maxLeafEntrySize(self.page_size);
+        if (entry_size_usize > max_leaf_entry) {
+            self.bp.unpinPage(frame, false);
+            return BTreeError.PageFull;
+        }
+
+        const entry_size: u16 = @intCast(entry_size_usize);
+        _ = entry_size;
+        const space_needed: u16 = @intCast(space_needed_usize);
         const free_space = LeafNode.getFreeSpace(buf, self.page_size);
 
         if (free_space >= space_needed) {
@@ -494,6 +507,25 @@ pub const BTree = struct {
 
         // Need to split
         return self.splitLeafAndInsert(frame, search.slot, key, value);
+    }
+
+    /// Maximum (key_len + value_len + per-entry framing) that a leaf page
+    /// can hold. An entry larger than this cannot fit even into a freshly
+    /// initialized leaf, so it must be rejected up-front. Per-entry
+    /// framing = key_len(2) + val_len(2) = 4 bytes, already included here.
+    fn maxLeafEntrySize(page_size: u32) usize {
+        const reserved = @sizeOf(PageHeader) + LEAF_HEADER_SIZE + LEAF_SLOT_SIZE;
+        if (page_size <= reserved) return 0;
+        return @as(usize, page_size) - reserved;
+    }
+
+    /// Check whether a (key, value) pair could theoretically fit into a
+    /// single empty leaf page of the tree. Callers perform this before a
+    /// delete+insert sequence so they can bail out with a clean error
+    /// instead of leaving the tree missing an entry.
+    pub fn canFitLeafEntry(self: *const Self, key: []const u8, value_len: usize) bool {
+        const entry_size: usize = 4 + key.len + value_len;
+        return entry_size <= maxLeafEntrySize(self.page_size);
     }
 
     fn insertLeafEntry(self: *Self, buf: []u8, slot: u16, key: []const u8, value: []const u8) void {

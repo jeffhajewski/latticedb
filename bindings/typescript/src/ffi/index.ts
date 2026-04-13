@@ -321,6 +321,36 @@ export class LatticeFFI {
   }
 
   /**
+   * Return every node id that currently carries `label`. An unknown label
+   * is not an error and yields an empty array.
+   */
+  getNodesByLabel(db: DatabaseHandle, label: string): bigint[] {
+    const labelBytes = Buffer.byteLength(label, 'utf8');
+    const idsOut: unknown[] = [null];
+    const countOut = [0];
+    const err = this.bindings.lattice_get_nodes_by_label(
+      db,
+      label,
+      labelBytes,
+      idsOut,
+      countOut
+    );
+    this.checkError(err);
+
+    const ptr = idsOut[0];
+    const count = countOut[0] ?? 0;
+    if (!ptr || count === 0) {
+      return [];
+    }
+
+    try {
+      return koffi.decode(ptr, 'uint64', count) as bigint[];
+    } finally {
+      this.bindings.lattice_free_node_ids(ptr, count);
+    }
+  }
+
+  /**
    * Set a vector on a node.
    */
   setVector(

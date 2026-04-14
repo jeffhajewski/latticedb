@@ -167,6 +167,25 @@ func (db *DB) CacheStats() (QueryCacheStats, error) {
 	}, nil
 }
 
+// GetNodesByLabel returns every node id that currently carries label.
+// An unknown label is not an error and yields an empty slice.
+func (db *DB) GetNodesByLabel(label string) ([]NodeID, error) {
+	if db == nil || db.raw == nil {
+		return nil, ErrDatabaseClosed
+	}
+
+	ids, err := db.raw.GetNodesByLabel(label)
+	if err != nil {
+		return nil, wrapError(err)
+	}
+
+	out := make([]NodeID, len(ids))
+	for i, id := range ids {
+		out[i] = NodeID(id)
+	}
+	return out, nil
+}
+
 func (db *DB) VectorSearch(vector []float32, opts VectorSearchOptions) ([]VectorSearchResult, error) {
 	if db == nil || db.raw == nil {
 		return nil, ErrDatabaseClosed

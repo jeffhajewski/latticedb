@@ -124,6 +124,10 @@ pub const DatabaseError = error{
     TransactionNotActive,
     TransactionReadOnly,
     TransactionsNotEnabled,
+    /// Serialized node/edge payload is too large for a single btree leaf
+    /// page. The caller should split the value across multiple entries
+    /// or open the database with a larger `page_size`.
+    ValueTooLarge,
 };
 
 /// Query execution errors
@@ -1278,6 +1282,20 @@ pub const Database = struct {
     // Graph Operations - Nodes
     // ========================================================================
 
+    /// Translate node-store errors into the user-facing DatabaseError set.
+    /// Reserved for call sites that want the `BufferTooSmall → ValueTooLarge`
+    /// translation; internal recovery paths may still use `catch {}`.
+    fn mapNodeStoreError(err: node_mod.NodeError) DatabaseError {
+        return switch (err) {
+            node_mod.NodeError.NotFound => DatabaseError.NotFound,
+            node_mod.NodeError.AlreadyExists => DatabaseError.AlreadyExists,
+            node_mod.NodeError.OutOfMemory => DatabaseError.OutOfMemory,
+            node_mod.NodeError.BufferPoolFull => DatabaseError.BufferPoolFull,
+            node_mod.NodeError.BufferTooSmall => DatabaseError.ValueTooLarge,
+            else => DatabaseError.IoError,
+        };
+    }
+
     /// Create a new node with the given labels
     /// Returns the new node's ID
     /// If txn is null, the operation is auto-committed
@@ -1303,8 +1321,8 @@ pub const Database = struct {
         }
 
         // Create node with no properties (can be added later with setNodeProperty)
-        const node_id = self.node_store.create(label_ids, &[_]node_mod.Property{}) catch {
-            return DatabaseError.IoError;
+        const node_id = self.node_store.create(label_ids, &[_]node_mod.Property{}) catch |err| {
+            return mapNodeStoreError(err);
         };
 
         // Update label index
@@ -1382,11 +1400,20 @@ pub const Database = struct {
                     };
                     defer self.allocator.free(prop_bytes);
 
-                    var buf: [4096]u8 = undefined;
-                    // Serialize node data for WAL and undo (now with properties)
-                    const payload = wal_payload.serializeNodeDelete(&buf, node_id, node.labels, prop_bytes) catch {
-                        return DatabaseError.IoError;
-                    };
+                    // Sized from wal_payload.nodeDeleteSize so a node with
+                    // large property blobs serializes into an exact-fit
+                    // buffer rather than hitting the old 4 KiB stack cap.
+                    const payload_buf = self.allocator.alloc(
+                        u8,
+                        wal_payload.nodeDeleteSize(node.labels.len, prop_bytes.len),
+                    ) catch return DatabaseError.OutOfMemory;
+                    defer self.allocator.free(payload_buf);
+                    const payload = wal_payload.serializeNodeDelete(
+                        payload_buf,
+                        node_id,
+                        node.labels,
+                        prop_bytes,
+                    ) catch return DatabaseError.IoError;
                     _ = tm.logOperation(t, .delete, payload) catch {
                         return DatabaseError.IoError;
                     };
@@ -1490,48 +1517,62 @@ pub const Database = struct {
         }
 
         // Update the node
-        self.node_store.update(node_id, existing_node.labels, new_props.items) catch {
-            return DatabaseError.IoError;
+        self.node_store.update(node_id, existing_node.labels, new_props.items) catch |err| {
+            return mapNodeStoreError(err);
         };
 
-        // Log to WAL and add undo entry if transaction is provided
+        // Log to WAL and add undo entry if transaction is provided.
+        // Every buffer below is sized from `wal_payload.*Size` helpers and
+        // heap-allocated so STRING/BYTES property values of arbitrary
+        // length round-trip through the write-ahead log. The previous
+        // fixed [512]u8 / [2048]u8 stack buffers capped values at ~507
+        // bytes and composite payloads at ~2 KiB.
         if (txn) |t| {
             if (self.txn_manager) |*tm| {
-                // Serialize old value for undo (if it existed)
-                var old_value_bytes: ?[]u8 = null;
-                var owns_old_bytes = false;
-                if (old_value) |ov| {
-                    var old_buf: [512]u8 = undefined;
-                    const old_size = wal_payload.serializePropertyValueToBuf(&old_buf, ov) catch null;
-                    if (old_size) |sz| {
-                        old_value_bytes = self.allocator.dupe(u8, old_buf[0..sz]) catch null;
-                        owns_old_bytes = old_value_bytes != null;
-                    }
-                }
-                defer if (owns_old_bytes) self.allocator.free(old_value_bytes.?);
+                const old_value_bytes = try self.serializePropertyValueAlloc(old_value);
+                defer if (old_value_bytes) |b| self.allocator.free(b);
 
-                // Serialize new value
-                var new_buf: [512]u8 = undefined;
-                const new_size = wal_payload.serializePropertyValueToBuf(&new_buf, value) catch {
-                    return DatabaseError.IoError;
-                };
+                const new_value_bytes = try self.serializePropertyValueAlloc(value) orelse unreachable;
+                defer self.allocator.free(new_value_bytes);
 
-                var buf: [2048]u8 = undefined;
-                // Serialize property update for WAL (now with old value)
-                const payload = wal_payload.serializePropertyUpdate(&buf, node_id, key, old_value_bytes, new_buf[0..new_size]) catch {
-                    return DatabaseError.IoError;
-                };
+                const old_len = if (old_value_bytes) |b| b.len else 0;
+                const payload_buf = self.allocator.alloc(
+                    u8,
+                    wal_payload.propertyUpdateSize(key.len, old_len, new_value_bytes.len),
+                ) catch return DatabaseError.OutOfMemory;
+                defer self.allocator.free(payload_buf);
+                const payload = wal_payload.serializePropertyUpdate(
+                    payload_buf,
+                    node_id,
+                    key,
+                    old_value_bytes,
+                    new_value_bytes,
+                ) catch return DatabaseError.IoError;
+
                 _ = tm.logOperation(t, .update, payload) catch {
                     return DatabaseError.IoError;
                 };
-                // Undo of update: store payload containing old value
-                // For new properties (found=false), undo is delete; for existing, restore old value
+                // Undo of update: store payload containing old value.
+                // For new properties (found=false), undo is delete; for existing, restore old value.
                 const undo_op: UndoOpType = if (found) .update else .insert;
                 tm.addUndoEntry(t, undo_op, .property, node_id, 0, key_id, payload) catch {
                     return DatabaseError.IoError;
                 };
             }
         }
+    }
+
+    /// Heap-allocate and serialize a PropertyValue into a fresh WAL-format
+    /// byte slice. Returns null when `value` is null. Caller owns the
+    /// returned memory and must free it.
+    fn serializePropertyValueAlloc(self: *Self, value: ?PropertyValue) !?[]u8 {
+        const v = value orelse return null;
+        const size = wal_payload.propertyValueSize(v);
+        const buf = self.allocator.alloc(u8, size) catch return DatabaseError.OutOfMemory;
+        errdefer self.allocator.free(buf);
+        const written = wal_payload.serializePropertyValueToBuf(buf, v) catch return DatabaseError.IoError;
+        if (written != size) return DatabaseError.IoError;
+        return buf;
     }
 
     /// Remove a property from a node.
@@ -1585,31 +1626,34 @@ pub const Database = struct {
         }
 
         // Update the node
-        self.node_store.update(node_id, existing_node.labels, new_props.items) catch {
-            return DatabaseError.IoError;
+        self.node_store.update(node_id, existing_node.labels, new_props.items) catch |err| {
+            return mapNodeStoreError(err);
         };
 
-        // Log to WAL and add undo entry if transaction is provided
+        // Log to WAL and add undo entry if transaction is provided.
+        // Buffer sizes come from `wal_payload.*Size` helpers so arbitrarily
+        // large old-value payloads fit (previously capped by [512]u8 and
+        // [2048]u8 stack buffers at ~507 B and ~2 KiB respectively).
         if (txn) |t| {
             if (self.txn_manager) |*tm| {
-                // Serialize old value for undo
-                var old_value_bytes: ?[]u8 = null;
-                var owns_old_bytes = false;
-                if (old_value) |ov| {
-                    var old_buf: [512]u8 = undefined;
-                    const old_size = wal_payload.serializePropertyValueToBuf(&old_buf, ov) catch null;
-                    if (old_size) |sz| {
-                        old_value_bytes = self.allocator.dupe(u8, old_buf[0..sz]) catch null;
-                        owns_old_bytes = old_value_bytes != null;
-                    }
-                }
-                defer if (owns_old_bytes) self.allocator.free(old_value_bytes.?);
+                const old_value_bytes = try self.serializePropertyValueAlloc(old_value);
+                defer if (old_value_bytes) |b| self.allocator.free(b);
 
-                var buf: [2048]u8 = undefined;
+                const old_len = if (old_value_bytes) |b| b.len else 0;
+                const payload_buf = self.allocator.alloc(
+                    u8,
+                    wal_payload.propertyUpdateSize(key.len, old_len, 0),
+                ) catch return DatabaseError.OutOfMemory;
+                defer self.allocator.free(payload_buf);
                 // Serialize property delete for WAL (old value, no new value)
-                const payload = wal_payload.serializePropertyUpdate(&buf, node_id, key, old_value_bytes, &[_]u8{}) catch {
-                    return DatabaseError.IoError;
-                };
+                const payload = wal_payload.serializePropertyUpdate(
+                    payload_buf,
+                    node_id,
+                    key,
+                    old_value_bytes,
+                    &[_]u8{},
+                ) catch return DatabaseError.IoError;
+
                 _ = tm.logOperation(t, .delete, payload) catch {
                     return DatabaseError.IoError;
                 };
@@ -2015,13 +2059,23 @@ pub const Database = struct {
             return DatabaseError.IoError;
         };
 
-        // Log to WAL and add undo entry if transaction is provided
+        // Log to WAL and add undo entry if transaction is provided.
+        // Buffer sized via edgeInsertSize so arbitrarily long edge_type
+        // names survive (previously capped at ~240 bytes by [256]u8).
         if (txn) |t| {
             if (self.txn_manager) |*tm| {
-                var buf: [256]u8 = undefined;
-                const payload = wal_payload.serializeEdgeInsert(&buf, edge_id, source, target, edge_type) catch {
-                    return DatabaseError.IoError;
-                };
+                const payload_buf = self.allocator.alloc(
+                    u8,
+                    wal_payload.edgeInsertSize(edge_type),
+                ) catch return DatabaseError.OutOfMemory;
+                defer self.allocator.free(payload_buf);
+                const payload = wal_payload.serializeEdgeInsert(
+                    payload_buf,
+                    edge_id,
+                    source,
+                    target,
+                    edge_type,
+                ) catch return DatabaseError.IoError;
                 _ = tm.logOperation(t, .insert, payload) catch {
                     return DatabaseError.IoError;
                 };
@@ -2093,17 +2147,19 @@ pub const Database = struct {
                 }
                 defer if (owns_prop_bytes) self.allocator.free(prop_bytes);
 
-                var buf: [2048]u8 = undefined;
+                const payload_buf = self.allocator.alloc(
+                    u8,
+                    wal_payload.edgeDeleteSize(prop_bytes.len),
+                ) catch return DatabaseError.OutOfMemory;
+                defer self.allocator.free(payload_buf);
                 const payload = wal_payload.serializeEdgeDelete(
-                    &buf,
+                    payload_buf,
                     edge_id,
                     source,
                     target,
                     type_id,
                     prop_bytes,
-                ) catch {
-                    return DatabaseError.IoError;
-                };
+                ) catch return DatabaseError.IoError;
                 _ = tm.logOperation(t, .delete, payload) catch {
                     return DatabaseError.IoError;
                 };
@@ -2158,9 +2214,13 @@ pub const Database = struct {
                 }
                 defer if (owns_prop_bytes) self.allocator.free(prop_bytes);
 
-                var buf: [2048]u8 = undefined;
+                const payload_buf = self.allocator.alloc(
+                    u8,
+                    wal_payload.edgeDeleteSize(prop_bytes.len),
+                ) catch return DatabaseError.OutOfMemory;
+                defer self.allocator.free(payload_buf);
                 const payload = wal_payload.serializeEdgeDelete(
-                    &buf,
+                    payload_buf,
                     edge.id,
                     edge.source,
                     edge.target,
@@ -2226,17 +2286,8 @@ pub const Database = struct {
 
         if (txn) |t| {
             if (self.txn_manager) |*tm| {
-                var old_value_bytes: ?[]u8 = null;
-                var owns_old_value_bytes = false;
-                if (old_value) |ov| {
-                    var old_value_buf: [512]u8 = undefined;
-                    const old_value_size = wal_payload.serializePropertyValueToBuf(&old_value_buf, ov) catch null;
-                    if (old_value_size) |sz| {
-                        old_value_bytes = self.allocator.dupe(u8, old_value_buf[0..sz]) catch null;
-                        owns_old_value_bytes = old_value_bytes != null;
-                    }
-                }
-                defer if (owns_old_value_bytes) self.allocator.free(old_value_bytes.?);
+                const old_value_bytes = try self.serializePropertyValueAlloc(old_value);
+                defer if (old_value_bytes) |b| self.allocator.free(b);
 
                 var old_prop_bytes: []u8 = &[_]u8{};
                 var owns_old_prop_bytes = false;
@@ -2246,9 +2297,13 @@ pub const Database = struct {
                 }
                 defer if (owns_old_prop_bytes) self.allocator.free(old_prop_bytes);
 
-                var old_buf: [4096]u8 = undefined;
+                const old_payload_buf = self.allocator.alloc(
+                    u8,
+                    wal_payload.edgeDeleteSize(old_prop_bytes.len),
+                ) catch return DatabaseError.OutOfMemory;
+                defer self.allocator.free(old_payload_buf);
                 const old_payload = wal_payload.serializeEdgeDelete(
-                    &old_buf,
+                    old_payload_buf,
                     edge.id,
                     edge.source,
                     edge.target,
@@ -2256,18 +2311,21 @@ pub const Database = struct {
                     old_prop_bytes,
                 ) catch return DatabaseError.IoError;
 
-                var value_buf: [512]u8 = undefined;
-                const value_size = wal_payload.serializePropertyValueToBuf(&value_buf, value) catch {
-                    return DatabaseError.IoError;
-                };
+                const new_value_bytes = try self.serializePropertyValueAlloc(value) orelse unreachable;
+                defer self.allocator.free(new_value_bytes);
 
-                var wal_buf: [2048]u8 = undefined;
+                const old_len = if (old_value_bytes) |b| b.len else 0;
+                const wal_payload_buf = self.allocator.alloc(
+                    u8,
+                    wal_payload.edgePropertyUpdateSize(key.len, old_len, new_value_bytes.len),
+                ) catch return DatabaseError.OutOfMemory;
+                defer self.allocator.free(wal_payload_buf);
                 const wal_payload_bytes = wal_payload.serializeEdgePropertyUpdate(
-                    &wal_buf,
+                    wal_payload_buf,
                     edge.id,
                     key,
                     old_value_bytes,
-                    value_buf[0..value_size],
+                    new_value_bytes,
                 ) catch return DatabaseError.IoError;
 
                 _ = tm.logOperation(t, .update, wal_payload_bytes) catch return DatabaseError.IoError;
@@ -2326,17 +2384,8 @@ pub const Database = struct {
 
         if (txn) |t| {
             if (self.txn_manager) |*tm| {
-                var old_value_bytes: ?[]u8 = null;
-                var owns_old_value_bytes = false;
-                if (old_value) |ov| {
-                    var old_value_buf: [512]u8 = undefined;
-                    const old_value_size = wal_payload.serializePropertyValueToBuf(&old_value_buf, ov) catch null;
-                    if (old_value_size) |sz| {
-                        old_value_bytes = self.allocator.dupe(u8, old_value_buf[0..sz]) catch null;
-                        owns_old_value_bytes = old_value_bytes != null;
-                    }
-                }
-                defer if (owns_old_value_bytes) self.allocator.free(old_value_bytes.?);
+                const old_value_bytes = try self.serializePropertyValueAlloc(old_value);
+                defer if (old_value_bytes) |b| self.allocator.free(b);
 
                 var old_prop_bytes: []u8 = &[_]u8{};
                 var owns_old_prop_bytes = false;
@@ -2346,9 +2395,13 @@ pub const Database = struct {
                 }
                 defer if (owns_old_prop_bytes) self.allocator.free(old_prop_bytes);
 
-                var old_buf: [4096]u8 = undefined;
+                const old_payload_buf = self.allocator.alloc(
+                    u8,
+                    wal_payload.edgeDeleteSize(old_prop_bytes.len),
+                ) catch return DatabaseError.OutOfMemory;
+                defer self.allocator.free(old_payload_buf);
                 const old_payload = wal_payload.serializeEdgeDelete(
-                    &old_buf,
+                    old_payload_buf,
                     edge.id,
                     edge.source,
                     edge.target,
@@ -2356,9 +2409,14 @@ pub const Database = struct {
                     old_prop_bytes,
                 ) catch return DatabaseError.IoError;
 
-                var wal_buf: [2048]u8 = undefined;
+                const old_len = if (old_value_bytes) |b| b.len else 0;
+                const wal_payload_buf = self.allocator.alloc(
+                    u8,
+                    wal_payload.edgePropertyUpdateSize(key.len, old_len, 0),
+                ) catch return DatabaseError.OutOfMemory;
+                defer self.allocator.free(wal_payload_buf);
                 const wal_payload_bytes = wal_payload.serializeEdgePropertyUpdate(
-                    &wal_buf,
+                    wal_payload_buf,
                     edge.id,
                     key,
                     old_value_bytes,
@@ -3436,6 +3494,200 @@ test "graph crud operations" {
     try db.deleteNode(null, alice);
     try std.testing.expect(!(try db.nodeExists(alice)));
     try std.testing.expect(try db.nodeExists(bob));
+}
+
+test "setNodeProperty round-trips string values above the old 512-byte WAL buffer" {
+    // Regression: `setNodeProperty` used to serialize the new/old values
+    // into fixed `[512]u8` stack buffers and the outer WAL payload into a
+    // `[2048]u8` buffer, which capped STRING/BYTES properties at ~507
+    // bytes and composite payloads at ~2 KiB. Both fixed buffers are
+    // now heap-allocated from `wal_payload.*Size`, so values round-trip
+    // through the node store and WAL undo path up to the btree page-size
+    // ceiling (a separate limitation tracked in `btree.zig`).
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_large_prop_test.ltdb";
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = true,
+            .enable_fts = false,
+        },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+        std.fs.cwd().deleteFile("/tmp/lattice_large_prop_test.ltdb.wal") catch {};
+    }
+
+    const node_id = try db.createNode(null, &[_][]const u8{"Doc"});
+
+    // Walk past the old 512 B per-property cap and the 2 KiB composite
+    // WAL-payload cap. 3000 B is comfortably below the 4 KiB btree page
+    // size so entries still fit in a single leaf slot.
+    const sizes = [_]usize{ 64, 512, 600, 1024, 2048, 3000 };
+    var buf: [3000]u8 = undefined;
+    for (sizes, 0..) |sz, i| {
+        // Distinct byte pattern per offset so ordering regressions fail loud.
+        for (buf[0..sz], 0..) |*b, j| b.* = @truncate(j +% (i * 17));
+        try db.setNodeProperty(null, node_id, "content", .{ .string_val = buf[0..sz] });
+
+        var got = (try db.getNodeProperty(node_id, "content")).?;
+        defer got.deinit(allocator);
+        try std.testing.expectEqualSlices(u8, buf[0..sz], got.string_val);
+    }
+}
+
+test "getNodesByLabel returns every node with the requested label for reopen indexing" {
+    // Regression: nullclaw's LatticeMemory adapter needs to rebuild its
+    // in-memory key→node index on database reopen so short-lived CLI
+    // invocations don't silently create duplicate Entry nodes. It walks
+    // every node labelled "Entry" (plus "Category", "Session", etc.)
+    // via getNodesByLabel, so the API has to return all matches even
+    // when they were created in earlier process lifetimes.
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_nodes_by_label_reopen_test.ltdb";
+
+    {
+        var db = try Database.open(allocator, path, .{
+            .create = true,
+            .config = .{ .enable_wal = true, .enable_fts = false },
+        });
+        defer {
+            db.close();
+        }
+
+        const ids = [_]NodeId{
+            try db.createNode(null, &[_][]const u8{"Entry"}),
+            try db.createNode(null, &[_][]const u8{"Entry"}),
+            try db.createNode(null, &[_][]const u8{"Entry"}),
+        };
+        _ = ids;
+        // Create an unrelated Category node so the label filter has to
+        // actually discriminate, not just return every node in the store.
+        _ = try db.createNode(null, &[_][]const u8{"Category"});
+    }
+
+    // Reopen the database in a fresh process-equivalent scope. If
+    // getNodesByLabel only surfaced nodes from the *current* process
+    // the count would be 0 and this test would fail.
+    var db = try Database.open(allocator, path, .{
+        .create = false,
+        .config = .{ .enable_wal = true, .enable_fts = false },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+        std.fs.cwd().deleteFile("/tmp/lattice_nodes_by_label_reopen_test.ltdb.wal") catch {};
+    }
+
+    const entries = try db.getNodesByLabel("Entry");
+    defer allocator.free(entries);
+    try std.testing.expectEqual(@as(usize, 3), entries.len);
+
+    const cats = try db.getNodesByLabel("Category");
+    defer allocator.free(cats);
+    try std.testing.expectEqual(@as(usize, 1), cats.len);
+
+    // Unknown labels surface as an empty slice, not an error.
+    const missing = try db.getNodesByLabel("Nonexistent");
+    defer allocator.free(missing);
+    try std.testing.expectEqual(@as(usize, 0), missing.len);
+}
+
+test "ftsIndexDocument handles multi-KiB markdown-shaped documents" {
+    // Regression: `nullclaw onboard --memory latticedb` tripped a
+    // `panic: integer overflow` inside `lattice_fts_index` when it
+    // reached AGENTS.md (9242 bytes). Reproduce the exact shape of the
+    // failing flow — Database open with fts enabled, a sequence of
+    // stores ranging from ~1 KiB to ~9 KiB of realistic markdown
+    // tokens — and assert each call returns cleanly.
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_fts_db_large_test.ltdb";
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = true,
+            .enable_fts = true,
+        },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+        std.fs.cwd().deleteFile("/tmp/lattice_fts_db_large_test.ltdb.wal") catch {};
+    }
+
+    // Scaffold a family of varied documents that together exercise the
+    // per-call and cumulative FTS code paths. Vocabulary grows with
+    // the doc index so posting lists keep extending.
+    const sizes = [_]usize{ 1674, 9242, 861, 2112, 637, 478, 169, 1591 };
+
+    var buf: [32768]u8 = undefined;
+    var rng = std.Random.DefaultPrng.init(0x1abe1);
+    const r = rng.random();
+
+    for (sizes, 0..) |target, idx| {
+        var pos: usize = 0;
+        while (pos < target) {
+            // Emit pseudo-markdown tokens: short punctuation-free words,
+            // the occasional '#' heading marker, newlines. Vocab keeps
+            // shifting with idx so later docs keep extending dictionary.
+            var word_buf: [32]u8 = undefined;
+            const wlen: usize = 3 + (r.int(usize) % 10);
+            var j: usize = 0;
+            while (j < wlen and pos < target) : (j += 1) {
+                word_buf[j] = 'a' + @as(u8, @intCast((idx + j + r.int(usize)) % 26));
+            }
+            const remaining = target - pos;
+            const take = @min(j, remaining);
+            @memcpy(buf[pos..][0..take], word_buf[0..take]);
+            pos += take;
+            if (pos < target) {
+                buf[pos] = ' ';
+                pos += 1;
+            }
+        }
+
+        const node_id = try db.createNode(null, &[_][]const u8{"Entry"});
+        try db.ftsIndexDocument(node_id, buf[0..target]);
+    }
+}
+
+test "setNodeProperty rejects values larger than one btree leaf page gracefully" {
+    // Regression: a property value big enough that its serialized node
+    // cannot fit in a single btree leaf used to panic deep inside
+    // `insertLeafEntry` (`min_offset - entry_size` integer overflow).
+    // It now propagates as `DatabaseError.ValueTooLarge` so callers can
+    // split the value or widen `page_size` instead of crashing.
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_oversized_value_test.ltdb";
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = false,
+            .enable_fts = false,
+        },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    const node_id = try db.createNode(null, &[_][]const u8{"Doc"});
+
+    // ~16 KiB blows past the 4 KiB default page_size by several pages.
+    var big_buf: [16384]u8 = undefined;
+    @memset(&big_buf, 'x');
+    const result = db.setNodeProperty(null, node_id, "blob", .{ .string_val = &big_buf });
+    try std.testing.expectError(DatabaseError.ValueTooLarge, result);
+
+    // Prior (fitting) state must survive the rejected write.
+    try db.setNodeProperty(null, node_id, "blob", .{ .string_val = "small" });
+    var got = (try db.getNodeProperty(node_id, "blob")).?;
+    defer got.deinit(allocator);
+    try std.testing.expectEqualStrings("small", got.string_val);
 }
 
 test "query: simple MATCH RETURN" {

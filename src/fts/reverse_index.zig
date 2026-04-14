@@ -93,6 +93,13 @@ pub const ReverseIndex = struct {
             offset += term.len;
         }
 
+        // Check up-front that the btree leaf page can hold this entry
+        // so we can return a specific ValueTooLarge error without leaving
+        // the reverse index in a half-deleted state.
+        if (!self.tree.canFitLeafEntry(&key_buf, value_buf.len)) {
+            return ReverseIndexError.ValueTooLarge;
+        }
+
         // Delete existing entry first (ignore NotFound)
         self.tree.delete(&key_buf) catch |err| {
             if (err != BTreeError.KeyNotFound) {

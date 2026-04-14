@@ -514,6 +514,23 @@ class LatticeLib:
         ]
         self._lib.lattice_node_get_labels.restype = c_int
 
+        # lattice_get_nodes_by_label
+        self._lib.lattice_get_nodes_by_label.argtypes = [
+            LatticeDatabase,
+            c_char_p,
+            c_size_t,
+            POINTER(POINTER(LatticeNodeId)),
+            POINTER(c_size_t),
+        ]
+        self._lib.lattice_get_nodes_by_label.restype = c_int
+
+        # lattice_free_node_ids
+        self._lib.lattice_free_node_ids.argtypes = [
+            POINTER(LatticeNodeId),
+            c_size_t,
+        ]
+        self._lib.lattice_free_node_ids.restype = None
+
         # lattice_free_string
         self._lib.lattice_free_string.argtypes = [c_char_p]
         self._lib.lattice_free_string.restype = None

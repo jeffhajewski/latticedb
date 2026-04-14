@@ -280,6 +280,10 @@ fn mapDatabaseError(err: DatabaseError) lattice_error {
         DatabaseError.TransactionNotActive => .err_invalid_arg,
         DatabaseError.TransactionReadOnly => .err_read_only,
         DatabaseError.TransactionsNotEnabled => .err_invalid_arg,
+        // Node/edge payload too big for one btree leaf page. No dedicated
+        // C enum value exists yet; `err_full` signals "cannot fit" as
+        // close as possible until the ABI is versioned.
+        DatabaseError.ValueTooLarge => .err_full,
     };
 }
 
@@ -1109,6 +1113,56 @@ pub export fn lattice_node_exists(
         };
     };
     return .ok;
+}
+
+/// Return every node id that currently carries `label`. On success writes
+/// a heap-allocated array of node ids into `node_ids_out` and its element
+/// count into `count_out`; the caller must release it with
+/// `lattice_free_node_ids`. An unknown label is not an error and yields
+/// `count_out = 0` with `node_ids_out = null`.
+pub export fn lattice_get_nodes_by_label(
+    db: ?*lattice_database,
+    label: [*c]const u8,
+    label_len: usize,
+    node_ids_out: *?[*]lattice_node_id,
+    count_out: *usize,
+) lattice_error {
+    const db_handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
+    if (label == null) return .err_invalid_arg;
+
+    node_ids_out.* = null;
+    count_out.* = 0;
+
+    const label_slice = label[0..label_len];
+    const owned = db_handle.db.getNodesByLabel(label_slice) catch |err| {
+        return mapDatabaseError(err);
+    };
+
+    if (owned.len == 0) {
+        db_handle.db.allocator.free(owned);
+        return .ok;
+    }
+
+    // `getNodesByLabel` hands back a slice owned by the database allocator.
+    // Copy it into a `global_allocator` buffer so `lattice_free_node_ids`
+    // can release it without coupling the caller to lattice internals.
+    const out = global_allocator.alloc(lattice_node_id, owned.len) catch {
+        db_handle.db.allocator.free(owned);
+        return .err_out_of_memory;
+    };
+    @memcpy(out, owned);
+    db_handle.db.allocator.free(owned);
+
+    node_ids_out.* = out.ptr;
+    count_out.* = out.len;
+    return .ok;
+}
+
+/// Free an array returned by `lattice_get_nodes_by_label`.
+pub export fn lattice_free_node_ids(node_ids: ?[*]lattice_node_id, count: usize) void {
+    const ptr = node_ids orelse return;
+    if (count == 0) return;
+    global_allocator.free(ptr[0..count]);
 }
 
 /// Get labels for a node as comma-separated string

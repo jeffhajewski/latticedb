@@ -561,6 +561,49 @@ pub fn deserializeLabelRemove(payload: []const u8) PayloadError!LabelMutationPay
 }
 
 // ============================================================================
+// Payload Size Calculators
+// ============================================================================
+//
+// Callers (storage/database.zig and friends) used to serialize WAL payloads
+// into fixed-size stack buffers like `var buf: [512]u8 = undefined;`, which
+// imposed a ~507-byte cap on STRING/BYTES property values and a ~2 KiB cap
+// on composite node/edge payloads. These helpers return the exact byte
+// count each `serialize*` function will emit so callers can heap-allocate
+// an exact-fit buffer and pass it in.
+
+/// Required byte count for `serializeNodeInsert(buf, node_id, labels)`.
+pub fn nodeInsertSize(labels: []const []const u8) usize {
+    var size: usize = 1 + 8 + 2; // tag + node_id + label_count
+    for (labels) |label| size += 2 + label.len;
+    return size;
+}
+
+/// Required byte count for `serializeNodeDelete(buf, node_id, label_ids, properties)`.
+pub fn nodeDeleteSize(label_count: usize, properties_len: usize) usize {
+    return 1 + 8 + 2 + label_count * 2 + 4 + properties_len;
+}
+
+/// Required byte count for `serializeEdgeInsert(buf, edge_id, source, target, edge_type)`.
+pub fn edgeInsertSize(edge_type: []const u8) usize {
+    return 1 + 8 + 8 + 8 + 2 + edge_type.len;
+}
+
+/// Required byte count for `serializeEdgeDelete(buf, edge_id, source, target, type_id, properties)`.
+pub fn edgeDeleteSize(properties_len: usize) usize {
+    return 1 + 8 + 8 + 8 + 2 + 4 + properties_len;
+}
+
+/// Required byte count for `serializePropertyUpdate(buf, node_id, key, old_value, new_value)`.
+pub fn propertyUpdateSize(key_len: usize, old_len: usize, new_len: usize) usize {
+    return 1 + 8 + 2 + key_len + 4 + old_len + 4 + new_len;
+}
+
+/// Required byte count for `serializeEdgePropertyUpdate(buf, edge_id, key, old_value, new_value)`.
+pub fn edgePropertyUpdateSize(key_len: usize, old_len: usize, new_len: usize) usize {
+    return 1 + 8 + 2 + key_len + 4 + old_len + 4 + new_len;
+}
+
+// ============================================================================
 // Property Serialization for Undo
 // ============================================================================
 
@@ -636,7 +679,7 @@ pub fn deserializePropertyValueFromBytes(allocator: Allocator, data: []const u8)
 }
 
 /// Calculate size needed for a PropertyValue.
-fn propertyValueSize(value: PropertyValue) usize {
+pub fn propertyValueSize(value: PropertyValue) usize {
     return switch (value) {
         .null_val => 1,
         .bool_val => 2,

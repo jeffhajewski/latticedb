@@ -660,6 +660,49 @@ test "fts: indexing thousands of repeated terms remains responsive" {
     try std.testing.expectEqual(@as(u64, 3000), stats.total_docs);
 }
 
+test "fts: reindex oversized document purges stale terms via dictionary scan" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.initWithPoolSize(allocator, "fts_reindex_oversize", 1024 * 1024);
+    defer db.deinit();
+
+    var dict_tree = try BTree.init(allocator, db.bp);
+    var lengths_tree = try BTree.init(allocator, db.bp);
+    var reverse_tree = try BTree.init(allocator, db.bp);
+
+    var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, &reverse_tree, .{});
+
+    // Build a document whose unique-term list is larger than a single btree
+    // leaf page, forcing indexDocument to skip populating the reverse index.
+    // removeDocument must then fall back to a full dictionary scan; otherwise
+    // the old terms survive re-indexing under the same doc_id.
+    var big: std.ArrayList(u8) = .empty;
+    defer big.deinit(allocator);
+    var i: usize = 0;
+    while (i < 1200) : (i += 1) {
+        try big.writer(allocator).print("alphaunique{d} ", .{i});
+    }
+
+    _ = try index.indexDocument(42, big.items);
+
+    // Sanity: a term from the oversized doc is queryable via forward posting.
+    const pre = try index.search("alphaunique7", 10);
+    defer index.freeResults(pre);
+    try std.testing.expectEqual(@as(usize, 1), pre.len);
+
+    // Remove + reindex with different content. The fallback path must evict
+    // the old posting entries so stale terms no longer match.
+    try index.removeDocument(42);
+    _ = try index.indexDocument(42, "fresh content betaword");
+
+    const stale = try index.search("alphaunique7", 10);
+    defer index.freeResults(stale);
+    try std.testing.expectEqual(@as(usize, 0), stale.len);
+
+    const fresh = try index.search("betaword", 10);
+    defer index.freeResults(fresh);
+    try std.testing.expectEqual(@as(usize, 1), fresh.len);
+}
+
 test "fts: reindex same document updates content" {
     const allocator = std.testing.allocator;
     var db = try helpers.TempDb.init(allocator, "fts_reindex");

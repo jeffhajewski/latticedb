@@ -272,6 +272,37 @@ class Database:
             if query_ptr.value:
                 lib._lib.lattice_query_free(query_ptr)
 
+    def get_nodes_by_label(self, label: str) -> List[int]:
+        """
+        Return every node id that currently carries ``label``.
+
+        An unknown label is not an error and returns an empty list.
+        """
+        if self._handle is None:
+            raise RuntimeError("Database is not open")
+
+        lib = get_lib()
+        label_bytes = label.encode("utf-8")
+        ids_ptr = ctypes.POINTER(LatticeNodeId)()
+        count = ctypes.c_size_t(0)
+
+        code = lib._lib.lattice_get_nodes_by_label(
+            self._handle,
+            label_bytes,
+            len(label_bytes),
+            byref(ids_ptr),
+            byref(count),
+        )
+        check_error(code)
+
+        try:
+            if count.value == 0 or not ids_ptr:
+                return []
+            return [ids_ptr[i] for i in range(count.value)]
+        finally:
+            if ids_ptr:
+                lib._lib.lattice_free_node_ids(ids_ptr, count.value)
+
     def vector_search(
         self,
         vector: "NDArray[np.float32]",

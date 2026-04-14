@@ -537,6 +537,36 @@ func (tx *Tx) Query(cypher string, params map[string]any) (QueryResult, error) {
 	return result.materialize()
 }
 
+func (db *DB) GetNodesByLabel(label string) ([]uint64, error) {
+	var labelPtr *C.char
+	if len(label) > 0 {
+		labelPtr = (*C.char)(C.CBytes([]byte(label)))
+		defer C.free(unsafe.Pointer(labelPtr))
+	}
+
+	var idsPtr *C.lattice_node_id
+	var count C.size_t
+	if err := errorFromCode(ErrorCode(C.lattice_get_nodes_by_label(
+		db.ptr,
+		labelPtr,
+		C.size_t(len(label)),
+		&idsPtr,
+		&count,
+	))); err != nil {
+		return nil, err
+	}
+	if count == 0 || idsPtr == nil {
+		return []uint64{}, nil
+	}
+	defer C.lattice_free_node_ids(idsPtr, count)
+
+	n := int(count)
+	src := unsafe.Slice((*uint64)(unsafe.Pointer(idsPtr)), n)
+	out := make([]uint64, n)
+	copy(out, src)
+	return out, nil
+}
+
 func (db *DB) VectorSearch(vector []float32, k uint32, efSearch uint16) ([]VectorSearchResult, error) {
 	var vectorPtr *C.float
 	if len(vector) > 0 {

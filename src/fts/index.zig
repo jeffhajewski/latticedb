@@ -306,8 +306,25 @@ pub const FtsIndex = struct {
                 idx += 1;
             }
 
-            ri.setDocTerms(doc_id, term_slice) catch {
-                return FtsError.IoError;
+            // Skip populating the reverse index when the serialized term
+            // list would exceed a single btree leaf page. The document
+            // stays queryable via the forward posting lists; only future
+            // `removeDocument(doc_id)` calls for this specific doc will
+            // need to walk the dictionary as a fallback instead of using
+            // the reverse-index shortcut. Treating this as fatal used to
+            // propagate a bare IoError back to callers that index
+            // multi-KiB markdown content, which is precisely the
+            // nullclaw onboard-scaffold workload.
+            ri.setDocTerms(doc_id, term_slice) catch |err| switch (err) {
+                reverse_index_mod.ReverseIndexError.ValueTooLarge => {
+                    std.log.warn(
+                        "fts: reverse_index too large for doc={d}, terms={d}; " ++
+                            "future removeDocument will fall back to dictionary scan",
+                        .{ doc_id, num_terms },
+                    );
+                },
+                reverse_index_mod.ReverseIndexError.OutOfMemory => return FtsError.OutOfMemory,
+                else => return FtsError.IoError,
             };
         }
 
@@ -326,45 +343,47 @@ pub const FtsIndex = struct {
         // If we have a reverse index, do proper cleanup
         if (self.reverse_index) |*ri| {
             // 1. Get terms from reverse index
-            const terms = ri.getDocTerms(doc_id) catch {
+            if (ri.getDocTerms(doc_id) catch {
                 return FtsError.IoError;
-            } orelse {
-                // Document not in reverse index, just remove doc length
-                self.doc_lengths.removeDoc(doc_id) catch |err| {
+            }) |terms| {
+                defer ri.freeTerms(terms);
+
+                // 2. For each term, remove from posting list and update dictionary
+                for (terms) |term| {
+                    const entry = self.dictionary.get(term) catch continue orelse continue;
+
+                    if (entry.posting_page != 0) {
+                        const result = self.posting_store.removeEntry(entry.posting_page, doc_id) catch continue;
+                        if (result.found) {
+                            // Update dictionary statistics - track failures
+                            self.dictionary.decrementDocFreq(term) catch {
+                                stats_update_failed = true;
+                            };
+                            self.dictionary.subtractTotalFreq(term, result.term_freq) catch {
+                                stats_update_failed = true;
+                            };
+                        }
+                    }
+                }
+
+                // 3. Remove reverse index entry
+                ri.removeDoc(doc_id) catch |err| {
                     return switch (err) {
                         error.OutOfMemory => FtsError.OutOfMemory,
                         else => FtsError.IoError,
                     };
                 };
-                return;
-            };
-            defer ri.freeTerms(terms);
-
-            // 2. For each term, remove from posting list and update dictionary
-            for (terms) |term| {
-                const entry = self.dictionary.get(term) catch continue orelse continue;
-
-                if (entry.posting_page != 0) {
-                    const result = self.posting_store.removeEntry(entry.posting_page, doc_id) catch continue;
-                    if (result.found) {
-                        // Update dictionary statistics - track failures
-                        self.dictionary.decrementDocFreq(term) catch {
-                            stats_update_failed = true;
-                        };
-                        self.dictionary.subtractTotalFreq(term, result.term_freq) catch {
-                            stats_update_failed = true;
-                        };
-                    }
-                }
-            }
-
-            // 3. Remove reverse index entry
-            ri.removeDoc(doc_id) catch |err| {
-                return switch (err) {
-                    error.OutOfMemory => FtsError.OutOfMemory,
-                    else => FtsError.IoError,
+            } else {
+                // Reverse index has no entry for this doc. This happens when
+                // indexDocument skipped populating it because the serialized
+                // term list exceeded a single btree leaf page. Fall back to a
+                // full dictionary scan so stale posting entries for doc_id do
+                // not survive removal (and resurrect on re-index under the
+                // same id).
+                self.removeDocumentByDictionaryScan(doc_id, &stats_update_failed) catch |err| {
+                    return err;
                 };
-            };
+            }
         }
 
         // 4. Remove from doc lengths (this updates stats)
@@ -379,6 +398,70 @@ pub const FtsIndex = struct {
         // The document is removed but stats may be inconsistent
         if (stats_update_failed) {
             return FtsError.DictionaryError;
+        }
+    }
+
+    /// Fallback cleanup path used when the reverse index has no terms for
+    /// `doc_id` (indexDocument skipped populating it because the term list
+    /// was too large for a single btree leaf). Walks the entire dictionary
+    /// and removes any posting entries referencing `doc_id`, keeping
+    /// dictionary stats consistent.
+    ///
+    /// We cannot mutate the dictionary tree while iterating it, so this is
+    /// done in two phases: collect a snapshot of (term, posting_page) pairs
+    /// first, then apply removals afterwards. The work is O(|dictionary|),
+    /// but this path only fires for oversized documents on removal.
+    fn removeDocumentByDictionaryScan(
+        self: *Self,
+        doc_id: DocId,
+        stats_update_failed: *bool,
+    ) FtsError!void {
+        const PostingRef = struct {
+            term: []u8,
+            posting_page: lattice.core.types.PageId,
+        };
+
+        var refs: ArrayListUnmanaged(PostingRef) = .empty;
+        defer {
+            for (refs.items) |ref| {
+                self.allocator.free(ref.term);
+            }
+            refs.deinit(self.allocator);
+        }
+
+        {
+            var iter = self.dictionary.iterate() catch {
+                return FtsError.DictionaryError;
+            };
+            defer iter.deinit();
+
+            while (iter.next() catch {
+                return FtsError.DictionaryError;
+            }) |item| {
+                if (item.entry.posting_page == 0) continue;
+                const term_copy = self.allocator.dupe(u8, item.term) catch {
+                    return FtsError.OutOfMemory;
+                };
+                refs.append(self.allocator, .{
+                    .term = term_copy,
+                    .posting_page = item.entry.posting_page,
+                }) catch {
+                    self.allocator.free(term_copy);
+                    return FtsError.OutOfMemory;
+                };
+            }
+        }
+
+        for (refs.items) |ref| {
+            const result = self.posting_store.removeEntry(ref.posting_page, doc_id) catch continue;
+            if (!result.found) continue;
+
+            self.dictionary.decrementDocFreq(ref.term) catch {
+                stats_update_failed.* = true;
+            };
+            self.dictionary.subtractTotalFreq(ref.term, result.term_freq) catch {
+                stats_update_failed.* = true;
+            };
         }
     }
 
@@ -1799,6 +1882,65 @@ test "fts index basic" {
     const results4 = try index.search("elephant", 10);
     defer index.freeResults(results4);
     try std.testing.expectEqual(@as(usize, 0), results4.len);
+}
+
+test "fts indexDocument survives large (>=9 KiB) documents" {
+    // Regression: a ~9 KiB document tripped an integer-overflow panic
+    // somewhere in the tokenize→posting→dictionary pipeline when called
+    // from nullclaw's memory engine (SOUL.md → AGENTS.md scaffold).
+    // This test indexes progressively larger synthetic documents and
+    // asserts that each completes cleanly so the panic surfaces in CI.
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_fts_large_doc_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var dict_tree = try BTree.init(allocator, &bp);
+    var lengths_tree = try BTree.init(allocator, &bp);
+
+    var index = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{});
+
+    // Build a synthetic document whose token vocabulary and total token
+    // count both scale with `word_count`, so any cumulative-state bug in
+    // posting lists, dictionary BTree inserts, or skip-pointer rollover
+    // becomes visible.
+    var doc: std.ArrayListUnmanaged(u8) = .empty;
+    defer doc.deinit(allocator);
+
+    const sizes = [_]usize{ 256, 1024, 4096, 9242, 16384 };
+    var doc_id: u64 = 1;
+    for (sizes) |target_bytes| {
+        doc.clearRetainingCapacity();
+        var seed: usize = 0;
+        while (doc.items.len < target_bytes) : (seed += 1) {
+            // Vocabulary grows with seed (`wordXXXX`), so each run adds
+            // fresh dictionary entries plus repeats of earlier words.
+            var word_buf: [32]u8 = undefined;
+            const word = std.fmt.bufPrint(&word_buf, "word{d} ", .{seed}) catch unreachable;
+            try doc.appendSlice(allocator, word);
+        }
+        const n = try index.indexDocument(doc_id, doc.items[0..@min(doc.items.len, target_bytes)]);
+        try std.testing.expect(n > 0);
+        doc_id += 1;
+    }
+
+    const stats = index.getStats();
+    try std.testing.expect(stats.total_docs == sizes.len);
 }
 
 test "fts OR query" {

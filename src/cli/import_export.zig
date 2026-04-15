@@ -368,6 +368,8 @@ pub fn exportJson(
     var stats = ExportStats{};
     const node_ids = try collectCanonicalNodeIds(allocator, db, label_filter);
     defer allocator.free(node_ids);
+    var exported_nodes = try buildNodeIdSet(allocator, node_ids);
+    defer exported_nodes.deinit();
 
     try writer.writeAll("{\"nodes\":[");
 
@@ -390,6 +392,7 @@ pub fn exportJson(
         defer db.freeEdgeInfos(edges);
 
         for (edges) |edge| {
+            if (!exported_nodes.contains(edge.target)) continue;
             if (!first_edge) {
                 try writer.writeAll(",");
             }
@@ -425,6 +428,8 @@ pub fn dumpCanonicalJson(
 
     const node_ids = try collectCanonicalNodeIds(allocator, db, label_filter);
     defer allocator.free(node_ids);
+    var exported_nodes = try buildNodeIdSet(allocator, node_ids);
+    defer exported_nodes.deinit();
 
     try writer.writeAll("{\"nodes\":[");
     for (node_ids, 0..) |node_id, i| {
@@ -450,6 +455,7 @@ pub fn dumpCanonicalJson(
         }.lessThan);
 
         for (edges) |edge| {
+            if (!exported_nodes.contains(edge.target)) continue;
             if (!first_edge) try writer.writeByte(',');
             first_edge = false;
             try writeEdgeJsonCanonical(allocator, db, writer, edge);
@@ -471,6 +477,8 @@ pub fn exportJsonl(
     var stats = ExportStats{};
     const node_ids = try collectCanonicalNodeIds(allocator, db, label_filter);
     defer allocator.free(node_ids);
+    var exported_nodes = try buildNodeIdSet(allocator, node_ids);
+    defer exported_nodes.deinit();
 
     for (node_ids) |node_id| {
         try writeNodeJsonlRecord(allocator, db, writer, node_id);
@@ -483,6 +491,7 @@ pub fn exportJsonl(
         defer db.freeEdgeInfos(edges);
 
         for (edges) |edge| {
+            if (!exported_nodes.contains(edge.target)) continue;
             try writeEdgeJsonlRecord(db, writer, edge);
             try writer.writeByte('\n');
             stats.edges_exported += 1;
@@ -502,6 +511,8 @@ pub fn exportDot(
     var stats = ExportStats{};
     const node_ids = try collectCanonicalNodeIds(allocator, db, label_filter);
     defer allocator.free(node_ids);
+    var exported_nodes = try buildNodeIdSet(allocator, node_ids);
+    defer exported_nodes.deinit();
     try writer.writeAll("digraph G {\n");
 
     for (node_ids) |node_id| {
@@ -514,6 +525,7 @@ pub fn exportDot(
         defer db.freeEdgeInfos(edges);
 
         for (edges) |edge| {
+            if (!exported_nodes.contains(edge.target)) continue;
             try writeEdgeDot(writer, edge);
             stats.edges_exported += 1;
         }
@@ -931,6 +943,20 @@ fn collectCanonicalNodeIds(
     return owned;
 }
 
+fn buildNodeIdSet(
+    allocator: std.mem.Allocator,
+    node_ids: []const NodeId,
+) !std.AutoHashMap(NodeId, void) {
+    var set = std.AutoHashMap(NodeId, void).init(allocator);
+    errdefer set.deinit();
+
+    for (node_ids) |node_id| {
+        try set.put(node_id, {});
+    }
+
+    return set;
+}
+
 /// Import data from a CSV file.
 /// CSV format for nodes: _id,_labels,prop1,prop2,...
 /// CSV format for edges: _source,_target,_type,prop1,prop2,...
@@ -1129,6 +1155,8 @@ pub fn exportCsv(
     var stats = ExportStats{};
     const node_ids = try collectCanonicalNodeIds(allocator, db, label_filter);
     defer allocator.free(node_ids);
+    var exported_nodes = try buildNodeIdSet(allocator, node_ids);
+    defer exported_nodes.deinit();
 
     // Write nodes header
     try nodes_writer.writeAll("_id,_labels\n");
@@ -1159,6 +1187,7 @@ pub fn exportCsv(
         defer db.freeEdgeInfos(edges);
 
         for (edges) |edge| {
+            if (!exported_nodes.contains(edge.target)) continue;
             try edges_writer.print("{d},{d},{s}\n", .{
                 edge.source,
                 edge.target,

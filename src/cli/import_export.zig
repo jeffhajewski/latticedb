@@ -12,6 +12,34 @@ const EdgeId = lattice.core.types.EdgeId;
 const Transaction = lattice.Transaction;
 const TxnMode = lattice.TxnMode;
 
+const max_import_file_bytes: usize = 100 * 1024 * 1024;
+const node_key_size = @sizeOf(NodeId);
+const wal_path_buffer_size = 512;
+const decimal_base = 10;
+
+const json_field_edges = "edges";
+const json_field_id = "id";
+const json_field_kind = "kind";
+const json_field_labels = "labels";
+const json_field_nodes = "nodes";
+const json_field_properties = "properties";
+const json_field_source = "source";
+const json_field_target = "target";
+const json_field_type = "type";
+const json_record_kind_edge = "edge";
+const json_record_kind_node = "node";
+
+const csv_edges_header = "_source,_target,_type";
+const csv_nodes_header = "_id,_labels";
+const csv_edges_header_line = csv_edges_header ++ "\n";
+const csv_nodes_header_line = csv_nodes_header ++ "\n";
+const csv_field_separator = ',';
+const csv_label_separator = ';';
+const csv_trim_chars = " \t\r";
+const csv_quoted_trim_chars = " \t\r\"";
+const label_filter_separator = ',';
+const label_trim_chars = " ";
+
 /// Managed array list for allocator tracking
 fn ManagedArrayList(comptime T: type) type {
     return std.array_list.Managed(T);
@@ -161,7 +189,7 @@ pub fn importJson(
     };
     defer file.close();
 
-    const content = file.readToEndAlloc(allocator, 100 * 1024 * 1024) catch {
+    const content = file.readToEndAlloc(allocator, max_import_file_bytes) catch {
         return ImportExportError.IoError;
     };
     defer allocator.free(content);
@@ -197,7 +225,7 @@ pub fn importJsonContent(
     defer id_map.deinit();
 
     // Import nodes
-    if (root.object.get("nodes")) |nodes_val| {
+    if (root.object.get(json_field_nodes)) |nodes_val| {
         if (nodes_val == .array) {
             for (nodes_val.array.items) |node_val| {
                 const txn = try batcher.transaction();
@@ -216,7 +244,7 @@ pub fn importJsonContent(
     try batcher.flush(&stats);
 
     // Import edges
-    if (root.object.get("edges")) |edges_val| {
+    if (root.object.get(json_field_edges)) |edges_val| {
         if (edges_val == .array) {
             for (edges_val.array.items) |edge_val| {
                 const txn = try batcher.transaction();
@@ -248,7 +276,7 @@ fn importNode(
     const obj = node_val.object;
 
     // Get node ID (required)
-    const id_str = if (obj.get("id")) |v| switch (v) {
+    const id_str = if (obj.get(json_field_id)) |v| switch (v) {
         .string => |s| s,
         else => return error.InvalidFormat,
     } else return error.MissingRequiredField;
@@ -257,7 +285,7 @@ fn importNode(
     var labels_list = ManagedArrayList([]const u8).init(allocator);
     defer labels_list.deinit();
 
-    if (obj.get("labels")) |labels_val| {
+    if (obj.get(json_field_labels)) |labels_val| {
         if (labels_val == .array) {
             for (labels_val.array.items) |label| {
                 if (label == .string) {
@@ -276,7 +304,7 @@ fn importNode(
     try id_map.put(id_str, node_id);
 
     // Set properties
-    if (obj.get("properties")) |props_val| {
+    if (obj.get(json_field_properties)) |props_val| {
         if (props_val == .object) {
             var iter = props_val.object.iterator();
             while (iter.next()) |entry| {
@@ -298,19 +326,19 @@ fn importEdge(
     const obj = edge_val.object;
 
     // Get source ID
-    const source_str = if (obj.get("source")) |v| switch (v) {
+    const source_str = if (obj.get(json_field_source)) |v| switch (v) {
         .string => |s| s,
         else => return error.InvalidFormat,
     } else return error.MissingRequiredField;
 
     // Get target ID
-    const target_str = if (obj.get("target")) |v| switch (v) {
+    const target_str = if (obj.get(json_field_target)) |v| switch (v) {
         .string => |s| s,
         else => return error.InvalidFormat,
     } else return error.MissingRequiredField;
 
     // Get edge type
-    const edge_type = if (obj.get("type")) |v| switch (v) {
+    const edge_type = if (obj.get(json_field_type)) |v| switch (v) {
         .string => |s| s,
         else => return error.InvalidFormat,
     } else return error.MissingRequiredField;
@@ -324,7 +352,7 @@ fn importEdge(
         return error.DatabaseError;
     };
 
-    if (obj.get("properties")) |props_val| {
+    if (obj.get(json_field_properties)) |props_val| {
         if (props_val == .object) {
             var iter = props_val.object.iterator();
             while (iter.next()) |entry| {
@@ -371,7 +399,7 @@ pub fn exportJson(
     var exported_nodes = try buildNodeIdSet(allocator, node_ids);
     defer exported_nodes.deinit();
 
-    try writer.writeAll("{\"nodes\":[");
+    try writer.writeAll("{\"" ++ json_field_nodes ++ "\":[");
 
     var first_node = true;
     for (node_ids) |node_id| {
@@ -384,7 +412,7 @@ pub fn exportJson(
         stats.nodes_exported += 1;
     }
 
-    try writer.writeAll("],\"edges\":[");
+    try writer.writeAll("],\"" ++ json_field_edges ++ "\":[");
 
     var first_edge = true;
     for (node_ids) |node_id| {
@@ -431,13 +459,13 @@ pub fn dumpCanonicalJson(
     var exported_nodes = try buildNodeIdSet(allocator, node_ids);
     defer exported_nodes.deinit();
 
-    try writer.writeAll("{\"nodes\":[");
+    try writer.writeAll("{\"" ++ json_field_nodes ++ "\":[");
     for (node_ids, 0..) |node_id, i| {
         if (i > 0) try writer.writeByte(',');
         try writeNodeJsonCanonical(allocator, db, writer, node_id);
         stats.nodes_exported += 1;
     }
-    try writer.writeAll("],\"edges\":[");
+    try writer.writeAll("],\"" ++ json_field_edges ++ "\":[");
 
     var first_edge = true;
     for (node_ids) |node_id| {
@@ -583,7 +611,7 @@ fn writeNodeJson(
     writer: anytype,
     node_id: NodeId,
 ) !void {
-    try writer.print("{{\"id\":\"{d}\",\"labels\":[", .{node_id});
+    try writer.print("{{\"" ++ json_field_id ++ "\":\"{d}\",\"" ++ json_field_labels ++ "\":[", .{node_id});
 
     // Get labels for this node
     const node_labels = db.getNodeLabels(node_id) catch |err| return mapDatabaseError(err);
@@ -599,7 +627,7 @@ fn writeNodeJson(
         try writeJsonString(writer, label);
     }
 
-    try writer.writeAll("],\"properties\":{");
+    try writer.writeAll("],\"" ++ json_field_properties ++ "\":{");
 
     // Get properties
     const props = db.getNodeProperties(node_id) catch |err| return mapDatabaseError(err);
@@ -621,7 +649,7 @@ fn writeNodeJsonCanonical(
     writer: anytype,
     node_id: NodeId,
 ) !void {
-    try writer.print("{{\"id\":\"{d}\",\"labels\":[", .{node_id});
+    try writer.print("{{\"" ++ json_field_id ++ "\":\"{d}\",\"" ++ json_field_labels ++ "\":[", .{node_id});
 
     const node_labels = db.getNodeLabels(node_id) catch |err| return mapDatabaseError(err);
     defer {
@@ -642,7 +670,7 @@ fn writeNodeJsonCanonical(
         try writeJsonString(writer, label);
     }
 
-    try writer.writeAll("],\"properties\":{");
+    try writer.writeAll("],\"" ++ json_field_properties ++ "\":{");
 
     const props = db.getNodeProperties(node_id) catch |err| return mapDatabaseError(err);
     defer db.freePropertyEntries(props);
@@ -651,9 +679,12 @@ fn writeNodeJsonCanonical(
 }
 
 fn writeEdgeJson(db: *Database, writer: anytype, edge: Database.EdgeInfo) !void {
-    try writer.print("{{\"source\":\"{d}\",\"target\":\"{d}\",\"type\":", .{ edge.source, edge.target });
+    try writer.print(
+        "{{\"" ++ json_field_source ++ "\":\"{d}\",\"" ++ json_field_target ++ "\":\"{d}\",\"" ++ json_field_type ++ "\":",
+        .{ edge.source, edge.target },
+    );
     try writeJsonString(writer, edge.edge_type);
-    try writer.writeAll(",\"properties\":{");
+    try writer.writeAll(",\"" ++ json_field_properties ++ "\":{");
 
     const props = db.getEdgeProperties(edge.id) catch |err| return mapDatabaseError(err);
     defer db.freePropertyEntries(props);
@@ -675,11 +706,11 @@ fn writeEdgeJsonCanonical(
     edge: Database.EdgeInfo,
 ) !void {
     try writer.print(
-        "{{\"id\":\"{d}\",\"source\":\"{d}\",\"target\":\"{d}\",\"type\":",
+        "{{\"" ++ json_field_id ++ "\":\"{d}\",\"" ++ json_field_source ++ "\":\"{d}\",\"" ++ json_field_target ++ "\":\"{d}\",\"" ++ json_field_type ++ "\":",
         .{ edge.id, edge.source, edge.target },
     );
     try writeJsonString(writer, edge.edge_type);
-    try writer.writeAll(",\"properties\":{");
+    try writer.writeAll(",\"" ++ json_field_properties ++ "\":{");
 
     const props = db.getEdgeProperties(edge.id) catch |err| return mapDatabaseError(err);
     defer db.freePropertyEntries(props);
@@ -695,8 +726,8 @@ fn writeNodeJsonlRecord(
     writer: anytype,
     node_id: NodeId,
 ) !void {
-    try writer.writeAll("{\"kind\":\"node\",\"id\":");
-    try writer.print("\"{d}\",\"labels\":[", .{node_id});
+    try writer.writeAll("{\"" ++ json_field_kind ++ "\":\"" ++ json_record_kind_node ++ "\",\"" ++ json_field_id ++ "\":");
+    try writer.print("\"{d}\",\"" ++ json_field_labels ++ "\":[", .{node_id});
 
     const node_labels = db.getNodeLabels(node_id) catch |err| return mapDatabaseError(err);
     defer {
@@ -711,7 +742,7 @@ fn writeNodeJsonlRecord(
         try writeJsonString(writer, label);
     }
 
-    try writer.writeAll("],\"properties\":{");
+    try writer.writeAll("],\"" ++ json_field_properties ++ "\":{");
 
     const props = db.getNodeProperties(node_id) catch |err| return mapDatabaseError(err);
     defer db.freePropertyEntries(props);
@@ -727,9 +758,12 @@ fn writeNodeJsonlRecord(
 }
 
 fn writeEdgeJsonlRecord(db: *Database, writer: anytype, edge: Database.EdgeInfo) !void {
-    try writer.print("{{\"kind\":\"edge\",\"source\":\"{d}\",\"target\":\"{d}\",\"type\":", .{ edge.source, edge.target });
+    try writer.print(
+        "{{\"" ++ json_field_kind ++ "\":\"" ++ json_record_kind_edge ++ "\",\"" ++ json_field_source ++ "\":\"{d}\",\"" ++ json_field_target ++ "\":\"{d}\",\"" ++ json_field_type ++ "\":",
+        .{ edge.source, edge.target },
+    );
     try writeJsonString(writer, edge.edge_type);
-    try writer.writeAll(",\"properties\":{");
+    try writer.writeAll(",\"" ++ json_field_properties ++ "\":{");
 
     const props = db.getEdgeProperties(edge.id) catch |err| return mapDatabaseError(err);
     defer db.freePropertyEntries(props);
@@ -908,9 +942,9 @@ fn collectCanonicalNodeIds(
         var seen = std.AutoHashMap(NodeId, void).init(allocator);
         defer seen.deinit();
 
-        var filters = std.mem.splitScalar(u8, filter, ',');
+        var filters = std.mem.splitScalar(u8, filter, label_filter_separator);
         while (filters.next()) |raw_label| {
-            const label = std.mem.trim(u8, raw_label, " \t\r");
+            const label = std.mem.trim(u8, raw_label, csv_trim_chars);
             if (label.len == 0) continue;
 
             const filtered = db.getNodesByLabel(label) catch |err| return mapDatabaseError(err);
@@ -929,8 +963,8 @@ fn collectCanonicalNodeIds(
         while (true) {
             const entry = iter.next() catch return ImportExportError.DatabaseError;
             if (entry) |e| {
-                if (e.key.len == 8) {
-                    try node_ids.append(allocator, std.mem.readInt(u64, e.key[0..8], .little));
+                if (e.key.len == node_key_size) {
+                    try node_ids.append(allocator, std.mem.readInt(NodeId, e.key[0..node_key_size], .little));
                 }
             } else {
                 break;
@@ -972,7 +1006,7 @@ pub fn importCsv(
     };
     defer file.close();
 
-    const content = file.readToEndAlloc(allocator, 100 * 1024 * 1024) catch {
+    const content = file.readToEndAlloc(allocator, max_import_file_bytes) catch {
         return ImportExportError.IoError;
     };
     defer allocator.free(content);
@@ -981,9 +1015,9 @@ pub fn importCsv(
     var lines = std.mem.splitScalar(u8, content, '\n');
     const header_line = lines.next() orelse return ImportExportError.ParseError;
 
-    if (std.mem.startsWith(u8, header_line, "_id,_labels")) {
+    if (std.mem.startsWith(u8, header_line, csv_nodes_header)) {
         return importNodesCsv(allocator, db, content, batch_size, on_error_skip);
-    } else if (std.mem.startsWith(u8, header_line, "_source,_target,_type")) {
+    } else if (std.mem.startsWith(u8, header_line, csv_edges_header)) {
         return importEdgesCsv(db, content, batch_size, on_error_skip);
     } else {
         return ImportExportError.InvalidFormat;
@@ -1008,16 +1042,16 @@ fn importNodesCsv(
     var headers = ManagedArrayList([]const u8).init(allocator);
     defer headers.deinit();
 
-    var header_parts = std.mem.splitScalar(u8, header_line, ',');
+    var header_parts = std.mem.splitScalar(u8, header_line, csv_field_separator);
     while (header_parts.next()) |part| {
-        headers.append(std.mem.trim(u8, part, " \t\r")) catch {
+        headers.append(std.mem.trim(u8, part, csv_trim_chars)) catch {
             return ImportExportError.OutOfMemory;
         };
     }
 
     // Process data lines
     while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
+        const trimmed = std.mem.trim(u8, line, csv_trim_chars);
         if (trimmed.len == 0) continue;
 
         const txn = try batcher.transaction();
@@ -1046,9 +1080,9 @@ fn importNodeCsvLine(
     defer values.deinit();
 
     // Parse CSV values (simple, doesn't handle quoted values with commas)
-    var parts = std.mem.splitScalar(u8, line, ',');
+    var parts = std.mem.splitScalar(u8, line, csv_field_separator);
     while (parts.next()) |part| {
-        try values.append(std.mem.trim(u8, part, " \t\r\""));
+        try values.append(std.mem.trim(u8, part, csv_quoted_trim_chars));
     }
 
     if (values.items.len < 2) return error.InvalidFormat;
@@ -1058,9 +1092,9 @@ fn importNodeCsvLine(
     defer labels_list.deinit();
 
     if (values.items.len > 1 and values.items[1].len > 0) {
-        var label_parts = std.mem.splitScalar(u8, values.items[1], ';');
+        var label_parts = std.mem.splitScalar(u8, values.items[1], csv_label_separator);
         while (label_parts.next()) |label| {
-            const trimmed = std.mem.trim(u8, label, " ");
+            const trimmed = std.mem.trim(u8, label, label_trim_chars);
             if (trimmed.len > 0) {
                 try labels_list.append(trimmed);
             }
@@ -1077,7 +1111,7 @@ fn importNodeCsvLine(
         if (i < values.items.len and values.items[i].len > 0) {
             const val = values.items[i];
             // Try to parse as number, otherwise use as string
-            const prop_val: PropertyValue = if (std.fmt.parseInt(i64, val, 10)) |int_val|
+            const prop_val: PropertyValue = if (std.fmt.parseInt(i64, val, decimal_base)) |int_val|
                 .{ .int_val = int_val }
             else |_| if (std.fmt.parseFloat(f64, val)) |float_val|
                 .{ .float_val = float_val }
@@ -1106,7 +1140,7 @@ fn importEdgesCsv(
 
     // Process data lines
     while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, " \t\r");
+        const trimmed = std.mem.trim(u8, line, csv_trim_chars);
         if (trimmed.len == 0) continue;
 
         const txn = try batcher.transaction();
@@ -1125,17 +1159,17 @@ fn importEdgesCsv(
 }
 
 fn importEdgeCsvLine(db: *Database, txn: ?*Transaction, line: []const u8) !void {
-    var parts = std.mem.splitScalar(u8, line, ',');
+    var parts = std.mem.splitScalar(u8, line, csv_field_separator);
 
-    const source_str = std.mem.trim(u8, parts.next() orelse return error.InvalidFormat, " \t\r\"");
-    const target_str = std.mem.trim(u8, parts.next() orelse return error.InvalidFormat, " \t\r\"");
-    const edge_type = std.mem.trim(u8, parts.next() orelse return error.InvalidFormat, " \t\r\"");
+    const source_str = std.mem.trim(u8, parts.next() orelse return error.InvalidFormat, csv_quoted_trim_chars);
+    const target_str = std.mem.trim(u8, parts.next() orelse return error.InvalidFormat, csv_quoted_trim_chars);
+    const edge_type = std.mem.trim(u8, parts.next() orelse return error.InvalidFormat, csv_quoted_trim_chars);
 
     // Parse node IDs
-    const source_id = std.fmt.parseInt(NodeId, source_str, 10) catch {
+    const source_id = std.fmt.parseInt(NodeId, source_str, decimal_base) catch {
         return error.InvalidNodeId;
     };
-    const target_id = std.fmt.parseInt(NodeId, target_str, 10) catch {
+    const target_id = std.fmt.parseInt(NodeId, target_str, decimal_base) catch {
         return error.InvalidNodeId;
     };
 
@@ -1159,7 +1193,7 @@ pub fn exportCsv(
     defer exported_nodes.deinit();
 
     // Write nodes header
-    try nodes_writer.writeAll("_id,_labels\n");
+    try nodes_writer.writeAll(csv_nodes_header_line);
 
     for (node_ids) |node_id| {
         const node_labels = db.getNodeLabels(node_id) catch |err| return mapDatabaseError(err);
@@ -1172,7 +1206,7 @@ pub fn exportCsv(
 
         try nodes_writer.print("{d},\"", .{node_id});
         for (node_labels, 0..) |label, i| {
-            if (i > 0) try nodes_writer.writeAll(";");
+            if (i > 0) try nodes_writer.writeByte(csv_label_separator);
             try nodes_writer.writeAll(label);
         }
         try nodes_writer.writeAll("\"\n");
@@ -1180,7 +1214,7 @@ pub fn exportCsv(
     }
 
     // Write edges header
-    try edges_writer.writeAll("_source,_target,_type\n");
+    try edges_writer.writeAll(csv_edges_header_line);
 
     for (node_ids) |node_id| {
         const edges = db.getOutgoingEdges(node_id) catch continue;
@@ -1217,7 +1251,7 @@ pub const ExportStats = struct {
 fn cleanupTestDatabaseFiles(path: []const u8) void {
     std.fs.cwd().deleteFile(path) catch {};
 
-    var wal_path_buf: [512]u8 = undefined;
+    var wal_path_buf: [wal_path_buffer_size]u8 = undefined;
     const wal_path = std.fmt.bufPrint(&wal_path_buf, "{s}-wal", .{path}) catch return;
     std.fs.cwd().deleteFile(wal_path) catch {};
 }

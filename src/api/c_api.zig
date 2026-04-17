@@ -1079,8 +1079,9 @@ pub export fn lattice_node_get_property(
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
     const key_slice = cStrToSlice(key) orelse return .err_invalid_arg;
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 
-    const maybe_value = txn_handle.db_handle.db.getNodeProperty(node_id, key_slice) catch |err| {
+    const maybe_value = txn_handle.db_handle.db.getNodePropertyInTxn(txn_ptr, node_id, key_slice) catch |err| {
         return mapDatabaseError(err);
     };
 
@@ -1105,12 +1106,10 @@ pub export fn lattice_node_exists(
     exists_out: *bool,
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 
-    exists_out.* = txn_handle.db_handle.db.node_store.exists(node_id) catch |err| {
-        return switch (err) {
-            node_mod.NodeError.BufferPoolFull => .err_full,
-            else => .err_io,
-        };
+    exists_out.* = txn_handle.db_handle.db.nodeExistsInTxn(txn_ptr, node_id) catch |err| {
+        return mapDatabaseError(err);
     };
     return .ok;
 }
@@ -1158,6 +1157,42 @@ pub export fn lattice_get_nodes_by_label(
     return .ok;
 }
 
+pub export fn lattice_get_nodes_by_label_txn(
+    txn: ?*lattice_txn,
+    label: [*c]const u8,
+    label_len: usize,
+    node_ids_out: *?[*]lattice_node_id,
+    count_out: *usize,
+) lattice_error {
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    if (label == null) return .err_invalid_arg;
+
+    node_ids_out.* = null;
+    count_out.* = 0;
+
+    const label_slice = label[0..label_len];
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+    const owned = txn_handle.db_handle.db.getNodesByLabelInTxn(txn_ptr, label_slice) catch |err| {
+        return mapDatabaseError(err);
+    };
+
+    if (owned.len == 0) {
+        txn_handle.db_handle.db.allocator.free(owned);
+        return .ok;
+    }
+
+    const out = global_allocator.alloc(lattice_node_id, owned.len) catch {
+        txn_handle.db_handle.db.allocator.free(owned);
+        return .err_out_of_memory;
+    };
+    @memcpy(out, owned);
+    txn_handle.db_handle.db.allocator.free(owned);
+
+    node_ids_out.* = out.ptr;
+    count_out.* = out.len;
+    return .ok;
+}
+
 /// Free an array returned by `lattice_get_nodes_by_label`.
 pub export fn lattice_free_node_ids(node_ids: ?[*]lattice_node_id, count: usize) void {
     const ptr = node_ids orelse return;
@@ -1172,23 +1207,22 @@ pub export fn lattice_node_get_labels(
     labels_out: *[*c]u8,
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 
-    // Get the node from storage
-    var node = txn_handle.db_handle.db.node_store.get(node_id) catch |err| {
-        return switch (err) {
-            node_mod.NodeError.NotFound => .err_not_found,
-            else => .err,
-        };
+    const labels = txn_handle.db_handle.db.getNodeLabelsInTxn(txn_ptr, node_id) catch |err| {
+        return mapDatabaseError(err);
     };
-    defer node.deinit(txn_handle.db_handle.db.allocator);
+    defer {
+        for (labels) |label| {
+            txn_handle.db_handle.db.allocator.free(label);
+        }
+        txn_handle.db_handle.db.allocator.free(labels);
+    }
 
     // Build comma-separated label string
     var total_len: usize = 0;
-    for (node.labels, 0..) |label_id, i| {
+    for (labels, 0..) |label_str, i| {
         if (i > 0) total_len += 1; // comma
-        const label_str = txn_handle.db_handle.db.symbol_table.resolve(label_id) catch {
-            continue;
-        };
         total_len += label_str.len;
     }
 
@@ -1199,14 +1233,11 @@ pub export fn lattice_node_get_labels(
 
     // Fill the string
     var pos: usize = 0;
-    for (node.labels, 0..) |label_id, i| {
+    for (labels, 0..) |label_str, i| {
         if (i > 0) {
             result[pos] = ',';
             pos += 1;
         }
-        const label_str = txn_handle.db_handle.db.symbol_table.resolve(label_id) catch {
-            continue;
-        };
         @memcpy(result[pos..][0..label_str.len], label_str);
         pos += label_str.len;
     }
@@ -1258,8 +1289,9 @@ pub export fn lattice_node_set_vector(
 
     // Convert C pointer to Zig slice
     const vector_slice = vector[0..dimensions];
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 
-    txn_handle.db_handle.db.setNodeVector(node_id, vector_slice) catch |err| {
+    txn_handle.db_handle.db.setNodeVectorInTxn(txn_ptr, node_id, vector_slice) catch |err| {
         return mapDatabaseError(err);
     };
 
@@ -1311,7 +1343,7 @@ pub export fn lattice_batch_insert(
 
         // Set vector
         const vector_slice = spec.vector[0..spec.dimensions];
-        txn_handle.db_handle.db.setNodeVector(node_id, vector_slice) catch |err| {
+        txn_handle.db_handle.db.setNodeVectorInTxn(txn_ptr, node_id, vector_slice) catch |err| {
             return mapDatabaseError(err);
         };
 
@@ -1346,6 +1378,35 @@ pub export fn lattice_vector_search(
     };
 
     // Create result handle
+    const result_handle = global_allocator.create(VectorResultHandle) catch return .err_out_of_memory;
+    result_handle.* = VectorResultHandle{
+        .results = results,
+        .count = results.len,
+    };
+
+    result_out.* = toOpaque(lattice_vector_result, result_handle);
+    return .ok;
+}
+
+pub export fn lattice_vector_search_txn(
+    txn: ?*lattice_txn,
+    vector: [*c]const f32,
+    dimensions: u32,
+    k: u32,
+    ef_search: u16,
+    result_out: *?*lattice_vector_result,
+) lattice_error {
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+
+    if (vector == null or dimensions == 0 or k == 0) return .err_invalid_arg;
+
+    const query_vector = vector[0..dimensions];
+    const ef = if (ef_search == 0) null else ef_search;
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+    const results = txn_handle.db_handle.db.vectorSearchInTxn(txn_ptr, query_vector, k, ef) catch |err| {
+        return mapDatabaseError(err);
+    };
+
     const result_handle = global_allocator.create(VectorResultHandle) catch return .err_out_of_memory;
     result_handle.* = VectorResultHandle{
         .results = results,
@@ -1412,7 +1473,8 @@ pub export fn lattice_fts_index(
 
     const text_slice = text[0..text_len];
 
-    txn_handle.db_handle.db.ftsIndexDocument(node_id, text_slice) catch |err| {
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+    txn_handle.db_handle.db.ftsIndexDocumentInTxn(txn_ptr, node_id, text_slice) catch |err| {
         return mapDatabaseError(err);
     };
 
@@ -1450,6 +1512,33 @@ pub export fn lattice_fts_search(
     return .ok;
 }
 
+pub export fn lattice_fts_search_txn(
+    txn: ?*lattice_txn,
+    query_text: [*c]const u8,
+    query_len: usize,
+    limit: u32,
+    result_out: *?*lattice_fts_result,
+) lattice_error {
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    if (query_text == null or query_len == 0 or limit == 0) return .err_invalid_arg;
+
+    const query_slice = query_text[0..query_len];
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+    const results = txn_handle.db_handle.db.ftsSearchInTxn(txn_ptr, query_slice, limit) catch |err| {
+        return mapDatabaseError(err);
+    };
+
+    const result_handle = global_allocator.create(FtsResultHandle) catch return .err_out_of_memory;
+    result_handle.* = FtsResultHandle{
+        .results = results,
+        .count = results.len,
+        .db_handle = txn_handle.db_handle,
+    };
+
+    result_out.* = toOpaque(lattice_fts_result, result_handle);
+    return .ok;
+}
+
 /// Search for documents matching a text query with fuzzy (typo-tolerant) matching.
 pub export fn lattice_fts_search_fuzzy(
     db: ?*lattice_database,
@@ -1478,6 +1567,41 @@ pub export fn lattice_fts_search_fuzzy(
         .results = results,
         .count = results.len,
         .db_handle = db_handle,
+    };
+
+    result_out.* = toOpaque(lattice_fts_result, result_handle);
+    return .ok;
+}
+
+pub export fn lattice_fts_search_fuzzy_txn(
+    txn: ?*lattice_txn,
+    query_text: [*c]const u8,
+    query_len: usize,
+    limit: u32,
+    max_distance: u32,
+    min_term_length: u32,
+    result_out: *?*lattice_fts_result,
+) lattice_error {
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    if (query_text == null or query_len == 0 or limit == 0) return .err_invalid_arg;
+
+    const query_slice = query_text[0..query_len];
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+    const results = txn_handle.db_handle.db.ftsSearchFuzzyInTxn(
+        txn_ptr,
+        query_slice,
+        limit,
+        max_distance,
+        min_term_length,
+    ) catch |err| {
+        return mapDatabaseError(err);
+    };
+
+    const result_handle = global_allocator.create(FtsResultHandle) catch return .err_out_of_memory;
+    result_handle.* = FtsResultHandle{
+        .results = results,
+        .count = results.len,
+        .db_handle = txn_handle.db_handle,
     };
 
     result_out.* = toOpaque(lattice_fts_result, result_handle);
@@ -1604,8 +1728,9 @@ pub export fn lattice_edge_get_property(
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
     const key_slice = cStrToSlice(key) orelse return .err_invalid_arg;
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 
-    const maybe_value = txn_handle.db_handle.db.getEdgePropertyById(edge_id, key_slice) catch |err| {
+    const maybe_value = txn_handle.db_handle.db.getEdgePropertyByIdInTxn(txn_ptr, edge_id, key_slice) catch |err| {
         return mapDatabaseError(err);
     };
 
@@ -1652,8 +1777,9 @@ pub export fn lattice_edge_get_outgoing(
     result_out.* = null;
 
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 
-    const edges = txn_handle.db_handle.db.getOutgoingEdges(node_id) catch |err| {
+    const edges = txn_handle.db_handle.db.getOutgoingEdgesInTxn(txn_ptr, node_id) catch |err| {
         return mapAnyError(err);
     };
 
@@ -1681,8 +1807,9 @@ pub export fn lattice_edge_get_incoming(
     result_out.* = null;
 
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 
-    const edges = txn_handle.db_handle.db.getIncomingEdges(node_id) catch |err| {
+    const edges = txn_handle.db_handle.db.getIncomingEdgesInTxn(txn_ptr, node_id) catch |err| {
         return mapAnyError(err);
     };
 
@@ -1823,18 +1950,19 @@ pub export fn lattice_query_execute(
     result_out.* = null;
 
     const query_handle = toHandle(QueryHandle, query) orelse return .err_invalid_arg;
-    _ = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 
     // Clear any diagnostics from previous executions.
     query_handle.clearLastError();
 
     // Execute the query (with or without parameters), retaining structured diagnostics.
     var detailed = if (query_handle.parameters.count() > 0)
-        query_handle.db_handle.db.queryWithParamsDetailed(query_handle.cypher, &query_handle.parameters) catch |err| {
+        query_handle.db_handle.db.queryWithParamsDetailedInTxn(txn_ptr, query_handle.cypher, &query_handle.parameters) catch |err| {
             return mapQueryError(err);
         }
     else
-        query_handle.db_handle.db.queryDetailed(query_handle.cypher) catch |err| {
+        query_handle.db_handle.db.queryDetailedInTxn(txn_ptr, query_handle.cypher) catch |err| {
             return mapQueryError(err);
         };
 

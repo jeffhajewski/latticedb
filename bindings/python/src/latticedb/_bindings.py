@@ -524,6 +524,16 @@ class LatticeLib:
         ]
         self._lib.lattice_get_nodes_by_label.restype = c_int
 
+        # lattice_get_nodes_by_label_txn
+        self._lib.lattice_get_nodes_by_label_txn.argtypes = [
+            LatticeTxn,
+            c_char_p,
+            c_size_t,
+            POINTER(POINTER(LatticeNodeId)),
+            POINTER(c_size_t),
+        ]
+        self._lib.lattice_get_nodes_by_label_txn.restype = c_int
+
         # lattice_free_node_ids
         self._lib.lattice_free_node_ids.argtypes = [
             POINTER(LatticeNodeId),
@@ -570,6 +580,17 @@ class LatticeLib:
         ]
         self._lib.lattice_vector_search.restype = c_int
 
+        # lattice_vector_search_txn
+        self._lib.lattice_vector_search_txn.argtypes = [
+            LatticeTxn,
+            POINTER(ctypes.c_float),
+            c_uint32,
+            c_uint32,
+            c_uint16,
+            POINTER(LatticeVectorResult),
+        ]
+        self._lib.lattice_vector_search_txn.restype = c_int
+
         # lattice_vector_result_count
         self._lib.lattice_vector_result_count.argtypes = [LatticeVectorResult]
         self._lib.lattice_vector_result_count.restype = c_uint32
@@ -606,6 +627,16 @@ class LatticeLib:
         ]
         self._lib.lattice_fts_search.restype = c_int
 
+        # lattice_fts_search_txn
+        self._lib.lattice_fts_search_txn.argtypes = [
+            LatticeTxn,
+            c_char_p,
+            c_size_t,
+            c_uint32,
+            POINTER(LatticeFtsResult),
+        ]
+        self._lib.lattice_fts_search_txn.restype = c_int
+
         # lattice_fts_search_fuzzy
         self._lib.lattice_fts_search_fuzzy.argtypes = [
             LatticeDatabase,
@@ -617,6 +648,18 @@ class LatticeLib:
             POINTER(LatticeFtsResult),
         ]
         self._lib.lattice_fts_search_fuzzy.restype = c_int
+
+        # lattice_fts_search_fuzzy_txn
+        self._lib.lattice_fts_search_fuzzy_txn.argtypes = [
+            LatticeTxn,
+            c_char_p,
+            c_size_t,
+            c_uint32,
+            c_uint32,
+            c_uint32,
+            POINTER(LatticeFtsResult),
+        ]
+        self._lib.lattice_fts_search_fuzzy_txn.restype = c_int
 
         # lattice_fts_result_count
         self._lib.lattice_fts_result_count.argtypes = [LatticeFtsResult]

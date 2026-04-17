@@ -8,9 +8,14 @@ import {
   PropertyValue,
   CreateNodeOptions,
   CreateEdgeOptions,
+  QueryResult,
+  VectorSearchOptions,
+  VectorSearchResult,
+  FtsSearchOptions,
 } from './types';
 import {
   LatticeFFI,
+  DatabaseHandle,
   TransactionHandle,
 } from './ffi';
 
@@ -22,6 +27,7 @@ import {
  */
 export class Transaction {
   private ffi: LatticeFFI;
+  private readonly dbHandle: DatabaseHandle | null;
   private txnHandle: TransactionHandle | null;
   private readonly readOnly: boolean;
   private committed = false;
@@ -31,8 +37,14 @@ export class Transaction {
    * Create a new transaction wrapper.
    * @internal
    */
-  constructor(ffi: LatticeFFI, txnHandle: TransactionHandle, readOnly: boolean) {
+  constructor(
+    ffi: LatticeFFI,
+    txnHandle: TransactionHandle,
+    readOnly: boolean,
+    dbHandle?: DatabaseHandle
+  ) {
     this.ffi = ffi;
+    this.dbHandle = dbHandle ?? null;
     this.txnHandle = txnHandle;
     this.readOnly = readOnly;
   }
@@ -381,6 +393,143 @@ export class Transaction {
       return edges;
     } finally {
       this.ffi.edgeResultFree(resultHandle);
+    }
+  }
+
+  /**
+   * Execute a Cypher query inside this transaction.
+   */
+  async query(
+    cypher: string,
+    parameters?: Record<string, PropertyValue>
+  ): Promise<QueryResult> {
+    this.ensureActive();
+    if (this.dbHandle === null) {
+      throw new Error('Transaction is missing database handle');
+    }
+
+    const query = this.ffi.queryPrepare(this.dbHandle, cypher);
+    try {
+      if (parameters) {
+        for (const [name, value] of Object.entries(parameters)) {
+          if (value instanceof Float32Array) {
+            this.ffi.queryBindVector(query, name, value);
+          } else {
+            this.ffi.queryBind(query, name, value);
+          }
+        }
+      }
+
+      const result = this.ffi.queryExecute(query, this.txnHandle!);
+      try {
+        const columnCount = this.ffi.resultColumnCount(result);
+        const columns: string[] = [];
+        for (let i = 0; i < columnCount; i++) {
+          columns.push(this.ffi.resultColumnName(result, i));
+        }
+
+        const rows: Record<string, PropertyValue>[] = [];
+        while (this.ffi.resultNext(result)) {
+          const row: Record<string, PropertyValue> = {};
+          for (let i = 0; i < columnCount; i++) {
+            row[columns[i]!] = this.ffi.resultGet(result, i) as PropertyValue;
+          }
+          rows.push(row);
+        }
+
+        return { columns, rows };
+      } finally {
+        this.ffi.resultFree(result);
+      }
+    } finally {
+      this.ffi.queryFree(query);
+    }
+  }
+
+  /**
+   * Return every node id that currently carries `label`.
+   */
+  async getNodesByLabel(label: string): Promise<bigint[]> {
+    this.ensureActive();
+    return this.ffi.getNodesByLabelInTxn(this.txnHandle!, label);
+  }
+
+  /**
+   * Search for similar vectors inside this transaction.
+   */
+  async vectorSearch(
+    vector: Float32Array,
+    options?: VectorSearchOptions
+  ): Promise<VectorSearchResult[]> {
+    this.ensureActive();
+    const k = options?.k ?? 10;
+    const efSearch = options?.efSearch ?? 0;
+
+    const resultHandle = this.ffi.vectorSearchInTxn(this.txnHandle!, vector, k, efSearch);
+    try {
+      const count = this.ffi.vectorResultCount(resultHandle);
+      const results: VectorSearchResult[] = [];
+      for (let i = 0; i < count; i++) {
+        const r = this.ffi.vectorResultGet(resultHandle, i);
+        results.push({ nodeId: r.nodeId, distance: r.distance });
+      }
+      return results;
+    } finally {
+      this.ffi.vectorResultFree(resultHandle);
+    }
+  }
+
+  /**
+   * Search full-text documents inside this transaction.
+   */
+  async ftsSearch(
+    query: string,
+    options?: FtsSearchOptions
+  ): Promise<Array<{ nodeId: bigint; score: number }>> {
+    this.ensureActive();
+    const limit = options?.limit ?? 10;
+
+    const resultHandle = this.ffi.ftsSearchInTxn(this.txnHandle!, query, limit);
+    try {
+      const count = this.ffi.ftsResultCount(resultHandle);
+      const results: Array<{ nodeId: bigint; score: number }> = [];
+      for (let i = 0; i < count; i++) {
+        results.push(this.ffi.ftsResultGet(resultHandle, i));
+      }
+      return results;
+    } finally {
+      this.ffi.ftsResultFree(resultHandle);
+    }
+  }
+
+  /**
+   * Search full-text documents with fuzzy matching inside this transaction.
+   */
+  async ftsSearchFuzzy(
+    query: string,
+    options?: FtsSearchOptions & { maxDistance?: number; minTermLength?: number }
+  ): Promise<Array<{ nodeId: bigint; score: number }>> {
+    this.ensureActive();
+    const limit = options?.limit ?? 10;
+    const maxDistance = options?.maxDistance ?? 0;
+    const minTermLength = options?.minTermLength ?? 0;
+
+    const resultHandle = this.ffi.ftsSearchFuzzyInTxn(
+      this.txnHandle!,
+      query,
+      limit,
+      maxDistance,
+      minTermLength
+    );
+    try {
+      const count = this.ffi.ftsResultCount(resultHandle);
+      const results: Array<{ nodeId: bigint; score: number }> = [];
+      for (let i = 0; i < count; i++) {
+        results.push(this.ffi.ftsResultGet(resultHandle, i));
+      }
+      return results;
+    } finally {
+      this.ffi.ftsResultFree(resultHandle);
     }
   }
 

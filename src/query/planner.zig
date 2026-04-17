@@ -275,7 +275,7 @@ pub const QueryPlanner = struct {
                         // If no labels, no filter needed - just use the Expand output as-is
                     } else if (node_pattern.labels.len > 0) {
                         // Node with labels - create a label scan
-                        const label_index_ptr = self.storage.label_index orelse return PlannerError.MissingStorage;
+                        _ = self.storage.label_index orelse return PlannerError.MissingStorage;
                         const symbol_table = self.storage.symbol_table orelse return PlannerError.MissingStorage;
 
                         const label_id = symbol_table.lookup(node_pattern.labels[0]) catch |err| switch (err) {
@@ -283,7 +283,8 @@ pub const QueryPlanner = struct {
                             else => return PlannerError.InternalError,
                         };
 
-                        const label_scan = scan_ops.LabelScan.init(self.allocator, slot, label_id, label_index_ptr) catch {
+                        const database = self.storage.database orelse return PlannerError.MissingStorage;
+                        const label_scan = scan_ops.LabelScan.init(self.allocator, slot, label_id, database) catch {
                             return PlannerError.OutOfMemory;
                         };
                         var new_op: Operator = label_scan.operator();
@@ -311,15 +312,17 @@ pub const QueryPlanner = struct {
                         }
                     } else if (op == null) {
                         // All nodes scan (no labels, no previous operator)
-                        const node_tree = self.storage.node_tree orelse return PlannerError.MissingStorage;
-                        const all_scan = scan_ops.AllNodesScan.init(self.allocator, slot, node_tree) catch {
+                        _ = self.storage.node_tree orelse return PlannerError.MissingStorage;
+                        const database = self.storage.database orelse return PlannerError.MissingStorage;
+                        const all_scan = scan_ops.AllNodesScan.init(self.allocator, slot, database) catch {
                             return PlannerError.OutOfMemory;
                         };
                         op = all_scan.operator();
                     } else {
                         // No labels but existing operator — cross join with all nodes scan
-                        const node_tree = self.storage.node_tree orelse return PlannerError.MissingStorage;
-                        const all_scan = scan_ops.AllNodesScan.init(self.allocator, slot, node_tree) catch {
+                        _ = self.storage.node_tree orelse return PlannerError.MissingStorage;
+                        const database = self.storage.database orelse return PlannerError.MissingStorage;
+                        const all_scan = scan_ops.AllNodesScan.init(self.allocator, slot, database) catch {
                             return PlannerError.OutOfMemory;
                         };
                         const cross = cross_product_ops.CrossProduct.init(self.allocator, op.?, all_scan.operator()) catch {
@@ -414,7 +417,8 @@ pub const QueryPlanner = struct {
                     };
 
                     // Create expand operator (variable-length or regular)
-                    const edge_store = self.storage.edge_store orelse return PlannerError.MissingStorage;
+                    _ = self.storage.edge_store orelse return PlannerError.MissingStorage;
+                    const database = self.storage.database orelse return PlannerError.MissingStorage;
 
                     if (edge_pattern.quantifier) |quant| {
                         // Variable-length path: use VariableLengthExpand
@@ -425,7 +429,7 @@ pub const QueryPlanner = struct {
                             target_slot,
                             edge_type,
                             expand_dir,
-                            edge_store,
+                            database,
                             quant.min_hops,
                             quant.max_hops,
                         ) catch {
@@ -442,7 +446,7 @@ pub const QueryPlanner = struct {
                             edge_slot,
                             edge_type,
                             expand_dir,
-                            edge_store,
+                            database,
                         ) catch {
                             return PlannerError.OutOfMemory;
                         };
@@ -597,7 +601,8 @@ pub const QueryPlanner = struct {
 
     /// Plan a vector search operator
     fn planVectorSearch(self: *Self, input: Operator, info: VectorSearchInfo) PlannerError!Operator {
-        const hnsw_index = self.storage.hnsw_index orelse return PlannerError.MissingStorage;
+        _ = self.storage.hnsw_index orelse return PlannerError.MissingStorage;
+        const database = self.storage.database orelse return PlannerError.MissingStorage;
 
         const output_slot = info.variable_slot orelse return PlannerError.InvalidQuery;
 
@@ -610,7 +615,7 @@ pub const QueryPlanner = struct {
                 query_vector,
                 k,
                 info.threshold,
-                hnsw_index,
+                database,
             ) catch return PlannerError.OutOfMemory
         else blk: {
             const param_name = info.param_name orelse return PlannerError.InvalidQuery;
@@ -621,7 +626,7 @@ pub const QueryPlanner = struct {
                 param_name,
                 k,
                 info.threshold,
-                hnsw_index,
+                database,
             ) catch return PlannerError.OutOfMemory;
         };
 
@@ -718,7 +723,8 @@ pub const QueryPlanner = struct {
 
     /// Plan an FTS search operator
     fn planFtsSearch(self: *Self, input: Operator, info: FtsSearchInfo) PlannerError!Operator {
-        const fts_index = self.storage.fts_index orelse return PlannerError.MissingStorage;
+        _ = self.storage.fts_index orelse return PlannerError.MissingStorage;
+        const database = self.storage.database orelse return PlannerError.MissingStorage;
 
         const output_slot = info.variable_slot orelse return PlannerError.InvalidQuery;
 
@@ -732,7 +738,7 @@ pub const QueryPlanner = struct {
                 output_slot,
                 query_text,
                 100, // Default limit
-                fts_index,
+                database,
             ) catch {
                 return PlannerError.OutOfMemory;
             };
@@ -749,7 +755,7 @@ pub const QueryPlanner = struct {
             output_slot,
             param_name,
             100, // Default limit
-            fts_index,
+            database,
         ) catch {
             return PlannerError.OutOfMemory;
         };

@@ -188,6 +188,13 @@ export interface LatticeBindings {
     node_ids_out: unknown[],
     count_out: number[]
   ) => number;
+  lattice_get_nodes_by_label_txn: (
+    txn: unknown,
+    label: string | null,
+    label_len: number,
+    node_ids_out: unknown[],
+    count_out: number[]
+  ) => number;
   lattice_free_node_ids: (node_ids: unknown, count: number) => void;
   lattice_free_string: (str: unknown) => void;
   lattice_value_free: (value: unknown) => void;
@@ -227,6 +234,14 @@ export interface LatticeBindings {
     ef_search: number,
     result_out: unknown[]
   ) => number;
+  lattice_vector_search_txn: (
+    txn: unknown,
+    vector: Float32Array,
+    dimensions: number,
+    k: number,
+    ef_search: number,
+    result_out: unknown[]
+  ) => number;
   lattice_vector_result_count: (result: unknown) => number;
   lattice_vector_result_get: (
     result: unknown,
@@ -250,8 +265,24 @@ export interface LatticeBindings {
     limit: number,
     result_out: unknown[]
   ) => number;
+  lattice_fts_search_txn: (
+    txn: unknown,
+    query: string,
+    query_len: number,
+    limit: number,
+    result_out: unknown[]
+  ) => number;
   lattice_fts_search_fuzzy: (
     db: unknown,
+    query: string,
+    query_len: number,
+    limit: number,
+    max_distance: number,
+    min_term_length: number,
+    result_out: unknown[]
+  ) => number;
+  lattice_fts_search_fuzzy_txn: (
+    txn: unknown,
     query: string,
     query_len: number,
     limit: number,
@@ -499,6 +530,13 @@ function createBindings(): LatticeBindings {
       koffi.out(koffi.pointer('void*')), // node_ids_out - raw pointer for manual free
       koffi.out(koffi.pointer('size_t')), // count_out
     ]),
+    lattice_get_nodes_by_label_txn: lib.func('lattice_get_nodes_by_label_txn', 'int', [
+      TxnPtr,
+      'str', // label
+      'size_t', // label_len
+      koffi.out(koffi.pointer('void*')), // node_ids_out - raw pointer for manual free
+      koffi.out(koffi.pointer('size_t')), // count_out
+    ]),
     lattice_free_node_ids: lib.func('lattice_free_node_ids', 'void', [
       'void*',
       'size_t',
@@ -541,6 +579,14 @@ function createBindings(): LatticeBindings {
       'uint16', // ef_search
       koffi.out(VectorResultPtrPtr), // result_out
     ]),
+    lattice_vector_search_txn: lib.func('lattice_vector_search_txn', 'int', [
+      TxnPtr,
+      koffi.pointer('float'), // vector
+      'uint32', // dimensions
+      'uint32', // k
+      'uint16', // ef_search
+      koffi.out(VectorResultPtrPtr), // result_out
+    ]),
     lattice_vector_result_count: lib.func('lattice_vector_result_count', 'uint32', [
       VectorResultPtr,
     ]),
@@ -568,8 +614,24 @@ function createBindings(): LatticeBindings {
       'uint32', // limit
       koffi.out(FtsResultPtrPtr), // result_out
     ]),
+    lattice_fts_search_txn: lib.func('lattice_fts_search_txn', 'int', [
+      TxnPtr,
+      'str', // query
+      'uintptr_t', // query_len (size_t)
+      'uint32', // limit
+      koffi.out(FtsResultPtrPtr), // result_out
+    ]),
     lattice_fts_search_fuzzy: tryFunc(lib, 'lattice_fts_search_fuzzy', 'int', [
       DatabasePtr,
+      'str', // query
+      'uintptr_t', // query_len (size_t)
+      'uint32', // limit
+      'uint32', // max_distance
+      'uint32', // min_term_length
+      koffi.out(FtsResultPtrPtr), // result_out
+    ]),
+    lattice_fts_search_fuzzy_txn: tryFunc(lib, 'lattice_fts_search_fuzzy_txn', 'int', [
+      TxnPtr,
       'str', // query
       'uintptr_t', // query_len (size_t)
       'uint32', // limit

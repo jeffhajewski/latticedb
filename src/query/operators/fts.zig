@@ -16,12 +16,11 @@ const ExecutionContext = executor.ExecutionContext;
 const types = @import("../../core/types.zig");
 const NodeId = types.NodeId;
 
-const fts_index = @import("../../fts/index.zig");
-const FtsIndex = fts_index.FtsIndex;
-const FtsError = fts_index.FtsError;
-
 const scorer = @import("../../fts/scorer.zig");
 const ScoredDoc = scorer.ScoredDoc;
+
+const database_mod = @import("../../storage/database.zig");
+const Database = database_mod.Database;
 
 // ============================================================================
 // FtsSearch Operator
@@ -37,8 +36,8 @@ pub const FtsSearch = struct {
     limit: u32,
     /// Minimum score threshold (optional)
     min_score: ?f32,
-    /// FTS index
-    index: *FtsIndex,
+    /// Database for txn-aware FTS search
+    database: *Database,
     /// Search results
     results: ?[]ScoredDoc,
     /// Current result index
@@ -57,7 +56,7 @@ pub const FtsSearch = struct {
         query_text: []const u8,
         limit: u32,
         min_score: ?f32,
-        index: *FtsIndex,
+        database: *Database,
     ) !*Self {
         const self = try allocator.create(Self);
         self.* = Self{
@@ -65,7 +64,7 @@ pub const FtsSearch = struct {
             .query_text = query_text,
             .limit = limit,
             .min_score = min_score,
-            .index = index,
+            .database = database,
             .results = null,
             .current_index = 0,
             .output_row = null,
@@ -96,9 +95,7 @@ pub const FtsSearch = struct {
         self.output_row = ctx.allocRow() catch return OperatorError.OutOfMemory;
 
         // Perform the search
-        self.results = self.index.search(self.query_text, self.limit) catch |err| {
-            return mapFtsError(err);
-        };
+        self.results = self.database.ftsSearchInTxn(ctx.txn, self.query_text, self.limit) catch return OperatorError.StorageError;
         self.current_index = 0;
     }
 
@@ -135,7 +132,7 @@ pub const FtsSearch = struct {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
         if (self.results) |results| {
-            self.index.freeResults(results);
+            self.database.freeFtsSearchResults(results);
             self.results = null;
         }
     }
@@ -145,20 +142,12 @@ pub const FtsSearch = struct {
 
         // Free results if not already freed
         if (self.results) |results| {
-            self.index.freeResults(results);
+            self.database.freeFtsSearchResults(results);
         }
 
         allocator.destroy(self);
     }
 };
-
-/// Map FTS errors to OperatorError
-fn mapFtsError(err: FtsError) OperatorError {
-    return switch (err) {
-        FtsError.OutOfMemory => OperatorError.OutOfMemory,
-        else => OperatorError.StorageError,
-    };
-}
 
 // ============================================================================
 // FtsSearchWithInput Operator
@@ -180,8 +169,8 @@ pub const FtsSearchWithInput = struct {
     literal_query: ?[]const u8,
     /// Maximum results
     limit: u32,
-    /// FTS index
-    index: *FtsIndex,
+    /// Database for txn-aware FTS search
+    database: *Database,
     /// Search results
     results: ?[]ScoredDoc,
     /// Current result index
@@ -204,7 +193,7 @@ pub const FtsSearchWithInput = struct {
         output_slot: u8,
         param_name: []const u8,
         limit: u32,
-        index: *FtsIndex,
+        database: *Database,
     ) !*Self {
         const self = try allocator.create(Self);
         self.* = Self{
@@ -213,7 +202,7 @@ pub const FtsSearchWithInput = struct {
             .param_name = param_name,
             .literal_query = null,
             .limit = limit,
-            .index = index,
+            .database = database,
             .results = null,
             .current_index = 0,
             .current_doc_row_index = 0,
@@ -231,7 +220,7 @@ pub const FtsSearchWithInput = struct {
         output_slot: u8,
         query_text: []const u8,
         limit: u32,
-        index: *FtsIndex,
+        database: *Database,
     ) !*Self {
         const self = try allocator.create(Self);
         self.* = Self{
@@ -240,7 +229,7 @@ pub const FtsSearchWithInput = struct {
             .param_name = null,
             .literal_query = query_text,
             .limit = limit,
-            .index = index,
+            .database = database,
             .results = null,
             .current_index = 0,
             .current_doc_row_index = 0,
@@ -273,7 +262,7 @@ pub const FtsSearchWithInput = struct {
         errdefer {
             self.clearRowsByDoc();
             if (self.results) |results| {
-                self.index.freeResults(results);
+                self.database.freeFtsSearchResults(results);
                 self.results = null;
             }
             if (self.opened) {
@@ -299,9 +288,7 @@ pub const FtsSearchWithInput = struct {
         };
 
         // Perform the FTS search
-        self.results = self.index.search(query_text, self.limit) catch |err| {
-            return mapFtsError(err);
-        };
+        self.results = self.database.ftsSearchInTxn(ctx.txn, query_text, self.limit) catch return OperatorError.StorageError;
 
         // Keep only input rows whose node IDs are present in FTS results while
         // preserving full row context and multiplicity.
@@ -357,7 +344,7 @@ pub const FtsSearchWithInput = struct {
 
         // Free search results
         if (self.results) |results| {
-            self.index.freeResults(results);
+            self.database.freeFtsSearchResults(results);
             self.results = null;
         }
 
@@ -374,7 +361,7 @@ pub const FtsSearchWithInput = struct {
 
         // Free results if not already freed
         if (self.results) |results| {
-            self.index.freeResults(results);
+            self.database.freeFtsSearchResults(results);
         }
 
         self.clearRowsByDoc();

@@ -17,12 +17,8 @@ const ExecutionContext = executor.ExecutionContext;
 const types = @import("../../core/types.zig");
 const NodeId = types.NodeId;
 
-const btree = @import("../../storage/btree.zig");
-const BTree = btree.BTree;
-
-const label_index = @import("../../graph/label_index.zig");
-const LabelIndex = label_index.LabelIndex;
-const LabelIndexError = label_index.LabelIndexError;
+const database_mod = @import("../../storage/database.zig");
+const Database = database_mod.Database;
 
 const symbols = @import("../../graph/symbols.zig");
 const SymbolId = symbols.SymbolId;
@@ -36,22 +32,25 @@ const SymbolId = symbols.SymbolId;
 pub const AllNodesScan = struct {
     /// The slot to output node IDs to
     output_slot: u8,
-    /// The B+Tree containing node data
-    tree: *BTree,
-    /// Current iterator (set during open)
-    iterator: ?BTree.Iterator,
+    /// Database reference for txn-aware scans
+    database: *Database,
+    /// Materialized node ids visible in the current txn
+    node_ids: ?[]NodeId,
+    /// Current result index
+    current_index: usize,
     /// Current row being returned
     current_row: ?*Row,
 
     const Self = @This();
 
     /// Create a new AllNodesScan operator
-    pub fn init(allocator: Allocator, output_slot: u8, tree: *BTree) !*Self {
+    pub fn init(allocator: Allocator, output_slot: u8, database: *Database) !*Self {
         const self = try allocator.create(Self);
         self.* = Self{
             .output_slot = output_slot,
-            .tree = tree,
-            .iterator = null,
+            .database = database,
+            .node_ids = null,
+            .current_index = 0,
             .current_row = null,
         };
         return self;
@@ -78,28 +77,21 @@ pub const AllNodesScan = struct {
         // Allocate row for reuse
         self.current_row = ctx.allocRow() catch return OperatorError.OutOfMemory;
 
-        // Create iterator for all nodes (no start or end key)
-        self.iterator = self.tree.range(null, null) catch return OperatorError.StorageError;
+        self.node_ids = self.database.getAllNodeIdsInTxn(ctx.txn) catch return OperatorError.StorageError;
+        self.current_index = 0;
     }
 
     fn next(ptr: *anyopaque, _: *ExecutionContext) OperatorError!?*Row {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        const iter = &(self.iterator orelse return OperatorError.NotInitialized);
+        const node_ids = self.node_ids orelse return OperatorError.NotInitialized;
         const row = self.current_row orelse return OperatorError.NotInitialized;
 
-        // Get next entry from iterator
-        const entry = iter.next() catch return OperatorError.StorageError;
-
-        if (entry) |e| {
-            // Key is node_id as little-endian u64
-            if (e.key.len < 8) return OperatorError.StorageError;
-            const node_id = std.mem.readInt(u64, e.key[0..8], .little);
-
-            // Set the node reference in the output slot
+        if (self.current_index < node_ids.len) {
+            const node_id = node_ids[self.current_index];
+            self.current_index += 1;
             row.clear();
             row.setSlot(self.output_slot, .{ .node_ref = node_id });
-
             return row;
         }
 
@@ -109,9 +101,9 @@ pub const AllNodesScan = struct {
     fn close(ptr: *anyopaque, _: *ExecutionContext) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        if (self.iterator) |*iter| {
-            iter.deinit();
-            self.iterator = null;
+        if (self.node_ids) |node_ids| {
+            self.database.allocator.free(node_ids);
+            self.node_ids = null;
         }
     }
 
@@ -132,23 +124,26 @@ pub const LabelScan = struct {
     output_slot: u8,
     /// The label ID to scan for
     label_id: SymbolId,
-    /// The label index
-    index: *LabelIndex,
-    /// Current iterator (set during open)
-    iterator: ?LabelIndex.NodeIterator,
+    /// Database reference for txn-aware scans
+    database: *Database,
+    /// Materialized node ids visible in the current txn
+    node_ids: ?[]NodeId,
+    /// Current result index
+    current_index: usize,
     /// Current row being returned
     current_row: ?*Row,
 
     const Self = @This();
 
     /// Create a new LabelScan operator
-    pub fn init(allocator: Allocator, output_slot: u8, label_id: SymbolId, index: *LabelIndex) !*Self {
+    pub fn init(allocator: Allocator, output_slot: u8, label_id: SymbolId, database: *Database) !*Self {
         const self = try allocator.create(Self);
         self.* = Self{
             .output_slot = output_slot,
             .label_id = label_id,
-            .index = index,
-            .iterator = null,
+            .database = database,
+            .node_ids = null,
+            .current_index = 0,
             .current_row = null,
         };
         return self;
@@ -175,22 +170,19 @@ pub const LabelScan = struct {
         // Allocate row for reuse
         self.current_row = ctx.allocRow() catch return OperatorError.OutOfMemory;
 
-        // Create iterator for nodes with this label
-        self.iterator = self.index.iterNodesByLabel(self.label_id) catch |err| {
-            return mapLabelIndexError(err);
-        };
+        self.node_ids = self.database.getNodesByLabelIdInTxn(ctx.txn, self.label_id) catch return OperatorError.StorageError;
+        self.current_index = 0;
     }
 
     fn next(ptr: *anyopaque, _: *ExecutionContext) OperatorError!?*Row {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        var iter = &(self.iterator orelse return OperatorError.NotInitialized);
+        const node_ids = self.node_ids orelse return OperatorError.NotInitialized;
         const row = self.current_row orelse return OperatorError.NotInitialized;
 
-        // Get next node ID from iterator
-        const node_id_opt = iter.next() catch return OperatorError.StorageError;
-
-        if (node_id_opt) |node_id| {
+        if (self.current_index < node_ids.len) {
+            const node_id = node_ids[self.current_index];
+            self.current_index += 1;
             // Set the node reference in the output slot
             row.clear();
             row.setSlot(self.output_slot, .{ .node_ref = node_id });
@@ -204,9 +196,9 @@ pub const LabelScan = struct {
     fn close(ptr: *anyopaque, _: *ExecutionContext) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        if (self.iterator) |*iter| {
-            iter.deinit();
-            self.iterator = null;
+        if (self.node_ids) |node_ids| {
+            self.database.allocator.free(node_ids);
+            self.node_ids = null;
         }
     }
 
@@ -215,14 +207,6 @@ pub const LabelScan = struct {
         allocator.destroy(self);
     }
 };
-
-/// Map LabelIndex errors to OperatorError
-fn mapLabelIndexError(err: LabelIndexError) OperatorError {
-    return switch (err) {
-        LabelIndexError.OutOfMemory => OperatorError.OutOfMemory,
-        else => OperatorError.StorageError,
-    };
-}
 
 // ============================================================================
 // Tests

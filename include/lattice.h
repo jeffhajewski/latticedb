@@ -247,6 +247,14 @@ lattice_error lattice_get_nodes_by_label(
     size_t* count_out
 );
 
+lattice_error lattice_get_nodes_by_label_txn(
+    lattice_txn* txn,
+    const char* label,
+    size_t label_len,
+    lattice_node_id** node_ids_out,
+    size_t* count_out
+);
+
 /* Free an array returned by lattice_get_nodes_by_label. */
 void lattice_free_node_ids(lattice_node_id* node_ids, size_t count);
 
@@ -329,6 +337,15 @@ lattice_error lattice_vector_search(
     lattice_vector_result** result_out
 );
 
+lattice_error lattice_vector_search_txn(
+    lattice_txn* txn,
+    const float* vector,
+    uint32_t dimensions,
+    uint32_t k,
+    uint16_t ef_search,
+    lattice_vector_result** result_out
+);
+
 /* Get the number of results */
 uint32_t lattice_vector_result_count(lattice_vector_result* result);
 
@@ -387,11 +404,29 @@ lattice_error lattice_fts_search(
     lattice_fts_result** result_out
 );
 
+lattice_error lattice_fts_search_txn(
+    lattice_txn* txn,
+    const char* query,
+    size_t query_len,
+    uint32_t limit,
+    lattice_fts_result** result_out
+);
+
 /* Search with fuzzy matching (typo tolerance).
  * max_distance: max Levenshtein edit distance (0 = default 2)
  * min_term_length: min term length for fuzzy expansion (0 = default 4) */
 lattice_error lattice_fts_search_fuzzy(
     lattice_database* db,
+    const char* query,
+    size_t query_len,
+    uint32_t limit,
+    uint32_t max_distance,
+    uint32_t min_term_length,
+    lattice_fts_result** result_out
+);
+
+lattice_error lattice_fts_search_fuzzy_txn(
+    lattice_txn* txn,
     const char* query,
     size_t query_len,
     uint32_t limit,

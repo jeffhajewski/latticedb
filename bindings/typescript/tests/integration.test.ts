@@ -644,7 +644,7 @@ describeIfNative('Database Integration', () => {
       const internals = db as unknown as { ffi: unknown; dbHandle: unknown };
       const ffi = internals.ffi as { begin: (dbHandle: unknown, ro: boolean) => unknown };
       const handle = ffi.begin(internals.dbHandle, readOnly);
-      return new Transaction(internals.ffi as never, handle as never, readOnly);
+      return new Transaction(internals.ffi as never, handle as never, readOnly, internals.dbHandle as never);
     }
 
     test('write transaction commits changes', async () => {
@@ -727,6 +727,131 @@ describeIfNative('Database Integration', () => {
       await expect(txn.createNode({ labels: ['ShouldFail'] })).rejects.toThrow(/read-only/i);
       txn.rollback();
       expect(txn.isActive()).toBe(false);
+    });
+  });
+
+  describe('Transaction-scoped visibility', () => {
+    beforeEach(async () => {
+      db = new Database(dbPath, { create: true, enableVectors: true, vectorDimensions: 4 });
+      await db.open();
+    });
+
+    function beginManualTransaction(readOnly: boolean): Transaction {
+      const internals = db as unknown as { ffi: unknown; dbHandle: unknown };
+      const ffi = internals.ffi as { begin: (dbHandle: unknown, ro: boolean) => unknown };
+      const handle = ffi.begin(internals.dbHandle, readOnly);
+      return new Transaction(internals.ffi as never, handle as never, readOnly, internals.dbHandle as never);
+    }
+
+    async function queryCount(txn: Transaction, cypher: string): Promise<bigint> {
+      const result = await txn.query(cypher);
+      expect(result.rows.length).toBe(1);
+      const row = result.rows[0]!;
+      return row[result.columns[0]!] as bigint;
+    }
+
+    test('overlapping reader does not observe staged graph changes', async () => {
+      let companyId: bigint = BigInt(0);
+      await db.write(async (txn) => {
+        const company = await txn.createNode({ labels: ['Company'] });
+        companyId = company.id;
+      });
+
+      const writer = beginManualTransaction(false);
+      const reader = beginManualTransaction(true);
+
+      try {
+        const alice = await writer.createNode({
+          labels: ['Person'],
+          properties: { name: 'Alice' },
+        });
+        await writer.createEdge(alice.id, companyId, 'WORKS_AT');
+
+        expect(await writer.nodeExists(alice.id)).toBe(true);
+        expect(await writer.getProperty(alice.id, 'name')).toBe('Alice');
+        expect(await writer.getNodesByLabel('Person')).toEqual([alice.id]);
+        expect((await writer.getIncomingEdges(companyId)).length).toBe(1);
+        expect(await queryCount(writer, 'MATCH (n:Person) RETURN count(n)')).toBe(BigInt(1));
+
+        expect(await reader.nodeExists(alice.id)).toBe(false);
+        expect(await reader.getNodesByLabel('Person')).toEqual([]);
+        expect(await reader.getIncomingEdges(companyId)).toEqual([]);
+        expect(await queryCount(reader, 'MATCH (n:Person) RETURN count(n)')).toBe(BigInt(0));
+
+        expect(await db.getNodesByLabel('Person')).toEqual([]);
+        const publicResult = await db.query('MATCH (n:Person) RETURN count(n)');
+        expect(publicResult.rows.length).toBe(1);
+        expect(publicResult.rows[0]![publicResult.columns[0]!]).toBe(BigInt(0));
+
+        writer.commit();
+
+        expect(await reader.nodeExists(alice.id)).toBe(false);
+        expect(await queryCount(reader, 'MATCH (n:Person) RETURN count(n)')).toBe(BigInt(0));
+
+        reader.rollback();
+
+        await db.read(async (afterCommit) => {
+          expect(await afterCommit.nodeExists(alice.id)).toBe(true);
+          expect(await afterCommit.getNodesByLabel('Person')).toEqual([alice.id]);
+          expect(await queryCount(afterCommit, 'MATCH (n:Person) RETURN count(n)')).toBe(BigInt(1));
+        });
+      } finally {
+        if (writer.isActive()) {
+          writer.rollback();
+        }
+        if (reader.isActive()) {
+          reader.rollback();
+        }
+      }
+    });
+
+    test('overlapping reader does not observe staged vector and fts changes', async () => {
+      const writer = beginManualTransaction(false);
+      const reader = beginManualTransaction(true);
+      const queryVec = new Float32Array([1, 0, 0, 0]);
+
+      try {
+        const doc = await writer.createNode({ labels: ['Document'] });
+        await writer.setVector(doc.id, 'embedding', queryVec);
+        await writer.ftsIndex(doc.id, 'machine learning systems');
+
+        const writerVector = await writer.vectorSearch(queryVec, { k: 5 });
+        expect(writerVector.length).toBe(1);
+        expect(writerVector[0]?.nodeId).toBe(doc.id);
+
+        const writerFts = await writer.ftsSearch('machine learning', { limit: 5 });
+        expect(writerFts.length).toBe(1);
+        expect(writerFts[0]?.nodeId).toBe(doc.id);
+
+        expect(await reader.vectorSearch(queryVec, { k: 5 })).toEqual([]);
+        expect(await reader.ftsSearch('machine learning', { limit: 5 })).toEqual([]);
+        expect(await db.vectorSearch(queryVec, { k: 5 })).toEqual([]);
+        expect(await db.ftsSearch('machine learning', { limit: 5 })).toEqual([]);
+
+        writer.commit();
+
+        expect(await reader.vectorSearch(queryVec, { k: 5 })).toEqual([]);
+        expect(await reader.ftsSearch('machine learning', { limit: 5 })).toEqual([]);
+
+        reader.rollback();
+
+        await db.read(async (afterCommit) => {
+          const afterVector = await afterCommit.vectorSearch(queryVec, { k: 5 });
+          expect(afterVector.length).toBe(1);
+          expect(afterVector[0]?.nodeId).toBe(doc.id);
+
+          const afterFts = await afterCommit.ftsSearch('machine learning', { limit: 5 });
+          expect(afterFts.length).toBe(1);
+          expect(afterFts[0]?.nodeId).toBe(doc.id);
+        });
+      } finally {
+        if (writer.isActive()) {
+          writer.rollback();
+        }
+        if (reader.isActive()) {
+          reader.rollback();
+        }
+      }
     });
   });
 

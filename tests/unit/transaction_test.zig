@@ -30,6 +30,7 @@ const recoverDatabase = recovery_mod.recoverDatabase;
 const PageManager = lattice.storage.page_manager.PageManager;
 
 const Database = lattice.storage.database.Database;
+const DbQueryResult = lattice.storage.database.QueryResult;
 
 // ============================================================================
 // Test Helpers
@@ -80,6 +81,12 @@ const TestContext = struct {
         self.vfs.vfs().delete(self.wal_path) catch {};
     }
 };
+
+fn expectSingleIntResult(result: *const DbQueryResult, expected: i64) !void {
+    try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+    try std.testing.expectEqual(@as(usize, 1), result.rows[0].values.len);
+    try std.testing.expectEqual(expected, result.rows[0].values[0].int_val);
+}
 
 // ============================================================================
 // 8.1 Transaction State Machine Tests
@@ -946,7 +953,7 @@ test "future: uncommitted node creation rolled back on abort" {
     const node_id = try db.createNode(&txn, &[_][]const u8{"Person"});
 
     // Verify node exists before abort
-    try std.testing.expect(try db.nodeExists(node_id));
+    try std.testing.expect(try db.nodeExistsInTxn(&txn, node_id));
 
     // 3. Abort transaction
     try db.abortTransaction(&txn);
@@ -990,7 +997,10 @@ test "future: uncommitted edge creation rolled back on abort" {
     try db.createEdge(&txn, alice, bob, "KNOWS");
 
     // Verify edge exists before abort
-    try std.testing.expect(db.edgeExists(alice, bob, "KNOWS"));
+    const staged_edges = try db.getOutgoingEdgesInTxn(&txn, alice);
+    defer db.freeEdgeInfos(staged_edges);
+    try std.testing.expectEqual(@as(usize, 1), staged_edges.len);
+    try std.testing.expectEqual(bob, staged_edges[0].target);
 
     // 3. Abort transaction
     try db.abortTransaction(&txn);
@@ -1035,11 +1045,14 @@ test "rollback: deleteEdgeById restores deleted parallel edge with same id" {
     };
 
     const edge1 = try db.edge_store.createAndGetId(source, target, rel_type, &props1);
-    _ = try db.edge_store.createAndGetId(source, target, rel_type, &props2);
+    const edge2 = try db.edge_store.createAndGetId(source, target, rel_type, &props2);
 
     var txn = try db.beginTransaction(.read_write);
     try db.deleteEdgeById(&txn, edge1);
-    try std.testing.expectError(lattice.graph.edge.EdgeError.NotFound, db.edge_store.getById(edge1));
+    const visible_refs = try db.getOutgoingEdgeRefsInTxn(&txn, source);
+    defer allocator.free(visible_refs);
+    try std.testing.expectEqual(@as(usize, 1), visible_refs.len);
+    try std.testing.expectEqual(edge2, visible_refs[0].id);
 
     try db.abortTransaction(&txn);
 
@@ -1084,9 +1097,10 @@ test "rollback: deleteEdge(source,target,type) restores the exact deleted edge i
     try db.deleteEdge(&txn, source, target, "REL");
 
     // Endpoint delete should remove the first matching edge (lowest edge_id).
-    try std.testing.expectError(lattice.graph.edge.EdgeError.NotFound, db.edge_store.getById(edge1));
-    var still_present = try db.edge_store.getById(edge2);
-    still_present.deinit(allocator);
+    const visible_refs = try db.getOutgoingEdgeRefsInTxn(&txn, source);
+    defer allocator.free(visible_refs);
+    try std.testing.expectEqual(@as(usize, 1), visible_refs.len);
+    try std.testing.expectEqual(edge2, visible_refs[0].id);
 
     try db.abortTransaction(&txn);
 
@@ -1137,10 +1151,13 @@ test "rollback: endpoint delete restores deleted parallel edge properties" {
     var txn = try db.beginTransaction(.read_write);
     try db.deleteEdge(&txn, source, target, "REL");
 
-    try std.testing.expectError(lattice.graph.edge.EdgeError.NotFound, db.edge_store.getById(edge1));
-    var still_present = try db.edge_store.getById(edge2);
+    const visible_refs = try db.getOutgoingEdgeRefsInTxn(&txn, source);
+    defer allocator.free(visible_refs);
+    try std.testing.expectEqual(@as(usize, 1), visible_refs.len);
+    try std.testing.expectEqual(edge2, visible_refs[0].id);
+    var still_present = (try db.getEdgePropertyByIdInTxn(&txn, edge2, "w")).?;
     defer still_present.deinit(allocator);
-    try std.testing.expectEqual(@as(i64, 22), still_present.properties[0].value.int_val);
+    try std.testing.expectEqual(@as(i64, 22), still_present.int_val);
 
     try db.abortTransaction(&txn);
 
@@ -1185,9 +1202,9 @@ test "rollback: deleting all parallel edges and aborting restores all edge ids" 
     try db.deleteEdge(&txn, source, target, "REL");
     try db.deleteEdge(&txn, source, target, "REL");
 
-    var refs_during = try db.getOutgoingEdgeRefs(source);
-    defer refs_during.deinit();
-    try std.testing.expect((try refs_during.next()) == null);
+    const refs_during = try db.getOutgoingEdgeRefsInTxn(&txn, source);
+    defer allocator.free(refs_during);
+    try std.testing.expectEqual(@as(usize, 0), refs_during.len);
 
     try db.abortTransaction(&txn);
 
@@ -1278,9 +1295,9 @@ test "rollback: edge property update by id restores previous value on abort" {
     var txn = try db.beginTransaction(.read_write);
     try db.setEdgePropertyById(&txn, edge_id, "w", .{ .int_val = 99 });
 
-    var updated = try db.edge_store.getById(edge_id);
+    var updated = (try db.getEdgePropertyByIdInTxn(&txn, edge_id, "w")).?;
     defer updated.deinit(allocator);
-    try std.testing.expectEqual(@as(i64, 99), updated.properties[0].value.int_val);
+    try std.testing.expectEqual(@as(i64, 99), updated.int_val);
 
     try db.abortTransaction(&txn);
 
@@ -1324,9 +1341,9 @@ test "rollback: edge property removal by id restores removed property on abort" 
     var txn = try db.beginTransaction(.read_write);
     try db.removeEdgePropertyById(&txn, edge_id, "temp");
 
-    var removed = try db.edge_store.getById(edge_id);
-    defer removed.deinit(allocator);
-    try std.testing.expectEqual(@as(usize, 0), removed.properties.len);
+    const removed = try db.getEdgePropertiesInTxn(&txn, edge_id);
+    defer db.freePropertyEntries(removed);
+    try std.testing.expectEqual(@as(usize, 0), removed.len);
 
     try db.abortTransaction(&txn);
 
@@ -1368,7 +1385,7 @@ test "future: crash mid-transaction loses graph changes" {
         node_id = try db.createNode(&txn, &[_][]const u8{"Person"});
 
         // Verify node exists in this session
-        try std.testing.expect(try db.nodeExists(node_id));
+        try std.testing.expect(try db.nodeExistsInTxn(&txn, node_id));
 
         // Simulate crash by just closing without commit
         db.close();
@@ -1442,6 +1459,200 @@ test "future: savepoint rollback undoes property changes" {
     // Future implementation requires savepoint API in Database
 }
 
+test "txn-aware reads: queries and traversals hide uncommitted graph changes" {
+    if (!databaseSupportsTransactions()) {
+        return error.SkipZigTest;
+    }
+
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_txn_graph_snapshot_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = true,
+            .enable_fts = false,
+            .enable_vector = false,
+        },
+    });
+    defer db.close();
+
+    const company = try db.createNode(null, &[_][]const u8{"Company"});
+
+    var write_txn = try db.beginTransaction(.read_write);
+    var read_txn = try db.beginTransaction(.read_only);
+
+    const alice = try db.createNode(&write_txn, &[_][]const u8{"Person"});
+    try db.setNodeProperty(&write_txn, alice, "name", .{ .string_val = "Alice" });
+    _ = try db.createEdgeAndGetId(&write_txn, alice, company, "WORKS_AT");
+
+    try std.testing.expect(try db.nodeExistsInTxn(&write_txn, alice));
+    var writer_name = (try db.getNodePropertyInTxn(&write_txn, alice, "name")).?;
+    defer writer_name.deinit(allocator);
+    try std.testing.expectEqualStrings("Alice", writer_name.string_val);
+
+    const writer_people = try db.getNodesByLabelInTxn(&write_txn, "Person");
+    defer allocator.free(writer_people);
+    try std.testing.expectEqual(@as(usize, 1), writer_people.len);
+    try std.testing.expectEqual(alice, writer_people[0]);
+
+    const writer_incoming = try db.getIncomingEdgesInTxn(&write_txn, company);
+    defer db.freeEdgeInfos(writer_incoming);
+    try std.testing.expectEqual(@as(usize, 1), writer_incoming.len);
+    try std.testing.expectEqual(alice, writer_incoming[0].source);
+
+    var writer_query = try db.queryInTxn(&write_txn, "MATCH (n:Person) RETURN count(n)");
+    defer writer_query.deinit();
+    try expectSingleIntResult(&writer_query, 1);
+
+    var writer_traversal_query = try db.queryInTxn(&write_txn, "MATCH (:Person)-[:WORKS_AT]->(c:Company) RETURN count(c)");
+    defer writer_traversal_query.deinit();
+    try expectSingleIntResult(&writer_traversal_query, 1);
+
+    try std.testing.expect(!(try db.nodeExistsInTxn(&read_txn, alice)));
+
+    const read_people = try db.getNodesByLabelInTxn(&read_txn, "Person");
+    defer allocator.free(read_people);
+    try std.testing.expectEqual(@as(usize, 0), read_people.len);
+
+    const read_incoming = try db.getIncomingEdgesInTxn(&read_txn, company);
+    defer db.freeEdgeInfos(read_incoming);
+    try std.testing.expectEqual(@as(usize, 0), read_incoming.len);
+
+    var read_query = try db.queryInTxn(&read_txn, "MATCH (n:Person) RETURN count(n)");
+    defer read_query.deinit();
+    try expectSingleIntResult(&read_query, 0);
+
+    try std.testing.expect(!(try db.nodeExists(alice)));
+
+    const public_people = try db.getNodesByLabel("Person");
+    defer allocator.free(public_people);
+    try std.testing.expectEqual(@as(usize, 0), public_people.len);
+
+    const public_incoming = try db.getIncomingEdges(company);
+    defer db.freeEdgeInfos(public_incoming);
+    try std.testing.expectEqual(@as(usize, 0), public_incoming.len);
+
+    var public_query = try db.query("MATCH (n:Person) RETURN count(n)");
+    defer public_query.deinit();
+    try expectSingleIntResult(&public_query, 0);
+
+    try db.commitTransaction(&write_txn);
+
+    try std.testing.expect(!(try db.nodeExistsInTxn(&read_txn, alice)));
+    var stale_query = try db.queryInTxn(&read_txn, "MATCH (n:Person) RETURN count(n)");
+    defer stale_query.deinit();
+    try expectSingleIntResult(&stale_query, 0);
+    try db.commitTransaction(&read_txn);
+
+    var after_commit = try db.beginTransaction(.read_only);
+    defer db.commitTransaction(&after_commit) catch {};
+
+    try std.testing.expect(try db.nodeExistsInTxn(&after_commit, alice));
+
+    const visible_people = try db.getNodesByLabelInTxn(&after_commit, "Person");
+    defer allocator.free(visible_people);
+    try std.testing.expectEqual(@as(usize, 1), visible_people.len);
+    try std.testing.expectEqual(alice, visible_people[0]);
+
+    const visible_incoming = try db.getIncomingEdgesInTxn(&after_commit, company);
+    defer db.freeEdgeInfos(visible_incoming);
+    try std.testing.expectEqual(@as(usize, 1), visible_incoming.len);
+    try std.testing.expectEqual(alice, visible_incoming[0].source);
+
+    var after_query = try db.queryInTxn(&after_commit, "MATCH (:Person)-[:WORKS_AT]->(c:Company) RETURN count(c)");
+    defer after_query.deinit();
+    try expectSingleIntResult(&after_query, 1);
+}
+
+test "txn-aware searches: vector and fts reads stay snapshot-scoped" {
+    if (!databaseSupportsTransactions()) {
+        return error.SkipZigTest;
+    }
+
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_txn_search_snapshot_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer std.fs.cwd().deleteFile(path) catch {};
+    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = true,
+            .enable_fts = true,
+            .enable_vector = true,
+            .vector_dimensions = 4,
+        },
+    });
+    defer db.close();
+
+    var write_txn = try db.beginTransaction(.read_write);
+    var read_txn = try db.beginTransaction(.read_only);
+
+    const doc = try db.createNode(&write_txn, &[_][]const u8{"Document"});
+    const query_vector = [_]f32{ 1.0, 0.0, 0.0, 0.0 };
+    try db.setNodeVectorInTxn(&write_txn, doc, &query_vector);
+    try db.ftsIndexDocumentInTxn(&write_txn, doc, "machine learning systems");
+
+    const writer_vector = try db.vectorSearchInTxn(&write_txn, &query_vector, 5, null);
+    defer db.freeVectorSearchResults(writer_vector);
+    try std.testing.expectEqual(@as(usize, 1), writer_vector.len);
+    try std.testing.expectEqual(doc, writer_vector[0].node_id);
+
+    const writer_fts = try db.ftsSearchInTxn(&write_txn, "machine learning", 5);
+    defer db.freeFtsSearchResults(writer_fts);
+    try std.testing.expectEqual(@as(usize, 1), writer_fts.len);
+    try std.testing.expectEqual(doc, writer_fts[0].doc_id);
+
+    const read_vector = try db.vectorSearchInTxn(&read_txn, &query_vector, 5, null);
+    defer db.freeVectorSearchResults(read_vector);
+    try std.testing.expectEqual(@as(usize, 0), read_vector.len);
+
+    const read_fts = try db.ftsSearchInTxn(&read_txn, "machine learning", 5);
+    defer db.freeFtsSearchResults(read_fts);
+    try std.testing.expectEqual(@as(usize, 0), read_fts.len);
+
+    const public_vector = try db.vectorSearch(&query_vector, 5, null);
+    defer db.freeVectorSearchResults(public_vector);
+    try std.testing.expectEqual(@as(usize, 0), public_vector.len);
+
+    const public_fts = try db.ftsSearch("machine learning", 5);
+    defer db.freeFtsSearchResults(public_fts);
+    try std.testing.expectEqual(@as(usize, 0), public_fts.len);
+
+    try db.commitTransaction(&write_txn);
+
+    const stale_vector = try db.vectorSearchInTxn(&read_txn, &query_vector, 5, null);
+    defer db.freeVectorSearchResults(stale_vector);
+    try std.testing.expectEqual(@as(usize, 0), stale_vector.len);
+
+    const stale_fts = try db.ftsSearchInTxn(&read_txn, "machine learning", 5);
+    defer db.freeFtsSearchResults(stale_fts);
+    try std.testing.expectEqual(@as(usize, 0), stale_fts.len);
+    try db.commitTransaction(&read_txn);
+
+    var after_commit = try db.beginTransaction(.read_only);
+    defer db.commitTransaction(&after_commit) catch {};
+
+    const visible_vector = try db.vectorSearchInTxn(&after_commit, &query_vector, 5, null);
+    defer db.freeVectorSearchResults(visible_vector);
+    try std.testing.expectEqual(@as(usize, 1), visible_vector.len);
+    try std.testing.expectEqual(doc, visible_vector[0].node_id);
+
+    const visible_fts = try db.ftsSearchInTxn(&after_commit, "machine learning", 5);
+    defer db.freeFtsSearchResults(visible_fts);
+    try std.testing.expectEqual(@as(usize, 1), visible_fts.len);
+    try std.testing.expectEqual(doc, visible_fts[0].doc_id);
+}
+
 // ============================================================================
 // Property Rollback Tests (newly implemented)
 // ============================================================================
@@ -1478,7 +1689,7 @@ test "rollback: node deletion restores node with original ID" {
     try db.deleteNode(&txn, original_id);
 
     // Verify node is gone
-    try std.testing.expect(!(try db.nodeExists(original_id)));
+    try std.testing.expect(!(try db.nodeExistsInTxn(&txn, original_id)));
 
     // 3. Abort - should restore node with SAME ID
     try db.abortTransaction(&txn);
@@ -1525,7 +1736,7 @@ test "rollback: property update restores old value" {
     try db.setNodeProperty(&txn, node_id, "age", PropertyValue{ .int_val = 30 });
 
     // Verify property updated
-    const updated_val = try db.getNodeProperty(node_id, "age");
+    const updated_val = try db.getNodePropertyInTxn(&txn, node_id, "age");
     try std.testing.expectEqual(@as(i64, 30), updated_val.?.int_val);
 
     // 3. Abort - should restore old value
@@ -1575,7 +1786,7 @@ test "rollback: property removal restores property" {
     try db.removeNodeProperty(&txn, node_id, "name");
 
     // Verify property removed
-    const removed_val = try db.getNodeProperty(node_id, "name");
+    const removed_val = try db.getNodePropertyInTxn(&txn, node_id, "name");
     try std.testing.expect(removed_val == null);
 
     // 3. Abort - should restore property
@@ -1624,7 +1835,7 @@ test "rollback: new property added in txn is removed on abort" {
     try db.setNodeProperty(&txn, node_id, "email", PropertyValue{ .string_val = "alice@example.com" });
 
     // Verify property added
-    var added_val = (try db.getNodeProperty(node_id, "email")).?;
+    var added_val = (try db.getNodePropertyInTxn(&txn, node_id, "email")).?;
     defer added_val.deinit(allocator);
     try std.testing.expectEqualStrings("alice@example.com", added_val.string_val);
 
@@ -1676,7 +1887,7 @@ test "rollback: label addition is undone on abort" {
     try db.addNodeLabel(&txn, node_id, "Employee");
 
     // Verify label was added
-    const labels_after_add = try db.getNodeLabels(node_id);
+    const labels_after_add = try db.getNodeLabelsInTxn(&txn, node_id);
     defer {
         for (labels_after_add) |label| allocator.free(label);
         allocator.free(labels_after_add);
@@ -1735,7 +1946,7 @@ test "rollback: label removal is undone on abort" {
     try db.removeNodeLabel(&txn, node_id, "Employee");
 
     // Verify label was removed
-    const labels_after_remove = try db.getNodeLabels(node_id);
+    const labels_after_remove = try db.getNodeLabelsInTxn(&txn, node_id);
     defer {
         for (labels_after_remove) |label| allocator.free(label);
         allocator.free(labels_after_remove);

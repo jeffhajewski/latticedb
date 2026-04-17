@@ -17,9 +17,10 @@ const types = @import("../../core/types.zig");
 const NodeId = types.NodeId;
 
 const hnsw = @import("../../vector/hnsw.zig");
-const HnswIndex = hnsw.HnswIndex;
-const HnswError = hnsw.HnswError;
 const SearchResult = hnsw.SearchResult;
+
+const database_mod = @import("../../storage/database.zig");
+const Database = database_mod.Database;
 
 // ============================================================================
 // VectorSearch Operator
@@ -36,8 +37,8 @@ pub const VectorSearch = struct {
     k: u32,
     /// Optional distance threshold
     distance_threshold: ?f32,
-    /// HNSW index
-    index: *HnswIndex,
+    /// Database for txn-aware vector search
+    database: *Database,
     /// Search results
     results: ?[]SearchResult,
     /// Current result index
@@ -56,7 +57,7 @@ pub const VectorSearch = struct {
         query_vector: []const f32,
         k: u32,
         distance_threshold: ?f32,
-        index: *HnswIndex,
+        database: *Database,
     ) !*Self {
         const self = try allocator.create(Self);
         self.* = Self{
@@ -64,7 +65,7 @@ pub const VectorSearch = struct {
             .query_vector = query_vector,
             .k = k,
             .distance_threshold = distance_threshold,
-            .index = index,
+            .database = database,
             .results = null,
             .current_index = 0,
             .output_row = null,
@@ -95,9 +96,7 @@ pub const VectorSearch = struct {
         self.output_row = ctx.allocRow() catch return OperatorError.OutOfMemory;
 
         // Perform the search
-        self.results = self.index.search(self.query_vector, self.k, null) catch |err| {
-            return mapHnswError(err);
-        };
+        self.results = self.database.vectorSearchInTxn(ctx.txn, self.query_vector, self.k, null) catch return OperatorError.StorageError;
         self.current_index = 0;
     }
 
@@ -133,7 +132,7 @@ pub const VectorSearch = struct {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
         if (self.results) |results| {
-            self.index.freeResults(results);
+            self.database.freeVectorSearchResults(results);
             self.results = null;
         }
     }
@@ -143,20 +142,12 @@ pub const VectorSearch = struct {
 
         // Free results if not already freed
         if (self.results) |results| {
-            self.index.freeResults(results);
+            self.database.freeVectorSearchResults(results);
         }
 
         allocator.destroy(self);
     }
 };
-
-/// Map HNSW errors to OperatorError
-fn mapHnswError(err: HnswError) OperatorError {
-    return switch (err) {
-        HnswError.OutOfMemory => OperatorError.OutOfMemory,
-        else => OperatorError.StorageError,
-    };
-}
 
 // ============================================================================
 // VectorSearchWithInput Operator
@@ -178,8 +169,8 @@ pub const VectorSearchWithInput = struct {
     k: u32,
     /// Distance threshold (optional)
     distance_threshold: ?f32,
-    /// HNSW index
-    index: *HnswIndex,
+    /// Database for txn-aware vector search
+    database: *Database,
     /// Search results from HNSW
     results: ?[]SearchResult,
     /// Current result index
@@ -203,7 +194,7 @@ pub const VectorSearchWithInput = struct {
         param_name: []const u8,
         k: u32,
         distance_threshold: ?f32,
-        index: *HnswIndex,
+        database: *Database,
     ) !*Self {
         const self = try allocator.create(Self);
         self.* = Self{
@@ -213,7 +204,7 @@ pub const VectorSearchWithInput = struct {
             .literal_query = null,
             .k = k,
             .distance_threshold = distance_threshold,
-            .index = index,
+            .database = database,
             .results = null,
             .current_index = 0,
             .current_node_row_index = 0,
@@ -232,7 +223,7 @@ pub const VectorSearchWithInput = struct {
         query_vector: []const f32,
         k: u32,
         distance_threshold: ?f32,
-        index: *HnswIndex,
+        database: *Database,
     ) !*Self {
         const self = try allocator.create(Self);
         self.* = Self{
@@ -242,7 +233,7 @@ pub const VectorSearchWithInput = struct {
             .literal_query = query_vector,
             .k = k,
             .distance_threshold = distance_threshold,
-            .index = index,
+            .database = database,
             .results = null,
             .current_index = 0,
             .current_node_row_index = 0,
@@ -275,7 +266,7 @@ pub const VectorSearchWithInput = struct {
         errdefer {
             self.clearRowsByNode();
             if (self.results) |results| {
-                self.index.freeResults(results);
+                self.database.freeVectorSearchResults(results);
                 self.results = null;
             }
             if (self.opened) {
@@ -302,9 +293,7 @@ pub const VectorSearchWithInput = struct {
         };
 
         // Perform the HNSW search
-        self.results = self.index.search(query_vector, self.k, null) catch |err| {
-            return mapHnswError(err);
-        };
+        self.results = self.database.vectorSearchInTxn(ctx.txn, query_vector, self.k, null) catch return OperatorError.StorageError;
 
         // Precompute node IDs that survived vector-side filtering to avoid
         // storing irrelevant input rows.
@@ -377,7 +366,7 @@ pub const VectorSearchWithInput = struct {
 
         // Free search results
         if (self.results) |results| {
-            self.index.freeResults(results);
+            self.database.freeVectorSearchResults(results);
             self.results = null;
         }
 
@@ -394,7 +383,7 @@ pub const VectorSearchWithInput = struct {
 
         // Free results if not already freed
         if (self.results) |results| {
-            self.index.freeResults(results);
+            self.database.freeVectorSearchResults(results);
         }
 
         self.clearRowsByNode();

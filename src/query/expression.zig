@@ -310,22 +310,14 @@ pub const ExpressionEvaluator = struct {
             // Special pseudo-property for vector embeddings stored outside node properties.
             if (std.mem.eql(u8, pa.property, "embedding")) {
                 if (ctx.database) |database| {
-                    if (database.hnsw_index) |*hnsw_index| {
-                        if (hnsw_index.getNode(node_id)) |entry| {
-                            if (database.vector_storage) |*vector_storage| {
-                                const borrowed = vector_storage.borrowByLocation(entry.vector_loc) catch return .{ .null_val = {} };
-                                defer borrowed.release();
-
-                                const cloned = self.allocator.dupe(f32, borrowed.data) catch return EvalError.OutOfMemory;
-                                return .{ .vector_val = cloned };
-                            }
-                        }
+                    if (database.getNodeVectorInTxn(ctx.txn, node_id) catch return .{ .null_val = {} }) |vector| {
+                        return .{ .vector_val = vector };
                     }
                 }
             }
 
             // Get the node store and symbol table from context
-            const node_store = ctx.node_store orelse return .{ .null_val = {} };
+            const database = ctx.database orelse return .{ .null_val = {} };
             const symbol_table = ctx.symbol_table orelse return .{ .null_val = {} };
 
             // Look up the property key symbol ID
@@ -335,9 +327,9 @@ pub const ExpressionEvaluator = struct {
             };
 
             // Get the node from storage
-            var node = node_store.get(node_id) catch {
+            var node = database.getNodeInTxn(ctx.txn, node_id) catch {
                 return .{ .null_val = {} };
-            };
+            } orelse return .{ .null_val = {} };
             defer node.deinit(ctx.allocator);
 
             // Find the property with matching key_id
@@ -355,31 +347,15 @@ pub const ExpressionEvaluator = struct {
         if (obj == .edge_ref) {
             const edge_id = obj.edge_ref;
 
-            // Get the database and symbol table from context
+            // Get the database from context
             const database = ctx.database orelse return .{ .null_val = {} };
-            const symbol_table = ctx.symbol_table orelse return .{ .null_val = {} };
 
-            // Look up the property key symbol ID
-            const key_id = symbol_table.lookup(pa.property) catch {
-                // Property key not found in symbol table
+            var prop = database.getEdgePropertyByIdInTxn(ctx.txn, edge_id, pa.property) catch {
                 return .{ .null_val = {} };
-            };
+            } orelse return .{ .null_val = {} };
+            defer prop.deinit(ctx.allocator);
 
-            // Get the edge from storage
-            var edge = database.edge_store.getById(edge_id) catch {
-                return .{ .null_val = {} };
-            };
-            defer edge.deinit(ctx.allocator);
-
-            // Find the property with matching key_id
-            for (edge.properties) |prop| {
-                if (prop.key_id == key_id) {
-                    return EvalResult.fromPropertyValue(prop.value, self.allocator);
-                }
-            }
-
-            // Property not found on this edge
-            return .{ .null_val = {} };
+            return EvalResult.fromPropertyValue(prop, self.allocator);
         }
 
         // Unknown object type
@@ -779,7 +755,7 @@ pub const ExpressionEvaluator = struct {
                 .edge_ref => |edge_id| blk: {
                     const symbol_table = ctx.symbol_table orelse break :blk .{ .null_val = {} };
                     const database = ctx.database orelse break :blk .{ .null_val = {} };
-                    var edge = database.edge_store.getById(edge_id) catch break :blk .{ .null_val = {} };
+                    var edge = (database.getEdgeInTxn(ctx.txn, edge_id) catch break :blk .{ .null_val = {} }) orelse break :blk .{ .null_val = {} };
                     defer edge.deinit(ctx.allocator);
                     const resolved = symbol_table.resolve(edge.edge_type) catch break :blk .{ .null_val = {} };
                     defer symbol_table.freeString(resolved);
@@ -796,9 +772,9 @@ pub const ExpressionEvaluator = struct {
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             return switch (arg) {
                 .node_ref => |node_id| blk: {
-                    const node_store = ctx.node_store orelse break :blk .{ .null_val = {} };
+                    const database = ctx.database orelse break :blk .{ .null_val = {} };
                     const symbol_table = ctx.symbol_table orelse break :blk .{ .null_val = {} };
-                    var node = node_store.get(node_id) catch break :blk .{ .null_val = {} };
+                    var node = (database.getNodeInTxn(ctx.txn, node_id) catch break :blk .{ .null_val = {} }) orelse break :blk .{ .null_val = {} };
                     defer node.deinit(ctx.allocator);
                     var label_list: std.ArrayListUnmanaged(EvalResult) = .empty;
                     for (node.labels) |label_id| {
@@ -819,9 +795,9 @@ pub const ExpressionEvaluator = struct {
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             if (arg == .node_ref) {
                 const node_id = arg.node_ref;
-                const node_store = ctx.node_store orelse return .{ .null_val = {} };
+                const database = ctx.database orelse return .{ .null_val = {} };
                 const symbol_table = ctx.symbol_table orelse return .{ .null_val = {} };
-                var node = node_store.get(node_id) catch return .{ .null_val = {} };
+                var node = (database.getNodeInTxn(ctx.txn, node_id) catch return .{ .null_val = {} }) orelse return .{ .null_val = {} };
                 defer node.deinit(ctx.allocator);
                 var entries: std.ArrayListUnmanaged(EvalResult.MapEntry) = .empty;
                 for (node.properties) |prop| {
@@ -838,7 +814,7 @@ pub const ExpressionEvaluator = struct {
                 const edge_id = arg.edge_ref;
                 const database = ctx.database orelse return .{ .null_val = {} };
                 const symbol_table = ctx.symbol_table orelse return .{ .null_val = {} };
-                var edge = database.edge_store.getById(edge_id) catch return .{ .null_val = {} };
+                var edge = (database.getEdgeInTxn(ctx.txn, edge_id) catch return .{ .null_val = {} }) orelse return .{ .null_val = {} };
                 defer edge.deinit(ctx.allocator);
                 var entries: std.ArrayListUnmanaged(EvalResult.MapEntry) = .empty;
                 for (edge.properties) |prop| {

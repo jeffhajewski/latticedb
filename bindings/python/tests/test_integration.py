@@ -1023,6 +1023,105 @@ class TestFtsFuzzyOperations:
             assert len(results_loose) >= len(results_tight)
 
 
+class TestTransactionScopedVisibility:
+    """Regression tests for transaction-scoped read/query/search visibility."""
+
+    def test_uncommitted_graph_changes_are_hidden_from_other_transactions(self, tmp_path):
+        """A reader should not observe another transaction's staged graph/query changes."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as seed:
+                company = seed.create_node(labels=["Company"])
+                seed.commit()
+
+            with db.write() as writer:
+                with db.read() as reader:
+                    alice = writer.create_node(
+                        labels=["Person"],
+                        properties={"name": "Alice"},
+                    )
+                    writer.create_edge(alice.id, company.id, "WORKS_AT")
+
+                    assert writer.node_exists(alice.id) is True
+                    assert writer.get_property(alice.id, "name") == "Alice"
+                    assert writer.get_nodes_by_label("Person") == [alice.id]
+                    assert len(writer.get_incoming_edges(company.id)) == 1
+
+                    writer_rows = list(writer.query("MATCH (n:Person) RETURN count(n)"))
+                    assert len(writer_rows) == 1
+                    assert next(iter(writer_rows[0].values())) == 1
+
+                    assert reader.node_exists(alice.id) is False
+                    assert reader.get_nodes_by_label("Person") == []
+                    assert reader.get_incoming_edges(company.id) == []
+
+                    reader_rows = list(reader.query("MATCH (n:Person) RETURN count(n)"))
+                    assert len(reader_rows) == 1
+                    assert next(iter(reader_rows[0].values())) == 0
+
+                    assert db.get_nodes_by_label("Person") == []
+                    public_rows = list(db.query("MATCH (n:Person) RETURN count(n)"))
+                    assert len(public_rows) == 1
+                    assert next(iter(public_rows[0].values())) == 0
+
+                    writer.commit()
+
+                    assert reader.node_exists(alice.id) is False
+                    stale_rows = list(reader.query("MATCH (n:Person) RETURN count(n)"))
+                    assert len(stale_rows) == 1
+                    assert next(iter(stale_rows[0].values())) == 0
+
+            with db.read() as after_commit:
+                assert after_commit.node_exists(alice.id) is True
+                assert after_commit.get_nodes_by_label("Person") == [alice.id]
+                after_rows = list(after_commit.query("MATCH (n:Person) RETURN count(n)"))
+                assert len(after_rows) == 1
+                assert next(iter(after_rows[0].values())) == 1
+
+    def test_uncommitted_vector_and_fts_changes_are_hidden_from_other_transactions(self, tmp_path):
+        """A reader should not observe another transaction's staged vector/FTS changes."""
+        db_path = tmp_path / "test.db"
+
+        import numpy as np
+
+        query_vec = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
+
+        with Database(db_path, create=True, enable_vectors=True, vector_dimensions=4) as db:
+            with db.write() as writer:
+                with db.read() as reader:
+                    doc = writer.create_node(labels=["Document"])
+                    writer.set_vector(doc.id, "embedding", query_vec)
+                    writer.fts_index(doc.id, "machine learning systems")
+
+                    writer_vector = writer.vector_search(query_vec, k=5)
+                    assert len(writer_vector) == 1
+                    assert writer_vector[0].node_id == doc.id
+
+                    writer_fts = writer.fts_search("machine learning", limit=5)
+                    assert len(writer_fts) == 1
+                    assert writer_fts[0].node_id == doc.id
+
+                    assert reader.vector_search(query_vec, k=5) == []
+                    assert reader.fts_search("machine learning", limit=5) == []
+                    assert db.vector_search(query_vec, k=5) == []
+                    assert db.fts_search("machine learning", limit=5) == []
+
+                    writer.commit()
+
+                    assert reader.vector_search(query_vec, k=5) == []
+                    assert reader.fts_search("machine learning", limit=5) == []
+
+            with db.read() as after_commit:
+                after_vector = after_commit.vector_search(query_vec, k=5)
+                assert len(after_vector) == 1
+                assert after_vector[0].node_id == doc.id
+
+                after_fts = after_commit.fts_search("machine learning", limit=5)
+                assert len(after_fts) == 1
+                assert after_fts[0].node_id == doc.id
+
+
 class TestUtilities:
     """Tests for utility functions."""
 

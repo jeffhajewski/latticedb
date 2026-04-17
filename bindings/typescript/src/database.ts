@@ -117,7 +117,7 @@ export class Database {
   async read<T>(fn: (txn: Transaction) => Promise<T>): Promise<T> {
     this.ensureOpen();
     const txnHandle = this.ffi!.begin(this.dbHandle!, true);
-    const txn = new Transaction(this.ffi!, txnHandle, true);
+    const txn = new Transaction(this.ffi!, txnHandle, true, this.dbHandle!);
     try {
       const result = await fn(txn);
       return result;
@@ -138,7 +138,7 @@ export class Database {
     }
     this.ensureOpen();
     const txnHandle = this.ffi!.begin(this.dbHandle!, false);
-    const txn = new Transaction(this.ffi!, txnHandle, false);
+    const txn = new Transaction(this.ffi!, txnHandle, false, this.dbHandle!);
     try {
       const result = await fn(txn);
       txn.commit();

@@ -198,8 +198,7 @@ pub const LabelFilter = struct {
 
         if (!self.opened) return OperatorError.NotInitialized;
 
-        // Get node store from context
-        const node_store = ctx.node_store orelse return OperatorError.StorageError;
+        const database = ctx.database orelse return OperatorError.StorageError;
 
         // Pull rows from input until we find one where the node has the required label
         while (true) {
@@ -210,9 +209,9 @@ pub const LabelFilter = struct {
             const node_id = slot_value.asNodeId() orelse continue;
 
             // Look up the node to check its labels
-            var node = node_store.get(node_id) catch {
+            var node = database.getNodeInTxn(ctx.txn, node_id) catch {
                 continue; // Node not found, skip
-            };
+            } orelse continue;
             defer node.deinit(ctx.allocator);
 
             // Check if the node has the required label

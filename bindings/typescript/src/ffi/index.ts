@@ -344,7 +344,38 @@ export class LatticeFFI {
     }
 
     try {
-      return koffi.decode(ptr, 'uint64', count) as bigint[];
+      const decoded = koffi.decode(ptr, 'uint64', count) as Array<number | bigint>;
+      return decoded.map((id) => typeof id === 'bigint' ? id : BigInt(id));
+    } finally {
+      this.bindings.lattice_free_node_ids(ptr, count);
+    }
+  }
+
+  /**
+   * Return every node id that currently carries `label` within `txn`.
+   */
+  getNodesByLabelInTxn(txn: TransactionHandle, label: string): bigint[] {
+    const labelBytes = Buffer.byteLength(label, 'utf8');
+    const idsOut: unknown[] = [null];
+    const countOut = [0];
+    const err = this.bindings.lattice_get_nodes_by_label_txn(
+      txn,
+      label,
+      labelBytes,
+      idsOut,
+      countOut
+    );
+    this.checkError(err);
+
+    const ptr = idsOut[0];
+    const count = countOut[0] ?? 0;
+    if (!ptr || count === 0) {
+      return [];
+    }
+
+    try {
+      const decoded = koffi.decode(ptr, 'uint64', count) as Array<number | bigint>;
+      return decoded.map((id) => typeof id === 'bigint' ? id : BigInt(id));
     } finally {
       this.bindings.lattice_free_node_ids(ptr, count);
     }
@@ -695,6 +726,28 @@ export class LatticeFFI {
   }
 
   /**
+   * Search for similar vectors within `txn`.
+   */
+  vectorSearchInTxn(
+    txn: TransactionHandle,
+    vector: Float32Array,
+    k: number,
+    efSearch: number = 0
+  ): VectorResultHandle {
+    const resultOut: unknown[] = [null];
+    const err = this.bindings.lattice_vector_search_txn(
+      txn,
+      vector,
+      vector.length,
+      k,
+      efSearch,
+      resultOut
+    );
+    this.checkError(err);
+    return resultOut[0];
+  }
+
+  /**
    * Get the count of vector search results.
    */
   vectorResultCount(result: VectorResultHandle): number {
@@ -763,6 +816,26 @@ export class LatticeFFI {
   }
 
   /**
+   * Search for documents within `txn`.
+   */
+  ftsSearchInTxn(
+    txn: TransactionHandle,
+    query: string,
+    limit: number
+  ): FtsResultHandle {
+    const resultOut: unknown[] = [null];
+    const err = this.bindings.lattice_fts_search_txn(
+      txn,
+      query,
+      Buffer.byteLength(query, 'utf8'),
+      limit,
+      resultOut
+    );
+    this.checkError(err);
+    return resultOut[0];
+  }
+
+  /**
    * Search for documents with fuzzy matching.
    */
   ftsSearchFuzzy(
@@ -775,6 +848,30 @@ export class LatticeFFI {
     const resultOut: unknown[] = [null];
     const err = this.bindings.lattice_fts_search_fuzzy(
       db,
+      query,
+      Buffer.byteLength(query, 'utf8'),
+      limit,
+      maxDistance,
+      minTermLength,
+      resultOut
+    );
+    this.checkError(err);
+    return resultOut[0];
+  }
+
+  /**
+   * Search for documents with fuzzy matching within `txn`.
+   */
+  ftsSearchFuzzyInTxn(
+    txn: TransactionHandle,
+    query: string,
+    limit: number,
+    maxDistance: number = 0,
+    minTermLength: number = 0
+  ): FtsResultHandle {
+    const resultOut: unknown[] = [null];
+    const err = this.bindings.lattice_fts_search_fuzzy_txn(
+      txn,
       query,
       Buffer.byteLength(query, 'utf8'),
       limit,

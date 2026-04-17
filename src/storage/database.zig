@@ -74,6 +74,7 @@ pub const FtsSearchResult = scorer_mod.ScoredDoc;
 const vector_storage_mod = lattice.vector.storage;
 const VectorStorage = vector_storage_mod.VectorStorage;
 const VectorStorageError = vector_storage_mod.VectorStorageError;
+const vector_distance = lattice.vector.distance;
 
 const hnsw_mod = lattice.vector.hnsw;
 const HnswIndex = hnsw_mod.HnswIndex;
@@ -373,6 +374,199 @@ pub const OpenOptions = struct {
     config: DatabaseConfig = .{},
 };
 
+const TxnNodeState = struct {
+    exists: bool,
+    labels: []symbols_mod.SymbolId,
+    properties: []node_mod.Property,
+
+    fn clone(self: TxnNodeState, allocator: Allocator) Allocator.Error!TxnNodeState {
+        return .{
+            .exists = self.exists,
+            .labels = try cloneSymbolIds(allocator, self.labels),
+            .properties = try cloneProperties(allocator, self.properties),
+        };
+    }
+
+    fn toNode(self: TxnNodeState, allocator: Allocator, node_id: NodeId) Allocator.Error!node_mod.Node {
+        return .{
+            .id = node_id,
+            .labels = try cloneSymbolIds(allocator, self.labels),
+            .properties = try cloneProperties(allocator, self.properties),
+        };
+    }
+
+    fn deinit(self: *TxnNodeState, allocator: Allocator) void {
+        allocator.free(self.labels);
+        freeProperties(allocator, self.properties);
+        self.* = undefined;
+    }
+};
+
+const TxnEdgeState = struct {
+    exists: bool,
+    source: NodeId,
+    target: NodeId,
+    edge_type: symbols_mod.SymbolId,
+    properties: []node_mod.Property,
+
+    fn clone(self: TxnEdgeState, allocator: Allocator) Allocator.Error!TxnEdgeState {
+        return .{
+            .exists = self.exists,
+            .source = self.source,
+            .target = self.target,
+            .edge_type = self.edge_type,
+            .properties = try cloneProperties(allocator, self.properties),
+        };
+    }
+
+    fn toEdge(self: TxnEdgeState, allocator: Allocator, edge_id: EdgeId) Allocator.Error!edge_mod.Edge {
+        return .{
+            .id = edge_id,
+            .source = self.source,
+            .target = self.target,
+            .edge_type = self.edge_type,
+            .properties = try cloneProperties(allocator, self.properties),
+        };
+    }
+
+    fn deinit(self: *TxnEdgeState, allocator: Allocator) void {
+        freeProperties(allocator, self.properties);
+        self.* = undefined;
+    }
+};
+
+const TxnVectorState = union(enum) {
+    absent: void,
+    value: []f32,
+
+    fn clone(self: TxnVectorState, allocator: Allocator) Allocator.Error!TxnVectorState {
+        return switch (self) {
+            .absent => .{ .absent = {} },
+            .value => |vector| .{ .value = try allocator.dupe(f32, vector) },
+        };
+    }
+
+    fn deinit(self: *TxnVectorState, allocator: Allocator) void {
+        switch (self.*) {
+            .absent => {},
+            .value => |vector| allocator.free(vector),
+        }
+        self.* = undefined;
+    }
+};
+
+const TxnFtsDocState = union(enum) {
+    absent: void,
+    text: []u8,
+
+    fn clone(self: TxnFtsDocState, allocator: Allocator) Allocator.Error!TxnFtsDocState {
+        return switch (self) {
+            .absent => .{ .absent = {} },
+            .text => |text| .{ .text = try allocator.dupe(u8, text) },
+        };
+    }
+
+    fn deinit(self: *TxnFtsDocState, allocator: Allocator) void {
+        switch (self.*) {
+            .absent => {},
+            .text => |text| allocator.free(text),
+        }
+        self.* = undefined;
+    }
+};
+
+const TxnOverlay = struct {
+    node_states: std.AutoHashMapUnmanaged(NodeId, TxnNodeState) = .{},
+    edge_states: std.AutoHashMapUnmanaged(EdgeId, TxnEdgeState) = .{},
+    vector_states: std.AutoHashMapUnmanaged(NodeId, TxnVectorState) = .{},
+    fts_docs: std.AutoHashMapUnmanaged(NodeId, TxnFtsDocState) = .{},
+    has_staged_writes: bool = false,
+
+    fn hasChanges(self: *const TxnOverlay) bool {
+        return self.has_staged_writes;
+    }
+
+    fn markDirty(self: *TxnOverlay) void {
+        self.has_staged_writes = true;
+    }
+
+    fn deinit(self: *TxnOverlay, allocator: Allocator) void {
+        var node_iter = self.node_states.iterator();
+        while (node_iter.next()) |entry| {
+            entry.value_ptr.deinit(allocator);
+        }
+        self.node_states.deinit(allocator);
+
+        var edge_iter = self.edge_states.iterator();
+        while (edge_iter.next()) |entry| {
+            entry.value_ptr.deinit(allocator);
+        }
+        self.edge_states.deinit(allocator);
+
+        var vector_iter = self.vector_states.iterator();
+        while (vector_iter.next()) |entry| {
+            entry.value_ptr.deinit(allocator);
+        }
+        self.vector_states.deinit(allocator);
+
+        var fts_iter = self.fts_docs.iterator();
+        while (fts_iter.next()) |entry| {
+            entry.value_ptr.deinit(allocator);
+        }
+        self.fts_docs.deinit(allocator);
+
+        self.* = .{};
+    }
+};
+
+fn cloneSymbolIds(allocator: Allocator, labels: []const symbols_mod.SymbolId) Allocator.Error![]symbols_mod.SymbolId {
+    return allocator.dupe(symbols_mod.SymbolId, labels);
+}
+
+fn cloneProperties(allocator: Allocator, properties: []const node_mod.Property) Allocator.Error![]node_mod.Property {
+    const cloned = try allocator.alloc(node_mod.Property, properties.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (cloned[0..initialized]) |*prop| {
+            var value = prop.value;
+            value.deinit(allocator);
+        }
+        allocator.free(cloned);
+    }
+
+    for (properties, 0..) |prop, i| {
+        cloned[i] = .{
+            .key_id = prop.key_id,
+            .value = try prop.value.clone(allocator),
+        };
+        initialized += 1;
+    }
+    return cloned;
+}
+
+fn freeProperties(allocator: Allocator, properties: []node_mod.Property) void {
+    for (properties) |*prop| {
+        var value = prop.value;
+        value.deinit(allocator);
+    }
+    allocator.free(properties);
+}
+
+fn emptySymbolIds(allocator: Allocator) Allocator.Error![]symbols_mod.SymbolId {
+    return allocator.alloc(symbols_mod.SymbolId, 0);
+}
+
+fn emptyProperties(allocator: Allocator) Allocator.Error![]node_mod.Property {
+    return allocator.alloc(node_mod.Property, 0);
+}
+
+fn containsSymbolId(values: []const symbols_mod.SymbolId, needle: symbols_mod.SymbolId) bool {
+    for (values) |value| {
+        if (value == needle) return true;
+    }
+    return false;
+}
+
 /// Central database coordinator
 pub const Database = struct {
     allocator: Allocator,
@@ -408,6 +602,7 @@ pub const Database = struct {
 
     // Transactions
     txn_manager: ?TxnManager,
+    txn_overlays: std.AutoHashMap(u64, TxnOverlay),
 
     // Caches
     adjacency_cache: ?AdjacencyCache,
@@ -587,6 +782,7 @@ pub const Database = struct {
         if (self.wal) |*wal| {
             self.txn_manager = TxnManager.init(allocator, wal);
         }
+        self.txn_overlays = std.AutoHashMap(u64, TxnOverlay).init(allocator);
 
         // 10. Initialize Adjacency Cache (optional)
         self.adjacency_cache = if (options.config.enable_adjacency_cache)
@@ -654,6 +850,13 @@ pub const Database = struct {
             cache.deinit();
         }
 
+        // 9b. Transaction overlays
+        var overlay_iter = self.txn_overlays.iterator();
+        while (overlay_iter.next()) |entry| {
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.txn_overlays.deinit();
+
         // 9. Transaction manager
         if (self.txn_manager) |*tm| {
             tm.deinit();
@@ -702,12 +905,14 @@ pub const Database = struct {
     /// Returns a Transaction handle that must be passed to mutating operations
     pub fn beginTransaction(self: *Self, mode: TxnMode) DatabaseError!Transaction {
         if (self.txn_manager) |*tm| {
-            return tm.begin(mode, .snapshot) catch |err| {
+            const txn = tm.begin(mode, .snapshot) catch |err| {
                 return switch (err) {
                     TxnError.TooManyTransactions => DatabaseError.OutOfMemory,
                     else => DatabaseError.IoError,
                 };
             };
+            self.txn_overlays.put(txn.id, .{}) catch return DatabaseError.OutOfMemory;
+            return txn;
         }
         return DatabaseError.TransactionsNotEnabled;
     }
@@ -715,6 +920,12 @@ pub const Database = struct {
     /// Commit a transaction, making all changes durable
     pub fn commitTransaction(self: *Self, txn: *Transaction) DatabaseError!void {
         if (self.txn_manager) |*tm| {
+            if (self.txn_overlays.getPtr(txn.id)) |overlay| {
+                if (overlay.hasChanges()) {
+                    try self.captureTxnSnapshotsForCommit(txn.id, overlay);
+                    try self.applyTxnOverlay(txn.id, overlay);
+                }
+            }
             tm.commit(txn) catch |err| {
                 return switch (err) {
                     TxnError.NotActive => DatabaseError.TransactionNotActive,
@@ -722,6 +933,10 @@ pub const Database = struct {
                     else => DatabaseError.IoError,
                 };
             };
+            if (self.txn_overlays.fetchRemove(txn.id)) |entry| {
+                var overlay = entry.value;
+                overlay.deinit(self.allocator);
+            }
             return;
         }
         return DatabaseError.TransactionsNotEnabled;
@@ -730,14 +945,23 @@ pub const Database = struct {
     /// Abort a transaction, rolling back all changes
     pub fn abortTransaction(self: *Self, txn: *Transaction) DatabaseError!void {
         if (self.txn_manager) |*tm| {
-            // Execute undo operations in reverse order before aborting
-            if (tm.getUndoLog(txn)) |undo_log| {
-                var i = undo_log.len;
-                while (i > 0) {
-                    i -= 1;
-                    self.executeUndo(undo_log[i]) catch {
-                        // Log error but continue with remaining undos
-                    };
+            var used_overlay = false;
+            if (self.txn_overlays.getPtr(txn.id)) |overlay| {
+                if (overlay.hasChanges()) {
+                    used_overlay = true;
+                }
+            }
+
+            if (!used_overlay) {
+                // Execute undo operations in reverse order before aborting
+                if (tm.getUndoLog(txn)) |undo_log| {
+                    var i = undo_log.len;
+                    while (i > 0) {
+                        i -= 1;
+                        self.executeUndo(undo_log[i]) catch {
+                            // Log error but continue with remaining undos
+                        };
+                    }
                 }
             }
 
@@ -748,9 +972,185 @@ pub const Database = struct {
                     else => DatabaseError.IoError,
                 };
             };
+            if (self.txn_overlays.fetchRemove(txn.id)) |entry| {
+                var overlay = entry.value;
+                overlay.deinit(self.allocator);
+            }
             return;
         }
         return DatabaseError.TransactionsNotEnabled;
+    }
+
+    fn captureTxnSnapshotsForCommit(
+        self: *Self,
+        writer_txn_id: u64,
+        overlay: *const TxnOverlay,
+    ) DatabaseError!void {
+        var reader_iter = self.txn_overlays.iterator();
+        while (reader_iter.next()) |reader_entry| {
+            if (reader_entry.key_ptr.* == writer_txn_id) continue;
+            var reader_overlay = reader_entry.value_ptr;
+
+            var node_iter = overlay.node_states.iterator();
+            while (node_iter.next()) |node_entry| {
+                const node_id = node_entry.key_ptr.*;
+                if (reader_overlay.node_states.contains(node_id)) continue;
+
+                if (try self.readBaseNodeState(node_id)) |state| {
+                    try self.storeNodeOverlayState(reader_overlay, node_id, state);
+                } else {
+                    try self.storeNodeOverlayState(reader_overlay, node_id, .{
+                        .exists = false,
+                        .labels = emptySymbolIds(self.allocator) catch return DatabaseError.OutOfMemory,
+                        .properties = emptyProperties(self.allocator) catch return DatabaseError.OutOfMemory,
+                    });
+                }
+            }
+
+            var edge_iter = overlay.edge_states.iterator();
+            while (edge_iter.next()) |edge_entry| {
+                const edge_id = edge_entry.key_ptr.*;
+                if (reader_overlay.edge_states.contains(edge_id)) continue;
+
+                if (try self.readBaseEdgeState(edge_id)) |state| {
+                    try self.storeEdgeOverlayState(reader_overlay, edge_id, state);
+                } else {
+                    try self.storeEdgeOverlayState(reader_overlay, edge_id, .{
+                        .exists = false,
+                        .source = 0,
+                        .target = 0,
+                        .edge_type = 0,
+                        .properties = emptyProperties(self.allocator) catch return DatabaseError.OutOfMemory,
+                    });
+                }
+            }
+
+            var vector_iter = overlay.vector_states.iterator();
+            while (vector_iter.next()) |vector_entry| {
+                const node_id = vector_entry.key_ptr.*;
+                if (reader_overlay.vector_states.contains(node_id)) continue;
+                const state = try self.readBaseVectorState(node_id);
+                try self.storeVectorOverlayState(reader_overlay, node_id, state);
+            }
+
+            var fts_iter = overlay.fts_docs.iterator();
+            while (fts_iter.next()) |fts_entry| {
+                const node_id = fts_entry.key_ptr.*;
+                if (reader_overlay.fts_docs.contains(node_id)) continue;
+                try self.storeFtsDocOverlayState(reader_overlay, node_id, .{ .absent = {} });
+            }
+        }
+    }
+
+    fn applyTxnOverlay(
+        self: *Self,
+        writer_txn_id: u64,
+        overlay: *TxnOverlay,
+    ) DatabaseError!void {
+        _ = writer_txn_id;
+        var node_iter = overlay.node_states.iterator();
+        while (node_iter.next()) |entry| {
+            try self.applyNodeState(entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        var edge_iter = overlay.edge_states.iterator();
+        while (edge_iter.next()) |entry| {
+            try self.applyEdgeState(entry.key_ptr.*, entry.value_ptr.*);
+        }
+        if (overlay.edge_states.count() > 0) {
+            self.edge_store.syncNextEdgeId() catch return DatabaseError.IoError;
+        }
+
+        var vector_iter = overlay.vector_states.iterator();
+        while (vector_iter.next()) |entry| {
+            switch (entry.value_ptr.*) {
+                .absent => {},
+                .value => |vector| try self.setNodeVector(entry.key_ptr.*, vector),
+            }
+        }
+
+        var fts_iter = overlay.fts_docs.iterator();
+        while (fts_iter.next()) |entry| {
+            switch (entry.value_ptr.*) {
+                .absent => {},
+                .text => |text| try self.ftsIndexDocument(entry.key_ptr.*, text),
+            }
+        }
+    }
+
+    fn applyNodeState(self: *Self, node_id: NodeId, state: TxnNodeState) DatabaseError!void {
+        const current = try self.readBaseNodeState(node_id);
+        defer if (current) |existing| {
+            var owned_existing = existing;
+            owned_existing.deinit(self.allocator);
+        };
+
+        if (!state.exists) {
+            if (current) |existing| {
+                for (existing.labels) |label_id| {
+                    self.label_index.remove(label_id, node_id) catch {};
+                }
+                self.node_store.delete(node_id) catch |err| switch (err) {
+                    node_mod.NodeError.NotFound => {},
+                    else => return DatabaseError.IoError,
+                };
+            }
+            return;
+        }
+
+        if (current) |existing| {
+            self.node_store.update(node_id, state.labels, state.properties) catch |err| {
+                return mapNodeStoreError(err);
+            };
+
+            for (existing.labels) |label_id| {
+                if (!containsSymbolId(state.labels, label_id)) {
+                    self.label_index.remove(label_id, node_id) catch {};
+                }
+            }
+            for (state.labels) |label_id| {
+                if (!containsSymbolId(existing.labels, label_id)) {
+                    self.label_index.add(label_id, node_id) catch return DatabaseError.IoError;
+                }
+            }
+            return;
+        }
+
+        self.node_store.createWithId(node_id, state.labels, state.properties) catch |err| {
+            return mapNodeStoreError(err);
+        };
+        for (state.labels) |label_id| {
+            self.label_index.add(label_id, node_id) catch return DatabaseError.IoError;
+        }
+    }
+
+    fn applyEdgeState(self: *Self, edge_id: EdgeId, state: TxnEdgeState) DatabaseError!void {
+        const current = try self.readBaseEdgeState(edge_id);
+        defer if (current) |existing| {
+            var owned_existing = existing;
+            owned_existing.deinit(self.allocator);
+        };
+
+        if (!state.exists) {
+            if (current != null) {
+                self.edge_store.deleteById(edge_id) catch |err| switch (err) {
+                    edge_mod.EdgeError.NotFound => {},
+                    else => return DatabaseError.IoError,
+                };
+            }
+            return;
+        }
+
+        if (current != null) {
+            self.edge_store.deleteById(edge_id) catch |err| switch (err) {
+                edge_mod.EdgeError.NotFound => {},
+                else => return DatabaseError.IoError,
+            };
+        }
+
+        self.edge_store.createWithId(edge_id, state.source, state.target, state.edge_type, state.properties) catch {
+            return DatabaseError.IoError;
+        };
     }
 
     /// Execute a single undo operation
@@ -1296,6 +1696,332 @@ pub const Database = struct {
         };
     }
 
+    fn getTxnOverlay(self: *Self, txn: *const Transaction) ?*TxnOverlay {
+        return self.txn_overlays.getPtr(txn.id);
+    }
+
+    fn readBaseNodeState(self: *Self, node_id: NodeId) DatabaseError!?TxnNodeState {
+        var node = self.node_store.get(node_id) catch |err| {
+            return switch (err) {
+                node_mod.NodeError.NotFound => null,
+                else => DatabaseError.IoError,
+            };
+        };
+        defer node.deinit(self.allocator);
+
+        return .{
+            .exists = true,
+            .labels = cloneSymbolIds(self.allocator, node.labels) catch return DatabaseError.OutOfMemory,
+            .properties = cloneProperties(self.allocator, node.properties) catch return DatabaseError.OutOfMemory,
+        };
+    }
+
+    fn readVisibleNodeState(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError!?TxnNodeState {
+        if (txn) |t| {
+            if (self.getTxnOverlay(t)) |overlay| {
+                if (overlay.node_states.get(node_id)) |state| {
+                    return state.clone(self.allocator) catch return DatabaseError.OutOfMemory;
+                }
+            }
+        }
+        return self.readBaseNodeState(node_id);
+    }
+
+    fn storeNodeOverlayState(
+        self: *Self,
+        overlay: *TxnOverlay,
+        node_id: NodeId,
+        state: TxnNodeState,
+    ) DatabaseError!void {
+        if (overlay.node_states.getPtr(node_id)) |existing| {
+            existing.deinit(self.allocator);
+            existing.* = state;
+            return;
+        }
+        overlay.node_states.put(self.allocator, node_id, state) catch {
+            var owned_state = state;
+            owned_state.deinit(self.allocator);
+            return DatabaseError.OutOfMemory;
+        };
+    }
+
+    fn readBaseEdgeState(self: *Self, edge_id: EdgeId) DatabaseError!?TxnEdgeState {
+        var edge = self.edge_store.getById(edge_id) catch |err| {
+            return switch (err) {
+                edge_mod.EdgeError.NotFound => null,
+                else => DatabaseError.IoError,
+            };
+        };
+        defer edge.deinit(self.allocator);
+
+        return .{
+            .exists = true,
+            .source = edge.source,
+            .target = edge.target,
+            .edge_type = edge.edge_type,
+            .properties = cloneProperties(self.allocator, edge.properties) catch return DatabaseError.OutOfMemory,
+        };
+    }
+
+    fn readVisibleEdgeState(self: *Self, txn: ?*Transaction, edge_id: EdgeId) DatabaseError!?TxnEdgeState {
+        if (txn) |t| {
+            if (self.getTxnOverlay(t)) |overlay| {
+                if (overlay.edge_states.get(edge_id)) |state| {
+                    return state.clone(self.allocator) catch return DatabaseError.OutOfMemory;
+                }
+            }
+        }
+        return self.readBaseEdgeState(edge_id);
+    }
+
+    fn storeEdgeOverlayState(
+        self: *Self,
+        overlay: *TxnOverlay,
+        edge_id: EdgeId,
+        state: TxnEdgeState,
+    ) DatabaseError!void {
+        if (overlay.edge_states.getPtr(edge_id)) |existing| {
+            existing.deinit(self.allocator);
+            existing.* = state;
+            return;
+        }
+        overlay.edge_states.put(self.allocator, edge_id, state) catch {
+            var owned_state = state;
+            owned_state.deinit(self.allocator);
+            return DatabaseError.OutOfMemory;
+        };
+    }
+
+    fn readBaseVectorState(self: *Self, node_id: NodeId) DatabaseError!TxnVectorState {
+        var hnsw = self.hnsw_index orelse return .{ .absent = {} };
+        var vector_storage = self.vector_storage orelse return .{ .absent = {} };
+        if (hnsw.getNode(node_id)) |entry| {
+            const borrowed = vector_storage.borrowByLocation(entry.vector_loc) catch return DatabaseError.IoError;
+            defer borrowed.release();
+            return .{ .value = self.allocator.dupe(f32, borrowed.data) catch return DatabaseError.OutOfMemory };
+        }
+        return .{ .absent = {} };
+    }
+
+    fn readVisibleVectorState(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError!TxnVectorState {
+        if (txn) |t| {
+            if (self.getTxnOverlay(t)) |overlay| {
+                if (overlay.vector_states.get(node_id)) |state| {
+                    return state.clone(self.allocator) catch return DatabaseError.OutOfMemory;
+                }
+            }
+        }
+        return self.readBaseVectorState(node_id);
+    }
+
+    fn storeVectorOverlayState(
+        self: *Self,
+        overlay: *TxnOverlay,
+        node_id: NodeId,
+        state: TxnVectorState,
+    ) DatabaseError!void {
+        if (overlay.vector_states.getPtr(node_id)) |existing| {
+            existing.deinit(self.allocator);
+            existing.* = state;
+            return;
+        }
+        overlay.vector_states.put(self.allocator, node_id, state) catch {
+            var owned_state = state;
+            owned_state.deinit(self.allocator);
+            return DatabaseError.OutOfMemory;
+        };
+    }
+
+    fn storeFtsDocOverlayState(
+        self: *Self,
+        overlay: *TxnOverlay,
+        node_id: NodeId,
+        state: TxnFtsDocState,
+    ) DatabaseError!void {
+        if (overlay.fts_docs.getPtr(node_id)) |existing| {
+            existing.deinit(self.allocator);
+            existing.* = state;
+            return;
+        }
+        overlay.fts_docs.put(self.allocator, node_id, state) catch {
+            var owned_state = state;
+            owned_state.deinit(self.allocator);
+            return DatabaseError.OutOfMemory;
+        };
+    }
+
+    fn collectVisibleNodeIds(self: *Self, txn: ?*Transaction) DatabaseError![]NodeId {
+        var ids: std.ArrayListUnmanaged(NodeId) = .empty;
+        errdefer ids.deinit(self.allocator);
+
+        var seen: std.AutoHashMapUnmanaged(NodeId, void) = .{};
+        defer seen.deinit(self.allocator);
+
+        var iter = self.node_tree.range(null, null) catch return DatabaseError.IoError;
+        defer iter.deinit();
+
+        while (true) {
+            const entry = iter.next() catch return DatabaseError.IoError;
+            if (entry) |e| {
+                if (e.key.len < 8) continue;
+                const node_id = std.mem.readInt(u64, e.key[0..8], .little);
+                var include = true;
+                if (txn) |t| {
+                    if (self.getTxnOverlay(t)) |overlay| {
+                        if (overlay.node_states.get(node_id)) |state| {
+                            include = state.exists;
+                        }
+                    }
+                }
+                try seen.put(self.allocator, node_id, {});
+                if (include) {
+                    try ids.append(self.allocator, node_id);
+                }
+            } else {
+                break;
+            }
+        }
+
+        if (txn) |t| {
+            if (self.getTxnOverlay(t)) |overlay| {
+                var overlay_iter = overlay.node_states.iterator();
+                while (overlay_iter.next()) |entry| {
+                    if (seen.contains(entry.key_ptr.*)) continue;
+                    if (!entry.value_ptr.exists) continue;
+                    try ids.append(self.allocator, entry.key_ptr.*);
+                }
+            }
+        }
+
+        return ids.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+    }
+
+    pub fn getAllNodeIdsInTxn(self: *Self, txn: ?*Transaction) DatabaseError![]NodeId {
+        return self.collectVisibleNodeIds(txn);
+    }
+
+    pub fn getNodesByLabelIdInTxn(self: *Self, txn: ?*Transaction, label_id: symbols_mod.SymbolId) DatabaseError![]NodeId {
+        const visible_ids = try self.collectVisibleNodeIds(txn);
+        defer self.allocator.free(visible_ids);
+
+        var matches: std.ArrayListUnmanaged(NodeId) = .empty;
+        errdefer matches.deinit(self.allocator);
+
+        for (visible_ids) |node_id| {
+            var state = (try self.readVisibleNodeState(txn, node_id)) orelse continue;
+            defer state.deinit(self.allocator);
+            if (!state.exists) continue;
+            if (containsSymbolId(state.labels, label_id)) {
+                matches.append(self.allocator, node_id) catch return DatabaseError.OutOfMemory;
+            }
+        }
+
+        return matches.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+    }
+
+    fn edgeStateToRef(edge_id: EdgeId, state: TxnEdgeState) EdgeRef {
+        return .{
+            .id = edge_id,
+            .source = state.source,
+            .target = state.target,
+            .edge_type = state.edge_type,
+        };
+    }
+
+    fn edgeStateMatches(
+        state: TxnEdgeState,
+        node_id: NodeId,
+        direction: edge_mod.Direction,
+        edge_type: ?symbols_mod.SymbolId,
+    ) bool {
+        if (!state.exists) return false;
+        if (edge_type) |type_id| {
+            if (state.edge_type != type_id) return false;
+        }
+        return switch (direction) {
+            .outgoing => state.source == node_id,
+            .incoming => state.target == node_id,
+        };
+    }
+
+    fn collectVisibleEdgeRefs(
+        self: *Self,
+        txn: ?*Transaction,
+        node_id: NodeId,
+        direction: edge_mod.Direction,
+        edge_type: ?symbols_mod.SymbolId,
+    ) DatabaseError![]EdgeRef {
+        var refs: std.ArrayListUnmanaged(EdgeRef) = .empty;
+        errdefer refs.deinit(self.allocator);
+
+        var seen: std.AutoHashMapUnmanaged(EdgeId, void) = .{};
+        defer seen.deinit(self.allocator);
+
+        var base_iter = blk: {
+            if (direction == .outgoing) {
+                if (edge_type) |type_id| {
+                    break :blk self.edge_store.getOutgoingRefsByType(node_id, type_id) catch return DatabaseError.IoError;
+                }
+                break :blk self.edge_store.getOutgoingRefs(node_id) catch return DatabaseError.IoError;
+            }
+            if (edge_type) |type_id| {
+                break :blk self.edge_store.getIncomingRefsByType(node_id, type_id) catch return DatabaseError.IoError;
+            }
+            break :blk self.edge_store.getIncomingRefs(node_id) catch return DatabaseError.IoError;
+        };
+        defer base_iter.deinit();
+
+        while (base_iter.next() catch return DatabaseError.IoError) |base_ref| {
+            try seen.put(self.allocator, base_ref.id, {});
+
+            if (txn) |t| {
+                if (self.getTxnOverlay(t)) |overlay| {
+                    if (overlay.edge_states.get(base_ref.id)) |state| {
+                        if (edgeStateMatches(state, node_id, direction, edge_type)) {
+                            refs.append(self.allocator, edgeStateToRef(base_ref.id, state)) catch return DatabaseError.OutOfMemory;
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            refs.append(self.allocator, base_ref) catch return DatabaseError.OutOfMemory;
+        }
+
+        if (txn) |t| {
+            if (self.getTxnOverlay(t)) |overlay| {
+                var overlay_iter = overlay.edge_states.iterator();
+                while (overlay_iter.next()) |entry| {
+                    if (seen.contains(entry.key_ptr.*)) continue;
+                    if (!edgeStateMatches(entry.value_ptr.*, node_id, direction, edge_type)) continue;
+                    refs.append(self.allocator, edgeStateToRef(entry.key_ptr.*, entry.value_ptr.*)) catch return DatabaseError.OutOfMemory;
+                }
+            }
+        }
+
+        return refs.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+    }
+
+    fn findVisibleEdgeId(
+        self: *Self,
+        txn: ?*Transaction,
+        source: NodeId,
+        target: NodeId,
+        edge_type: symbols_mod.SymbolId,
+    ) DatabaseError!?EdgeId {
+        const refs = try self.collectVisibleEdgeRefs(txn, source, .outgoing, edge_type);
+        defer self.allocator.free(refs);
+
+        var found: ?EdgeId = null;
+        for (refs) |edge_ref| {
+            if (edge_ref.target != target) continue;
+            if (found == null or edge_ref.id < found.?) {
+                found = edge_ref.id;
+            }
+        }
+        return found;
+    }
+
     /// Create a new node with the given labels
     /// Returns the new node's ID
     /// If txn is null, the operation is auto-committed
@@ -1306,6 +2032,31 @@ pub const Database = struct {
         if (txn) |t| {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;
             if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+            if (self.getTxnOverlay(t)) |overlay| {
+                var label_ids = self.allocator.alloc(symbols_mod.SymbolId, labels.len) catch {
+                    return DatabaseError.OutOfMemory;
+                };
+                errdefer self.allocator.free(label_ids);
+
+                for (labels, 0..) |label, i| {
+                    label_ids[i] = self.symbol_table.intern(label) catch {
+                        return DatabaseError.IoError;
+                    };
+                }
+
+                const node_id = self.node_store.next_id;
+                self.node_store.next_id += 1;
+
+                try self.storeNodeOverlayState(overlay, node_id, .{
+                    .exists = true,
+                    .labels = label_ids,
+                    .properties = self.allocator.alloc(node_mod.Property, 0) catch return DatabaseError.OutOfMemory,
+                });
+                overlay.markDirty();
+
+                if (self.query_cache) |cache| cache.bumpSchemaVersion();
+                return node_id;
+            }
         }
 
         // Intern all labels
@@ -1372,6 +2123,18 @@ pub const Database = struct {
         return node;
     }
 
+    pub fn getNodeInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError!?node_mod.Node {
+        if (try self.readVisibleNodeState(txn, node_id)) |state| {
+            defer {
+                var owned = state;
+                owned.deinit(self.allocator);
+            }
+            if (!state.exists) return null;
+            return state.toNode(self.allocator, node_id) catch return DatabaseError.OutOfMemory;
+        }
+        return null;
+    }
+
     /// Delete a node
     /// If txn is null, the operation is auto-committed
     pub fn deleteNode(self: *Self, txn: ?*Transaction, node_id: NodeId) !void {
@@ -1381,6 +2144,26 @@ pub const Database = struct {
         if (txn) |t| {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;
             if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+            if (self.getTxnOverlay(t)) |overlay| {
+                const existing = try self.readVisibleNodeState(txn, node_id);
+                if (existing) |state| {
+                    var owned_state = state;
+                    defer owned_state.deinit(self.allocator);
+                    if (!owned_state.exists) return;
+                } else {
+                    return;
+                }
+
+                try self.storeNodeOverlayState(overlay, node_id, .{
+                    .exists = false,
+                    .labels = self.allocator.alloc(symbols_mod.SymbolId, 0) catch return DatabaseError.OutOfMemory,
+                    .properties = self.allocator.alloc(node_mod.Property, 0) catch return DatabaseError.OutOfMemory,
+                });
+                overlay.markDirty();
+
+                if (self.query_cache) |cache| cache.bumpSchemaVersion();
+                return;
+            }
         }
 
         // Get node to find its labels for index cleanup and WAL logging
@@ -1457,6 +2240,17 @@ pub const Database = struct {
         };
     }
 
+    pub fn nodeExistsInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError!bool {
+        if (try self.readVisibleNodeState(txn, node_id)) |state| {
+            defer {
+                var owned = state;
+                owned.deinit(self.allocator);
+            }
+            return state.exists;
+        }
+        return false;
+    }
+
     /// Set a property on a node
     /// If txn is null, the operation is auto-committed
     pub fn setNodeProperty(
@@ -1472,6 +2266,52 @@ pub const Database = struct {
         if (txn) |t| {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;
             if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+            if (self.getTxnOverlay(t)) |overlay| {
+                var state = (try self.readVisibleNodeState(txn, node_id)) orelse return DatabaseError.NotFound;
+                defer state.deinit(self.allocator);
+                if (!state.exists) return DatabaseError.NotFound;
+
+                const key_id = self.symbol_table.intern(key) catch return DatabaseError.IoError;
+
+                var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
+                errdefer {
+                    for (new_props.items) |*prop| {
+                        var val = prop.value;
+                        val.deinit(self.allocator);
+                    }
+                    new_props.deinit(self.allocator);
+                }
+
+                var found = false;
+                for (state.properties) |prop| {
+                    if (prop.key_id == key_id) {
+                        new_props.append(self.allocator, .{
+                            .key_id = key_id,
+                            .value = value.clone(self.allocator) catch return DatabaseError.OutOfMemory,
+                        }) catch return DatabaseError.OutOfMemory;
+                        found = true;
+                    } else {
+                        new_props.append(self.allocator, .{
+                            .key_id = prop.key_id,
+                            .value = prop.value.clone(self.allocator) catch return DatabaseError.OutOfMemory,
+                        }) catch return DatabaseError.OutOfMemory;
+                    }
+                }
+                if (!found) {
+                    new_props.append(self.allocator, .{
+                        .key_id = key_id,
+                        .value = value.clone(self.allocator) catch return DatabaseError.OutOfMemory,
+                    }) catch return DatabaseError.OutOfMemory;
+                }
+
+                try self.storeNodeOverlayState(overlay, node_id, .{
+                    .exists = true,
+                    .labels = cloneSymbolIds(self.allocator, state.labels) catch return DatabaseError.OutOfMemory,
+                    .properties = new_props.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory,
+                });
+                overlay.markDirty();
+                return;
+            }
         }
 
         // Get the existing node
@@ -1587,6 +2427,39 @@ pub const Database = struct {
         if (txn) |t| {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;
             if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+            if (self.getTxnOverlay(t)) |overlay| {
+                var state = (try self.readVisibleNodeState(txn, node_id)) orelse return DatabaseError.NotFound;
+                defer state.deinit(self.allocator);
+                if (!state.exists) return DatabaseError.NotFound;
+
+                const key_id = self.symbol_table.intern(key) catch return DatabaseError.IoError;
+
+                var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
+                errdefer {
+                    for (new_props.items) |*prop| {
+                        var val = prop.value;
+                        val.deinit(self.allocator);
+                    }
+                    new_props.deinit(self.allocator);
+                }
+
+                for (state.properties) |prop| {
+                    if (prop.key_id != key_id) {
+                        new_props.append(self.allocator, .{
+                            .key_id = prop.key_id,
+                            .value = prop.value.clone(self.allocator) catch return DatabaseError.OutOfMemory,
+                        }) catch return DatabaseError.OutOfMemory;
+                    }
+                }
+
+                try self.storeNodeOverlayState(overlay, node_id, .{
+                    .exists = true,
+                    .labels = cloneSymbolIds(self.allocator, state.labels) catch return DatabaseError.OutOfMemory,
+                    .properties = new_props.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory,
+                });
+                overlay.markDirty();
+                return;
+            }
         }
 
         var existing_node = self.node_store.get(node_id) catch |err| {
@@ -1677,6 +2550,33 @@ pub const Database = struct {
         if (txn) |t| {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;
             if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+            if (self.getTxnOverlay(t)) |overlay| {
+                var state = (try self.readVisibleNodeState(txn, node_id)) orelse return DatabaseError.NotFound;
+                defer state.deinit(self.allocator);
+                if (!state.exists) return DatabaseError.NotFound;
+
+                const label_id = self.symbol_table.intern(label) catch return DatabaseError.IoError;
+                for (state.labels) |existing| {
+                    if (existing == label_id) return;
+                }
+
+                var new_labels: std.ArrayListUnmanaged(symbols_mod.SymbolId) = .empty;
+                errdefer new_labels.deinit(self.allocator);
+                for (state.labels) |existing| {
+                    new_labels.append(self.allocator, existing) catch return DatabaseError.OutOfMemory;
+                }
+                new_labels.append(self.allocator, label_id) catch return DatabaseError.OutOfMemory;
+
+                try self.storeNodeOverlayState(overlay, node_id, .{
+                    .exists = true,
+                    .labels = new_labels.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory,
+                    .properties = cloneProperties(self.allocator, state.properties) catch return DatabaseError.OutOfMemory,
+                });
+                overlay.markDirty();
+
+                if (self.query_cache) |cache| cache.bumpSchemaVersion();
+                return;
+            }
         }
 
         var existing_node = self.node_store.get(node_id) catch |err| {
@@ -1761,6 +2661,36 @@ pub const Database = struct {
         if (txn) |t| {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;
             if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+            if (self.getTxnOverlay(t)) |overlay| {
+                var state = (try self.readVisibleNodeState(txn, node_id)) orelse return DatabaseError.NotFound;
+                defer state.deinit(self.allocator);
+                if (!state.exists) return DatabaseError.NotFound;
+
+                const label_id = self.symbol_table.lookup(label) catch return;
+
+                var new_labels: std.ArrayListUnmanaged(symbols_mod.SymbolId) = .empty;
+                errdefer new_labels.deinit(self.allocator);
+
+                var found = false;
+                for (state.labels) |existing| {
+                    if (existing == label_id) {
+                        found = true;
+                    } else {
+                        new_labels.append(self.allocator, existing) catch return DatabaseError.OutOfMemory;
+                    }
+                }
+                if (!found) return;
+
+                try self.storeNodeOverlayState(overlay, node_id, .{
+                    .exists = true,
+                    .labels = new_labels.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory,
+                    .properties = cloneProperties(self.allocator, state.properties) catch return DatabaseError.OutOfMemory,
+                });
+                overlay.markDirty();
+
+                if (self.query_cache) |cache| cache.bumpSchemaVersion();
+                return;
+            }
         }
 
         var existing_node = self.node_store.get(node_id) catch |err| {
@@ -1843,6 +2773,19 @@ pub const Database = struct {
         if (txn) |t| {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;
             if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+            if (self.getTxnOverlay(t)) |overlay| {
+                var state = (try self.readVisibleNodeState(txn, node_id)) orelse return DatabaseError.NotFound;
+                defer state.deinit(self.allocator);
+                if (!state.exists) return DatabaseError.NotFound;
+
+                try self.storeNodeOverlayState(overlay, node_id, .{
+                    .exists = true,
+                    .labels = cloneSymbolIds(self.allocator, state.labels) catch return DatabaseError.OutOfMemory,
+                    .properties = self.allocator.alloc(node_mod.Property, 0) catch return DatabaseError.OutOfMemory,
+                });
+                overlay.markDirty();
+                return;
+            }
         }
 
         var existing_node = self.node_store.get(node_id) catch |err| {
@@ -1893,6 +2836,31 @@ pub const Database = struct {
         return null;
     }
 
+    pub fn getNodePropertyInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        node_id: NodeId,
+        key: []const u8,
+    ) DatabaseError!?PropertyValue {
+        var state = (try self.readVisibleNodeState(txn, node_id)) orelse return null;
+        defer state.deinit(self.allocator);
+        if (!state.exists) return null;
+
+        const key_id = self.symbol_table.lookup(key) catch |err| {
+            return switch (err) {
+                symbols_mod.SymbolError.NotFound => null,
+                else => DatabaseError.IoError,
+            };
+        };
+
+        for (state.properties) |prop| {
+            if (prop.key_id == key_id) {
+                return prop.value.clone(self.allocator) catch return DatabaseError.OutOfMemory;
+            }
+        }
+        return null;
+    }
+
     // ========================================================================
     // Vector Operations
     // ========================================================================
@@ -1932,6 +2900,116 @@ pub const Database = struct {
                 };
             };
         }
+    }
+
+    pub fn setNodeVectorInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        node_id: NodeId,
+        vector: []const f32,
+    ) DatabaseError!void {
+        if (txn) |t| {
+            if (!t.isActive()) return DatabaseError.TransactionNotActive;
+            if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+            if (self.getTxnOverlay(t)) |overlay| {
+                if (!(try self.nodeExistsInTxn(txn, node_id))) return DatabaseError.NotFound;
+                try self.storeVectorOverlayState(overlay, node_id, .{
+                    .value = self.allocator.dupe(f32, vector) catch return DatabaseError.OutOfMemory,
+                });
+                overlay.markDirty();
+                return;
+            }
+        }
+        try self.setNodeVector(node_id, vector);
+    }
+
+    pub fn getNodeVectorInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError!?[]f32 {
+        var state = try self.readVisibleVectorState(txn, node_id);
+        return switch (state) {
+            .absent => blk: {
+                state.deinit(self.allocator);
+                break :blk null;
+            },
+            .value => |vector| vector,
+        };
+    }
+
+    fn vectorDistanceForSearch(self: *Self, query_vector: []const f32, candidate: []const f32) f32 {
+        if (self.hnsw_index) |*hnsw| {
+            const distance_fn = hnsw_mod.getDistanceFn(hnsw.config.metric);
+            return distance_fn(query_vector, candidate);
+        }
+        return vector_distance.euclideanDistance(query_vector, candidate);
+    }
+
+    pub fn vectorSearchInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        query_vector: []const f32,
+        k: u32,
+        ef_search: ?u16,
+    ) DatabaseError![]VectorSearchResult {
+        if (txn) |t| {
+            if (self.getTxnOverlay(t)) |overlay| {
+                if (overlay.vector_states.count() == 0) {
+                    return self.vectorSearch(query_vector, k, ef_search);
+                }
+
+                const extra: u32 = @intCast(overlay.vector_states.count());
+                const base_results = try self.vectorSearch(query_vector, k + extra, ef_search);
+                defer self.freeVectorSearchResults(base_results);
+
+                var merged: std.ArrayListUnmanaged(VectorSearchResult) = .empty;
+                errdefer merged.deinit(self.allocator);
+
+                var seen: std.AutoHashMapUnmanaged(NodeId, void) = .{};
+                defer seen.deinit(self.allocator);
+
+                for (base_results) |result| {
+                    try seen.put(self.allocator, result.node_id, {});
+                    if (overlay.vector_states.get(result.node_id)) |state| {
+                        switch (state) {
+                            .absent => continue,
+                            .value => |vector| {
+                                merged.append(self.allocator, .{
+                                    .node_id = result.node_id,
+                                    .distance = self.vectorDistanceForSearch(query_vector, vector),
+                                }) catch return DatabaseError.OutOfMemory;
+                            },
+                        }
+                        continue;
+                    }
+                    merged.append(self.allocator, result) catch return DatabaseError.OutOfMemory;
+                }
+
+                var overlay_iter = overlay.vector_states.iterator();
+                while (overlay_iter.next()) |entry| {
+                    if (seen.contains(entry.key_ptr.*)) continue;
+                    switch (entry.value_ptr.*) {
+                        .absent => {},
+                        .value => |vector| {
+                            merged.append(self.allocator, .{
+                                .node_id = entry.key_ptr.*,
+                                .distance = self.vectorDistanceForSearch(query_vector, vector),
+                            }) catch return DatabaseError.OutOfMemory;
+                        },
+                    }
+                }
+
+                std.mem.sort(VectorSearchResult, merged.items, {}, struct {
+                    fn lessThan(_: void, lhs: VectorSearchResult, rhs: VectorSearchResult) bool {
+                        return lhs.distance < rhs.distance;
+                    }
+                }.lessThan);
+
+                if (merged.items.len > k) {
+                    merged.items.len = k;
+                }
+                return merged.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+            }
+        }
+
+        return self.vectorSearch(query_vector, k, ef_search);
     }
 
     /// Search for similar vectors using HNSW index.
@@ -1981,6 +3059,95 @@ pub const Database = struct {
         };
     }
 
+    fn overlayFtsScore(self: *Self, query_text: []const u8, text: []const u8) DatabaseError!f32 {
+        const lower_query = self.allocator.dupe(u8, query_text) catch return DatabaseError.OutOfMemory;
+        defer self.allocator.free(lower_query);
+        for (lower_query) |*ch| ch.* = std.ascii.toLower(ch.*);
+
+        const lower_text = self.allocator.dupe(u8, text) catch return DatabaseError.OutOfMemory;
+        defer self.allocator.free(lower_text);
+        for (lower_text) |*ch| ch.* = std.ascii.toLower(ch.*);
+
+        var score: f32 = 0;
+        var iter = std.mem.tokenizeAny(u8, lower_query, " \t\r\n");
+        while (iter.next()) |token| {
+            if (token.len == 0) continue;
+            if (std.mem.indexOf(u8, lower_text, token) == null) return 0;
+            score += 1;
+        }
+        return score;
+    }
+
+    pub fn ftsSearchInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        query_text: []const u8,
+        limit: u32,
+    ) DatabaseError![]FtsSearchResult {
+        if (txn) |t| {
+            if (self.getTxnOverlay(t)) |overlay| {
+                if (overlay.fts_docs.count() == 0) {
+                    return self.ftsSearch(query_text, limit);
+                }
+
+                const extra: u32 = @intCast(overlay.fts_docs.count());
+                const base_results = try self.ftsSearch(query_text, limit + extra);
+                defer self.freeFtsSearchResults(base_results);
+
+                var merged: std.ArrayListUnmanaged(FtsSearchResult) = .empty;
+                errdefer merged.deinit(self.allocator);
+
+                var seen: std.AutoHashMapUnmanaged(NodeId, void) = .{};
+                defer seen.deinit(self.allocator);
+
+                for (base_results) |result| {
+                    try seen.put(self.allocator, result.doc_id, {});
+                    if (overlay.fts_docs.get(result.doc_id)) |state| {
+                        switch (state) {
+                            .absent => continue,
+                            .text => |text| {
+                                const score = try self.overlayFtsScore(query_text, text);
+                                if (score > 0) {
+                                    merged.append(self.allocator, .{
+                                        .doc_id = result.doc_id,
+                                        .score = score,
+                                    }) catch return DatabaseError.OutOfMemory;
+                                }
+                            },
+                        }
+                        continue;
+                    }
+                    merged.append(self.allocator, result) catch return DatabaseError.OutOfMemory;
+                }
+
+                var overlay_iter = overlay.fts_docs.iterator();
+                while (overlay_iter.next()) |entry| {
+                    if (seen.contains(entry.key_ptr.*)) continue;
+                    switch (entry.value_ptr.*) {
+                        .absent => {},
+                        .text => |text| {
+                            const score = try self.overlayFtsScore(query_text, text);
+                            if (score > 0) {
+                                merged.append(self.allocator, .{
+                                    .doc_id = entry.key_ptr.*,
+                                    .score = score,
+                                }) catch return DatabaseError.OutOfMemory;
+                            }
+                        },
+                    }
+                }
+
+                std.mem.sort(FtsSearchResult, merged.items, {}, FtsSearchResult.lessThan);
+                if (merged.items.len > limit) {
+                    merged.items.len = limit;
+                }
+                return merged.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+            }
+        }
+
+        return self.ftsSearch(query_text, limit);
+    }
+
     /// Search for documents matching a text query with fuzzy (typo-tolerant) matching.
     pub fn ftsSearchFuzzy(
         self: *Self,
@@ -1999,6 +3166,19 @@ pub const Database = struct {
                 else => DatabaseError.IoError,
             };
         };
+    }
+
+    pub fn ftsSearchFuzzyInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        query_text: []const u8,
+        limit: u32,
+        max_distance: u32,
+        min_term_length: u32,
+    ) DatabaseError![]FtsSearchResult {
+        _ = max_distance;
+        _ = min_term_length;
+        return self.ftsSearchInTxn(txn, query_text, limit);
     }
 
     /// Free FTS search results allocated by ftsSearch.
@@ -2028,6 +3208,26 @@ pub const Database = struct {
         };
     }
 
+    pub fn ftsIndexDocumentInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        node_id: NodeId,
+        text: []const u8,
+    ) DatabaseError!void {
+        if (txn) |t| {
+            if (!t.isActive()) return DatabaseError.TransactionNotActive;
+            if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+            if (self.getTxnOverlay(t)) |overlay| {
+                try self.storeFtsDocOverlayState(overlay, node_id, .{
+                    .text = self.allocator.dupe(u8, text) catch return DatabaseError.OutOfMemory,
+                });
+                overlay.markDirty();
+                return;
+            }
+        }
+        try self.ftsIndexDocument(node_id, text);
+    }
+
     // ========================================================================
     // Graph Operations - Edges
     // ========================================================================
@@ -2047,6 +3247,24 @@ pub const Database = struct {
         if (txn) |t| {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;
             if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+            if (self.getTxnOverlay(t)) |overlay| {
+                const type_id = self.symbol_table.intern(edge_type) catch return DatabaseError.IoError;
+                const edge_id = self.edge_store.reserveNextEdgeId();
+                try self.storeEdgeOverlayState(overlay, edge_id, .{
+                    .exists = true,
+                    .source = source,
+                    .target = target,
+                    .edge_type = type_id,
+                    .properties = emptyProperties(self.allocator) catch return DatabaseError.OutOfMemory,
+                });
+                overlay.markDirty();
+
+                if (self.adjacency_cache) |*cache| {
+                    cache.invalidate(source);
+                }
+                if (self.query_cache) |cache| cache.bumpSchemaVersion();
+                return edge_id;
+            }
         }
 
         // Intern edge type
@@ -2123,6 +3341,25 @@ pub const Database = struct {
         if (txn) |t| {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;
             if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+            if (self.getTxnOverlay(t)) |overlay| {
+                const type_id = self.symbol_table.intern(edge_type) catch return DatabaseError.IoError;
+                const edge_id = (try self.findVisibleEdgeId(txn, source, target, type_id)) orelse return DatabaseError.NotFound;
+                try self.storeEdgeOverlayState(overlay, edge_id, .{
+                    .exists = false,
+                    .source = 0,
+                    .target = 0,
+                    .edge_type = 0,
+                    .properties = emptyProperties(self.allocator) catch return DatabaseError.OutOfMemory,
+                });
+                overlay.markDirty();
+
+                if (self.adjacency_cache) |*cache| {
+                    cache.invalidate(source);
+                    cache.invalidate(target);
+                }
+                if (self.query_cache) |cache| cache.bumpSchemaVersion();
+                return;
+            }
         }
 
         // Intern edge type
@@ -2196,6 +3433,31 @@ pub const Database = struct {
         if (txn) |t| {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;
             if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+            if (self.getTxnOverlay(t)) |overlay| {
+                const existing = try self.readVisibleEdgeState(txn, edge_id);
+                if (existing) |state| {
+                    var owned_state = state;
+                    defer owned_state.deinit(self.allocator);
+                    if (!owned_state.exists) return DatabaseError.NotFound;
+
+                    try self.storeEdgeOverlayState(overlay, edge_id, .{
+                        .exists = false,
+                        .source = 0,
+                        .target = 0,
+                        .edge_type = 0,
+                        .properties = emptyProperties(self.allocator) catch return DatabaseError.OutOfMemory,
+                    });
+                    overlay.markDirty();
+
+                    if (self.adjacency_cache) |*cache| {
+                        cache.invalidate(owned_state.source);
+                        cache.invalidate(owned_state.target);
+                    }
+                    if (self.query_cache) |cache| cache.bumpSchemaVersion();
+                    return;
+                }
+                return DatabaseError.NotFound;
+            }
         }
 
         // Resolve edge data before deletion for WAL/undo/cache invalidation.
@@ -2254,6 +3516,53 @@ pub const Database = struct {
         if (txn) |t| {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;
             if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+            if (self.getTxnOverlay(t)) |overlay| {
+                var state = (try self.readVisibleEdgeState(txn, edge_id)) orelse return DatabaseError.NotFound;
+                defer state.deinit(self.allocator);
+                if (!state.exists) return DatabaseError.NotFound;
+
+                const key_id = self.symbol_table.intern(key) catch return DatabaseError.IoError;
+                var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
+                errdefer {
+                    for (new_props.items) |*prop| {
+                        var val = prop.value;
+                        val.deinit(self.allocator);
+                    }
+                    new_props.deinit(self.allocator);
+                }
+
+                var found = false;
+                for (state.properties) |prop| {
+                    if (prop.key_id == key_id) {
+                        new_props.append(self.allocator, .{
+                            .key_id = key_id,
+                            .value = value.clone(self.allocator) catch return DatabaseError.OutOfMemory,
+                        }) catch return DatabaseError.OutOfMemory;
+                        found = true;
+                    } else {
+                        new_props.append(self.allocator, .{
+                            .key_id = prop.key_id,
+                            .value = prop.value.clone(self.allocator) catch return DatabaseError.OutOfMemory,
+                        }) catch return DatabaseError.OutOfMemory;
+                    }
+                }
+                if (!found) {
+                    new_props.append(self.allocator, .{
+                        .key_id = key_id,
+                        .value = value.clone(self.allocator) catch return DatabaseError.OutOfMemory,
+                    }) catch return DatabaseError.OutOfMemory;
+                }
+
+                try self.storeEdgeOverlayState(overlay, edge_id, .{
+                    .exists = true,
+                    .source = state.source,
+                    .target = state.target,
+                    .edge_type = state.edge_type,
+                    .properties = new_props.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory,
+                });
+                overlay.markDirty();
+                return;
+            }
         }
 
         var edge = self.edge_store.getById(edge_id) catch |err| {
@@ -2353,6 +3662,40 @@ pub const Database = struct {
         if (txn) |t| {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;
             if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+            if (self.getTxnOverlay(t)) |overlay| {
+                var state = (try self.readVisibleEdgeState(txn, edge_id)) orelse return DatabaseError.NotFound;
+                defer state.deinit(self.allocator);
+                if (!state.exists) return DatabaseError.NotFound;
+
+                const key_id = self.symbol_table.intern(key) catch return DatabaseError.IoError;
+                var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
+                errdefer {
+                    for (new_props.items) |*prop| {
+                        var val = prop.value;
+                        val.deinit(self.allocator);
+                    }
+                    new_props.deinit(self.allocator);
+                }
+
+                for (state.properties) |prop| {
+                    if (prop.key_id != key_id) {
+                        new_props.append(self.allocator, .{
+                            .key_id = prop.key_id,
+                            .value = prop.value.clone(self.allocator) catch return DatabaseError.OutOfMemory,
+                        }) catch return DatabaseError.OutOfMemory;
+                    }
+                }
+
+                try self.storeEdgeOverlayState(overlay, edge_id, .{
+                    .exists = true,
+                    .source = state.source,
+                    .target = state.target,
+                    .edge_type = state.edge_type,
+                    .properties = new_props.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory,
+                });
+                overlay.markDirty();
+                return;
+            }
         }
 
         var edge = self.edge_store.getById(edge_id) catch |err| {
@@ -2512,12 +3855,72 @@ pub const Database = struct {
         return edges.toOwnedSlice(self.allocator);
     }
 
+    pub fn getOutgoingEdgesInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError![]EdgeInfo {
+        const refs = try self.collectVisibleEdgeRefs(txn, node_id, .outgoing, null);
+        defer self.allocator.free(refs);
+
+        var edges: std.ArrayListUnmanaged(EdgeInfo) = .empty;
+        errdefer edges.deinit(self.allocator);
+
+        for (refs) |edge_ref| {
+            const edge_type_str = self.symbol_table.resolve(edge_ref.edge_type) catch continue;
+            edges.append(self.allocator, .{
+                .id = edge_ref.id,
+                .source = edge_ref.source,
+                .target = edge_ref.target,
+                .edge_type = edge_type_str,
+            }) catch {
+                self.allocator.free(edge_type_str);
+                return DatabaseError.OutOfMemory;
+            };
+        }
+
+        return edges.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+    }
+
+    pub fn getIncomingEdgesInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError![]EdgeInfo {
+        const refs = try self.collectVisibleEdgeRefs(txn, node_id, .incoming, null);
+        defer self.allocator.free(refs);
+
+        var edges: std.ArrayListUnmanaged(EdgeInfo) = .empty;
+        errdefer edges.deinit(self.allocator);
+
+        for (refs) |edge_ref| {
+            const edge_type_str = self.symbol_table.resolve(edge_ref.edge_type) catch continue;
+            edges.append(self.allocator, .{
+                .id = edge_ref.id,
+                .source = edge_ref.source,
+                .target = edge_ref.target,
+                .edge_type = edge_type_str,
+            }) catch {
+                self.allocator.free(edge_type_str);
+                return DatabaseError.OutOfMemory;
+            };
+        }
+
+        return edges.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+    }
+
     /// Free edge info slice returned by getOutgoingEdges or getIncomingEdges.
     pub fn freeEdgeInfos(self: *Self, edges: []EdgeInfo) void {
         for (edges) |edge| {
             self.allocator.free(edge.edge_type);
         }
         self.allocator.free(edges);
+    }
+
+    pub fn getEdgeInTxn(self: *Self, txn: ?*Transaction, edge_id: EdgeId) DatabaseError!?edge_mod.Edge {
+        var state = (try self.readVisibleEdgeState(txn, edge_id)) orelse return null;
+        defer state.deinit(self.allocator);
+        if (!state.exists) return null;
+
+        return .{
+            .id = edge_id,
+            .source = state.source,
+            .target = state.target,
+            .edge_type = state.edge_type,
+            .properties = cloneProperties(self.allocator, state.properties) catch return DatabaseError.OutOfMemory,
+        };
     }
 
     /// Get a property from an edge by stable edge ID.
@@ -2542,6 +3945,32 @@ pub const Database = struct {
         };
 
         for (edge.properties) |prop| {
+            if (prop.key_id == key_id) {
+                return prop.value.clone(self.allocator) catch return DatabaseError.OutOfMemory;
+            }
+        }
+
+        return null;
+    }
+
+    pub fn getEdgePropertyByIdInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        edge_id: EdgeId,
+        key: []const u8,
+    ) DatabaseError!?PropertyValue {
+        var state = (try self.readVisibleEdgeState(txn, edge_id)) orelse return null;
+        defer state.deinit(self.allocator);
+        if (!state.exists) return null;
+
+        const key_id = self.symbol_table.lookup(key) catch |err| {
+            return switch (err) {
+                symbols_mod.SymbolError.NotFound => null,
+                else => DatabaseError.IoError,
+            };
+        };
+
+        for (state.properties) |prop| {
             if (prop.key_id == key_id) {
                 return prop.value.clone(self.allocator) catch return DatabaseError.OutOfMemory;
             }
@@ -2598,6 +4027,52 @@ pub const Database = struct {
         return props.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
     }
 
+    pub fn getEdgePropertiesInTxn(self: *Self, txn: ?*Transaction, edge_id: EdgeId) DatabaseError![]PropertyEntry {
+        var state = (try self.readVisibleEdgeState(txn, edge_id)) orelse {
+            return self.allocator.alloc(PropertyEntry, 0) catch return DatabaseError.OutOfMemory;
+        };
+        defer state.deinit(self.allocator);
+        if (!state.exists) {
+            return self.allocator.alloc(PropertyEntry, 0) catch return DatabaseError.OutOfMemory;
+        }
+
+        var props: std.ArrayListUnmanaged(PropertyEntry) = .empty;
+        errdefer {
+            for (props.items) |prop| {
+                self.allocator.free(prop.key);
+                var value = prop.value;
+                value.deinit(self.allocator);
+            }
+            props.deinit(self.allocator);
+        }
+
+        for (state.properties) |prop| {
+            const key_name = self.symbol_table.resolve(prop.key_id) catch continue;
+            errdefer self.allocator.free(key_name);
+
+            const value = prop.value.clone(self.allocator) catch {
+                self.allocator.free(key_name);
+                return DatabaseError.OutOfMemory;
+            };
+            errdefer {
+                var owned_value = value;
+                owned_value.deinit(self.allocator);
+            }
+
+            props.append(self.allocator, .{
+                .key = key_name,
+                .value = value,
+            }) catch {
+                self.allocator.free(key_name);
+                var owned_value = value;
+                owned_value.deinit(self.allocator);
+                return DatabaseError.OutOfMemory;
+            };
+        }
+
+        return props.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+    }
+
     /// Get lightweight iterator for outgoing edges (no property deserialization).
     /// Returns EdgeRef containing (id, source, target, edge_type_id).
     /// Ideal for graph traversal (BFS/DFS) where properties are not needed.
@@ -2606,6 +4081,19 @@ pub const Database = struct {
         return self.edge_store.getOutgoingRefs(node_id) catch {
             return DatabaseError.IoError;
         };
+    }
+
+    pub fn getOutgoingEdgeRefsInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError![]EdgeRef {
+        return self.collectVisibleEdgeRefs(txn, node_id, .outgoing, null);
+    }
+
+    pub fn getOutgoingEdgeRefsByTypeInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        node_id: NodeId,
+        edge_type: symbols_mod.SymbolId,
+    ) DatabaseError![]EdgeRef {
+        return self.collectVisibleEdgeRefs(txn, node_id, .outgoing, edge_type);
     }
 
     /// Get cached outgoing edges for a node. If the adjacency cache is enabled
@@ -2642,6 +4130,19 @@ pub const Database = struct {
         return self.edge_store.getIncomingRefs(node_id) catch {
             return DatabaseError.IoError;
         };
+    }
+
+    pub fn getIncomingEdgeRefsInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError![]EdgeRef {
+        return self.collectVisibleEdgeRefs(txn, node_id, .incoming, null);
+    }
+
+    pub fn getIncomingEdgeRefsByTypeInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        node_id: NodeId,
+        edge_type: symbols_mod.SymbolId,
+    ) DatabaseError![]EdgeRef {
+        return self.collectVisibleEdgeRefs(txn, node_id, .incoming, edge_type);
     }
 
     /// Get outgoing edge refs for multiple nodes in a single B+Tree scan.
@@ -2782,6 +4283,34 @@ pub const Database = struct {
         return labels_list.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
     }
 
+    pub fn getNodeLabelsInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError![][]const u8 {
+        var labels_list: std.ArrayListUnmanaged([]const u8) = .empty;
+        errdefer {
+            for (labels_list.items) |label| {
+                self.allocator.free(label);
+            }
+            labels_list.deinit(self.allocator);
+        }
+
+        var state = (try self.readVisibleNodeState(txn, node_id)) orelse {
+            return labels_list.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+        };
+        defer state.deinit(self.allocator);
+        if (!state.exists) {
+            return labels_list.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+        }
+
+        for (state.labels) |label_id| {
+            const label_name = self.symbol_table.resolve(label_id) catch continue;
+            labels_list.append(self.allocator, label_name) catch {
+                self.allocator.free(label_name);
+                return DatabaseError.OutOfMemory;
+            };
+        }
+
+        return labels_list.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+    }
+
     /// Property entry for property iteration
     pub const PropertyEntry = struct {
         key: []const u8,
@@ -2807,6 +4336,49 @@ pub const Database = struct {
         }
 
         for (node.properties) |prop| {
+            const key_name = self.symbol_table.resolve(prop.key_id) catch continue;
+            errdefer self.allocator.free(key_name);
+
+            const value = prop.value.clone(self.allocator) catch {
+                self.allocator.free(key_name);
+                return DatabaseError.OutOfMemory;
+            };
+            errdefer {
+                var owned_value = value;
+                owned_value.deinit(self.allocator);
+            }
+
+            props.append(self.allocator, .{ .key = key_name, .value = value }) catch {
+                self.allocator.free(key_name);
+                var owned_value = value;
+                owned_value.deinit(self.allocator);
+                return DatabaseError.OutOfMemory;
+            };
+        }
+
+        return props.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+    }
+
+    pub fn getNodePropertiesInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError![]PropertyEntry {
+        var state = (try self.readVisibleNodeState(txn, node_id)) orelse {
+            return self.allocator.alloc(PropertyEntry, 0) catch return DatabaseError.OutOfMemory;
+        };
+        defer state.deinit(self.allocator);
+        if (!state.exists) {
+            return self.allocator.alloc(PropertyEntry, 0) catch return DatabaseError.OutOfMemory;
+        }
+
+        var props: std.ArrayListUnmanaged(PropertyEntry) = .empty;
+        errdefer {
+            for (props.items) |prop| {
+                self.allocator.free(prop.key);
+                var value = prop.value;
+                value.deinit(self.allocator);
+            }
+            props.deinit(self.allocator);
+        }
+
+        for (state.properties) |prop| {
             const key_name = self.symbol_table.resolve(prop.key_id) catch continue;
             errdefer self.allocator.free(key_name);
 
@@ -2926,6 +4498,32 @@ pub const Database = struct {
         };
     }
 
+    pub fn getNodesByLabelInTxn(self: *Self, txn: ?*Transaction, label: []const u8) DatabaseError![]NodeId {
+        const label_id = self.symbol_table.lookup(label) catch |err| {
+            return switch (err) {
+                symbols_mod.SymbolError.NotFound => self.allocator.alloc(NodeId, 0) catch return DatabaseError.OutOfMemory,
+                else => DatabaseError.IoError,
+            };
+        };
+
+        const visible_ids = try self.collectVisibleNodeIds(txn);
+        defer self.allocator.free(visible_ids);
+
+        var matches: std.ArrayListUnmanaged(NodeId) = .empty;
+        errdefer matches.deinit(self.allocator);
+
+        for (visible_ids) |node_id| {
+            var state = (try self.readVisibleNodeState(txn, node_id)) orelse continue;
+            defer state.deinit(self.allocator);
+            if (!state.exists) continue;
+            if (containsSymbolId(state.labels, label_id)) {
+                matches.append(self.allocator, node_id) catch return DatabaseError.OutOfMemory;
+            }
+        }
+
+        return matches.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+    }
+
     // ========================================================================
     // Query Execution
     // ========================================================================
@@ -2944,7 +4542,7 @@ pub const Database = struct {
     /// }
     /// ```
     pub fn query(self: *Self, cypher: []const u8) QueryError!QueryResult {
-        var detailed = try self.queryDetailed(cypher);
+        var detailed = try self.queryDetailedInTxn(null, cypher);
         switch (detailed) {
             .success => |result| return result,
             .failure => |*failure| {
@@ -2961,7 +4559,7 @@ pub const Database = struct {
         cypher: []const u8,
         params: *const std.StringHashMap(types.PropertyValue),
     ) QueryError!QueryResult {
-        var detailed = try self.queryWithParamsDetailed(cypher, params);
+        var detailed = try self.queryWithParamsDetailedInTxn(null, cypher, params);
         switch (detailed) {
             .success => |result| return result,
             .failure => |*failure| {
@@ -2974,7 +4572,7 @@ pub const Database = struct {
 
     /// Execute a Cypher query and return either query results or structured failure details.
     pub fn queryDetailed(self: *Self, cypher: []const u8) QueryError!QueryDetailedResult {
-        return self.executeQueryDetailed(cypher, null);
+        return self.queryDetailedInTxn(null, cypher);
     }
 
     /// Execute a Cypher query with bound parameters and return structured success/failure output.
@@ -2983,7 +4581,53 @@ pub const Database = struct {
         cypher: []const u8,
         params: *const std.StringHashMap(types.PropertyValue),
     ) QueryError!QueryDetailedResult {
-        return self.executeQueryDetailed(cypher, params);
+        return self.queryWithParamsDetailedInTxn(null, cypher, params);
+    }
+
+    pub fn queryInTxn(self: *Self, txn: ?*Transaction, cypher: []const u8) QueryError!QueryResult {
+        var detailed = try self.queryDetailedInTxn(txn, cypher);
+        switch (detailed) {
+            .success => |result| return result,
+            .failure => |*failure| {
+                const legacy = failure.toLegacyError();
+                failure.deinit();
+                return legacy;
+            },
+        }
+    }
+
+    pub fn queryWithParamsInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        cypher: []const u8,
+        params: *const std.StringHashMap(types.PropertyValue),
+    ) QueryError!QueryResult {
+        var detailed = try self.queryWithParamsDetailedInTxn(txn, cypher, params);
+        switch (detailed) {
+            .success => |result| return result,
+            .failure => |*failure| {
+                const legacy = failure.toLegacyError();
+                failure.deinit();
+                return legacy;
+            },
+        }
+    }
+
+    pub fn queryDetailedInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        cypher: []const u8,
+    ) QueryError!QueryDetailedResult {
+        return self.executeQueryDetailed(txn, cypher, null);
+    }
+
+    pub fn queryWithParamsDetailedInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        cypher: []const u8,
+        params: *const std.StringHashMap(types.PropertyValue),
+    ) QueryError!QueryDetailedResult {
+        return self.executeQueryDetailed(txn, cypher, params);
     }
 
     /// Clear the query cache (if enabled).
@@ -3004,6 +4648,7 @@ pub const Database = struct {
     /// Internal: Execute a query with optional parameters, using the cache when available.
     fn executeQueryDetailed(
         self: *Self,
+        txn: ?*Transaction,
         cypher: []const u8,
         params: ?*const std.StringHashMap(types.PropertyValue),
     ) QueryError!QueryDetailedResult {
@@ -3152,6 +4797,7 @@ pub const Database = struct {
         // Execute
         var exec_ctx = ExecutionContext.initWithStorage(self.allocator, &self.node_store, &self.symbol_table);
         exec_ctx.database = self;
+        exec_ctx.txn = txn;
         defer exec_ctx.deinit();
 
         var binding_iter = planner.bindings.iterator();

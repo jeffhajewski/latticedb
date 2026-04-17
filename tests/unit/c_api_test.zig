@@ -21,6 +21,8 @@ const lattice_database = c_api.lattice_database;
 const lattice_txn = c_api.lattice_txn;
 const lattice_query = c_api.lattice_query;
 const lattice_result = c_api.lattice_result;
+const lattice_vector_result = c_api.lattice_vector_result;
+const lattice_fts_result = c_api.lattice_fts_result;
 const lattice_error = c_api.lattice_error;
 const lattice_list = c_api.lattice_list;
 const lattice_map = c_api.lattice_map;
@@ -32,6 +34,15 @@ const lattice_txn_mode = c_api.lattice_txn_mode;
 const lattice_node_id = c_api.lattice_node_id;
 const lattice_edge_id = c_api.lattice_edge_id;
 const lattice_query_error_stage = c_api.lattice_query_error_stage;
+
+fn expectSingleIntCell(result: ?*lattice_result, expected: i64) !void {
+    try std.testing.expect(c_api.lattice_result_next(result));
+    var value: lattice_value = undefined;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_result_get(result, 0, &value));
+    try std.testing.expectEqual(lattice_value_type.int, value.value_type);
+    try std.testing.expectEqual(expected, value.data.int_val);
+    try std.testing.expect(!c_api.lattice_result_next(result));
+}
 
 // ============================================================================
 // Database Lifecycle Tests
@@ -1798,6 +1809,263 @@ test "c_api: semantic query error diagnostics include code and location" {
 
     c_api.lattice_query_free(query);
     _ = c_api.lattice_commit(txn);
+}
+
+test "c_api: txn-scoped graph reads and queries hide uncommitted changes" {
+    const path = "/tmp/lattice_capi_txn_graph_snapshot_test.db";
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        std.fs.cwd().deleteFile(path) catch {};
+        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var seed_txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &seed_txn));
+    var company: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(seed_txn, "Company", &company));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(seed_txn));
+
+    var write_txn: ?*lattice_txn = null;
+    var read_txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &write_txn));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &read_txn));
+
+    var alice: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(write_txn, "Person", &alice));
+    var name_value = lattice_value{
+        .value_type = .string,
+        .data = .{ .string_val = .{ .ptr = "Alice".ptr, .len = "Alice".len } },
+    };
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_property(write_txn, alice, "name", &name_value));
+
+    var edge_id: lattice_edge_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(write_txn, alice, company, "WORKS_AT", &edge_id));
+
+    var exists = false;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_exists(write_txn, alice, &exists));
+    try std.testing.expect(exists);
+
+    var prop_value: lattice_value = undefined;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_get_property(write_txn, alice, "name", &prop_value));
+    defer c_api.lattice_value_free(&prop_value);
+    try std.testing.expectEqual(lattice_value_type.string, prop_value.value_type);
+    try std.testing.expectEqualStrings("Alice", prop_value.data.string_val.ptr[0..prop_value.data.string_val.len]);
+
+    var writer_ids: ?[*]lattice_node_id = null;
+    var writer_count: usize = 0;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_get_nodes_by_label_txn(write_txn, "Person", "Person".len, &writer_ids, &writer_count),
+    );
+    defer c_api.lattice_free_node_ids(writer_ids, writer_count);
+    try std.testing.expectEqual(@as(usize, 1), writer_count);
+    try std.testing.expectEqual(alice, writer_ids.?[0]);
+
+    var writer_edges: ?*c_api.lattice_edge_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_get_incoming(write_txn, company, &writer_edges));
+    defer c_api.lattice_edge_result_free(writer_edges);
+    try std.testing.expectEqual(@as(u32, 1), c_api.lattice_edge_result_count(writer_edges));
+
+    var invisible_prop: lattice_value = undefined;
+    try std.testing.expectEqual(lattice_error.err_not_found, c_api.lattice_node_get_property(read_txn, alice, "name", &invisible_prop));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_exists(read_txn, alice, &exists));
+    try std.testing.expect(!exists);
+
+    var read_ids: ?[*]lattice_node_id = null;
+    var read_count: usize = 0;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_get_nodes_by_label_txn(read_txn, "Person", "Person".len, &read_ids, &read_count),
+    );
+    defer c_api.lattice_free_node_ids(read_ids, read_count);
+    try std.testing.expectEqual(@as(usize, 0), read_count);
+
+    var public_ids: ?[*]lattice_node_id = null;
+    var public_count: usize = 0;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_get_nodes_by_label(db, "Person", "Person".len, &public_ids, &public_count),
+    );
+    defer c_api.lattice_free_node_ids(public_ids, public_count);
+    try std.testing.expectEqual(@as(usize, 0), public_count);
+
+    var read_edges: ?*c_api.lattice_edge_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_get_incoming(read_txn, company, &read_edges));
+    defer c_api.lattice_edge_result_free(read_edges);
+    try std.testing.expectEqual(@as(u32, 0), c_api.lattice_edge_result_count(read_edges));
+
+    var query: ?*lattice_query = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_prepare(db, "MATCH (n:Person) RETURN count(n)", &query));
+    defer c_api.lattice_query_free(query);
+
+    var writer_result: ?*lattice_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_execute(query, write_txn, &writer_result));
+    defer c_api.lattice_result_free(writer_result);
+    try expectSingleIntCell(writer_result, 1);
+
+    var read_result: ?*lattice_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_execute(query, read_txn, &read_result));
+    defer c_api.lattice_result_free(read_result);
+    try expectSingleIntCell(read_result, 0);
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(write_txn));
+
+    var stale_result: ?*lattice_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_execute(query, read_txn, &stale_result));
+    defer c_api.lattice_result_free(stale_result);
+    try expectSingleIntCell(stale_result, 0);
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(read_txn));
+
+    var after_txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &after_txn));
+    defer _ = c_api.lattice_commit(after_txn);
+
+    var after_result: ?*lattice_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_execute(query, after_txn, &after_result));
+    defer c_api.lattice_result_free(after_result);
+    try expectSingleIntCell(after_result, 1);
+}
+
+test "c_api: txn-scoped vector and fts searches hide uncommitted changes" {
+    const path = "/tmp/lattice_capi_txn_search_snapshot_test.db";
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = true,
+        .vector_dimensions = 4,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        std.fs.cwd().deleteFile(path) catch {};
+        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var write_txn: ?*lattice_txn = null;
+    var read_txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &write_txn));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &read_txn));
+
+    var doc: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(write_txn, "Document", &doc));
+
+    const query_vector = [_]f32{ 1.0, 0.0, 0.0, 0.0 };
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_node_set_vector(write_txn, doc, "embedding", &query_vector, query_vector.len),
+    );
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_fts_index(write_txn, doc, "machine learning systems", "machine learning systems".len),
+    );
+
+    var writer_vector: ?*lattice_vector_result = null;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_vector_search_txn(write_txn, &query_vector, query_vector.len, 5, 0, &writer_vector),
+    );
+    defer c_api.lattice_vector_result_free(writer_vector);
+    try std.testing.expectEqual(@as(u32, 1), c_api.lattice_vector_result_count(writer_vector));
+
+    var writer_fts: ?*lattice_fts_result = null;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_fts_search_txn(write_txn, "machine learning", "machine learning".len, 5, &writer_fts),
+    );
+    defer c_api.lattice_fts_result_free(writer_fts);
+    try std.testing.expectEqual(@as(u32, 1), c_api.lattice_fts_result_count(writer_fts));
+
+    var read_vector: ?*lattice_vector_result = null;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_vector_search_txn(read_txn, &query_vector, query_vector.len, 5, 0, &read_vector),
+    );
+    defer c_api.lattice_vector_result_free(read_vector);
+    try std.testing.expectEqual(@as(u32, 0), c_api.lattice_vector_result_count(read_vector));
+
+    var public_vector: ?*lattice_vector_result = null;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_vector_search(db, &query_vector, query_vector.len, 5, 0, &public_vector),
+    );
+    defer c_api.lattice_vector_result_free(public_vector);
+    try std.testing.expectEqual(@as(u32, 0), c_api.lattice_vector_result_count(public_vector));
+
+    var read_fts: ?*lattice_fts_result = null;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_fts_search_txn(read_txn, "machine learning", "machine learning".len, 5, &read_fts),
+    );
+    defer c_api.lattice_fts_result_free(read_fts);
+    try std.testing.expectEqual(@as(u32, 0), c_api.lattice_fts_result_count(read_fts));
+
+    var public_fts: ?*lattice_fts_result = null;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_fts_search(db, "machine learning", "machine learning".len, 5, &public_fts),
+    );
+    defer c_api.lattice_fts_result_free(public_fts);
+    try std.testing.expectEqual(@as(u32, 0), c_api.lattice_fts_result_count(public_fts));
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(write_txn));
+
+    var stale_vector: ?*lattice_vector_result = null;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_vector_search_txn(read_txn, &query_vector, query_vector.len, 5, 0, &stale_vector),
+    );
+    defer c_api.lattice_vector_result_free(stale_vector);
+    try std.testing.expectEqual(@as(u32, 0), c_api.lattice_vector_result_count(stale_vector));
+
+    var stale_fts: ?*lattice_fts_result = null;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_fts_search_txn(read_txn, "machine learning", "machine learning".len, 5, &stale_fts),
+    );
+    defer c_api.lattice_fts_result_free(stale_fts);
+    try std.testing.expectEqual(@as(u32, 0), c_api.lattice_fts_result_count(stale_fts));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(read_txn));
+
+    var after_txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &after_txn));
+    defer _ = c_api.lattice_commit(after_txn);
+
+    var after_vector: ?*lattice_vector_result = null;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_vector_search_txn(after_txn, &query_vector, query_vector.len, 5, 0, &after_vector),
+    );
+    defer c_api.lattice_vector_result_free(after_vector);
+    try std.testing.expectEqual(@as(u32, 1), c_api.lattice_vector_result_count(after_vector));
+
+    var after_fts: ?*lattice_fts_result = null;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_fts_search_txn(after_txn, "machine learning", "machine learning".len, 5, &after_fts),
+    );
+    defer c_api.lattice_fts_result_free(after_fts);
+    try std.testing.expectEqual(@as(u32, 1), c_api.lattice_fts_result_count(after_fts));
 }
 
 // ============================================================================

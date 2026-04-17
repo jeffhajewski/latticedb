@@ -11,21 +11,28 @@ from latticedb._bindings import (
     LATTICE_ERROR_NOT_FOUND,
     LATTICE_TXN_READ_ONLY,
     LATTICE_TXN_READ_WRITE,
+    LATTICE_VALUE_NULL,
     LatticeNodeId,
     LatticeValue,
     NodeWithVector,
     check_error,
+    check_query_error,
     get_lib,
     python_to_value,
     value_to_python,
 )
-from latticedb.types import Edge, Node, PropertyValue
+from latticedb.types import Edge, FtsSearchResult, Node, PropertyValue, QueryResult, VectorSearchResult
 
 if TYPE_CHECKING:
     import numpy as np
     from numpy.typing import NDArray
 
     from latticedb.database import Database
+
+
+def _is_numpy_array(value: Any) -> bool:
+    """Check if a value is a numpy array without importing numpy."""
+    return type(value).__module__ == "numpy" and type(value).__name__ == "ndarray"
 
 
 class Transaction:
@@ -293,6 +300,126 @@ class Transaction:
         finally:
             lib._lib.lattice_value_free(byref(c_value))
 
+    def query(
+        self,
+        cypher: str,
+        parameters: Optional[Dict[str, PropertyValue]] = None,
+    ) -> QueryResult:
+        """
+        Execute a Cypher query inside this transaction.
+
+        Args:
+            cypher: The Cypher query string.
+            parameters: Optional query parameters.
+
+        Returns:
+            Query results scoped to this transaction's snapshot.
+        """
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+        if self._db._handle is None:
+            raise RuntimeError("Database is not open")
+
+        lib = get_lib()
+        query_ptr = c_void_p()
+        result_ptr = c_void_p()
+
+        try:
+            code = lib._lib.lattice_query_prepare(
+                self._db._handle,
+                cypher.encode("utf-8"),
+                byref(query_ptr),
+            )
+            check_error(code)
+
+            if parameters:
+                for name, value in parameters.items():
+                    if _is_numpy_array(value):
+                        import numpy as np
+
+                        vec = np.ascontiguousarray(value, dtype=np.float32)
+                        vec_ptr = vec.ctypes.data_as(ctypes.POINTER(ctypes.c_float))
+                        code = lib._lib.lattice_query_bind_vector(
+                            query_ptr,
+                            name.encode("utf-8"),
+                            vec_ptr,
+                            len(vec),
+                        )
+                        check_error(code)
+                    else:
+                        c_value = LatticeValue()
+                        _ref = python_to_value(value, c_value)
+                        code = lib._lib.lattice_query_bind(
+                            query_ptr,
+                            name.encode("utf-8"),
+                            byref(c_value),
+                        )
+                        del _ref
+                        check_error(code)
+
+            code = lib._lib.lattice_query_execute(
+                query_ptr,
+                self._handle,
+                byref(result_ptr),
+            )
+            check_query_error(code, query_ptr)
+
+            column_count = lib._lib.lattice_result_column_count(result_ptr)
+            columns = []
+            for i in range(column_count):
+                name_ptr = lib._lib.lattice_result_column_name(result_ptr, i)
+                if name_ptr:
+                    columns.append(name_ptr.decode("utf-8"))
+                else:
+                    columns.append(f"column_{i}")
+
+            rows: List[Dict[str, Any]] = []
+            while lib._lib.lattice_result_next(result_ptr):
+                row: Dict[str, Any] = {}
+                for i, col_name in enumerate(columns):
+                    c_value = LatticeValue()
+                    c_value.type = LATTICE_VALUE_NULL
+                    code = lib._lib.lattice_result_get(result_ptr, i, byref(c_value))
+                    check_error(code)
+                    row[col_name] = value_to_python(c_value)
+                rows.append(row)
+
+            return QueryResult(columns=columns, _rows=rows)
+        finally:
+            if result_ptr.value:
+                lib._lib.lattice_result_free(result_ptr)
+            if query_ptr.value:
+                lib._lib.lattice_query_free(query_ptr)
+
+    def get_nodes_by_label(self, label: str) -> List[int]:
+        """
+        Return every node id that currently carries ``label`` in this transaction.
+        """
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        label_bytes = label.encode("utf-8")
+        ids_ptr = ctypes.POINTER(LatticeNodeId)()
+        count = ctypes.c_size_t(0)
+
+        code = lib._lib.lattice_get_nodes_by_label_txn(
+            self._handle,
+            label_bytes,
+            len(label_bytes),
+            byref(ids_ptr),
+            byref(count),
+        )
+        check_error(code)
+
+        try:
+            if count.value == 0 or not ids_ptr:
+                return []
+            return [ids_ptr[i] for i in range(count.value)]
+        finally:
+            if ids_ptr:
+                lib._lib.lattice_free_node_ids(ids_ptr, count.value)
+
     def set_vector(
         self,
         node_id: int,
@@ -401,6 +528,58 @@ class Transaction:
         )
         return self.batch_insert_vectors(label, vectors)
 
+    def vector_search(
+        self,
+        vector: "NDArray[np.float32]",
+        *,
+        k: int = 10,
+        ef_search: int = 64,
+    ) -> List[VectorSearchResult]:
+        """
+        Search for similar vectors within this transaction.
+        """
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        import numpy as np
+
+        if not isinstance(vector, np.ndarray):
+            vector = np.array(vector, dtype=np.float32)
+        elif vector.dtype != np.float32:
+            vector = vector.astype(np.float32)
+        if not vector.flags["C_CONTIGUOUS"]:
+            vector = np.ascontiguousarray(vector)
+
+        lib = get_lib()
+        result_ptr = c_void_p()
+        code = lib._lib.lattice_vector_search_txn(
+            self._handle,
+            vector.ctypes.data_as(ctypes.POINTER(ctypes.c_float)),
+            len(vector),
+            k,
+            ef_search,
+            byref(result_ptr),
+        )
+        check_error(code)
+
+        try:
+            count = lib._lib.lattice_vector_result_count(result_ptr)
+            results: List[VectorSearchResult] = []
+            for i in range(count):
+                node_id = LatticeNodeId()
+                distance = ctypes.c_float()
+                code = lib._lib.lattice_vector_result_get(
+                    result_ptr, i, byref(node_id), byref(distance)
+                )
+                check_error(code)
+                results.append(
+                    VectorSearchResult(node_id=node_id.value, distance=distance.value)
+                )
+            return results
+        finally:
+            if result_ptr.value:
+                lib._lib.lattice_vector_result_free(result_ptr)
+
     def fts_index(
         self,
         node_id: int,
@@ -427,6 +606,92 @@ class Transaction:
             len(text_bytes),
         )
         check_error(code)
+
+    def fts_search(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+    ) -> List[FtsSearchResult]:
+        """
+        Full-text search within this transaction.
+        """
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        result_ptr = c_void_p()
+        query_bytes = query.encode("utf-8")
+
+        code = lib._lib.lattice_fts_search_txn(
+            self._handle,
+            query_bytes,
+            len(query_bytes),
+            limit,
+            byref(result_ptr),
+        )
+        check_error(code)
+
+        try:
+            count = lib._lib.lattice_fts_result_count(result_ptr)
+            results: List[FtsSearchResult] = []
+            for i in range(count):
+                node_id = LatticeNodeId()
+                score = ctypes.c_float()
+                code = lib._lib.lattice_fts_result_get(
+                    result_ptr, i, byref(node_id), byref(score)
+                )
+                check_error(code)
+                results.append(FtsSearchResult(node_id=node_id.value, score=score.value))
+            return results
+        finally:
+            if result_ptr.value:
+                lib._lib.lattice_fts_result_free(result_ptr)
+
+    def fts_search_fuzzy(
+        self,
+        query: str,
+        *,
+        limit: int = 10,
+        max_distance: int = 0,
+        min_term_length: int = 0,
+    ) -> List[FtsSearchResult]:
+        """
+        Fuzzy full-text search within this transaction.
+        """
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        result_ptr = c_void_p()
+        query_bytes = query.encode("utf-8")
+
+        code = lib._lib.lattice_fts_search_fuzzy_txn(
+            self._handle,
+            query_bytes,
+            len(query_bytes),
+            limit,
+            max_distance,
+            min_term_length,
+            byref(result_ptr),
+        )
+        check_error(code)
+
+        try:
+            count = lib._lib.lattice_fts_result_count(result_ptr)
+            results: List[FtsSearchResult] = []
+            for i in range(count):
+                node_id = LatticeNodeId()
+                score = ctypes.c_float()
+                code = lib._lib.lattice_fts_result_get(
+                    result_ptr, i, byref(node_id), byref(score)
+                )
+                check_error(code)
+                results.append(FtsSearchResult(node_id=node_id.value, score=score.value))
+            return results
+        finally:
+            if result_ptr.value:
+                lib._lib.lattice_fts_result_free(result_ptr)
 
     def create_edge(
         self,

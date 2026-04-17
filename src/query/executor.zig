@@ -21,6 +21,9 @@ const NodeStore = node_mod.NodeStore;
 const symbols_mod = lattice.graph.symbols;
 const SymbolTable = symbols_mod.SymbolTable;
 
+const txn_mod = lattice.transaction.manager;
+const Transaction = txn_mod.Transaction;
+
 const database_mod = lattice.storage.database;
 const Database = database_mod.Database;
 
@@ -288,6 +291,9 @@ pub const ExecutionContext = struct {
     /// Database reference for mutation operators (optional)
     database: ?*Database,
 
+    /// Active transaction for txn-aware reads and writes (optional)
+    txn: ?*Transaction,
+
     const Self = @This();
 
     /// Create a new execution context
@@ -300,6 +306,7 @@ pub const ExecutionContext = struct {
             .node_store = null,
             .symbol_table = null,
             .database = null,
+            .txn = null,
         };
     }
 
@@ -313,6 +320,7 @@ pub const ExecutionContext = struct {
             .node_store = node_store,
             .symbol_table = symbol_table,
             .database = null,
+            .txn = null,
         };
     }
 

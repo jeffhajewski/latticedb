@@ -16,10 +16,12 @@ const types = @import("../../core/types.zig");
 const NodeId = types.NodeId;
 
 const edge_mod = @import("../../graph/edge.zig");
-const EdgeStore = edge_mod.EdgeStore;
 
 const symbols = @import("../../graph/symbols.zig");
 const SymbolId = symbols.SymbolId;
+
+const database_mod = @import("../../storage/database.zig");
+const Database = database_mod.Database;
 
 const expand_ops = @import("expand.zig");
 const ExpandDirection = expand_ops.ExpandDirection;
@@ -34,19 +36,25 @@ const PathFrame = struct {
     node_id: NodeId,
     /// Current depth (1 = first hop)
     depth: u32,
-    /// Iterator for outgoing edges
-    outgoing_iter: ?EdgeStore.EdgeRefIterator,
-    /// Iterator for incoming edges (used when direction is .both)
-    incoming_iter: ?EdgeStore.EdgeRefIterator,
+    /// Materialized outgoing edges for this frame
+    outgoing_edges: ?[]edge_mod.EdgeRef,
+    /// Materialized incoming edges for this frame (used when direction is .both)
+    incoming_edges: ?[]edge_mod.EdgeRef,
+    /// Current outgoing index
+    outgoing_index: usize,
+    /// Current incoming index
+    incoming_index: usize,
     /// Whether we're in the incoming phase
     in_incoming_phase: bool,
 
-    fn deinit(self: *PathFrame) void {
-        if (self.outgoing_iter) |*iter| {
-            iter.deinit();
+    fn deinit(self: *PathFrame, allocator: Allocator) void {
+        if (self.outgoing_edges) |edges| {
+            allocator.free(edges);
+            self.outgoing_edges = null;
         }
-        if (self.incoming_iter) |*iter| {
-            iter.deinit();
+        if (self.incoming_edges) |edges| {
+            allocator.free(edges);
+            self.incoming_edges = null;
         }
     }
 };
@@ -67,8 +75,8 @@ pub const VariableLengthExpand = struct {
     edge_type: ?SymbolId,
     /// Direction to traverse
     direction: ExpandDirection,
-    /// Edge store for traversal
-    edge_store: *EdgeStore,
+    /// Database reference for txn-aware traversal
+    database: *Database,
     /// Minimum hops (inclusive)
     min_hops: u32,
     /// Maximum hops (inclusive), null means unbounded (with safety limit)
@@ -102,7 +110,7 @@ pub const VariableLengthExpand = struct {
         target_slot: u8,
         edge_type: ?SymbolId,
         direction: ExpandDirection,
-        edge_store: *EdgeStore,
+        database: *Database,
         min_hops: u32,
         max_hops: ?u32,
     ) !*Self {
@@ -113,7 +121,7 @@ pub const VariableLengthExpand = struct {
             .target_slot = target_slot,
             .edge_type = edge_type,
             .direction = direction,
-            .edge_store = edge_store,
+            .database = database,
             .min_hops = min_hops,
             .max_hops = max_hops,
             .current_input = null,
@@ -166,7 +174,7 @@ pub const VariableLengthExpand = struct {
             }
 
             // Try to continue DFS from current path
-            if (try self.exploreNext()) |result| {
+            if (try self.exploreNext(ctx)) |result| {
                 // Check if hop count meets min_hops requirement
                 if (result.depth >= self.min_hops) {
                     return self.emitResult(result.target_id);
@@ -186,7 +194,7 @@ pub const VariableLengthExpand = struct {
             self.current_input = try self.input.next(ctx) orelse return null;
 
             // Start traversal from source node
-            try self.startTraversal();
+            try self.startTraversal(ctx);
         }
     }
 
@@ -204,7 +212,7 @@ pub const VariableLengthExpand = struct {
         return output_row;
     }
 
-    fn startTraversal(self: *Self) OperatorError!void {
+    fn startTraversal(self: *Self, ctx: *ExecutionContext) OperatorError!void {
         const input_row = self.current_input orelse return;
         const source_val = input_row.getSlot(self.source_slot) orelse return OperatorError.UnboundVariable;
 
@@ -219,16 +227,18 @@ pub const VariableLengthExpand = struct {
         }
 
         // Create initial frame at depth 0 (source node, before first hop)
-        const frame = try self.createFrame(source_id, 0);
+        const frame = try self.createFrame(ctx, source_id, 0);
         self.path_stack.append(self.allocator, frame) catch return OperatorError.OutOfMemory;
     }
 
-    fn createFrame(self: *Self, node_id: NodeId, depth: u32) OperatorError!PathFrame {
+    fn createFrame(self: *Self, ctx: *ExecutionContext, node_id: NodeId, depth: u32) OperatorError!PathFrame {
         var frame = PathFrame{
             .node_id = node_id,
             .depth = depth,
-            .outgoing_iter = null,
-            .incoming_iter = null,
+            .outgoing_edges = null,
+            .incoming_edges = null,
+            .outgoing_index = 0,
+            .incoming_index = 0,
             .in_incoming_phase = false,
         };
 
@@ -236,16 +246,16 @@ pub const VariableLengthExpand = struct {
         switch (self.direction) {
             .outgoing, .both => {
                 if (self.edge_type) |edge_type| {
-                    frame.outgoing_iter = self.edge_store.getOutgoingRefsByType(node_id, edge_type) catch return OperatorError.StorageError;
+                    frame.outgoing_edges = self.database.getOutgoingEdgeRefsByTypeInTxn(ctx.txn, node_id, edge_type) catch return OperatorError.StorageError;
                 } else {
-                    frame.outgoing_iter = self.edge_store.getOutgoingRefs(node_id) catch return OperatorError.StorageError;
+                    frame.outgoing_edges = self.database.getOutgoingEdgeRefsInTxn(ctx.txn, node_id) catch return OperatorError.StorageError;
                 }
             },
             .incoming => {
                 if (self.edge_type) |edge_type| {
-                    frame.incoming_iter = self.edge_store.getIncomingRefsByType(node_id, edge_type) catch return OperatorError.StorageError;
+                    frame.incoming_edges = self.database.getIncomingEdgeRefsByTypeInTxn(ctx.txn, node_id, edge_type) catch return OperatorError.StorageError;
                 } else {
-                    frame.incoming_iter = self.edge_store.getIncomingRefs(node_id) catch return OperatorError.StorageError;
+                    frame.incoming_edges = self.database.getIncomingEdgeRefsInTxn(ctx.txn, node_id) catch return OperatorError.StorageError;
                 }
                 frame.in_incoming_phase = true;
             },
@@ -260,7 +270,7 @@ pub const VariableLengthExpand = struct {
         depth: u32,
     };
 
-    fn exploreNext(self: *Self) OperatorError!?ExploreResult {
+    fn exploreNext(self: *Self, ctx: *ExecutionContext) OperatorError!?ExploreResult {
         if (self.path_stack.items.len == 0) return null;
 
         const frame = &self.path_stack.items[self.path_stack.items.len - 1];
@@ -270,68 +280,80 @@ pub const VariableLengthExpand = struct {
         if (frame.depth >= effective_max) return null;
 
         while (true) {
-            // Get next edge from current iterator
-            var iter_ptr: *?EdgeStore.EdgeRefIterator = undefined;
+            var edges: []edge_mod.EdgeRef = undefined;
+            var index_ptr: *usize = undefined;
             if (frame.in_incoming_phase) {
-                iter_ptr = &frame.incoming_iter;
+                edges = frame.incoming_edges orelse {
+                    if (self.direction == .both and !frame.in_incoming_phase) {
+                        frame.in_incoming_phase = true;
+                        if (self.edge_type) |edge_type| {
+                            frame.incoming_edges = self.database.getIncomingEdgeRefsByTypeInTxn(ctx.txn, frame.node_id, edge_type) catch return OperatorError.StorageError;
+                        } else {
+                            frame.incoming_edges = self.database.getIncomingEdgeRefsInTxn(ctx.txn, frame.node_id) catch return OperatorError.StorageError;
+                        }
+                        frame.incoming_index = 0;
+                        continue;
+                    }
+                    return null;
+                };
+                index_ptr = &frame.incoming_index;
             } else {
-                iter_ptr = &frame.outgoing_iter;
+                edges = frame.outgoing_edges orelse {
+                    if (self.direction == .both and !frame.in_incoming_phase) {
+                        frame.in_incoming_phase = true;
+                        if (self.edge_type) |edge_type| {
+                            frame.incoming_edges = self.database.getIncomingEdgeRefsByTypeInTxn(ctx.txn, frame.node_id, edge_type) catch return OperatorError.StorageError;
+                        } else {
+                            frame.incoming_edges = self.database.getIncomingEdgeRefsInTxn(ctx.txn, frame.node_id) catch return OperatorError.StorageError;
+                        }
+                        frame.incoming_index = 0;
+                        continue;
+                    }
+                    return null;
+                };
+                index_ptr = &frame.outgoing_index;
             }
 
-            var iter = iter_ptr.* orelse {
+            if (index_ptr.* >= edges.len) {
                 // Switch to incoming if doing both directions
                 if (self.direction == .both and !frame.in_incoming_phase) {
                     frame.in_incoming_phase = true;
                     if (self.edge_type) |edge_type| {
-                        frame.incoming_iter = self.edge_store.getIncomingRefsByType(frame.node_id, edge_type) catch return OperatorError.StorageError;
+                        frame.incoming_edges = self.database.getIncomingEdgeRefsByTypeInTxn(ctx.txn, frame.node_id, edge_type) catch return OperatorError.StorageError;
                     } else {
-                        frame.incoming_iter = self.edge_store.getIncomingRefs(frame.node_id) catch return OperatorError.StorageError;
+                        frame.incoming_edges = self.database.getIncomingEdgeRefsInTxn(ctx.txn, frame.node_id) catch return OperatorError.StorageError;
                     }
-                    continue;
-                }
-                return null;
-            };
-
-            const edge_opt = iter.next() catch return OperatorError.StorageError;
-            iter_ptr.* = iter; // Update iterator state
-
-            if (edge_opt) |edge| {
-                // Get target node based on direction
-                const target_id = if (frame.in_incoming_phase) edge.source else edge.target;
-
-                // Skip if already visited (cycle detection)
-                if (self.visited.contains(target_id)) {
-                    continue;
-                }
-
-                // Mark as visited
-                self.visited.put(target_id, {}) catch return OperatorError.OutOfMemory;
-
-                const new_depth = frame.depth + 1;
-
-                // Check if we need to continue exploring (push frame for further traversal)
-                if (new_depth < effective_max) {
-                    // Push new frame for continued exploration
-                    const new_frame = try self.createFrame(target_id, new_depth);
-                    self.path_stack.append(self.allocator, new_frame) catch return OperatorError.OutOfMemory;
-                }
-
-                // Return this target with its hop depth
-                return ExploreResult{ .target_id = target_id, .depth = new_depth };
-            } else {
-                // No more edges from current iterator
-                // Switch to incoming if doing both directions
-                if (self.direction == .both and !frame.in_incoming_phase) {
-                    frame.in_incoming_phase = true;
-                    if (self.edge_type) |edge_type| {
-                        frame.incoming_iter = self.edge_store.getIncomingRefsByType(frame.node_id, edge_type) catch return OperatorError.StorageError;
-                    } else {
-                        frame.incoming_iter = self.edge_store.getIncomingRefs(frame.node_id) catch return OperatorError.StorageError;
-                    }
+                    frame.incoming_index = 0;
                     continue;
                 }
                 return null;
             }
+
+            const edge = edges[index_ptr.*];
+            index_ptr.* += 1;
+
+            // Get target node based on direction
+            const target_id = if (frame.in_incoming_phase) edge.source else edge.target;
+
+            // Skip if already visited (cycle detection)
+            if (self.visited.contains(target_id)) {
+                continue;
+            }
+
+            // Mark as visited
+            self.visited.put(target_id, {}) catch return OperatorError.OutOfMemory;
+
+            const new_depth = frame.depth + 1;
+
+            // Check if we need to continue exploring (push frame for further traversal)
+            if (new_depth < effective_max) {
+                // Push new frame for continued exploration
+                const new_frame = try self.createFrame(ctx, target_id, new_depth);
+                self.path_stack.append(self.allocator, new_frame) catch return OperatorError.OutOfMemory;
+            }
+
+            // Return this target with its hop depth
+            return ExploreResult{ .target_id = target_id, .depth = new_depth };
         }
     }
 
@@ -344,12 +366,23 @@ pub const VariableLengthExpand = struct {
             _ = self.visited.remove(frame.node_id);
 
             // Clean up frame resources
-            frame.deinit();
+            frame.deinit(self.allocator);
 
             // Check if parent frame has more edges to explore
             if (self.path_stack.items.len > 0) {
                 const parent = &self.path_stack.items[self.path_stack.items.len - 1];
-                if (parent.outgoing_iter != null or parent.incoming_iter != null) {
+                const has_more_outgoing = if (parent.outgoing_edges) |edges|
+                    parent.outgoing_index < edges.len
+                else
+                    false;
+                const has_more_incoming = if (parent.incoming_edges) |edges|
+                    parent.incoming_index < edges.len
+                else
+                    false;
+                const can_switch_to_incoming = self.direction == .both and
+                    !parent.in_incoming_phase and
+                    parent.incoming_edges == null;
+                if (has_more_outgoing or has_more_incoming or can_switch_to_incoming) {
                     return true;
                 }
             }
@@ -361,7 +394,7 @@ pub const VariableLengthExpand = struct {
     fn resetTraversal(self: *Self) void {
         // Clean up path stack
         for (self.path_stack.items) |*frame| {
-            frame.deinit();
+            frame.deinit(self.allocator);
         }
         self.path_stack.clearRetainingCapacity();
 
@@ -387,7 +420,7 @@ pub const VariableLengthExpand = struct {
 
         // Clean up path stack
         for (self.path_stack.items) |*frame| {
-            frame.deinit();
+            frame.deinit(self.allocator);
         }
         self.path_stack.deinit(self.allocator);
 

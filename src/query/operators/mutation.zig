@@ -27,7 +27,7 @@ const NodeId = types.NodeId;
 const EdgeId = types.EdgeId;
 const PropertyValue = types.PropertyValue;
 const SymbolError = lattice.graph.symbols.SymbolError;
-const EdgeError = lattice.graph.edge.EdgeError;
+const Transaction = lattice.transaction.manager.Transaction;
 
 const database_mod = lattice.storage.database;
 const Database = database_mod.Database;
@@ -172,11 +172,11 @@ pub const CreateNode = struct {
         );
 
         // Create node with labels
-        const node_id = self.database.createNode(null, self.labels) catch {
+        const node_id = self.database.createNode(ctx.txn, self.labels) catch {
             return OperatorError.StorageError;
         };
 
-        try applyEvaluatedNodeProperties(self.database, node_id, evaluated.items);
+        try applyEvaluatedNodeProperties(self.database, ctx.txn, node_id, evaluated.items);
         return node_id;
     }
 
@@ -305,14 +305,14 @@ pub const CreateEdge = struct {
             &evaluated,
         );
 
-        const edge_id = self.database.createEdgeAndGetId(null, source_id, target_id, self.edge_type) catch {
+        const edge_id = self.database.createEdgeAndGetId(ctx.txn, source_id, target_id, self.edge_type) catch {
             return OperatorError.StorageError;
         };
 
         for (evaluated.items) |item| {
-            self.database.setEdgePropertyById(null, edge_id, item.key, item.value) catch {
+            self.database.setEdgePropertyById(ctx.txn, edge_id, item.key, item.value) catch {
                 // Best-effort rollback to avoid exposing partially initialized edges.
-                self.database.deleteEdgeById(null, edge_id) catch {};
+                self.database.deleteEdgeById(ctx.txn, edge_id) catch {};
                 return OperatorError.StorageError;
             };
         }
@@ -414,34 +414,34 @@ pub const DeleteNode = struct {
 
         // If detach, delete all connected edges first
         if (self.detach) {
-            self.deleteAllEdges(node_id) catch {
+            self.deleteAllEdges(ctx, node_id) catch {
                 return OperatorError.StorageError;
             };
         }
 
         // Delete the node
-        self.database.deleteNode(null, node_id) catch {
+        self.database.deleteNode(ctx.txn, node_id) catch {
             return OperatorError.StorageError;
         };
 
         return row;
     }
 
-    fn deleteAllEdges(self: *Self, node_id: NodeId) !void {
+    fn deleteAllEdges(self: *Self, ctx: *ExecutionContext, node_id: NodeId) !void {
         // Delete outgoing edges
-        const outgoing = try self.database.getOutgoingEdges(node_id);
+        const outgoing = try self.database.getOutgoingEdgesInTxn(ctx.txn, node_id);
         defer self.database.freeEdgeInfos(outgoing);
 
         for (outgoing) |edge| {
-            try self.database.deleteEdge(null, edge.source, edge.target, edge.edge_type);
+            try self.database.deleteEdge(ctx.txn, edge.source, edge.target, edge.edge_type);
         }
 
         // Delete incoming edges
-        const incoming = try self.database.getIncomingEdges(node_id);
+        const incoming = try self.database.getIncomingEdgesInTxn(ctx.txn, node_id);
         defer self.database.freeEdgeInfos(incoming);
 
         for (incoming) |edge| {
-            try self.database.deleteEdge(null, edge.source, edge.target, edge.edge_type);
+            try self.database.deleteEdge(ctx.txn, edge.source, edge.target, edge.edge_type);
         }
     }
 
@@ -527,7 +527,7 @@ pub const DeleteEdge = struct {
         const edge_val = row.getSlot(self.edge_slot) orelse return OperatorError.UnboundVariable;
         const edge_id = edge_val.asEdgeId() orelse return OperatorError.TypeError;
 
-        self.database.deleteEdgeById(null, edge_id) catch {
+        self.database.deleteEdgeById(ctx.txn, edge_id) catch {
             return OperatorError.StorageError;
         };
 
@@ -635,24 +635,24 @@ pub const SetProperty = struct {
             .node_ref => |node_id| {
                 if (value == .null_val) {
                     // NULL removes property
-                    self.database.removeNodeProperty(null, node_id, self.property_name) catch {
+                    self.database.removeNodeProperty(ctx.txn, node_id, self.property_name) catch {
                         return OperatorError.StorageError;
                     };
                 } else {
                     const prop_value = evalResultToPropertyValue(value, self.evaluator.allocator) orelse return OperatorError.TypeError;
-                    self.database.setNodeProperty(null, node_id, self.property_name, prop_value) catch {
+                    self.database.setNodeProperty(ctx.txn, node_id, self.property_name, prop_value) catch {
                         return OperatorError.StorageError;
                     };
                 }
             },
             .edge_ref => |edge_id| {
                 if (value == .null_val) {
-                    self.database.removeEdgePropertyById(null, edge_id, self.property_name) catch {
+                    self.database.removeEdgePropertyById(ctx.txn, edge_id, self.property_name) catch {
                         return OperatorError.StorageError;
                     };
                 } else {
                     const prop_value = evalResultToPropertyValue(value, self.evaluator.allocator) orelse return OperatorError.TypeError;
-                    self.database.setEdgePropertyById(null, edge_id, self.property_name, prop_value) catch {
+                    self.database.setEdgePropertyById(ctx.txn, edge_id, self.property_name, prop_value) catch {
                         return OperatorError.StorageError;
                     };
                 }
@@ -750,7 +750,7 @@ pub const SetLabels = struct {
 
         // Add each label
         for (self.label_names) |label| {
-            self.database.addNodeLabel(null, node_id, label) catch {
+            self.database.addNodeLabel(ctx.txn, node_id, label) catch {
                 return OperatorError.StorageError;
             };
         }
@@ -861,14 +861,14 @@ pub const SetPropertiesReplace = struct {
         switch (target_val) {
             .node_ref => |node_id| {
                 // Clear existing properties and apply new values.
-                self.database.clearNodeProperties(null, node_id) catch {
+                self.database.clearNodeProperties(ctx.txn, node_id) catch {
                     return OperatorError.StorageError;
                 };
-                try applyEvaluatedNodeProperties(self.database, node_id, evaluated.items);
+                try applyEvaluatedNodeProperties(self.database, ctx.txn, node_id, evaluated.items);
             },
             .edge_ref => |edge_id| {
-                try clearEdgeProperties(self.database, edge_id);
-                try applyEvaluatedEdgeProperties(self.database, edge_id, evaluated.items);
+                try clearEdgeProperties(self.database, ctx.txn, edge_id);
+                try applyEvaluatedEdgeProperties(self.database, ctx.txn, edge_id, evaluated.items);
             },
             else => return OperatorError.TypeError,
         }
@@ -976,8 +976,8 @@ pub const SetPropertiesMerge = struct {
             &evaluated,
         );
         switch (target_val) {
-            .node_ref => |node_id| try applyEvaluatedNodeProperties(self.database, node_id, evaluated.items),
-            .edge_ref => |edge_id| try applyEvaluatedEdgeProperties(self.database, edge_id, evaluated.items),
+            .node_ref => |node_id| try applyEvaluatedNodeProperties(self.database, ctx.txn, node_id, evaluated.items),
+            .edge_ref => |edge_id| try applyEvaluatedEdgeProperties(self.database, ctx.txn, edge_id, evaluated.items),
             else => return OperatorError.TypeError,
         }
 
@@ -1071,12 +1071,12 @@ pub const RemoveProperty = struct {
         // Remove property based on target type
         switch (target_val) {
             .node_ref => |node_id| {
-                self.database.removeNodeProperty(null, node_id, self.property_name) catch {
+                self.database.removeNodeProperty(ctx.txn, node_id, self.property_name) catch {
                     return OperatorError.StorageError;
                 };
             },
             .edge_ref => |edge_id| {
-                self.database.removeEdgePropertyById(null, edge_id, self.property_name) catch {
+                self.database.removeEdgePropertyById(ctx.txn, edge_id, self.property_name) catch {
                     return OperatorError.StorageError;
                 };
             },
@@ -1173,7 +1173,7 @@ pub const RemoveLabels = struct {
 
         // Remove each label
         for (self.label_names) |label| {
-            self.database.removeNodeLabel(null, node_id, label) catch {
+            self.database.removeNodeLabel(ctx.txn, node_id, label) catch {
                 return OperatorError.StorageError;
             };
         }
@@ -1281,11 +1281,12 @@ fn evaluateMapExpression(
 
 fn applyEvaluatedNodeProperties(
     database: *Database,
+    txn: ?*Transaction,
     node_id: NodeId,
     items: []const EvaluatedProperty,
 ) OperatorError!void {
     for (items) |item| {
-        database.setNodeProperty(null, node_id, item.key, item.value) catch {
+        database.setNodeProperty(txn, node_id, item.key, item.value) catch {
             return OperatorError.StorageError;
         };
     }
@@ -1293,27 +1294,25 @@ fn applyEvaluatedNodeProperties(
 
 fn applyEvaluatedEdgeProperties(
     database: *Database,
+    txn: ?*Transaction,
     edge_id: EdgeId,
     items: []const EvaluatedProperty,
 ) OperatorError!void {
     for (items) |item| {
-        database.setEdgePropertyById(null, edge_id, item.key, item.value) catch {
+        database.setEdgePropertyById(txn, edge_id, item.key, item.value) catch {
             return OperatorError.StorageError;
         };
     }
 }
 
-fn clearEdgeProperties(database: *Database, edge_id: EdgeId) OperatorError!void {
-    var edge = database.edge_store.getById(edge_id) catch return OperatorError.StorageError;
-    defer edge.deinit(database.allocator);
+fn clearEdgeProperties(database: *Database, txn: ?*Transaction, edge_id: EdgeId) OperatorError!void {
+    const props = database.getEdgePropertiesInTxn(txn, edge_id) catch return OperatorError.StorageError;
+    defer database.freePropertyEntries(props);
 
-    for (edge.properties) |prop| {
-        const key = database.symbol_table.resolve(prop.key_id) catch return OperatorError.StorageError;
-        database.removeEdgePropertyById(null, edge_id, key) catch {
-            database.symbol_table.freeString(key);
+    for (props) |prop| {
+        database.removeEdgePropertyById(txn, edge_id, prop.key) catch {
             return OperatorError.StorageError;
         };
-        database.symbol_table.freeString(key);
     }
 }
 
@@ -1430,7 +1429,7 @@ pub const MergeNode = struct {
     fn mergeNode(self: *Self, ctx: *ExecutionContext, row: ?*const Row) OperatorError!NodeId {
         // Try to find an existing node matching the pattern
         if (self.labels.len > 0) {
-            const candidates = self.database.getNodesByLabel(self.labels[0]) catch {
+            const candidates = self.database.getNodesByLabelInTxn(ctx.txn, self.labels[0]) catch {
                 return OperatorError.StorageError;
             };
             defer self.database.allocator.free(candidates);
@@ -1461,12 +1460,12 @@ pub const MergeNode = struct {
         );
 
         // Not found — create the node
-        const node_id = self.database.createNode(null, self.labels) catch {
+        const node_id = self.database.createNode(ctx.txn, self.labels) catch {
             return OperatorError.StorageError;
         };
 
         // Set the pattern properties on the new node
-        try applyEvaluatedNodeProperties(self.database, node_id, evaluated_pattern.items);
+        try applyEvaluatedNodeProperties(self.database, ctx.txn, node_id, evaluated_pattern.items);
 
         // ON CREATE: apply on_create properties
         try self.applySetItems(node_id, self.on_create_props, ctx, row);
@@ -1488,7 +1487,7 @@ pub const MergeNode = struct {
             const expected_pv = evalResultToPropertyValue(expected, self.allocator) orelse return OperatorError.TypeError;
 
             // Get the actual value from the node
-            const actual = self.database.getNodeProperty(node_id, prop.key) catch {
+            const actual = self.database.getNodePropertyInTxn(ctx.txn, node_id, prop.key) catch {
                 return OperatorError.StorageError;
             };
             if (actual == null) return false;
@@ -1516,7 +1515,7 @@ pub const MergeNode = struct {
             ctx,
             &evaluated,
         );
-        try applyEvaluatedNodeProperties(self.database, node_id, evaluated.items);
+        try applyEvaluatedNodeProperties(self.database, ctx.txn, node_id, evaluated.items);
     }
 
     fn close(ptr: *anyopaque, ctx: *ExecutionContext) void {
@@ -1650,7 +1649,7 @@ pub const MergeEdge = struct {
             return edge_id;
         }
 
-        const edge_id = self.database.createEdgeAndGetId(null, source_id, target_id, self.edge_type) catch {
+        const edge_id = self.database.createEdgeAndGetId(ctx.txn, source_id, target_id, self.edge_type) catch {
             return OperatorError.StorageError;
         };
 
@@ -1675,26 +1674,14 @@ pub const MergeEdge = struct {
             };
         };
 
-        if (self.properties.len == 0) {
-            var edge = self.database.edge_store.get(source_id, target_id, type_id) catch |err| {
-                return switch (err) {
-                    EdgeError.NotFound => null,
-                    else => OperatorError.StorageError,
-                };
-            };
-            defer edge.deinit(self.database.allocator);
-            return edge.id;
-        }
-
-        var refs = self.database.edge_store.getOutgoingRefsByType(source_id, type_id) catch {
+        const refs = self.database.getOutgoingEdgeRefsByTypeInTxn(ctx.txn, source_id, type_id) catch {
             return OperatorError.StorageError;
         };
-        defer refs.deinit();
+        defer self.database.allocator.free(refs);
 
-        while (true) {
-            const maybe_ref = refs.next() catch return OperatorError.StorageError;
-            const edge_ref = maybe_ref orelse break;
+        for (refs) |edge_ref| {
             if (edge_ref.target != target_id) continue;
+            if (self.properties.len == 0) return edge_ref.id;
             if (try self.matchesPatternProperties(edge_ref.id, ctx, row)) {
                 return edge_ref.id;
             }
@@ -1710,9 +1697,7 @@ pub const MergeEdge = struct {
     ) OperatorError!bool {
         if (self.properties.len == 0) return true;
 
-        var edge = self.database.edge_store.getById(edge_id) catch {
-            return OperatorError.StorageError;
-        };
+        var edge = (self.database.getEdgeInTxn(ctx.txn, edge_id) catch return OperatorError.StorageError) orelse return OperatorError.StorageError;
         defer edge.deinit(self.database.allocator);
 
         for (self.properties) |prop| {
@@ -1763,7 +1748,7 @@ pub const MergeEdge = struct {
         );
 
         for (evaluated.items) |item| {
-            self.database.setEdgePropertyById(null, edge_id, item.key, item.value) catch {
+            self.database.setEdgePropertyById(ctx.txn, edge_id, item.key, item.value) catch {
                 return OperatorError.StorageError;
             };
         }

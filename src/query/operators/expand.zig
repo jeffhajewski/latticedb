@@ -13,10 +13,12 @@ const Row = executor.Row;
 const ExecutionContext = executor.ExecutionContext;
 
 const edge_mod = @import("../../graph/edge.zig");
-const EdgeStore = edge_mod.EdgeStore;
 
 const symbols = @import("../../graph/symbols.zig");
 const SymbolId = symbols.SymbolId;
+
+const database_mod = @import("../../storage/database.zig");
+const Database = database_mod.Database;
 
 // ============================================================================
 // Expand Direction
@@ -50,14 +52,18 @@ pub const Expand = struct {
     edge_type: ?SymbolId,
     /// Direction to traverse
     direction: ExpandDirection,
-    /// Edge store for traversal
-    edge_store: *EdgeStore,
+    /// Database for txn-aware traversal
+    database: *Database,
     /// Current input row
     current_input: ?*Row,
-    /// Current edge iterator (for outgoing)
-    outgoing_iter: ?EdgeStore.EdgeRefIterator,
-    /// Current edge iterator (for incoming, when doing both)
-    incoming_iter: ?EdgeStore.EdgeRefIterator,
+    /// Current outgoing edges
+    outgoing_edges: ?[]edge_mod.EdgeRef,
+    /// Current incoming edges
+    incoming_edges: ?[]edge_mod.EdgeRef,
+    /// Current outgoing index
+    outgoing_index: usize,
+    /// Current incoming index
+    incoming_index: usize,
     /// Output row
     output_row: ?*Row,
     /// Whether doing incoming phase (for both direction)
@@ -78,7 +84,7 @@ pub const Expand = struct {
         edge_slot: ?u8,
         edge_type: ?SymbolId,
         direction: ExpandDirection,
-        edge_store: *EdgeStore,
+        database: *Database,
     ) !*Self {
         const self = try allocator.create(Self);
         self.* = Self{
@@ -88,10 +94,12 @@ pub const Expand = struct {
             .edge_slot = edge_slot,
             .edge_type = edge_type,
             .direction = direction,
-            .edge_store = edge_store,
+            .database = database,
             .current_input = null,
-            .outgoing_iter = null,
-            .incoming_iter = null,
+            .outgoing_edges = null,
+            .incoming_edges = null,
+            .outgoing_index = 0,
+            .incoming_index = 0,
             .output_row = null,
             .in_incoming_phase = false,
             .opened = false,
@@ -140,7 +148,7 @@ pub const Expand = struct {
             // If doing both directions and in outgoing phase, switch to incoming
             if (self.direction == .both and !self.in_incoming_phase and self.current_input != null) {
                 self.in_incoming_phase = true;
-                try self.startIncomingIterator();
+                try self.startIncomingIterator(ctx);
                 continue;
             }
 
@@ -151,7 +159,7 @@ pub const Expand = struct {
             self.current_input = try self.input.next(ctx) orelse return null;
 
             // Start iterator for this node
-            try self.startIteratorForCurrentInput();
+            try self.startIteratorForCurrentInput(ctx);
         }
     }
 
@@ -160,20 +168,19 @@ pub const Expand = struct {
         const input_row = self.current_input orelse return null;
 
         // Determine which iterator to use
-        var iter_ptr: *?EdgeStore.EdgeRefIterator = undefined;
+        var edges: []edge_mod.EdgeRef = undefined;
+        var index_ptr: *usize = undefined;
         if (self.in_incoming_phase) {
-            iter_ptr = &self.incoming_iter;
+            edges = self.incoming_edges orelse return null;
+            index_ptr = &self.incoming_index;
         } else {
-            iter_ptr = &self.outgoing_iter;
+            edges = self.outgoing_edges orelse return null;
+            index_ptr = &self.outgoing_index;
         }
 
-        var iter = iter_ptr.* orelse return null;
-
-        // Get next edge
-        const edge_opt = iter.next() catch return OperatorError.StorageError;
-        iter_ptr.* = iter; // Update iterator state
-
-        if (edge_opt) |edge| {
+        if (index_ptr.* < edges.len) {
+            const edge = edges[index_ptr.*];
+            index_ptr.* += 1;
             // Build output row - copy ALL populated slots from input
             output_row.clear();
             output_row.copyFrom(input_row);
@@ -193,7 +200,7 @@ pub const Expand = struct {
         return null;
     }
 
-    fn startIteratorForCurrentInput(self: *Self) OperatorError!void {
+    fn startIteratorForCurrentInput(self: *Self, ctx: *ExecutionContext) OperatorError!void {
         const input_row = self.current_input orelse return;
         const source_val = input_row.getSlot(self.source_slot) orelse return OperatorError.UnboundVariable;
 
@@ -203,50 +210,55 @@ pub const Expand = struct {
         switch (self.direction) {
             .outgoing => {
                 if (self.edge_type) |edge_type| {
-                    self.outgoing_iter = self.edge_store.getOutgoingRefsByType(node_id, edge_type) catch return OperatorError.StorageError;
+                    self.outgoing_edges = self.database.getOutgoingEdgeRefsByTypeInTxn(ctx.txn, node_id, edge_type) catch return OperatorError.StorageError;
                 } else {
-                    self.outgoing_iter = self.edge_store.getOutgoingRefs(node_id) catch return OperatorError.StorageError;
+                    self.outgoing_edges = self.database.getOutgoingEdgeRefsInTxn(ctx.txn, node_id) catch return OperatorError.StorageError;
                 }
+                self.outgoing_index = 0;
             },
             .incoming => {
                 if (self.edge_type) |edge_type| {
-                    self.incoming_iter = self.edge_store.getIncomingRefsByType(node_id, edge_type) catch return OperatorError.StorageError;
+                    self.incoming_edges = self.database.getIncomingEdgeRefsByTypeInTxn(ctx.txn, node_id, edge_type) catch return OperatorError.StorageError;
                 } else {
-                    self.incoming_iter = self.edge_store.getIncomingRefs(node_id) catch return OperatorError.StorageError;
+                    self.incoming_edges = self.database.getIncomingEdgeRefsInTxn(ctx.txn, node_id) catch return OperatorError.StorageError;
                 }
+                self.incoming_index = 0;
             },
             .both => {
-                // Start with outgoing
                 if (self.edge_type) |edge_type| {
-                    self.outgoing_iter = self.edge_store.getOutgoingRefsByType(node_id, edge_type) catch return OperatorError.StorageError;
+                    self.outgoing_edges = self.database.getOutgoingEdgeRefsByTypeInTxn(ctx.txn, node_id, edge_type) catch return OperatorError.StorageError;
                 } else {
-                    self.outgoing_iter = self.edge_store.getOutgoingRefs(node_id) catch return OperatorError.StorageError;
+                    self.outgoing_edges = self.database.getOutgoingEdgeRefsInTxn(ctx.txn, node_id) catch return OperatorError.StorageError;
                 }
+                self.outgoing_index = 0;
             },
         }
     }
 
-    fn startIncomingIterator(self: *Self) OperatorError!void {
+    fn startIncomingIterator(self: *Self, ctx: *ExecutionContext) OperatorError!void {
         const input_row = self.current_input orelse return;
         const source_val = input_row.getSlot(self.source_slot) orelse return;
 
         const node_id = source_val.asNodeId() orelse return;
 
         if (self.edge_type) |edge_type| {
-            self.incoming_iter = self.edge_store.getIncomingRefsByType(node_id, edge_type) catch return OperatorError.StorageError;
+            self.incoming_edges = self.database.getIncomingEdgeRefsByTypeInTxn(ctx.txn, node_id, edge_type) catch return OperatorError.StorageError;
         } else {
-            self.incoming_iter = self.edge_store.getIncomingRefs(node_id) catch return OperatorError.StorageError;
+            self.incoming_edges = self.database.getIncomingEdgeRefsInTxn(ctx.txn, node_id) catch return OperatorError.StorageError;
         }
+        self.incoming_index = 0;
     }
 
     fn closeCurrentIterators(self: *Self) void {
-        if (self.outgoing_iter) |*iter| {
-            iter.deinit();
-            self.outgoing_iter = null;
+        if (self.outgoing_edges) |edges| {
+            self.database.allocator.free(edges);
+            self.outgoing_edges = null;
+            self.outgoing_index = 0;
         }
-        if (self.incoming_iter) |*iter| {
-            iter.deinit();
-            self.incoming_iter = null;
+        if (self.incoming_edges) |edges| {
+            self.database.allocator.free(edges);
+            self.incoming_edges = null;
+            self.incoming_index = 0;
         }
     }
 

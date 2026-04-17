@@ -330,6 +330,19 @@ pub const EdgeStore = struct {
         _ = try self.createAndGetId(source, target, edge_type, properties);
     }
 
+    /// Reserve the next stable edge id without writing any edge records yet.
+    /// Used by transaction overlays that stage edge creation until commit.
+    pub fn reserveNextEdgeId(self: *Self) EdgeId {
+        const edge_id = self.next_edge_id;
+        self.next_edge_id += 1;
+        return edge_id;
+    }
+
+    /// Persist the current `next_edge_id` reservation metadata.
+    pub fn syncNextEdgeId(self: *Self) EdgeError!void {
+        try self.persistNextEdgeId(self.next_edge_id);
+    }
+
     /// Create an edge with an explicit edge_id (used by recovery/undo).
     pub fn createWithId(
         self: *Self,

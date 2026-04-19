@@ -567,6 +567,16 @@ fn containsSymbolId(values: []const symbols_mod.SymbolId, needle: symbols_mod.Sy
     return false;
 }
 
+fn findPropertyById(
+    properties: []const node_mod.Property,
+    key_id: symbols_mod.SymbolId,
+) ?node_mod.Property {
+    for (properties) |prop| {
+        if (prop.key_id == key_id) return prop;
+    }
+    return null;
+}
+
 /// Central database coordinator
 pub const Database = struct {
     allocator: Allocator,
@@ -923,6 +933,7 @@ pub const Database = struct {
             if (self.txn_overlays.getPtr(txn.id)) |overlay| {
                 if (overlay.hasChanges()) {
                     try self.captureTxnSnapshotsForCommit(txn.id, overlay);
+                    try self.logTxnOverlayForCommit(txn, overlay);
                     try self.applyTxnOverlay(txn.id, overlay);
                 }
             }
@@ -1040,6 +1051,363 @@ pub const Database = struct {
                 try self.storeFtsDocOverlayState(reader_overlay, node_id, .{ .absent = {} });
             }
         }
+    }
+
+    fn logTxnOverlayForCommit(
+        self: *Self,
+        txn: *Transaction,
+        overlay: *const TxnOverlay,
+    ) DatabaseError!void {
+        var node_iter = overlay.node_states.iterator();
+        while (node_iter.next()) |entry| {
+            try self.logCommittedNodeState(txn, entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        var edge_iter = overlay.edge_states.iterator();
+        while (edge_iter.next()) |entry| {
+            try self.logCommittedEdgeState(txn, entry.key_ptr.*, entry.value_ptr.*);
+        }
+    }
+
+    fn logCommittedNodeState(
+        self: *Self,
+        txn: *Transaction,
+        node_id: NodeId,
+        state: TxnNodeState,
+    ) DatabaseError!void {
+        const current = try self.readBaseNodeState(node_id);
+        defer if (current) |existing| {
+            var owned_existing = existing;
+            owned_existing.deinit(self.allocator);
+        };
+
+        if (!state.exists) {
+            if (current) |existing| {
+                try self.logWalNodeDelete(txn, node_id, existing);
+            }
+            return;
+        }
+
+        if (current) |existing| {
+            for (existing.labels) |label_id| {
+                if (!containsSymbolId(state.labels, label_id)) {
+                    try self.logWalLabelMutation(txn, .label_remove, node_id, label_id);
+                }
+            }
+            for (state.labels) |label_id| {
+                if (!containsSymbolId(existing.labels, label_id)) {
+                    try self.logWalLabelMutation(txn, .label_add, node_id, label_id);
+                }
+            }
+
+            for (existing.properties) |prop| {
+                if (findPropertyById(state.properties, prop.key_id) == null) {
+                    try self.logWalNodePropertyMutation(txn, node_id, prop.key_id, prop.value, null);
+                }
+            }
+            for (state.properties) |prop| {
+                const old_prop = findPropertyById(existing.properties, prop.key_id);
+                try self.logWalNodePropertyMutation(
+                    txn,
+                    node_id,
+                    prop.key_id,
+                    if (old_prop) |value| value.value else null,
+                    prop.value,
+                );
+            }
+            return;
+        }
+
+        try self.logWalNodeInsert(txn, node_id, state.labels);
+        for (state.properties) |prop| {
+            try self.logWalNodePropertyMutation(txn, node_id, prop.key_id, null, prop.value);
+        }
+    }
+
+    fn logCommittedEdgeState(
+        self: *Self,
+        txn: *Transaction,
+        edge_id: EdgeId,
+        state: TxnEdgeState,
+    ) DatabaseError!void {
+        const current = try self.readBaseEdgeState(edge_id);
+        defer if (current) |existing| {
+            var owned_existing = existing;
+            owned_existing.deinit(self.allocator);
+        };
+
+        if (!state.exists) {
+            if (current) |existing| {
+                try self.logWalEdgeSnapshot(txn, edge_id, existing, .delete);
+            } else if (state.source != 0 or state.target != 0 or state.edge_type != 0) {
+                try self.logWalEdgeInsert(txn, edge_id, state.source, state.target, state.edge_type);
+                try self.logWalEdgeSnapshot(txn, edge_id, state, .delete);
+            }
+            return;
+        }
+
+        if (current == null) {
+            try self.logWalEdgeInsert(txn, edge_id, state.source, state.target, state.edge_type);
+            for (state.properties) |prop| {
+                try self.logWalEdgePropertyMutation(txn, edge_id, prop.key_id, null, prop.value);
+            }
+            return;
+        }
+
+        const existing = current.?;
+        for (existing.properties) |prop| {
+            if (findPropertyById(state.properties, prop.key_id) == null) {
+                try self.logWalEdgePropertyMutation(txn, edge_id, prop.key_id, prop.value, null);
+            }
+        }
+        for (state.properties) |prop| {
+            const old_prop = findPropertyById(existing.properties, prop.key_id);
+            try self.logWalEdgePropertyMutation(
+                txn,
+                edge_id,
+                prop.key_id,
+                if (old_prop) |value| value.value else null,
+                prop.value,
+            );
+        }
+    }
+
+    fn logWalNodeInsert(
+        self: *Self,
+        txn: *Transaction,
+        node_id: NodeId,
+        label_ids: []const symbols_mod.SymbolId,
+    ) DatabaseError!void {
+        const tm = &(self.txn_manager orelse return DatabaseError.TransactionsNotEnabled);
+
+        var label_names: std.ArrayListUnmanaged([]const u8) = .empty;
+        defer {
+            for (label_names.items) |label_name| {
+                self.allocator.free(label_name);
+            }
+            label_names.deinit(self.allocator);
+        }
+
+        for (label_ids) |label_id| {
+            const label_name = self.symbol_table.resolve(label_id) catch return DatabaseError.IoError;
+            label_names.append(self.allocator, label_name) catch {
+                self.allocator.free(label_name);
+                return DatabaseError.OutOfMemory;
+            };
+        }
+
+        const payload_buf = self.allocator.alloc(
+            u8,
+            wal_payload.nodeInsertSize(label_names.items),
+        ) catch return DatabaseError.OutOfMemory;
+        defer self.allocator.free(payload_buf);
+
+        const payload = wal_payload.serializeNodeInsert(
+            payload_buf,
+            node_id,
+            label_names.items,
+        ) catch return DatabaseError.IoError;
+
+        _ = tm.logOperation(txn, .insert, payload) catch return DatabaseError.IoError;
+    }
+
+    fn logWalNodeDelete(
+        self: *Self,
+        txn: *Transaction,
+        node_id: NodeId,
+        state: TxnNodeState,
+    ) DatabaseError!void {
+        const tm = &(self.txn_manager orelse return DatabaseError.TransactionsNotEnabled);
+
+        var prop_bytes: []u8 = &[_]u8{};
+        var owns_prop_bytes = false;
+        if (state.properties.len > 0) {
+            prop_bytes = wal_payload.serializeProperties(self.allocator, @ptrCast(state.properties)) catch return DatabaseError.OutOfMemory;
+            owns_prop_bytes = true;
+        }
+        defer if (owns_prop_bytes) self.allocator.free(prop_bytes);
+
+        const payload_buf = self.allocator.alloc(
+            u8,
+            wal_payload.nodeDeleteSize(state.labels.len, prop_bytes.len),
+        ) catch return DatabaseError.OutOfMemory;
+        defer self.allocator.free(payload_buf);
+
+        const payload = wal_payload.serializeNodeDelete(
+            payload_buf,
+            node_id,
+            state.labels,
+            prop_bytes,
+        ) catch return DatabaseError.IoError;
+
+        _ = tm.logOperation(txn, .delete, payload) catch return DatabaseError.IoError;
+    }
+
+    fn logWalNodePropertyMutation(
+        self: *Self,
+        txn: *Transaction,
+        node_id: NodeId,
+        key_id: symbols_mod.SymbolId,
+        old_value: ?PropertyValue,
+        new_value: ?PropertyValue,
+    ) DatabaseError!void {
+        const tm = &(self.txn_manager orelse return DatabaseError.TransactionsNotEnabled);
+
+        const key = self.symbol_table.resolve(key_id) catch return DatabaseError.IoError;
+        defer self.allocator.free(key);
+
+        const old_value_bytes = try self.serializePropertyValueAlloc(old_value);
+        defer if (old_value_bytes) |bytes| self.allocator.free(bytes);
+
+        const new_value_bytes = try self.serializePropertyValueAlloc(new_value);
+        defer if (new_value_bytes) |bytes| self.allocator.free(bytes);
+
+        const old_len = if (old_value_bytes) |bytes| bytes.len else 0;
+        const new_slice = new_value_bytes orelse &[_]u8{};
+        const payload_buf = self.allocator.alloc(
+            u8,
+            wal_payload.propertyUpdateSize(key.len, old_len, new_slice.len),
+        ) catch return DatabaseError.OutOfMemory;
+        defer self.allocator.free(payload_buf);
+
+        const payload = wal_payload.serializePropertyUpdate(
+            payload_buf,
+            node_id,
+            key,
+            old_value_bytes,
+            new_slice,
+        ) catch return DatabaseError.IoError;
+
+        _ = tm.logOperation(txn, .update, payload) catch return DatabaseError.IoError;
+    }
+
+    fn logWalLabelMutation(
+        self: *Self,
+        txn: *Transaction,
+        payload_type: wal_payload.PayloadType,
+        node_id: NodeId,
+        label_id: symbols_mod.SymbolId,
+    ) DatabaseError!void {
+        const tm = &(self.txn_manager orelse return DatabaseError.TransactionsNotEnabled);
+
+        const label = self.symbol_table.resolve(label_id) catch return DatabaseError.IoError;
+        defer self.allocator.free(label);
+
+        const payload_buf = self.allocator.alloc(u8, 1 + 8 + 2 + label.len) catch {
+            return DatabaseError.OutOfMemory;
+        };
+        defer self.allocator.free(payload_buf);
+
+        const payload = switch (payload_type) {
+            .label_add => wal_payload.serializeLabelAdd(payload_buf, node_id, label),
+            .label_remove => wal_payload.serializeLabelRemove(payload_buf, node_id, label),
+            else => unreachable,
+        } catch return DatabaseError.IoError;
+
+        _ = tm.logOperation(txn, .update, payload) catch return DatabaseError.IoError;
+    }
+
+    fn logWalEdgeInsert(
+        self: *Self,
+        txn: *Transaction,
+        edge_id: EdgeId,
+        source: NodeId,
+        target: NodeId,
+        edge_type_id: symbols_mod.SymbolId,
+    ) DatabaseError!void {
+        const tm = &(self.txn_manager orelse return DatabaseError.TransactionsNotEnabled);
+
+        const edge_type = self.symbol_table.resolve(edge_type_id) catch return DatabaseError.IoError;
+        defer self.allocator.free(edge_type);
+
+        const payload_buf = self.allocator.alloc(
+            u8,
+            wal_payload.edgeInsertSize(edge_type),
+        ) catch return DatabaseError.OutOfMemory;
+        defer self.allocator.free(payload_buf);
+
+        const payload = wal_payload.serializeEdgeInsert(
+            payload_buf,
+            edge_id,
+            source,
+            target,
+            edge_type,
+        ) catch return DatabaseError.IoError;
+
+        _ = tm.logOperation(txn, .insert, payload) catch return DatabaseError.IoError;
+    }
+
+    fn logWalEdgeSnapshot(
+        self: *Self,
+        txn: *Transaction,
+        edge_id: EdgeId,
+        state: TxnEdgeState,
+        record_type: WalRecordType,
+    ) DatabaseError!void {
+        const tm = &(self.txn_manager orelse return DatabaseError.TransactionsNotEnabled);
+
+        var prop_bytes: []u8 = &[_]u8{};
+        var owns_prop_bytes = false;
+        if (state.properties.len > 0) {
+            prop_bytes = wal_payload.serializeProperties(self.allocator, @ptrCast(state.properties)) catch return DatabaseError.OutOfMemory;
+            owns_prop_bytes = true;
+        }
+        defer if (owns_prop_bytes) self.allocator.free(prop_bytes);
+
+        const payload_buf = self.allocator.alloc(
+            u8,
+            wal_payload.edgeDeleteSize(prop_bytes.len),
+        ) catch return DatabaseError.OutOfMemory;
+        defer self.allocator.free(payload_buf);
+
+        const payload = wal_payload.serializeEdgeDelete(
+            payload_buf,
+            edge_id,
+            state.source,
+            state.target,
+            state.edge_type,
+            prop_bytes,
+        ) catch return DatabaseError.IoError;
+
+        _ = tm.logOperation(txn, record_type, payload) catch return DatabaseError.IoError;
+    }
+
+    fn logWalEdgePropertyMutation(
+        self: *Self,
+        txn: *Transaction,
+        edge_id: EdgeId,
+        key_id: symbols_mod.SymbolId,
+        old_value: ?PropertyValue,
+        new_value: ?PropertyValue,
+    ) DatabaseError!void {
+        const tm = &(self.txn_manager orelse return DatabaseError.TransactionsNotEnabled);
+
+        const key = self.symbol_table.resolve(key_id) catch return DatabaseError.IoError;
+        defer self.allocator.free(key);
+
+        const old_value_bytes = try self.serializePropertyValueAlloc(old_value);
+        defer if (old_value_bytes) |bytes| self.allocator.free(bytes);
+
+        const new_value_bytes = try self.serializePropertyValueAlloc(new_value);
+        defer if (new_value_bytes) |bytes| self.allocator.free(bytes);
+
+        const old_len = if (old_value_bytes) |bytes| bytes.len else 0;
+        const new_slice = new_value_bytes orelse &[_]u8{};
+        const payload_buf = self.allocator.alloc(
+            u8,
+            wal_payload.edgePropertyUpdateSize(key.len, old_len, new_slice.len),
+        ) catch return DatabaseError.OutOfMemory;
+        defer self.allocator.free(payload_buf);
+
+        const payload = wal_payload.serializeEdgePropertyUpdate(
+            payload_buf,
+            edge_id,
+            key,
+            old_value_bytes,
+            new_slice,
+        ) catch return DatabaseError.IoError;
+
+        _ = tm.logOperation(txn, .update, payload) catch return DatabaseError.IoError;
     }
 
     fn applyTxnOverlay(
@@ -3344,12 +3712,15 @@ pub const Database = struct {
             if (self.getTxnOverlay(t)) |overlay| {
                 const type_id = self.symbol_table.intern(edge_type) catch return DatabaseError.IoError;
                 const edge_id = (try self.findVisibleEdgeId(txn, source, target, type_id)) orelse return DatabaseError.NotFound;
+                var existing = (try self.readVisibleEdgeState(txn, edge_id)) orelse return DatabaseError.NotFound;
+                defer existing.deinit(self.allocator);
+                if (!existing.exists) return DatabaseError.NotFound;
                 try self.storeEdgeOverlayState(overlay, edge_id, .{
                     .exists = false,
-                    .source = 0,
-                    .target = 0,
-                    .edge_type = 0,
-                    .properties = emptyProperties(self.allocator) catch return DatabaseError.OutOfMemory,
+                    .source = existing.source,
+                    .target = existing.target,
+                    .edge_type = existing.edge_type,
+                    .properties = cloneProperties(self.allocator, existing.properties) catch return DatabaseError.OutOfMemory,
                 });
                 overlay.markDirty();
 
@@ -3442,10 +3813,10 @@ pub const Database = struct {
 
                     try self.storeEdgeOverlayState(overlay, edge_id, .{
                         .exists = false,
-                        .source = 0,
-                        .target = 0,
-                        .edge_type = 0,
-                        .properties = emptyProperties(self.allocator) catch return DatabaseError.OutOfMemory,
+                        .source = owned_state.source,
+                        .target = owned_state.target,
+                        .edge_type = owned_state.edge_type,
+                        .properties = cloneProperties(self.allocator, owned_state.properties) catch return DatabaseError.OutOfMemory,
                     });
                     overlay.markDirty();
 

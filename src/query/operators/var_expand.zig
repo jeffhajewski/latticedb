@@ -47,13 +47,13 @@ const PathFrame = struct {
     /// Whether we're in the incoming phase
     in_incoming_phase: bool,
 
-    fn deinit(self: *PathFrame, allocator: Allocator) void {
+    fn deinit(self: *PathFrame, edge_allocator: Allocator) void {
         if (self.outgoing_edges) |edges| {
-            allocator.free(edges);
+            edge_allocator.free(edges);
             self.outgoing_edges = null;
         }
         if (self.incoming_edges) |edges| {
-            allocator.free(edges);
+            edge_allocator.free(edges);
             self.incoming_edges = null;
         }
     }
@@ -227,7 +227,8 @@ pub const VariableLengthExpand = struct {
         }
 
         // Create initial frame at depth 0 (source node, before first hop)
-        const frame = try self.createFrame(ctx, source_id, 0);
+        var frame = try self.createFrame(ctx, source_id, 0);
+        errdefer frame.deinit(self.database.allocator);
         self.path_stack.append(self.allocator, frame) catch return OperatorError.OutOfMemory;
     }
 
@@ -348,7 +349,8 @@ pub const VariableLengthExpand = struct {
             // Check if we need to continue exploring (push frame for further traversal)
             if (new_depth < effective_max) {
                 // Push new frame for continued exploration
-                const new_frame = try self.createFrame(ctx, target_id, new_depth);
+                var new_frame = try self.createFrame(ctx, target_id, new_depth);
+                errdefer new_frame.deinit(self.database.allocator);
                 self.path_stack.append(self.allocator, new_frame) catch return OperatorError.OutOfMemory;
             }
 
@@ -366,7 +368,7 @@ pub const VariableLengthExpand = struct {
             _ = self.visited.remove(frame.node_id);
 
             // Clean up frame resources
-            frame.deinit(self.allocator);
+            frame.deinit(self.database.allocator);
 
             // Check if parent frame has more edges to explore
             if (self.path_stack.items.len > 0) {
@@ -394,7 +396,7 @@ pub const VariableLengthExpand = struct {
     fn resetTraversal(self: *Self) void {
         // Clean up path stack
         for (self.path_stack.items) |*frame| {
-            frame.deinit(self.allocator);
+            frame.deinit(self.database.allocator);
         }
         self.path_stack.clearRetainingCapacity();
 
@@ -420,7 +422,7 @@ pub const VariableLengthExpand = struct {
 
         // Clean up path stack
         for (self.path_stack.items) |*frame| {
-            frame.deinit(self.allocator);
+            frame.deinit(self.database.allocator);
         }
         self.path_stack.deinit(self.allocator);
 

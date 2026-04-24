@@ -391,6 +391,7 @@ LatticeResult = c_void_p
 LatticeVectorResult = c_void_p
 LatticeFtsResult = c_void_p
 LatticeEdgeResult = c_void_p
+LatticeStreamBatch = c_void_p
 LatticeEmbeddingClient = c_void_p
 LatticeNodeId = c_uint64
 LatticeEdgeId = c_uint64
@@ -548,6 +549,73 @@ class LatticeLib:
         # lattice_value_free
         self._lib.lattice_value_free.argtypes = [POINTER(LatticeValue)]
         self._lib.lattice_value_free.restype = None
+
+        # stream operations
+        self._lib.lattice_stream_publish.argtypes = [
+            LatticeTxn,
+            c_char_p,
+            c_size_t,
+            c_char_p,
+            c_size_t,
+            POINTER(LatticeValue),
+        ]
+        self._lib.lattice_stream_publish.restype = c_int
+
+        self._lib.lattice_stream_read.argtypes = [
+            LatticeDatabase,
+            c_char_p,
+            c_size_t,
+            c_uint64,
+            c_size_t,
+            c_uint32,
+            POINTER(LatticeStreamBatch),
+        ]
+        self._lib.lattice_stream_read.restype = c_int
+
+        self._lib.lattice_stream_batch_count.argtypes = [LatticeStreamBatch]
+        self._lib.lattice_stream_batch_count.restype = c_size_t
+
+        self._lib.lattice_stream_batch_get.argtypes = [
+            LatticeStreamBatch,
+            c_size_t,
+            POINTER(c_uint64),
+            POINTER(POINTER(c_char)),
+            POINTER(c_size_t),
+            POINTER(POINTER(LatticeValue)),
+        ]
+        self._lib.lattice_stream_batch_get.restype = c_int
+
+        self._lib.lattice_stream_batch_free.argtypes = [LatticeStreamBatch]
+        self._lib.lattice_stream_batch_free.restype = None
+
+        self._lib.lattice_stream_get_offset.argtypes = [
+            LatticeDatabase,
+            c_char_p,
+            c_size_t,
+            c_char_p,
+            c_size_t,
+            POINTER(c_bool),
+            POINTER(c_uint64),
+        ]
+        self._lib.lattice_stream_get_offset.restype = c_int
+
+        self._lib.lattice_stream_set_offset.argtypes = [
+            LatticeTxn,
+            c_char_p,
+            c_size_t,
+            c_char_p,
+            c_size_t,
+            c_uint64,
+        ]
+        self._lib.lattice_stream_set_offset.restype = c_int
+
+        self._lib.lattice_stream_trim.argtypes = [
+            LatticeTxn,
+            c_char_p,
+            c_size_t,
+            c_uint64,
+        ]
+        self._lib.lattice_stream_trim.restype = c_int
 
         # lattice_node_set_vector
         self._lib.lattice_node_set_vector.argtypes = [

@@ -9,6 +9,7 @@ import {
   PropertyValue,
   VectorSearchOptions,
   FtsSearchOptions,
+  StreamRecord,
 } from './types';
 import {
   getFFI,
@@ -219,6 +220,31 @@ export class Database {
   async getNodesByLabel(label: string): Promise<bigint[]> {
     this.ensureOpen();
     return this.ffi!.getNodesByLabel(this.dbHandle!, label);
+  }
+
+  async readStream(
+    stream: string,
+    options: { afterSequence?: bigint; limit?: number; timeoutMs?: number } = {}
+  ): Promise<StreamRecord[]> {
+    this.ensureOpen();
+    return this.ffi!.readStream(
+      this.dbHandle!,
+      stream,
+      options.afterSequence ?? BigInt(0),
+      options.limit ?? 100,
+      options.timeoutMs ?? 0
+    );
+  }
+
+  async getStreamOffset(stream: string, consumer: string): Promise<bigint | null> {
+    this.ensureOpen();
+    return this.ffi!.getStreamOffset(this.dbHandle!, stream, consumer);
+  }
+
+  async changes(
+    options: { afterSequence?: bigint; limit?: number; timeoutMs?: number } = {}
+  ): Promise<StreamRecord[]> {
+    return this.readStream('__lattice_changes', options);
   }
 
   /**

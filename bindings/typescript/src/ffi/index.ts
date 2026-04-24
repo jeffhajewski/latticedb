@@ -12,6 +12,7 @@ import {
   LatticeTxnMode,
   LatticeValueType,
 } from './types';
+import type { PropertyValue, StreamRecord } from '../types';
 
 export { isLibraryAvailable, getLibraryPath } from './library';
 export { LatticeErrorCode, QueryErrorStage, LatticeTxnMode, LatticeValueType } from './types';
@@ -88,6 +89,11 @@ export type FtsResultHandle = unknown;
  * Opaque handle to edge results.
  */
 export type EdgeResultHandle = unknown;
+
+/**
+ * Opaque handle to a stream batch.
+ */
+export type StreamBatchHandle = unknown;
 
 /**
  * Opaque handle to an embedding client.
@@ -481,6 +487,133 @@ export class LatticeFFI {
     } finally {
       this.bindings.lattice_value_free(valueOut);
     }
+  }
+
+  publishStream(
+    txn: TransactionHandle,
+    stream: string,
+    payload: PropertyValue,
+    kind = 'message'
+  ): void {
+    const streamBuf = Buffer.from(stream, 'utf8');
+    const kindBuf = kind.length > 0 ? Buffer.from(kind, 'utf8') : null;
+    const latticeValue = this.jsToLatticeValue(payload);
+    const err = this.bindings.lattice_stream_publish(
+      txn,
+      streamBuf,
+      streamBuf.length,
+      kindBuf,
+      kindBuf?.length ?? 0,
+      latticeValue
+    );
+    this.checkError(err);
+  }
+
+  readStream(
+    db: DatabaseHandle,
+    stream: string,
+    afterSequence = BigInt(0),
+    limit = 100,
+    timeoutMs = 0
+  ): StreamRecord[] {
+    const streamBuf = Buffer.from(stream, 'utf8');
+    const batchOut: unknown[] = [null];
+    const err = this.bindings.lattice_stream_read(
+      db,
+      streamBuf,
+      streamBuf.length,
+      afterSequence,
+      limit,
+      timeoutMs,
+      batchOut
+    );
+    this.checkError(err);
+
+    const batch = batchOut[0];
+    if (!batch) {
+      return [];
+    }
+
+    try {
+      const count = this.bindings.lattice_stream_batch_count(batch);
+      const records: StreamRecord[] = [];
+      for (let i = 0; i < count; i++) {
+        const sequenceOut = Buffer.alloc(8);
+        const kindOut: unknown[] = [null];
+        const kindLenOut = [0];
+        const payloadOut: unknown[] = [null];
+        const getErr = this.bindings.lattice_stream_batch_get(
+          batch,
+          i,
+          sequenceOut,
+          kindOut,
+          kindLenOut,
+          payloadOut
+        );
+        this.checkError(getErr);
+        const kindLen = kindLenOut[0] ?? 0;
+        const kind = kindOut[0]
+          ? koffi.decode(kindOut[0], 'char', kindLen) as string
+          : '';
+        const payloadValue = koffi.decode(payloadOut[0] as never, 'lattice_value') as Record<string, unknown>;
+        records.push({
+          sequence: sequenceOut.readBigUInt64LE(),
+          kind,
+          payload: this.latticeValueToJs(payloadValue) as PropertyValue,
+        });
+      }
+      return records;
+    } finally {
+      this.bindings.lattice_stream_batch_free(batch);
+    }
+  }
+
+  getStreamOffset(db: DatabaseHandle, stream: string, consumer: string): bigint | null {
+    const streamBuf = Buffer.from(stream, 'utf8');
+    const consumerBuf = Buffer.from(consumer, 'utf8');
+    const existsOut = Buffer.alloc(1);
+    const sequenceOut = Buffer.alloc(8);
+    const err = this.bindings.lattice_stream_get_offset(
+      db,
+      streamBuf,
+      streamBuf.length,
+      consumerBuf,
+      consumerBuf.length,
+      existsOut,
+      sequenceOut
+    );
+    this.checkError(err);
+    return existsOut.readUInt8() !== 0 ? sequenceOut.readBigUInt64LE() : null;
+  }
+
+  setStreamOffset(
+    txn: TransactionHandle,
+    stream: string,
+    consumer: string,
+    sequence: bigint
+  ): void {
+    const streamBuf = Buffer.from(stream, 'utf8');
+    const consumerBuf = Buffer.from(consumer, 'utf8');
+    const err = this.bindings.lattice_stream_set_offset(
+      txn,
+      streamBuf,
+      streamBuf.length,
+      consumerBuf,
+      consumerBuf.length,
+      sequence
+    );
+    this.checkError(err);
+  }
+
+  trimStream(txn: TransactionHandle, stream: string, throughSequence: bigint): void {
+    const streamBuf = Buffer.from(stream, 'utf8');
+    const err = this.bindings.lattice_stream_trim(
+      txn,
+      streamBuf,
+      streamBuf.length,
+      throughSequence
+    );
+    this.checkError(err);
   }
 
   /**

@@ -1111,4 +1111,59 @@ describeIfNative('Database Integration', () => {
       expect(stats3.entries).toBe(0);
     });
   });
+
+  describe('Streams', () => {
+    beforeEach(async () => {
+      db = new Database(dbPath, { create: true });
+      await db.open();
+    });
+
+    test('publishes, reads, commits offsets, trims, and exposes graph changes', async () => {
+      let nodeId = BigInt(0);
+      await db.write(async (txn) => {
+        txn.publishStream('events', { id: BigInt(1) }, 'created');
+        txn.publishStream('events', 'second');
+        const node = await txn.createNode({
+          labels: ['Person'],
+          properties: { name: 'Ada' },
+        });
+        nodeId = node.id;
+      });
+
+      const records = await db.readStream('events');
+      expect(records.map((record) => record.sequence)).toEqual([BigInt(1), BigInt(2)]);
+      expect(records[0]!.kind).toBe('created');
+      expect(records[0]!.payload).toEqual({ id: BigInt(1) });
+      expect(records[1]!.kind).toBe('message');
+      expect(records[1]!.payload).toBe('second');
+
+      await db.write(async (txn) => {
+        txn.setStreamOffset('events', 'consumer-a', BigInt(2));
+        txn.trimStream('events', BigInt(1));
+      });
+
+      expect(await db.getStreamOffset('events', 'consumer-a')).toBe(BigInt(2));
+      const afterTrim = await db.readStream('events');
+      expect(afterTrim.map((record) => record.sequence)).toEqual([BigInt(2)]);
+
+      const changes = await db.changes();
+      expect(changes.some((record) => record.kind === 'node.insert')).toBe(true);
+      expect(changes.some((record) => {
+        const payload = record.payload as Record<string, unknown>;
+        return record.kind === 'node.property_set'
+          && payload.node_id === nodeId
+          && payload.key === 'name';
+      })).toBe(true);
+    });
+
+    test('rollback keeps stream records hidden', async () => {
+      await expect(db.write(async (txn) => {
+        txn.publishStream('events', 'hidden');
+        txn.rollback();
+        throw new Error('rolled back');
+      })).rejects.toThrow('rolled back');
+
+      await expect(db.readStream('events')).resolves.toEqual([]);
+    });
+  });
 });

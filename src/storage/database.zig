@@ -40,6 +40,9 @@ const wal_mod = lattice.storage.wal;
 const WalManager = wal_mod.WalManager;
 
 const recovery_mod = lattice.storage.recovery;
+const stream_store_mod = lattice.stream.store;
+pub const StreamBatch = stream_store_mod.Batch;
+pub const StreamRecord = stream_store_mod.Record;
 
 // Graph layer
 const symbols_mod = lattice.graph.symbols;
@@ -122,6 +125,7 @@ pub const DatabaseError = error{
     AlreadyExists,
     ReadOnly,
     NotFound,
+    InvalidArgument,
     TransactionNotActive,
     TransactionReadOnly,
     TransactionsNotEnabled,
@@ -475,11 +479,50 @@ const TxnFtsDocState = union(enum) {
     }
 };
 
+const TxnStreamAppend = struct {
+    stream: []u8,
+    kind: []u8,
+    payload: PropertyValue,
+    sequence: ?u64 = null,
+
+    fn deinit(self: *TxnStreamAppend, allocator: Allocator) void {
+        allocator.free(self.stream);
+        allocator.free(self.kind);
+        self.payload.deinit(allocator);
+        self.* = undefined;
+    }
+};
+
+const TxnStreamOffset = struct {
+    stream: []u8,
+    consumer: []u8,
+    sequence: u64,
+
+    fn deinit(self: *TxnStreamOffset, allocator: Allocator) void {
+        allocator.free(self.stream);
+        allocator.free(self.consumer);
+        self.* = undefined;
+    }
+};
+
+const TxnStreamTrim = struct {
+    stream: []u8,
+    through_sequence: u64,
+
+    fn deinit(self: *TxnStreamTrim, allocator: Allocator) void {
+        allocator.free(self.stream);
+        self.* = undefined;
+    }
+};
+
 const TxnOverlay = struct {
     node_states: std.AutoHashMapUnmanaged(NodeId, TxnNodeState) = .{},
     edge_states: std.AutoHashMapUnmanaged(EdgeId, TxnEdgeState) = .{},
     vector_states: std.AutoHashMapUnmanaged(NodeId, TxnVectorState) = .{},
     fts_docs: std.AutoHashMapUnmanaged(NodeId, TxnFtsDocState) = .{},
+    stream_appends: std.ArrayListUnmanaged(TxnStreamAppend) = .empty,
+    stream_offsets: std.ArrayListUnmanaged(TxnStreamOffset) = .empty,
+    stream_trims: std.ArrayListUnmanaged(TxnStreamTrim) = .empty,
     has_staged_writes: bool = false,
 
     fn hasChanges(self: *const TxnOverlay) bool {
@@ -514,6 +557,21 @@ const TxnOverlay = struct {
             entry.value_ptr.deinit(allocator);
         }
         self.fts_docs.deinit(allocator);
+
+        for (self.stream_appends.items) |*append| {
+            append.deinit(allocator);
+        }
+        self.stream_appends.deinit(allocator);
+
+        for (self.stream_offsets.items) |*offset| {
+            offset.deinit(allocator);
+        }
+        self.stream_offsets.deinit(allocator);
+
+        for (self.stream_trims.items) |*trim| {
+            trim.deinit(allocator);
+        }
+        self.stream_trims.deinit(allocator);
 
         self.* = .{};
     }
@@ -598,6 +656,9 @@ pub const Database = struct {
     fts_lengths_tree: BTree,
     fts_reverse_tree: ?BTree,
     hnsw_node_tree: ?BTree,
+    stream_meta_tree: ?BTree,
+    stream_events_tree: ?BTree,
+    stream_offsets_tree: ?BTree,
 
     // Graph stores
     symbol_table: SymbolTable,
@@ -613,6 +674,9 @@ pub const Database = struct {
     // Transactions
     txn_manager: ?TxnManager,
     txn_overlays: std.AutoHashMap(u64, TxnOverlay),
+    stream_mutex: std.Thread.Mutex,
+    stream_cond: std.Thread.Condition,
+    stream_epoch: u64,
 
     // Caches
     adjacency_cache: ?AdjacencyCache,
@@ -685,6 +749,11 @@ pub const Database = struct {
         self.vector_storage = null;
         self.hnsw_index = null;
         self.hnsw_node_tree = null;
+        self.stream_meta_tree = null;
+        self.stream_events_tree = null;
+        self.stream_offsets_tree = null;
+        self.stream_mutex = .{};
+        self.stream_cond = .{};
 
         // 5. Initialize or load B+Trees
         const header = self.page_manager.getHeader();
@@ -694,6 +763,10 @@ pub const Database = struct {
             try self.initNewTrees();
         } else {
             try self.loadExistingTrees();
+        }
+
+        if (!options.read_only) {
+            try self.ensureStreamTreesForWrite();
         }
 
         // 6. Initialize Symbol Table
@@ -711,6 +784,7 @@ pub const Database = struct {
                 .edge_store = &self.edge_store,
                 .symbol_table = &self.symbol_table,
                 .label_index = &self.label_index,
+                .stream_trees = self.streamTrees(),
             });
             const stats = rm.recover(wal, &self.page_manager) catch |err| switch (err) {
                 error.MidLogCorruption => return DatabaseError.InvalidDatabase,
@@ -793,6 +867,7 @@ pub const Database = struct {
             self.txn_manager = TxnManager.init(allocator, wal);
         }
         self.txn_overlays = std.AutoHashMap(u64, TxnOverlay).init(allocator);
+        self.stream_epoch = 0;
 
         // 10. Initialize Adjacency Cache (optional)
         self.adjacency_cache = if (options.config.enable_adjacency_cache)
@@ -930,9 +1005,15 @@ pub const Database = struct {
     /// Commit a transaction, making all changes durable
     pub fn commitTransaction(self: *Self, txn: *Transaction) DatabaseError!void {
         if (self.txn_manager) |*tm| {
+            var should_broadcast_streams = false;
             if (self.txn_overlays.getPtr(txn.id)) |overlay| {
                 if (overlay.hasChanges()) {
                     try self.captureTxnSnapshotsForCommit(txn.id, overlay);
+                    try self.stageGraphChangefeed(overlay);
+                    try self.assignStreamSequences(overlay);
+                    should_broadcast_streams = overlay.stream_appends.items.len > 0 or
+                        overlay.stream_offsets.items.len > 0 or
+                        overlay.stream_trims.items.len > 0;
                     try self.logTxnOverlayForCommit(txn, overlay);
                     try self.applyTxnOverlay(txn.id, overlay);
                 }
@@ -947,6 +1028,12 @@ pub const Database = struct {
             if (self.txn_overlays.fetchRemove(txn.id)) |entry| {
                 var overlay = entry.value;
                 overlay.deinit(self.allocator);
+            }
+            if (should_broadcast_streams) {
+                self.stream_mutex.lock();
+                self.stream_epoch +%= 1;
+                self.stream_cond.broadcast();
+                self.stream_mutex.unlock();
             }
             return;
         }
@@ -1066,6 +1153,16 @@ pub const Database = struct {
         var edge_iter = overlay.edge_states.iterator();
         while (edge_iter.next()) |entry| {
             try self.logCommittedEdgeState(txn, entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        for (overlay.stream_appends.items) |append| {
+            try self.logWalStreamAppend(txn, append);
+        }
+        for (overlay.stream_offsets.items) |offset| {
+            try self.logWalStreamOffset(txn, offset);
+        }
+        for (overlay.stream_trims.items) |trim_op| {
+            try self.logWalStreamTrim(txn, trim_op);
         }
     }
 
@@ -1410,6 +1507,55 @@ pub const Database = struct {
         _ = tm.logOperation(txn, .update, payload) catch return DatabaseError.IoError;
     }
 
+    fn logWalStreamAppend(
+        self: *Self,
+        txn: *Transaction,
+        append: TxnStreamAppend,
+    ) DatabaseError!void {
+        const tm = &(self.txn_manager orelse return DatabaseError.TransactionsNotEnabled);
+        const sequence = append.sequence orelse return DatabaseError.IoError;
+        const payload = stream_store_mod.serializeAppendWalAlloc(
+            self.allocator,
+            append.stream,
+            sequence,
+            append.kind,
+            append.payload,
+        ) catch |err| return self.mapStreamError(err);
+        defer self.allocator.free(payload);
+        _ = tm.logOperation(txn, .insert, payload) catch return DatabaseError.IoError;
+    }
+
+    fn logWalStreamOffset(
+        self: *Self,
+        txn: *Transaction,
+        offset: TxnStreamOffset,
+    ) DatabaseError!void {
+        const tm = &(self.txn_manager orelse return DatabaseError.TransactionsNotEnabled);
+        const payload = stream_store_mod.serializeOffsetWalAlloc(
+            self.allocator,
+            offset.stream,
+            offset.consumer,
+            offset.sequence,
+        ) catch |err| return self.mapStreamError(err);
+        defer self.allocator.free(payload);
+        _ = tm.logOperation(txn, .update, payload) catch return DatabaseError.IoError;
+    }
+
+    fn logWalStreamTrim(
+        self: *Self,
+        txn: *Transaction,
+        trim_op: TxnStreamTrim,
+    ) DatabaseError!void {
+        const tm = &(self.txn_manager orelse return DatabaseError.TransactionsNotEnabled);
+        const payload = stream_store_mod.serializeTrimWalAlloc(
+            self.allocator,
+            trim_op.stream,
+            trim_op.through_sequence,
+        ) catch |err| return self.mapStreamError(err);
+        defer self.allocator.free(payload);
+        _ = tm.logOperation(txn, .delete, payload) catch return DatabaseError.IoError;
+    }
+
     fn applyTxnOverlay(
         self: *Self,
         writer_txn_id: u64,
@@ -1442,6 +1588,41 @@ pub const Database = struct {
             switch (entry.value_ptr.*) {
                 .absent => {},
                 .text => |text| try self.ftsIndexDocument(entry.key_ptr.*, text),
+            }
+        }
+
+        if (overlay.stream_appends.items.len > 0 or
+            overlay.stream_offsets.items.len > 0 or
+            overlay.stream_trims.items.len > 0)
+        {
+            const trees = try self.streamTreesForWrite();
+            for (overlay.stream_appends.items) |append| {
+                const sequence = append.sequence orelse return DatabaseError.IoError;
+                stream_store_mod.appendWithSequence(
+                    trees,
+                    self.allocator,
+                    append.stream,
+                    sequence,
+                    append.kind,
+                    append.payload,
+                ) catch |err| return self.mapStreamError(err);
+            }
+            for (overlay.stream_offsets.items) |offset| {
+                stream_store_mod.setOffset(
+                    trees,
+                    self.allocator,
+                    offset.stream,
+                    offset.consumer,
+                    offset.sequence,
+                ) catch |err| return self.mapStreamError(err);
+            }
+            for (overlay.stream_trims.items) |trim_op| {
+                stream_store_mod.trim(
+                    trees,
+                    self.allocator,
+                    trim_op.stream,
+                    trim_op.through_sequence,
+                ) catch |err| return self.mapStreamError(err);
             }
         }
     }
@@ -1857,6 +2038,16 @@ pub const Database = struct {
         // hnsw_node_tree is created lazily on first sync when vectors exist
         self.hnsw_node_tree = null;
 
+        self.stream_meta_tree = BTree.init(self.allocator, &self.buffer_pool) catch {
+            return DatabaseError.TreeInitFailed;
+        };
+        self.stream_events_tree = BTree.init(self.allocator, &self.buffer_pool) catch {
+            return DatabaseError.TreeInitFailed;
+        };
+        self.stream_offsets_tree = BTree.init(self.allocator, &self.buffer_pool) catch {
+            return DatabaseError.TreeInitFailed;
+        };
+
         // Save root pages to header
         try self.saveTreeRoots();
     }
@@ -1940,6 +2131,67 @@ pub const Database = struct {
         } else {
             self.hnsw_node_tree = null;
         }
+
+        const stream_meta_root = header.getTreeRoot(.stream_meta);
+        self.stream_meta_tree = if (stream_meta_root != NULL_PAGE)
+            BTree.open(self.allocator, &self.buffer_pool, stream_meta_root)
+        else
+            null;
+
+        const stream_events_root = header.getTreeRoot(.stream_events);
+        self.stream_events_tree = if (stream_events_root != NULL_PAGE)
+            BTree.open(self.allocator, &self.buffer_pool, stream_events_root)
+        else
+            null;
+
+        const stream_offsets_root = header.getTreeRoot(.stream_offsets);
+        self.stream_offsets_tree = if (stream_offsets_root != NULL_PAGE)
+            BTree.open(self.allocator, &self.buffer_pool, stream_offsets_root)
+        else
+            null;
+    }
+
+    fn ensureStreamTreesForWrite(self: *Self) DatabaseError!void {
+        if (self.read_only) return DatabaseError.ReadOnly;
+
+        var created = false;
+        if (self.stream_meta_tree == null) {
+            self.stream_meta_tree = BTree.init(self.allocator, &self.buffer_pool) catch {
+                return DatabaseError.TreeInitFailed;
+            };
+            created = true;
+        }
+        if (self.stream_events_tree == null) {
+            self.stream_events_tree = BTree.init(self.allocator, &self.buffer_pool) catch {
+                return DatabaseError.TreeInitFailed;
+            };
+            created = true;
+        }
+        if (self.stream_offsets_tree == null) {
+            self.stream_offsets_tree = BTree.init(self.allocator, &self.buffer_pool) catch {
+                return DatabaseError.TreeInitFailed;
+            };
+            created = true;
+        }
+        if (created) {
+            try self.saveTreeRoots();
+        }
+    }
+
+    fn streamTrees(self: *Self) ?stream_store_mod.TreeSet {
+        const meta = if (self.stream_meta_tree) |*tree| tree else return null;
+        const events = if (self.stream_events_tree) |*tree| tree else return null;
+        const offsets = if (self.stream_offsets_tree) |*tree| tree else return null;
+        return .{
+            .meta = meta,
+            .events = events,
+            .offsets = offsets,
+        };
+    }
+
+    fn streamTreesForWrite(self: *Self) DatabaseError!stream_store_mod.TreeSet {
+        try self.ensureStreamTreesForWrite();
+        return self.streamTrees() orelse DatabaseError.IoError;
     }
 
     fn saveTreeRoots(self: *Self) DatabaseError!void {
@@ -1960,6 +2212,16 @@ pub const Database = struct {
 
         if (self.hnsw_node_tree) |*tree| {
             header.setTreeRoot(.hnsw_node, tree.getRootPage());
+        }
+
+        if (self.stream_meta_tree) |*tree| {
+            header.setTreeRoot(.stream_meta, tree.getRootPage());
+        }
+        if (self.stream_events_tree) |*tree| {
+            header.setTreeRoot(.stream_events, tree.getRootPage());
+        }
+        if (self.stream_offsets_tree) |*tree| {
+            header.setTreeRoot(.stream_offsets, tree.getRootPage());
         }
 
         // Save vector storage first page for persistence
@@ -2062,6 +2324,512 @@ pub const Database = struct {
             node_mod.NodeError.BufferTooSmall => DatabaseError.ValueTooLarge,
             else => DatabaseError.IoError,
         };
+    }
+
+    fn mapStreamError(self: *Self, err: stream_store_mod.StreamError) DatabaseError {
+        _ = self;
+        return switch (err) {
+            stream_store_mod.StreamError.InvalidName,
+            stream_store_mod.StreamError.ReservedName,
+            stream_store_mod.StreamError.InvalidKind,
+            stream_store_mod.StreamError.InvalidConsumer,
+            stream_store_mod.StreamError.InvalidRecord,
+            => DatabaseError.InvalidArgument,
+            stream_store_mod.StreamError.OutOfMemory => DatabaseError.OutOfMemory,
+            stream_store_mod.StreamError.ValueTooLarge => DatabaseError.ValueTooLarge,
+            stream_store_mod.StreamError.IoError => DatabaseError.IoError,
+        };
+    }
+
+    fn stageStreamAppend(
+        self: *Self,
+        overlay: *TxnOverlay,
+        stream: []const u8,
+        kind: []const u8,
+        payload: PropertyValue,
+        user_publish: bool,
+    ) DatabaseError!void {
+        if (user_publish) {
+            stream_store_mod.validateUserStreamName(stream) catch |err| return self.mapStreamError(err);
+        } else {
+            stream_store_mod.validateStreamNameForRead(stream) catch |err| return self.mapStreamError(err);
+        }
+        stream_store_mod.validateKind(kind) catch |err| return self.mapStreamError(err);
+
+        const stream_copy = self.allocator.dupe(u8, stream) catch return DatabaseError.OutOfMemory;
+        errdefer self.allocator.free(stream_copy);
+        const kind_copy = self.allocator.dupe(u8, kind) catch return DatabaseError.OutOfMemory;
+        errdefer self.allocator.free(kind_copy);
+        const payload_copy = payload.clone(self.allocator) catch return DatabaseError.OutOfMemory;
+        errdefer {
+            var owned = payload_copy;
+            owned.deinit(self.allocator);
+        }
+
+        overlay.stream_appends.append(self.allocator, .{
+            .stream = stream_copy,
+            .kind = kind_copy,
+            .payload = payload_copy,
+            .sequence = null,
+        }) catch return DatabaseError.OutOfMemory;
+        overlay.markDirty();
+    }
+
+    fn assignStreamSequences(self: *Self, overlay: *TxnOverlay) DatabaseError!void {
+        if (overlay.stream_appends.items.len == 0) return;
+        const trees = try self.streamTreesForWrite();
+
+        for (overlay.stream_appends.items, 0..) |*append, i| {
+            if (append.sequence != null) continue;
+
+            var last = stream_store_mod.getLastSequence(
+                trees,
+                self.allocator,
+                append.stream,
+            ) catch |err| return self.mapStreamError(err);
+
+            for (overlay.stream_appends.items[0..i]) |previous| {
+                if (previous.sequence) |seq| {
+                    if (std.mem.eql(u8, previous.stream, append.stream) and seq > last) {
+                        last = seq;
+                    }
+                }
+            }
+
+            if (last == std.math.maxInt(u64)) return DatabaseError.ValueTooLarge;
+            append.sequence = last + 1;
+        }
+    }
+
+    pub fn publishStream(
+        self: *Self,
+        txn: *Transaction,
+        stream: []const u8,
+        kind: ?[]const u8,
+        payload: PropertyValue,
+    ) DatabaseError!void {
+        if (self.read_only) return DatabaseError.PermissionDenied;
+        if (!txn.isActive()) return DatabaseError.TransactionNotActive;
+        if (txn.mode == .read_only) return DatabaseError.TransactionReadOnly;
+        const overlay = self.getTxnOverlay(txn) orelse return DatabaseError.TransactionNotActive;
+        try self.ensureStreamTreesForWrite();
+        try self.stageStreamAppend(
+            overlay,
+            stream,
+            kind orelse stream_store_mod.default_kind,
+            payload,
+            true,
+        );
+    }
+
+    pub fn setStreamOffset(
+        self: *Self,
+        txn: *Transaction,
+        stream: []const u8,
+        consumer: []const u8,
+        sequence: u64,
+    ) DatabaseError!void {
+        if (self.read_only) return DatabaseError.PermissionDenied;
+        if (!txn.isActive()) return DatabaseError.TransactionNotActive;
+        if (txn.mode == .read_only) return DatabaseError.TransactionReadOnly;
+        stream_store_mod.validateStreamNameForRead(stream) catch |err| return self.mapStreamError(err);
+        stream_store_mod.validateConsumer(consumer) catch |err| return self.mapStreamError(err);
+        const overlay = self.getTxnOverlay(txn) orelse return DatabaseError.TransactionNotActive;
+        try self.ensureStreamTreesForWrite();
+
+        const stream_copy = self.allocator.dupe(u8, stream) catch return DatabaseError.OutOfMemory;
+        errdefer self.allocator.free(stream_copy);
+        const consumer_copy = self.allocator.dupe(u8, consumer) catch return DatabaseError.OutOfMemory;
+        errdefer self.allocator.free(consumer_copy);
+
+        overlay.stream_offsets.append(self.allocator, .{
+            .stream = stream_copy,
+            .consumer = consumer_copy,
+            .sequence = sequence,
+        }) catch return DatabaseError.OutOfMemory;
+        overlay.markDirty();
+    }
+
+    pub fn trimStream(
+        self: *Self,
+        txn: *Transaction,
+        stream: []const u8,
+        through_sequence: u64,
+    ) DatabaseError!void {
+        if (self.read_only) return DatabaseError.PermissionDenied;
+        if (!txn.isActive()) return DatabaseError.TransactionNotActive;
+        if (txn.mode == .read_only) return DatabaseError.TransactionReadOnly;
+        stream_store_mod.validateStreamNameForRead(stream) catch |err| return self.mapStreamError(err);
+        const overlay = self.getTxnOverlay(txn) orelse return DatabaseError.TransactionNotActive;
+        try self.ensureStreamTreesForWrite();
+
+        const stream_copy = self.allocator.dupe(u8, stream) catch return DatabaseError.OutOfMemory;
+        errdefer self.allocator.free(stream_copy);
+        overlay.stream_trims.append(self.allocator, .{
+            .stream = stream_copy,
+            .through_sequence = through_sequence,
+        }) catch return DatabaseError.OutOfMemory;
+        overlay.markDirty();
+    }
+
+    pub fn getStreamOffset(
+        self: *Self,
+        stream: []const u8,
+        consumer: []const u8,
+    ) DatabaseError!?u64 {
+        return stream_store_mod.getOffset(
+            self.streamTrees(),
+            self.allocator,
+            stream,
+            consumer,
+        ) catch |err| return self.mapStreamError(err);
+    }
+
+    fn readStreamOnce(
+        self: *Self,
+        stream: []const u8,
+        after_sequence: u64,
+        limit: usize,
+    ) DatabaseError!StreamBatch {
+        return stream_store_mod.read(
+            self.streamTrees(),
+            self.allocator,
+            stream,
+            after_sequence,
+            limit,
+        ) catch |err| return self.mapStreamError(err);
+    }
+
+    pub fn readStream(
+        self: *Self,
+        stream: []const u8,
+        after_sequence: u64,
+        limit: usize,
+        timeout_ms: u64,
+    ) DatabaseError!StreamBatch {
+        if (limit == 0) return DatabaseError.InvalidArgument;
+
+        var batch = try self.readStreamOnce(stream, after_sequence, limit);
+        if (batch.records.len > 0 or timeout_ms == 0) return batch;
+        batch.deinit();
+
+        const timeout_ns: i128 = @as(i128, @intCast(timeout_ms)) * std.time.ns_per_ms;
+        const start_ns = std.time.nanoTimestamp();
+
+        self.stream_mutex.lock();
+        var observed_epoch = self.stream_epoch;
+        self.stream_mutex.unlock();
+
+        while (true) {
+            const elapsed = std.time.nanoTimestamp() - start_ns;
+            if (elapsed >= timeout_ns) {
+                return try self.readStreamOnce(stream, after_sequence, limit);
+            }
+            const remaining_ns: u64 = @intCast(timeout_ns - elapsed);
+
+            self.stream_mutex.lock();
+            if (self.stream_epoch == observed_epoch) {
+                self.stream_cond.timedWait(&self.stream_mutex, remaining_ns) catch {};
+            }
+            observed_epoch = self.stream_epoch;
+            self.stream_mutex.unlock();
+
+            batch = try self.readStreamOnce(stream, after_sequence, limit);
+            if (batch.records.len > 0) return batch;
+            batch.deinit();
+        }
+    }
+
+    pub fn readChanges(self: *Self, after_sequence: u64, limit: usize, timeout_ms: u64) DatabaseError!StreamBatch {
+        return self.readStream(stream_store_mod.changes_stream, after_sequence, limit, timeout_ms);
+    }
+
+    fn propertyValueEqual(a: PropertyValue, b: PropertyValue) bool {
+        return switch (a) {
+            .null_val => b == .null_val,
+            .bool_val => |v| b == .bool_val and b.bool_val == v,
+            .int_val => |v| b == .int_val and b.int_val == v,
+            .float_val => |v| b == .float_val and b.float_val == v,
+            .string_val => |v| b == .string_val and std.mem.eql(u8, b.string_val, v),
+            .bytes_val => |v| b == .bytes_val and std.mem.eql(u8, b.bytes_val, v),
+            .vector_val => |v| b == .vector_val and std.mem.eql(f32, b.vector_val, v),
+            .list_val => |list| blk: {
+                if (b != .list_val or b.list_val.len != list.len) break :blk false;
+                for (list, b.list_val) |lhs, rhs| {
+                    if (!propertyValueEqual(lhs, rhs)) break :blk false;
+                }
+                break :blk true;
+            },
+            .map_val => |map| blk: {
+                if (b != .map_val or b.map_val.len != map.len) break :blk false;
+                for (map, b.map_val) |lhs, rhs| {
+                    if (!std.mem.eql(u8, lhs.key, rhs.key)) break :blk false;
+                    if (!propertyValueEqual(lhs.value, rhs.value)) break :blk false;
+                }
+                break :blk true;
+            },
+        };
+    }
+
+    fn idValue(id: u64) PropertyValue {
+        return .{ .int_val = @intCast(id) };
+    }
+
+    fn stageChangePayload(
+        self: *Self,
+        overlay: *TxnOverlay,
+        kind: []const u8,
+        entries: []const PropertyValue.MapEntry,
+    ) DatabaseError!void {
+        const payload = PropertyValue{ .map_val = entries };
+        try self.stageStreamAppend(
+            overlay,
+            stream_store_mod.changes_stream,
+            kind,
+            payload,
+            false,
+        );
+    }
+
+    fn stageNodeChange(
+        self: *Self,
+        overlay: *TxnOverlay,
+        kind: []const u8,
+        op: []const u8,
+        node_id: NodeId,
+    ) DatabaseError!void {
+        var entries = [_]PropertyValue.MapEntry{
+            .{ .key = "entity", .value = .{ .string_val = "node" } },
+            .{ .key = "op", .value = .{ .string_val = op } },
+            .{ .key = "node_id", .value = idValue(node_id) },
+        };
+        try self.stageChangePayload(overlay, kind, &entries);
+    }
+
+    fn stageNodeLabelChange(
+        self: *Self,
+        overlay: *TxnOverlay,
+        kind: []const u8,
+        op: []const u8,
+        node_id: NodeId,
+        label_id: symbols_mod.SymbolId,
+    ) DatabaseError!void {
+        const label = self.symbol_table.resolve(label_id) catch return DatabaseError.IoError;
+        defer self.allocator.free(label);
+        var entries = [_]PropertyValue.MapEntry{
+            .{ .key = "entity", .value = .{ .string_val = "node" } },
+            .{ .key = "op", .value = .{ .string_val = op } },
+            .{ .key = "node_id", .value = idValue(node_id) },
+            .{ .key = "label", .value = .{ .string_val = label } },
+        };
+        try self.stageChangePayload(overlay, kind, &entries);
+    }
+
+    fn stageNodePropertyChange(
+        self: *Self,
+        overlay: *TxnOverlay,
+        kind: []const u8,
+        op: []const u8,
+        node_id: NodeId,
+        key_id: symbols_mod.SymbolId,
+        old_value: ?PropertyValue,
+        new_value: ?PropertyValue,
+    ) DatabaseError!void {
+        const key = self.symbol_table.resolve(key_id) catch return DatabaseError.IoError;
+        defer self.allocator.free(key);
+        var entries = [_]PropertyValue.MapEntry{
+            .{ .key = "entity", .value = .{ .string_val = "node" } },
+            .{ .key = "op", .value = .{ .string_val = op } },
+            .{ .key = "node_id", .value = idValue(node_id) },
+            .{ .key = "key", .value = .{ .string_val = key } },
+            .{ .key = "old_value", .value = old_value orelse .{ .null_val = {} } },
+            .{ .key = "new_value", .value = new_value orelse .{ .null_val = {} } },
+        };
+        try self.stageChangePayload(overlay, kind, &entries);
+    }
+
+    fn stageEdgeChange(
+        self: *Self,
+        overlay: *TxnOverlay,
+        kind: []const u8,
+        op: []const u8,
+        edge_id: EdgeId,
+        state: TxnEdgeState,
+    ) DatabaseError!void {
+        const type_name = self.symbol_table.resolve(state.edge_type) catch return DatabaseError.IoError;
+        defer self.allocator.free(type_name);
+        var entries = [_]PropertyValue.MapEntry{
+            .{ .key = "entity", .value = .{ .string_val = "edge" } },
+            .{ .key = "op", .value = .{ .string_val = op } },
+            .{ .key = "edge_id", .value = idValue(edge_id) },
+            .{ .key = "source_id", .value = idValue(state.source) },
+            .{ .key = "target_id", .value = idValue(state.target) },
+            .{ .key = "type", .value = .{ .string_val = type_name } },
+        };
+        try self.stageChangePayload(overlay, kind, &entries);
+    }
+
+    fn stageEdgePropertyChange(
+        self: *Self,
+        overlay: *TxnOverlay,
+        kind: []const u8,
+        op: []const u8,
+        edge_id: EdgeId,
+        key_id: symbols_mod.SymbolId,
+        old_value: ?PropertyValue,
+        new_value: ?PropertyValue,
+    ) DatabaseError!void {
+        const key = self.symbol_table.resolve(key_id) catch return DatabaseError.IoError;
+        defer self.allocator.free(key);
+        var entries = [_]PropertyValue.MapEntry{
+            .{ .key = "entity", .value = .{ .string_val = "edge" } },
+            .{ .key = "op", .value = .{ .string_val = op } },
+            .{ .key = "edge_id", .value = idValue(edge_id) },
+            .{ .key = "key", .value = .{ .string_val = key } },
+            .{ .key = "old_value", .value = old_value orelse .{ .null_val = {} } },
+            .{ .key = "new_value", .value = new_value orelse .{ .null_val = {} } },
+        };
+        try self.stageChangePayload(overlay, kind, &entries);
+    }
+
+    fn stageGraphChangefeed(self: *Self, overlay: *TxnOverlay) DatabaseError!void {
+        var node_iter = overlay.node_states.iterator();
+        while (node_iter.next()) |entry| {
+            const node_id = entry.key_ptr.*;
+            const state = entry.value_ptr.*;
+            const current = try self.readBaseNodeState(node_id);
+            defer if (current) |existing| {
+                var owned_existing = existing;
+                owned_existing.deinit(self.allocator);
+            };
+
+            if (!state.exists) {
+                if (current != null) {
+                    try self.stageNodeChange(overlay, "node.delete", "delete", node_id);
+                }
+                continue;
+            }
+
+            if (current) |existing| {
+                for (existing.labels) |label_id| {
+                    if (!containsSymbolId(state.labels, label_id)) {
+                        try self.stageNodeLabelChange(overlay, "node.label_remove", "label_remove", node_id, label_id);
+                    }
+                }
+                for (state.labels) |label_id| {
+                    if (!containsSymbolId(existing.labels, label_id)) {
+                        try self.stageNodeLabelChange(overlay, "node.label_add", "label_add", node_id, label_id);
+                    }
+                }
+
+                for (existing.properties) |prop| {
+                    if (findPropertyById(state.properties, prop.key_id) == null) {
+                        try self.stageNodePropertyChange(
+                            overlay,
+                            "node.property_remove",
+                            "property_remove",
+                            node_id,
+                            prop.key_id,
+                            prop.value,
+                            null,
+                        );
+                    }
+                }
+                for (state.properties) |prop| {
+                    const old_prop = findPropertyById(existing.properties, prop.key_id);
+                    if (old_prop) |old| {
+                        if (propertyValueEqual(old.value, prop.value)) continue;
+                    }
+                    try self.stageNodePropertyChange(
+                        overlay,
+                        "node.property_set",
+                        "property_set",
+                        node_id,
+                        prop.key_id,
+                        if (old_prop) |old| old.value else null,
+                        prop.value,
+                    );
+                }
+            } else {
+                try self.stageNodeChange(overlay, "node.insert", "insert", node_id);
+                for (state.labels) |label_id| {
+                    try self.stageNodeLabelChange(overlay, "node.label_add", "label_add", node_id, label_id);
+                }
+                for (state.properties) |prop| {
+                    try self.stageNodePropertyChange(
+                        overlay,
+                        "node.property_set",
+                        "property_set",
+                        node_id,
+                        prop.key_id,
+                        null,
+                        prop.value,
+                    );
+                }
+            }
+        }
+
+        var edge_iter = overlay.edge_states.iterator();
+        while (edge_iter.next()) |entry| {
+            const edge_id = entry.key_ptr.*;
+            const state = entry.value_ptr.*;
+            const current = try self.readBaseEdgeState(edge_id);
+            defer if (current) |existing| {
+                var owned_existing = existing;
+                owned_existing.deinit(self.allocator);
+            };
+
+            if (!state.exists) {
+                if (current) |existing| {
+                    try self.stageEdgeChange(overlay, "edge.delete", "delete", edge_id, existing);
+                }
+                continue;
+            }
+
+            if (current) |existing| {
+                for (existing.properties) |prop| {
+                    if (findPropertyById(state.properties, prop.key_id) == null) {
+                        try self.stageEdgePropertyChange(
+                            overlay,
+                            "edge.property_remove",
+                            "property_remove",
+                            edge_id,
+                            prop.key_id,
+                            prop.value,
+                            null,
+                        );
+                    }
+                }
+                for (state.properties) |prop| {
+                    const old_prop = findPropertyById(existing.properties, prop.key_id);
+                    if (old_prop) |old| {
+                        if (propertyValueEqual(old.value, prop.value)) continue;
+                    }
+                    try self.stageEdgePropertyChange(
+                        overlay,
+                        "edge.property_set",
+                        "property_set",
+                        edge_id,
+                        prop.key_id,
+                        if (old_prop) |old| old.value else null,
+                        prop.value,
+                    );
+                }
+            } else {
+                try self.stageEdgeChange(overlay, "edge.insert", "insert", edge_id, state);
+                for (state.properties) |prop| {
+                    try self.stageEdgePropertyChange(
+                        overlay,
+                        "edge.property_set",
+                        "property_set",
+                        edge_id,
+                        prop.key_id,
+                        null,
+                        prop.value,
+                    );
+                }
+            }
+        }
     }
 
     fn getTxnOverlay(self: *Self, txn: *const Transaction) ?*TxnOverlay {

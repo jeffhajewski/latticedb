@@ -23,6 +23,7 @@ const OpenOptions = database.OpenOptions;
 const DatabaseConfig = database.DatabaseConfig;
 const VectorSearchResult = database.VectorSearchResult;
 const FtsSearchResult = database.FtsSearchResult;
+const StreamBatch = database.StreamBatch;
 const hash_embed_mod = lattice.vector.hash_embed;
 const embedding_mod = lattice.vector.embedding;
 const node_mod = lattice.graph.node;
@@ -193,6 +194,12 @@ const EdgeResultHandle = struct {
     db_handle: *DatabaseHandle,
 };
 
+/// Internal stream batch handle
+const StreamBatchHandle = struct {
+    batch: StreamBatch,
+    c_values: []lattice_value,
+};
+
 /// Internal embedding client handle
 const EmbeddingClientHandle = struct {
     client: embedding_mod.EmbeddingClient,
@@ -222,6 +229,9 @@ pub const lattice_fts_result = opaque {};
 
 /// Opaque edge result handle for C API
 pub const lattice_edge_result = opaque {};
+
+/// Opaque stream batch handle for C API
+pub const lattice_stream_batch = opaque {};
 
 /// Opaque embedding client handle for C API
 pub const lattice_embedding_client = opaque {};
@@ -277,6 +287,7 @@ fn mapDatabaseError(err: DatabaseError) lattice_error {
         DatabaseError.AlreadyExists => .err_already_exists,
         DatabaseError.ReadOnly => .err_read_only,
         DatabaseError.NotFound => .err_not_found,
+        DatabaseError.InvalidArgument => .err_invalid_arg,
         DatabaseError.TransactionNotActive => .err_invalid_arg,
         DatabaseError.TransactionReadOnly => .err_read_only,
         DatabaseError.TransactionsNotEnabled => .err_invalid_arg,
@@ -432,6 +443,12 @@ fn floatSlicePtrOrNull(slice: []const f32) [*c]const f32 {
 fn cBytesToSlice(ptr: [*c]const u8, len: usize) ValueConversionError![]const u8 {
     if (len == 0) return &[_]u8{};
     if (ptr == null) return error.InvalidValue;
+    return ptr[0..len];
+}
+
+fn cArgBytes(ptr: [*c]const u8, len: usize) ?[]const u8 {
+    if (len == 0) return &[_]u8{};
+    if (ptr == null) return null;
     return ptr[0..len];
 }
 
@@ -1267,6 +1284,192 @@ pub export fn lattice_value_free(value: ?*lattice_value) void {
     const c_value = value orelse return;
     freeOwnedCValue(c_value);
     emptyCValue(c_value);
+}
+
+// ============================================================================
+// Stream Operations
+// ============================================================================
+
+pub export fn lattice_stream_publish(
+    txn: ?*lattice_txn,
+    stream: [*c]const u8,
+    stream_len: usize,
+    kind: [*c]const u8,
+    kind_len: usize,
+    payload: ?*const lattice_value,
+) lattice_error {
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
+
+    const stream_slice = cArgBytes(stream, stream_len) orelse return .err_invalid_arg;
+    const kind_slice: ?[]const u8 = if (kind_len == 0)
+        null
+    else
+        cArgBytes(kind, kind_len) orelse return .err_invalid_arg;
+    const c_payload = payload orelse return .err_invalid_arg;
+
+    var zig_payload = cValueToOwnedZigValue(c_payload, global_allocator) catch |err| {
+        return mapValueConversionError(err);
+    };
+    defer zig_payload.deinit(global_allocator);
+
+    txn_handle.db_handle.db.publishStream(
+        &txn_handle.txn,
+        stream_slice,
+        kind_slice,
+        zig_payload,
+    ) catch |err| return mapDatabaseError(err);
+
+    return .ok;
+}
+
+pub export fn lattice_stream_read(
+    db: ?*lattice_database,
+    stream: [*c]const u8,
+    stream_len: usize,
+    after_sequence: u64,
+    limit: usize,
+    timeout_ms: u32,
+    batch_out: *?*lattice_stream_batch,
+) lattice_error {
+    batch_out.* = null;
+    const db_handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
+    const stream_slice = cArgBytes(stream, stream_len) orelse return .err_invalid_arg;
+
+    var batch = db_handle.db.readStream(
+        stream_slice,
+        after_sequence,
+        limit,
+        timeout_ms,
+    ) catch |err| return mapDatabaseError(err);
+    errdefer batch.deinit();
+
+    const c_values = global_allocator.alloc(lattice_value, batch.records.len) catch {
+        return .err_out_of_memory;
+    };
+    var initialized: usize = 0;
+    errdefer {
+        for (c_values[0..initialized]) |*value| {
+            freeOwnedCValue(value);
+        }
+        global_allocator.free(c_values);
+    }
+    for (c_values) |*value| emptyCValue(value);
+
+    for (batch.records, 0..) |record, i| {
+        zigValueToOwnedCValue(record.payload, &c_values[i]) catch |err| {
+            return mapValueConversionError(err);
+        };
+        initialized += 1;
+    }
+
+    const handle = global_allocator.create(StreamBatchHandle) catch {
+        return .err_out_of_memory;
+    };
+    handle.* = .{
+        .batch = batch,
+        .c_values = c_values,
+    };
+
+    batch_out.* = @ptrCast(handle);
+    return .ok;
+}
+
+pub export fn lattice_stream_batch_count(batch: ?*lattice_stream_batch) usize {
+    const handle = toHandle(StreamBatchHandle, batch) orelse return 0;
+    return handle.batch.records.len;
+}
+
+pub export fn lattice_stream_batch_get(
+    batch: ?*lattice_stream_batch,
+    index: usize,
+    sequence_out: *u64,
+    kind_out: *[*c]const u8,
+    kind_len_out: *usize,
+    payload_out: *?*const lattice_value,
+) lattice_error {
+    const handle = toHandle(StreamBatchHandle, batch) orelse return .err_invalid_arg;
+    if (index >= handle.batch.records.len) return .err_invalid_arg;
+
+    const record = handle.batch.records[index];
+    sequence_out.* = record.sequence;
+    kind_out.* = record.kind.ptr;
+    kind_len_out.* = record.kind.len;
+    payload_out.* = &handle.c_values[index];
+    return .ok;
+}
+
+pub export fn lattice_stream_batch_free(batch: ?*lattice_stream_batch) void {
+    const handle = toHandle(StreamBatchHandle, batch) orelse return;
+    for (handle.c_values) |*value| {
+        freeOwnedCValue(value);
+    }
+    global_allocator.free(handle.c_values);
+    handle.batch.deinit();
+    global_allocator.destroy(handle);
+}
+
+pub export fn lattice_stream_get_offset(
+    db: ?*lattice_database,
+    stream: [*c]const u8,
+    stream_len: usize,
+    consumer: [*c]const u8,
+    consumer_len: usize,
+    exists_out: *bool,
+    sequence_out: *u64,
+) lattice_error {
+    const db_handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
+    const stream_slice = cArgBytes(stream, stream_len) orelse return .err_invalid_arg;
+    const consumer_slice = cArgBytes(consumer, consumer_len) orelse return .err_invalid_arg;
+    exists_out.* = false;
+    sequence_out.* = 0;
+
+    const value = db_handle.db.getStreamOffset(stream_slice, consumer_slice) catch |err| {
+        return mapDatabaseError(err);
+    };
+    if (value) |sequence| {
+        exists_out.* = true;
+        sequence_out.* = sequence;
+    }
+    return .ok;
+}
+
+pub export fn lattice_stream_set_offset(
+    txn: ?*lattice_txn,
+    stream: [*c]const u8,
+    stream_len: usize,
+    consumer: [*c]const u8,
+    consumer_len: usize,
+    sequence: u64,
+) lattice_error {
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
+    const stream_slice = cArgBytes(stream, stream_len) orelse return .err_invalid_arg;
+    const consumer_slice = cArgBytes(consumer, consumer_len) orelse return .err_invalid_arg;
+    txn_handle.db_handle.db.setStreamOffset(
+        &txn_handle.txn,
+        stream_slice,
+        consumer_slice,
+        sequence,
+    ) catch |err| return mapDatabaseError(err);
+    return .ok;
+}
+
+pub export fn lattice_stream_trim(
+    txn: ?*lattice_txn,
+    stream: [*c]const u8,
+    stream_len: usize,
+    through_sequence: u64,
+) lattice_error {
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
+    const stream_slice = cArgBytes(stream, stream_len) orelse return .err_invalid_arg;
+    txn_handle.db_handle.db.trimStream(
+        &txn_handle.txn,
+        stream_slice,
+        through_sequence,
+    ) catch |err| return mapDatabaseError(err);
+    return .ok;
 }
 
 /// Set a vector on a node

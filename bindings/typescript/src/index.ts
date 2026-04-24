@@ -36,6 +36,7 @@ export {
   Edge,
   Value,
   QueryResult,
+  StreamRecord,
   VectorSearchResult,
   PropertyValue,
   CreateNodeOptions,

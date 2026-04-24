@@ -221,6 +221,71 @@ test "only committed transactions recovered in mixed workload" {
     }
 }
 
+test "committed stream records and offsets recovered after crash" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_streams.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+        var txn = try db.beginTransaction(.read_write);
+        try db.publishStream(&txn, "jobs", "queued", .{ .string_val = "job-1" });
+        try db.setStreamOffset(&txn, "jobs", "worker-a", 1);
+        try db.commitTransaction(&txn);
+        db.close();
+    }
+
+    try simulateCrash(path);
+
+    {
+        var db = try openCrashTestDb(allocator, path, false);
+        defer db.close();
+
+        var batch = try db.readStream("jobs", 0, 10, 0);
+        defer batch.deinit();
+        try std.testing.expectEqual(@as(usize, 1), batch.records.len);
+        try std.testing.expectEqual(@as(u64, 1), batch.records[0].sequence);
+        try std.testing.expectEqualStrings("queued", batch.records[0].kind);
+        try std.testing.expectEqualStrings("job-1", batch.records[0].payload.string_val);
+
+        const offset = try db.getStreamOffset("jobs", "worker-a");
+        try std.testing.expect(offset != null);
+        try std.testing.expectEqual(@as(u64, 1), offset.?);
+    }
+}
+
+test "aborted stream records and changefeed records are not recovered" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_streams_aborted.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+        var txn = try db.beginTransaction(.read_write);
+        _ = try db.createNode(&txn, &[_][]const u8{"Hidden"});
+        try db.publishStream(&txn, "events", null, .{ .string_val = "hidden" });
+        try db.abortTransaction(&txn);
+        db.close();
+    }
+
+    try simulateCrash(path);
+
+    {
+        var db = try openCrashTestDb(allocator, path, false);
+        defer db.close();
+
+        var events = try db.readStream("events", 0, 10, 0);
+        defer events.deinit();
+        try std.testing.expectEqual(@as(usize, 0), events.records.len);
+
+        var changes = try db.readChanges(0, 10, 0);
+        defer changes.deinit();
+        try std.testing.expectEqual(@as(usize, 0), changes.records.len);
+    }
+}
+
 test "edges recovered with source and target nodes" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_crash_edges.ltdb";

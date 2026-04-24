@@ -82,6 +82,21 @@ export class Transaction {
     this.rolledBack = true;
   }
 
+  publishStream(stream: string, payload: PropertyValue, kind = 'message'): void {
+    this.ensureWritable();
+    this.ffi.publishStream(this.txnHandle!, stream, payload, kind);
+  }
+
+  setStreamOffset(stream: string, consumer: string, sequence: bigint): void {
+    this.ensureWritable();
+    this.ffi.setStreamOffset(this.txnHandle!, stream, consumer, sequence);
+  }
+
+  trimStream(stream: string, throughSequence: bigint): void {
+    this.ensureWritable();
+    this.ffi.trimStream(this.txnHandle!, stream, throughSequence);
+  }
+
   /**
    * Create a new node.
    *

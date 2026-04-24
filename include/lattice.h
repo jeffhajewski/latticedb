@@ -32,6 +32,7 @@ typedef struct lattice_result lattice_result;
 typedef struct lattice_vector_result lattice_vector_result;
 typedef struct lattice_fts_result lattice_fts_result;
 typedef struct lattice_edge_result lattice_edge_result;
+typedef struct lattice_stream_batch lattice_stream_batch;
 
 /* ID types */
 typedef uint64_t lattice_node_id;
@@ -271,6 +272,75 @@ void lattice_free_string(char* str);
  * and must not be passed to lattice_value_free().
  */
 void lattice_value_free(lattice_value* value);
+
+/*
+ * Durable stream operations
+ */
+
+/* Publish a record in a write transaction. Named streams auto-create on first
+ * publish. User stream names beginning with "__lattice_" are reserved. Pass
+ * NULL/0 for kind to use "message". */
+lattice_error lattice_stream_publish(
+    lattice_txn* txn,
+    const char* stream,
+    size_t stream_len,
+    const char* kind,
+    size_t kind_len,
+    const lattice_value* payload
+);
+
+/* Read records after a sequence cursor. Reads do not commit offsets. If no
+ * records are available, timeout_ms waits for a same-process commit wakeup. */
+lattice_error lattice_stream_read(
+    lattice_database* db,
+    const char* stream,
+    size_t stream_len,
+    uint64_t after_sequence,
+    size_t limit,
+    uint32_t timeout_ms,
+    lattice_stream_batch** batch_out
+);
+
+size_t lattice_stream_batch_count(lattice_stream_batch* batch);
+
+/* Returned kind and payload are borrowed from the batch and remain valid until
+ * lattice_stream_batch_free(). */
+lattice_error lattice_stream_batch_get(
+    lattice_stream_batch* batch,
+    size_t index,
+    uint64_t* sequence_out,
+    const char** kind_out,
+    size_t* kind_len_out,
+    const lattice_value** payload_out
+);
+
+void lattice_stream_batch_free(lattice_stream_batch* batch);
+
+lattice_error lattice_stream_get_offset(
+    lattice_database* db,
+    const char* stream,
+    size_t stream_len,
+    const char* consumer,
+    size_t consumer_len,
+    bool* exists_out,
+    uint64_t* sequence_out
+);
+
+lattice_error lattice_stream_set_offset(
+    lattice_txn* txn,
+    const char* stream,
+    size_t stream_len,
+    const char* consumer,
+    size_t consumer_len,
+    uint64_t sequence
+);
+
+lattice_error lattice_stream_trim(
+    lattice_txn* txn,
+    const char* stream,
+    size_t stream_len,
+    uint64_t through_sequence
+);
 
 /* Set a vector on a node */
 lattice_error lattice_node_set_vector(

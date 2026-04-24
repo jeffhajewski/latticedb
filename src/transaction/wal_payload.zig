@@ -27,6 +27,9 @@ pub const PayloadType = enum(u8) {
     label_add = 0x06,
     label_remove = 0x07,
     edge_property_update = 0x08,
+    stream_append = 0x20,
+    stream_offset_set = 0x21,
+    stream_trim = 0x22,
 };
 
 /// Errors that can occur during payload serialization/deserialization

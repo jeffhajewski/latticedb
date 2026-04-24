@@ -149,3 +149,12 @@ class FtsSearchResult:
     node_id: int
     score: float
     node: Optional[Node] = None
+
+
+@dataclass
+class StreamRecord:
+    """A durable stream record."""
+
+    sequence: int
+    kind: str
+    payload: PropertyValue

@@ -1222,3 +1222,49 @@ class TestQueryCache:
             db.cache_clear()
             stats_after_clear = db.cache_stats()
             assert stats_after_clear["entries"] == 0
+
+
+class TestStreams:
+    def test_publish_read_offsets_trim_and_changes(self, tmp_path):
+        db_path = tmp_path / "streams.lattice"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                txn.publish_stream("events", {"id": 1}, kind="created")
+                txn.publish_stream("events", "second")
+                node = txn.create_node(labels=["Person"], properties={"name": "Ada"})
+                txn.commit()
+
+            records = db.read_stream("events")
+            assert [record.sequence for record in records] == [1, 2]
+            assert records[0].kind == "created"
+            assert records[0].payload == {"id": 1}
+            assert records[1].kind == "message"
+            assert records[1].payload == "second"
+
+            with db.write() as txn:
+                txn.set_stream_offset("events", "consumer-a", 2)
+                txn.trim_stream("events", 1)
+                txn.commit()
+
+            assert db.get_stream_offset("events", "consumer-a") == 2
+            assert [record.sequence for record in db.read_stream("events")] == [2]
+
+            changes = db.changes()
+            assert any(record.kind == "node.insert" for record in changes)
+            assert any(
+                record.kind == "node.property_set"
+                and record.payload["node_id"] == node.id
+                and record.payload["key"] == "name"
+                for record in changes
+            )
+
+    def test_rollback_keeps_stream_records_hidden(self, tmp_path):
+        db_path = tmp_path / "stream_rollback.lattice"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                txn.publish_stream("events", "hidden")
+                txn.rollback()
+
+            assert db.read_stream("events") == []

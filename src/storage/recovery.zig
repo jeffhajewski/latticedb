@@ -35,6 +35,8 @@ const LabelIndex = label_index_mod.LabelIndex;
 
 // WAL payload deserialization
 const wal_payload = lattice.transaction.wal_payload;
+const stream_store = lattice.stream.store;
+const stream_payload = lattice.stream.payload;
 
 // ============================================================================
 // Types
@@ -108,6 +110,7 @@ pub const LogicalRecoveryContext = struct {
     edge_store: *EdgeStore,
     symbol_table: *SymbolTable,
     label_index: *LabelIndex,
+    stream_trees: ?stream_store.TreeSet = null,
 };
 
 // ============================================================================
@@ -417,6 +420,22 @@ pub const RecoveryManager = struct {
 
         const payload_type = payload[0];
 
+        if (payload_type == @intFromEnum(wal_payload.PayloadType.stream_append)) {
+            const trees = ctx.stream_trees orelse return;
+            const append = stream_store.deserializeAppendWal(payload) catch return;
+            var value = stream_payload.decode(self.allocator, append.payload_bytes) catch return;
+            defer value.deinit(self.allocator);
+            stream_store.appendWithSequence(
+                trees,
+                self.allocator,
+                append.stream,
+                append.sequence,
+                append.kind,
+                value,
+            ) catch {};
+            return;
+        }
+
         // Node insert
         if (payload_type == @intFromEnum(wal_payload.PayloadType.node_insert)) {
             const node_payload = wal_payload.deserializeNodeInsert(payload) catch return;
@@ -456,6 +475,19 @@ pub const RecoveryManager = struct {
         if (payload.len == 0) return;
 
         const payload_type = payload[0];
+
+        if (payload_type == @intFromEnum(wal_payload.PayloadType.stream_offset_set)) {
+            const trees = ctx.stream_trees orelse return;
+            const offset = stream_store.deserializeOffsetWal(payload) catch return;
+            stream_store.setOffset(
+                trees,
+                self.allocator,
+                offset.stream,
+                offset.consumer,
+                offset.sequence,
+            ) catch {};
+            return;
+        }
 
         // Property update
         if (payload_type == @intFromEnum(wal_payload.PayloadType.node_update)) {
@@ -640,6 +672,18 @@ pub const RecoveryManager = struct {
         if (payload.len == 0) return;
 
         const payload_type = payload[0];
+
+        if (payload_type == @intFromEnum(wal_payload.PayloadType.stream_trim)) {
+            const trees = ctx.stream_trees orelse return;
+            const trim_payload = stream_store.deserializeTrimWal(payload) catch return;
+            stream_store.trim(
+                trees,
+                self.allocator,
+                trim_payload.stream,
+                trim_payload.through_sequence,
+            ) catch {};
+            return;
+        }
 
         // Node delete
         if (payload_type == @intFromEnum(wal_payload.PayloadType.node_delete)) {

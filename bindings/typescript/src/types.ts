@@ -90,6 +90,15 @@ export interface QueryResult {
 }
 
 /**
+ * Durable stream record.
+ */
+export interface StreamRecord {
+  sequence: bigint;
+  kind: string;
+  payload: PropertyValue;
+}
+
+/**
  * Result of a vector similarity search.
  */
 export interface VectorSearchResult {

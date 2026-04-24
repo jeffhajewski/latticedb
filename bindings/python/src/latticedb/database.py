@@ -25,7 +25,7 @@ from latticedb._bindings import (
     value_to_python,
 )
 from latticedb.transaction import Transaction
-from latticedb.types import QueryResult, VectorSearchResult, FtsSearchResult
+from latticedb.types import QueryResult, VectorSearchResult, FtsSearchResult, StreamRecord
 
 
 def _is_numpy_array(value: Any) -> bool:
@@ -302,6 +302,94 @@ class Database:
         finally:
             if ids_ptr:
                 lib._lib.lattice_free_node_ids(ids_ptr, count.value)
+
+    def read_stream(
+        self,
+        stream: str,
+        *,
+        after_sequence: int = 0,
+        limit: int = 100,
+        timeout_ms: int = 0,
+    ) -> List[StreamRecord]:
+        """Read durable stream records after ``after_sequence``."""
+        if self._handle is None:
+            raise RuntimeError("Database is not open")
+
+        lib = get_lib()
+        stream_bytes = stream.encode("utf-8")
+        batch_ptr = c_void_p()
+        code = lib._lib.lattice_stream_read(
+            self._handle,
+            stream_bytes,
+            len(stream_bytes),
+            after_sequence,
+            limit,
+            timeout_ms,
+            byref(batch_ptr),
+        )
+        check_error(code)
+
+        try:
+            count = lib._lib.lattice_stream_batch_count(batch_ptr)
+            records: List[StreamRecord] = []
+            for i in range(count):
+                sequence = ctypes.c_uint64()
+                kind_ptr = ctypes.POINTER(ctypes.c_char)()
+                kind_len = ctypes.c_size_t()
+                payload_ptr = ctypes.POINTER(LatticeValue)()
+                code = lib._lib.lattice_stream_batch_get(
+                    batch_ptr,
+                    i,
+                    byref(sequence),
+                    byref(kind_ptr),
+                    byref(kind_len),
+                    byref(payload_ptr),
+                )
+                check_error(code)
+                kind = ctypes.string_at(kind_ptr, kind_len.value).decode("utf-8")
+                payload = value_to_python(payload_ptr.contents)
+                records.append(StreamRecord(sequence=sequence.value, kind=kind, payload=payload))
+            return records
+        finally:
+            if batch_ptr.value:
+                lib._lib.lattice_stream_batch_free(batch_ptr)
+
+    def get_stream_offset(self, stream: str, consumer: str) -> Optional[int]:
+        """Return a durable consumer offset, or None if it has not been set."""
+        if self._handle is None:
+            raise RuntimeError("Database is not open")
+
+        lib = get_lib()
+        stream_bytes = stream.encode("utf-8")
+        consumer_bytes = consumer.encode("utf-8")
+        exists = ctypes.c_bool()
+        sequence = ctypes.c_uint64()
+        code = lib._lib.lattice_stream_get_offset(
+            self._handle,
+            stream_bytes,
+            len(stream_bytes),
+            consumer_bytes,
+            len(consumer_bytes),
+            byref(exists),
+            byref(sequence),
+        )
+        check_error(code)
+        return sequence.value if exists.value else None
+
+    def changes(
+        self,
+        *,
+        after_sequence: int = 0,
+        limit: int = 100,
+        timeout_ms: int = 0,
+    ) -> List[StreamRecord]:
+        """Read graph changefeed records from ``__lattice_changes``."""
+        return self.read_stream(
+            "__lattice_changes",
+            after_sequence=after_sequence,
+            limit=limit,
+            timeout_ms=timeout_ms,
+        )
 
     def vector_search(
         self,

@@ -11,7 +11,15 @@ import warnings
 
 from latticedb.database import Database
 from latticedb.transaction import Transaction
-from latticedb.types import Node, Edge, QueryResult, Value, VectorSearchResult, FtsSearchResult
+from latticedb.types import (
+    Node,
+    Edge,
+    QueryResult,
+    Value,
+    VectorSearchResult,
+    FtsSearchResult,
+    StreamRecord,
+)
 from latticedb.embedding import (
     hash_embed as _hash_embed,
     EmbeddingClient as _EmbeddingClient,
@@ -88,6 +96,7 @@ __all__ = [
     "Value",
     "VectorSearchResult",
     "FtsSearchResult",
+    "StreamRecord",
     # Exceptions
     "LatticeError",
     "LatticeIOError",

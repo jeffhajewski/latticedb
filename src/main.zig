@@ -23,6 +23,12 @@ pub const storage = struct {
     pub const database = @import("storage/database.zig");
 };
 
+// Durable streams
+pub const stream = struct {
+    pub const payload = @import("stream/payload.zig");
+    pub const store = @import("stream/store.zig");
+};
+
 // Vector search
 pub const vector = struct {
     pub const hnsw = @import("vector/hnsw.zig");
@@ -141,6 +147,14 @@ comptime {
     _ = &c_api.lattice_embedding_client_create;
     _ = &c_api.lattice_embedding_client_embed;
     _ = &c_api.lattice_embedding_client_free;
+    _ = &c_api.lattice_stream_publish;
+    _ = &c_api.lattice_stream_read;
+    _ = &c_api.lattice_stream_batch_count;
+    _ = &c_api.lattice_stream_batch_get;
+    _ = &c_api.lattice_stream_batch_free;
+    _ = &c_api.lattice_stream_get_offset;
+    _ = &c_api.lattice_stream_set_offset;
+    _ = &c_api.lattice_stream_trim;
 }
 
 // Re-export common types at top level
@@ -170,6 +184,9 @@ pub const BTreeEntry = storage.btree.Entry;
 pub const WalManager = storage.wal.WalManager;
 pub const WalError = storage.wal.WalError;
 pub const WalRecordType = storage.wal.WalRecordType;
+
+pub const StreamRecord = stream.store.Record;
+pub const StreamBatch = stream.store.Batch;
 
 pub const Checkpointer = storage.checkpoint.Checkpointer;
 pub const CheckpointMode = storage.checkpoint.CheckpointMode;

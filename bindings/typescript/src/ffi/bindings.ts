@@ -44,6 +44,7 @@ const LatticeResult = defineNamedType('lattice_result', () => koffi.opaque('latt
 const LatticeVectorResult = defineNamedType('lattice_vector_result', () => koffi.opaque('lattice_vector_result'));
 const LatticeFtsResult = defineNamedType('lattice_fts_result', () => koffi.opaque('lattice_fts_result'));
 const LatticeEdgeResult = defineNamedType('lattice_edge_result', () => koffi.opaque('lattice_edge_result'));
+const LatticeStreamBatch = defineNamedType('lattice_stream_batch', () => koffi.opaque('lattice_stream_batch'));
 const LatticeEmbeddingClient = defineNamedType(
   'lattice_embedding_client',
   () => koffi.opaque('lattice_embedding_client')
@@ -209,6 +210,56 @@ export interface LatticeBindings {
     node_id: bigint,
     key: string,
     value_out: unknown
+  ) => number;
+  lattice_stream_publish: (
+    txn: unknown,
+    stream: Buffer,
+    stream_len: number,
+    kind: Buffer | null,
+    kind_len: number,
+    payload: unknown
+  ) => number;
+  lattice_stream_read: (
+    db: unknown,
+    stream: Buffer,
+    stream_len: number,
+    after_sequence: bigint,
+    limit: number,
+    timeout_ms: number,
+    batch_out: unknown[]
+  ) => number;
+  lattice_stream_batch_count: (batch: unknown) => number;
+  lattice_stream_batch_get: (
+    batch: unknown,
+    index: number,
+    sequence_out: Buffer,
+    kind_out: unknown[],
+    kind_len_out: number[],
+    payload_out: unknown[]
+  ) => number;
+  lattice_stream_batch_free: (batch: unknown) => void;
+  lattice_stream_get_offset: (
+    db: unknown,
+    stream: Buffer,
+    stream_len: number,
+    consumer: Buffer,
+    consumer_len: number,
+    exists_out: Buffer,
+    sequence_out: Buffer
+  ) => number;
+  lattice_stream_set_offset: (
+    txn: unknown,
+    stream: Buffer,
+    stream_len: number,
+    consumer: Buffer,
+    consumer_len: number,
+    sequence: bigint
+  ) => number;
+  lattice_stream_trim: (
+    txn: unknown,
+    stream: Buffer,
+    stream_len: number,
+    through_sequence: bigint
   ) => number;
   lattice_node_set_vector: (
     txn: unknown,
@@ -468,8 +519,12 @@ function createBindings(): LatticeBindings {
   const FtsResultPtrPtr = koffi.pointer(FtsResultPtr);
   const EdgeResultPtr = koffi.pointer(LatticeEdgeResult);
   const EdgeResultPtrPtr = koffi.pointer(EdgeResultPtr);
+  const StreamBatchPtr = koffi.pointer(LatticeStreamBatch);
+  const StreamBatchPtrPtr = koffi.pointer(StreamBatchPtr);
   const OpenOptionsPtr = koffi.pointer(LatticeOpenOptions);
   const ValuePtr = koffi.pointer(LatticeValue);
+  const ValueConstPtr = koffi.pointer(LatticeValue);
+  const ValueConstPtrPtr = koffi.pointer(ValueConstPtr);
   const EmbeddingClientPtr = koffi.pointer(LatticeEmbeddingClient);
   const EmbeddingClientPtrPtr = koffi.pointer(EmbeddingClientPtr);
   const EmbeddingConfigPtr = koffi.pointer(LatticeEmbeddingConfig);
@@ -554,6 +609,60 @@ function createBindings(): LatticeBindings {
       'uint64', // node_id
       'str', // key
       koffi.out(ValuePtr), // value_out
+    ]),
+    lattice_stream_publish: lib.func('lattice_stream_publish', 'int', [
+      TxnPtr,
+      koffi.pointer('uint8_t'),
+      'size_t',
+      koffi.pointer('uint8_t'),
+      'size_t',
+      ValuePtr,
+    ]),
+    lattice_stream_read: lib.func('lattice_stream_read', 'int', [
+      DatabasePtr,
+      koffi.pointer('uint8_t'),
+      'size_t',
+      'uint64',
+      'size_t',
+      'uint32',
+      koffi.out(StreamBatchPtrPtr),
+    ]),
+    lattice_stream_batch_count: lib.func('lattice_stream_batch_count', 'size_t', [
+      StreamBatchPtr,
+    ]),
+    lattice_stream_batch_get: lib.func('lattice_stream_batch_get', 'int', [
+      StreamBatchPtr,
+      'size_t',
+      koffi.out(koffi.pointer('uint64')),
+      koffi.out(koffi.pointer('void*')),
+      koffi.out(koffi.pointer('size_t')),
+      koffi.out(ValueConstPtrPtr),
+    ]),
+    lattice_stream_batch_free: lib.func('lattice_stream_batch_free', 'void', [
+      StreamBatchPtr,
+    ]),
+    lattice_stream_get_offset: lib.func('lattice_stream_get_offset', 'int', [
+      DatabasePtr,
+      koffi.pointer('uint8_t'),
+      'size_t',
+      koffi.pointer('uint8_t'),
+      'size_t',
+      koffi.out(koffi.pointer('bool')),
+      koffi.out(koffi.pointer('uint64')),
+    ]),
+    lattice_stream_set_offset: lib.func('lattice_stream_set_offset', 'int', [
+      TxnPtr,
+      koffi.pointer('uint8_t'),
+      'size_t',
+      koffi.pointer('uint8_t'),
+      'size_t',
+      'uint64',
+    ]),
+    lattice_stream_trim: lib.func('lattice_stream_trim', 'int', [
+      TxnPtr,
+      koffi.pointer('uint8_t'),
+      'size_t',
+      'uint64',
     ]),
     lattice_node_set_vector: lib.func('lattice_node_set_vector', 'int', [
       TxnPtr,

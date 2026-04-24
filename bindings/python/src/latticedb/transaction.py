@@ -115,6 +115,72 @@ class Transaction:
         self._rolled_back = True
         check_error(code)
 
+    def publish_stream(
+        self,
+        stream: str,
+        payload: PropertyValue,
+        *,
+        kind: str = "message",
+    ) -> None:
+        """Publish a durable stream record in this write transaction."""
+        if self._read_only:
+            raise RuntimeError("Cannot publish stream records in read-only transaction")
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        stream_bytes = stream.encode("utf-8")
+        kind_bytes = kind.encode("utf-8") if kind else b""
+        c_value = LatticeValue()
+        _ref = python_to_value(payload, c_value)
+        code = lib._lib.lattice_stream_publish(
+            self._handle,
+            stream_bytes,
+            len(stream_bytes),
+            kind_bytes if kind_bytes else None,
+            len(kind_bytes),
+            byref(c_value),
+        )
+        del _ref
+        check_error(code)
+
+    def set_stream_offset(self, stream: str, consumer: str, sequence: int) -> None:
+        """Commit a durable consumer offset in this write transaction."""
+        if self._read_only:
+            raise RuntimeError("Cannot set stream offsets in read-only transaction")
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        stream_bytes = stream.encode("utf-8")
+        consumer_bytes = consumer.encode("utf-8")
+        code = lib._lib.lattice_stream_set_offset(
+            self._handle,
+            stream_bytes,
+            len(stream_bytes),
+            consumer_bytes,
+            len(consumer_bytes),
+            sequence,
+        )
+        check_error(code)
+
+    def trim_stream(self, stream: str, through_sequence: int) -> None:
+        """Delete stream records through ``through_sequence`` in this transaction."""
+        if self._read_only:
+            raise RuntimeError("Cannot trim streams in read-only transaction")
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        stream_bytes = stream.encode("utf-8")
+        code = lib._lib.lattice_stream_trim(
+            self._handle,
+            stream_bytes,
+            len(stream_bytes),
+            through_sequence,
+        )
+        check_error(code)
+
     def create_node(
         self,
         *,

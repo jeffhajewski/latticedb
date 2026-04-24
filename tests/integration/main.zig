@@ -12,6 +12,7 @@ const mvcc_test = @import("mvcc_test.zig");
 const embedding_test = @import("embedding_test.zig");
 const query_mutation_test = @import("query_mutation_test.zig");
 const import_export_test = @import("import_export_test.zig");
+const stream_test = @import("stream_test.zig");
 
 // Re-export tests from all modules
 test {
@@ -25,6 +26,8 @@ test {
     _ = query_mutation_test;
     // Import/export end-to-end tests
     _ = import_export_test;
+    // Durable stream and graph changefeed tests
+    _ = stream_test;
 }
 
 test "integration test runner initialized" {

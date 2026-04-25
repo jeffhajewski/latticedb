@@ -297,7 +297,7 @@ test "streams: graph changefeed emits semantic events" {
     var edge_id: u64 = 0;
     {
         var txn = try db.beginTransaction(.read_write);
-        node_id = try db.createNode(&txn, &[_][]const u8{"Person"});
+        node_id = try db.createNode(&txn, &[_][]const u8{ "Person", "Employee" });
         try db.setNodeProperty(&txn, node_id, "name", .{ .string_val = "Ada" });
         const other = try db.createNode(&txn, &[_][]const u8{"Person"});
         edge_id = try db.createEdgeAndGetId(&txn, node_id, other, "KNOWS");
@@ -305,23 +305,88 @@ test "streams: graph changefeed emits semantic events" {
         try db.commitTransaction(&txn);
     }
 
-    var changes = try db.readChanges(0, 20, 0);
+    {
+        var txn = try db.beginTransaction(.read_write);
+        try db.removeNodeLabel(&txn, node_id, "Employee");
+        try db.removeNodeProperty(&txn, node_id, "name");
+        try db.removeEdgePropertyById(&txn, edge_id, "since");
+        try db.commitTransaction(&txn);
+    }
+
+    {
+        var txn = try db.beginTransaction(.read_write);
+        try db.deleteEdgeById(&txn, edge_id);
+        try db.deleteNode(&txn, node_id);
+        try db.commitTransaction(&txn);
+    }
+
+    var changes = try db.readChanges(0, 32, 0);
     defer changes.deinit();
 
     try std.testing.expect(hasKind(changes, "node.insert"));
     try std.testing.expect(hasKind(changes, "node.label_add"));
+    try std.testing.expect(hasKind(changes, "node.label_remove"));
     try std.testing.expect(hasKind(changes, "node.property_set"));
+    try std.testing.expect(hasKind(changes, "node.property_remove"));
+    try std.testing.expect(hasKind(changes, "node.delete"));
     try std.testing.expect(hasKind(changes, "edge.insert"));
     try std.testing.expect(hasKind(changes, "edge.property_set"));
+    try std.testing.expect(hasKind(changes, "edge.property_remove"));
+    try std.testing.expect(hasKind(changes, "edge.delete"));
 
     var saw_node_property = false;
+    var saw_node_property_remove = false;
+    var saw_label_remove = false;
+    var saw_edge_property_remove = false;
+    var saw_edge_delete = false;
+    var saw_node_delete = false;
     for (changes.records) |record| {
-        if (!std.mem.eql(u8, record.kind, "node.property_set")) continue;
-        const key = findPayloadEntry(record.payload, "key").?;
-        if (!std.mem.eql(u8, key.string_val, "name")) continue;
-        const id = findPayloadEntry(record.payload, "node_id").?;
-        try std.testing.expectEqual(@as(i64, @intCast(node_id)), id.int_val);
-        saw_node_property = true;
+        if (std.mem.eql(u8, record.kind, "node.property_set")) {
+            const key = findPayloadEntry(record.payload, "key").?;
+            if (!std.mem.eql(u8, key.string_val, "name")) continue;
+            const id = findPayloadEntry(record.payload, "node_id").?;
+            try std.testing.expectEqual(@as(i64, @intCast(node_id)), id.int_val);
+            const new_value = findPayloadEntry(record.payload, "new_value").?;
+            try std.testing.expectEqualStrings("Ada", new_value.string_val);
+            saw_node_property = true;
+        } else if (std.mem.eql(u8, record.kind, "node.property_remove")) {
+            const key = findPayloadEntry(record.payload, "key").?;
+            if (!std.mem.eql(u8, key.string_val, "name")) continue;
+            const old_value = findPayloadEntry(record.payload, "old_value").?;
+            const new_value = findPayloadEntry(record.payload, "new_value").?;
+            try std.testing.expectEqualStrings("Ada", old_value.string_val);
+            try std.testing.expect(new_value == .null_val);
+            saw_node_property_remove = true;
+        } else if (std.mem.eql(u8, record.kind, "node.label_remove")) {
+            const label = findPayloadEntry(record.payload, "label").?;
+            if (!std.mem.eql(u8, label.string_val, "Employee")) continue;
+            const id = findPayloadEntry(record.payload, "node_id").?;
+            try std.testing.expectEqual(@as(i64, @intCast(node_id)), id.int_val);
+            saw_label_remove = true;
+        } else if (std.mem.eql(u8, record.kind, "edge.property_remove")) {
+            const key = findPayloadEntry(record.payload, "key").?;
+            if (!std.mem.eql(u8, key.string_val, "since")) continue;
+            const old_value = findPayloadEntry(record.payload, "old_value").?;
+            const new_value = findPayloadEntry(record.payload, "new_value").?;
+            try std.testing.expectEqual(@as(i64, 1843), old_value.int_val);
+            try std.testing.expect(new_value == .null_val);
+            saw_edge_property_remove = true;
+        } else if (std.mem.eql(u8, record.kind, "edge.delete")) {
+            const id = findPayloadEntry(record.payload, "edge_id").?;
+            try std.testing.expectEqual(@as(i64, @intCast(edge_id)), id.int_val);
+            const edge_type = findPayloadEntry(record.payload, "type").?;
+            try std.testing.expectEqualStrings("KNOWS", edge_type.string_val);
+            saw_edge_delete = true;
+        } else if (std.mem.eql(u8, record.kind, "node.delete")) {
+            const id = findPayloadEntry(record.payload, "node_id").?;
+            try std.testing.expectEqual(@as(i64, @intCast(node_id)), id.int_val);
+            saw_node_delete = true;
+        }
     }
     try std.testing.expect(saw_node_property);
+    try std.testing.expect(saw_node_property_remove);
+    try std.testing.expect(saw_label_remove);
+    try std.testing.expect(saw_edge_property_remove);
+    try std.testing.expect(saw_edge_delete);
+    try std.testing.expect(saw_node_delete);
 }

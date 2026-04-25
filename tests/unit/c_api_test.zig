@@ -23,6 +23,7 @@ const lattice_query = c_api.lattice_query;
 const lattice_result = c_api.lattice_result;
 const lattice_vector_result = c_api.lattice_vector_result;
 const lattice_fts_result = c_api.lattice_fts_result;
+const lattice_stream_batch = c_api.lattice_stream_batch;
 const lattice_error = c_api.lattice_error;
 const lattice_list = c_api.lattice_list;
 const lattice_map = c_api.lattice_map;
@@ -1714,6 +1715,265 @@ test "c_api: invalid nested values fail explicitly on input" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_prepare(db, "RETURN $vals", &query));
     defer c_api.lattice_query_free(query);
     try std.testing.expectEqual(lattice_error.err_invalid_arg, c_api.lattice_query_bind(query, "vals", &dup_value));
+}
+
+// ============================================================================
+// Stream Operations Tests
+// ============================================================================
+
+test "c_api: stream publish read offset trim and free batch" {
+    const path = "/tmp/lattice_capi_stream_roundtrip_test.db";
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        std.fs.cwd().deleteFile(path) catch {};
+        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+
+        const payload_text = "first";
+        var first_payload = lattice_value{
+            .value_type = .string,
+            .data = .{ .string_val = .{ .ptr = payload_text.ptr, .len = payload_text.len } },
+        };
+        try std.testing.expectEqual(
+            lattice_error.ok,
+            c_api.lattice_stream_publish(
+                txn,
+                "events".ptr,
+                "events".len,
+                "created".ptr,
+                "created".len,
+                &first_payload,
+            ),
+        );
+
+        var second_payload = lattice_value{
+            .value_type = .int,
+            .data = .{ .int_val = 42 },
+        };
+        try std.testing.expectEqual(
+            lattice_error.ok,
+            c_api.lattice_stream_publish(
+                txn,
+                "events".ptr,
+                "events".len,
+                null,
+                0,
+                &second_payload,
+            ),
+        );
+
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+    }
+
+    var batch: ?*lattice_stream_batch = null;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_stream_read(db, "events".ptr, "events".len, 0, 10, 0, &batch),
+    );
+    defer c_api.lattice_stream_batch_free(batch);
+    try std.testing.expect(batch != null);
+    try std.testing.expectEqual(@as(usize, 2), c_api.lattice_stream_batch_count(batch));
+    try std.testing.expectEqual(@as(usize, 0), c_api.lattice_stream_batch_count(null));
+
+    var sequence: u64 = 0;
+    var kind_ptr: [*c]const u8 = null;
+    var kind_len: usize = 0;
+    var payload: ?*const lattice_value = null;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_stream_batch_get(batch, 0, &sequence, &kind_ptr, &kind_len, &payload),
+    );
+    try std.testing.expectEqual(@as(u64, 1), sequence);
+    try std.testing.expectEqualStrings("created", kind_ptr[0..kind_len]);
+    try std.testing.expect(payload != null);
+    try std.testing.expectEqual(lattice_value_type.string, payload.?.value_type);
+    try std.testing.expectEqualStrings(
+        "first",
+        payload.?.data.string_val.ptr[0..payload.?.data.string_val.len],
+    );
+
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_stream_batch_get(batch, 1, &sequence, &kind_ptr, &kind_len, &payload),
+    );
+    try std.testing.expectEqual(@as(u64, 2), sequence);
+    try std.testing.expectEqualStrings("message", kind_ptr[0..kind_len]);
+    try std.testing.expect(payload != null);
+    try std.testing.expectEqual(lattice_value_type.int, payload.?.value_type);
+    try std.testing.expectEqual(@as(i64, 42), payload.?.data.int_val);
+
+    try std.testing.expectEqual(
+        lattice_error.err_invalid_arg,
+        c_api.lattice_stream_batch_get(batch, 2, &sequence, &kind_ptr, &kind_len, &payload),
+    );
+    try std.testing.expectEqual(
+        lattice_error.err_invalid_arg,
+        c_api.lattice_stream_batch_get(null, 0, &sequence, &kind_ptr, &kind_len, &payload),
+    );
+
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+        try std.testing.expectEqual(
+            lattice_error.ok,
+            c_api.lattice_stream_set_offset(
+                txn,
+                "events".ptr,
+                "events".len,
+                "worker-a".ptr,
+                "worker-a".len,
+                2,
+            ),
+        );
+        try std.testing.expectEqual(
+            lattice_error.ok,
+            c_api.lattice_stream_trim(txn, "events".ptr, "events".len, 1),
+        );
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+    }
+
+    var exists = false;
+    var offset_sequence: u64 = 0;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_stream_get_offset(
+            db,
+            "events".ptr,
+            "events".len,
+            "worker-a".ptr,
+            "worker-a".len,
+            &exists,
+            &offset_sequence,
+        ),
+    );
+    try std.testing.expect(exists);
+    try std.testing.expectEqual(@as(u64, 2), offset_sequence);
+
+    var trimmed_batch: ?*lattice_stream_batch = null;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_stream_read(db, "events".ptr, "events".len, 0, 10, 0, &trimmed_batch),
+    );
+    defer c_api.lattice_stream_batch_free(trimmed_batch);
+    try std.testing.expectEqual(@as(usize, 1), c_api.lattice_stream_batch_count(trimmed_batch));
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_stream_batch_get(
+            trimmed_batch,
+            0,
+            &sequence,
+            &kind_ptr,
+            &kind_len,
+            &payload,
+        ),
+    );
+    try std.testing.expectEqual(@as(u64, 2), sequence);
+}
+
+test "c_api: stream rollback read-only and reserved names" {
+    const path = "/tmp/lattice_capi_stream_reject_test.db";
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        std.fs.cwd().deleteFile(path) catch {};
+        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var payload = lattice_value{
+        .value_type = .string,
+        .data = .{ .string_val = .{ .ptr = "hidden".ptr, .len = "hidden".len } },
+    };
+
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+        try std.testing.expectEqual(
+            lattice_error.ok,
+            c_api.lattice_stream_publish(txn, "events".ptr, "events".len, null, 0, &payload),
+        );
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_rollback(txn));
+    }
+
+    var batch: ?*lattice_stream_batch = null;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_stream_read(db, "events".ptr, "events".len, 0, 10, 0, &batch),
+    );
+    defer c_api.lattice_stream_batch_free(batch);
+    try std.testing.expectEqual(@as(usize, 0), c_api.lattice_stream_batch_count(batch));
+
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+        try std.testing.expectEqual(
+            lattice_error.err_invalid_arg,
+            c_api.lattice_stream_publish(
+                txn,
+                "__lattice_user".ptr,
+                "__lattice_user".len,
+                null,
+                0,
+                &payload,
+            ),
+        );
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_rollback(txn));
+    }
+
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &txn));
+        try std.testing.expectEqual(
+            lattice_error.err_read_only,
+            c_api.lattice_stream_publish(txn, "events".ptr, "events".len, null, 0, &payload),
+        );
+        try std.testing.expectEqual(
+            lattice_error.err_read_only,
+            c_api.lattice_stream_set_offset(
+                txn,
+                "events".ptr,
+                "events".len,
+                "reader".ptr,
+                "reader".len,
+                1,
+            ),
+        );
+        try std.testing.expectEqual(
+            lattice_error.err_read_only,
+            c_api.lattice_stream_trim(txn, "events".ptr, "events".len, 1),
+        );
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+    }
 }
 
 test "c_api: query with invalid syntax returns error" {

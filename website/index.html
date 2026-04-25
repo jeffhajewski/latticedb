@@ -4,7 +4,7 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>LatticeDB - Embedded Property-Graph Database</title>
-<meta name="description" content="Single-file embedded property-graph database with native vector and BM25 full-text search. Query the same local data by relationship, semantics, and text.">
+<meta name="description" content="Single-file embedded property-graph database with native vector search, BM25 full-text search, durable streams, and graph changefeeds.">
 <style>
 *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -444,7 +444,7 @@ footer .footer-links {
 <section class="hero">
   <div class="container">
     <h1>Embedded property-graph database with native vector and full-text indexing.</h1>
-    <p class="subhead">One file. Relationship traversal, vector similarity, BM25 full-text search, and ACID transactions in one local engine and one query layer.</p>
+    <p class="subhead">One file. Relationship traversal, vector similarity, BM25 full-text search, durable streams, and ACID transactions in one local engine and one query layer.</p>
     <p class="positioning">Think SQLite, but for connected data you want to query by relationship, semantics, and text.</p>
 
     <div class="install-tabs">
@@ -572,6 +572,15 @@ footer .footer-links {
           <li>300x faster than SQLite FTS5</li>
         </ul>
       </div>
+      <div class="feature-card">
+        <h3>Streams and Changefeeds</h3>
+        <ul>
+          <li>Durable named streams stored in system B+Trees</li>
+          <li>Per-stream sequences and explicit consumer offsets</li>
+          <li>Manual trim for retention control</li>
+          <li>Built-in graph changefeed from committed graph writes</li>
+        </ul>
+      </div>
     </div>
   </div>
 </section>
@@ -579,39 +588,39 @@ footer .footer-links {
 <!-- Release Notes -->
 <section class="release-notes">
   <div class="container">
-    <h2>What's new in v0.3.0</h2>
-    <p class="caption">Major query-engine correctness work and stronger reliability across core and bindings.</p>
+    <h2>What's new on main</h2>
+    <p class="caption">Durable event streams and graph changefeeds are now part of the local storage engine and client APIs.</p>
     <div class="release-grid">
       <div class="release-card">
-        <h3>Query Engine</h3>
+        <h3>Durable Streams</h3>
         <ul>
-          <li>Full relationship MERGE support with stable edge IDs and inline properties</li>
-          <li>LIMIT and SKIP now support expressions and parameters</li>
-          <li>Standalone UNWIND support and corrected alias handling</li>
-          <li>Variable-length path semantics tightened, including zero-hop behavior</li>
+          <li>Named streams auto-create on first publish</li>
+          <li>Records commit atomically with graph writes</li>
+          <li>Reads use explicit cursors and do not auto-ack</li>
+          <li>Consumer offsets are durable transaction records</li>
         </ul>
       </div>
       <div class="release-card">
-        <h3>Planner and Runtime</h3>
+        <h3>Graph Changefeeds</h3>
         <ul>
-          <li>ORDER BY / SKIP / LIMIT execution order corrected before RETURN projection</li>
-          <li>Typed MATCH on unknown relationship types returns empty results</li>
-          <li>DISTINCT and GROUP key handling hardened with canonical encoding</li>
-          <li>Null-safe behavior improved for incompatible numeric comparisons</li>
+          <li><code>__lattice_changes</code> captures semantic graph mutations</li>
+          <li>Node and edge inserts, deletes, labels, and properties are represented</li>
+          <li>Payloads use stable typed maps with IDs and old/new values</li>
+          <li>Records replay through WAL recovery like other committed writes</li>
         </ul>
       </div>
       <div class="release-card">
-        <h3>Reliability and Tooling</h3>
+        <h3>Client APIs</h3>
         <ul>
-          <li>Edge ID monotonicity hardened across replay and recovery</li>
-          <li>Expanded rollback and cross-binding intent test coverage</li>
-          <li>TypeScript binding initialization hardened for repeated test runs</li>
-          <li>Release automation now validates version consistency across code and docs</li>
+          <li>C API stream batches borrow data until batch free</li>
+          <li>Python exposes <code>read_stream</code>, <code>publish_stream</code>, and <code>changes</code></li>
+          <li>TypeScript exposes <code>readStream</code>, <code>publishStream</code>, and <code>changes</code></li>
+          <li>Same-process readers can wait for committed stream records</li>
         </ul>
       </div>
     </div>
     <p class="release-meta">
-      <a href="https://github.com/jeffhajewski/latticedb/compare/v0.2.1...v0.3.0">View the full v0.2.1 to v0.3.0 diff on GitHub</a>
+      <a href="https://github.com/jeffhajewski/latticedb/blob/main/docs/14_durable_streams.md">Read the durable streams and changefeeds guide</a>
     </p>
   </div>
 </section>

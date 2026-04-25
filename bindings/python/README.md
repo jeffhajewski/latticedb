@@ -114,6 +114,9 @@ Database(
 - `vector_search(vector, k=10, ef_search=64)` - k-NN vector search
 - `fts_search(query, limit=10)` - Full-text search
 - `fts_search_fuzzy(query, limit=10, max_distance=0, min_term_length=0)` - Fuzzy full-text search
+- `read_stream(stream, after_sequence=0, limit=100, timeout_ms=0)` - Read durable stream records by cursor
+- `get_stream_offset(stream, consumer)` - Read a committed consumer offset
+- `changes(after_sequence=0, limit=100, timeout_ms=0)` - Read the built-in graph changefeed
 - `cache_clear()` - Clear the query cache
 - `cache_stats()` - Get cache hit/miss statistics
 
@@ -142,6 +145,9 @@ Database(
 - `set_edge_property(edge_id, key, value)` - Set an edge property by stable edge ID
 - `get_edge_property(edge_id, key)` - Get an edge property by stable edge ID
 - `remove_edge_property(edge_id, key)` - Remove an edge property by stable edge ID
+- `publish_stream(stream, payload, kind="message")` - Publish a durable stream record
+- `set_stream_offset(stream, consumer, sequence)` - Commit a durable consumer offset
+- `trim_stream(stream, through_sequence)` - Delete stream records through a sequence
 - `commit()` / `rollback()` - Commit or rollback the transaction
 
 ### Bulk Vector Insertion
@@ -272,6 +278,31 @@ print(f"Entries: {stats['entries']}, Hits: {stats['hits']}, Misses: {stats['miss
 # Clear the cache
 db.cache_clear()
 ```
+
+### Durable Streams and Changefeeds
+
+Streams are durable named event logs stored inside the database file. Records are
+published in write transactions, sequence numbers are per stream, and reads use
+an explicit cursor. Reads do not acknowledge records; commit offsets separately
+when your consumer has processed a batch.
+
+```python
+with Database("events.db", create=True) as db:
+    with db.write() as txn:
+        txn.publish_stream("jobs", {"id": 1, "status": "queued"}, kind="job.queued")
+        txn.commit()
+
+    records = db.read_stream("jobs", after_sequence=0, limit=100, timeout_ms=0)
+
+    with db.write() as txn:
+        txn.set_stream_offset("jobs", "worker-a", records[-1].sequence)
+        txn.trim_stream("jobs", records[-1].sequence - 1)
+        txn.commit()
+```
+
+`db.changes()` reads the reserved `__lattice_changes` stream. It emits semantic
+graph events such as `node.insert`, `node.property_set`, `edge.delete`, and
+`edge.property_remove`, with payloads represented as normal Python values.
 
 ## Supported Property Types
 

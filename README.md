@@ -4,10 +4,11 @@
 
 LatticeDB is a single-file local database for connected, semantic, and textual data. It lets you traverse relationships, run vector similarity search, and do BM25 full-text search over the same dataset in one engine and one query layer. It is designed for relationship-heavy workloads on a single machine, with zero-config operation and an embedded single-writer model.
 
-LatticeDB is an embedded, single-file graph database that lets local applications query the same data by relationship, semantics, and text. Workloads like Graph RAG, agent memory, and local knowledge tools are examples built on those primitives, not the definition of the engine.
+LatticeDB is an embedded, single-file graph database that lets local applications query the same data by relationship, semantics, and text, then consume durable graph and application events from the same file. Workloads like Graph RAG, agent memory, and local knowledge tools are examples built on those primitives, not the definition of the engine.
 
 - **One file.** Your entire database is a single portable file. No server, no configuration.
 - **One query layer.** Graph traversal, HNSW vector similarity, and BM25 full-text — in the same query language.
+- **One event log.** Durable named streams and a built-in graph changefeed share the same transaction/WAL path as graph writes.
 - **Local-first.** Designed for one owning process on one machine, with WAL-backed durability.
 - **Fast.** 0.13 μs node lookups. 0.83 ms vector search at 1M vectors with 100% recall.
 
@@ -350,6 +351,7 @@ LatticeDB's inverted index with BM25 scoring is ~300x faster than SQLite FTS5 an
 
 **Operations**
 - Single-file storage with write-ahead log for crash recovery
+- Durable named streams with explicit consumer offsets, manual trim, and graph changefeeds
 - Zero configuration — open a file and start working
 - Embedded single-writer model for local applications
 - Clean C API; Python, TypeScript, and Go bindings wrap it
@@ -396,6 +398,7 @@ zig build -Doptimize=ReleaseFast   # optimized build
 ## Documentation
 
 - [Getting Started](docs/getting_started.md)
+- [Durable Streams and Graph Changefeeds](docs/14_durable_streams.md)
 - [Examples Overview](examples/README.md)
 - [CLI Quickstart](examples/cli/README.md)
 - [Architecture Specification](ARCHITECTURE_SPEC.md)

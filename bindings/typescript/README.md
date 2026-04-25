@@ -151,6 +151,9 @@ interface DatabaseOptions {
 - `await db.vectorSearch(vector, options?)` - k-NN vector search
 - `await db.ftsSearch(query, options?)` - Full-text search
 - `await db.ftsSearchFuzzy(query, options?)` - Fuzzy full-text search
+- `await db.readStream(stream, options?)` - Read durable stream records by cursor
+- `await db.getStreamOffset(stream, consumer)` - Read a committed consumer offset
+- `await db.changes(options?)` - Read the built-in graph changefeed
 - `await db.cacheClear()` - Clear the query cache
 - `await db.cacheStats()` - Get cache hit/miss statistics
 - `db.isOpen()` - Check if database is open
@@ -181,6 +184,9 @@ interface DatabaseOptions {
 - `await txn.setEdgeProperty(edgeId, key, value)` - Set an edge property by stable edge ID
 - `await txn.getEdgeProperty(edgeId, key)` - Get an edge property by stable edge ID
 - `await txn.removeEdgeProperty(edgeId, key)` - Remove an edge property by stable edge ID
+- `txn.publishStream(stream, payload, kind?)` - Publish a durable stream record
+- `txn.setStreamOffset(stream, consumer, sequence)` - Commit a durable consumer offset
+- `txn.trimStream(stream, throughSequence)` - Delete stream records through a sequence
 - `txn.commit()` / `txn.rollback()` - Commit or rollback
 
 ### Bulk Vector Insertion
@@ -330,6 +336,37 @@ console.log(
 // Clear the cache
 await db.cacheClear();
 ```
+
+### Durable Streams and Changefeeds
+
+Streams are durable named event logs stored inside the database file. Records are
+published in write transactions, sequence numbers are per stream, and reads use
+an explicit cursor. Reads do not acknowledge records; commit offsets separately
+when your consumer has processed a batch.
+
+```typescript
+const db = new Database("events.db", { create: true });
+await db.open();
+
+await db.write(async (txn) => {
+  txn.publishStream("jobs", { id: 1, status: "queued" }, "job.queued");
+});
+
+const records = await db.readStream("jobs", {
+  afterSequence: 0n,
+  limit: 100,
+  timeoutMs: 0,
+});
+
+await db.write(async (txn) => {
+  txn.setStreamOffset("jobs", "worker-a", records.at(-1)!.sequence);
+  txn.trimStream("jobs", records.at(-1)!.sequence - 1n);
+});
+```
+
+`db.changes()` reads the reserved `__lattice_changes` stream. It emits semantic
+graph events such as `node.insert`, `node.property_set`, `edge.delete`, and
+`edge.property_remove`, with payloads represented as normal TypeScript values.
 
 ## Supported Property Types
 

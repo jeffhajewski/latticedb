@@ -15,6 +15,7 @@ const page_manager_test = @import("page_manager_test.zig");
 const graph_test = @import("graph_test.zig");
 const query_test = @import("query_test.zig");
 const search_test = @import("search_test.zig");
+const stream_store_test = @import("stream_store_test.zig");
 const c_api_test = @import("c_api_test.zig");
 const concurrency_test = @import("concurrency_test.zig");
 const transaction_test = @import("transaction_test.zig");
@@ -43,6 +44,10 @@ test {
     // Transaction
     _ = lattice.transaction.manager;
 
+    // Streams
+    _ = lattice.stream.payload;
+    _ = lattice.stream.store;
+
     // Concurrency
     _ = lattice.concurrency.locking;
 
@@ -63,6 +68,7 @@ test {
     _ = graph_test;
     _ = query_test;
     _ = search_test;
+    _ = stream_store_test;
     _ = c_api_test;
     _ = concurrency_test;
     _ = transaction_test;

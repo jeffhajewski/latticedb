@@ -1,0 +1,1316 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LatticeDB experimental redesign</title>
+  <meta name="description" content="Experimental LatticeDB website redesign: minimal, information-dense, text-forward, with an animated ASCII graph hero and clear install paths.">
+  <script>document.documentElement.classList.add('js');</script>
+  <style>
+    :root {
+      --paper: #f4f1ea;
+      --panel: #eeeadf;
+      --panel-strong: #e6e0d2;
+      --ink: #11110f;
+      --muted: #5b5a55;
+      --line: rgba(17, 17, 15, 0.16);
+      --line-strong: rgba(17, 17, 15, 0.34);
+      --accent: #1e5ed6;
+      --accent-soft: rgba(30, 94, 214, 0.1);
+      --max: 1380px;
+      --mono: "SF Mono", "JetBrains Mono", "Geist Mono", "Roboto Mono", "Menlo", monospace;
+      --sans: "Geist", "SF Pro Display", "Helvetica Neue", "Arial", sans-serif;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      background: var(--paper);
+      color: var(--ink);
+      font-family: var(--sans);
+      text-rendering: optimizeLegibility;
+      -webkit-font-smoothing: antialiased;
+      background-image:
+        linear-gradient(to right, rgba(17, 17, 15, 0.03) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(17, 17, 15, 0.03) 1px, transparent 1px);
+      background-size: 32px 32px;
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    button,
+    input,
+    textarea,
+    select {
+      font: inherit;
+    }
+
+    .skip-link {
+      position: absolute;
+      left: 1rem;
+      top: -4rem;
+      z-index: 40;
+      padding: 0.75rem 1rem;
+      background: var(--ink);
+      color: var(--paper);
+      border: 1px solid var(--ink);
+    }
+
+    .skip-link:focus {
+      top: 1rem;
+    }
+
+    .shell {
+      max-width: var(--max);
+      margin: 0 auto;
+      padding: 0 1.25rem;
+    }
+
+    .micro {
+      font-family: var(--mono);
+      font-size: 0.76rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: var(--muted);
+    }
+
+    .site-header {
+      position: sticky;
+      top: 0;
+      z-index: 20;
+      backdrop-filter: blur(8px);
+      background: rgba(244, 241, 234, 0.9);
+      border-bottom: 1px solid var(--line);
+    }
+
+    .site-header-inner {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      align-items: center;
+      gap: 1rem;
+      min-height: 4rem;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 0.8rem;
+      font-weight: 700;
+      letter-spacing: -0.04em;
+      font-size: 1.05rem;
+    }
+
+    .brand-mark {
+      width: 0.8rem;
+      height: 0.8rem;
+      background: var(--accent);
+      box-shadow: 1rem 0 0 rgba(30, 94, 214, 0.3), 2rem 0 0 rgba(30, 94, 214, 0.14);
+    }
+
+    .site-nav {
+      justify-self: center;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 1rem;
+    }
+
+    .site-nav a,
+    .header-cta a,
+    .button,
+    .install-tabs button {
+      transition: transform 180ms ease, background-color 180ms ease, color 180ms ease, border-color 180ms ease;
+    }
+
+    .site-nav a:hover,
+    .site-nav a:focus-visible,
+    .header-cta a:hover,
+    .header-cta a:focus-visible,
+    .button:hover,
+    .button:focus-visible,
+    .install-tabs button:hover,
+    .install-tabs button:focus-visible {
+      transform: translateY(-1px);
+    }
+
+    .header-cta {
+      display: flex;
+      align-items: center;
+      gap: 0.7rem;
+    }
+
+    .header-cta a,
+    .button {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 2.6rem;
+      padding: 0 1rem;
+      border: 1px solid var(--line-strong);
+      background: transparent;
+      color: var(--ink);
+    }
+
+    .button--solid,
+    .header-cta .button--solid {
+      background: var(--ink);
+      color: var(--paper);
+      border-color: var(--ink);
+    }
+
+    .hero {
+      padding: 3rem 0 2rem;
+    }
+
+    .hero-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(20rem, 0.9fr);
+      gap: 1px;
+      background: var(--line-strong);
+      border: 1px solid var(--line-strong);
+    }
+
+    .hero-copy,
+    .hero-visual {
+      min-width: 0;
+      background: var(--paper);
+    }
+
+    .hero-copy {
+      padding: 1.5rem;
+      display: grid;
+      gap: 2rem;
+      align-content: start;
+    }
+
+    .eyebrow-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.65rem;
+    }
+
+    .eyebrow-row span {
+      display: inline-flex;
+      align-items: center;
+      min-height: 2rem;
+      padding: 0 0.7rem;
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.28);
+    }
+
+    h1,
+    h2,
+    h3,
+    p {
+      margin: 0;
+    }
+
+    h1 {
+      max-width: 12ch;
+      font-size: clamp(3rem, 9vw, 6.8rem);
+      line-height: 0.9;
+      letter-spacing: -0.075em;
+      text-transform: uppercase;
+    }
+
+    .hero-lead {
+      max-width: 58ch;
+      font-size: 1.08rem;
+      line-height: 1.65;
+      color: var(--muted);
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.75rem;
+    }
+
+    .hero-notes {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 1px;
+      background: var(--line);
+      border: 1px solid var(--line);
+    }
+
+    .hero-note {
+      padding: 1rem;
+      background: var(--panel);
+      min-height: 8rem;
+      display: grid;
+      align-content: start;
+      gap: 0.8rem;
+    }
+
+    .hero-note strong {
+      font-size: 1rem;
+      letter-spacing: -0.03em;
+    }
+
+    .hero-note p {
+      color: var(--muted);
+      line-height: 1.55;
+    }
+
+    .hero-visual {
+      padding: 1.5rem;
+      display: grid;
+      gap: 1rem;
+      align-content: start;
+      background: linear-gradient(180deg, rgba(255,255,255,0.34), rgba(238,234,223,0.6));
+    }
+
+    .terminal-frame {
+      display: grid;
+      gap: 1px;
+      background: var(--line-strong);
+      border: 1px solid var(--line-strong);
+    }
+
+    .terminal-head,
+    .terminal-body,
+    .terminal-foot {
+      background: #121212;
+      color: #f4f0e6;
+    }
+
+    .terminal-head,
+    .terminal-foot {
+      padding: 0.75rem 1rem;
+      font-family: var(--mono);
+      font-size: 0.74rem;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: rgba(244, 240, 230, 0.66);
+      display: flex;
+      justify-content: space-between;
+      gap: 1rem;
+      flex-wrap: wrap;
+    }
+
+    .terminal-body {
+      padding: 1.1rem 1rem 0.9rem;
+      overflow: hidden;
+      position: relative;
+    }
+
+    .terminal-body::after {
+      content: "";
+      position: absolute;
+      inset: 0;
+      pointer-events: none;
+      background: repeating-linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.03) 1px, transparent 1px, transparent 4px);
+      opacity: 0.16;
+    }
+
+    #ascii-graph {
+      margin: 0;
+      min-height: 27rem;
+      font-family: var(--mono);
+      font-size: clamp(0.46rem, 0.75vw, 0.72rem);
+      line-height: 1.02;
+      white-space: pre;
+      letter-spacing: 0.02em;
+      overflow: hidden;
+      color: #f2eee5;
+    }
+
+    .status-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 1px;
+      background: var(--line);
+      border: 1px solid var(--line);
+    }
+
+    .status-grid > div {
+      background: var(--panel);
+      padding: 0.9rem 1rem;
+      min-height: 6rem;
+      display: grid;
+      align-content: start;
+      gap: 0.45rem;
+    }
+
+    .status-grid strong,
+    .split-card strong,
+    .rail-card strong,
+    .metric-card strong,
+    .path-step strong,
+    .install-copy strong,
+    .code-card strong,
+    .stack-card strong,
+    .footer-grid strong {
+      font-size: 0.9rem;
+      letter-spacing: -0.02em;
+    }
+
+    .section {
+      padding: 1.2rem 0 0;
+    }
+
+    .section-head {
+      display: grid;
+      grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+      gap: 1rem;
+      align-items: end;
+      padding: 1.5rem 0 1rem;
+      border-bottom: 1px solid var(--line-strong);
+    }
+
+    .section-head h2 {
+      font-size: clamp(1.8rem, 4vw, 3.2rem);
+      line-height: 0.96;
+      letter-spacing: -0.055em;
+      text-transform: uppercase;
+    }
+
+    .section-head p {
+      max-width: 65ch;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+
+    .install-layout,
+    .split-layout,
+    .code-layout,
+    .stack-layout,
+    .footer-grid {
+      display: grid;
+      gap: 1px;
+      background: var(--line-strong);
+      border: 1px solid var(--line-strong);
+      margin-top: 1.25rem;
+    }
+
+    .install-layout {
+      grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+    }
+
+    .install-copy,
+    .install-panel,
+    .split-card,
+    .rail-card,
+    .code-card,
+    .stack-card,
+    .footer-grid > div {
+      background: var(--paper);
+      padding: 1.25rem;
+      min-width: 0;
+    }
+
+    .install-copy {
+      display: grid;
+      gap: 1rem;
+      align-content: start;
+    }
+
+    .install-copy ul,
+    .stack-card ul,
+    .split-card ul {
+      margin: 0;
+      padding-left: 1rem;
+      color: var(--muted);
+      line-height: 1.7;
+    }
+
+    .install-panel {
+      display: grid;
+      gap: 1rem;
+      background: var(--panel);
+    }
+
+    .install-tabs {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 0.5rem;
+    }
+
+    .install-tabs button {
+      border: 1px solid var(--line-strong);
+      background: transparent;
+      color: var(--muted);
+      min-height: 2.45rem;
+      padding: 0 0.9rem;
+      cursor: pointer;
+    }
+
+    .install-tabs button[aria-selected="true"] {
+      background: var(--ink);
+      color: var(--paper);
+      border-color: var(--ink);
+    }
+
+    .install-pane {
+      display: none;
+      gap: 0.9rem;
+    }
+
+    .install-pane.is-active {
+      display: grid;
+    }
+
+    .command-block,
+    .mini-terminal {
+      margin: 0;
+      padding: 1rem;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: #121212;
+      color: #f4f0e6;
+      font-family: var(--mono);
+      white-space: pre-wrap;
+      word-break: break-word;
+      line-height: 1.65;
+      overflow-x: auto;
+    }
+
+    .command-caption,
+    .muted {
+      color: var(--muted);
+      line-height: 1.65;
+    }
+
+    .data-rail {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(16rem, 0.75fr);
+      gap: 1px;
+      background: var(--line-strong);
+      border: 1px solid var(--line-strong);
+      margin-top: 1.25rem;
+    }
+
+    .rail-card {
+      display: grid;
+      gap: 1rem;
+    }
+
+    .rail-card--metrics {
+      background: var(--panel);
+    }
+
+    .metric-list {
+      display: grid;
+      gap: 1px;
+      background: var(--line);
+      border: 1px solid var(--line);
+    }
+
+    .metric-card {
+      display: grid;
+      gap: 0.35rem;
+      padding: 0.9rem 1rem;
+      background: rgba(255,255,255,0.18);
+    }
+
+    .metric-value {
+      font-size: clamp(1.2rem, 3vw, 2rem);
+      letter-spacing: -0.06em;
+      font-weight: 700;
+    }
+
+    .metric-card p,
+    .path-step p,
+    .split-card p,
+    .stack-card p,
+    .footer-grid p {
+      color: var(--muted);
+      line-height: 1.65;
+    }
+
+    .split-layout {
+      grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+    }
+
+    .split-card {
+      display: grid;
+      gap: 1rem;
+    }
+
+    .three-lane {
+      display: grid;
+      grid-template-columns: 1.2fr 0.9fr 0.9fr;
+      gap: 1px;
+      background: var(--line-strong);
+      border: 1px solid var(--line-strong);
+      margin-top: 1.25rem;
+    }
+
+    .three-lane > article {
+      background: var(--paper);
+      padding: 1.25rem;
+      display: grid;
+      gap: 0.95rem;
+    }
+
+    .path-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 1px;
+      background: var(--line-strong);
+      border: 1px solid var(--line-strong);
+      margin-top: 1.25rem;
+    }
+
+    .path-step {
+      background: var(--paper);
+      padding: 1.1rem;
+      display: grid;
+      gap: 0.8rem;
+    }
+
+    .path-step code,
+    .inline-code {
+      font-family: var(--mono);
+      font-size: 0.88rem;
+      background: var(--accent-soft);
+      padding: 0.15rem 0.35rem;
+    }
+
+    .code-layout {
+      grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+    }
+
+    .code-card {
+      display: grid;
+      gap: 1rem;
+    }
+
+    .stack-layout {
+      grid-template-columns: 1.05fr 0.95fr;
+    }
+
+    .stack-card {
+      display: grid;
+      gap: 1rem;
+    }
+
+    .footer-grid {
+      grid-template-columns: 1.1fr 0.9fr 0.9fr;
+      margin-top: 1.25rem;
+      margin-bottom: 2.5rem;
+    }
+
+    .footer-links {
+      display: grid;
+      gap: 0.65rem;
+      font-family: var(--mono);
+      font-size: 0.83rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
+    .footer-links a {
+      color: var(--muted);
+    }
+
+    .footer-links a:hover,
+    .footer-links a:focus-visible {
+      color: var(--ink);
+    }
+
+    .reveal {
+      opacity: 1;
+      transform: none;
+    }
+
+    .js .reveal {
+      opacity: 0;
+      transform: translateY(12px);
+      transition: opacity 600ms cubic-bezier(0.16, 1, 0.3, 1), transform 600ms cubic-bezier(0.16, 1, 0.3, 1);
+    }
+
+    .js .reveal.is-visible {
+      opacity: 1;
+      transform: translateY(0);
+    }
+
+    :focus-visible {
+      outline: 2px solid var(--accent);
+      outline-offset: 2px;
+    }
+
+    @media (max-width: 1120px) {
+      .hero-grid,
+      .install-layout,
+      .split-layout,
+      .code-layout,
+      .stack-layout,
+      .data-rail,
+      .section-head,
+      .footer-grid,
+      .three-lane,
+      .path-grid,
+      .hero-notes,
+      .status-grid {
+        grid-template-columns: 1fr;
+      }
+
+      .site-header-inner {
+        grid-template-columns: 1fr;
+        justify-items: start;
+        padding: 0.9rem 0;
+      }
+
+      .site-nav,
+      .header-cta {
+        justify-self: start;
+      }
+    }
+
+    @media (max-width: 760px) {
+      body {
+        background-size: 22px 22px;
+      }
+
+      .shell {
+        padding: 0 0.9rem;
+      }
+
+      .hero {
+        padding-top: 1.3rem;
+      }
+
+      .hero-copy,
+      .hero-visual,
+      .install-copy,
+      .install-panel,
+      .split-card,
+      .rail-card,
+      .code-card,
+      .stack-card,
+      .footer-grid > div,
+      .three-lane > article,
+      .path-step,
+      .hero-note,
+      .status-grid > div {
+        padding: 1rem;
+      }
+
+      h1 {
+        max-width: none;
+      }
+
+      #ascii-graph {
+        min-height: 22rem;
+        font-size: 0.42rem;
+      }
+
+      .hero-actions,
+      .install-tabs,
+      .site-nav,
+      .header-cta,
+      .eyebrow-row {
+        width: 100%;
+      }
+
+      .hero-actions > *,
+      .header-cta > *,
+      .install-tabs > * {
+        flex: 1 1 auto;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      html {
+        scroll-behavior: auto;
+      }
+
+      .reveal,
+      .reveal.is-visible,
+      .site-nav a,
+      .header-cta a,
+      .button,
+      .install-tabs button {
+        transition: none;
+        transform: none;
+        opacity: 1;
+      }
+    }
+  </style>
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+
+  <header class="site-header">
+    <div class="shell site-header-inner">
+      <a class="brand" href="#top" aria-label="LatticeDB experimental home">
+        <span class="brand-mark" aria-hidden="true"></span>
+        <span>LatticeDB / experimental</span>
+      </a>
+
+      <nav class="site-nav micro" aria-label="Primary">
+        <a href="#install">Install</a>
+        <a href="#why">Why</a>
+        <a href="#quickstart">Quickstart</a>
+        <a href="#query">Query model</a>
+        <a href="#notes">Notes</a>
+      </nav>
+
+      <div class="header-cta micro">
+        <a href="https://github.com/jeffhajewski/latticedb" target="_blank" rel="noreferrer">GitHub</a>
+        <a class="button--solid" href="#install">Start here</a>
+      </div>
+    </div>
+  </header>
+
+  <main id="main">
+    <section class="hero shell reveal" id="top">
+      <div class="hero-grid">
+        <div class="hero-copy">
+          <div class="eyebrow-row micro">
+            <span>single-file graph database</span>
+            <span>vector + bm25 + traversal</span>
+            <span>durable streams</span>
+          </div>
+
+          <div style="display:grid; gap: 1.2rem;">
+            <h1>One local file. Three query modes. Zero platform theater.</h1>
+            <p class="hero-lead">
+              LatticeDB is an embedded property-graph database for connected, semantic, and textual
+              data. Keep graph traversal, vector similarity, BM25 full-text search, and durable
+              change streams in the same engine and the same file.
+            </p>
+          </div>
+
+          <div class="hero-actions micro">
+            <a class="button button--solid" href="#install">install / 2 min</a>
+            <a class="button" href="#quickstart">see quickstart</a>
+            <a class="button" href="https://github.com/jeffhajewski/latticedb/tree/main/examples" target="_blank" rel="noreferrer">examples</a>
+          </div>
+
+          <div class="hero-notes">
+            <article class="hero-note">
+              <span class="micro">01 / topology</span>
+              <strong>Graph, vector, text, stream.</strong>
+              <p>Relationship-heavy local workloads without adding a separate vector store, search index, or event bus.</p>
+            </article>
+            <article class="hero-note">
+              <span class="micro">02 / operating model</span>
+              <strong>Single owning process. WAL-backed durability.</strong>
+              <p>Built for one machine, one file, and local application control instead of remote-cluster ceremony.</p>
+            </article>
+            <article class="hero-note">
+              <span class="micro">03 / fit</span>
+              <strong>Good for Graph RAG, agent memory, local knowledge tools.</strong>
+              <p>Those workloads are examples of the primitives, not the product boundary.</p>
+            </article>
+          </div>
+        </div>
+
+        <aside class="hero-visual" aria-label="Animated ASCII graph visualization">
+          <div class="terminal-frame">
+            <div class="terminal-head">
+              <span>live graph field / ASCII telemetry</span>
+              <span>experimental surface</span>
+            </div>
+            <div class="terminal-body">
+              <pre id="ascii-graph" aria-live="off">initializing graph field...</pre>
+            </div>
+            <div class="terminal-foot">
+              <span>nodes drift / edges re-form / topology stays legible</span>
+              <span>reduced motion aware</span>
+            </div>
+          </div>
+
+          <div class="status-grid micro">
+            <div>
+              <span>mode</span>
+              <strong>ASCII graph blob</strong>
+              <span>Text-only motion surface inspired by terminal telemetry rather than canvas-heavy hero art.</span>
+            </div>
+            <div>
+              <span>signal</span>
+              <strong>Connected structure</strong>
+              <span>Edges breathe while node clusters stay coherent, like a living graph instead of a logo loop.</span>
+            </div>
+            <div>
+              <span>payload</span>
+              <strong>Readable information</strong>
+              <span>The page keeps install, query model, and performance data visible instead of hiding them under decoration.</span>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="section shell reveal" id="install">
+      <div class="section-head">
+        <h2>Install without hunting through docs.</h2>
+        <p>
+          Four entry paths, one obvious first step. The goal of this redesign is to make the
+          shortest route visible immediately while still exposing the deeper workflows for repo-local
+          development and bindings.
+        </p>
+      </div>
+
+      <div class="install-layout">
+        <div class="install-copy">
+          <span class="micro">fast path</span>
+          <strong>Pick the interface you actually want to use.</strong>
+          <p class="muted">
+            The current repo already has clear commands. This layout surfaces them early, keeps the
+            friction low, and then adds just enough context to prevent a dead end.
+          </p>
+          <ul>
+            <li>CLI for importing data, running queries, and inspecting files.</li>
+            <li>Python for local apps, scripts, and notebooks.</li>
+            <li>TypeScript for Node.js tooling and services.</li>
+            <li>Go for cgo-backed native workflows.</li>
+          </ul>
+          <p class="muted">
+            Published Python wheels and TypeScript tarballs are expected to bundle <span class="inline-code">liblattice</span>
+            on supported platforms. Go uses an installed-prefix or repo-local shared-library workflow.
+          </p>
+        </div>
+
+        <div class="install-panel">
+          <div class="install-tabs micro" role="tablist" aria-label="Install tabs">
+            <button type="button" role="tab" aria-selected="true" aria-controls="install-cli" id="tab-cli" data-tab="cli">CLI</button>
+            <button type="button" role="tab" aria-selected="false" aria-controls="install-python" id="tab-python" data-tab="python">Python</button>
+            <button type="button" role="tab" aria-selected="false" aria-controls="install-ts" id="tab-ts" data-tab="ts">TypeScript</button>
+            <button type="button" role="tab" aria-selected="false" aria-controls="install-go" id="tab-go" data-tab="go">Go</button>
+          </div>
+
+          <section class="install-pane is-active" id="install-cli" role="tabpanel" aria-labelledby="tab-cli">
+            <strong>CLI install</strong>
+            <pre class="command-block">curl -fsSL https://raw.githubusercontent.com/jeffhajewski/latticedb/main/dist/install.sh | bash</pre>
+            <p class="command-caption">Best starting point if you want the shortest path to a working database file.</p>
+          </section>
+
+          <section class="install-pane" id="install-python" role="tabpanel" aria-labelledby="tab-python" hidden>
+            <strong>Python install</strong>
+            <pre class="command-block">pip install latticedb</pre>
+            <p class="command-caption">For local applications, notebooks, and scripts. Supported wheels are expected to bundle the native library.</p>
+          </section>
+
+          <section class="install-pane" id="install-ts" role="tabpanel" aria-labelledby="tab-ts" hidden>
+            <strong>TypeScript / Node.js install</strong>
+            <pre class="command-block">npm install @hajewski/latticedb</pre>
+            <p class="command-caption">For Node services and tooling. Supported package tarballs are expected to bundle the native library.</p>
+          </section>
+
+          <section class="install-pane" id="install-go" role="tabpanel" aria-labelledby="tab-go" hidden>
+            <strong>Go workflow</strong>
+            <pre class="command-block">zig build install --prefix /tmp/lattice-install
+export PKG_CONFIG_PATH=/tmp/lattice-install/lib/pkgconfig
+# macOS
+export DYLD_LIBRARY_PATH=/tmp/lattice-install/lib
+# Linux
+export LD_LIBRARY_PATH=/tmp/lattice-install/lib
+cd bindings/go && go test ./...</pre>
+            <p class="command-caption">Go is cgo-backed today. For repo-local development, build the shared library and use <span class="inline-code">go test -tags repolocal ./...</span>.</p>
+          </section>
+        </div>
+      </div>
+
+      <div class="data-rail">
+        <article class="rail-card">
+          <span class="micro">starting points</span>
+          <strong>Recommended sequence</strong>
+          <pre class="mini-terminal">CLI         import data / run queries / inspect files
+Python      local apps / scripts / notebooks
+TypeScript  Node services / tooling
+Go          installed prefix or repo-local cgo workflow</pre>
+          <p class="muted">This keeps the install section useful for both first-time users and people evaluating whether the binding model fits their stack.</p>
+        </article>
+
+        <aside class="rail-card rail-card--metrics">
+          <span class="micro">bench notes</span>
+          <div class="metric-list">
+            <div class="metric-card">
+              <span class="micro">node lookup</span>
+              <div class="metric-value">0.13 μs</div>
+              <p>Cached point lookup from the benchmark table.</p>
+            </div>
+            <div class="metric-card">
+              <span class="micro">vector search / 1M</span>
+              <div class="metric-value">0.83 ms</div>
+              <p>10-NN search at one million vectors with 100% recall@10 in the README benchmark.</p>
+            </div>
+            <div class="metric-card">
+              <span class="micro">event path</span>
+              <div class="metric-value">1 WAL path</div>
+              <p>Durable named streams and graph changefeed share the same transactional durability path.</p>
+            </div>
+          </div>
+        </aside>
+      </div>
+    </section>
+
+    <section class="section shell reveal" id="why">
+      <div class="section-head">
+        <h2>Why this page should feel denser and calmer.</h2>
+        <p>
+          The visual reference here is not glossy SaaS. It is closer to a research lab index page,
+          a clean terminal surface, or a documentation front page that still feels designed.
+        </p>
+      </div>
+
+      <div class="split-layout">
+        <article class="split-card">
+          <span class="micro">core story</span>
+          <strong>One engine for three ways of asking for data.</strong>
+          <p>
+            Traversal, vector similarity, and BM25 full-text search belong in the same mental model.
+            The site should make that visible early instead of treating them as scattered subfeatures.
+          </p>
+          <ul>
+            <li>Traverse relationships across author, document, and chunk structure.</li>
+            <li>Search embeddings with HNSW-based vector similarity.</li>
+            <li>Index and search text with BM25.</li>
+            <li>Consume durable graph and application events from the same file.</li>
+          </ul>
+        </article>
+
+        <article class="split-card" style="background: var(--panel);">
+          <span class="micro">anti-slop rules used here</span>
+          <strong>Minimal does not mean empty.</strong>
+          <p>
+            This concept uses visible 1px structure, asymmetry, typographic scale, and text-first
+            blocks rather than glossy cards, gradients, or dashboard wallpaper.
+          </p>
+          <ul>
+            <li>No dependency-heavy frontend stack.</li>
+            <li>No decorative icon library dependence.</li>
+            <li>No generic three-card hero row as the main story.</li>
+            <li>Information remains visible above the fold.</li>
+          </ul>
+        </article>
+      </div>
+
+      <div class="three-lane">
+        <article>
+          <span class="micro">01 / single file</span>
+          <strong>Your database is a portable file, not a service to babysit.</strong>
+          <p>That point deserves headline treatment because it changes setup, deployment, demos, and local iteration.</p>
+        </article>
+        <article>
+          <span class="micro">02 / local-first</span>
+          <strong>Designed for one owning process on one machine.</strong>
+          <p>That constraint should be framed as a deliberate operating model, not as a limitation buried in notes.</p>
+        </article>
+        <article>
+          <span class="micro">03 / streams</span>
+          <strong>Graph writes and durable streams share the same durability path.</strong>
+          <p>This is unusual enough that the site should give it a dedicated lane instead of a stray bullet point.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section shell reveal" id="quickstart">
+      <div class="section-head">
+        <h2>Five-minute path.</h2>
+        <p>
+          The current getting-started guide is good. This experiment compresses it into a single
+          visual strip so a visitor can tell whether the product is easy before scrolling farther.
+        </p>
+      </div>
+
+      <div class="path-grid">
+        <article class="path-step">
+          <span class="micro">step 01</span>
+          <strong>Create a database.</strong>
+          <pre class="mini-terminal">$LATTICE create /tmp/lattice-quickstart.lattice</pre>
+          <p>Either install the CLI or build locally with <code>zig build</code> and point <code>$LATTICE</code> at <code>./zig-out/bin/lattice</code>.</p>
+        </article>
+        <article class="path-step">
+          <span class="micro">step 02</span>
+          <strong>Import the sample graph.</strong>
+          <pre class="mini-terminal">$LATTICE import /tmp/lattice-quickstart.lattice \
+  --file=examples/cli/people_graph.json</pre>
+          <p>Start from a small author/document graph instead of a blank database.</p>
+        </article>
+        <article class="path-step">
+          <span class="micro">step 03</span>
+          <strong>Inspect counts.</strong>
+          <pre class="mini-terminal">$LATTICE count /tmp/lattice-quickstart.lattice</pre>
+          <p>Quick feedback that the file exists, the import worked, and the graph is queryable.</p>
+        </article>
+        <article class="path-step">
+          <span class="micro">step 04</span>
+          <strong>Run a query file.</strong>
+          <pre class="mini-terminal">$LATTICE exec /tmp/lattice-quickstart.lattice \
+  --file=examples/cli/authored_docs.cypher</pre>
+          <p>Then verify file checksums with <code>$LATTICE check /tmp/lattice-quickstart.lattice</code>.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section shell reveal" id="query">
+      <div class="section-head">
+        <h2>Show the query model, not just the promise.</h2>
+        <p>
+          The fastest way to explain LatticeDB is to show one snippet that crosses vector, text, and
+          graph traversal in the same query path.
+        </p>
+      </div>
+
+      <div class="code-layout">
+        <article class="code-card">
+          <span class="micro">example shape</span>
+          <strong>One query layer.</strong>
+          <p>
+            This is the part that should anchor the page: not marketing abstraction, but one concise
+            example that proves why these primitives belong together.
+          </p>
+          <ul>
+            <li>Match chunks and walk to documents and authors.</li>
+            <li>Filter semantically with vector distance.</li>
+            <li>Add lexical precision with BM25 full-text conditions.</li>
+          </ul>
+        </article>
+
+        <article class="code-card" style="background: var(--panel);">
+          <pre class="mini-terminal">MATCH (chunk:Chunk)-[:PART_OF]-&gt;(doc:Document)-[:AUTHORED_BY]-&gt;(author:Person)
+WHERE chunk.embedding &lt;=&gt; $query_vector &lt; 0.3
+  AND doc.content @@ "neural networks"
+RETURN doc.title, chunk.text, author.name
+ORDER BY chunk.embedding &lt;=&gt; $query_vector
+LIMIT 10</pre>
+          <p class="muted">That combination is the thesis of the product, so the redesign keeps it physically near the install path and quickstart.</p>
+        </article>
+      </div>
+    </section>
+
+    <section class="section shell reveal" id="notes">
+      <div class="section-head">
+        <h2>Important information should read like field notes.</h2>
+        <p>
+          This section keeps key operational facts visible without drifting into FAQ sprawl or
+          feature-card repetition.
+        </p>
+      </div>
+
+      <div class="stack-layout">
+        <article class="stack-card">
+          <span class="micro">operating notes</span>
+          <strong>What a serious reader wants to know early.</strong>
+          <ul>
+            <li>Embedded, single-file, local-first database.</li>
+            <li>Single-writer model for one owning process.</li>
+            <li>WAL-backed durability for graph writes and streams.</li>
+            <li>Bindings for Python, TypeScript, and Go on top of the stable C ABI.</li>
+            <li>Examples include graph/vector/text retrieval demos.</li>
+          </ul>
+        </article>
+
+        <article class="stack-card" style="background: var(--panel);">
+          <span class="micro">benchmark snapshot</span>
+          <strong>Performance numbers that matter on the front page.</strong>
+          <pre class="mini-terminal">node lookup                  0.13 μs
+node creation                0.65 μs
+edge traversal               9 μs
+full-text search (100 docs)  19 μs
+10-NN vector search (1M)     0.83 ms</pre>
+          <p class="muted">The redesign treats these as proof points, not as buried appendix material.</p>
+        </article>
+      </div>
+    </section>
+
+    <footer class="section shell reveal">
+      <div class="section-head">
+        <h2>Experimental directory, not a replacement.</h2>
+        <p>
+          This page is meant to live beside the current site so you can iterate on voice, motion,
+          density, and install ergonomics without disturbing the existing landing page.
+        </p>
+      </div>
+
+      <div class="footer-grid">
+        <div>
+          <span class="micro">directory</span>
+          <strong>website/experimental/</strong>
+          <p>A contained surface for trying a more research-lab, text-forward presentation style.</p>
+        </div>
+        <div>
+          <span class="micro">docs worth linking</span>
+          <div class="footer-links">
+            <a href="../index.html">current site</a>
+            <a href="https://github.com/jeffhajewski/latticedb#readme" target="_blank" rel="noreferrer">README</a>
+            <a href="https://github.com/jeffhajewski/latticedb/blob/main/docs/getting_started.md" target="_blank" rel="noreferrer">getting started</a>
+            <a href="https://github.com/jeffhajewski/latticedb/tree/main/examples/cli" target="_blank" rel="noreferrer">CLI quickstart</a>
+          </div>
+        </div>
+        <div>
+          <span class="micro">next iteration ideas</span>
+          <p>Add an ASCII query playground, a stream/changefeed visual, and a sharper comparison between graph-only, vector-only, and unified local workflows.</p>
+        </div>
+      </div>
+    </footer>
+  </main>
+
+  <script>
+    (function () {
+      const tabs = Array.from(document.querySelectorAll('[data-tab]'));
+      const panes = Array.from(document.querySelectorAll('.install-pane'));
+
+      function activateTab(name) {
+        tabs.forEach((tab) => {
+          const active = tab.dataset.tab === name;
+          tab.setAttribute('aria-selected', String(active));
+          tab.tabIndex = active ? 0 : -1;
+        });
+
+        panes.forEach((pane) => {
+          const active = pane.id === 'install-' + name;
+          pane.classList.toggle('is-active', active);
+          pane.hidden = !active;
+        });
+      }
+
+      tabs.forEach((tab, index) => {
+        tab.addEventListener('click', () => activateTab(tab.dataset.tab));
+        tab.addEventListener('keydown', (event) => {
+          if (event.key !== 'ArrowRight' && event.key !== 'ArrowLeft') return;
+          event.preventDefault();
+          const nextIndex = event.key === 'ArrowRight'
+            ? (index + 1) % tabs.length
+            : (index - 1 + tabs.length) % tabs.length;
+          tabs[nextIndex].focus();
+          activateTab(tabs[nextIndex].dataset.tab);
+        });
+      });
+
+      activateTab('cli');
+    }());
+
+    (function () {
+      const graph = document.getElementById('ascii-graph');
+      if (!graph) return;
+
+      const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+      const columns = 62;
+      const rows = 34;
+      const centerX = columns / 2;
+      const centerY = rows / 2;
+      const timeStart = performance.now();
+      const nodeCount = 16;
+      const nodes = Array.from({ length: nodeCount }, (_, i) => {
+        const angle = (Math.PI * 2 * i) / nodeCount;
+        const ring = i % 2 === 0 ? 0.78 : 0.54;
+        return {
+          angle,
+          ring,
+          speed: 0.00018 + (i % 5) * 0.00005,
+          phase: i * 0.91,
+          jitter: 0.7 + (i % 4) * 0.12,
+          glyph: i % 5 === 0 ? '@' : i % 3 === 0 ? 'o' : '*'
+        };
+      });
+
+      function makeGrid() {
+        return Array.from({ length: rows }, () => Array.from({ length: columns }, () => ' '));
+      }
+
+      function plot(grid, x, y, char) {
+        if (x < 0 || x >= columns || y < 0 || y >= rows) return;
+        grid[y][x] = char;
+      }
+
+      function drawLine(grid, x1, y1, x2, y2) {
+        let dx = Math.abs(x2 - x1);
+        let sx = x1 < x2 ? 1 : -1;
+        let dy = -Math.abs(y2 - y1);
+        let sy = y1 < y2 ? 1 : -1;
+        let err = dx + dy;
+        let x = x1;
+        let y = y1;
+
+        while (true) {
+          const char = x1 === x2 ? '|' : y1 === y2 ? '-' : ((x2 - x1) * (y2 - y1) > 0 ? '\\' : '/');
+          if (grid[y][x] === ' ') grid[y][x] = char;
+          if (x === x2 && y === y2) break;
+          const e2 = 2 * err;
+          if (e2 >= dy) {
+            err += dy;
+            x += sx;
+          }
+          if (e2 <= dx) {
+            err += dx;
+            y += sy;
+          }
+        }
+      }
+
+      function project(node, t) {
+        const orbit = node.angle + t * node.speed * 6;
+        const pulse = 1 + 0.18 * Math.sin(t * node.speed * 8 + node.phase);
+        const skew = Math.sin(orbit * 1.7 + node.phase) * 0.9;
+        const rx = (columns * 0.33) * node.ring * pulse;
+        const ry = (rows * 0.35) * node.ring * (0.84 + 0.14 * Math.cos(t * node.speed * 6 + node.phase));
+        const x = Math.round(centerX + Math.cos(orbit) * rx + Math.sin(t * node.speed * 10 + node.phase) * node.jitter);
+        const y = Math.round(centerY + Math.sin(orbit + skew * 0.08) * ry + Math.cos(t * node.speed * 7 + node.phase) * 0.65);
+        return { x, y, glyph: node.glyph };
+      }
+
+      function frame(now) {
+        const t = now - timeStart;
+        const grid = makeGrid();
+        const points = nodes.map((node) => project(node, t));
+
+        for (let i = 0; i < points.length; i += 1) {
+          const a = points[i];
+          const b = points[(i + 1) % points.length];
+          const c = points[(i + 5) % points.length];
+          drawLine(grid, a.x, a.y, b.x, b.y);
+          if (i % 2 === 0) drawLine(grid, a.x, a.y, c.x, c.y);
+        }
+
+        points.forEach((point, index) => {
+          plot(grid, point.x, point.y, point.glyph);
+          if (index % 4 === 0) {
+            plot(grid, point.x + 1, point.y, '.');
+          }
+        });
+
+        const labels = [
+          '  LATTICEDB GRAPH FIELD',
+          '  graph / vector / text / streams',
+          '',
+        ];
+
+        labels.forEach((line, rowIndex) => {
+          for (let i = 0; i < line.length && i < columns; i += 1) {
+            grid[rowIndex][i] = line[i];
+          }
+        });
+
+        const footer = '  local-first topology    ' + String(Math.round((t / 1000) % 100)).padStart(2, '0') + 's';
+        for (let i = 0; i < footer.length && i < columns; i += 1) {
+          grid[rows - 1][i] = footer[i];
+        }
+
+        graph.textContent = grid.map((row) => row.join('')).join('\n');
+
+        if (!reduceMotion) window.requestAnimationFrame(frame);
+      }
+
+      frame(performance.now());
+    }());
+
+    (function () {
+      const observer = new IntersectionObserver((entries) => {
+        entries.forEach((entry) => {
+          if (entry.isIntersecting) entry.target.classList.add('is-visible');
+        });
+      }, { threshold: 0.12 });
+
+      document.querySelectorAll('.reveal').forEach((element) => observer.observe(element));
+
+      if (window.matchMedia('(prefers-reduced-motion: reduce)').matches) {
+        document.querySelectorAll('.reveal').forEach((element) => element.classList.add('is-visible'));
+      }
+    }());
+  </script>
+</body>
+</html>

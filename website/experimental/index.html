@@ -314,9 +314,12 @@
       min-height: clamp(31rem, 52vw, 46rem);
       background: var(--paper);
       overflow: hidden;
+      contain: layout paint;
     }
 
     .graph-panel canvas {
+      position: absolute;
+      inset: 0;
       width: 100%;
       height: 100%;
       display: block;
@@ -1259,15 +1262,20 @@ full-text search (100 docs)  19 μs
       const canvas = document.getElementById('graph-canvas');
       if (!canvas) return;
 
-      const ctx = canvas.getContext('2d', { alpha: true });
+      const panel = canvas.closest('.graph-panel');
+      if (!panel) return;
+
+      const ctx = canvas.getContext('2d', { alpha: false });
       if (!ctx) return;
       const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      const dpr = Math.min(window.devicePixelRatio || 1, 1.5);
       let width = 0;
       let height = 0;
       let running = true;
       let lastFrame = -Infinity;
       let frameRequest = 0;
+      let activeMode = '';
+      let canvasBackground = '#f7f4ec';
       const frameInterval = 1000 / 24;
 
       function random(seed) {
@@ -1349,58 +1357,127 @@ full-text search (100 docs)  19 μs
         .map((node, index) => ({ index, d: Math.hypot(node.x - targetX, node.y - targetY) }))
         .sort((a, b) => a.d - b.d)[0].index;
 
+      function path(points) {
+        return points.map(([x, y]) => anchor(x, y));
+      }
+
+      function pattern(mode, root, branches) {
+        return {
+          mode,
+          root: anchor(root[0], root[1]),
+          branches: branches.map(path)
+        };
+      }
+
       const branchTrees = [
-        {
-          mode: 'VECTOR',
-          root: anchor(11, 18),
-          branches: [
-            [anchor(11, 18), anchor(26, 16), anchor(43, 20), anchor(62, 25), anchor(85, 18)],
-            [anchor(11, 18), anchor(28, 25), anchor(48, 31), anchor(70, 36), anchor(90, 30)],
-            [anchor(11, 18), anchor(24, 31), anchor(44, 39), anchor(66, 48)],
-            [anchor(43, 20), anchor(58, 13), anchor(78, 15)],
-            [anchor(48, 31), anchor(63, 31), anchor(82, 42)]
-          ]
-        },
-        {
-          mode: 'BM25',
-          root: anchor(12, 48),
-          branches: [
-            [anchor(12, 48), anchor(27, 50), anchor(49, 44), anchor(72, 34), anchor(91, 32)],
-            [anchor(12, 48), anchor(31, 40), anchor(51, 34), anchor(75, 24)],
-            [anchor(12, 48), anchor(33, 55), anchor(55, 53), anchor(83, 52)],
-            [anchor(49, 44), anchor(62, 44), anchor(87, 43)],
-            [anchor(51, 34), anchor(67, 20), anchor(88, 18)]
-          ]
-        },
-        {
-          mode: 'GRAPH',
-          root: anchor(18, 32),
-          branches: [
-            [anchor(18, 32), anchor(35, 24), anchor(54, 21), anchor(75, 18), anchor(91, 22)],
-            [anchor(18, 32), anchor(37, 36), anchor(58, 40), anchor(83, 45)],
-            [anchor(18, 32), anchor(32, 48), anchor(55, 54), anchor(76, 52)],
-            [anchor(35, 24), anchor(52, 31), anchor(73, 32), anchor(91, 38)],
-            [anchor(37, 36), anchor(57, 29), anchor(77, 27)]
-          ]
-        },
-        {
-          mode: 'STREAM',
-          root: anchor(84, 50),
-          branches: [
-            [anchor(84, 50), anchor(66, 47), anchor(50, 42), anchor(31, 36), anchor(12, 34)],
-            [anchor(84, 50), anchor(70, 35), anchor(55, 28), anchor(35, 20)],
-            [anchor(84, 50), anchor(63, 55), anchor(42, 54), anchor(22, 48)],
-            [anchor(66, 47), anchor(78, 25), anchor(91, 17)],
-            [anchor(50, 42), anchor(68, 41), anchor(90, 44)]
-          ]
-        }
+        pattern('VECTOR', [11, 18], [
+          [[11, 18], [26, 16], [43, 20], [62, 25], [85, 18]],
+          [[11, 18], [28, 25], [48, 31], [70, 36], [90, 30]],
+          [[11, 18], [24, 31], [44, 39], [66, 48]],
+          [[43, 20], [58, 13], [78, 15]],
+          [[48, 31], [63, 31], [82, 42]]
+        ]),
+        pattern('GRAPH', [58, 32], [
+          [[58, 32], [43, 22], [25, 19], [11, 24]],
+          [[58, 32], [41, 36], [25, 45], [12, 54]],
+          [[58, 32], [70, 24], [86, 18], [94, 28]],
+          [[58, 32], [69, 42], [87, 48], [96, 41]],
+          [[43, 22], [49, 13], [67, 12]]
+        ]),
+        pattern('BM25', [12, 48], [
+          [[12, 48], [27, 50], [49, 44], [72, 34], [91, 32]],
+          [[12, 48], [31, 40], [51, 34], [75, 24]],
+          [[12, 48], [33, 55], [55, 53], [83, 52]],
+          [[49, 44], [62, 44], [87, 43]],
+          [[51, 34], [67, 20], [88, 18]]
+        ]),
+        pattern('STREAM', [84, 50], [
+          [[84, 50], [66, 47], [50, 42], [31, 36], [12, 34]],
+          [[84, 50], [70, 35], [55, 28], [35, 20]],
+          [[84, 50], [63, 55], [42, 54], [22, 48]],
+          [[66, 47], [78, 25], [91, 17]],
+          [[50, 42], [68, 41], [90, 44]]
+        ]),
+        pattern('VECTOR', [88, 18], [
+          [[88, 18], [72, 15], [54, 18], [36, 26], [15, 22]],
+          [[88, 18], [75, 27], [59, 33], [38, 35], [17, 43]],
+          [[88, 18], [80, 39], [67, 51], [48, 55], [29, 52]],
+          [[72, 15], [62, 9], [43, 12]],
+          [[59, 33], [71, 38], [91, 49]]
+        ]),
+        pattern('BM25', [50, 13], [
+          [[50, 13], [34, 18], [18, 28], [10, 42]],
+          [[50, 13], [57, 26], [65, 41], [83, 56]],
+          [[50, 13], [45, 31], [37, 47], [22, 57]],
+          [[57, 26], [75, 21], [94, 24]],
+          [[45, 31], [63, 32], [82, 39]]
+        ]),
+        pattern('GRAPH', [19, 32], [
+          [[19, 32], [35, 24], [54, 21], [75, 18], [91, 22]],
+          [[19, 32], [37, 36], [58, 40], [83, 45]],
+          [[19, 32], [32, 48], [55, 54], [76, 52]],
+          [[35, 24], [52, 31], [73, 32], [91, 38]],
+          [[37, 36], [57, 29], [77, 27]]
+        ]),
+        pattern('STREAM', [16, 53], [
+          [[16, 53], [31, 47], [45, 39], [61, 29], [80, 18]],
+          [[16, 53], [38, 55], [58, 50], [79, 43], [94, 35]],
+          [[16, 53], [25, 35], [37, 24], [55, 14]],
+          [[45, 39], [57, 43], [70, 56]],
+          [[61, 29], [78, 31], [94, 47]]
+        ]),
+        pattern('VECTOR', [49, 55], [
+          [[49, 55], [38, 47], [26, 35], [14, 21]],
+          [[49, 55], [55, 42], [62, 29], [71, 16], [88, 12]],
+          [[49, 55], [66, 54], [82, 49], [95, 38]],
+          [[38, 47], [52, 36], [69, 35]],
+          [[55, 42], [40, 27], [28, 14]]
+        ]),
+        pattern('GRAPH', [75, 33], [
+          [[75, 33], [61, 25], [45, 20], [26, 17], [10, 27]],
+          [[75, 33], [60, 37], [42, 43], [21, 48]],
+          [[75, 33], [85, 24], [94, 15]],
+          [[75, 33], [88, 42], [94, 55]],
+          [[60, 37], [68, 50], [78, 57]]
+        ]),
+        pattern('BM25', [90, 46], [
+          [[90, 46], [75, 51], [57, 49], [36, 43], [13, 37]],
+          [[90, 46], [73, 37], [57, 28], [39, 18], [21, 14]],
+          [[90, 46], [80, 56], [61, 58], [42, 54]],
+          [[57, 49], [67, 40], [84, 31]],
+          [[57, 28], [66, 19], [83, 15]]
+        ]),
+        pattern('STREAM', [11, 18], [
+          [[11, 18], [24, 25], [41, 30], [58, 34], [78, 41], [94, 50]],
+          [[11, 18], [30, 15], [50, 17], [70, 22], [91, 30]],
+          [[11, 18], [20, 36], [36, 48], [56, 55], [78, 54]],
+          [[41, 30], [53, 22], [65, 12]],
+          [[58, 34], [70, 46], [88, 56]]
+        ])
       ];
 
       branchTrees.forEach((tree) => {
-        tree.branches.forEach((branch) => {
-          for (let i = 0; i < branch.length - 1; i += 1) addEdge(branch[i], branch[i + 1]);
+        const activePairs = new Set();
+        const activeNodes = new Set([tree.root]);
+        const pulseTracks = [];
+        tree.branches.forEach((branch, branchIndex) => {
+          branch.forEach((nodeIndex) => activeNodes.add(nodeIndex));
+          for (let i = 0; i < branch.length - 1; i += 1) {
+            addEdge(branch[i], branch[i + 1]);
+            activePairs.add(edgeKey(branch[i], branch[i + 1]));
+            pulseTracks.push({
+              from: branch[i],
+              to: branch[i + 1],
+              depth: i,
+              branchIndex
+            });
+          }
         });
+        tree.activePairs = activePairs;
+        tree.activeNodes = activeNodes;
+        tree.pulseTracks = pulseTracks;
       });
+      const branchOrder = [0, 7, 2, 9, 4, 11, 6, 5, 8, 3, 10, 1];
 
       const positions = nodes.map(() => ({ x: 0, y: 0 }));
       function position(node, elapsed) {
@@ -1428,12 +1505,25 @@ full-text search (100 docs)  19 μs
         };
       }
       function resize() {
-        const rect = canvas.getBoundingClientRect();
-        width = rect.width;
-        height = rect.height;
-        canvas.width = Math.max(1, Math.floor(width * dpr));
-        canvas.height = Math.max(1, Math.floor(height * dpr));
+        const rect = panel.getBoundingClientRect();
+        const nextWidth = rect.width;
+        const nextHeight = rect.height;
+        const backingWidth = Math.max(1, Math.ceil(nextWidth * dpr));
+        const backingHeight = Math.max(1, Math.ceil(nextHeight * dpr));
+        if (
+          width === nextWidth &&
+          height === nextHeight &&
+          canvas.width === backingWidth &&
+          canvas.height === backingHeight
+        ) {
+          return;
+        }
+        width = nextWidth;
+        height = nextHeight;
+        canvas.width = backingWidth;
+        canvas.height = backingHeight;
         ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        canvasBackground = getComputedStyle(panel).backgroundColor || canvasBackground;
         draw(performance.now(), true);
       }
 
@@ -1446,7 +1536,7 @@ full-text search (100 docs)  19 μs
       }
 
       const resizeObserver = new ResizeObserver(resize);
-      resizeObserver.observe(canvas);
+      resizeObserver.observe(panel);
       resize();
 
       function draw(now, force) {
@@ -1456,16 +1546,21 @@ full-text search (100 docs)  19 μs
           return;
         }
         lastFrame = now;
-        ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = canvasBackground;
+        ctx.fillRect(0, 0, width, height);
 
-        const cycleMs = 4200;
-        const burstMs = 1800;
+        const cycleMs = 1900;
+        const burstMs = 1050;
+        const pulseWindowMs = 1500;
         const cycleIndex = Math.floor(now / cycleMs);
-        const tree = branchTrees[cycleIndex % branchTrees.length];
+        const tree = branchTrees[branchOrder[cycleIndex % branchOrder.length]];
         const cycleT = now % cycleMs;
-        const burstActive = cycleT < burstMs;
-        canvas.parentElement.dataset.mode = tree.mode;
-        canvas.parentElement.style.setProperty('--graph-meta', tree.mode === 'VECTOR' ? `'OUTPUT VECTOR  SEED: HNSW'` : tree.mode === 'BM25' ? `'OUTPUT BM25  SEED: TERM'` : tree.mode === 'STREAM' ? `'OUTPUT STREAM  SEED: WAL'` : `'OUTPUT PATH  SEED: CYPHER'`);
+        const burstActive = cycleT < pulseWindowMs;
+        if (tree.mode !== activeMode) {
+          activeMode = tree.mode;
+          panel.dataset.mode = tree.mode;
+          panel.style.setProperty('--graph-meta', tree.mode === 'VECTOR' ? `'OUTPUT VECTOR  SEED: HNSW'` : tree.mode === 'BM25' ? `'OUTPUT BM25  SEED: TERM'` : tree.mode === 'STREAM' ? `'OUTPUT STREAM  SEED: WAL'` : `'OUTPUT PATH  SEED: CYPHER'`);
+        }
 
         const rotation = reduceMotion ? 0 : (Math.sin(now * 0.00018) * 5 + now * 0.0014) * Math.PI / 180;
         const driftX = reduceMotion ? 0 : Math.sin(now * 0.00028) * 1.8;
@@ -1474,47 +1569,45 @@ full-text search (100 docs)  19 μs
           positions[index] = project(position(node, now), rotation, driftX, driftY);
         });
 
-        const activePairs = new Set();
-        const activeNodes = new Set([tree.root]);
-        tree.branches.forEach((branch) => {
-          branch.forEach((nodeIndex) => activeNodes.add(nodeIndex));
-          for (let i = 0; i < branch.length - 1; i += 1) activePairs.add(edgeKey(branch[i], branch[i + 1]));
-        });
+        const activePairs = tree.activePairs;
+        const activeNodes = tree.activeNodes;
+        const pulseTracks = tree.pulseTracks;
 
         ctx.lineCap = 'round';
         ctx.strokeStyle = 'rgba(7,7,6,0.34)';
         ctx.lineWidth = 0.55;
+        ctx.beginPath();
         edges.forEach((edge) => {
           const active = activePairs.has(edge.key);
           if (active) return;
           const a = positions[edge.from];
           const b = positions[edge.to];
-          ctx.beginPath();
           ctx.moveTo(a.x, a.y);
           ctx.lineTo(b.x, b.y);
-          ctx.stroke();
         });
+        ctx.stroke();
 
         ctx.fillStyle = 'rgba(7,7,6,0.7)';
+        ctx.beginPath();
         nodes.forEach((node, index) => {
           if (activeNodes.has(index)) return;
           const p = positions[index];
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, Math.max(0.8, node.r * 2.1), 0, Math.PI * 2);
-          ctx.fill();
+          const radius = Math.max(0.8, node.r * 2.1);
+          ctx.moveTo(p.x + radius, p.y);
+          ctx.arc(p.x, p.y, radius, 0, Math.PI * 2);
         });
+        ctx.fill();
 
         // Cluster highlights: when a pulse reaches a node, its immediate local subgraph lights up briefly.
-        const pulseTracks = tree.branches.flatMap((branch, branchIndex) => branch.slice(0, -1).map((from, index) => ({ from, to: branch[index + 1], depth: index, branchIndex })));
         const clusterNodes = new Set();
         const clusterPairs = new Set();
         const livePulses = [];
         if (burstActive) {
           pulseTracks.forEach((track, trackIndex) => {
-            const branchDelay = track.branchIndex * 0.07;
-            const depthDelay = track.depth * 0.12;
+            const branchDelay = track.branchIndex * 0.045;
+            const depthDelay = track.depth * 0.075;
             const start = (branchDelay + depthDelay) * burstMs;
-            const local = (cycleT - start) / (burstMs * 0.64);
+            const local = (cycleT - start) / (burstMs * 0.6);
             if (local < 0 || local > 1.12) return;
             const progress = easeOutCubic(Math.min(1, local));
             livePulses.push({ track, progress, local, trackIndex });
@@ -1531,43 +1624,45 @@ full-text search (100 docs)  19 μs
 
         ctx.strokeStyle = 'rgba(7,7,6,0.62)';
         ctx.lineWidth = 0.75;
+        ctx.beginPath();
         edges.forEach((edge) => {
           if (!clusterPairs.has(edge.key) || activePairs.has(edge.key)) return;
           const a = positions[edge.from];
           const b = positions[edge.to];
-          ctx.beginPath();
           ctx.moveTo(a.x, a.y);
           ctx.lineTo(b.x, b.y);
-          ctx.stroke();
         });
+        ctx.stroke();
 
-        ctx.strokeStyle = 'rgba(7,7,6,0.96)';
-        ctx.lineWidth = 1.55;
+        ctx.strokeStyle = 'rgba(7,7,6,0.62)';
+        ctx.lineWidth = 0.75;
+        ctx.beginPath();
         edges.forEach((edge) => {
           if (!activePairs.has(edge.key)) return;
           const a = positions[edge.from];
           const b = positions[edge.to];
-          ctx.beginPath();
           ctx.moveTo(a.x, a.y);
           ctx.lineTo(b.x, b.y);
-          ctx.stroke();
         });
+        ctx.stroke();
 
         ctx.fillStyle = 'rgba(7,7,6,0.92)';
+        ctx.beginPath();
         clusterNodes.forEach((index) => {
           const p = positions[index];
-          ctx.beginPath();
+          ctx.moveTo(p.x + 1.65, p.y);
           ctx.arc(p.x, p.y, 1.65, 0, Math.PI * 2);
-          ctx.fill();
         });
+        ctx.fill();
 
         ctx.fillStyle = 'rgba(7,7,6,1)';
+        ctx.beginPath();
         activeNodes.forEach((index) => {
           const p = positions[index];
-          ctx.beginPath();
+          ctx.moveTo(p.x + 2.1, p.y);
           ctx.arc(p.x, p.y, 2.1, 0, Math.PI * 2);
-          ctx.fill();
         });
+        ctx.fill();
 
         ctx.fillStyle = 'rgba(7,7,6,1)';
         livePulses.forEach(({ track, progress, local }) => {
@@ -1591,7 +1686,7 @@ full-text search (100 docs)  19 μs
         if (running) draw(performance.now(), true);
       }, { threshold: 0.05 });
 
-      visibilityObserver.observe(canvas);
+      visibilityObserver.observe(panel);
       draw(performance.now(), true);
     }());
 

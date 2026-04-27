@@ -4,18 +4,18 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LatticeDB experimental redesign</title>
-  <meta name="description" content="Experimental LatticeDB website redesign: minimal, information-dense, text-forward, with an animated ASCII graph hero and clear install paths.">
+  <meta name="description" content="LatticeDB: embedded graph database with vector search, BM25 full-text search, durable streams, and clear performance comparisons.">
   <script>document.documentElement.classList.add('js');</script>
   <style>
     :root {
-      --paper: #f4f1ea;
-      --panel: #eeeadf;
-      --panel-strong: #e6e0d2;
-      --ink: #11110f;
-      --muted: #5b5a55;
-      --line: rgba(17, 17, 15, 0.16);
-      --line-strong: rgba(17, 17, 15, 0.34);
-      --accent: #1e5ed6;
+      --paper: #f7f4ec;
+      --panel: #f0eadc;
+      --panel-strong: #ddd4c1;
+      --ink: #070706;
+      --muted: #45423a;
+      --line: rgba(7, 7, 6, 0.12);
+      --line-strong: rgba(7, 7, 6, 0.72);
+      --accent: #0d47b8;
       --accent-soft: rgba(30, 94, 214, 0.1);
       --max: 1380px;
       --mono: "SF Mono", "JetBrains Mono", "Geist Mono", "Roboto Mono", "Menlo", monospace;
@@ -37,10 +37,6 @@
       font-family: var(--sans);
       text-rendering: optimizeLegibility;
       -webkit-font-smoothing: antialiased;
-      background-image:
-        linear-gradient(to right, rgba(17, 17, 15, 0.03) 1px, transparent 1px),
-        linear-gradient(to bottom, rgba(17, 17, 15, 0.03) 1px, transparent 1px);
-      background-size: 32px 32px;
     }
 
     a {
@@ -173,10 +169,10 @@
 
     .hero-grid {
       display: grid;
-      grid-template-columns: minmax(0, 1.1fr) minmax(20rem, 0.9fr);
-      gap: 1px;
-      background: var(--line-strong);
-      border: 1px solid var(--line-strong);
+      grid-template-columns: minmax(0, 0.95fr) minmax(24rem, 1.05fr);
+      gap: 0;
+      border-top: 2px solid var(--ink);
+      border-bottom: 2px solid var(--ink);
     }
 
     .hero-copy,
@@ -185,10 +181,14 @@
       background: var(--paper);
     }
 
+    .hero-visual {
+      border-left: 2px solid var(--ink);
+    }
+
     .hero-copy {
-      padding: 1.5rem;
+      padding: clamp(1.5rem, 3vw, 2.5rem);
       display: grid;
-      gap: 2rem;
+      gap: 1.65rem;
       align-content: start;
     }
 
@@ -215,16 +215,17 @@
     }
 
     h1 {
-      max-width: 12ch;
-      font-size: clamp(3rem, 9vw, 6.8rem);
-      line-height: 0.9;
-      letter-spacing: -0.075em;
-      text-transform: uppercase;
+      max-width: 32ch;
+      font-size: clamp(1.85rem, 3.4vw, 3.35rem);
+      line-height: 1.08;
+      letter-spacing: -0.045em;
+      text-transform: none;
+      text-wrap: balance;
     }
 
     .hero-lead {
-      max-width: 58ch;
-      font-size: 1.08rem;
+      max-width: 70ch;
+      font-size: 1.04rem;
       line-height: 1.65;
       color: var(--muted);
     }
@@ -238,18 +239,23 @@
     .hero-notes {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 1px;
-      background: var(--line);
-      border: 1px solid var(--line);
+      gap: 0;
+      border-top: 1px solid var(--ink);
+      border-bottom: 1px solid var(--ink);
     }
 
     .hero-note {
-      padding: 1rem;
-      background: var(--panel);
-      min-height: 8rem;
+      padding: 1.15rem;
+      background: transparent;
+      min-height: 6.5rem;
       display: grid;
       align-content: start;
-      gap: 0.8rem;
+      gap: 0.7rem;
+      border-right: 1px solid rgba(7, 7, 6, 0.18);
+    }
+
+    .hero-note:last-child {
+      border-right: 0;
     }
 
     .hero-note strong {
@@ -262,68 +268,83 @@
       line-height: 1.55;
     }
 
-    .hero-visual {
-      padding: 1.5rem;
-      display: grid;
-      gap: 1rem;
-      align-content: start;
-      background: linear-gradient(180deg, rgba(255,255,255,0.34), rgba(238,234,223,0.6));
-    }
-
-    .terminal-frame {
-      display: grid;
-      gap: 1px;
-      background: var(--line-strong);
-      border: 1px solid var(--line-strong);
-    }
-
-    .terminal-head,
-    .terminal-body,
-    .terminal-foot {
-      background: #121212;
-      color: #f4f0e6;
-    }
-
-    .terminal-head,
-    .terminal-foot {
-      padding: 0.75rem 1rem;
+    .comparison-table {
+      width: 100%;
+      border-collapse: collapse;
       font-family: var(--mono);
+      font-size: 0.82rem;
+      line-height: 1.5;
+    }
+
+    .comparison-table th,
+    .comparison-table td {
+      padding: 0.7rem 0.75rem;
+      text-align: left;
+      vertical-align: top;
+      border-bottom: 1px solid var(--line);
+    }
+
+    .comparison-table th {
       font-size: 0.74rem;
       letter-spacing: 0.08em;
       text-transform: uppercase;
-      color: rgba(244, 240, 230, 0.66);
-      display: flex;
-      justify-content: space-between;
-      gap: 1rem;
-      flex-wrap: wrap;
+      color: var(--muted);
+      background: rgba(255, 255, 255, 0.22);
     }
 
-    .terminal-body {
-      padding: 1.1rem 1rem 0.9rem;
-      overflow: hidden;
+    .comparison-table td strong {
+      font-size: inherit;
+      letter-spacing: 0;
+    }
+
+    .compact-table {
+      font-size: 0.78rem;
+    }
+
+    .hero-visual {
+      padding: clamp(1rem, 2vw, 1.5rem);
+      display: grid;
+      align-content: stretch;
+      background: linear-gradient(180deg, rgba(255,255,255,0.34), rgba(238,234,223,0.6));
+    }
+
+    .graph-panel {
       position: relative;
-    }
-
-    .terminal-body::after {
-      content: "";
-      position: absolute;
-      inset: 0;
-      pointer-events: none;
-      background: repeating-linear-gradient(180deg, rgba(255,255,255,0.03), rgba(255,255,255,0.03) 1px, transparent 1px, transparent 4px);
-      opacity: 0.16;
-    }
-
-    #ascii-graph {
-      margin: 0;
-      min-height: 27rem;
-      font-family: var(--mono);
-      font-size: clamp(0.46rem, 0.75vw, 0.72rem);
-      line-height: 1.02;
-      white-space: pre;
-      letter-spacing: 0.02em;
+      height: 100%;
+      min-height: clamp(31rem, 52vw, 46rem);
+      background: var(--paper);
       overflow: hidden;
-      color: #f2eee5;
     }
+
+    .graph-panel canvas {
+      width: 100%;
+      height: 100%;
+      display: block;
+    }
+
+    .ambient-edge,
+    .graph-edge {
+      stroke: rgba(7, 7, 6, 0.34);
+      stroke-width: 0.34;
+      vector-effect: non-scaling-stroke;
+    }
+
+    .graph-edge.is-active {
+      stroke: rgba(7, 7, 6, 0.92);
+      stroke-width: 1.05;
+    }
+
+    .ambient-node,
+    .graph-node circle {
+      fill: rgba(7, 7, 6, 0.88);
+      stroke: none;
+    }
+
+    .graph-pulse {
+      fill: var(--ink);
+      opacity: 0.9;
+    }
+
 
     .status-grid {
       display: grid;
@@ -361,17 +382,17 @@
 
     .section-head {
       display: grid;
-      grid-template-columns: minmax(0, 0.8fr) minmax(0, 1.2fr);
+      grid-template-columns: minmax(0, 0.72fr) minmax(0, 1.28fr);
       gap: 1rem;
       align-items: end;
-      padding: 1.5rem 0 1rem;
-      border-bottom: 1px solid var(--line-strong);
+      padding: 2.2rem 0 1rem;
+      border-bottom: 2px solid var(--ink);
     }
 
     .section-head h2 {
-      font-size: clamp(1.8rem, 4vw, 3.2rem);
+      font-size: clamp(2.1rem, 5vw, 4.2rem);
       line-height: 0.96;
-      letter-spacing: -0.055em;
+      letter-spacing: -0.065em;
       text-transform: uppercase;
     }
 
@@ -480,9 +501,17 @@
       line-height: 1.65;
     }
 
+
+    .comparison-block {
+      display: grid;
+      border-top: 2px solid var(--ink);
+      border-bottom: 2px solid var(--ink);
+      margin-top: 1.25rem;
+    }
+
     .data-rail {
       display: grid;
-      grid-template-columns: minmax(0, 1.4fr) minmax(16rem, 0.75fr);
+      grid-template-columns: minmax(0, 1.7fr) minmax(18rem, 0.65fr);
       gap: 1px;
       background: var(--line-strong);
       border: 1px solid var(--line-strong);
@@ -554,18 +583,30 @@
 
     .path-grid {
       display: grid;
-      grid-template-columns: repeat(4, minmax(0, 1fr));
-      gap: 1px;
-      background: var(--line-strong);
-      border: 1px solid var(--line-strong);
+      gap: 0;
+      border-top: 2px solid var(--ink);
+      border-bottom: 2px solid var(--ink);
       margin-top: 1.25rem;
     }
 
     .path-step {
-      background: var(--paper);
-      padding: 1.1rem;
+      background: transparent;
+      padding: 1.1rem 0;
       display: grid;
-      gap: 0.8rem;
+      grid-template-columns: 9rem minmax(12rem, 0.65fr) minmax(0, 1.35fr);
+      gap: 1.25rem;
+      align-items: start;
+      border-bottom: 1px solid rgba(7, 7, 6, 0.18);
+    }
+
+    .path-step:last-child {
+      border-bottom: 0;
+    }
+
+    .path-step .mini-terminal {
+      min-height: 3.15rem;
+      display: flex;
+      align-items: center;
     }
 
     .path-step code,
@@ -649,7 +690,6 @@
       .section-head,
       .footer-grid,
       .three-lane,
-      .path-grid,
       .hero-notes,
       .status-grid {
         grid-template-columns: 1fr;
@@ -668,10 +708,6 @@
     }
 
     @media (max-width: 760px) {
-      body {
-        background-size: 22px 22px;
-      }
-
       .shell {
         padding: 0 0.9rem;
       }
@@ -700,9 +736,13 @@
         max-width: none;
       }
 
-      #ascii-graph {
-        min-height: 22rem;
-        font-size: 0.42rem;
+      .path-step {
+        grid-template-columns: 1fr;
+        gap: 0.75rem;
+      }
+
+      .path-step .mini-terminal {
+        min-height: auto;
       }
 
       .hero-actions,
@@ -745,15 +785,15 @@
     <div class="shell site-header-inner">
       <a class="brand" href="#top" aria-label="LatticeDB experimental home">
         <span class="brand-mark" aria-hidden="true"></span>
-        <span>LatticeDB / experimental</span>
+        <span>LatticeDB</span>
       </a>
 
       <nav class="site-nav micro" aria-label="Primary">
+        <a href="#performance">Performance</a>
         <a href="#install">Install</a>
-        <a href="#why">Why</a>
         <a href="#quickstart">Quickstart</a>
         <a href="#query">Query model</a>
-        <a href="#notes">Notes</a>
+        <a href="#notes">Facts</a>
       </nav>
 
       <div class="header-cta micro">
@@ -768,109 +808,225 @@
       <div class="hero-grid">
         <div class="hero-copy">
           <div class="eyebrow-row micro">
-            <span>single-file graph database</span>
-            <span>vector + bm25 + traversal</span>
-            <span>durable streams</span>
+            <span>embedded</span>
+            <span>single file</span>
+            <span>graph + vector + bm25</span>
           </div>
 
           <div style="display:grid; gap: 1.2rem;">
-            <h1>One local file. Three query modes. Zero platform theater.</h1>
+            <h1>Embedded graph database for local apps that need graph traversal, vector search, and full-text search.</h1>
             <p class="hero-lead">
-              LatticeDB is an embedded property-graph database for connected, semantic, and textual
-              data. Keep graph traversal, vector similarity, BM25 full-text search, and durable
-              change streams in the same engine and the same file.
+              LatticeDB replaces a stack of separate local systems with one embedded database file:
+              property graph storage, HNSW vector search, BM25 full-text search, and durable streams.
             </p>
           </div>
 
           <div class="hero-actions micro">
-            <a class="button button--solid" href="#install">install / 2 min</a>
-            <a class="button" href="#quickstart">see quickstart</a>
-            <a class="button" href="https://github.com/jeffhajewski/latticedb/tree/main/examples" target="_blank" rel="noreferrer">examples</a>
+            <a class="button button--solid" href="#install">Install</a>
+            <a class="button" href="#performance">Performance</a>
+            <a class="button" href="#quickstart">Quickstart</a>
           </div>
 
           <div class="hero-notes">
             <article class="hero-note">
-              <span class="micro">01 / topology</span>
-              <strong>Graph, vector, text, stream.</strong>
-              <p>Relationship-heavy local workloads without adding a separate vector store, search index, or event bus.</p>
+              <span class="micro">vector search</span>
+              <strong>0.83 ms</strong>
+              <p>1M vectors, 100% recall@10.</p>
             </article>
             <article class="hero-note">
-              <span class="micro">02 / operating model</span>
-              <strong>Single owning process. WAL-backed durability.</strong>
-              <p>Built for one machine, one file, and local application control instead of remote-cluster ceremony.</p>
+              <span class="micro">graph traversal</span>
+              <strong>38.7 μs</strong>
+              <p>2-hop traversal at 100K nodes.</p>
             </article>
             <article class="hero-note">
-              <span class="micro">03 / fit</span>
-              <strong>Good for Graph RAG, agent memory, local knowledge tools.</strong>
-              <p>Those workloads are examples of the primitives, not the product boundary.</p>
+              <span class="micro">point lookup</span>
+              <strong>0.13 μs</strong>
+              <p>7.9M ops/sec.</p>
             </article>
           </div>
         </div>
 
-        <aside class="hero-visual" aria-label="Animated ASCII graph visualization">
-          <div class="terminal-frame">
-            <div class="terminal-head">
-              <span>live graph field / ASCII telemetry</span>
-              <span>experimental surface</span>
-            </div>
-            <div class="terminal-body">
-              <pre id="ascii-graph" aria-live="off">initializing graph field...</pre>
-            </div>
-            <div class="terminal-foot">
-              <span>nodes drift / edges re-form / topology stays legible</span>
-              <span>reduced motion aware</span>
-            </div>
-          </div>
-
-          <div class="status-grid micro">
-            <div>
-              <span>mode</span>
-              <strong>ASCII graph blob</strong>
-              <span>Text-only motion surface inspired by terminal telemetry rather than canvas-heavy hero art.</span>
-            </div>
-            <div>
-              <span>signal</span>
-              <strong>Connected structure</strong>
-              <span>Edges breathe while node clusters stay coherent, like a living graph instead of a logo loop.</span>
-            </div>
-            <div>
-              <span>payload</span>
-              <strong>Readable information</strong>
-              <span>The page keeps install, query model, and performance data visible instead of hiding them under decoration.</span>
-            </div>
+        <aside class="hero-visual" aria-label="LatticeDB query graph visualization">
+          <div class="graph-panel">
+            <canvas id="graph-canvas" role="img" aria-label="Dense graph with branching query pulses highlighting local subgraphs"></canvas>
           </div>
         </aside>
       </div>
     </section>
 
+    <section class="section shell reveal" id="performance">
+      <div class="section-head">
+        <h2>Performance</h2>
+        <p>
+          Benchmarks from the README, presented the same way a technical reader usually scans them:
+          headline metrics first, then focused comparisons by workload.
+        </p>
+      </div>
+
+      <div class="three-lane">
+        <article>
+          <span class="micro">vector search</span>
+          <strong>0.83 ms</strong>
+          <p>10-NN at 1M vectors, 100% recall@10.</p>
+        </article>
+        <article>
+          <span class="micro">graph traversal</span>
+          <strong>39 μs</strong>
+          <p>2-hop traversal at 100K nodes.</p>
+        </article>
+        <article>
+          <span class="micro">full-text search</span>
+          <strong>19 μs</strong>
+          <p>BM25 search; about 300x faster than SQLite FTS5 in the cited comparison.</p>
+        </article>
+      </div>
+
+      <div class="comparison-block">
+        <article class="rail-card">
+          <span class="micro">benchmark summary</span>
+          <table class="comparison-table">
+            <thead>
+              <tr>
+                <th>Metric</th>
+                <th>Performance</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td>Node lookup</td>
+                <td><strong>0.13 μs</strong></td>
+              </tr>
+              <tr>
+                <td>10-NN vector search @ 1M vectors</td>
+                <td><strong>0.83 ms</strong>, 100% recall@10</td>
+              </tr>
+              <tr>
+                <td>Full-text search</td>
+                <td><strong>19 μs</strong>, about 300x faster than SQLite FTS5</td>
+              </tr>
+              <tr>
+                <td>Graph traversal vs SQLite</td>
+                <td><strong>14–2819x faster</strong>, depending on traversal depth</td>
+              </tr>
+              <tr>
+                <td>2-hop traversal, 100K nodes</td>
+                <td><strong>39 μs</strong></td>
+              </tr>
+            </tbody>
+          </table>
+        </article>
+      </div>
+
+      <div class="split-layout">
+        <article class="rail-card">
+          <span class="micro">vector search comparison</span>
+          <table class="comparison-table compact-table">
+            <thead>
+              <tr>
+                <th>System</th>
+                <th>Latency</th>
+                <th>Recall</th>
+                <th>Type</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>LatticeDB</strong></td>
+                <td><strong>0.83 ms</strong></td>
+                <td><strong>100%</strong></td>
+                <td>Embedded</td>
+              </tr>
+              <tr>
+                <td>FAISS HNSW</td>
+                <td>0.5–3 ms</td>
+                <td>—</td>
+                <td>Library</td>
+              </tr>
+              <tr>
+                <td>Weaviate</td>
+                <td>1.4 ms</td>
+                <td>—</td>
+                <td>Server</td>
+              </tr>
+              <tr>
+                <td>Qdrant</td>
+                <td>~1–2 ms</td>
+                <td>—</td>
+                <td>Server</td>
+              </tr>
+              <tr>
+                <td>pgvector</td>
+                <td>~5 ms</td>
+                <td>99%</td>
+                <td>Extension</td>
+              </tr>
+              <tr>
+                <td>sqlite-vec</td>
+                <td>17 ms</td>
+                <td>—</td>
+                <td>Extension</td>
+              </tr>
+            </tbody>
+          </table>
+        </article>
+
+        <article class="rail-card" style="background: var(--panel);">
+          <span class="micro">graph traversal comparison</span>
+          <table class="comparison-table compact-table">
+            <thead>
+              <tr>
+                <th>System</th>
+                <th>Latency</th>
+                <th>Type</th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr>
+                <td><strong>LatticeDB</strong></td>
+                <td><strong>39 μs</strong></td>
+                <td>Embedded</td>
+              </tr>
+              <tr>
+                <td>SQLite recursive CTE</td>
+                <td>548 μs</td>
+                <td>Embedded</td>
+              </tr>
+              <tr>
+                <td>Neo4j</td>
+                <td>10 ms</td>
+                <td>Server</td>
+              </tr>
+              <tr>
+                <td>Kuzu</td>
+                <td>19 ms</td>
+                <td>Embedded</td>
+              </tr>
+            </tbody>
+          </table>
+        </article>
+      </div>
+    </section>
+
     <section class="section shell reveal" id="install">
       <div class="section-head">
-        <h2>Install without hunting through docs.</h2>
+        <h2>Install</h2>
         <p>
-          Four entry paths, one obvious first step. The goal of this redesign is to make the
-          shortest route visible immediately while still exposing the deeper workflows for repo-local
-          development and bindings.
+          Start with the interface you want to use. The shortest path is the CLI. Python and
+          TypeScript packages are expected to bundle the native library on supported platforms.
+          Go currently uses an installed-prefix or repo-local cgo workflow.
         </p>
       </div>
 
       <div class="install-layout">
         <div class="install-copy">
-          <span class="micro">fast path</span>
-          <strong>Pick the interface you actually want to use.</strong>
-          <p class="muted">
-            The current repo already has clear commands. This layout surfaces them early, keeps the
-            friction low, and then adds just enough context to prevent a dead end.
-          </p>
+          <span class="micro">packages</span>
+          <strong>Choose a binding.</strong>
           <ul>
             <li>CLI for importing data, running queries, and inspecting files.</li>
-            <li>Python for local apps, scripts, and notebooks.</li>
-            <li>TypeScript for Node.js tooling and services.</li>
+            <li>Python for local applications, notebooks, and scripts.</li>
+            <li>TypeScript for Node.js services and tooling.</li>
             <li>Go for cgo-backed native workflows.</li>
           </ul>
-          <p class="muted">
-            Published Python wheels and TypeScript tarballs are expected to bundle <span class="inline-code">liblattice</span>
-            on supported platforms. Go uses an installed-prefix or repo-local shared-library workflow.
-          </p>
         </div>
 
         <div class="install-panel">
@@ -882,25 +1038,25 @@
           </div>
 
           <section class="install-pane is-active" id="install-cli" role="tabpanel" aria-labelledby="tab-cli">
-            <strong>CLI install</strong>
+            <strong>CLI</strong>
             <pre class="command-block">curl -fsSL https://raw.githubusercontent.com/jeffhajewski/latticedb/main/dist/install.sh | bash</pre>
-            <p class="command-caption">Best starting point if you want the shortest path to a working database file.</p>
+            <p class="command-caption">Fastest way to create a database file and run the quickstart.</p>
           </section>
 
           <section class="install-pane" id="install-python" role="tabpanel" aria-labelledby="tab-python" hidden>
-            <strong>Python install</strong>
+            <strong>Python</strong>
             <pre class="command-block">pip install latticedb</pre>
-            <p class="command-caption">For local applications, notebooks, and scripts. Supported wheels are expected to bundle the native library.</p>
+            <p class="command-caption">For local applications, notebooks, and scripts.</p>
           </section>
 
           <section class="install-pane" id="install-ts" role="tabpanel" aria-labelledby="tab-ts" hidden>
-            <strong>TypeScript / Node.js install</strong>
+            <strong>TypeScript / Node.js</strong>
             <pre class="command-block">npm install @hajewski/latticedb</pre>
-            <p class="command-caption">For Node services and tooling. Supported package tarballs are expected to bundle the native library.</p>
+            <p class="command-caption">For Node services and tooling.</p>
           </section>
 
           <section class="install-pane" id="install-go" role="tabpanel" aria-labelledby="tab-go" hidden>
-            <strong>Go workflow</strong>
+            <strong>Go</strong>
             <pre class="command-block">zig build install --prefix /tmp/lattice-install
 export PKG_CONFIG_PATH=/tmp/lattice-install/lib/pkgconfig
 # macOS
@@ -908,102 +1064,9 @@ export DYLD_LIBRARY_PATH=/tmp/lattice-install/lib
 # Linux
 export LD_LIBRARY_PATH=/tmp/lattice-install/lib
 cd bindings/go && go test ./...</pre>
-            <p class="command-caption">Go is cgo-backed today. For repo-local development, build the shared library and use <span class="inline-code">go test -tags repolocal ./...</span>.</p>
+            <p class="command-caption">For repo-local development, use <span class="inline-code">go test -tags repolocal ./...</span>.</p>
           </section>
         </div>
-      </div>
-
-      <div class="data-rail">
-        <article class="rail-card">
-          <span class="micro">starting points</span>
-          <strong>Recommended sequence</strong>
-          <pre class="mini-terminal">CLI         import data / run queries / inspect files
-Python      local apps / scripts / notebooks
-TypeScript  Node services / tooling
-Go          installed prefix or repo-local cgo workflow</pre>
-          <p class="muted">This keeps the install section useful for both first-time users and people evaluating whether the binding model fits their stack.</p>
-        </article>
-
-        <aside class="rail-card rail-card--metrics">
-          <span class="micro">bench notes</span>
-          <div class="metric-list">
-            <div class="metric-card">
-              <span class="micro">node lookup</span>
-              <div class="metric-value">0.13 μs</div>
-              <p>Cached point lookup from the benchmark table.</p>
-            </div>
-            <div class="metric-card">
-              <span class="micro">vector search / 1M</span>
-              <div class="metric-value">0.83 ms</div>
-              <p>10-NN search at one million vectors with 100% recall@10 in the README benchmark.</p>
-            </div>
-            <div class="metric-card">
-              <span class="micro">event path</span>
-              <div class="metric-value">1 WAL path</div>
-              <p>Durable named streams and graph changefeed share the same transactional durability path.</p>
-            </div>
-          </div>
-        </aside>
-      </div>
-    </section>
-
-    <section class="section shell reveal" id="why">
-      <div class="section-head">
-        <h2>Why this page should feel denser and calmer.</h2>
-        <p>
-          The visual reference here is not glossy SaaS. It is closer to a research lab index page,
-          a clean terminal surface, or a documentation front page that still feels designed.
-        </p>
-      </div>
-
-      <div class="split-layout">
-        <article class="split-card">
-          <span class="micro">core story</span>
-          <strong>One engine for three ways of asking for data.</strong>
-          <p>
-            Traversal, vector similarity, and BM25 full-text search belong in the same mental model.
-            The site should make that visible early instead of treating them as scattered subfeatures.
-          </p>
-          <ul>
-            <li>Traverse relationships across author, document, and chunk structure.</li>
-            <li>Search embeddings with HNSW-based vector similarity.</li>
-            <li>Index and search text with BM25.</li>
-            <li>Consume durable graph and application events from the same file.</li>
-          </ul>
-        </article>
-
-        <article class="split-card" style="background: var(--panel);">
-          <span class="micro">anti-slop rules used here</span>
-          <strong>Minimal does not mean empty.</strong>
-          <p>
-            This concept uses visible 1px structure, asymmetry, typographic scale, and text-first
-            blocks rather than glossy cards, gradients, or dashboard wallpaper.
-          </p>
-          <ul>
-            <li>No dependency-heavy frontend stack.</li>
-            <li>No decorative icon library dependence.</li>
-            <li>No generic three-card hero row as the main story.</li>
-            <li>Information remains visible above the fold.</li>
-          </ul>
-        </article>
-      </div>
-
-      <div class="three-lane">
-        <article>
-          <span class="micro">01 / single file</span>
-          <strong>Your database is a portable file, not a service to babysit.</strong>
-          <p>That point deserves headline treatment because it changes setup, deployment, demos, and local iteration.</p>
-        </article>
-        <article>
-          <span class="micro">02 / local-first</span>
-          <strong>Designed for one owning process on one machine.</strong>
-          <p>That constraint should be framed as a deliberate operating model, not as a limitation buried in notes.</p>
-        </article>
-        <article>
-          <span class="micro">03 / streams</span>
-          <strong>Graph writes and durable streams share the same durability path.</strong>
-          <p>This is unusual enough that the site should give it a dedicated lane instead of a stray bullet point.</p>
-        </article>
       </div>
     </section>
 
@@ -1011,62 +1074,65 @@ Go          installed prefix or repo-local cgo workflow</pre>
       <div class="section-head">
         <h2>Five-minute path.</h2>
         <p>
-          The current getting-started guide is good. This experiment compresses it into a single
-          visual strip so a visitor can tell whether the product is easy before scrolling farther.
+          Build or install the CLI, create a file, import the sample graph, and run a query.
         </p>
       </div>
 
       <div class="path-grid">
         <article class="path-step">
           <span class="micro">step 01</span>
-          <strong>Create a database.</strong>
+          <div>
+            <strong>Create a database.</strong>
+            <p>Use the installed CLI or the local binary from <code>zig build</code>.</p>
+          </div>
           <pre class="mini-terminal">$LATTICE create /tmp/lattice-quickstart.lattice</pre>
-          <p>Either install the CLI or build locally with <code>zig build</code> and point <code>$LATTICE</code> at <code>./zig-out/bin/lattice</code>.</p>
         </article>
         <article class="path-step">
           <span class="micro">step 02</span>
-          <strong>Import the sample graph.</strong>
+          <div>
+            <strong>Import the sample graph.</strong>
+            <p>Load the repository’s author/document graph.</p>
+          </div>
           <pre class="mini-terminal">$LATTICE import /tmp/lattice-quickstart.lattice \
   --file=examples/cli/people_graph.json</pre>
-          <p>Start from a small author/document graph instead of a blank database.</p>
         </article>
         <article class="path-step">
           <span class="micro">step 03</span>
-          <strong>Inspect counts.</strong>
+          <div>
+            <strong>Inspect counts.</strong>
+            <p>Confirm the file exists and the import worked.</p>
+          </div>
           <pre class="mini-terminal">$LATTICE count /tmp/lattice-quickstart.lattice</pre>
-          <p>Quick feedback that the file exists, the import worked, and the graph is queryable.</p>
         </article>
         <article class="path-step">
           <span class="micro">step 04</span>
-          <strong>Run a query file.</strong>
+          <div>
+            <strong>Run a query file.</strong>
+            <p>Execute the quickstart Cypher query, then run <code>$LATTICE check</code>.</p>
+          </div>
           <pre class="mini-terminal">$LATTICE exec /tmp/lattice-quickstart.lattice \
   --file=examples/cli/authored_docs.cypher</pre>
-          <p>Then verify file checksums with <code>$LATTICE check /tmp/lattice-quickstart.lattice</code>.</p>
         </article>
       </div>
     </section>
 
     <section class="section shell reveal" id="query">
       <div class="section-head">
-        <h2>Show the query model, not just the promise.</h2>
+        <h2>Query model</h2>
         <p>
-          The fastest way to explain LatticeDB is to show one snippet that crosses vector, text, and
-          graph traversal in the same query path.
+          LatticeDB uses one query layer for graph traversal, vector similarity, and BM25 full-text
+          search. This is the simplest way to show what that means.
         </p>
       </div>
 
       <div class="code-layout">
         <article class="code-card">
-          <span class="micro">example shape</span>
-          <strong>One query layer.</strong>
-          <p>
-            This is the part that should anchor the page: not marketing abstraction, but one concise
-            example that proves why these primitives belong together.
-          </p>
+          <span class="micro">example</span>
+          <strong>One query across graph, vector, and text.</strong>
           <ul>
-            <li>Match chunks and walk to documents and authors.</li>
-            <li>Filter semantically with vector distance.</li>
-            <li>Add lexical precision with BM25 full-text conditions.</li>
+            <li>Match chunks, documents, and authors as graph structure.</li>
+            <li>Filter by vector distance on the chunk embedding.</li>
+            <li>Filter by BM25 full-text match on document content.</li>
           </ul>
         </article>
 
@@ -1077,73 +1143,78 @@ WHERE chunk.embedding &lt;=&gt; $query_vector &lt; 0.3
 RETURN doc.title, chunk.text, author.name
 ORDER BY chunk.embedding &lt;=&gt; $query_vector
 LIMIT 10</pre>
-          <p class="muted">That combination is the thesis of the product, so the redesign keeps it physically near the install path and quickstart.</p>
         </article>
       </div>
     </section>
 
     <section class="section shell reveal" id="notes">
       <div class="section-head">
-        <h2>Important information should read like field notes.</h2>
+        <h2>Facts</h2>
         <p>
-          This section keeps key operational facts visible without drifting into FAQ sprawl or
-          feature-card repetition.
+          Embedded, single file, single writer, WAL-backed durability.
         </p>
       </div>
 
       <div class="stack-layout">
         <article class="stack-card">
-          <span class="micro">operating notes</span>
-          <strong>What a serious reader wants to know early.</strong>
+          <span class="micro">operating model</span>
+          <strong>Core facts.</strong>
           <ul>
-            <li>Embedded, single-file, local-first database.</li>
+            <li>Embedded property-graph database.</li>
+            <li>Single-file storage model.</li>
             <li>Single-writer model for one owning process.</li>
             <li>WAL-backed durability for graph writes and streams.</li>
-            <li>Bindings for Python, TypeScript, and Go on top of the stable C ABI.</li>
-            <li>Examples include graph/vector/text retrieval demos.</li>
+            <li>Bindings for Python, TypeScript, and Go.</li>
           </ul>
         </article>
 
         <article class="stack-card" style="background: var(--panel);">
           <span class="micro">benchmark snapshot</span>
-          <strong>Performance numbers that matter on the front page.</strong>
+          <strong>Core operation timings.</strong>
           <pre class="mini-terminal">node lookup                  0.13 μs
 node creation                0.65 μs
 edge traversal               9 μs
 full-text search (100 docs)  19 μs
 10-NN vector search (1M)     0.83 ms</pre>
-          <p class="muted">The redesign treats these as proof points, not as buried appendix material.</p>
         </article>
       </div>
     </section>
 
     <footer class="section shell reveal">
       <div class="section-head">
-        <h2>Experimental directory, not a replacement.</h2>
+        <h2>More information</h2>
         <p>
-          This page is meant to live beside the current site so you can iterate on voice, motion,
-          density, and install ergonomics without disturbing the existing landing page.
+          The README and getting started guide have the full benchmark tables, examples, and binding
+          details.
         </p>
       </div>
 
       <div class="footer-grid">
         <div>
-          <span class="micro">directory</span>
-          <strong>website/experimental/</strong>
-          <p>A contained surface for trying a more research-lab, text-forward presentation style.</p>
-        </div>
-        <div>
-          <span class="micro">docs worth linking</span>
+          <span class="micro">docs</span>
+          <strong>Primary references</strong>
           <div class="footer-links">
-            <a href="../index.html">current site</a>
             <a href="https://github.com/jeffhajewski/latticedb#readme" target="_blank" rel="noreferrer">README</a>
-            <a href="https://github.com/jeffhajewski/latticedb/blob/main/docs/getting_started.md" target="_blank" rel="noreferrer">getting started</a>
+            <a href="https://github.com/jeffhajewski/latticedb/blob/main/docs/getting_started.md" target="_blank" rel="noreferrer">Getting started</a>
             <a href="https://github.com/jeffhajewski/latticedb/tree/main/examples/cli" target="_blank" rel="noreferrer">CLI quickstart</a>
           </div>
         </div>
         <div>
-          <span class="micro">next iteration ideas</span>
-          <p>Add an ASCII query playground, a stream/changefeed visual, and a sharper comparison between graph-only, vector-only, and unified local workflows.</p>
+          <span class="micro">examples</span>
+          <strong>Repository</strong>
+          <div class="footer-links">
+            <a href="https://github.com/jeffhajewski/latticedb/tree/main/examples" target="_blank" rel="noreferrer">Examples</a>
+            <a href="https://github.com/jeffhajewski/latticedb/tree/main/bindings/python" target="_blank" rel="noreferrer">Python binding</a>
+            <a href="https://github.com/jeffhajewski/latticedb/tree/main/bindings/typescript" target="_blank" rel="noreferrer">TypeScript binding</a>
+          </div>
+        </div>
+        <div>
+          <span class="micro">source</span>
+          <strong>GitHub</strong>
+          <div class="footer-links">
+            <a href="../index.html">Current site</a>
+            <a href="https://github.com/jeffhajewski/latticedb" target="_blank" rel="noreferrer">Repository</a>
+          </div>
         </div>
       </div>
     </footer>
@@ -1185,117 +1256,343 @@ full-text search (100 docs)  19 μs
     }());
 
     (function () {
-      const graph = document.getElementById('ascii-graph');
-      if (!graph) return;
+      const canvas = document.getElementById('graph-canvas');
+      if (!canvas) return;
 
+      const ctx = canvas.getContext('2d', { alpha: true });
+      if (!ctx) return;
       const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-      const columns = 62;
-      const rows = 34;
-      const centerX = columns / 2;
-      const centerY = rows / 2;
-      const timeStart = performance.now();
-      const nodeCount = 16;
-      const nodes = Array.from({ length: nodeCount }, (_, i) => {
-        const angle = (Math.PI * 2 * i) / nodeCount;
-        const ring = i % 2 === 0 ? 0.78 : 0.54;
-        return {
-          angle,
-          ring,
-          speed: 0.00018 + (i % 5) * 0.00005,
-          phase: i * 0.91,
-          jitter: 0.7 + (i % 4) * 0.12,
-          glyph: i % 5 === 0 ? '@' : i % 3 === 0 ? 'o' : '*'
+      const dpr = Math.min(window.devicePixelRatio || 1, 2);
+      let width = 0;
+      let height = 0;
+      let running = true;
+      let lastFrame = -Infinity;
+      let frameRequest = 0;
+      const frameInterval = 1000 / 24;
+
+      function random(seed) {
+        let state = seed >>> 0;
+        return function () {
+          state = (1664525 * state + 1013904223) >>> 0;
+          return state / 4294967296;
         };
+      }
+
+      const rand = random(718231);
+      const nodes = [];
+      const nodeCount = 520;
+      let attempts = 0;
+      while (nodes.length < nodeCount && attempts < nodeCount * 100) {
+        attempts += 1;
+        const theta = rand() * Math.PI * 2;
+        const radial = Math.sqrt(rand());
+        if (radial < 0.15 && rand() < 0.48) continue;
+        const contour = 1 + Math.sin(theta * 3.3) * 0.055 + Math.cos(theta * 5.1) * 0.035;
+        const x = 50 + Math.cos(theta) * radial * 44 * contour + (rand() - 0.5) * 1.6;
+        const y = 32 + Math.sin(theta) * radial * 25.8 * contour + Math.sin(theta * 2) * 1.4 * radial + (rand() - 0.5) * 1.25;
+        nodes.push({
+          id: nodes.length,
+          x,
+          y,
+          theta,
+          radial,
+          phase: rand() * Math.PI * 2,
+          r: 0.21 + rand() * 0.04,
+          amp: 0.42 + rand() * 0.48
+        });
+      }
+
+      function distance(a, b) {
+        return Math.hypot(a.x - b.x, a.y - b.y);
+      }
+
+      const edgeKeys = new Set();
+      const edges = [];
+      const adjacency = nodes.map(() => []);
+      function edgeKey(a, b) {
+        return `${Math.min(a, b)}:${Math.max(a, b)}`;
+      }
+      function addEdge(from, to) {
+        if (from === to) return;
+        const key = edgeKey(from, to);
+        if (edgeKeys.has(key)) return;
+        edgeKeys.add(key);
+        const edge = { from, to, key };
+        edges.push(edge);
+        adjacency[from].push(to);
+        adjacency[to].push(from);
+      }
+
+      nodes.forEach((node, index) => {
+        const nearest = nodes
+          .map((candidate, candidateIndex) => ({ candidateIndex, d: candidateIndex === index ? Infinity : distance(node, candidate) }))
+          .sort((a, b) => a.d - b.d)
+          .slice(0, node.radial > 0.7 ? 7 : 6);
+        nearest.forEach(({ candidateIndex }) => addEdge(index, candidateIndex));
       });
 
-      function makeGrid() {
-        return Array.from({ length: rows }, () => Array.from({ length: columns }, () => ' '));
+      for (let i = 0; i < 260; i += 1) {
+        const from = Math.floor(rand() * nodes.length);
+        const source = nodes[from];
+        const candidates = nodes
+          .map((candidate, candidateIndex) => ({
+            candidateIndex,
+            score: Math.abs(Math.atan2(Math.sin(candidate.theta - source.theta), Math.cos(candidate.theta - source.theta))) * 1.15 + Math.abs(candidate.radial - source.radial) * 0.72 + rand() * 0.38
+          }))
+          .filter((item) => item.candidateIndex !== from)
+          .sort((a, b) => a.score - b.score)
+          .slice(7, 28);
+        addEdge(from, candidates[i % candidates.length].candidateIndex);
       }
 
-      function plot(grid, x, y, char) {
-        if (x < 0 || x >= columns || y < 0 || y >= rows) return;
-        grid[y][x] = char;
-      }
+      const anchor = (targetX, targetY) => nodes
+        .map((node, index) => ({ index, d: Math.hypot(node.x - targetX, node.y - targetY) }))
+        .sort((a, b) => a.d - b.d)[0].index;
 
-      function drawLine(grid, x1, y1, x2, y2) {
-        let dx = Math.abs(x2 - x1);
-        let sx = x1 < x2 ? 1 : -1;
-        let dy = -Math.abs(y2 - y1);
-        let sy = y1 < y2 ? 1 : -1;
-        let err = dx + dy;
-        let x = x1;
-        let y = y1;
-
-        while (true) {
-          const char = x1 === x2 ? '|' : y1 === y2 ? '-' : ((x2 - x1) * (y2 - y1) > 0 ? '\\' : '/');
-          if (grid[y][x] === ' ') grid[y][x] = char;
-          if (x === x2 && y === y2) break;
-          const e2 = 2 * err;
-          if (e2 >= dy) {
-            err += dy;
-            x += sx;
-          }
-          if (e2 <= dx) {
-            err += dx;
-            y += sy;
-          }
+      const branchTrees = [
+        {
+          mode: 'VECTOR',
+          root: anchor(11, 18),
+          branches: [
+            [anchor(11, 18), anchor(26, 16), anchor(43, 20), anchor(62, 25), anchor(85, 18)],
+            [anchor(11, 18), anchor(28, 25), anchor(48, 31), anchor(70, 36), anchor(90, 30)],
+            [anchor(11, 18), anchor(24, 31), anchor(44, 39), anchor(66, 48)],
+            [anchor(43, 20), anchor(58, 13), anchor(78, 15)],
+            [anchor(48, 31), anchor(63, 31), anchor(82, 42)]
+          ]
+        },
+        {
+          mode: 'BM25',
+          root: anchor(12, 48),
+          branches: [
+            [anchor(12, 48), anchor(27, 50), anchor(49, 44), anchor(72, 34), anchor(91, 32)],
+            [anchor(12, 48), anchor(31, 40), anchor(51, 34), anchor(75, 24)],
+            [anchor(12, 48), anchor(33, 55), anchor(55, 53), anchor(83, 52)],
+            [anchor(49, 44), anchor(62, 44), anchor(87, 43)],
+            [anchor(51, 34), anchor(67, 20), anchor(88, 18)]
+          ]
+        },
+        {
+          mode: 'GRAPH',
+          root: anchor(18, 32),
+          branches: [
+            [anchor(18, 32), anchor(35, 24), anchor(54, 21), anchor(75, 18), anchor(91, 22)],
+            [anchor(18, 32), anchor(37, 36), anchor(58, 40), anchor(83, 45)],
+            [anchor(18, 32), anchor(32, 48), anchor(55, 54), anchor(76, 52)],
+            [anchor(35, 24), anchor(52, 31), anchor(73, 32), anchor(91, 38)],
+            [anchor(37, 36), anchor(57, 29), anchor(77, 27)]
+          ]
+        },
+        {
+          mode: 'STREAM',
+          root: anchor(84, 50),
+          branches: [
+            [anchor(84, 50), anchor(66, 47), anchor(50, 42), anchor(31, 36), anchor(12, 34)],
+            [anchor(84, 50), anchor(70, 35), anchor(55, 28), anchor(35, 20)],
+            [anchor(84, 50), anchor(63, 55), anchor(42, 54), anchor(22, 48)],
+            [anchor(66, 47), anchor(78, 25), anchor(91, 17)],
+            [anchor(50, 42), anchor(68, 41), anchor(90, 44)]
+          ]
         }
+      ];
+
+      branchTrees.forEach((tree) => {
+        tree.branches.forEach((branch) => {
+          for (let i = 0; i < branch.length - 1; i += 1) addEdge(branch[i], branch[i + 1]);
+        });
+      });
+
+      const positions = nodes.map(() => ({ x: 0, y: 0 }));
+      function position(node, elapsed) {
+        if (reduceMotion) return { x: node.x, y: node.y };
+        const shear = Math.sin(elapsed * 0.00018) * 0.09;
+        return {
+          x: node.x + Math.sin(elapsed * 0.00072 + node.phase) * node.amp + (node.y - 32) * shear,
+          y: node.y + Math.cos(elapsed * 0.00065 + node.phase * 1.2) * node.amp * 0.7
+        };
+      }
+      function easeOutCubic(t) {
+        return 1 - Math.pow(1 - t, 3);
+      }
+      function project(point, rotation, driftX, driftY) {
+        const scale = Math.min(width / 100, height / 64) * 1.1;
+        const cx = width / 2;
+        const cy = height / 2;
+        const x = (point.x - 50) * scale;
+        const y = (point.y - 32) * scale;
+        const c = Math.cos(rotation);
+        const s = Math.sin(rotation);
+        return {
+          x: cx + x * c - y * s + driftX * scale,
+          y: cy + x * s + y * c + driftY * scale
+        };
+      }
+      function resize() {
+        const rect = canvas.getBoundingClientRect();
+        width = rect.width;
+        height = rect.height;
+        canvas.width = Math.max(1, Math.floor(width * dpr));
+        canvas.height = Math.max(1, Math.floor(height * dpr));
+        ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+        draw(performance.now(), true);
       }
 
-      function project(node, t) {
-        const orbit = node.angle + t * node.speed * 6;
-        const pulse = 1 + 0.18 * Math.sin(t * node.speed * 8 + node.phase);
-        const skew = Math.sin(orbit * 1.7 + node.phase) * 0.9;
-        const rx = (columns * 0.33) * node.ring * pulse;
-        const ry = (rows * 0.35) * node.ring * (0.84 + 0.14 * Math.cos(t * node.speed * 6 + node.phase));
-        const x = Math.round(centerX + Math.cos(orbit) * rx + Math.sin(t * node.speed * 10 + node.phase) * node.jitter);
-        const y = Math.round(centerY + Math.sin(orbit + skew * 0.08) * ry + Math.cos(t * node.speed * 7 + node.phase) * 0.65);
-        return { x, y, glyph: node.glyph };
+      function queueFrame() {
+        if (reduceMotion || frameRequest) return;
+        frameRequest = window.requestAnimationFrame((timestamp) => {
+          frameRequest = 0;
+          draw(timestamp);
+        });
       }
 
-      function frame(now) {
-        const t = now - timeStart;
-        const grid = makeGrid();
-        const points = nodes.map((node) => project(node, t));
+      const resizeObserver = new ResizeObserver(resize);
+      resizeObserver.observe(canvas);
+      resize();
 
-        for (let i = 0; i < points.length; i += 1) {
-          const a = points[i];
-          const b = points[(i + 1) % points.length];
-          const c = points[(i + 5) % points.length];
-          drawLine(grid, a.x, a.y, b.x, b.y);
-          if (i % 2 === 0) drawLine(grid, a.x, a.y, c.x, c.y);
+      function draw(now, force) {
+        if (!running && !force) return;
+        if (!force && now - lastFrame < frameInterval) {
+          queueFrame();
+          return;
         }
+        lastFrame = now;
+        ctx.clearRect(0, 0, width, height);
 
-        points.forEach((point, index) => {
-          plot(grid, point.x, point.y, point.glyph);
-          if (index % 4 === 0) {
-            plot(grid, point.x + 1, point.y, '.');
-          }
+        const cycleMs = 4200;
+        const burstMs = 1800;
+        const cycleIndex = Math.floor(now / cycleMs);
+        const tree = branchTrees[cycleIndex % branchTrees.length];
+        const cycleT = now % cycleMs;
+        const burstActive = cycleT < burstMs;
+        canvas.parentElement.dataset.mode = tree.mode;
+        canvas.parentElement.style.setProperty('--graph-meta', tree.mode === 'VECTOR' ? `'OUTPUT VECTOR  SEED: HNSW'` : tree.mode === 'BM25' ? `'OUTPUT BM25  SEED: TERM'` : tree.mode === 'STREAM' ? `'OUTPUT STREAM  SEED: WAL'` : `'OUTPUT PATH  SEED: CYPHER'`);
+
+        const rotation = reduceMotion ? 0 : (Math.sin(now * 0.00018) * 5 + now * 0.0014) * Math.PI / 180;
+        const driftX = reduceMotion ? 0 : Math.sin(now * 0.00028) * 1.8;
+        const driftY = reduceMotion ? 0 : Math.cos(now * 0.00024) * 1.2;
+        nodes.forEach((node, index) => {
+          positions[index] = project(position(node, now), rotation, driftX, driftY);
         });
 
-        const labels = [
-          '  LATTICEDB GRAPH FIELD',
-          '  graph / vector / text / streams',
-          '',
-        ];
-
-        labels.forEach((line, rowIndex) => {
-          for (let i = 0; i < line.length && i < columns; i += 1) {
-            grid[rowIndex][i] = line[i];
-          }
+        const activePairs = new Set();
+        const activeNodes = new Set([tree.root]);
+        tree.branches.forEach((branch) => {
+          branch.forEach((nodeIndex) => activeNodes.add(nodeIndex));
+          for (let i = 0; i < branch.length - 1; i += 1) activePairs.add(edgeKey(branch[i], branch[i + 1]));
         });
 
-        const footer = '  local-first topology    ' + String(Math.round((t / 1000) % 100)).padStart(2, '0') + 's';
-        for (let i = 0; i < footer.length && i < columns; i += 1) {
-          grid[rows - 1][i] = footer[i];
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = 'rgba(7,7,6,0.34)';
+        ctx.lineWidth = 0.55;
+        edges.forEach((edge) => {
+          const active = activePairs.has(edge.key);
+          if (active) return;
+          const a = positions[edge.from];
+          const b = positions[edge.to];
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+        });
+
+        ctx.fillStyle = 'rgba(7,7,6,0.7)';
+        nodes.forEach((node, index) => {
+          if (activeNodes.has(index)) return;
+          const p = positions[index];
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, Math.max(0.8, node.r * 2.1), 0, Math.PI * 2);
+          ctx.fill();
+        });
+
+        // Cluster highlights: when a pulse reaches a node, its immediate local subgraph lights up briefly.
+        const pulseTracks = tree.branches.flatMap((branch, branchIndex) => branch.slice(0, -1).map((from, index) => ({ from, to: branch[index + 1], depth: index, branchIndex })));
+        const clusterNodes = new Set();
+        const clusterPairs = new Set();
+        const livePulses = [];
+        if (burstActive) {
+          pulseTracks.forEach((track, trackIndex) => {
+            const branchDelay = track.branchIndex * 0.07;
+            const depthDelay = track.depth * 0.12;
+            const start = (branchDelay + depthDelay) * burstMs;
+            const local = (cycleT - start) / (burstMs * 0.64);
+            if (local < 0 || local > 1.12) return;
+            const progress = easeOutCubic(Math.min(1, local));
+            livePulses.push({ track, progress, local, trackIndex });
+            if (local > 0.56) {
+              const hit = track.to;
+              clusterNodes.add(hit);
+              adjacency[hit].slice(0, 8).forEach((neighbor) => {
+                clusterNodes.add(neighbor);
+                clusterPairs.add(edgeKey(hit, neighbor));
+              });
+            }
+          });
         }
 
-        graph.textContent = grid.map((row) => row.join('')).join('\n');
+        ctx.strokeStyle = 'rgba(7,7,6,0.62)';
+        ctx.lineWidth = 0.75;
+        edges.forEach((edge) => {
+          if (!clusterPairs.has(edge.key) || activePairs.has(edge.key)) return;
+          const a = positions[edge.from];
+          const b = positions[edge.to];
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+        });
 
-        if (!reduceMotion) window.requestAnimationFrame(frame);
+        ctx.strokeStyle = 'rgba(7,7,6,0.96)';
+        ctx.lineWidth = 1.55;
+        edges.forEach((edge) => {
+          if (!activePairs.has(edge.key)) return;
+          const a = positions[edge.from];
+          const b = positions[edge.to];
+          ctx.beginPath();
+          ctx.moveTo(a.x, a.y);
+          ctx.lineTo(b.x, b.y);
+          ctx.stroke();
+        });
+
+        ctx.fillStyle = 'rgba(7,7,6,0.92)';
+        clusterNodes.forEach((index) => {
+          const p = positions[index];
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 1.65, 0, Math.PI * 2);
+          ctx.fill();
+        });
+
+        ctx.fillStyle = 'rgba(7,7,6,1)';
+        activeNodes.forEach((index) => {
+          const p = positions[index];
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, 2.1, 0, Math.PI * 2);
+          ctx.fill();
+        });
+
+        ctx.fillStyle = 'rgba(7,7,6,1)';
+        livePulses.forEach(({ track, progress, local }) => {
+          if (local > 1) return;
+          const from = positions[track.from];
+          const to = positions[track.to];
+          const x = from.x + (to.x - from.x) * progress;
+          const y = from.y + (to.y - from.y) * progress;
+          ctx.globalAlpha = Math.max(0, 1 - Math.max(0, local - 0.74) * 2.8);
+          ctx.beginPath();
+          ctx.arc(x, y, 1.8, 0, Math.PI * 2);
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        });
+
+        if (running) queueFrame();
       }
 
-      frame(performance.now());
+      const visibilityObserver = new IntersectionObserver((entries) => {
+        running = entries.some((entry) => entry.isIntersecting);
+        if (running) draw(performance.now(), true);
+      }, { threshold: 0.05 });
+
+      visibilityObserver.observe(canvas);
+      draw(performance.now(), true);
     }());
 
     (function () {

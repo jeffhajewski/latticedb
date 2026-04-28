@@ -278,9 +278,9 @@ pub const CacheEntry = query.cache.CacheEntry;
 pub const CacheStats = query.cache.CacheStats;
 
 // Version information
-pub const VERSION = "0.5.0";
+pub const VERSION = "0.6.0";
 pub const VERSION_MAJOR = 0;
-pub const VERSION_MINOR = 5;
+pub const VERSION_MINOR = 6;
 pub const VERSION_PATCH = 0;
 
 test {

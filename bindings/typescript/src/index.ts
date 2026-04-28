@@ -87,6 +87,6 @@ export function version(): string {
     const { getFFI } = require('./ffi');
     return getFFI().version();
   } catch {
-    return '0.5.0';
+    return '0.6.0';
   }
 }

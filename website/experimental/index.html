@@ -1458,10 +1458,8 @@ full-text search (100 docs)  19 μs
 
       branchTrees.forEach((tree) => {
         const activePairs = new Set();
-        const activeNodes = new Set([tree.root]);
         const pulseTracks = [];
         tree.branches.forEach((branch, branchIndex) => {
-          branch.forEach((nodeIndex) => activeNodes.add(nodeIndex));
           for (let i = 0; i < branch.length - 1; i += 1) {
             addEdge(branch[i], branch[i + 1]);
             activePairs.add(edgeKey(branch[i], branch[i + 1]));
@@ -1474,7 +1472,6 @@ full-text search (100 docs)  19 μs
           }
         });
         tree.activePairs = activePairs;
-        tree.activeNodes = activeNodes;
         tree.pulseTracks = pulseTracks;
       });
       const branchOrder = [0, 7, 2, 9, 4, 11, 6, 5, 8, 3, 10, 1];
@@ -1570,7 +1567,6 @@ full-text search (100 docs)  19 μs
         });
 
         const activePairs = tree.activePairs;
-        const activeNodes = tree.activeNodes;
         const pulseTracks = tree.pulseTracks;
 
         ctx.lineCap = 'round';
@@ -1578,8 +1574,6 @@ full-text search (100 docs)  19 μs
         ctx.lineWidth = 0.55;
         ctx.beginPath();
         edges.forEach((edge) => {
-          const active = activePairs.has(edge.key);
-          if (active) return;
           const a = positions[edge.from];
           const b = positions[edge.to];
           ctx.moveTo(a.x, a.y);
@@ -1590,7 +1584,6 @@ full-text search (100 docs)  19 μs
         ctx.fillStyle = 'rgba(7,7,6,0.7)';
         ctx.beginPath();
         nodes.forEach((node, index) => {
-          if (activeNodes.has(index)) return;
           const p = positions[index];
           const radius = Math.max(0.8, node.r * 2.1);
           ctx.moveTo(p.x + radius, p.y);
@@ -1601,6 +1594,8 @@ full-text search (100 docs)  19 μs
         // Cluster highlights: when a pulse reaches a node, its immediate local subgraph lights up briefly.
         const clusterNodes = new Set();
         const clusterPairs = new Set();
+        const routeNodes = new Set([tree.root]);
+        const routeSegments = [];
         const livePulses = [];
         if (burstActive) {
           pulseTracks.forEach((track, trackIndex) => {
@@ -1610,9 +1605,12 @@ full-text search (100 docs)  19 μs
             const local = (cycleT - start) / (burstMs * 0.6);
             if (local < 0 || local > 1.12) return;
             const progress = easeOutCubic(Math.min(1, local));
+            routeNodes.add(track.from);
+            routeSegments.push({ track, progress });
             livePulses.push({ track, progress, local, trackIndex });
             if (local > 0.56) {
               const hit = track.to;
+              routeNodes.add(hit);
               clusterNodes.add(hit);
               adjacency[hit].slice(0, 8).forEach((neighbor) => {
                 clusterNodes.add(neighbor);
@@ -1637,12 +1635,13 @@ full-text search (100 docs)  19 μs
         ctx.strokeStyle = 'rgba(7,7,6,0.62)';
         ctx.lineWidth = 0.75;
         ctx.beginPath();
-        edges.forEach((edge) => {
-          if (!activePairs.has(edge.key)) return;
-          const a = positions[edge.from];
-          const b = positions[edge.to];
-          ctx.moveTo(a.x, a.y);
-          ctx.lineTo(b.x, b.y);
+        routeSegments.forEach(({ track, progress }) => {
+          const from = positions[track.from];
+          const to = positions[track.to];
+          const x = from.x + (to.x - from.x) * progress;
+          const y = from.y + (to.y - from.y) * progress;
+          ctx.moveTo(from.x, from.y);
+          ctx.lineTo(x, y);
         });
         ctx.stroke();
 
@@ -1657,7 +1656,7 @@ full-text search (100 docs)  19 μs
 
         ctx.fillStyle = 'rgba(7,7,6,1)';
         ctx.beginPath();
-        activeNodes.forEach((index) => {
+        routeNodes.forEach((index) => {
           const p = positions[index];
           ctx.moveTo(p.x + 2.1, p.y);
           ctx.arc(p.x, p.y, 2.1, 0, Math.PI * 2);

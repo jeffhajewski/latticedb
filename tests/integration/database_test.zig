@@ -1356,6 +1356,108 @@ test "database: vector search finds similar nodes" {
     try std.testing.expectEqual(n2, results[1].node_id);
 }
 
+test "database: rejects invalid vector dimensions" {
+    const allocator = std.testing.allocator;
+
+    const zero_path = "/tmp/lattice_vector_zero_dims_test.ltdb";
+    std.fs.cwd().deleteFile(zero_path) catch {};
+    defer std.fs.cwd().deleteFile(zero_path) catch {};
+    try std.testing.expectError(error.InvalidArgument, Database.open(allocator, zero_path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = false,
+            .enable_fts = false,
+            .enable_vector = true,
+            .vector_dimensions = 0,
+        },
+    }));
+
+    const too_large_path = "/tmp/lattice_vector_too_large_dims_test.ltdb";
+    std.fs.cwd().deleteFile(too_large_path) catch {};
+    defer std.fs.cwd().deleteFile(too_large_path) catch {};
+    try std.testing.expectError(error.InvalidArgument, Database.open(allocator, too_large_path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = false,
+            .enable_fts = false,
+            .enable_vector = true,
+            .vector_dimensions = 4097,
+        },
+    }));
+}
+
+test "database: rejects vector insert and query dimension mismatches" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_vector_dimension_mismatch_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = false,
+            .enable_fts = false,
+            .enable_vector = true,
+            .vector_dimensions = 4,
+        },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    const node = try db.createNode(null, &[_][]const u8{"Embedding"});
+    try std.testing.expectError(error.InvalidArgument, db.setNodeVector(node, &[_]f32{ 1.0, 2.0, 3.0 }));
+
+    try db.setNodeVector(node, &[_]f32{ 1.0, 0.0, 0.0, 0.0 });
+    try std.testing.expectError(error.InvalidArgument, db.vectorSearch(&[_]f32{ 1.0, 0.0, 0.0 }, 1, null));
+}
+
+test "database: vector search supports 4096 dimensions" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_vector_4096_integration_test.ltdb";
+
+    std.fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = false,
+            .enable_fts = false,
+            .enable_vector = true,
+            .vector_dimensions = 4096,
+        },
+    });
+    defer {
+        db.close();
+        std.fs.cwd().deleteFile(path) catch {};
+    }
+
+    var exact: [4096]f32 = [_]f32{0.0} ** 4096;
+    exact[0] = 1.0;
+    var near: [4096]f32 = [_]f32{0.0} ** 4096;
+    near[0] = 0.95;
+    near[1] = 0.05;
+    var far: [4096]f32 = [_]f32{0.0} ** 4096;
+    far[512] = 1.0;
+
+    const n1 = try db.createNode(null, &[_][]const u8{"Embedding"});
+    try db.setNodeVector(n1, &exact);
+
+    const n2 = try db.createNode(null, &[_][]const u8{"Embedding"});
+    try db.setNodeVector(n2, &near);
+
+    const n3 = try db.createNode(null, &[_][]const u8{"Embedding"});
+    try db.setNodeVector(n3, &far);
+
+    const results = try db.vectorSearch(&exact, 3, null);
+    defer db.freeVectorSearchResults(results);
+
+    try std.testing.expectEqual(@as(usize, 3), results.len);
+    try std.testing.expectEqual(n1, results[0].node_id);
+    try std.testing.expectEqual(n2, results[1].node_id);
+}
+
 // ============================================================================
 // Stress Tests
 // ============================================================================

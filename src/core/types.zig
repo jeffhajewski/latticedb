@@ -149,6 +149,23 @@ pub const VectorDimension = u16;
 /// Maximum supported vector dimensions
 pub const MAX_VECTOR_DIMENSIONS: VectorDimension = 4096;
 
+/// Vector dimension validation error
+pub const VectorDimensionError = error{
+    InvalidVectorDimensions,
+};
+
+/// Return true when a vector dimension count is within the supported range.
+pub fn isValidVectorDimensions(dimensions: anytype) bool {
+    return dimensions > 0 and dimensions <= MAX_VECTOR_DIMENSIONS;
+}
+
+/// Validate a vector dimension count against the supported range.
+pub fn validateVectorDimensions(dimensions: anytype) VectorDimensionError!void {
+    if (!isValidVectorDimensions(dimensions)) {
+        return VectorDimensionError.InvalidVectorDimensions;
+    }
+}
+
 /// Error codes for database operations
 pub const Error = error{
     OutOfMemory,

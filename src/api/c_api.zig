@@ -458,6 +458,15 @@ fn cVectorToSlice(ptr: [*c]const f32, dimensions: u32) ValueConversionError![]co
     return ptr[0..dimensions];
 }
 
+fn isValidEmbeddingDimensions(dimensions: u32) bool {
+    return types.isValidVectorDimensions(dimensions);
+}
+
+fn cEmbeddingVectorToSlice(ptr: [*c]const f32, dimensions: u32) ?[]const f32 {
+    if (ptr == null or !isValidEmbeddingDimensions(dimensions)) return null;
+    return ptr[0..dimensions];
+}
+
 fn freeOwnedCValue(c_val: *lattice_value) void {
     switch (c_val.value_type) {
         .string => {
@@ -1488,10 +1497,8 @@ pub export fn lattice_node_set_vector(
     // In future, we could support multiple vectors per node with different keys
     _ = key;
 
-    if (vector == null or dimensions == 0) return .err_invalid_arg;
-
     // Convert C pointer to Zig slice
-    const vector_slice = vector[0..dimensions];
+    const vector_slice = cEmbeddingVectorToSlice(vector, dimensions) orelse return .err_invalid_arg;
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 
     txn_handle.db_handle.db.setNodeVectorInTxn(txn_ptr, node_id, vector_slice) catch |err| {
@@ -1536,7 +1543,7 @@ pub export fn lattice_batch_insert(
 
         // Validate
         const label_slice = cStrToSlice(spec.label) orelse return .err_invalid_arg;
-        if (spec.vector == null or spec.dimensions == 0) return .err_invalid_arg;
+        const vector_slice = cEmbeddingVectorToSlice(spec.vector, spec.dimensions) orelse return .err_invalid_arg;
 
         // Create node
         const labels = [_][]const u8{label_slice};
@@ -1545,7 +1552,6 @@ pub export fn lattice_batch_insert(
         };
 
         // Set vector
-        const vector_slice = spec.vector[0..spec.dimensions];
         txn_handle.db_handle.db.setNodeVectorInTxn(txn_ptr, node_id, vector_slice) catch |err| {
             return mapDatabaseError(err);
         };
@@ -1569,10 +1575,10 @@ pub export fn lattice_vector_search(
 ) lattice_error {
     const db_handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
 
-    if (vector == null or dimensions == 0 or k == 0) return .err_invalid_arg;
+    if (k == 0) return .err_invalid_arg;
 
     // Convert C pointer to Zig slice
-    const query_vector = vector[0..dimensions];
+    const query_vector = cEmbeddingVectorToSlice(vector, dimensions) orelse return .err_invalid_arg;
 
     // Perform the search
     const ef = if (ef_search == 0) null else ef_search;
@@ -1601,9 +1607,9 @@ pub export fn lattice_vector_search_txn(
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    if (vector == null or dimensions == 0 or k == 0) return .err_invalid_arg;
+    if (k == 0) return .err_invalid_arg;
 
-    const query_vector = vector[0..dimensions];
+    const query_vector = cEmbeddingVectorToSlice(vector, dimensions) orelse return .err_invalid_arg;
     const ef = if (ef_search == 0) null else ef_search;
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
     const results = txn_handle.db_handle.db.vectorSearchInTxn(txn_ptr, query_vector, k, ef) catch |err| {
@@ -2138,9 +2144,9 @@ pub export fn lattice_query_bind_vector(
     const query_handle = toHandle(QueryHandle, query) orelse return .err_invalid_arg;
     const name_slice = cStrToSlice(name) orelse return .err_invalid_arg;
 
-    if (vector == null or dimensions == 0) return .err_invalid_arg;
+    const vector_slice = cEmbeddingVectorToSlice(vector, dimensions) orelse return .err_invalid_arg;
 
-    const owned_value = (PropertyValue{ .vector_val = vector[0..dimensions] }).clone(global_allocator) catch return .err_out_of_memory;
+    const owned_value = (PropertyValue{ .vector_val = vector_slice }).clone(global_allocator) catch return .err_out_of_memory;
     return query_handle.storeOwnedParameter(name_slice, owned_value);
 }
 
@@ -2426,7 +2432,7 @@ pub export fn lattice_hash_embed(
     dims_out.* = 0;
 
     if (text == null or text_len == 0) return .err_invalid_arg;
-    if (dimensions == 0) return .err_invalid_arg;
+    if (!isValidEmbeddingDimensions(dimensions)) return .err_invalid_arg;
 
     const text_slice = text[0..text_len];
 

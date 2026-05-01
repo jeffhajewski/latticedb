@@ -132,7 +132,7 @@ typedef struct {
     uint32_t cache_size_mb; /* Cache size in MB (default: 100) */
     uint32_t page_size;     /* Page size in bytes (default: 4096) */
     bool enable_vector;     /* Enable vector storage for embeddings */
-    uint16_t vector_dimensions; /* Vector dimensions (default: 128) */
+    uint16_t vector_dimensions; /* Vector dimensions, 1..4096 (default: 128) */
 } lattice_open_options;
 
 /* Default open options */

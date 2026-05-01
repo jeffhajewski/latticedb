@@ -214,7 +214,7 @@ Vectors are stored in pages managed by the buffer pool, separate from the HNSW g
 │   page_type: u8 = 0x04 (vector_data)                          │
 │   dimensions: u16                                              │
 │   vector_count: u16                                            │
-│   next_page: u32 (overflow chain)                             │
+│   next_page: u32 (next vector page)                           │
 ├────────────────────────────────────────────────────────────────┤
 │ Slot 0: [vector_id: u64][f32 × dimensions]                    │
 │ Slot 1: [vector_id: u64][f32 × dimensions]                    │
@@ -222,10 +222,20 @@ Vectors are stored in pages managed by the buffer pool, separate from the HNSW g
 └────────────────────────────────────────────────────────────────┘
 ```
 
+Vectors up to 4096 dimensions are supported. Vectors that fit in one page use the packed slot layout above. Larger embeddings use a compact head record in the vector page:
+
+```
+[vector_id: u64][first_overflow_page: u32][reserved: u32]
+```
+
+The f32 payload is stored across linked 4096-byte overflow pages. Common embedding sizes such as 1536, 3072, and 4096 dimensions therefore persist normally; they just span multiple pages.
+
 Vectors per page depends on dimensions:
 - 384-dim (1536 bytes): 2 vectors/page
 - 768-dim (3072 bytes): 1 vector/page
-- 1536-dim (6144 bytes): spans multiple pages
+- 1536-dim (6144 bytes): head record plus 2 overflow pages
+- 3072-dim (12288 bytes): head record plus 4 overflow pages
+- 4096-dim (16384 bytes): head record plus 5 overflow pages
 
 ## Performance Characteristics
 

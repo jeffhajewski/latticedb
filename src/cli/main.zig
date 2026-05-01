@@ -63,7 +63,7 @@ pub fn main() !void {
         switch (err) {
             error.UnknownOption => output.printError(stderr, "Unknown option. Use 'lattice help' for available options.", .{}),
             error.InvalidFormat => output.printError(stderr, "Invalid format. Use: table, json, or csv", .{}),
-            error.InvalidVectorDims => output.printError(stderr, "Invalid vector dimensions. Must be a positive integer.", .{}),
+            error.InvalidVectorDims => output.printError(stderr, "Invalid vector dimensions. Must be in the range 1..4096.", .{}),
             error.InvalidCacheSize => output.printError(stderr, "Invalid cache size. Must be a positive integer.", .{}),
             error.InvalidBatchSize => output.printError(stderr, "Invalid batch size. Must be a positive integer.", .{}),
             else => output.printError(stderr, "Failed to parse arguments", .{}),
@@ -978,7 +978,7 @@ fn printUsage(writer: anytype) void {
         \\Options:
         \\  --format=<fmt>        Output format: table, json, csv (default: table)
         \\  --enable-vector       Enable vector index (for create)
-        \\  --vector-dims=<n>     Vector dimensions (default: 128)
+        \\  --vector-dims=<n>     Vector dimensions, 1..4096 (default: 128)
         \\  --enable-fts          Enable full-text search (default: on)
         \\  --no-fts              Disable full-text search
         \\  --cache-size=<mb>     Buffer pool size in MB (default: 64)

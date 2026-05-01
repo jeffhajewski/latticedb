@@ -1,6 +1,9 @@
 //! Command-line argument parsing for Lattice CLI.
 
 const std = @import("std");
+const lattice = @import("lattice");
+
+const types = lattice.core.types;
 
 /// Managed array list for allocator tracking
 fn ManagedArrayList(comptime T: type) type {
@@ -142,9 +145,11 @@ pub const Args = struct {
                     args.enable_vector = true;
                 } else if (std.mem.startsWith(u8, arg, "--vector-dims=")) {
                     const value = arg["--vector-dims=".len..];
-                    args.vector_dims = std.fmt.parseInt(u16, value, 10) catch {
+                    const parsed_dims = std.fmt.parseInt(u32, value, 10) catch {
                         return error.InvalidVectorDims;
                     };
+                    types.validateVectorDimensions(parsed_dims) catch return error.InvalidVectorDims;
+                    args.vector_dims = @intCast(parsed_dims);
                 } else if (std.mem.eql(u8, arg, "--enable-fts")) {
                     args.enable_fts = true;
                 } else if (std.mem.eql(u8, arg, "--no-fts")) {
@@ -243,4 +248,16 @@ test "parse format option" {
     defer args.deinit(allocator);
 
     try std.testing.expectEqual(OutputFormat.json, args.format);
+}
+
+test "parse vector dimensions range" {
+    const allocator = std.testing.allocator;
+    var args = try Args.parse(allocator, &.{ "lattice", "create", "test.db", "--enable-vector", "--vector-dims=4096" });
+    defer args.deinit(allocator);
+
+    try std.testing.expect(args.enable_vector);
+    try std.testing.expectEqual(@as(u16, 4096), args.vector_dims);
+
+    try std.testing.expectError(error.InvalidVectorDims, Args.parse(allocator, &.{ "lattice", "create", "test.db", "--vector-dims=0" }));
+    try std.testing.expectError(error.InvalidVectorDims, Args.parse(allocator, &.{ "lattice", "create", "test.db", "--vector-dims=4097" }));
 }

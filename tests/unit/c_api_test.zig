@@ -2328,6 +2328,130 @@ test "c_api: txn-scoped vector and fts searches hide uncommitted changes" {
     try std.testing.expectEqual(@as(u32, 1), c_api.lattice_fts_result_count(after_fts));
 }
 
+test "c_api: vector dimension validation returns invalid argument" {
+    const zero_path = "/tmp/lattice_capi_vector_zero_dims_test.db";
+    std.fs.cwd().deleteFile(zero_path) catch {};
+    defer std.fs.cwd().deleteFile(zero_path) catch {};
+
+    var db: ?*lattice_database = null;
+    const zero_options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = true,
+        .vector_dimensions = 0,
+    };
+    try std.testing.expectEqual(lattice_error.err_invalid_arg, c_api.lattice_open(zero_path, &zero_options, &db));
+    try std.testing.expect(db == null);
+
+    const too_large_path = "/tmp/lattice_capi_vector_too_large_dims_test.db";
+    std.fs.cwd().deleteFile(too_large_path) catch {};
+    defer std.fs.cwd().deleteFile(too_large_path) catch {};
+
+    const too_large_options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = true,
+        .vector_dimensions = 4097,
+    };
+    try std.testing.expectEqual(lattice_error.err_invalid_arg, c_api.lattice_open(too_large_path, &too_large_options, &db));
+    try std.testing.expect(db == null);
+
+    const path = "/tmp/lattice_capi_vector_wrong_dims_test.db";
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = true,
+        .vector_dimensions = 4,
+    };
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        std.fs.cwd().deleteFile(path) catch {};
+        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+    defer _ = c_api.lattice_rollback(txn);
+
+    var node: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Document", &node));
+
+    const short_vector = [_]f32{ 1.0, 2.0, 3.0 };
+    try std.testing.expectEqual(
+        lattice_error.err_invalid_arg,
+        c_api.lattice_node_set_vector(txn, node, "embedding", &short_vector, short_vector.len),
+    );
+
+    const dummy: f32 = 1.0;
+    var result: ?*lattice_vector_result = null;
+    try std.testing.expectEqual(
+        lattice_error.err_invalid_arg,
+        c_api.lattice_vector_search(db, &dummy, 4097, 1, 0, &result),
+    );
+    try std.testing.expect(result == null);
+}
+
+test "c_api: vector search supports large vectors" {
+    const path = "/tmp/lattice_capi_large_vector_test.db";
+    std.fs.cwd().deleteFile(path) catch {};
+    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 8,
+        .page_size = 4096,
+        .enable_vector = true,
+        .vector_dimensions = 1536,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        std.fs.cwd().deleteFile(path) catch {};
+        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+
+    var node: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Document", &node));
+
+    var embedding: [1536]f32 = [_]f32{0.0} ** 1536;
+    embedding[0] = 1.0;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_node_set_vector(txn, node, "embedding", &embedding, embedding.len),
+    );
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+
+    var result: ?*lattice_vector_result = null;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_vector_search(db, &embedding, embedding.len, 1, 0, &result),
+    );
+    defer c_api.lattice_vector_result_free(result);
+
+    try std.testing.expectEqual(@as(u32, 1), c_api.lattice_vector_result_count(result));
+    var found_node: lattice_node_id = 0;
+    var distance: f32 = 0.0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_vector_result_get(result, 0, &found_node, &distance));
+    try std.testing.expectEqual(node, found_node);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.0), distance, 0.001);
+}
+
 // ============================================================================
 // Utility Function Tests
 // ============================================================================

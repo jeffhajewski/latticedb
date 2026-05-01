@@ -838,8 +838,11 @@ pub const HnswIndex = struct {
         // Vector storage pages
         if (self.vector_count > 0) {
             const vpp: u64 = self.vector_storage.vectors_per_page;
-            const vector_pages = (self.vector_count + vpp - 1) / vpp;
-            total += vector_pages * PAGE_SIZE;
+            const head_pages = (self.vector_count + vpp - 1) / vpp;
+            total += head_pages * PAGE_SIZE;
+            if (self.vector_storage.usesOverflowPages()) {
+                total += self.vector_count * self.vector_storage.overflowPagesPerVector() * PAGE_SIZE;
+            }
         }
 
         return total;
@@ -862,12 +865,15 @@ pub const HnswIndex = struct {
 
     /// Search for k nearest neighbors
     pub fn search(self: *Self, query: []const f32, k: u32, ef_override: ?u16) HnswError![]SearchResult {
+        if (!types.isValidVectorDimensions(self.config.dimensions) or query.len != self.config.dimensions) {
+            return HnswError.DimensionMismatch;
+        }
+
         if (self.entry_point == null) {
             return self.allocator.alloc(SearchResult, 0) catch return HnswError.OutOfMemory;
         }
 
         const ef = ef_override orelse self.config.ef_search;
-        std.debug.assert(query.len == self.config.dimensions);
 
         // For cosine metric, normalize query to match stored normalized vectors
         var norm_buf: [4096]f32 = undefined;
@@ -917,10 +923,10 @@ pub const HnswIndex = struct {
 
             // Batch borrow all neighbor vectors
             const count = self.borrowNeighborVectors(neighbors, &batch_buf);
-            defer releaseBatch(batch_buf[0..count]);
 
             // Batch compute all distances
             self.batchComputeDistances(query, batch_buf[0..count], dist_buf[0..count]);
+            releaseBatch(batch_buf[0..count]);
 
             // Find minimum
             for (batch_buf[0..count], dist_buf[0..count]) |be, dist| {
@@ -995,10 +1001,10 @@ pub const HnswIndex = struct {
 
             // Phase 2: Borrow — pin all pages at once
             const batch_count = self.borrowNeighborVectors(unvisited_buf[0..unvisited_count], &batch_buf);
-            defer releaseBatch(batch_buf[0..batch_count]);
 
             // Phase 3: Compute — batch SIMD distances
             self.batchComputeDistances(query, batch_buf[0..batch_count], dist_buf[0..batch_count]);
+            releaseBatch(batch_buf[0..batch_count]);
 
             // Phase 4: Process — insert into priority queues
             for (batch_buf[0..batch_count], dist_buf[0..batch_count]) |be, dist| {
@@ -1030,7 +1036,9 @@ pub const HnswIndex = struct {
 
     /// Insert a vector into the index
     pub fn insert(self: *Self, vector_id: u64, vector: []const f32) HnswError!void {
-        std.debug.assert(vector.len == self.config.dimensions);
+        if (!types.isValidVectorDimensions(self.config.dimensions) or vector.len != self.config.dimensions) {
+            return HnswError.DimensionMismatch;
+        }
 
         // For cosine metric, normalize vector before storing so we can use
         // fast dot-product distance instead of full cosine computation.
@@ -1457,4 +1465,34 @@ test "hnsw search empty index" {
     defer index.freeResults(results);
 
     try std.testing.expectEqual(@as(usize, 0), results.len);
+}
+
+test "hnsw rejects wrong vector dimensions" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_hnsw_dimension_validation_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try buffer_pool.BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var vs = try VectorStorage.init(allocator, &bp, 4);
+    var index = HnswIndex.init(allocator, &bp, &vs, .{ .dimensions = 4 });
+    defer index.deinit();
+
+    try std.testing.expectError(HnswError.DimensionMismatch, index.insert(1, &[_]f32{ 1.0, 0.0, 0.0 }));
+    try index.insert(1, &[_]f32{ 1.0, 0.0, 0.0, 0.0 });
+    try std.testing.expectError(HnswError.DimensionMismatch, index.search(&[_]f32{ 1.0, 0.0, 0.0 }, 1, null));
 }

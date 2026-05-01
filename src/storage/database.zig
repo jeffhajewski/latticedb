@@ -691,6 +691,10 @@ pub const Database = struct {
 
     /// Open or create a database
     pub fn open(allocator: Allocator, path: []const u8, options: OpenOptions) DatabaseError!*Self {
+        if (options.config.enable_vector and !types.isValidVectorDimensions(options.config.vector_dimensions)) {
+            return DatabaseError.InvalidArgument;
+        }
+
         var self = allocator.create(Self) catch return DatabaseError.OutOfMemory;
         errdefer allocator.destroy(self);
 
@@ -821,14 +825,14 @@ pub const Database = struct {
                     &self.buffer_pool,
                     header.vector_segment_page,
                     options.config.vector_dimensions,
-                ) catch null;
+                ) catch |err| return mapVectorStorageError(err);
             } else {
                 // Create new vector storage
                 self.vector_storage = VectorStorage.init(
                     allocator,
                     &self.buffer_pool,
                     options.config.vector_dimensions,
-                ) catch null;
+                ) catch |err| return mapVectorStorageError(err);
             }
 
             // 8c. Initialize HNSW index if vector storage is available
@@ -2339,6 +2343,32 @@ pub const Database = struct {
             stream_store_mod.StreamError.ValueTooLarge => DatabaseError.ValueTooLarge,
             stream_store_mod.StreamError.IoError => DatabaseError.IoError,
         };
+    }
+
+    fn mapVectorStorageError(err: VectorStorageError) DatabaseError {
+        return switch (err) {
+            VectorStorageError.DimensionMismatch,
+            VectorStorageError.InvalidDimensions,
+            VectorStorageError.VectorTooLarge,
+            => DatabaseError.InvalidArgument,
+            VectorStorageError.OutOfMemory => DatabaseError.OutOfMemory,
+            VectorStorageError.StorageFull => DatabaseError.BufferPoolFull,
+            else => DatabaseError.IoError,
+        };
+    }
+
+    fn mapHnswError(err: HnswError) DatabaseError {
+        return switch (err) {
+            HnswError.DimensionMismatch => DatabaseError.InvalidArgument,
+            HnswError.OutOfMemory => DatabaseError.OutOfMemory,
+            else => DatabaseError.IoError,
+        };
+    }
+
+    fn validateVectorValue(self: *Self, vector: []const f32) DatabaseError!void {
+        if (!types.isValidVectorDimensions(vector.len)) return DatabaseError.InvalidArgument;
+        const vs = self.vector_storage orelse return DatabaseError.IoError;
+        if (vector.len != vs.dimensions) return DatabaseError.InvalidArgument;
     }
 
     fn stageStreamAppend(
@@ -4012,6 +4042,7 @@ pub const Database = struct {
 
         // Check if vector storage is enabled
         const vs = &(self.vector_storage orelse return DatabaseError.IoError);
+        try self.validateVectorValue(vector);
 
         // Verify node exists
         if (!(try self.nodeExists(node_id))) {
@@ -4019,22 +4050,11 @@ pub const Database = struct {
         }
 
         // Store the vector (using node_id as vector_id)
-        _ = vs.store(node_id, vector) catch |err| {
-            return switch (err) {
-                VectorStorageError.DimensionMismatch => DatabaseError.IoError,
-                else => DatabaseError.IoError,
-            };
-        };
+        _ = vs.store(node_id, vector) catch |err| return mapVectorStorageError(err);
 
         // Index the vector in HNSW for similarity search
         if (self.hnsw_index) |*hnsw| {
-            hnsw.insert(node_id, vector) catch |err| {
-                return switch (err) {
-                    HnswError.DimensionMismatch => DatabaseError.IoError,
-                    HnswError.OutOfMemory => DatabaseError.OutOfMemory,
-                    else => DatabaseError.IoError,
-                };
-            };
+            hnsw.insert(node_id, vector) catch |err| return mapHnswError(err);
         }
     }
 
@@ -4048,6 +4068,7 @@ pub const Database = struct {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;
             if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
             if (self.getTxnOverlay(t)) |overlay| {
+                try self.validateVectorValue(vector);
                 if (!(try self.nodeExistsInTxn(txn, node_id))) return DatabaseError.NotFound;
                 try self.storeVectorOverlayState(overlay, node_id, .{
                     .value = self.allocator.dupe(f32, vector) catch return DatabaseError.OutOfMemory,
@@ -4085,6 +4106,8 @@ pub const Database = struct {
         k: u32,
         ef_search: ?u16,
     ) DatabaseError![]VectorSearchResult {
+        try self.validateVectorValue(query_vector);
+
         if (txn) |t| {
             if (self.getTxnOverlay(t)) |overlay| {
                 if (overlay.vector_states.count() == 0) {
@@ -4156,12 +4179,14 @@ pub const Database = struct {
         k: u32,
         ef_search: ?u16,
     ) DatabaseError![]VectorSearchResult {
+        try self.validateVectorValue(query_vector);
         const hnsw = &(self.hnsw_index orelse return DatabaseError.IoError);
 
         return hnsw.search(query_vector, k, ef_search) catch |err| {
             return switch (err) {
                 HnswError.EmptyIndex => self.allocator.alloc(VectorSearchResult, 0) catch return DatabaseError.OutOfMemory,
                 HnswError.NotFound => self.allocator.alloc(VectorSearchResult, 0) catch return DatabaseError.OutOfMemory,
+                HnswError.DimensionMismatch => DatabaseError.InvalidArgument,
                 HnswError.OutOfMemory => DatabaseError.OutOfMemory,
                 else => DatabaseError.IoError,
             };

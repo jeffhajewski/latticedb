@@ -8,6 +8,7 @@
 const std = @import("std");
 const Allocator = std.mem.Allocator;
 const Wyhash = std.hash.Wyhash;
+const types = @import("../core/types.zig");
 const tokenizer_mod = @import("../fts/tokenizer.zig");
 const Tokenizer = tokenizer_mod.Tokenizer;
 const TokenizerConfig = tokenizer_mod.TokenizerConfig;
@@ -24,7 +25,7 @@ pub const HashEmbedError = error{ OutOfMemory, EmptyInput, InvalidDimensions };
 /// Caller owns the returned slice and must free it with the same allocator.
 pub fn hashEmbed(allocator: Allocator, text: []const u8, config: HashEmbedConfig) HashEmbedError![]f32 {
     if (text.len == 0) return HashEmbedError.EmptyInput;
-    if (config.dimensions == 0) return HashEmbedError.InvalidDimensions;
+    if (!types.isValidVectorDimensions(config.dimensions)) return HashEmbedError.InvalidDimensions;
 
     const dims: usize = config.dimensions;
     const vector = allocator.alloc(f32, dims) catch return HashEmbedError.OutOfMemory;

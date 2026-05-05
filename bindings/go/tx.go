@@ -242,6 +242,27 @@ func (tx *Tx) FTSIndex(nodeID NodeID, text string) error {
 	return wrapError(tx.raw.FTSIndex(uint64(nodeID), text))
 }
 
+func (tx *Tx) PublishStream(stream, kind string, payload Value) error {
+	if err := tx.ensureWritable(); err != nil {
+		return err
+	}
+	return wrapError(tx.raw.PublishStream(stream, kind, payload))
+}
+
+func (tx *Tx) SetStreamOffset(stream, consumer string, sequence uint64) error {
+	if err := tx.ensureWritable(); err != nil {
+		return err
+	}
+	return wrapError(tx.raw.SetStreamOffset(stream, consumer, sequence))
+}
+
+func (tx *Tx) TrimStream(stream string, beforeSequence uint64) error {
+	if err := tx.ensureWritable(); err != nil {
+		return err
+	}
+	return wrapError(tx.raw.TrimStream(stream, beforeSequence))
+}
+
 func (tx *Tx) Query(cypher string, params map[string]Value) (QueryResult, error) {
 	if err := tx.ensureActive(); err != nil {
 		return QueryResult{}, err

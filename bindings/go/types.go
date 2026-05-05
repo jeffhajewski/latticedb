@@ -74,6 +74,12 @@ type FTSSearchResult struct {
 	Score  float32
 }
 
+type StreamRecord struct {
+	Sequence uint64
+	Kind     string
+	Payload  Value
+}
+
 // Deprecated: use package github.com/jeffhajewski/latticedb/bindings/go/embedding. Earliest removal is v0.6.0.
 type EmbeddingAPIFormat int
 

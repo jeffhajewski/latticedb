@@ -95,6 +95,12 @@ type FTSSearchResult struct {
 	Score  float32
 }
 
+type StreamRecord struct {
+	Sequence uint64
+	Kind     string
+	Payload  any
+}
+
 type EdgeRecord struct {
 	ID       uint64
 	SourceID uint64
@@ -384,6 +390,73 @@ func (tx *Tx) FTSIndex(nodeID uint64, text string) error {
 	)))
 }
 
+func (tx *Tx) PublishStream(stream, kind string, payload any) error {
+	var streamPtr unsafe.Pointer
+	if len(stream) > 0 {
+		streamPtr = C.CBytes([]byte(stream))
+		defer C.free(streamPtr)
+	}
+
+	var kindPtr unsafe.Pointer
+	if len(kind) > 0 {
+		kindPtr = C.CBytes([]byte(kind))
+		defer C.free(kindPtr)
+	}
+
+	cValue, cleanup, err := encodeValue(payload)
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+
+	return errorFromCode(ErrorCode(C.lattice_stream_publish(
+		tx.ptr,
+		(*C.char)(streamPtr),
+		C.size_t(len(stream)),
+		(*C.char)(kindPtr),
+		C.size_t(len(kind)),
+		cValue,
+	)))
+}
+
+func (tx *Tx) SetStreamOffset(stream, consumer string, sequence uint64) error {
+	var streamPtr unsafe.Pointer
+	if len(stream) > 0 {
+		streamPtr = C.CBytes([]byte(stream))
+		defer C.free(streamPtr)
+	}
+
+	var consumerPtr unsafe.Pointer
+	if len(consumer) > 0 {
+		consumerPtr = C.CBytes([]byte(consumer))
+		defer C.free(consumerPtr)
+	}
+
+	return errorFromCode(ErrorCode(C.lattice_stream_set_offset(
+		tx.ptr,
+		(*C.char)(streamPtr),
+		C.size_t(len(stream)),
+		(*C.char)(consumerPtr),
+		C.size_t(len(consumer)),
+		C.uint64_t(sequence),
+	)))
+}
+
+func (tx *Tx) TrimStream(stream string, beforeSequence uint64) error {
+	var streamPtr unsafe.Pointer
+	if len(stream) > 0 {
+		streamPtr = C.CBytes([]byte(stream))
+		defer C.free(streamPtr)
+	}
+
+	return errorFromCode(ErrorCode(C.lattice_stream_trim(
+		tx.ptr,
+		(*C.char)(streamPtr),
+		C.size_t(len(stream)),
+		C.uint64_t(beforeSequence),
+	)))
+}
+
 func (tx *Tx) SetNodeProperty(nodeID uint64, key string, value any) error {
 	cKey := C.CString(key)
 	defer C.free(unsafe.Pointer(cKey))
@@ -614,6 +687,92 @@ func (db *DB) FTSSearch(query string, limit uint32) ([]FTSSearchResult, error) {
 
 func (db *DB) FTSSearchFuzzy(query string, limit, maxDistance, minTermLength uint32) ([]FTSSearchResult, error) {
 	return db.ftsSearch(query, limit, maxDistance, minTermLength, true)
+}
+
+func (db *DB) ReadStream(stream string, afterSequence uint64, limit uint, timeoutMs uint32) ([]StreamRecord, error) {
+	var streamPtr unsafe.Pointer
+	if len(stream) > 0 {
+		streamPtr = C.CBytes([]byte(stream))
+		defer C.free(streamPtr)
+	}
+
+	var batch *C.lattice_stream_batch
+	if err := errorFromCode(ErrorCode(C.lattice_stream_read(
+		db.ptr,
+		(*C.char)(streamPtr),
+		C.size_t(len(stream)),
+		C.uint64_t(afterSequence),
+		C.size_t(limit),
+		C.uint32_t(timeoutMs),
+		&batch,
+	))); err != nil {
+		return nil, err
+	}
+	if batch == nil {
+		return []StreamRecord{}, nil
+	}
+	defer C.lattice_stream_batch_free(batch)
+
+	count := int(C.lattice_stream_batch_count(batch))
+	records := make([]StreamRecord, 0, count)
+	for i := 0; i < count; i++ {
+		var sequence C.uint64_t
+		var kind *C.char
+		var kindLen C.size_t
+		var payload *C.lattice_value
+		if err := errorFromCode(ErrorCode(C.lattice_stream_batch_get(
+			batch,
+			C.size_t(i),
+			&sequence,
+			&kind,
+			&kindLen,
+			(**C.lattice_value)(unsafe.Pointer(&payload)),
+		))); err != nil {
+			return nil, err
+		}
+
+		decoded, err := decodeValue(payload)
+		if err != nil {
+			return nil, err
+		}
+		records = append(records, StreamRecord{
+			Sequence: uint64(sequence),
+			Kind:     cStringN(kind, int(kindLen)),
+			Payload:  decoded,
+		})
+	}
+
+	return records, nil
+}
+
+func (db *DB) GetStreamOffset(stream, consumer string) (uint64, bool, error) {
+	var streamPtr unsafe.Pointer
+	if len(stream) > 0 {
+		streamPtr = C.CBytes([]byte(stream))
+		defer C.free(streamPtr)
+	}
+
+	var consumerPtr unsafe.Pointer
+	if len(consumer) > 0 {
+		consumerPtr = C.CBytes([]byte(consumer))
+		defer C.free(consumerPtr)
+	}
+
+	var exists C.bool
+	var sequence C.uint64_t
+	if err := errorFromCode(ErrorCode(C.lattice_stream_get_offset(
+		db.ptr,
+		(*C.char)(streamPtr),
+		C.size_t(len(stream)),
+		(*C.char)(consumerPtr),
+		C.size_t(len(consumer)),
+		&exists,
+		&sequence,
+	))); err != nil {
+		return 0, false, err
+	}
+
+	return uint64(sequence), bool(exists), nil
 }
 
 func (db *DB) ftsSearch(query string, limit, maxDistance, minTermLength uint32, fuzzy bool) ([]FTSSearchResult, error) {

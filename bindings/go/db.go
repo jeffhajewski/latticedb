@@ -233,12 +233,52 @@ func (db *DB) FTSSearchFuzzy(query string, opts FTSSearchOptions) ([]FTSSearchRe
 	return convertFTSResults(results), nil
 }
 
+func (db *DB) ReadStream(stream string, afterSequence uint64, limit uint, timeoutMs uint32) ([]StreamRecord, error) {
+	if db == nil || db.raw == nil {
+		return nil, ErrDatabaseClosed
+	}
+
+	records, err := db.raw.ReadStream(stream, afterSequence, limit, timeoutMs)
+	if err != nil {
+		return nil, wrapError(err)
+	}
+	return convertStreamRecords(records), nil
+}
+
+func (db *DB) GetStreamOffset(stream, consumer string) (uint64, bool, error) {
+	if db == nil || db.raw == nil {
+		return 0, false, ErrDatabaseClosed
+	}
+
+	offset, ok, err := db.raw.GetStreamOffset(stream, consumer)
+	if err != nil {
+		return 0, false, wrapError(err)
+	}
+	return offset, ok, nil
+}
+
+func (db *DB) Changes(afterSequence uint64, limit uint, timeoutMs uint32) ([]StreamRecord, error) {
+	return db.ReadStream("__lattice_changes", afterSequence, limit, timeoutMs)
+}
+
 func convertFTSResults(results []cgobridge.FTSSearchResult) []FTSSearchResult {
 	out := make([]FTSSearchResult, 0, len(results))
 	for _, result := range results {
 		out = append(out, FTSSearchResult{
 			NodeID: NodeID(result.NodeID),
 			Score:  result.Score,
+		})
+	}
+	return out
+}
+
+func convertStreamRecords(records []cgobridge.StreamRecord) []StreamRecord {
+	out := make([]StreamRecord, 0, len(records))
+	for _, record := range records {
+		out = append(out, StreamRecord{
+			Sequence: record.Sequence,
+			Kind:     record.Kind,
+			Payload:  record.Payload,
 		})
 	}
 	return out

@@ -15,6 +15,7 @@ This is a cgo-backed client built on the stable C ABI. The current API supports:
 - vector storage and search
 - full-text search and fuzzy search
 - bulk insertion of vector-bearing nodes
+- durable streams and graph changefeeds
 - built-in hash embeddings
 - HTTP embedding client
 
@@ -164,6 +165,7 @@ For a larger end-to-end example, see [examples/go](../../examples/go).
   - `[]any`
   - `map[string]any`
 - Query results are materialized into `[]map[string]Value`.
+- Durable streams use explicit cursors: `DB.ReadStream`, `DB.GetStreamOffset`, `DB.Changes`, `Tx.PublishStream`, `Tx.SetStreamOffset`, and `Tx.TrimStream`.
 
 ## Embeddings
 

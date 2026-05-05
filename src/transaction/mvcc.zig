@@ -62,7 +62,7 @@ pub const Snapshot = struct {
         defer txn_manager.mutex.unlock();
 
         // Collect active transaction IDs (excluding the owner)
-        var active_list = std.ArrayListUnmanaged(TransactionId){};
+        var active_list = std.ArrayListUnmanaged(TransactionId).empty;
         errdefer active_list.deinit(allocator);
 
         var iter = txn_manager.active_txns.keyIterator();
@@ -413,7 +413,7 @@ pub const VersionChain = struct {
 
     pub fn init(allocator: Allocator) Self {
         return Self{
-            .versions = .{},
+            .versions = .empty,
             .allocator = allocator,
         };
     }
@@ -489,7 +489,7 @@ pub fn VersionStore(comptime KeyType: type) type {
     return struct {
         chains: std.AutoHashMap(KeyType, VersionChain),
         allocator: Allocator,
-        mutex: std.Thread.Mutex,
+        mutex: @import("compat").Mutex,
 
         const Self = @This();
 
@@ -554,7 +554,7 @@ pub fn VersionStore(comptime KeyType: type) type {
             };
 
             // Collect keys of chains to remove (fully deleted records)
-            var to_remove = std.ArrayListUnmanaged(KeyType){};
+            var to_remove = std.ArrayListUnmanaged(KeyType).empty;
             defer to_remove.deinit(self.allocator);
 
             var iter = self.chains.iterator();

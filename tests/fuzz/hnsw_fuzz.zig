@@ -38,8 +38,8 @@ const FuzzHnsw = struct {
     fn init(allocator: Allocator, dimensions: u16) !FuzzHnsw {
         // Generate unique path
         var path_buf: [128]u8 = undefined;
-        const timestamp = std.time.milliTimestamp();
-        const random = std.crypto.random.int(u32);
+        const timestamp = @import("compat").milliTimestamp();
+        const random = @import("compat").randomInt(u32);
         const path = try std.fmt.bufPrint(&path_buf, "/tmp/lattice_fuzz_hnsw_{d}_{x}.db", .{ timestamp, random });
         const path_copy = try allocator.dupe(u8, path);
         errdefer allocator.free(path_copy);

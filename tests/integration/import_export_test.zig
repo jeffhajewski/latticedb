@@ -48,7 +48,7 @@ const second_since_year = 2021;
 const line_trim_chars = " \t\r";
 
 fn openTestDb(path: []const u8) !*Database {
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
     return try Database.open(std.testing.allocator, path, .{
         .create = true,
         .config = .{
@@ -60,7 +60,7 @@ fn openTestDb(path: []const u8) !*Database {
 
 fn cleanupTestDb(db: *Database, path: []const u8) void {
     db.close();
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 }
 
 fn overwriteNodePayloadWithInvalidData(db: *Database, node_id: u64) !void {
@@ -143,7 +143,7 @@ test "import_export: exportJson deduplicates multi-label nodes and preserves par
     try seedMultiLabelParallelGraph(db);
 
     var buf: [large_export_buffer_size]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = @import("compat").fixedBufferStream(&buf);
 
     const stats = try import_export.exportJson(allocator, db, stream.writer(), null);
     try std.testing.expectEqual(@as(u64, 2), stats.nodes_exported);
@@ -185,10 +185,10 @@ test "import_export: exportCsv deduplicates multi-label nodes and preserves para
     try seedMultiLabelParallelGraph(db);
 
     var nodes_buf: [small_export_buffer_size]u8 = undefined;
-    var nodes_stream = std.io.fixedBufferStream(&nodes_buf);
+    var nodes_stream = @import("compat").fixedBufferStream(&nodes_buf);
 
     var edges_buf: [small_export_buffer_size]u8 = undefined;
-    var edges_stream = std.io.fixedBufferStream(&edges_buf);
+    var edges_stream = @import("compat").fixedBufferStream(&edges_buf);
 
     const stats = try import_export.exportCsv(allocator, db, nodes_stream.writer(), edges_stream.writer(), null);
     try std.testing.expectEqual(@as(u64, 2), stats.nodes_exported);
@@ -210,7 +210,7 @@ test "import_export: exportJsonl emits node and edge records without duplication
     try seedMultiLabelParallelGraph(db);
 
     var buf: [large_export_buffer_size]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = @import("compat").fixedBufferStream(&buf);
 
     const stats = try import_export.exportJsonl(allocator, db, stream.writer(), null);
     try std.testing.expectEqual(@as(u64, 2), stats.nodes_exported);
@@ -266,7 +266,7 @@ test "import_export: exportDot emits valid graph with deduplicated nodes and par
     try seedMultiLabelParallelGraph(db);
 
     var buf: [large_export_buffer_size]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = @import("compat").fixedBufferStream(&buf);
 
     const stats = try import_export.exportDot(allocator, db, stream.writer(), null);
     try std.testing.expectEqual(@as(u64, 2), stats.nodes_exported);
@@ -302,7 +302,7 @@ test "import_export: all export formats include unlabeled nodes" {
     try seedGraphWithUnlabeledNode(db);
 
     var json_buf: [small_export_buffer_size]u8 = undefined;
-    var json_stream = std.io.fixedBufferStream(&json_buf);
+    var json_stream = @import("compat").fixedBufferStream(&json_buf);
     const json_stats = try import_export.exportJson(allocator, db, json_stream.writer(), null);
     try std.testing.expectEqual(@as(u64, 2), json_stats.nodes_exported);
     try std.testing.expectEqual(@as(u64, 1), json_stats.edges_exported);
@@ -320,7 +320,7 @@ test "import_export: all export formats include unlabeled nodes" {
     try std.testing.expect(found_empty_labels_json);
 
     var jsonl_buf: [small_export_buffer_size]u8 = undefined;
-    var jsonl_stream = std.io.fixedBufferStream(&jsonl_buf);
+    var jsonl_stream = @import("compat").fixedBufferStream(&jsonl_buf);
     const jsonl_stats = try import_export.exportJsonl(allocator, db, jsonl_stream.writer(), null);
     try std.testing.expectEqual(@as(u64, 2), jsonl_stats.nodes_exported);
     try std.testing.expectEqual(@as(u64, 1), jsonl_stats.edges_exported);
@@ -342,9 +342,9 @@ test "import_export: all export formats include unlabeled nodes" {
     try std.testing.expect(found_empty_labels_jsonl);
 
     var nodes_csv_buf: [small_export_buffer_size]u8 = undefined;
-    var nodes_csv_stream = std.io.fixedBufferStream(&nodes_csv_buf);
+    var nodes_csv_stream = @import("compat").fixedBufferStream(&nodes_csv_buf);
     var edges_csv_buf: [small_export_buffer_size]u8 = undefined;
-    var edges_csv_stream = std.io.fixedBufferStream(&edges_csv_buf);
+    var edges_csv_stream = @import("compat").fixedBufferStream(&edges_csv_buf);
     const csv_stats = try import_export.exportCsv(
         allocator,
         db,
@@ -357,7 +357,7 @@ test "import_export: all export formats include unlabeled nodes" {
     try std.testing.expect(std.mem.indexOf(u8, nodes_csv_buf[0..nodes_csv_stream.pos], "2,\"\"") != null);
 
     var dot_buf: [small_export_buffer_size]u8 = undefined;
-    var dot_stream = std.io.fixedBufferStream(&dot_buf);
+    var dot_stream = @import("compat").fixedBufferStream(&dot_buf);
     const dot_stats = try import_export.exportDot(allocator, db, dot_stream.writer(), null);
     try std.testing.expectEqual(@as(u64, 2), dot_stats.nodes_exported);
     try std.testing.expectEqual(@as(u64, 1), dot_stats.edges_exported);
@@ -375,7 +375,7 @@ test "import_export: comma-separated label filter unions matching nodes without 
     try seedGraphForMultiLabelFilter(db);
 
     var json_buf: [small_export_buffer_size]u8 = undefined;
-    var json_stream = std.io.fixedBufferStream(&json_buf);
+    var json_stream = @import("compat").fixedBufferStream(&json_buf);
     const json_stats = try import_export.exportJson(allocator, db, json_stream.writer(), person_label ++ ", " ++ employee_label);
     try std.testing.expectEqual(@as(u64, 3), json_stats.nodes_exported);
     try std.testing.expectEqual(@as(u64, 2), json_stats.edges_exported);
@@ -397,7 +397,7 @@ test "import_export: comma-separated label filter unions matching nodes without 
     try std.testing.expectEqual(@as(usize, 3), ids.count());
 
     var dump_buf: [small_export_buffer_size]u8 = undefined;
-    var dump_stream = std.io.fixedBufferStream(&dump_buf);
+    var dump_stream = @import("compat").fixedBufferStream(&dump_buf);
     const dump_stats = try import_export.dumpCanonicalJson(allocator, db, dump_stream.writer(), person_label ++ "," ++ employee_label);
     try std.testing.expectEqual(@as(u64, 3), dump_stats.nodes_exported);
     try std.testing.expectEqual(@as(u64, 2), dump_stats.edges_exported);
@@ -412,7 +412,7 @@ test "import_export: label-filtered exports keep only edges within exported node
     try seedGraphForLabelScopedExport(db);
 
     var json_buf: [small_export_buffer_size]u8 = undefined;
-    var json_stream = std.io.fixedBufferStream(&json_buf);
+    var json_stream = @import("compat").fixedBufferStream(&json_buf);
     const json_stats = try import_export.exportJson(allocator, db, json_stream.writer(), person_label);
     try std.testing.expectEqual(@as(u64, 1), json_stats.nodes_exported);
     try std.testing.expectEqual(@as(u64, 0), json_stats.edges_exported);
@@ -422,16 +422,16 @@ test "import_export: label-filtered exports keep only edges within exported node
     try std.testing.expectEqual(@as(usize, 0), json_parsed.value.object.get(json_field_edges).?.array.items.len);
 
     var jsonl_buf: [small_export_buffer_size]u8 = undefined;
-    var jsonl_stream = std.io.fixedBufferStream(&jsonl_buf);
+    var jsonl_stream = @import("compat").fixedBufferStream(&jsonl_buf);
     const jsonl_stats = try import_export.exportJsonl(allocator, db, jsonl_stream.writer(), person_label);
     try std.testing.expectEqual(@as(u64, 1), jsonl_stats.nodes_exported);
     try std.testing.expectEqual(@as(u64, 0), jsonl_stats.edges_exported);
     try std.testing.expectEqual(@as(usize, 1), countNonEmptyLines(jsonl_buf[0..jsonl_stream.pos]));
 
     var nodes_csv_buf: [small_export_buffer_size]u8 = undefined;
-    var nodes_csv_stream = std.io.fixedBufferStream(&nodes_csv_buf);
+    var nodes_csv_stream = @import("compat").fixedBufferStream(&nodes_csv_buf);
     var edges_csv_buf: [small_export_buffer_size]u8 = undefined;
-    var edges_csv_stream = std.io.fixedBufferStream(&edges_csv_buf);
+    var edges_csv_stream = @import("compat").fixedBufferStream(&edges_csv_buf);
     const csv_stats = try import_export.exportCsv(
         allocator,
         db,
@@ -445,7 +445,7 @@ test "import_export: label-filtered exports keep only edges within exported node
     try std.testing.expectEqual(@as(usize, 1), countNonEmptyLines(edges_csv_buf[0..edges_csv_stream.pos]));
 
     var dot_buf: [small_export_buffer_size]u8 = undefined;
-    var dot_stream = std.io.fixedBufferStream(&dot_buf);
+    var dot_stream = @import("compat").fixedBufferStream(&dot_buf);
     const dot_stats = try import_export.exportDot(allocator, db, dot_stream.writer(), person_label);
     try std.testing.expectEqual(@as(u64, 1), dot_stats.nodes_exported);
     try std.testing.expectEqual(@as(u64, 0), dot_stats.edges_exported);
@@ -454,7 +454,7 @@ test "import_export: label-filtered exports keep only edges within exported node
     try std.testing.expect(std.mem.indexOf(u8, dot_output, works_at_type) == null);
 
     var dump_buf: [small_export_buffer_size]u8 = undefined;
-    var dump_stream = std.io.fixedBufferStream(&dump_buf);
+    var dump_stream = @import("compat").fixedBufferStream(&dump_buf);
     const dump_stats = try import_export.dumpCanonicalJson(allocator, db, dump_stream.writer(), person_label);
     try std.testing.expectEqual(@as(u64, 1), dump_stats.nodes_exported);
     try std.testing.expectEqual(@as(u64, 0), dump_stats.edges_exported);
@@ -471,21 +471,21 @@ test "import_export: JSON-family exports fail on unreadable node properties" {
     try overwriteNodePayloadWithInvalidData(db, node);
 
     var json_buf: [small_export_buffer_size]u8 = undefined;
-    var json_stream = std.io.fixedBufferStream(&json_buf);
+    var json_stream = @import("compat").fixedBufferStream(&json_buf);
     try std.testing.expectError(
         import_export.ImportExportError.DatabaseError,
         import_export.exportJson(allocator, db, json_stream.writer(), null),
     );
 
     var jsonl_buf: [small_export_buffer_size]u8 = undefined;
-    var jsonl_stream = std.io.fixedBufferStream(&jsonl_buf);
+    var jsonl_stream = @import("compat").fixedBufferStream(&jsonl_buf);
     try std.testing.expectError(
         import_export.ImportExportError.DatabaseError,
         import_export.exportJsonl(allocator, db, jsonl_stream.writer(), null),
     );
 
     var canonical_buf: [small_export_buffer_size]u8 = undefined;
-    var canonical_stream = std.io.fixedBufferStream(&canonical_buf);
+    var canonical_stream = @import("compat").fixedBufferStream(&canonical_buf);
     try std.testing.expectError(
         import_export.ImportExportError.DatabaseError,
         import_export.dumpCanonicalJson(allocator, db, canonical_stream.writer(), null),
@@ -505,21 +505,21 @@ test "import_export: JSON-family exports fail on unreadable edge properties" {
     try overwriteEdgePayloadWithInvalidData(db, edge_id);
 
     var json_buf: [small_export_buffer_size]u8 = undefined;
-    var json_stream = std.io.fixedBufferStream(&json_buf);
+    var json_stream = @import("compat").fixedBufferStream(&json_buf);
     try std.testing.expectError(
         import_export.ImportExportError.DatabaseError,
         import_export.exportJson(allocator, db, json_stream.writer(), null),
     );
 
     var jsonl_buf: [small_export_buffer_size]u8 = undefined;
-    var jsonl_stream = std.io.fixedBufferStream(&jsonl_buf);
+    var jsonl_stream = @import("compat").fixedBufferStream(&jsonl_buf);
     try std.testing.expectError(
         import_export.ImportExportError.DatabaseError,
         import_export.exportJsonl(allocator, db, jsonl_stream.writer(), null),
     );
 
     var canonical_buf: [small_export_buffer_size]u8 = undefined;
-    var canonical_stream = std.io.fixedBufferStream(&canonical_buf);
+    var canonical_stream = @import("compat").fixedBufferStream(&canonical_buf);
     try std.testing.expectError(
         import_export.ImportExportError.DatabaseError,
         import_export.dumpCanonicalJson(allocator, db, canonical_stream.writer(), null),

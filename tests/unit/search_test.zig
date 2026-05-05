@@ -679,7 +679,7 @@ test "fts: reindex oversized document purges stale terms via dictionary scan" {
     defer big.deinit(allocator);
     var i: usize = 0;
     while (i < 1200) : (i += 1) {
-        try big.writer(allocator).print("alphaunique{d} ", .{i});
+        try @import("compat").arrayListWriterWithAllocator(&big, allocator).print("alphaunique{d} ", .{i});
     }
 
     _ = try index.indexDocument(42, big.items);

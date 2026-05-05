@@ -26,7 +26,7 @@ const NULL_PAGE = lattice.core.types.NULL_PAGE;
 /// Truncates the file to a single page (4096 bytes).
 /// Leaves the WAL file untouched.
 fn simulateCrash(path: []const u8) !void {
-    const file = try std.fs.cwd().openFile(path, .{ .mode = .read_write });
+    const file = try @import("compat").fs.cwd().openFile(path, .{ .mode = .read_write });
     defer file.close();
 
     // Read the full header page
@@ -60,11 +60,11 @@ fn simulateCrash(path: []const u8) !void {
 
 /// Clean up database and WAL files.
 fn cleanup(path: []const u8) void {
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
     // Delete WAL file (path + "-wal")
     var wal_buf: [256]u8 = undefined;
     const wal_path = std.fmt.bufPrint(&wal_buf, "{s}-wal", .{path}) catch return;
-    std.fs.cwd().deleteFile(wal_path) catch {};
+    @import("compat").fs.cwd().deleteFile(wal_path) catch {};
 }
 
 /// Open a database with WAL enabled for crash testing.

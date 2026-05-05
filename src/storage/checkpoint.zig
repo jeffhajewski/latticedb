@@ -74,7 +74,7 @@ pub const Checkpointer = struct {
     pm: *PageManager,
     wal: *WalManager,
     /// Prevents concurrent checkpoints
-    checkpoint_mutex: std.Thread.Mutex,
+    checkpoint_mutex: @import("compat").Mutex,
     /// Set to true during checkpoint
     checkpoint_in_progress: bool,
     /// Statistics from last checkpoint
@@ -107,7 +107,7 @@ pub const Checkpointer = struct {
         self.checkpoint_in_progress = true;
         defer self.checkpoint_in_progress = false;
 
-        const start_time = std.time.nanoTimestamp();
+        const start_time = @import("compat").nanoTimestamp();
 
         // 1. Write CHECKPOINT_BEGIN to WAL
         const begin_lsn = self.wal.appendRecord(.checkpoint_begin, 0, 0, &[_]u8{}) catch {
@@ -157,7 +157,7 @@ pub const Checkpointer = struct {
             wal_truncated = true;
         }
 
-        const end_time = std.time.nanoTimestamp();
+        const end_time = @import("compat").nanoTimestamp();
 
         const stats = CheckpointStats{
             .pages_flushed = pages_flushed,
@@ -312,7 +312,7 @@ test "checkpoint basic" {
 
     // Create WAL
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     var wal = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
     defer {
@@ -366,7 +366,7 @@ test "checkpoint passive skips pinned pages" {
     defer bp.deinit();
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     var wal = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
     defer {
@@ -427,7 +427,7 @@ test "checkpoint updates WAL checkpoint_lsn" {
     defer bp.deinit();
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     var wal = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
     defer {
@@ -471,7 +471,7 @@ test "checkpoint statistics" {
     defer bp.deinit();
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     var wal = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
     defer {

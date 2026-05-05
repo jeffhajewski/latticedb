@@ -57,7 +57,7 @@ pub fn serializeNodeInsert(
     }
     if (buf.len < required_size) return PayloadError.BufferTooSmall;
 
-    var stream = std.io.fixedBufferStream(buf);
+    var stream = @import("compat").fixedBufferStream(buf);
     const writer = stream.writer();
 
     writer.writeByte(@intFromEnum(PayloadType.node_insert)) catch return PayloadError.BufferTooSmall;
@@ -144,7 +144,7 @@ pub fn serializeNodeDelete(
     const required_size = 1 + 8 + 2 + (label_ids.len * 2) + 4 + properties.len;
     if (buf.len < required_size) return PayloadError.BufferTooSmall;
 
-    var stream = std.io.fixedBufferStream(buf);
+    var stream = @import("compat").fixedBufferStream(buf);
     const writer = stream.writer();
 
     writer.writeByte(@intFromEnum(PayloadType.node_delete)) catch return PayloadError.BufferTooSmall;
@@ -222,7 +222,7 @@ pub fn serializeEdgeInsert(
     const required_size = 1 + 8 + 8 + 8 + 2 + edge_type.len;
     if (buf.len < required_size) return PayloadError.BufferTooSmall;
 
-    var stream = std.io.fixedBufferStream(buf);
+    var stream = @import("compat").fixedBufferStream(buf);
     const writer = stream.writer();
 
     writer.writeByte(@intFromEnum(PayloadType.edge_insert)) catch return PayloadError.BufferTooSmall;
@@ -283,7 +283,7 @@ pub fn serializeEdgeDelete(
     const required_size = 1 + 8 + 8 + 8 + 2 + 4 + properties.len;
     if (buf.len < required_size) return PayloadError.BufferTooSmall;
 
-    var stream = std.io.fixedBufferStream(buf);
+    var stream = @import("compat").fixedBufferStream(buf);
     const writer = stream.writer();
 
     writer.writeByte(@intFromEnum(PayloadType.edge_delete)) catch return PayloadError.BufferTooSmall;
@@ -350,7 +350,7 @@ pub fn serializePropertyUpdate(
     const required_size = 1 + 8 + 2 + key.len + 4 + old_len + 4 + new_value.len;
     if (buf.len < required_size) return PayloadError.BufferTooSmall;
 
-    var stream = std.io.fixedBufferStream(buf);
+    var stream = @import("compat").fixedBufferStream(buf);
     const writer = stream.writer();
 
     writer.writeByte(@intFromEnum(PayloadType.node_update)) catch return PayloadError.BufferTooSmall;
@@ -435,7 +435,7 @@ pub fn serializeEdgePropertyUpdate(
     const required_size = 1 + 8 + 2 + key.len + 4 + old_len + 4 + new_value.len;
     if (buf.len < required_size) return PayloadError.BufferTooSmall;
 
-    var stream = std.io.fixedBufferStream(buf);
+    var stream = @import("compat").fixedBufferStream(buf);
     const writer = stream.writer();
 
     writer.writeByte(@intFromEnum(PayloadType.edge_property_update)) catch return PayloadError.BufferTooSmall;
@@ -517,7 +517,7 @@ fn serializeLabelMutation(
     const required_size = 1 + 8 + 2 + label.len;
     if (buf.len < required_size) return PayloadError.BufferTooSmall;
 
-    var stream = std.io.fixedBufferStream(buf);
+    var stream = @import("compat").fixedBufferStream(buf);
     const writer = stream.writer();
 
     writer.writeByte(@intFromEnum(payload_type)) catch return PayloadError.BufferTooSmall;
@@ -624,7 +624,7 @@ pub fn serializeProperties(allocator: Allocator, properties: []const Property) !
     const buf = try allocator.alloc(u8, size);
     errdefer allocator.free(buf);
 
-    var stream = std.io.fixedBufferStream(buf);
+    var stream = @import("compat").fixedBufferStream(buf);
     const writer = stream.writer();
 
     writer.writeInt(u16, @intCast(properties.len), .little) catch return error.BufferTooSmall;
@@ -641,7 +641,7 @@ pub fn serializeProperties(allocator: Allocator, properties: []const Property) !
 pub fn deserializeProperties(allocator: Allocator, data: []const u8) ![]Property {
     if (data.len < 2) return error.InvalidPayload;
 
-    var stream = std.io.fixedBufferStream(data);
+    var stream = @import("compat").fixedBufferStream(data);
     const reader = stream.reader();
 
     const num_props = try reader.readInt(u16, .little);
@@ -670,14 +670,14 @@ pub fn deserializeProperties(allocator: Allocator, data: []const u8) ![]Property
 /// Serialize a single PropertyValue to a fixed buffer.
 /// Returns number of bytes written, or error if buffer too small.
 pub fn serializePropertyValueToBuf(buf: []u8, value: PropertyValue) !usize {
-    var stream = std.io.fixedBufferStream(buf);
+    var stream = @import("compat").fixedBufferStream(buf);
     try serializePropertyValue(stream.writer(), value);
     return stream.pos;
 }
 
 /// Deserialize a single PropertyValue from bytes.
 pub fn deserializePropertyValueFromBytes(allocator: Allocator, data: []const u8) !PropertyValue {
-    var stream = std.io.fixedBufferStream(data);
+    var stream = @import("compat").fixedBufferStream(data);
     return deserializePropertyValue(allocator, stream.reader());
 }
 

@@ -107,7 +107,7 @@ pub const History = struct {
     pub fn load(self: *Self) !void {
         const path = self.file_path orelse return;
 
-        const file = std.fs.cwd().openFile(path, .{}) catch |err| {
+        const file = @import("compat").fs.cwd().openFile(path, .{}) catch |err| {
             if (err == error.FileNotFound) return;
             return err;
         };
@@ -128,7 +128,7 @@ pub const History = struct {
     pub fn save(self: *Self) !void {
         const path = self.file_path orelse return;
 
-        const file = std.fs.cwd().createFile(path, .{}) catch return;
+        const file = @import("compat").fs.cwd().createFile(path, .{}) catch return;
         defer file.close();
 
         const writer = file.deprecatedWriter();

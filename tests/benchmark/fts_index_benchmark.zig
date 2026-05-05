@@ -60,7 +60,7 @@ fn percentile(timings: []u64, p: f64) u64 {
 }
 
 fn setupDatabase(allocator: std.mem.Allocator, path: []const u8) !*Database {
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     return Database.open(allocator, path, .{
         .create = true,
@@ -92,7 +92,7 @@ fn benchmarkScale(allocator: std.mem.Allocator, docs: usize) !BenchmarkResult {
     var db = try setupDatabase(allocator, path);
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     const node_ids = try createNodes(db, docs);
@@ -112,9 +112,9 @@ fn benchmarkScale(allocator: std.mem.Allocator, docs: usize) !BenchmarkResult {
             .{i},
         );
 
-        const start = std.time.nanoTimestamp();
+        const start = @import("compat").nanoTimestamp();
         try db.ftsIndexDocument(node_id, text);
-        const end = std.time.nanoTimestamp();
+        const end = @import("compat").nanoTimestamp();
 
         const elapsed: u64 = @intCast(end - start);
         timings[i] = elapsed;
@@ -122,9 +122,9 @@ fn benchmarkScale(allocator: std.mem.Allocator, docs: usize) !BenchmarkResult {
         if (elapsed > max_ns) max_ns = elapsed;
     }
 
-    const search_start = std.time.nanoTimestamp();
+    const search_start = @import("compat").nanoTimestamp();
     const results = try db.ftsSearch("connection", 10);
-    const search_end = std.time.nanoTimestamp();
+    const search_end = @import("compat").nanoTimestamp();
     defer db.freeFtsSearchResults(results);
 
     if (results.len != 10) return error.InvalidData;
@@ -160,7 +160,7 @@ fn printHeader() void {
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

@@ -162,7 +162,7 @@ pub fn expandFuzzyTerms(
     dictionary: *Dictionary,
     max_distance: u32,
 ) ![]FuzzyMatch {
-    var matches: std.ArrayListUnmanaged(FuzzyMatch) = .{};
+    var matches: std.ArrayListUnmanaged(FuzzyMatch) = .empty;
     errdefer matches.deinit(allocator);
 
     // Iterate all dictionary terms

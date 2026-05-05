@@ -52,7 +52,7 @@ const TestContext = struct {
         vfs_impl.delete(path) catch {};
 
         var uuid: [16]u8 = undefined;
-        std.crypto.random.bytes(&uuid);
+        @import("compat").randomBytes(&uuid);
 
         // Heap allocate WAL and TxnManager to avoid pointer invalidation
         const wal = try allocator.create(WalManager);
@@ -445,11 +445,11 @@ test "durability: committed transaction survives simulated crash" {
     const db_path = "/tmp/lattice_durability_commit.db";
 
     // Clean up
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(db_path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(db_path) catch {};
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     // Phase 1: Write and commit
     {
@@ -483,8 +483,8 @@ test "durability: committed transaction survives simulated crash" {
         try std.testing.expectEqual(@as(u32, 0), stats.transactions_rolled_back);
     }
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(db_path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(db_path) catch {};
 }
 
 test "durability: uncommitted transaction not visible after recovery" {
@@ -492,11 +492,11 @@ test "durability: uncommitted transaction not visible after recovery" {
     const path = "/tmp/lattice_durability_uncommit.wal";
     const db_path = "/tmp/lattice_durability_uncommit.db";
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(db_path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(db_path) catch {};
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     // Phase 1: Write WITHOUT commit (simulates crash)
     {
@@ -530,8 +530,8 @@ test "durability: uncommitted transaction not visible after recovery" {
         try std.testing.expectEqual(@as(u32, 1), stats.transactions_rolled_back);
     }
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(db_path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(db_path) catch {};
 }
 
 test "durability: aborted transaction not recovered" {
@@ -539,11 +539,11 @@ test "durability: aborted transaction not recovered" {
     const path = "/tmp/lattice_durability_abort.wal";
     const db_path = "/tmp/lattice_durability_abort.db";
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(db_path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(db_path) catch {};
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     // Phase 1: Write and explicitly abort
     {
@@ -575,8 +575,8 @@ test "durability: aborted transaction not recovered" {
         try std.testing.expectEqual(@as(u32, 0), stats.transactions_committed);
     }
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(db_path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(db_path) catch {};
 }
 
 test "durability: multiple committed transactions all survive" {
@@ -584,11 +584,11 @@ test "durability: multiple committed transactions all survive" {
     const path = "/tmp/lattice_durability_multi.wal";
     const db_path = "/tmp/lattice_durability_multi.db";
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(db_path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(db_path) catch {};
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     // Phase 1: Multiple committed transactions
     {
@@ -623,8 +623,8 @@ test "durability: multiple committed transactions all survive" {
         try std.testing.expectEqual(@as(u32, 5), stats.transactions_committed);
     }
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(db_path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(db_path) catch {};
 }
 
 test "durability: recovery is idempotent" {
@@ -632,11 +632,11 @@ test "durability: recovery is idempotent" {
     const path = "/tmp/lattice_durability_idempotent.wal";
     const db_path = "/tmp/lattice_durability_idempotent.db";
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(db_path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(db_path) catch {};
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     // Create committed transaction
     {
@@ -682,8 +682,8 @@ test "durability: recovery is idempotent" {
     try std.testing.expectEqual(stats1.transactions_found, stats2.transactions_found);
     try std.testing.expectEqual(stats1.transactions_committed, stats2.transactions_committed);
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(db_path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(db_path) catch {};
 }
 
 // ============================================================================
@@ -931,10 +931,10 @@ test "future: uncommitted node creation rolled back on abort" {
     const path = "/tmp/lattice_txn_abort_node_test.ltdb";
 
     // Clean up from previous runs
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -971,10 +971,10 @@ test "future: uncommitted edge creation rolled back on abort" {
     const path = "/tmp/lattice_txn_abort_edge_test.ltdb";
 
     // Clean up from previous runs
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1017,10 +1017,10 @@ test "rollback: deleteEdgeById restores deleted parallel edge with same id" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_txn_delete_edge_id_rollback.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1071,10 +1071,10 @@ test "rollback: deleteEdge(source,target,type) restores the exact deleted edge i
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_txn_delete_edge_endpoint_rollback.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1118,10 +1118,10 @@ test "rollback: endpoint delete restores deleted parallel edge properties" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_txn_delete_edge_endpoint_props_rollback.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1177,10 +1177,10 @@ test "rollback: deleting all parallel edges and aborting restores all edge ids" 
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_txn_delete_all_edges_abort_restore_ids.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1222,10 +1222,10 @@ test "rollback: delete and create in same txn preserves monotonic edge ids after
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_txn_delete_create_edge_abort_monotonic.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1268,10 +1268,10 @@ test "rollback: edge property update by id restores previous value on abort" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_txn_edge_property_update_abort_restore.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1314,10 +1314,10 @@ test "rollback: edge property removal by id restores removed property on abort" 
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_txn_edge_property_remove_abort_restore.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1362,10 +1362,10 @@ test "future: crash mid-transaction loses graph changes" {
     const path = "/tmp/lattice_txn_crash_test.ltdb";
 
     // Clean up from previous runs
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var node_id: u64 = 0;
 
@@ -1467,10 +1467,10 @@ test "txn-aware reads: queries and traversals hide uncommitted graph changes" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_txn_graph_snapshot_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1578,10 +1578,10 @@ test "txn-aware searches: vector and fts reads stay snapshot-scoped" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_txn_search_snapshot_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1666,10 +1666,10 @@ test "rollback: node deletion restores node with original ID" {
     const path = "/tmp/lattice_txn_delete_restore_id.ltdb";
 
     // Clean up from previous runs
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1708,10 +1708,10 @@ test "rollback: property update restores old value" {
     const PropertyValue = lattice.core.types.PropertyValue;
 
     // Clean up from previous runs
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1757,10 +1757,10 @@ test "rollback: property removal restores property" {
     const PropertyValue = lattice.core.types.PropertyValue;
 
     // Clean up from previous runs
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1808,10 +1808,10 @@ test "rollback: new property added in txn is removed on abort" {
     const PropertyValue = lattice.core.types.PropertyValue;
 
     // Clean up from previous runs
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1856,10 +1856,10 @@ test "rollback: label addition is undone on abort" {
     const path = "/tmp/lattice_txn_label_add_rollback.ltdb";
 
     // Clean up from previous runs
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1915,10 +1915,10 @@ test "rollback: label removal is undone on abort" {
     const path = "/tmp/lattice_txn_label_remove_rollback.ltdb";
 
     // Clean up from previous runs
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,

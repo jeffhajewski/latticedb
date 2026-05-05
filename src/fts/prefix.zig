@@ -88,7 +88,7 @@ pub fn expandPrefixTerms(
     dictionary: *Dictionary,
     config: PrefixConfig,
 ) ![]PrefixMatch {
-    var matches: std.ArrayListUnmanaged(PrefixMatch) = .{};
+    var matches: std.ArrayListUnmanaged(PrefixMatch) = .empty;
     errdefer matches.deinit(allocator);
 
     // Check minimum prefix length

@@ -39,8 +39,8 @@ test "database: data persists across close and reopen" {
     const path = "/tmp/lattice_persist_test.ltdb";
 
     // Clean up from previous runs
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     // Phase 1: Create database and add data
     {
@@ -99,14 +99,14 @@ test "database: data persists across close and reopen" {
     }
 
     // Cleanup
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 }
 
 test "database: labels persist and are queryable after reopen" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_label_persist_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     // Create nodes with different labels
     {
@@ -146,17 +146,17 @@ test "database: labels persist and are queryable after reopen" {
         try std.testing.expectEqual(@as(usize, 3), all_labels.len); // Person, Company, Employee
     }
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 }
 
 test "database: edge IDs remain monotonic across abort and reopen" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_edge_id_monotonic_reopen_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var source: u64 = 0;
     var target: u64 = 0;
@@ -213,10 +213,10 @@ test "database: deleteEdgeById persists exact parallel-edge deletion across reop
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_delete_edge_id_reopen_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     const source: u64 = 1;
     const target: u64 = 2;
@@ -277,10 +277,10 @@ test "database: endpoint delete removes one parallel edge and keeps id monotonic
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_endpoint_delete_parallel_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -327,10 +327,10 @@ test "database: getAllEdgeTypes counts parallel edges and reflects deletes" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_edge_type_count_parallel_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -382,10 +382,10 @@ test "database: edge type counts persist across reopen after endpoint delete" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_edge_type_count_reopen_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     {
         var db = try Database.open(allocator, path, .{
@@ -440,10 +440,10 @@ test "database: edge ids are not reused after deleting all edges and reopening" 
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_edge_id_no_reuse_after_reopen_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var source: u64 = 0;
     var target: u64 = 0;
@@ -496,10 +496,10 @@ test "database: aborted edge delete leaves edge type counts unchanged" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_edge_type_count_abort_delete_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
-    defer std.fs.cwd().deleteFile(path) catch {};
-    defer std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -540,7 +540,7 @@ test "database: tree roots saved correctly across sessions" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_tree_roots_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     // Create database with many operations to ensure tree splits
     {
@@ -579,7 +579,7 @@ test "database: tree roots saved correctly across sessions" {
         }
     }
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 }
 
 // ============================================================================
@@ -590,7 +590,7 @@ test "database: delete node removes from label index" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_delete_label_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -598,7 +598,7 @@ test "database: delete node removes from label index" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create nodes
@@ -634,7 +634,7 @@ test "database: edge operations are consistent" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_edge_consistency_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -642,7 +642,7 @@ test "database: edge operations are consistent" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create a small social graph
@@ -678,7 +678,7 @@ test "database: self-loop edge works correctly" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_selfloop_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -686,7 +686,7 @@ test "database: self-loop edge works correctly" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     const node = try db.createNode(null, &[_][]const u8{"Node"});
@@ -714,7 +714,7 @@ test "database: query with property filter" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_query_filter_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -722,7 +722,7 @@ test "database: query with property filter" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create test data
@@ -748,7 +748,7 @@ test "database: query with LIMIT" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_query_limit_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -756,7 +756,7 @@ test "database: query with LIMIT" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create many nodes
@@ -778,7 +778,7 @@ test "database: count aggregation" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_agg_count_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -786,7 +786,7 @@ test "database: count aggregation" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create some Person nodes
@@ -814,7 +814,7 @@ test "database: sum aggregation" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_agg_sum_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -822,7 +822,7 @@ test "database: sum aggregation" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create Person nodes with ages
@@ -851,7 +851,7 @@ test "database: avg aggregation" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_agg_avg_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -859,7 +859,7 @@ test "database: avg aggregation" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create Person nodes with ages
@@ -888,7 +888,7 @@ test "database: min/max aggregation" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_agg_minmax_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -896,7 +896,7 @@ test "database: min/max aggregation" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create Person nodes with ages
@@ -943,7 +943,7 @@ test "database: count with empty result" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_agg_count_empty_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -951,7 +951,7 @@ test "database: count with empty result" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // No nodes created - count should return 0
@@ -978,7 +978,7 @@ test "database: variable-length path 1 to 2 hops" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_var_path_1_2_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -986,7 +986,7 @@ test "database: variable-length path 1 to 2 hops" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create a chain: Start -> A -> B -> C (using distinct labels)
@@ -1017,7 +1017,7 @@ test "database: variable-length path exact hops" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_var_path_exact_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1025,7 +1025,7 @@ test "database: variable-length path exact hops" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create a chain: Start -> A -> B -> C
@@ -1055,7 +1055,7 @@ test "database: variable-length path with branching" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_var_path_branch_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1063,7 +1063,7 @@ test "database: variable-length path with branching" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create a branching graph:
@@ -1100,7 +1100,7 @@ test "database: variable-length path unbounded star" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_var_path_star_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1108,7 +1108,7 @@ test "database: variable-length path unbounded star" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create a chain: Start -> A -> B
@@ -1135,7 +1135,7 @@ test "database: variable-length path supports exact zero hops" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_var_path_zero_exact_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1143,7 +1143,7 @@ test "database: variable-length path supports exact zero hops" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     const root = try db.createNode(null, &[_][]const u8{"Root"});
@@ -1168,7 +1168,7 @@ test "database: variable-length path zero to one hops includes source and neighb
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_var_path_zero_to_one_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1176,7 +1176,7 @@ test "database: variable-length path zero to one hops includes source and neighb
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     const root = try db.createNode(null, &[_][]const u8{ "Root", "Target" });
@@ -1205,7 +1205,7 @@ test "database: fts search returns relevant results" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_fts_integration_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1217,7 +1217,7 @@ test "database: fts search returns relevant results" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create documents
@@ -1241,7 +1241,7 @@ test "database: fts handles document updates" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_fts_update_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1253,7 +1253,7 @@ test "database: fts handles document updates" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create and index document
@@ -1273,7 +1273,7 @@ test "database: fts fuzzy search finds documents with typos" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_fts_fuzzy_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1285,7 +1285,7 @@ test "database: fts fuzzy search finds documents with typos" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create and index documents
@@ -1315,7 +1315,7 @@ test "database: vector search finds similar nodes" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_vector_integration_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1328,7 +1328,7 @@ test "database: vector search finds similar nodes" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create nodes with vectors
@@ -1356,12 +1356,214 @@ test "database: vector search finds similar nodes" {
     try std.testing.expectEqual(n2, results[1].node_id);
 }
 
+fn expectVectorResultAbsent(results: []const lattice.storage.database.VectorSearchResult, node_id: u64) !void {
+    for (results) |result| {
+        try std.testing.expect(result.node_id != node_id);
+    }
+}
+
+test "database: vector delete removes from search results" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_vector_delete_test.ltdb";
+
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false, .enable_vector = true, .vector_dimensions = 4 },
+    });
+    defer db.close();
+
+    const n1 = try db.createNode(null, &[_][]const u8{"Embedding"});
+    try db.setNodeVector(n1, &[_]f32{ 1.0, 0.0, 0.0, 0.0 });
+    const n2 = try db.createNode(null, &[_][]const u8{"Embedding"});
+    try db.setNodeVector(n2, &[_]f32{ 0.0, 1.0, 0.0, 0.0 });
+
+    try db.deleteNode(null, n1);
+
+    const results = try db.vectorSearch(&[_]f32{ 1.0, 0.0, 0.0, 0.0 }, 2, null);
+    defer db.freeVectorSearchResults(results);
+
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqual(n2, results[0].node_id);
+    try expectVectorResultAbsent(results, n1);
+}
+
+test "database: vector replace updates search results" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_vector_replace_test.ltdb";
+
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false, .enable_vector = true, .vector_dimensions = 4 },
+    });
+    defer db.close();
+
+    const n1 = try db.createNode(null, &[_][]const u8{"Embedding"});
+    try db.setNodeVector(n1, &[_]f32{ 1.0, 0.0, 0.0, 0.0 });
+    const n2 = try db.createNode(null, &[_][]const u8{"Embedding"});
+    try db.setNodeVector(n2, &[_]f32{ 0.9, 0.1, 0.0, 0.0 });
+
+    try db.setNodeVector(n1, &[_]f32{ 0.0, 0.0, 1.0, 0.0 });
+
+    const old_query_results = try db.vectorSearch(&[_]f32{ 1.0, 0.0, 0.0, 0.0 }, 2, null);
+    defer db.freeVectorSearchResults(old_query_results);
+    try std.testing.expectEqual(n2, old_query_results[0].node_id);
+
+    const new_query_results = try db.vectorSearch(&[_]f32{ 0.0, 0.0, 1.0, 0.0 }, 2, null);
+    defer db.freeVectorSearchResults(new_query_results);
+    try std.testing.expectEqual(n1, new_query_results[0].node_id);
+}
+
+test "database: vector delete in transaction removes from search" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_vector_delete_txn_test.ltdb";
+
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = true, .enable_fts = false, .enable_vector = true, .vector_dimensions = 4 },
+    });
+    defer db.close();
+
+    const n1 = try db.createNode(null, &[_][]const u8{"Embedding"});
+    try db.setNodeVector(n1, &[_]f32{ 1.0, 0.0, 0.0, 0.0 });
+    const n2 = try db.createNode(null, &[_][]const u8{"Embedding"});
+    try db.setNodeVector(n2, &[_]f32{ 0.0, 1.0, 0.0, 0.0 });
+
+    var txn = try db.beginTransaction(.read_write);
+    try db.deleteNode(&txn, n1);
+
+    const txn_results = try db.vectorSearchInTxn(&txn, &[_]f32{ 1.0, 0.0, 0.0, 0.0 }, 2, null);
+    defer db.freeVectorSearchResults(txn_results);
+    try std.testing.expectEqual(@as(usize, 1), txn_results.len);
+    try std.testing.expectEqual(n2, txn_results[0].node_id);
+    try expectVectorResultAbsent(txn_results, n1);
+
+    try db.commitTransaction(&txn);
+
+    const committed_results = try db.vectorSearch(&[_]f32{ 1.0, 0.0, 0.0, 0.0 }, 2, null);
+    defer db.freeVectorSearchResults(committed_results);
+    try expectVectorResultAbsent(committed_results, n1);
+}
+
+test "database: vector replace in transaction updates search" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_vector_replace_txn_test.ltdb";
+
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = true, .enable_fts = false, .enable_vector = true, .vector_dimensions = 4 },
+    });
+    defer db.close();
+
+    const n1 = try db.createNode(null, &[_][]const u8{"Embedding"});
+    try db.setNodeVector(n1, &[_]f32{ 1.0, 0.0, 0.0, 0.0 });
+    const n2 = try db.createNode(null, &[_][]const u8{"Embedding"});
+    try db.setNodeVector(n2, &[_]f32{ 0.9, 0.1, 0.0, 0.0 });
+
+    var txn = try db.beginTransaction(.read_write);
+    try db.setNodeVectorInTxn(&txn, n1, &[_]f32{ 0.0, 0.0, 1.0, 0.0 });
+
+    const old_query_results = try db.vectorSearchInTxn(&txn, &[_]f32{ 1.0, 0.0, 0.0, 0.0 }, 2, null);
+    defer db.freeVectorSearchResults(old_query_results);
+    try std.testing.expectEqual(n2, old_query_results[0].node_id);
+
+    const new_query_results = try db.vectorSearchInTxn(&txn, &[_]f32{ 0.0, 0.0, 1.0, 0.0 }, 2, null);
+    defer db.freeVectorSearchResults(new_query_results);
+    try std.testing.expectEqual(n1, new_query_results[0].node_id);
+
+    try db.commitTransaction(&txn);
+
+    const committed_results = try db.vectorSearch(&[_]f32{ 0.0, 0.0, 1.0, 0.0 }, 2, null);
+    defer db.freeVectorSearchResults(committed_results);
+    try std.testing.expectEqual(n1, committed_results[0].node_id);
+}
+
+test "database: vector delete survives reopen" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_vector_delete_reopen_test.ltdb";
+
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+
+    const n1: u64 = blk: {
+        var db = try Database.open(allocator, path, .{
+            .create = true,
+            .config = .{ .enable_wal = false, .enable_fts = false, .enable_vector = true, .vector_dimensions = 4 },
+        });
+
+        const node = try db.createNode(null, &[_][]const u8{"Embedding"});
+        try db.setNodeVector(node, &[_]f32{ 1.0, 0.0, 0.0, 0.0 });
+        const n2 = try db.createNode(null, &[_][]const u8{"Embedding"});
+        try db.setNodeVector(n2, &[_]f32{ 0.0, 1.0, 0.0, 0.0 });
+        try db.deleteNode(null, node);
+        db.close();
+        break :blk node;
+    };
+
+    var reopened = try Database.open(allocator, path, .{
+        .create = false,
+        .config = .{ .enable_wal = false, .enable_fts = false, .enable_vector = true, .vector_dimensions = 4 },
+    });
+    defer reopened.close();
+
+    const results = try reopened.vectorSearch(&[_]f32{ 1.0, 0.0, 0.0, 0.0 }, 2, null);
+    defer reopened.freeVectorSearchResults(results);
+    try expectVectorResultAbsent(results, n1);
+}
+
+test "database: vector replace survives reopen" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_vector_replace_reopen_test.ltdb";
+
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+
+    const n1: u64 = blk: {
+        var db = try Database.open(allocator, path, .{
+            .create = true,
+            .config = .{ .enable_wal = false, .enable_fts = false, .enable_vector = true, .vector_dimensions = 4 },
+        });
+
+        const node = try db.createNode(null, &[_][]const u8{"Embedding"});
+        try db.setNodeVector(node, &[_]f32{ 1.0, 0.0, 0.0, 0.0 });
+        _ = try db.createNode(null, &[_][]const u8{"Embedding"});
+        try db.setNodeVector(node, &[_]f32{ 0.0, 0.0, 1.0, 0.0 });
+        db.close();
+        break :blk node;
+    };
+
+    var reopened = try Database.open(allocator, path, .{
+        .create = false,
+        .config = .{ .enable_wal = false, .enable_fts = false, .enable_vector = true, .vector_dimensions = 4 },
+    });
+    defer reopened.close();
+
+    const results = try reopened.vectorSearch(&[_]f32{ 0.0, 0.0, 1.0, 0.0 }, 2, null);
+    defer reopened.freeVectorSearchResults(results);
+    try std.testing.expectEqual(n1, results[0].node_id);
+}
+
 test "database: rejects invalid vector dimensions" {
     const allocator = std.testing.allocator;
 
     const zero_path = "/tmp/lattice_vector_zero_dims_test.ltdb";
-    std.fs.cwd().deleteFile(zero_path) catch {};
-    defer std.fs.cwd().deleteFile(zero_path) catch {};
+    @import("compat").fs.cwd().deleteFile(zero_path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(zero_path) catch {};
     try std.testing.expectError(error.InvalidArgument, Database.open(allocator, zero_path, .{
         .create = true,
         .config = .{
@@ -1373,8 +1575,8 @@ test "database: rejects invalid vector dimensions" {
     }));
 
     const too_large_path = "/tmp/lattice_vector_too_large_dims_test.ltdb";
-    std.fs.cwd().deleteFile(too_large_path) catch {};
-    defer std.fs.cwd().deleteFile(too_large_path) catch {};
+    @import("compat").fs.cwd().deleteFile(too_large_path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(too_large_path) catch {};
     try std.testing.expectError(error.InvalidArgument, Database.open(allocator, too_large_path, .{
         .create = true,
         .config = .{
@@ -1390,7 +1592,7 @@ test "database: rejects vector insert and query dimension mismatches" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_vector_dimension_mismatch_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1403,7 +1605,7 @@ test "database: rejects vector insert and query dimension mismatches" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     const node = try db.createNode(null, &[_][]const u8{"Embedding"});
@@ -1417,7 +1619,7 @@ test "database: vector search supports 4096 dimensions" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_vector_4096_integration_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1430,7 +1632,7 @@ test "database: vector search supports 4096 dimensions" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     var exact: [4096]f32 = [_]f32{0.0} ** 4096;
@@ -1466,7 +1668,7 @@ test "database: handles many nodes efficiently" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_stress_nodes_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1474,7 +1676,7 @@ test "database: handles many nodes efficiently" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     const node_count = 500;
@@ -1500,7 +1702,7 @@ test "database: handles many edges efficiently" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_stress_edges_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1508,7 +1710,7 @@ test "database: handles many edges efficiently" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create a star topology: center node with 100 connections
@@ -1536,7 +1738,7 @@ test "database: outgoing traversal does not depend on edge payload deserializati
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_outgoing_refs_regression.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     {
         var db = try Database.open(allocator, path, .{
@@ -1568,7 +1770,7 @@ test "database: outgoing traversal does not depend on edge payload deserializati
         });
         defer {
             db.close();
-            std.fs.cwd().deleteFile(path) catch {};
+            @import("compat").fs.cwd().deleteFile(path) catch {};
         }
 
         const first_hop = try db.getOutgoingEdges(1);
@@ -1599,7 +1801,7 @@ test "database: read-only mode prevents writes" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_readonly_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     // Create database first
     {
@@ -1628,14 +1830,14 @@ test "database: read-only mode prevents writes" {
         try std.testing.expectError(lattice.storage.database.DatabaseError.PermissionDenied, result);
     }
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 }
 
 test "database: unknown read lookups do not intern symbols" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_unknown_lookup_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var alice: u64 = 0;
     var bob: u64 = 0;
@@ -1686,14 +1888,14 @@ test "database: unknown read lookups do not intern symbols" {
         try std.testing.expectEqual(symbol_count_before, db.symbol_table.count());
     }
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 }
 
 test "database: property type handling" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_property_types_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1701,7 +1903,7 @@ test "database: property type handling" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     const node = try db.createNode(null, &[_][]const u8{"TypeTest"});
@@ -1731,7 +1933,7 @@ test "database: getNodeProperty returns owned heap-backed values" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_owned_property_values_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1739,7 +1941,7 @@ test "database: getNodeProperty returns owned heap-backed values" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     const node = try db.createNode(null, &[_][]const u8{"OwnedValues"});
@@ -1786,7 +1988,7 @@ test "database: getNodeProperties returns owned decoded values" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_node_properties_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1794,7 +1996,7 @@ test "database: getNodeProperties returns owned decoded values" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     const empty_node = try db.createNode(null, &[_][]const u8{"Empty"});
@@ -1862,7 +2064,7 @@ test "database: list property round-trip through query" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_list_prop_query_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1874,7 +2076,7 @@ test "database: list property round-trip through query" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     const node = try db.createNode(null, &[_][]const u8{"ListNode"});
@@ -1907,7 +2109,7 @@ test "database: vector property round-trip through query" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_vec_prop_query_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1919,7 +2121,7 @@ test "database: vector property round-trip through query" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     const node = try db.createNode(null, &[_][]const u8{"VecNode"});
@@ -1949,7 +2151,7 @@ test "database: map property round-trip through query" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_map_prop_query_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -1961,7 +2163,7 @@ test "database: map property round-trip through query" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     const node = try db.createNode(null, &[_][]const u8{"MapNode"});
@@ -1994,7 +2196,7 @@ test "database: mixed-type list property through query" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_mixed_list_query_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -2006,7 +2208,7 @@ test "database: mixed-type list property through query" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     const node = try db.createNode(null, &[_][]const u8{"MixedNode"});
@@ -2040,7 +2242,7 @@ test "database: empty list property through query" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_empty_list_query_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -2052,7 +2254,7 @@ test "database: empty list property through query" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     const node = try db.createNode(null, &[_][]const u8{"EmptyListNode"});
@@ -2076,7 +2278,7 @@ test "database: multiple complex properties on same node" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_multi_complex_query_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -2088,7 +2290,7 @@ test "database: multiple complex properties on same node" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     const node = try db.createNode(null, &[_][]const u8{"ComplexNode"});
@@ -2133,7 +2335,7 @@ test "database: multi-label query filters nodes with all specified labels" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_multi_label_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -2141,7 +2343,7 @@ test "database: multi-label query filters nodes with all specified labels" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create nodes with varying label combinations
@@ -2179,7 +2381,7 @@ test "database: multi-label query on target of edge" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_multi_label_edge_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -2187,7 +2389,7 @@ test "database: multi-label query on target of edge" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create nodes
@@ -2216,7 +2418,7 @@ test "database: three labels on node pattern" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_three_label_test.ltdb";
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -2224,7 +2426,7 @@ test "database: three labels on node pattern" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create nodes with varying label counts

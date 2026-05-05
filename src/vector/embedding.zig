@@ -67,7 +67,7 @@ pub const EmbeddingClient = struct {
         return Self{
             .allocator = allocator,
             .config = config,
-            .http_client = std.http.Client{ .allocator = allocator },
+            .http_client = std.http.Client{ .allocator = allocator, .io = @import("compat").io },
         };
     }
 
@@ -141,7 +141,7 @@ pub const EmbeddingClient = struct {
         var buffer = std.array_list.Managed(u8).init(self.allocator);
         errdefer buffer.deinit();
 
-        const writer = buffer.writer();
+        const writer = @import("compat").arrayListWriter(&buffer);
 
         switch (self.config.api_format) {
             .ollama => {
@@ -255,7 +255,7 @@ test "json escaping" {
     var buffer = std.array_list.Managed(u8).init(allocator);
     defer buffer.deinit();
 
-    try writeJsonEscaped(buffer.writer(), "hello \"world\"\ntest\\path");
+    try writeJsonEscaped(@import("compat").arrayListWriter(&buffer), "hello \"world\"\ntest\\path");
     try std.testing.expectEqualStrings("hello \\\"world\\\"\\ntest\\\\path", buffer.items);
 }
 

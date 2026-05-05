@@ -4,6 +4,11 @@ const version = "0.6.0";
 pub fn build(b: *std.Build) void {
     const target = b.standardTargetOptions(.{});
     const optimize = b.standardOptimizeOption(.{});
+    const compat_module = b.createModule(.{
+        .root_source_file = b.path("src/compat.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
 
     // Create the main library module — exposed publicly via b.addModule so
     // sibling Zig packages can consume it as `dep.module("lattice")` without
@@ -16,6 +21,8 @@ pub fn build(b: *std.Build) void {
 
     // Add self-import so internal files can use @import("lattice")
     lib_module.addImport("lattice", lib_module);
+    lib_module.addImport("compat", compat_module);
+    lib_module.link_libc = true;
 
     // Core static library
     const lib = b.addLibrary(.{
@@ -39,6 +46,8 @@ pub fn build(b: *std.Build) void {
         .optimize = optimize,
     });
     shared_lib_module.addImport("lattice", shared_lib_module);
+    shared_lib_module.addImport("compat", compat_module);
+    shared_lib_module.link_libc = true;
 
     // Shared library — link libc for proper TLS and dlopen() compatibility on Linux
     const shared_lib = b.addLibrary(.{
@@ -46,7 +55,6 @@ pub fn build(b: *std.Build) void {
         .root_module = shared_lib_module,
         .linkage = .dynamic,
     });
-    shared_lib.linkLibC();
 
     // CLI module - imports the library module
     const cli_module = b.createModule(.{
@@ -57,13 +65,14 @@ pub fn build(b: *std.Build) void {
             .{ .name = "lattice", .module = lib_module },
         },
     });
+    cli_module.addImport("compat", compat_module);
 
     // CLI executable
     const cli = b.addExecutable(.{
         .name = "lattice",
         .root_module = cli_module,
     });
-    cli.linkLibrary(lib);
+    cli_module.linkLibrary(lib);
 
     const cli_main_test_module = b.createModule(.{
         .root_source_file = b.path("src/cli/main.zig"),
@@ -73,6 +82,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "lattice", .module = lib_module },
         },
     });
+    cli_main_test_module.addImport("compat", compat_module);
 
     // Unit test module - imports the library module
     const unit_test_module = b.createModule(.{
@@ -84,6 +94,7 @@ pub fn build(b: *std.Build) void {
         },
     });
     unit_test_module.addImport("cli_main", cli_main_test_module);
+    unit_test_module.addImport("compat", compat_module);
 
     // Unit tests
     const unit_tests = b.addTest(.{
@@ -100,6 +111,7 @@ pub fn build(b: *std.Build) void {
 
     // Add self-import for tests
     lib_test_module.addImport("lattice", lib_test_module);
+    lib_test_module.addImport("compat", compat_module);
 
     // Library tests (tests within src/)
     const lib_tests = b.addTest(.{
@@ -173,6 +185,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "lattice", .module = lib_module },
         },
     });
+    import_export_module.addImport("compat", compat_module);
 
     const integration_test_module = b.createModule(.{
         .root_source_file = b.path("tests/integration/main.zig"),
@@ -183,6 +196,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "import_export", .module = import_export_module },
         },
     });
+    integration_test_module.addImport("compat", compat_module);
 
     // Integration tests
     const integration_tests = b.addTest(.{
@@ -202,6 +216,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "lattice", .module = lib_module },
         },
     });
+    crash_test_module.addImport("compat", compat_module);
 
     // Crash tests
     const crash_tests = b.addTest(.{
@@ -221,13 +236,14 @@ pub fn build(b: *std.Build) void {
             .{ .name = "lattice", .module = lib_module },
         },
     });
+    bench_module.addImport("compat", compat_module);
 
     // Benchmark executable
     const bench_exe = b.addExecutable(.{
         .name = "lattice-bench",
         .root_module = bench_module,
     });
-    bench_exe.linkLibrary(lib);
+    bench_module.linkLibrary(lib);
 
     const run_bench = b.addRunArtifact(bench_exe);
     run_bench.step.dependOn(&bench_exe.step);
@@ -244,13 +260,14 @@ pub fn build(b: *std.Build) void {
             .{ .name = "lattice", .module = lib_module },
         },
     });
+    stress_module.addImport("compat", compat_module);
 
     // Stress test executable
     const stress_exe = b.addExecutable(.{
         .name = "lattice-stress",
         .root_module = stress_module,
     });
-    stress_exe.linkLibrary(lib);
+    stress_module.linkLibrary(lib);
 
     const run_stress = b.addRunArtifact(stress_exe);
     run_stress.step.dependOn(&stress_exe.step);
@@ -267,12 +284,13 @@ pub fn build(b: *std.Build) void {
             .{ .name = "lattice", .module = lib_module },
         },
     });
+    fts_bench_module.addImport("compat", compat_module);
 
     const fts_bench_exe = b.addExecutable(.{
         .name = "fts-benchmark",
         .root_module = fts_bench_module,
     });
-    fts_bench_exe.linkLibrary(lib);
+    fts_bench_module.linkLibrary(lib);
 
     const run_fts_bench = b.addRunArtifact(fts_bench_exe);
     run_fts_bench.step.dependOn(&fts_bench_exe.step);
@@ -292,12 +310,13 @@ pub fn build(b: *std.Build) void {
             .{ .name = "lattice", .module = lib_module },
         },
     });
+    vector_bench_module.addImport("compat", compat_module);
 
     const vector_bench_exe = b.addExecutable(.{
         .name = "vector-benchmark",
         .root_module = vector_bench_module,
     });
-    vector_bench_exe.linkLibrary(lib);
+    vector_bench_module.linkLibrary(lib);
 
     const run_vector_bench = b.addRunArtifact(vector_bench_exe);
     run_vector_bench.step.dependOn(&vector_bench_exe.step);
@@ -317,14 +336,15 @@ pub fn build(b: *std.Build) void {
             .{ .name = "lattice", .module = lib_module },
         },
     });
+    sqlite_bench_module.addImport("compat", compat_module);
 
     // SQLite comparison benchmark executable
     const sqlite_bench_exe = b.addExecutable(.{
         .name = "sqlite-benchmark",
         .root_module = sqlite_bench_module,
     });
-    sqlite_bench_exe.linkLibrary(lib);
-    sqlite_bench_exe.linkSystemLibrary("sqlite3");
+    sqlite_bench_module.linkLibrary(lib);
+    sqlite_bench_module.linkSystemLibrary("sqlite3", .{});
 
     const run_sqlite_bench = b.addRunArtifact(sqlite_bench_exe);
     run_sqlite_bench.step.dependOn(&sqlite_bench_exe.step);
@@ -341,13 +361,14 @@ pub fn build(b: *std.Build) void {
             .{ .name = "lattice", .module = lib_module },
         },
     });
+    graph_bench_module.addImport("compat", compat_module);
 
     const graph_bench_exe = b.addExecutable(.{
         .name = "graph-benchmark",
         .root_module = graph_bench_module,
     });
-    graph_bench_exe.linkLibrary(lib);
-    graph_bench_exe.linkSystemLibrary("sqlite3");
+    graph_bench_module.linkLibrary(lib);
+    graph_bench_module.linkSystemLibrary("sqlite3", .{});
 
     const run_graph_bench = b.addRunArtifact(graph_bench_exe);
     run_graph_bench.step.dependOn(&graph_bench_exe.step);
@@ -367,6 +388,7 @@ pub fn build(b: *std.Build) void {
             .{ .name = "lattice", .module = lib_module },
         },
     });
+    fuzz_module.addImport("compat", compat_module);
 
     // Fuzz tests (run with: zig build fuzz -- --fuzz)
     const fuzz_tests = b.addTest(.{

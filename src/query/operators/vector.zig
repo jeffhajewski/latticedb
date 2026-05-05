@@ -317,7 +317,7 @@ pub const VectorSearchWithInput = struct {
 
             const gop = self.rows_by_node.getOrPut(self.allocator, node_id) catch return OperatorError.OutOfMemory;
             if (!gop.found_existing) {
-                gop.value_ptr.* = .{};
+                gop.value_ptr.* = .empty;
             }
             gop.value_ptr.append(self.allocator, row.*) catch return OperatorError.OutOfMemory;
         }

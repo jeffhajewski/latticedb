@@ -923,7 +923,7 @@ pub const EdgeStore = struct {
         errdefer alloc.free(results);
 
         // 3. Collect edges via single scan using unmanaged list
-        var edges = std.ArrayListUnmanaged(EdgeRef){};
+        var edges = std.ArrayListUnmanaged(EdgeRef).empty;
         errdefer edges.deinit(alloc);
 
         // 4. Start scan from first node's key
@@ -1117,7 +1117,7 @@ fn serializeEdge(
     properties: []const Property,
     buf: []u8,
 ) ![]u8 {
-    var stream = std.io.fixedBufferStream(buf);
+    var stream = @import("compat").fixedBufferStream(buf);
     const writer = stream.writer();
 
     try writer.writeInt(u64, source, .little);
@@ -1192,7 +1192,7 @@ fn deserializeEdge(
     edge_id: EdgeId,
     data: []const u8,
 ) !Edge {
-    var stream = std.io.fixedBufferStream(data);
+    var stream = @import("compat").fixedBufferStream(data);
     const reader = stream.reader();
 
     const source = try reader.readInt(u64, .little);

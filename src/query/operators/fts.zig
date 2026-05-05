@@ -306,7 +306,7 @@ pub const FtsSearchWithInput = struct {
             if (!allowed_docs.contains(doc_id)) continue;
 
             const gop = self.rows_by_doc.getOrPut(self.allocator, doc_id) catch return OperatorError.OutOfMemory;
-            if (!gop.found_existing) gop.value_ptr.* = .{};
+            if (!gop.found_existing) gop.value_ptr.* = .empty;
             gop.value_ptr.append(self.allocator, row.*) catch return OperatorError.OutOfMemory;
         }
 

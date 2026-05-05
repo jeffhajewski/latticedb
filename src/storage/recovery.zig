@@ -191,7 +191,7 @@ pub const RecoveryManager = struct {
     /// Perform crash recovery
     /// Returns statistics about the recovery process
     pub fn recover(self: *Self, wal: *WalManager, pm: *PageManager) RecoveryError!RecoveryStats {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = @import("compat").nanoTimestamp();
 
         var stats = RecoveryStats{
             .start_lsn = wal.getCheckpointLsn(),
@@ -211,7 +211,7 @@ pub const RecoveryManager = struct {
         var txn_states = std.AutoHashMap(u64, TxnRecoveryInfo).init(self.allocator);
         defer txn_states.deinit();
 
-        var redo_list: std.ArrayListUnmanaged(RedoEntry) = .{};
+        var redo_list: std.ArrayListUnmanaged(RedoEntry) = .empty;
         defer redo_list.deinit(self.allocator);
 
         try self.analysisPass(wal, &txn_states, &redo_list, &stats);
@@ -232,7 +232,7 @@ pub const RecoveryManager = struct {
         // Sync to ensure all changes are durable
         pm.sync() catch return RecoveryError.IoError;
 
-        const end_time = std.time.nanoTimestamp();
+        const end_time = @import("compat").nanoTimestamp();
         stats.duration_ns = @intCast(end_time - start_time);
 
         return stats;
@@ -440,7 +440,7 @@ pub const RecoveryManager = struct {
         if (payload_type == @intFromEnum(wal_payload.PayloadType.node_insert)) {
             const node_payload = wal_payload.deserializeNodeInsert(payload) catch return;
             // Intern label strings to get label IDs
-            var label_ids: std.ArrayListUnmanaged(u16) = .{};
+            var label_ids: std.ArrayListUnmanaged(u16) = .empty;
             defer label_ids.deinit(self.allocator);
             var iter = node_payload.labelIterator();
             while (iter.next()) |label| {
@@ -749,7 +749,7 @@ test "recovery with no WAL records" {
     }
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     var wal = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
     defer {
@@ -784,7 +784,7 @@ test "recovery with committed transaction" {
     }
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     var wal = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
     defer {
@@ -828,7 +828,7 @@ test "recovery with aborted transaction" {
     }
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     var wal = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
     defer {
@@ -870,7 +870,7 @@ test "recovery with uncommitted transaction (crash simulation)" {
     }
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     var wal = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
     defer {
@@ -914,7 +914,7 @@ test "recovery with mixed transactions" {
     }
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     var wal = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
     defer {
@@ -973,7 +973,7 @@ test "recovery respects checkpoint_lsn" {
     }
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     var wal = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
     defer {
@@ -1024,7 +1024,7 @@ test "recovery handles tail corruption (torn write)" {
     }
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     var wal = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
 
@@ -1083,7 +1083,7 @@ test "recovery fails on mid-log corruption" {
     }
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     var wal = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
 

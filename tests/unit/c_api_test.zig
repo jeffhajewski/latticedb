@@ -53,7 +53,7 @@ test "c_api: open and close database" {
     const path = "/tmp/lattice_capi_open_test.db";
 
     // Clean up from previous runs
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -75,7 +75,7 @@ test "c_api: open and close database" {
     try std.testing.expectEqual(lattice_error.ok, close_result);
 
     // Cleanup
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 }
 
 test "c_api: open nonexistent file without create fails" {
@@ -101,7 +101,7 @@ test "c_api: close null handle returns error" {
 
 test "c_api: reopen existing database" {
     const path = "/tmp/lattice_capi_reopen_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     // Create database
     {
@@ -135,7 +135,7 @@ test "c_api: reopen existing database" {
         try std.testing.expectEqual(lattice_error.ok, c_api.lattice_close(db));
     }
 
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 }
 
 // ============================================================================
@@ -144,7 +144,7 @@ test "c_api: reopen existing database" {
 
 test "c_api: begin and commit transaction" {
     const path = "/tmp/lattice_capi_txn_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -159,7 +159,7 @@ test "c_api: begin and commit transaction" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Begin transaction
@@ -173,7 +173,7 @@ test "c_api: begin and commit transaction" {
 
 test "c_api: begin and rollback transaction" {
     const path = "/tmp/lattice_capi_rollback_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -188,7 +188,7 @@ test "c_api: begin and rollback transaction" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     var txn: ?*lattice_txn = null;
@@ -200,7 +200,7 @@ test "c_api: begin and rollback transaction" {
 
 test "c_api: read-only transaction prevents writes" {
     const path = "/tmp/lattice_capi_readonly_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -215,7 +215,7 @@ test "c_api: read-only transaction prevents writes" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Begin read-only transaction
@@ -232,8 +232,8 @@ test "c_api: read-only transaction prevents writes" {
 
 test "c_api: rollback undoes node creation" {
     const path = "/tmp/lattice_capi_rollback_node_create.db";
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -248,8 +248,8 @@ test "c_api: rollback undoes node creation" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     // Begin transaction and create node
@@ -279,8 +279,8 @@ test "c_api: rollback undoes node creation" {
 
 test "c_api: rollback undoes node deletion" {
     const path = "/tmp/lattice_capi_rollback_node_delete.db";
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -295,8 +295,8 @@ test "c_api: rollback undoes node deletion" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     // First, create and commit a node
@@ -344,8 +344,8 @@ test "c_api: rollback undoes node deletion" {
 
 test "c_api: rollback undoes property changes" {
     const path = "/tmp/lattice_capi_rollback_property.db";
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -360,8 +360,8 @@ test "c_api: rollback undoes property changes" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     // Create node with initial property
@@ -417,8 +417,8 @@ test "c_api: rollback undoes property changes" {
 
 test "c_api: committed changes persist across transactions" {
     const path = "/tmp/lattice_capi_commit_persist.db";
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -433,8 +433,8 @@ test "c_api: committed changes persist across transactions" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     var node_id: lattice_node_id = 0;
@@ -478,8 +478,8 @@ test "c_api: committed changes persist across transactions" {
 
 test "c_api: rollback undoes edge creation" {
     const path = "/tmp/lattice_capi_rollback_edge.db";
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -494,8 +494,8 @@ test "c_api: rollback undoes edge creation" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     // Create two nodes first (committed)
@@ -549,7 +549,7 @@ test "c_api: rollback undoes edge creation" {
 
 test "c_api: create and check node exists" {
     const path = "/tmp/lattice_capi_node_create_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -564,7 +564,7 @@ test "c_api: create and check node exists" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     var txn: ?*lattice_txn = null;
@@ -589,7 +589,7 @@ test "c_api: create and check node exists" {
 
 test "c_api: node properties set and get" {
     const path = "/tmp/lattice_capi_node_props_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -604,7 +604,7 @@ test "c_api: node properties set and get" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     var txn: ?*lattice_txn = null;
@@ -681,7 +681,7 @@ test "c_api: node properties set and get" {
 
 test "c_api: delete node" {
     const path = "/tmp/lattice_capi_node_delete_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -696,7 +696,7 @@ test "c_api: delete node" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     var txn: ?*lattice_txn = null;
@@ -720,7 +720,7 @@ test "c_api: delete node" {
 
 test "c_api: get node labels" {
     const path = "/tmp/lattice_capi_labels_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -735,7 +735,7 @@ test "c_api: get node labels" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     var txn: ?*lattice_txn = null;
@@ -761,7 +761,7 @@ test "c_api: get node labels" {
 
 test "c_api: unlabeled nodes and multi-label mutation" {
     const path = "/tmp/lattice_capi_multilabel_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -776,7 +776,7 @@ test "c_api: unlabeled nodes and multi-label mutation" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     var txn: ?*lattice_txn = null;
@@ -815,7 +815,7 @@ test "c_api: unlabeled nodes and multi-label mutation" {
 
 test "c_api: create edge" {
     const path = "/tmp/lattice_capi_edge_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -830,7 +830,7 @@ test "c_api: create edge" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     var txn: ?*lattice_txn = null;
@@ -852,7 +852,7 @@ test "c_api: create edge" {
 
 test "c_api: edge property CRUD and traversal exposes stable edge IDs" {
     const path = "/tmp/lattice_capi_edge_props_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -867,7 +867,7 @@ test "c_api: edge property CRUD and traversal exposes stable edge IDs" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     var txn: ?*lattice_txn = null;
@@ -920,7 +920,7 @@ test "c_api: edge property CRUD and traversal exposes stable edge IDs" {
 
 test "c_api: get outgoing edges" {
     const path = "/tmp/lattice_capi_outgoing_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -935,7 +935,7 @@ test "c_api: get outgoing edges" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     var txn: ?*lattice_txn = null;
@@ -972,8 +972,8 @@ test "c_api: get outgoing edges" {
 
 test "c_api: edge IDs stay monotonic across rollback and parallel creates" {
     const path = "/tmp/lattice_capi_edge_id_monotonic_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -988,8 +988,8 @@ test "c_api: edge IDs stay monotonic across rollback and parallel creates" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     var alice: lattice_node_id = 0;
@@ -1035,11 +1035,11 @@ test "c_api: edge IDs stay monotonic across rollback and parallel creates" {
 
 test "c_api: edge ID allocator persists across reopen" {
     const path = "/tmp/lattice_capi_edge_id_reopen_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     var db: ?*lattice_database = null;
@@ -1097,8 +1097,8 @@ test "c_api: edge ID allocator persists across reopen" {
 
 test "c_api: endpoint delete on parallel edges keeps allocator monotonic" {
     const path = "/tmp/lattice_capi_endpoint_delete_parallel_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -1113,8 +1113,8 @@ test "c_api: endpoint delete on parallel edges keeps allocator monotonic" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     var alice: lattice_node_id = 0;
@@ -1152,11 +1152,11 @@ test "c_api: endpoint delete on parallel edges keeps allocator monotonic" {
 
 test "c_api: endpoint delete behavior persists across reopen" {
     const path = "/tmp/lattice_capi_endpoint_delete_reopen_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     var db: ?*lattice_database = null;
@@ -1214,11 +1214,11 @@ test "c_api: endpoint delete behavior persists across reopen" {
 
 test "c_api: rollback of endpoint delete keeps both parallel edges" {
     const path = "/tmp/lattice_capi_endpoint_delete_rollback_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     var db: ?*lattice_database = null;
@@ -1273,11 +1273,11 @@ test "c_api: rollback of endpoint delete keeps both parallel edges" {
 
 test "c_api: edge ids are not reused after deleting all edges and reopen" {
     const path = "/tmp/lattice_capi_edge_id_no_reuse_reopen_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     var db: ?*lattice_database = null;
@@ -1332,11 +1332,11 @@ test "c_api: edge ids are not reused after deleting all edges and reopen" {
 
 test "c_api: deleting nonexistent edge returns not_found" {
     const path = "/tmp/lattice_capi_delete_nonexistent_edge_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     defer {
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     var db: ?*lattice_database = null;
@@ -1391,7 +1391,7 @@ test "c_api: deleting nonexistent edge returns not_found" {
 
 test "c_api: prepare and execute query" {
     const path = "/tmp/lattice_capi_query_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -1406,7 +1406,7 @@ test "c_api: prepare and execute query" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     var txn: ?*lattice_txn = null;
@@ -1451,7 +1451,7 @@ test "c_api: prepare and execute query" {
 
 test "c_api: prepared query copies and replaces string parameters" {
     const path = "/tmp/lattice_capi_query_bind_copy_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -1466,7 +1466,7 @@ test "c_api: prepared query copies and replaces string parameters" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     {
@@ -1560,8 +1560,8 @@ test "c_api: prepared query copies and replaces string parameters" {
 
 test "c_api: nested values round-trip on input and output" {
     const path = "/tmp/lattice_capi_nested_values_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -1576,8 +1576,8 @@ test "c_api: nested values round-trip on input and output" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     var txn: ?*lattice_txn = null;
@@ -1654,7 +1654,7 @@ test "c_api: nested values round-trip on input and output" {
 
 test "c_api: invalid nested values fail explicitly on input" {
     const path = "/tmp/lattice_capi_invalid_nested_input_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -1669,7 +1669,7 @@ test "c_api: invalid nested values fail explicitly on input" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     var txn: ?*lattice_txn = null;
@@ -1723,8 +1723,8 @@ test "c_api: invalid nested values fail explicitly on input" {
 
 test "c_api: stream publish read offset trim and free batch" {
     const path = "/tmp/lattice_capi_stream_roundtrip_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -1739,8 +1739,8 @@ test "c_api: stream publish read offset trim and free batch" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     {
@@ -1890,8 +1890,8 @@ test "c_api: stream publish read offset trim and free batch" {
 
 test "c_api: stream rollback read-only and reserved names" {
     const path = "/tmp/lattice_capi_stream_reject_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -1906,8 +1906,8 @@ test "c_api: stream rollback read-only and reserved names" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     var payload = lattice_value{
@@ -1978,7 +1978,7 @@ test "c_api: stream rollback read-only and reserved names" {
 
 test "c_api: query with invalid syntax returns error" {
     const path = "/tmp/lattice_capi_bad_query_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -1993,7 +1993,7 @@ test "c_api: query with invalid syntax returns error" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     var txn: ?*lattice_txn = null;
@@ -2024,7 +2024,7 @@ test "c_api: query with invalid syntax returns error" {
 
 test "c_api: semantic query error diagnostics include code and location" {
     const path = "/tmp/lattice_capi_semantic_diag_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -2039,7 +2039,7 @@ test "c_api: semantic query error diagnostics include code and location" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     var txn: ?*lattice_txn = null;
@@ -2073,8 +2073,8 @@ test "c_api: semantic query error diagnostics include code and location" {
 
 test "c_api: txn-scoped graph reads and queries hide uncommitted changes" {
     const path = "/tmp/lattice_capi_txn_graph_snapshot_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -2089,8 +2089,8 @@ test "c_api: txn-scoped graph reads and queries hide uncommitted changes" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     var seed_txn: ?*lattice_txn = null;
@@ -2202,8 +2202,8 @@ test "c_api: txn-scoped graph reads and queries hide uncommitted changes" {
 
 test "c_api: txn-scoped vector and fts searches hide uncommitted changes" {
     const path = "/tmp/lattice_capi_txn_search_snapshot_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -2218,8 +2218,8 @@ test "c_api: txn-scoped vector and fts searches hide uncommitted changes" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     var write_txn: ?*lattice_txn = null;
@@ -2330,8 +2330,8 @@ test "c_api: txn-scoped vector and fts searches hide uncommitted changes" {
 
 test "c_api: vector dimension validation returns invalid argument" {
     const zero_path = "/tmp/lattice_capi_vector_zero_dims_test.db";
-    std.fs.cwd().deleteFile(zero_path) catch {};
-    defer std.fs.cwd().deleteFile(zero_path) catch {};
+    @import("compat").fs.cwd().deleteFile(zero_path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(zero_path) catch {};
 
     var db: ?*lattice_database = null;
     const zero_options = lattice_open_options{
@@ -2346,8 +2346,8 @@ test "c_api: vector dimension validation returns invalid argument" {
     try std.testing.expect(db == null);
 
     const too_large_path = "/tmp/lattice_capi_vector_too_large_dims_test.db";
-    std.fs.cwd().deleteFile(too_large_path) catch {};
-    defer std.fs.cwd().deleteFile(too_large_path) catch {};
+    @import("compat").fs.cwd().deleteFile(too_large_path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(too_large_path) catch {};
 
     const too_large_options = lattice_open_options{
         .create = true,
@@ -2361,8 +2361,8 @@ test "c_api: vector dimension validation returns invalid argument" {
     try std.testing.expect(db == null);
 
     const path = "/tmp/lattice_capi_vector_wrong_dims_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     const options = lattice_open_options{
         .create = true,
@@ -2375,8 +2375,8 @@ test "c_api: vector dimension validation returns invalid argument" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     var txn: ?*lattice_txn = null;
@@ -2403,8 +2403,8 @@ test "c_api: vector dimension validation returns invalid argument" {
 
 test "c_api: vector search supports large vectors" {
     const path = "/tmp/lattice_capi_large_vector_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -2419,8 +2419,8 @@ test "c_api: vector search supports large vectors" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     var txn: ?*lattice_txn = null;
@@ -2509,7 +2509,7 @@ test "c_api: null argument handling" {
 
 test "c_api: string allocation and free" {
     const path = "/tmp/lattice_capi_string_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -2524,7 +2524,7 @@ test "c_api: string allocation and free" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     var txn: ?*lattice_txn = null;
@@ -2549,7 +2549,7 @@ test "c_api: string allocation and free" {
 
 test "c_api: result set iteration and cleanup" {
     const path = "/tmp/lattice_capi_result_cleanup_test.db";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db: ?*lattice_database = null;
     const options = lattice_open_options{
@@ -2564,7 +2564,7 @@ test "c_api: result set iteration and cleanup" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
         _ = c_api.lattice_close(db);
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     var txn: ?*lattice_txn = null;

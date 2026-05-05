@@ -6,6 +6,7 @@
 //! - Portable file operations across platforms
 
 const std = @import("std");
+const compat = @import("compat");
 const Allocator = std.mem.Allocator;
 
 /// Errors that can occur during VFS operations.
@@ -181,31 +182,18 @@ pub const PosixVfs = struct {
 
     /// Open a file.
     pub fn openFile(self: *Self, path: []const u8, flags: OpenFlags) VfsError!File {
-        // Build POSIX open flags
-        var posix_flags: std.posix.O = .{};
+        const file_handle = if (flags.create)
+            std.Io.Dir.cwd().createFile(compat.io, path, .{
+                .read = flags.read,
+                .truncate = flags.truncate,
+                .exclusive = flags.exclusive,
+            })
+        else
+            std.Io.Dir.cwd().openFile(compat.io, path, .{
+                .mode = if (flags.read and flags.write) .read_write else if (flags.write) .write_only else .read_only,
+            });
 
-        if (flags.read and flags.write) {
-            posix_flags.ACCMODE = .RDWR;
-        } else if (flags.write) {
-            posix_flags.ACCMODE = .WRONLY;
-        } else {
-            posix_flags.ACCMODE = .RDONLY;
-        }
-
-        if (flags.create) {
-            posix_flags.CREAT = true;
-        }
-        if (flags.exclusive) {
-            posix_flags.EXCL = true;
-        }
-        if (flags.truncate) {
-            posix_flags.TRUNC = true;
-        }
-
-        // Need null-terminated path for POSIX
-        const path_z = std.posix.toPosixPath(path) catch return VfsError.InvalidPath;
-
-        const fd = std.posix.openatZ(std.posix.AT.FDCWD, &path_z, posix_flags, 0o644) catch |err| {
+        const opened = file_handle catch |err| {
             return switch (err) {
                 error.FileNotFound => VfsError.FileNotFound,
                 error.AccessDenied => VfsError.PermissionDenied,
@@ -217,7 +205,7 @@ pub const PosixVfs = struct {
 
         const file = self.allocator.create(PosixFile) catch return VfsError.Unexpected;
         file.* = .{
-            .fd = fd,
+            .handle = opened,
             .allocator = self.allocator,
             .writable = flags.write,
         };
@@ -228,9 +216,7 @@ pub const PosixVfs = struct {
     /// Delete a file.
     pub fn deleteFile(self: *Self, path: []const u8) VfsError!void {
         _ = self;
-        const path_z = std.posix.toPosixPath(path) catch return VfsError.InvalidPath;
-
-        std.posix.unlinkatZ(std.posix.AT.FDCWD, &path_z, 0) catch |err| {
+        std.Io.Dir.cwd().deleteFile(compat.io, path) catch |err| {
             return switch (err) {
                 error.FileNotFound => VfsError.FileNotFound,
                 error.AccessDenied => VfsError.PermissionDenied,
@@ -242,15 +228,14 @@ pub const PosixVfs = struct {
     /// Check if a file exists.
     pub fn fileExists(self: *Self, path: []const u8) bool {
         _ = self;
-        const path_z = std.posix.toPosixPath(path) catch return false;
-        _ = std.posix.fstatatZ(std.posix.AT.FDCWD, &path_z, 0) catch return false;
+        std.Io.Dir.cwd().access(compat.io, path, .{}) catch return false;
         return true;
     }
 };
 
 /// POSIX file handle.
 pub const PosixFile = struct {
-    fd: std.posix.fd_t,
+    handle: std.Io.File,
     allocator: Allocator,
     writable: bool,
 
@@ -317,7 +302,7 @@ pub const PosixFile = struct {
 
     /// Read from file at offset.
     pub fn readAt(self: *Self, offset: u64, buf: []u8) VfsError!usize {
-        const n = std.posix.pread(self.fd, buf, offset) catch |err| {
+        const n = self.handle.readPositionalAll(compat.io, buf, offset) catch |err| {
             return switch (err) {
                 error.InputOutput => VfsError.IoError,
                 else => VfsError.Unexpected,
@@ -332,21 +317,22 @@ pub const PosixFile = struct {
 
         var written: usize = 0;
         while (written < data.len) {
-            const n = std.posix.pwrite(self.fd, data[written..], offset + written) catch |err| {
+            const before = written;
+            self.handle.writePositionalAll(compat.io, data[written..], offset + written) catch |err| {
                 return switch (err) {
                     error.InputOutput => VfsError.IoError,
                     error.NoSpaceLeft => VfsError.DiskFull,
                     else => VfsError.Unexpected,
                 };
             };
-            if (n == 0) return VfsError.IoError;
-            written += n;
+            written = data.len;
+            if (written == before) return VfsError.IoError;
         }
     }
 
     /// Sync file to disk.
     pub fn syncFile(self: *Self) VfsError!void {
-        std.posix.fsync(self.fd) catch |err| {
+        self.handle.sync(compat.io) catch |err| {
             return switch (err) {
                 error.InputOutput => VfsError.IoError,
                 else => VfsError.Unexpected,
@@ -358,7 +344,7 @@ pub const PosixFile = struct {
     pub fn truncateFile(self: *Self, new_size: u64) VfsError!void {
         if (!self.writable) return VfsError.NotOpenForWriting;
 
-        std.posix.ftruncate(self.fd, @intCast(new_size)) catch |err| {
+        self.handle.setLength(compat.io, new_size) catch |err| {
             return switch (err) {
                 error.AccessDenied, error.PermissionDenied => VfsError.PermissionDenied,
                 else => VfsError.Unexpected,
@@ -368,33 +354,23 @@ pub const PosixFile = struct {
 
     /// Get file size.
     pub fn getSize(self: *Self) VfsError!u64 {
-        const stat = std.posix.fstat(self.fd) catch return VfsError.IoError;
+        const stat = self.handle.stat(compat.io) catch return VfsError.IoError;
         return @intCast(stat.size);
     }
 
     /// Close file.
     pub fn closeFile(self: *Self) void {
-        std.posix.close(self.fd);
+        self.handle.close(compat.io);
         self.allocator.destroy(self);
     }
 
     /// Lock file.
     pub fn lockFile(self: *Self, mode: LockMode) VfsError!void {
-        const lock_type: i16 = switch (mode) {
-            .shared => std.c.F.RDLCK,
-            .exclusive => std.c.F.WRLCK,
-        };
-
-        var flock: std.c.Flock = std.mem.zeroes(std.c.Flock);
-        flock.type = lock_type;
-        flock.whence = 0; // SEEK_SET
-        flock.start = 0;
-        flock.len = 0; // Entire file
-        flock.pid = 0;
-
-        _ = std.posix.fcntl(self.fd, std.c.F.SETLKW, @intFromPtr(&flock)) catch |err| {
+        self.handle.lock(compat.io, switch (mode) {
+            .shared => .shared,
+            .exclusive => .exclusive,
+        }) catch |err| {
             return switch (err) {
-                error.DeadLock => VfsError.FileLocked,
                 else => VfsError.Unexpected,
             };
         };
@@ -402,14 +378,7 @@ pub const PosixFile = struct {
 
     /// Unlock file.
     pub fn unlockFile(self: *Self) void {
-        var flock: std.c.Flock = std.mem.zeroes(std.c.Flock);
-        flock.type = std.c.F.UNLCK;
-        flock.whence = 0; // SEEK_SET
-        flock.start = 0;
-        flock.len = 0;
-        flock.pid = 0;
-
-        _ = std.posix.fcntl(self.fd, std.c.F.SETLK, @intFromPtr(&flock)) catch {};
+        self.handle.unlock(compat.io);
     }
 };
 

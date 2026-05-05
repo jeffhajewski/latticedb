@@ -222,7 +222,7 @@ pub const FtsIndex = struct {
                 result.key_ptr.* = key_copy;
                 result.value_ptr.* = TermInfo{
                     .freq = 1,
-                    .positions = .{},
+                    .positions = .empty,
                 };
                 if (self.config.store_positions) {
                     result.value_ptr.positions.append(self.allocator, token.position) catch {
@@ -562,7 +562,7 @@ pub const FtsIndex = struct {
         }
 
         // Iterate posting list and score documents
-        var results: ArrayListUnmanaged(ScoredDoc) = .{};
+        var results: ArrayListUnmanaged(ScoredDoc) = .empty;
         errdefer results.deinit(self.allocator);
 
         var iter = self.posting_store.iterate(dict_entry.posting_page) catch {
@@ -685,7 +685,7 @@ pub const FtsIndex = struct {
         }
 
         // Intersection with skip pointers
-        var results: ArrayListUnmanaged(ScoredDoc) = .{};
+        var results: ArrayListUnmanaged(ScoredDoc) = .empty;
         errdefer results.deinit(self.allocator);
 
         while (driver_iter.next() catch null) |driver_entry| {
@@ -859,7 +859,7 @@ pub const FtsIndex = struct {
         }
 
         // Convert to result array
-        var results: ArrayListUnmanaged(ScoredDoc) = .{};
+        var results: ArrayListUnmanaged(ScoredDoc) = .empty;
         errdefer results.deinit(self.allocator);
 
         var iter = doc_scores.iterator();
@@ -1041,7 +1041,7 @@ pub const FtsIndex = struct {
         }
 
         // Convert to result array (AND semantics: require all terms)
-        var results: ArrayListUnmanaged(ScoredDoc) = .{};
+        var results: ArrayListUnmanaged(ScoredDoc) = .empty;
         errdefer results.deinit(self.allocator);
 
         var score_iter = doc_scores.iterator();
@@ -1161,7 +1161,7 @@ pub const FtsIndex = struct {
                 }
 
                 // Filter candidates to those matching this phrase
-                var filtered: ArrayListUnmanaged(ScoredDoc) = .{};
+                var filtered: ArrayListUnmanaged(ScoredDoc) = .empty;
                 for (candidates) |doc| {
                     if (phrase_docs.get(doc.doc_id)) |score| {
                         filtered.append(self.allocator, .{
@@ -1199,7 +1199,7 @@ pub const FtsIndex = struct {
                 }
 
                 // Filter phrase candidates by term matches (AND mode) or merge (OR mode)
-                var filtered: ArrayListUnmanaged(ScoredDoc) = .{};
+                var filtered: ArrayListUnmanaged(ScoredDoc) = .empty;
                 if (mode == .@"and") {
                     for (candidates) |doc| {
                         if (term_docs.get(doc.doc_id)) |score| {
@@ -1285,7 +1285,7 @@ pub const FtsIndex = struct {
         }
 
         // Filter results
-        var results: ArrayListUnmanaged(ScoredDoc) = .{};
+        var results: ArrayListUnmanaged(ScoredDoc) = .empty;
         errdefer results.deinit(self.allocator);
 
         for (candidates) |doc| {
@@ -1519,7 +1519,7 @@ pub const FtsIndex = struct {
         }
 
         // Collect all results (no term count filter for OR)
-        var results: ArrayListUnmanaged(ScoredDoc) = .{};
+        var results: ArrayListUnmanaged(ScoredDoc) = .empty;
         errdefer results.deinit(self.allocator);
 
         var score_iter = doc_scores.iterator();
@@ -1769,7 +1769,7 @@ pub const FtsIndex = struct {
         }
 
         // Collect results
-        var results: ArrayListUnmanaged(ScoredDoc) = .{};
+        var results: ArrayListUnmanaged(ScoredDoc) = .empty;
         errdefer results.deinit(self.allocator);
 
         var result_iter = phrase_matches.iterator();

@@ -37,7 +37,7 @@ const TxnMode = txn_mod.TxnMode;
 
 /// Global general-purpose allocator for C API.
 /// C callers cannot provide Zig allocators, so we use a global one.
-var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+var gpa = std.heap.DebugAllocator(.{}){};
 const global_allocator = gpa.allocator();
 
 // ============================================================================

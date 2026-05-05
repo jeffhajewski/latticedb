@@ -113,11 +113,11 @@ pub const PageManager = struct {
     fn initNewFile(self: *Self) PageManagerError!void {
         self.header = FileHeader.init();
         self.header.page_size = self.page_size;
-        self.header.created_timestamp = @intCast(std.time.timestamp());
+        self.header.created_timestamp = @intCast(@import("compat").timestamp());
         self.header.modified_timestamp = self.header.created_timestamp;
 
         // Generate random UUID
-        std.crypto.random.bytes(&self.header.file_uuid);
+        @import("compat").randomBytes(&self.header.file_uuid);
 
         try self.writeHeader();
     }
@@ -149,7 +149,7 @@ pub const PageManager = struct {
     fn writeHeader(self: *Self) PageManagerError!void {
         if (self.read_only) return PageManagerError.PermissionDenied;
 
-        self.header.modified_timestamp = @intCast(std.time.timestamp());
+        self.header.modified_timestamp = @intCast(@import("compat").timestamp());
 
         var buf: [4096]u8 = [_]u8{0} ** 4096;
         const header_bytes = std.mem.asBytes(&self.header);

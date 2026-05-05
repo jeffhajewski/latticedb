@@ -288,7 +288,7 @@ test "rwlatch: concurrent readers" {
                     }
 
                     // Keep the shared lock briefly so peers can overlap more reliably.
-                    std.Thread.sleep(100_000);
+                    @import("compat").sleep(100_000);
 
                     _ = active.fetchSub(1, .seq_cst);
                     l.releaseShared();

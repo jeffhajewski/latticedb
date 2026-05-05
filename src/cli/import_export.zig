@@ -184,7 +184,7 @@ pub fn importJson(
     batch_size: u32,
     on_error_skip: bool,
 ) ImportExportError!ImportStats {
-    const file = std.fs.cwd().openFile(file_path, .{}) catch {
+    const file = @import("compat").fs.cwd().openFile(file_path, .{}) catch {
         return ImportExportError.IoError;
     };
     defer file.close();
@@ -1001,7 +1001,7 @@ pub fn importCsv(
     batch_size: u32,
     on_error_skip: bool,
 ) ImportExportError!ImportStats {
-    const file = std.fs.cwd().openFile(file_path, .{}) catch {
+    const file = @import("compat").fs.cwd().openFile(file_path, .{}) catch {
         return ImportExportError.IoError;
     };
     defer file.close();
@@ -1249,11 +1249,11 @@ pub const ExportStats = struct {
 };
 
 fn cleanupTestDatabaseFiles(path: []const u8) void {
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var wal_path_buf: [wal_path_buffer_size]u8 = undefined;
     const wal_path = std.fmt.bufPrint(&wal_path_buf, "{s}-wal", .{path}) catch return;
-    std.fs.cwd().deleteFile(wal_path) catch {};
+    @import("compat").fs.cwd().deleteFile(wal_path) catch {};
 }
 
 test "import/export JSON batching rolls back failed batch" {
@@ -1359,7 +1359,7 @@ test "import/export JSON roundtrip" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Import JSON
@@ -1402,8 +1402,8 @@ test "import_export: dumpCanonicalJson is deterministic and includes unlabeled n
     const path_a = "/tmp/lattice_dump_canonical_a.ltdb";
     const path_b = "/tmp/lattice_dump_canonical_b.ltdb";
 
-    std.fs.cwd().deleteFile(path_a) catch {};
-    std.fs.cwd().deleteFile(path_b) catch {};
+    @import("compat").fs.cwd().deleteFile(path_a) catch {};
+    @import("compat").fs.cwd().deleteFile(path_b) catch {};
 
     var db_a = try Database.open(allocator, path_a, .{
         .create = true,
@@ -1411,7 +1411,7 @@ test "import_export: dumpCanonicalJson is deterministic and includes unlabeled n
     });
     defer {
         db_a.close();
-        std.fs.cwd().deleteFile(path_a) catch {};
+        @import("compat").fs.cwd().deleteFile(path_a) catch {};
     }
 
     var db_b = try Database.open(allocator, path_b, .{
@@ -1420,7 +1420,7 @@ test "import_export: dumpCanonicalJson is deterministic and includes unlabeled n
     });
     defer {
         db_b.close();
-        std.fs.cwd().deleteFile(path_b) catch {};
+        @import("compat").fs.cwd().deleteFile(path_b) catch {};
     }
 
     const alice_a = try db_a.createNode(null, &.{ "Person", "Employee" });
@@ -1452,13 +1452,13 @@ test "import_export: dumpCanonicalJson is deterministic and includes unlabeled n
     try db_b.setEdgePropertyById(null, edge_b, "status", .{ .string_val = "active" });
 
     var buf_a: [8192]u8 = undefined;
-    var stream_a = std.io.fixedBufferStream(&buf_a);
+    var stream_a = @import("compat").fixedBufferStream(&buf_a);
     const stats_a = try dumpCanonicalJson(allocator, db_a, stream_a.writer(), null);
     try std.testing.expectEqual(@as(u64, 2), stats_a.nodes_exported);
     try std.testing.expectEqual(@as(u64, 1), stats_a.edges_exported);
 
     var buf_b: [8192]u8 = undefined;
-    var stream_b = std.io.fixedBufferStream(&buf_b);
+    var stream_b = @import("compat").fixedBufferStream(&buf_b);
     const stats_b = try dumpCanonicalJson(allocator, db_b, stream_b.writer(), null);
     try std.testing.expectEqual(@as(u64, 2), stats_b.nodes_exported);
     try std.testing.expectEqual(@as(u64, 1), stats_b.edges_exported);

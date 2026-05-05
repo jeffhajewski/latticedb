@@ -47,8 +47,8 @@ test "hash embed: vector search pipeline" {
     const path = "/tmp/lattice_hash_embed_test.ltdb";
 
     // Clean up
-    std.fs.cwd().deleteFile(path) catch {};
-    std.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     // Create database with vector support
     var db = try Database.open(allocator, path, .{
@@ -62,7 +62,7 @@ test "hash embed: vector search pipeline" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Hash embed 3 documents and insert

@@ -535,7 +535,7 @@ pub const Repl = struct {
 
     /// Execute a Cypher query and display results
     fn executeQuery(self: *Self, query_str: []const u8, stdout: anytype, stderr: anytype) void {
-        const start_time = std.time.nanoTimestamp();
+        const start_time = @import("compat").nanoTimestamp();
 
         var detailed = self.db.queryDetailed(query_str) catch |err| {
             const err_msg = switch (err) {
@@ -555,7 +555,7 @@ pub const Repl = struct {
         }
         defer detailed.success.deinit();
 
-        const end_time = std.time.nanoTimestamp();
+        const end_time = @import("compat").nanoTimestamp();
         const elapsed_ns = @as(u64, @intCast(end_time - start_time));
         const elapsed_ms = @as(f64, @floatFromInt(elapsed_ns)) / 1_000_000.0;
 

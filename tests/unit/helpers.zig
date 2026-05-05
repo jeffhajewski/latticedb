@@ -45,8 +45,8 @@ pub const TempDb = struct {
         var path_buf: [128]u8 = undefined;
         var wal_path_buf: [128]u8 = undefined;
 
-        const timestamp = std.time.milliTimestamp();
-        const random = std.crypto.random.int(u32);
+        const timestamp = @import("compat").milliTimestamp();
+        const random = @import("compat").randomInt(u32);
 
         const path = try std.fmt.bufPrint(&path_buf, "/tmp/lattice_test_{s}_{d}_{x}.db", .{ name, timestamp, random });
         const wal_path = try std.fmt.bufPrint(&wal_path_buf, "/tmp/lattice_test_{s}_{d}_{x}.wal", .{ name, timestamp, random });
@@ -90,8 +90,8 @@ pub const TempDb = struct {
         var path_buf: [128]u8 = undefined;
         var wal_path_buf: [128]u8 = undefined;
 
-        const timestamp = std.time.milliTimestamp();
-        const random = std.crypto.random.int(u32);
+        const timestamp = @import("compat").milliTimestamp();
+        const random = @import("compat").randomInt(u32);
 
         const path = try std.fmt.bufPrint(&path_buf, "/tmp/lattice_test_{s}_{d}_{x}.db", .{ name, timestamp, random });
         const wal_path = try std.fmt.bufPrint(&wal_path_buf, "/tmp/lattice_test_{s}_{d}_{x}.wal", .{ name, timestamp, random });
@@ -203,7 +203,7 @@ pub fn generateRandomKeys(allocator: Allocator, count: usize, key_length: usize)
 
     for (0..count) |i| {
         const key = try allocator.alloc(u8, key_length);
-        std.crypto.random.bytes(key);
+        @import("compat").randomBytes(key);
         // Make keys printable for debugging
         for (key) |*byte| {
             byte.* = 'a' + (byte.* % 26);

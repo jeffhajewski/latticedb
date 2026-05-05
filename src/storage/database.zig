@@ -350,8 +350,8 @@ pub const DatabaseConfig = struct {
     /// - Vector enabled: +12MB (HNSW connections, vector pages)
     pub fn effectiveBufferPoolSize(self: DatabaseConfig) usize {
         // Environment variable override (useful for tuning without recompilation)
-        if (std.posix.getenv("LATTICE_BUFFER_POOL_MB")) |mb_str| {
-            if (std.fmt.parseInt(usize, mb_str, 10)) |mb| {
+        if (std.c.getenv("LATTICE_BUFFER_POOL_MB")) |mb_z| {
+            if (std.fmt.parseInt(usize, std.mem.span(mb_z), 10)) |mb| {
                 if (mb > 0) return mb * 1024 * 1024;
             } else |_| {}
         }
@@ -674,8 +674,8 @@ pub const Database = struct {
     // Transactions
     txn_manager: ?TxnManager,
     txn_overlays: std.AutoHashMap(u64, TxnOverlay),
-    stream_mutex: std.Thread.Mutex,
-    stream_cond: std.Thread.Condition,
+    stream_mutex: @import("compat").Mutex,
+    stream_cond: @import("compat").Condition,
     stream_epoch: u64,
 
     // Caches
@@ -888,23 +888,25 @@ pub const Database = struct {
         return self;
     }
 
+    fn persistHnswIndex(self: *Self) DatabaseError!void {
+        if (self.hnsw_index) |*hnsw| {
+            if (!hnsw.dirty) return;
+            if (self.hnsw_node_tree == null) {
+                self.hnsw_node_tree = BTree.init(self.allocator, &self.buffer_pool) catch return DatabaseError.IoError;
+            }
+            if (self.hnsw_node_tree) |*tree| {
+                hnsw.saveToTree(tree) catch return DatabaseError.IoError;
+            }
+        }
+    }
+
     /// Sync all pending writes to disk.
     /// Call this before close() if you need durability guarantees.
     /// Returns an error if flushing fails - data may not be persisted.
     pub fn sync(self: *Self) DatabaseError!void {
         if (self.read_only) return;
 
-        // Persist HNSW index to B+Tree before saving roots
-        if (self.hnsw_index) |*hnsw| {
-            if (hnsw.vector_count > 0) {
-                if (self.hnsw_node_tree == null) {
-                    self.hnsw_node_tree = BTree.init(self.allocator, &self.buffer_pool) catch null;
-                }
-                if (self.hnsw_node_tree) |*tree| {
-                    hnsw.saveToTree(tree) catch {};
-                }
-            }
-        }
+        try self.persistHnswIndex();
 
         // Save B+Tree root pages
         self.saveTreeRoots() catch {
@@ -953,6 +955,9 @@ pub const Database = struct {
 
         // 8c. HNSW index
         if (self.hnsw_index) |*hnsw| {
+            if (!self.read_only) {
+                self.persistHnswIndex() catch {};
+            }
             hnsw.deinit();
         }
 
@@ -1582,7 +1587,11 @@ pub const Database = struct {
         var vector_iter = overlay.vector_states.iterator();
         while (vector_iter.next()) |entry| {
             switch (entry.value_ptr.*) {
-                .absent => {},
+                .absent => {
+                    if (self.hnsw_index) |*hnsw| {
+                        hnsw.remove(entry.key_ptr.*);
+                    }
+                },
                 .value => |vector| try self.setNodeVector(entry.key_ptr.*, vector),
             }
         }
@@ -2544,14 +2553,14 @@ pub const Database = struct {
         batch.deinit();
 
         const timeout_ns: i128 = @as(i128, @intCast(timeout_ms)) * std.time.ns_per_ms;
-        const start_ns = std.time.nanoTimestamp();
+        const start_ns = @import("compat").nanoTimestamp();
 
         self.stream_mutex.lock();
         var observed_epoch = self.stream_epoch;
         self.stream_mutex.unlock();
 
         while (true) {
-            const elapsed = std.time.nanoTimestamp() - start_ns;
+            const elapsed = @import("compat").nanoTimestamp() - start_ns;
             if (elapsed >= timeout_ns) {
                 return try self.readStreamOnce(stream, after_sequence, limit);
             }
@@ -3325,6 +3334,7 @@ pub const Database = struct {
                     .labels = self.allocator.alloc(symbols_mod.SymbolId, 0) catch return DatabaseError.OutOfMemory,
                     .properties = self.allocator.alloc(node_mod.Property, 0) catch return DatabaseError.OutOfMemory,
                 });
+                try self.storeVectorOverlayState(overlay, node_id, .{ .absent = {} });
                 overlay.markDirty();
 
                 if (self.query_cache) |cache| cache.bumpSchemaVersion();
@@ -3391,6 +3401,10 @@ pub const Database = struct {
                 else => DatabaseError.IoError,
             };
         };
+
+        if (self.hnsw_index) |*hnsw| {
+            hnsw.remove(node_id);
+        }
 
         // Invalidate query cache (labels changed)
         if (self.query_cache) |cache| cache.bumpSchemaVersion();
@@ -3847,11 +3861,19 @@ pub const Database = struct {
                 }
                 if (!found) return;
 
+                const owned_labels = new_labels.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+                const owned_properties = cloneProperties(self.allocator, state.properties) catch {
+                    self.allocator.free(owned_labels);
+                    return DatabaseError.OutOfMemory;
+                };
                 try self.storeNodeOverlayState(overlay, node_id, .{
                     .exists = true,
-                    .labels = new_labels.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory,
-                    .properties = cloneProperties(self.allocator, state.properties) catch return DatabaseError.OutOfMemory,
+                    .labels = owned_labels,
+                    .properties = owned_properties,
                 });
+                if (owned_labels.len == 0) {
+                    try self.storeVectorOverlayState(overlay, node_id, .{ .absent = {} });
+                }
                 overlay.markDirty();
 
                 if (self.query_cache) |cache| cache.bumpSchemaVersion();
@@ -3897,6 +3919,12 @@ pub const Database = struct {
         self.label_index.remove(label_id, node_id) catch {
             return DatabaseError.IoError;
         };
+
+        if (new_labels.items.len == 0) {
+            if (self.hnsw_index) |*hnsw| {
+                hnsw.remove(node_id);
+            }
+        }
 
         // Log undo entry for transaction rollback
         if (txn) |t| {
@@ -4041,7 +4069,7 @@ pub const Database = struct {
         if (self.read_only) return DatabaseError.PermissionDenied;
 
         // Check if vector storage is enabled
-        const vs = &(self.vector_storage orelse return DatabaseError.IoError);
+        _ = self.vector_storage orelse return DatabaseError.IoError;
         try self.validateVectorValue(vector);
 
         // Verify node exists
@@ -4049,10 +4077,7 @@ pub const Database = struct {
             return DatabaseError.NotFound;
         }
 
-        // Store the vector (using node_id as vector_id)
-        _ = vs.store(node_id, vector) catch |err| return mapVectorStorageError(err);
-
-        // Index the vector in HNSW for similarity search
+        // HNSW stores the vector internally while indexing it for similarity search.
         if (self.hnsw_index) |*hnsw| {
             hnsw.insert(node_id, vector) catch |err| return mapHnswError(err);
         }
@@ -4126,6 +4151,7 @@ pub const Database = struct {
 
                 for (base_results) |result| {
                     try seen.put(self.allocator, result.node_id, {});
+                    if (!(try self.nodeExistsInTxn(txn, result.node_id))) continue;
                     if (overlay.vector_states.get(result.node_id)) |state| {
                         switch (state) {
                             .absent => continue,
@@ -4144,6 +4170,7 @@ pub const Database = struct {
                 var overlay_iter = overlay.vector_states.iterator();
                 while (overlay_iter.next()) |entry| {
                     if (seen.contains(entry.key_ptr.*)) continue;
+                    if (!(try self.nodeExistsInTxn(txn, entry.key_ptr.*))) continue;
                     switch (entry.value_ptr.*) {
                         .absent => {},
                         .value => |vector| {
@@ -4182,7 +4209,8 @@ pub const Database = struct {
         try self.validateVectorValue(query_vector);
         const hnsw = &(self.hnsw_index orelse return DatabaseError.IoError);
 
-        return hnsw.search(query_vector, k, ef_search) catch |err| {
+        const search_limit: u32 = @intCast(@min(hnsw.vector_count, @as(u64, std.math.maxInt(u32))));
+        const raw_results = hnsw.search(query_vector, search_limit, ef_search) catch |err| {
             return switch (err) {
                 HnswError.EmptyIndex => self.allocator.alloc(VectorSearchResult, 0) catch return DatabaseError.OutOfMemory,
                 HnswError.NotFound => self.allocator.alloc(VectorSearchResult, 0) catch return DatabaseError.OutOfMemory,
@@ -4191,6 +4219,18 @@ pub const Database = struct {
                 else => DatabaseError.IoError,
             };
         };
+        defer hnsw.freeResults(raw_results);
+
+        var filtered: std.ArrayListUnmanaged(VectorSearchResult) = .empty;
+        errdefer filtered.deinit(self.allocator);
+
+        for (raw_results) |result| {
+            if (filtered.items.len >= k) break;
+            if (!(try self.nodeExists(result.node_id))) continue;
+            filtered.append(self.allocator, result) catch return DatabaseError.OutOfMemory;
+        }
+
+        return filtered.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
     }
 
     /// Free vector search results allocated by vectorSearch.
@@ -5992,7 +6032,7 @@ pub const Database = struct {
     fn normalizeCypher(cypher: []const u8) []const u8 {
         var trimmed = std.mem.trim(u8, cypher, " \t\r\n");
         while (trimmed.len > 0 and trimmed[trimmed.len - 1] == ';') {
-            trimmed = std.mem.trimRight(u8, trimmed[0 .. trimmed.len - 1], " \t\r\n");
+            trimmed = std.mem.trimEnd(u8, trimmed[0 .. trimmed.len - 1], " \t\r\n");
         }
         return trimmed;
     }
@@ -6247,7 +6287,7 @@ test "database open and close" {
     db2.close();
 
     // Cleanup
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 }
 
 test "database file not found" {
@@ -6270,7 +6310,7 @@ test "graph crud operations" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create nodes
@@ -6326,8 +6366,8 @@ test "setNodeProperty round-trips string values above the old 512-byte WAL buffe
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile("/tmp/lattice_large_prop_test.ltdb.wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile("/tmp/lattice_large_prop_test.ltdb.wal") catch {};
     }
 
     const node_id = try db.createNode(null, &[_][]const u8{"Doc"});
@@ -6387,8 +6427,8 @@ test "getNodesByLabel returns every node with the requested label for reopen ind
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile("/tmp/lattice_nodes_by_label_reopen_test.ltdb.wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile("/tmp/lattice_nodes_by_label_reopen_test.ltdb.wal") catch {};
     }
 
     const entries = try db.getNodesByLabel("Entry");
@@ -6424,8 +6464,8 @@ test "ftsIndexDocument handles multi-KiB markdown-shaped documents" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
-        std.fs.cwd().deleteFile("/tmp/lattice_fts_db_large_test.ltdb.wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile("/tmp/lattice_fts_db_large_test.ltdb.wal") catch {};
     }
 
     // Scaffold a family of varied documents that together exercise the
@@ -6482,7 +6522,7 @@ test "setNodeProperty rejects values larger than one btree leaf page gracefully"
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     const node_id = try db.createNode(null, &[_][]const u8{"Doc"});
@@ -6514,7 +6554,7 @@ test "query: simple MATCH RETURN" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create some test nodes
@@ -6556,7 +6596,7 @@ test "query: parse error" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Invalid query syntax
@@ -6577,7 +6617,7 @@ test "query: semantic error" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Reference undefined variable
@@ -6599,7 +6639,7 @@ test "edge traversal" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create nodes
@@ -6638,7 +6678,7 @@ test "introspection: getAllLabels and getAllEdgeTypes" {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Initially no labels or edge types

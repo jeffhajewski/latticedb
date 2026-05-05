@@ -49,7 +49,7 @@ fn failCommand(stderr: anytype, comptime fmt: []const u8, args: anytype) CliErro
 }
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -145,7 +145,7 @@ fn cmdCreate(
     const path = parsed_args.path.?;
 
     // Check if file already exists
-    if (std.fs.cwd().access(path, .{})) |_| {
+    if (@import("compat").fs.cwd().access(path, .{})) |_| {
         return failCommand(stderr, "Database already exists: {s}", .{path});
     } else |_| {
         // File doesn't exist, which is what we want for create
@@ -198,7 +198,7 @@ fn cmdInfo(
     const edge_count = db.edgeCount();
 
     // Get file size
-    const file = std.fs.cwd().openFile(path, .{}) catch {
+    const file = @import("compat").fs.cwd().openFile(path, .{}) catch {
         return failCommand(stderr, "Cannot read file info", .{});
     };
     defer file.close();
@@ -335,7 +335,7 @@ fn cmdExec(
         query_string = qs;
     } else if (parsed_args.file) |file_path| {
         // Read query from file
-        const file = std.fs.cwd().openFile(file_path, .{}) catch |err| {
+        const file = @import("compat").fs.cwd().openFile(file_path, .{}) catch |err| {
             return failCommand(stderr, "Cannot open query file: {s}", .{@errorName(err)});
         };
         defer file.close();
@@ -712,7 +712,7 @@ fn mapPageManagerCheckError(err: PageManagerError) CheckError {
 fn hasWalSibling(path: []const u8) bool {
     var wal_path_buf: [512]u8 = undefined;
     const wal_path = std.fmt.bufPrint(&wal_path_buf, "{s}-wal", .{path}) catch return false;
-    std.fs.cwd().access(wal_path, .{}) catch return false;
+    @import("compat").fs.cwd().access(wal_path, .{}) catch return false;
     return true;
 }
 
@@ -814,7 +814,7 @@ fn cmdExport(
 
     if (export_kind != .csv) {
         // Single-file exports: JSON, JSONL, DOT.
-        const out_file = std.fs.cwd().createFile(file, .{}) catch |err| {
+        const out_file = @import("compat").fs.cwd().createFile(file, .{}) catch |err| {
             return failCommand(stderr, "Cannot create output file: {s}", .{@errorName(err)});
         };
         defer out_file.close();
@@ -863,12 +863,12 @@ fn cmdExport(
             return failCommand(stderr, "Path too long", .{});
         };
 
-        const nodes_file = std.fs.cwd().createFile(nodes_path, .{}) catch |err| {
+        const nodes_file = @import("compat").fs.cwd().createFile(nodes_path, .{}) catch |err| {
             return failCommand(stderr, "Cannot create nodes file: {s}", .{@errorName(err)});
         };
         defer nodes_file.close();
 
-        const edges_file = std.fs.cwd().createFile(edges_path, .{}) catch |err| {
+        const edges_file = @import("compat").fs.cwd().createFile(edges_path, .{}) catch |err| {
             return failCommand(stderr, "Cannot create edges file: {s}", .{@errorName(err)});
         };
         defer edges_file.close();
@@ -1125,11 +1125,11 @@ fn printCommandHelp(writer: anytype, command: Command) void {
 }
 
 fn cleanupTestDatabaseFiles(path: []const u8) void {
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var wal_path_buf: [512]u8 = undefined;
     const wal_path = std.fmt.bufPrint(&wal_path_buf, "{s}-wal", .{path}) catch return;
-    std.fs.cwd().deleteFile(wal_path) catch {};
+    @import("compat").fs.cwd().deleteFile(wal_path) catch {};
 }
 
 test "checkDatabaseFile validates database pages" {
@@ -1171,7 +1171,7 @@ test "checkDatabaseFile detects checksum mismatches" {
     _ = try db.createNode(null, &[_][]const u8{"Person"});
     db.close();
 
-    var file = try std.fs.cwd().openFile(path, .{ .mode = .read_write });
+    var file = try @import("compat").fs.cwd().openFile(path, .{ .mode = .read_write });
     defer file.close();
     try file.pwriteAll(&[_]u8{0xFF}, 4096 + 16);
 

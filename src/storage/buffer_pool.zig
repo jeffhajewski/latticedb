@@ -78,7 +78,7 @@ pub const BufferPool = struct {
     /// Allocator for dynamic memory
     allocator: Allocator,
     /// Mutex protecting page_table and free_list
-    mutex: std.Thread.Mutex,
+    mutex: @import("compat").Mutex,
     /// Number of frames in the pool
     frame_count: usize,
 
@@ -97,7 +97,7 @@ pub const BufferPool = struct {
         var frames = try allocator.alloc(BufferFrame, frame_count);
         errdefer allocator.free(frames);
 
-        var free_list: std.ArrayList(FrameId) = .{};
+        var free_list: std.ArrayList(FrameId) = .empty;
         errdefer free_list.deinit(allocator);
 
         // Initialize all frames

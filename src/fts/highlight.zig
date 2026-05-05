@@ -91,7 +91,7 @@ pub fn findMatches(
         return allocator.alloc(Match, 0) catch return HighlightError.OutOfMemory;
     }
 
-    var matches: std.ArrayListUnmanaged(Match) = .{};
+    var matches: std.ArrayListUnmanaged(Match) = .empty;
     errdefer matches.deinit(allocator);
 
     // Build a set of normalized query terms for O(1) lookup
@@ -162,10 +162,10 @@ pub fn highlight(
     }
 
     // Group matches into snippet regions
-    var regions: std.ArrayListUnmanaged(SnippetRegion) = .{};
+    var regions: std.ArrayListUnmanaged(SnippetRegion) = .empty;
     defer regions.deinit(allocator);
 
-    var region_matches: std.ArrayListUnmanaged(Match) = .{};
+    var region_matches: std.ArrayListUnmanaged(Match) = .empty;
     defer region_matches.deinit(allocator);
 
     var region_start: u32 = 0;

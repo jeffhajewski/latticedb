@@ -27,7 +27,7 @@ fn openTestDb(path: []const u8, opts: struct {
     vector_dimensions: u16 = 0,
     enable_fts: bool = false,
 }) !*Database {
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
     return try Database.open(std.testing.allocator, path, .{
         .create = true,
         .config = .{
@@ -41,7 +41,7 @@ fn openTestDb(path: []const u8, opts: struct {
 
 fn cleanupTestDb(db: *Database, path: []const u8) void {
     db.close();
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 }
 
 // ============================================================================

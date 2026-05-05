@@ -540,7 +540,7 @@ pub const HnswIndex = struct {
             .nodes = std.AutoHashMap(u64, HnswNodeEntry).init(allocator),
             .connection_pool = ConnectionPool.init(allocator, bp, config.m, config.m_max0),
             .distance_fn = getDistanceFn(config.metric),
-            .rng = std.Random.DefaultPrng.init(@intCast(std.time.timestamp())),
+            .rng = std.Random.DefaultPrng.init(@intCast(@import("compat").timestamp())),
             .dirty = false,
         };
     }
@@ -950,13 +950,13 @@ pub const HnswIndex = struct {
     fn searchLayer(self: *Self, query: []const f32, entry: u64, layer: u8, ef: u16) HnswError![]SearchResult {
         const entry_node = self.getNode(entry) orelse return HnswError.NotFound;
 
-        var candidates = std.PriorityQueue(SearchResult, void, compareSearchResults).init(self.allocator, {});
-        defer candidates.deinit();
-        candidates.ensureTotalCapacity(ef) catch return HnswError.OutOfMemory;
+        var candidates = std.PriorityQueue(SearchResult, void, compareSearchResults).initContext({});
+        defer candidates.deinit(self.allocator);
+        candidates.ensureTotalCapacity(self.allocator, ef) catch return HnswError.OutOfMemory;
 
-        var results = std.PriorityDequeue(SearchResult, void, compareSearchResults).init(self.allocator, {});
-        defer results.deinit();
-        results.ensureTotalCapacity(ef) catch return HnswError.OutOfMemory;
+        var results = std.PriorityDequeue(SearchResult, void, compareSearchResults).initContext({});
+        defer results.deinit(self.allocator);
+        results.ensureTotalCapacity(self.allocator, ef) catch return HnswError.OutOfMemory;
 
         var visited = std.AutoHashMap(u64, void).init(self.allocator);
         defer visited.deinit();
@@ -965,8 +965,8 @@ pub const HnswIndex = struct {
         // Initialize with entry point
         const entry_dist = try self.distanceTo(query, entry_node.vector_loc);
         const entry_result = SearchResult{ .node_id = entry, .distance = entry_dist };
-        candidates.add(entry_result) catch return HnswError.OutOfMemory;
-        results.add(entry_result) catch return HnswError.OutOfMemory;
+        candidates.push(self.allocator, entry_result) catch return HnswError.OutOfMemory;
+        results.push(self.allocator, entry_result) catch return HnswError.OutOfMemory;
         visited.put(entry, {}) catch return HnswError.OutOfMemory;
 
         // Stack buffers for batch processing
@@ -976,7 +976,7 @@ pub const HnswIndex = struct {
         var dist_buf: [64]f32 = undefined;
 
         while (candidates.count() > 0) {
-            const closest = candidates.remove();
+            const closest = candidates.pop() orelse break;
 
             // Stop if closest candidate is worse than worst result
             const furthest_dist = if (results.peekMax()) |r| r.distance else 0;
@@ -1011,11 +1011,11 @@ pub const HnswIndex = struct {
                 const current_furthest = if (results.peekMax()) |r| r.distance else 0;
                 if (results.count() < ef or dist < current_furthest) {
                     const result = SearchResult{ .node_id = be.neighbor_id, .distance = dist };
-                    candidates.add(result) catch return HnswError.OutOfMemory;
-                    results.add(result) catch return HnswError.OutOfMemory;
+                    candidates.push(self.allocator, result) catch return HnswError.OutOfMemory;
+                    results.push(self.allocator, result) catch return HnswError.OutOfMemory;
 
                     if (results.count() > ef) {
-                        _ = results.removeMax();
+                        _ = results.popMax();
                     }
                 }
             }
@@ -1025,7 +1025,7 @@ pub const HnswIndex = struct {
         const result_count = results.count();
         const output = self.allocator.alloc(SearchResult, result_count) catch return HnswError.OutOfMemory;
         for (0..result_count) |i| {
-            output[i] = results.removeMin();
+            output[i] = results.popMin().?;
         }
         return output;
     }
@@ -1038,6 +1038,10 @@ pub const HnswIndex = struct {
     pub fn insert(self: *Self, vector_id: u64, vector: []const f32) HnswError!void {
         if (!types.isValidVectorDimensions(self.config.dimensions) or vector.len != self.config.dimensions) {
             return HnswError.DimensionMismatch;
+        }
+
+        if (self.nodes.contains(vector_id)) {
+            self.remove(vector_id);
         }
 
         // For cosine metric, normalize vector before storing so we can use
@@ -1133,6 +1137,72 @@ pub const HnswIndex = struct {
         self.vector_count += 1;
     }
 
+    fn recomputeEntryPointAndMaxLayer(self: *Self) void {
+        var new_entry_point: ?u64 = null;
+        var new_max_layer: u8 = 0;
+
+        var iter = self.nodes.iterator();
+        while (iter.next()) |entry| {
+            if (new_entry_point == null or entry.value_ptr.max_layer > new_max_layer) {
+                new_entry_point = entry.key_ptr.*;
+                new_max_layer = entry.value_ptr.max_layer;
+            }
+        }
+
+        self.entry_point = new_entry_point;
+        self.max_layer = if (new_entry_point == null) 0 else new_max_layer;
+    }
+
+    /// Remove a vector from the index.
+    pub fn remove(self: *Self, vector_id: u64) void {
+        const removed = self.nodes.fetchRemove(vector_id) orelse return;
+        const removed_entry = removed.value;
+
+        var iter = self.nodes.iterator();
+        while (iter.next()) |entry| {
+            var layer: u16 = 0;
+            while (layer <= entry.value_ptr.max_layer) : (layer += 1) {
+                const layer_u8: u8 = @intCast(layer);
+                const connections = self.getConnections(entry.value_ptr.connections_loc, layer_u8) catch continue;
+                defer self.allocator.free(connections);
+
+                var write_index: usize = 0;
+                var found = false;
+                for (connections) |neighbor| {
+                    if (neighbor == vector_id) {
+                        found = true;
+                    } else {
+                        connections[write_index] = neighbor;
+                        write_index += 1;
+                    }
+                }
+
+                if (found) {
+                    self.setConnections(
+                        entry.value_ptr.connections_loc,
+                        entry.key_ptr.*,
+                        layer_u8,
+                        connections[0..write_index],
+                    ) catch {};
+                }
+            }
+        }
+
+        if (self.vector_count > 0) {
+            self.vector_count -= 1;
+        }
+
+        if (self.vector_count == 0 or
+            self.entry_point == null or
+            self.entry_point.? == vector_id or
+            removed_entry.max_layer >= self.max_layer)
+        {
+            self.recomputeEntryPointAndMaxLayer();
+        }
+
+        self.dirty = true;
+    }
+
     /// Free search results allocated by search()
     pub fn freeResults(self: *Self, results: []SearchResult) void {
         self.allocator.free(results);
@@ -1188,9 +1258,30 @@ pub const HnswIndex = struct {
     }
 
     /// Save the HNSW index state to a B+Tree for persistence.
-    /// Only writes if the index is dirty and non-empty.
+    /// Only writes if the index is dirty.
     pub fn saveToTree(self: *Self, tree: *BTree) HnswError!void {
-        if (!self.dirty or self.vector_count == 0) return;
+        if (!self.dirty) return;
+
+        var stale_keys: std.ArrayListUnmanaged(u64) = .empty;
+        defer stale_keys.deinit(self.allocator);
+
+        {
+            var range_iter = tree.range(null, null) catch return HnswError.StorageError;
+            defer range_iter.deinit();
+
+            while (true) {
+                const existing = range_iter.next() catch return HnswError.StorageError;
+                if (existing == null) break;
+                const e = existing.?;
+                if (e.key.len != 8) continue;
+                if (std.mem.eql(u8, e.key, &METADATA_KEY)) continue;
+
+                const vector_id = std.mem.readInt(u64, e.key[0..8], .little);
+                if (!self.nodes.contains(vector_id)) {
+                    stale_keys.append(self.allocator, vector_id) catch return HnswError.OutOfMemory;
+                }
+            }
+        }
 
         // 1. Save metadata under sentinel key
         var meta_buf: [1300]u8 = undefined;
@@ -1202,6 +1293,15 @@ pub const HnswIndex = struct {
             else => return HnswError.StorageError,
         };
         tree.insert(&METADATA_KEY, meta_data) catch return HnswError.StorageError;
+
+        for (stale_keys.items) |vector_id| {
+            var key_buf: [8]u8 = undefined;
+            std.mem.writeInt(u64, &key_buf, vector_id, .little);
+            tree.delete(&key_buf) catch |err| switch (err) {
+                BTreeError.KeyNotFound => {},
+                else => return HnswError.StorageError,
+            };
+        }
 
         // 2. Save each node entry
         var iter = self.nodes.iterator();

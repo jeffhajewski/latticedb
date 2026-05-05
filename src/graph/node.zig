@@ -289,7 +289,7 @@ fn serializedValueSize(value: PropertyValue) usize {
 
 /// Serialize node data to bytes
 fn serializeNode(labels: []const SymbolId, properties: []const Property, buf: []u8) ![]u8 {
-    var stream = std.io.fixedBufferStream(buf);
+    var stream = @import("compat").fixedBufferStream(buf);
     const writer = stream.writer();
 
     // Write labels
@@ -378,7 +378,7 @@ fn serializeValue(writer: anytype, value: PropertyValue) !void {
 
 /// Deserialize node data from bytes
 fn deserializeNode(allocator: Allocator, node_id: NodeId, data: []const u8) !Node {
-    var stream = std.io.fixedBufferStream(data);
+    var stream = @import("compat").fixedBufferStream(data);
     const reader = stream.reader();
 
     // Read labels
@@ -718,7 +718,7 @@ test "property value list serialization round-trip" {
 
     // Serialize
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = @import("compat").fixedBufferStream(&buf);
     try serializeValue(stream.writer(), list_val);
 
     // Deserialize
@@ -745,7 +745,7 @@ test "property value map serialization round-trip" {
 
     // Serialize
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = @import("compat").fixedBufferStream(&buf);
     try serializeValue(stream.writer(), map_val);
 
     // Deserialize
@@ -777,7 +777,7 @@ test "property value nested list/map serialization" {
 
     // Serialize
     var buf: [1024]u8 = undefined;
-    var stream = std.io.fixedBufferStream(&buf);
+    var stream = @import("compat").fixedBufferStream(&buf);
     try serializeValue(stream.writer(), nested_val);
 
     // Deserialize

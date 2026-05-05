@@ -16,13 +16,13 @@ const PosixVfs = vfs_mod.PosixVfs;
 
 fn generateUuid() [16]u8 {
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
     return uuid;
 }
 
 fn createTempPath(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
-    const timestamp = std.time.milliTimestamp();
-    const random = std.crypto.random.int(u32);
+    const timestamp = @import("compat").milliTimestamp();
+    const random = @import("compat").randomInt(u32);
     var buf: [128]u8 = undefined;
     const path = try std.fmt.bufPrint(&buf, "/tmp/lattice_wal_test_{s}_{d}_{x}.wal", .{ name, timestamp, random });
     return allocator.dupe(u8, path);

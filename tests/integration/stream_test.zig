@@ -7,10 +7,10 @@ const FileHeader = lattice.storage.page.FileHeader;
 const NULL_PAGE = lattice.core.types.NULL_PAGE;
 
 fn cleanup(path: []const u8) void {
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
     var wal_buf: [256]u8 = undefined;
     const wal_path = std.fmt.bufPrint(&wal_buf, "{s}-wal", .{path}) catch return;
-    std.fs.cwd().deleteFile(wal_path) catch {};
+    @import("compat").fs.cwd().deleteFile(wal_path) catch {};
 }
 
 fn openDb(allocator: std.mem.Allocator, path: []const u8) !*Database {
@@ -37,7 +37,7 @@ fn openReadOnlyDb(allocator: std.mem.Allocator, path: []const u8) !*Database {
 }
 
 fn clearStreamRoots(path: []const u8) !void {
-    const file = try std.fs.cwd().openFile(path, .{ .mode = .read_write });
+    const file = try @import("compat").fs.cwd().openFile(path, .{ .mode = .read_write });
     defer file.close();
 
     var header_buf: [4096]u8 = undefined;
@@ -154,13 +154,13 @@ test "streams: read waits and wakes after same-process commit" {
         elapsed_ms: std.atomic.Value(u64) = std.atomic.Value(u64).init(0),
 
         fn run(self: *@This()) void {
-            const start_ns = std.time.nanoTimestamp();
+            const start_ns = @import("compat").nanoTimestamp();
             var batch = self.db.readStream("wake", 0, 10, 5000) catch {
                 self.status.store(2, .release);
                 return;
             };
             defer batch.deinit();
-            const elapsed_ns = std.time.nanoTimestamp() - start_ns;
+            const elapsed_ns = @import("compat").nanoTimestamp() - start_ns;
             self.elapsed_ms.store(@intCast(@divTrunc(elapsed_ns, std.time.ns_per_ms)), .release);
             if (batch.records.len != 1) {
                 self.status.store(3, .release);
@@ -182,7 +182,7 @@ test "streams: read waits and wakes after same-process commit" {
 
     var reader = Reader{ .db = db };
     const thread = try std.Thread.spawn(.{}, Reader.run, .{&reader});
-    std.Thread.sleep(50 * std.time.ns_per_ms);
+    @import("compat").sleep(50 * std.time.ns_per_ms);
 
     {
         var txn = try db.beginTransaction(.read_write);

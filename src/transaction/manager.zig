@@ -185,7 +185,7 @@ pub const TxnManager = struct {
     committed_count: u64,
     aborted_count: u64,
     /// Mutex for thread safety
-    mutex: std.Thread.Mutex,
+    mutex: @import("compat").Mutex,
 
     const Self = @This();
 
@@ -247,8 +247,8 @@ pub const TxnManager = struct {
             .txn = txn,
             .last_lsn = begin_lsn,
             .begin_lsn = begin_lsn,
-            .savepoints = .{},
-            .undo_log = .{},
+            .savepoints = .empty,
+            .undo_log = .empty,
         };
 
         self.active_txns.put(txn_id, entry) catch {
@@ -563,7 +563,7 @@ test "begin and commit transaction" {
     vfs_impl.delete(wal_path) catch {};
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     var wal = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
     defer {
@@ -602,7 +602,7 @@ test "begin and abort transaction" {
     vfs_impl.delete(wal_path) catch {};
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     var wal = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
     defer {
@@ -633,7 +633,7 @@ test "multiple concurrent transactions" {
     vfs_impl.delete(wal_path) catch {};
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     var wal = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
     defer {
@@ -678,7 +678,7 @@ test "savepoint and rollback" {
     vfs_impl.delete(wal_path) catch {};
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     var wal = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
     defer {
@@ -723,7 +723,7 @@ test "read-only transaction cannot write" {
     vfs_impl.delete(wal_path) catch {};
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     var wal = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
     defer {
@@ -754,7 +754,7 @@ test "log operations update prev_lsn chain" {
     vfs_impl.delete(wal_path) catch {};
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     var wal = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
     defer {

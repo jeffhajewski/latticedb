@@ -220,7 +220,7 @@ fn stressTestNodeCreation(allocator: Allocator, target_count: usize) !void {
     std.debug.print("\n═══ Node Creation Stress Test ({d} nodes) ═══\n", .{target_count});
 
     const path = "/tmp/lattice_stress_nodes.ltdb";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -231,7 +231,7 @@ fn stressTestNodeCreation(allocator: Allocator, target_count: usize) !void {
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     const labels = &[_][]const u8{"StressNode"};
@@ -242,7 +242,7 @@ fn stressTestNodeCreation(allocator: Allocator, target_count: usize) !void {
     // Create nodes in batches and measure
     const batch_size: usize = 10000;
     var total_time: u64 = 0;
-    var batch_start = std.time.nanoTimestamp();
+    var batch_start = @import("compat").nanoTimestamp();
     var actual_count: usize = 0;
 
     for (0..target_count) |i| {
@@ -253,14 +253,14 @@ fn stressTestNodeCreation(allocator: Allocator, target_count: usize) !void {
         actual_count = i + 1;
 
         if (actual_count % batch_size == 0) {
-            const batch_end = std.time.nanoTimestamp();
+            const batch_end = @import("compat").nanoTimestamp();
             const batch_time = @as(u64, @intCast(batch_end - batch_start));
             total_time += batch_time;
 
             const ops_per_sec = @as(f64, @floatFromInt(batch_size)) / (@as(f64, @floatFromInt(batch_time)) / 1_000_000_000.0);
             std.debug.print("  Created {d} nodes ({d:.0} nodes/sec)\n", .{ actual_count, ops_per_sec });
 
-            batch_start = std.time.nanoTimestamp();
+            batch_start = @import("compat").nanoTimestamp();
         }
     }
 
@@ -270,7 +270,7 @@ fn stressTestNodeCreation(allocator: Allocator, target_count: usize) !void {
     if (actual_count == 0) return;
 
     // Measure lookup performance at scale
-    const lookup_start = std.time.nanoTimestamp();
+    const lookup_start = @import("compat").nanoTimestamp();
     const lookup_count: usize = @min(10000, actual_count);
     const rng = std.crypto.random;
 
@@ -279,14 +279,14 @@ fn stressTestNodeCreation(allocator: Allocator, target_count: usize) !void {
         _ = db.getNode(node_ids[idx]) catch {};
     }
 
-    const lookup_end = std.time.nanoTimestamp();
+    const lookup_end = @import("compat").nanoTimestamp();
     const lookup_time = @as(u64, @intCast(lookup_end - lookup_start));
     const avg_lookup = lookup_time / lookup_count;
 
     printTiming("Avg lookup time", avg_lookup);
 
     // Check file size
-    const file = try std.fs.cwd().openFile(path, .{});
+    const file = try @import("compat").fs.cwd().openFile(path, .{});
     defer file.close();
     const stat = try file.stat();
     std.debug.print("  Database size: {d:.2} MB\n", .{@as(f64, @floatFromInt(stat.size)) / (1024.0 * 1024.0)});
@@ -297,7 +297,7 @@ fn stressTestEdgeCreation(allocator: Allocator, node_count: usize, edges_per_nod
     std.debug.print("\n═══ Edge Creation Stress Test ({d} nodes, {d} edges) ═══\n", .{ node_count, total_edges });
 
     const path = "/tmp/lattice_stress_edges.ltdb";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -305,7 +305,7 @@ fn stressTestEdgeCreation(allocator: Allocator, node_count: usize, edges_per_nod
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create nodes first
@@ -321,7 +321,7 @@ fn stressTestEdgeCreation(allocator: Allocator, node_count: usize, edges_per_nod
     // Create edges
     std.debug.print("  Creating edges ({d} per node)...\n", .{edges_per_node});
     const rng = std.crypto.random;
-    const edge_start = std.time.nanoTimestamp();
+    const edge_start = @import("compat").nanoTimestamp();
     var edge_count: u64 = 0;
 
     for (node_ids) |source| {
@@ -335,7 +335,7 @@ fn stressTestEdgeCreation(allocator: Allocator, node_count: usize, edges_per_nod
         }
     }
 
-    const edge_end = std.time.nanoTimestamp();
+    const edge_end = @import("compat").nanoTimestamp();
     const edge_time = @as(u64, @intCast(edge_end - edge_start));
 
     printTiming("Total edge creation time", edge_time);
@@ -347,7 +347,7 @@ fn stressTestEdgeCreation(allocator: Allocator, node_count: usize, edges_per_nod
 
     // Test traversal performance
     std.debug.print("\n  Traversal Performance:\n", .{});
-    const traversal_start = std.time.nanoTimestamp();
+    const traversal_start = @import("compat").nanoTimestamp();
     const traversal_count: usize = 1000;
 
     for (0..traversal_count) |i| {
@@ -355,7 +355,7 @@ fn stressTestEdgeCreation(allocator: Allocator, node_count: usize, edges_per_nod
         db.freeEdgeInfos(edges);
     }
 
-    const traversal_end = std.time.nanoTimestamp();
+    const traversal_end = @import("compat").nanoTimestamp();
     const avg_traversal = @as(u64, @intCast(traversal_end - traversal_start)) / traversal_count;
     printTiming("    Avg edge traversal", avg_traversal);
 }
@@ -364,7 +364,7 @@ fn stressTestGraphAlgorithms(allocator: Allocator, node_count: usize, edges_per_
     std.debug.print("\n═══ Graph Algorithm Stress Test ({d} nodes) ═══\n", .{node_count});
 
     const path = "/tmp/lattice_stress_algo.ltdb";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -372,7 +372,7 @@ fn stressTestGraphAlgorithms(allocator: Allocator, node_count: usize, edges_per_
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create graph
@@ -403,10 +403,10 @@ fn stressTestGraphAlgorithms(allocator: Allocator, node_count: usize, edges_per_
 
     // Test Degree Centrality
     std.debug.print("\n  Degree Centrality:\n", .{});
-    const cent_start = std.time.nanoTimestamp();
+    const cent_start = @import("compat").nanoTimestamp();
     var centrality = try computeDegreeCentrality(allocator, db, node_ids);
     defer centrality.deinit();
-    const cent_end = std.time.nanoTimestamp();
+    const cent_end = @import("compat").nanoTimestamp();
 
     printTiming("    Computation time", @intCast(cent_end - cent_start));
 
@@ -421,7 +421,7 @@ fn stressTestGraphAlgorithms(allocator: Allocator, node_count: usize, edges_per_
     // Test Clustering Coefficient (sample for large graphs)
     std.debug.print("\n  Clustering Coefficient:\n", .{});
     const sample_size = @min(node_count, 100);
-    const cc_start = std.time.nanoTimestamp();
+    const cc_start = @import("compat").nanoTimestamp();
 
     var total_cc: f64 = 0;
     for (0..sample_size) |i| {
@@ -430,13 +430,13 @@ fn stressTestGraphAlgorithms(allocator: Allocator, node_count: usize, edges_per_
     }
     const avg_cc = total_cc / @as(f64, @floatFromInt(sample_size));
 
-    const cc_end = std.time.nanoTimestamp();
+    const cc_end = @import("compat").nanoTimestamp();
     printTiming("    Sample computation time", @intCast(cc_end - cc_start));
     std.debug.print("    Average clustering coefficient: {d:.4}\n", .{avg_cc});
 
     // Test Shortest Path (BFS)
     std.debug.print("\n  Shortest Path (BFS):\n", .{});
-    const path_start = std.time.nanoTimestamp();
+    const path_start = @import("compat").nanoTimestamp();
 
     // Find paths between random pairs
     var paths_found: u32 = 0;
@@ -453,7 +453,7 @@ fn stressTestGraphAlgorithms(allocator: Allocator, node_count: usize, edges_per_
         }
     }
 
-    const path_end = std.time.nanoTimestamp();
+    const path_end = @import("compat").nanoTimestamp();
     printTiming("    100 BFS searches", @intCast(path_end - path_start));
     std.debug.print("    Paths found: {d}/{d}\n", .{ paths_found, path_tests });
     if (paths_found > 0) {
@@ -465,7 +465,7 @@ fn stressTestQueries(allocator: Allocator, node_count: usize, edges_per_node: us
     std.debug.print("\n═══ Cypher Query Stress Test ({d} nodes) ═══\n", .{node_count});
 
     const path = "/tmp/lattice_stress_query.ltdb";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -473,7 +473,7 @@ fn stressTestQueries(allocator: Allocator, node_count: usize, edges_per_node: us
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create graph with properties
@@ -504,39 +504,39 @@ fn stressTestQueries(allocator: Allocator, node_count: usize, edges_per_node: us
 
     // Simple node match
     {
-        const start = std.time.nanoTimestamp();
+        const start = @import("compat").nanoTimestamp();
         var result = try db.query("MATCH (n:Person) RETURN n LIMIT 100");
         defer result.deinit();
-        const end = std.time.nanoTimestamp();
+        const end = @import("compat").nanoTimestamp();
         printTiming("    MATCH (n:Person) LIMIT 100", @intCast(end - start));
         std.debug.print("      Returned {d} rows\n", .{result.rowCount()});
     }
 
     // Filtered query
     {
-        const start = std.time.nanoTimestamp();
+        const start = @import("compat").nanoTimestamp();
         var result = try db.query("MATCH (n:Person) WHERE n.age > 50 RETURN n LIMIT 100");
         defer result.deinit();
-        const end = std.time.nanoTimestamp();
+        const end = @import("compat").nanoTimestamp();
         printTiming("    MATCH WHERE age > 50 LIMIT 100", @intCast(end - start));
         std.debug.print("      Returned {d} rows\n", .{result.rowCount()});
     }
 
     // Single-hop traversal
     {
-        const start = std.time.nanoTimestamp();
+        const start = @import("compat").nanoTimestamp();
         var result = try db.query("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a, b LIMIT 100");
         defer result.deinit();
-        const end = std.time.nanoTimestamp();
+        const end = @import("compat").nanoTimestamp();
         printTiming("    Single-hop traversal LIMIT 100", @intCast(end - start));
         std.debug.print("      Returned {d} rows\n", .{result.rowCount()});
     }
 
     // Two-hop traversal
     {
-        const start = std.time.nanoTimestamp();
+        const start = @import("compat").nanoTimestamp();
         const query_result = db.query("MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person) RETURN a, b, c LIMIT 100");
-        const end = std.time.nanoTimestamp();
+        const end = @import("compat").nanoTimestamp();
         if (query_result) |_| {
             var result = query_result catch unreachable;
             defer result.deinit();
@@ -550,9 +550,9 @@ fn stressTestQueries(allocator: Allocator, node_count: usize, edges_per_node: us
 
     // Three-hop traversal
     {
-        const start = std.time.nanoTimestamp();
+        const start = @import("compat").nanoTimestamp();
         const query_result = db.query("MATCH (a:Person)-[:KNOWS]->(b:Person)-[:KNOWS]->(c:Person)-[:KNOWS]->(d:Person) RETURN a, b, c, d LIMIT 100");
-        const end = std.time.nanoTimestamp();
+        const end = @import("compat").nanoTimestamp();
         if (query_result) |_| {
             var result = query_result catch unreachable;
             defer result.deinit();
@@ -566,9 +566,9 @@ fn stressTestQueries(allocator: Allocator, node_count: usize, edges_per_node: us
 
     // Aggregation
     {
-        const start = std.time.nanoTimestamp();
+        const start = @import("compat").nanoTimestamp();
         const query_result = db.query("MATCH (n:Person) RETURN count(n)");
-        const end = std.time.nanoTimestamp();
+        const end = @import("compat").nanoTimestamp();
         if (query_result) |_| {
             var result = query_result catch unreachable;
             defer result.deinit();
@@ -584,7 +584,7 @@ fn stressTestVectorSearch(allocator: Allocator, vector_count: usize, dimensions:
     std.debug.print("\n═══ Vector Search Stress Test ({d} vectors, {d}D) ═══\n", .{ vector_count, dimensions });
 
     const path = "/tmp/lattice_stress_vector.ltdb";
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -596,7 +596,7 @@ fn stressTestVectorSearch(allocator: Allocator, vector_count: usize, dimensions:
     });
     defer {
         db.close();
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
     // Create nodes with vectors
@@ -609,7 +609,7 @@ fn stressTestVectorSearch(allocator: Allocator, vector_count: usize, dimensions:
     defer allocator.free(vector);
 
     const rng = std.crypto.random;
-    const index_start = std.time.nanoTimestamp();
+    const index_start = @import("compat").nanoTimestamp();
 
     for (0..vector_count) |i| {
         node_ids[i] = try db.createNode(null, labels);
@@ -632,7 +632,7 @@ fn stressTestVectorSearch(allocator: Allocator, vector_count: usize, dimensions:
         }
     }
 
-    const index_end = std.time.nanoTimestamp();
+    const index_end = @import("compat").nanoTimestamp();
     printTiming("  Total indexing time", @intCast(index_end - index_start));
 
     // Create query vector
@@ -652,19 +652,19 @@ fn stressTestVectorSearch(allocator: Allocator, vector_count: usize, dimensions:
     std.debug.print("\n  Search Performance:\n", .{});
 
     const search_iterations: usize = 100;
-    const search_start = std.time.nanoTimestamp();
+    const search_start = @import("compat").nanoTimestamp();
 
     for (0..search_iterations) |_| {
         const results = db.vectorSearch(query, 10, null) catch continue;
         db.freeVectorSearchResults(results);
     }
 
-    const search_end = std.time.nanoTimestamp();
+    const search_end = @import("compat").nanoTimestamp();
     const avg_search = @as(u64, @intCast(search_end - search_start)) / search_iterations;
     printTiming("    Avg 10-NN search time", avg_search);
 
     // Check file size
-    const file = try std.fs.cwd().openFile(path, .{});
+    const file = try @import("compat").fs.cwd().openFile(path, .{});
     defer file.close();
     const stat = try file.stat();
     std.debug.print("  Database size: {d:.2} MB\n", .{@as(f64, @floatFromInt(stat.size)) / (1024.0 * 1024.0)});
@@ -675,7 +675,7 @@ fn stressTestVectorSearch(allocator: Allocator, vector_count: usize, dimensions:
 // ============================================================================
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

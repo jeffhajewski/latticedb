@@ -422,7 +422,7 @@ const LatticeDb = struct {
 
     fn open(allocator: std.mem.Allocator, path: []const u8) !LatticeDb {
         // Remove existing file
-        std.fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path) catch {};
 
         const db = try Database.open(allocator, path, .{
             .create = true,
@@ -537,10 +537,10 @@ const LatticeDb = struct {
         var visited = std.DynamicBitSet.initEmpty(allocator, bitset_size) catch return 0;
         defer visited.deinit();
 
-        var current_level = std.ArrayListUnmanaged(u64){};
+        var current_level = std.ArrayListUnmanaged(u64).empty;
         defer current_level.deinit(allocator);
 
-        var next_level = std.ArrayListUnmanaged(u64){};
+        var next_level = std.ArrayListUnmanaged(u64).empty;
         defer next_level.deinit(allocator);
 
         current_level.append(allocator, node_id) catch return 0;
@@ -594,10 +594,10 @@ const LatticeDb = struct {
         var visited = std.DynamicBitSet.initEmpty(allocator, bitset_size) catch return 0;
         defer visited.deinit();
 
-        var current_level = std.ArrayListUnmanaged(u64){};
+        var current_level = std.ArrayListUnmanaged(u64).empty;
         defer current_level.deinit(allocator);
 
-        var next_level = std.ArrayListUnmanaged(u64){};
+        var next_level = std.ArrayListUnmanaged(u64).empty;
         defer next_level.deinit(allocator);
 
         current_level.append(allocator, node_id) catch return 0;
@@ -659,10 +659,10 @@ const LatticeDb = struct {
         var visited = std.DynamicBitSet.initEmpty(allocator, bitset_size) catch return .{ .count = 0, .timings = timings };
         defer visited.deinit();
 
-        var current_level = std.ArrayListUnmanaged(u64){};
+        var current_level = std.ArrayListUnmanaged(u64).empty;
         defer current_level.deinit(allocator);
 
-        var next_level = std.ArrayListUnmanaged(u64){};
+        var next_level = std.ArrayListUnmanaged(u64).empty;
         defer next_level.deinit(allocator);
 
         current_level.append(allocator, node_id) catch return .{ .count = 0, .timings = timings };
@@ -789,9 +789,9 @@ fn runWorkload(
     var sqlite_total: u64 = 0;
     for (0..total_iters) |i| {
         const node = test_nodes[i % test_nodes.len];
-        const start = std.time.nanoTimestamp();
+        const start = @import("compat").nanoTimestamp();
         _ = sqliteFn(sqlite_db, node);
-        const elapsed = @as(u64, @intCast(std.time.nanoTimestamp() - start));
+        const elapsed = @as(u64, @intCast(@import("compat").nanoTimestamp() - start));
 
         if (i >= config.warmup_iterations) {
             sqlite_total += elapsed;
@@ -802,9 +802,9 @@ fn runWorkload(
     var lattice_total: u64 = 0;
     for (0..total_iters) |i| {
         const node = test_nodes[i % test_nodes.len];
-        const start = std.time.nanoTimestamp();
+        const start = @import("compat").nanoTimestamp();
         _ = latticeFn(lattice_db, node, allocator);
-        const elapsed = @as(u64, @intCast(std.time.nanoTimestamp() - start));
+        const elapsed = @as(u64, @intCast(@import("compat").nanoTimestamp() - start));
 
         if (i >= config.warmup_iterations) {
             lattice_total += elapsed;
@@ -890,12 +890,12 @@ fn runBenchmarkSuite(
     // Setup SQLite
     std.debug.print("  Setting up SQLite...\n", .{});
     const sqlite_path: [:0]const u8 = "/tmp/bench_sqlite.db";
-    std.fs.cwd().deleteFile(sqlite_path) catch {};
+    @import("compat").fs.cwd().deleteFile(sqlite_path) catch {};
 
     var sqlite_db = try SqliteDb.open(allocator, sqlite_path);
     defer {
         sqlite_db.close();
-        std.fs.cwd().deleteFile(sqlite_path) catch {};
+        @import("compat").fs.cwd().deleteFile(sqlite_path) catch {};
     }
 
     try sqlite_db.populateGraph(&graph);
@@ -908,7 +908,7 @@ fn runBenchmarkSuite(
     var lattice_db = try LatticeDb.open(allocator, lattice_path);
     defer {
         lattice_db.close();
-        std.fs.cwd().deleteFile(lattice_path) catch {};
+        @import("compat").fs.cwd().deleteFile(lattice_path) catch {};
     }
 
     try lattice_db.populateGraph(&graph);
@@ -1101,7 +1101,7 @@ fn printMarkdownSummary(all_results: []const ScaleResults) void {
 // ============================================================================
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

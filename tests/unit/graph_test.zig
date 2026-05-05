@@ -603,7 +603,7 @@ test "edges: filter by type with getOutgoingByType" {
 
 /// Helper: collect all outgoing EdgeRefs for a node using the individual iterator API.
 fn collectOutgoingRefs(store: *EdgeStore, node_id: NodeId, allocator: Allocator) ![]EdgeRef {
-    var refs = std.ArrayListUnmanaged(EdgeRef){};
+    var refs = std.ArrayListUnmanaged(EdgeRef).empty;
     var iter = try store.getOutgoingRefs(node_id);
     defer iter.deinit();
     while (try iter.next()) |ref| {

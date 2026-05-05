@@ -52,7 +52,7 @@ pub const AdjacencyCache = struct {
         // Skip if already cached
         if (self.map.contains(node_id)) return;
 
-        var edges_list = std.ArrayListUnmanaged(CachedEdge){};
+        var edges_list = std.ArrayListUnmanaged(CachedEdge).empty;
         errdefer edges_list.deinit(self.allocator);
 
         var iter = edge_store.getOutgoingRefs(node_id) catch return;

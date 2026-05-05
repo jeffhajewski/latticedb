@@ -17,8 +17,8 @@ const PosixVfs = vfs.PosixVfs;
 const LatchMode = locking.LatchMode;
 
 fn createTempPath(allocator: std.mem.Allocator, name: []const u8) ![]u8 {
-    const timestamp = std.time.milliTimestamp();
-    const random = std.crypto.random.int(u32);
+    const timestamp = @import("compat").milliTimestamp();
+    const random = @import("compat").randomInt(u32);
     var buf: [128]u8 = undefined;
     const path = try std.fmt.bufPrint(&buf, "/tmp/lattice_bp_test_{s}_{d}_{x}.db", .{ name, timestamp, random });
     return allocator.dupe(u8, path);

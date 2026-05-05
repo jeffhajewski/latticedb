@@ -258,8 +258,8 @@ const BenchIndex = struct {
 
     fn initWithEfC(allocator: Allocator, scale: usize, ef_search: u16, ef_construction: u16) !BenchIndex {
         var path_buf: [128]u8 = undefined;
-        const timestamp = std.time.milliTimestamp();
-        const random_val = std.crypto.random.int(u32);
+        const timestamp = @import("compat").milliTimestamp();
+        const random_val = @import("compat").randomInt(u32);
         const path = try std.fmt.bufPrint(&path_buf, "/tmp/lattice_vecbench_{d}_{d}_{x}.db", .{ scale, timestamp, random_val });
         const path_copy = try allocator.dupe(u8, path);
         errdefer allocator.free(path_copy);
@@ -359,14 +359,14 @@ fn buildBenchContext(allocator: Allocator, scale: usize, ef_construction: u16) !
 
     // --- Insertion ---
     const report_interval = @max(scale / 10, 10_000);
-    const insert_start = std.time.nanoTimestamp();
+    const insert_start = @import("compat").nanoTimestamp();
     for (0..scale) |i| {
         try bench.index.insert(@intCast(i + 1), vectors[i]);
         if ((i + 1) % report_interval == 0) {
             std.debug.print("    Inserted {d}/{d}...\n", .{ i + 1, scale });
         }
     }
-    const insert_end = std.time.nanoTimestamp();
+    const insert_end = @import("compat").nanoTimestamp();
     const insert_ns: u64 = @intCast(insert_end - insert_start);
 
     const queries = try generateQueryVectors(allocator, NUM_SEARCH_QUERIES, vectors, DIMENSIONS, &rng);
@@ -405,9 +405,9 @@ fn measureScale(allocator: Allocator, ctx: *BenchContext, scale: usize) !ScaleRe
     // --- Search latency ---
     var timings: [NUM_SEARCH_QUERIES]u64 = undefined;
     for (0..NUM_SEARCH_QUERIES) |i| {
-        const t0 = std.time.nanoTimestamp();
+        const t0 = @import("compat").nanoTimestamp();
         const results = try ctx.bench.index.search(ctx.queries[i], K, null);
-        const t1 = std.time.nanoTimestamp();
+        const t1 = @import("compat").nanoTimestamp();
         ctx.bench.index.freeResults(results);
         timings[i] = @intCast(t1 - t0);
     }
@@ -474,9 +474,9 @@ fn runEfSearchSensitivity(allocator: Allocator, ctx: *BenchContext) ![]EfResult 
         // Latency
         var total_ns: u64 = 0;
         for (0..NUM_SEARCH_QUERIES) |i| {
-            const t0 = std.time.nanoTimestamp();
+            const t0 = @import("compat").nanoTimestamp();
             const r = try ctx.bench.index.search(ctx.queries[i], K, ef);
-            const t1 = std.time.nanoTimestamp();
+            const t1 = @import("compat").nanoTimestamp();
             ctx.bench.index.freeResults(r);
             total_ns += @as(u64, @intCast(t1 - t0));
         }
@@ -538,23 +538,23 @@ fn runEfConstructionSensitivity(allocator: Allocator) ![]EfCResult {
 
         // Insert
         const report_interval = @max(scale / 10, 10_000);
-        const insert_start = std.time.nanoTimestamp();
+        const insert_start = @import("compat").nanoTimestamp();
         for (0..scale) |i| {
             try bench.index.insert(@intCast(i + 1), vectors[i]);
             if ((i + 1) % report_interval == 0) {
                 std.debug.print("    Inserted {d}/{d}...\n", .{ i + 1, scale });
             }
         }
-        const insert_end = std.time.nanoTimestamp();
+        const insert_end = @import("compat").nanoTimestamp();
         const insert_ns: u64 = @intCast(insert_end - insert_start);
         const insert_rate = @as(f64, @floatFromInt(scale)) / (@as(f64, @floatFromInt(insert_ns)) / 1_000_000_000.0);
 
         // Search latency
         var total_ns: u64 = 0;
         for (0..NUM_SEARCH_QUERIES) |i| {
-            const t0 = std.time.nanoTimestamp();
+            const t0 = @import("compat").nanoTimestamp();
             const r = try bench.index.search(queries[i], K, null);
-            const t1 = std.time.nanoTimestamp();
+            const t1 = @import("compat").nanoTimestamp();
             bench.index.freeResults(r);
             total_ns += @as(u64, @intCast(t1 - t0));
         }
@@ -656,7 +656,7 @@ fn printEfCResults(results: []const EfCResult) void {
 // ============================================================================
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 

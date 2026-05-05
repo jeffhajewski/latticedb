@@ -51,9 +51,9 @@ fn runBenchmarkDynamic(
     var max: u64 = 0;
 
     for (0..measure_iters) |_| {
-        const start = std.time.nanoTimestamp();
+        const start = @import("compat").nanoTimestamp();
         benchFn(context);
-        const end = std.time.nanoTimestamp();
+        const end = @import("compat").nanoTimestamp();
         const elapsed = @as(u64, @intCast(end - start));
         total += elapsed;
         if (elapsed < min) min = elapsed;
@@ -168,7 +168,7 @@ fn setupDatabase(allocator: std.mem.Allocator, path: []const u8, config: struct 
     vector_dimensions: u16 = 128,
 }) !*Database {
     // Remove existing file
-    std.fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path) catch {};
 
     // Use auto-scaling buffer pool (buffer_pool_size=0 triggers automatic sizing)
     const db = try Database.open(allocator, path, .{
@@ -269,7 +269,7 @@ fn createFtsData(db: *Database, node_ids: []const u64, allocator: std.mem.Alloca
 // ============================================================================
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
@@ -295,7 +295,7 @@ pub fn main() !void {
     // Vector search benchmark (100 vectors due to scalability issue with larger datasets)
     {
         const vec_path = "/tmp/lattice_bench_vec.ltdb";
-        std.fs.cwd().deleteFile(vec_path) catch {};
+        @import("compat").fs.cwd().deleteFile(vec_path) catch {};
 
         var vec_db = setupDatabase(allocator, vec_path, .{
             .enable_vector = true,
@@ -306,7 +306,7 @@ pub fn main() !void {
         };
         defer {
             vec_db.close();
-            std.fs.cwd().deleteFile(vec_path) catch {};
+            @import("compat").fs.cwd().deleteFile(vec_path) catch {};
         }
 
         const vec_node_ids = createNodes(vec_db, 100, "Vector") catch |err| {
@@ -347,7 +347,7 @@ pub fn main() !void {
         var db = try setupDatabase(allocator, "/tmp/lattice_bench_nodes.ltdb", .{});
         defer {
             db.close();
-            std.fs.cwd().deleteFile("/tmp/lattice_bench_nodes.ltdb") catch {};
+            @import("compat").fs.cwd().deleteFile("/tmp/lattice_bench_nodes.ltdb") catch {};
         }
 
         // Setup: Create nodes for lookup benchmark
@@ -377,7 +377,7 @@ pub fn main() !void {
         var db = try setupDatabase(allocator, "/tmp/lattice_bench_create.ltdb", .{});
         defer {
             db.close();
-            std.fs.cwd().deleteFile("/tmp/lattice_bench_create.ltdb") catch {};
+            @import("compat").fs.cwd().deleteFile("/tmp/lattice_bench_create.ltdb") catch {};
         }
 
         // Node creation benchmark
@@ -404,7 +404,7 @@ pub fn main() !void {
         var db = try setupDatabase(allocator, "/tmp/lattice_bench_edges.ltdb", .{});
         defer {
             db.close();
-            std.fs.cwd().deleteFile("/tmp/lattice_bench_edges.ltdb") catch {};
+            @import("compat").fs.cwd().deleteFile("/tmp/lattice_bench_edges.ltdb") catch {};
         }
 
         const node_ids = try createNodes(db, 1000, "Person");
@@ -430,7 +430,7 @@ pub fn main() !void {
 
     {
         const fts_path = "/tmp/lattice_bench_fts.ltdb";
-        std.fs.cwd().deleteFile(fts_path) catch {};
+        @import("compat").fs.cwd().deleteFile(fts_path) catch {};
 
         var fts_db = setupDatabase(allocator, fts_path, .{
             .enable_fts = true,
@@ -440,7 +440,7 @@ pub fn main() !void {
         };
         defer {
             fts_db.close();
-            std.fs.cwd().deleteFile(fts_path) catch {};
+            @import("compat").fs.cwd().deleteFile(fts_path) catch {};
         }
 
         // Debug: Check if FTS index was initialized

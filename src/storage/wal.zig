@@ -170,7 +170,7 @@ pub const WalManager = struct {
     /// Next LSN to assign
     next_lsn: u64,
     /// Mutex for thread safety
-    mutex: std.Thread.Mutex,
+    mutex: @import("compat").Mutex,
 
     const Self = @This();
 
@@ -547,7 +547,7 @@ test "wal create new" {
     vfs_impl.delete(path) catch {};
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
     defer {
@@ -569,7 +569,7 @@ test "wal append and read records" {
     vfs_impl.delete(path) catch {};
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
     defer {
@@ -622,7 +622,7 @@ test "wal reopen and continue" {
     vfs_impl.delete(path) catch {};
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     // Create and write
     {
@@ -660,7 +660,7 @@ test "wal uuid mismatch" {
     vfs_impl.delete(path) catch {};
 
     var uuid1: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid1);
+    @import("compat").randomBytes(&uuid1);
 
     // Create with uuid1
     {
@@ -671,7 +671,7 @@ test "wal uuid mismatch" {
 
     // Try to open with different uuid
     var uuid2: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid2);
+    @import("compat").randomBytes(&uuid2);
 
     const result = WalManager.init(allocator, vfs_impl, path, uuid2);
     try std.testing.expectError(WalError.UuidMismatch, result);
@@ -689,7 +689,7 @@ test "wal multiple frames" {
     vfs_impl.delete(path) catch {};
 
     var uuid: [16]u8 = undefined;
-    std.crypto.random.bytes(&uuid);
+    @import("compat").randomBytes(&uuid);
 
     var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
     defer {

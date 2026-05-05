@@ -6,6 +6,7 @@ const std = @import("std");
 const lattice = @import("lattice");
 
 const Database = lattice.storage.database.Database;
+const PropertyValue = lattice.core.types.PropertyValue;
 const import_export = @import("import_export");
 
 const database_key_size = @sizeOf(u64);
@@ -134,6 +135,13 @@ fn countNonEmptyLines(s: []const u8) usize {
     return count;
 }
 
+fn mapValue(entries: []const PropertyValue.MapEntry, key: []const u8) ?PropertyValue {
+    for (entries) |entry| {
+        if (std.mem.eql(u8, entry.key, key)) return entry.value;
+    }
+    return null;
+}
+
 test "import_export: exportJson deduplicates multi-label nodes and preserves parallel edges" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_export_json_dedup_test.ltdb";
@@ -174,6 +182,97 @@ test "import_export: exportJson deduplicates multi-label nodes and preserves par
     }
     try std.testing.expect(found_2020);
     try std.testing.expect(found_2021);
+}
+
+test "import_export: JSON roundtrip preserves nested property types" {
+    const allocator = std.testing.allocator;
+    const source_path = "/tmp/lattice_export_json_nested_source.ltdb";
+    const imported_path = "/tmp/lattice_export_json_nested_imported.ltdb";
+    const source_db = try openTestDb(source_path);
+    defer cleanupTestDb(source_db, source_path);
+    const imported_db = try openTestDb(imported_path);
+    defer cleanupTestDb(imported_db, imported_path);
+
+    const node = try source_db.createNode(null, &.{person_label});
+    const blob = [_]u8{ 0xde, 0xad, 0xbe, 0xef };
+    const embedding = [_]f32{ 0.25, 1.5, -3.0 };
+    const nested_list = [_]PropertyValue{
+        .{ .string_val = "inner" },
+        .{ .bool_val = false },
+    };
+    const tags = [_]PropertyValue{
+        .{ .string_val = "graph" },
+        .{ .int_val = 7 },
+        .{ .bool_val = true },
+        .{ .list_val = &nested_list },
+    };
+    const meta = [_]PropertyValue.MapEntry{
+        .{ .key = "city", .value = .{ .string_val = "Portland" } },
+        .{ .key = "score", .value = .{ .float_val = 98.5 } },
+        .{ .key = "flags", .value = .{ .list_val = &nested_list } },
+        .{ .key = "embedding", .value = .{ .vector_val = &embedding } },
+    };
+
+    try source_db.setNodeProperty(null, node, "tags", .{ .list_val = &tags });
+    try source_db.setNodeProperty(null, node, "meta", .{ .map_val = &meta });
+    try source_db.setNodeProperty(null, node, "blob", .{ .bytes_val = &blob });
+    try source_db.setNodeProperty(null, node, "embedding", .{ .vector_val = &embedding });
+
+    var export_buf: [large_export_buffer_size]u8 = undefined;
+    var export_stream = @import("compat").fixedBufferStream(&export_buf);
+    const export_stats = try import_export.exportJson(allocator, source_db, export_stream.writer(), null);
+    try std.testing.expectEqual(@as(u64, 1), export_stats.nodes_exported);
+    try std.testing.expectEqual(@as(u64, 0), export_stats.edges_exported);
+
+    const import_stats = try import_export.importJsonContent(
+        allocator,
+        imported_db,
+        export_buf[0..export_stream.pos],
+        1000,
+        false,
+    );
+    try std.testing.expectEqual(@as(u64, 1), import_stats.nodes_imported);
+    try std.testing.expectEqual(@as(u64, 0), import_stats.nodes_failed);
+
+    var imported_tags = (try imported_db.getNodeProperty(1, "tags")).?;
+    defer imported_tags.deinit(allocator);
+    try std.testing.expect(imported_tags == .list_val);
+    try std.testing.expectEqual(@as(usize, 4), imported_tags.list_val.len);
+    try std.testing.expectEqualStrings("graph", imported_tags.list_val[0].string_val);
+    try std.testing.expectEqual(@as(i64, 7), imported_tags.list_val[1].int_val);
+    try std.testing.expectEqual(true, imported_tags.list_val[2].bool_val);
+    try std.testing.expect(imported_tags.list_val[3] == .list_val);
+    try std.testing.expectEqualStrings("inner", imported_tags.list_val[3].list_val[0].string_val);
+    try std.testing.expectEqual(false, imported_tags.list_val[3].list_val[1].bool_val);
+
+    var imported_meta = (try imported_db.getNodeProperty(1, "meta")).?;
+    defer imported_meta.deinit(allocator);
+    try std.testing.expect(imported_meta == .map_val);
+    try std.testing.expectEqual(@as(usize, 4), imported_meta.map_val.len);
+    try std.testing.expectEqualStrings("Portland", mapValue(imported_meta.map_val, "city").?.string_val);
+    try std.testing.expectApproxEqAbs(@as(f64, 98.5), mapValue(imported_meta.map_val, "score").?.float_val, 0.001);
+    const flags = mapValue(imported_meta.map_val, "flags").?;
+    try std.testing.expect(flags == .list_val);
+    try std.testing.expectEqualStrings("inner", flags.list_val[0].string_val);
+    try std.testing.expectEqual(false, flags.list_val[1].bool_val);
+    const meta_embedding = mapValue(imported_meta.map_val, "embedding").?;
+    try std.testing.expect(meta_embedding == .vector_val);
+    try std.testing.expectApproxEqAbs(@as(f32, 0.25), meta_embedding.vector_val[0], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, 1.5), meta_embedding.vector_val[1], 0.001);
+    try std.testing.expectApproxEqAbs(@as(f32, -3.0), meta_embedding.vector_val[2], 0.001);
+
+    var imported_blob = (try imported_db.getNodeProperty(1, "blob")).?;
+    defer imported_blob.deinit(allocator);
+    try std.testing.expect(imported_blob == .bytes_val);
+    try std.testing.expectEqualSlices(u8, blob[0..], imported_blob.bytes_val);
+
+    var imported_embedding = (try imported_db.getNodeProperty(1, "embedding")).?;
+    defer imported_embedding.deinit(allocator);
+    try std.testing.expect(imported_embedding == .vector_val);
+    try std.testing.expectEqual(@as(usize, embedding.len), imported_embedding.vector_val.len);
+    try std.testing.expectApproxEqAbs(embedding[0], imported_embedding.vector_val[0], 0.001);
+    try std.testing.expectApproxEqAbs(embedding[1], imported_embedding.vector_val[1], 0.001);
+    try std.testing.expectApproxEqAbs(embedding[2], imported_embedding.vector_val[2], 0.001);
 }
 
 test "import_export: exportCsv deduplicates multi-label nodes and preserves parallel edges" {

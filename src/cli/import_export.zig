@@ -248,7 +248,7 @@ pub fn importJsonContent(
         if (edges_val == .array) {
             for (edges_val.array.items) |edge_val| {
                 const txn = try batcher.transaction();
-                if (importEdge(db, txn, edge_val, &id_map)) |_| {
+                if (importEdge(allocator, db, txn, edge_val, &id_map)) |_| {
                     try batcher.recordSuccess(&stats, .edge);
                 } else |_| {
                     try batcher.recordFailure(&stats, .edge);
@@ -308,7 +308,8 @@ fn importNode(
         if (props_val == .object) {
             var iter = props_val.object.iterator();
             while (iter.next()) |entry| {
-                const prop_val = jsonToPropertyValue(entry.value_ptr.*) catch continue;
+                var prop_val = jsonToPropertyValue(allocator, entry.value_ptr.*) catch continue;
+                defer prop_val.deinit(allocator);
                 db.setNodeProperty(txn, node_id, entry.key_ptr.*, prop_val) catch continue;
             }
         }
@@ -316,6 +317,7 @@ fn importNode(
 }
 
 fn importEdge(
+    allocator: std.mem.Allocator,
     db: *Database,
     txn: ?*Transaction,
     edge_val: std.json.Value,
@@ -356,21 +358,130 @@ fn importEdge(
         if (props_val == .object) {
             var iter = props_val.object.iterator();
             while (iter.next()) |entry| {
-                const prop_val = jsonToPropertyValue(entry.value_ptr.*) catch continue;
+                var prop_val = jsonToPropertyValue(allocator, entry.value_ptr.*) catch continue;
+                defer prop_val.deinit(allocator);
                 db.setEdgePropertyById(txn, edge_id, entry.key_ptr.*, prop_val) catch continue;
             }
         }
     }
 }
 
-fn jsonToPropertyValue(val: std.json.Value) !PropertyValue {
+fn jsonToPropertyValue(allocator: std.mem.Allocator, val: std.json.Value) !PropertyValue {
     return switch (val) {
         .null => .{ .null_val = {} },
         .bool => |b| .{ .bool_val = b },
         .integer => |i| .{ .int_val = i },
         .float => |f| .{ .float_val = f },
-        .string => |s| .{ .string_val = s },
+        .string => |s| blk: {
+            if (isHexBytesString(s)) {
+                break :blk .{ .bytes_val = try decodeHexBytes(allocator, s) };
+            }
+            break :blk .{ .string_val = try allocator.dupe(u8, s) };
+        },
+        .array => |array| blk: {
+            if (isNumericJsonArray(array.items)) {
+                const vector = try allocator.alloc(f32, array.items.len);
+                errdefer allocator.free(vector);
+
+                for (array.items, 0..) |item, i| {
+                    vector[i] = switch (item) {
+                        .integer => |n| @floatFromInt(n),
+                        .float => |n| @floatCast(n),
+                        else => unreachable,
+                    };
+                }
+
+                break :blk .{ .vector_val = vector };
+            }
+
+            const list = try allocator.alloc(PropertyValue, array.items.len);
+            var initialized: usize = 0;
+            errdefer {
+                for (list[0..initialized]) |*item| {
+                    item.deinit(allocator);
+                }
+                allocator.free(list);
+            }
+
+            for (array.items, 0..) |item, i| {
+                list[i] = try jsonToPropertyValue(allocator, item);
+                initialized += 1;
+            }
+
+            break :blk .{ .list_val = list };
+        },
+        .object => |object| blk: {
+            const map = try allocator.alloc(PropertyValue.MapEntry, object.count());
+            var initialized: usize = 0;
+            errdefer {
+                for (map[0..initialized]) |*entry| {
+                    allocator.free(entry.key);
+                    entry.value.deinit(allocator);
+                }
+                allocator.free(map);
+            }
+
+            var iter = object.iterator();
+            while (iter.next()) |entry| {
+                const key = try allocator.dupe(u8, entry.key_ptr.*);
+                errdefer allocator.free(key);
+
+                const value = try jsonToPropertyValue(allocator, entry.value_ptr.*);
+                errdefer {
+                    var owned_value = value;
+                    owned_value.deinit(allocator);
+                }
+
+                map[initialized] = .{
+                    .key = key,
+                    .value = value,
+                };
+                initialized += 1;
+            }
+
+            break :blk .{ .map_val = map };
+        },
         else => error.InvalidFormat,
+    };
+}
+
+fn isNumericJsonArray(items: []const std.json.Value) bool {
+    for (items) |item| {
+        switch (item) {
+            .integer, .float => {},
+            else => return false,
+        }
+    }
+    return true;
+}
+
+fn isHexBytesString(s: []const u8) bool {
+    if (s.len == 0 or s.len % 2 != 0) return false;
+    for (s) |c| {
+        if (hexNibble(c) == null) return false;
+    }
+    return true;
+}
+
+fn decodeHexBytes(allocator: std.mem.Allocator, s: []const u8) ![]const u8 {
+    const bytes = try allocator.alloc(u8, s.len / 2);
+    errdefer allocator.free(bytes);
+
+    for (bytes, 0..) |*byte, i| {
+        const hi = hexNibble(s[i * 2]) orelse return error.InvalidFormat;
+        const lo = hexNibble(s[i * 2 + 1]) orelse return error.InvalidFormat;
+        byte.* = (hi << 4) | lo;
+    }
+
+    return bytes;
+}
+
+fn hexNibble(c: u8) ?u8 {
+    return switch (c) {
+        '0'...'9' => c - '0',
+        'a'...'f' => c - 'a' + 10,
+        'A'...'F' => c - 'A' + 10,
+        else => null,
     };
 }
 

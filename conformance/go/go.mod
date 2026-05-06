@@ -2,6 +2,6 @@ module github.com/jeffhajewski/latticedb/conformance/go
 
 go 1.22
 
-require github.com/jeffhajewski/latticedb/bindings/go v0.8.1
+require github.com/jeffhajewski/latticedb/bindings/go v0.8.2
 
 replace github.com/jeffhajewski/latticedb/bindings/go => ../../bindings/go

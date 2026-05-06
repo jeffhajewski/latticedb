@@ -343,7 +343,36 @@ jobs:
       - name: List distributions
         run: ls -la dist/
 
+      - name: Check PyPI version
+        id: pypi-version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          fi
+
+          if python3 - "$VERSION" <<'PY'
+          import sys
+          import urllib.error
+          import urllib.request
+
+          version = sys.argv[1]
+          try:
+              urllib.request.urlopen(f"https://pypi.org/pypi/latticedb/{version}/json", timeout=10)
+          except urllib.error.HTTPError as exc:
+              if exc.code == 404:
+                  sys.exit(1)
+              raise
+          PY
+          then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Publish to PyPI
+        if: steps.pypi-version.outputs.exists != 'true'
         uses: pypa/gh-action-pypi-publish@release/v1
         with:
           packages-dir: dist/
@@ -456,13 +485,31 @@ jobs:
           node-version: '24'
           registry-url: 'https://registry.npmjs.org'
 
+      - name: Check npm version
+        id: npm-version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            VERSION="${{ inputs.version }}"
+          else
+            VERSION="${GITHUB_REF#refs/tags/v}"
+          fi
+
+          if npm view "@hajewski/latticedb@$VERSION" version >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
       - name: Install dependencies
+        if: steps.npm-version.outputs.exists != 'true'
         working-directory: bindings/typescript
         run: npm ci --ignore-scripts
 
       - name: List bundled libraries
+        if: steps.npm-version.outputs.exists != 'true'
         run: find bindings/typescript/lib -type f | sort || echo "No lib directory"
 
       - name: Publish to npm
+        if: steps.npm-version.outputs.exists != 'true'
         working-directory: bindings/typescript
         run: npm publish --ignore-scripts --access public --provenance

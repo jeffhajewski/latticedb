@@ -402,7 +402,7 @@ zig build -Doptimize=ReleaseFast   # optimized build
 - [Examples Overview](examples/README.md)
 - [CLI Quickstart](examples/cli/README.md)
 - [Architecture Specification](ARCHITECTURE_SPEC.md)
-- [0.6.0 Release Notes](docs/release_notes_next.md)
+- [0.8.0 Release Notes](docs/release_notes_0.8.0.md)
 - [Client API Migration Notes](docs/client_api_migration.md)
 - [Python API Reference](bindings/python/README.md)
 - [TypeScript API Reference](bindings/typescript/README.md)

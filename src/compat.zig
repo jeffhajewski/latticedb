@@ -64,7 +64,7 @@ pub fn sleep(ns: u64) void {
             .raw = .fromNanoseconds(@intCast(ns)),
         }, io) catch {};
     } else {
-        std.time.sleep(ns);
+        std.Thread.sleep(ns);
     }
 }
 
@@ -227,9 +227,9 @@ fn FixedReader(comptime StreamPtr: type) type {
 pub const fs = struct {
     const DirHandle = if (has_io_fs) std.Io.Dir else std.fs.Dir;
     const FileHandle = if (has_io_fs) std.Io.File else std.fs.File;
-    const AccessOptions = if (has_io_fs) std.Io.Dir.AccessOptions else std.fs.Dir.AccessOptions;
-    const OpenFileOptions = if (has_io_fs) std.Io.Dir.OpenFileOptions else std.fs.Dir.OpenFileOptions;
-    const CreateFileOptions = if (has_io_fs) std.Io.Dir.CreateFileOptions else std.fs.Dir.CreateFileOptions;
+    const AccessOptions = if (has_io_fs) std.Io.Dir.AccessOptions else std.fs.File.OpenFlags;
+    const OpenFileOptions = if (has_io_fs) std.Io.Dir.OpenFileOptions else std.fs.File.OpenFlags;
+    const CreateFileOptions = if (has_io_fs) std.Io.Dir.CreateFileOptions else std.fs.File.CreateFlags;
     const FileStat = if (has_io_fs) std.Io.File.Stat else std.fs.File.Stat;
     const FileLock = if (has_io_fs) std.Io.File.Lock else std.fs.File.Lock;
 

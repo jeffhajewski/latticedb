@@ -959,8 +959,10 @@ pub const HnswIndex = struct {
             candidates.deinit(self.allocator)
         else
             candidates.deinit();
-        if (@hasDecl(CandidateQueue, "ensureTotalCapacity")) {
+        if (@hasDecl(CandidateQueue, "initContext")) {
             candidates.ensureTotalCapacity(self.allocator, ef) catch return HnswError.OutOfMemory;
+        } else if (@hasDecl(CandidateQueue, "ensureTotalCapacity")) {
+            candidates.ensureTotalCapacity(ef) catch return HnswError.OutOfMemory;
         } else {
             candidates.ensureCapacity(ef) catch return HnswError.OutOfMemory;
         }
@@ -974,8 +976,10 @@ pub const HnswIndex = struct {
             results.deinit(self.allocator)
         else
             results.deinit();
-        if (@hasDecl(ResultQueue, "ensureTotalCapacity")) {
+        if (@hasDecl(ResultQueue, "initContext")) {
             results.ensureTotalCapacity(self.allocator, ef) catch return HnswError.OutOfMemory;
+        } else if (@hasDecl(ResultQueue, "ensureTotalCapacity")) {
+            results.ensureTotalCapacity(ef) catch return HnswError.OutOfMemory;
         } else {
             results.ensureCapacity(ef) catch return HnswError.OutOfMemory;
         }

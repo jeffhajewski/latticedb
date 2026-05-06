@@ -62,8 +62,12 @@ def get_current_platform() -> str:
 
 def get_lib_name(target: str) -> str:
     """Get library name for target."""
-    os_part = target.split("-")[0]
-    return LIB_NAMES.get(os_part, "liblattice.so")
+    target = target.lower()
+    if "windows" in target:
+        return LIB_NAMES["windows"]
+    if "darwin" in target or "macos" in target:
+        return LIB_NAMES["macos"]
+    return LIB_NAMES["linux"]
 
 
 def build_library(target: str) -> Path:

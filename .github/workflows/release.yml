@@ -228,6 +228,9 @@ jobs:
           ls -la bindings/python/src/latticedb/lib/
 
       - name: Build wheel
+        env:
+          LATTICE_NATIVE_TARGET: ${{ matrix.target }}
+          LATTICE_BUNDLE_LIB_DIR: ${{ github.workspace }}/native-lib/lib
         run: |
           cd bindings/python
           python -m build --wheel

@@ -608,7 +608,7 @@ function createBindings(): LatticeBindings {
       TxnPtr,
       'uint64', // node_id
       'str', // key
-      koffi.out(ValuePtr), // value_out
+      ValuePtr, // value_out
     ]),
     lattice_stream_publish: lib.func('lattice_stream_publish', 'int', [
       TxnPtr,
@@ -785,7 +785,7 @@ function createBindings(): LatticeBindings {
       TxnPtr,
       'uint64', // edge_id
       'str', // key
-      koffi.out(ValuePtr), // value_out
+      ValuePtr, // value_out
     ]),
     lattice_edge_remove_property: lib.func('lattice_edge_remove_property', 'int', [
       TxnPtr,
@@ -886,7 +886,7 @@ function createBindings(): LatticeBindings {
     lattice_result_get: lib.func('lattice_result_get', 'int', [
       ResultPtr,
       'uint32', // index
-      koffi.out(ValuePtr), // value_out
+      ValuePtr, // value_out
     ]),
     lattice_result_free: lib.func('lattice_result_free', 'void', [ResultPtr]),
 

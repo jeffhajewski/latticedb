@@ -170,7 +170,8 @@ test "wal: rejects uuid mismatch" {
     defer vfs_impl.delete(path) catch {};
 
     const uuid1 = generateUuid();
-    const uuid2 = generateUuid();
+    var uuid2 = uuid1;
+    uuid2[0] ^= 0xff;
 
     // Create WAL with uuid1
     {

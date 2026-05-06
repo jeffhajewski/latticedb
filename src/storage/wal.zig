@@ -670,8 +670,8 @@ test "wal uuid mismatch" {
     }
 
     // Try to open with different uuid
-    var uuid2: [16]u8 = undefined;
-    @import("compat").randomBytes(&uuid2);
+    var uuid2 = uuid1;
+    uuid2[0] ^= 0xff;
 
     const result = WalManager.init(allocator, vfs_impl, path, uuid2);
     try std.testing.expectError(WalError.UuidMismatch, result);

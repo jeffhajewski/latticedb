@@ -118,6 +118,10 @@ export interface OpenOptions {
  */
 export class LatticeFFI {
   private bindings: LatticeBindings;
+  private static readonly VALUE_DATA_OFFSET = koffi.offsetof('lattice_value', 'data');
+  private static readonly VALUE_SIZE = koffi.sizeof('lattice_value');
+  private static readonly MAP_ENTRY_SIZE = koffi.sizeof('lattice_map_entry');
+  private static readonly MAP_ENTRY_VALUE_OFFSET = koffi.offsetof('lattice_map_entry', 'value');
 
   constructor() {
     this.bindings = getBindings();
@@ -479,13 +483,18 @@ export class LatticeFFI {
     nodeId: bigint,
     key: string
   ): unknown {
-    const valueOut = this.makeEmptyValue();
-    const err = this.bindings.lattice_node_get_property(txn, nodeId, key, valueOut);
-    this.checkError(err);
+    const valueOut = this.makeValueOut();
+    let ownsNativeValue = false;
     try {
-      return this.latticeValueToJs(valueOut);
+      const err = this.bindings.lattice_node_get_property(txn, nodeId, key, valueOut);
+      this.checkError(err);
+      ownsNativeValue = true;
+      return this.nativeValueToJs(valueOut);
     } finally {
-      this.bindings.lattice_value_free(valueOut);
+      if (ownsNativeValue) {
+        this.bindings.lattice_value_free(valueOut);
+      }
+      koffi.free(valueOut);
     }
   }
 
@@ -555,11 +564,10 @@ export class LatticeFFI {
         const kind = kindOut[0]
           ? koffi.decode(kindOut[0], 'char', kindLen) as string
           : '';
-        const payloadValue = koffi.decode(payloadOut[0] as never, 'lattice_value') as Record<string, unknown>;
         records.push({
           sequence: sequenceOut.readBigUInt64LE(),
           kind,
-          payload: this.latticeValueToJs(payloadValue) as PropertyValue,
+          payload: this.nativeValueToJs(payloadOut[0]) as PropertyValue,
         });
       }
       return records;
@@ -620,10 +628,14 @@ export class LatticeFFI {
    * Get a value from a result set column.
    */
   resultGet(result: ResultHandle, index: number): unknown {
-    const valueOut = this.makeEmptyValue();
-    const err = this.bindings.lattice_result_get(result, index, valueOut);
-    this.checkError(err);
-    return this.latticeValueToJs(valueOut);
+    const valueOut = this.makeValueOut();
+    try {
+      const err = this.bindings.lattice_result_get(result, index, valueOut);
+      this.checkError(err);
+      return this.nativeValueToJs(valueOut);
+    } finally {
+      koffi.free(valueOut);
+    }
   }
 
   /**
@@ -653,6 +665,10 @@ export class LatticeFFI {
         map_val: null,
       },
     };
+  }
+
+  private makeValueOut(): unknown {
+    return koffi.alloc('lattice_value', 1);
   }
 
   private isPlainObject(value: unknown): value is Record<string, unknown> {
@@ -759,6 +775,90 @@ export class LatticeFFI {
       };
     }
     throw new TypeError(`Unsupported value type: ${typeof value}`);
+  }
+
+  private decodeSize(value: unknown, offset: number): number {
+    return Number(koffi.decode(value as never, offset, 'size_t') as number | bigint);
+  }
+
+  private decodePointer(value: unknown, offset: number): unknown {
+    return koffi.decode(value as never, offset, 'void*');
+  }
+
+  private nativeValueToJs(value: unknown, offset = 0): unknown {
+    const type = koffi.decode(value as never, offset, 'int') as number;
+    const dataOffset = offset + LatticeFFI.VALUE_DATA_OFFSET;
+
+    switch (type) {
+      case LatticeValueType.Null:
+        return null;
+      case LatticeValueType.Bool:
+        return koffi.decode(value as never, dataOffset, 'bool') as boolean;
+      case LatticeValueType.Int: {
+        const iv = koffi.decode(value as never, dataOffset, 'int64') as number | bigint;
+        return typeof iv === 'bigint' ? iv : BigInt(iv);
+      }
+      case LatticeValueType.Float:
+        return koffi.decode(value as never, dataOffset, 'double') as number;
+      case LatticeValueType.String: {
+        const ptr = this.decodePointer(value, dataOffset);
+        const len = this.decodeSize(value, dataOffset + 8);
+        if (!ptr || len === 0) return '';
+        return koffi.decode(ptr as never, 'char', len) as string;
+      }
+      case LatticeValueType.Bytes: {
+        const ptr = this.decodePointer(value, dataOffset);
+        const len = this.decodeSize(value, dataOffset + 8);
+        if (!ptr || len === 0) return new Uint8Array(0);
+        const bytes = koffi.decode(ptr as never, 'uint8_t', len) as number[];
+        return Uint8Array.from(bytes);
+      }
+      case LatticeValueType.Vector: {
+        const ptr = this.decodePointer(value, dataOffset);
+        const dims = Number(koffi.decode(value as never, dataOffset + 8, 'uint32') as number | bigint);
+        if (!ptr || dims === 0) return new Float32Array(0);
+        const floats = koffi.decode(ptr as never, 'float', dims) as number[];
+        return new Float32Array(floats);
+      }
+      case LatticeValueType.List: {
+        const listPtr = this.decodePointer(value, dataOffset);
+        if (!listPtr) return [];
+        const itemsPtr = this.decodePointer(listPtr, 0);
+        const len = this.decodeSize(listPtr, 8);
+        if (!itemsPtr || len === 0) return [];
+        const items: unknown[] = [];
+        for (let i = 0; i < len; i++) {
+          items.push(this.nativeValueToJs(itemsPtr, i * LatticeFFI.VALUE_SIZE));
+        }
+        return items;
+      }
+      case LatticeValueType.Map: {
+        const mapPtr = this.decodePointer(value, dataOffset);
+        if (!mapPtr) return {};
+        const entriesPtr = this.decodePointer(mapPtr, 0);
+        const len = this.decodeSize(mapPtr, 8);
+        const result: Record<string, unknown> = {};
+        if (!entriesPtr || len === 0) return result;
+        for (let i = 0; i < len; i++) {
+          const entryOffset = i * LatticeFFI.MAP_ENTRY_SIZE;
+          const keyPtr = this.decodePointer(entriesPtr, entryOffset);
+          const keyLen = this.decodeSize(entriesPtr, entryOffset + 8);
+          const key = !keyPtr || keyLen === 0
+            ? ''
+            : koffi.decode(keyPtr as never, 'char', keyLen) as string;
+          result[key] = this.nativeValueToJs(
+            entriesPtr,
+            entryOffset + LatticeFFI.MAP_ENTRY_VALUE_OFFSET
+          );
+        }
+        return result;
+      }
+      default:
+        throw new LatticeError(
+          `Unsupported native value type: ${type}`,
+          LatticeErrorCode.Unsupported
+        );
+    }
   }
 
   /**
@@ -1112,16 +1212,21 @@ export class LatticeFFI {
     edgeId: bigint,
     key: string
   ): unknown {
-    const valueOut = this.makeEmptyValue();
-    const err = this.bindings.lattice_edge_get_property(txn, edgeId, key, valueOut);
-    if (err === LatticeErrorCode.NotFound) {
-      return null;
-    }
-    this.checkError(err);
+    const valueOut = this.makeValueOut();
+    let ownsNativeValue = false;
     try {
-      return this.latticeValueToJs(valueOut);
+      const err = this.bindings.lattice_edge_get_property(txn, edgeId, key, valueOut);
+      if (err === LatticeErrorCode.NotFound) {
+        return null;
+      }
+      this.checkError(err);
+      ownsNativeValue = true;
+      return this.nativeValueToJs(valueOut);
     } finally {
-      this.bindings.lattice_value_free(valueOut);
+      if (ownsNativeValue) {
+        this.bindings.lattice_value_free(valueOut);
+      }
+      koffi.free(valueOut);
     }
   }
 

@@ -134,15 +134,19 @@ func (db *DB) Update(fn func(*Tx) error) error {
 
 func (db *DB) Query(cypher string, params map[string]Value) (QueryResult, error) {
 	var result QueryResult
-	err := db.View(func(tx *Tx) error {
+	run := func(tx *Tx) error {
 		queryResult, err := tx.Query(cypher, params)
 		if err != nil {
 			return err
 		}
 		result = queryResult
 		return nil
-	})
-	return result, err
+	}
+
+	if db != nil && db.options.ReadOnly {
+		return result, db.View(run)
+	}
+	return result, db.Update(run)
 }
 
 func (db *DB) CacheClear() error {

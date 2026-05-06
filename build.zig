@@ -83,6 +83,7 @@ pub fn build(b: *std.Build) void {
         },
     });
     cli_main_test_module.addImport("compat", compat_module);
+    cli_main_test_module.link_libc = true;
 
     // Unit test module - imports the library module
     const unit_test_module = b.createModule(.{
@@ -95,6 +96,7 @@ pub fn build(b: *std.Build) void {
     });
     unit_test_module.addImport("cli_main", cli_main_test_module);
     unit_test_module.addImport("compat", compat_module);
+    unit_test_module.link_libc = true;
 
     // Unit tests
     const unit_tests = b.addTest(.{
@@ -112,6 +114,7 @@ pub fn build(b: *std.Build) void {
     // Add self-import for tests
     lib_test_module.addImport("lattice", lib_test_module);
     lib_test_module.addImport("compat", compat_module);
+    lib_test_module.link_libc = true;
 
     // Library tests (tests within src/)
     const lib_tests = b.addTest(.{
@@ -186,6 +189,7 @@ pub fn build(b: *std.Build) void {
         },
     });
     import_export_module.addImport("compat", compat_module);
+    import_export_module.link_libc = true;
 
     const integration_test_module = b.createModule(.{
         .root_source_file = b.path("tests/integration/main.zig"),
@@ -197,6 +201,7 @@ pub fn build(b: *std.Build) void {
         },
     });
     integration_test_module.addImport("compat", compat_module);
+    integration_test_module.link_libc = true;
 
     // Integration tests
     const integration_tests = b.addTest(.{
@@ -217,6 +222,7 @@ pub fn build(b: *std.Build) void {
         },
     });
     crash_test_module.addImport("compat", compat_module);
+    crash_test_module.link_libc = true;
 
     // Crash tests
     const crash_tests = b.addTest(.{
@@ -389,6 +395,7 @@ pub fn build(b: *std.Build) void {
         },
     });
     fuzz_module.addImport("compat", compat_module);
+    fuzz_module.link_libc = true;
 
     // Fuzz tests (run with: zig build fuzz -- --fuzz)
     const fuzz_tests = b.addTest(.{

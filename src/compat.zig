@@ -3,7 +3,9 @@ const std = @import("std");
 pub const io = std.Options.debug_io;
 
 const has_io_fs = @hasDecl(std.Io, "Dir");
+const has_thread_condition = @hasDecl(std.Thread, "Condition");
 const MutexState = if (@hasDecl(std.atomic, "Mutex")) std.atomic.Mutex else std.Thread.Mutex;
+const ConditionState = if (has_thread_condition) std.Thread.Condition else void;
 
 pub const Mutex = struct {
     state: MutexState = if (@hasDecl(std.atomic, "Mutex")) .unlocked else .{},
@@ -24,14 +26,22 @@ pub const Mutex = struct {
 };
 
 pub const Condition = struct {
+    state: ConditionState = if (has_thread_condition) .{} else {},
+
     pub fn broadcast(self: *Condition) void {
-        _ = self;
+        if (has_thread_condition) {
+            self.state.broadcast();
+        }
     }
 
     pub fn timedWait(self: *Condition, mutex: *Mutex, ns: u64) !void {
-        _ = self;
+        if (has_thread_condition) {
+            return self.state.timedWait(&mutex.state, ns);
+        }
+
+        const poll_ns = @min(ns, 10 * std.time.ns_per_ms);
         mutex.unlock();
-        sleep(ns);
+        sleep(poll_ns);
         mutex.lock();
     }
 };

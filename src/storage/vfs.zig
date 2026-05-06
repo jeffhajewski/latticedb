@@ -183,7 +183,12 @@ pub const PosixVfs = struct {
     /// Open a file.
     pub fn openFile(self: *Self, path: []const u8, flags: OpenFlags) VfsError!File {
         const cwd = compat.fs.cwd();
-        const file_handle = if (flags.create)
+        const should_open_existing = flags.create and !flags.truncate and !flags.exclusive and self.fileExists(path);
+        const file_handle = if (should_open_existing)
+            cwd.openFile(path, .{
+                .mode = if (flags.read and flags.write) .read_write else if (flags.write) .write_only else .read_only,
+            })
+        else if (flags.create)
             cwd.createFile(path, .{
                 .read = flags.read,
                 .truncate = flags.truncate,

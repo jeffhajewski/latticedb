@@ -44,10 +44,12 @@ fn clearStreamRoots(path: []const u8) !void {
     const n = try file.preadAll(&header_buf, 0);
     if (n < @sizeOf(FileHeader)) return error.HeaderTooSmall;
 
-    const header: *FileHeader = @ptrCast(@alignCast(&header_buf));
+    var header: FileHeader = undefined;
+    @memcpy(std.mem.asBytes(&header), header_buf[0..@sizeOf(FileHeader)]);
     header.setTreeRoot(.stream_meta, NULL_PAGE);
     header.setTreeRoot(.stream_events, NULL_PAGE);
     header.setTreeRoot(.stream_offsets, NULL_PAGE);
+    @memcpy(header_buf[0..@sizeOf(FileHeader)], std.mem.asBytes(&header));
 
     try file.pwriteAll(&header_buf, 0);
 }

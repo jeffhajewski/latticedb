@@ -95,9 +95,9 @@ class Transaction:
 
         lib = get_lib()
         code = lib._lib.lattice_commit(self._handle)
+        check_error(code)
         self._handle = None
         self._committed = True
-        check_error(code)
 
     def rollback(self) -> None:
         """Rollback the transaction."""

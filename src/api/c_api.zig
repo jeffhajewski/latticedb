@@ -6,6 +6,7 @@
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
+const Mutex = @import("compat").Mutex;
 
 const lattice = @import("lattice");
 
@@ -44,22 +45,67 @@ const global_allocator = gpa.allocator();
 // Opaque Handle Types
 // ============================================================================
 
+const HandleMagic: u64 = 0x4c44544243415049; // "LDTBCAPI"
+
+const HandleKind = enum {
+    database,
+    txn,
+    query,
+    result,
+    vector_result,
+    fts_result,
+    edge_result,
+    stream_batch,
+    embedding_client,
+};
+
+const HandleState = enum {
+    active,
+    closed,
+};
+
+const HandleHeader = struct {
+    magic: u64,
+    kind: HandleKind,
+    state: HandleState,
+
+    fn init(kind: HandleKind) HandleHeader {
+        return .{
+            .magic = HandleMagic,
+            .kind = kind,
+            .state = .active,
+        };
+    }
+};
+
+var handle_registry_mutex: Mutex = .{};
+var handle_registry: std.AutoHashMapUnmanaged(usize, HandleKind) = .{};
+
 /// Internal database handle wrapping the Zig Database
 const DatabaseHandle = struct {
+    header: HandleHeader,
     db: *Database,
+    mutex: Mutex,
+    active_children: usize,
+    retired_txns: ?*TxnHandle,
 };
 
 /// Internal transaction handle wrapping actual Transaction
 const TxnHandle = struct {
+    header: HandleHeader,
     db_handle: *DatabaseHandle,
     txn: Transaction, // Actual Transaction struct from TxnManager
+    counted_child: bool,
+    next_retired: ?*TxnHandle,
 };
 
 /// Internal query handle storing prepared query state
 const QueryHandle = struct {
+    header: HandleHeader,
     cypher: []const u8,
     cypher_owned: bool,
     db_handle: *DatabaseHandle,
+    counted_child: bool,
     /// Bound parameters (name -> value)
     parameters: std.StringHashMap(PropertyValue),
     last_error_stage: lattice_query_error_stage,
@@ -72,9 +118,11 @@ const QueryHandle = struct {
 
     fn init(cypher: []const u8, cypher_owned: bool, db_handle: *DatabaseHandle) QueryHandle {
         return .{
+            .header = HandleHeader.init(.query),
             .cypher = cypher,
             .cypher_owned = cypher_owned,
             .db_handle = db_handle,
+            .counted_child = true,
             .parameters = std.StringHashMap(PropertyValue).init(global_allocator),
             .last_error_stage = .none,
             .last_error_message = null,
@@ -167,6 +215,7 @@ const QueryHandle = struct {
 
 /// Internal result handle wrapping query results
 const ResultHandle = struct {
+    header: HandleHeader,
     result: QueryResult,
     column_names_z: []const [:0]u8,
     current_row: usize,
@@ -176,32 +225,39 @@ const ResultHandle = struct {
 
 /// Internal vector search result handle
 const VectorResultHandle = struct {
+    header: HandleHeader,
     results: []VectorSearchResult,
     count: usize,
 };
 
 /// Internal FTS search result handle
 const FtsResultHandle = struct {
+    header: HandleHeader,
     results: []FtsSearchResult,
     count: usize,
     db_handle: *DatabaseHandle,
+    counted_child: bool,
 };
 
 /// Internal edge result handle for edge traversal
 const EdgeResultHandle = struct {
+    header: HandleHeader,
     edges: []Database.EdgeInfo,
     count: usize,
     db_handle: *DatabaseHandle,
+    counted_child: bool,
 };
 
 /// Internal stream batch handle
 const StreamBatchHandle = struct {
+    header: HandleHeader,
     batch: StreamBatch,
     c_values: []lattice_value,
 };
 
 /// Internal embedding client handle
 const EmbeddingClientHandle = struct {
+    header: HandleHeader,
     client: embedding_mod.EmbeddingClient,
 };
 
@@ -824,10 +880,112 @@ fn duplicateColumnNamesZ(columns: [][]const u8) ![][:0]u8 {
     return owned;
 }
 
-/// Cast opaque C pointer to internal handle
+fn kindForHandle(comptime T: type) HandleKind {
+    if (T == DatabaseHandle) return .database;
+    if (T == TxnHandle) return .txn;
+    if (T == QueryHandle) return .query;
+    if (T == ResultHandle) return .result;
+    if (T == VectorResultHandle) return .vector_result;
+    if (T == FtsResultHandle) return .fts_result;
+    if (T == EdgeResultHandle) return .edge_result;
+    if (T == StreamBatchHandle) return .stream_batch;
+    if (T == EmbeddingClientHandle) return .embedding_client;
+    @compileError("unknown C API handle type");
+}
+
+fn registerHandle(comptime T: type, handle: *T) lattice_error {
+    handle_registry_mutex.lock();
+    defer handle_registry_mutex.unlock();
+
+    handle_registry.put(global_allocator, @intFromPtr(handle), kindForHandle(T)) catch {
+        return .err_out_of_memory;
+    };
+    return .ok;
+}
+
+fn unregisterHandle(comptime T: type, handle: *T) void {
+    handle_registry_mutex.lock();
+    defer handle_registry_mutex.unlock();
+
+    const addr = @intFromPtr(handle);
+    if (handle_registry.get(addr)) |kind| {
+        if (kind == kindForHandle(T)) {
+            _ = handle_registry.remove(addr);
+        }
+    }
+}
+
+/// Cast opaque C pointer to an internal handle after address-based liveness
+/// validation. This rejects stale pointers before dereferencing freed memory.
 fn toHandle(comptime T: type, ptr: anytype) ?*T {
-    if (@intFromPtr(ptr) == 0) return null;
-    return @ptrCast(@alignCast(ptr));
+    const addr = @intFromPtr(ptr);
+    if (addr == 0) return null;
+
+    handle_registry_mutex.lock();
+    const registered = if (handle_registry.get(addr)) |kind|
+        kind == kindForHandle(T)
+    else
+        false;
+    handle_registry_mutex.unlock();
+
+    if (!registered) return null;
+
+    const handle: *T = @ptrCast(@alignCast(ptr));
+    if (handle.header.magic != HandleMagic or handle.header.kind != kindForHandle(T)) {
+        return null;
+    }
+    return handle;
+}
+
+fn releaseDbChildLocked(db_handle: *DatabaseHandle, counted_child: *bool) void {
+    if (!counted_child.*) return;
+    std.debug.assert(db_handle.active_children > 0);
+    db_handle.active_children -= 1;
+    counted_child.* = false;
+}
+
+fn retireTxnHandleLocked(txn_handle: *TxnHandle) void {
+    const db_handle = txn_handle.db_handle;
+    releaseDbChildLocked(db_handle, &txn_handle.counted_child);
+    txn_handle.header.state = .closed;
+    txn_handle.next_retired = db_handle.retired_txns;
+    db_handle.retired_txns = txn_handle;
+}
+
+fn destroyRetiredTxnsLocked(db_handle: *DatabaseHandle) void {
+    var next = db_handle.retired_txns;
+    db_handle.retired_txns = null;
+    while (next) |txn_handle| {
+        next = txn_handle.next_retired;
+        unregisterHandle(TxnHandle, txn_handle);
+        global_allocator.destroy(txn_handle);
+    }
+}
+
+fn ensureActiveDbLocked(db_handle: *DatabaseHandle) lattice_error {
+    if (db_handle.header.state != .active) return .err_invalid_arg;
+    return .ok;
+}
+
+fn ensureActiveTxnLocked(txn_handle: *TxnHandle) lattice_error {
+    if (txn_handle.header.state != .active) return .err_txn_aborted;
+    if (txn_handle.db_handle.header.state != .active) return .err_txn_aborted;
+    return .ok;
+}
+
+fn lockActiveTxnDb(txn_handle: *TxnHandle) lattice_error {
+    const db_handle = txn_handle.db_handle;
+    db_handle.mutex.lock();
+    const active_txn_result = ensureActiveTxnLocked(txn_handle);
+    if (active_txn_result != .ok) {
+        db_handle.mutex.unlock();
+        return active_txn_result;
+    }
+    return .ok;
+}
+
+fn unlockTxnDb(txn_handle: *TxnHandle) void {
+    txn_handle.db_handle.mutex.unlock();
 }
 
 /// Cast internal handle to opaque C pointer
@@ -897,13 +1055,26 @@ fn openDatabase(
         db.close();
         return .err_out_of_memory;
     };
-    handle.* = .{ .db = db };
+    handle.* = .{
+        .header = HandleHeader.init(.database),
+        .db = db,
+        .mutex = .{},
+        .active_children = 0,
+        .retired_txns = null,
+    };
+    const register_result = registerHandle(DatabaseHandle, handle);
+    if (register_result != .ok) {
+        db.close();
+        global_allocator.destroy(handle);
+        return register_result;
+    }
 
     db_out.* = @ptrCast(handle);
     return .ok;
 }
 
 fn rejectFakeStreamTxn(txn_handle: *TxnHandle) ?lattice_error {
+    if (txn_handle.header.state != .active) return .err_txn_aborted;
     if (txn_handle.txn.id == 0) return .err_unsupported;
     if (txn_handle.txn.mode == .read_only) return .err_read_only;
     return null;
@@ -944,11 +1115,25 @@ pub export fn lattice_open_v2(
 pub export fn lattice_close(db: ?*lattice_database) lattice_error {
     const handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
 
+    handle.mutex.lock();
+    if (handle.header.state != .active) {
+        handle.mutex.unlock();
+        return .err_invalid_arg;
+    }
+    if (handle.active_children != 0) {
+        handle.mutex.unlock();
+        return .err_invalid_arg;
+    }
+    handle.header.state = .closed;
+    destroyRetiredTxnsLocked(handle);
+    handle.mutex.unlock();
+
     // Sync first to ensure durability, capture any errors
     const sync_result = handle.db.sync();
 
     // Always close and free resources
     handle.db.close();
+    unregisterHandle(DatabaseHandle, handle);
     global_allocator.destroy(handle);
 
     // Return sync error if there was one
@@ -972,6 +1157,10 @@ pub export fn lattice_begin(
     txn_out.* = null;
 
     const db_handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active_db_result = ensureActiveDbLocked(db_handle);
+    if (active_db_result != .ok) return active_db_result;
 
     // Map C API mode to TxnMode
     const txn_mode: TxnMode = if (mode == .read_only) .read_only else .read_write;
@@ -983,6 +1172,7 @@ pub export fn lattice_begin(
                 if (txn_mode == .read_only) {
                     const txn_handle = global_allocator.create(TxnHandle) catch return .err_out_of_memory;
                     txn_handle.* = .{
+                        .header = HandleHeader.init(.txn),
                         .db_handle = db_handle,
                         .txn = Transaction{
                             .id = 0,
@@ -992,7 +1182,15 @@ pub export fn lattice_begin(
                             .start_ts = 0,
                             .commit_ts = 0,
                         },
+                        .counted_child = true,
+                        .next_retired = null,
                     };
+                    const register_result = registerHandle(TxnHandle, txn_handle);
+                    if (register_result != .ok) {
+                        global_allocator.destroy(txn_handle);
+                        return register_result;
+                    }
+                    db_handle.active_children += 1;
                     txn_out.* = @ptrCast(txn_handle);
                     return .ok;
                 }
@@ -1004,11 +1202,26 @@ pub export fn lattice_begin(
     };
 
     // Create transaction handle with real transaction
-    const txn_handle = global_allocator.create(TxnHandle) catch return .err_out_of_memory;
+    const txn_handle = global_allocator.create(TxnHandle) catch {
+        var mutable_txn = txn;
+        db_handle.db.abortTransaction(&mutable_txn) catch {};
+        return .err_out_of_memory;
+    };
     txn_handle.* = .{
+        .header = HandleHeader.init(.txn),
         .db_handle = db_handle,
         .txn = txn,
+        .counted_child = true,
+        .next_retired = null,
     };
+    const register_result = registerHandle(TxnHandle, txn_handle);
+    if (register_result != .ok) {
+        var mutable_txn = txn;
+        db_handle.db.abortTransaction(&mutable_txn) catch {};
+        global_allocator.destroy(txn_handle);
+        return register_result;
+    }
+    db_handle.active_children += 1;
 
     txn_out.* = @ptrCast(txn_handle);
     return .ok;
@@ -1017,32 +1230,47 @@ pub export fn lattice_begin(
 /// Commit a transaction
 pub export fn lattice_commit(txn: ?*lattice_txn) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const db_handle = txn_handle.db_handle;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+
+    const active_result = ensureActiveTxnLocked(txn_handle);
+    if (active_result != .ok) return active_result;
 
     // Only commit if this is a real transaction (id != 0)
     if (txn_handle.txn.id != 0) {
         txn_handle.db_handle.db.commitTransaction(&txn_handle.txn) catch |err| {
             // Don't destroy handle on error - let caller retry or rollback
             return switch (err) {
-                DatabaseError.TransactionNotActive => .err_txn_aborted,
+                DatabaseError.TransactionNotActive => blk: {
+                    retireTxnHandleLocked(txn_handle);
+                    break :blk .err_txn_aborted;
+                },
                 DatabaseError.IoError => .err_io,
                 else => .err,
             };
         };
     }
 
-    global_allocator.destroy(txn_handle);
+    retireTxnHandleLocked(txn_handle);
     return .ok;
 }
 
 /// Rollback a transaction
 pub export fn lattice_rollback(txn: ?*lattice_txn) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const db_handle = txn_handle.db_handle;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+
+    const active_result = ensureActiveTxnLocked(txn_handle);
+    if (active_result != .ok) return active_result;
 
     // Only abort if this is a real transaction (id != 0)
     if (txn_handle.txn.id != 0) {
         txn_handle.db_handle.db.abortTransaction(&txn_handle.txn) catch |err| {
             // Still destroy handle even on error - transaction is unusable
-            global_allocator.destroy(txn_handle);
+            retireTxnHandleLocked(txn_handle);
             return switch (err) {
                 DatabaseError.TransactionNotActive => .err_txn_aborted,
                 else => .err,
@@ -1050,7 +1278,7 @@ pub export fn lattice_rollback(txn: ?*lattice_txn) lattice_error {
         };
     }
 
-    global_allocator.destroy(txn_handle);
+    retireTxnHandleLocked(txn_handle);
     return .ok;
 }
 
@@ -1067,13 +1295,17 @@ pub export fn lattice_node_create(
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    if (txn_handle.txn.mode == .read_only) return .err_read_only;
-
     const maybe_label_slice = cStrToSlice(label);
     const labels: []const []const u8 = if (maybe_label_slice) |label_slice|
         if (label_slice.len == 0) &.{} else &.{label_slice}
     else
         &.{};
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
+
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
 
     // Pass transaction if it's a real one (id != 0)
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
@@ -1093,10 +1325,14 @@ pub export fn lattice_node_add_label(
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    if (txn_handle.txn.mode == .read_only) return .err_read_only;
-
     const label_slice = cStrToSlice(label) orelse return .err_invalid_arg;
     if (label_slice.len == 0) return .err_invalid_arg;
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
+
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
 
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
     txn_handle.db_handle.db.addNodeLabel(txn_ptr, node_id, label_slice) catch |err| {
@@ -1114,10 +1350,14 @@ pub export fn lattice_node_remove_label(
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    if (txn_handle.txn.mode == .read_only) return .err_read_only;
-
     const label_slice = cStrToSlice(label) orelse return .err_invalid_arg;
     if (label_slice.len == 0) return .err_invalid_arg;
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
+
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
 
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
     txn_handle.db_handle.db.removeNodeLabel(txn_ptr, node_id, label_slice) catch |err| {
@@ -1133,6 +1373,10 @@ pub export fn lattice_node_delete(
     node_id: lattice_node_id,
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
 
     if (txn_handle.txn.mode == .read_only) return .err_read_only;
 
@@ -1154,14 +1398,18 @@ pub export fn lattice_node_set_property(
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    if (txn_handle.txn.mode == .read_only) return .err_read_only;
-
     const key_slice = cStrToSlice(key) orelse return .err_invalid_arg;
     const c_val = value orelse return .err_invalid_arg;
 
     // Convert C value to an owned Zig PropertyValue for the duration of this call.
     var zig_value = cValueToOwnedZigValue(c_val, global_allocator) catch |err| return mapValueConversionError(err);
     defer zig_value.deinit(global_allocator);
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
+
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
 
     // Pass transaction if it's a real one (id != 0)
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
@@ -1184,6 +1432,11 @@ pub export fn lattice_node_get_property(
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
     const key_slice = cStrToSlice(key) orelse return .err_invalid_arg;
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
+
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 
     const maybe_value = txn_handle.db_handle.db.getNodePropertyInTxn(txn_ptr, node_id, key_slice) catch |err| {
@@ -1211,6 +1464,11 @@ pub export fn lattice_node_exists(
     exists_out: *bool,
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
+
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 
     exists_out.* = txn_handle.db_handle.db.nodeExistsInTxn(txn_ptr, node_id) catch |err| {
@@ -1276,6 +1534,11 @@ pub export fn lattice_get_nodes_by_label_txn(
     count_out.* = 0;
 
     const label_slice = label[0..label_len];
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
+
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
     const owned = txn_handle.db_handle.db.getNodesByLabelInTxn(txn_ptr, label_slice) catch |err| {
         return mapDatabaseError(err);
@@ -1312,6 +1575,11 @@ pub export fn lattice_node_get_labels(
     labels_out: *[*c]u8,
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
+
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 
     const labels = txn_handle.db_handle.db.getNodeLabelsInTxn(txn_ptr, node_id) catch |err| {
@@ -1387,7 +1655,6 @@ pub export fn lattice_stream_publish(
     payload: ?*const lattice_value,
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
-    if (rejectFakeStreamTxn(txn_handle)) |err| return err;
 
     const stream_slice = cArgBytes(stream, stream_len) orelse return .err_invalid_arg;
     const kind_slice: ?[]const u8 = if (kind_len == 0)
@@ -1400,6 +1667,13 @@ pub export fn lattice_stream_publish(
         return mapValueConversionError(err);
     };
     defer zig_payload.deinit(global_allocator);
+
+    const db_handle = txn_handle.db_handle;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active_txn_result = ensureActiveTxnLocked(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    if (rejectFakeStreamTxn(txn_handle)) |err| return err;
 
     txn_handle.db_handle.db.publishStream(
         &txn_handle.txn,
@@ -1455,9 +1729,15 @@ pub export fn lattice_stream_read(
         return .err_out_of_memory;
     };
     handle.* = .{
+        .header = HandleHeader.init(.stream_batch),
         .batch = batch,
         .c_values = c_values,
     };
+    const register_result = registerHandle(StreamBatchHandle, handle);
+    if (register_result != .ok) {
+        global_allocator.destroy(handle);
+        return register_result;
+    }
 
     batch_out.* = @ptrCast(handle);
     return .ok;
@@ -1489,6 +1769,7 @@ pub export fn lattice_stream_batch_get(
 
 pub export fn lattice_stream_batch_free(batch: ?*lattice_stream_batch) void {
     const handle = toHandle(StreamBatchHandle, batch) orelse return;
+    unregisterHandle(StreamBatchHandle, handle);
     for (handle.c_values) |*value| {
         freeOwnedCValue(value);
     }
@@ -1531,9 +1812,16 @@ pub export fn lattice_stream_set_offset(
     sequence: u64,
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
-    if (rejectFakeStreamTxn(txn_handle)) |err| return err;
     const stream_slice = cArgBytes(stream, stream_len) orelse return .err_invalid_arg;
     const consumer_slice = cArgBytes(consumer, consumer_len) orelse return .err_invalid_arg;
+
+    const db_handle = txn_handle.db_handle;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active_txn_result = ensureActiveTxnLocked(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    if (rejectFakeStreamTxn(txn_handle)) |err| return err;
+
     txn_handle.db_handle.db.setStreamOffset(
         &txn_handle.txn,
         stream_slice,
@@ -1550,8 +1838,15 @@ pub export fn lattice_stream_trim(
     through_sequence: u64,
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
-    if (rejectFakeStreamTxn(txn_handle)) |err| return err;
     const stream_slice = cArgBytes(stream, stream_len) orelse return .err_invalid_arg;
+
+    const db_handle = txn_handle.db_handle;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active_txn_result = ensureActiveTxnLocked(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    if (rejectFakeStreamTxn(txn_handle)) |err| return err;
+
     txn_handle.db_handle.db.trimStream(
         &txn_handle.txn,
         stream_slice,
@@ -1570,14 +1865,19 @@ pub export fn lattice_node_set_vector(
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    if (txn_handle.txn.mode == .read_only) return .err_read_only;
-
     // Key is currently ignored - vectors are stored by node_id
     // In future, we could support multiple vectors per node with different keys
     _ = key;
 
     // Convert C pointer to Zig slice
     const vector_slice = cEmbeddingVectorToSlice(vector, dimensions) orelse return .err_invalid_arg;
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
+
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
+
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 
     txn_handle.db_handle.db.setNodeVectorInTxn(txn_ptr, node_id, vector_slice) catch |err| {
@@ -1611,8 +1911,13 @@ pub export fn lattice_batch_insert(
     count_out.* = 0;
 
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
-    if (txn_handle.txn.mode == .read_only) return .err_read_only;
     if (nodes == null or count == 0 or node_ids_out == null) return .err_invalid_arg;
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
+
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
 
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 
@@ -1666,11 +1971,21 @@ pub export fn lattice_vector_search(
     };
 
     // Create result handle
-    const result_handle = global_allocator.create(VectorResultHandle) catch return .err_out_of_memory;
+    const result_handle = global_allocator.create(VectorResultHandle) catch {
+        global_allocator.free(results);
+        return .err_out_of_memory;
+    };
     result_handle.* = VectorResultHandle{
+        .header = HandleHeader.init(.vector_result),
         .results = results,
         .count = results.len,
     };
+    const register_result = registerHandle(VectorResultHandle, result_handle);
+    if (register_result != .ok) {
+        global_allocator.free(results);
+        global_allocator.destroy(result_handle);
+        return register_result;
+    }
 
     result_out.* = toOpaque(lattice_vector_result, result_handle);
     return .ok;
@@ -1690,16 +2005,31 @@ pub export fn lattice_vector_search_txn(
 
     const query_vector = cEmbeddingVectorToSlice(vector, dimensions) orelse return .err_invalid_arg;
     const ef = if (ef_search == 0) null else ef_search;
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
+
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
     const results = txn_handle.db_handle.db.vectorSearchInTxn(txn_ptr, query_vector, k, ef) catch |err| {
         return mapDatabaseError(err);
     };
 
-    const result_handle = global_allocator.create(VectorResultHandle) catch return .err_out_of_memory;
+    const result_handle = global_allocator.create(VectorResultHandle) catch {
+        global_allocator.free(results);
+        return .err_out_of_memory;
+    };
     result_handle.* = VectorResultHandle{
+        .header = HandleHeader.init(.vector_result),
         .results = results,
         .count = results.len,
     };
+    const register_result = registerHandle(VectorResultHandle, result_handle);
+    if (register_result != .ok) {
+        global_allocator.free(results);
+        global_allocator.destroy(result_handle);
+        return register_result;
+    }
 
     result_out.* = toOpaque(lattice_vector_result, result_handle);
     return .ok;
@@ -1735,6 +2065,7 @@ pub export fn lattice_vector_result_free(
     result: ?*lattice_vector_result,
 ) void {
     const result_handle = toHandle(VectorResultHandle, result) orelse return;
+    unregisterHandle(VectorResultHandle, result_handle);
 
     // Free the results slice (allocated by Database.vectorSearch)
     global_allocator.free(result_handle.results);
@@ -1756,10 +2087,15 @@ pub export fn lattice_fts_index(
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    if (txn_handle.txn.mode == .read_only) return .err_read_only;
     if (text == null or text_len == 0) return .err_invalid_arg;
 
     const text_slice = text[0..text_len];
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
+
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
 
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
     txn_handle.db_handle.db.ftsIndexDocumentInTxn(txn_ptr, node_id, text_slice) catch |err| {
@@ -1783,18 +2119,35 @@ pub export fn lattice_fts_search(
 
     const query_slice = query_text[0..query_len];
 
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active_db_result = ensureActiveDbLocked(db_handle);
+    if (active_db_result != .ok) return active_db_result;
+
     // Perform the search
     const results = db_handle.db.ftsSearch(query_slice, limit) catch |err| {
         return mapDatabaseError(err);
     };
 
     // Create result handle
-    const result_handle = global_allocator.create(FtsResultHandle) catch return .err_out_of_memory;
+    const result_handle = global_allocator.create(FtsResultHandle) catch {
+        db_handle.db.freeFtsSearchResults(results);
+        return .err_out_of_memory;
+    };
     result_handle.* = FtsResultHandle{
+        .header = HandleHeader.init(.fts_result),
         .results = results,
         .count = results.len,
         .db_handle = db_handle,
+        .counted_child = true,
     };
+    const register_result = registerHandle(FtsResultHandle, result_handle);
+    if (register_result != .ok) {
+        db_handle.db.freeFtsSearchResults(results);
+        global_allocator.destroy(result_handle);
+        return register_result;
+    }
+    db_handle.active_children += 1;
 
     result_out.* = toOpaque(lattice_fts_result, result_handle);
     return .ok;
@@ -1811,17 +2164,36 @@ pub export fn lattice_fts_search_txn(
     if (query_text == null or query_len == 0 or limit == 0) return .err_invalid_arg;
 
     const query_slice = query_text[0..query_len];
+
+    const db_handle = txn_handle.db_handle;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active_txn_result = ensureActiveTxnLocked(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
     const results = txn_handle.db_handle.db.ftsSearchInTxn(txn_ptr, query_slice, limit) catch |err| {
         return mapDatabaseError(err);
     };
 
-    const result_handle = global_allocator.create(FtsResultHandle) catch return .err_out_of_memory;
+    const result_handle = global_allocator.create(FtsResultHandle) catch {
+        txn_handle.db_handle.db.freeFtsSearchResults(results);
+        return .err_out_of_memory;
+    };
     result_handle.* = FtsResultHandle{
+        .header = HandleHeader.init(.fts_result),
         .results = results,
         .count = results.len,
         .db_handle = txn_handle.db_handle,
+        .counted_child = true,
     };
+    const register_result = registerHandle(FtsResultHandle, result_handle);
+    if (register_result != .ok) {
+        txn_handle.db_handle.db.freeFtsSearchResults(results);
+        global_allocator.destroy(result_handle);
+        return register_result;
+    }
+    db_handle.active_children += 1;
 
     result_out.* = toOpaque(lattice_fts_result, result_handle);
     return .ok;
@@ -1846,16 +2218,33 @@ pub export fn lattice_fts_search_fuzzy(
     const eff_max_dist = if (max_distance == 0) 2 else max_distance;
     const eff_min_len = if (min_term_length == 0) 4 else min_term_length;
 
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active_db_result = ensureActiveDbLocked(db_handle);
+    if (active_db_result != .ok) return active_db_result;
+
     const results = db_handle.db.ftsSearchFuzzy(query_slice, limit, eff_max_dist, eff_min_len) catch |err| {
         return mapDatabaseError(err);
     };
 
-    const result_handle = global_allocator.create(FtsResultHandle) catch return .err_out_of_memory;
+    const result_handle = global_allocator.create(FtsResultHandle) catch {
+        db_handle.db.freeFtsSearchResults(results);
+        return .err_out_of_memory;
+    };
     result_handle.* = FtsResultHandle{
+        .header = HandleHeader.init(.fts_result),
         .results = results,
         .count = results.len,
         .db_handle = db_handle,
+        .counted_child = true,
     };
+    const register_result = registerHandle(FtsResultHandle, result_handle);
+    if (register_result != .ok) {
+        db_handle.db.freeFtsSearchResults(results);
+        global_allocator.destroy(result_handle);
+        return register_result;
+    }
+    db_handle.active_children += 1;
 
     result_out.* = toOpaque(lattice_fts_result, result_handle);
     return .ok;
@@ -1874,6 +2263,13 @@ pub export fn lattice_fts_search_fuzzy_txn(
     if (query_text == null or query_len == 0 or limit == 0) return .err_invalid_arg;
 
     const query_slice = query_text[0..query_len];
+
+    const db_handle = txn_handle.db_handle;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active_txn_result = ensureActiveTxnLocked(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
     const results = txn_handle.db_handle.db.ftsSearchFuzzyInTxn(
         txn_ptr,
@@ -1885,12 +2281,24 @@ pub export fn lattice_fts_search_fuzzy_txn(
         return mapDatabaseError(err);
     };
 
-    const result_handle = global_allocator.create(FtsResultHandle) catch return .err_out_of_memory;
+    const result_handle = global_allocator.create(FtsResultHandle) catch {
+        txn_handle.db_handle.db.freeFtsSearchResults(results);
+        return .err_out_of_memory;
+    };
     result_handle.* = FtsResultHandle{
+        .header = HandleHeader.init(.fts_result),
         .results = results,
         .count = results.len,
         .db_handle = txn_handle.db_handle,
+        .counted_child = true,
     };
+    const register_result = registerHandle(FtsResultHandle, result_handle);
+    if (register_result != .ok) {
+        txn_handle.db_handle.db.freeFtsSearchResults(results);
+        global_allocator.destroy(result_handle);
+        return register_result;
+    }
+    db_handle.active_children += 1;
 
     result_out.* = toOpaque(lattice_fts_result, result_handle);
     return .ok;
@@ -1925,6 +2333,11 @@ pub export fn lattice_fts_result_free(
     result: ?*lattice_fts_result,
 ) void {
     const result_handle = toHandle(FtsResultHandle, result) orelse return;
+    const db_handle = result_handle.db_handle;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    unregisterHandle(FtsResultHandle, result_handle);
+    releaseDbChildLocked(db_handle, &result_handle.counted_child);
 
     // Free the results through database (uses FTS index's allocator)
     result_handle.db_handle.db.freeFtsSearchResults(result_handle.results);
@@ -1947,9 +2360,13 @@ pub export fn lattice_edge_create(
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    if (txn_handle.txn.mode == .read_only) return .err_read_only;
-
     const type_slice = cStrToSlice(edge_type) orelse return .err_invalid_arg;
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
+
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
 
     // Pass transaction if it's a real one (id != 0)
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
@@ -1970,9 +2387,13 @@ pub export fn lattice_edge_delete(
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    if (txn_handle.txn.mode == .read_only) return .err_read_only;
-
     const type_slice = cStrToSlice(edge_type) orelse return .err_invalid_arg;
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
+
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
 
     // Pass transaction if it's a real one (id != 0)
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
@@ -1992,12 +2413,16 @@ pub export fn lattice_edge_set_property(
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    if (txn_handle.txn.mode == .read_only) return .err_read_only;
-
     const key_slice = cStrToSlice(key) orelse return .err_invalid_arg;
     const c_val = value orelse return .err_invalid_arg;
     var zig_value = cValueToOwnedZigValue(c_val, global_allocator) catch |err| return mapValueConversionError(err);
     defer zig_value.deinit(global_allocator);
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
+
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
 
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
     txn_handle.db_handle.db.setEdgePropertyById(txn_ptr, edge_id, key_slice, zig_value) catch |err| {
@@ -2016,6 +2441,11 @@ pub export fn lattice_edge_get_property(
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
     const key_slice = cStrToSlice(key) orelse return .err_invalid_arg;
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
+
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 
     const maybe_value = txn_handle.db_handle.db.getEdgePropertyByIdInTxn(txn_ptr, edge_id, key_slice) catch |err| {
@@ -2044,9 +2474,13 @@ pub export fn lattice_edge_remove_property(
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
-    if (txn_handle.txn.mode == .read_only) return .err_read_only;
-
     const key_slice = cStrToSlice(key) orelse return .err_invalid_arg;
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
+
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
 
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
     txn_handle.db_handle.db.removeEdgePropertyById(txn_ptr, edge_id, key_slice) catch |err| {
@@ -2065,6 +2499,13 @@ pub export fn lattice_edge_get_outgoing(
     result_out.* = null;
 
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+
+    const db_handle = txn_handle.db_handle;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active_txn_result = ensureActiveTxnLocked(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 
     const edges = txn_handle.db_handle.db.getOutgoingEdgesInTxn(txn_ptr, node_id) catch |err| {
@@ -2077,10 +2518,19 @@ pub export fn lattice_edge_get_outgoing(
     };
 
     result_handle.* = EdgeResultHandle{
+        .header = HandleHeader.init(.edge_result),
         .edges = edges,
         .count = edges.len,
         .db_handle = txn_handle.db_handle,
+        .counted_child = true,
     };
+    const register_result = registerHandle(EdgeResultHandle, result_handle);
+    if (register_result != .ok) {
+        txn_handle.db_handle.db.freeEdgeInfos(edges);
+        global_allocator.destroy(result_handle);
+        return register_result;
+    }
+    db_handle.active_children += 1;
 
     result_out.* = toOpaque(lattice_edge_result, result_handle);
     return .ok;
@@ -2095,6 +2545,13 @@ pub export fn lattice_edge_get_incoming(
     result_out.* = null;
 
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+
+    const db_handle = txn_handle.db_handle;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active_txn_result = ensureActiveTxnLocked(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 
     const edges = txn_handle.db_handle.db.getIncomingEdgesInTxn(txn_ptr, node_id) catch |err| {
@@ -2107,10 +2564,19 @@ pub export fn lattice_edge_get_incoming(
     };
 
     result_handle.* = EdgeResultHandle{
+        .header = HandleHeader.init(.edge_result),
         .edges = edges,
         .count = edges.len,
         .db_handle = txn_handle.db_handle,
+        .counted_child = true,
     };
+    const register_result = registerHandle(EdgeResultHandle, result_handle);
+    if (register_result != .ok) {
+        txn_handle.db_handle.db.freeEdgeInfos(edges);
+        global_allocator.destroy(result_handle);
+        return register_result;
+    }
+    db_handle.active_children += 1;
 
     result_out.* = toOpaque(lattice_edge_result, result_handle);
     return .ok;
@@ -2161,6 +2627,11 @@ pub export fn lattice_edge_result_get(
 /// Free an edge result set
 pub export fn lattice_edge_result_free(result: ?*lattice_edge_result) void {
     const result_handle = toHandle(EdgeResultHandle, result) orelse return;
+    const db_handle = result_handle.db_handle;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    unregisterHandle(EdgeResultHandle, result_handle);
+    releaseDbChildLocked(db_handle, &result_handle.counted_child);
 
     // Free the edge infos through database
     result_handle.db_handle.db.freeEdgeInfos(result_handle.edges);
@@ -2184,6 +2655,11 @@ pub export fn lattice_query_prepare(
     const db_handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
     const cypher_slice = cStrToSlice(cypher) orelse return .err_invalid_arg;
 
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active_db_result = ensureActiveDbLocked(db_handle);
+    if (active_db_result != .ok) return active_db_result;
+
     // Copy cypher string
     const cypher_copy = global_allocator.dupe(u8, cypher_slice) catch return .err_out_of_memory;
 
@@ -2194,6 +2670,14 @@ pub export fn lattice_query_prepare(
     };
 
     query_handle.* = QueryHandle.init(cypher_copy, true, db_handle);
+    const register_result = registerHandle(QueryHandle, query_handle);
+    if (register_result != .ok) {
+        query_handle.deinit();
+        global_allocator.free(cypher_copy);
+        global_allocator.destroy(query_handle);
+        return register_result;
+    }
+    db_handle.active_children += 1;
 
     query_out.* = @ptrCast(query_handle);
     return .ok;
@@ -2239,6 +2723,16 @@ pub export fn lattice_query_execute(
 
     const query_handle = toHandle(QueryHandle, query) orelse return .err_invalid_arg;
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    if (query_handle.db_handle != txn_handle.db_handle) return .err_invalid_arg;
+
+    const db_handle = query_handle.db_handle;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active_db_result = ensureActiveDbLocked(db_handle);
+    if (active_db_result != .ok) return active_db_result;
+    const active_txn_result = ensureActiveTxnLocked(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 
     // Clear any diagnostics from previous executions.
@@ -2281,12 +2775,25 @@ pub export fn lattice_query_execute(
     };
 
     result_handle.* = .{
+        .header = HandleHeader.init(.result),
         .result = result,
         .column_names_z = column_names_z,
         .current_row = 0,
         .started = false,
         .borrowed_value_arena = std.heap.ArenaAllocator.init(global_allocator),
     };
+    const register_result = registerHandle(ResultHandle, result_handle);
+    if (register_result != .ok) {
+        result_handle.borrowed_value_arena.deinit();
+        for (column_names_z) |name| {
+            global_allocator.free(name);
+        }
+        global_allocator.free(column_names_z);
+        var mutable_result = result;
+        mutable_result.deinit();
+        global_allocator.destroy(result_handle);
+        return register_result;
+    }
 
     result_out.* = @ptrCast(result_handle);
     return .ok;
@@ -2339,6 +2846,11 @@ pub export fn lattice_query_last_error_length(query: ?*lattice_query) u32 {
 /// Free a prepared query
 pub export fn lattice_query_free(query: ?*lattice_query) void {
     const query_handle = toHandle(QueryHandle, query) orelse return;
+    const db_handle = query_handle.db_handle;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    unregisterHandle(QueryHandle, query_handle);
+    releaseDbChildLocked(db_handle, &query_handle.counted_child);
 
     // Clean up parameters
     query_handle.deinit();
@@ -2406,6 +2918,7 @@ pub export fn lattice_result_get(
 /// Free a result set
 pub export fn lattice_result_free(result: ?*lattice_result) void {
     const result_handle = toHandle(ResultHandle, result) orelse return;
+    unregisterHandle(ResultHandle, result_handle);
 
     result_handle.borrowed_value_arena.deinit();
     for (result_handle.column_names_z) |name| {
@@ -2455,7 +2968,7 @@ pub export fn lattice_query_cache_stats(
 
 /// Get version string
 pub export fn lattice_version() [*c]const u8 {
-    return "0.8.2";
+    return "0.8.3";
 }
 
 /// Get error message for error code
@@ -2565,6 +3078,7 @@ pub export fn lattice_embedding_client_create(
 
     const handle = global_allocator.create(EmbeddingClientHandle) catch return .err_out_of_memory;
     handle.* = .{
+        .header = HandleHeader.init(.embedding_client),
         .client = embedding_mod.EmbeddingClient.init(global_allocator, .{
             .endpoint = endpoint,
             .model = model,
@@ -2573,6 +3087,12 @@ pub export fn lattice_embedding_client_create(
             .timeout_ms = timeout,
         }),
     };
+    const register_result = registerHandle(EmbeddingClientHandle, handle);
+    if (register_result != .ok) {
+        handle.client.deinit();
+        global_allocator.destroy(handle);
+        return register_result;
+    }
 
     client_out.* = @ptrCast(handle);
     return .ok;
@@ -2622,6 +3142,7 @@ pub export fn lattice_embedding_client_free(
     client: ?*lattice_embedding_client,
 ) void {
     const handle = toHandle(EmbeddingClientHandle, client) orelse return;
+    unregisterHandle(EmbeddingClientHandle, handle);
     handle.client.deinit();
     global_allocator.destroy(handle);
 }
@@ -2647,7 +3168,7 @@ test "value type tags match header" {
 test "version returns expected string" {
     const version = lattice_version();
     try std.testing.expect(version != null);
-    try std.testing.expectEqualStrings("0.8.2", std.mem.sliceTo(version, 0));
+    try std.testing.expectEqualStrings("0.8.3", std.mem.sliceTo(version, 0));
 }
 
 test "error message returns valid strings" {

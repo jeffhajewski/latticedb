@@ -19,10 +19,10 @@ extern "C" {
 #endif
 
 /* Version information */
-#define LATTICE_VERSION "0.8.2"
+#define LATTICE_VERSION "0.8.3"
 #define LATTICE_VERSION_MAJOR 0
 #define LATTICE_VERSION_MINOR 8
-#define LATTICE_VERSION_PATCH 2
+#define LATTICE_VERSION_PATCH 3
 
 /* Opaque handle types */
 typedef struct lattice_database lattice_database;
@@ -171,7 +171,9 @@ lattice_error lattice_open_v2(
     lattice_database** db_out
 );
 
-/* Close a database */
+/* Close a database.
+ * Returns LATTICE_ERROR_INVALID_ARG if transaction or result handles that
+ * depend on this database are still active. Close those handles first. */
 lattice_error lattice_close(lattice_database* db);
 
 /*
@@ -185,10 +187,14 @@ lattice_error lattice_begin(
     lattice_txn** txn_out
 );
 
-/* Commit a transaction */
+/* Commit a transaction.
+ * On success, the transaction handle is closed and must not be used for new
+ * operations. Reusing it before database close returns LATTICE_ERROR_TXN_ABORTED. */
 lattice_error lattice_commit(lattice_txn* txn);
 
-/* Rollback a transaction */
+/* Rollback a transaction.
+ * On success, the transaction handle is closed and must not be used for new
+ * operations. Reusing it before database close returns LATTICE_ERROR_TXN_ABORTED. */
 lattice_error lattice_rollback(lattice_txn* txn);
 
 /*

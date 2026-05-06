@@ -160,6 +160,74 @@ test "c_api: close null handle returns error" {
     try std.testing.expectEqual(lattice_error.err_invalid_arg, result);
 }
 
+test "c_api: committed transaction handle is rejected deterministically" {
+    const path = "/tmp/lattice_capi_committed_txn_rejected_test.db";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+    try std.testing.expectEqual(lattice_error.err_txn_aborted, c_api.lattice_commit(txn));
+    try std.testing.expectEqual(lattice_error.err_txn_aborted, c_api.lattice_rollback(txn));
+
+    var payload = lattice_value{
+        .value_type = .string,
+        .data = .{ .string_val = .{ .ptr = "payload".ptr, .len = "payload".len } },
+    };
+    try std.testing.expectEqual(
+        lattice_error.err_txn_aborted,
+        c_api.lattice_stream_publish(txn, "events".ptr, "events".len, null, 0, &payload),
+    );
+}
+
+test "c_api: close rejects active transaction handles" {
+    const path = "/tmp/lattice_capi_close_active_txn_test.db";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+    try std.testing.expectEqual(lattice_error.err_invalid_arg, c_api.lattice_close(db));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_rollback(txn));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_close(db));
+    db = null;
+}
+
 test "c_api: reopen existing database" {
     const path = "/tmp/lattice_capi_reopen_test.db";
     @import("compat").fs.cwd().deleteFile(path) catch {};

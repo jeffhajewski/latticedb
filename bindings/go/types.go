@@ -12,6 +12,11 @@ type OpenOptions struct {
 	ReadOnly    bool
 	CacheSizeMB uint32
 	PageSize    uint32
+	// EnableWAL controls WAL-backed transactions. The normalized default is true.
+	EnableWAL bool
+	// DisableWAL explicitly opens without WAL-backed transactions. It exists because
+	// Go bool fields cannot distinguish an omitted EnableWAL from EnableWAL=false.
+	DisableWAL bool
 	// Preferred public option name.
 	EnableVectors bool
 	// Deprecated: use EnableVectors. Earliest removal is v0.6.0.
@@ -106,6 +111,11 @@ func (o OpenOptions) withDefaults() OpenOptions {
 	}
 	if o.VectorDimensions == 0 {
 		o.VectorDimensions = 128
+	}
+	if o.DisableWAL {
+		o.EnableWAL = false
+	} else {
+		o.EnableWAL = true
 	}
 	return o
 }

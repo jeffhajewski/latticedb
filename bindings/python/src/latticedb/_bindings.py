@@ -45,9 +45,9 @@ def _find_library() -> Optional[Path]:
     1. LATTICE_LIB_PATH environment variable (explicit path)
     2. Package lib directory (bundled in wheel)
     3. LATTICE_PREFIX environment variable (installed prefix)
-    4. pkg-config lattice libdir
-    5. Homebrew/system library paths
-    6. Development build directory (zig-out/lib)
+    4. Development build directory (zig-out/lib)
+    5. pkg-config lattice libdir
+    6. Homebrew/system library paths
     """
     lib_name = _get_lib_name()
 
@@ -75,7 +75,12 @@ def _find_library() -> Optional[Path]:
         if prefix_lib.exists():
             return prefix_lib
 
-    # 4. pkg-config metadata
+    # 4. Development: relative to bindings (zig-out/lib)
+    dev_path = Path(__file__).parent.parent.parent.parent.parent / "zig-out" / "lib" / lib_name
+    if dev_path.exists():
+        return dev_path
+
+    # 5. pkg-config metadata
     try:
         libdir = subprocess.run(
             ["pkg-config", "--variable=libdir", "lattice"],
@@ -90,7 +95,7 @@ def _find_library() -> Optional[Path]:
     except (FileNotFoundError, subprocess.CalledProcessError):
         pass
 
-    # 5. System paths
+    # 6. System paths
     system_paths = [
         Path("/usr/local/lib"),
         Path("/usr/lib"),
@@ -106,11 +111,6 @@ def _find_library() -> Optional[Path]:
         lib_path = path / lib_name
         if lib_path.exists():
             return lib_path
-
-    # 6. Development: relative to bindings (zig-out/lib)
-    dev_path = Path(__file__).parent.parent.parent.parent.parent / "zig-out" / "lib" / lib_name
-    if dev_path.exists():
-        return dev_path
 
     return None
 
@@ -383,6 +383,19 @@ class OpenOptions(Structure):
     ]
 
 
+class OpenOptionsV2(Structure):
+    _fields_ = [
+        ("struct_size", c_size_t),
+        ("create", c_bool),
+        ("read_only", c_bool),
+        ("cache_size_mb", c_uint32),
+        ("page_size", c_uint32),
+        ("enable_vector", c_bool),
+        ("vector_dimensions", c_uint16),
+        ("enable_wal", c_bool),
+    ]
+
+
 # Type aliases
 LatticeDatabase = c_void_p
 LatticeTxn = c_void_p
@@ -421,6 +434,7 @@ class LatticeLib:
             )
 
         self._lib = ctypes.CDLL(str(lib_path))
+        self._has_lattice_open_v2 = hasattr(self._lib, "lattice_open_v2")
         self._setup_functions()
 
     def _setup_functions(self) -> None:
@@ -432,6 +446,14 @@ class LatticeLib:
             POINTER(LatticeDatabase),
         ]
         self._lib.lattice_open.restype = c_int
+
+        if self._has_lattice_open_v2:
+            self._lib.lattice_open_v2.argtypes = [
+                c_char_p,
+                POINTER(OpenOptionsV2),
+                POINTER(LatticeDatabase),
+            ]
+            self._lib.lattice_open_v2.restype = c_int
 
         # lattice_close
         self._lib.lattice_close.argtypes = [LatticeDatabase]

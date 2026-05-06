@@ -70,6 +70,7 @@ export function defaultOpenOptions(): {
   page_size: number;
   enable_vector: boolean;
   vector_dimensions: number;
+  enable_wal: boolean;
 } {
   return {
     create: false,
@@ -78,5 +79,6 @@ export function defaultOpenOptions(): {
     page_size: 4096,
     enable_vector: false,
     vector_dimensions: 128,
+    enable_wal: true,
   };
 }

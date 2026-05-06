@@ -103,6 +103,7 @@ pub const c_api = @import("api/c_api.zig");
 // Force C API exports to be included in the library
 comptime {
     _ = &c_api.lattice_open;
+    _ = &c_api.lattice_open_v2;
     _ = &c_api.lattice_close;
     _ = &c_api.lattice_begin;
     _ = &c_api.lattice_commit;

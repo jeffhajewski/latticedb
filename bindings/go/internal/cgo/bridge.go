@@ -70,6 +70,7 @@ type OpenOptions struct {
 	ReadOnly         bool
 	CacheSizeMB      uint32
 	PageSize         uint32
+	EnableWAL        bool
 	EnableVector     bool
 	VectorDimensions uint16
 }
@@ -153,17 +154,19 @@ func Open(path string, opts OpenOptions) (*DB, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 
-	cOpts := C.lattice_open_options{
+	cOpts := C.lattice_open_options_v2{
+		struct_size:       C.size_t(unsafe.Sizeof(C.lattice_open_options_v2{})),
 		create:            C.bool(opts.Create),
 		read_only:         C.bool(opts.ReadOnly),
 		cache_size_mb:     C.uint32_t(opts.CacheSizeMB),
 		page_size:         C.uint32_t(opts.PageSize),
 		enable_vector:     C.bool(opts.EnableVector),
 		vector_dimensions: C.uint16_t(opts.VectorDimensions),
+		enable_wal:        C.bool(opts.EnableWAL),
 	}
 
 	var db *C.lattice_database
-	if err := errorFromCode(ErrorCode(C.lattice_open(cPath, &cOpts, &db))); err != nil {
+	if err := errorFromCode(ErrorCode(C.lattice_open_v2(cPath, &cOpts, &db))); err != nil {
 		return nil, err
 	}
 

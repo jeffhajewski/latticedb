@@ -18,6 +18,9 @@ from latticedb._bindings import (
     LatticeNodeId,
     LatticeValue,
     OpenOptions,
+    OpenOptionsV2,
+    LATTICE_ERROR_UNSUPPORTED,
+    LatticeUnsupportedError,
     check_error,
     check_query_error,
     get_lib,
@@ -51,6 +54,7 @@ class Database:
         create: bool = False,
         read_only: bool = False,
         cache_size_mb: int = 100,
+        enable_wal: bool = True,
         enable_vectors: Optional[bool] = None,
         enable_vector: Optional[bool] = None,
         vector_dimensions: int = 128,
@@ -63,6 +67,7 @@ class Database:
             create: Create the database if it doesn't exist.
             read_only: Open in read-only mode.
             cache_size_mb: Size of the page cache in megabytes.
+            enable_wal: Enable WAL-backed transactions.
             enable_vectors: Enable vector storage and indexing.
             enable_vector: Compatibility alias for ``enable_vectors``.
             vector_dimensions: Dimension of vectors when vector support is enabled.
@@ -71,6 +76,7 @@ class Database:
         self._create = create
         self._read_only = read_only
         self._cache_size_mb = cache_size_mb
+        self._enable_wal = enable_wal
         if enable_vector is not None:
             warnings.warn(
                 "Database(..., enable_vector=...) is deprecated; use enable_vectors=.... Earliest removal is v0.6.0.",
@@ -99,20 +105,42 @@ class Database:
             return
 
         lib = get_lib()
-        opts = OpenOptions(
-            create=self._create,
-            read_only=self._read_only,
-            cache_size_mb=self._cache_size_mb,
-            page_size=4096,
-            enable_vector=self._enable_vectors,
-            vector_dimensions=self._vector_dimensions,
-        )
         db_ptr = c_void_p()
-        code = lib._lib.lattice_open(
-            str(self._path).encode("utf-8"),
-            byref(opts),
-            byref(db_ptr),
-        )
+        if getattr(lib, "_has_lattice_open_v2", False):
+            opts = OpenOptionsV2(
+                struct_size=ctypes.sizeof(OpenOptionsV2),
+                create=self._create,
+                read_only=self._read_only,
+                cache_size_mb=self._cache_size_mb,
+                page_size=4096,
+                enable_vector=self._enable_vectors,
+                vector_dimensions=self._vector_dimensions,
+                enable_wal=self._enable_wal,
+            )
+            code = lib._lib.lattice_open_v2(
+                str(self._path).encode("utf-8"),
+                byref(opts),
+                byref(db_ptr),
+            )
+        else:
+            if not self._enable_wal:
+                raise LatticeUnsupportedError(
+                    "lattice_open_v2 is required to disable WAL",
+                    LATTICE_ERROR_UNSUPPORTED,
+                )
+            opts = OpenOptions(
+                create=self._create,
+                read_only=self._read_only,
+                cache_size_mb=self._cache_size_mb,
+                page_size=4096,
+                enable_vector=self._enable_vectors,
+                vector_dimensions=self._vector_dimensions,
+            )
+            code = lib._lib.lattice_open(
+                str(self._path).encode("utf-8"),
+                byref(opts),
+                byref(db_ptr),
+            )
         check_error(code)
         self._handle = db_ptr
 

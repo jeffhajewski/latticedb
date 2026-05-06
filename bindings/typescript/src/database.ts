@@ -27,6 +27,8 @@ export interface DatabaseOptions {
   readOnly?: boolean;
   /** Cache size in megabytes */
   cacheSizeMb?: number;
+  /** Enable WAL-backed transactions (default: true) */
+  enableWal?: boolean;
   /** Enable vector storage and indexing */
   enableVectors?: boolean;
   /** @deprecated Use enableVectors instead. Earliest removal is v0.6.0. */
@@ -72,6 +74,7 @@ export class Database {
       create: false,
       readOnly: false,
       cacheSizeMb: 100,
+      enableWal: true,
       enableVector: false,
       vectorDimensions: 128,
       ...options,
@@ -91,6 +94,7 @@ export class Database {
       create: this.options.create,
       readOnly: this.options.readOnly,
       cacheSizeMb: this.options.cacheSizeMb,
+      enableWal: this.options.enableWal,
       enableVectors: this.options.enableVectors,
       enableVector: this.options.enableVector,
       vectorDimensions: this.options.vectorDimensions,

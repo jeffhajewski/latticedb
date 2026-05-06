@@ -417,6 +417,20 @@ pub const lattice_open_options = extern struct {
     vector_dimensions: u16 = 128,
 };
 
+/// Versioned open options for C API.
+/// New fields must be added through a new versioned struct to preserve the
+/// ABI of lattice_open_options.
+pub const lattice_open_options_v2 = extern struct {
+    struct_size: usize = @sizeOf(lattice_open_options_v2),
+    create: bool = false,
+    read_only: bool = false,
+    cache_size_mb: u32 = 100,
+    page_size: u32 = 4096,
+    enable_vector: bool = false,
+    vector_dimensions: u16 = 128,
+    enable_wal: bool = true,
+};
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -821,25 +835,13 @@ fn toOpaque(comptime T: type, handle: *anyopaque) *T {
     return @ptrCast(handle);
 }
 
-// ============================================================================
-// Database Operations
-// ============================================================================
-
-/// Open a database file
-pub export fn lattice_open(
-    path: [*c]const u8,
-    options: ?*const lattice_open_options,
-    db_out: *?*lattice_database,
-) lattice_error {
-    db_out.* = null;
-
-    const path_slice = cStrToSlice(path) orelse return .err_invalid_arg;
-
-    // Build Zig open options
+fn buildOpenOptionsV1(options: ?*const lattice_open_options) OpenOptions {
     var zig_options = OpenOptions{
         .create = false,
         .read_only = false,
-        .config = DatabaseConfig{},
+        .config = DatabaseConfig{
+            .enable_wal = true,
+        },
     };
 
     if (options) |opts| {
@@ -850,17 +852,92 @@ pub export fn lattice_open(
         zig_options.config.vector_dimensions = opts.vector_dimensions;
     }
 
-    // Open the database
+    return zig_options;
+}
+
+fn buildOpenOptionsV2(options: ?*const lattice_open_options_v2) DatabaseError!OpenOptions {
+    var zig_options = OpenOptions{
+        .create = false,
+        .read_only = false,
+        .config = DatabaseConfig{
+            .enable_wal = true,
+        },
+    };
+
+    if (options) |opts| {
+        if (opts.struct_size < @sizeOf(lattice_open_options_v2)) {
+            return DatabaseError.InvalidArgument;
+        }
+
+        zig_options.create = opts.create;
+        zig_options.read_only = opts.read_only;
+        zig_options.config.buffer_pool_size = @as(usize, opts.cache_size_mb) * 1024 * 1024;
+        zig_options.config.enable_vector = opts.enable_vector;
+        zig_options.config.vector_dimensions = opts.vector_dimensions;
+        zig_options.config.enable_wal = opts.enable_wal;
+    }
+
+    return zig_options;
+}
+
+fn openDatabase(
+    path: [*c]const u8,
+    zig_options: OpenOptions,
+    db_out: *?*lattice_database,
+) lattice_error {
+    db_out.* = null;
+
+    const path_slice = cStrToSlice(path) orelse return .err_invalid_arg;
+
     const db = Database.open(global_allocator, path_slice, zig_options) catch |err| {
         return mapDatabaseError(err);
     };
 
-    // Create handle
-    const handle = global_allocator.create(DatabaseHandle) catch return .err_out_of_memory;
+    const handle = global_allocator.create(DatabaseHandle) catch {
+        db.close();
+        return .err_out_of_memory;
+    };
     handle.* = .{ .db = db };
 
     db_out.* = @ptrCast(handle);
     return .ok;
+}
+
+fn rejectFakeStreamTxn(txn_handle: *TxnHandle) ?lattice_error {
+    if (txn_handle.txn.id == 0) return .err_unsupported;
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
+    return null;
+}
+
+fn mapStreamMutationError(err: DatabaseError) lattice_error {
+    return switch (err) {
+        DatabaseError.TransactionNotActive => .err_txn_aborted,
+        DatabaseError.TransactionsNotEnabled => .err_unsupported,
+        else => mapDatabaseError(err),
+    };
+}
+
+// ============================================================================
+// Database Operations
+// ============================================================================
+
+/// Open a database file
+pub export fn lattice_open(
+    path: [*c]const u8,
+    options: ?*const lattice_open_options,
+    db_out: *?*lattice_database,
+) lattice_error {
+    return openDatabase(path, buildOpenOptionsV1(options), db_out);
+}
+
+/// Open a database file with versioned options
+pub export fn lattice_open_v2(
+    path: [*c]const u8,
+    options: ?*const lattice_open_options_v2,
+    db_out: *?*lattice_database,
+) lattice_error {
+    const zig_options = buildOpenOptionsV2(options) catch |err| return mapDatabaseError(err);
+    return openDatabase(path, zig_options, db_out);
 }
 
 /// Close a database
@@ -903,21 +980,23 @@ pub export fn lattice_begin(
     const txn = db_handle.db.beginTransaction(txn_mode) catch |err| {
         return switch (err) {
             DatabaseError.TransactionsNotEnabled => {
-                // Fallback: create handle without transaction for non-WAL databases
-                const txn_handle = global_allocator.create(TxnHandle) catch return .err_out_of_memory;
-                txn_handle.* = .{
-                    .db_handle = db_handle,
-                    .txn = Transaction{
-                        .id = 0, // Sentinel for "no real txn"
-                        .state = .active,
-                        .mode = txn_mode,
-                        .isolation = .snapshot,
-                        .start_ts = 0,
-                        .commit_ts = 0,
-                    },
-                };
-                txn_out.* = @ptrCast(txn_handle);
-                return .ok;
+                if (txn_mode == .read_only) {
+                    const txn_handle = global_allocator.create(TxnHandle) catch return .err_out_of_memory;
+                    txn_handle.* = .{
+                        .db_handle = db_handle,
+                        .txn = Transaction{
+                            .id = 0,
+                            .state = .active,
+                            .mode = .read_only,
+                            .isolation = .snapshot,
+                            .start_ts = 0,
+                            .commit_ts = 0,
+                        },
+                    };
+                    txn_out.* = @ptrCast(txn_handle);
+                    return .ok;
+                }
+                return .err_unsupported;
             },
             DatabaseError.OutOfMemory => .err_out_of_memory,
             else => .err,
@@ -1308,7 +1387,7 @@ pub export fn lattice_stream_publish(
     payload: ?*const lattice_value,
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
-    if (txn_handle.txn.mode == .read_only) return .err_read_only;
+    if (rejectFakeStreamTxn(txn_handle)) |err| return err;
 
     const stream_slice = cArgBytes(stream, stream_len) orelse return .err_invalid_arg;
     const kind_slice: ?[]const u8 = if (kind_len == 0)
@@ -1327,7 +1406,7 @@ pub export fn lattice_stream_publish(
         stream_slice,
         kind_slice,
         zig_payload,
-    ) catch |err| return mapDatabaseError(err);
+    ) catch |err| return mapStreamMutationError(err);
 
     return .ok;
 }
@@ -1452,7 +1531,7 @@ pub export fn lattice_stream_set_offset(
     sequence: u64,
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
-    if (txn_handle.txn.mode == .read_only) return .err_read_only;
+    if (rejectFakeStreamTxn(txn_handle)) |err| return err;
     const stream_slice = cArgBytes(stream, stream_len) orelse return .err_invalid_arg;
     const consumer_slice = cArgBytes(consumer, consumer_len) orelse return .err_invalid_arg;
     txn_handle.db_handle.db.setStreamOffset(
@@ -1460,7 +1539,7 @@ pub export fn lattice_stream_set_offset(
         stream_slice,
         consumer_slice,
         sequence,
-    ) catch |err| return mapDatabaseError(err);
+    ) catch |err| return mapStreamMutationError(err);
     return .ok;
 }
 
@@ -1471,13 +1550,13 @@ pub export fn lattice_stream_trim(
     through_sequence: u64,
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
-    if (txn_handle.txn.mode == .read_only) return .err_read_only;
+    if (rejectFakeStreamTxn(txn_handle)) |err| return err;
     const stream_slice = cArgBytes(stream, stream_len) orelse return .err_invalid_arg;
     txn_handle.db_handle.db.trimStream(
         &txn_handle.txn,
         stream_slice,
         through_sequence,
-    ) catch |err| return mapDatabaseError(err);
+    ) catch |err| return mapStreamMutationError(err);
     return .ok;
 }
 

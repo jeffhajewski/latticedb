@@ -38,6 +38,7 @@ const BTreeError = btree_mod.BTreeError;
 
 const wal_mod = lattice.storage.wal;
 const WalManager = wal_mod.WalManager;
+const WalError = wal_mod.WalError;
 
 const recovery_mod = lattice.storage.recovery;
 const stream_store_mod = lattice.stream.store;
@@ -377,6 +378,33 @@ pub const OpenOptions = struct {
     /// Database configuration
     config: DatabaseConfig = .{},
 };
+
+fn mapWalInitError(err: WalError) DatabaseError {
+    return switch (err) {
+        WalError.IoError => DatabaseError.IoError,
+        WalError.InvalidMagic,
+        WalError.UuidMismatch,
+        WalError.VersionMismatch,
+        WalError.ChecksumMismatch,
+        WalError.CorruptedFrame,
+        => DatabaseError.InvalidDatabase,
+        WalError.RecordTooLarge,
+        WalError.EndOfLog,
+        => DatabaseError.IoError,
+    };
+}
+
+fn shouldResetWalForNewDatabase(err: WalError) bool {
+    return switch (err) {
+        WalError.InvalidMagic,
+        WalError.UuidMismatch,
+        WalError.VersionMismatch,
+        WalError.ChecksumMismatch,
+        WalError.CorruptedFrame,
+        => true,
+        else => false,
+    };
+}
 
 const TxnNodeState = struct {
     exists: bool,
@@ -730,6 +758,8 @@ pub const Database = struct {
         };
         errdefer self.buffer_pool.deinit();
 
+        const opened_new_database = !self.page_manager.getHeader().hasInitializedTrees();
+
         // 4. Initialize WAL (optional)
         self.wal = null;
         if (options.config.enable_wal and !options.read_only) {
@@ -743,9 +773,17 @@ pub const Database = struct {
                 self.vfs.vfs(),
                 wal_path,
                 self.page_manager.getHeader().file_uuid,
-            ) catch blk: {
-                // WAL init failure is non-fatal, continue without WAL
-                break :blk null;
+            ) catch |err| blk: {
+                if (opened_new_database and options.create and shouldResetWalForNewDatabase(err)) {
+                    @import("compat").fs.cwd().deleteFile(wal_path) catch return mapWalInitError(err);
+                    break :blk WalManager.init(
+                        allocator,
+                        self.vfs.vfs(),
+                        wal_path,
+                        self.page_manager.getHeader().file_uuid,
+                    ) catch |retry_err| return mapWalInitError(retry_err);
+                }
+                return mapWalInitError(err);
             };
         }
 
@@ -6356,6 +6394,8 @@ test "setNodeProperty round-trips string values above the old 512-byte WAL buffe
     // ceiling (a separate limitation tracked in `btree.zig`).
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_large_prop_test.ltdb";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -6367,7 +6407,7 @@ test "setNodeProperty round-trips string values above the old 512-byte WAL buffe
     defer {
         db.close();
         @import("compat").fs.cwd().deleteFile(path) catch {};
-        @import("compat").fs.cwd().deleteFile("/tmp/lattice_large_prop_test.ltdb.wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     const node_id = try db.createNode(null, &[_][]const u8{"Doc"});
@@ -6397,6 +6437,8 @@ test "getNodesByLabel returns every node with the requested label for reopen ind
     // when they were created in earlier process lifetimes.
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_nodes_by_label_reopen_test.ltdb";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     {
         var db = try Database.open(allocator, path, .{
@@ -6428,7 +6470,7 @@ test "getNodesByLabel returns every node with the requested label for reopen ind
     defer {
         db.close();
         @import("compat").fs.cwd().deleteFile(path) catch {};
-        @import("compat").fs.cwd().deleteFile("/tmp/lattice_nodes_by_label_reopen_test.ltdb.wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     const entries = try db.getNodesByLabel("Entry");
@@ -6454,6 +6496,8 @@ test "ftsIndexDocument handles multi-KiB markdown-shaped documents" {
     // tokens — and assert each call returns cleanly.
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_fts_db_large_test.ltdb";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
 
     var db = try Database.open(allocator, path, .{
         .create = true,
@@ -6465,7 +6509,7 @@ test "ftsIndexDocument handles multi-KiB markdown-shaped documents" {
     defer {
         db.close();
         @import("compat").fs.cwd().deleteFile(path) catch {};
-        @import("compat").fs.cwd().deleteFile("/tmp/lattice_fts_db_large_test.ltdb.wal") catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
     // Scaffold a family of varied documents that together exercise the

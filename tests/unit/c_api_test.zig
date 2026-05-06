@@ -31,6 +31,7 @@ const lattice_map_entry = c_api.lattice_map_entry;
 const lattice_value = c_api.lattice_value;
 const lattice_value_type = c_api.lattice_value_type;
 const lattice_open_options = c_api.lattice_open_options;
+const lattice_open_options_v2 = c_api.lattice_open_options_v2;
 const lattice_txn_mode = c_api.lattice_txn_mode;
 const lattice_node_id = c_api.lattice_node_id;
 const lattice_edge_id = c_api.lattice_edge_id;
@@ -76,6 +77,66 @@ test "c_api: open and close database" {
 
     // Cleanup
     @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+}
+
+test "c_api: open v2 can disable WAL and rejects write transactions" {
+    const path = "/tmp/lattice_capi_open_v2_no_wal_test.db";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options_v2{
+        .struct_size = @sizeOf(lattice_open_options_v2),
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+        .enable_wal = false,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open_v2(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var write_txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(
+        lattice_error.err_unsupported,
+        c_api.lattice_begin(db, .read_write, &write_txn),
+    );
+    try std.testing.expect(write_txn == null);
+
+    var read_txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &read_txn));
+    var payload = lattice_value{
+        .value_type = .string,
+        .data = .{ .string_val = .{ .ptr = "payload".ptr, .len = "payload".len } },
+    };
+    try std.testing.expectEqual(
+        lattice_error.err_unsupported,
+        c_api.lattice_stream_publish(read_txn, "events".ptr, "events".len, null, 0, &payload),
+    );
+    try std.testing.expectEqual(
+        lattice_error.err_unsupported,
+        c_api.lattice_stream_set_offset(
+            read_txn,
+            "events".ptr,
+            "events".len,
+            "worker".ptr,
+            "worker".len,
+            1,
+        ),
+    );
+    try std.testing.expectEqual(
+        lattice_error.err_unsupported,
+        c_api.lattice_stream_trim(read_txn, "events".ptr, "events".len, 1),
+    );
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_rollback(read_txn));
 }
 
 test "c_api: open nonexistent file without create fails" {
@@ -2480,6 +2541,7 @@ test "c_api: error messages are valid" {
         .err_version_mismatch,
         .err_checksum,
         .err_out_of_memory,
+        .err_unsupported,
     };
 
     for (errors) |err| {

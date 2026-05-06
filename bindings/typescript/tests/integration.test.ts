@@ -10,7 +10,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { Database } from '../src/database';
 import { Transaction } from '../src/transaction';
-import { isLibraryAvailable, LatticeQueryError, QueryErrorStage } from '../src/ffi';
+import { isLibraryAvailable, LatticeErrorCode, LatticeQueryError, QueryErrorStage } from '../src/ffi';
 
 // Skip all tests if native library is not available
 const describeIfNative = isLibraryAvailable() ? describe : describe.skip;
@@ -35,6 +35,10 @@ function cleanupDb(dbPath: string): void {
     const walPath = dbPath + '.wal';
     if (fs.existsSync(walPath)) {
       fs.unlinkSync(walPath);
+    }
+    const dashWalPath = dbPath + '-wal';
+    if (fs.existsSync(dashWalPath)) {
+      fs.unlinkSync(dashWalPath);
     }
   } catch {
     // Ignore cleanup errors
@@ -1164,6 +1168,18 @@ describeIfNative('Database Integration', () => {
       })).rejects.toThrow('rolled back');
 
       await expect(db.readStream('events')).resolves.toEqual([]);
+    });
+
+    test('enableWal false rejects stream writes', async () => {
+      await db.close();
+      cleanupDb(dbPath);
+
+      db = new Database(dbPath, { create: true, enableWal: false });
+      await db.open();
+
+      await expect(db.write(async (txn) => {
+        txn.publishStream('events', 'hidden');
+      })).rejects.toMatchObject({ code: LatticeErrorCode.Unsupported });
     });
   });
 });

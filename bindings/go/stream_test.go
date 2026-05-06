@@ -1,6 +1,7 @@
 package latticedb
 
 import (
+	"errors"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -141,6 +142,29 @@ func TestStreamTrim(t *testing.T) {
 	}
 	if records[0].Sequence != 2 || records[0].Kind != "second" || records[0].Payload != "two" {
 		t.Fatalf("unexpected remaining record: %#v", records[0])
+	}
+}
+
+func TestStreamWritesRequireWAL(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "no-wal.db"), OpenOptions{
+		Create:     true,
+		DisableWAL: true,
+	})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	t.Cleanup(func() {
+		if closeErr := db.Close(); closeErr != nil {
+			t.Fatalf("close db: %v", closeErr)
+		}
+	})
+
+	err = db.Update(func(tx *Tx) error {
+		return tx.PublishStream("events", "message", "hidden")
+	})
+	var latticeErr *Error
+	if !errors.As(err, &latticeErr) || latticeErr.Code != ErrorUnsupported {
+		t.Fatalf("expected unsupported error, got %v", err)
 	}
 }
 

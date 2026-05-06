@@ -5,9 +5,9 @@
  * 1. LATTICE_LIB_PATH environment variable
  * 2. Bundled in package (lib/<platform>/ or libc-aware linux variants)
  * 3. LATTICE_PREFIX environment variable
- * 4. pkg-config lattice libdir
- * 5. System paths
- * 6. Development build (zig-out/lib)
+ * 4. Development build (zig-out/lib)
+ * 5. pkg-config lattice libdir
+ * 6. System paths
  */
 
 import { execFileSync, spawnSync } from 'child_process';
@@ -137,7 +137,14 @@ function findLibrary(): string | null {
     }
   }
 
-  // 4. pkg-config metadata
+  // 4. Development build (zig-out/lib)
+  // Goes up from bindings/typescript/src/ffi/ to repo root
+  const devPath = path.join(__dirname, '../../../../zig-out/lib', libName);
+  if (fs.existsSync(devPath)) {
+    return devPath;
+  }
+
+  // 5. pkg-config metadata
   try {
     const libDir = execFileSync('pkg-config', ['--variable=libdir', 'lattice'], {
       encoding: 'utf8',
@@ -153,7 +160,7 @@ function findLibrary(): string | null {
     // pkg-config unavailable or lattice.pc not present
   }
 
-  // 5. System paths
+  // 6. System paths
   const systemPaths: string[] = [
     '/usr/local/lib',
     '/usr/lib',
@@ -171,13 +178,6 @@ function findLibrary(): string | null {
     if (fs.existsSync(libPath)) {
       return libPath;
     }
-  }
-
-  // 6. Development build (zig-out/lib)
-  // Goes up from bindings/typescript/src/ffi/ to repo root
-  const devPath = path.join(__dirname, '../../../../zig-out/lib', libName);
-  if (fs.existsSync(devPath)) {
-    return devPath;
   }
 
   return null;

@@ -108,6 +108,7 @@ export interface OpenOptions {
   readOnly?: boolean;
   cacheSizeMb?: number;
   pageSize?: number;
+  enableWal?: boolean;
   enableVectors?: boolean;
   enableVector?: boolean;
   vectorDimensions?: number;
@@ -204,7 +205,15 @@ export class LatticeFFI {
    * Open a database.
    */
   open(path: string, options: OpenOptions = {}): DatabaseHandle {
-    const opts = {
+    const enableWal = options.enableWal ?? true;
+    if (!this.bindings.lattice_open_v2 && !enableWal) {
+      throw new LatticeError(
+        'lattice_open_v2 is required to disable WAL',
+        LatticeErrorCode.Unsupported
+      );
+    }
+
+    const baseOpts = {
       create: options.create ?? false,
       read_only: options.readOnly ?? false,
       cache_size_mb: options.cacheSizeMb ?? 100,
@@ -212,9 +221,16 @@ export class LatticeFFI {
       enable_vector: options.enableVectors ?? options.enableVector ?? false,
       vector_dimensions: options.vectorDimensions ?? 128,
     };
+    const opts = {
+      struct_size: koffi.sizeof('lattice_open_options_v2'),
+      ...baseOpts,
+      enable_wal: enableWal,
+    };
 
     const dbOut: unknown[] = [null];
-    const err = this.bindings.lattice_open(path, opts, dbOut);
+    const err = this.bindings.lattice_open_v2
+      ? this.bindings.lattice_open_v2(path, opts, dbOut)
+      : this.bindings.lattice_open(path, baseOpts, dbOut);
     this.checkError(err);
     return dbOut[0];
   }

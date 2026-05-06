@@ -6,6 +6,7 @@ import ctypes
 import os
 import pytest
 import numpy as np
+from pathlib import Path
 from types import SimpleNamespace
 
 from latticedb import Database, Node, Edge, Value
@@ -55,7 +56,7 @@ class TestLibraryDiscovery:
         assert bindings._find_library() == lib_path
 
     def test_find_library_uses_pkg_config_libdir(self, monkeypatch, tmp_path) -> None:
-        """pkg-config libdir should be used when present."""
+        """pkg-config libdir should be used when no repo-local build is present."""
         lib_dir = tmp_path / "pkg-lib"
         lib_dir.mkdir()
         lib_path = lib_dir / bindings._get_lib_name()
@@ -68,6 +69,20 @@ class TestLibraryDiscovery:
             return SimpleNamespace(stdout=f"{lib_dir}{os.linesep}")
 
         monkeypatch.setattr(bindings.subprocess, "run", fake_run)
+        original_exists = Path.exists
+        dev_path = (
+            Path(bindings.__file__).parent.parent.parent.parent.parent
+            / "zig-out"
+            / "lib"
+            / bindings._get_lib_name()
+        )
+
+        def fake_exists(path: Path) -> bool:
+            if path == dev_path:
+                return False
+            return original_exists(path)
+
+        monkeypatch.setattr(bindings.Path, "exists", fake_exists)
 
         assert bindings._find_library() == lib_path
 

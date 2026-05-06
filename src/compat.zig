@@ -2,12 +2,18 @@ const std = @import("std");
 
 pub const io = std.Options.debug_io;
 
+const MutexState = if (@hasDecl(std.atomic, "Mutex")) std.atomic.Mutex else std.Thread.Mutex;
+
 pub const Mutex = struct {
-    state: std.atomic.Mutex = .unlocked,
+    state: MutexState = if (@hasDecl(std.atomic, "Mutex")) .unlocked else .{},
 
     pub fn lock(self: *Mutex) void {
-        while (!self.state.tryLock()) {
-            std.atomic.spinLoopHint();
+        if (@hasDecl(std.atomic, "Mutex")) {
+            while (!self.state.tryLock()) {
+                std.atomic.spinLoopHint();
+            }
+        } else {
+            self.state.lock();
         }
     }
 
@@ -58,6 +64,13 @@ pub fn randomBytes(buf: []u8) void {
 pub fn randomInt(comptime T: type) T {
     var prng = std.Random.DefaultPrng.init(@intCast(nanoTimestamp()));
     return prng.random().int(T);
+}
+
+pub fn httpClient(allocator: std.mem.Allocator) std.http.Client {
+    if (@hasField(std.http.Client, "io")) {
+        return .{ .allocator = allocator, .io = io };
+    }
+    return .{ .allocator = allocator };
 }
 
 pub fn fixedBufferStream(buffer: anytype) FixedBufferStream(@TypeOf(buffer)) {

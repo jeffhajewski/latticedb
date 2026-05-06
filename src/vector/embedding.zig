@@ -67,7 +67,7 @@ pub const EmbeddingClient = struct {
         return Self{
             .allocator = allocator,
             .config = config,
-            .http_client = std.http.Client{ .allocator = allocator, .io = @import("compat").io },
+            .http_client = @import("compat").httpClient(allocator),
         };
     }
 

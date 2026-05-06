@@ -182,14 +182,15 @@ pub const PosixVfs = struct {
 
     /// Open a file.
     pub fn openFile(self: *Self, path: []const u8, flags: OpenFlags) VfsError!File {
+        const cwd = compat.fs.cwd();
         const file_handle = if (flags.create)
-            std.Io.Dir.cwd().createFile(compat.io, path, .{
+            cwd.createFile(path, .{
                 .read = flags.read,
                 .truncate = flags.truncate,
                 .exclusive = flags.exclusive,
             })
         else
-            std.Io.Dir.cwd().openFile(compat.io, path, .{
+            cwd.openFile(path, .{
                 .mode = if (flags.read and flags.write) .read_write else if (flags.write) .write_only else .read_only,
             });
 
@@ -216,7 +217,7 @@ pub const PosixVfs = struct {
     /// Delete a file.
     pub fn deleteFile(self: *Self, path: []const u8) VfsError!void {
         _ = self;
-        std.Io.Dir.cwd().deleteFile(compat.io, path) catch |err| {
+        compat.fs.cwd().deleteFile(path) catch |err| {
             return switch (err) {
                 error.FileNotFound => VfsError.FileNotFound,
                 error.AccessDenied => VfsError.PermissionDenied,
@@ -228,14 +229,14 @@ pub const PosixVfs = struct {
     /// Check if a file exists.
     pub fn fileExists(self: *Self, path: []const u8) bool {
         _ = self;
-        std.Io.Dir.cwd().access(compat.io, path, .{}) catch return false;
+        compat.fs.cwd().access(path, .{}) catch return false;
         return true;
     }
 };
 
 /// POSIX file handle.
 pub const PosixFile = struct {
-    handle: std.Io.File,
+    handle: compat.fs.File,
     allocator: Allocator,
     writable: bool,
 
@@ -302,7 +303,7 @@ pub const PosixFile = struct {
 
     /// Read from file at offset.
     pub fn readAt(self: *Self, offset: u64, buf: []u8) VfsError!usize {
-        const n = self.handle.readPositionalAll(compat.io, buf, offset) catch |err| {
+        const n = self.handle.preadAll(buf, offset) catch |err| {
             return switch (err) {
                 error.InputOutput => VfsError.IoError,
                 else => VfsError.Unexpected,
@@ -318,7 +319,7 @@ pub const PosixFile = struct {
         var written: usize = 0;
         while (written < data.len) {
             const before = written;
-            self.handle.writePositionalAll(compat.io, data[written..], offset + written) catch |err| {
+            self.handle.pwriteAll(data[written..], offset + written) catch |err| {
                 return switch (err) {
                     error.InputOutput => VfsError.IoError,
                     error.NoSpaceLeft => VfsError.DiskFull,
@@ -332,7 +333,7 @@ pub const PosixFile = struct {
 
     /// Sync file to disk.
     pub fn syncFile(self: *Self) VfsError!void {
-        self.handle.sync(compat.io) catch |err| {
+        self.handle.sync() catch |err| {
             return switch (err) {
                 error.InputOutput => VfsError.IoError,
                 else => VfsError.Unexpected,
@@ -344,7 +345,7 @@ pub const PosixFile = struct {
     pub fn truncateFile(self: *Self, new_size: u64) VfsError!void {
         if (!self.writable) return VfsError.NotOpenForWriting;
 
-        self.handle.setLength(compat.io, new_size) catch |err| {
+        self.handle.setLength(new_size) catch |err| {
             return switch (err) {
                 error.AccessDenied, error.PermissionDenied => VfsError.PermissionDenied,
                 else => VfsError.Unexpected,
@@ -354,19 +355,19 @@ pub const PosixFile = struct {
 
     /// Get file size.
     pub fn getSize(self: *Self) VfsError!u64 {
-        const stat = self.handle.stat(compat.io) catch return VfsError.IoError;
+        const stat = self.handle.stat() catch return VfsError.IoError;
         return @intCast(stat.size);
     }
 
     /// Close file.
     pub fn closeFile(self: *Self) void {
-        self.handle.close(compat.io);
+        self.handle.close();
         self.allocator.destroy(self);
     }
 
     /// Lock file.
     pub fn lockFile(self: *Self, mode: LockMode) VfsError!void {
-        self.handle.lock(compat.io, switch (mode) {
+        self.handle.lock(switch (mode) {
             .shared => .shared,
             .exclusive => .exclusive,
         }) catch |err| {
@@ -378,7 +379,7 @@ pub const PosixFile = struct {
 
     /// Unlock file.
     pub fn unlockFile(self: *Self) void {
-        self.handle.unlock(compat.io);
+        self.handle.unlock();
     }
 };
 

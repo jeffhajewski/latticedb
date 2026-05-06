@@ -2,6 +2,7 @@ const std = @import("std");
 
 pub const io = std.Options.debug_io;
 
+const has_io_fs = @hasDecl(std.Io, "Dir");
 const MutexState = if (@hasDecl(std.atomic, "Mutex")) std.atomic.Mutex else std.Thread.Mutex;
 
 pub const Mutex = struct {
@@ -36,22 +37,35 @@ pub const Condition = struct {
 };
 
 pub fn timestamp() i64 {
-    return @intCast(std.Io.Clock.real.now(io).toSeconds());
+    if (@hasDecl(std.Io, "Clock")) {
+        return @intCast(std.Io.Clock.real.now(io).toSeconds());
+    }
+    return std.time.timestamp();
 }
 
 pub fn milliTimestamp() i64 {
-    return std.Io.Clock.real.now(io).toMilliseconds();
+    if (@hasDecl(std.Io, "Clock")) {
+        return std.Io.Clock.real.now(io).toMilliseconds();
+    }
+    return std.time.milliTimestamp();
 }
 
 pub fn nanoTimestamp() i128 {
-    return @intCast(std.Io.Clock.boot.now(io).toNanoseconds());
+    if (@hasDecl(std.Io, "Clock")) {
+        return @intCast(std.Io.Clock.boot.now(io).toNanoseconds());
+    }
+    return std.time.nanoTimestamp();
 }
 
 pub fn sleep(ns: u64) void {
-    std.Io.Clock.Duration.sleep(.{
-        .clock = .boot,
-        .raw = .fromNanoseconds(@intCast(ns)),
-    }, io) catch {};
+    if (@hasDecl(std.Io, "Clock")) {
+        std.Io.Clock.Duration.sleep(.{
+            .clock = .boot,
+            .raw = .fromNanoseconds(@intCast(ns)),
+        }, io) catch {};
+    } else {
+        std.time.sleep(ns);
+    }
 }
 
 pub fn randomBytes(buf: []u8) void {
@@ -211,50 +225,109 @@ fn FixedReader(comptime StreamPtr: type) type {
 }
 
 pub const fs = struct {
+    const DirHandle = if (has_io_fs) std.Io.Dir else std.fs.Dir;
+    const FileHandle = if (has_io_fs) std.Io.File else std.fs.File;
+    const AccessOptions = if (has_io_fs) std.Io.Dir.AccessOptions else std.fs.Dir.AccessOptions;
+    const OpenFileOptions = if (has_io_fs) std.Io.Dir.OpenFileOptions else std.fs.Dir.OpenFileOptions;
+    const CreateFileOptions = if (has_io_fs) std.Io.Dir.CreateFileOptions else std.fs.Dir.CreateFileOptions;
+    const FileStat = if (has_io_fs) std.Io.File.Stat else std.fs.File.Stat;
+    const FileLock = if (has_io_fs) std.Io.File.Lock else std.fs.File.Lock;
+
     pub fn cwd() Cwd {
-        return .{ .dir = .cwd() };
+        return .{ .dir = if (has_io_fs) std.Io.Dir.cwd() else std.fs.cwd() };
     }
 
     pub const Cwd = struct {
-        dir: std.Io.Dir,
+        dir: DirHandle,
 
         pub fn deleteFile(self: Cwd, path: []const u8) !void {
-            return self.dir.deleteFile(io, path);
+            if (has_io_fs) {
+                return self.dir.deleteFile(io, path);
+            }
+            return self.dir.deleteFile(path);
         }
 
-        pub fn access(self: Cwd, path: []const u8, options: std.Io.Dir.AccessOptions) !void {
-            return self.dir.access(io, path, options);
+        pub fn access(self: Cwd, path: []const u8, options: AccessOptions) !void {
+            if (has_io_fs) {
+                return self.dir.access(io, path, options);
+            }
+            return self.dir.access(path, options);
         }
 
-        pub fn openFile(self: Cwd, path: []const u8, options: std.Io.Dir.OpenFileOptions) !File {
-            return .{ .file = try self.dir.openFile(io, path, options) };
+        pub fn openFile(self: Cwd, path: []const u8, options: OpenFileOptions) !File {
+            return .{ .file = if (has_io_fs) try self.dir.openFile(io, path, options) else try self.dir.openFile(path, options) };
         }
 
-        pub fn createFile(self: Cwd, path: []const u8, options: std.Io.Dir.CreateFileOptions) !File {
-            return .{ .file = try self.dir.createFile(io, path, options) };
+        pub fn createFile(self: Cwd, path: []const u8, options: CreateFileOptions) !File {
+            return .{ .file = if (has_io_fs) try self.dir.createFile(io, path, options) else try self.dir.createFile(path, options) };
         }
     };
 
     pub const File = struct {
-        file: std.Io.File,
+        file: FileHandle,
 
         pub fn close(self: File) void {
-            self.file.close(io);
+            if (has_io_fs) {
+                self.file.close(io);
+            } else {
+                self.file.close();
+            }
         }
 
-        pub fn stat(self: File) !std.Io.File.Stat {
-            return self.file.stat(io);
+        pub fn stat(self: File) !FileStat {
+            if (has_io_fs) {
+                return self.file.stat(io);
+            }
+            return self.file.stat();
         }
 
         pub fn preadAll(self: File, buf: []u8, offset: u64) !usize {
-            return self.file.readPositionalAll(io, buf, offset);
+            if (has_io_fs) {
+                return self.file.readPositionalAll(io, buf, offset);
+            }
+            return self.file.preadAll(buf, offset);
         }
 
         pub fn pwriteAll(self: File, bytes: []const u8, offset: u64) !void {
-            return self.file.writePositionalAll(io, bytes, offset);
+            if (has_io_fs) {
+                return self.file.writePositionalAll(io, bytes, offset);
+            }
+            return self.file.pwriteAll(bytes, offset);
+        }
+
+        pub fn sync(self: File) !void {
+            if (has_io_fs) {
+                return self.file.sync(io);
+            }
+            return self.file.sync();
+        }
+
+        pub fn setLength(self: File, length: u64) !void {
+            if (has_io_fs) {
+                return self.file.setLength(io, length);
+            }
+            return self.file.setEndPos(length);
+        }
+
+        pub fn lock(self: File, lock_mode: FileLock) !void {
+            if (has_io_fs) {
+                return self.file.lock(io, lock_mode);
+            }
+            return self.file.lock(lock_mode);
+        }
+
+        pub fn unlock(self: File) void {
+            if (has_io_fs) {
+                self.file.unlock(io);
+            } else {
+                self.file.unlock();
+            }
         }
 
         pub fn readToEndAlloc(self: File, allocator: std.mem.Allocator, max_bytes: usize) ![]u8 {
+            if (!has_io_fs) {
+                return self.file.readToEndAlloc(allocator, max_bytes);
+            }
             var buf: [4096]u8 = undefined;
             var reader = self.file.reader(io, &buf);
             return reader.interface.allocRemaining(allocator, .limited(max_bytes));
@@ -266,10 +339,13 @@ pub const fs = struct {
     };
 
     pub const FileWriter = struct {
-        file: std.Io.File,
+        file: FileHandle,
 
         pub fn writeAll(self: FileWriter, bytes: []const u8) !void {
-            return self.file.writeStreamingAll(io, bytes);
+            if (has_io_fs) {
+                return self.file.writeStreamingAll(io, bytes);
+            }
+            return self.file.writeAll(bytes);
         }
 
         pub fn writeByte(self: FileWriter, byte: u8) !void {

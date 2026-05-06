@@ -950,13 +950,35 @@ pub const HnswIndex = struct {
     fn searchLayer(self: *Self, query: []const f32, entry: u64, layer: u8, ef: u16) HnswError![]SearchResult {
         const entry_node = self.getNode(entry) orelse return HnswError.NotFound;
 
-        var candidates = std.PriorityQueue(SearchResult, void, compareSearchResults).initContext({});
-        defer candidates.deinit(self.allocator);
-        candidates.ensureTotalCapacity(self.allocator, ef) catch return HnswError.OutOfMemory;
+        const CandidateQueue = std.PriorityQueue(SearchResult, void, compareSearchResults);
+        var candidates = if (@hasDecl(CandidateQueue, "initContext"))
+            CandidateQueue.initContext({})
+        else
+            CandidateQueue.init(self.allocator, {});
+        defer if (@hasDecl(CandidateQueue, "initContext"))
+            candidates.deinit(self.allocator)
+        else
+            candidates.deinit();
+        if (@hasDecl(CandidateQueue, "ensureTotalCapacity")) {
+            candidates.ensureTotalCapacity(self.allocator, ef) catch return HnswError.OutOfMemory;
+        } else {
+            candidates.ensureCapacity(ef) catch return HnswError.OutOfMemory;
+        }
 
-        var results = std.PriorityDequeue(SearchResult, void, compareSearchResults).initContext({});
-        defer results.deinit(self.allocator);
-        results.ensureTotalCapacity(self.allocator, ef) catch return HnswError.OutOfMemory;
+        const ResultQueue = std.PriorityDequeue(SearchResult, void, compareSearchResults);
+        var results = if (@hasDecl(ResultQueue, "initContext"))
+            ResultQueue.initContext({})
+        else
+            ResultQueue.init(self.allocator, {});
+        defer if (@hasDecl(ResultQueue, "initContext"))
+            results.deinit(self.allocator)
+        else
+            results.deinit();
+        if (@hasDecl(ResultQueue, "ensureTotalCapacity")) {
+            results.ensureTotalCapacity(self.allocator, ef) catch return HnswError.OutOfMemory;
+        } else {
+            results.ensureCapacity(ef) catch return HnswError.OutOfMemory;
+        }
 
         var visited = std.AutoHashMap(u64, void).init(self.allocator);
         defer visited.deinit();
@@ -965,8 +987,16 @@ pub const HnswIndex = struct {
         // Initialize with entry point
         const entry_dist = try self.distanceTo(query, entry_node.vector_loc);
         const entry_result = SearchResult{ .node_id = entry, .distance = entry_dist };
-        candidates.push(self.allocator, entry_result) catch return HnswError.OutOfMemory;
-        results.push(self.allocator, entry_result) catch return HnswError.OutOfMemory;
+        if (@hasDecl(CandidateQueue, "push")) {
+            candidates.push(self.allocator, entry_result) catch return HnswError.OutOfMemory;
+        } else {
+            candidates.add(entry_result) catch return HnswError.OutOfMemory;
+        }
+        if (@hasDecl(ResultQueue, "push")) {
+            results.push(self.allocator, entry_result) catch return HnswError.OutOfMemory;
+        } else {
+            results.add(entry_result) catch return HnswError.OutOfMemory;
+        }
         visited.put(entry, {}) catch return HnswError.OutOfMemory;
 
         // Stack buffers for batch processing
@@ -976,7 +1006,10 @@ pub const HnswIndex = struct {
         var dist_buf: [64]f32 = undefined;
 
         while (candidates.count() > 0) {
-            const closest = candidates.pop() orelse break;
+            const closest = if (@hasDecl(CandidateQueue, "pop"))
+                candidates.pop() orelse break
+            else
+                candidates.removeOrNull() orelse break;
 
             // Stop if closest candidate is worse than worst result
             const furthest_dist = if (results.peekMax()) |r| r.distance else 0;
@@ -1011,11 +1044,23 @@ pub const HnswIndex = struct {
                 const current_furthest = if (results.peekMax()) |r| r.distance else 0;
                 if (results.count() < ef or dist < current_furthest) {
                     const result = SearchResult{ .node_id = be.neighbor_id, .distance = dist };
-                    candidates.push(self.allocator, result) catch return HnswError.OutOfMemory;
-                    results.push(self.allocator, result) catch return HnswError.OutOfMemory;
+                    if (@hasDecl(CandidateQueue, "push")) {
+                        candidates.push(self.allocator, result) catch return HnswError.OutOfMemory;
+                    } else {
+                        candidates.add(result) catch return HnswError.OutOfMemory;
+                    }
+                    if (@hasDecl(ResultQueue, "push")) {
+                        results.push(self.allocator, result) catch return HnswError.OutOfMemory;
+                    } else {
+                        results.add(result) catch return HnswError.OutOfMemory;
+                    }
 
                     if (results.count() > ef) {
-                        _ = results.popMax();
+                        if (@hasDecl(ResultQueue, "popMax")) {
+                            _ = results.popMax();
+                        } else {
+                            _ = results.removeMaxOrNull();
+                        }
                     }
                 }
             }
@@ -1025,7 +1070,10 @@ pub const HnswIndex = struct {
         const result_count = results.count();
         const output = self.allocator.alloc(SearchResult, result_count) catch return HnswError.OutOfMemory;
         for (0..result_count) |i| {
-            output[i] = results.popMin().?;
+            output[i] = if (@hasDecl(ResultQueue, "popMin"))
+                results.popMin().?
+            else
+                results.removeMinOrNull().?;
         }
         return output;
     }

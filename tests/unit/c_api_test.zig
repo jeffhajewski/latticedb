@@ -14,6 +14,7 @@ const lattice = @import("lattice");
 
 const c_api = lattice.c_api;
 const CoreDatabase = lattice.storage.database.Database;
+const CoreFileHeader = lattice.storage.page.FileHeader;
 const CorePropertyValue = lattice.PropertyValue;
 
 // Import C API types
@@ -50,6 +51,26 @@ fn expectSingleIntCell(result: ?*lattice_result, expected: i64) !void {
 // Database Lifecycle Tests
 // ============================================================================
 
+test "c_api: open options ABI layout is stable" {
+    try std.testing.expectEqual(@as(usize, 16), @sizeOf(lattice_open_options));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(lattice_open_options, "create"));
+    try std.testing.expectEqual(@as(usize, 1), @offsetOf(lattice_open_options, "read_only"));
+    try std.testing.expectEqual(@as(usize, 4), @offsetOf(lattice_open_options, "cache_size_mb"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(lattice_open_options, "page_size"));
+    try std.testing.expectEqual(@as(usize, 12), @offsetOf(lattice_open_options, "enable_vector"));
+    try std.testing.expectEqual(@as(usize, 14), @offsetOf(lattice_open_options, "vector_dimensions"));
+
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(lattice_open_options_v2));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(lattice_open_options_v2, "struct_size"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(lattice_open_options_v2, "create"));
+    try std.testing.expectEqual(@as(usize, 9), @offsetOf(lattice_open_options_v2, "read_only"));
+    try std.testing.expectEqual(@as(usize, 12), @offsetOf(lattice_open_options_v2, "cache_size_mb"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(lattice_open_options_v2, "page_size"));
+    try std.testing.expectEqual(@as(usize, 20), @offsetOf(lattice_open_options_v2, "enable_vector"));
+    try std.testing.expectEqual(@as(usize, 22), @offsetOf(lattice_open_options_v2, "vector_dimensions"));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(lattice_open_options_v2, "enable_wal"));
+}
+
 test "c_api: open and close database" {
     const path = "/tmp/lattice_capi_open_test.db";
 
@@ -78,6 +99,101 @@ test "c_api: open and close database" {
     // Cleanup
     @import("compat").fs.cwd().deleteFile(path) catch {};
     @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+}
+
+test "c_api: open page_size option is applied to new database files" {
+    const path = "/tmp/lattice_capi_page_size_option_test.db";
+
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 32768,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var file = try @import("compat").fs.cwd().openFile(path, .{});
+    defer file.close();
+    var header: CoreFileHeader = undefined;
+    const header_bytes = std.mem.asBytes(&header);
+    try std.testing.expectEqual(header_bytes.len, try file.preadAll(header_bytes, 0));
+    try std.testing.expectEqual(@as(u32, 32768), header.page_size);
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+
+    var node_id: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Doc".ptr, &node_id));
+
+    var value_buf: [128]u8 = undefined;
+    @memset(&value_buf, 'x');
+    const key = "payload";
+    const property = lattice_value{
+        .value_type = .string,
+        .data = .{ .string_val = .{ .ptr = value_buf[0..].ptr, .len = value_buf.len } },
+    };
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_node_set_property(txn, node_id, key.ptr, &property),
+    );
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+}
+
+test "c_api: commit maps oversized values to full instead of generic error" {
+    const path = "/tmp/lattice_capi_commit_value_too_large_test.db";
+
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+    errdefer _ = c_api.lattice_rollback(txn);
+
+    var node_id: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Doc".ptr, &node_id));
+
+    var large_value: [12000]u8 = undefined;
+    @memset(&large_value, 'x');
+    const key = "payload";
+    const property = lattice_value{
+        .value_type = .string,
+        .data = .{ .string_val = .{ .ptr = large_value[0..].ptr, .len = large_value.len } },
+    };
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_node_set_property(txn, node_id, key.ptr, &property),
+    );
+    try std.testing.expectEqual(lattice_error.err_full, c_api.lattice_commit(txn));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_rollback(txn));
 }
 
 test "c_api: open v2 can disable WAL and rejects write transactions" {

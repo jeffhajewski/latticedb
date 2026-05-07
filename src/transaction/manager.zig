@@ -63,11 +63,20 @@ pub const TxnError = error{
     SavepointNotFound,
     /// WAL write failed
     WalError,
+    /// WAL record cannot fit in one frame
+    RecordTooLarge,
     /// Transaction was aborted due to conflict
     Conflict,
     /// Out of memory
     OutOfMemory,
 };
+
+fn mapWalError(err: WalError) TxnError {
+    return switch (err) {
+        WalError.RecordTooLarge => TxnError.RecordTooLarge,
+        else => TxnError.WalError,
+    };
+}
 
 /// Transaction handle (returned to user)
 pub const Transaction = struct {
@@ -230,8 +239,8 @@ pub const TxnManager = struct {
         self.current_ts += 1;
 
         // Log TXN_BEGIN to WAL
-        const begin_lsn = self.wal.appendRecord(.txn_begin, txn_id, 0, &[_]u8{}) catch {
-            return TxnError.WalError;
+        const begin_lsn = self.wal.appendRecord(.txn_begin, txn_id, 0, &[_]u8{}) catch |err| {
+            return mapWalError(err);
         };
 
         const txn = Transaction{
@@ -272,8 +281,8 @@ pub const TxnManager = struct {
         };
 
         // Log TXN_COMMIT to WAL
-        _ = self.wal.appendRecord(.txn_commit, txn.id, entry.last_lsn, &[_]u8{}) catch {
-            return TxnError.WalError;
+        _ = self.wal.appendRecord(.txn_commit, txn.id, entry.last_lsn, &[_]u8{}) catch |err| {
+            return mapWalError(err);
         };
 
         // Sync WAL to ensure durability
@@ -317,8 +326,8 @@ pub const TxnManager = struct {
         };
 
         // Log TXN_ABORT to WAL
-        _ = self.wal.appendRecord(.txn_abort, txn.id, entry.last_lsn, &[_]u8{}) catch {
-            return TxnError.WalError;
+        _ = self.wal.appendRecord(.txn_abort, txn.id, entry.last_lsn, &[_]u8{}) catch |err| {
+            return mapWalError(err);
         };
 
         // Sync WAL
@@ -357,8 +366,8 @@ pub const TxnManager = struct {
         };
 
         // Log savepoint to WAL
-        const lsn = self.wal.appendRecord(.savepoint, txn.id, entry.last_lsn, name) catch {
-            return TxnError.WalError;
+        const lsn = self.wal.appendRecord(.savepoint, txn.id, entry.last_lsn, name) catch |err| {
+            return mapWalError(err);
         };
         entry.last_lsn = lsn;
 
@@ -400,8 +409,8 @@ pub const TxnManager = struct {
         const sp = entry.savepoints.items[idx];
 
         // Log rollback to WAL
-        const lsn = self.wal.appendRecord(.savepoint_rollback, txn.id, entry.last_lsn, name) catch {
-            return TxnError.WalError;
+        const lsn = self.wal.appendRecord(.savepoint_rollback, txn.id, entry.last_lsn, name) catch |err| {
+            return mapWalError(err);
         };
         entry.last_lsn = lsn;
 
@@ -433,8 +442,8 @@ pub const TxnManager = struct {
             return TxnError.NotFound;
         };
 
-        const lsn = self.wal.appendRecord(record_type, txn.id, entry.last_lsn, payload) catch {
-            return TxnError.WalError;
+        const lsn = self.wal.appendRecord(record_type, txn.id, entry.last_lsn, payload) catch |err| {
+            return mapWalError(err);
         };
         entry.last_lsn = lsn;
 

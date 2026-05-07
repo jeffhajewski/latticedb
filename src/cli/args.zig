@@ -4,6 +4,7 @@ const std = @import("std");
 const lattice = @import("lattice");
 
 const types = lattice.core.types;
+const page_manager = lattice.storage.page_manager;
 
 /// Managed array list for allocator tracking
 fn ManagedArrayList(comptime T: type) type {
@@ -159,6 +160,14 @@ pub const Args = struct {
                     args.cache_size_mb = std.fmt.parseInt(u32, value, 10) catch {
                         return error.InvalidCacheSize;
                     };
+                } else if (std.mem.startsWith(u8, arg, "--page-size=")) {
+                    const value = arg["--page-size=".len..];
+                    args.page_size = std.fmt.parseInt(u32, value, 10) catch {
+                        return error.InvalidPageSize;
+                    };
+                    if (!page_manager.isValidPageSize(args.page_size)) {
+                        return error.InvalidPageSize;
+                    }
                 } else if (std.mem.startsWith(u8, arg, "--batch-size=")) {
                     const value = arg["--batch-size=".len..];
                     args.batch_size = std.fmt.parseInt(u32, value, 10) catch {
@@ -219,6 +228,7 @@ pub const Error = error{
     InvalidFormat,
     InvalidVectorDims,
     InvalidCacheSize,
+    InvalidPageSize,
     InvalidBatchSize,
     UnknownOption,
     MissingPath,
@@ -260,4 +270,15 @@ test "parse vector dimensions range" {
 
     try std.testing.expectError(error.InvalidVectorDims, Args.parse(allocator, &.{ "lattice", "create", "test.db", "--vector-dims=0" }));
     try std.testing.expectError(error.InvalidVectorDims, Args.parse(allocator, &.{ "lattice", "create", "test.db", "--vector-dims=4097" }));
+}
+
+test "parse page size option" {
+    const allocator = std.testing.allocator;
+    var args = try Args.parse(allocator, &.{ "lattice", "create", "test.db", "--page-size=32768" });
+    defer args.deinit(allocator);
+
+    try std.testing.expectEqual(@as(u32, 32768), args.page_size);
+
+    try std.testing.expectError(error.InvalidPageSize, Args.parse(allocator, &.{ "lattice", "create", "test.db", "--page-size=4095" }));
+    try std.testing.expectError(error.InvalidPageSize, Args.parse(allocator, &.{ "lattice", "create", "test.db", "--page-size=65536" }));
 }

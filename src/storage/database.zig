@@ -375,6 +375,8 @@ pub const OpenOptions = struct {
     create: bool = false,
     /// Open in read-only mode
     read_only: bool = false,
+    /// Page size in bytes, only used when creating a new database file
+    page_size: u32 = types.DEFAULT_PAGE_SIZE,
     /// Database configuration
     config: DatabaseConfig = .{},
 };
@@ -391,6 +393,20 @@ fn mapWalInitError(err: WalError) DatabaseError {
         WalError.RecordTooLarge,
         WalError.EndOfLog,
         => DatabaseError.IoError,
+    };
+}
+
+fn mapTxnError(err: TxnError) DatabaseError {
+    return switch (err) {
+        TxnError.NotActive => DatabaseError.TransactionNotActive,
+        TxnError.ReadOnly => DatabaseError.TransactionReadOnly,
+        TxnError.NotFound => DatabaseError.NotFound,
+        TxnError.TooManyTransactions => DatabaseError.OutOfMemory,
+        TxnError.SavepointNotFound => DatabaseError.InvalidArgument,
+        TxnError.RecordTooLarge => DatabaseError.ValueTooLarge,
+        TxnError.WalError => DatabaseError.IoError,
+        TxnError.Conflict => DatabaseError.TransactionNotActive,
+        TxnError.OutOfMemory => DatabaseError.OutOfMemory,
     };
 }
 
@@ -719,6 +735,9 @@ pub const Database = struct {
 
     /// Open or create a database
     pub fn open(allocator: Allocator, path: []const u8, options: OpenOptions) DatabaseError!*Self {
+        if (!page_manager.isValidPageSize(options.page_size)) {
+            return DatabaseError.InvalidArgument;
+        }
         if (options.config.enable_vector and !types.isValidVectorDimensions(options.config.vector_dimensions)) {
             return DatabaseError.InvalidArgument;
         }
@@ -741,10 +760,13 @@ pub const Database = struct {
         self.page_manager = PageManager.init(allocator, self.vfs.vfs(), path, .{
             .create = options.create,
             .read_only = options.read_only,
+            .page_size = options.page_size,
         }) catch |err| {
             return switch (err) {
                 PageManagerError.FileNotFound => DatabaseError.FileNotFound,
                 PageManagerError.PermissionDenied => DatabaseError.PermissionDenied,
+                PageManagerError.InvalidPageSize => DatabaseError.InvalidArgument,
+                PageManagerError.OutOfMemory => DatabaseError.OutOfMemory,
                 PageManagerError.InvalidMagic, PageManagerError.InvalidHeader => DatabaseError.InvalidDatabase,
                 else => DatabaseError.IoError,
             };
@@ -1352,7 +1374,7 @@ pub const Database = struct {
             label_names.items,
         ) catch return DatabaseError.IoError;
 
-        _ = tm.logOperation(txn, .insert, payload) catch return DatabaseError.IoError;
+        _ = tm.logOperation(txn, .insert, payload) catch |err| return mapTxnError(err);
     }
 
     fn logWalNodeDelete(
@@ -1384,7 +1406,7 @@ pub const Database = struct {
             prop_bytes,
         ) catch return DatabaseError.IoError;
 
-        _ = tm.logOperation(txn, .delete, payload) catch return DatabaseError.IoError;
+        _ = tm.logOperation(txn, .delete, payload) catch |err| return mapTxnError(err);
     }
 
     fn logWalNodePropertyMutation(
@@ -1422,7 +1444,7 @@ pub const Database = struct {
             new_slice,
         ) catch return DatabaseError.IoError;
 
-        _ = tm.logOperation(txn, .update, payload) catch return DatabaseError.IoError;
+        _ = tm.logOperation(txn, .update, payload) catch |err| return mapTxnError(err);
     }
 
     fn logWalLabelMutation(
@@ -1448,7 +1470,7 @@ pub const Database = struct {
             else => unreachable,
         } catch return DatabaseError.IoError;
 
-        _ = tm.logOperation(txn, .update, payload) catch return DatabaseError.IoError;
+        _ = tm.logOperation(txn, .update, payload) catch |err| return mapTxnError(err);
     }
 
     fn logWalEdgeInsert(
@@ -1478,7 +1500,7 @@ pub const Database = struct {
             edge_type,
         ) catch return DatabaseError.IoError;
 
-        _ = tm.logOperation(txn, .insert, payload) catch return DatabaseError.IoError;
+        _ = tm.logOperation(txn, .insert, payload) catch |err| return mapTxnError(err);
     }
 
     fn logWalEdgeSnapshot(
@@ -1513,7 +1535,7 @@ pub const Database = struct {
             prop_bytes,
         ) catch return DatabaseError.IoError;
 
-        _ = tm.logOperation(txn, record_type, payload) catch return DatabaseError.IoError;
+        _ = tm.logOperation(txn, record_type, payload) catch |err| return mapTxnError(err);
     }
 
     fn logWalEdgePropertyMutation(
@@ -1551,7 +1573,7 @@ pub const Database = struct {
             new_slice,
         ) catch return DatabaseError.IoError;
 
-        _ = tm.logOperation(txn, .update, payload) catch return DatabaseError.IoError;
+        _ = tm.logOperation(txn, .update, payload) catch |err| return mapTxnError(err);
     }
 
     fn logWalStreamAppend(
@@ -1569,7 +1591,7 @@ pub const Database = struct {
             append.payload,
         ) catch |err| return self.mapStreamError(err);
         defer self.allocator.free(payload);
-        _ = tm.logOperation(txn, .insert, payload) catch return DatabaseError.IoError;
+        _ = tm.logOperation(txn, .insert, payload) catch |err| return mapTxnError(err);
     }
 
     fn logWalStreamOffset(
@@ -1585,7 +1607,7 @@ pub const Database = struct {
             offset.sequence,
         ) catch |err| return self.mapStreamError(err);
         defer self.allocator.free(payload);
-        _ = tm.logOperation(txn, .update, payload) catch return DatabaseError.IoError;
+        _ = tm.logOperation(txn, .update, payload) catch |err| return mapTxnError(err);
     }
 
     fn logWalStreamTrim(
@@ -1600,7 +1622,7 @@ pub const Database = struct {
             trim_op.through_sequence,
         ) catch |err| return self.mapStreamError(err);
         defer self.allocator.free(payload);
-        _ = tm.logOperation(txn, .delete, payload) catch return DatabaseError.IoError;
+        _ = tm.logOperation(txn, .delete, payload) catch |err| return mapTxnError(err);
     }
 
     fn applyTxnOverlay(
@@ -6425,6 +6447,127 @@ test "setNodeProperty round-trips string values above the old 512-byte WAL buffe
         var got = (try db.getNodeProperty(node_id, "content")).?;
         defer got.deinit(allocator);
         try std.testing.expectEqualSlices(u8, buf[0..sz], got.string_val);
+    }
+}
+
+test "sustained transactional writes preserve data with large pages" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_sustained_writes_large_page_test.ltdb";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer {
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    const iterations = 128;
+    var node_ids: [iterations]NodeId = undefined;
+    var edge_ids: [iterations - 1]EdgeId = undefined;
+
+    {
+        var db = try Database.open(allocator, path, .{
+            .create = true,
+            .page_size = 32768,
+            .config = .{
+                .enable_wal = true,
+                .enable_fts = false,
+            },
+        });
+        defer db.close();
+
+        try std.testing.expectEqual(@as(u32, 32768), db.page_manager.getPageSize());
+
+        for (0..iterations) |i| {
+            var txn = try db.beginTransaction(.read_write);
+            var committed = false;
+            errdefer if (!committed) db.abortTransaction(&txn) catch {};
+
+            const label = if (i % 2 == 0) "Entry" else "Event";
+            const labels = [_][]const u8{label};
+            const node_id = try db.createNode(&txn, &labels);
+            node_ids[i] = node_id;
+
+            var payload_buf: [192]u8 = undefined;
+            const payload = try std.fmt.bufPrint(
+                &payload_buf,
+                "node-{d}-payload-{d}",
+                .{ i, i * i },
+            );
+            try db.setNodeProperty(&txn, node_id, "payload", .{ .string_val = payload });
+            try db.setNodeProperty(&txn, node_id, "ordinal", .{ .int_val = @intCast(i) });
+
+            if (i > 0) {
+                const edge_id = try db.createEdgeAndGetId(&txn, node_ids[i - 1], node_id, "NEXT");
+                edge_ids[i - 1] = edge_id;
+                try db.setEdgePropertyById(&txn, edge_id, "weight", .{ .int_val = @intCast(i) });
+            }
+
+            try db.publishStream(&txn, "events", "write", .{ .int_val = @intCast(i) });
+            try db.setStreamOffset(&txn, "events", "consumer", @intCast(i + 1));
+
+            try db.commitTransaction(&txn);
+            committed = true;
+        }
+
+        try db.sync();
+        try std.testing.expectEqual(@as(u64, iterations), db.nodeCount());
+        try std.testing.expectEqual(@as(u64, iterations - 1), db.edgeCount());
+    }
+
+    {
+        var db = try Database.open(allocator, path, .{
+            .create = false,
+            .config = .{
+                .enable_wal = true,
+                .enable_fts = false,
+            },
+        });
+        defer db.close();
+
+        try std.testing.expectEqual(@as(u32, 32768), db.page_manager.getPageSize());
+        try std.testing.expectEqual(@as(u64, iterations), db.nodeCount());
+        try std.testing.expectEqual(@as(u64, iterations - 1), db.edgeCount());
+
+        const entry_nodes = try db.getNodesByLabel("Entry");
+        defer allocator.free(entry_nodes);
+        try std.testing.expectEqual(@as(usize, (iterations + 1) / 2), entry_nodes.len);
+
+        const check_indices = [_]usize{ 0, 1, 17, 63, 127 };
+        for (check_indices) |idx| {
+            try std.testing.expect(try db.nodeExists(node_ids[idx]));
+
+            var ordinal = (try db.getNodeProperty(node_ids[idx], "ordinal")).?;
+            defer ordinal.deinit(allocator);
+            switch (ordinal) {
+                .int_val => |value| try std.testing.expectEqual(@as(i64, @intCast(idx)), value),
+                else => return error.TestUnexpectedResult,
+            }
+
+            if (idx > 0) {
+                try std.testing.expect(db.edgeExists(node_ids[idx - 1], node_ids[idx], "NEXT"));
+                var weight = (try db.getEdgePropertyById(edge_ids[idx - 1], "weight")).?;
+                defer weight.deinit(allocator);
+                switch (weight) {
+                    .int_val => |value| try std.testing.expectEqual(@as(i64, @intCast(idx)), value),
+                    else => return error.TestUnexpectedResult,
+                }
+            }
+        }
+
+        var batch = try db.readStream("events", 0, iterations, 0);
+        defer batch.deinit();
+        try std.testing.expectEqual(@as(usize, iterations), batch.records.len);
+        for (batch.records, 0..) |record, i| {
+            try std.testing.expectEqual(@as(u64, i + 1), record.sequence);
+            try std.testing.expectEqualStrings("write", record.kind);
+            switch (record.payload) {
+                .int_val => |value| try std.testing.expectEqual(@as(i64, @intCast(i)), value),
+                else => return error.TestUnexpectedResult,
+            }
+        }
+
+        const offset = try db.getStreamOffset("events", "consumer");
+        try std.testing.expectEqual(@as(?u64, iterations), offset);
     }
 }
 

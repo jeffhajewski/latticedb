@@ -27,15 +27,21 @@ const FORMAT_VERSION = types.FORMAT_VERSION;
 const DEFAULT_PAGE_SIZE = types.DEFAULT_PAGE_SIZE;
 const NULL_PAGE = types.NULL_PAGE;
 
+pub fn isValidPageSize(page_size: u32) bool {
+    return page_size >= DEFAULT_PAGE_SIZE and page_size <= std.math.maxInt(u16);
+}
+
 /// Page Manager errors
 pub const PageManagerError = error{
     InvalidHeader,
     InvalidMagic,
+    InvalidPageSize,
     VersionTooNew,
     ChecksumMismatch,
     InvalidPageId,
     PageNotAllocated,
     IoError,
+    OutOfMemory,
     Unexpected,
     FileNotFound,
     PermissionDenied,
@@ -64,6 +70,8 @@ pub const PageManager = struct {
 
     /// Open or create a database file.
     pub fn init(allocator: Allocator, vfs_impl: Vfs, path: []const u8, options: OpenOptions) PageManagerError!Self {
+        if (!isValidPageSize(options.page_size)) return PageManagerError.InvalidPageSize;
+
         const flags = OpenFlags{
             .read = true,
             .write = !options.read_only,
@@ -143,6 +151,12 @@ pub const PageManager = struct {
 
         // Use the page size from the file
         self.page_size = self.header.page_size;
+        if (!isValidPageSize(self.page_size)) return PageManagerError.InvalidPageSize;
+
+        const file_size = self.file.size() catch return PageManagerError.IoError;
+        if (file_size < self.page_size or file_size % self.page_size != 0) {
+            return PageManagerError.InvalidHeader;
+        }
     }
 
     /// Write the file header to disk.
@@ -151,11 +165,17 @@ pub const PageManager = struct {
 
         self.header.modified_timestamp = @intCast(@import("compat").timestamp());
 
-        var buf: [4096]u8 = [_]u8{0} ** 4096;
+        const page_alignment = comptime std.mem.Alignment.fromByteUnits(4096);
+        const buf = self.allocator.alignedAlloc(u8, page_alignment, self.page_size) catch {
+            return PageManagerError.OutOfMemory;
+        };
+        defer self.allocator.free(buf);
+        @memset(buf, 0);
+
         const header_bytes = std.mem.asBytes(&self.header);
         @memcpy(buf[0..header_bytes.len], header_bytes);
 
-        self.file.write(0, &buf) catch return PageManagerError.IoError;
+        self.file.write(0, buf) catch return PageManagerError.IoError;
     }
 
     /// Allocate a new page.
@@ -173,13 +193,18 @@ pub const PageManager = struct {
 
         // Extend file with zeroed page
         const offset = self.pageOffset(page_id);
-        var zeros: [4096]u8 align(@alignOf(PageHeader)) = [_]u8{0} ** 4096;
+        const page_alignment = comptime std.mem.Alignment.fromByteUnits(4096);
+        const zeros = self.allocator.alignedAlloc(u8, page_alignment, self.page_size) catch {
+            return PageManagerError.OutOfMemory;
+        };
+        defer self.allocator.free(zeros);
+        @memset(zeros, 0);
 
         // Set up as free page initially
-        const header_ptr: *PageHeader = @ptrCast(&zeros);
+        const header_ptr: *PageHeader = @ptrCast(@alignCast(zeros.ptr));
         header_ptr.* = PageHeader.init(.free);
 
-        self.file.write(offset, &zeros) catch return PageManagerError.IoError;
+        self.file.write(offset, zeros) catch return PageManagerError.IoError;
 
         try self.writeHeader();
 
@@ -191,8 +216,12 @@ pub const PageManager = struct {
         const page_id = self.header.freelist_page;
 
         // Read the free page to get next pointer
-        var buf: [4096]u8 = undefined;
-        try self.readPageRaw(page_id, &buf);
+        const page_alignment = comptime std.mem.Alignment.fromByteUnits(4096);
+        const buf = self.allocator.alignedAlloc(u8, page_alignment, self.page_size) catch {
+            return PageManagerError.OutOfMemory;
+        };
+        defer self.allocator.free(buf);
+        try self.readPageRaw(page_id, buf);
 
         // Next free page is stored at offset 8 (after PageHeader)
         const next_free = std.mem.readInt(u32, buf[8..12], .little);
@@ -208,10 +237,15 @@ pub const PageManager = struct {
         if (self.read_only) return PageManagerError.PermissionDenied;
         if (page_id == 0) return PageManagerError.InvalidPageId; // Can't free header
 
-        var buf: [4096]u8 align(@alignOf(PageHeader)) = [_]u8{0} ** 4096;
+        const page_alignment = comptime std.mem.Alignment.fromByteUnits(4096);
+        const buf = self.allocator.alignedAlloc(u8, page_alignment, self.page_size) catch {
+            return PageManagerError.OutOfMemory;
+        };
+        defer self.allocator.free(buf);
+        @memset(buf, 0);
 
         // Set up page header as free
-        const header_ptr: *PageHeader = @ptrCast(&buf);
+        const header_ptr: *PageHeader = @ptrCast(@alignCast(buf.ptr));
         header_ptr.* = PageHeader.init(.free);
 
         // Store pointer to current freelist head
@@ -222,7 +256,7 @@ pub const PageManager = struct {
 
         // Write the page
         const offset = self.pageOffset(page_id);
-        self.file.write(offset, &buf) catch return PageManagerError.IoError;
+        self.file.write(offset, buf) catch return PageManagerError.IoError;
 
         // Update freelist head
         self.header.freelist_page = page_id;

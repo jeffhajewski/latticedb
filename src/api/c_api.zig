@@ -1005,6 +1005,7 @@ fn buildOpenOptionsV1(options: ?*const lattice_open_options) OpenOptions {
     if (options) |opts| {
         zig_options.create = opts.create;
         zig_options.read_only = opts.read_only;
+        zig_options.page_size = opts.page_size;
         zig_options.config.buffer_pool_size = @as(usize, opts.cache_size_mb) * 1024 * 1024;
         zig_options.config.enable_vector = opts.enable_vector;
         zig_options.config.vector_dimensions = opts.vector_dimensions;
@@ -1029,6 +1030,7 @@ fn buildOpenOptionsV2(options: ?*const lattice_open_options_v2) DatabaseError!Op
 
         zig_options.create = opts.create;
         zig_options.read_only = opts.read_only;
+        zig_options.page_size = opts.page_size;
         zig_options.config.buffer_pool_size = @as(usize, opts.cache_size_mb) * 1024 * 1024;
         zig_options.config.enable_vector = opts.enable_vector;
         zig_options.config.vector_dimensions = opts.vector_dimensions;
@@ -1246,8 +1248,7 @@ pub export fn lattice_commit(txn: ?*lattice_txn) lattice_error {
                     retireTxnHandleLocked(txn_handle);
                     break :blk .err_txn_aborted;
                 },
-                DatabaseError.IoError => .err_io,
-                else => .err,
+                else => mapDatabaseError(err),
             };
         };
     }

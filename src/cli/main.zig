@@ -65,6 +65,7 @@ pub fn main() !void {
             error.InvalidFormat => output.printError(stderr, "Invalid format. Use: table, json, or csv", .{}),
             error.InvalidVectorDims => output.printError(stderr, "Invalid vector dimensions. Must be in the range 1..4096.", .{}),
             error.InvalidCacheSize => output.printError(stderr, "Invalid cache size. Must be a positive integer.", .{}),
+            error.InvalidPageSize => output.printError(stderr, "Invalid page size. Must be in the range 4096..65535 bytes.", .{}),
             error.InvalidBatchSize => output.printError(stderr, "Invalid batch size. Must be a positive integer.", .{}),
             else => output.printError(stderr, "Failed to parse arguments", .{}),
         }
@@ -162,6 +163,7 @@ fn cmdCreate(
     // Create the database
     const db = Database.open(allocator, path, .{
         .create = true,
+        .page_size = parsed_args.page_size,
         .config = config,
     }) catch |err| {
         return failCommand(stderr, "Failed to create database: {s}", .{@errorName(err)});
@@ -982,6 +984,7 @@ fn printUsage(writer: anytype) void {
         \\  --enable-fts          Enable full-text search (default: on)
         \\  --no-fts              Disable full-text search
         \\  --cache-size=<mb>     Buffer pool size in MB (default: 64)
+        \\  --page-size=<bytes>   Page size in bytes, 4096..65535 (default: 4096)
         \\  --file=<path>         Input/output file for import/export
         \\  --query=<cypher>      Query string for exec command
         \\  -h, --help            Show help for a command

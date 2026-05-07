@@ -12,6 +12,29 @@ const btree = lattice.storage.btree;
 const BTree = btree.BTree;
 const BTreeError = btree.BTreeError;
 
+fn longSplitKey(buf: *[256]u8, index: usize) []const u8 {
+    @memset(buf, 'z');
+    const prefix = std.fmt.bufPrint(buf[0..32], "key{d:08}", .{index}) catch unreachable;
+    buf[prefix.len] = ':';
+    return buf[0..180];
+}
+
+fn firstInsertThatRaisesHeightToThree(allocator: std.mem.Allocator) !usize {
+    var db = try helpers.TempDb.initWithPoolSize(allocator, "internal_split_probe", 1024 * 1024);
+    defer db.deinit();
+
+    var tree = try db.createBTree();
+
+    var key_buf: [256]u8 = undefined;
+    for (0..5000) |i| {
+        try tree.insert(longSplitKey(&key_buf, i), "value");
+        const stats = try helpers.getTreeStats(&tree);
+        if (stats.height >= 3) return i;
+    }
+
+    return error.InternalSplitNotReached;
+}
+
 // ============================================================================
 // Contract: Keys remain sorted after any operation
 // ============================================================================
@@ -671,6 +694,35 @@ test "btree: cascading split propagates leaf through internal to new root" {
     try std.testing.expect(saw_height_3);
 
     try helpers.validateBTreeInvariants(&tree);
+}
+
+test "btree: failed internal split releases all pinned pages" {
+    const allocator = std.testing.allocator;
+    const split_index = try firstInsertThatRaisesHeightToThree(allocator);
+
+    var db = try helpers.TempDb.initWithPoolSize(allocator, "internal_split_pin_cleanup", 1024 * 1024);
+    defer db.deinit();
+
+    var failing_allocator_state = std.testing.FailingAllocator.init(allocator, .{});
+    const failing_allocator = failing_allocator_state.allocator();
+    var tree = try BTree.init(failing_allocator, db.bp);
+
+    var key_buf: [256]u8 = undefined;
+    for (0..split_index) |i| {
+        try tree.insert(longSplitKey(&key_buf, i), "value");
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), db.bp.getStats().pinned_frames);
+
+    // The next insert first splits a leaf, then attempts to split the full
+    // root internal page. Let the leaf split allocations succeed and fail the
+    // first allocation inside the internal split path.
+    failing_allocator_state.fail_index = failing_allocator_state.alloc_index + 3;
+
+    const result = tree.insert(longSplitKey(&key_buf, split_index), "value");
+    try std.testing.expectError(BTreeError.OutOfMemory, result);
+    try std.testing.expect(failing_allocator_state.has_induced_failure);
+    try std.testing.expectEqual(@as(usize, 0), db.bp.getStats().pinned_frames);
 }
 
 test "btree: range scan across split boundaries returns all entries" {

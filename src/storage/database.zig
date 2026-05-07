@@ -6691,6 +6691,60 @@ test "ftsIndexDocument handles multi-KiB markdown-shaped documents" {
     }
 }
 
+test "transactional commit across graph fts and vector indexes leaves no pinned pages" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_commit_pin_cleanup_test.ltdb";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .buffer_pool_size = 4 * 1024 * 1024,
+            .enable_wal = true,
+            .enable_fts = true,
+            .enable_vector = true,
+            .vector_dimensions = 4,
+        },
+    });
+    defer {
+        db.close();
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var txn = try db.beginTransaction(.read_write);
+    var committed = false;
+    errdefer if (!committed) db.abortTransaction(&txn) catch {};
+
+    const labels = [_][]const u8{"Entry"};
+    for (0..96) |i| {
+        const node_id = try db.createNode(&txn, &labels);
+
+        var title_buf: [64]u8 = undefined;
+        const title = try std.fmt.bufPrint(&title_buf, "memory record {d:04}", .{i});
+        try db.setNodeProperty(&txn, node_id, "title", .{ .string_val = title });
+        try db.setNodeProperty(&txn, node_id, "ordinal", .{ .int_val = @intCast(i) });
+
+        var text_buf: [256]u8 = undefined;
+        const text = try std.fmt.bufPrint(
+            &text_buf,
+            "lattice commit pin cleanup graph fts vector document {d:04} token_{d:04}",
+            .{ i, i },
+        );
+        try db.ftsIndexDocumentInTxn(&txn, node_id, text);
+
+        const base: f32 = @floatFromInt(i);
+        const vector = [_]f32{ base, base + 0.25, base + 0.5, base + 0.75 };
+        try db.setNodeVectorInTxn(&txn, node_id, &vector);
+    }
+
+    try db.commitTransaction(&txn);
+    committed = true;
+
+    try std.testing.expectEqual(@as(usize, 0), db.buffer_pool.getStats().pinned_frames);
+}
+
 test "setNodeProperty rejects values larger than one btree leaf page gracefully" {
     // Regression: a property value big enough that its serialized node
     // cannot fit in a single btree leaf used to panic deep inside

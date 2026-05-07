@@ -884,11 +884,20 @@ pub const BTree = struct {
     fn splitInternalAndInsert(self: *Self, frame: *BufferFrame, slot: u16, key: []const u8, new_child: PageId) BTreeError!InsertResult {
         const old_buf = frame.data;
         const old_page_id = frame.page_id;
+        var old_frame_pinned = true;
+        var old_frame_dirty = false;
+        errdefer if (old_frame_pinned) self.bp.unpinPage(frame, old_frame_dirty);
 
         // Allocate new internal page
         const new_page_id = self.bp.pm.allocatePage() catch return BTreeError.IoError;
-        const new_frame = self.bp.fetchPage(new_page_id, .exclusive) catch return BTreeError.BufferPoolFull;
+        const new_frame = self.bp.fetchPage(new_page_id, .exclusive) catch {
+            self.bp.pm.freePage(new_page_id) catch {};
+            return BTreeError.BufferPoolFull;
+        };
         const new_buf = new_frame.data;
+        var new_frame_pinned = true;
+        var new_frame_dirty = false;
+        errdefer if (new_frame_pinned) self.bp.unpinPage(new_frame, new_frame_dirty);
 
         // Get current state
         const num_keys = InternalNode.getNumKeys(old_buf);
@@ -897,6 +906,7 @@ pub const BTree = struct {
 
         // Initialize new internal node
         InternalNode.init(new_buf, level);
+        new_frame_dirty = true;
 
         // Internal node structure: child[0] key[0] child[1] key[1] ... child[n] key[n] right_child
         // We have n+1 children for n keys. The slot[i].child is child[i] (left of key[i]).
@@ -971,6 +981,7 @@ pub const BTree = struct {
 
         // Reinitialize old page
         InternalNode.init(old_buf, level);
+        old_frame_dirty = true;
 
         // Write first half to old page
         for (0..split_point) |i| {
@@ -981,11 +992,7 @@ pub const BTree = struct {
 
         // Get the promoted key before we lose access to it
         const promoted = keys[split_point];
-        const promoted_key_copy = self.allocator.alloc(u8, promoted.len) catch {
-            self.bp.unpinPage(new_frame, true);
-            self.bp.unpinPage(frame, true);
-            return BTreeError.OutOfMemory;
-        };
+        const promoted_key_copy = self.allocator.alloc(u8, promoted.len) catch return BTreeError.OutOfMemory;
         @memcpy(promoted_key_copy, promoted.ptr[0..promoted.len]);
 
         // Write second half to new page
@@ -998,7 +1005,9 @@ pub const BTree = struct {
         InternalNode.setRightChild(new_buf, children[total_children - 1]);
 
         self.bp.unpinPage(new_frame, true);
+        new_frame_pinned = false;
         self.bp.unpinPage(frame, true);
+        old_frame_pinned = false;
 
         return .{
             .page_id = old_page_id,

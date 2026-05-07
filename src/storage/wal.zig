@@ -21,8 +21,11 @@ const calculateChecksum = page.calculateChecksum;
 /// WAL file magic number: "WLOG" (0x574C4F47)
 pub const WAL_MAGIC: u32 = types.WAL_MAGIC_NUMBER;
 
-/// WAL frame size (matches page size)
+/// Default WAL frame size. New databases opened through Database use the
+/// database page size for WAL frames so larger page configurations can log
+/// larger property values transactionally.
 pub const FRAME_SIZE: u32 = 4096;
+pub const MAX_FRAME_SIZE: u32 = std.math.maxInt(u16);
 
 /// WAL errors
 pub const WalError = error{
@@ -35,6 +38,18 @@ pub const WalError = error{
     IoError,
     EndOfLog,
 };
+
+const WAL_HEADER_SIZE: u64 = @sizeOf(WalHeader);
+const MAX_FRAME_DATA_SIZE: usize = MAX_FRAME_SIZE - @sizeOf(WalFrameHeader);
+pub const MAX_RECORD_PAYLOAD_SIZE: usize = MAX_FRAME_DATA_SIZE - @sizeOf(WalRecordHeader);
+
+fn isValidFrameSize(frame_size: u32) bool {
+    return frame_size >= FRAME_SIZE and frame_size <= MAX_FRAME_SIZE;
+}
+
+fn frameDataSizeFor(frame_size: u32) usize {
+    return @as(usize, frame_size) - @sizeOf(WalFrameHeader);
+}
 
 // ============================================================================
 // WAL Structures
@@ -162,9 +177,10 @@ pub const WalManager = struct {
     allocator: Allocator,
     file: File,
     header: WalHeader,
+    frame_size: u32,
     /// Current frame being built
     current_frame_header: WalFrameHeader,
-    current_frame_data: [FRAME_DATA_SIZE]u8,
+    current_frame_data: [MAX_FRAME_DATA_SIZE]u8,
     /// Offset within current frame's data area
     current_offset: usize,
     /// Next LSN to assign
@@ -176,6 +192,20 @@ pub const WalManager = struct {
 
     /// Open or create a WAL file
     pub fn init(allocator: Allocator, vfs_impl: Vfs, path: []const u8, db_uuid: [16]u8) WalError!Self {
+        return initWithFrameSize(allocator, vfs_impl, path, db_uuid, FRAME_SIZE);
+    }
+
+    /// Open or create a WAL file using a requested frame size for new logs.
+    /// Existing logs keep the frame size recorded in their header.
+    pub fn initWithFrameSize(
+        allocator: Allocator,
+        vfs_impl: Vfs,
+        path: []const u8,
+        db_uuid: [16]u8,
+        requested_frame_size: u32,
+    ) WalError!Self {
+        if (!isValidFrameSize(requested_frame_size)) return WalError.CorruptedFrame;
+
         const file = vfs_impl.open(path, .{ .read = true, .write = true, .create = true }) catch {
             return WalError.IoError;
         };
@@ -187,8 +217,9 @@ pub const WalManager = struct {
             .allocator = allocator,
             .file = file,
             .header = undefined,
+            .frame_size = requested_frame_size,
             .current_frame_header = undefined,
-            .current_frame_data = [_]u8{0} ** FRAME_DATA_SIZE,
+            .current_frame_data = [_]u8{0} ** MAX_FRAME_DATA_SIZE,
             .current_offset = 0,
             .next_lsn = 1,
             .mutex = .{},
@@ -203,6 +234,10 @@ pub const WalManager = struct {
         return self;
     }
 
+    fn frameDataSize(self: *const Self) usize {
+        return frameDataSizeFor(self.frame_size);
+    }
+
     /// Close the WAL file
     pub fn deinit(self: *Self) void {
         // Flush any pending records
@@ -213,6 +248,7 @@ pub const WalManager = struct {
     /// Initialize a new WAL file
     fn initNewWal(self: *Self, db_uuid: [16]u8) WalError!void {
         self.header = WalHeader{
+            .frame_size = self.frame_size,
             .database_uuid = db_uuid,
         };
         self.header.checksum = self.header.calculateHeaderChecksum();
@@ -229,6 +265,8 @@ pub const WalManager = struct {
         if (n != 4096) return WalError.IoError;
 
         self.header = std.mem.bytesAsValue(WalHeader, header_buf[0..@sizeOf(WalHeader)]).*;
+        if (!isValidFrameSize(self.header.frame_size)) return WalError.CorruptedFrame;
+        self.frame_size = self.header.frame_size;
 
         // Validate magic
         if (self.header.magic != WAL_MAGIC) {
@@ -256,30 +294,35 @@ pub const WalManager = struct {
         var frame_num: u64 = 0;
 
         while (frame_num < self.header.frame_count) {
-            const offset = FRAME_SIZE + frame_num * FRAME_SIZE;
+            const offset = WAL_HEADER_SIZE + frame_num * self.frame_size;
 
-            var frame_buf: [FRAME_SIZE]u8 = undefined;
-            const n = self.file.read(offset, &frame_buf) catch break;
-            if (n != FRAME_SIZE) break;
+            var frame_buf: [MAX_FRAME_SIZE]u8 = undefined;
+            const frame = frame_buf[0..self.frame_size];
+            const n = self.file.read(offset, frame) catch break;
+            if (n != self.frame_size) break;
 
-            const header = std.mem.bytesAsValue(WalFrameHeader, frame_buf[0..@sizeOf(WalFrameHeader)]);
+            const header = std.mem.bytesAsValue(WalFrameHeader, frame[0..@sizeOf(WalFrameHeader)]);
+            if (header.data_size > self.frameDataSize()) break;
 
             // Validate checksum
-            const data = frame_buf[@sizeOf(WalFrameHeader)..][0..header.data_size];
+            const data = frame[@sizeOf(WalFrameHeader)..][0..header.data_size];
             const expected = calculateChecksum(data);
             if (header.checksum != expected) break;
 
             // Find max LSN in this frame
             var record_offset: usize = 0;
             while (record_offset < header.data_size) {
+                if (record_offset + @sizeOf(WalRecordHeader) > header.data_size) break;
                 const rec_header = std.mem.bytesAsValue(
                     WalRecordHeader,
                     data[record_offset..][0..@sizeOf(WalRecordHeader)],
                 );
+                const record_size = @sizeOf(WalRecordHeader) + @as(usize, rec_header.payload_size);
+                if (record_offset + record_size > header.data_size) break;
                 if (rec_header.lsn > max_lsn) {
                     max_lsn = rec_header.lsn;
                 }
-                record_offset += @sizeOf(WalRecordHeader) + rec_header.payload_size;
+                record_offset += record_size;
             }
 
             frame_num += 1;
@@ -306,15 +349,16 @@ pub const WalManager = struct {
             .checksum = 0,
         };
         self.current_offset = 0;
-        @memset(&self.current_frame_data, 0);
+        @memset(self.current_frame_data[0..self.frameDataSize()], 0);
     }
 
     /// Append a record to the WAL
     /// Returns the assigned LSN
     pub fn appendRecord(self: *Self, record_type: WalRecordType, txn_id: u64, prev_lsn: u64, payload: []const u8) WalError!u64 {
+        if (payload.len > std.math.maxInt(u16)) return WalError.RecordTooLarge;
         const record_size = @sizeOf(WalRecordHeader) + payload.len;
 
-        if (record_size > FRAME_DATA_SIZE) {
+        if (record_size > self.frameDataSize()) {
             return WalError.RecordTooLarge;
         }
 
@@ -322,7 +366,7 @@ pub const WalManager = struct {
         defer self.mutex.unlock();
 
         // Check if record fits in current frame
-        if (self.current_offset + record_size > FRAME_DATA_SIZE) {
+        if (self.current_offset + record_size > self.frameDataSize()) {
             try self.flushCurrentFrame();
             self.startNewFrame();
         }
@@ -368,14 +412,15 @@ pub const WalManager = struct {
         );
 
         // Build complete frame
-        var frame_buf: [FRAME_SIZE]u8 = [_]u8{0} ** FRAME_SIZE;
+        var frame_buf: [MAX_FRAME_SIZE]u8 = [_]u8{0} ** MAX_FRAME_SIZE;
+        const frame = frame_buf[0..self.frame_size];
         const header_bytes = std.mem.asBytes(&self.current_frame_header);
-        @memcpy(frame_buf[0..@sizeOf(WalFrameHeader)], header_bytes);
-        @memcpy(frame_buf[@sizeOf(WalFrameHeader)..][0..FRAME_DATA_SIZE], &self.current_frame_data);
+        @memcpy(frame[0..@sizeOf(WalFrameHeader)], header_bytes);
+        @memcpy(frame[@sizeOf(WalFrameHeader)..][0..self.frameDataSize()], self.current_frame_data[0..self.frameDataSize()]);
 
         // Write frame to disk
-        const offset = FRAME_SIZE + self.header.frame_count * FRAME_SIZE;
-        self.file.write(offset, &frame_buf) catch return WalError.IoError;
+        const offset = WAL_HEADER_SIZE + self.header.frame_count * self.frame_size;
+        self.file.write(offset, frame) catch return WalError.IoError;
 
         self.header.frame_count += 1;
 
@@ -430,7 +475,7 @@ pub const WalIterator = struct {
     wal: *WalManager,
     current_frame: u64,
     current_offset: usize,
-    frame_data: [FRAME_SIZE]u8,
+    frame_data: [MAX_FRAME_SIZE]u8,
     frame_header: WalFrameHeader,
     frame_loaded: bool,
     start_lsn: u64,
@@ -509,9 +554,10 @@ pub const WalIterator = struct {
             return false; // No more frames
         }
 
-        const offset = FRAME_SIZE + self.current_frame * FRAME_SIZE;
-        const n = self.wal.file.read(offset, &self.frame_data) catch return WalError.IoError;
-        if (n != FRAME_SIZE) return WalError.IoError;
+        const offset = WAL_HEADER_SIZE + self.current_frame * self.wal.frame_size;
+        const frame = self.frame_data[0..self.wal.frame_size];
+        const n = self.wal.file.read(offset, frame) catch return WalError.IoError;
+        if (n != self.wal.frame_size) return WalError.IoError;
 
         self.frame_header = std.mem.bytesAsValue(
             WalFrameHeader,
@@ -519,6 +565,7 @@ pub const WalIterator = struct {
         ).*;
 
         // Validate checksum
+        if (self.frame_header.data_size > self.wal.frameDataSize()) return WalError.CorruptedFrame;
         const data = self.frame_data[@sizeOf(WalFrameHeader)..][0..self.frame_header.data_size];
         const expected = calculateChecksum(data);
         if (self.frame_header.checksum != expected) {

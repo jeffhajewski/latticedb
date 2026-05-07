@@ -152,17 +152,18 @@ pub const RecoveryManager = struct {
         // If any are valid, we have mid-log corruption
         const max_scan = @min(corrupted_frame + 10, frame_count);
 
-        var frame_buf: [wal_mod.FRAME_SIZE]u8 align(4096) = undefined;
+        var frame_buf: [wal_mod.MAX_FRAME_SIZE]u8 align(4096) = undefined;
 
         var frame_num = corrupted_frame + 1;
         while (frame_num < max_scan) : (frame_num += 1) {
             // Read frame directly
-            const offset = wal_mod.FRAME_SIZE + frame_num * wal_mod.FRAME_SIZE;
-            const n = wal.file.read(offset, &frame_buf) catch {
+            const offset = @as(u64, @sizeOf(wal_mod.WalHeader)) + frame_num * wal.frame_size;
+            const frame = frame_buf[0..wal.frame_size];
+            const n = wal.file.read(offset, frame) catch {
                 continue; // IO error, try next frame
             };
 
-            if (n != wal_mod.FRAME_SIZE) {
+            if (n != wal.frame_size) {
                 continue; // Incomplete read, try next frame
             }
 
@@ -173,7 +174,8 @@ pub const RecoveryManager = struct {
             ).*;
 
             // Validate checksum
-            if (frame_header.data_size > 0 and frame_header.data_size <= wal_mod.FRAME_DATA_SIZE) {
+            const frame_data_size = @as(usize, wal.frame_size) - @sizeOf(wal_mod.WalFrameHeader);
+            if (frame_header.data_size > 0 and frame_header.data_size <= frame_data_size) {
                 const data = frame_buf[@sizeOf(wal_mod.WalFrameHeader)..][0..frame_header.data_size];
                 const expected = page.calculateChecksum(data);
 
@@ -249,7 +251,7 @@ pub const RecoveryManager = struct {
         const start_lsn = if (stats.start_lsn > 0) stats.start_lsn else 1;
         var wal_iter = wal.iterate(start_lsn);
 
-        var payload_buf: [4096]u8 = undefined;
+        var payload_buf: [wal_mod.MAX_RECORD_PAYLOAD_SIZE]u8 = undefined;
 
         while (true) {
             const maybe_record = wal_iter.next(&payload_buf) catch |err| {

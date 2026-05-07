@@ -29,6 +29,7 @@ const (
 	ErrorChecksum        ErrorCode = -12
 	ErrorOutOfMemory     ErrorCode = -13
 	ErrorUnsupported     ErrorCode = -14
+	ErrorValueTooLarge   ErrorCode = -15
 )
 
 type QueryErrorStage int

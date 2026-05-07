@@ -790,19 +790,21 @@ pub const Database = struct {
             };
             defer allocator.free(wal_path);
 
-            self.wal = WalManager.init(
+            self.wal = WalManager.initWithFrameSize(
                 allocator,
                 self.vfs.vfs(),
                 wal_path,
                 self.page_manager.getHeader().file_uuid,
+                self.page_manager.getPageSize(),
             ) catch |err| blk: {
                 if (opened_new_database and options.create and shouldResetWalForNewDatabase(err)) {
                     @import("compat").fs.cwd().deleteFile(wal_path) catch return mapWalInitError(err);
-                    break :blk WalManager.init(
+                    break :blk WalManager.initWithFrameSize(
                         allocator,
                         self.vfs.vfs(),
                         wal_path,
                         self.page_manager.getHeader().file_uuid,
+                        self.page_manager.getPageSize(),
                     ) catch |retry_err| return mapWalInitError(retry_err);
                 }
                 return mapWalInitError(err);
@@ -2968,6 +2970,12 @@ pub const Database = struct {
         node_id: NodeId,
         state: TxnNodeState,
     ) DatabaseError!void {
+        if (state.exists and !self.node_store.canFitNode(node_id, state.labels, state.properties)) {
+            var owned_state = state;
+            owned_state.deinit(self.allocator);
+            return DatabaseError.ValueTooLarge;
+        }
+
         if (overlay.node_states.getPtr(node_id)) |existing| {
             existing.deinit(self.allocator);
             existing.* = state;
@@ -6779,6 +6787,50 @@ test "setNodeProperty rejects values larger than one btree leaf page gracefully"
     var got = (try db.getNodeProperty(node_id, "blob")).?;
     defer got.deinit(allocator);
     try std.testing.expectEqualStrings("small", got.string_val);
+}
+
+test "transactional oversized node property is rejected before commit without pinned frames" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_txn_oversized_node_value_test.ltdb";
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .buffer_pool_size = 4 * 1024 * 1024,
+            .enable_wal = true,
+            .enable_fts = false,
+        },
+    });
+    defer {
+        db.close();
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var txn = try db.beginTransaction(.read_write);
+    var committed = false;
+    errdefer if (!committed) db.abortTransaction(&txn) catch {};
+
+    const node_id = try db.createNode(&txn, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(&txn, node_id, "qid", .{ .string_val = "lme-q-000001" });
+
+    var large_json: [8192]u8 = undefined;
+    @memset(&large_json, 'x');
+    try std.testing.expectError(
+        DatabaseError.ValueTooLarge,
+        db.setNodeProperty(&txn, node_id, "properties_json", .{ .string_val = &large_json }),
+    );
+
+    try std.testing.expectEqual(@as(usize, 0), db.buffer_pool.getStats().pinned_frames);
+
+    try db.commitTransaction(&txn);
+    committed = true;
+    try std.testing.expectEqual(@as(usize, 0), db.buffer_pool.getStats().pinned_frames);
+
+    var got = (try db.getNodeProperty(node_id, "qid")).?;
+    defer got.deinit(allocator);
+    try std.testing.expectEqualStrings("lme-q-000001", got.string_val);
+    try std.testing.expect((try db.getNodeProperty(node_id, "properties_json")) == null);
 }
 
 test "query: simple MATCH RETURN" {

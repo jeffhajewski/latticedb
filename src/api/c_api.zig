@@ -319,6 +319,7 @@ pub const lattice_error = enum(c_int) {
     err_checksum = -12,
     err_out_of_memory = -13,
     err_unsupported = -14,
+    err_value_too_large = -15,
 };
 
 /// Query diagnostic stage for prepared query execution failures.
@@ -347,10 +348,7 @@ fn mapDatabaseError(err: DatabaseError) lattice_error {
         DatabaseError.TransactionNotActive => .err_invalid_arg,
         DatabaseError.TransactionReadOnly => .err_read_only,
         DatabaseError.TransactionsNotEnabled => .err_invalid_arg,
-        // Node/edge payload too big for one btree leaf page. No dedicated
-        // C enum value exists yet; `err_full` signals "cannot fit" as
-        // close as possible until the ABI is versioned.
-        DatabaseError.ValueTooLarge => .err_full,
+        DatabaseError.ValueTooLarge => .err_value_too_large,
     };
 }
 
@@ -2990,6 +2988,7 @@ pub export fn lattice_error_message(code: lattice_error) [*c]const u8 {
         .err_checksum => "Checksum error",
         .err_out_of_memory => "Out of memory",
         .err_unsupported => "Unsupported operation or value type",
+        .err_value_too_large => "Value too large for database page size",
     };
 }
 
@@ -3157,6 +3156,7 @@ test "error code values match header" {
     try std.testing.expectEqual(@as(c_int, -1), @intFromEnum(lattice_error.err));
     try std.testing.expectEqual(@as(c_int, -13), @intFromEnum(lattice_error.err_out_of_memory));
     try std.testing.expectEqual(@as(c_int, -14), @intFromEnum(lattice_error.err_unsupported));
+    try std.testing.expectEqual(@as(c_int, -15), @intFromEnum(lattice_error.err_value_too_large));
 }
 
 test "value type tags match header" {
@@ -3180,6 +3180,10 @@ test "error message returns valid strings" {
     const unsupported = lattice_error_message(.err_unsupported);
     try std.testing.expect(unsupported != null);
     try std.testing.expectEqualStrings("Unsupported operation or value type", std.mem.sliceTo(unsupported, 0));
+
+    const too_large = lattice_error_message(.err_value_too_large);
+    try std.testing.expect(too_large != null);
+    try std.testing.expectEqualStrings("Value too large for database page size", std.mem.sliceTo(too_large, 0));
 }
 
 test "null handle returns error" {

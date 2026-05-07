@@ -245,6 +245,20 @@ pub const NodeStore = struct {
             };
         };
     }
+
+    /// Check whether a fully serialized node record can fit in this store's
+    /// backing B+Tree. Nodes are stored as one leaf value, so callers use this
+    /// before staging transactional state that would later fail at commit.
+    pub fn canFitNode(
+        self: *const Self,
+        node_id: NodeId,
+        labels: []const SymbolId,
+        properties: []const Property,
+    ) bool {
+        var key_buf: [8]u8 = undefined;
+        std.mem.writeInt(u64, &key_buf, node_id, .little);
+        return self.tree.canFitLeafEntry(&key_buf, serializedNodeSize(labels, properties));
+    }
 };
 
 // ============================================================================

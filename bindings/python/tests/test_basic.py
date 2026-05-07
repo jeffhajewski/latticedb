@@ -326,6 +326,7 @@ class TestErrorMapping:
             (bindings.LATTICE_ERROR_CHECKSUM, bindings.LatticeChecksumError),
             (bindings.LATTICE_ERROR_OUT_OF_MEMORY, bindings.LatticeOutOfMemoryError),
             (bindings.LATTICE_ERROR_UNSUPPORTED, bindings.LatticeUnsupportedError),
+            (bindings.LATTICE_ERROR_VALUE_TOO_LARGE, bindings.LatticeValueTooLargeError),
         ],
     )
     def test_check_error_raises_specific_exception(self, monkeypatch, code, expected_exc):
@@ -608,6 +609,7 @@ class TestPublicApiExports:
             "LatticeVersionMismatchError",
             "LatticeChecksumError",
             "LatticeOutOfMemoryError",
+            "LatticeValueTooLargeError",
             "LatticeQueryError",
             "EmbeddingClient",
             "EmbeddingApiFormat",

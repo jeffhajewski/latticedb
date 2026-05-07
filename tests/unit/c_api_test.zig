@@ -182,8 +182,8 @@ test "c_api: zero page_size in open options keeps default page size" {
     try std.testing.expectEqual(@as(u32, 4096), header.page_size);
 }
 
-test "c_api: commit maps oversized values to full instead of generic error" {
-    const path = "/tmp/lattice_capi_commit_value_too_large_test.db";
+test "c_api: oversized first-write node properties report value too large" {
+    const path = "/tmp/lattice_capi_first_write_value_too_large_test.db";
 
     @import("compat").fs.cwd().deleteFile(path) catch {};
     @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
@@ -212,19 +212,84 @@ test "c_api: commit maps oversized values to full instead of generic error" {
     var node_id: lattice_node_id = 0;
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Doc".ptr, &node_id));
 
-    var large_value: [12000]u8 = undefined;
-    @memset(&large_value, 'x');
-    const key = "payload";
-    const property = lattice_value{
+    const qid_key = "qid";
+    const qid_value = "lme-q-000001";
+    const qid_property = lattice_value{
         .value_type = .string,
-        .data = .{ .string_val = .{ .ptr = large_value[0..].ptr, .len = large_value.len } },
+        .data = .{ .string_val = .{ .ptr = qid_value.ptr, .len = qid_value.len } },
     };
     try std.testing.expectEqual(
         lattice_error.ok,
-        c_api.lattice_node_set_property(txn, node_id, key.ptr, &property),
+        c_api.lattice_node_set_property(txn, node_id, qid_key.ptr, &qid_property),
     );
-    try std.testing.expectEqual(lattice_error.err_full, c_api.lattice_commit(txn));
+
+    var large_json: [8192]u8 = undefined;
+    @memset(&large_json, 'x');
+    const json_key = "properties_json";
+    const json_property = lattice_value{
+        .value_type = .string,
+        .data = .{ .string_val = .{ .ptr = large_json[0..].ptr, .len = large_json.len } },
+    };
+    try std.testing.expectEqual(
+        lattice_error.err_value_too_large,
+        c_api.lattice_node_set_property(txn, node_id, json_key.ptr, &json_property),
+    );
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_rollback(txn));
+}
+
+test "c_api: LongMemEval-shaped first write succeeds with larger page size" {
+    const path = "/tmp/lattice_capi_first_write_large_page_test.db";
+
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 32768,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+    errdefer _ = c_api.lattice_rollback(txn);
+
+    var node_id: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Doc".ptr, &node_id));
+
+    const qid_key = "qid";
+    const qid_value = "lme-q-000001";
+    const qid_property = lattice_value{
+        .value_type = .string,
+        .data = .{ .string_val = .{ .ptr = qid_value.ptr, .len = qid_value.len } },
+    };
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_node_set_property(txn, node_id, qid_key.ptr, &qid_property),
+    );
+
+    var large_json: [12000]u8 = undefined;
+    @memset(&large_json, 'x');
+    const json_key = "properties_json";
+    const json_property = lattice_value{
+        .value_type = .string,
+        .data = .{ .string_val = .{ .ptr = large_json[0..].ptr, .len = large_json.len } },
+    };
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_node_set_property(txn, node_id, json_key.ptr, &json_property),
+    );
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
 }
 
 test "c_api: open v2 can disable WAL and rejects write transactions" {
@@ -2757,6 +2822,7 @@ test "c_api: error messages are valid" {
         .err_checksum,
         .err_out_of_memory,
         .err_unsupported,
+        .err_value_too_large,
     };
 
     for (errors) |err| {

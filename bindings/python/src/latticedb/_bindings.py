@@ -131,6 +131,7 @@ LATTICE_ERROR_VERSION_MISMATCH = -11
 LATTICE_ERROR_CHECKSUM = -12
 LATTICE_ERROR_OUT_OF_MEMORY = -13
 LATTICE_ERROR_UNSUPPORTED = -14
+LATTICE_ERROR_VALUE_TOO_LARGE = -15
 
 
 # Exception classes
@@ -220,6 +221,12 @@ class LatticeUnsupportedError(LatticeError):
     pass
 
 
+class LatticeValueTooLargeError(LatticeError):
+    """Value is too large for the configured database page size."""
+
+    pass
+
+
 class LatticeQueryError(LatticeError):
     """Rich query execution error with stage-aware diagnostics."""
 
@@ -254,6 +261,7 @@ _ERROR_MAP = {
     LATTICE_ERROR_CHECKSUM: LatticeChecksumError,
     LATTICE_ERROR_OUT_OF_MEMORY: LatticeOutOfMemoryError,
     LATTICE_ERROR_UNSUPPORTED: LatticeUnsupportedError,
+    LATTICE_ERROR_VALUE_TOO_LARGE: LatticeValueTooLargeError,
 }
 
 

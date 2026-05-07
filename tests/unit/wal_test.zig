@@ -314,6 +314,44 @@ test "wal: record too large rejected" {
     try std.testing.expectError(WalError.RecordTooLarge, result);
 }
 
+test "wal: larger frame size preserves larger records" {
+    const allocator = std.testing.allocator;
+
+    var posix_vfs = PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const path = try createTempPath(allocator, "largeframe");
+    defer allocator.free(path);
+    defer vfs_impl.delete(path) catch {};
+
+    const uuid = generateUuid();
+
+    var large_payload: [12000]u8 = undefined;
+    @memset(&large_payload, 'x');
+
+    {
+        var wal = try WalManager.initWithFrameSize(allocator, vfs_impl, path, uuid, 32768);
+        defer wal.deinit();
+
+        const lsn = try wal.appendRecord(.insert, 1, 0, &large_payload);
+        try std.testing.expectEqual(@as(u64, 1), lsn);
+        try wal.sync();
+    }
+
+    {
+        var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+        defer wal.deinit();
+
+        try std.testing.expectEqual(@as(u32, 32768), wal.header.frame_size);
+
+        var iter = wal.iterate(1);
+        var read_buf: [12000]u8 = undefined;
+        const record = (try iter.next(&read_buf)).?;
+        try std.testing.expectEqual(WalRecordType.insert, record.header.record_type);
+        try std.testing.expectEqualSlices(u8, &large_payload, record.payload);
+    }
+}
+
 // ============================================================================
 // Contract: Different record types are preserved
 // ============================================================================

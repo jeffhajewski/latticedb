@@ -40,6 +40,7 @@ from latticedb._bindings import (
     LatticeChecksumError,
     LatticeOutOfMemoryError,
     LatticeUnsupportedError,
+    LatticeValueTooLargeError,
     LatticeQueryError,
     library_available,
     get_lib,
@@ -112,6 +113,7 @@ __all__ = [
     "LatticeChecksumError",
     "LatticeOutOfMemoryError",
     "LatticeUnsupportedError",
+    "LatticeValueTooLargeError",
     "LatticeQueryError",
     # Deprecated embedding compatibility re-exports
     "hash_embed",

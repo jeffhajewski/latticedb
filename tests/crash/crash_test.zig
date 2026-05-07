@@ -55,7 +55,7 @@ fn simulateCrash(path: []const u8) !void {
     try file.pwriteAll(&header_buf, 0);
 
     // Truncate file to just the header page (4096 bytes)
-    try file.setEndPos(4096);
+    try file.setLength(4096);
 }
 
 /// Clean up database and WAL files.

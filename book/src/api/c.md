@@ -47,6 +47,8 @@ LATTICE_ERROR_FULL          // -10 - Database full
 LATTICE_ERROR_VERSION_MISMATCH // -11 - Version mismatch
 LATTICE_ERROR_CHECKSUM      // -12 - Checksum verification failed
 LATTICE_ERROR_OUT_OF_MEMORY // -13 - Out of memory
+LATTICE_ERROR_UNSUPPORTED   // -14 - Unsupported operation or value type
+LATTICE_ERROR_VALUE_TOO_LARGE // -15 - Value exceeds configured page size
 ```
 
 ### Value Types

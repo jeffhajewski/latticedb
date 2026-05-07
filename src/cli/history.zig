@@ -141,8 +141,15 @@ pub const History = struct {
     /// Get the default history file path
     pub fn getDefaultPath(allocator: std.mem.Allocator) ?[]const u8 {
         // Try $HOME/.lattice_history
-        if (std.posix.getenv("HOME")) |home| {
-            return std.fmt.allocPrint(allocator, "{s}/.lattice_history", .{home}) catch null;
+        const home = if (@hasDecl(std.posix, "getenv"))
+            std.posix.getenv("HOME")
+        else if (@hasDecl(std, "c"))
+            if (std.c.getenv("HOME")) |home_ptr| std.mem.span(home_ptr) else null
+        else
+            null;
+
+        if (home) |path| {
+            return std.fmt.allocPrint(allocator, "{s}/.lattice_history", .{path}) catch null;
         }
         return null;
     }

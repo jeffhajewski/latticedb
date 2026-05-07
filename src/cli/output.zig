@@ -373,7 +373,7 @@ pub fn printQueryFailure(writer: anytype, query: []const u8, failure: QueryFailu
 
 fn printSourceHint(writer: anytype, query: []const u8, loc: QueryFailureLocation) void {
     const raw_line = sourceLineAt(query, loc.line) orelse return;
-    const line = std.mem.trimRight(u8, raw_line, "\r");
+    const line = std.mem.trimEnd(u8, raw_line, "\r");
 
     writer.print("  {d} | {s}\n", .{ loc.line, line }) catch return;
     writer.writeAll("    | ") catch return;

@@ -24,6 +24,9 @@ const PageManagerError = lattice.storage.page_manager.PageManagerError;
 const PosixVfs = lattice.storage.vfs.PosixVfs;
 
 pub const VERSION = lattice.VERSION;
+const INSTALL_SCRIPT_URL = "https://raw.githubusercontent.com/jeffhajewski/latticedb/main/dist/install.sh";
+const UPDATE_INSTALL_COMMAND = "curl -fsSL " ++ INSTALL_SCRIPT_URL ++ " | bash";
+const UPDATE_SHELL_COMMAND = "set -o pipefail; " ++ UPDATE_INSTALL_COMMAND;
 
 const CliError = error{
     CommandFailed,
@@ -48,16 +51,20 @@ fn failCommand(stderr: anytype, comptime fmt: []const u8, args: anytype) CliErro
     return error.CommandFailed;
 }
 
-pub fn main() !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+pub fn main(init: std.process.Init) !u8 {
+    const allocator = init.gpa;
+    const argv = try collectProcessArgs(allocator, init.minimal.args);
+    defer freeProcessArgs(allocator, argv);
 
-    const argv = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, argv);
+    var stdout_buffer: [4096]u8 = undefined;
+    var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
+    const stdout = &stdout_writer.interface;
+    defer stdout.flush() catch {};
 
-    const stdout = std.fs.File.stdout().deprecatedWriter();
-    const stderr = std.fs.File.stderr().deprecatedWriter();
+    var stderr_buffer: [4096]u8 = undefined;
+    var stderr_writer = std.Io.File.stderr().writer(init.io, &stderr_buffer);
+    const stderr = &stderr_writer.interface;
+    defer stderr.flush() catch {};
 
     var parsed_args = Args.parse(allocator, argv) catch |err| {
         switch (err) {
@@ -69,7 +76,8 @@ pub fn main() !void {
             error.InvalidBatchSize => output.printError(stderr, "Invalid batch size. Must be a positive integer.", .{}),
             else => output.printError(stderr, "Failed to parse arguments", .{}),
         }
-        std.process.exit(1);
+        stderr.flush() catch {};
+        return 1;
     };
     defer parsed_args.deinit(allocator);
 
@@ -80,13 +88,13 @@ pub fn main() !void {
         } else {
             printUsage(stdout);
         }
-        return;
+        return 0;
     }
 
     // No command provided
     if (parsed_args.command == null) {
         printUsage(stdout);
-        return;
+        return 0;
     }
 
     const command = parsed_args.command.?;
@@ -95,7 +103,8 @@ pub fn main() !void {
     if (command.requiresPath() and parsed_args.path == null) {
         output.printError(stderr, "Missing database path", .{});
         try stderr.print("Usage: lattice {s} <path>\n", .{@tagName(command)});
-        std.process.exit(1);
+        stderr.flush() catch {};
+        return 1;
     }
 
     // Dispatch to command handler
@@ -103,8 +112,39 @@ pub fn main() !void {
         if (err != error.CommandFailed) {
             output.printError(stderr, "Command failed: {s}", .{@errorName(err)});
         }
-        std.process.exit(1);
+        stderr.flush() catch {};
+        return 1;
     };
+
+    return 0;
+}
+
+fn collectProcessArgs(allocator: std.mem.Allocator, process_args: std.process.Args) ![]const []const u8 {
+    var iter = try std.process.Args.Iterator.initAllocator(process_args, allocator);
+    defer iter.deinit();
+
+    var argv: std.ArrayList([]const u8) = .empty;
+    errdefer {
+        for (argv.items) |arg| {
+            allocator.free(@constCast(arg));
+        }
+        argv.deinit(allocator);
+    }
+
+    while (iter.next()) |arg| {
+        const owned = try allocator.dupe(u8, arg);
+        errdefer allocator.free(owned);
+        try argv.append(allocator, owned);
+    }
+
+    return argv.toOwnedSlice(allocator);
+}
+
+fn freeProcessArgs(allocator: std.mem.Allocator, argv: []const []const u8) void {
+    for (argv) |arg| {
+        allocator.free(@constCast(arg));
+    }
+    allocator.free(argv);
 }
 
 fn runCommand(
@@ -115,6 +155,7 @@ fn runCommand(
     parsed_args: *const Args,
 ) !void {
     switch (command) {
+        .update => try cmdUpdate(stdout, stderr),
         .version => printVersion(stdout),
         .help => printUsage(stdout),
         .create => try cmdCreate(allocator, stdout, stderr, parsed_args),
@@ -136,6 +177,34 @@ fn runCommand(
 // ============================================
 // Command Implementations (stubs for now)
 // ============================================
+
+fn cmdUpdate(stdout: anytype, stderr: anytype) !void {
+    try stdout.print("Updating LatticeDB using:\n  {s}\n\n", .{UPDATE_INSTALL_COMMAND});
+
+    var child = std.process.spawn(@import("compat").io, .{
+        .argv = &[_][]const u8{ "bash", "-c", UPDATE_SHELL_COMMAND },
+    }) catch |err| {
+        return failCommand(stderr, "Failed to start updater: {s}", .{@errorName(err)});
+    };
+    defer child.kill(@import("compat").io);
+
+    const term = child.wait(@import("compat").io) catch |err| {
+        return failCommand(stderr, "Failed to wait for updater: {s}", .{@errorName(err)});
+    };
+
+    switch (term) {
+        .exited => |code| {
+            if (code == 0) {
+                try stdout.writeAll("\nLatticeDB update complete.\n");
+                return;
+            }
+            return failCommand(stderr, "Updater exited with status {d}", .{code});
+        },
+        .signal => |sig| return failCommand(stderr, "Updater terminated by signal {d}", .{@intFromEnum(sig)}),
+        .stopped => |sig| return failCommand(stderr, "Updater stopped by signal {d}", .{@intFromEnum(sig)}),
+        .unknown => |code| return failCommand(stderr, "Updater ended with unknown status {d}", .{code}),
+    }
+}
 
 fn cmdCreate(
     allocator: std.mem.Allocator,
@@ -930,8 +999,7 @@ fn cmdDump(
 
     if (stats) |s| {
         // Print stats to stderr so they don't mix with JSON output
-        const stderr_writer = std.fs.File.stderr().deprecatedWriter();
-        try stderr_writer.print("Dumped {d} nodes, {d} edges\n", .{ s.nodes_exported, s.edges_exported });
+        try stderr.print("Dumped {d} nodes, {d} edges\n", .{ s.nodes_exported, s.edges_exported });
     } else |err| {
         return failCommand(stderr, "Dump failed: {s}", .{@errorName(err)});
     }
@@ -974,6 +1042,7 @@ fn printUsage(writer: anytype) void {
         \\    count <path>        Show node/edge counts
         \\
         \\  Utility:
+        \\    update              Update the local LatticeDB installation
         \\    version             Show version information
         \\    help                Show this help message
         \\
@@ -997,6 +1066,7 @@ fn printUsage(writer: anytype) void {
         \\  lattice count mydb.lattice --format=json
         \\  lattice check mydb.lattice
         \\  lattice export mydb.lattice --file=backup.json
+        \\  lattice update
         \\
     ) catch {};
 }
@@ -1019,6 +1089,17 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\Examples:
             \\  lattice create mydb.lattice
             \\  lattice create embeddings.lattice --enable-vector --vector-dims=1536
+            \\
+        ) catch {},
+        .update => writer.writeAll(
+            \\Usage: lattice update
+            \\
+            \\Update the local LatticeDB installation by running the public
+            \\installer script:
+            \\
+            \\  curl -fsSL https://raw.githubusercontent.com/jeffhajewski/latticedb/main/dist/install.sh | bash
+            \\
+            \\The updater streams installer output directly to the terminal.
             \\
         ) catch {},
         .query => writer.writeAll(

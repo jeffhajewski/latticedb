@@ -47,6 +47,7 @@ pub const Command = enum {
     count,
 
     // Utility
+    update,
     version,
     help,
 
@@ -64,6 +65,7 @@ pub const Command = enum {
         if (std.mem.eql(u8, s, "types")) return .types;
         if (std.mem.eql(u8, s, "schema")) return .schema;
         if (std.mem.eql(u8, s, "count")) return .count;
+        if (std.mem.eql(u8, s, "update")) return .update;
         if (std.mem.eql(u8, s, "version") or std.mem.eql(u8, s, "-v") or std.mem.eql(u8, s, "--version")) return .version;
         if (std.mem.eql(u8, s, "help") or std.mem.eql(u8, s, "-h") or std.mem.eql(u8, s, "--help")) return .help;
         return null;
@@ -71,7 +73,7 @@ pub const Command = enum {
 
     pub fn requiresPath(self: Command) bool {
         return switch (self) {
-            .version, .help => false,
+            .update, .version, .help => false,
             else => true,
         };
     }
@@ -91,6 +93,7 @@ pub const Command = enum {
             .types => "List all edge types",
             .schema => "Show inferred schema",
             .count => "Show node/edge counts",
+            .update => "Update the local LatticeDB installation",
             .version => "Show version information",
             .help => "Show help message",
         };
@@ -241,6 +244,15 @@ test "parse basic command" {
     defer args.deinit(allocator);
 
     try std.testing.expectEqual(Command.version, args.command.?);
+}
+
+test "parse update command" {
+    const allocator = std.testing.allocator;
+    var args = try Args.parse(allocator, &.{ "lattice", "update" });
+    defer args.deinit(allocator);
+
+    try std.testing.expectEqual(Command.update, args.command.?);
+    try std.testing.expect(!args.command.?.requiresPath());
 }
 
 test "parse command with path" {

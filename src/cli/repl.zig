@@ -31,7 +31,7 @@ const RawTerminalMode = struct {
     original: std.posix.termios = undefined,
 
     fn enableIfTty() !RawTerminalMode {
-        if (!std.posix.isatty(std.posix.STDIN_FILENO)) {
+        if (!stdinIsTty()) {
             return .{};
         }
 
@@ -60,11 +60,30 @@ const RawTerminalMode = struct {
     }
 };
 
-fn readByte(file: std.fs.File) !?u8 {
+fn stdinIsTty() bool {
+    if (@hasDecl(std.posix, "isatty")) {
+        return std.posix.isatty(std.posix.STDIN_FILENO);
+    }
+    return std.c.isatty(std.c.STDIN_FILENO) != 0;
+}
+
+fn readByteStdin() !?u8 {
     var buf: [1]u8 = undefined;
-    const n = try file.read(&buf);
+    const n = try std.posix.read(std.posix.STDIN_FILENO, &buf);
     if (n == 0) return null;
     return buf[0];
+}
+
+fn readLineFromStdin(line_buf: *ManagedArrayList(u8), max_len: usize) !void {
+    while (line_buf.items.len < max_len) {
+        const byte = (try readByteStdin()) orelse {
+            if (line_buf.items.len == 0) return error.EndOfStream;
+            return;
+        };
+        if (byte == '\n') return;
+        try line_buf.append(byte);
+    }
+    return error.StreamTooLong;
 }
 
 fn setLineBuffer(line_buf: *ManagedArrayList(u8), value: []const u8) !void {
@@ -223,10 +242,9 @@ pub const Repl = struct {
         const prompt = promptFor(in_multiline);
         line_buf.items.len = 0;
 
-        if (!std.posix.isatty(std.posix.STDIN_FILENO)) {
-            const stdin = std.fs.File.stdin().deprecatedReader();
+        if (!stdinIsTty()) {
             try stdout.writeAll(prompt);
-            stdin.readUntilDelimiterArrayList(line_buf, '\n', 65536) catch |err| {
+            readLineFromStdin(line_buf, 65536) catch |err| {
                 if (err == error.EndOfStream) return .eof;
                 return err;
             };
@@ -240,7 +258,6 @@ pub const Repl = struct {
         var raw_mode = try RawTerminalMode.enableIfTty();
         defer raw_mode.restore();
 
-        const stdin_file = std.fs.File.stdin();
         try stdout.writeAll(prompt);
 
         self.history.resetPosition();
@@ -250,7 +267,7 @@ pub const Repl = struct {
         defer if (history_scratch) |scratch| self.allocator.free(scratch);
 
         while (true) {
-            const key = (try readByte(stdin_file)) orelse return .eof;
+            const key = (try readByteStdin()) orelse return .eof;
             switch (key) {
                 '\r', '\n' => {
                     try stdout.writeAll("\r\n");
@@ -294,9 +311,9 @@ pub const Repl = struct {
                     }
                 },
                 27 => { // Escape sequence
-                    const b1 = (try readByte(stdin_file)) orelse continue;
+                    const b1 = (try readByteStdin()) orelse continue;
                     if (b1 != '[') continue;
-                    const b2 = (try readByte(stdin_file)) orelse continue;
+                    const b2 = (try readByteStdin()) orelse continue;
                     switch (b2) {
                         'A' => { // Up: previous history entry
                             if (!browsing_history) {
@@ -337,7 +354,7 @@ pub const Repl = struct {
                             }
                         },
                         '3' => { // Delete: ESC [ 3 ~
-                            const b3 = (try readByte(stdin_file)) orelse continue;
+                            const b3 = (try readByteStdin()) orelse continue;
                             if (b3 == '~' and cursor < line_buf.items.len) {
                                 _ = line_buf.orderedRemove(cursor);
                                 try refreshInputLine(stdout, prompt, line_buf.items, cursor);

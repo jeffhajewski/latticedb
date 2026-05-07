@@ -26,6 +26,12 @@ pub const WAL_MAGIC: u32 = types.WAL_MAGIC_NUMBER;
 /// larger property values transactionally.
 pub const FRAME_SIZE: u32 = 4096;
 pub const MAX_FRAME_SIZE: u32 = std.math.maxInt(u16);
+pub const WAL_FORMAT_VERSION: u16 = 2;
+pub const MIN_READABLE_WAL_VERSION: u16 = 1;
+pub const MAX_LOGICAL_RECORD_PAYLOAD_SIZE: usize = 64 * 1024 * 1024;
+
+const LARGE_FRAGMENT_MAGIC: u32 = 0x31464c57; // "WLF1"
+const LARGE_FRAGMENT_HEADER_SIZE: usize = 28;
 
 /// WAL errors
 pub const WalError = error{
@@ -69,7 +75,7 @@ pub const WalHeader = extern struct {
     /// Must match the main database file UUID
     database_uuid: [16]u8,
     /// WAL format version
-    version: u16 = 1,
+    version: u16 = WAL_FORMAT_VERSION,
     /// Reserved for future use
     _reserved: u16 = 0,
     /// Padding to 4096 bytes (4096 - 44 - 4 = 4048)
@@ -135,6 +141,9 @@ pub const WalRecordType = enum(u8) {
 
     // Compensation (for undo during recovery)
     clr = 0x50,
+
+    // Physical record used to fragment a larger logical WAL record.
+    large_fragment = 0x60,
 };
 
 /// WAL record header (32 bytes)
@@ -167,6 +176,116 @@ pub const WalRecord = struct {
         return @sizeOf(WalRecordHeader) + self.payload.len;
     }
 };
+
+pub const OwnedWalRecord = struct {
+    header: WalRecordHeader,
+    payload: []u8,
+    allocator: Allocator,
+
+    pub fn deinit(self: *OwnedWalRecord) void {
+        self.allocator.free(self.payload);
+        self.* = undefined;
+    }
+};
+
+const LargeFragmentInfo = struct {
+    record_type: WalRecordType,
+    total_len: usize,
+    fragment_offset: usize,
+    fragment_len: usize,
+    fragment_index: u16,
+    fragment_count: u16,
+    logical_prev_lsn: u64,
+    fragment: []const u8,
+};
+
+fn maxRecordPayloadSizeFor(frame_size: u32) usize {
+    return frameDataSizeFor(frame_size) - @sizeOf(WalRecordHeader);
+}
+
+fn largeFragmentPayloadCapacityFor(frame_size: u32) usize {
+    const physical_payload_size = maxRecordPayloadSizeFor(frame_size);
+    if (physical_payload_size <= LARGE_FRAGMENT_HEADER_SIZE) return 0;
+    return physical_payload_size - LARGE_FRAGMENT_HEADER_SIZE;
+}
+
+fn writeLargeFragmentPayload(
+    buf: []u8,
+    record_type: WalRecordType,
+    total_len: usize,
+    fragment_offset: usize,
+    fragment_index: u16,
+    fragment_count: u16,
+    logical_prev_lsn: u64,
+    fragment: []const u8,
+) WalError![]const u8 {
+    if (record_type == .large_fragment) return WalError.CorruptedFrame;
+    if (total_len > MAX_LOGICAL_RECORD_PAYLOAD_SIZE) return WalError.RecordTooLarge;
+    if (fragment.len > std.math.maxInt(u16)) return WalError.RecordTooLarge;
+    if (buf.len < LARGE_FRAGMENT_HEADER_SIZE + fragment.len) return WalError.RecordTooLarge;
+
+    std.mem.writeInt(u32, buf[0..4], LARGE_FRAGMENT_MAGIC, .little);
+    buf[4] = @intFromEnum(record_type);
+    buf[5] = 0;
+    std.mem.writeInt(u16, buf[6..8], fragment_index, .little);
+    std.mem.writeInt(u16, buf[8..10], fragment_count, .little);
+    std.mem.writeInt(u16, buf[10..12], @intCast(fragment.len), .little);
+    std.mem.writeInt(u32, buf[12..16], @intCast(total_len), .little);
+    std.mem.writeInt(u32, buf[16..20], @intCast(fragment_offset), .little);
+    std.mem.writeInt(u64, buf[20..28], logical_prev_lsn, .little);
+    if (fragment.len > 0) {
+        @memcpy(buf[LARGE_FRAGMENT_HEADER_SIZE..][0..fragment.len], fragment);
+    }
+    return buf[0 .. LARGE_FRAGMENT_HEADER_SIZE + fragment.len];
+}
+
+fn parseLargeFragmentPayload(payload: []const u8) WalError!LargeFragmentInfo {
+    if (payload.len < LARGE_FRAGMENT_HEADER_SIZE) return WalError.CorruptedFrame;
+    const magic = std.mem.readInt(u32, payload[0..4], .little);
+    if (magic != LARGE_FRAGMENT_MAGIC) return WalError.CorruptedFrame;
+
+    const record_type: WalRecordType = switch (payload[4]) {
+        @intFromEnum(WalRecordType.txn_begin) => .txn_begin,
+        @intFromEnum(WalRecordType.txn_commit) => .txn_commit,
+        @intFromEnum(WalRecordType.txn_abort) => .txn_abort,
+        @intFromEnum(WalRecordType.insert) => .insert,
+        @intFromEnum(WalRecordType.update) => .update,
+        @intFromEnum(WalRecordType.delete) => .delete,
+        @intFromEnum(WalRecordType.page_write) => .page_write,
+        @intFromEnum(WalRecordType.checkpoint_begin) => .checkpoint_begin,
+        @intFromEnum(WalRecordType.checkpoint_end) => .checkpoint_end,
+        @intFromEnum(WalRecordType.savepoint) => .savepoint,
+        @intFromEnum(WalRecordType.savepoint_rollback) => .savepoint_rollback,
+        @intFromEnum(WalRecordType.clr) => .clr,
+        else => return WalError.CorruptedFrame,
+    };
+    if (record_type == .large_fragment) return WalError.CorruptedFrame;
+
+    const fragment_index = std.mem.readInt(u16, payload[6..8], .little);
+    const fragment_count = std.mem.readInt(u16, payload[8..10], .little);
+    const fragment_len = std.mem.readInt(u16, payload[10..12], .little);
+    const total_len = std.mem.readInt(u32, payload[12..16], .little);
+    const fragment_offset = std.mem.readInt(u32, payload[16..20], .little);
+    const logical_prev_lsn = std.mem.readInt(u64, payload[20..28], .little);
+
+    if (total_len > MAX_LOGICAL_RECORD_PAYLOAD_SIZE) return WalError.RecordTooLarge;
+    if (fragment_count == 0 or fragment_index >= fragment_count) return WalError.CorruptedFrame;
+    if (payload.len != LARGE_FRAGMENT_HEADER_SIZE + fragment_len) return WalError.CorruptedFrame;
+    if (@as(usize, fragment_offset) + @as(usize, fragment_len) > @as(usize, total_len)) {
+        return WalError.CorruptedFrame;
+    }
+
+    return .{
+        .record_type = record_type,
+        .total_len = total_len,
+        .fragment_offset = fragment_offset,
+        .fragment_len = fragment_len,
+        .fragment_index = fragment_index,
+        .fragment_count = fragment_count,
+        .logical_prev_lsn = logical_prev_lsn,
+        .fragment = payload[LARGE_FRAGMENT_HEADER_SIZE..],
+    };
+}
 
 // ============================================================================
 // WAL Manager
@@ -238,6 +357,10 @@ pub const WalManager = struct {
         return frameDataSizeFor(self.frame_size);
     }
 
+    fn maxRecordPayloadSize(self: *const Self) usize {
+        return maxRecordPayloadSizeFor(self.frame_size);
+    }
+
     /// Close the WAL file
     pub fn deinit(self: *Self) void {
         // Flush any pending records
@@ -271,6 +394,10 @@ pub const WalManager = struct {
         // Validate magic
         if (self.header.magic != WAL_MAGIC) {
             return WalError.InvalidMagic;
+        }
+
+        if (self.header.version < MIN_READABLE_WAL_VERSION or self.header.version > WAL_FORMAT_VERSION) {
+            return WalError.VersionMismatch;
         }
 
         // Validate UUID
@@ -355,15 +482,31 @@ pub const WalManager = struct {
     /// Append a record to the WAL
     /// Returns the assigned LSN
     pub fn appendRecord(self: *Self, record_type: WalRecordType, txn_id: u64, prev_lsn: u64, payload: []const u8) WalError!u64 {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (record_type == .large_fragment) return WalError.CorruptedFrame;
+
+        if (payload.len <= self.maxRecordPayloadSize()) {
+            return self.appendPhysicalRecordLocked(record_type, txn_id, prev_lsn, payload);
+        }
+
+        return self.appendFragmentedRecordLocked(record_type, txn_id, prev_lsn, payload);
+    }
+
+    fn appendPhysicalRecordLocked(
+        self: *Self,
+        record_type: WalRecordType,
+        txn_id: u64,
+        prev_lsn: u64,
+        payload: []const u8,
+    ) WalError!u64 {
         if (payload.len > std.math.maxInt(u16)) return WalError.RecordTooLarge;
         const record_size = @sizeOf(WalRecordHeader) + payload.len;
 
         if (record_size > self.frameDataSize()) {
             return WalError.RecordTooLarge;
         }
-
-        self.mutex.lock();
-        defer self.mutex.unlock();
 
         // Check if record fits in current frame
         if (self.current_offset + record_size > self.frameDataSize()) {
@@ -398,6 +541,49 @@ pub const WalManager = struct {
         self.current_frame_header.data_size = @intCast(self.current_offset);
 
         return lsn;
+    }
+
+    fn appendFragmentedRecordLocked(
+        self: *Self,
+        record_type: WalRecordType,
+        txn_id: u64,
+        prev_lsn: u64,
+        payload: []const u8,
+    ) WalError!u64 {
+        if (payload.len > MAX_LOGICAL_RECORD_PAYLOAD_SIZE) return WalError.RecordTooLarge;
+
+        const fragment_capacity = largeFragmentPayloadCapacityFor(self.frame_size);
+        if (fragment_capacity == 0) return WalError.RecordTooLarge;
+
+        const fragment_count_usize = (payload.len + fragment_capacity - 1) / fragment_capacity;
+        if (fragment_count_usize == 0 or fragment_count_usize > std.math.maxInt(u16)) {
+            return WalError.RecordTooLarge;
+        }
+
+        var fragment_buf: [MAX_RECORD_PAYLOAD_SIZE]u8 = undefined;
+        var offset: usize = 0;
+        var fragment_index: u16 = 0;
+        var physical_prev_lsn = prev_lsn;
+        var last_lsn: u64 = prev_lsn;
+
+        while (offset < payload.len) : (fragment_index += 1) {
+            const chunk_len = @min(fragment_capacity, payload.len - offset);
+            const fragment_payload = try writeLargeFragmentPayload(
+                fragment_buf[0..self.maxRecordPayloadSize()],
+                record_type,
+                payload.len,
+                offset,
+                fragment_index,
+                @intCast(fragment_count_usize),
+                prev_lsn,
+                payload[offset..][0..chunk_len],
+            );
+            last_lsn = try self.appendPhysicalRecordLocked(.large_fragment, txn_id, physical_prev_lsn, fragment_payload);
+            physical_prev_lsn = last_lsn;
+            offset += chunk_len;
+        }
+
+        return last_lsn;
     }
 
     /// Flush current frame to disk
@@ -496,6 +682,55 @@ pub const WalIterator = struct {
 
     /// Get the next record
     pub fn next(self: *Self, payload_buf: []u8) WalError!?WalRecord {
+        var physical_buf: [MAX_RECORD_PAYLOAD_SIZE]u8 = undefined;
+        const physical = (try self.nextPhysical(&physical_buf)) orelse return null;
+        if (physical.header.record_type != .large_fragment) {
+            if (physical.payload.len > payload_buf.len) return WalError.RecordTooLarge;
+            if (physical.payload.len > 0) {
+                @memcpy(payload_buf[0..physical.payload.len], physical.payload);
+            }
+            return .{
+                .header = physical.header,
+                .payload = payload_buf[0..physical.payload.len],
+            };
+        }
+
+        return try self.reassembleLargeRecord(physical, &physical_buf, payload_buf);
+    }
+
+    /// Get the next logical record with an owned payload.
+    pub fn nextAlloc(self: *Self, allocator: Allocator) WalError!?OwnedWalRecord {
+        const physical_buf = allocator.alloc(u8, self.wal.maxRecordPayloadSize()) catch return WalError.IoError;
+        defer allocator.free(physical_buf);
+
+        const physical = (try self.nextPhysical(physical_buf)) orelse return null;
+        if (physical.header.record_type != .large_fragment) {
+            const owned = allocator.alloc(u8, physical.payload.len) catch return WalError.IoError;
+            if (physical.payload.len > 0) @memcpy(owned, physical.payload);
+            return .{
+                .header = physical.header,
+                .payload = owned,
+                .allocator = allocator,
+            };
+        }
+
+        const first = try parseLargeFragmentPayload(physical.payload);
+        const owned = allocator.alloc(u8, first.total_len) catch return WalError.IoError;
+        errdefer allocator.free(owned);
+
+        const logical = (try self.reassembleLargeRecordInto(physical, first, physical_buf, owned)) orelse {
+            allocator.free(owned);
+            return null;
+        };
+
+        return .{
+            .header = logical,
+            .payload = owned,
+            .allocator = allocator,
+        };
+    }
+
+    fn nextPhysical(self: *Self, payload_buf: []u8) WalError!?WalRecord {
         while (true) {
             // Load frame if needed
             if (!self.frame_loaded or self.current_offset >= self.frame_header.data_size) {
@@ -546,6 +781,77 @@ pub const WalIterator = struct {
                 .payload = payload_buf[0..payload_len],
             };
         }
+    }
+
+    fn reassembleLargeRecord(
+        self: *Self,
+        first_record: WalRecord,
+        physical_buf: []u8,
+        payload_buf: []u8,
+    ) WalError!?WalRecord {
+        const first = try parseLargeFragmentPayload(first_record.payload);
+        if (first.total_len > payload_buf.len) return WalError.RecordTooLarge;
+        const header = (try self.reassembleLargeRecordInto(
+            first_record,
+            first,
+            physical_buf,
+            payload_buf[0..first.total_len],
+        )) orelse return null;
+        return .{
+            .header = header,
+            .payload = payload_buf[0..first.total_len],
+        };
+    }
+
+    fn reassembleLargeRecordInto(
+        self: *Self,
+        first_record: WalRecord,
+        first: LargeFragmentInfo,
+        physical_buf: []u8,
+        output: []u8,
+    ) WalError!?WalRecordHeader {
+        if (first.fragment_index != 0 or first.fragment_offset != 0) return WalError.CorruptedFrame;
+        if (first.total_len != output.len) return WalError.RecordTooLarge;
+
+        if (first.fragment_len > 0) {
+            @memcpy(output[0..first.fragment_len], first.fragment);
+        }
+
+        var logical_header = first_record.header;
+        logical_header.record_type = first.record_type;
+        logical_header.prev_lsn = first.logical_prev_lsn;
+        logical_header.payload_size = @intCast(@min(first.total_len, std.math.maxInt(u16)));
+
+        var expected_offset = first.fragment_len;
+        var expected_index: u16 = 1;
+        var last_lsn = first_record.header.lsn;
+
+        while (expected_index < first.fragment_count) : (expected_index += 1) {
+            const next_record = (try self.nextPhysical(physical_buf)) orelse return null;
+            if (next_record.header.record_type != .large_fragment) return WalError.CorruptedFrame;
+            if (next_record.header.txn_id != first_record.header.txn_id) return WalError.CorruptedFrame;
+
+            const fragment = try parseLargeFragmentPayload(next_record.payload);
+            if (fragment.record_type != first.record_type or
+                fragment.total_len != first.total_len or
+                fragment.fragment_index != expected_index or
+                fragment.fragment_count != first.fragment_count or
+                fragment.fragment_offset != expected_offset or
+                fragment.logical_prev_lsn != first.logical_prev_lsn)
+            {
+                return WalError.CorruptedFrame;
+            }
+
+            if (fragment.fragment_len > 0) {
+                @memcpy(output[fragment.fragment_offset..][0..fragment.fragment_len], fragment.fragment);
+            }
+            expected_offset += fragment.fragment_len;
+            last_lsn = next_record.header.lsn;
+        }
+
+        if (expected_offset != first.total_len) return WalError.CorruptedFrame;
+        logical_header.lsn = last_lsn;
+        return logical_header;
     }
 
     /// Load the next frame

@@ -105,7 +105,7 @@ fn validateUtf8Name(value: []const u8, comptime err: StreamError) StreamError!vo
 fn mapBTreeError(err: BTreeError) StreamError {
     return switch (err) {
         BTreeError.OutOfMemory => StreamError.OutOfMemory,
-        BTreeError.PageFull => StreamError.ValueTooLarge,
+        BTreeError.PageFull, BTreeError.ValueTooLarge => StreamError.ValueTooLarge,
         else => StreamError.IoError,
     };
 }
@@ -161,6 +161,7 @@ fn readU64Value(bytes: []const u8) StreamError!u64 {
 }
 
 fn upsert(tree: *BTree, key: []const u8, value: []const u8) StreamError!void {
+    // Guard the delete+insert sequence against values above the B-tree cap.
     if (!tree.canFitLeafEntry(key, value.len)) return StreamError.ValueTooLarge;
     if (tree.contains(key) catch |err| return mapBTreeError(err)) {
         tree.delete(key) catch |err| switch (err) {

@@ -251,10 +251,8 @@ pub const RecoveryManager = struct {
         const start_lsn = if (stats.start_lsn > 0) stats.start_lsn else 1;
         var wal_iter = wal.iterate(start_lsn);
 
-        var payload_buf: [wal_mod.MAX_RECORD_PAYLOAD_SIZE]u8 = undefined;
-
         while (true) {
-            const maybe_record = wal_iter.next(&payload_buf) catch |err| {
+            const owned_record = wal_iter.nextAlloc(self.allocator) catch |err| {
                 switch (err) {
                     WalError.ChecksumMismatch => {
                         // Got corruption - need to determine if it's tail or mid-log
@@ -277,7 +275,12 @@ pub const RecoveryManager = struct {
                 }
             };
 
-            const record = maybe_record orelse break;
+            const record = owned_record orelse break;
+            var payload_taken = false;
+            defer if (!payload_taken) {
+                var mutable_record = record;
+                mutable_record.deinit();
+            };
 
             stats.records_scanned += 1;
             stats.end_lsn = record.header.lsn;
@@ -317,18 +320,16 @@ pub const RecoveryManager = struct {
                         info.last_lsn = record.header.lsn;
                     }
 
-                    // Store for redo phase
-                    const payload_copy = self.allocator.alloc(u8, record.payload.len) catch {
-                        return RecoveryError.OutOfMemory;
-                    };
-                    @memcpy(payload_copy, record.payload);
-
+                    // Store for redo phase. `nextAlloc` already returned an
+                    // owned logical payload, including any reassembled large
+                    // fragment sequence.
                     redo_list.append(self.allocator, RedoEntry{
                         .txn_id = txn_id,
                         .lsn = record.header.lsn,
                         .record_type = record.header.record_type,
-                        .payload = payload_copy,
+                        .payload = record.payload,
                     }) catch return RecoveryError.OutOfMemory;
+                    payload_taken = true;
                 },
 
                 .checkpoint_begin, .checkpoint_end => {
@@ -346,6 +347,8 @@ pub const RecoveryManager = struct {
                     // Compensation log record - for undo operations
                     // In our simple model, we don't need to process these specially
                 },
+
+                .large_fragment => unreachable,
             }
         }
     }

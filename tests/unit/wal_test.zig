@@ -289,10 +289,10 @@ test "wal: checkpoint lsn updated correctly" {
 }
 
 // ============================================================================
-// Contract: Large records that exceed frame size are rejected
+// Contract: Large logical records are fragmented and reassembled
 // ============================================================================
 
-test "wal: record too large rejected" {
+test "wal: 1MB logical payload fragmented and reassembled" {
     const allocator = std.testing.allocator;
 
     var posix_vfs = PosixVfs.init(allocator);
@@ -307,10 +307,44 @@ test "wal: record too large rejected" {
     var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
     defer wal.deinit();
 
-    // Frame data size is ~4064 bytes, try to write something larger
-    const huge_payload = [_]u8{'x'} ** 5000;
+    const payload = try allocator.alloc(u8, 1024 * 1024);
+    defer allocator.free(payload);
+    @memset(payload, 'x');
 
-    const result = wal.appendRecord(.insert, 1, 0, &huge_payload);
+    const lsn = try wal.appendRecord(.insert, 1, 0, payload);
+    try std.testing.expect(lsn > 1);
+    try wal.sync();
+
+    var iter = wal.iterate(1);
+    const read_buf = try allocator.alloc(u8, payload.len);
+    defer allocator.free(read_buf);
+    const record = (try iter.next(read_buf)).?;
+    try std.testing.expectEqual(WalRecordType.insert, record.header.record_type);
+    try std.testing.expectEqualSlices(u8, payload, record.payload);
+
+    const end = try iter.next(read_buf);
+    try std.testing.expect(end == null);
+}
+
+test "wal: logical record above max rejected" {
+    const allocator = std.testing.allocator;
+
+    var posix_vfs = PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const path = try createTempPath(allocator, "toolarge");
+    defer allocator.free(path);
+    defer vfs_impl.delete(path) catch {};
+
+    const uuid = generateUuid();
+
+    var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+    defer wal.deinit();
+
+    const huge_payload = try allocator.alloc(u8, wal_mod.MAX_LOGICAL_RECORD_PAYLOAD_SIZE + 1);
+    defer allocator.free(huge_payload);
+
+    const result = wal.appendRecord(.insert, 1, 0, huge_payload);
     try std.testing.expectError(WalError.RecordTooLarge, result);
 }
 

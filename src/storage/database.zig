@@ -130,9 +130,8 @@ pub const DatabaseError = error{
     TransactionNotActive,
     TransactionReadOnly,
     TransactionsNotEnabled,
-    /// Serialized node/edge payload is too large for a single btree leaf
-    /// page. The caller should split the value across multiple entries
-    /// or open the database with a larger `page_size`.
+    /// Serialized node/edge payload exceeds the B-tree value limit or could
+    /// not be represented by the on-disk value layout.
     ValueTooLarge,
 };
 
@@ -6753,12 +6752,7 @@ test "transactional commit across graph fts and vector indexes leaves no pinned 
     try std.testing.expectEqual(@as(usize, 0), db.buffer_pool.getStats().pinned_frames);
 }
 
-test "setNodeProperty rejects values larger than one btree leaf page gracefully" {
-    // Regression: a property value big enough that its serialized node
-    // cannot fit in a single btree leaf used to panic deep inside
-    // `insertLeafEntry` (`min_offset - entry_size` integer overflow).
-    // It now propagates as `DatabaseError.ValueTooLarge` so callers can
-    // split the value or widen `page_size` instead of crashing.
+test "setNodeProperty round-trips values larger than one btree leaf page" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_oversized_value_test.ltdb";
 
@@ -6776,20 +6770,16 @@ test "setNodeProperty rejects values larger than one btree leaf page gracefully"
 
     const node_id = try db.createNode(null, &[_][]const u8{"Doc"});
 
-    // ~16 KiB blows past the 4 KiB default page_size by several pages.
     var big_buf: [16384]u8 = undefined;
     @memset(&big_buf, 'x');
-    const result = db.setNodeProperty(null, node_id, "blob", .{ .string_val = &big_buf });
-    try std.testing.expectError(DatabaseError.ValueTooLarge, result);
+    try db.setNodeProperty(null, node_id, "blob", .{ .string_val = &big_buf });
 
-    // Prior (fitting) state must survive the rejected write.
-    try db.setNodeProperty(null, node_id, "blob", .{ .string_val = "small" });
     var got = (try db.getNodeProperty(node_id, "blob")).?;
     defer got.deinit(allocator);
-    try std.testing.expectEqualStrings("small", got.string_val);
+    try std.testing.expectEqualSlices(u8, &big_buf, got.string_val);
 }
 
-test "transactional oversized node property is rejected before commit without pinned frames" {
+test "transactional oversized node property commits without pinned frames" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_txn_oversized_node_value_test.ltdb";
 
@@ -6816,10 +6806,7 @@ test "transactional oversized node property is rejected before commit without pi
 
     var large_json: [8192]u8 = undefined;
     @memset(&large_json, 'x');
-    try std.testing.expectError(
-        DatabaseError.ValueTooLarge,
-        db.setNodeProperty(&txn, node_id, "properties_json", .{ .string_val = &large_json }),
-    );
+    try db.setNodeProperty(&txn, node_id, "properties_json", .{ .string_val = &large_json });
 
     try std.testing.expectEqual(@as(usize, 0), db.buffer_pool.getStats().pinned_frames);
 
@@ -6830,7 +6817,172 @@ test "transactional oversized node property is rejected before commit without pi
     var got = (try db.getNodeProperty(node_id, "qid")).?;
     defer got.deinit(allocator);
     try std.testing.expectEqualStrings("lme-q-000001", got.string_val);
-    try std.testing.expect((try db.getNodeProperty(node_id, "properties_json")) == null);
+    var got_json = (try db.getNodeProperty(node_id, "properties_json")).?;
+    defer got_json.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, &large_json, got_json.string_val);
+}
+
+test "default 4KiB pages round-trip 100KB and 1MB string properties" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_default_page_large_string_values_test.ltdb";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .page_size = 4096,
+        .config = .{
+            .enable_wal = true,
+            .enable_fts = false,
+        },
+    });
+    defer {
+        db.close();
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    try std.testing.expectEqual(@as(u32, 4096), db.page_manager.getPageSize());
+
+    const node_id = try db.createNode(null, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(null, node_id, "status", .{ .string_val = "small-ok" });
+
+    const cases = [_]struct {
+        name: []const u8,
+        len: usize,
+    }{
+        .{ .name = "blob_100kb", .len = 100 * 1024 },
+        .{ .name = "blob_1mb", .len = 1024 * 1024 },
+    };
+
+    for (cases) |case| {
+        const payload = try allocator.alloc(u8, case.len);
+        defer allocator.free(payload);
+        @memset(payload, 'x');
+
+        try db.setNodeProperty(null, node_id, case.name, .{ .string_val = payload });
+
+        var got_status = (try db.getNodeProperty(node_id, "status")).?;
+        defer got_status.deinit(allocator);
+        try std.testing.expectEqualStrings("small-ok", got_status.string_val);
+        var got_payload = (try db.getNodeProperty(node_id, case.name)).?;
+        defer got_payload.deinit(allocator);
+        try std.testing.expectEqualSlices(u8, payload, got_payload.string_val);
+        try std.testing.expectEqual(@as(usize, 0), db.buffer_pool.getStats().pinned_frames);
+    }
+}
+
+test "default 4KiB transactional writes round-trip 100KB and 1MB string properties without pinned frames" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_default_page_txn_large_string_values_test.ltdb";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .page_size = 4096,
+        .config = .{
+            .buffer_pool_size = 4 * 1024 * 1024,
+            .enable_wal = true,
+            .enable_fts = false,
+        },
+    });
+    defer {
+        db.close();
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    try std.testing.expectEqual(@as(u32, 4096), db.page_manager.getPageSize());
+
+    const cases = [_]struct {
+        qid: []const u8,
+        len: usize,
+    }{
+        .{ .qid = "lme-q-100kb", .len = 100 * 1024 },
+        .{ .qid = "lme-q-1mb", .len = 1024 * 1024 },
+    };
+
+    for (cases) |case| {
+        const payload = try allocator.alloc(u8, case.len);
+        defer allocator.free(payload);
+        @memset(payload, 'y');
+
+        var txn = try db.beginTransaction(.read_write);
+        var committed = false;
+        errdefer if (!committed) db.abortTransaction(&txn) catch {};
+
+        const node_id = try db.createNode(&txn, &[_][]const u8{"Doc"});
+        try db.setNodeProperty(&txn, node_id, "qid", .{ .string_val = case.qid });
+        try db.setNodeProperty(&txn, node_id, "properties_json", .{ .string_val = payload });
+        try std.testing.expectEqual(@as(usize, 0), db.buffer_pool.getStats().pinned_frames);
+
+        try db.commitTransaction(&txn);
+        committed = true;
+        try std.testing.expectEqual(@as(usize, 0), db.buffer_pool.getStats().pinned_frames);
+
+        var got_qid = (try db.getNodeProperty(node_id, "qid")).?;
+        defer got_qid.deinit(allocator);
+        try std.testing.expectEqualStrings(case.qid, got_qid.string_val);
+        var got_payload = (try db.getNodeProperty(node_id, "properties_json")).?;
+        defer got_payload.deinit(allocator);
+        try std.testing.expectEqualSlices(u8, payload, got_payload.string_val);
+    }
+}
+
+test "default 4KiB high-write nodes with qid and large properties_json leave no pinned frames" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_default_page_high_write_large_properties_test.ltdb";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .page_size = 4096,
+        .config = .{
+            .buffer_pool_size = 8 * 1024 * 1024,
+            .enable_wal = true,
+            .enable_fts = false,
+        },
+    });
+    defer {
+        db.close();
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    const payload = try allocator.alloc(u8, 64 * 1024);
+    defer allocator.free(payload);
+    @memset(payload, 'p');
+
+    var txn = try db.beginTransaction(.read_write);
+    var committed = false;
+    errdefer if (!committed) db.abortTransaction(&txn) catch {};
+
+    const count = 32;
+    var ids: [count]NodeId = undefined;
+    var qid_buf: [32]u8 = undefined;
+    for (0..count) |i| {
+        const node_id = try db.createNode(&txn, &[_][]const u8{"Doc"});
+        ids[i] = node_id;
+        const qid = try std.fmt.bufPrint(&qid_buf, "lme-q-{d:06}", .{i});
+        try db.setNodeProperty(&txn, node_id, "qid", .{ .string_val = qid });
+        try db.setNodeProperty(&txn, node_id, "properties_json", .{ .string_val = payload });
+    }
+
+    try std.testing.expectEqual(@as(usize, 0), db.buffer_pool.getStats().pinned_frames);
+    try db.commitTransaction(&txn);
+    committed = true;
+    try std.testing.expectEqual(@as(usize, 0), db.buffer_pool.getStats().pinned_frames);
+
+    var got_qid = (try db.getNodeProperty(ids[0], "qid")).?;
+    defer got_qid.deinit(allocator);
+    try std.testing.expectEqualStrings("lme-q-000000", got_qid.string_val);
+
+    var got_payload = (try db.getNodeProperty(ids[count - 1], "properties_json")).?;
+    defer got_payload.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, payload, got_payload.string_val);
+    try std.testing.expectEqual(@as(usize, 0), db.buffer_pool.getStats().pinned_frames);
 }
 
 test "query: simple MATCH RETURN" {

@@ -111,6 +111,39 @@ test "committed transaction recovered after crash" {
     }
 }
 
+test "committed 1MB property recovered from fragmented WAL after crash" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_large_property.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    const payload = try allocator.alloc(u8, 1024 * 1024);
+    defer allocator.free(payload);
+    @memset(payload, 'r');
+
+    var node_id: NodeId = undefined;
+
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+        var txn = try db.beginTransaction(.read_write);
+        node_id = try db.createNode(&txn, &[_][]const u8{"Doc"});
+        try db.setNodeProperty(&txn, node_id, "properties_json", .{ .string_val = payload });
+        try db.commitTransaction(&txn);
+        db.close();
+    }
+
+    try simulateCrash(path);
+
+    {
+        var db = try openCrashTestDb(allocator, path, false);
+        defer db.close();
+
+        var got = (try db.getNodeProperty(node_id, "properties_json")).?;
+        defer got.deinit(allocator);
+        try std.testing.expectEqualSlices(u8, payload, got.string_val);
+    }
+}
+
 test "uncommitted transaction not recovered" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_crash_uncommitted.ltdb";

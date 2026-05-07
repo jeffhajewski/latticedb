@@ -1322,6 +1322,7 @@ fn mapBTreeError(err: BTreeError) EdgeError {
     return switch (err) {
         BTreeError.KeyNotFound => EdgeError.NotFound,
         BTreeError.OutOfMemory => EdgeError.OutOfMemory,
+        BTreeError.PageFull, BTreeError.ValueTooLarge => EdgeError.BufferTooSmall,
         else => EdgeError.BTreeError,
     };
 }

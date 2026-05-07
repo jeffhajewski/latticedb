@@ -204,11 +204,9 @@ pub const NodeStore = struct {
             return NodeError.NotFound;
         }
 
-        // Serialize new data AND bail out up-front if it is too big for
-        // a single btree leaf page. Doing the size check before the
-        // delete keeps the store consistent if an oversized update is
-        // rejected: the existing node is still reachable and callers see
-        // a clean `BufferTooSmall` error.
+        // Serialize new data AND bail out up-front if it exceeds the B-tree
+        // value limit. Doing the size check before the delete keeps the store
+        // consistent if an oversized update is rejected.
         const serialized = try self.serializeNodeAlloc(labels, properties);
         defer self.allocator.free(serialized);
         if (!self.tree.canFitLeafEntry(&key_buf, serialized.len)) {
@@ -246,9 +244,8 @@ pub const NodeStore = struct {
         };
     }
 
-    /// Check whether a fully serialized node record can fit in this store's
-    /// backing B+Tree. Nodes are stored as one leaf value, so callers use this
-    /// before staging transactional state that would later fail at commit.
+    /// Check whether a fully serialized node record is representable in this
+    /// store's backing B+Tree.
     pub fn canFitNode(
         self: *const Self,
         node_id: NodeId,
@@ -527,11 +524,9 @@ fn mapBTreeError(err: BTreeError) NodeError {
     return switch (err) {
         BTreeError.KeyNotFound => NodeError.NotFound,
         BTreeError.OutOfMemory => NodeError.OutOfMemory,
-        // PageFull from the leaf layer surfaces when a single node's
-        // serialized payload would not fit inside one btree leaf page.
-        // Translate it into BufferTooSmall so callers see a clear "value
-        // too large for page_size" signal instead of a generic BTreeError.
-        BTreeError.PageFull => NodeError.BufferTooSmall,
+        // Translate storage-layer size rejections into the existing
+        // BufferTooSmall signal consumed by Database.
+        BTreeError.PageFull, BTreeError.ValueTooLarge => NodeError.BufferTooSmall,
         else => NodeError.BTreeError,
     };
 }

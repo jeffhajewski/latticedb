@@ -182,7 +182,7 @@ test "c_api: zero page_size in open options keeps default page size" {
     try std.testing.expectEqual(@as(u32, 4096), header.page_size);
 }
 
-test "c_api: oversized first-write node properties report value too large" {
+test "c_api: oversized first-write node properties fit on default pages" {
     const path = "/tmp/lattice_capi_first_write_value_too_large_test.db";
 
     @import("compat").fs.cwd().deleteFile(path) catch {};
@@ -231,10 +231,10 @@ test "c_api: oversized first-write node properties report value too large" {
         .data = .{ .string_val = .{ .ptr = large_json[0..].ptr, .len = large_json.len } },
     };
     try std.testing.expectEqual(
-        lattice_error.err_value_too_large,
+        lattice_error.ok,
         c_api.lattice_node_set_property(txn, node_id, json_key.ptr, &json_property),
     );
-    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_rollback(txn));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
 }
 
 test "c_api: LongMemEval-shaped first write succeeds with larger page size" {

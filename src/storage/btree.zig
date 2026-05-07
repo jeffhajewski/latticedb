@@ -27,6 +27,7 @@ pub const BTreeError = error{
     KeyNotFound,
     DuplicateKey,
     PageFull,
+    ValueTooLarge,
     InvalidPage,
     TreeEmpty,
     IoError,
@@ -64,6 +65,21 @@ const INTERNAL_SLOT_SIZE = 6;
 /// Each slot in leaf node: offset(2) = 2 bytes (points to key-value entry)
 const LEAF_SLOT_SIZE = 2;
 
+/// Leaf value length sentinel for generic B-tree overflow values.
+const OVERFLOW_VALUE_LEN_SENTINEL: u16 = std.math.maxInt(u16);
+
+/// Maximum serialized value accepted by the B-tree layer.
+pub const MAX_VALUE_SIZE: usize = 64 * 1024 * 1024;
+
+/// Keep a small prefix on the leaf page so scans can inspect a little local
+/// value data without following the overflow chain in future callers.
+const OVERFLOW_LOCAL_PREFIX_TARGET: usize = 64;
+
+const OVERFLOW_DESCRIPTOR_MAGIC: u32 = 0x31564f4c; // "LOV1"
+const OVERFLOW_PAGE_MAGIC: u32 = 0x31564f42; // "BOV1"
+const OVERFLOW_DESCRIPTOR_FIXED_SIZE: usize = 28;
+const OVERFLOW_PAGE_HEADER_SIZE: usize = @sizeOf(PageHeader) + 12;
+
 /// Minimum keys before considering merge (not implemented yet)
 const MIN_KEYS = 2;
 
@@ -71,6 +87,59 @@ const MIN_KEYS = 2;
 pub const Entry = struct {
     key: []const u8,
     value: []const u8,
+};
+
+const StoredEntry = struct {
+    key: []const u8,
+    value: []const u8,
+    overflow: bool,
+};
+
+const StoredValue = struct {
+    value: []const u8,
+    overflow: bool,
+};
+
+const OverflowChain = struct {
+    first_page: PageId,
+    page_count: u32,
+};
+
+const OverflowDescriptor = struct {
+    total_len: usize,
+    first_page: PageId,
+    page_count: u32,
+    local_prefix_len: u16,
+    flags: u16,
+    checksum: u32,
+    local_prefix: []const u8,
+
+    fn storedLen(self: OverflowDescriptor) usize {
+        return OVERFLOW_DESCRIPTOR_FIXED_SIZE + self.local_prefix_len;
+    }
+};
+
+const PreparedStoredValue = struct {
+    value: []const u8,
+    overflow: bool,
+    owns_value: bool,
+    first_overflow_page: PageId,
+    page_count: u32,
+
+    fn deinit(self: *PreparedStoredValue, tree: *BTree) void {
+        if (self.owns_value) {
+            tree.allocator.free(@constCast(self.value));
+            self.owns_value = false;
+        }
+    }
+
+    fn rollback(self: *PreparedStoredValue, tree: *BTree) void {
+        if (self.overflow and self.first_overflow_page != NULL_PAGE and self.page_count > 0) {
+            tree.freeOverflowChain(self.first_overflow_page, self.page_count) catch {};
+            self.first_overflow_page = NULL_PAGE;
+            self.page_count = 0;
+        }
+    }
 };
 
 // ============================================================================
@@ -225,21 +294,50 @@ pub const LeafNode = struct {
     }
 
     /// Get value at slot
-    fn getValue(buf: []const u8, slot: u16) []const u8 {
+    fn getStoredValue(buf: []const u8, slot: u16) StoredValue {
         const offset = getEntryOffset(buf, slot);
         const key_len = std.mem.readInt(u16, buf[offset..][0..2], .little);
         const val_len = std.mem.readInt(u16, buf[offset + 2 ..][0..2], .little);
-        return buf[offset + 4 + key_len ..][0..val_len];
+        const value_offset = offset + 4 + key_len;
+        if (val_len == OVERFLOW_VALUE_LEN_SENTINEL) {
+            const desc = parseOverflowDescriptor(buf[value_offset..]) catch {
+                return .{ .value = &[_]u8{}, .overflow = true };
+            };
+            return .{
+                .value = buf[value_offset..][0..desc.storedLen()],
+                .overflow = true,
+            };
+        }
+        return .{
+            .value = buf[value_offset..][0..val_len],
+            .overflow = false,
+        };
     }
 
     /// Get both key and value at slot
-    fn getEntry(buf: []const u8, slot: u16) Entry {
+    fn getStoredEntry(buf: []const u8, slot: u16) StoredEntry {
         const offset = getEntryOffset(buf, slot);
         const key_len = std.mem.readInt(u16, buf[offset..][0..2], .little);
         const val_len = std.mem.readInt(u16, buf[offset + 2 ..][0..2], .little);
+        const value_offset = offset + 4 + key_len;
+        if (val_len == OVERFLOW_VALUE_LEN_SENTINEL) {
+            const desc = parseOverflowDescriptor(buf[value_offset..]) catch {
+                return .{
+                    .key = buf[offset + 4 ..][0..key_len],
+                    .value = &[_]u8{},
+                    .overflow = true,
+                };
+            };
+            return .{
+                .key = buf[offset + 4 ..][0..key_len],
+                .value = buf[value_offset..][0..desc.storedLen()],
+                .overflow = true,
+            };
+        }
         return .{
             .key = buf[offset + 4 ..][0..key_len],
-            .value = buf[offset + 4 + key_len ..][0..val_len],
+            .value = buf[value_offset..][0..val_len],
+            .overflow = false,
         };
     }
 
@@ -292,6 +390,65 @@ pub const LeafNode = struct {
         return .{ .slot = lo, .found = false };
     }
 };
+
+fn overflowPagePayloadCapacity(page_size: u32) usize {
+    if (page_size <= OVERFLOW_PAGE_HEADER_SIZE) return 0;
+    return @as(usize, page_size) - OVERFLOW_PAGE_HEADER_SIZE;
+}
+
+fn parseOverflowDescriptor(bytes: []const u8) BTreeError!OverflowDescriptor {
+    if (bytes.len < OVERFLOW_DESCRIPTOR_FIXED_SIZE) return BTreeError.InvalidPage;
+    const magic = std.mem.readInt(u32, bytes[0..4], .little);
+    if (magic != OVERFLOW_DESCRIPTOR_MAGIC) return BTreeError.InvalidPage;
+
+    const total_len_u64 = std.mem.readInt(u64, bytes[4..12], .little);
+    if (total_len_u64 > MAX_VALUE_SIZE) return BTreeError.ValueTooLarge;
+
+    const first_page = std.mem.readInt(u32, bytes[12..16], .little);
+    const page_count = std.mem.readInt(u32, bytes[16..20], .little);
+    const local_prefix_len = std.mem.readInt(u16, bytes[20..22], .little);
+    const flags = std.mem.readInt(u16, bytes[22..24], .little);
+    const checksum = std.mem.readInt(u32, bytes[24..28], .little);
+    const stored_len = OVERFLOW_DESCRIPTOR_FIXED_SIZE + @as(usize, local_prefix_len);
+    if (bytes.len < stored_len) return BTreeError.InvalidPage;
+    if (page_count == 0 and first_page != NULL_PAGE) return BTreeError.InvalidPage;
+    if (page_count > 0 and first_page == NULL_PAGE) return BTreeError.InvalidPage;
+    if (@as(u64, local_prefix_len) > total_len_u64) return BTreeError.InvalidPage;
+
+    return .{
+        .total_len = @intCast(total_len_u64),
+        .first_page = first_page,
+        .page_count = page_count,
+        .local_prefix_len = local_prefix_len,
+        .flags = flags,
+        .checksum = checksum,
+        .local_prefix = bytes[OVERFLOW_DESCRIPTOR_FIXED_SIZE..stored_len],
+    };
+}
+
+fn writeOverflowDescriptor(
+    buf: []u8,
+    total_len: usize,
+    first_page: PageId,
+    page_count: u32,
+    local_prefix: []const u8,
+    checksum: u32,
+) BTreeError!void {
+    if (buf.len != OVERFLOW_DESCRIPTOR_FIXED_SIZE + local_prefix.len) return BTreeError.InvalidPage;
+    if (total_len > MAX_VALUE_SIZE) return BTreeError.ValueTooLarge;
+    if (local_prefix.len > std.math.maxInt(u16)) return BTreeError.PageFull;
+
+    std.mem.writeInt(u32, buf[0..4], OVERFLOW_DESCRIPTOR_MAGIC, .little);
+    std.mem.writeInt(u64, buf[4..12], @intCast(total_len), .little);
+    std.mem.writeInt(u32, buf[12..16], first_page, .little);
+    std.mem.writeInt(u32, buf[16..20], page_count, .little);
+    std.mem.writeInt(u16, buf[20..22], @intCast(local_prefix.len), .little);
+    std.mem.writeInt(u16, buf[22..24], 0, .little);
+    std.mem.writeInt(u32, buf[24..28], checksum, .little);
+    if (local_prefix.len > 0) {
+        @memcpy(buf[OVERFLOW_DESCRIPTOR_FIXED_SIZE..], local_prefix);
+    }
+}
 
 // ============================================================================
 // B+Tree Structure
@@ -367,8 +524,8 @@ pub const BTree = struct {
                 // Search in leaf
                 const result = LeafNode.searchSlot(frame.data, key, self.comparator);
                 if (result.found) {
-                    const value = LeafNode.getValue(frame.data, result.slot);
-                    return self.allocator.dupe(u8, value) catch return BTreeError.OutOfMemory;
+                    const stored = LeafNode.getStoredValue(frame.data, result.slot);
+                    return self.materializeStoredValue(stored) catch |err| return err;
                 }
                 return null;
             }
@@ -398,6 +555,253 @@ pub const BTree = struct {
     /// Free a value returned by get().
     pub fn freeValue(self: *Self, value: []const u8) void {
         self.allocator.free(@constCast(value));
+    }
+
+    fn materializeStoredValue(self: *Self, stored: StoredValue) BTreeError![]u8 {
+        if (!stored.overflow) {
+            return self.allocator.dupe(u8, stored.value) catch return BTreeError.OutOfMemory;
+        }
+
+        const desc = try parseOverflowDescriptor(stored.value);
+        const result = self.allocator.alloc(u8, desc.total_len) catch return BTreeError.OutOfMemory;
+        errdefer self.allocator.free(result);
+
+        if (desc.local_prefix_len > 0) {
+            @memcpy(result[0..desc.local_prefix_len], desc.local_prefix);
+        }
+
+        var written: usize = desc.local_prefix_len;
+        if (desc.page_count > 0) {
+            try self.readOverflowChain(desc.first_page, desc.page_count, result[written..]);
+            written = desc.total_len;
+        }
+
+        if (written != desc.total_len) return BTreeError.InvalidPage;
+        if (page.calculateChecksum(result) != desc.checksum) return BTreeError.InvalidPage;
+        return result;
+    }
+
+    fn readOverflowChain(
+        self: *Self,
+        first_page: PageId,
+        page_count: u32,
+        dest: []u8,
+    ) BTreeError!void {
+        if (page_count == 0) {
+            if (dest.len != 0) return BTreeError.InvalidPage;
+            return;
+        }
+
+        const capacity = overflowPagePayloadCapacity(self.page_size);
+        if (capacity == 0) return BTreeError.InvalidPage;
+
+        var page_id = first_page;
+        var remaining = dest;
+        var pages_read: u32 = 0;
+        while (pages_read < page_count) : (pages_read += 1) {
+            if (page_id == NULL_PAGE) return BTreeError.InvalidPage;
+
+            const frame = self.bp.fetchPage(page_id, .shared) catch return BTreeError.BufferPoolFull;
+
+            const header: *const PageHeader = @ptrCast(@alignCast(frame.data.ptr));
+            if (header.page_type != .overflow) {
+                self.bp.unpinPage(frame, false);
+                return BTreeError.InvalidPage;
+            }
+            const magic = std.mem.readInt(u32, frame.data[@sizeOf(PageHeader)..][0..4], .little);
+            if (magic != OVERFLOW_PAGE_MAGIC) {
+                self.bp.unpinPage(frame, false);
+                return BTreeError.InvalidPage;
+            }
+
+            const next_page = std.mem.readInt(u32, frame.data[@sizeOf(PageHeader) + 4 ..][0..4], .little);
+            const chunk_len = std.mem.readInt(u16, frame.data[@sizeOf(PageHeader) + 8 ..][0..2], .little);
+            if (chunk_len > capacity or chunk_len > remaining.len) {
+                self.bp.unpinPage(frame, false);
+                return BTreeError.InvalidPage;
+            }
+
+            if (chunk_len > 0) {
+                @memcpy(remaining[0..chunk_len], frame.data[OVERFLOW_PAGE_HEADER_SIZE..][0..chunk_len]);
+                remaining = remaining[chunk_len..];
+            }
+
+            page_id = next_page;
+            self.bp.unpinPage(frame, false);
+        }
+
+        if (remaining.len != 0) return BTreeError.InvalidPage;
+        if (page_id != NULL_PAGE) return BTreeError.InvalidPage;
+    }
+
+    fn prepareStoredValue(self: *Self, key: []const u8, value: []const u8) BTreeError!PreparedStoredValue {
+        if (key.len > std.math.maxInt(u16)) return BTreeError.PageFull;
+        if (value.len > MAX_VALUE_SIZE) return BTreeError.ValueTooLarge;
+
+        if (value.len < OVERFLOW_VALUE_LEN_SENTINEL) {
+            const inline_size = storedLeafEntrySize(key, value) orelse return BTreeError.PageFull;
+            if (inline_size <= maxLeafEntrySize(self.page_size)) {
+                return .{
+                    .value = value,
+                    .overflow = false,
+                    .owns_value = false,
+                    .first_overflow_page = NULL_PAGE,
+                    .page_count = 0,
+                };
+            }
+        }
+
+        const prefix_len = self.chooseOverflowLocalPrefixLen(key, value.len) orelse {
+            return BTreeError.PageFull;
+        };
+        const remaining_len = value.len - prefix_len;
+        const capacity = overflowPagePayloadCapacity(self.page_size);
+        if (remaining_len > 0 and capacity == 0) return BTreeError.PageFull;
+
+        const page_count_usize = if (remaining_len == 0)
+            0
+        else
+            (remaining_len + capacity - 1) / capacity;
+        if (page_count_usize > std.math.maxInt(u32)) return BTreeError.ValueTooLarge;
+
+        const chain = if (remaining_len > 0)
+            try self.writeOverflowChain(value[prefix_len..], @intCast(page_count_usize))
+        else
+            OverflowChain{ .first_page = NULL_PAGE, .page_count = 0 };
+        errdefer if (chain.first_page != NULL_PAGE and chain.page_count > 0) {
+            self.freeOverflowChain(chain.first_page, chain.page_count) catch {};
+        };
+
+        const desc_len = OVERFLOW_DESCRIPTOR_FIXED_SIZE + prefix_len;
+        const desc = self.allocator.alloc(u8, desc_len) catch return BTreeError.OutOfMemory;
+        errdefer self.allocator.free(desc);
+
+        try writeOverflowDescriptor(
+            desc,
+            value.len,
+            chain.first_page,
+            chain.page_count,
+            value[0..prefix_len],
+            page.calculateChecksum(value),
+        );
+
+        return .{
+            .value = desc,
+            .overflow = true,
+            .owns_value = true,
+            .first_overflow_page = chain.first_page,
+            .page_count = chain.page_count,
+        };
+    }
+
+    fn chooseOverflowLocalPrefixLen(self: *const Self, key: []const u8, value_len: usize) ?usize {
+        if (key.len > std.math.maxInt(u16)) return null;
+        const fixed_entry_size = std.math.add(usize, 4 + OVERFLOW_DESCRIPTOR_FIXED_SIZE, key.len) catch return null;
+        const max_entry = maxLeafEntrySize(self.page_size);
+        if (fixed_entry_size > max_entry) return null;
+        const available = max_entry - fixed_entry_size;
+        return @min(@min(OVERFLOW_LOCAL_PREFIX_TARGET, value_len), available);
+    }
+
+    fn writeOverflowChain(
+        self: *Self,
+        bytes: []const u8,
+        page_count: u32,
+    ) BTreeError!OverflowChain {
+        if (page_count == 0) return .{ .first_page = NULL_PAGE, .page_count = 0 };
+        const capacity = overflowPagePayloadCapacity(self.page_size);
+        if (capacity == 0) return BTreeError.PageFull;
+
+        const pages = self.allocator.alloc(PageId, page_count) catch return BTreeError.OutOfMemory;
+        defer self.allocator.free(pages);
+
+        var allocated: usize = 0;
+        errdefer {
+            for (pages[0..allocated]) |page_id| {
+                self.freeSingleOverflowPage(page_id) catch {};
+            }
+        }
+
+        for (pages) |*page_id| {
+            page_id.* = self.bp.pm.allocatePage() catch return BTreeError.IoError;
+            allocated += 1;
+        }
+
+        var offset: usize = 0;
+        for (pages, 0..) |page_id, i| {
+            const next_page = if (i + 1 < pages.len) pages[i + 1] else NULL_PAGE;
+            const chunk_len = @min(capacity, bytes.len - offset);
+
+            const frame = self.bp.fetchPage(page_id, .exclusive) catch return BTreeError.BufferPoolFull;
+            const header: *PageHeader = @ptrCast(@alignCast(frame.data.ptr));
+            header.* = PageHeader.init(.overflow);
+            std.mem.writeInt(u32, frame.data[@sizeOf(PageHeader)..][0..4], OVERFLOW_PAGE_MAGIC, .little);
+            std.mem.writeInt(u32, frame.data[@sizeOf(PageHeader) + 4 ..][0..4], next_page, .little);
+            std.mem.writeInt(u16, frame.data[@sizeOf(PageHeader) + 8 ..][0..2], @intCast(chunk_len), .little);
+            std.mem.writeInt(u16, frame.data[@sizeOf(PageHeader) + 10 ..][0..2], 0, .little);
+            if (chunk_len > 0) {
+                @memcpy(frame.data[OVERFLOW_PAGE_HEADER_SIZE..][0..chunk_len], bytes[offset..][0..chunk_len]);
+            }
+            if (OVERFLOW_PAGE_HEADER_SIZE + chunk_len < frame.data.len) {
+                @memset(frame.data[OVERFLOW_PAGE_HEADER_SIZE + chunk_len ..], 0);
+            }
+            self.bp.unpinPage(frame, true);
+            offset += chunk_len;
+        }
+
+        return .{ .first_page = pages[0], .page_count = page_count };
+    }
+
+    fn freeOverflowChain(self: *Self, first_page: PageId, page_count: u32) BTreeError!void {
+        var page_id = first_page;
+        var freed: u32 = 0;
+        while (freed < page_count) : (freed += 1) {
+            if (page_id == NULL_PAGE) return BTreeError.InvalidPage;
+
+            const frame = self.bp.fetchPage(page_id, .exclusive) catch return BTreeError.BufferPoolFull;
+            const header: *const PageHeader = @ptrCast(@alignCast(frame.data.ptr));
+            if (header.page_type != .overflow) {
+                self.bp.unpinPage(frame, false);
+                return BTreeError.InvalidPage;
+            }
+
+            const magic = std.mem.readInt(u32, frame.data[@sizeOf(PageHeader)..][0..4], .little);
+            if (magic != OVERFLOW_PAGE_MAGIC) {
+                self.bp.unpinPage(frame, false);
+                return BTreeError.InvalidPage;
+            }
+
+            const next_page = std.mem.readInt(u32, frame.data[@sizeOf(PageHeader) + 4 ..][0..4], .little);
+            try self.markPageFreeInPlace(frame);
+            page_id = next_page;
+        }
+        if (page_id != NULL_PAGE) return BTreeError.InvalidPage;
+    }
+
+    fn freeSingleOverflowPage(self: *Self, page_id: PageId) BTreeError!void {
+        const frame = self.bp.fetchPage(page_id, .exclusive) catch return BTreeError.BufferPoolFull;
+        try self.markPageFreeInPlace(frame);
+    }
+
+    fn markPageFreeInPlace(self: *Self, frame: *BufferFrame) BTreeError!void {
+        var header_copy = self.bp.pm.getHeader().*;
+        const old_freelist_head = header_copy.freelist_page;
+        const page_id = frame.page_id;
+
+        @memset(frame.data, 0);
+        const header: *PageHeader = @ptrCast(@alignCast(frame.data.ptr));
+        header.* = PageHeader.init(.free);
+        std.mem.writeInt(u32, frame.data[@sizeOf(PageHeader)..][0..4], old_freelist_head, .little);
+
+        self.bp.pm.writePage(page_id, frame.data) catch {
+            self.bp.unpinPage(frame, false);
+            return BTreeError.IoError;
+        };
+        frame.dirty = false;
+        self.bp.unpinPage(frame, false);
+
+        header_copy.freelist_page = page_id;
+        self.bp.pm.updateHeader(&header_copy) catch return BTreeError.IoError;
     }
 
     /// Find the child page to descend into for a given key
@@ -480,12 +884,20 @@ pub const BTree = struct {
             return BTreeError.DuplicateKey;
         }
 
+        var prepared = self.prepareStoredValue(key, value) catch |err| {
+            self.bp.unpinPage(frame, false);
+            return err;
+        };
+        defer prepared.deinit(self);
+        var overflow_published = false;
+        errdefer if (!overflow_published) prepared.rollback(self);
+
         // Calculate space needed: slot(2) + key_len(2) + val_len(2) + key + value.
         // Use usize for the math so comically large values do not wrap u16
         // before we compare against the per-page upper bound; a key/value
         // pair that cannot physically fit in an empty page is rejected
         // with `PageFull` instead of panicking inside `insertLeafEntry`.
-        const entry_size_usize = leafEntrySize(key, value) orelse {
+        const entry_size_usize = storedLeafEntrySize(key, prepared.value) orelse {
             self.bp.unpinPage(frame, false);
             return BTreeError.PageFull;
         };
@@ -504,13 +916,20 @@ pub const BTree = struct {
 
         if (free_space >= space_needed) {
             // Fits in current page
-            try self.insertLeafEntry(buf, search.slot, key, value);
+            try self.insertLeafEntryStored(buf, search.slot, key, prepared.value, prepared.overflow);
+            overflow_published = true;
             self.bp.unpinPage(frame, true);
             return .{ .page_id = page_id, .split = null };
         }
 
         // Need to split
-        return self.splitLeafAndInsert(frame, search.slot, key, value);
+        const result = try self.splitLeafAndInsert(
+            frame,
+            search.slot,
+            .{ .key = key, .value = prepared.value, .overflow = prepared.overflow },
+            &overflow_published,
+        );
+        return result;
     }
 
     /// Maximum (key_len + value_len + per-entry framing) that a leaf page
@@ -528,13 +947,15 @@ pub const BTree = struct {
         return @as(usize, page_size) - LEAF_SLOTS_OFFSET;
     }
 
-    fn leafEntrySize(key: []const u8, value: []const u8) ?usize {
+    fn storedLeafEntrySize(key: []const u8, value: []const u8) ?usize {
+        if (key.len > std.math.maxInt(u16)) return null;
+        if (value.len > std.math.maxInt(u16)) return null;
         const with_key = std.math.add(usize, 4, key.len) catch return null;
         return std.math.add(usize, with_key, value.len) catch null;
     }
 
-    fn leafEntrySpace(key: []const u8, value: []const u8) ?usize {
-        const entry_size = leafEntrySize(key, value) orelse return null;
+    fn storedLeafEntrySpace(key: []const u8, value: []const u8) ?usize {
+        const entry_size = storedLeafEntrySize(key, value) orelse return null;
         return std.math.add(usize, LEAF_SLOT_SIZE, entry_size) catch null;
     }
 
@@ -543,14 +964,25 @@ pub const BTree = struct {
     /// delete+insert sequence so they can bail out with a clean error
     /// instead of leaving the tree missing an entry.
     pub fn canFitLeafEntry(self: *const Self, key: []const u8, value_len: usize) bool {
-        const entry_size = std.math.add(usize, 4, key.len) catch return false;
-        const entry_size_with_value = std.math.add(usize, entry_size, value_len) catch return false;
-        return entry_size_with_value <= maxLeafEntrySize(self.page_size);
+        if (key.len > std.math.maxInt(u16) or value_len > MAX_VALUE_SIZE) return false;
+        if (value_len < OVERFLOW_VALUE_LEN_SENTINEL) {
+            const entry_size = std.math.add(usize, 4, key.len) catch return false;
+            const entry_size_with_value = std.math.add(usize, entry_size, value_len) catch return false;
+            if (entry_size_with_value <= maxLeafEntrySize(self.page_size)) return true;
+        }
+        return self.chooseOverflowLocalPrefixLen(key, value_len) != null;
     }
 
-    fn insertLeafEntry(self: *Self, buf: []u8, slot: u16, key: []const u8, value: []const u8) BTreeError!void {
+    fn insertLeafEntryStored(
+        self: *Self,
+        buf: []u8,
+        slot: u16,
+        key: []const u8,
+        value: []const u8,
+        overflow: bool,
+    ) BTreeError!void {
         const num_entries = LeafNode.getNumEntries(buf);
-        const entry_size_usize = leafEntrySize(key, value) orelse return BTreeError.PageFull;
+        const entry_size_usize = storedLeafEntrySize(key, value) orelse return BTreeError.PageFull;
         const space_needed_usize = std.math.add(usize, LEAF_SLOT_SIZE, entry_size_usize) catch return BTreeError.PageFull;
 
         if (entry_size_usize > std.math.maxInt(u16) or space_needed_usize > std.math.maxInt(u16)) {
@@ -576,7 +1008,12 @@ pub const BTree = struct {
         const new_offset = min_offset - entry_size;
 
         std.mem.writeInt(u16, buf[new_offset..][0..2], @intCast(key.len), .little);
-        std.mem.writeInt(u16, buf[new_offset + 2 ..][0..2], @intCast(value.len), .little);
+        std.mem.writeInt(
+            u16,
+            buf[new_offset + 2 ..][0..2],
+            if (overflow) OVERFLOW_VALUE_LEN_SENTINEL else @as(u16, @intCast(value.len)),
+            .little,
+        );
         @memcpy(buf[new_offset + 4 ..][0..key.len], key);
         @memcpy(buf[new_offset + 4 + key.len ..][0..value.len], value);
 
@@ -592,7 +1029,7 @@ pub const BTree = struct {
         LeafNode.setNumEntries(buf, num_entries + 1);
     }
 
-    fn chooseLeafSplitPoint(self: *Self, entries: []const Entry) BTreeError!u16 {
+    fn chooseLeafSplitPoint(self: *Self, entries: []const StoredEntry) BTreeError!u16 {
         if (entries.len < 2 or entries.len > std.math.maxInt(u16)) {
             return BTreeError.PageFull;
         }
@@ -600,7 +1037,7 @@ pub const BTree = struct {
         const capacity = leafPagePayloadCapacity(self.page_size);
         var total_space: usize = 0;
         for (entries) |entry| {
-            const entry_space = leafEntrySpace(entry.key, entry.value) orelse return BTreeError.PageFull;
+            const entry_space = storedLeafEntrySpace(entry.key, entry.value) orelse return BTreeError.PageFull;
             if (entry_space > capacity) return BTreeError.PageFull;
             total_space = std.math.add(usize, total_space, entry_space) catch return BTreeError.PageFull;
         }
@@ -609,7 +1046,7 @@ pub const BTree = struct {
         var best_split: ?usize = null;
         var best_imbalance: usize = std.math.maxInt(usize);
         for (entries[0 .. entries.len - 1], 0..) |entry, i| {
-            const entry_space = leafEntrySpace(entry.key, entry.value) orelse return BTreeError.PageFull;
+            const entry_space = storedLeafEntrySpace(entry.key, entry.value) orelse return BTreeError.PageFull;
             left_space += entry_space;
             const right_space = total_space - left_space;
             if (left_space <= capacity and right_space <= capacity) {
@@ -627,7 +1064,13 @@ pub const BTree = struct {
         return @intCast(best_split orelse return BTreeError.PageFull);
     }
 
-    fn splitLeafAndInsert(self: *Self, frame: *BufferFrame, slot: u16, key: []const u8, value: []const u8) BTreeError!InsertResult {
+    fn splitLeafAndInsert(
+        self: *Self,
+        frame: *BufferFrame,
+        slot: u16,
+        new_entry: StoredEntry,
+        overflow_published: *bool,
+    ) BTreeError!InsertResult {
         const old_buf = frame.data;
         const old_page_id = frame.page_id;
 
@@ -642,13 +1085,13 @@ pub const BTree = struct {
         // Calculate total size needed for key/value data copies
         var total_data_size: usize = 0;
         for (0..num_entries) |i| {
-            const entry = LeafNode.getEntry(old_buf, @intCast(i));
+            const entry = LeafNode.getStoredEntry(old_buf, @intCast(i));
             total_data_size += entry.key.len + entry.value.len;
         }
 
         // Allocate temporary storage for entries and their data
         // We must copy entry data because entries point into old_buf which we reinitialize
-        var entries = self.allocator.alloc(Entry, total) catch {
+        var entries = self.allocator.alloc(StoredEntry, total) catch {
             self.bp.unpinPage(frame, false);
             return BTreeError.OutOfMemory;
         };
@@ -666,10 +1109,10 @@ pub const BTree = struct {
         for (0..num_entries) |i| {
             if (i == slot) {
                 // New entry doesn't need copying - it comes from outside old_buf
-                entries[j] = .{ .key = key, .value = value };
+                entries[j] = new_entry;
                 j += 1;
             }
-            const entry = LeafNode.getEntry(old_buf, @intCast(i));
+            const entry = LeafNode.getStoredEntry(old_buf, @intCast(i));
             // Copy key
             const key_copy = data_buffer[data_offset..][0..entry.key.len];
             @memcpy(key_copy, entry.key);
@@ -678,11 +1121,11 @@ pub const BTree = struct {
             const value_copy = data_buffer[data_offset..][0..entry.value.len];
             @memcpy(value_copy, entry.value);
             data_offset += entry.value.len;
-            entries[j] = .{ .key = key_copy, .value = value_copy };
+            entries[j] = .{ .key = key_copy, .value = value_copy, .overflow = entry.overflow };
             j += 1;
         }
         if (slot == num_entries) {
-            entries[j] = .{ .key = key, .value = value };
+            entries[j] = new_entry;
         }
 
         const split_point = self.chooseLeafSplitPoint(entries) catch |err| {
@@ -711,13 +1154,15 @@ pub const BTree = struct {
 
         // Write first half to old page
         for (0..split_point) |i| {
-            try self.insertLeafEntry(old_buf, @intCast(i), entries[i].key, entries[i].value);
+            try self.insertLeafEntryStored(old_buf, @intCast(i), entries[i].key, entries[i].value, entries[i].overflow);
         }
 
         // Write second half to new page
         for (split_point..total) |i| {
-            try self.insertLeafEntry(new_buf, @intCast(i - split_point), entries[i].key, entries[i].value);
+            try self.insertLeafEntryStored(new_buf, @intCast(i - split_point), entries[i].key, entries[i].value, entries[i].overflow);
         }
+
+        overflow_published.* = true;
 
         // Update sibling pointers
         LeafNode.setNextLeaf(old_buf, new_page_id);
@@ -1093,7 +1538,7 @@ pub const BTree = struct {
         }
 
         // Remove the entry from the leaf
-        self.deleteLeafEntry(frame.data, search.slot);
+        try self.deleteLeafEntry(frame.data, search.slot);
 
         self.bp.unpinPage(frame, true);
 
@@ -1103,9 +1548,15 @@ pub const BTree = struct {
     }
 
     /// Remove an entry from a leaf node by shifting slots
-    fn deleteLeafEntry(self: *Self, buf: []u8, slot: u16) void {
-        _ = self;
+    fn deleteLeafEntry(self: *Self, buf: []u8, slot: u16) BTreeError!void {
         const num_entries = LeafNode.getNumEntries(buf);
+        const stored = LeafNode.getStoredValue(buf, slot);
+        if (stored.overflow) {
+            const desc = try parseOverflowDescriptor(stored.value);
+            if (desc.page_count > 0) {
+                try self.freeOverflowChain(desc.first_page, desc.page_count);
+            }
+        }
 
         // Shift slots down to fill the gap
         // Note: We don't reclaim the actual entry space at the end of the page.
@@ -1146,6 +1597,7 @@ pub const BTree = struct {
             .current_frame = frame,
             .current_slot = start_slot,
             .end_key = end_key,
+            .scratch_value = null,
         };
     }
 
@@ -1192,9 +1644,15 @@ pub const BTree = struct {
         current_frame: ?*BufferFrame,
         current_slot: u16,
         end_key: ?[]const u8,
+        scratch_value: ?[]u8,
 
         /// Get the next key-value pair
         pub fn next(self: *Iterator) BTreeError!?Entry {
+            if (self.scratch_value) |scratch| {
+                self.tree.allocator.free(scratch);
+                self.scratch_value = null;
+            }
+
             const frame = self.current_frame orelse return null;
 
             const num_entries = LeafNode.getNumEntries(frame.data);
@@ -1215,11 +1673,11 @@ pub const BTree = struct {
                 return self.next();
             }
 
-            const entry = LeafNode.getEntry(frame.data, self.current_slot);
+            const stored_entry = LeafNode.getStoredEntry(frame.data, self.current_slot);
 
             // Check end key
             if (self.end_key) |end| {
-                if (self.tree.comparator(entry.key, end) != .lt) {
+                if (self.tree.comparator(stored_entry.key, end) != .lt) {
                     self.tree.bp.unpinPage(frame, false);
                     self.current_frame = null;
                     return null;
@@ -1227,7 +1685,22 @@ pub const BTree = struct {
             }
 
             self.current_slot += 1;
-            return entry;
+            if (stored_entry.overflow) {
+                const materialized = try self.tree.materializeStoredValue(.{
+                    .value = stored_entry.value,
+                    .overflow = true,
+                });
+                self.scratch_value = materialized;
+                return .{
+                    .key = stored_entry.key,
+                    .value = materialized,
+                };
+            }
+
+            return .{
+                .key = stored_entry.key,
+                .value = stored_entry.value,
+            };
         }
 
         /// Reposition the iterator to the first entry >= key.
@@ -1261,6 +1734,10 @@ pub const BTree = struct {
 
         /// Clean up the iterator
         pub fn deinit(self: *Iterator) void {
+            if (self.scratch_value) |scratch| {
+                self.tree.allocator.free(scratch);
+                self.scratch_value = null;
+            }
             if (self.current_frame) |frame| {
                 self.tree.bp.unpinPage(frame, false);
                 self.current_frame = null;
@@ -1563,6 +2040,77 @@ test "btree leaf split accounts for variable-sized entries" {
         defer tree.freeValue(small_read);
         try std.testing.expectEqualSlices(u8, &small_value, small_read);
     }
+}
+
+test "btree overflow values round-trip, scan, delete, and reinsert" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const path = "/tmp/lattice_btree_test_overflow_values.db";
+    vfs_impl.delete(path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, path, .{ .create = true, .page_size = 4096 });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 16 * 1024 * 1024);
+    defer bp.deinit();
+
+    var tree = try BTree.init(allocator, &bp);
+
+    const small = "inline-value";
+    const medium = try allocator.alloc(u8, 100 * 1024);
+    defer allocator.free(medium);
+    @memset(medium, 'm');
+    const large = try allocator.alloc(u8, 1024 * 1024);
+    defer allocator.free(large);
+    @memset(large, 'l');
+
+    try tree.insert("a-inline", small);
+    try tree.insert("b-100kb", medium);
+    try tree.insert("c-1mb", large);
+
+    const got_small = (try tree.get("a-inline")).?;
+    defer tree.freeValue(got_small);
+    try std.testing.expectEqualStrings(small, got_small);
+
+    const got_medium = (try tree.get("b-100kb")).?;
+    defer tree.freeValue(got_medium);
+    try std.testing.expectEqualSlices(u8, medium, got_medium);
+
+    const got_large = (try tree.get("c-1mb")).?;
+    defer tree.freeValue(got_large);
+    try std.testing.expectEqualSlices(u8, large, got_large);
+
+    var iter = try tree.range(null, null);
+    defer iter.deinit();
+    var seen: usize = 0;
+    while (try iter.next()) |entry| {
+        if (std.mem.eql(u8, entry.key, "a-inline")) {
+            try std.testing.expectEqualStrings(small, entry.value);
+        } else if (std.mem.eql(u8, entry.key, "b-100kb")) {
+            try std.testing.expectEqualSlices(u8, medium, entry.value);
+        } else if (std.mem.eql(u8, entry.key, "c-1mb")) {
+            try std.testing.expectEqualSlices(u8, large, entry.value);
+        }
+        seen += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 3), seen);
+
+    try tree.delete("b-100kb");
+    try std.testing.expect((try tree.get("b-100kb")) == null);
+    try tree.insert("b-100kb", small);
+    const got_reinsert = (try tree.get("b-100kb")).?;
+    defer tree.freeValue(got_reinsert);
+    try std.testing.expectEqualStrings(small, got_reinsert);
+
+    try std.testing.expect(!tree.canFitLeafEntry("too-big", MAX_VALUE_SIZE + 1));
 }
 
 test "btree delete single key" {

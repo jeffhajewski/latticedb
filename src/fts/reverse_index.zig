@@ -93,9 +93,8 @@ pub const ReverseIndex = struct {
             offset += term.len;
         }
 
-        // Check up-front that the btree leaf page can hold this entry
-        // so we can return a specific ValueTooLarge error without leaving
-        // the reverse index in a half-deleted state.
+        // Check up-front that the B-tree can represent this entry so a
+        // rejected update cannot leave the reverse index half-deleted.
         if (!self.tree.canFitLeafEntry(&key_buf, value_buf.len)) {
             return ReverseIndexError.ValueTooLarge;
         }
@@ -219,6 +218,7 @@ fn mapBTreeError(err: BTreeError) ReverseIndexError {
     return switch (err) {
         BTreeError.KeyNotFound => ReverseIndexError.NotFound,
         BTreeError.OutOfMemory => ReverseIndexError.OutOfMemory,
+        BTreeError.PageFull, BTreeError.ValueTooLarge => ReverseIndexError.ValueTooLarge,
         else => ReverseIndexError.BTreeError,
     };
 }

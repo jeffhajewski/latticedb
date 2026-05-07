@@ -157,6 +157,12 @@ pub const PageManager = struct {
         if (file_size < self.page_size or file_size % self.page_size != 0) {
             return PageManagerError.InvalidHeader;
         }
+
+        if (!self.read_only and self.header.format_version < FORMAT_VERSION) {
+            self.header.format_version = FORMAT_VERSION;
+            self.header.min_reader_version = FORMAT_VERSION;
+            try self.writeHeader();
+        }
     }
 
     /// Write the file header to disk.

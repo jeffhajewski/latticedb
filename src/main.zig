@@ -279,10 +279,10 @@ pub const CacheEntry = query.cache.CacheEntry;
 pub const CacheStats = query.cache.CacheStats;
 
 // Version information
-pub const VERSION = "0.8.5";
+pub const VERSION = "0.8.6";
 pub const VERSION_MAJOR = 0;
 pub const VERSION_MINOR = 8;
-pub const VERSION_PATCH = 5;
+pub const VERSION_PATCH = 6;
 
 test {
     // Run tests from all modules

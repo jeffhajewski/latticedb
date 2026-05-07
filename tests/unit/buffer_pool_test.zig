@@ -231,6 +231,35 @@ test "buffer_pool: pool full with all pinned returns error" {
     bp.unpinPage(frame2, false);
 }
 
+test "buffer_pool: pinned frame does not hide evictable second-chance frame" {
+    const allocator = std.testing.allocator;
+
+    var posix_vfs = PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const path = try createTempPath(allocator, "second_chance_pinned");
+    defer allocator.free(path);
+    defer vfs_impl.delete(path) catch {};
+
+    var pm = try PageManager.init(allocator, vfs_impl, path, .{ .create = true });
+    defer pm.deinit();
+
+    var bp = try BufferPool.init(allocator, &pm, 8192);
+    defer bp.deinit();
+
+    const page1 = pm.allocatePage() catch unreachable;
+    const page2 = pm.allocatePage() catch unreachable;
+    const page3 = pm.allocatePage() catch unreachable;
+
+    const pinned = try bp.fetchPage(page1, .exclusive);
+    const second_chance = try bp.fetchPage(page2, .exclusive);
+    bp.unpinPage(second_chance, false);
+
+    const evicted = try bp.fetchPage(page3, .exclusive);
+    bp.unpinPage(evicted, false);
+    bp.unpinPage(pinned, false);
+}
+
 // ============================================================================
 // Contract: Dirty tracking works
 // ============================================================================

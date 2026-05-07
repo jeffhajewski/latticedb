@@ -481,13 +481,16 @@ pub const PostingStore = struct {
         const frame = self.bp.fetchPage(page_id, .exclusive) catch {
             return PostingError.BufferPoolError;
         };
-        defer self.bp.unpinPage(frame, true);
+        var frame_pinned = true;
+        var frame_dirty = false;
+        errdefer if (frame_pinned) self.bp.unpinPage(frame, frame_dirty);
 
         const data = frame.data;
         var posting_header = self.readPageMeta(data, true);
 
         if (posting_header.layout == .v1) {
             try self.upgradePageToV2(data, &posting_header);
+            frame_dirty = true;
         }
 
         // Encode the entry - use larger buffer for positions
@@ -516,7 +519,10 @@ pub const PostingStore = struct {
         const current_end: usize = posting_header.data_end;
         if (current_end + encode_len > PAGE_SIZE) {
             if (posting_header.next_page != 0) {
-                return self.appendWithPositions(posting_header.next_page, entry, store_positions);
+                const next_page = posting_header.next_page;
+                self.bp.unpinPage(frame, frame_dirty);
+                frame_pinned = false;
+                return self.appendWithPositions(next_page, entry, store_positions);
             }
 
             // Need to allocate overflow page
@@ -526,6 +532,9 @@ pub const PostingStore = struct {
             const new_flags = posting_header.flags;
             posting_header.next_page = new_page_id;
             posting_header.write(data);
+            frame_dirty = true;
+            self.bp.unpinPage(frame, true);
+            frame_pinned = false;
 
             // Create new page with same flags
             const new_frame = self.bp.fetchPage(new_page_id, .exclusive) catch {
@@ -567,6 +576,8 @@ pub const PostingStore = struct {
         posting_header.data_end = @intCast(current_end + encode_len);
         posting_header.write(data);
 
+        self.bp.unpinPage(frame, true);
+        frame_pinned = false;
         return page_id;
     }
 
@@ -1347,4 +1358,44 @@ test "posting store appends thousands of entries without stalling" {
 
     try std.testing.expectEqual(@as(usize, 3000), count);
     try std.testing.expectEqual(@as(DocId, 3000), last_doc);
+}
+
+test "posting store releases full pages before appending to overflow tail" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lattice_posting_overflow_pin_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 2 * 4096);
+    defer bp.deinit();
+
+    var store = PostingStore.init(allocator, &bp);
+    const page_id = try store.create(1);
+
+    var positions: [256]u32 = undefined;
+    for (&positions, 0..) |*position, i| {
+        position.* = @intCast(i);
+    }
+
+    for (1..41) |i| {
+        _ = try store.appendWithPositions(page_id, .{
+            .doc_id = @intCast(i),
+            .term_freq = 1,
+            .positions = positions[0..],
+        }, true);
+
+        try std.testing.expectEqual(@as(usize, 0), bp.getStats().pinned_frames);
+    }
 }

@@ -402,6 +402,7 @@ zig build -Doptimize=ReleaseFast   # optimized build
 - [Examples Overview](examples/README.md)
 - [CLI Quickstart](examples/cli/README.md)
 - [Architecture Specification](ARCHITECTURE_SPEC.md)
+- [0.8.6 Release Notes](docs/release_notes_0.8.6.md)
 - [0.8.5 Release Notes](docs/release_notes_0.8.5.md)
 - [0.8.4 Release Notes](docs/release_notes_0.8.4.md)
 - [0.8.2 Release Notes](docs/release_notes_0.8.2.md)

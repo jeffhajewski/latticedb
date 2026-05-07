@@ -340,7 +340,6 @@ pub const BufferPool = struct {
         }
 
         // Clock eviction algorithm
-        const start = self.clock_hand;
         var iterations: usize = 0;
         const max_iterations = self.frame_count * 2; // Allow two full rotations
 
@@ -352,11 +351,6 @@ pub const BufferPool = struct {
             if (frame.pin_count.load(.monotonic) > 0) {
                 self.advanceClock();
                 iterations += 1;
-
-                // Check if we've gone full circle with all pinned
-                if (self.clock_hand == start and iterations >= self.frame_count) {
-                    return BufferPoolError.BufferPoolFull;
-                }
                 continue;
             }
 

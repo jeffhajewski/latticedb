@@ -7,7 +7,7 @@ on:
       - 'v*'
 
 env:
-  ZIG_VERSION: "0.15.2"
+  ZIG_VERSION: "0.16.0"
 
 jobs:
   benchmark:

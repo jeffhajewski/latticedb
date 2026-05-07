@@ -25,8 +25,7 @@ const PosixVfs = lattice.storage.vfs.PosixVfs;
 
 pub const VERSION = lattice.VERSION;
 const INSTALL_SCRIPT_URL = "https://raw.githubusercontent.com/jeffhajewski/latticedb/main/dist/install.sh";
-const UPDATE_INSTALL_COMMAND = "curl -fsSL " ++ INSTALL_SCRIPT_URL ++ " | bash";
-const UPDATE_SHELL_COMMAND = "set -o pipefail; " ++ UPDATE_INSTALL_COMMAND;
+const UPDATE_SHELL_COMMAND = "set -o pipefail; curl -fsSL " ++ INSTALL_SCRIPT_URL ++ " | LATTICE_INSTALL_MODE=update bash";
 
 const CliError = error{
     CommandFailed,
@@ -108,7 +107,7 @@ pub fn main(init: std.process.Init) !u8 {
     }
 
     // Dispatch to command handler
-    runCommand(allocator, stdout, stderr, command, &parsed_args) catch |err| {
+    runCommand(init.io, allocator, stdout, stderr, command, &parsed_args) catch |err| {
         if (err != error.CommandFailed) {
             output.printError(stderr, "Command failed: {s}", .{@errorName(err)});
         }
@@ -148,6 +147,7 @@ fn freeProcessArgs(allocator: std.mem.Allocator, argv: []const []const u8) void 
 }
 
 fn runCommand(
+    io: std.Io,
     allocator: std.mem.Allocator,
     stdout: anytype,
     stderr: anytype,
@@ -155,7 +155,7 @@ fn runCommand(
     parsed_args: *const Args,
 ) !void {
     switch (command) {
-        .update => try cmdUpdate(stdout, stderr),
+        .update => try cmdUpdate(io, stderr),
         .version => printVersion(stdout),
         .help => printUsage(stdout),
         .create => try cmdCreate(allocator, stdout, stderr, parsed_args),
@@ -178,24 +178,25 @@ fn runCommand(
 // Command Implementations (stubs for now)
 // ============================================
 
-fn cmdUpdate(stdout: anytype, stderr: anytype) !void {
-    try stdout.print("Updating LatticeDB using:\n  {s}\n\n", .{UPDATE_INSTALL_COMMAND});
+fn cmdUpdate(io: std.Io, stderr: anytype) !void {
+    try runUpdateShellCommand(io, stderr, UPDATE_SHELL_COMMAND);
+}
 
-    var child = std.process.spawn(@import("compat").io, .{
-        .argv = &[_][]const u8{ "bash", "-c", UPDATE_SHELL_COMMAND },
+fn runUpdateShellCommand(io: std.Io, stderr: anytype, shell_command: []const u8) !void {
+    var child = std.process.spawn(io, .{
+        .argv = &[_][]const u8{ "bash", "-c", shell_command },
     }) catch |err| {
         return failCommand(stderr, "Failed to start updater: {s}", .{@errorName(err)});
     };
-    defer child.kill(@import("compat").io);
+    defer child.kill(io);
 
-    const term = child.wait(@import("compat").io) catch |err| {
+    const term = child.wait(io) catch |err| {
         return failCommand(stderr, "Failed to wait for updater: {s}", .{@errorName(err)});
     };
 
     switch (term) {
         .exited => |code| {
             if (code == 0) {
-                try stdout.writeAll("\nLatticeDB update complete.\n");
                 return;
             }
             return failCommand(stderr, "Updater exited with status {d}", .{code});
@@ -204,6 +205,14 @@ fn cmdUpdate(stdout: anytype, stderr: anytype) !void {
         .stopped => |sig| return failCommand(stderr, "Updater stopped by signal {d}", .{@intFromEnum(sig)}),
         .unknown => |code| return failCommand(stderr, "Updater ended with unknown status {d}", .{code}),
     }
+}
+
+test "update runner uses supplied io for process spawning" {
+    if (!std.process.can_spawn) return error.SkipZigTest;
+
+    var stderr_buf: [256]u8 = undefined;
+    var stderr_stream = @import("compat").fixedBufferStream(&stderr_buf);
+    try runUpdateShellCommand(std.testing.io, stderr_stream.writer(), "exit 0");
 }
 
 fn cmdCreate(
@@ -1094,12 +1103,9 @@ fn printCommandHelp(writer: anytype, command: Command) void {
         .update => writer.writeAll(
             \\Usage: lattice update
             \\
-            \\Update the local LatticeDB installation by running the public
-            \\installer script:
-            \\
-            \\  curl -fsSL https://raw.githubusercontent.com/jeffhajewski/latticedb/main/dist/install.sh | bash
-            \\
-            \\The updater streams installer output directly to the terminal.
+            \\Update the local LatticeDB installation to the latest release.
+            \\The updater streams download and install progress directly to
+            \\the terminal.
             \\
         ) catch {},
         .query => writer.writeAll(

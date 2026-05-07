@@ -15,6 +15,18 @@ set -euo pipefail
 REPO="jeffhajewski/latticedb"
 VERSION="${1:-${LATTICE_VERSION:-latest}}"
 INSTALL_DIR="${LATTICE_INSTALL_DIR:-}"
+INSTALL_MODE="${LATTICE_INSTALL_MODE:-install}"
+
+case "$INSTALL_MODE" in
+    update)
+        ACTION_MESSAGE="Updating to version"
+        RESULT_ACTION="updated"
+        ;;
+    *)
+        ACTION_MESSAGE="Installing LatticeDB"
+        RESULT_ACTION="installed"
+        ;;
+esac
 
 # Colors for output
 RED='\033[0;31m'
@@ -72,8 +84,6 @@ command_exists() {
 
 # Main installation
 main() {
-    info "Installing LatticeDB..."
-
     # Check dependencies
     if ! command_exists curl; then
         error "curl is required but not installed"
@@ -86,11 +96,8 @@ main() {
     OS=$(detect_os)
     ARCH=$(detect_arch)
 
-    info "Detected platform: $OS-$ARCH"
-
     # Resolve version
     if [ "$VERSION" = "latest" ]; then
-        info "Fetching latest version..."
         VERSION=$(get_latest_version)
         if [ -z "$VERSION" ]; then
             error "Could not determine latest version"
@@ -98,7 +105,8 @@ main() {
     fi
     # Remove 'v' prefix if present
     VERSION="${VERSION#v}"
-    info "Version: $VERSION"
+    info "$ACTION_MESSAGE v$VERSION"
+    info "Detected platform: $OS-$ARCH"
 
     # Build download URL
     case "$OS" in
@@ -113,14 +121,14 @@ main() {
     URL="https://github.com/$REPO/releases/download/v$VERSION/latticedb-$VERSION-$TARGET.tar.gz"
     INSTALL_DIR=$(get_install_dir)
 
-    info "Downloading from $URL..."
+    info "Downloading release archive..."
 
     # Create temp directory
     TMP_DIR=$(mktemp -d)
     trap 'rm -rf "$TMP_DIR"' EXIT
 
     # Download and extract
-    if ! curl -fsSL "$URL" -o "$TMP_DIR/latticedb.tar.gz"; then
+    if ! curl -fL --progress-bar "$URL" -o "$TMP_DIR/latticedb.tar.gz"; then
         error "Download failed. Check that version $VERSION exists."
     fi
 
@@ -161,7 +169,7 @@ main() {
     # Verify installation
     echo ""
     if [ -x "$INSTALL_DIR/lattice" ]; then
-        info "LatticeDB v$VERSION installed successfully!"
+        info "LatticeDB v$VERSION $RESULT_ACTION successfully!"
         echo ""
 
         # Check if in PATH

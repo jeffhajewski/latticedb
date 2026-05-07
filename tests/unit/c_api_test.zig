@@ -151,6 +151,37 @@ test "c_api: open page_size option is applied to new database files" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
 }
 
+test "c_api: zero page_size in open options keeps default page size" {
+    const path = "/tmp/lattice_capi_zero_page_size_option_test.db";
+
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 0,
+        .page_size = 0,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var file = try @import("compat").fs.cwd().openFile(path, .{});
+    defer file.close();
+    var header: CoreFileHeader = undefined;
+    const header_bytes = std.mem.asBytes(&header);
+    try std.testing.expectEqual(header_bytes.len, try file.preadAll(header_bytes, 0));
+    try std.testing.expectEqual(@as(u32, 4096), header.page_size);
+}
+
 test "c_api: commit maps oversized values to full instead of generic error" {
     const path = "/tmp/lattice_capi_commit_value_too_large_test.db";
 

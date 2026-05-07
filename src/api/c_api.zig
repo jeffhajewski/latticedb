@@ -1005,7 +1005,7 @@ fn buildOpenOptionsV1(options: ?*const lattice_open_options) OpenOptions {
     if (options) |opts| {
         zig_options.create = opts.create;
         zig_options.read_only = opts.read_only;
-        zig_options.page_size = opts.page_size;
+        zig_options.page_size = if (opts.page_size == 0) types.DEFAULT_PAGE_SIZE else opts.page_size;
         zig_options.config.buffer_pool_size = @as(usize, opts.cache_size_mb) * 1024 * 1024;
         zig_options.config.enable_vector = opts.enable_vector;
         zig_options.config.vector_dimensions = opts.vector_dimensions;
@@ -1030,7 +1030,7 @@ fn buildOpenOptionsV2(options: ?*const lattice_open_options_v2) DatabaseError!Op
 
         zig_options.create = opts.create;
         zig_options.read_only = opts.read_only;
-        zig_options.page_size = opts.page_size;
+        zig_options.page_size = if (opts.page_size == 0) types.DEFAULT_PAGE_SIZE else opts.page_size;
         zig_options.config.buffer_pool_size = @as(usize, opts.cache_size_mb) * 1024 * 1024;
         zig_options.config.enable_vector = opts.enable_vector;
         zig_options.config.vector_dimensions = opts.vector_dimensions;
@@ -2969,7 +2969,7 @@ pub export fn lattice_query_cache_stats(
 
 /// Get version string
 pub export fn lattice_version() [*c]const u8 {
-    return "0.8.3";
+    return "0.8.4";
 }
 
 /// Get error message for error code
@@ -3169,7 +3169,7 @@ test "value type tags match header" {
 test "version returns expected string" {
     const version = lattice_version();
     try std.testing.expect(version != null);
-    try std.testing.expectEqualStrings("0.8.3", std.mem.sliceTo(version, 0));
+    try std.testing.expectEqualStrings("0.8.4", std.mem.sliceTo(version, 0));
 }
 
 test "error message returns valid strings" {

@@ -916,7 +916,10 @@ pub const BTree = struct {
 
         if (free_space >= space_needed) {
             // Fits in current page
-            try self.insertLeafEntryStored(buf, search.slot, key, prepared.value, prepared.overflow);
+            self.insertLeafEntryStored(buf, search.slot, key, prepared.value, prepared.overflow) catch |err| {
+                self.bp.unpinPage(frame, false);
+                return err;
+            };
             overflow_published = true;
             self.bp.unpinPage(frame, true);
             return .{ .page_id = page_id, .split = null };
@@ -1145,9 +1148,17 @@ pub const BTree = struct {
             return BTreeError.BufferPoolFull;
         };
         const new_buf = new_frame.data;
+        var old_frame_pinned = true;
+        var new_frame_pinned = true;
+        var split_pages_dirty = false;
+        errdefer {
+            if (new_frame_pinned) self.bp.unpinPage(new_frame, split_pages_dirty);
+            if (old_frame_pinned) self.bp.unpinPage(frame, split_pages_dirty);
+        }
 
         // Initialize new leaf
         LeafNode.init(new_buf);
+        split_pages_dirty = true;
 
         // Reinitialize old leaf - now safe because we copied all data
         LeafNode.init(old_buf);
@@ -1172,26 +1183,20 @@ pub const BTree = struct {
 
         // Update old_next's prev pointer if it exists
         if (old_next != NULL_PAGE) {
-            const next_frame = self.bp.fetchPage(old_next, .exclusive) catch {
-                self.bp.unpinPage(new_frame, true);
-                self.bp.unpinPage(frame, true);
-                return BTreeError.BufferPoolFull;
-            };
+            const next_frame = self.bp.fetchPage(old_next, .exclusive) catch return BTreeError.BufferPoolFull;
             LeafNode.setPrevLeaf(next_frame.data, new_page_id);
             self.bp.unpinPage(next_frame, true);
         }
 
         // Copy split key for caller (first key of new page)
         const split_key = LeafNode.getKey(new_buf, 0);
-        const split_key_copy = self.allocator.alloc(u8, split_key.len) catch {
-            self.bp.unpinPage(new_frame, true);
-            self.bp.unpinPage(frame, true);
-            return BTreeError.OutOfMemory;
-        };
+        const split_key_copy = self.allocator.alloc(u8, split_key.len) catch return BTreeError.OutOfMemory;
         @memcpy(split_key_copy, split_key);
 
         self.bp.unpinPage(new_frame, true);
+        new_frame_pinned = false;
         self.bp.unpinPage(frame, true);
+        old_frame_pinned = false;
 
         return .{
             .page_id = old_page_id,
@@ -1529,11 +1534,14 @@ pub const BTree = struct {
 
         // Fetch the leaf with exclusive latch
         const frame = self.bp.fetchPage(leaf_page, .exclusive) catch return BTreeError.BufferPoolFull;
+        var frame_pinned = true;
+        errdefer if (frame_pinned) self.bp.unpinPage(frame, false);
 
         // Find the key in the leaf
         const search = LeafNode.searchSlot(frame.data, key, self.comparator);
         if (!search.found) {
             self.bp.unpinPage(frame, false);
+            frame_pinned = false;
             return BTreeError.KeyNotFound;
         }
 
@@ -1541,6 +1549,7 @@ pub const BTree = struct {
         try self.deleteLeafEntry(frame.data, search.slot);
 
         self.bp.unpinPage(frame, true);
+        frame_pinned = false;
 
         // Note: We don't handle underflow (merge/redistribute) for simplicity.
         // Underflowed pages still work correctly, they just have wasted space.
@@ -1662,9 +1671,9 @@ pub const BTree = struct {
                 // Move to next leaf
                 const next_page = LeafNode.getNextLeaf(frame.data);
                 self.tree.bp.unpinPage(frame, false);
+                self.current_frame = null;
 
                 if (next_page == NULL_PAGE) {
-                    self.current_frame = null;
                     return null;
                 }
 

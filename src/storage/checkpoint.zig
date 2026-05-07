@@ -382,6 +382,8 @@ test "checkpoint passive skips pinned pages" {
 
     // Fetch and dirty page1, but keep it pinned
     const frame1 = try bp.fetchPage(page1, .exclusive);
+    var frame1_pinned = true;
+    errdefer if (frame1_pinned) bp.unpinPage(frame1, true);
     frame1.dirty = true;
     // Don't unpin page1!
 
@@ -398,6 +400,7 @@ test "checkpoint passive skips pinned pages" {
 
     // Now unpin page1
     bp.unpinPage(frame1, true);
+    frame1_pinned = false;
 
     // Full checkpoint should flush remaining dirty page
     const stats2 = try checkpointer.checkpoint(.full);

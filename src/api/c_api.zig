@@ -1152,9 +1152,10 @@ pub export fn lattice_close(db: ?*lattice_database) lattice_error {
 pub export fn lattice_begin(
     db: ?*lattice_database,
     mode: lattice_txn_mode,
-    txn_out: *?*lattice_txn,
+    txn_out: ?*?*lattice_txn,
 ) lattice_error {
-    txn_out.* = null;
+    const out = txn_out orelse return .err_invalid_arg;
+    out.* = null;
 
     const db_handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
     db_handle.mutex.lock();
@@ -1191,7 +1192,7 @@ pub export fn lattice_begin(
                         return register_result;
                     }
                     db_handle.active_children += 1;
-                    txn_out.* = @ptrCast(txn_handle);
+                    out.* = @ptrCast(txn_handle);
                     return .ok;
                 }
                 return .err_unsupported;
@@ -1223,7 +1224,7 @@ pub export fn lattice_begin(
     }
     db_handle.active_children += 1;
 
-    txn_out.* = @ptrCast(txn_handle);
+    out.* = @ptrCast(txn_handle);
     return .ok;
 }
 

@@ -2838,6 +2838,7 @@ test "c_api: null argument handling" {
     try std.testing.expectEqual(lattice_error.err_invalid_arg, c_api.lattice_close(null));
 
     var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.err_invalid_arg, c_api.lattice_begin(null, .read_write, null));
     try std.testing.expectEqual(lattice_error.err_invalid_arg, c_api.lattice_begin(null, .read_write, &txn));
     try std.testing.expectEqual(lattice_error.err_invalid_arg, c_api.lattice_commit(null));
     try std.testing.expectEqual(lattice_error.err_invalid_arg, c_api.lattice_rollback(null));

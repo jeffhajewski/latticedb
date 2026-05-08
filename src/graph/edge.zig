@@ -266,10 +266,8 @@ pub const EdgeStore = struct {
         const next_edge_id = edge_id + 1;
 
         // Serialize edge record (stored once in edge_id_index tree).
-        var buf: [4096]u8 = undefined;
-        const serialized = serializeEdge(source, target, edge_type, properties, &buf) catch {
-            return EdgeError.BufferTooSmall;
-        };
+        const serialized = try self.serializeEdgeAlloc(source, target, edge_type, properties);
+        defer self.allocator.free(serialized);
 
         // Create outgoing key (source, outgoing, type, target)
         const outgoing_key = EdgeKey{
@@ -292,6 +290,9 @@ pub const EdgeStore = struct {
         const incoming_bytes = incoming_key.toBytes();
 
         const id_key = edgeIdToKey(edge_id);
+        if (!self.edge_id_index.canFitLeafEntry(&id_key, serialized.len)) {
+            return EdgeError.BufferTooSmall;
+        }
 
         // Insert all entries with rollback on failure
         self.tree.insert(&outgoing_bytes, &[_]u8{}) catch |err| {
@@ -365,10 +366,8 @@ pub const EdgeStore = struct {
             else => return err,
         }
 
-        var buf: [4096]u8 = undefined;
-        const serialized = serializeEdge(source, target, edge_type, properties, &buf) catch {
-            return EdgeError.BufferTooSmall;
-        };
+        const serialized = try self.serializeEdgeAlloc(source, target, edge_type, properties);
+        defer self.allocator.free(serialized);
 
         const outgoing_key = EdgeKey{
             .source = source,
@@ -389,6 +388,9 @@ pub const EdgeStore = struct {
         const incoming_bytes = incoming_key.toBytes();
 
         const id_key = edgeIdToKey(edge_id);
+        if (!self.edge_id_index.canFitLeafEntry(&id_key, serialized.len)) {
+            return EdgeError.BufferTooSmall;
+        }
 
         self.tree.insert(&outgoing_bytes, &[_]u8{}) catch |err| {
             return mapBTreeError(err);
@@ -1103,11 +1105,94 @@ pub const EdgeStore = struct {
         }
         return count;
     }
+
+    /// Check whether a fully serialized edge record is representable in this
+    /// store's backing B+Tree.
+    pub fn canFitEdge(
+        self: *const Self,
+        edge_id: EdgeId,
+        source: NodeId,
+        target: NodeId,
+        edge_type: SymbolId,
+        properties: []const Property,
+    ) bool {
+        if (edge_id == EDGE_ID_META_KEY) return false;
+        if (properties.len > std.math.maxInt(u16)) return false;
+
+        const id_key = edgeIdToKey(edge_id);
+        return self.edge_id_index.canFitLeafEntry(
+            &id_key,
+            serializedEdgeSize(source, target, edge_type, properties),
+        );
+    }
+
+    /// Heap-allocate and serialize an edge's identity + properties.
+    fn serializeEdgeAlloc(
+        self: *Self,
+        source: NodeId,
+        target: NodeId,
+        edge_type: SymbolId,
+        properties: []const Property,
+    ) EdgeError![]u8 {
+        if (properties.len > std.math.maxInt(u16)) return EdgeError.BufferTooSmall;
+
+        const size = serializedEdgeSize(source, target, edge_type, properties);
+        const buf = self.allocator.alloc(u8, size) catch return EdgeError.OutOfMemory;
+        errdefer self.allocator.free(buf);
+        const written = serializeEdge(source, target, edge_type, properties, buf) catch {
+            return EdgeError.BufferTooSmall;
+        };
+        if (written.len != size) return EdgeError.InvalidData;
+        return buf;
+    }
 };
 
 // ============================================================================
 // Serialization
 // ============================================================================
+
+/// Exact byte count that `serializeEdge` will emit for the given inputs.
+fn serializedEdgeSize(
+    source: NodeId,
+    target: NodeId,
+    edge_type: SymbolId,
+    properties: []const Property,
+) usize {
+    _ = source;
+    _ = target;
+    _ = edge_type;
+
+    // source u64 + target u64 + edge_type u16 + properties.len u16.
+    var size: usize = 8 + 8 + 2 + 2;
+    for (properties) |prop| {
+        size += 2; // key_id u16
+        size += serializedValueSize(prop.value);
+    }
+    return size;
+}
+
+/// Exact byte count that `serializeValue` will emit for a PropertyValue.
+fn serializedValueSize(value: PropertyValue) usize {
+    return switch (value) {
+        .null_val => 1,
+        .bool_val => 2,
+        .int_val => 9,
+        .float_val => 9,
+        .string_val => |s| 5 + s.len,
+        .bytes_val => |b| 5 + b.len,
+        .vector_val => |v| 5 + v.len * 4,
+        .list_val => |list| blk: {
+            var s: usize = 5;
+            for (list) |item| s += serializedValueSize(item);
+            break :blk s;
+        },
+        .map_val => |map| blk: {
+            var s: usize = 5;
+            for (map) |entry| s += 4 + entry.key.len + serializedValueSize(entry.value);
+            break :blk s;
+        },
+    };
+}
 
 /// Serialize full edge data for edge_id lookup tree.
 fn serializeEdge(

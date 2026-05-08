@@ -1763,6 +1763,10 @@ pub const Database = struct {
             return;
         }
 
+        if (!self.edge_store.canFitEdge(edge_id, state.source, state.target, state.edge_type, state.properties)) {
+            return DatabaseError.ValueTooLarge;
+        }
+
         if (current != null) {
             self.edge_store.deleteById(edge_id) catch |err| switch (err) {
                 edge_mod.EdgeError.NotFound => {},
@@ -1770,8 +1774,8 @@ pub const Database = struct {
             };
         }
 
-        self.edge_store.createWithId(edge_id, state.source, state.target, state.edge_type, state.properties) catch {
-            return DatabaseError.IoError;
+        self.edge_store.createWithId(edge_id, state.source, state.target, state.edge_type, state.properties) catch |err| {
+            return mapEdgeStoreError(err);
         };
     }
 
@@ -2395,6 +2399,16 @@ pub const Database = struct {
             node_mod.NodeError.OutOfMemory => DatabaseError.OutOfMemory,
             node_mod.NodeError.BufferPoolFull => DatabaseError.BufferPoolFull,
             node_mod.NodeError.BufferTooSmall => DatabaseError.ValueTooLarge,
+            else => DatabaseError.IoError,
+        };
+    }
+
+    fn mapEdgeStoreError(err: edge_mod.EdgeError) DatabaseError {
+        return switch (err) {
+            edge_mod.EdgeError.NotFound => DatabaseError.NotFound,
+            edge_mod.EdgeError.AlreadyExists => DatabaseError.AlreadyExists,
+            edge_mod.EdgeError.OutOfMemory => DatabaseError.OutOfMemory,
+            edge_mod.EdgeError.BufferTooSmall => DatabaseError.ValueTooLarge,
             else => DatabaseError.IoError,
         };
     }
@@ -3105,6 +3119,12 @@ pub const Database = struct {
         edge_id: EdgeId,
         state: TxnEdgeState,
     ) DatabaseError!void {
+        if (state.exists and !self.edge_store.canFitEdge(edge_id, state.source, state.target, state.edge_type, state.properties)) {
+            var owned_state = state;
+            owned_state.deinit(self.allocator);
+            return DatabaseError.ValueTooLarge;
+        }
+
         if (overlay.edge_states.getPtr(edge_id)) |existing| {
             existing.deinit(self.allocator);
             existing.* = state;
@@ -4624,8 +4644,8 @@ pub const Database = struct {
         };
 
         // Create edge with no properties and get stable edge ID.
-        const edge_id = self.edge_store.createAndGetId(source, target, type_id, &[_]node_mod.Property{}) catch {
-            return DatabaseError.IoError;
+        const edge_id = self.edge_store.createAndGetId(source, target, type_id, &[_]node_mod.Property{}) catch |err| {
+            return mapEdgeStoreError(err);
         };
 
         // Log to WAL and add undo entry if transaction is provided.
@@ -4947,6 +4967,10 @@ pub const Database = struct {
             new_props.append(self.allocator, .{ .key_id = key_id, .value = value }) catch return DatabaseError.IoError;
         }
 
+        if (!self.edge_store.canFitEdge(edge_id, edge.source, edge.target, edge.edge_type, new_props.items)) {
+            return DatabaseError.ValueTooLarge;
+        }
+
         if (txn) |t| {
             if (self.txn_manager) |*tm| {
                 const old_value_bytes = try self.serializePropertyValueAlloc(old_value);
@@ -4997,10 +5021,10 @@ pub const Database = struct {
         }
 
         self.edge_store.deleteById(edge_id) catch return DatabaseError.IoError;
-        self.edge_store.createWithId(edge_id, edge.source, edge.target, edge.edge_type, new_props.items) catch {
+        self.edge_store.createWithId(edge_id, edge.source, edge.target, edge.edge_type, new_props.items) catch |err| {
             // Best-effort restore of previous state.
             self.edge_store.createWithId(edge_id, edge.source, edge.target, edge.edge_type, edge.properties) catch {};
-            return DatabaseError.IoError;
+            return mapEdgeStoreError(err);
         };
     }
 
@@ -5079,6 +5103,10 @@ pub const Database = struct {
         // Property absent: no-op.
         if (!found) return;
 
+        if (!self.edge_store.canFitEdge(edge_id, edge.source, edge.target, edge.edge_type, new_props.items)) {
+            return DatabaseError.ValueTooLarge;
+        }
+
         if (txn) |t| {
             if (self.txn_manager) |*tm| {
                 const old_value_bytes = try self.serializePropertyValueAlloc(old_value);
@@ -5126,9 +5154,9 @@ pub const Database = struct {
         }
 
         self.edge_store.deleteById(edge_id) catch return DatabaseError.IoError;
-        self.edge_store.createWithId(edge_id, edge.source, edge.target, edge.edge_type, new_props.items) catch {
+        self.edge_store.createWithId(edge_id, edge.source, edge.target, edge.edge_type, new_props.items) catch |err| {
             self.edge_store.createWithId(edge_id, edge.source, edge.target, edge.edge_type, edge.properties) catch {};
-            return DatabaseError.IoError;
+            return mapEdgeStoreError(err);
         };
     }
 
@@ -6537,6 +6565,96 @@ test "setNodeProperty round-trips string values above the old 512-byte WAL buffe
         var got = (try db.getNodeProperty(node_id, "content")).?;
         defer got.deinit(allocator);
         try std.testing.expectEqualSlices(u8, buf[0..sz], got.string_val);
+    }
+}
+
+test "edge properties above 4KB round-trip with 4KB pages" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_large_edge_prop_test.ltdb";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer {
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    const payload = try allocator.alloc(u8, 8192);
+    defer allocator.free(payload);
+    for (payload, 0..) |*b, i| b.* = 'a' + @as(u8, @intCast(i % 26));
+
+    var direct_edge_id: EdgeId = undefined;
+    var txn_edge_id: EdgeId = undefined;
+
+    {
+        var db = try Database.open(allocator, path, .{
+            .create = true,
+            .page_size = 4096,
+            .config = .{
+                .enable_wal = true,
+                .enable_fts = false,
+            },
+        });
+        defer db.close();
+
+        try std.testing.expectEqual(@as(u32, 4096), db.page_manager.getPageSize());
+
+        const direct_source = try db.createNode(null, &[_][]const u8{"Entity"});
+        const direct_target = try db.createNode(null, &[_][]const u8{"Entity"});
+        direct_edge_id = try db.createEdgeAndGetId(null, direct_source, direct_target, "RESOLVES_TO");
+        try db.setEdgePropertyById(null, direct_edge_id, "propertiesJson", .{ .string_val = payload });
+
+        {
+            var got = (try db.getEdgePropertyById(direct_edge_id, "propertiesJson")).?;
+            defer got.deinit(allocator);
+            switch (got) {
+                .string_val => |s| try std.testing.expectEqualSlices(u8, payload, s),
+                else => return error.TestUnexpectedResult,
+            }
+        }
+
+        var txn = try db.beginTransaction(.read_write);
+        var committed = false;
+        errdefer if (!committed) db.abortTransaction(&txn) catch {};
+
+        const txn_source = try db.createNode(&txn, &[_][]const u8{"Entity"});
+        const txn_target = try db.createNode(&txn, &[_][]const u8{"Entity"});
+        txn_edge_id = try db.createEdgeAndGetId(&txn, txn_source, txn_target, "RESOLVES_TO");
+        try db.setEdgePropertyById(&txn, txn_edge_id, "propertiesJson", .{ .string_val = payload });
+        try db.commitTransaction(&txn);
+        committed = true;
+
+        {
+            var got = (try db.getEdgePropertyById(txn_edge_id, "propertiesJson")).?;
+            defer got.deinit(allocator);
+            switch (got) {
+                .string_val => |s| try std.testing.expectEqualSlices(u8, payload, s),
+                else => return error.TestUnexpectedResult,
+            }
+        }
+
+        try db.sync();
+    }
+
+    {
+        var db = try Database.open(allocator, path, .{
+            .create = false,
+            .config = .{
+                .enable_wal = true,
+                .enable_fts = false,
+            },
+        });
+        defer db.close();
+
+        try std.testing.expectEqual(@as(u32, 4096), db.page_manager.getPageSize());
+
+        for ([_]EdgeId{ direct_edge_id, txn_edge_id }) |edge_id| {
+            var got = (try db.getEdgePropertyById(edge_id, "propertiesJson")).?;
+            defer got.deinit(allocator);
+            switch (got) {
+                .string_val => |s| try std.testing.expectEqualSlices(u8, payload, s),
+                else => return error.TestUnexpectedResult,
+            }
+        }
     }
 }
 

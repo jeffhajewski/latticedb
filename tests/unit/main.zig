@@ -19,6 +19,7 @@ const stream_store_test = @import("stream_store_test.zig");
 const c_api_test = @import("c_api_test.zig");
 const concurrency_test = @import("concurrency_test.zig");
 const transaction_test = @import("transaction_test.zig");
+const quipu_repro_test = @import("quipu_longmemeval_repro.zig");
 const cli_main = @import("cli_main");
 
 // Re-export tests from all modules
@@ -72,6 +73,7 @@ test {
     _ = c_api_test;
     _ = concurrency_test;
     _ = transaction_test;
+    _ = quipu_repro_test;
     _ = cli_main;
 }
 

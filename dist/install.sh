@@ -141,12 +141,15 @@ main() {
         EXTRACT_DIR="$TMP_DIR"
     fi
 
-    # Install binary
+    # Install binary using atomic replacement (mv works on running binaries, cp does not)
     info "Installing to $INSTALL_DIR..."
 
     if [ -f "$EXTRACT_DIR/bin/lattice" ]; then
-        cp "$EXTRACT_DIR/bin/lattice" "$INSTALL_DIR/"
-        chmod +x "$INSTALL_DIR/lattice"
+        # Use temp file + mv for atomic replacement (cp fails on macOS for running executables)
+        TMP_BIN="$INSTALL_DIR/.lattice.new.$$"
+        cp "$EXTRACT_DIR/bin/lattice" "$TMP_BIN"
+        chmod +x "$TMP_BIN"
+        mv "$TMP_BIN" "$INSTALL_DIR/lattice"
     else
         error "Binary not found in archive"
     fi
@@ -169,6 +172,12 @@ main() {
     # Verify installation
     echo ""
     if [ -x "$INSTALL_DIR/lattice" ]; then
+        # Verify the binary actually has the expected version
+        INSTALLED_VERSION=$("$INSTALL_DIR/lattice" --version 2>/dev/null | head -1 | sed -E 's/.*v([0-9]+\.[0-9]+\.[0-9]+).*/\1/' || true)
+        if [ -n "$INSTALLED_VERSION" ] && [ "$INSTALLED_VERSION" != "$VERSION" ]; then
+            warn "Installed version ($INSTALLED_VERSION) does not match expected version ($VERSION)"
+            warn "This can happen when the old binary is still running. Restart lattice to use the new version."
+        fi
         info "LatticeDB v$VERSION $RESULT_ACTION successfully!"
         echo ""
 

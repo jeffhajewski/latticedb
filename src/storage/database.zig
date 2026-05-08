@@ -42,6 +42,7 @@ const WalError = wal_mod.WalError;
 
 const recovery_mod = lattice.storage.recovery;
 const stream_store_mod = lattice.stream.store;
+const stream_payload_mod = lattice.stream.payload;
 pub const StreamBatch = stream_store_mod.Batch;
 pub const StreamRecord = stream_store_mod.Record;
 
@@ -1269,16 +1270,19 @@ pub const Database = struct {
 
             for (existing.properties) |prop| {
                 if (findPropertyById(state.properties, prop.key_id) == null) {
-                    try self.logWalNodePropertyMutation(txn, node_id, prop.key_id, prop.value, null);
+                    try self.logWalNodePropertyMutation(txn, node_id, prop.key_id, null, null);
                 }
             }
             for (state.properties) |prop| {
                 const old_prop = findPropertyById(existing.properties, prop.key_id);
+                if (old_prop) |old| {
+                    if (propertyValueEqual(old.value, prop.value)) continue;
+                }
                 try self.logWalNodePropertyMutation(
                     txn,
                     node_id,
                     prop.key_id,
-                    if (old_prop) |value| value.value else null,
+                    null,
                     prop.value,
                 );
             }
@@ -1324,16 +1328,19 @@ pub const Database = struct {
         const existing = current.?;
         for (existing.properties) |prop| {
             if (findPropertyById(state.properties, prop.key_id) == null) {
-                try self.logWalEdgePropertyMutation(txn, edge_id, prop.key_id, prop.value, null);
+                try self.logWalEdgePropertyMutation(txn, edge_id, prop.key_id, null, null);
             }
         }
         for (state.properties) |prop| {
             const old_prop = findPropertyById(existing.properties, prop.key_id);
+            if (old_prop) |old| {
+                if (propertyValueEqual(old.value, prop.value)) continue;
+            }
             try self.logWalEdgePropertyMutation(
                 txn,
                 edge_id,
                 prop.key_id,
-                if (old_prop) |value| value.value else null,
+                null,
                 prop.value,
             );
         }
@@ -1386,17 +1393,9 @@ pub const Database = struct {
     ) DatabaseError!void {
         const tm = &(self.txn_manager orelse return DatabaseError.TransactionsNotEnabled);
 
-        var prop_bytes: []u8 = &[_]u8{};
-        var owns_prop_bytes = false;
-        if (state.properties.len > 0) {
-            prop_bytes = wal_payload.serializeProperties(self.allocator, @ptrCast(state.properties)) catch return DatabaseError.OutOfMemory;
-            owns_prop_bytes = true;
-        }
-        defer if (owns_prop_bytes) self.allocator.free(prop_bytes);
-
         const payload_buf = self.allocator.alloc(
             u8,
-            wal_payload.nodeDeleteSize(state.labels.len, prop_bytes.len),
+            wal_payload.nodeDeleteSize(state.labels.len, 0),
         ) catch return DatabaseError.OutOfMemory;
         defer self.allocator.free(payload_buf);
 
@@ -1404,7 +1403,7 @@ pub const Database = struct {
             payload_buf,
             node_id,
             state.labels,
-            prop_bytes,
+            &[_]u8{},
         ) catch return DatabaseError.IoError;
 
         _ = tm.logOperation(txn, .delete, payload) catch |err| return mapTxnError(err);
@@ -1515,7 +1514,7 @@ pub const Database = struct {
 
         var prop_bytes: []u8 = &[_]u8{};
         var owns_prop_bytes = false;
-        if (state.properties.len > 0) {
+        if (record_type != .delete and state.properties.len > 0) {
             prop_bytes = wal_payload.serializeProperties(self.allocator, @ptrCast(state.properties)) catch return DatabaseError.OutOfMemory;
             owns_prop_bytes = true;
         }
@@ -2675,6 +2674,54 @@ pub const Database = struct {
         return .{ .int_val = @intCast(id) };
     }
 
+    fn propertyValueTypeName(value: PropertyValue) []const u8 {
+        return switch (value) {
+            .null_val => "null",
+            .bool_val => "bool",
+            .int_val => "int",
+            .float_val => "float",
+            .string_val => "string",
+            .bytes_val => "bytes",
+            .vector_val => "vector",
+            .list_val => "list",
+            .map_val => "map",
+        };
+    }
+
+    fn intValueFromSize(size: usize) PropertyValue {
+        const capped = @min(size, @as(usize, @intCast(std.math.maxInt(i64))));
+        return .{ .int_val = @intCast(capped) };
+    }
+
+    fn summarizedChangefeedValue(
+        value: PropertyValue,
+        entries: *[3]PropertyValue.MapEntry,
+    ) PropertyValue {
+        entries.* = .{
+            .{ .key = "__lattice_value_omitted", .value = .{ .bool_val = true } },
+            .{ .key = "type", .value = .{ .string_val = propertyValueTypeName(value) } },
+            .{ .key = "encoded_bytes", .value = intValueFromSize(wal_payload.propertyValueSize(value)) },
+        };
+        return .{ .map_val = entries[0..] };
+    }
+
+    fn streamAppendPayloadFits(kind: []const u8, payload: PropertyValue) bool {
+        const payload_len = stream_payload_mod.encodedSize(payload);
+        if (payload_len > std.math.maxInt(u32)) return false;
+
+        const record_prefix = std.math.add(usize, 1 + kind.len, 4) catch return false;
+        const record_value_len = std.math.add(usize, record_prefix, payload_len) catch return false;
+        if (record_value_len > btree_mod.MAX_VALUE_SIZE) return false;
+
+        const wal_prefix = std.math.add(usize, 1 + 1 + stream_store_mod.changes_stream.len + 8 + 1 + kind.len, 4) catch return false;
+        const wal_payload_len = std.math.add(usize, wal_prefix, payload_len) catch return false;
+        return wal_payload_len <= wal_mod.MAX_LOGICAL_RECORD_PAYLOAD_SIZE;
+    }
+
+    fn changePayloadFits(kind: []const u8, entries: []const PropertyValue.MapEntry) bool {
+        return streamAppendPayloadFits(kind, .{ .map_val = entries });
+    }
+
     fn stageChangePayload(
         self: *Self,
         overlay: *TxnOverlay,
@@ -2689,6 +2736,42 @@ pub const Database = struct {
             payload,
             false,
         );
+    }
+
+    fn stagePropertyChangePayload(
+        self: *Self,
+        overlay: *TxnOverlay,
+        kind: []const u8,
+        entries: *[6]PropertyValue.MapEntry,
+        old_value: ?PropertyValue,
+        new_value: ?PropertyValue,
+    ) DatabaseError!void {
+        entries[4].value = old_value orelse .{ .null_val = {} };
+        entries[5].value = new_value orelse .{ .null_val = {} };
+        if (changePayloadFits(kind, entries[0..])) {
+            try self.stageChangePayload(overlay, kind, entries[0..]);
+            return;
+        }
+
+        var old_summary_entries: [3]PropertyValue.MapEntry = undefined;
+        if (old_value) |value| {
+            entries[4].value = summarizedChangefeedValue(value, &old_summary_entries);
+            if (changePayloadFits(kind, entries[0..])) {
+                try self.stageChangePayload(overlay, kind, entries[0..]);
+                return;
+            }
+        }
+
+        var new_summary_entries: [3]PropertyValue.MapEntry = undefined;
+        if (new_value) |value| {
+            entries[5].value = summarizedChangefeedValue(value, &new_summary_entries);
+            if (changePayloadFits(kind, entries[0..])) {
+                try self.stageChangePayload(overlay, kind, entries[0..]);
+                return;
+            }
+        }
+
+        return DatabaseError.ValueTooLarge;
     }
 
     fn stageNodeChange(
@@ -2742,10 +2825,10 @@ pub const Database = struct {
             .{ .key = "op", .value = .{ .string_val = op } },
             .{ .key = "node_id", .value = idValue(node_id) },
             .{ .key = "key", .value = .{ .string_val = key } },
-            .{ .key = "old_value", .value = old_value orelse .{ .null_val = {} } },
-            .{ .key = "new_value", .value = new_value orelse .{ .null_val = {} } },
+            .{ .key = "old_value", .value = .{ .null_val = {} } },
+            .{ .key = "new_value", .value = .{ .null_val = {} } },
         };
-        try self.stageChangePayload(overlay, kind, &entries);
+        try self.stagePropertyChangePayload(overlay, kind, &entries, old_value, new_value);
     }
 
     fn stageEdgeChange(
@@ -2786,10 +2869,10 @@ pub const Database = struct {
             .{ .key = "op", .value = .{ .string_val = op } },
             .{ .key = "edge_id", .value = idValue(edge_id) },
             .{ .key = "key", .value = .{ .string_val = key } },
-            .{ .key = "old_value", .value = old_value orelse .{ .null_val = {} } },
-            .{ .key = "new_value", .value = new_value orelse .{ .null_val = {} } },
+            .{ .key = "old_value", .value = .{ .null_val = {} } },
+            .{ .key = "new_value", .value = .{ .null_val = {} } },
         };
-        try self.stageChangePayload(overlay, kind, &entries);
+        try self.stagePropertyChangePayload(overlay, kind, &entries, old_value, new_value);
     }
 
     fn stageGraphChangefeed(self: *Self, overlay: *TxnOverlay) DatabaseError!void {
@@ -6928,6 +7011,72 @@ test "default 4KiB transactional writes round-trip 100KB and 1MB string properti
         defer got_payload.deinit(allocator);
         try std.testing.expectEqualSlices(u8, payload, got_payload.string_val);
     }
+}
+
+test "transactional large property updates do not double old and new payloads" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_txn_large_property_update_no_double_payload_test.ltdb";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .page_size = 4096,
+        .config = .{
+            .buffer_pool_size = 16 * 1024 * 1024,
+            .enable_wal = true,
+            .enable_fts = false,
+        },
+    });
+    defer {
+        db.close();
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    const node_id = try db.createNode(null, &[_][]const u8{"Doc"});
+    const large_len = 33 * 1024 * 1024;
+
+    {
+        const initial = try allocator.alloc(u8, large_len);
+        defer allocator.free(initial);
+        @memset(initial, 'a');
+        try db.setNodeProperty(null, node_id, "properties_json", .{ .string_val = initial });
+    }
+
+    {
+        const replacement = try allocator.alloc(u8, large_len);
+        defer allocator.free(replacement);
+        @memset(replacement, 'b');
+
+        var txn = try db.beginTransaction(.read_write);
+        var committed = false;
+        errdefer if (!committed) db.abortTransaction(&txn) catch {};
+
+        try db.setNodeProperty(&txn, node_id, "properties_json", .{ .string_val = replacement });
+        try db.commitTransaction(&txn);
+        committed = true;
+    }
+
+    {
+        var txn = try db.beginTransaction(.read_write);
+        var committed = false;
+        errdefer if (!committed) db.abortTransaction(&txn) catch {};
+
+        try db.setNodeProperty(&txn, node_id, "qid", .{ .string_val = "resolved-0001" });
+        try db.commitTransaction(&txn);
+        committed = true;
+    }
+
+    var got_qid = (try db.getNodeProperty(node_id, "qid")).?;
+    defer got_qid.deinit(allocator);
+    try std.testing.expectEqualStrings("resolved-0001", got_qid.string_val);
+
+    var got_json = (try db.getNodeProperty(node_id, "properties_json")).?;
+    defer got_json.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, large_len), got_json.string_val.len);
+    try std.testing.expectEqual(@as(u8, 'b'), got_json.string_val[0]);
+    try std.testing.expectEqual(@as(u8, 'b'), got_json.string_val[large_len - 1]);
 }
 
 test "default 4KiB high-write nodes with qid and large properties_json leave no pinned frames" {

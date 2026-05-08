@@ -54,6 +54,10 @@ Payloads are typed `lattice_value` maps with stable keys such as `entity`, `op`,
 `node_id`, `edge_id`, `source_id`, `target_id`, `type`, `label`, `key`,
 `old_value`, and `new_value`.
 
+Large property values that would make a changefeed record exceed internal
+record-size limits are represented as summary maps with
+`__lattice_value_omitted`, `type`, and `encoded_bytes`.
+
 User publishes to streams beginning with `__lattice_` are rejected so system
 streams remain reserved.
 

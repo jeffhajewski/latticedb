@@ -125,6 +125,11 @@ the map can include:
 - `old_value`
 - `new_value`
 
+For very large property changes, `old_value` and/or `new_value` may be a
+summary map instead of the original value so the built-in changefeed does not
+make the graph write exceed internal record-size limits. Summary maps include
+`__lattice_value_omitted`, `type`, and `encoded_bytes`.
+
 Example Python reader:
 
 ```python

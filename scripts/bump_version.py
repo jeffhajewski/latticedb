@@ -168,6 +168,15 @@ def _update_python_init(text: str, version: str, path: Path) -> str:
     )
 
 
+def _update_uv_lock(text: str, version: str, path: Path) -> str:
+    return _replace_exactly_one(
+        text,
+        r'(\[\[package\]\]\nname = "latticedb"\nversion = )"[^"]+"',
+        rf'\1"{version}"',
+        path,
+    )
+
+
 def _update_ts_index(text: str, version: str, path: Path) -> str:
     return _replace_exactly_one(
         text,
@@ -421,6 +430,22 @@ def _collect_version_observations(
     )
     observations.append(
         VersionObservation("Python __version__", python_init_path, python_init_version)
+    )
+
+    python_uv_lock_path = root / "bindings/python/uv.lock"
+    python_uv_lock = _load(python_uv_lock_path)
+    python_uv_lock_version = _extract_exactly_one(
+        python_uv_lock,
+        r'\[\[package\]\]\nname = "latticedb"\nversion = "([^"]+)"',
+        python_uv_lock_path,
+        "uv.lock editable package version",
+    )
+    observations.append(
+        VersionObservation(
+            "Python uv.lock package version",
+            python_uv_lock_path,
+            python_uv_lock_version,
+        )
     )
 
     # TypeScript metadata
@@ -704,6 +729,9 @@ def _compute_changes(root: Path, version: str) -> Tuple[FileChange, ...]:
         ),
         root / "bindings/python/src/latticedb/__init__.py": lambda t: _update_python_init(
             t, version, root / "bindings/python/src/latticedb/__init__.py"
+        ),
+        root / "bindings/python/uv.lock": lambda t: _update_uv_lock(
+            t, version, root / "bindings/python/uv.lock"
         ),
         root / "bindings/typescript/package.json": lambda t: _update_package_json(
             t, version, root / "bindings/typescript/package.json"

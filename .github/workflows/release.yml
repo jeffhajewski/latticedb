@@ -41,6 +41,9 @@ jobs:
             echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
           fi
 
+      - name: Check all tracked versions
+        run: python3 scripts/bump_version.py --check "${{ steps.version.outputs.version }}" --strict-lockfile
+
       - name: Check Zig version
         run: |
           ZIG_VERSION=$(grep 'const version' build.zig | sed -E 's/.*"([^"]+)".*/\1/')
@@ -83,7 +86,7 @@ jobs:
 
       - name: Check Zig source version
         run: |
-          SRC_VERSION=$(grep 'pub const VERSION' src/main.zig | sed -E 's/.*"([^"]+)".*/\1/')
+          SRC_VERSION=$(grep '^pub const VERSION = ' src/main.zig | sed -E 's/.*"([^"]+)".*/\1/')
           echo "Zig source version: $SRC_VERSION"
           echo "Expected: ${{ steps.version.outputs.version }}"
           if [ "$SRC_VERSION" != "${{ steps.version.outputs.version }}" ]; then

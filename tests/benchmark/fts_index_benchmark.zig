@@ -159,22 +159,20 @@ fn printHeader() void {
     std.debug.print("\n", .{});
 }
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
-    const argv = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, argv);
+    var args = try init.minimal.args.iterateAllocator(allocator);
+    defer args.deinit();
+    _ = args.skip();
 
     var single_scale: ?usize = null;
-    var i: usize = 1;
-    while (i < argv.len) : (i += 1) {
-        if (std.mem.eql(u8, argv[i], "--scale")) {
-            i += 1;
-            if (i < argv.len) {
-                single_scale = std.fmt.parseInt(usize, argv[i], 10) catch null;
-            }
+    while (args.next()) |arg| {
+        if (std.mem.eql(u8, arg, "--scale")) {
+            const scale_arg = args.next() orelse continue;
+            single_scale = std.fmt.parseInt(usize, scale_arg, 10) catch null;
         }
     }
 

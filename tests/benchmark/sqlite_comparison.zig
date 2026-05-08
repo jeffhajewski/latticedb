@@ -7,6 +7,7 @@
 
 const std = @import("std");
 const lattice = @import("lattice");
+const compat = @import("compat");
 const Database = lattice.storage.database.Database;
 
 // SQLite C bindings
@@ -24,6 +25,13 @@ const Config = struct {
     /// Random seed for reproducible graph generation
     seed: u64 = 42,
 };
+
+fn lap(last_ns: *i128) u64 {
+    const now = compat.nanoTimestamp();
+    const elapsed = now - last_ns.*;
+    last_ns.* = now;
+    return @intCast(elapsed);
+}
 
 const Scale = enum {
     small, // 10K nodes, 50K edges
@@ -652,7 +660,7 @@ const LatticeDb = struct {
         const node_id = self.node_ids[@intCast(node_idx)];
 
         var timings = VarPathTimings{};
-        var timer = std.time.Timer.start() catch return .{ .count = 0, .timings = timings };
+        var last_ns = compat.nanoTimestamp();
 
         // Initialization
         const bitset_size = self.node_ids.len + 1;
@@ -669,7 +677,7 @@ const LatticeDb = struct {
         visited.set(@intCast(node_id));
         var visited_count: u32 = 1;
 
-        timings.init_ns = timer.lap();
+        timings.init_ns = lap(&last_ns);
 
         var depth: u32 = 0;
         while (depth < 5 and current_level.items.len > 0) {
@@ -677,38 +685,38 @@ const LatticeDb = struct {
 
             for (current_level.items) |current| {
                 // Time: getOutgoingEdgeRefs
-                _ = timer.lap();
+                _ = lap(&last_ns);
                 var iter = self.db.getOutgoingEdgeRefs(current) catch continue;
-                timings.get_edges_ns += timer.lap();
+                timings.get_edges_ns += lap(&last_ns);
                 defer iter.deinit();
 
                 // Time: iteration
                 while (true) {
-                    _ = timer.lap();
+                    _ = lap(&last_ns);
                     const edge_ref = iter.next() catch null;
-                    timings.iter_next_ns += timer.lap();
+                    timings.iter_next_ns += lap(&last_ns);
 
                     if (edge_ref == null) break;
 
                     const target: usize = @intCast(edge_ref.?.target);
 
                     // Time: bitset check
-                    _ = timer.lap();
+                    _ = lap(&last_ns);
                     const already_visited = visited.isSet(target);
-                    timings.bitset_check_ns += timer.lap();
+                    timings.bitset_check_ns += lap(&last_ns);
 
                     if (!already_visited) {
                         // Time: bitset set
-                        _ = timer.lap();
+                        _ = lap(&last_ns);
                         visited.set(target);
-                        timings.bitset_set_ns += timer.lap();
+                        timings.bitset_set_ns += lap(&last_ns);
 
                         visited_count += 1;
 
                         // Time: append
-                        _ = timer.lap();
+                        _ = lap(&last_ns);
                         next_level.append(allocator, edge_ref.?.target) catch continue;
-                        timings.append_ns += timer.lap();
+                        timings.append_ns += lap(&last_ns);
                     }
                 }
                 timings.iter_deinit_count += 1;

@@ -31,9 +31,14 @@ run_test() {
 }
 
 run_test "$SCRIPT_DIR/test-cli.sh" "CLI Tests"
-run_test "$SCRIPT_DIR/test-shared-lib.sh" "Shared Library Tests"
-run_test "$SCRIPT_DIR/test-python.sh" "Python Binding Tests"
-run_test "$SCRIPT_DIR/test-typescript.sh" "TypeScript Binding Tests"
+if [ "$DISTRO" = "alpine-3.19" ]; then
+    echo "# Skipping dynamic library and binding smoke tests on Alpine musl."
+    echo "# Published dynamic package artifacts target glibc Linux and macOS."
+else
+    run_test "$SCRIPT_DIR/test-shared-lib.sh" "Shared Library Tests"
+    run_test "$SCRIPT_DIR/test-python.sh" "Python Binding Tests"
+    run_test "$SCRIPT_DIR/test-typescript.sh" "TypeScript Binding Tests"
+fi
 
 echo "========================================"
 if [ "$OVERALL_EXIT" -eq 0 ]; then

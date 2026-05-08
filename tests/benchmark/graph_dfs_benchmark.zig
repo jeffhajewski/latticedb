@@ -498,17 +498,18 @@ fn printResults(scale: Scale, results: []const DfsResult) void {
 // Main
 // ============================================================================
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     // Parse CLI args
-    const argv = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, argv);
+    var args = try init.minimal.args.iterateAllocator(allocator);
+    defer args.deinit();
+    _ = args.skip();
 
     var quick = false;
-    for (argv[1..]) |arg| {
+    while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--quick")) {
             quick = true;
         }

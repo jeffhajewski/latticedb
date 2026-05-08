@@ -655,14 +655,15 @@ fn printEfCResults(results: []const EfCResult) void {
 // Main
 // ============================================================================
 
-pub fn main() !void {
+pub fn main(init: std.process.Init) !void {
     var gpa = std.heap.DebugAllocator(.{}){};
     defer _ = gpa.deinit();
     const allocator = gpa.allocator();
 
     // Parse CLI args
-    const argv = try std.process.argsAlloc(allocator);
-    defer std.process.argsFree(allocator, argv);
+    var args = try init.minimal.args.iterateAllocator(allocator);
+    defer args.deinit();
+    _ = args.skip();
 
     var quick = false;
     var run_scales = true;
@@ -671,9 +672,7 @@ pub fn main() !void {
     var ef_construction: u16 = DEFAULT_EF_CONSTRUCTION;
     var single_scale: ?usize = null;
 
-    var i: usize = 1;
-    while (i < argv.len) : (i += 1) {
-        const arg = argv[i];
+    while (args.next()) |arg| {
         if (std.mem.eql(u8, arg, "--quick")) {
             quick = true;
         } else if (std.mem.eql(u8, arg, "--scale-only")) {
@@ -686,15 +685,11 @@ pub fn main() !void {
             run_scales = false;
             run_ef_search = false;
         } else if (std.mem.eql(u8, arg, "--ef-c")) {
-            i += 1;
-            if (i < argv.len) {
-                ef_construction = std.fmt.parseInt(u16, argv[i], 10) catch DEFAULT_EF_CONSTRUCTION;
-            }
+            const ef_arg = args.next() orelse continue;
+            ef_construction = std.fmt.parseInt(u16, ef_arg, 10) catch DEFAULT_EF_CONSTRUCTION;
         } else if (std.mem.eql(u8, arg, "--scale")) {
-            i += 1;
-            if (i < argv.len) {
-                single_scale = std.fmt.parseInt(usize, argv[i], 10) catch null;
-            }
+            const scale_arg = args.next() orelse continue;
+            single_scale = std.fmt.parseInt(usize, scale_arg, 10) catch null;
         }
     }
 

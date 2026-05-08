@@ -24,11 +24,62 @@ env:
 
 jobs:
   # ============================================
+  # Verify version consistency before building
+  # ============================================
+  version-check:
+    name: Version Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Determine expected version
+        id: version
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            echo "version=${{ inputs.version }}" >> $GITHUB_OUTPUT
+          else
+            echo "version=${GITHUB_REF#refs/tags/v}" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Check Zig version
+        run: |
+          ZIG_VERSION=$(grep 'const version' build.zig | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "Zig version: $ZIG_VERSION"
+          echo "Expected: ${{ steps.version.outputs.version }}"
+          if [ "$ZIG_VERSION" != "${{ steps.version.outputs.version }}" ]; then
+            echo "ERROR: build.zig version ($ZIG_VERSION) does not match tag (${{ steps.version.outputs.version }})"
+            exit 1
+          fi
+
+      - name: Check Python version
+        run: |
+          PYTHON_VERSION=$(grep '^version' bindings/python/pyproject.toml | sed -E 's/[^"]*"([^"]+)".*/\1/')
+          echo "Python version: $PYTHON_VERSION"
+          echo "Expected: ${{ steps.version.outputs.version }}"
+          if [ "$PYTHON_VERSION" != "${{ steps.version.outputs.version }}" ]; then
+            echo "ERROR: pyproject.toml version ($PYTHON_VERSION) does not match tag (${{ steps.version.outputs.version }})"
+            exit 1
+          fi
+
+      - name: Check npm version
+        run: |
+          NPM_VERSION=$(grep '"version"' bindings/typescript/package.json | head -1 | sed -E 's/.*"version": "([^"]+)".*/\1/')
+          echo "npm version: $NPM_VERSION"
+          echo "Expected: ${{ steps.version.outputs.version }}"
+          if [ "$NPM_VERSION" != "${{ steps.version.outputs.version }}" ]; then
+            echo "ERROR: package.json version ($NPM_VERSION) does not match tag (${{ steps.version.outputs.version }})"
+            exit 1
+          fi
+
+      - name: Versions OK
+        run: echo "All version files match tag ${{ steps.version.outputs.version }}"
+
+  # ============================================
   # Build native binaries for all platforms
-  # Using Zig cross-compilation from single runner
   # ============================================
   build-native:
     name: Build Native Libraries
+    needs: version-check
     runs-on: ubuntu-latest
     strategy:
       fail-fast: false
@@ -117,7 +168,7 @@ jobs:
   # ============================================
   release-github:
     name: GitHub Release
-    needs: [build-native, smoke-test-go]
+    needs: [version-check, build-native, smoke-test-go]
     runs-on: ubuntu-latest
     permissions:
       contents: write

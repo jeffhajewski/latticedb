@@ -40,7 +40,17 @@ jobs:
         run: zig build integration-test
 
       - name: Build shared library
-        run: zig build shared -Doptimize=ReleaseSafe
+        run: |
+          case "${{ matrix.os }}-$(uname -m)" in
+            ubuntu-latest-x86_64) target="x86_64-linux-gnu" ;;
+            macos-14-arm64) target="aarch64-macos" ;;
+            macos-14-x86_64) target="x86_64-macos" ;;
+            *)
+              echo "Unsupported CI shared library target: ${{ matrix.os }}-$(uname -m)" >&2
+              exit 1
+              ;;
+          esac
+          zig build shared -Dtarget="$target" -Doptimize=ReleaseSafe
 
       - name: Upload shared library
         uses: actions/upload-artifact@v4

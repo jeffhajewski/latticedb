@@ -49,33 +49,47 @@ sed -i '' -E "s/^version = \"[0-9]+\.[0-9]+\.[0-9]+\"/version = \"$VERSION\"/" b
 echo "  package.json: $(grep '"version"' bindings/typescript/package.json | head -1 | sed -E 's/.*\"version\": \"([^\"]+)\".*/\1/') -> $VERSION"
 sed -i '' -E "s/\"version\": \"[0-9]+\.[0-9]+\.[0-9]+\"/\"version\": \"$VERSION\"/" bindings/typescript/package.json
 
+# ── 4. Update Zig source version ────────────────────────────
+echo "  src/main.zig: $(grep 'pub const VERSION' src/main.zig | sed -E 's/.*"([^"]+)".*/\1/') -> $VERSION"
+sed -i '' -E "s/pub const VERSION = \"[0-9]+\.[0-9]+\.[0-9]+\"/pub const VERSION = \"$VERSION\"/" src/main.zig
+sed -i '' -E "s/VERSION_PATCH = [0-9]+/VERSION_PATCH = $(echo $VERSION | cut -d. -f3)/" src/main.zig
+
+# ── 5. Update C header version ──────────────────────────────
+echo "  include/lattice.h: $(grep 'LATTICE_VERSION ' include/lattice.h | sed -E 's/.*"([^"]+)".*/\1/') -> $VERSION"
+sed -i '' -E "s/#define LATTICE_VERSION \"[0-9]+\.[0-9]+\.[0-9]+\"/#define LATTICE_VERSION \"$VERSION\"/" include/lattice.h
+sed -i '' -E "s/LATTICE_VERSION_PATCH [0-9]+/LATTICE_VERSION_PATCH $(echo $VERSION | cut -d. -f3)/" include/lattice.h
+
 echo ""
 
-# ── 4. Verify all three match ────────────────────────────────
+# ── 6. Verify all match ─────────────────────────────────────
 ZIG_V=$(grep 'const version' build.zig | sed -E 's/.*"([^"]+)".*/\1/')
 PY_V=$(grep '^version' bindings/python/pyproject.toml | sed -E 's/[^"]*"([^"]+)".*/\1/')
 NPM_V=$(grep '"version"' bindings/typescript/package.json | head -1 | sed -E 's/.*"version": "([^"]+)".*/\1/')
+SRC_V=$(grep 'pub const VERSION' src/main.zig | sed -E 's/.*"([^"]+)".*/\1/')
+HDR_V=$(grep 'LATTICE_VERSION ' include/lattice.h | sed -E 's/.*"([^"]+)".*/\1/')
 
-if [ "$ZIG_V" != "$VERSION" ] || [ "$PY_V" != "$VERSION" ] || [ "$NPM_V" != "$VERSION" ]; then
+if [ "$ZIG_V" != "$VERSION" ] || [ "$PY_V" != "$VERSION" ] || [ "$NPM_V" != "$VERSION" ] || [ "$SRC_V" != "$VERSION" ] || [ "$HDR_V" != "$VERSION" ]; then
     echo "Error: Version mismatch after bump!"
-    echo "  build.zig:    $ZIG_V"
+    echo "  build.zig:      $ZIG_V"
     echo "  pyproject.toml: $PY_V"
     echo "  package.json:   $NPM_V"
-    git checkout -- build.zig bindings/python/pyproject.toml bindings/typescript/package.json
+    echo "  src/main.zig:   $SRC_V"
+    echo "  include/lattice.h: $HDR_V"
+    git checkout -- build.zig bindings/python/pyproject.toml bindings/typescript/package.json src/main.zig include/lattice.h
     exit 1
 fi
 
 echo "✓ All version files updated to $VERSION"
 echo ""
 
-# ── 5. Commit ────────────────────────────────────────────────
-git add build.zig bindings/python/pyproject.toml bindings/typescript/package.json
+# ── 7. Commit ───────────────────────────────────────────────
+git add build.zig bindings/python/pyproject.toml bindings/typescript/package.json src/main.zig include/lattice.h
 git commit -m "Release v$VERSION"
 
-# ── 6. Tag ───────────────────────────────────────────────────
+# ── 8. Tag ──────────────────────────────────────────────────
 git tag -a "v$VERSION" -m "LatticeDB v$VERSION"
 
-# ── 7. Push ──────────────────────────────────────────────────
+# ── 9. Push ─────────────────────────────────────────────────
 git push origin main
 git push origin "v$VERSION"
 

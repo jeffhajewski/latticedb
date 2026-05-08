@@ -71,6 +71,26 @@ jobs:
             exit 1
           fi
 
+      - name: Check Zig header version
+        run: |
+          HDR_VERSION=$(grep 'LATTICE_VERSION ' include/lattice.h | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "C header version: $HDR_VERSION"
+          echo "Expected: ${{ steps.version.outputs.version }}"
+          if [ "$HDR_VERSION" != "${{ steps.version.outputs.version }}" ]; then
+            echo "ERROR: include/lattice.h version ($HDR_VERSION) does not match tag (${{ steps.version.outputs.version }})"
+            exit 1
+          fi
+
+      - name: Check Zig source version
+        run: |
+          SRC_VERSION=$(grep 'pub const VERSION' src/main.zig | sed -E 's/.*"([^"]+)".*/\1/')
+          echo "Zig source version: $SRC_VERSION"
+          echo "Expected: ${{ steps.version.outputs.version }}"
+          if [ "$SRC_VERSION" != "${{ steps.version.outputs.version }}" ]; then
+            echo "ERROR: src/main.zig version ($SRC_VERSION) does not match tag (${{ steps.version.outputs.version }})"
+            exit 1
+          fi
+
       - name: Versions OK
         run: echo "All version files match tag ${{ steps.version.outputs.version }}"
 

@@ -641,13 +641,19 @@ pub const BTree = struct {
         if (value.len < OVERFLOW_VALUE_LEN_SENTINEL) {
             const inline_size = storedLeafEntrySize(key, value) orelse return BTreeError.PageFull;
             if (inline_size <= maxLeafEntrySize(self.page_size)) {
-                return .{
-                    .value = value,
-                    .overflow = false,
-                    .owns_value = false,
-                    .first_overflow_page = NULL_PAGE,
-                    .page_count = 0,
-                };
+                const inline_space = storedLeafEntrySpace(key, value) orelse return BTreeError.PageFull;
+                // Keep inline entries small enough that any full leaf plus
+                // one new entry can always be split into two ordered leaves.
+                const split_safe_inline_limit = leafPagePayloadCapacity(self.page_size) / 2;
+                if (inline_space <= split_safe_inline_limit or self.chooseOverflowLocalPrefixLen(key, value.len) == null) {
+                    return .{
+                        .value = value,
+                        .overflow = false,
+                        .owns_value = false,
+                        .first_overflow_page = NULL_PAGE,
+                        .page_count = 0,
+                    };
+                }
             }
         }
 
@@ -1556,10 +1562,69 @@ pub const BTree = struct {
         // A background compaction process could reclaim this space later.
     }
 
-    /// Remove an entry from a leaf node by shifting slots
+    /// Remove an entry from a leaf node and compact surviving entries.
     fn deleteLeafEntry(self: *Self, buf: []u8, slot: u16) BTreeError!void {
         const num_entries = LeafNode.getNumEntries(buf);
         const stored = LeafNode.getStoredValue(buf, slot);
+
+        const remaining_count = num_entries - 1;
+        if (remaining_count > 0) {
+            var total_data_size: usize = 0;
+            for (0..num_entries) |i| {
+                if (i == slot) continue;
+                const entry = LeafNode.getStoredEntry(buf, @intCast(i));
+                total_data_size += entry.key.len + entry.value.len;
+            }
+
+            var entries = self.allocator.alloc(StoredEntry, remaining_count) catch return BTreeError.OutOfMemory;
+            defer self.allocator.free(entries);
+
+            var data_buffer = self.allocator.alloc(u8, total_data_size) catch return BTreeError.OutOfMemory;
+            defer self.allocator.free(data_buffer);
+
+            var data_offset: usize = 0;
+            var entry_index: usize = 0;
+            for (0..num_entries) |i| {
+                if (i == slot) continue;
+
+                const entry = LeafNode.getStoredEntry(buf, @intCast(i));
+                const key_copy = data_buffer[data_offset..][0..entry.key.len];
+                @memcpy(key_copy, entry.key);
+                data_offset += entry.key.len;
+
+                const value_copy = data_buffer[data_offset..][0..entry.value.len];
+                @memcpy(value_copy, entry.value);
+                data_offset += entry.value.len;
+
+                entries[entry_index] = .{
+                    .key = key_copy,
+                    .value = value_copy,
+                    .overflow = entry.overflow,
+                };
+                entry_index += 1;
+            }
+
+            const page_len: usize = self.page_size;
+            const compacted = self.allocator.alloc(u8, page_len) catch return BTreeError.OutOfMemory;
+            defer self.allocator.free(compacted);
+            @memcpy(compacted[0..page_len], buf[0..page_len]);
+            LeafNode.setNumEntries(compacted, 0);
+
+            for (entries, 0..) |entry, i| {
+                try self.insertLeafEntryStored(compacted, @intCast(i), entry.key, entry.value, entry.overflow);
+            }
+
+            if (stored.overflow) {
+                const desc = try parseOverflowDescriptor(stored.value);
+                if (desc.page_count > 0) {
+                    try self.freeOverflowChain(desc.first_page, desc.page_count);
+                }
+            }
+
+            @memcpy(buf[0..page_len], compacted[0..page_len]);
+            return;
+        }
+
         if (stored.overflow) {
             const desc = try parseOverflowDescriptor(stored.value);
             if (desc.page_count > 0) {
@@ -1567,18 +1632,7 @@ pub const BTree = struct {
             }
         }
 
-        // Shift slots down to fill the gap
-        // Note: We don't reclaim the actual entry space at the end of the page.
-        // This creates "dead" space that would be reclaimed on page compaction.
-        if (slot < num_entries - 1) {
-            const slots_start = LEAF_SLOTS_OFFSET + slot * LEAF_SLOT_SIZE;
-            const next_slot_start = LEAF_SLOTS_OFFSET + (slot + 1) * LEAF_SLOT_SIZE;
-            const slots_end = LEAF_SLOTS_OFFSET + num_entries * LEAF_SLOT_SIZE;
-            std.mem.copyForwards(u8, buf[slots_start .. slots_end - LEAF_SLOT_SIZE], buf[next_slot_start..slots_end]);
-        }
-
-        // Decrement entry count
-        LeafNode.setNumEntries(buf, num_entries - 1);
+        LeafNode.setNumEntries(buf, 0);
     }
 
     // ========================================================================
@@ -2051,6 +2105,49 @@ test "btree leaf split accounts for variable-sized entries" {
     }
 }
 
+test "btree uses overflow for large inline-capable values to preserve split boundaries" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const path = "/tmp/lattice_btree_test_large_inline_split_boundary.db";
+    vfs_impl.delete(path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, path, .{ .create = true, .page_size = 4096 });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 65536);
+    defer bp.deinit();
+
+    var tree = try BTree.init(allocator, &bp);
+
+    const left = [_]u8{'l'} ** 1500;
+    const middle = [_]u8{'m'} ** 3000;
+    const right = [_]u8{'r'} ** 1494;
+
+    try tree.insert("a", &left);
+    try tree.insert("c", &right);
+    try tree.insert("b", &middle);
+
+    const got_left = (try tree.get("a")).?;
+    defer tree.freeValue(got_left);
+    try std.testing.expectEqualSlices(u8, &left, got_left);
+
+    const got_middle = (try tree.get("b")).?;
+    defer tree.freeValue(got_middle);
+    try std.testing.expectEqualSlices(u8, &middle, got_middle);
+
+    const got_right = (try tree.get("c")).?;
+    defer tree.freeValue(got_right);
+    try std.testing.expectEqualSlices(u8, &right, got_right);
+}
+
 test "btree overflow values round-trip, scan, delete, and reinsert" {
     const allocator = std.testing.allocator;
 
@@ -2285,4 +2382,50 @@ test "btree delete and reinsert" {
     try std.testing.expect(val != null);
     defer if (val) |owned| tree.freeValue(owned);
     try std.testing.expectEqualStrings("value2", val.?);
+}
+
+test "btree delete compacts leaf payload space before reinsert" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const path = "/tmp/lattice_btree_test_delete_compacts_leaf.db";
+    vfs_impl.delete(path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, path, .{ .create = true, .page_size = 4096 });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 65536);
+    defer bp.deinit();
+
+    var tree = try BTree.init(allocator, &bp);
+
+    const first = [_]u8{'a'} ** 1800;
+    const second = [_]u8{'b'} ** 1800;
+    const replacement = [_]u8{'c'} ** 1800;
+
+    try tree.insert("a", &first);
+    try tree.insert("b", &second);
+    try tree.delete("a");
+    try tree.insert("c", &replacement);
+
+    const root = try tree.bp.fetchPage(tree.root_page, .shared);
+    defer tree.bp.unpinPage(root, false);
+    const header: *const PageHeader = @ptrCast(@alignCast(root.data.ptr));
+    try std.testing.expectEqual(PageType.btree_leaf, header.page_type);
+    try std.testing.expectEqual(@as(u16, 2), LeafNode.getNumEntries(root.data));
+
+    const got_second = (try tree.get("b")).?;
+    defer tree.freeValue(got_second);
+    try std.testing.expectEqualSlices(u8, &second, got_second);
+
+    const got_replacement = (try tree.get("c")).?;
+    defer tree.freeValue(got_replacement);
+    try std.testing.expectEqualSlices(u8, &replacement, got_replacement);
 }

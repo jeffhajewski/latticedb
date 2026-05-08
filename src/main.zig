@@ -279,10 +279,10 @@ pub const CacheEntry = query.cache.CacheEntry;
 pub const CacheStats = query.cache.CacheStats;
 
 // Version information (keep in sync with build.zig)
-pub const VERSION = "0.9.3";
+pub const VERSION = "0.9.4";
 pub const VERSION_MAJOR = 0;
 pub const VERSION_MINOR = 9;
-pub const VERSION_PATCH = 3;
+pub const VERSION_PATCH = 4;
 
 test {
     // Run tests from all modules

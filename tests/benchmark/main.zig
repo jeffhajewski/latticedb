@@ -208,7 +208,8 @@ fn createNodesWithProperties(db: *Database, count: usize) ![]u64 {
 }
 
 fn createEdges(db: *Database, node_ids: []const u64, edges_per_node: usize) !void {
-    const rng = std.crypto.random;
+    var prng = std.Random.DefaultPrng.init(0x1a77_ce5);
+    const rng = prng.random();
     for (node_ids) |source| {
         for (0..edges_per_node) |_| {
             const target_idx = rng.intRangeAtMost(usize, 0, node_ids.len - 1);
@@ -224,7 +225,8 @@ fn createVectorData(db: *Database, node_ids: []const u64, dimensions: usize) !vo
     var vector = try db.allocator.alloc(f32, dimensions);
     defer db.allocator.free(vector);
 
-    const rng = std.crypto.random;
+    var prng = std.Random.DefaultPrng.init(0x1a77_ce6);
+    const rng = prng.random();
     for (node_ids, 0..) |node_id, i| {
         // Generate random vector
         for (0..dimensions) |j| {

@@ -19,10 +19,10 @@ extern "C" {
 #endif
 
 /* Version information */
-#define LATTICE_VERSION "0.9.2"
+#define LATTICE_VERSION "0.9.3"
 #define LATTICE_VERSION_MAJOR 0
 #define LATTICE_VERSION_MINOR 9
-#define LATTICE_VERSION_PATCH 2
+#define LATTICE_VERSION_PATCH 3
 
 /* Opaque handle types */
 typedef struct lattice_database lattice_database;

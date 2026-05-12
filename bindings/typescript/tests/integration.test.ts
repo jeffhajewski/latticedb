@@ -103,6 +103,27 @@ describeIfNative('Database Integration', () => {
       db = new Database(dbPath, { create: false });
       await expect(db.open()).rejects.toThrow();
     });
+
+    test('enable adjacency cache option keeps graph traversal correct', async () => {
+      db = new Database(dbPath, { create: true, enableAdjacencyCache: true });
+      await db.open();
+
+      let aliceId!: bigint;
+      let bobId!: bigint;
+      await db.write(async (txn) => {
+        const alice = await txn.createNode({ labels: ['Person'] });
+        const bob = await txn.createNode({ labels: ['Person'] });
+        await txn.createEdge(alice.id, bob.id, 'KNOWS');
+        aliceId = alice.id;
+        bobId = bob.id;
+      });
+
+      await db.read(async (txn) => {
+        const edges = await txn.getOutgoingEdges(aliceId);
+        expect(edges).toHaveLength(1);
+        expect(edges[0]!.targetId).toBe(bobId);
+      });
+    });
   });
 
   describe('Node operations', () => {

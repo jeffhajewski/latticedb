@@ -19,6 +19,7 @@ from latticedb._bindings import (
     LatticeValue,
     OpenOptions,
     OpenOptionsV2,
+    OpenOptionsV3,
     LATTICE_ERROR_UNSUPPORTED,
     LatticeUnsupportedError,
     check_error,
@@ -55,6 +56,7 @@ class Database:
         read_only: bool = False,
         cache_size_mb: int = 100,
         enable_wal: bool = True,
+        enable_adjacency_cache: bool = False,
         enable_vectors: Optional[bool] = None,
         enable_vector: Optional[bool] = None,
         vector_dimensions: int = 128,
@@ -68,6 +70,7 @@ class Database:
             read_only: Open in read-only mode.
             cache_size_mb: Size of the page cache in megabytes.
             enable_wal: Enable WAL-backed transactions.
+            enable_adjacency_cache: Enable the in-memory graph adjacency cache.
             enable_vectors: Enable vector storage and indexing.
             enable_vector: Compatibility alias for ``enable_vectors``.
             vector_dimensions: Dimension of vectors when vector support is enabled.
@@ -77,6 +80,7 @@ class Database:
         self._read_only = read_only
         self._cache_size_mb = cache_size_mb
         self._enable_wal = enable_wal
+        self._enable_adjacency_cache = enable_adjacency_cache
         if enable_vector is not None:
             warnings.warn(
                 "Database(..., enable_vector=...) is deprecated; use enable_vectors=.... Earliest removal is v0.6.0.",
@@ -106,7 +110,29 @@ class Database:
 
         lib = get_lib()
         db_ptr = c_void_p()
-        if getattr(lib, "_has_lattice_open_v2", False):
+        if getattr(lib, "_has_lattice_open_v3", False):
+            opts = OpenOptionsV3(
+                struct_size=ctypes.sizeof(OpenOptionsV3),
+                create=self._create,
+                read_only=self._read_only,
+                cache_size_mb=self._cache_size_mb,
+                page_size=4096,
+                enable_vector=self._enable_vectors,
+                vector_dimensions=self._vector_dimensions,
+                enable_wal=self._enable_wal,
+                enable_adjacency_cache=self._enable_adjacency_cache,
+            )
+            code = lib._lib.lattice_open_v3(
+                str(self._path).encode("utf-8"),
+                byref(opts),
+                byref(db_ptr),
+            )
+        elif getattr(lib, "_has_lattice_open_v2", False):
+            if self._enable_adjacency_cache:
+                raise LatticeUnsupportedError(
+                    "lattice_open_v3 is required to enable the adjacency cache",
+                    LATTICE_ERROR_UNSUPPORTED,
+                )
             opts = OpenOptionsV2(
                 struct_size=ctypes.sizeof(OpenOptionsV2),
                 create=self._create,
@@ -123,6 +149,11 @@ class Database:
                 byref(db_ptr),
             )
         else:
+            if self._enable_adjacency_cache:
+                raise LatticeUnsupportedError(
+                    "lattice_open_v3 is required to enable the adjacency cache",
+                    LATTICE_ERROR_UNSUPPORTED,
+                )
             if not self._enable_wal:
                 raise LatticeUnsupportedError(
                     "lattice_open_v2 is required to disable WAL",

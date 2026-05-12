@@ -404,6 +404,20 @@ class OpenOptionsV2(Structure):
     ]
 
 
+class OpenOptionsV3(Structure):
+    _fields_ = [
+        ("struct_size", c_size_t),
+        ("create", c_bool),
+        ("read_only", c_bool),
+        ("cache_size_mb", c_uint32),
+        ("page_size", c_uint32),
+        ("enable_vector", c_bool),
+        ("vector_dimensions", c_uint16),
+        ("enable_wal", c_bool),
+        ("enable_adjacency_cache", c_bool),
+    ]
+
+
 # Type aliases
 LatticeDatabase = c_void_p
 LatticeTxn = c_void_p
@@ -443,6 +457,7 @@ class LatticeLib:
 
         self._lib = ctypes.CDLL(str(lib_path))
         self._has_lattice_open_v2 = hasattr(self._lib, "lattice_open_v2")
+        self._has_lattice_open_v3 = hasattr(self._lib, "lattice_open_v3")
         self._setup_functions()
 
     def _setup_functions(self) -> None:
@@ -462,6 +477,14 @@ class LatticeLib:
                 POINTER(LatticeDatabase),
             ]
             self._lib.lattice_open_v2.restype = c_int
+
+        if self._has_lattice_open_v3:
+            self._lib.lattice_open_v3.argtypes = [
+                c_char_p,
+                POINTER(OpenOptionsV3),
+                POINTER(LatticeDatabase),
+            ]
+            self._lib.lattice_open_v3.restype = c_int
 
         # lattice_close
         self._lib.lattice_close.argtypes = [LatticeDatabase]

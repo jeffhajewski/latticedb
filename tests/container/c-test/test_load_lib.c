@@ -32,6 +32,18 @@ _Static_assert(offsetof(lattice_open_options_v2, enable_vector) == 20, "v2 enabl
 _Static_assert(offsetof(lattice_open_options_v2, vector_dimensions) == 22, "v2 vector_dimensions offset changed");
 _Static_assert(offsetof(lattice_open_options_v2, enable_wal) == 24, "v2 enable_wal offset changed");
 
+_Static_assert(sizeof(lattice_open_options_v3) == 32, "lattice_open_options_v3 ABI size changed");
+_Static_assert(offsetof(lattice_open_options_v3, struct_size) == 0, "v3 struct_size offset changed");
+_Static_assert(offsetof(lattice_open_options_v3, create) == 8, "v3 create offset changed");
+_Static_assert(offsetof(lattice_open_options_v3, read_only) == 9, "v3 read_only offset changed");
+_Static_assert(offsetof(lattice_open_options_v3, cache_size_mb) == 12, "v3 cache_size_mb offset changed");
+_Static_assert(offsetof(lattice_open_options_v3, page_size) == 16, "v3 page_size offset changed");
+_Static_assert(sizeof(((lattice_open_options_v3 *)0)->page_size) == sizeof(uint32_t), "v3 page_size must be uint32_t");
+_Static_assert(offsetof(lattice_open_options_v3, enable_vector) == 20, "v3 enable_vector offset changed");
+_Static_assert(offsetof(lattice_open_options_v3, vector_dimensions) == 22, "v3 vector_dimensions offset changed");
+_Static_assert(offsetof(lattice_open_options_v3, enable_wal) == 24, "v3 enable_wal offset changed");
+_Static_assert(offsetof(lattice_open_options_v3, enable_adjacency_cache) == 25, "v3 enable_adjacency_cache offset changed");
+
 int main(void) {
     int failures = 0;
 

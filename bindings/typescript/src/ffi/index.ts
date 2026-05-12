@@ -109,6 +109,7 @@ export interface OpenOptions {
   cacheSizeMb?: number;
   pageSize?: number;
   enableWal?: boolean;
+  enableAdjacencyCache?: boolean;
   enableVectors?: boolean;
   enableVector?: boolean;
   vectorDimensions?: number;
@@ -206,9 +207,16 @@ export class LatticeFFI {
    */
   open(path: string, options: OpenOptions = {}): DatabaseHandle {
     const enableWal = options.enableWal ?? true;
+    const enableAdjacencyCache = options.enableAdjacencyCache ?? false;
     if (!this.bindings.lattice_open_v2 && !enableWal) {
       throw new LatticeError(
         'lattice_open_v2 is required to disable WAL',
+        LatticeErrorCode.Unsupported
+      );
+    }
+    if (!this.bindings.lattice_open_v3 && enableAdjacencyCache) {
+      throw new LatticeError(
+        'lattice_open_v3 is required to enable the adjacency cache',
         LatticeErrorCode.Unsupported
       );
     }
@@ -221,16 +229,24 @@ export class LatticeFFI {
       enable_vector: options.enableVectors ?? options.enableVector ?? false,
       vector_dimensions: options.vectorDimensions ?? 128,
     };
-    const opts = {
+    const v2Opts = {
       struct_size: koffi.sizeof('lattice_open_options_v2'),
       ...baseOpts,
       enable_wal: enableWal,
     };
+    const v3Opts = {
+      struct_size: koffi.sizeof('lattice_open_options_v3'),
+      ...baseOpts,
+      enable_wal: enableWal,
+      enable_adjacency_cache: enableAdjacencyCache,
+    };
 
     const dbOut: unknown[] = [null];
-    const err = this.bindings.lattice_open_v2
-      ? this.bindings.lattice_open_v2(path, opts, dbOut)
-      : this.bindings.lattice_open(path, baseOpts, dbOut);
+    const err = this.bindings.lattice_open_v3
+      ? this.bindings.lattice_open_v3(path, v3Opts, dbOut)
+      : this.bindings.lattice_open_v2
+        ? this.bindings.lattice_open_v2(path, v2Opts, dbOut)
+        : this.bindings.lattice_open(path, baseOpts, dbOut);
     this.checkError(err);
     return dbOut[0];
   }

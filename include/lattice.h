@@ -154,6 +154,22 @@ typedef struct {
 /* Default open options v2 */
 #define LATTICE_OPEN_OPTIONS_V2_DEFAULT { sizeof(lattice_open_options_v2), false, false, 100, 4096, false, 128, true }
 
+/* Open options v3 */
+typedef struct {
+    size_t struct_size;     /* Must be sizeof(lattice_open_options_v3) */
+    bool create;            /* Create if not exists */
+    bool read_only;         /* Open in read-only mode */
+    uint32_t cache_size_mb; /* Cache size in MB (default: 100) */
+    uint32_t page_size;     /* Page size in bytes (default: 4096) */
+    bool enable_vector;     /* Enable vector storage for embeddings */
+    uint16_t vector_dimensions; /* Vector dimensions, 1..4096 (default: 128) */
+    bool enable_wal;        /* Enable WAL-backed transactions (default: true) */
+    bool enable_adjacency_cache; /* Enable in-memory graph adjacency cache */
+} lattice_open_options_v3;
+
+/* Default open options v3 */
+#define LATTICE_OPEN_OPTIONS_V3_DEFAULT { sizeof(lattice_open_options_v3), false, false, 100, 4096, false, 128, true, false }
+
 /*
  * Database operations
  */
@@ -169,6 +185,13 @@ lattice_error lattice_open(
 lattice_error lattice_open_v2(
     const char* path,
     const lattice_open_options_v2* options,
+    lattice_database** db_out
+);
+
+/* Open a database file with v3 options */
+lattice_error lattice_open_v3(
+    const char* path,
+    const lattice_open_options_v3* options,
     lattice_database** db_out
 );
 

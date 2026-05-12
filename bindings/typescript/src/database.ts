@@ -29,6 +29,8 @@ export interface DatabaseOptions {
   cacheSizeMb?: number;
   /** Enable WAL-backed transactions (default: true) */
   enableWal?: boolean;
+  /** Enable in-memory graph adjacency cache */
+  enableAdjacencyCache?: boolean;
   /** Enable vector storage and indexing */
   enableVectors?: boolean;
   /** @deprecated Use enableVectors instead. Earliest removal is v0.6.0. */
@@ -75,6 +77,7 @@ export class Database {
       readOnly: false,
       cacheSizeMb: 100,
       enableWal: true,
+      enableAdjacencyCache: false,
       enableVector: false,
       vectorDimensions: 128,
       ...options,
@@ -95,6 +98,7 @@ export class Database {
       readOnly: this.options.readOnly,
       cacheSizeMb: this.options.cacheSizeMb,
       enableWal: this.options.enableWal,
+      enableAdjacencyCache: this.options.enableAdjacencyCache,
       enableVectors: this.options.enableVectors,
       enableVector: this.options.enableVector,
       vectorDimensions: this.options.vectorDimensions,

@@ -17,6 +17,8 @@ type OpenOptions struct {
 	// DisableWAL explicitly opens without WAL-backed transactions. It exists because
 	// Go bool fields cannot distinguish an omitted EnableWAL from EnableWAL=false.
 	DisableWAL bool
+	// EnableAdjacencyCache enables the in-memory graph adjacency cache.
+	EnableAdjacencyCache bool
 	// Preferred public option name.
 	EnableVectors bool
 	// Deprecated: use EnableVectors. Earliest removal is v0.6.0.

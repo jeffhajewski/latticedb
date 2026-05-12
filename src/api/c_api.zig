@@ -485,6 +485,19 @@ pub const lattice_open_options_v2 = extern struct {
     enable_wal: bool = true,
 };
 
+/// Versioned open options for adjacency cache exposure.
+pub const lattice_open_options_v3 = extern struct {
+    struct_size: usize = @sizeOf(lattice_open_options_v3),
+    create: bool = false,
+    read_only: bool = false,
+    cache_size_mb: u32 = 100,
+    page_size: u32 = 4096,
+    enable_vector: bool = false,
+    vector_dimensions: u16 = 128,
+    enable_wal: bool = true,
+    enable_adjacency_cache: bool = false,
+};
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -1038,6 +1051,33 @@ fn buildOpenOptionsV2(options: ?*const lattice_open_options_v2) DatabaseError!Op
     return zig_options;
 }
 
+fn buildOpenOptionsV3(options: ?*const lattice_open_options_v3) DatabaseError!OpenOptions {
+    var zig_options = OpenOptions{
+        .create = false,
+        .read_only = false,
+        .config = DatabaseConfig{
+            .enable_wal = true,
+        },
+    };
+
+    if (options) |opts| {
+        if (opts.struct_size < @sizeOf(lattice_open_options_v3)) {
+            return DatabaseError.InvalidArgument;
+        }
+
+        zig_options.create = opts.create;
+        zig_options.read_only = opts.read_only;
+        zig_options.page_size = if (opts.page_size == 0) types.DEFAULT_PAGE_SIZE else opts.page_size;
+        zig_options.config.buffer_pool_size = @as(usize, opts.cache_size_mb) * 1024 * 1024;
+        zig_options.config.enable_vector = opts.enable_vector;
+        zig_options.config.vector_dimensions = opts.vector_dimensions;
+        zig_options.config.enable_wal = opts.enable_wal;
+        zig_options.config.enable_adjacency_cache = opts.enable_adjacency_cache;
+    }
+
+    return zig_options;
+}
+
 fn openDatabase(
     path: [*c]const u8,
     zig_options: OpenOptions,
@@ -1108,6 +1148,16 @@ pub export fn lattice_open_v2(
     db_out: *?*lattice_database,
 ) lattice_error {
     const zig_options = buildOpenOptionsV2(options) catch |err| return mapDatabaseError(err);
+    return openDatabase(path, zig_options, db_out);
+}
+
+/// Open a database file with v3 options
+pub export fn lattice_open_v3(
+    path: [*c]const u8,
+    options: ?*const lattice_open_options_v3,
+    db_out: *?*lattice_database,
+) lattice_error {
+    const zig_options = buildOpenOptionsV3(options) catch |err| return mapDatabaseError(err);
     return openDatabase(path, zig_options, db_out);
 }
 

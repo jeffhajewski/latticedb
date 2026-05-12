@@ -20,13 +20,14 @@ func Open(path string, opts OpenOptions) (*DB, error) {
 	opts = opts.withDefaults()
 
 	raw, err := cgobridge.Open(path, cgobridge.OpenOptions{
-		Create:           opts.Create,
-		ReadOnly:         opts.ReadOnly,
-		CacheSizeMB:      opts.CacheSizeMB,
-		PageSize:         opts.PageSize,
-		EnableWAL:        opts.EnableWAL,
-		EnableVector:     opts.vectorsEnabled(),
-		VectorDimensions: opts.VectorDimensions,
+		Create:               opts.Create,
+		ReadOnly:             opts.ReadOnly,
+		CacheSizeMB:          opts.CacheSizeMB,
+		PageSize:             opts.PageSize,
+		EnableWAL:            opts.EnableWAL,
+		EnableAdjacencyCache: opts.EnableAdjacencyCache,
+		EnableVector:         opts.vectorsEnabled(),
+		VectorDimensions:     opts.VectorDimensions,
 	})
 	if err != nil {
 		return nil, wrapError(err)

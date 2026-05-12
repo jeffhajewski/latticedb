@@ -471,6 +471,58 @@ func TestOpenOptionsEnableVectorCompatibilityAlias(t *testing.T) {
 	}
 }
 
+func TestOpenOptionsEnableAdjacencyCache(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "adjacency-cache.db")
+
+	db, err := Open(dbPath, OpenOptions{
+		Create:               true,
+		EnableAdjacencyCache: true,
+	})
+	if err != nil {
+		t.Fatalf("open db with adjacency cache: %v", err)
+	}
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			t.Fatalf("close db: %v", closeErr)
+		}
+	}()
+
+	var aliceID, bobID NodeID
+	err = db.Update(func(tx *Tx) error {
+		alice, err := tx.CreateNode(CreateNodeOptions{Labels: []string{"Person"}})
+		if err != nil {
+			return err
+		}
+		bob, err := tx.CreateNode(CreateNodeOptions{Labels: []string{"Person"}})
+		if err != nil {
+			return err
+		}
+		if _, err := tx.CreateEdge(alice.ID, bob.ID, "KNOWS", CreateEdgeOptions{}); err != nil {
+			return err
+		}
+		aliceID = alice.ID
+		bobID = bob.ID
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed graph: %v", err)
+	}
+
+	err = db.View(func(tx *Tx) error {
+		edges, err := tx.GetOutgoingEdges(aliceID)
+		if err != nil {
+			return err
+		}
+		if len(edges) != 1 || edges[0].TargetID != bobID {
+			t.Fatalf("unexpected outgoing edges: %#v", edges)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("view graph: %v", err)
+	}
+}
+
 func TestQueryCache(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "cache.db")
 

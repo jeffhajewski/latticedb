@@ -33,6 +33,7 @@ const lattice_value = c_api.lattice_value;
 const lattice_value_type = c_api.lattice_value_type;
 const lattice_open_options = c_api.lattice_open_options;
 const lattice_open_options_v2 = c_api.lattice_open_options_v2;
+const lattice_open_options_v3 = c_api.lattice_open_options_v3;
 const lattice_txn_mode = c_api.lattice_txn_mode;
 const lattice_node_id = c_api.lattice_node_id;
 const lattice_edge_id = c_api.lattice_edge_id;
@@ -69,6 +70,17 @@ test "c_api: open options ABI layout is stable" {
     try std.testing.expectEqual(@as(usize, 20), @offsetOf(lattice_open_options_v2, "enable_vector"));
     try std.testing.expectEqual(@as(usize, 22), @offsetOf(lattice_open_options_v2, "vector_dimensions"));
     try std.testing.expectEqual(@as(usize, 24), @offsetOf(lattice_open_options_v2, "enable_wal"));
+
+    try std.testing.expectEqual(@as(usize, 32), @sizeOf(lattice_open_options_v3));
+    try std.testing.expectEqual(@as(usize, 0), @offsetOf(lattice_open_options_v3, "struct_size"));
+    try std.testing.expectEqual(@as(usize, 8), @offsetOf(lattice_open_options_v3, "create"));
+    try std.testing.expectEqual(@as(usize, 9), @offsetOf(lattice_open_options_v3, "read_only"));
+    try std.testing.expectEqual(@as(usize, 12), @offsetOf(lattice_open_options_v3, "cache_size_mb"));
+    try std.testing.expectEqual(@as(usize, 16), @offsetOf(lattice_open_options_v3, "page_size"));
+    try std.testing.expectEqual(@as(usize, 20), @offsetOf(lattice_open_options_v3, "enable_vector"));
+    try std.testing.expectEqual(@as(usize, 22), @offsetOf(lattice_open_options_v3, "vector_dimensions"));
+    try std.testing.expectEqual(@as(usize, 24), @offsetOf(lattice_open_options_v3, "enable_wal"));
+    try std.testing.expectEqual(@as(usize, 25), @offsetOf(lattice_open_options_v3, "enable_adjacency_cache"));
 }
 
 test "c_api: open and close database" {
@@ -349,6 +361,50 @@ test "c_api: open v2 can disable WAL and rejects write transactions" {
         c_api.lattice_stream_trim(read_txn, "events".ptr, "events".len, 1),
     );
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_rollback(read_txn));
+}
+
+test "c_api: open v3 can enable adjacency cache and traverse graph" {
+    const path = "/tmp/lattice_capi_open_v3_adjacency_test.db";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options_v3{
+        .struct_size = @sizeOf(lattice_open_options_v3),
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+        .enable_wal = true,
+        .enable_adjacency_cache = true,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open_v3(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+
+    var alice: lattice_node_id = 0;
+    var bob: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &alice));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &bob));
+
+    var edge_id: lattice_edge_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, alice, bob, "KNOWS", &edge_id));
+
+    var edges: ?*c_api.lattice_edge_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_get_outgoing(txn, alice, &edges));
+    defer c_api.lattice_edge_result_free(edges);
+    try std.testing.expectEqual(@as(u32, 1), c_api.lattice_edge_result_count(edges));
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
 }
 
 test "c_api: open nonexistent file without create fails" {

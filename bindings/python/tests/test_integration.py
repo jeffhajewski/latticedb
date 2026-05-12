@@ -83,6 +83,24 @@ class TestDatabaseLifecycle:
             with pytest.raises(RuntimeError, match="read-only"):
                 db.write()
 
+    def test_enable_adjacency_cache_option(self, tmp_path):
+        """Opening with the adjacency cache enabled keeps graph traversal correct."""
+        db_path = tmp_path / "adjacency.db"
+
+        with Database(db_path, create=True, enable_adjacency_cache=True) as db:
+            with db.write() as txn:
+                alice = txn.create_node(labels=["Person"])
+                bob = txn.create_node(labels=["Person"])
+                txn.create_edge(alice.id, bob.id, "KNOWS")
+                alice_id = alice.id
+                bob_id = bob.id
+                txn.commit()
+
+            with db.read() as txn:
+                edges = txn.get_outgoing_edges(alice_id)
+                assert len(edges) == 1
+                assert edges[0].target_id == bob_id
+
     def test_path_property(self, tmp_path):
         """Database.path should preserve the provided database file path."""
         db_path = tmp_path / "test.db"

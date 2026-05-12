@@ -87,6 +87,18 @@ const LatticeOpenOptionsV2 = defineNamedType('lattice_open_options_v2', () => ko
   enable_wal: 'bool',
 }));
 
+const LatticeOpenOptionsV3 = defineNamedType('lattice_open_options_v3', () => koffi.struct('lattice_open_options_v3', {
+  struct_size: 'uintptr_t',
+  create: 'bool',
+  read_only: 'bool',
+  cache_size_mb: 'uint32',
+  page_size: 'uint32',
+  enable_vector: 'bool',
+  vector_dimensions: 'uint16',
+  enable_wal: 'bool',
+  enable_adjacency_cache: 'bool',
+}));
+
 // Define struct for string in value union
 const LatticeStringValue = defineNamedType('lattice_string_value', () => koffi.struct('lattice_string_value', {
   ptr: 'void*',
@@ -156,6 +168,11 @@ export interface LatticeBindings {
     db_out: unknown[]
   ) => number;
   lattice_open_v2?: (
+    path: string,
+    options: unknown,
+    db_out: unknown[]
+  ) => number;
+  lattice_open_v3?: (
     path: string,
     options: unknown,
     db_out: unknown[]
@@ -571,6 +588,7 @@ function createBindings(): LatticeBindings {
   const StreamBatchPtrPtr = koffi.pointer(StreamBatchPtr);
   const OpenOptionsPtr = koffi.pointer(LatticeOpenOptions);
   const OpenOptionsV2Ptr = koffi.pointer(LatticeOpenOptionsV2);
+  const OpenOptionsV3Ptr = koffi.pointer(LatticeOpenOptionsV3);
   const ValuePtr = koffi.pointer(LatticeValue);
   const ValueConstPtr = koffi.pointer(LatticeValue);
   const ValueConstPtrPtr = koffi.pointer(ValueConstPtr);
@@ -589,6 +607,11 @@ function createBindings(): LatticeBindings {
     lattice_open_v2: tryOptionalFunc(lib, 'lattice_open_v2', 'int', [
       'str', // path
       OpenOptionsV2Ptr, // options
+      koffi.out(DatabasePtrPtr), // db_out
+    ]),
+    lattice_open_v3: tryOptionalFunc(lib, 'lattice_open_v3', 'int', [
+      'str', // path
+      OpenOptionsV3Ptr, // options
       koffi.out(DatabasePtrPtr), // db_out
     ]),
     lattice_close: lib.func('lattice_close', 'int', [DatabasePtr]),

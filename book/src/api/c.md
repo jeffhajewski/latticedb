@@ -414,7 +414,7 @@ lattice_query_cache_stats(db, &entries, &hits, &misses);
 
 ```c
 // Get version string
-const char* version = lattice_version();  // e.g. "0.9.5"
+const char* version = lattice_version();  // e.g. "0.9.6"
 
 // Get error message
 const char* msg = lattice_error_message(LATTICE_ERROR_NOT_FOUND);

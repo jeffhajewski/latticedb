@@ -997,7 +997,7 @@ test "future: uncommitted edge creation rolled back on abort" {
     try db.createEdge(&txn, alice, bob, "KNOWS");
 
     // Verify edge exists before abort
-    const staged_edges = try db.getOutgoingEdgesInTxn(&txn, alice);
+    const staged_edges = try db.getOutgoingEdgesInTxn(&txn, alice, 0);
     defer db.freeEdgeInfos(staged_edges);
     try std.testing.expectEqual(@as(usize, 1), staged_edges.len);
     try std.testing.expectEqual(bob, staged_edges[0].target);
@@ -1501,7 +1501,7 @@ test "txn-aware reads: queries and traversals hide uncommitted graph changes" {
     try std.testing.expectEqual(@as(usize, 1), writer_people.len);
     try std.testing.expectEqual(alice, writer_people[0]);
 
-    const writer_incoming = try db.getIncomingEdgesInTxn(&write_txn, company);
+    const writer_incoming = try db.getIncomingEdgesInTxn(&write_txn, company, 0);
     defer db.freeEdgeInfos(writer_incoming);
     try std.testing.expectEqual(@as(usize, 1), writer_incoming.len);
     try std.testing.expectEqual(alice, writer_incoming[0].source);
@@ -1520,7 +1520,7 @@ test "txn-aware reads: queries and traversals hide uncommitted graph changes" {
     defer allocator.free(read_people);
     try std.testing.expectEqual(@as(usize, 0), read_people.len);
 
-    const read_incoming = try db.getIncomingEdgesInTxn(&read_txn, company);
+    const read_incoming = try db.getIncomingEdgesInTxn(&read_txn, company, 0);
     defer db.freeEdgeInfos(read_incoming);
     try std.testing.expectEqual(@as(usize, 0), read_incoming.len);
 
@@ -1560,7 +1560,7 @@ test "txn-aware reads: queries and traversals hide uncommitted graph changes" {
     try std.testing.expectEqual(@as(usize, 1), visible_people.len);
     try std.testing.expectEqual(alice, visible_people[0]);
 
-    const visible_incoming = try db.getIncomingEdgesInTxn(&after_commit, company);
+    const visible_incoming = try db.getIncomingEdgesInTxn(&after_commit, company, 0);
     defer db.freeEdgeInfos(visible_incoming);
     try std.testing.expectEqual(@as(usize, 1), visible_incoming.len);
     try std.testing.expectEqual(alice, visible_incoming[0].source);

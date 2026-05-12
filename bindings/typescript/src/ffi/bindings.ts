@@ -407,6 +407,20 @@ export interface LatticeBindings {
     node_id: bigint,
     result_out: unknown[]
   ) => number;
+  lattice_edge_get_outgoing_by_type: (
+    txn: unknown,
+    node_id: bigint,
+    edge_type: string,
+    limit: number,
+    result_out: unknown[]
+  ) => number;
+  lattice_edge_get_incoming_by_type: (
+    txn: unknown,
+    node_id: bigint,
+    edge_type: string,
+    limit: number,
+    result_out: unknown[]
+  ) => number;
   lattice_edge_result_count: (result: unknown) => number;
   lattice_edge_result_get_id: (
     result: unknown,
@@ -831,6 +845,20 @@ function createBindings(): LatticeBindings {
     lattice_edge_get_incoming: lib.func('lattice_edge_get_incoming', 'int', [
       TxnPtr,
       'uint64', // node_id
+      koffi.out(EdgeResultPtrPtr), // result_out
+    ]),
+    lattice_edge_get_outgoing_by_type: lib.func('lattice_edge_get_outgoing_by_type', 'int', [
+      TxnPtr,
+      'uint64', // node_id
+      'str', // edge_type
+      'size_t', // limit
+      koffi.out(EdgeResultPtrPtr), // result_out
+    ]),
+    lattice_edge_get_incoming_by_type: lib.func('lattice_edge_get_incoming_by_type', 'int', [
+      TxnPtr,
+      'uint64', // node_id
+      'str', // edge_type
+      'size_t', // limit
       koffi.out(EdgeResultPtrPtr), // result_out
     ]),
     lattice_edge_result_count: lib.func('lattice_edge_result_count', 'uint32', [

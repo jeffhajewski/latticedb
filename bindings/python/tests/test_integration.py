@@ -483,6 +483,41 @@ class TestEdgeOperations:
                     assert edge.id > 0
                     assert edge.target_id == charlie_id
 
+    def test_get_edges_by_type_with_limit(self, tmp_path):
+        """Test typed edge traversal with limits."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                alice = txn.create_node(labels=["Person"])
+                bob = txn.create_node(labels=["Person"])
+                charlie = txn.create_node(labels=["Person"])
+                dana = txn.create_node(labels=["Person"])
+
+                txn.create_edge(alice.id, bob.id, "KNOWS")
+                txn.create_edge(alice.id, charlie.id, "KNOWS")
+                txn.create_edge(alice.id, dana.id, "LIKES")
+                txn.create_edge(bob.id, alice.id, "KNOWS")
+                alice_id = alice.id
+                bob_id = bob.id
+                charlie_id = charlie.id
+                txn.commit()
+
+            with db.read() as txn:
+                outgoing = txn.get_outgoing_edges_by_type(alice_id, "KNOWS")
+                assert len(outgoing) == 2
+                assert {edge.target_id for edge in outgoing} == {bob_id, charlie_id}
+                assert all(edge.edge_type == "KNOWS" for edge in outgoing)
+
+                limited = txn.get_outgoing_edges_by_type(alice_id, "KNOWS", limit=1)
+                assert len(limited) == 1
+
+                incoming = txn.get_incoming_edges_by_type(alice_id, "KNOWS")
+                assert len(incoming) == 1
+                assert incoming[0].source_id == bob_id
+
+                assert txn.get_outgoing_edges_by_type(alice_id, "MISSING") == []
+
     def test_get_edges_empty(self, tmp_path):
         """Test getting edges when none exist."""
         db_path = tmp_path / "test.db"

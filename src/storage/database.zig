@@ -3289,12 +3289,52 @@ pub const Database = struct {
         };
     }
 
+    fn edgeStateMatchesType(state: TxnEdgeState, edge_type: ?symbols_mod.SymbolId) bool {
+        if (!state.exists) return false;
+        if (edge_type) |type_id| {
+            if (state.edge_type != type_id) return false;
+        }
+        return true;
+    }
+
+    fn edgeTypeIdOrEmpty(self: *Self, edge_type: []const u8) DatabaseError!?symbols_mod.SymbolId {
+        return self.symbol_table.lookup(edge_type) catch |err| switch (err) {
+            symbols_mod.SymbolError.NotFound => null,
+            else => DatabaseError.IoError,
+        };
+    }
+
+    fn edgeRefsToInfos(self: *Self, refs: []const EdgeRef) DatabaseError![]EdgeInfo {
+        var edges: std.ArrayListUnmanaged(EdgeInfo) = .empty;
+        errdefer edges.deinit(self.allocator);
+
+        for (refs) |edge_ref| {
+            const edge_type_str = self.symbol_table.resolve(edge_ref.edge_type) catch continue;
+            edges.append(self.allocator, .{
+                .id = edge_ref.id,
+                .source = edge_ref.source,
+                .target = edge_ref.target,
+                .edge_type = edge_type_str,
+            }) catch {
+                self.allocator.free(edge_type_str);
+                return DatabaseError.OutOfMemory;
+            };
+        }
+
+        return edges.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+    }
+
+    fn edgeLimitReached(count: usize, limit: usize) bool {
+        return limit != 0 and count >= limit;
+    }
+
     fn collectVisibleEdgeRefs(
         self: *Self,
         txn: ?*Transaction,
         node_id: NodeId,
         direction: edge_mod.Direction,
         edge_type: ?symbols_mod.SymbolId,
+        limit: usize,
     ) DatabaseError![]EdgeRef {
         var refs: std.ArrayListUnmanaged(EdgeRef) = .empty;
         errdefer refs.deinit(self.allocator);
@@ -3324,6 +3364,7 @@ pub const Database = struct {
                     if (overlay.edge_states.get(base_ref.id)) |state| {
                         if (edgeStateMatches(state, node_id, direction, edge_type)) {
                             refs.append(self.allocator, edgeStateToRef(base_ref.id, state)) catch return DatabaseError.OutOfMemory;
+                            if (edgeLimitReached(refs.items.len, limit)) break;
                         }
                         continue;
                     }
@@ -3331,15 +3372,73 @@ pub const Database = struct {
             }
 
             refs.append(self.allocator, base_ref) catch return DatabaseError.OutOfMemory;
+            if (edgeLimitReached(refs.items.len, limit)) break;
         }
 
-        if (txn) |t| {
-            if (self.getTxnOverlay(t)) |overlay| {
-                var overlay_iter = overlay.edge_states.iterator();
-                while (overlay_iter.next()) |entry| {
-                    if (seen.contains(entry.key_ptr.*)) continue;
-                    if (!edgeStateMatches(entry.value_ptr.*, node_id, direction, edge_type)) continue;
-                    refs.append(self.allocator, edgeStateToRef(entry.key_ptr.*, entry.value_ptr.*)) catch return DatabaseError.OutOfMemory;
+        if (!edgeLimitReached(refs.items.len, limit)) {
+            if (txn) |t| {
+                if (self.getTxnOverlay(t)) |overlay| {
+                    var overlay_iter = overlay.edge_states.iterator();
+                    while (overlay_iter.next()) |entry| {
+                        if (seen.contains(entry.key_ptr.*)) continue;
+                        if (!edgeStateMatches(entry.value_ptr.*, node_id, direction, edge_type)) continue;
+                        refs.append(self.allocator, edgeStateToRef(entry.key_ptr.*, entry.value_ptr.*)) catch return DatabaseError.OutOfMemory;
+                        if (edgeLimitReached(refs.items.len, limit)) break;
+                    }
+                }
+            }
+        }
+
+        return refs.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+    }
+
+    fn collectVisibleAllEdgeRefs(
+        self: *Self,
+        txn: ?*Transaction,
+        edge_type: ?symbols_mod.SymbolId,
+        limit: usize,
+    ) DatabaseError![]EdgeRef {
+        var refs: std.ArrayListUnmanaged(EdgeRef) = .empty;
+        errdefer refs.deinit(self.allocator);
+
+        var seen: std.AutoHashMapUnmanaged(EdgeId, void) = .{};
+        defer seen.deinit(self.allocator);
+
+        var base_iter = self.edge_store.scanRefs() catch return DatabaseError.IoError;
+        defer base_iter.deinit();
+
+        while (base_iter.next() catch return DatabaseError.IoError) |base_ref| {
+            try seen.put(self.allocator, base_ref.id, {});
+
+            if (txn) |t| {
+                if (self.getTxnOverlay(t)) |overlay| {
+                    if (overlay.edge_states.get(base_ref.id)) |state| {
+                        if (edgeStateMatchesType(state, edge_type)) {
+                            refs.append(self.allocator, edgeStateToRef(base_ref.id, state)) catch return DatabaseError.OutOfMemory;
+                            if (edgeLimitReached(refs.items.len, limit)) break;
+                        }
+                        continue;
+                    }
+                }
+            }
+
+            if (edge_type) |type_id| {
+                if (base_ref.edge_type != type_id) continue;
+            }
+            refs.append(self.allocator, base_ref) catch return DatabaseError.OutOfMemory;
+            if (edgeLimitReached(refs.items.len, limit)) break;
+        }
+
+        if (!edgeLimitReached(refs.items.len, limit)) {
+            if (txn) |t| {
+                if (self.getTxnOverlay(t)) |overlay| {
+                    var overlay_iter = overlay.edge_states.iterator();
+                    while (overlay_iter.next()) |entry| {
+                        if (seen.contains(entry.key_ptr.*)) continue;
+                        if (!edgeStateMatchesType(entry.value_ptr.*, edge_type)) continue;
+                        refs.append(self.allocator, edgeStateToRef(entry.key_ptr.*, entry.value_ptr.*)) catch return DatabaseError.OutOfMemory;
+                        if (edgeLimitReached(refs.items.len, limit)) break;
+                    }
                 }
             }
         }
@@ -3354,7 +3453,7 @@ pub const Database = struct {
         target: NodeId,
         edge_type: symbols_mod.SymbolId,
     ) DatabaseError!?EdgeId {
-        const refs = try self.collectVisibleEdgeRefs(txn, source, .outgoing, edge_type);
+        const refs = try self.collectVisibleEdgeRefs(txn, source, .outgoing, edge_type, 0);
         defer self.allocator.free(refs);
 
         var found: ?EdgeId = null;
@@ -5237,50 +5336,62 @@ pub const Database = struct {
         return edges.toOwnedSlice(self.allocator);
     }
 
-    pub fn getOutgoingEdgesInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError![]EdgeInfo {
-        const refs = try self.collectVisibleEdgeRefs(txn, node_id, .outgoing, null);
+    pub fn getOutgoingEdgesInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId, limit: usize) DatabaseError![]EdgeInfo {
+        const refs = try self.collectVisibleEdgeRefs(txn, node_id, .outgoing, null, limit);
         defer self.allocator.free(refs);
 
-        var edges: std.ArrayListUnmanaged(EdgeInfo) = .empty;
-        errdefer edges.deinit(self.allocator);
-
-        for (refs) |edge_ref| {
-            const edge_type_str = self.symbol_table.resolve(edge_ref.edge_type) catch continue;
-            edges.append(self.allocator, .{
-                .id = edge_ref.id,
-                .source = edge_ref.source,
-                .target = edge_ref.target,
-                .edge_type = edge_type_str,
-            }) catch {
-                self.allocator.free(edge_type_str);
-                return DatabaseError.OutOfMemory;
-            };
-        }
-
-        return edges.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+        return self.edgeRefsToInfos(refs);
     }
 
-    pub fn getIncomingEdgesInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError![]EdgeInfo {
-        const refs = try self.collectVisibleEdgeRefs(txn, node_id, .incoming, null);
+    pub fn getIncomingEdgesInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId, limit: usize) DatabaseError![]EdgeInfo {
+        const refs = try self.collectVisibleEdgeRefs(txn, node_id, .incoming, null, limit);
         defer self.allocator.free(refs);
 
-        var edges: std.ArrayListUnmanaged(EdgeInfo) = .empty;
-        errdefer edges.deinit(self.allocator);
+        return self.edgeRefsToInfos(refs);
+    }
 
-        for (refs) |edge_ref| {
-            const edge_type_str = self.symbol_table.resolve(edge_ref.edge_type) catch continue;
-            edges.append(self.allocator, .{
-                .id = edge_ref.id,
-                .source = edge_ref.source,
-                .target = edge_ref.target,
-                .edge_type = edge_type_str,
-            }) catch {
-                self.allocator.free(edge_type_str);
-                return DatabaseError.OutOfMemory;
-            };
-        }
+    pub fn getOutgoingEdgesByTypeInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        node_id: NodeId,
+        edge_type: []const u8,
+        limit: usize,
+    ) DatabaseError![]EdgeInfo {
+        const type_id = (try self.edgeTypeIdOrEmpty(edge_type)) orelse return self.allocator.alloc(EdgeInfo, 0) catch return DatabaseError.OutOfMemory;
+        const refs = try self.collectVisibleEdgeRefs(txn, node_id, .outgoing, type_id, limit);
+        defer self.allocator.free(refs);
 
-        return edges.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+        return self.edgeRefsToInfos(refs);
+    }
+
+    pub fn getIncomingEdgesByTypeInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        node_id: NodeId,
+        edge_type: []const u8,
+        limit: usize,
+    ) DatabaseError![]EdgeInfo {
+        const type_id = (try self.edgeTypeIdOrEmpty(edge_type)) orelse return self.allocator.alloc(EdgeInfo, 0) catch return DatabaseError.OutOfMemory;
+        const refs = try self.collectVisibleEdgeRefs(txn, node_id, .incoming, type_id, limit);
+        defer self.allocator.free(refs);
+
+        return self.edgeRefsToInfos(refs);
+    }
+
+    pub fn scanEdgesInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        edge_type: ?[]const u8,
+        limit: usize,
+    ) DatabaseError![]EdgeInfo {
+        const type_id = if (edge_type) |value|
+            (try self.edgeTypeIdOrEmpty(value)) orelse return self.allocator.alloc(EdgeInfo, 0) catch return DatabaseError.OutOfMemory
+        else
+            null;
+        const refs = try self.collectVisibleAllEdgeRefs(txn, type_id, limit);
+        defer self.allocator.free(refs);
+
+        return self.edgeRefsToInfos(refs);
     }
 
     /// Free edge info slice returned by getOutgoingEdges or getIncomingEdges.
@@ -5466,7 +5577,7 @@ pub const Database = struct {
     }
 
     pub fn getOutgoingEdgeRefsInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError![]EdgeRef {
-        return self.collectVisibleEdgeRefs(txn, node_id, .outgoing, null);
+        return self.collectVisibleEdgeRefs(txn, node_id, .outgoing, null, 0);
     }
 
     pub fn getOutgoingEdgeRefsByTypeInTxn(
@@ -5475,7 +5586,7 @@ pub const Database = struct {
         node_id: NodeId,
         edge_type: symbols_mod.SymbolId,
     ) DatabaseError![]EdgeRef {
-        return self.collectVisibleEdgeRefs(txn, node_id, .outgoing, edge_type);
+        return self.collectVisibleEdgeRefs(txn, node_id, .outgoing, edge_type, 0);
     }
 
     /// Get cached outgoing edges for a node. If the adjacency cache is enabled
@@ -5515,7 +5626,7 @@ pub const Database = struct {
     }
 
     pub fn getIncomingEdgeRefsInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError![]EdgeRef {
-        return self.collectVisibleEdgeRefs(txn, node_id, .incoming, null);
+        return self.collectVisibleEdgeRefs(txn, node_id, .incoming, null, 0);
     }
 
     pub fn getIncomingEdgeRefsByTypeInTxn(
@@ -5524,7 +5635,7 @@ pub const Database = struct {
         node_id: NodeId,
         edge_type: symbols_mod.SymbolId,
     ) DatabaseError![]EdgeRef {
-        return self.collectVisibleEdgeRefs(txn, node_id, .incoming, edge_type);
+        return self.collectVisibleEdgeRefs(txn, node_id, .incoming, edge_type, 0);
     }
 
     /// Get outgoing edge refs for multiple nodes in a single B+Tree scan.

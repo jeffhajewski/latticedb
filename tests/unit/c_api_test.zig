@@ -1311,6 +1311,130 @@ test "c_api: get outgoing edges" {
     _ = c_api.lattice_commit(txn);
 }
 
+test "c_api: typed edge traversal and native edge scan" {
+    const path = "/tmp/lattice_capi_typed_edge_scan_test.db";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var alice: lattice_node_id = 0;
+    var bob: lattice_node_id = 0;
+    var charlie: lattice_node_id = 0;
+    var dana: lattice_node_id = 0;
+    var erin: lattice_node_id = 0;
+
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &alice));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &bob));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &charlie));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &dana));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &erin));
+
+        var edge_id: lattice_edge_id = 0;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, alice, bob, "KNOWS", &edge_id));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, alice, charlie, "KNOWS", &edge_id));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, alice, erin, "LIKES", &edge_id));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, bob, alice, "KNOWS", &edge_id));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+    }
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+
+    var edge_id: lattice_edge_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, alice, dana, "KNOWS", &edge_id));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, charlie, alice, "KNOWS", &edge_id));
+
+    var outgoing_knows: ?*c_api.lattice_edge_result = null;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_edge_get_outgoing_by_type(txn, alice, "KNOWS", 0, &outgoing_knows),
+    );
+    defer c_api.lattice_edge_result_free(outgoing_knows);
+    try std.testing.expectEqual(@as(u32, 3), c_api.lattice_edge_result_count(outgoing_knows));
+
+    var source: lattice_node_id = 0;
+    var target: lattice_node_id = 0;
+    var edge_type_ptr: [*c]const u8 = null;
+    var edge_type_len: u32 = 0;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_edge_result_get(outgoing_knows, 0, &source, &target, &edge_type_ptr, &edge_type_len),
+    );
+    try std.testing.expectEqual(alice, source);
+    try std.testing.expectEqual(bob, target);
+    try std.testing.expectEqualStrings("KNOWS", edge_type_ptr[0..edge_type_len]);
+
+    var outgoing_limited: ?*c_api.lattice_edge_result = null;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_edge_get_outgoing_by_type(txn, alice, "KNOWS", 2, &outgoing_limited),
+    );
+    defer c_api.lattice_edge_result_free(outgoing_limited);
+    try std.testing.expectEqual(@as(u32, 2), c_api.lattice_edge_result_count(outgoing_limited));
+
+    var incoming_knows: ?*c_api.lattice_edge_result = null;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_edge_get_incoming_by_type(txn, alice, "KNOWS", 1, &incoming_knows),
+    );
+    defer c_api.lattice_edge_result_free(incoming_knows);
+    try std.testing.expectEqual(@as(u32, 1), c_api.lattice_edge_result_count(incoming_knows));
+
+    var incoming_unlimited: ?*c_api.lattice_edge_result = null;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_edge_get_incoming_by_type(txn, alice, "KNOWS", 0, &incoming_unlimited),
+    );
+    defer c_api.lattice_edge_result_free(incoming_unlimited);
+    try std.testing.expectEqual(@as(u32, 2), c_api.lattice_edge_result_count(incoming_unlimited));
+
+    var knows_scan: ?*c_api.lattice_edge_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_scan(txn, "KNOWS", 3, &knows_scan));
+    defer c_api.lattice_edge_result_free(knows_scan);
+    try std.testing.expectEqual(@as(u32, 3), c_api.lattice_edge_result_count(knows_scan));
+
+    var knows_scan_unlimited: ?*c_api.lattice_edge_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_scan(txn, "KNOWS", 0, &knows_scan_unlimited));
+    defer c_api.lattice_edge_result_free(knows_scan_unlimited);
+    try std.testing.expectEqual(@as(u32, 5), c_api.lattice_edge_result_count(knows_scan_unlimited));
+
+    var all_scan: ?*c_api.lattice_edge_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_scan(txn, null, 0, &all_scan));
+    defer c_api.lattice_edge_result_free(all_scan);
+    try std.testing.expectEqual(@as(u32, 6), c_api.lattice_edge_result_count(all_scan));
+
+    var all_scan_limited: ?*c_api.lattice_edge_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_scan(txn, null, 2, &all_scan_limited));
+    defer c_api.lattice_edge_result_free(all_scan_limited);
+    try std.testing.expectEqual(@as(u32, 2), c_api.lattice_edge_result_count(all_scan_limited));
+
+    var missing_scan: ?*c_api.lattice_edge_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_scan(txn, "MISSING", 0, &missing_scan));
+    defer c_api.lattice_edge_result_free(missing_scan);
+    try std.testing.expectEqual(@as(u32, 0), c_api.lattice_edge_result_count(missing_scan));
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+}
+
 test "c_api: edge IDs stay monotonic across rollback and parallel creates" {
     const path = "/tmp/lattice_capi_edge_id_monotonic_test.db";
     @import("compat").fs.cwd().deleteFile(path) catch {};

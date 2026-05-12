@@ -443,6 +443,39 @@ describeIfNative('Database Integration', () => {
       });
     });
 
+    test('get typed edges with limits', async () => {
+      let charlieId!: bigint;
+      let danaId!: bigint;
+
+      await db.write(async (txn) => {
+        const charlie = await txn.createNode({ labels: ['Person'] });
+        const dana = await txn.createNode({ labels: ['Person'] });
+        charlieId = charlie.id;
+        danaId = dana.id;
+
+        await txn.createEdge(aliceId, bobId, 'KNOWS');
+        await txn.createEdge(aliceId, charlieId, 'KNOWS');
+        await txn.createEdge(aliceId, danaId, 'LIKES');
+        await txn.createEdge(bobId, aliceId, 'KNOWS');
+      });
+
+      await db.read(async (txn) => {
+        const outgoing = await txn.getOutgoingEdgesByType(aliceId, 'KNOWS');
+        expect(outgoing).toHaveLength(2);
+        expect(outgoing.map((edge) => edge.targetId).sort()).toEqual([bobId, charlieId].sort());
+        expect(outgoing.every((edge) => edge.type === 'KNOWS')).toBe(true);
+
+        const limited = await txn.getOutgoingEdgesByType(aliceId, 'KNOWS', 1);
+        expect(limited).toHaveLength(1);
+
+        const incoming = await txn.getIncomingEdgesByType(aliceId, 'KNOWS');
+        expect(incoming).toHaveLength(1);
+        expect(incoming[0]!.sourceId).toBe(bobId);
+
+        await expect(txn.getOutgoingEdgesByType(aliceId, 'MISSING')).resolves.toEqual([]);
+      });
+    });
+
     test('delete edge', async () => {
       await db.write(async (txn) => {
         await txn.createEdge(aliceId, bobId, 'KNOWS');

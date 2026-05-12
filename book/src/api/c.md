@@ -237,6 +237,17 @@ for (uint32_t i = 0; i < count; i++) {
 lattice_edge_result_free(edges);
 ```
 
+Typed traversal accepts a limit. Pass `0` for no limit:
+
+```c
+lattice_edge_get_outgoing_by_type(txn, node_id, "KNOWS", 100, &edges);
+lattice_edge_get_incoming_by_type(txn, node_id, "KNOWS", 0, &edges);
+```
+
+`lattice_edge_scan(txn, edge_type_or_null, limit, &edges)` scans native edge
+identities for administrative work such as index rebuilds or exports. It is not
+the hot-path graph expansion API.
+
 ## Batch Insert
 
 Insert many nodes with vectors in a single call:

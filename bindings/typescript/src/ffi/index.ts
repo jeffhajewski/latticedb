@@ -1279,6 +1279,48 @@ export class LatticeFFI {
   }
 
   /**
+   * Get outgoing edges from a node filtered by edge type.
+   */
+  getOutgoingEdgesByType(
+    txn: TransactionHandle,
+    nodeId: bigint,
+    edgeType: string,
+    limit = 0
+  ): EdgeResultHandle {
+    const resultOut: unknown[] = [null];
+    const err = this.bindings.lattice_edge_get_outgoing_by_type(
+      txn,
+      nodeId,
+      edgeType,
+      limit,
+      resultOut
+    );
+    this.checkError(err);
+    return resultOut[0];
+  }
+
+  /**
+   * Get incoming edges to a node filtered by edge type.
+   */
+  getIncomingEdgesByType(
+    txn: TransactionHandle,
+    nodeId: bigint,
+    edgeType: string,
+    limit = 0
+  ): EdgeResultHandle {
+    const resultOut: unknown[] = [null];
+    const err = this.bindings.lattice_edge_get_incoming_by_type(
+      txn,
+      nodeId,
+      edgeType,
+      limit,
+      resultOut
+    );
+    this.checkError(err);
+    return resultOut[0];
+  }
+
+  /**
    * Get the count of edge results.
    */
   edgeResultCount(result: EdgeResultHandle): number {

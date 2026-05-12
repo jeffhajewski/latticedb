@@ -214,6 +214,28 @@ func (tx *Tx) GetIncomingEdges(nodeID NodeID) ([]Edge, error) {
 	return edgeRecordsToEdges(records), nil
 }
 
+func (tx *Tx) GetOutgoingEdgesByType(nodeID NodeID, edgeType string, limit uint) ([]Edge, error) {
+	if err := tx.ensureActive(); err != nil {
+		return nil, err
+	}
+	records, err := tx.raw.GetOutgoingEdgesByType(uint64(nodeID), edgeType, limit)
+	if err != nil {
+		return nil, wrapError(err)
+	}
+	return edgeRecordsToEdges(records), nil
+}
+
+func (tx *Tx) GetIncomingEdgesByType(nodeID NodeID, edgeType string, limit uint) ([]Edge, error) {
+	if err := tx.ensureActive(); err != nil {
+		return nil, err
+	}
+	records, err := tx.raw.GetIncomingEdgesByType(uint64(nodeID), edgeType, limit)
+	if err != nil {
+		return nil, wrapError(err)
+	}
+	return edgeRecordsToEdges(records), nil
+}
+
 // BatchInsertVectors inserts multiple vector-bearing nodes in a single call.
 func (tx *Tx) BatchInsertVectors(label string, vectors [][]float32) ([]NodeID, error) {
 	if err := tx.ensureWritable(); err != nil {

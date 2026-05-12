@@ -2490,28 +2490,11 @@ pub export fn lattice_edge_remove_property(
     return .ok;
 }
 
-/// Get all outgoing edges from a node
-pub export fn lattice_edge_get_outgoing(
-    txn: ?*lattice_txn,
-    node_id: lattice_node_id,
+fn finishEdgeResultHandleLocked(
+    txn_handle: *TxnHandle,
+    edges: []Database.EdgeInfo,
     result_out: *?*lattice_edge_result,
 ) lattice_error {
-    result_out.* = null;
-
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
-
-    const db_handle = txn_handle.db_handle;
-    db_handle.mutex.lock();
-    defer db_handle.mutex.unlock();
-    const active_txn_result = ensureActiveTxnLocked(txn_handle);
-    if (active_txn_result != .ok) return active_txn_result;
-
-    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
-
-    const edges = txn_handle.db_handle.db.getOutgoingEdgesInTxn(txn_ptr, node_id) catch |err| {
-        return mapAnyError(err);
-    };
-
     const result_handle = global_allocator.create(EdgeResultHandle) catch {
         txn_handle.db_handle.db.freeEdgeInfos(edges);
         return .err_out_of_memory;
@@ -2530,10 +2513,35 @@ pub export fn lattice_edge_get_outgoing(
         global_allocator.destroy(result_handle);
         return register_result;
     }
-    db_handle.active_children += 1;
+    txn_handle.db_handle.active_children += 1;
 
     result_out.* = toOpaque(lattice_edge_result, result_handle);
     return .ok;
+}
+
+/// Get all outgoing edges from a node
+pub export fn lattice_edge_get_outgoing(
+    txn: ?*lattice_txn,
+    node_id: lattice_node_id,
+    result_out: *?*lattice_edge_result,
+) lattice_error {
+    result_out.* = null;
+
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+
+    const db_handle = txn_handle.db_handle;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active_txn_result = ensureActiveTxnLocked(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+
+    const edges = txn_handle.db_handle.db.getOutgoingEdgesInTxn(txn_ptr, node_id, 0) catch |err| {
+        return mapAnyError(err);
+    };
+
+    return finishEdgeResultHandleLocked(txn_handle, edges, result_out);
 }
 
 /// Get all incoming edges to a node
@@ -2554,32 +2562,94 @@ pub export fn lattice_edge_get_incoming(
 
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 
-    const edges = txn_handle.db_handle.db.getIncomingEdgesInTxn(txn_ptr, node_id) catch |err| {
+    const edges = txn_handle.db_handle.db.getIncomingEdgesInTxn(txn_ptr, node_id, 0) catch |err| {
         return mapAnyError(err);
     };
 
-    const result_handle = global_allocator.create(EdgeResultHandle) catch {
-        txn_handle.db_handle.db.freeEdgeInfos(edges);
-        return .err_out_of_memory;
+    return finishEdgeResultHandleLocked(txn_handle, edges, result_out);
+}
+
+/// Get outgoing edges from a node filtered by type
+pub export fn lattice_edge_get_outgoing_by_type(
+    txn: ?*lattice_txn,
+    node_id: lattice_node_id,
+    edge_type: [*c]const u8,
+    limit: usize,
+    result_out: *?*lattice_edge_result,
+) lattice_error {
+    result_out.* = null;
+
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const type_slice = cStrToSlice(edge_type) orelse return .err_invalid_arg;
+
+    const db_handle = txn_handle.db_handle;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active_txn_result = ensureActiveTxnLocked(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+    const edges = txn_handle.db_handle.db.getOutgoingEdgesByTypeInTxn(txn_ptr, node_id, type_slice, limit) catch |err| {
+        return mapAnyError(err);
     };
 
-    result_handle.* = EdgeResultHandle{
-        .header = HandleHeader.init(.edge_result),
-        .edges = edges,
-        .count = edges.len,
-        .db_handle = txn_handle.db_handle,
-        .counted_child = true,
-    };
-    const register_result = registerHandle(EdgeResultHandle, result_handle);
-    if (register_result != .ok) {
-        txn_handle.db_handle.db.freeEdgeInfos(edges);
-        global_allocator.destroy(result_handle);
-        return register_result;
-    }
-    db_handle.active_children += 1;
+    return finishEdgeResultHandleLocked(txn_handle, edges, result_out);
+}
 
-    result_out.* = toOpaque(lattice_edge_result, result_handle);
-    return .ok;
+/// Get incoming edges to a node filtered by type
+pub export fn lattice_edge_get_incoming_by_type(
+    txn: ?*lattice_txn,
+    node_id: lattice_node_id,
+    edge_type: [*c]const u8,
+    limit: usize,
+    result_out: *?*lattice_edge_result,
+) lattice_error {
+    result_out.* = null;
+
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const type_slice = cStrToSlice(edge_type) orelse return .err_invalid_arg;
+
+    const db_handle = txn_handle.db_handle;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active_txn_result = ensureActiveTxnLocked(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+    const edges = txn_handle.db_handle.db.getIncomingEdgesByTypeInTxn(txn_ptr, node_id, type_slice, limit) catch |err| {
+        return mapAnyError(err);
+    };
+
+    return finishEdgeResultHandleLocked(txn_handle, edges, result_out);
+}
+
+/// Scan visible native edges, optionally filtered by type
+pub export fn lattice_edge_scan(
+    txn: ?*lattice_txn,
+    edge_type: [*c]const u8,
+    limit: usize,
+    result_out: *?*lattice_edge_result,
+) lattice_error {
+    result_out.* = null;
+
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const type_slice: ?[]const u8 = if (edge_type == null)
+        null
+    else
+        cStrToSlice(edge_type) orelse return .err_invalid_arg;
+
+    const db_handle = txn_handle.db_handle;
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active_txn_result = ensureActiveTxnLocked(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+    const edges = txn_handle.db_handle.db.scanEdgesInTxn(txn_ptr, type_slice, limit) catch |err| {
+        return mapAnyError(err);
+    };
+
+    return finishEdgeResultHandleLocked(txn_handle, edges, result_out);
 }
 
 /// Get the number of edges in an edge result set

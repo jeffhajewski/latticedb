@@ -240,6 +240,22 @@ Query: "Does Alice know Bob?"
   Returns the first matching edge ID, if present
 ```
 
+The C API exposes typed traversal with a caller-provided limit:
+
+```c
+lattice_edge_get_outgoing_by_type(txn, alice_id, "KNOWS", 100, &edges);
+lattice_edge_get_incoming_by_type(txn, bob_id, "KNOWS", 100, &edges);
+```
+
+For these APIs, `limit == 0` means unlimited. The limit is applied while
+collecting visible edge references, before edge type strings are materialized
+for the result handle.
+
+`lattice_edge_scan(txn, edge_type_or_null, limit, &edges)` walks native edge
+identities once via the edge-ID index. It is intended for administrative work
+such as index rebuilds, consistency checks, and export jobs, not for hot-path
+graph expansion. Use node-local traversal for request-path graph walks.
+
 Large edge properties use the same heap serialization and B+Tree overflow path
 as node properties. The store checks whether the serialized edge payload can be
 represented before replacing an existing edge-ID entry, so oversized updates

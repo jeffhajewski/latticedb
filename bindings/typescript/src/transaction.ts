@@ -412,6 +412,86 @@ export class Transaction {
   }
 
   /**
+   * Get outgoing edges from a node filtered by edge type.
+   *
+   * @param nodeId - The node ID
+   * @param edgeType - Edge type/label
+   * @param limit - Maximum number of edges to return; 0 means unlimited
+   * @returns Array of edges
+   */
+  async getOutgoingEdgesByType(
+    nodeId: bigint,
+    edgeType: string,
+    limit = 0
+  ): Promise<Edge[]> {
+    this.ensureActive();
+    const resultHandle = this.ffi.getOutgoingEdgesByType(
+      this.txnHandle!,
+      nodeId,
+      edgeType,
+      limit
+    );
+    try {
+      const count = this.ffi.edgeResultCount(resultHandle);
+      const edges: Edge[] = [];
+      for (let i = 0; i < count; i++) {
+        const edgeId = this.ffi.edgeResultGetId(resultHandle, i);
+        const e = this.ffi.edgeResultGet(resultHandle, i);
+        edges.push({
+          id: edgeId,
+          sourceId: e.source,
+          targetId: e.target,
+          type: e.edgeType,
+          properties: {},
+        });
+      }
+      return edges;
+    } finally {
+      this.ffi.edgeResultFree(resultHandle);
+    }
+  }
+
+  /**
+   * Get incoming edges to a node filtered by edge type.
+   *
+   * @param nodeId - The node ID
+   * @param edgeType - Edge type/label
+   * @param limit - Maximum number of edges to return; 0 means unlimited
+   * @returns Array of edges
+   */
+  async getIncomingEdgesByType(
+    nodeId: bigint,
+    edgeType: string,
+    limit = 0
+  ): Promise<Edge[]> {
+    this.ensureActive();
+    const resultHandle = this.ffi.getIncomingEdgesByType(
+      this.txnHandle!,
+      nodeId,
+      edgeType,
+      limit
+    );
+    try {
+      const count = this.ffi.edgeResultCount(resultHandle);
+      const edges: Edge[] = [];
+      for (let i = 0; i < count; i++) {
+        const edgeId = this.ffi.edgeResultGetId(resultHandle, i);
+        const e = this.ffi.edgeResultGet(resultHandle, i);
+        edges.push({
+          id: edgeId,
+          sourceId: e.source,
+          targetId: e.target,
+          type: e.edgeType,
+          properties: {},
+        });
+      }
+      return edges;
+    } finally {
+      this.ffi.edgeResultFree(resultHandle);
+    }
+  }
+
+  /**
    * Execute a Cypher query inside this transaction.
    */
   async query(

@@ -837,6 +837,26 @@ class LatticeLib:
         ]
         self._lib.lattice_edge_get_incoming.restype = c_int
 
+        # lattice_edge_get_outgoing_by_type
+        self._lib.lattice_edge_get_outgoing_by_type.argtypes = [
+            LatticeTxn,
+            LatticeNodeId,
+            c_char_p,
+            c_size_t,
+            POINTER(LatticeEdgeResult),
+        ]
+        self._lib.lattice_edge_get_outgoing_by_type.restype = c_int
+
+        # lattice_edge_get_incoming_by_type
+        self._lib.lattice_edge_get_incoming_by_type.argtypes = [
+            LatticeTxn,
+            LatticeNodeId,
+            c_char_p,
+            c_size_t,
+            POINTER(LatticeEdgeResult),
+        ]
+        self._lib.lattice_edge_get_incoming_by_type.restype = c_int
+
         # lattice_edge_result_count
         self._lib.lattice_edge_result_count.argtypes = [LatticeEdgeResult]
         self._lib.lattice_edge_result_count.restype = c_uint32

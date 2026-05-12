@@ -215,6 +215,106 @@ func TestEdgePropertiesAndQueryRoundTrip(t *testing.T) {
 	}
 }
 
+func TestTypedEdgeTraversalWithLimit(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "typed-edges.db")
+
+	db, err := Open(dbPath, OpenOptions{Create: true})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			t.Fatalf("close db: %v", closeErr)
+		}
+	}()
+
+	var aliceID, bobID, charlieID NodeID
+	err = db.Update(func(tx *Tx) error {
+		alice, err := tx.CreateNode(CreateNodeOptions{Labels: []string{"Person"}})
+		if err != nil {
+			return err
+		}
+		bob, err := tx.CreateNode(CreateNodeOptions{Labels: []string{"Person"}})
+		if err != nil {
+			return err
+		}
+		charlie, err := tx.CreateNode(CreateNodeOptions{Labels: []string{"Person"}})
+		if err != nil {
+			return err
+		}
+		dana, err := tx.CreateNode(CreateNodeOptions{Labels: []string{"Person"}})
+		if err != nil {
+			return err
+		}
+
+		if _, err := tx.CreateEdge(alice.ID, bob.ID, "KNOWS", CreateEdgeOptions{}); err != nil {
+			return err
+		}
+		if _, err := tx.CreateEdge(alice.ID, charlie.ID, "KNOWS", CreateEdgeOptions{}); err != nil {
+			return err
+		}
+		if _, err := tx.CreateEdge(alice.ID, dana.ID, "LIKES", CreateEdgeOptions{}); err != nil {
+			return err
+		}
+		if _, err := tx.CreateEdge(bob.ID, alice.ID, "KNOWS", CreateEdgeOptions{}); err != nil {
+			return err
+		}
+
+		aliceID = alice.ID
+		bobID = bob.ID
+		charlieID = charlie.ID
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("seed graph: %v", err)
+	}
+
+	err = db.View(func(tx *Tx) error {
+		outgoing, err := tx.GetOutgoingEdgesByType(aliceID, "KNOWS", 0)
+		if err != nil {
+			return err
+		}
+		if len(outgoing) != 2 {
+			t.Fatalf("expected 2 typed outgoing edges, got %d: %#v", len(outgoing), outgoing)
+		}
+		targets := map[NodeID]bool{
+			outgoing[0].TargetID: true,
+			outgoing[1].TargetID: true,
+		}
+		if !targets[bobID] || !targets[charlieID] {
+			t.Fatalf("unexpected typed outgoing targets: %#v", outgoing)
+		}
+
+		limited, err := tx.GetOutgoingEdgesByType(aliceID, "KNOWS", 1)
+		if err != nil {
+			return err
+		}
+		if len(limited) != 1 {
+			t.Fatalf("expected 1 limited edge, got %d: %#v", len(limited), limited)
+		}
+
+		incoming, err := tx.GetIncomingEdgesByType(aliceID, "KNOWS", 0)
+		if err != nil {
+			return err
+		}
+		if len(incoming) != 1 || incoming[0].SourceID != bobID {
+			t.Fatalf("unexpected typed incoming edges: %#v", incoming)
+		}
+
+		missing, err := tx.GetOutgoingEdgesByType(aliceID, "MISSING", 0)
+		if err != nil {
+			return err
+		}
+		if len(missing) != 0 {
+			t.Fatalf("expected no missing typed edges, got %#v", missing)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("view graph: %v", err)
+	}
+}
+
 func TestBatchInsertVectorsVectorSearchAndFTS(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "search.db")
 

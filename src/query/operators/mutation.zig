@@ -429,7 +429,7 @@ pub const DeleteNode = struct {
 
     fn deleteAllEdges(self: *Self, ctx: *ExecutionContext, node_id: NodeId) !void {
         // Delete outgoing edges
-        const outgoing = try self.database.getOutgoingEdgesInTxn(ctx.txn, node_id);
+        const outgoing = try self.database.getOutgoingEdgesInTxn(ctx.txn, node_id, 0);
         defer self.database.freeEdgeInfos(outgoing);
 
         for (outgoing) |edge| {
@@ -437,7 +437,7 @@ pub const DeleteNode = struct {
         }
 
         // Delete incoming edges
-        const incoming = try self.database.getIncomingEdgesInTxn(ctx.txn, node_id);
+        const incoming = try self.database.getIncomingEdgesInTxn(ctx.txn, node_id, 0);
         defer self.database.freeEdgeInfos(incoming);
 
         for (incoming) |edge| {

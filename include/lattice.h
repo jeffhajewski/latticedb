@@ -678,6 +678,36 @@ lattice_error lattice_edge_get_incoming(
     lattice_edge_result** result_out
 );
 
+/* Get outgoing edges from a node filtered by edge type.
+ * limit == 0 means unlimited. */
+lattice_error lattice_edge_get_outgoing_by_type(
+    lattice_txn* txn,
+    lattice_node_id node_id,
+    const char* edge_type,
+    size_t limit,
+    lattice_edge_result** result_out
+);
+
+/* Get incoming edges to a node filtered by edge type.
+ * limit == 0 means unlimited. */
+lattice_error lattice_edge_get_incoming_by_type(
+    lattice_txn* txn,
+    lattice_node_id node_id,
+    const char* edge_type,
+    size_t limit,
+    lattice_edge_result** result_out
+);
+
+/* Scan native edges for admin/index rebuild use. This is not intended for
+ * hot-path graph expansion. Pass NULL edge_type to return all visible edges.
+ * limit == 0 means unlimited. */
+lattice_error lattice_edge_scan(
+    lattice_txn* txn,
+    const char* edge_type,
+    size_t limit,
+    lattice_edge_result** result_out
+);
+
 /* Get the number of edges in a result set */
 uint32_t lattice_edge_result_count(lattice_edge_result* result);
 

@@ -440,6 +440,45 @@ pub const EdgeStore = struct {
         };
     }
 
+    /// Lightweight iterator over every edge identity in stable edge ID order.
+    /// This walks the edge ID index, so each logical edge is returned once
+    /// rather than once per traversal direction.
+    pub const EdgeIdRefIterator = struct {
+        tree_iter: btree.BTree.Iterator,
+        done: bool,
+
+        pub fn next(self: *EdgeIdRefIterator) EdgeError!?EdgeRef {
+            if (self.done) return null;
+
+            while (self.tree_iter.next() catch |err| {
+                self.done = true;
+                return mapBTreeError(err);
+            }) |entry| {
+                if (entry.key.len != 8) continue;
+                const edge_id = std.mem.readInt(u64, entry.key[0..8], .little);
+                if (edge_id == EDGE_ID_META_KEY) continue;
+                return deserializeEdgeRef(edge_id, entry.value) catch return EdgeError.InvalidData;
+            }
+
+            self.done = true;
+            return null;
+        }
+
+        pub fn deinit(self: *EdgeIdRefIterator) void {
+            self.tree_iter.deinit();
+        }
+    };
+
+    pub fn scanRefs(self: *Self) EdgeError!EdgeIdRefIterator {
+        const iter = self.edge_id_index.range(null, null) catch |err| {
+            return mapBTreeError(err);
+        };
+        return .{
+            .tree_iter = iter,
+            .done = false,
+        };
+    }
+
     /// Delete an edge
     /// Uses double-delete pattern: removes both outgoing and incoming entries
     /// Atomic: if incoming delete fails, outgoing is restored
@@ -1306,6 +1345,16 @@ fn deserializeEdge(
         .target = target,
         .edge_type = edge_type,
         .properties = properties,
+    };
+}
+
+fn deserializeEdgeRef(edge_id: EdgeId, data: []const u8) !EdgeRef {
+    if (data.len < 18) return EdgeError.InvalidData;
+    return .{
+        .id = edge_id,
+        .source = std.mem.readInt(u64, data[0..8], .little),
+        .target = std.mem.readInt(u64, data[8..16], .little),
+        .edge_type = std.mem.readInt(u16, data[16..18], .little),
     };
 }
 

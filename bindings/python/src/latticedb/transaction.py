@@ -965,6 +965,62 @@ class Transaction:
 
         return self._collect_edge_results(result_ptr, lib)
 
+    def get_outgoing_edges_by_type(
+        self, node_id: int, edge_type: str, *, limit: int = 0
+    ) -> List[Edge]:
+        """
+        Get outgoing edges from a node filtered by edge type.
+
+        A limit of 0 means unlimited.
+        """
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+        if limit < 0:
+            raise ValueError("limit must be non-negative")
+
+        lib = get_lib()
+        result_ptr = c_void_p()
+        code = lib._lib.lattice_edge_get_outgoing_by_type(
+            self._handle,
+            node_id,
+            edge_type.encode("utf-8"),
+            limit,
+            byref(result_ptr),
+        )
+        if code == LATTICE_ERROR_NOT_FOUND:
+            return []
+        check_error(code)
+
+        return self._collect_edge_results(result_ptr, lib)
+
+    def get_incoming_edges_by_type(
+        self, node_id: int, edge_type: str, *, limit: int = 0
+    ) -> List[Edge]:
+        """
+        Get incoming edges to a node filtered by edge type.
+
+        A limit of 0 means unlimited.
+        """
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+        if limit < 0:
+            raise ValueError("limit must be non-negative")
+
+        lib = get_lib()
+        result_ptr = c_void_p()
+        code = lib._lib.lattice_edge_get_incoming_by_type(
+            self._handle,
+            node_id,
+            edge_type.encode("utf-8"),
+            limit,
+            byref(result_ptr),
+        )
+        if code == LATTICE_ERROR_NOT_FOUND:
+            return []
+        check_error(code)
+
+        return self._collect_edge_results(result_ptr, lib)
+
     def _collect_edge_results(self, result_ptr: c_void_p, lib: Any) -> List[Edge]:
         """
         Helper to collect edges from a result handle.

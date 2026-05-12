@@ -125,6 +125,9 @@ comptime {
     _ = &c_api.lattice_edge_remove_property;
     _ = &c_api.lattice_edge_get_outgoing;
     _ = &c_api.lattice_edge_get_incoming;
+    _ = &c_api.lattice_edge_get_outgoing_by_type;
+    _ = &c_api.lattice_edge_get_incoming_by_type;
+    _ = &c_api.lattice_edge_scan;
     _ = &c_api.lattice_edge_result_count;
     _ = &c_api.lattice_edge_result_get_id;
     _ = &c_api.lattice_edge_result_get;

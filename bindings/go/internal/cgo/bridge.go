@@ -592,6 +592,36 @@ func (tx *Tx) GetIncomingEdges(nodeID uint64) ([]EdgeRecord, error) {
 	})
 }
 
+func (tx *Tx) GetOutgoingEdgesByType(nodeID uint64, edgeType string, limit uint) ([]EdgeRecord, error) {
+	cType := C.CString(edgeType)
+	defer C.free(unsafe.Pointer(cType))
+
+	return tx.readEdgeResults(func(resultOut **C.lattice_edge_result) C.lattice_error {
+		return C.lattice_edge_get_outgoing_by_type(
+			tx.ptr,
+			C.lattice_node_id(nodeID),
+			cType,
+			C.size_t(limit),
+			resultOut,
+		)
+	})
+}
+
+func (tx *Tx) GetIncomingEdgesByType(nodeID uint64, edgeType string, limit uint) ([]EdgeRecord, error) {
+	cType := C.CString(edgeType)
+	defer C.free(unsafe.Pointer(cType))
+
+	return tx.readEdgeResults(func(resultOut **C.lattice_edge_result) C.lattice_error {
+		return C.lattice_edge_get_incoming_by_type(
+			tx.ptr,
+			C.lattice_node_id(nodeID),
+			cType,
+			C.size_t(limit),
+			resultOut,
+		)
+	})
+}
+
 func (tx *Tx) Query(cypher string, params map[string]any) (QueryResult, error) {
 	query, err := tx.prepareQuery(cypher)
 	if err != nil {

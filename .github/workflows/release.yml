@@ -187,11 +187,44 @@ jobs:
         run: go test ./...
 
   # ============================================
+  # Run extracted black-box conformance suite
+  # before publishing any release artifacts
+  # ============================================
+  conformance-go-test:
+    name: Go Conformance Suite
+    needs: version-check
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Zig
+        uses: mlugg/setup-zig@v2
+        with:
+          version: ${{ env.ZIG_VERSION }}
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: conformance/go/go.mod
+          cache: false
+
+      - name: Build installed development layout
+        run: zig build install --prefix /tmp/lattice-install -Doptimize=ReleaseSafe
+
+      - name: Run conformance suite
+        working-directory: conformance/go
+        env:
+          PKG_CONFIG_PATH: /tmp/lattice-install/lib/pkgconfig
+          LD_LIBRARY_PATH: /tmp/lattice-install/lib
+        run: go test ./...
+
+  # ============================================
   # Create GitHub Release with tarballs
   # ============================================
   release-github:
     name: GitHub Release
-    needs: [version-check, build-native, smoke-test-go]
+    needs: [version-check, build-native, smoke-test-go, conformance-go-test]
     runs-on: ubuntu-latest
     permissions:
       contents: write

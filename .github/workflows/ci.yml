@@ -231,6 +231,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version-file: conformance/go/go.mod
+          cache: false
 
       - name: Build installed development layout
         run: zig build install --prefix /tmp/lattice-install -Doptimize=ReleaseSafe

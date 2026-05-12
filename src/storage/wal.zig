@@ -646,6 +646,26 @@ pub const WalManager = struct {
         self.writeHeader() catch return WalError.IoError;
     }
 
+    /// Reset the WAL to an empty header-only log after a full checkpoint.
+    /// The next LSN is preserved so future records remain monotonic, but
+    /// recovery no longer scans frames that are already durable in the data file.
+    pub fn truncateToEmpty(self: *Self) WalError!void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.current_frame_header.record_count > 0) {
+            try self.flushCurrentFrame();
+        }
+
+        self.header.frame_count = 0;
+        self.header.checkpoint_lsn = 0;
+        self.current_offset = 0;
+        self.file.truncate(WAL_HEADER_SIZE) catch return WalError.IoError;
+        self.writeHeader() catch return WalError.IoError;
+        self.startNewFrame();
+        self.file.sync() catch return WalError.IoError;
+    }
+
     /// Create an iterator for reading WAL records
     pub fn iterate(self: *Self, start_lsn: u64) WalIterator {
         return WalIterator.init(self, start_lsn);

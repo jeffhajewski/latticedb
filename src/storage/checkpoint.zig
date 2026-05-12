@@ -233,16 +233,9 @@ pub const Checkpointer = struct {
 
     /// Truncate the WAL file (reset to header only)
     fn truncateWal(self: *Self) CheckpointError!void {
-        // For now, we don't actually truncate the file - we just reset frame_count
-        // A full implementation would:
-        // 1. Ensure no active readers
-        // 2. Truncate the file to header size
-        // 3. Reset frame_count to 0
-        //
-        // This is safe because:
-        // - checkpoint_lsn tells recovery where to start
-        // - Old frames before checkpoint_lsn are ignored
-        _ = self;
+        self.wal.truncateToEmpty() catch {
+            return CheckpointError.WalError;
+        };
     }
 
     /// Get statistics from the last checkpoint

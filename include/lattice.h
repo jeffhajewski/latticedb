@@ -308,6 +308,13 @@ lattice_error lattice_get_nodes_by_label_txn(
     size_t* count_out
 );
 
+/* Return every visible node id for a transaction snapshot. */
+lattice_error lattice_get_all_nodes_txn(
+    lattice_txn* txn,
+    lattice_node_id** node_ids_out,
+    size_t* count_out
+);
+
 /* Free an array returned by lattice_get_nodes_by_label. */
 void lattice_free_node_ids(lattice_node_id* node_ids, size_t count);
 

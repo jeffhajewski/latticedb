@@ -2704,6 +2704,15 @@ test "c_api: txn-scoped graph reads and queries hide uncommitted changes" {
     try std.testing.expectEqual(@as(usize, 1), writer_count);
     try std.testing.expectEqual(alice, writer_ids.?[0]);
 
+    var writer_all_ids: ?[*]lattice_node_id = null;
+    var writer_all_count: usize = 0;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_get_all_nodes_txn(write_txn, &writer_all_ids, &writer_all_count),
+    );
+    defer c_api.lattice_free_node_ids(writer_all_ids, writer_all_count);
+    try std.testing.expectEqual(@as(usize, 2), writer_all_count);
+
     var writer_edges: ?*c_api.lattice_edge_result = null;
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_get_incoming(write_txn, company, &writer_edges));
     defer c_api.lattice_edge_result_free(writer_edges);
@@ -2722,6 +2731,16 @@ test "c_api: txn-scoped graph reads and queries hide uncommitted changes" {
     );
     defer c_api.lattice_free_node_ids(read_ids, read_count);
     try std.testing.expectEqual(@as(usize, 0), read_count);
+
+    var read_all_ids: ?[*]lattice_node_id = null;
+    var read_all_count: usize = 0;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_get_all_nodes_txn(read_txn, &read_all_ids, &read_all_count),
+    );
+    defer c_api.lattice_free_node_ids(read_all_ids, read_all_count);
+    try std.testing.expectEqual(@as(usize, 1), read_all_count);
+    try std.testing.expectEqual(company, read_all_ids.?[0]);
 
     var public_ids: ?[*]lattice_node_id = null;
     var public_count: usize = 0;

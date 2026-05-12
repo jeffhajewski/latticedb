@@ -1178,20 +1178,22 @@ pub export fn lattice_close(db: ?*lattice_database) lattice_error {
     destroyRetiredTxnsLocked(handle);
     handle.mutex.unlock();
 
-    // Sync first to ensure durability, capture any errors
-    const sync_result = handle.db.sync();
+    var close_error: ?lattice_error = null;
+    handle.db.sync() catch {
+        close_error = .err_io;
+    };
+    if (close_error == null) {
+        handle.db.checkpointWal(.truncate) catch {
+            close_error = .err_io;
+        };
+    }
 
     // Always close and free resources
     handle.db.close();
     unregisterHandle(DatabaseHandle, handle);
     global_allocator.destroy(handle);
 
-    // Return sync error if there was one
-    if (sync_result) |_| {
-        return .ok;
-    } else |_| {
-        return .err_io;
-    }
+    return close_error orelse .ok;
 }
 
 // ============================================================================
@@ -1591,6 +1593,42 @@ pub export fn lattice_get_nodes_by_label_txn(
 
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
     const owned = txn_handle.db_handle.db.getNodesByLabelInTxn(txn_ptr, label_slice) catch |err| {
+        return mapDatabaseError(err);
+    };
+
+    if (owned.len == 0) {
+        txn_handle.db_handle.db.allocator.free(owned);
+        return .ok;
+    }
+
+    const out = global_allocator.alloc(lattice_node_id, owned.len) catch {
+        txn_handle.db_handle.db.allocator.free(owned);
+        return .err_out_of_memory;
+    };
+    @memcpy(out, owned);
+    txn_handle.db_handle.db.allocator.free(owned);
+
+    node_ids_out.* = out.ptr;
+    count_out.* = out.len;
+    return .ok;
+}
+
+pub export fn lattice_get_all_nodes_txn(
+    txn: ?*lattice_txn,
+    node_ids_out: *?[*]lattice_node_id,
+    count_out: *usize,
+) lattice_error {
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+
+    node_ids_out.* = null;
+    count_out.* = 0;
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
+
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+    const owned = txn_handle.db_handle.db.getAllNodeIdsInTxn(txn_ptr) catch |err| {
         return mapDatabaseError(err);
     };
 

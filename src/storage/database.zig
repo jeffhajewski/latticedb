@@ -41,6 +41,7 @@ const WalManager = wal_mod.WalManager;
 const WalError = wal_mod.WalError;
 
 const recovery_mod = lattice.storage.recovery;
+const checkpoint_mod = lattice.storage.checkpoint;
 const stream_store_mod = lattice.stream.store;
 const stream_payload_mod = lattice.stream.payload;
 pub const StreamBatch = stream_store_mod.Batch;
@@ -983,6 +984,16 @@ pub const Database = struct {
         // Sync WAL if present
         if (self.wal) |*wal| {
             wal.sync() catch {
+                return DatabaseError.IoError;
+            };
+        }
+    }
+
+    pub fn checkpointWal(self: *Self, mode: checkpoint_mod.CheckpointMode) DatabaseError!void {
+        if (self.read_only) return;
+        if (self.wal) |*wal| {
+            var checkpointer = checkpoint_mod.Checkpointer.init(self.allocator, &self.buffer_pool, &self.page_manager, wal);
+            _ = checkpointer.checkpoint(mode) catch {
                 return DatabaseError.IoError;
             };
         }

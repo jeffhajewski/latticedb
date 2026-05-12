@@ -534,6 +534,29 @@ export class LatticeFFI {
     this.checkError(err);
   }
 
+  publishStreamGetSequence(
+    txn: TransactionHandle,
+    stream: string,
+    payload: PropertyValue,
+    kind = 'message'
+  ): bigint {
+    const streamBuf = Buffer.from(stream, 'utf8');
+    const kindBuf = kind.length > 0 ? Buffer.from(kind, 'utf8') : null;
+    const latticeValue = this.jsToLatticeValue(payload);
+    const sequenceOut = Buffer.alloc(8);
+    const err = this.bindings.lattice_stream_publish_get_sequence(
+      txn,
+      streamBuf,
+      streamBuf.length,
+      kindBuf,
+      kindBuf?.length ?? 0,
+      latticeValue,
+      sequenceOut
+    );
+    this.checkError(err);
+    return sequenceOut.readBigUInt64LE();
+  }
+
   readStream(
     db: DatabaseHandle,
     stream: string,

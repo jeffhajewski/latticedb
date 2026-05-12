@@ -271,6 +271,14 @@ func (tx *Tx) PublishStream(stream, kind string, payload Value) error {
 	return wrapError(tx.raw.PublishStream(stream, kind, payload))
 }
 
+func (tx *Tx) PublishStreamGetSequence(stream, kind string, payload Value) (uint64, error) {
+	if err := tx.ensureWritable(); err != nil {
+		return 0, err
+	}
+	sequence, err := tx.raw.PublishStreamGetSequence(stream, kind, payload)
+	return sequence, wrapError(err)
+}
+
 func (tx *Tx) SetStreamOffset(stream, consumer string, sequence uint64) error {
 	if err := tx.ensureWritable(); err != nil {
 		return err

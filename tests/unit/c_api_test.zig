@@ -2217,17 +2217,20 @@ test "c_api: stream publish read offset trim and free batch" {
             .value_type = .string,
             .data = .{ .string_val = .{ .ptr = payload_text.ptr, .len = payload_text.len } },
         };
+        var published_sequence: u64 = 0;
         try std.testing.expectEqual(
             lattice_error.ok,
-            c_api.lattice_stream_publish(
+            c_api.lattice_stream_publish_get_sequence(
                 txn,
                 "events".ptr,
                 "events".len,
                 "created".ptr,
                 "created".len,
                 &first_payload,
+                &published_sequence,
             ),
         );
+        try std.testing.expectEqual(@as(u64, 1), published_sequence);
 
         var second_payload = lattice_value{
             .value_type = .int,
@@ -2235,18 +2238,33 @@ test "c_api: stream publish read offset trim and free batch" {
         };
         try std.testing.expectEqual(
             lattice_error.ok,
-            c_api.lattice_stream_publish(
+            c_api.lattice_stream_publish_get_sequence(
                 txn,
                 "events".ptr,
                 "events".len,
                 null,
                 0,
                 &second_payload,
+                &published_sequence,
             ),
         );
+        try std.testing.expectEqual(@as(u64, 2), published_sequence);
 
         try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
     }
+
+    var last_sequence: u64 = 0;
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_stream_get_last_sequence(db, "events".ptr, "events".len, &last_sequence),
+    );
+    try std.testing.expectEqual(@as(u64, 2), last_sequence);
+
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_stream_get_last_sequence(db, "missing".ptr, "missing".len, &last_sequence),
+    );
+    try std.testing.expectEqual(@as(u64, 0), last_sequence);
 
     var batch: ?*lattice_stream_batch = null;
     try std.testing.expectEqual(
@@ -2383,10 +2401,20 @@ test "c_api: stream rollback read-only and reserved names" {
     {
         var txn: ?*lattice_txn = null;
         try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+        var published_sequence: u64 = 0;
         try std.testing.expectEqual(
             lattice_error.ok,
-            c_api.lattice_stream_publish(txn, "events".ptr, "events".len, null, 0, &payload),
+            c_api.lattice_stream_publish_get_sequence(
+                txn,
+                "events".ptr,
+                "events".len,
+                null,
+                0,
+                &payload,
+                &published_sequence,
+            ),
         );
+        try std.testing.expectEqual(@as(u64, 1), published_sequence);
         try std.testing.expectEqual(lattice_error.ok, c_api.lattice_rollback(txn));
     }
 
@@ -2397,6 +2425,26 @@ test "c_api: stream rollback read-only and reserved names" {
     );
     defer c_api.lattice_stream_batch_free(batch);
     try std.testing.expectEqual(@as(usize, 0), c_api.lattice_stream_batch_count(batch));
+
+    {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+        var published_sequence: u64 = 0;
+        try std.testing.expectEqual(
+            lattice_error.ok,
+            c_api.lattice_stream_publish_get_sequence(
+                txn,
+                "events".ptr,
+                "events".len,
+                null,
+                0,
+                &payload,
+                &published_sequence,
+            ),
+        );
+        try std.testing.expectEqual(@as(u64, 1), published_sequence);
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+    }
 
     {
         var txn: ?*lattice_txn = null;

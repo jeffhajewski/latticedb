@@ -144,6 +144,38 @@ class Transaction:
         del _ref
         check_error(code)
 
+    def publish_stream_get_sequence(
+        self,
+        stream: str,
+        payload: PropertyValue,
+        *,
+        kind: str = "message",
+    ) -> int:
+        """Publish a durable stream record and return its transaction-local sequence."""
+        if self._read_only:
+            raise RuntimeError("Cannot publish stream records in read-only transaction")
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        stream_bytes = stream.encode("utf-8")
+        kind_bytes = kind.encode("utf-8") if kind else b""
+        c_value = LatticeValue()
+        sequence = c_uint64()
+        _ref = python_to_value(payload, c_value)
+        code = lib._lib.lattice_stream_publish_get_sequence(
+            self._handle,
+            stream_bytes,
+            len(stream_bytes),
+            kind_bytes if kind_bytes else None,
+            len(kind_bytes),
+            byref(c_value),
+            byref(sequence),
+        )
+        del _ref
+        check_error(code)
+        return int(sequence.value)
+
     def set_stream_offset(self, stream: str, consumer: str, sequence: int) -> None:
         """Commit a durable consumer offset in this write transaction."""
         if self._read_only:

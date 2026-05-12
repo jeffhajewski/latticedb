@@ -1158,8 +1158,8 @@ describeIfNative('Database Integration', () => {
     test('publishes, reads, commits offsets, trims, and exposes graph changes', async () => {
       let nodeId = BigInt(0);
       await db.write(async (txn) => {
-        txn.publishStream('events', { id: BigInt(1) }, 'created');
-        txn.publishStream('events', 'second');
+        expect(txn.publishStreamGetSequence('events', { id: BigInt(1) }, 'created')).toBe(BigInt(1));
+        expect(txn.publishStreamGetSequence('events', 'second')).toBe(BigInt(2));
         const node = await txn.createNode({
           labels: ['Person'],
           properties: { name: 'Ada' },
@@ -1195,12 +1195,19 @@ describeIfNative('Database Integration', () => {
 
     test('rollback keeps stream records hidden', async () => {
       await expect(db.write(async (txn) => {
-        txn.publishStream('events', 'hidden');
+        expect(txn.publishStreamGetSequence('events', 'hidden')).toBe(BigInt(1));
         txn.rollback();
         throw new Error('rolled back');
       })).rejects.toThrow('rolled back');
 
       await expect(db.readStream('events')).resolves.toEqual([]);
+
+      await db.write(async (txn) => {
+        expect(txn.publishStreamGetSequence('events', 'visible')).toBe(BigInt(1));
+      });
+      await expect(db.readStream('events')).resolves.toMatchObject([
+        { sequence: BigInt(1), payload: 'visible' },
+      ]);
     });
 
     test('enableWal false rejects stream writes', async () => {

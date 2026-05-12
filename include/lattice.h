@@ -318,6 +318,18 @@ lattice_error lattice_stream_publish(
     const lattice_value* payload
 );
 
+/* Publish a record and return the sequence assigned inside this transaction.
+ * The sequence is durable only after the transaction commits. */
+lattice_error lattice_stream_publish_get_sequence(
+    lattice_txn* txn,
+    const char* stream,
+    size_t stream_len,
+    const char* kind,
+    size_t kind_len,
+    const lattice_value* payload,
+    uint64_t* sequence_out
+);
+
 /* Read records after a sequence cursor. Reads do not commit offsets. If no
  * records are available, timeout_ms waits for a same-process commit wakeup. */
 lattice_error lattice_stream_read(
@@ -352,6 +364,15 @@ lattice_error lattice_stream_get_offset(
     const char* consumer,
     size_t consumer_len,
     bool* exists_out,
+    uint64_t* sequence_out
+);
+
+/* Return the latest sequence published to a stream, or 0 when the stream has
+ * no records. */
+lattice_error lattice_stream_get_last_sequence(
+    lattice_database* db,
+    const char* stream,
+    size_t stream_len,
     uint64_t* sequence_out
 );
 

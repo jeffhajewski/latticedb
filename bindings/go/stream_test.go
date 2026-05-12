@@ -11,10 +11,24 @@ func TestStreamPublishAndReadRecord(t *testing.T) {
 	db := openStreamTestDB(t, "publish-read.db")
 
 	err := db.Update(func(tx *Tx) error {
-		return tx.PublishStream("events", "created", map[string]Value{
+		sequence, err := tx.PublishStreamGetSequence("events", "created", map[string]Value{
 			"id":     int64(1),
 			"status": "queued",
 		})
+		if err != nil {
+			return err
+		}
+		if sequence != 1 {
+			t.Fatalf("unexpected published sequence: %d", sequence)
+		}
+		sequence, err = tx.PublishStreamGetSequence("events", "updated", "second")
+		if err != nil {
+			return err
+		}
+		if sequence != 2 {
+			t.Fatalf("unexpected second sequence: %d", sequence)
+		}
+		return nil
 	})
 	if err != nil {
 		t.Fatalf("publish stream: %v", err)
@@ -24,8 +38,8 @@ func TestStreamPublishAndReadRecord(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read stream: %v", err)
 	}
-	if len(records) != 1 {
-		t.Fatalf("expected 1 record, got %d: %#v", len(records), records)
+	if len(records) != 2 {
+		t.Fatalf("expected 2 records, got %d: %#v", len(records), records)
 	}
 
 	record := records[0]
@@ -43,13 +57,16 @@ func TestStreamPublishAndReadRecord(t *testing.T) {
 	if !reflect.DeepEqual(record.Payload, expectedPayload) {
 		t.Fatalf("unexpected payload: %#v", record.Payload)
 	}
+	if records[1].Sequence != 2 || records[1].Kind != "updated" || records[1].Payload != "second" {
+		t.Fatalf("unexpected second record: %#v", records[1])
+	}
 
 	afterRecords, err := db.ReadStream("events", record.Sequence, 100, 0)
 	if err != nil {
 		t.Fatalf("read after record: %v", err)
 	}
-	if len(afterRecords) != 0 {
-		t.Fatalf("expected no records after sequence %d, got %#v", record.Sequence, afterRecords)
+	if len(afterRecords) != 1 || afterRecords[0].Sequence != 2 {
+		t.Fatalf("expected second record after sequence %d, got %#v", record.Sequence, afterRecords)
 	}
 }
 
@@ -142,6 +159,47 @@ func TestStreamTrim(t *testing.T) {
 	}
 	if records[0].Sequence != 2 || records[0].Kind != "second" || records[0].Payload != "two" {
 		t.Fatalf("unexpected remaining record: %#v", records[0])
+	}
+}
+
+func TestStreamPublishSequenceRollbackIsNotDurable(t *testing.T) {
+	db := openStreamTestDB(t, "rollback-sequence.db")
+
+	tx, err := db.BeginWrite()
+	if err != nil {
+		t.Fatalf("begin write: %v", err)
+	}
+	sequence, err := tx.PublishStreamGetSequence("events", "message", "hidden")
+	if err != nil {
+		t.Fatalf("publish hidden: %v", err)
+	}
+	if sequence != 1 {
+		t.Fatalf("unexpected hidden sequence: %d", sequence)
+	}
+	if err := tx.Rollback(); err != nil {
+		t.Fatalf("rollback: %v", err)
+	}
+
+	records, err := db.ReadStream("events", 0, 100, 0)
+	if err != nil {
+		t.Fatalf("read after rollback: %v", err)
+	}
+	if len(records) != 0 {
+		t.Fatalf("expected no durable records after rollback, got %#v", records)
+	}
+
+	err = db.Update(func(tx *Tx) error {
+		sequence, err := tx.PublishStreamGetSequence("events", "message", "visible")
+		if err != nil {
+			return err
+		}
+		if sequence != 1 {
+			t.Fatalf("unexpected visible sequence after rollback: %d", sequence)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("publish visible: %v", err)
 	}
 }
 

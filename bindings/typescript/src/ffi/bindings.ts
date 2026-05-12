@@ -235,6 +235,15 @@ export interface LatticeBindings {
     kind_len: number,
     payload: unknown
   ) => number;
+  lattice_stream_publish_get_sequence: (
+    txn: unknown,
+    stream: Buffer,
+    stream_len: number,
+    kind: Buffer | null,
+    kind_len: number,
+    payload: unknown,
+    sequence_out: Buffer
+  ) => number;
   lattice_stream_read: (
     db: unknown,
     stream: Buffer,
@@ -662,6 +671,15 @@ function createBindings(): LatticeBindings {
       koffi.pointer('uint8_t'),
       'size_t',
       ValuePtr,
+    ]),
+    lattice_stream_publish_get_sequence: lib.func('lattice_stream_publish_get_sequence', 'int', [
+      TxnPtr,
+      koffi.pointer('uint8_t'),
+      'size_t',
+      koffi.pointer('uint8_t'),
+      'size_t',
+      ValuePtr,
+      koffi.out(koffi.pointer('uint64')),
     ]),
     lattice_stream_read: lib.func('lattice_stream_read', 'int', [
       DatabasePtr,

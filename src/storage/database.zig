@@ -2461,7 +2461,7 @@ pub const Database = struct {
         kind: []const u8,
         payload: PropertyValue,
         user_publish: bool,
-    ) DatabaseError!void {
+    ) DatabaseError!u64 {
         if (user_publish) {
             stream_store_mod.validateUserStreamName(stream) catch |err| return self.mapStreamError(err);
         } else {
@@ -2469,6 +2469,7 @@ pub const Database = struct {
         }
         stream_store_mod.validateKind(kind) catch |err| return self.mapStreamError(err);
 
+        const sequence = try self.nextStreamSequence(overlay.stream_appends.items, stream);
         const stream_copy = self.allocator.dupe(u8, stream) catch return DatabaseError.OutOfMemory;
         errdefer self.allocator.free(stream_copy);
         const kind_copy = self.allocator.dupe(u8, kind) catch return DatabaseError.OutOfMemory;
@@ -2483,35 +2484,60 @@ pub const Database = struct {
             .stream = stream_copy,
             .kind = kind_copy,
             .payload = payload_copy,
-            .sequence = null,
+            .sequence = sequence,
         }) catch return DatabaseError.OutOfMemory;
         overlay.markDirty();
+        return sequence;
+    }
+
+    fn nextStreamSequence(self: *Self, prior_appends: []const TxnStreamAppend, stream: []const u8) DatabaseError!u64 {
+        const trees = try self.streamTreesForWrite();
+
+        var last = stream_store_mod.getLastSequence(
+            trees,
+            self.allocator,
+            stream,
+        ) catch |err| return self.mapStreamError(err);
+
+        for (prior_appends) |previous| {
+            if (previous.sequence) |seq| {
+                if (std.mem.eql(u8, previous.stream, stream) and seq > last) {
+                    last = seq;
+                }
+            }
+        }
+
+        if (last == std.math.maxInt(u64)) return DatabaseError.ValueTooLarge;
+        return last + 1;
     }
 
     fn assignStreamSequences(self: *Self, overlay: *TxnOverlay) DatabaseError!void {
-        if (overlay.stream_appends.items.len == 0) return;
-        const trees = try self.streamTreesForWrite();
-
         for (overlay.stream_appends.items, 0..) |*append, i| {
             if (append.sequence != null) continue;
 
-            var last = stream_store_mod.getLastSequence(
-                trees,
-                self.allocator,
-                append.stream,
-            ) catch |err| return self.mapStreamError(err);
-
-            for (overlay.stream_appends.items[0..i]) |previous| {
-                if (previous.sequence) |seq| {
-                    if (std.mem.eql(u8, previous.stream, append.stream) and seq > last) {
-                        last = seq;
-                    }
-                }
-            }
-
-            if (last == std.math.maxInt(u64)) return DatabaseError.ValueTooLarge;
-            append.sequence = last + 1;
+            append.sequence = try self.nextStreamSequence(overlay.stream_appends.items[0..i], append.stream);
         }
+    }
+
+    pub fn publishStreamGetSequence(
+        self: *Self,
+        txn: *Transaction,
+        stream: []const u8,
+        kind: ?[]const u8,
+        payload: PropertyValue,
+    ) DatabaseError!u64 {
+        if (self.read_only) return DatabaseError.PermissionDenied;
+        if (!txn.isActive()) return DatabaseError.TransactionNotActive;
+        if (txn.mode == .read_only) return DatabaseError.TransactionReadOnly;
+        const overlay = self.getTxnOverlay(txn) orelse return DatabaseError.TransactionNotActive;
+        try self.ensureStreamTreesForWrite();
+        return self.stageStreamAppend(
+            overlay,
+            stream,
+            kind orelse stream_store_mod.default_kind,
+            payload,
+            true,
+        );
     }
 
     pub fn publishStream(
@@ -2521,18 +2547,7 @@ pub const Database = struct {
         kind: ?[]const u8,
         payload: PropertyValue,
     ) DatabaseError!void {
-        if (self.read_only) return DatabaseError.PermissionDenied;
-        if (!txn.isActive()) return DatabaseError.TransactionNotActive;
-        if (txn.mode == .read_only) return DatabaseError.TransactionReadOnly;
-        const overlay = self.getTxnOverlay(txn) orelse return DatabaseError.TransactionNotActive;
-        try self.ensureStreamTreesForWrite();
-        try self.stageStreamAppend(
-            overlay,
-            stream,
-            kind orelse stream_store_mod.default_kind,
-            payload,
-            true,
-        );
+        _ = try self.publishStreamGetSequence(txn, stream, kind, payload);
     }
 
     pub fn setStreamOffset(
@@ -2595,6 +2610,21 @@ pub const Database = struct {
             self.allocator,
             stream,
             consumer,
+        ) catch |err| return self.mapStreamError(err);
+    }
+
+    pub fn getStreamLastSequence(
+        self: *Self,
+        stream: []const u8,
+    ) DatabaseError!u64 {
+        const trees = self.streamTrees() orelse {
+            stream_store_mod.validateStreamNameForRead(stream) catch |err| return self.mapStreamError(err);
+            return 0;
+        };
+        return stream_store_mod.getLastSequence(
+            trees,
+            self.allocator,
+            stream,
         ) catch |err| return self.mapStreamError(err);
     }
 
@@ -2743,7 +2773,7 @@ pub const Database = struct {
         entries: []const PropertyValue.MapEntry,
     ) DatabaseError!void {
         const payload = PropertyValue{ .map_val = entries };
-        try self.stageStreamAppend(
+        _ = try self.stageStreamAppend(
             overlay,
             stream_store_mod.changes_stream,
             kind,

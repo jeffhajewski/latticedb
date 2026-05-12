@@ -1646,13 +1646,14 @@ pub export fn lattice_value_free(value: ?*lattice_value) void {
 // Stream Operations
 // ============================================================================
 
-pub export fn lattice_stream_publish(
+fn streamPublishGetSequenceImpl(
     txn: ?*lattice_txn,
     stream: [*c]const u8,
     stream_len: usize,
     kind: [*c]const u8,
     kind_len: usize,
     payload: ?*const lattice_value,
+    sequence_out: ?*u64,
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
 
@@ -1675,14 +1676,40 @@ pub export fn lattice_stream_publish(
     if (active_txn_result != .ok) return active_txn_result;
     if (rejectFakeStreamTxn(txn_handle)) |err| return err;
 
-    txn_handle.db_handle.db.publishStream(
+    const sequence = txn_handle.db_handle.db.publishStreamGetSequence(
         &txn_handle.txn,
         stream_slice,
         kind_slice,
         zig_payload,
     ) catch |err| return mapStreamMutationError(err);
+    if (sequence_out) |out| out.* = sequence;
 
     return .ok;
+}
+
+pub export fn lattice_stream_publish(
+    txn: ?*lattice_txn,
+    stream: [*c]const u8,
+    stream_len: usize,
+    kind: [*c]const u8,
+    kind_len: usize,
+    payload: ?*const lattice_value,
+) lattice_error {
+    return streamPublishGetSequenceImpl(txn, stream, stream_len, kind, kind_len, payload, null);
+}
+
+pub export fn lattice_stream_publish_get_sequence(
+    txn: ?*lattice_txn,
+    stream: [*c]const u8,
+    stream_len: usize,
+    kind: [*c]const u8,
+    kind_len: usize,
+    payload: ?*const lattice_value,
+    sequence_out: ?*u64,
+) lattice_error {
+    const out = sequence_out orelse return .err_invalid_arg;
+    out.* = 0;
+    return streamPublishGetSequenceImpl(txn, stream, stream_len, kind, kind_len, payload, out);
 }
 
 pub export fn lattice_stream_read(
@@ -1800,6 +1827,22 @@ pub export fn lattice_stream_get_offset(
         exists_out.* = true;
         sequence_out.* = sequence;
     }
+    return .ok;
+}
+
+pub export fn lattice_stream_get_last_sequence(
+    db: ?*lattice_database,
+    stream: [*c]const u8,
+    stream_len: usize,
+    sequence_out: *u64,
+) lattice_error {
+    const db_handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
+    const stream_slice = cArgBytes(stream, stream_len) orelse return .err_invalid_arg;
+    sequence_out.* = 0;
+
+    sequence_out.* = db_handle.db.getStreamLastSequence(stream_slice) catch |err| {
+        return mapDatabaseError(err);
+    };
     return .ok;
 }
 

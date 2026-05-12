@@ -591,6 +591,17 @@ class LatticeLib:
         ]
         self._lib.lattice_stream_publish.restype = c_int
 
+        self._lib.lattice_stream_publish_get_sequence.argtypes = [
+            LatticeTxn,
+            c_char_p,
+            c_size_t,
+            c_char_p,
+            c_size_t,
+            POINTER(LatticeValue),
+            POINTER(c_uint64),
+        ]
+        self._lib.lattice_stream_publish_get_sequence.restype = c_int
+
         self._lib.lattice_stream_read.argtypes = [
             LatticeDatabase,
             c_char_p,

@@ -152,11 +152,13 @@ comptime {
     _ = &c_api.lattice_embedding_client_embed;
     _ = &c_api.lattice_embedding_client_free;
     _ = &c_api.lattice_stream_publish;
+    _ = &c_api.lattice_stream_publish_get_sequence;
     _ = &c_api.lattice_stream_read;
     _ = &c_api.lattice_stream_batch_count;
     _ = &c_api.lattice_stream_batch_get;
     _ = &c_api.lattice_stream_batch_free;
     _ = &c_api.lattice_stream_get_offset;
+    _ = &c_api.lattice_stream_get_last_sequence;
     _ = &c_api.lattice_stream_set_offset;
     _ = &c_api.lattice_stream_trim;
 }

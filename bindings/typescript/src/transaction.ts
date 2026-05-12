@@ -87,6 +87,11 @@ export class Transaction {
     this.ffi.publishStream(this.txnHandle!, stream, payload, kind);
   }
 
+  publishStreamGetSequence(stream: string, payload: PropertyValue, kind = 'message'): bigint {
+    this.ensureWritable();
+    return this.ffi.publishStreamGetSequence(this.txnHandle!, stream, payload, kind);
+  }
+
   setStreamOffset(stream: string, consumer: string, sequence: bigint): void {
     this.ensureWritable();
     this.ffi.setStreamOffset(this.txnHandle!, stream, consumer, sequence);

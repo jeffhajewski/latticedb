@@ -1266,8 +1266,8 @@ class TestStreams:
 
         with Database(db_path, create=True) as db:
             with db.write() as txn:
-                txn.publish_stream("events", {"id": 1}, kind="created")
-                txn.publish_stream("events", "second")
+                assert txn.publish_stream_get_sequence("events", {"id": 1}, kind="created") == 1
+                assert txn.publish_stream_get_sequence("events", "second") == 2
                 node = txn.create_node(labels=["Person"], properties={"name": "Ada"})
                 txn.commit()
 
@@ -1300,10 +1300,16 @@ class TestStreams:
 
         with Database(db_path, create=True) as db:
             with db.write() as txn:
-                txn.publish_stream("events", "hidden")
+                assert txn.publish_stream_get_sequence("events", "hidden") == 1
                 txn.rollback()
 
             assert db.read_stream("events") == []
+
+            with db.write() as txn:
+                assert txn.publish_stream_get_sequence("events", "visible") == 1
+                txn.commit()
+
+            assert [record.sequence for record in db.read_stream("events")] == [1]
 
     def test_enable_wal_false_rejects_stream_writes(self, tmp_path):
         db_path = tmp_path / "stream_no_wal.lattice"

@@ -12,6 +12,9 @@ changefeed records become visible atomically.
 
 - Stream names auto-create on first publish.
 - Sequence numbers are per stream, start at `1`, and are read in ascending order.
+- Publish APIs that return a sequence assign it inside the transaction. The
+  returned number is durable only if that transaction commits; a rollback does
+  not reserve it.
 - Each record has a `sequence`, `kind`, and typed `lattice_value` payload.
 - The default record kind is `message`.
 - Reads are cursor-based: pass `after_sequence` to get later records.
@@ -30,7 +33,11 @@ from latticedb import Database
 
 with Database("events.lattice", create=True) as db:
     with db.write() as txn:
-        txn.publish_stream("jobs", {"id": 1, "status": "queued"}, kind="job.queued")
+        sequence = txn.publish_stream_get_sequence(
+            "jobs",
+            {"id": 1, "status": "queued"},
+            kind="job.queued",
+        )
         txn.commit()
 
     records = db.read_stream("jobs", after_sequence=0, limit=100)
@@ -57,7 +64,11 @@ const db = new Database("events.lattice", { create: true });
 await db.open();
 
 await db.write(async (txn) => {
-  txn.publishStream("jobs", { id: 1, status: "queued" }, "job.queued");
+  const sequence = txn.publishStreamGetSequence(
+    "jobs",
+    { id: 1, status: "queued" },
+    "job.queued",
+  );
 });
 
 const records = await db.readStream("jobs", {
@@ -81,11 +92,13 @@ await db.close();
 The stable C ABI exposes the same operations:
 
 - `lattice_stream_publish`
+- `lattice_stream_publish_get_sequence`
 - `lattice_stream_read`
 - `lattice_stream_batch_count`
 - `lattice_stream_batch_get`
 - `lattice_stream_batch_free`
 - `lattice_stream_get_offset`
+- `lattice_stream_get_last_sequence`
 - `lattice_stream_set_offset`
 - `lattice_stream_trim`
 

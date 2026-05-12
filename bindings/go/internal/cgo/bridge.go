@@ -395,6 +395,11 @@ func (tx *Tx) FTSIndex(nodeID uint64, text string) error {
 }
 
 func (tx *Tx) PublishStream(stream, kind string, payload any) error {
+	_, err := tx.PublishStreamGetSequence(stream, kind, payload)
+	return err
+}
+
+func (tx *Tx) PublishStreamGetSequence(stream, kind string, payload any) (uint64, error) {
 	var streamPtr unsafe.Pointer
 	if len(stream) > 0 {
 		streamPtr = C.CBytes([]byte(stream))
@@ -409,18 +414,24 @@ func (tx *Tx) PublishStream(stream, kind string, payload any) error {
 
 	cValue, cleanup, err := encodeValue(payload)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	defer cleanup()
 
-	return errorFromCode(ErrorCode(C.lattice_stream_publish(
+	var sequence C.uint64_t
+	if err := errorFromCode(ErrorCode(C.lattice_stream_publish_get_sequence(
 		tx.ptr,
 		(*C.char)(streamPtr),
 		C.size_t(len(stream)),
 		(*C.char)(kindPtr),
 		C.size_t(len(kind)),
 		cValue,
-	)))
+		&sequence,
+	))); err != nil {
+		return 0, err
+	}
+
+	return uint64(sequence), nil
 }
 
 func (tx *Tx) SetStreamOffset(stream, consumer string, sequence uint64) error {

@@ -4,15 +4,23 @@ import (
 	"encoding/binary"
 	"fmt"
 	"os"
+	"testing"
 )
 
 type RecoveryHarness interface {
-	SimulateCrash(dbPath string) error
+	CaptureCrashState(dbPath string) (RecoverySnapshot, error)
+	SimulateCrash(dbPath string, snapshot RecoverySnapshot) error
 }
 
 var testRecoveryHarness RecoveryHarness = latticeRecoveryHarness{}
 
+type RecoverySnapshot any
+
 type latticeRecoveryHarness struct{}
+
+type latticeRecoverySnapshot struct {
+	wal []byte
+}
 
 const (
 	headerPageSize          = 4096
@@ -29,9 +37,43 @@ const (
 	treeRootsByteLength     = maxTreeRoots * 4
 )
 
-func (latticeRecoveryHarness) SimulateCrash(dbPath string) error {
-	if _, err := os.Stat(dbPath + "-wal"); err != nil {
-		return fmt.Errorf("stat wal file: %w", err)
+func simulateCrashAfterClose(t *testing.T, dbPath string, db Database) {
+	t.Helper()
+
+	snapshot, err := testRecoveryHarness.CaptureCrashState(dbPath)
+	if err != nil {
+		t.Fatalf("capture crash state: %v", err)
+	}
+
+	closeDB(t, db)
+
+	if err := testRecoveryHarness.SimulateCrash(dbPath, snapshot); err != nil {
+		t.Fatalf("simulate crash: %v", err)
+	}
+}
+
+func (latticeRecoveryHarness) CaptureCrashState(dbPath string) (RecoverySnapshot, error) {
+	wal, err := os.ReadFile(dbPath + "-wal")
+	if err != nil {
+		return nil, fmt.Errorf("read wal file: %w", err)
+	}
+	if len(wal) < headerPageSize {
+		return nil, fmt.Errorf("wal file too small: got %d bytes", len(wal))
+	}
+	return latticeRecoverySnapshot{wal: wal}, nil
+}
+
+func (latticeRecoveryHarness) SimulateCrash(dbPath string, snapshot RecoverySnapshot) error {
+	latticeSnapshot, ok := snapshot.(latticeRecoverySnapshot)
+	if !ok {
+		return fmt.Errorf("unexpected recovery snapshot type %T", snapshot)
+	}
+	if len(latticeSnapshot.wal) < headerPageSize {
+		return fmt.Errorf("wal snapshot too small: got %d bytes", len(latticeSnapshot.wal))
+	}
+
+	if err := os.WriteFile(dbPath+"-wal", latticeSnapshot.wal, 0o600); err != nil {
+		return fmt.Errorf("restore wal snapshot: %w", err)
 	}
 
 	file, err := os.OpenFile(dbPath, os.O_RDWR, 0)

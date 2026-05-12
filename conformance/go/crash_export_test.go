@@ -76,11 +76,7 @@ func TestConformanceCrashRecoveryCommittedGraphAndAbortedTail(t *testing.T) {
 	rolledBackEdgeID = ghostEdge.ID
 	rollbackTx(t, rollback)
 
-	closeDB(t, db)
-
-	if err := testRecoveryHarness.SimulateCrash(dbPath); err != nil {
-		t.Fatalf("simulate crash: %v", err)
-	}
+	simulateCrashAfterClose(t, dbPath, db)
 
 	db = openDB(t, dbPath, OpenOptions{})
 	defer closeDB(t, db)
@@ -199,11 +195,7 @@ func TestConformanceCrashRecoveryCommittedNodePropertyUpdateWinsOverAbortedUpdat
 	}
 	rollbackTx(t, rollback)
 
-	closeDB(t, db)
-
-	if err := testRecoveryHarness.SimulateCrash(dbPath); err != nil {
-		t.Fatalf("simulate crash: %v", err)
-	}
+	simulateCrashAfterClose(t, dbPath, db)
 
 	db = openDB(t, dbPath, OpenOptions{})
 	defer closeDB(t, db)
@@ -268,11 +260,7 @@ func TestConformanceCrashRecoverySecondaryLabelsAndEdgeProperties(t *testing.T) 
 	if err != nil {
 		t.Fatalf("seed crash graph with secondary labels and edge properties: %v", err)
 	}
-	closeDB(t, db)
-
-	if err := testRecoveryHarness.SimulateCrash(dbPath); err != nil {
-		t.Fatalf("simulate crash: %v", err)
-	}
+	simulateCrashAfterClose(t, dbPath, db)
 
 	db = openDB(t, dbPath, OpenOptions{})
 	defer closeDB(t, db)

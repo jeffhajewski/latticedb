@@ -47,7 +47,7 @@ On Linux, use `LD_LIBRARY_PATH` instead of `DYLD_LIBRARY_PATH`.
 The module still uses a local `replace` to point at `../../bindings/go` so the suite exercises the binding code in this checkout, but native linking follows the installed `pkg-config` workflow rather than the repo-local `zig-out/lib` path.
 
 The export and dump cases build the `lattice` CLI on demand during the test run.
-The crash cases use a recovery harness adapter; the current `lattice` adapter simulates a crash by resetting the main database file and replaying the WAL on reopen.
+The crash cases use a recovery harness adapter; the current `lattice` adapter snapshots the pre-close WAL, then simulates a crash by resetting the main database file and replaying that WAL on reopen. This keeps the recovery cases meaningful even though public close may checkpoint and truncate the live WAL.
 
 ## Future Direction
 

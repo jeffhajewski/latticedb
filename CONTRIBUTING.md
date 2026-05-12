@@ -6,10 +6,10 @@ This guide covers how to set up your development environment, build the project,
 
 ### Required
 
-- **Zig 0.15.x** - [Installation guide](https://ziglang.org/download/)
+- **Zig 0.16.0** - [Installation guide](https://ziglang.org/download/)
   ```bash
   # Verify installation
-  zig version  # Should show 0.15.x
+  zig version  # Should show 0.16.0
   ```
 
 - **Python 3.9+** - For Python bindings
@@ -46,12 +46,14 @@ latticedb/
 │   ├── python/            # Python bindings
 │   └── typescript/        # TypeScript/Node.js bindings
 ├── tests/
-│   ├── unit/              # Zig unit tests
+│   ├── unit/              # Zig unit tests and focused regressions
 │   ├── integration/       # Integration tests
 │   ├── fuzz/              # Fuzz tests
+│   ├── crash/             # Crash recovery tests
+│   ├── container/         # Linux container smoke/integration tests
 │   └── benchmark/         # Performance benchmarks
 ├── docs/                  # Implementation documentation
-└── context/               # Architecture decisions
+└── book/                  # mdBook user/developer documentation
 ```
 
 ## Building
@@ -146,7 +148,7 @@ This runs:
    zig build shared
    cd bindings/typescript
    npm install
-   npm run build:all
+   npm run build
    ```
 
 2. **Run tests:**
@@ -190,25 +192,39 @@ tests/test_integration.py: 21 skipped (Native library not found)
 
 ### Making Changes to Python Bindings
 
-1. Make your changes in `bindings/python/src/lattice/`
+1. Make your changes in `bindings/python/src/latticedb/`
 2. Run `pytest tests/test_basic.py` for quick feedback
 3. Build the shared library and run `pytest tests/` for full testing
 
 ### Making Changes to TypeScript Bindings
 
 1. Make your changes in `bindings/typescript/src/`
-2. Build with `npm run build:all`
+2. Build with `npm run build`
 3. Run tests with `npm test`
 
 ### Adding New C API Functions
 
 1. Add the function declaration to `include/lattice.h`
 2. Implement the function in `src/api/c_api.zig`
-3. For Python: Add ctypes signature in `bindings/python/src/lattice/_bindings.py`
+3. For Python: Add ctypes signature in `bindings/python/src/latticedb/_bindings.py`
 4. For Python: Add wrapper in `database.py` or `transaction.py`
-5. For TypeScript: Add N-API wrapper in `bindings/typescript/src/addon.cpp`
-6. For TypeScript: Add TypeScript wrapper in appropriate source file
+5. For TypeScript: Add or update the FFI signature in `bindings/typescript/src/ffi/`
+6. For TypeScript: Add TypeScript wrapper in the appropriate source file
 7. Add tests for all bindings
+
+### Preparing a Release
+
+Use the release prep script rather than editing version values by hand:
+
+```bash
+scripts/prepare_release.sh 0.9.6
+python3 scripts/bump_version.py --check 0.9.6 --strict-lockfile
+```
+
+The version checker covers native, Python, TypeScript, examples, conformance,
+lockfiles, and the C API docs example. See
+[book/src/development/releasing.md](book/src/development/releasing.md) for the
+full release flow.
 
 ## Code Style
 
@@ -222,7 +238,7 @@ tests/test_integration.py: 21 skipped (Native library not found)
 
 - Follow PEP 8
 - Use type hints for all public functions
-- Run `mypy` for type checking: `mypy src/lattice/`
+- Run `mypy` for type checking: `mypy src/latticedb/`
 
 ### TypeScript
 
@@ -252,7 +268,7 @@ The shared library hasn't been built or isn't in the expected location.
 
 ### Zig build errors after updating Zig version
 
-LatticeDB requires Zig 0.15.x. Check your version:
+LatticeDB release and CI jobs use Zig 0.16.0. Check your version:
 
 ```bash
 zig version

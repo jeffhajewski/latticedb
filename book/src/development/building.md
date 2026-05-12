@@ -4,7 +4,7 @@ LatticeDB is written in Zig with zero external dependencies.
 
 ## Prerequisites
 
-- [Zig](https://ziglang.org/download/) (0.15.x or later)
+- [Zig](https://ziglang.org/download/) 0.16.0 (the version used by CI and release workflows)
 
 ## Clone and Build
 
@@ -76,5 +76,6 @@ include/
 
 bindings/
 ├── python/         # Python bindings
-└── typescript/     # TypeScript/Node.js bindings
+├── typescript/     # TypeScript/Node.js bindings
+└── go/             # Go bindings
 ```

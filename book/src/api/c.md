@@ -48,7 +48,7 @@ LATTICE_ERROR_VERSION_MISMATCH // -11 - Version mismatch
 LATTICE_ERROR_CHECKSUM      // -12 - Checksum verification failed
 LATTICE_ERROR_OUT_OF_MEMORY // -13 - Out of memory
 LATTICE_ERROR_UNSUPPORTED   // -14 - Unsupported operation or value type
-LATTICE_ERROR_VALUE_TOO_LARGE // -15 - Value exceeds configured page size
+LATTICE_ERROR_VALUE_TOO_LARGE // -15 - Value exceeds engine storage limits
 ```
 
 ### Value Types
@@ -198,6 +198,27 @@ lattice_edge_create(txn, source_id, target_id, "KNOWS", &edge_id);
 lattice_edge_delete(txn, source_id, target_id, "KNOWS");
 ```
 
+The returned `lattice_edge_id` is stable. Use it for edge property APIs and to
+identify traversal results.
+
+### Edge Properties
+
+```c
+lattice_value since = {
+    .type = LATTICE_VALUE_INT,
+    .data.int_val = 2020
+};
+lattice_edge_set_property(txn, edge_id, "since", &since);
+
+lattice_value out;
+if (lattice_edge_get_property(txn, edge_id, "since", &out) == LATTICE_OK) {
+    /* consume out */
+    lattice_value_free(&out);
+}
+
+lattice_edge_remove_property(txn, edge_id, "since");
+```
+
 ### Traverse Edges
 
 ```c
@@ -206,9 +227,11 @@ lattice_edge_get_outgoing(txn, node_id, &edges);
 
 uint32_t count = lattice_edge_result_count(edges);
 for (uint32_t i = 0; i < count; i++) {
+    lattice_edge_id edge_id;
     lattice_node_id source, target;
     const char* type;
     uint32_t type_len;
+    lattice_edge_result_get_id(edges, i, &edge_id);
     lattice_edge_result_get(edges, i, &source, &target, &type, &type_len);
 }
 lattice_edge_result_free(edges);

@@ -16,7 +16,7 @@ The native shared library (`liblattice.dylib` / `liblattice.so`) must be availab
 import numpy as np
 from latticedb import Database
 
-with Database("knowledge.db", create=True, enable_vector=True, vector_dimensions=4) as db:
+with Database("knowledge.db", create=True, enable_vectors=True, vector_dimensions=4) as db:
     # Create nodes, edges, and index content
     with db.write() as txn:
         alice = txn.create_node(
@@ -69,7 +69,8 @@ Database(
     create: bool = False,        # Create if doesn't exist
     read_only: bool = False,     # Open in read-only mode
     cache_size_mb: int = 100,    # Page cache size
-    enable_vector: bool = False, # Enable vector storage
+    enable_vectors: bool | None = None, # Preferred vector config flag
+    enable_vector: bool | None = None,  # Deprecated compatibility alias
     vector_dimensions: int = 128 # Vector dimensions
 )
 ```
@@ -83,6 +84,9 @@ Database(
 - `vector_search(vector, k=10, ef_search=64)` - k-NN vector search
 - `fts_search(query, limit=10)` - Full-text search
 - `fts_search_fuzzy(query, limit=10, max_distance=0, min_term_length=0)` - Fuzzy full-text search
+- `read_stream(stream, after_sequence=0, limit=100, timeout_ms=0)` - Read durable stream records by cursor
+- `get_stream_offset(stream, consumer)` - Read a committed consumer offset
+- `changes(after_sequence=0, limit=100, timeout_ms=0)` - Read the built-in graph changefeed
 - `cache_clear()` - Clear the query cache
 - `cache_stats()` - Get cache hit/miss statistics
 
@@ -103,23 +107,30 @@ Database(
 - `delete_node(node_id)` - Delete a node
 - `set_property(node_id, key, value)` - Set a property on a node
 - `set_vector(node_id, key, vector)` - Set a vector embedding
-- `batch_insert(label, vectors)` - Batch insert nodes with vectors
+- `batch_insert_vectors(label, vectors)` - Insert vector-bearing nodes in one call
+- `batch_insert(label, vectors)` - Deprecated compatibility alias for `batch_insert_vectors`
 - `fts_index(node_id, text)` - Index text for full-text search
-- `create_edge(source_id, target_id, edge_type)` - Create an edge
+- `create_edge(source_id, target_id, edge_type, properties=None)` - Create an edge and return its stable edge ID on the `Edge`
 - `delete_edge(source_id, target_id, edge_type)` - Delete an edge
+- `set_edge_property(edge_id, key, value)` - Set an edge property by stable edge ID
+- `get_edge_property(edge_id, key)` - Get an edge property by stable edge ID
+- `remove_edge_property(edge_id, key)` - Remove an edge property by stable edge ID
+- `publish_stream(stream, payload, kind="message")` - Publish a durable stream record
+- `set_stream_offset(stream, consumer, sequence)` - Commit a durable consumer offset
+- `trim_stream(stream, through_sequence)` - Delete stream records through a sequence
 - `commit()` / `rollback()` - Commit or rollback the transaction
 
-### Batch Insert
+### Bulk Vector Insertion
 
 Insert many nodes with vectors in a single efficient call:
 
 ```python
 import numpy as np
 
-with Database("vectors.db", create=True, enable_vector=True, vector_dimensions=128) as db:
+with Database("vectors.db", create=True, enable_vectors=True, vector_dimensions=128) as db:
     with db.write() as txn:
         vectors = np.random.rand(1000, 128).astype(np.float32)
-        node_ids = txn.batch_insert("Document", vectors)
+        node_ids = txn.batch_insert_vectors("Document", vectors)
         print(f"Created {len(node_ids)} nodes")
         txn.commit()
 ```
@@ -158,7 +169,7 @@ LatticeDB includes a built-in hash embedding function and an HTTP client for ext
 Deterministic, no external service needed. Useful for testing or simple keyword-based similarity:
 
 ```python
-from latticedb import hash_embed
+from latticedb.embedding import hash_embed
 
 vec = hash_embed("hello world", dimensions=128)
 print(vec.shape)  # (128,)
@@ -169,7 +180,7 @@ print(vec.shape)  # (128,)
 Connect to Ollama, OpenAI, or compatible APIs:
 
 ```python
-from latticedb import EmbeddingClient, EmbeddingApiFormat
+from latticedb.embedding import EmbeddingClient, EmbeddingApiFormat
 
 # Ollama (default)
 with EmbeddingClient("http://localhost:11434") as client:
@@ -191,11 +202,36 @@ with EmbeddingClient(
 with db.read() as txn:
     outgoing = txn.get_outgoing_edges(node_id)
     for edge in outgoing:
-        print(f"{edge.source_id} --[{edge.edge_type}]--> {edge.target_id}")
+        print(f"{edge.id}: {edge.source_id} --[{edge.edge_type}]--> {edge.target_id}")
 
     incoming = txn.get_incoming_edges(node_id)
     for edge in incoming:
-        print(f"{edge.source_id} --[{edge.edge_type}]--> {edge.target_id}")
+        print(f"{edge.id}: {edge.source_id} --[{edge.edge_type}]--> {edge.target_id}")
+```
+
+### Edge Properties
+
+Edge properties are addressed by stable edge ID. `create_edge` returns an
+`Edge` object containing that ID, and traversal results include it.
+
+```python
+with db.write() as txn:
+    edge = txn.create_edge(alice.id, bob.id, "KNOWS")
+    txn.set_edge_property(edge.id, "since", 2020)
+    assert txn.get_edge_property(edge.id, "since") == 2020
+    txn.commit()
+```
+
+### Durable Streams
+
+```python
+with db.write() as txn:
+    txn.publish_stream("jobs", {"id": 1, "status": "queued"}, kind="job.queued")
+    txn.set_stream_offset("jobs", "worker-a", 1)
+    txn.commit()
+
+records = db.read_stream("jobs", after_sequence=0, limit=100)
+changes = db.changes(after_sequence=0, limit=100)
 ```
 
 ### Cypher Queries

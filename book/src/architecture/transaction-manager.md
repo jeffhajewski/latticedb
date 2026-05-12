@@ -165,6 +165,14 @@ Application                    TxnManager                         WAL           
 
 **The critical point**: We only return success to the application AFTER `fsync()` completes. This is the durability guarantee.
 
+Graph, vector, FTS, and stream mutations are staged in a transaction overlay
+until commit. At commit time the database logs the semantic graph state needed
+for recovery, stages graph changefeed records, flushes the WAL, and then applies
+the overlay to the base stores. Large property updates avoid carrying both old
+and new full values in commit-time WAL records when redo does not require both;
+the changefeed uses summary maps for values that would exceed stream/WAL sizing
+limits.
+
 ### 4. ABORT
 
 Abort discards everything:

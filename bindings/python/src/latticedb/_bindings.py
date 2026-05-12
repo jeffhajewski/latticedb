@@ -222,7 +222,7 @@ class LatticeUnsupportedError(LatticeError):
 
 
 class LatticeValueTooLargeError(LatticeError):
-    """Value is too large for the configured database page size."""
+    """Value is too large for the engine's storage limits."""
 
     pass
 

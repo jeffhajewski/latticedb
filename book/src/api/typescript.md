@@ -17,7 +17,7 @@ import { Database } from "@hajewski/latticedb";
 
 const db = new Database("knowledge.db", {
   create: true,
-  enableVector: true,
+  enableVectors: true,
   vectorDimensions: 4,
 });
 await db.open();
@@ -96,7 +96,8 @@ interface DatabaseOptions {
   create?: boolean;          // Create if not exists (default: false)
   readOnly?: boolean;        // Open read-only (default: false)
   cacheSizeMb?: number;      // Cache size in MB (default: 100)
-  enableVector?: boolean;    // Enable vector storage (default: false)
+  enableVectors?: boolean;   // Preferred vector config flag
+  enableVector?: boolean;    // Deprecated compatibility alias
   vectorDimensions?: number; // Vector dimensions (default: 128)
 }
 ```
@@ -111,6 +112,9 @@ interface DatabaseOptions {
 - `await db.vectorSearch(vector, options?)` - k-NN vector search
 - `await db.ftsSearch(query, options?)` - Full-text search
 - `await db.ftsSearchFuzzy(query, options?)` - Fuzzy full-text search
+- `await db.readStream(stream, options?)` - Read durable stream records by cursor
+- `await db.getStreamOffset(stream, consumer)` - Read a committed consumer offset
+- `await db.changes(options?)` - Read the built-in graph changefeed
 - `await db.cacheClear()` - Clear the query cache
 - `await db.cacheStats()` - Get cache hit/miss statistics
 - `db.isOpen()` - Check if database is open
@@ -133,10 +137,17 @@ interface DatabaseOptions {
 - `await txn.deleteNode(nodeId)` - Delete a node
 - `await txn.setProperty(nodeId, key, value)` - Set a property
 - `await txn.setVector(nodeId, key, vector)` - Set a vector embedding
-- `await txn.batchInsert(label, vectors)` - Batch insert nodes with vectors
+- `await txn.batchInsertVectors(label, vectors)` - Insert vector-bearing nodes in one call
+- `await txn.batchInsert(label, vectors)` - Deprecated compatibility alias for `batchInsertVectors`
 - `await txn.ftsIndex(nodeId, text)` - Index text for full-text search
-- `await txn.createEdge(sourceId, targetId, edgeType)` - Create an edge
+- `await txn.createEdge(sourceId, targetId, edgeType, options?)` - Create an edge and return its stable edge ID on the `Edge`
 - `await txn.deleteEdge(sourceId, targetId, edgeType)` - Delete an edge
+- `await txn.setEdgeProperty(edgeId, key, value)` - Set an edge property by stable edge ID
+- `await txn.getEdgeProperty(edgeId, key)` - Get an edge property by stable edge ID
+- `await txn.removeEdgeProperty(edgeId, key)` - Remove an edge property by stable edge ID
+- `txn.publishStream(stream, payload, kind?)` - Publish a durable stream record
+- `txn.setStreamOffset(stream, consumer, sequence)` - Commit a durable consumer offset
+- `txn.trimStream(stream, throughSequence)` - Delete stream records through a sequence
 - `txn.commit()` / `txn.rollback()` - Commit or rollback
 
 ### Batch Insert
@@ -148,7 +159,7 @@ import { Database } from "@hajewski/latticedb";
 
 const db = new Database("vectors.db", {
   create: true,
-  enableVector: true,
+  enableVectors: true,
   vectorDimensions: 128,
 });
 await db.open();
@@ -157,7 +168,7 @@ await db.write(async (txn) => {
   const vectors = Array.from({ length: 1000 }, () =>
     Float32Array.from({ length: 128 }, () => Math.random())
   );
-  const nodeIds = await txn.batchInsert("Document", vectors);
+  const nodeIds = await txn.batchInsertVectors("Document", vectors);
   console.log(`Created ${nodeIds.length} nodes`);
 });
 
@@ -198,7 +209,7 @@ LatticeDB includes a built-in hash embedding function and an HTTP client for ext
 Deterministic, no external service needed. Useful for testing or simple keyword-based similarity:
 
 ```typescript
-import { hashEmbed } from "@hajewski/latticedb";
+import { hashEmbed } from "@hajewski/latticedb/embedding";
 
 const vec = hashEmbed("hello world", 128);
 console.log(vec.length); // 128
@@ -209,7 +220,7 @@ console.log(vec.length); // 128
 Connect to Ollama, OpenAI, or compatible APIs:
 
 ```typescript
-import { EmbeddingClient, EmbeddingApiFormat } from "@hajewski/latticedb";
+import { EmbeddingClient, EmbeddingApiFormat } from "@hajewski/latticedb/embedding";
 
 // Ollama (default)
 const client = new EmbeddingClient({
@@ -235,14 +246,39 @@ openaiClient.close();
 await db.read(async (txn) => {
   const outgoing = await txn.getOutgoingEdges(nodeId);
   for (const edge of outgoing) {
-    console.log(`${edge.sourceId} --[${edge.type}]--> ${edge.targetId}`);
+    console.log(`${edge.id}: ${edge.sourceId} --[${edge.type}]--> ${edge.targetId}`);
   }
 
   const incoming = await txn.getIncomingEdges(nodeId);
   for (const edge of incoming) {
-    console.log(`${edge.sourceId} --[${edge.type}]--> ${edge.targetId}`);
+    console.log(`${edge.id}: ${edge.sourceId} --[${edge.type}]--> ${edge.targetId}`);
   }
 });
+```
+
+### Edge Properties
+
+Edge properties are addressed by stable edge ID. `createEdge` returns an `Edge`
+object containing that ID, and traversal results include it.
+
+```typescript
+await db.write(async (txn) => {
+  const edge = await txn.createEdge(alice.id, bob.id, "KNOWS");
+  await txn.setEdgeProperty(edge.id, "since", 2020);
+  const since = await txn.getEdgeProperty(edge.id, "since");
+});
+```
+
+### Durable Streams
+
+```typescript
+await db.write(async (txn) => {
+  await txn.publishStream("jobs", { id: 1, status: "queued" }, "job.queued");
+  await txn.setStreamOffset("jobs", "worker-a", 1);
+});
+
+const records = await db.readStream("jobs", { afterSequence: 0, limit: 100 });
+const changes = await db.changes({ afterSequence: 0, limit: 100 });
 ```
 
 ### Cypher Queries

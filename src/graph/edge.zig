@@ -14,7 +14,7 @@
 //!   (B, 1, TYPE, A, EID) -> empty     (incoming to B)
 //!
 //! Edge ID index:
-//!   edge_id -> (source, target, type_id)
+//!   edge_id -> (source, target, type_id, properties)
 //!
 //! This layout preserves efficient traversal while storing edge payload once.
 

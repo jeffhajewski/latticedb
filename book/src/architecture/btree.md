@@ -87,27 +87,38 @@ No intermediate objects. No serialization overhead.
 │ Bytes 0-7:   Page Header (checksum, type=leaf, flags)          │
 ├────────────────────────────────────────────────────────────────┤
 │ Bytes 8-9:   Entry count (u16)                                 │
-│ Bytes 10-13: Prev leaf page (u32)                              │
-│ Bytes 14-17: Next leaf page (u32)                              │
-│ Bytes 18-19: Free space offset (u16)                           │
+│ Bytes 10-11: Flags (u16)                                       │
+│ Bytes 12-15: Next leaf page (u32)                              │
+│ Bytes 16-19: Prev leaf page (u32)                              │
 ├────────────────────────────────────────────────────────────────┤
-│ Slot 0: key_offset, key_len, val_offset, val_len (8 bytes)     │
-│ Slot 1: key_offset, key_len, val_offset, val_len (8 bytes)     │
+│ Slot 0: entry_offset (u16)                                      │
+│ Slot 1: entry_offset (u16)                                      │
 │ Slot 2: ...                                                    │
 │         ...                                                    │
 │                    [free space grows down ↓]                   │
 │                                                                │
-│                    [entries grow up ↑]                         │
+│                    [entry bytes grow down ↓ from page end]      │
 │                                                                │
-│ "value2"                                                       │
-│ "key2"                                                         │
-│ "value1"                                                       │
-│ "key1"                                                         │
+│ [key_len][value_len][key2][value2-or-overflow-descriptor]      │
+│ [key_len][value_len][key1][value1-or-overflow-descriptor]      │
 └────────────────────────────────────────────────────────────────┘
                                                           Byte 4095
 ```
 
-**Variable-length entries**: Keys and values are stored at the end of the page, growing upward. Slots at the front point to them.
+**Variable-length entries**: Keys and values are stored at the end of the page,
+growing downward from high offsets. Slots at the front point to the entry
+records.
+
+Large values are stored through generic B+Tree overflow records. A leaf entry
+uses the normal key bytes plus a compact overflow descriptor; the descriptor
+contains the total value length, first overflow page, page count, checksum, and
+a small local prefix. Point reads and range scans materialize the full value
+transparently, and deletes free the overflow chain.
+
+Values up to `64 MiB` are accepted by the B+Tree layer when the key and overflow
+descriptor can fit in an empty leaf. Inline-capable values may still be stored
+as overflow records when keeping them inline would make future 4 KiB leaf splits
+impossible to divide into two valid ordered pages.
 
 ### Internal Node
 
@@ -118,11 +129,11 @@ No intermediate objects. No serialization overhead.
 │ Bytes 0-7:   Page Header (checksum, type=internal, flags)      │
 ├────────────────────────────────────────────────────────────────┤
 │ Bytes 8-9:   Key count (u16)                                   │
-│ Bytes 10-13: Rightmost child (u32)                             │
-│ Bytes 14-15: Free space offset (u16)                           │
+│ Bytes 10-11: Level (u16; 0 = parent of leaves)                 │
+│ Bytes 12-15: Rightmost child (u32)                             │
 ├────────────────────────────────────────────────────────────────┤
-│ Slot 0: child_page, key_offset, key_len (8 bytes)              │
-│ Slot 1: child_page, key_offset, key_len (8 bytes)              │
+│ Slot 0: key_offset (u16), child_page (u32)                     │
+│ Slot 1: key_offset (u16), child_page (u32)                     │
 │         ...                                                    │
 │                    [free space]                                │
 │                                                                │
@@ -187,13 +198,16 @@ pub fn insert(self: *Self, key: []const u8, value: []const u8) !void {
     const frame = try self.bp.fetchPage(leaf_page, .exclusive);
     defer self.bp.unpinPage(frame, true);
 
-    // 3. Check if there's space
-    if (LeafNode.hasSpace(frame.data, key.len, value.len)) {
-        // 4. Insert directly
-        LeafNode.insert(frame.data, key, value, self.comparator);
+    // 3. Prepare either inline bytes or an overflow descriptor
+    const prepared = try self.prepareStoredValue(key, value);
+
+    // 4. Check if the prepared entry fits
+    if (LeafNode.hasSpace(frame.data, key.len, prepared.value.len)) {
+        // 5. Insert directly
+        LeafNode.insert(frame.data, key, prepared.value, self.comparator);
     } else {
-        // 5. Need to split
-        try self.splitLeafAndInsert(frame, key, value);
+        // 6. Need to split
+        try self.splitLeafAndInsert(frame, key, prepared);
     }
 }
 ```
@@ -227,9 +241,8 @@ fn splitLeaf(self: *Self, frame: *BufferFrame, key: []const u8, value: []const u
     const new_page = try self.pm.allocatePage();
     const new_frame = try self.bp.fetchPage(new_page, .exclusive);
 
-    // 2. Find split point (middle)
-    const entry_count = LeafNode.getCount(frame.data);
-    const split_point = entry_count / 2;
+    // 2. Find a byte-balanced split point that keeps both leaves valid.
+    const split_point = try self.chooseLeafSplitPoint(frame.data, key, value);
 
     // 3. Move upper half to new page
     LeafNode.moveEntries(frame.data, new_frame.data, split_point, entry_count);
@@ -250,6 +263,10 @@ fn splitLeaf(self: *Self, frame: *BufferFrame, key: []const u8, value: []const u
     try self.insertIntoParent(frame.page_id, separator, new_page);
 }
 ```
+
+The split point is chosen by serialized byte size, not just entry count. This
+matters when a leaf mixes small keys with large values: both halves must fit in
+the configured page size after the new entry is included.
 
 ### Growing the Tree
 
@@ -369,13 +386,19 @@ We store the actual bytes, not fixed-size slots. This supports:
 
 Internal nodes store separator keys, not full key-value pairs. This maximizes fanout (keys per internal node).
 
-### No Deletion (Yet)
+### Delete Compaction Without Rebalancing
 
-Our implementation doesn't handle deletes with rebalancing. For a knowledge graph database, we can use soft deletes (mark as deleted) and periodic compaction.
+Deletes remove the slot, rebuild the surviving leaf entries contiguously, and
+free any overflow chain owned by the removed entry. The implementation still
+does not merge or redistribute underfull pages, so a delete-heavy workload can
+leave low-density leaves, but the freed space within each leaf is reusable
+immediately by later inserts or updates.
 
-### Page-Based, Not Block-Based
+### Page-Based, With Explicit Overflow
 
-Each node is exactly one page. No spanning, no compression across pages. Simple and predictable.
+Each B+Tree node is exactly one page. Large values span linked overflow pages
+through an explicit descriptor stored in the leaf; ordinary internal and leaf
+pages remain fixed-size and directly addressable.
 
 ## Example: Full Insert Sequence
 

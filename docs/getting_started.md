@@ -76,4 +76,4 @@ If you are developing from a source checkout, see the binding READMEs for staged
 - [../examples/README.md](../examples/README.md) for the larger research-paper retrieval demos
 - [14_durable_streams.md](14_durable_streams.md) for durable streams and the graph changefeed
 - [client_api_migration.md](client_api_migration.md) for current preferred client imports and compatibility aliases
-- [../ARCHITECTURE_SPEC.md](../ARCHITECTURE_SPEC.md) if you want the engine-level design after the user-facing overview
+- [00_introduction.md](00_introduction.md) if you want the engine-level design after the user-facing overview

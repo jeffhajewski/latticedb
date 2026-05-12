@@ -1,11 +1,12 @@
 # LatticeDB
 
-**The embedded knowledge graph for AI.**
+**Embedded property graph with native vector, full-text, and durable event primitives.**
 
-LatticeDB is a single-file database that combines a property graph, vector search, and full-text search. It's built for RAG, agents, and any application where relationships between data matter as much as the data itself.
+LatticeDB is a single-file local database for connected, semantic, and textual data. It lets applications traverse relationships, run HNSW vector similarity, run BM25 full-text search, and consume durable graph/application events from the same file.
 
 - **One file.** Your entire database is a single portable file. No server, no configuration.
-- **Three search modes.** Graph traversal, HNSW vector similarity, and BM25 full-text — in one query.
+- **One query layer.** Graph traversal, HNSW vector similarity, and BM25 full-text — in one query.
+- **One event log.** Durable named streams and the built-in graph changefeed share the same transaction/WAL path as graph writes.
 - **Sub-millisecond.** 0.13 us node lookups. 0.83 ms vector search at 1M vectors with 100% recall.
 
 ```cypher
@@ -44,8 +45,9 @@ LIMIT 10
 
 **Operations**
 - Single-file storage with write-ahead log for crash recovery
+- Durable streams and semantic graph changefeeds
 - Zero configuration — open a file and start working
-- Clean C API; Python and TypeScript bindings wrap it
+- Clean C API; Python, TypeScript, and Go bindings wrap it
 
 ## Use Cases
 

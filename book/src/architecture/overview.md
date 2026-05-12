@@ -1,6 +1,6 @@
 # Architecture Overview
 
-This section explains how LatticeDB's storage engine works, from the ground up. Each chapter builds on the previous, showing how simple primitives combine to create a durable, transactional database.
+This section explains how LatticeDB's storage engine works, from the ground up. Each chapter builds on the previous, showing how simple primitives combine to create a durable, transactional graph database with vector search, full-text search, and local event streams.
 
 ## The Stack
 
@@ -63,13 +63,14 @@ This section explains how LatticeDB's storage engine works, from the ground up. 
 
 ### Data Model
 9. [Graph Storage](./graph-storage.md) - Nodes, edges, labels, and properties
+10. [Durable Streams](../guides/durable-streams.md) - Transactional event records and semantic graph changes
 
 ### Search Indexes
-10. [Vector Search](./vector-search.md) - HNSW approximate nearest neighbor search
-11. [Full-Text Search](./full-text-search.md) - BM25-scored inverted index with tokenization
+11. [Vector Search](./vector-search.md) - HNSW approximate nearest neighbor search
+12. [Full-Text Search](./full-text-search.md) - BM25-scored inverted index with tokenization
 
 ### Query System
-12. [Query Execution](./query-execution.md) - Volcano iterator model, operators, and planning
+13. [Query Execution](./query-execution.md) - Volcano iterator model, operators, and planning
 
 ## Design Principles
 
@@ -95,6 +96,7 @@ Object ──► Serialize ──► Page   Already in page buffer!
 The entire database is built on fixed-size pages (4KB by default):
 
 - B+Tree nodes are pages
+- Large B+Tree values spill into linked overflow pages
 - WAL frames are pages
 - The file header is a page
 - Free list entries are pages

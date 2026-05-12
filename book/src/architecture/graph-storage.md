@@ -11,6 +11,7 @@ Node:
   - properties: key-value pairs (e.g., name: "Alice", age: 30)
 
 Edge:
+  - id: stable unique identifier (u64)
   - source: node id
   - target: node id
   - type: string (e.g., "KNOWS", "WORKS_AT")
@@ -132,9 +133,16 @@ Value Types:
   3 = Float64 (8 bytes, IEEE 754)
   4 = String (u32 length + bytes)
   5 = Bytes (u32 length + bytes)
-  6 = List (TODO)
-  7 = Map (TODO)
+  6 = Vector (u32 length + f32 values)
+  7 = List (u32 length + nested values)
+  8 = Map (u32 length + key/value entries)
 ```
+
+Node records are serialized into heap buffers sized from the exact labels and
+properties being written. The old fixed 4 KiB serialization buffer is no longer
+part of the node path; large string and bytes properties are handed to the
+B+Tree, which stores them inline or through overflow pages according to the
+entry-size rules in [B+Tree](./btree.md).
 
 ### API
 
@@ -165,34 +173,43 @@ try store.delete(node_id);
 
 ## Edge Storage
 
-Edges are more complex because we need efficient traversal in **both directions**:
+Edges are more complex because we need efficient traversal in **both directions**
+and stable identity for properties, recovery, and parallel edges:
 - "Find all people Alice knows" (outgoing)
 - "Find all people who know Alice" (incoming)
+- "Set this edge's properties after creation" (stable edge ID)
 
-### The Double-Write Pattern
+### Traversal Tree Plus Edge-ID Index
 
-For edge `(Alice)-[:KNOWS]->(Bob)`, we store **two entries**:
+For edge `(Alice)-[:KNOWS]->(Bob)`, the traversal tree stores **two keys** and
+the payload is stored once in an edge-ID index:
 
 ```
 Entry 1 (Outgoing from Alice):
-  Key: (Alice, OUTGOING, KNOWS, Bob)
-  Value: edge properties
+  Key: (Alice, OUTGOING, KNOWS, Bob, edge_id)
+  Value: empty
 
 Entry 2 (Incoming to Bob):
-  Key: (Bob, INCOMING, KNOWS, Alice)
-  Value: edge properties (same data)
+  Key: (Bob, INCOMING, KNOWS, Alice, edge_id)
+  Value: empty
+
+Payload entry:
+  Key: edge_id
+  Value: serialized source, target, type, and properties
 ```
 
-This doubles write cost but enables O(1) traversal in either direction.
+This keeps traversal efficient in either direction without duplicating large
+edge properties. The stable `edge_id` lets callers update properties by ID and
+lets the storage layer restore or delete the exact edge during WAL recovery.
 
 ### Key Format
 
 ```
-Edge Key (19 bytes, big-endian for lexicographic ordering):
-┌──────────────────────────────────────────────────────────┐
-│ source_id: u64    │ direction: u8 │ type_id: u16 │ target_id: u64 │
-│   (8 bytes)       │   (1 byte)    │  (2 bytes)   │   (8 bytes)    │
-└──────────────────────────────────────────────────────────┘
+Edge Key (27 bytes, big-endian for lexicographic ordering):
+┌──────────────────────────────────────────────────────────────────────┐
+│ source_id: u64 │ direction: u8 │ type_id: u16 │ target_id: u64 │ edge_id: u64 │
+│   (8 bytes)    │   (1 byte)    │  (2 bytes)   │   (8 bytes)    │  (8 bytes)   │
+└──────────────────────────────────────────────────────────────────────┘
 
 Direction:
   0 = Outgoing (source → target)
@@ -203,6 +220,7 @@ Big-endian encoding ensures keys sort correctly for range scans:
 - All edges from node X are contiguous
 - Within that, all outgoing edges are together
 - Within that, edges of same type are together
+- Within a source/type/target tuple, parallel edges remain distinct by edge ID
 
 ### Why This Key Order?
 
@@ -218,20 +236,25 @@ Query: "All KNOWS edges from Alice"
   Even more specific prefix!
 
 Query: "Does Alice know Bob?"
-  Point lookup: (Alice, 0, KNOWS, Bob)
-  Direct key access!
+  Prefix scan: (Alice, 0, KNOWS, Bob, *)
+  Returns the first matching edge ID, if present
 ```
+
+Large edge properties use the same heap serialization and B+Tree overflow path
+as node properties. The store checks whether the serialized edge payload can be
+represented before replacing an existing edge-ID entry, so oversized updates
+return `ValueTooLarge` without deleting the previous edge record.
 
 ### API
 
 ```zig
-var store = EdgeStore.init(allocator, &edges_tree);
+var store = EdgeStore.init(allocator, &edges_tree, &edge_id_tree);
 
 // Create an edge
 const properties = [_]Property{
     .{ .key_id = since_id, .value = .{ .int_val = 2020 } },
 };
-try store.create(alice_id, bob_id, knows_id, &properties);
+const edge_id = try store.createAndGetId(alice_id, bob_id, knows_id, &properties);
 
 // Get an edge
 var edge = try store.get(alice_id, bob_id, knows_id);
@@ -262,6 +285,9 @@ defer knows_edges.deinit();
 // Count edges without allocating
 const out_count = try store.countOutgoing(alice_id);
 const in_count = try store.countIncoming(bob_id);
+
+// Property updates use the stable edge ID through the database layer
+try db.setEdgePropertyById(null, edge_id, "since", .{ .int_val = 2020 });
 ```
 
 ## Label Index
@@ -344,8 +370,9 @@ Creating edge (Alice)-[:KNOWS]->(Bob):
    - intern("KNOWS") → 1002
 
 2. Edge Store:
-   - Insert: (1, OUT, 1002, 2) → properties
-   - Insert: (2, IN, 1002, 1) → properties
+   - Allocate edge_id = 1
+   - Insert traversal keys: (1, OUT, 1002, 2, 1) → ∅ and (2, IN, 1002, 1, 1) → ∅
+   - Insert payload: 1 → serialized edge data and properties
 ```
 
 ## Performance Characteristics
@@ -355,9 +382,9 @@ Creating edge (Alice)-[:KNOWS]->(Bob):
 | Create node | O(log n) | One B+Tree insert + label index inserts |
 | Get node | O(log n) | Single B+Tree lookup |
 | Delete node | O(log n) | One B+Tree delete |
-| Create edge | O(log n) | Two B+Tree inserts (double-write) |
-| Get edge | O(log n) | Single B+Tree lookup |
-| Delete edge | O(log n) | Two B+Tree deletes (double-delete) |
+| Create edge | O(log n) | Two traversal inserts + one edge-ID payload insert |
+| Get edge | O(log n + k) | Prefix scan to edge ID, then payload lookup |
+| Delete edge | O(log n) | Two traversal deletes + one edge-ID payload delete |
 | Check label | O(log n) | Single B+Tree lookup |
 | Remove label | O(log n) | Single B+Tree delete |
 | All nodes with label | O(log n + k) | Range scan, k = result count |
@@ -367,16 +394,15 @@ Where n = total items in the respective B+Tree.
 
 ## Current Limitations
 
-1. **No MVCC**: All operations see latest data (no snapshot isolation yet)
-2. **Property updates overwrite**: No partial property updates
-3. **No underflow handling**: Deleted entries leave wasted space until compaction
+1. **Property updates rewrite records**: No in-place partial property update at the storage-record level
+2. **No page merge/redistribution**: B+Tree deletes compact each leaf but do not merge underfull pages
 
 ## Future Enhancements
 
 1. **Property indexes**: Secondary indexes on property values
 2. **Edge type index**: Fast lookup by edge type across all nodes
-3. **MVCC integration**: Transaction-aware reads and writes
-4. **B+Tree underflow handling**: Merge/redistribute pages after deletions
+3. **Cross-node edge type scans**: Dedicated indexes for type-wide traversals
+4. **B+Tree underflow handling**: Merge/redistribute pages after deletes
 
 ## Summary
 
@@ -385,7 +411,10 @@ Where n = total items in the respective B+Tree.
 | Symbol Table (forward) | string | String → ID mapping |
 | Symbol Table (reverse) | symbol_id | ID → String mapping |
 | Node Store | node_id | Node data storage |
-| Edge Store | (src, dir, type, tgt) | Edge data + traversal |
+| Edge Store | (src, dir, type, tgt, edge_id) | Traversal keys |
+| Edge ID Index | edge_id | Stable edge identity and property payload |
 | Label Index | (label_id, node_id) | Label-based queries |
 
-The graph storage layer transforms a B+Tree (a key-value store) into a full property graph database through careful key design and the double-write pattern for edges.
+The graph storage layer transforms B+Trees into a full property graph database
+through careful key design, stable edge IDs, and a traversal/payload split for
+edges.

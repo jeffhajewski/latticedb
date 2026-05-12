@@ -548,9 +548,9 @@ footer .footer-links {
       <div class="feature-card">
         <h3>Graph</h3>
         <ul>
-          <li>Stable edge IDs across CREATE and MERGE paths</li>
+          <li>Stable edge IDs for traversal and property updates</li>
+          <li>Large node and edge properties via B+Tree overflow storage</li>
           <li>Multi-hop traversal with validated variable-length patterns</li>
-          <li>ACID transactions with crash-safe recovery</li>
           <li>MERGE, WITH, UNWIND, expression LIMIT/SKIP, aggregations</li>
         </ul>
       </div>
@@ -578,7 +578,7 @@ footer .footer-links {
           <li>Durable named streams stored in system B+Trees</li>
           <li>Per-stream sequences and explicit consumer offsets</li>
           <li>Manual trim for retention control</li>
-          <li>Built-in graph changefeed from committed graph writes</li>
+          <li>Built-in graph changefeed with large-value summaries</li>
         </ul>
       </div>
     </div>
@@ -588,41 +588,41 @@ footer .footer-links {
 <!-- Release Notes -->
 <section class="release-notes">
   <div class="container">
-    <h2>What's new in 0.6.0</h2>
-    <p class="caption">Durable event streams and graph changefeeds are now part of the local storage engine and client APIs.</p>
+    <h2>What's new in 0.9.5</h2>
+    <p class="caption">Large graph-property writes are hardened for default 4 KiB page databases and release checks now validate every tracked version value.</p>
     <div class="release-grid">
       <div class="release-card">
-        <h3>Durable Streams</h3>
+        <h3>4 KiB Large Values</h3>
         <ul>
-          <li>Named streams auto-create on first publish</li>
-          <li>Records commit atomically with graph writes</li>
-          <li>Reads use explicit cursors and do not auto-ack</li>
-          <li>Consumer offsets are durable transaction records</li>
+          <li>B+Tree split boundaries stay valid for large inline-capable values</li>
+          <li>Overflow records keep point reads and range scans transparent</li>
+          <li>Leaf deletes compact payload space before reinserts</li>
+          <li>Regression coverage includes LongMemEval-shaped 4 KiB writes</li>
         </ul>
       </div>
       <div class="release-card">
-        <h3>Graph Changefeeds</h3>
+        <h3>Graph Storage</h3>
         <ul>
-          <li><code>__lattice_changes</code> captures semantic graph mutations</li>
-          <li>Node and edge inserts, deletes, labels, and properties are represented</li>
-          <li>Payloads use stable typed maps with IDs and old/new values</li>
-          <li>Records replay through WAL recovery like other committed writes</li>
+          <li>Node and edge records serialize with exact heap-sized buffers</li>
+          <li>Large string and bytes properties use B+Tree overflow storage</li>
+          <li>Edge payloads live once behind stable edge IDs</li>
+          <li>Oversized changefeed values are summarized instead of duplicated</li>
         </ul>
       </div>
       <div class="release-card">
-        <h3>Client APIs</h3>
+        <h3>Release Automation</h3>
         <ul>
-          <li>C API stream batches borrow data until batch free</li>
-          <li>Python exposes <code>read_stream</code>, <code>publish_stream</code>, and <code>changes</code></li>
-          <li>TypeScript exposes <code>readStream</code>, <code>publishStream</code>, and <code>changes</code></li>
-          <li>Same-process readers can wait for committed stream records</li>
+          <li>Release workflow blocks mismatched source, header, and package versions</li>
+          <li>Python, TypeScript, Go examples, and lockfiles are checked together</li>
+          <li>CI validates the shared-library target used by bindings</li>
+          <li>Container coverage exercises supported Linux package paths</li>
         </ul>
       </div>
     </div>
     <p class="release-meta">
-      <a href="https://github.com/jeffhajewski/latticedb/blob/main/docs/14_durable_streams.md">Read the durable streams and changefeeds guide</a>
+      <a href="https://github.com/jeffhajewski/latticedb/blob/main/docs/04_btree.md">Read the B+Tree design notes</a>
       <span aria-hidden="true"> | </span>
-      <a href="https://github.com/jeffhajewski/latticedb/blob/main/docs/release_notes_0.8.2.md">Read the 0.8.2 release notes</a>
+      <a href="https://github.com/jeffhajewski/latticedb/blob/main/docs/release_notes_0.9.5.md">Read the 0.9.5 release notes</a>
     </p>
   </div>
 </section>

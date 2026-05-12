@@ -15,6 +15,7 @@
 - [Knowledge Graph Modeling](./guides/knowledge-graph.md)
 - [Working with Embeddings](./guides/embeddings.md)
 - [Full-Text Search](./guides/full-text-search.md)
+- [Durable Streams](./guides/durable-streams.md)
 - [Data Export](./guides/data-export.md)
 - [Transactions and Durability](./guides/transactions.md)
 - [Performance Tuning](./guides/performance-tuning.md)
@@ -67,4 +68,5 @@
 
 - [Building from Source](./development/building.md)
 - [Running Tests](./development/testing.md)
+- [Releasing](./development/releasing.md)
 - [Contributing](./development/contributing.md)

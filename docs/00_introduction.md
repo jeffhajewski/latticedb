@@ -115,6 +115,7 @@ Object ──► Serialize ──► Page   Already in page buffer!
 The entire database is built on fixed-size pages (4KB by default):
 
 - B+Tree nodes are pages
+- Large B+Tree values spill into linked overflow pages
 - WAL frames are pages
 - The file header is a page
 - Free list entries are pages

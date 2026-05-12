@@ -7,8 +7,8 @@ LatticeDB has a comprehensive test suite covering unit tests, integration tests,
 ```bash
 zig build test                 # Run unit tests
 zig build integration-test     # Run integration tests
-zig build concurrency-test     # Run concurrency tests
 zig build crash-test           # Run crash recovery tests
+zig build shared               # Build shared library used by bindings
 ```
 
 ## Benchmarks
@@ -28,8 +28,8 @@ tests/
 ├── integration/    # End-to-end integration tests
 ├── fuzz/           # Fuzzing targets for parser and serialization
 ├── crash/          # Crash recovery tests (kill process mid-transaction)
-├── concurrency/    # Multi-threaded concurrency tests
-└── performance/    # Performance benchmarks
+├── container/      # Linux package/shared-library smoke tests
+└── benchmark/      # Performance benchmarks
 ```
 
 ## Testing Standards
@@ -50,5 +50,18 @@ npm test
 
 ```bash
 cd bindings/python
-pytest
+uv run --extra dev pytest tests -q
+```
+
+## Release Checks
+
+Before tagging a release, validate version consistency and the binding smoke
+paths:
+
+```bash
+python3 scripts/bump_version.py --check <version> --strict-lockfile
+zig build test
+zig build integration-test
+zig build shared
+cd bindings/typescript && npm test -- --runInBand
 ```

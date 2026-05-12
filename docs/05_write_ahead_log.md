@@ -187,6 +187,11 @@ The key insight: we buffer multiple records in memory, only hitting disk when:
 1. The frame buffer is full (4KB of records accumulated)
 2. A transaction commits (durability guarantee)
 
+Logical WAL records can be larger than a single frame. Large graph, stream, and
+property payloads are fragmented into physical `large_fragment` records and
+reassembled by recovery before redo. The logical payload limit is `64 MiB`; a
+record above that limit returns `ValueTooLarge`.
+
 ## Commit Protocol
 
 When you call `COMMIT`:
@@ -242,6 +247,13 @@ Each fsync is expensive (~1-10ms). By batching records into frames, we amortize 
 **Reason 3: Checksums**
 
 Each frame has a checksum. During recovery, we can detect partial/corrupted frames and stop replay at the right point.
+
+**Reason 4: Large logical records**
+
+Frames remain page-sized for torn-write detection and batching, but the WAL no
+longer requires each logical record to fit inside one frame. Fragmentation keeps
+large transactional property updates on the WAL path without changing the frame
+format used for normal records.
 
 ## The Checksum
 

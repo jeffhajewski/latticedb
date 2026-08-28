@@ -1,6 +1,6 @@
 .{
     .name = .lattice,
-    .version = "0.14.0",
+    .version = "0.15.0",
     .fingerprint = 0xced309c8562b881e,
     .minimum_zig_version = "0.16.0",
     .paths = .{

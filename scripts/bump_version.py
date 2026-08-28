@@ -209,9 +209,18 @@ def _update_website(text: str, version: str, path: Path) -> str:
         rf"\g<1>{version}\g<2>",
         path,
     )
-    return _replace_exactly_one(
+    text = _replace_exactly_one(
         text,
         r"(docs/release_notes_)[0-9]+\.[0-9]+\.[0-9]+(\.md)",
+        rf"\g<1>{version}\g<2>",
+        path,
+    )
+    # The link's text as well as its target. Updating only the href leaves the
+    # page offering "the 0.14.0 release notes" and delivering the 0.15.0 ones,
+    # which is worse than either being stale on its own.
+    return _replace_exactly_one(
+        text,
+        r"(Read the )[0-9]+\.[0-9]+\.[0-9]+( release notes)",
         rf"\g<1>{version}\g<2>",
         path,
     )

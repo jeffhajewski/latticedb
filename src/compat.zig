@@ -247,6 +247,18 @@ pub const fs = struct {
         return .{ .dir = if (has_io_fs) std.Io.Dir.cwd() else std.fs.cwd() };
     }
 
+    /// Standard input, so callers do not have to know whether this Zig release
+    /// routes file I/O through `std.Io`.
+    pub fn stdin() File {
+        return .{ .file = if (has_io_fs) std.Io.File.stdin() else std.fs.File.stdin() };
+    }
+
+    /// Standard output as a handle rather than a writer, for the console mode
+    /// calls on Windows that have to name the underlying handle.
+    pub fn stdoutFile() File {
+        return .{ .file = if (has_io_fs) std.Io.File.stdout() else std.fs.File.stdout() };
+    }
+
     pub const Cwd = struct {
         dir: DirHandle,
 
@@ -381,6 +393,32 @@ pub const fs = struct {
 
         pub fn deprecatedWriter(self: File) FileWriter {
             return .{ .file = self.file };
+        }
+
+        /// The raw OS handle: a file descriptor on POSIX, a HANDLE on Windows.
+        pub fn handle(self: File) std.posix.fd_t {
+            return self.file.handle;
+        }
+
+        pub fn isTty(self: File) bool {
+            if (has_io_fs) {
+                return self.file.isTty(io) catch false;
+            }
+            return self.file.isTty();
+        }
+
+        /// Read whatever is available, reporting end of stream as an error
+        /// rather than as a zero-length read.
+        ///
+        /// A zero-length read does not mean end of stream under `std.Io`, so a
+        /// caller that took it for one would cut the stream short.
+        pub fn readSome(self: File, buffer: []u8) !usize {
+            if (has_io_fs) {
+                return self.file.readStreaming(io, &.{buffer});
+            }
+            const n = try self.file.read(buffer);
+            if (n == 0) return error.EndOfStream;
+            return n;
         }
     };
 

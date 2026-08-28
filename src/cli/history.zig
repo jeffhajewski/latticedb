@@ -3,10 +3,20 @@
 //! Provides in-memory history with optional file persistence.
 
 const std = @import("std");
+const builtin = @import("builtin");
 
 /// Managed array list for allocator tracking
 fn ManagedArrayList(comptime T: type) type {
     return std.array_list.Managed(T);
+}
+
+/// Read an environment variable, whichever way this Zig release spells it.
+fn lookupEnv(name: [:0]const u8) ?[]const u8 {
+    if (@hasDecl(std.posix, "getenv")) {
+        return std.posix.getenv(name);
+    }
+    const value = std.c.getenv(name.ptr) orelse return null;
+    return std.mem.span(value);
 }
 
 /// Command history manager
@@ -140,16 +150,17 @@ pub const History = struct {
 
     /// Get the default history file path
     pub fn getDefaultPath(allocator: std.mem.Allocator) ?[]const u8 {
-        // Try $HOME/.lattice_history
-        const home = if (@hasDecl(std.posix, "getenv"))
-            std.posix.getenv("HOME")
-        else if (@hasDecl(std, "c"))
-            if (std.c.getenv("HOME")) |home_ptr| std.mem.span(home_ptr) else null
+        // Windows names the home directory %USERPROFILE%, and only has $HOME
+        // when something like Git Bash has put it there.
+        const home_vars: []const [:0]const u8 = if (builtin.os.tag == .windows)
+            &.{ "USERPROFILE", "HOME" }
         else
-            null;
+            &.{"HOME"};
 
-        if (home) |path| {
-            return std.fmt.allocPrint(allocator, "{s}/.lattice_history", .{path}) catch null;
+        for (home_vars) |name| {
+            const home = lookupEnv(name) orelse continue;
+            if (home.len == 0) continue;
+            return std.fmt.allocPrint(allocator, "{s}/.lattice_history", .{home}) catch null;
         }
         return null;
     }

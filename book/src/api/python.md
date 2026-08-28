@@ -18,6 +18,8 @@ from latticedb import Database
 
 with Database("knowledge.db", create=True, enable_vectors=True, vector_dimensions=4) as db:
     # Create nodes, edges, and index content
+    db.create_node_fts_index("Person", "bio")
+
     with db.write() as txn:
         alice = txn.create_node(
             labels=["Person"],
@@ -30,8 +32,8 @@ with Database("knowledge.db", create=True, enable_vectors=True, vector_dimension
         txn.create_edge(alice.id, bob.id, "KNOWS")
 
         # Index text for full-text search
-        txn.fts_index(alice.id, "Alice works on machine learning research")
-        txn.fts_index(bob.id, "Bob studies deep learning and neural networks")
+        txn.set_property(alice.id, "bio", "Alice works on machine learning research")
+        txn.set_property(bob.id, "bio", "Bob studies deep learning and neural networks")
 
         # Store vector embeddings
         txn.set_vector(alice.id, "embedding", np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
@@ -50,11 +52,11 @@ with Database("knowledge.db", create=True, enable_vectors=True, vector_dimension
         print(f"Node {r.node_id}: distance={r.distance:.4f}")
 
     # Full-text search
-    for r in db.fts_search("machine learning"):
+    for r in db.fts_search("Person", "bio", "machine learning"):
         print(f"Node {r.node_id}: score={r.score:.4f}")
 
     # Fuzzy search (typo-tolerant)
-    for r in db.fts_search_fuzzy("machin lerning"):
+    for r in db.fts_search_fuzzy("Person", "bio", "machin lerning"):
         print(f"Node {r.node_id}: score={r.score:.4f}")
 ```
 
@@ -139,7 +141,7 @@ was not.
 - `set_vector(node_id, key, vector)` - Set a vector embedding
 - `batch_insert_vectors(label, vectors)` - Insert vector-bearing nodes in one call
 - `batch_insert(label, vectors)` - Deprecated compatibility alias for `batch_insert_vectors`
-- `fts_index(node_id, text)` - Index text for full-text search
+- `db.create_node_fts_index(label, property)` - Declare a full-text index; writing that property keeps it current
 - `create_edge(source_id, target_id, edge_type, properties=None)` - Create an edge and return its stable edge ID on the `Edge`
 - `delete_edge(source_id, target_id, edge_type)` - Delete an edge
 - `set_edge_property(edge_id, key, value)` - Set an edge property by stable edge ID
@@ -170,7 +172,7 @@ with Database("vectors.db", create=True, enable_vectors=True, vector_dimensions=
 #### Exact Search
 
 ```python
-results = db.fts_search("machine learning", limit=10)
+results = db.fts_search("Person", "bio", "machine learning", limit=10)
 for r in results:
     print(f"Node {r.node_id}: score={r.score:.4f}")
 ```
@@ -179,7 +181,7 @@ for r in results:
 
 ```python
 # Finds "machine learning" even with typos
-results = db.fts_search_fuzzy("machne lerning", limit=10)
+results = db.fts_search_fuzzy("Person", "bio", "machne lerning", limit=10)
 
 # Control fuzzy matching sensitivity
 results = db.fts_search_fuzzy(

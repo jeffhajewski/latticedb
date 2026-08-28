@@ -213,7 +213,7 @@ load many at once with `tx.BatchInsertVectors`.
 ## Full-text search
 
 ```go
-results, err := db.FTSSearch("graph database", latticedb.FTSSearchOptions{Limit: 20})
+results, err := db.FTSSearch("Document", "text", "graph database", latticedb.FTSSearchOptions{Limit: 20})
 
 results, err = db.FTSSearchFuzzy("databse", latticedb.FTSSearchOptions{
     Limit:         20,
@@ -222,7 +222,10 @@ results, err = db.FTSSearchFuzzy("databse", latticedb.FTSSearchOptions{
 })
 ```
 
-Text has to be indexed before it can be found, with `tx.FTSIndex(nodeID, text)`.
+Declare an index over the property holding the text with
+`db.CreateNodeFTSIndex(label, property)`. Writing that property keeps it current,
+and searching a label and property with no declared index is an error rather than
+an empty result.
 
 Fuzzy search tolerates misspellings. `MaxDistance` is how many single-character
 edits away a word may be, and `MinTermLength` stops short words being matched

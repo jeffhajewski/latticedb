@@ -92,14 +92,17 @@ LatticeDB provides two ways to generate embeddings:
 LatticeDB includes a BM25-scored inverted index for full-text search. Index text content on nodes, then search across all indexed text.
 
 ```python
-# Index text
-txn.fts_index(node.id, "The transformer architecture uses self-attention")
+# Declare an index over the property holding the text
+db.create_node_fts_index("Chunk", "text")
+
+# Writing that property is what indexes it
+txn.set_property(node.id, "text", "The transformer architecture uses self-attention")
 
 # Search
-results = db.fts_search("transformer attention")
+results = db.fts_search("Chunk", "text", "transformer attention")
 
 # Fuzzy search (typo-tolerant)
-results = db.fts_search_fuzzy("transformr atention")
+results = db.fts_search_fuzzy("Chunk", "text", "transformr atention")
 
 # Or in Cypher
 db.query('MATCH (n) WHERE n.text @@ "transformer attention" RETURN n')

@@ -31,6 +31,7 @@
 - [Knowledge Graph Modeling](./guides/knowledge-graph.md)
 - [Working with Embeddings](./guides/embeddings.md)
 - [Full-Text Search](./guides/full-text-search.md)
+- [Migrating to Per-Property FTS](./guides/migrating-to-per-property-fts.md)
 - [Durable Streams](./guides/durable-streams.md)
 - [Data Export](./guides/data-export.md)
 - [Transactions and Durability](./guides/transactions.md)

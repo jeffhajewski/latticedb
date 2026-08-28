@@ -80,12 +80,14 @@ print(f"Hit rate: {stats['hits'] / (stats['hits'] + stats['misses']):.1%}")
 
 ### Full-Text Search
 
-Only index text that you need to search. Indexing unnecessary text wastes memory and slows inserts:
+Declare a full-text index only over properties you actually search. Every declared
+index is maintained on every write that touches its property, so an index nobody
+queries is pure cost:
 
 ```python
-# Index only the searchable text field
-txn.fts_index(chunk.id, chunk_text)
-# Don't index metadata, IDs, etc.
+# The text people search
+db.create_node_fts_index("Chunk", "text")
+# Not metadata, IDs, or timestamps
 ```
 
 ### Labels

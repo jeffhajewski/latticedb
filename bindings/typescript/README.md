@@ -49,6 +49,8 @@ const db = new Database("knowledge.db", {
 await db.open();
 
 // Create nodes, edges, and index content
+await db.createNodeFtsIndex("Person", "bio");
+
 await db.write(async (txn) => {
   const alice = await txn.createNode({
     labels: ["Person"],
@@ -62,9 +64,9 @@ await db.write(async (txn) => {
 
   await txn.createEdge(alice.id, bob.id, "KNOWS");
 
-  // Index text for full-text search
-  await txn.ftsIndex(alice.id, "Alice works on machine learning research");
-  await txn.ftsIndex(bob.id, "Bob studies deep learning and neural networks");
+  // Writing the indexed property is what makes it searchable.
+  await txn.setProperty(alice.id, "bio", "Alice works on machine learning research");
+  await txn.setProperty(bob.id, "bio", "Bob studies deep learning and neural networks");
 
   // Store vector embeddings
   await txn.setVector(
@@ -97,7 +99,7 @@ for (const r of results) {
 }
 
 // Full-text search
-const ftsResults = await db.ftsSearch("machine learning");
+const ftsResults = await db.ftsSearch("Person", "bio", "machine learning");
 for (const r of ftsResults) {
   console.log(`Node ${r.nodeId}: score=${r.score.toFixed(4)}`);
 }
@@ -182,7 +184,7 @@ interface DatabaseOptions {
 - `await txn.setVector(nodeId, key, vector)` - Set a vector embedding
 - `await txn.batchInsertVectors(label, vectors)` - Insert vector-bearing nodes in one call
 - `await txn.batchInsert(label, vectors)` - Deprecated compatibility alias for `batchInsertVectors`
-- `await txn.ftsIndex(nodeId, text)` - Index text for full-text search
+- `await db.createNodeFtsIndex(label, property)` - Declare a full-text index; writing that property keeps it current
 - `await txn.createEdge(sourceId, targetId, edgeType, options?)` - Create an edge
 - `await txn.deleteEdge(sourceId, targetId, edgeType)` - Delete an edge
 - `await txn.setEdgeProperty(edgeId, key, value)` - Set an edge property by stable edge ID
@@ -243,7 +245,7 @@ const rows = await db.query(
 #### Exact Search
 
 ```typescript
-const results = await db.ftsSearch("machine learning", { limit: 10 });
+const results = await db.ftsSearch("Person", "bio", "machine learning", { limit: 10 });
 for (const r of results) {
   console.log(`Node ${r.nodeId}: score=${r.score.toFixed(4)}`);
 }

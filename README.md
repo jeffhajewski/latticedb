@@ -82,7 +82,9 @@ from latticedb.embedding import hash_embed
 with Database("knowledge.db", create=True, enable_vectors=True, vector_dimensions=128) as db:
 
     # --- Build the graph ---
-    with db.write() as txn:
+    db.create_node_fts_index("Chunk", "text")
+
+with db.write() as txn:
         # Create authors
         alice = txn.create_node(labels=["Person"], properties={"name": "Alice", "field": "ML"})
         bob = txn.create_node(labels=["Person"], properties={"name": "Bob", "field": "Systems"})
@@ -97,9 +99,8 @@ with Database("knowledge.db", create=True, enable_vectors=True, vector_dimension
             doc = txn.create_node(labels=["Document"], properties={"title": title})
             chunk = txn.create_node(labels=["Chunk"], properties={"text": text})
 
-            # Store embedding and index text
+            # The chunk's text property is already indexed by the declaration above.
             txn.set_vector(chunk.id, "embedding", hash_embed(text, dimensions=128))
-            txn.fts_index(chunk.id, text)
 
             txn.create_edge(chunk.id, doc.id, "PART_OF")
             txn.create_edge(doc.id, author.id, "AUTHORED_BY")
@@ -119,7 +120,7 @@ with Database("knowledge.db", create=True, enable_vectors=True, vector_dimension
         print(f"{row['doc.title']} by {row['author.name']}")
 
     # --- Full-text search ---
-    for r in db.fts_search("self-attention transformer"):
+    for r in db.fts_search("Chunk", "text", "self-attention transformer"):
         print(f"Node {r.node_id}: score={r.score:.4f}")
 
     # --- Aggregations ---
@@ -161,7 +162,6 @@ await db.write(async (txn) => {
   });
 
   await txn.setVector(chunk.id, "embedding", hashEmbed("transformer self-attention", 128));
-  await txn.ftsIndex(chunk.id, "The transformer architecture uses self-attention...");
 
   await txn.createEdge(chunk.id, doc.id, "PART_OF");
   await txn.createEdge(doc.id, alice.id, "AUTHORED_BY");
@@ -197,6 +197,10 @@ if err != nil {
 }
 defer db.Close()
 
+if err := db.CreateNodeFTSIndex("Chunk", "text"); err != nil {
+    log.Fatal(err)
+}
+
 err = db.Update(func(tx *latticedb.Tx) error {
     node, err := tx.CreateNode(latticedb.CreateNodeOptions{
         Labels: []string{"Chunk"},
@@ -212,7 +216,7 @@ err = db.Update(func(tx *latticedb.Tx) error {
     if err := tx.SetVector(node.ID, "embedding", embedding); err != nil {
         return err
     }
-    return tx.FTSIndex(node.ID, "The transformer architecture uses self-attention...")
+    return tx.SetProperty(node.ID, "text", "The transformer architecture uses self-attention...")
 })
 if err != nil {
     log.Fatal(err)
@@ -229,13 +233,15 @@ import java.util.Map;
 try (Database db = Database.open("knowledge.db",
         OpenOptions.defaults().create(true).enableVectors(true).vectorDimensions(128))) {
 
+    // The Chunk.text property is what full-text search reads.
+    db.createNodeFtsIndex("Chunk", "text");
+
     // Build a graph
     try (Transaction txn = db.beginWrite()) {
         Node chunk = txn.createNode(List.of("Chunk"),
                 Map.of("text", "The transformer architecture uses self-attention..."));
         txn.setVector(chunk.id(), "embedding",
                 Embedding.hashEmbed("transformer self-attention", 128));
-        txn.ftsIndex(chunk.id(), "The transformer architecture uses self-attention...");
         txn.commit();
     }
 

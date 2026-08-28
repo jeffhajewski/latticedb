@@ -97,6 +97,10 @@ func main() {
 	}
 	defer db.Close()
 
+	if err := db.CreateNodeFTSIndex("Person", "bio"); err != nil {
+		log.Fatal(err)
+	}
+
 	err = db.Update(func(tx *latticedb.Tx) error {
 		alice, err := tx.CreateNode(latticedb.CreateNodeOptions{
 			Labels: []string{"Person"},
@@ -115,7 +119,7 @@ func main() {
 		if err := tx.SetVector(alice.ID, "embedding", []float32{1, 0, 0, 0}); err != nil {
 			return err
 		}
-		return tx.FTSIndex(alice.ID, "Alice works on graph retrieval systems")
+		return tx.SetProperty(alice.ID, "bio", "Alice works on graph retrieval systems")
 	})
 	if err != nil {
 		log.Fatal(err)
@@ -141,7 +145,7 @@ func main() {
 	}
 	fmt.Println("vector results:", neighbors)
 
-	fts, err := db.FTSSearch("graph retrieval", latticedb.FTSSearchOptions{Limit: 5})
+	fts, err := db.FTSSearch("Person", "bio", "graph retrieval", latticedb.FTSSearchOptions{Limit: 5})
 	if err != nil {
 		log.Fatal(err)
 	}

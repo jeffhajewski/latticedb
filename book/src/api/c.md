@@ -424,18 +424,19 @@ Parameters:
 
 ## Full-Text Search
 
-### Index a Document
+### Declare an Index
 
 ```c
-const char* text = "The quick brown fox jumps over the lazy dog";
-lattice_fts_index(txn, node_id, text, strlen(text));
+/* One index per label and property. Declaring it reads the property from every
+   node already carrying the label; writes maintain it from then on. */
+lattice_node_fts_index_create(db, "Document", "text");
 ```
 
 ### Search
 
 ```c
 lattice_fts_result* results;
-lattice_fts_search(db, "quick fox", 9, 10, &results);
+lattice_fts_search(db, "Document", "text", "quick fox", 9, 10, &results);
 
 uint32_t count = lattice_fts_result_count(results);
 for (uint32_t i = 0; i < count; i++) {

@@ -42,7 +42,9 @@ Split documents into chunks and store them with graph relationships:
 
 ```python
 def ingest_document(db, title, author_name, chunks):
-    with db.write() as txn:
+    db.create_node_fts_index("Chunk", "text")
+
+with db.write() as txn:
         # Create or find the author
         doc = txn.create_node(
             labels=["Document"],
@@ -66,9 +68,6 @@ def ingest_document(db, title, author_name, chunks):
             # Store embedding
             embedding = hash_embed(text, dimensions=128)
             txn.set_vector(chunk.id, "embedding", embedding)
-
-            # Index for full-text search
-            txn.fts_index(chunk.id, text)
 
             # Link chunk to document
             txn.create_edge(chunk.id, doc.id, "PART_OF")
@@ -182,7 +181,6 @@ with db.write() as txn:
     # Set properties and create edges afterward
     for node_id, text in zip(node_ids, all_chunks):
         txn.set_property(node_id, "text", text)
-        txn.fts_index(node_id, text)
 
     txn.commit()
 ```
@@ -192,5 +190,5 @@ with db.write() as txn:
 - Use `batch_insert()` for bulk loading — significantly faster than individual creates
 - Set `ef_search` based on your recall requirements (64 gives 100% recall at 1M vectors)
 - Use `cache_size_mb` to control memory usage
-- Index only the text fields you need to search with `fts_index()`
+- Declare a full-text index only over properties you actually search; each one costs write time
 - Use parameters (`$name`) to enable query plan caching

@@ -48,7 +48,9 @@ from latticedb import Database
 
 with Database("knowledge.db", create=True, enable_vectors=True, vector_dimensions=4) as db:
     # Create nodes, edges, and index content
-    with db.write() as txn:
+    db.create_node_fts_index("Person", "bio")
+
+with db.write() as txn:
         alice = txn.create_node(
             labels=["Person"],
             properties={"name": "Alice", "age": 30},
@@ -59,9 +61,9 @@ with Database("knowledge.db", create=True, enable_vectors=True, vector_dimension
         )
         txn.create_edge(alice.id, bob.id, "KNOWS")
 
-        # Index text for full-text search
-        txn.fts_index(alice.id, "Alice works on machine learning research")
-        txn.fts_index(bob.id, "Bob studies deep learning and neural networks")
+        # Writing the indexed property is what makes it searchable.
+        txn.set_property(alice.id, "bio", "Alice works on machine learning research")
+        txn.set_property(bob.id, "bio", "Bob studies deep learning and neural networks")
 
         # Store vector embeddings
         txn.set_vector(alice.id, "embedding", np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32))
@@ -80,7 +82,7 @@ with Database("knowledge.db", create=True, enable_vectors=True, vector_dimension
         print(f"Node {r.node_id}: distance={r.distance:.4f}")
 
     # Full-text search
-    for r in db.fts_search("machine learning"):
+    for r in db.fts_search("Person", "bio", "machine learning"):
         print(f"Node {r.node_id}: score={r.score:.4f}")
 
     # Fuzzy search (typo-tolerant)
@@ -143,7 +145,7 @@ Database(
 - `set_vector(node_id, key, vector)` - Set a vector embedding
 - `batch_insert_vectors(label, vectors)` - Insert vector-bearing nodes in one call
 - `batch_insert(label, vectors)` - Deprecated compatibility alias for `batch_insert_vectors`
-- `fts_index(node_id, text)` - Index text for full-text search
+- `db.create_node_fts_index(label, property)` - Declare a full-text index; writing that property keeps it current
 - `create_edge(source_id, target_id, edge_type, properties=None)` - Create an edge
 - `delete_edge(source_id, target_id, edge_type)` - Delete an edge
 - `set_edge_property(edge_id, key, value)` - Set an edge property by stable edge ID
@@ -195,7 +197,7 @@ rows = db.query(
 #### Exact Search
 
 ```python
-results = db.fts_search("machine learning", limit=10)
+results = db.fts_search("Person", "bio", "machine learning", limit=10)
 for r in results:
     print(f"Node {r.node_id}: score={r.score:.4f}")
 ```

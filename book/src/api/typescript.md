@@ -23,6 +23,8 @@ const db = new Database("knowledge.db", {
 await db.open();
 
 // Create nodes, edges, and index content
+await db.createNodeFtsIndex("Person", "bio");
+
 await db.write(async (txn) => {
   const alice = await txn.createNode({
     labels: ["Person"],
@@ -37,8 +39,8 @@ await db.write(async (txn) => {
   await txn.createEdge(alice.id, bob.id, "KNOWS");
 
   // Index text for full-text search
-  await txn.ftsIndex(alice.id, "Alice works on machine learning research");
-  await txn.ftsIndex(bob.id, "Bob studies deep learning and neural networks");
+  await txn.setProperty(alice.id, "bio", "Alice works on machine learning research");
+  await txn.setProperty(bob.id, "bio", "Bob studies deep learning and neural networks");
 
   // Store vector embeddings
   await txn.setVector(
@@ -71,13 +73,13 @@ for (const r of results) {
 }
 
 // Full-text search
-const ftsResults = await db.ftsSearch("machine learning");
+const ftsResults = await db.ftsSearch("Person", "bio", "machine learning");
 for (const r of ftsResults) {
   console.log(`Node ${r.nodeId}: score=${r.score.toFixed(4)}`);
 }
 
 // Fuzzy search (typo-tolerant)
-const fuzzyResults = await db.ftsSearchFuzzy("machin lerning");
+const fuzzyResults = await db.ftsSearchFuzzy("Person", "bio", "machin lerning");
 for (const r of fuzzyResults) {
   console.log(`Node ${r.nodeId}: score=${r.score.toFixed(4)}`);
 }
@@ -170,7 +172,7 @@ was not.
 - `await txn.setVector(nodeId, key, vector)` - Set a vector embedding
 - `await txn.batchInsertVectors(label, vectors)` - Insert vector-bearing nodes in one call
 - `await txn.batchInsert(label, vectors)` - Deprecated compatibility alias for `batchInsertVectors`
-- `await txn.ftsIndex(nodeId, text)` - Index text for full-text search
+- `await db.createNodeFtsIndex(label, property)` - Declare a full-text index; writing that property keeps it current
 - `await txn.createEdge(sourceId, targetId, edgeType, options?)` - Create an edge and return its stable edge ID on the `Edge`
 - `await txn.deleteEdge(sourceId, targetId, edgeType)` - Delete an edge
 - `await txn.setEdgeProperty(edgeId, key, value)` - Set an edge property by stable edge ID
@@ -211,7 +213,7 @@ await db.close();
 #### Exact Search
 
 ```typescript
-const results = await db.ftsSearch("machine learning", { limit: 10 });
+const results = await db.ftsSearch("Person", "bio", "machine learning", { limit: 10 });
 for (const r of results) {
   console.log(`Node ${r.nodeId}: score=${r.score.toFixed(4)}`);
 }
@@ -221,10 +223,10 @@ for (const r of results) {
 
 ```typescript
 // Finds "machine learning" even with typos
-const results = await db.ftsSearchFuzzy("machne lerning", { limit: 10 });
+const results = await db.ftsSearchFuzzy("Person", "bio", "machne lerning", { limit: 10 });
 
 // Control fuzzy matching sensitivity
-const precise = await db.ftsSearchFuzzy("machne", {
+const precise = await db.ftsSearchFuzzy("Person", "bio", "machne", {
   limit: 10,
   maxDistance: 2, // Max edit distance (default: 0 = auto)
   minTermLength: 4, // Min term length for fuzzy matching (default: 0 = auto)

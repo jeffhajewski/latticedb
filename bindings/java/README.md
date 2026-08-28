@@ -29,12 +29,15 @@ import java.util.Map;
 try (Database db = Database.open("knowledge.db",
         OpenOptions.defaults().create(true).enableVectors(true).vectorDimensions(128))) {
 
+    // Full-text search reads a declared index over the property holding the text.
+    db.createNodeFtsIndex("Person", "bio");
+
     try (Transaction txn = db.beginWrite()) {
         Node alice = txn.createNode(List.of("Person"), Map.of("name", "Alice"));
-        Node bob = txn.createNode(List.of("Person"), Map.of("name", "Bob"));
+        Node bob = txn.createNode(List.of("Person"),
+                Map.of("name", "Bob", "bio", "some document text"));
         txn.createEdge(alice.id(), bob.id(), "KNOWS");
         txn.setVector(alice.id(), "embedding", Embedding.hashEmbed("text", 128));
-        txn.ftsIndex(bob.id(), "some document text");
         txn.commit();
     }
 
@@ -44,7 +47,7 @@ try (Database db = Database.open("knowledge.db",
             Map.of());
     rows.rows().forEach(row -> System.out.println(row.get("name")));
 
-    List<FTSSearchResult> hits = db.ftsSearch("document", FTSSearchOptions.defaults());
+    List<FTSSearchResult> hits = db.ftsSearch("Person", "bio", "document", FTSSearchOptions.defaults());
     List<VectorSearchResult> near = db.vectorSearch(Embedding.hashEmbed("text", 128),
             VectorSearchOptions.defaults().k(5));
 }

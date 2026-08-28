@@ -11,19 +11,26 @@ LatticeDB's full-text search uses:
 - **Inverted index** — maps terms to the nodes containing them
 - **BM25 scoring** — ranks results by relevance considering term frequency, document frequency, and document length
 
-## Indexing Text
+## Declaring an Index
 
-Text has to be handed to the index on purpose. Storing a string in a property does
-not index it, so a node with a `body` property that was never indexed will never
-turn up in a search, and nothing warns you about it — the search just comes back
-empty.
+An index covers one label and one property, and the property is where the text
+lives. Declare it once; writing that property keeps the index current, the same
+way a property index stays current.
 
-Index text content on a node within a write transaction:
+Declaring an index reads the property from every node already carrying the label,
+so adding one to a database full of documents makes them searchable immediately.
+
+If you are coming from an earlier version, see
+[Migrating to Per-Property FTS](./migrating-to-per-property-fts.md).
 
 ```python
+db.create_node_fts_index("Document", "text")
+
 with db.write() as txn:
-    node = txn.create_node(labels=["Document"], properties={"title": "My Doc"})
-    txn.fts_index(node.id, "The quick brown fox jumps over the lazy dog")
+    node = txn.create_node(labels=["Document"], properties={
+        "title": "My Doc",
+        "text": "The quick brown fox jumps over the lazy dog",
+    })
     txn.commit()
 ```
 
@@ -31,9 +38,11 @@ with db.write() as txn:
 await db.write(async (txn) => {
   const node = await txn.createNode({
     labels: ["Document"],
-    properties: { title: "My Doc" },
+    properties: {
+      title: "My Doc",
+      text: "The quick brown fox jumps over the lazy dog",
+    },
   });
-  await txn.ftsIndex(node.id, "The quick brown fox jumps over the lazy dog");
 });
 ```
 
@@ -42,13 +51,13 @@ await db.write(async (txn) => {
 ### Programmatic API
 
 ```python
-results = db.fts_search("quick fox", limit=10)
+results = db.fts_search("Document", "text", "quick fox", limit=10)
 for r in results:
     print(f"Node {r.node_id}: score={r.score:.4f}")
 ```
 
 ```typescript
-const results = await db.ftsSearch("quick fox", { limit: 10 });
+const results = await db.ftsSearch("Document", "text", "quick fox", { limit: 10 });
 for (const r of results) {
   console.log(`Node ${r.nodeId}: score=${r.score.toFixed(4)}`);
 }
@@ -76,7 +85,7 @@ Fuzzy search tolerates typos using Levenshtein edit distance:
 
 ```python
 # Finds "machine learning" despite typos
-results = db.fts_search_fuzzy("machin lerning", limit=10)
+results = db.fts_search_fuzzy("Document", "text", "machin lerning", limit=10)
 ```
 
 ### Controlling Sensitivity
@@ -91,7 +100,7 @@ results = db.fts_search_fuzzy(
 ```
 
 ```typescript
-const results = await db.ftsSearchFuzzy("machne", {
+const results = await db.ftsSearchFuzzy("Document", "text", "machne", {
   limit: 10,
   maxDistance: 2,
   minTermLength: 4,

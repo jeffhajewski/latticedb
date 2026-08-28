@@ -1,0 +1,10 @@
+{
+  "leaseTtlMs": 1800000,
+  "heartbeatIntervalMs": 60000,
+  "maxAttempts": 3,
+  "guard": {
+    "mode": "deny",
+    "protectedPaths": [".claude/state/**"]
+  },
+  "defaultAcceptance": []
+}

@@ -1,0 +1,6 @@
+{
+  "name": "latticedb-harness",
+  "private": true,
+  "type": "module",
+  "description": "Multi-agent coordination harness. Run with node; nothing is installed or built."
+}

@@ -77,6 +77,30 @@ The upside is that the searchable text is now visible in the database. You can
 read it, correct it, and rebuild the index from it — none of which was possible
 when it lived only inside the index.
 
+## Relationship properties
+
+Relationships work the same way, with the type standing in for the label:
+
+```python
+db.create_edge_fts_index("REVIEWED", "note")
+```
+
+```cypher
+MATCH (a:Person)-[x:REVIEWED]->(p:Paper)
+WHERE x.note @@ "thorough"
+RETURN p.title
+```
+
+This is new rather than changed: there was no way to search relationship text
+before, because the old index held one document per node and relationships had no
+place in it. Nothing to migrate — but if you worked around the gap by copying
+relationship text onto one of its endpoints, you can stop.
+
+The pattern has to name the type, for the reason a node pattern has to name a
+label. A single `@@` searches nodes or relationships, not both, so
+`d.title @@ "x" OR x.note @@ "x"` is answered row by row rather than as one
+index scan. It returns the right rows either way.
+
 ## Searching several properties at once
 
 `OR` searches each index and returns the union, scoring each document by its best
@@ -123,6 +147,10 @@ Every search now takes the label and property first.
 | Java | `db.ftsSearch(q, opts)` | `db.ftsSearch(label, prop, q, opts)` |
 | C | `lattice_fts_index(...)` | `lattice_node_fts_index_create(db, label, prop)` |
 | C | `lattice_fts_search(db, q, ...)` | `lattice_fts_search(db, label, prop, q, ...)` |
+
+Every language also gained the relationship equivalent of the declaration call —
+`create_edge_fts_index`, `createEdgeFtsIndex`, `CreateEdgeFTSIndex`, and
+`lattice_edge_fts_index_create` — along with `drop` and `has` forms of both.
 
 The fuzzy variants changed the same way.
 

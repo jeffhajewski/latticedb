@@ -1263,10 +1263,12 @@ pub const ExpressionEvaluator = struct {
         // which is why the planner prefers an index scan when it can build one.
         // Correctness first: a filter that agrees with the scan beats a fast
         // filter that disagrees with it.
+        // The cache lives for one query execution, so every row after the first
+        // reads a set rather than searching the index again.
         const matched = (if (is_edge)
-            database.ftsEdgeMatches(ctx.txn, doc_id, property_access.property, query, FTS_FILTER_LIMIT)
+            database.ftsEdgeMatches(ctx.fts_cache, ctx.txn, doc_id, property_access.property, query, FTS_FILTER_LIMIT)
         else
-            database.ftsNodeMatches(ctx.txn, doc_id, property_access.property, query, FTS_FILTER_LIMIT)) catch {
+            database.ftsNodeMatches(ctx.fts_cache, ctx.txn, doc_id, property_access.property, query, FTS_FILTER_LIMIT)) catch {
             return .{ .null_val = {} };
         };
 

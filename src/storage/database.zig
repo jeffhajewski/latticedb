@@ -3659,6 +3659,7 @@ pub const Database = struct {
     /// carries, which the caller reports rather than reading as "did not match".
     pub fn ftsNodeMatches(
         self: *Self,
+        cache: ?*executor_mod.FtsFilterCache,
         txn: ?*Transaction,
         node_id: NodeId,
         property: []const u8,
@@ -3670,13 +3671,14 @@ pub const Database = struct {
         var node = (try self.getNodeInTxn(txn, node_id)) orelse return null;
         defer node.deinit(self.allocator);
 
-        return self.ftsScopedMatch(txn, .node, node.labels, node_id, property_id, query_text, limit);
+        return self.ftsScopedMatch(txn, .node, node.labels, node_id, property_id, query_text, limit, cache);
     }
 
     /// The same for an edge, whose scope is its one type rather than a set of
     /// labels.
     pub fn ftsEdgeMatches(
         self: *Self,
+        cache: ?*executor_mod.FtsFilterCache,
         txn: ?*Transaction,
         edge_id: EdgeId,
         property: []const u8,
@@ -3689,7 +3691,7 @@ pub const Database = struct {
         defer edge.deinit(self.allocator);
 
         const scopes = [_]symbols_mod.SymbolId{edge.edge_type};
-        return self.ftsScopedMatch(txn, .edge, &scopes, edge_id, property_id, query_text, limit);
+        return self.ftsScopedMatch(txn, .edge, &scopes, edge_id, property_id, query_text, limit, cache);
     }
 
     /// Whether one entity matches through whichever of its scopes declares an
@@ -3703,6 +3705,7 @@ pub const Database = struct {
         property_id: symbols_mod.SymbolId,
         query_text: []const u8,
         limit: u32,
+        cache: ?*executor_mod.FtsFilterCache,
     ) DatabaseError!?bool {
         var catalog = self.ftsCatalog() orelse return null;
         for (scopes) |scope_id| {
@@ -3712,6 +3715,34 @@ pub const Database = struct {
                 .property_id = property_id,
             };
             if (!(catalog.has(definition) catch |err| return mapFtsCatalogError(err))) continue;
+
+            // Every row asks the same index the same question. Answering it once
+            // is the difference between linear and quadratic in the corpus.
+            if (cache) |c| {
+                var key_buf: [512]u8 = undefined;
+                const key = std.fmt.bufPrint(&key_buf, "{d}:{d}:{d}:{s}", .{
+                    @intFromEnum(kind), scope_id, property_id, query_text,
+                }) catch null;
+
+                if (key) |k| {
+                    if (c.get(k)) |ids| return ids.contains(doc_id);
+
+                    const results = try self.ftsSearchDefinitionInTxn(txn, definition, query_text, limit);
+                    defer self.freeFtsSearchResults(results);
+
+                    var ids: std.AutoHashMapUnmanaged(u64, void) = .{};
+                    errdefer ids.deinit(self.allocator);
+                    for (results) |hit| {
+                        ids.put(self.allocator, hit.doc_id, {}) catch return DatabaseError.OutOfMemory;
+                    }
+                    const found = ids.contains(doc_id);
+                    c.put(k, ids) catch {
+                        ids.deinit(self.allocator);
+                        return found;
+                    };
+                    return found;
+                }
+            }
 
             const results = try self.ftsSearchDefinitionInTxn(txn, definition, query_text, limit);
             defer self.freeFtsSearchResults(results);

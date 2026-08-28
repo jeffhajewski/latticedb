@@ -267,6 +267,52 @@ pub const Operator = struct {
 // Execution Context
 // ============================================================================
 
+/// Results of one full-text search, held for the length of a query.
+///
+/// A `@@` the planner could not turn into an access path is evaluated per row,
+/// and every row asks the same index the same question. Without this, a term
+/// most documents contain costs one index search per row, which is quadratic in
+/// the corpus: measured at eight thousand documents, twenty-one seconds against
+/// a hundred microseconds for the same query the planner could seek.
+///
+/// The engine already treats a search as stable for the length of an operator —
+/// the scanning operators search once when they open and use that result for
+/// every row they emit. This is the same assumption at the same granularity,
+/// which is why it is safe to reuse an answer within one execution.
+pub const FtsFilterCache = struct {
+    allocator: Allocator,
+    entries: std.StringHashMapUnmanaged(std.AutoHashMapUnmanaged(u64, void)) = .{},
+
+    pub fn init(allocator: Allocator) FtsFilterCache {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *FtsFilterCache) void {
+        var iter = self.entries.iterator();
+        while (iter.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit(self.allocator);
+        }
+        self.entries.deinit(self.allocator);
+    }
+
+    /// The document ids for a search, or null when it has not been run yet.
+    pub fn get(self: *FtsFilterCache, key: []const u8) ?*std.AutoHashMapUnmanaged(u64, void) {
+        return self.entries.getPtr(key);
+    }
+
+    /// Remember a search's document ids. Takes ownership of `ids`.
+    pub fn put(
+        self: *FtsFilterCache,
+        key: []const u8,
+        ids: std.AutoHashMapUnmanaged(u64, void),
+    ) !void {
+        const owned_key = try self.allocator.dupe(u8, key);
+        errdefer self.allocator.free(owned_key);
+        try self.entries.put(self.allocator, owned_key, ids);
+    }
+};
+
 /// Runtime context for query execution.
 /// Provides access to storage, parameters, and memory management.
 pub const ExecutionContext = struct {
@@ -294,9 +340,25 @@ pub const ExecutionContext = struct {
     /// Active transaction for txn-aware reads and writes (optional)
     txn: ?*Transaction,
 
+    /// Full-text searches already answered during this execution.
+    ///
+    /// A pointer, so a filter holding a `*const ExecutionContext` can still
+    /// record what it looked up. Null until the first search needs it.
+    fts_cache: ?*FtsFilterCache = null,
+
     const Self = @This();
 
     /// Create a new execution context
+    /// Somewhere to remember full-text searches for the length of a query.
+    ///
+    /// Null when it could not be allocated, which costs speed and nothing else:
+    /// the filter searches every time instead of once.
+    fn newFtsCache(allocator: Allocator) ?*FtsFilterCache {
+        const cache = allocator.create(FtsFilterCache) catch return null;
+        cache.* = FtsFilterCache.init(allocator);
+        return cache;
+    }
+
     pub fn init(allocator: Allocator) Self {
         return Self{
             .allocator = allocator,
@@ -307,6 +369,7 @@ pub const ExecutionContext = struct {
             .symbol_table = null,
             .database = null,
             .txn = null,
+            .fts_cache = newFtsCache(allocator),
         };
     }
 
@@ -321,11 +384,17 @@ pub const ExecutionContext = struct {
             .symbol_table = symbol_table,
             .database = null,
             .txn = null,
+            .fts_cache = newFtsCache(allocator),
         };
     }
 
     /// Free the execution context
     pub fn deinit(self: *Self) void {
+        if (self.fts_cache) |cache| {
+            cache.deinit();
+            self.allocator.destroy(cache);
+            self.fts_cache = null;
+        }
         self.row_arena.deinit();
         self.parameters.deinit();
         self.variables.deinit();

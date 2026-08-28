@@ -172,6 +172,8 @@ pub const QueryPlanner = struct {
         label_scan,
         /// Straight to the matching nodes through a property index.
         property_index_scan,
+        /// Straight to the matching entities through a full-text index.
+        fts_index_seek,
     };
 
     const Self = @This();
@@ -421,13 +423,54 @@ pub const QueryPlanner = struct {
                             }
                         }
 
+                        // A declared full-text index answers the question and
+                        // names the label, so seeking it replaces the label scan
+                        // rather than sitting on top of one.
+                        var fts_seek: ?fts_ops.Search = null;
+                        if (indexed_property == null) {
+                            if (node_var_name) |variable_name| {
+                                if (where_hint) |condition| {
+                                    if (self.findWhereFtsSeek(variable_name, condition)) |info| {
+                                        if (self.resolveFtsIndex(info)) |resolved| {
+                                            var search = resolved;
+                                            search.param_name = info.param_name;
+                                            search.literal_query = info.query_text;
+                                            // Only when the index covers a label
+                                            // this pattern actually asks for.
+                                            for (node_pattern.labels, 0..) |label_name, label_idx| {
+                                                if (std.mem.eql(u8, label_name, search.scope)) {
+                                                    fts_seek = search;
+                                                    scan_label_index = label_idx;
+                                                    break;
+                                                }
+                                            }
+                                        } else |_| {}
+                                    }
+                                }
+                            }
+                        }
+
                         const scan_label_name = node_pattern.labels[scan_label_index];
                         const label_id = symbol_table.lookup(scan_label_name) catch |err| switch (err) {
                             symbols.SymbolError.NotFound => symbols.NULL_SYMBOL,
                             else => return PlannerError.InternalError,
                         };
 
-                        var new_op: Operator = if (indexed_property) |property| blk: {
+                        var new_op: Operator = if (fts_seek) |search| blk: {
+                            const searches = self.allocator.alloc(fts_ops.Search, 1) catch {
+                                return PlannerError.OutOfMemory;
+                            };
+                            searches[0] = search;
+                            const seek = fts_ops.FtsIndexSeek.init(
+                                self.allocator,
+                                slot,
+                                searches,
+                                fts_ops.NO_RESULT_LIMIT,
+                                database,
+                            ) catch return PlannerError.OutOfMemory;
+                            self.last_scan_kind = .fts_index_seek;
+                            break :blk seek.operator();
+                        } else if (indexed_property) |property| blk: {
                             const property_scan = scan_ops.PropertyIndexScan.init(
                                 self.allocator,
                                 slot,
@@ -680,6 +723,34 @@ pub const QueryPlanner = struct {
         property_name: []const u8,
         value: *const ast.Expression,
     };
+
+    /// A full-text predicate on `variable_name` that an index can answer as the
+    /// access path, rather than as a filter over a label scan.
+    ///
+    /// Only conjunctive positions count. Under an OR the predicate does not
+    /// constrain which entities the query is about — the other side may admit
+    /// rows the index never names — so seeking would drop them.
+    fn findWhereFtsSeek(
+        self: *Self,
+        variable_name: []const u8,
+        expr: *const ast.Expression,
+    ) ?FtsSearchInfo {
+        const binary = switch (expr.*) {
+            .binary => |binary| binary,
+            else => return null,
+        };
+
+        if (binary.operator == .and_) {
+            return self.findWhereFtsSeek(variable_name, binary.left) orelse
+                self.findWhereFtsSeek(variable_name, binary.right);
+        }
+        if (binary.operator != .fts_match) return null;
+
+        const info = self.extractFtsInfo(binary.*) orelse return null;
+        const named = info.variable_name orelse return null;
+        if (!std.mem.eql(u8, named, variable_name)) return null;
+        return info;
+    }
 
     fn findWherePropertyIndex(
         self: *Self,

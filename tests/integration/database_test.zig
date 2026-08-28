@@ -5399,3 +5399,73 @@ test "database: an edge search sees the transaction's own uncommitted writes" {
     defer db.freeFtsSearchResults(committed);
     try std.testing.expectEqual(@as(usize, 1), committed.len);
 }
+
+test "database: a full-text predicate becomes the access path, not a filter" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    try db.createNodeFtsIndex("Doc", "title");
+
+    var txn = try db.beginTransaction(.read_write);
+    var i: usize = 0;
+    while (i < 40) : (i += 1) {
+        const node = try db.createNode(&txn, &[_][]const u8{"Doc"});
+        const title = if (i == 0) "ciabatta loaf" else "focaccia loaf";
+        try db.setNodeProperty(&txn, node, "title", .{ .string_val = title });
+        try db.setNodeProperty(&txn, node, "kind", .{ .string_val = "bread" });
+    }
+    try db.commitTransaction(&txn);
+
+    // The index names the matching documents, so reading it answers the query.
+    // Scanning every Doc and keeping the ones the index named costs the whole
+    // corpus to find one document, which is what this used to do.
+    try std.testing.expectEqual(
+        lattice.query.planner.QueryPlanner.ScanKind.fts_index_seek,
+        try planScanKind(db, "MATCH (d:Doc) WHERE d.title @@ 'ciabatta' RETURN d.title AS t"),
+    );
+
+    // Still the access path when other conditions sit beside it, because an AND
+    // only ever narrows what the index already found.
+    try std.testing.expectEqual(
+        lattice.query.planner.QueryPlanner.ScanKind.fts_index_seek,
+        try planScanKind(db, "MATCH (d:Doc) WHERE d.title @@ 'ciabatta' AND d.kind = 'bread' RETURN d.title AS t"),
+    );
+
+    // Not under an OR. The other side may admit documents the index never names,
+    // so seeking would drop them.
+    try std.testing.expectEqual(
+        lattice.query.planner.QueryPlanner.ScanKind.label_scan,
+        try planScanKind(db, "MATCH (d:Doc) WHERE d.title @@ 'ciabatta' OR d.kind = 'cake' RETURN d.title AS t"),
+    );
+
+    // And the answers are the same whichever path ran.
+    {
+        var r = try db.query("MATCH (d:Doc) WHERE d.title @@ 'ciabatta' RETURN d.title AS t");
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 1), r.rowCount());
+    }
+    {
+        var r = try db.query("MATCH (d:Doc) WHERE d.title @@ 'ciabatta' AND d.kind = 'bread' RETURN d.title AS t");
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 1), r.rowCount());
+    }
+    {
+        var r = try db.query("MATCH (d:Doc) WHERE d.title @@ 'ciabatta' AND d.kind = 'cake' RETURN d.title AS t");
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 0), r.rowCount());
+    }
+    {
+        var r = try db.query("MATCH (d:Doc) WHERE d.title @@ 'loaf' RETURN d.title AS t");
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 40), r.rowCount());
+    }
+    {
+        var r = try db.query("MATCH (d:Doc) WHERE d.title @@ 'ciabatta' OR d.kind = 'cake' RETURN d.title AS t");
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 1), r.rowCount());
+    }
+}

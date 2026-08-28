@@ -506,10 +506,23 @@ and the `asarUnpack` glob to add.
 
 ### Windows
 
-The published package bundles macOS and Linux libraries only. Windows apps must
-supply `lattice.dll` themselves — build it with
-`zig build shared -Dtarget=x86_64-windows-gnu` and ship it via `extraResources`,
-or point at it with `LATTICE_LIB_PATH`.
+Both Windows architectures are supported: `lib/win32-x64/lattice.dll` and
+`lib/win32-arm64/lattice.dll`. koffi ships prebuilt `win32_x64` and `win32_arm64`
+binaries, so nothing else has to be compiled for the FFI layer.
+
+Building the library from a source checkout:
+
+```bash
+# From the package directory; picks the target for the host architecture
+npm run bundle:native
+
+# Or cross-compile one explicitly from the repository root
+zig build shared -Dtarget=aarch64-windows-gnu -Doptimize=ReleaseFast
+```
+
+Note that `zig build shared` installs `lattice.dll` into `zig-out/bin` and leaves
+only the import library `lattice.lib` in `zig-out/lib`. `bundle:native` and the
+runtime loader both account for this; hand-written copy steps usually do not.
 
 ## Building from Source
 

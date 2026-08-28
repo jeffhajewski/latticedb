@@ -168,6 +168,85 @@ describe('Electron resource candidates', () => {
   });
 });
 
+describe('Windows bundles', () => {
+  let library: LibraryModule;
+
+  beforeAll(async () => {
+    // Loaded before any platform is forced: koffi resolves its own native
+    // module from process.platform/arch at require time, so re-importing under
+    // a foreign arch would fail to find koffi rather than exercise the lookup.
+    library = await freshLibraryModule();
+  });
+
+  /**
+   * Run `body` with `process.platform` and `process.arch` forced, so the
+   * Windows lookups are exercised from any host. The loader reads both at call
+   * time, so no module reload is needed.
+   */
+  function asPlatform(
+    platform: NodeJS.Platform,
+    arch: string,
+    body: (library: LibraryModule) => void
+  ): void {
+    const platformDescriptor = Object.getOwnPropertyDescriptor(process, 'platform')!;
+    const archDescriptor = Object.getOwnPropertyDescriptor(process, 'arch')!;
+    Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+    Object.defineProperty(process, 'arch', { value: arch, configurable: true });
+
+    try {
+      body(library);
+    } finally {
+      Object.defineProperty(process, 'platform', platformDescriptor);
+      Object.defineProperty(process, 'arch', archDescriptor);
+    }
+  }
+
+  test('x64 resolves the win32-x64 bundle', () => {
+    asPlatform('win32', 'x64', (library) => {
+      expect(library.getBundledPlatformDirs()).toEqual(['win32-x64']);
+      expect(library.getBundledLibraryCandidates('/pkg/dist/ffi')).toEqual([
+        path.join('/pkg', 'lib', 'win32-x64', 'lattice.dll'),
+      ]);
+    });
+  });
+
+  test('arm64 resolves the win32-arm64 bundle', async () => {
+    await asPlatform('win32', 'arm64', (library) => {
+      expect(library.getBundledPlatformDirs()).toEqual(['win32-arm64']);
+      expect(library.getBundledLibraryCandidates('/pkg/dist/ffi')).toEqual([
+        path.join('/pkg', 'lib', 'win32-arm64', 'lattice.dll'),
+      ]);
+    });
+  });
+
+  test('Electron resource candidates carry the Windows library name', async () => {
+    const resourcesPath = path.join(os.tmpdir(), 'lattice-electron-win');
+    const withResources = process as NodeJS.Process & { resourcesPath?: string };
+    withResources.resourcesPath = resourcesPath;
+
+    try {
+      await asPlatform('win32', 'arm64', (library) => {
+        const candidates = library.getElectronLibraryCandidates();
+        expect(candidates).toContain(
+          path.join(
+            resourcesPath,
+            'app.asar.unpacked',
+            'node_modules',
+            '@hajewski/latticedb',
+            'lib',
+            'win32-arm64',
+            'lattice.dll'
+          )
+        );
+        expect(candidates).toContain(path.join(resourcesPath, 'lib', 'win32-arm64', 'lattice.dll'));
+        expect(candidates.every((candidate) => candidate.endsWith('lattice.dll'))).toBe(true);
+      });
+    } finally {
+      delete withResources.resourcesPath;
+    }
+  });
+});
+
 describe('packaged library resolution', () => {
   let appRoot: string;
   let libName: string;

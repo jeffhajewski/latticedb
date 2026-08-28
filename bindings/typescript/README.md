@@ -105,7 +105,7 @@ for (const r of ftsResults) {
 }
 
 // Fuzzy search (typo-tolerant)
-const fuzzyResults = await db.ftsSearchFuzzy("machin lerning");
+const fuzzyResults = await db.ftsSearchFuzzy("Person", "bio", "machin lerning");
 for (const r of fuzzyResults) {
   console.log(`Node ${r.nodeId}: score=${r.score.toFixed(4)}`);
 }
@@ -255,10 +255,10 @@ for (const r of results) {
 
 ```typescript
 // Finds "machine learning" even with typos
-const results = await db.ftsSearchFuzzy("machne lerning", { limit: 10 });
+const results = await db.ftsSearchFuzzy("Person", "bio", "machne lerning", { limit: 10 });
 
 // Control fuzzy matching sensitivity
-const precise = await db.ftsSearchFuzzy("machne", {
+const precise = await db.ftsSearchFuzzy("Person", "bio", "machne", {
   limit: 10,
   maxDistance: 2, // Max edit distance (default: 0 = auto)
   minTermLength: 4, // Min term length for fuzzy matching (default: 0 = auto)

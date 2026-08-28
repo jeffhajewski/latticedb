@@ -217,6 +217,21 @@ def _update_website(text: str, version: str, path: Path) -> str:
     )
 
 
+def _update_java_pom(text: str, version: str, path: Path) -> str:
+    """Keep the Java artifact's version with everyone else's.
+
+    Only the project's own version, which is the first <version> in the file.
+    The ones after it pin JUnit and the compiler plugin and have nothing to do
+    with a LatticeDB release.
+    """
+    return _replace_exactly_one(
+        text,
+        r"(<artifactId>latticedb</artifactId>\s*\n\s*<version>)[0-9]+\.[0-9]+\.[0-9]+(</version>)",
+        rf"\g<1>{version}\g<2>",
+        path,
+    )
+
+
 def _update_book_api_c(text: str, version: str, path: Path) -> str:
     return _replace_exactly_one(
         text,
@@ -685,6 +700,18 @@ def _collect_version_observations(
     )
 
     # Marketing site
+    java_pom_path = root / "bindings/java/pom.xml"
+    java_pom = _load(java_pom_path)
+    java_version = _extract_exactly_one(
+        java_pom,
+        r"<artifactId>latticedb</artifactId>\s*\n\s*<version>([0-9]+\.[0-9]+\.[0-9]+)</version>",
+        java_pom_path,
+        "Java artifact version",
+    )
+    observations.append(
+        VersionObservation("Java artifact version", java_pom_path, java_version)
+    )
+
     website_path = root / "website/index.html"
     website = _load(website_path)
     website_version = _extract_exactly_one(
@@ -828,6 +855,9 @@ def _compute_changes(root: Path, version: str) -> Tuple[FileChange, ...]:
         ),
         root / "website/index.html": lambda t: _update_website(
             t, version, root / "website/index.html"
+        ),
+        root / "bindings/java/pom.xml": lambda t: _update_java_pom(
+            t, version, root / "bindings/java/pom.xml"
         ),
     }
 

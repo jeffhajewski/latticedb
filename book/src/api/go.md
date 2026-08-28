@@ -215,7 +215,7 @@ load many at once with `tx.BatchInsertVectors`.
 ```go
 results, err := db.FTSSearch("Document", "text", "graph database", latticedb.FTSSearchOptions{Limit: 20})
 
-results, err = db.FTSSearchFuzzy("databse", latticedb.FTSSearchOptions{
+results, err = db.FTSSearchFuzzy("Document", "text", "databse", latticedb.FTSSearchOptions{
     Limit:         20,
     MaxDistance:   2,
     MinTermLength: 4,
@@ -223,7 +223,8 @@ results, err = db.FTSSearchFuzzy("databse", latticedb.FTSSearchOptions{
 ```
 
 Declare an index over the property holding the text with
-`db.CreateNodeFTSIndex(label, property)`. Writing that property keeps it current,
+`db.CreateNodeFTSIndex(label, property)`, or `db.CreateEdgeFTSIndex(edgeType,
+property)` for a relationship. Writing that property keeps it current,
 and searching a label and property with no declared index is an error rather than
 an empty result.
 

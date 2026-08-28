@@ -273,22 +273,39 @@ fn next(self: *VectorSearch, ctx: *ExecutionContext) !?*Row {
 
 The distance is stored in the row for use in expressions or sorting.
 
-### FTS Search Operator
+### FTS Operators
 
-Performs full-text search with BM25 scoring.
+There are two, and which one the planner picks is the difference between reading
+an index and reading a corpus.
+
+**FtsIndexSeek** is a leaf. It searches the declared index and emits one row per
+hit, in score order. It has no input because it needs none: a `Document.body`
+index holds only `Document` nodes, so seeking it does the label scan's job as well
+as answering the text question.
 
 ```zig
-fn open(self: *FtsSearch, ctx: *ExecutionContext) !void {
-    self.results = try self.index.search(self.query_text, self.limit);
+fn open(self: *FtsIndexSeek, ctx: *ExecutionContext) !void {
+    self.results = try runSearches(self.database, ctx, self.searches, self.limit, self.allocator);
 }
 
-fn next(self: *FtsSearch, ctx: *ExecutionContext) !?*Row {
-    // Similar to VectorSearch but with scores instead of distances
-    // ...
-    self.row.setScore(self.output_slot, result.score);
+fn next(self: *FtsIndexSeek, _: *ExecutionContext) !?*Row {
+    const hit = self.results.?[self.current_index];
+    self.current_index += 1;
+    self.row.?.setSlot(self.output_slot, .{ .node_ref = hit.doc_id });
+    self.row.?.setScore(self.output_slot, hit.score);
     return self.row;
 }
 ```
+
+**FtsSearchWithInput** filters rows somebody else produced, keeping those the
+index named. It is what runs when the entity is already bound by an upstream
+expand, so the input decides which rows exist and the index can only narrow them.
+
+Both run their searches through one shared function, so they cannot come to
+disagree about what a disjunction of `@@` predicates means.
+
+The full reasoning, including the measurements that motivated the seek, is in
+[Full-Text Search](./full-text-search.md), section 16.
 
 ### Mutation Operators
 
@@ -409,7 +426,14 @@ MATCH (d:Doc) WHERE d.text @@ $search RETURN d
 MATCH (d:Doc) WHERE d.text @@ "neural networks" RETURN d
 ```
 
-These operators are recognized by the planner and converted to specialized search operators that use the HNSW and FTS indexes directly, rather than scanning all nodes.
+These operators are recognized by the planner and converted to specialized search
+operators that use the HNSW and FTS indexes directly, rather than scanning all
+nodes.
+
+For full-text search that holds only in conjunctive positions — the whole `WHERE`,
+or a branch of an `AND`. Under an `OR` the planner keeps the label scan on
+purpose, because the other branch can admit entities the index never names and
+seeking would silently drop them.
 
 ### Type Coercion
 

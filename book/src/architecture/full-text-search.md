@@ -6,6 +6,12 @@ This document explains how Lattice's full-text search works, from text input to 
 
 Full-text search allows you to find documents containing specific words or phrases, ranked by relevance. Lattice implements the **BM25** (Best Match 25) ranking algorithm, the same algorithm used by Elasticsearch and other production search engines.
 
+An index covers exactly one label and one property — `Document.body`, say. You
+declare it once, and writing that property keeps it current. Sections 13 to 16
+cover how a declaration is stored, how one set of trees carries many indexes, how
+writes maintain them, and why the one-label-one-property shape is what lets a
+query read the index instead of scanning.
+
 The FTS system consists of five components:
 
 <img class="diagram" src="../assets/diagrams/fts-pipeline.svg"
@@ -726,7 +732,11 @@ for (matches) |match| {
 
 ## 7. Indexing Flow
 
-### indexDocument(doc_id, text)
+Nothing calls this directly any more. Writing an indexed property is what runs it,
+and section 15 covers how that happens. The mechanics below are unchanged: this is
+what one document costs whenever it is indexed.
+
+### Indexing one document
 
 <img class="diagram" src="../assets/diagrams/fts-index-document.svg"
      alt="Indexing document 42 with the text The quick database optimization guide: tokenize into four terms, count their frequencies, then for each term get or create a dictionary entry, allocate a posting page if needed, append the posting and increment doc_freq, then store the document length of 4 and update the average document length">
@@ -747,8 +757,14 @@ for (matches) |match| {
 
 | B+Tree | Key | Value |
 |--------|-----|-------|
-| Dictionary | Token string | DictionaryEntry (24 bytes) |
-| DocLengths | DocId (8 bytes) | Length (4 bytes) |
+| Dictionary | 4-byte scope prefix + token string | DictionaryEntry (24 bytes) |
+| DocLengths | 4-byte scope prefix + DocId (8 bytes) | Length (4 bytes) |
+| Reverse index | 4-byte scope prefix + DocId | Terms the document contributed |
+| Index catalog | `[kind, scope_id, property_id]` | empty; the key is the record |
+
+The scope prefix is what keeps one declared index out of another's way; section
+14 explains it. The catalog shares its tree with the property indexes, under
+different kind discriminators.
 
 ### On-Disk (Pages)
 
@@ -763,6 +779,9 @@ for (matches) |match| {
 ### Current Limitations
 
 1. **English-only stemming** - Porter stemmer for English only (other languages skip stemming)
+2. **One property per index** - Searching several fields as one document means storing the combined text in a property and indexing that. The reasoning is in the design note: an index spanning `title` and `body` would make `d.title @@ "x"` match on body text, which is the confusion per-property indexes exist to remove.
+3. **No cost-based choice between two indexes** - `d.title @@ "x" AND d.body @@ "y"` seeks whichever the planner meets first and filters by the other. The dictionary already stores `doc_freq`, so seeking the rarer term is available but not yet implemented.
+4. **Fuzzy matching does not reach uncommitted text** - Text written in the current transaction is matched by term presence rather than edit distance, because fuzzy expansion walks the committed dictionary.
 
 ### Implemented Features
 
@@ -777,6 +796,10 @@ for (matches) |match| {
 9. **Prefix/wildcard search** - `searchWithPrefix("optim*")` expands to matching terms
 10. **Search highlighting** - `highlight()` returns snippets with matched terms marked
 11. **Document deletion** - `removeDocument()` with reverse index properly cleans posting lists and stats
+2. **Per-property indexes** - one index per label and property, declared and then maintained by writes (sections 13 to 15)
+3. **Relationship indexes** - the same over a relationship type and property
+4. **Index seek as the access path** - a full-text predicate reads the index instead of filtering a label scan (section 16)
+5. **Corpus statistics on disk** - document count and average length survive a reopen, so scores do not depend on what the session happened to index
 
 ### Planned Features
 
@@ -784,14 +807,23 @@ for (matches) |match| {
 
 ---
 
-## 10. Usage Example
+## 10. The Index Component Directly
+
+This is the engine component, wired up by hand. It is here to show what the
+pieces above do together, not as an API to use: nothing outside the storage layer
+constructs an `FtsIndex`, and `indexDocument` is reached by writing an indexed
+property rather than by calling it.
+
+For the API you would actually use, see
+[Full-Text Search (@@)](../cypher/full-text-search.md) and the
+[full-text search guide](../guides/full-text-search.md).
 
 ```zig
 const std = @import("std");
 const lattice = @import("lattice");
 
 pub fn main() !void {
-    var gpa = std.heap.GeneralPurposeAllocator(.{}){};
+    var gpa = std.heap.DebugAllocator(.{}){};
     const allocator = gpa.allocator();
 
     // Initialize storage (simplified)
@@ -907,6 +939,218 @@ pub const DictionaryEntry = extern struct {
 
 ---
 
+## 13. Declared Indexes
+
+An index covers one label and one property. Nothing is indexed until you say so.
+
+```zig
+try db.createNodeFtsIndex("Document", "body");
+```
+
+Declaring reads `body` from every node already carrying `Document` and indexes
+it, so adding an index to a database full of documents makes them searchable
+immediately rather than only affecting what arrives afterwards. That mirrors what
+`createNodePropertyIndex` does, for the same reason: an index that only covers
+future writes is a trap.
+
+### Where a declaration lives
+
+Declarations go in the same B+Tree as the property index catalog, under their own
+kind discriminators:
+
+| Kind | Meaning |
+|------|---------|
+| 1 | node property index |
+| 2 | edge property index |
+| 3 | node full-text index |
+| 4 | edge full-text index |
+
+The key is `[kind (1 byte), scope_id (2 bytes big-endian), property_id (2 bytes
+big-endian)]` and the value is empty — the key is the whole record. `scope_id` is
+a label for a node index and a relationship type for an edge one; both are symbol
+ids from the same table the rest of the engine uses.
+
+Sharing the catalog tree was free. The key already began with a kind byte, so
+adding two more kinds needed no format change and no new tree. Big-endian is what
+makes a range scan over one kind possible: `[3]` to `[4]` covers every node
+full-text declaration and nothing else.
+
+### Why not multiple properties per index
+
+Storing several properties as one document is easy. Asking for it is not. If an
+index merged `title` and `body`, then `WHERE d.title @@ "x"` would match documents
+whose *body* contained the term, and the property name would be lying — which is
+the exact confusion per-property indexes exist to remove. Reusing property access
+as the query syntax requires one property per index.
+
+Somebody who wants several fields ranked as one document stores the combined text
+in a property and indexes that. The text is then visible in the database, where it
+can be read and rebuilt, instead of living only inside an index.
+
+---
+
+## 14. One Set of Trees, Many Indexes
+
+Every declared index shares the dictionary, document-length, and reverse-index
+trees. Without something separating them, a term indexed for `title` would be
+found by a search of `body`.
+
+Every key written for an index carries a four-byte prefix naming it:
+
+```
+[kind (1), scope_id (2 BE), property_id (1)]  ++  the key the store wanted
+```
+
+So `bread` in `Document.title` and `bread` in `Document.body` are two different
+keys in one tree, and a range over a prefix walks one index's terms and stops.
+
+### Why a view rather than a prefix argument
+
+The prefix is applied by a wrapper — `ScopedTree` — that the stores hold in place
+of a raw B+Tree. The stores' key-building code did not change at all.
+
+The alternative was passing a prefix into each place that builds a key, of which
+there are about a dozen across three files. Missing one would not fail to
+compile. It would write an entry the matching read could never find, or read
+another index's entries. One place to get right beats twelve places to remember.
+
+### The prefix arithmetic
+
+Walking one index means ranging from its prefix to the next one. Computing "the
+next prefix" has a trap: a prefix ending in `0xFF` has to carry into the byte
+before it. Incrementing the last byte alone wraps to zero, producing an upper
+bound *below* the lower one, and the index reads as empty. That carry is a
+function with its cases tested rather than arithmetic written inline twice.
+
+### Where the prefix comes off again
+
+Reads strip the prefix before returning keys, because callers want the term.
+This matters more than it sounds: fuzzy search measures edit distance against the
+term text, so four bytes of index identity on the front puts every term far
+outside any sensible distance and nothing ever matches. The stripping lives in
+the iterator, next to the prefixing, so the two cannot drift apart.
+
+---
+
+## 15. Keeping Indexes Current
+
+Writing an indexed property maintains the index. There is no separate indexing
+call, and nothing to forget.
+
+Create, update, and delete all funnel through one function per entity kind, where
+an empty old state means a create and an empty new state means a delete. Eight
+call sites reach those two functions, which is eight fewer places that could each
+decide what a change means.
+
+### What is indexed
+
+Only string properties. A number, a list, or an absent property contributes
+nothing. Rendering `42` as `"42"` so a text search could match it would be a
+different feature with different rules, and doing half of it silently would make
+results hard to explain.
+
+### Unchanged text is left alone
+
+An update whose indexed text did not change skips the index entirely. Without
+that, writing any property on an entity would reindex its longest indexed string,
+and the cost of an unrelated write would scale with how much text the entity
+happens to carry.
+
+### Recovery
+
+Redo replays into the stores directly rather than through the write path, so
+nothing maintains the indexes while it runs — the same situation the property
+indexes are already in. After a redo, each declared index is cleared and rebuilt.
+
+The clear works by scope prefix rather than by walking documents. An entity the
+redo deleted is no longer there to walk, so walking would leave its terms behind
+to keep matching. Deleting by prefix is a batched collect-then-delete, because the
+tree's iterator pins a leaf and holds a slot in it, which makes deleting during
+iteration unsafe; a fixed batch keeps memory flat rather than proportional to what
+is often the largest structure in the database.
+
+Posting pages of a cleared index stay allocated. Nothing points at them once the
+dictionary entries naming them are gone, so it is wasted space rather than wrong
+data, and reclaiming it needs page reuse the store does not have yet.
+
+---
+
+## 16. Search as an Access Path
+
+A `@@` predicate is planned as the way into the data, not as a filter over a scan.
+
+### Why per-property indexing is what makes this possible
+
+A `Document.body` index contains only `Document` nodes. The index is already
+label-scoped, so reading it does the label scan's job and answers the text
+question at the same time. The older design — one index spanning every node —
+could not have done this: it had no idea which nodes carried which label, so it
+could only ever filter a scan somebody else produced.
+
+### The measurement
+
+Eight thousand documents, a query matching one of them:
+
+| | time |
+|---|---:|
+| the index lookup alone | 31 µs |
+| scanning the label and keeping what the index named | 72 ms |
+| the same predicate under an `AND`, filtered per row | 216 ms |
+
+The scan cost the whole corpus to answer a question the index had already
+answered. Seeking instead:
+
+| | before | after |
+|---|---:|---:|
+| `@@ 'rare'` | 72 ms | 105 µs |
+| `@@ 'rare' AND …` | 216 ms | 105 µs |
+| `@@ 'common' AND …` | 21.3 s | 320 ms |
+
+Selective queries also stopped growing with the corpus — 65 µs, 80 µs, 105 µs
+from five hundred to eight thousand documents, against 3.9 ms, 17 ms, 72 ms
+before.
+
+### When it applies
+
+Only in conjunctive positions: the whole `WHERE`, or a branch of an `AND`.
+
+Under an `OR` the planner deliberately does not seek. The other branch can admit
+entities the index never names, so seeking would silently drop rows. There is a
+test asserting that an `OR` plans a label scan, because the reason is not visible
+from reading the planner and the shape looks like a missed optimisation.
+
+The predicate also has to name the entity the pattern is about. Where the variable
+is already bound by an upstream expand, the input decides which rows exist and
+the index can only filter them.
+
+### The filter that remains
+
+What cannot be sought is still answered by evaluating `@@` per row. That path
+consults the index once per query rather than once per row, keyed on the
+resolved index and the query text, and held for one execution.
+
+Without it the filter was quadratic in the corpus: its cost against a scan grew
+8.4x, 22.2x, then 152.1x as the corpus grew, and is now a flat 2.4x, 2.7x, 2.3x.
+
+Reusing a search within one execution is the same assumption the scanning
+operators have always made — they search once when they open and use that result
+for every row they emit. The cache matches that granularity rather than inventing
+a stricter or a looser rule.
+
+### Disjunctions
+
+Several `@@` predicates on one variable joined by `OR` are planned as a single
+operator that reads each index once and unions the results. A document found by
+more than one takes its best score rather than a sum: two properties matching is
+not evidence that either matched twice as well, and adding them would rank a
+document matching both weakly above one matching a single property strongly.
+
+Mixing kinds is refused. `d.title @@ "x" OR r.note @@ "x"` cannot be one union,
+because one operator filters one slot and a slot holds a node or an edge. That
+query still answers correctly, through the row filter.
+
+---
+
 ## 12. File Reference
 
 | File | Purpose |
@@ -922,3 +1166,6 @@ pub const DictionaryEntry = extern struct {
 | `src/fts/prefix.zig` | Prefix/wildcard search, upper bound calculation |
 | `src/fts/highlight.zig` | Search result highlighting, snippet extraction |
 | `src/fts/reverse_index.zig` | doc_id → terms mapping for document deletion |
+| `src/fts/catalog.zig` | Declared indexes: kind, scope, property |
+| `src/fts/scoped_tree.zig` | Prefixing view that keeps declared indexes apart |
+| `src/query/operators/fts.zig` | Index seek and filtering operators |

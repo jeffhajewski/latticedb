@@ -132,3 +132,40 @@ Full-text search in LatticeDB is fast:
 | FTS search (100 docs) | 19 us |
 
 This is ~300x faster than SQLite FTS5 and competitive with Tantivy, a dedicated Rust search library. See [Benchmarks](../performance/benchmarks.md) for details.
+
+### Write the query so it can use the index
+
+A `@@` predicate reads the index directly when it is the whole `WHERE` clause or a
+branch of an `AND`. The query never looks at documents the index did not name, so
+a selective search costs about the same on eight thousand documents as on five
+hundred:
+
+```cypher
+MATCH (d:Document) WHERE d.body @@ "sourdough" RETURN d.title
+MATCH (d:Document) WHERE d.body @@ "sourdough" AND d.year > 2020 RETURN d.title
+```
+
+Under an `OR` it cannot. The other branch may match documents the index never
+names, so the query has to look at every node carrying the label:
+
+```cypher
+MATCH (d:Document) WHERE d.body @@ "sourdough" OR d.year > 2020 RETURN d.title
+```
+
+That is correct, just more work. Two `@@` predicates joined by `OR` on the same
+variable are fine — those are planned as one pass over both indexes:
+
+```cypher
+MATCH (d:Document) WHERE d.title @@ "sourdough" OR d.body @@ "sourdough" RETURN d.title
+```
+
+If an `OR` against a non-text condition is slow on a large label, the usual fix is
+two queries and a `UNION`, so each side can use the index that suits it.
+
+### Rare terms cost less than common ones
+
+Scoring reads the posting list for each term, so a term appearing in most
+documents costs proportionally more than one appearing in a handful. That is
+inherent to the index rather than something to tune around, and it is why a
+search for a distinctive word is far quicker than one for a word your whole
+corpus shares.

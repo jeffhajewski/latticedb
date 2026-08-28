@@ -452,7 +452,7 @@ lattice_fts_result_free(results);
 
 ```c
 lattice_fts_result* results;
-lattice_fts_search_fuzzy(db, "quik fox", 8, 10, 2, 4, &results);
+lattice_fts_search_fuzzy(db, "Document", "text", "quik fox", 8, 10, 2, 4, &results);
 // max_distance=2, min_term_length=4
 ```
 
@@ -722,9 +722,9 @@ transaction.
 lattice_vector_search_txn(txn, query_vector, 128, /* k */ 10,
                           /* ef_search */ 64, &vector_result);
 
-lattice_fts_search_txn(txn, "graph database", 14, /* limit */ 20, &fts_result);
+lattice_fts_search_txn(txn, "Document", "text", "graph database", 14, /* limit */ 20, &fts_result);
 
-lattice_fts_search_fuzzy_txn(txn, "databse", 7, /* limit */ 20,
+lattice_fts_search_fuzzy_txn(txn, "Document", "text", "databse", 7, /* limit */ 20,
                              /* max_distance */ 2, /* min_term_length */ 4,
                              &fts_result);
 ```

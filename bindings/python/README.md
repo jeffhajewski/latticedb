@@ -86,7 +86,7 @@ with db.write() as txn:
         print(f"Node {r.node_id}: score={r.score:.4f}")
 
     # Fuzzy search (typo-tolerant)
-    for r in db.fts_search_fuzzy("machin lerning"):
+    for r in db.fts_search_fuzzy("Person", "bio", "machin lerning"):
         print(f"Node {r.node_id}: score={r.score:.4f}")
 ```
 
@@ -206,7 +206,7 @@ for r in results:
 
 ```python
 # Finds "machine learning" even with typos
-results = db.fts_search_fuzzy("machne lerning", limit=10)
+results = db.fts_search_fuzzy("Person", "bio", "machne lerning", limit=10)
 
 # Control fuzzy matching sensitivity
 results = db.fts_search_fuzzy(

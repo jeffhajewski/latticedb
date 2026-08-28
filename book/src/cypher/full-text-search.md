@@ -127,11 +127,21 @@ rebuild it, and correct it.
 
 ## How it works
 
-When the planner sees `@@`, it resolves the label and property to a declared
-index and scans it, rather than reading every node. Results are scored with BM25,
-which weighs term frequency, inverse document frequency, and document length —
-which is why a title mentioning a term beats a passing mention buried in a page
-of text.
+When the planner sees `@@`, it resolves the label and property to a declared index
+and reads the matching entities straight out of it. It does not look at anything
+the index did not name, so a search that matches one document out of eight
+thousand costs about what it costs out of five hundred.
+
+That holds when `@@` is the whole `WHERE` clause or a branch of an `AND`. Under an
+`OR` beside a non-text condition it cannot: the other branch may match entities
+the index never names, so the query examines every entity carrying the label. The
+result is the same; the work is not. See the
+[performance notes](../guides/full-text-search.md#performance) if that matters for
+your data.
+
+Results are scored with BM25, which weighs term frequency, inverse document
+frequency, and document length — which is why a title mentioning a term beats a
+passing mention buried in a page of text.
 
 A query with no `LIMIT` returns every match. Writing `LIMIT` still limits.
 

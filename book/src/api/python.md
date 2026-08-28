@@ -110,8 +110,10 @@ was not.
 - `query(cypher, parameters=None)` - Execute a Cypher query
 - `serialize()` - Return the whole database as bytes
 - `vector_search(vector, k=10, ef_search=64)` - k-NN vector search
-- `fts_search(query, limit=10)` - Full-text search
-- `fts_search_fuzzy(query, limit=10, max_distance=0, min_term_length=0)` - Fuzzy full-text search
+- `fts_search(label, prop, query, limit=10)` - Full-text search of one declared index
+- `fts_search_fuzzy(label, prop, query, limit=10, max_distance=0, min_term_length=0)` - Fuzzy full-text search
+- `create_node_fts_index(label, property)` / `drop_node_fts_index(...)` / `has_node_fts_index(...)` - Manage node full-text indexes
+- `create_edge_fts_index(edge_type, property)` / `drop_edge_fts_index(...)` / `has_edge_fts_index(...)` - Manage relationship full-text indexes
 - `create_node_property_index(label, property_key)` / `drop_node_property_index(...)` - Manage explicit node equality indexes
 - `create_edge_property_index(edge_type, property_key)` / `drop_edge_property_index(...)` - Manage explicit edge equality indexes
 - `read_stream(stream, after_sequence=0, limit=100, timeout_ms=0)` - Read durable stream records by cursor

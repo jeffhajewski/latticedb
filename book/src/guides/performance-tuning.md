@@ -90,6 +90,11 @@ db.create_node_fts_index("Chunk", "text")
 # Not metadata, IDs, or timestamps
 ```
 
+Then write queries that can use it. A `@@` predicate reads the index directly when
+it is the whole `WHERE` or a branch of an `AND`, and falls back to examining every
+node carrying the label when it sits under an `OR` beside a non-text condition.
+See [Full-Text Search](./full-text-search.md#performance).
+
 ### Labels
 
 Use specific labels for nodes you query frequently. Label scans are fast because they use a dedicated index:

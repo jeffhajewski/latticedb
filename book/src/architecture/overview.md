@@ -28,7 +28,7 @@ This section explains how LatticeDB's storage engine works, from the ground up. 
 
 ### Search Indexes
 11. [Vector Search](./vector-search.md) - HNSW approximate nearest neighbor search
-12. [Full-Text Search](./full-text-search.md) - BM25-scored inverted index with tokenization
+12. [Full-Text Search](./full-text-search.md) - BM25-scored inverted index, per-property declarations, and search as an access path
 
 ### Query System
 13. [Query Execution](./query-execution.md) - Volcano iterator model, operators, and planning

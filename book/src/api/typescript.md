@@ -139,8 +139,10 @@ was not.
 - `await db.write(fn)` - Execute a read-write transaction
 - `await db.query(cypher, params?)` - Execute a Cypher query
 - `await db.vectorSearch(vector, options?)` - k-NN vector search
-- `await db.ftsSearch(query, options?)` - Full-text search
-- `await db.ftsSearchFuzzy(query, options?)` - Fuzzy full-text search
+- `await db.ftsSearch(label, property, query, options?)` - Full-text search of one declared index
+- `await db.ftsSearchFuzzy(label, property, query, options?)` - Fuzzy full-text search
+- `await db.createNodeFtsIndex(label, property)` / `dropNodeFtsIndex(...)` / `hasNodeFtsIndex(...)` - Manage node full-text indexes
+- `await db.createEdgeFtsIndex(edgeType, property)` / `dropEdgeFtsIndex(...)` / `hasEdgeFtsIndex(...)` - Manage relationship full-text indexes
 - `await db.createNodePropertyIndex(label, property)` / `dropNodePropertyIndex(...)` - Manage explicit node equality indexes
 - `await db.createEdgePropertyIndex(edgeType, property)` / `dropEdgePropertyIndex(...)` - Manage explicit edge equality indexes
 - `await db.readStream(stream, options?)` - Read durable stream records by cursor

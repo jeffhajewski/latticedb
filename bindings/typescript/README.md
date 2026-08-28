@@ -506,9 +506,14 @@ and the `asarUnpack` glob to add.
 
 ### Windows
 
-Both Windows architectures are supported: `lib/win32-x64/lattice.dll` and
-`lib/win32-arm64/lattice.dll`. koffi ships prebuilt `win32_x64` and `win32_arm64`
-binaries, so nothing else has to be compiled for the FFI layer.
+Both Windows architectures are supported. Published package tarballs are
+expected to bundle `lib/win32-x64/lattice.dll` and `lib/win32-arm64/lattice.dll`,
+and koffi ships matching prebuilt `win32_x64` and `win32_arm64` binaries, so
+nothing has to be compiled at install time.
+
+Standalone release archives for Windows are `.zip` rather than `.tar.gz`, if you
+would rather take `lattice.dll` from a release and ship it through
+`extraResources`.
 
 Building the library from a source checkout:
 
@@ -544,7 +549,8 @@ npm test
 ## Requirements
 
 - Node.js 18+, or Electron 23+ (main process, Node 18 — see [Electron](#electron))
-- The native LatticeDB library (`liblattice.dylib` / `liblattice.so`)
+- The native LatticeDB library (`liblattice.dylib` / `liblattice.so` /
+  `lattice.dll`)
 
 ## License
 

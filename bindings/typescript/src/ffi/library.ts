@@ -6,7 +6,7 @@
  * 2. Bundled in package (lib/<platform>/ or libc-aware linux variants)
  * 3. Electron resource directories (asar.unpacked, extraResources, extraFiles)
  * 4. LATTICE_PREFIX environment variable
- * 5. Development build (zig-out/lib)
+ * 5. Development build (zig-out/lib, plus zig-out/bin on Windows)
  * 6. pkg-config lattice libdir
  * 7. System paths
  *
@@ -271,10 +271,17 @@ function findLibrary(): { libPath: string | null; asarBlocked: string[] } {
   }
 
   // 5. Development build (zig-out/lib)
-  // Goes up from bindings/typescript/src/ffi/ to repo root
-  const devPath = accept(path.join(__dirname, '../../../../zig-out/lib', libName));
-  if (devPath) {
-    return { libPath: devPath, asarBlocked };
+  // Goes up from bindings/typescript/src/ffi/ to repo root. Windows keeps the
+  // DLL beside the executables and leaves only the import library under lib/.
+  const devDirs =
+    process.platform === 'win32'
+      ? ['../../../../zig-out/bin', '../../../../zig-out/lib']
+      : ['../../../../zig-out/lib'];
+  for (const devDir of devDirs) {
+    const devPath = accept(path.join(__dirname, devDir, libName));
+    if (devPath) {
+      return { libPath: devPath, asarBlocked };
+    }
   }
 
   // 6. pkg-config metadata

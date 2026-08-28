@@ -71,15 +71,13 @@ class TestLibraryDiscovery:
 
         monkeypatch.setattr(bindings.subprocess, "run", fake_run)
         original_exists = Path.exists
-        dev_path = (
-            Path(bindings.__file__).parent.parent.parent.parent.parent
-            / "zig-out"
-            / "lib"
-            / bindings._get_lib_name()
-        )
+        zig_out = Path(bindings.__file__).parent.parent.parent.parent.parent / "zig-out"
 
         def fake_exists(path: Path) -> bool:
-            if path == dev_path:
+            # The whole repo-local build is hidden rather than one file inside
+            # it: Windows keeps the DLL in zig-out/bin and leaves only the
+            # import library in zig-out/lib, so the search looks in both.
+            if zig_out in path.parents:
                 return False
             return original_exists(path)
 

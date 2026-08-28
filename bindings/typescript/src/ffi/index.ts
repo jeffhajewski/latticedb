@@ -1248,6 +1248,32 @@ export class LatticeFFI {
   }
 
   /**
+   * Declare a full-text index over one relationship type/property pair.
+   */
+  createEdgeFtsIndex(db: DatabaseHandle, edgeType: string, property: string): void {
+    const err = this.bindings.lattice_edge_fts_index_create(db, edgeType, property);
+    this.checkError(err);
+  }
+
+  /**
+   * Remove a declared relationship full-text index.
+   */
+  dropEdgeFtsIndex(db: DatabaseHandle, edgeType: string, property: string): void {
+    const err = this.bindings.lattice_edge_fts_index_drop(db, edgeType, property);
+    this.checkError(err);
+  }
+
+  /**
+   * Whether an index is declared for this relationship type and property.
+   */
+  hasEdgeFtsIndex(db: DatabaseHandle, edgeType: string, property: string): boolean {
+    const out = Buffer.alloc(1);
+    const err = this.bindings.lattice_edge_fts_index_exists(db, edgeType, property, out);
+    this.checkError(err);
+    return out[0] !== 0;
+  }
+
+  /**
    * Search one declared index.
    */
   ftsSearch(

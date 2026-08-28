@@ -3501,14 +3501,14 @@ pub const Database = struct {
         query_text: []const u8,
         limit: u32,
     ) DatabaseError![]FtsSearchResult {
-        // Only node states are merged. `@@` reads a property off a node, so an
-        // edge index is not reachable from a query and has no pending state to
-        // reconcile here.
         const overlay = blk: {
-            if (definition.kind != .node) break :blk null;
             const t = txn orelse break :blk null;
             const found = self.getTxnOverlay(t) orelse break :blk null;
-            if (found.node_states.count() == 0) break :blk null;
+            const pending = switch (definition.kind) {
+                .node => found.node_states.count(),
+                .edge => found.edge_states.count(),
+            };
+            if (pending == 0) break :blk null;
             break :blk found;
         };
 
@@ -3518,7 +3518,10 @@ pub const Database = struct {
         }
         const pending = overlay.?;
 
-        const extra: u32 = @intCast(pending.node_states.count());
+        const extra: u32 = @intCast(switch (definition.kind) {
+            .node => pending.node_states.count(),
+            .edge => pending.edge_states.count(),
+        });
         // Saturating: a caller wanting every match passes the largest u32 there
         // is, and asking for a few more than that wraps to nearly none.
         const base_results = index.search(query_text, limit +| extra) catch |err| return mapFtsError(err);
@@ -3549,8 +3552,8 @@ pub const Database = struct {
 
         for (base) |result| {
             try seen.put(self.allocator, result.doc_id, {});
-            if (pending.node_states.get(result.doc_id)) |state| {
-                if (try self.pendingFtsScore(definition, state, query_text)) |score| {
+            if (try self.pendingFtsFor(definition, pending, result.doc_id, query_text)) |staged| {
+                if (staged.score) |score| {
                     merged.append(self.allocator, .{ .doc_id = result.doc_id, .score = score }) catch {
                         return DatabaseError.OutOfMemory;
                     };
@@ -3560,14 +3563,29 @@ pub const Database = struct {
             merged.append(self.allocator, result) catch return DatabaseError.OutOfMemory;
         }
 
-        var overlay_iter = pending.node_states.iterator();
-        while (overlay_iter.next()) |entry| {
-            if (seen.contains(entry.key_ptr.*)) continue;
-            if (try self.pendingFtsScore(definition, entry.value_ptr.*, query_text)) |score| {
-                merged.append(self.allocator, .{ .doc_id = entry.key_ptr.*, .score = score }) catch {
-                    return DatabaseError.OutOfMemory;
-                };
-            }
+        switch (definition.kind) {
+            .node => {
+                var overlay_iter = pending.node_states.iterator();
+                while (overlay_iter.next()) |entry| {
+                    if (seen.contains(entry.key_ptr.*)) continue;
+                    if (try self.pendingNodeFtsScore(definition, entry.value_ptr.*, query_text)) |score| {
+                        merged.append(self.allocator, .{ .doc_id = entry.key_ptr.*, .score = score }) catch {
+                            return DatabaseError.OutOfMemory;
+                        };
+                    }
+                }
+            },
+            .edge => {
+                var overlay_iter = pending.edge_states.iterator();
+                while (overlay_iter.next()) |entry| {
+                    if (seen.contains(entry.key_ptr.*)) continue;
+                    if (try self.pendingEdgeFtsScore(definition, entry.value_ptr.*, query_text)) |score| {
+                        merged.append(self.allocator, .{ .doc_id = entry.key_ptr.*, .score = score }) catch {
+                            return DatabaseError.OutOfMemory;
+                        };
+                    }
+                }
+            },
         }
 
         std.mem.sort(FtsSearchResult, merged.items, {}, FtsSearchResult.lessThan);
@@ -3575,9 +3593,49 @@ pub const Database = struct {
         return merged.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
     }
 
+    /// Whether an entity has pending state for this index, and what it scores.
+    ///
+    /// The outer optional says "this transaction has written this entity", which
+    /// is what decides whether the indexed result is replaced. The inner one says
+    /// whether the pending state matches, so a document whose text stopped
+    /// matching drops out rather than keeping its old score.
+    fn pendingFtsFor(
+        self: *Self,
+        definition: FtsDefinition,
+        pending: *TxnOverlay,
+        doc_id: NodeId,
+        query_text: []const u8,
+    ) DatabaseError!?struct { score: ?f32 } {
+        switch (definition.kind) {
+            .node => {
+                const state = pending.node_states.get(doc_id) orelse return null;
+                return .{ .score = try self.pendingNodeFtsScore(definition, state, query_text) };
+            },
+            .edge => {
+                const state = pending.edge_states.get(doc_id) orelse return null;
+                return .{ .score = try self.pendingEdgeFtsScore(definition, state, query_text) };
+            },
+        }
+    }
+
+    /// What an uncommitted edge state would score, or null when it would not be
+    /// in this index at all.
+    fn pendingEdgeFtsScore(
+        self: *Self,
+        definition: FtsDefinition,
+        state: TxnEdgeState,
+        query_text: []const u8,
+    ) DatabaseError!?f32 {
+        if (!state.exists) return null;
+        if (state.edge_type != definition.scope_id) return null;
+        const text = ftsTextOf(definition, state.properties) orelse return null;
+        const score = try self.overlayFtsScore(query_text, text);
+        return if (score > 0) score else null;
+    }
+
     /// What an uncommitted node state would score for a declared index, or null
     /// when it would not be in that index at all.
-    fn pendingFtsScore(
+    fn pendingNodeFtsScore(
         self: *Self,
         definition: FtsDefinition,
         state: TxnNodeState,
@@ -3612,11 +3670,45 @@ pub const Database = struct {
         var node = (try self.getNodeInTxn(txn, node_id)) orelse return null;
         defer node.deinit(self.allocator);
 
+        return self.ftsScopedMatch(txn, .node, node.labels, node_id, property_id, query_text, limit);
+    }
+
+    /// The same for an edge, whose scope is its one type rather than a set of
+    /// labels.
+    pub fn ftsEdgeMatches(
+        self: *Self,
+        txn: ?*Transaction,
+        edge_id: EdgeId,
+        property: []const u8,
+        query_text: []const u8,
+        limit: u32,
+    ) DatabaseError!?bool {
+        const property_id = self.symbol_table.lookup(property) catch return null;
+
+        var edge = (try self.getEdgeInTxn(txn, edge_id)) orelse return null;
+        defer edge.deinit(self.allocator);
+
+        const scopes = [_]symbols_mod.SymbolId{edge.edge_type};
+        return self.ftsScopedMatch(txn, .edge, &scopes, edge_id, property_id, query_text, limit);
+    }
+
+    /// Whether one entity matches through whichever of its scopes declares an
+    /// index on the property.
+    fn ftsScopedMatch(
+        self: *Self,
+        txn: ?*Transaction,
+        kind: FtsEntityKind,
+        scopes: []const symbols_mod.SymbolId,
+        doc_id: NodeId,
+        property_id: symbols_mod.SymbolId,
+        query_text: []const u8,
+        limit: u32,
+    ) DatabaseError!?bool {
         var catalog = self.ftsCatalog() orelse return null;
-        for (node.labels) |label_id| {
+        for (scopes) |scope_id| {
             const definition = FtsDefinition{
-                .kind = .node,
-                .scope_id = label_id,
+                .kind = kind,
+                .scope_id = scope_id,
                 .property_id = property_id,
             };
             if (!(catalog.has(definition) catch |err| return mapFtsCatalogError(err))) continue;
@@ -3624,7 +3716,7 @@ pub const Database = struct {
             const results = try self.ftsSearchDefinitionInTxn(txn, definition, query_text, limit);
             defer self.freeFtsSearchResults(results);
             for (results) |hit| {
-                if (hit.doc_id == node_id) return true;
+                if (hit.doc_id == doc_id) return true;
             }
             return false;
         }

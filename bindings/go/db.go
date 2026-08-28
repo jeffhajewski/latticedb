@@ -292,6 +292,35 @@ func (db *DB) HasNodeFTSIndex(label, property string) (bool, error) {
 	return ok, wrapError(err)
 }
 
+// CreateEdgeFTSIndex declares a full-text index over one relationship
+// type/property pair.
+//
+// A Cypher `-[x:TYPE]->` pattern with `x.property @@ "query"` searches it.
+func (db *DB) CreateEdgeFTSIndex(edgeType, property string) error {
+	if db == nil || db.raw == nil {
+		return ErrDatabaseClosed
+	}
+	return wrapError(db.raw.CreateEdgeFTSIndex(edgeType, property))
+}
+
+// DropEdgeFTSIndex removes a declared relationship full-text index.
+func (db *DB) DropEdgeFTSIndex(edgeType, property string) error {
+	if db == nil || db.raw == nil {
+		return ErrDatabaseClosed
+	}
+	return wrapError(db.raw.DropEdgeFTSIndex(edgeType, property))
+}
+
+// HasEdgeFTSIndex reports whether an index is declared for this relationship
+// type and property.
+func (db *DB) HasEdgeFTSIndex(edgeType, property string) (bool, error) {
+	if db == nil || db.raw == nil {
+		return false, ErrDatabaseClosed
+	}
+	ok, err := db.raw.HasEdgeFTSIndex(edgeType, property)
+	return ok, wrapError(err)
+}
+
 // CreateEdgePropertyIndex creates an explicit equality index for an edge
 // type/property pair and indexes existing matching edges.
 func (db *DB) CreateEdgePropertyIndex(edgeType, property string) error {

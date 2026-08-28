@@ -925,3 +925,77 @@ func TestBeginCompatibilityAlias(t *testing.T) {
 		t.Fatalf("expected Begin(false) on read-only db to fail with ErrReadOnlyDatabase, got %v", err)
 	}
 }
+
+func TestEdgeFullTextSearch(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "edge-fts.db")
+	db, err := Open(dbPath, OpenOptions{Create: true})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer func() {
+		if closeErr := db.Close(); closeErr != nil {
+			t.Fatalf("close db: %v", closeErr)
+		}
+	}()
+
+	if err := db.CreateEdgeFTSIndex("REVIEWED", "note"); err != nil {
+		t.Fatalf("declare edge fts index: %v", err)
+	}
+	declared, err := db.HasEdgeFTSIndex("REVIEWED", "note")
+	if err != nil || !declared {
+		t.Fatalf("expected REVIEWED.note to be declared: %v", err)
+	}
+
+	err = db.Update(func(tx *Tx) error {
+		alice, err := tx.CreateNode(CreateNodeOptions{
+			Labels:     []string{"Person"},
+			Properties: map[string]Value{"name": "Alice"},
+		})
+		if err != nil {
+			return err
+		}
+		paper, err := tx.CreateNode(CreateNodeOptions{
+			Labels:     []string{"Paper"},
+			Properties: map[string]Value{"title": "Attention"},
+		})
+		if err != nil {
+			return err
+		}
+		other, err := tx.CreateNode(CreateNodeOptions{
+			Labels:     []string{"Paper"},
+			Properties: map[string]Value{"title": "Sourdough"},
+		})
+		if err != nil {
+			return err
+		}
+		good, err := tx.CreateEdge(alice.ID, paper.ID, "REVIEWED", CreateEdgeOptions{})
+		if err != nil {
+			return err
+		}
+		weak, err := tx.CreateEdge(alice.ID, other.ID, "REVIEWED", CreateEdgeOptions{})
+		if err != nil {
+			return err
+		}
+		if err := tx.SetEdgeProperty(good.ID, "note", "thorough and well argued"); err != nil {
+			return err
+		}
+		return tx.SetEdgeProperty(weak.ID, "note", "mostly about bread")
+	})
+	if err != nil {
+		t.Fatalf("seed reviews: %v", err)
+	}
+
+	result, err := db.Query(
+		"MATCH (a:Person)-[x:REVIEWED]->(p:Paper) WHERE x.note @@ 'thorough' RETURN p.title AS t",
+		nil,
+	)
+	if err != nil {
+		t.Fatalf("edge fts query: %v", err)
+	}
+	if len(result.Rows) != 1 {
+		t.Fatalf("expected 1 row, got %d", len(result.Rows))
+	}
+	if got := result.Rows[0]["t"]; got != "Attention" {
+		t.Fatalf("expected Attention, got %v", got)
+	}
+}

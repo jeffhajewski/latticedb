@@ -1095,6 +1095,34 @@ describeIfNative('Database Integration', () => {
     });
   });
 
+  describe('Relationship full-text search', () => {
+    beforeEach(async () => {
+      db = new Database(dbPath, { create: true });
+      await db.open();
+      await db.createEdgeFtsIndex('REVIEWED', 'note');
+    });
+
+    test('a relationship property is searchable through its declared index', async () => {
+      expect(await db.hasEdgeFtsIndex('REVIEWED', 'note')).toBe(true);
+
+      await db.write(async (txn) => {
+        const alice = await txn.createNode({ labels: ['Person'], properties: { name: 'Alice' } });
+        const paper = await txn.createNode({ labels: ['Paper'], properties: { title: 'Attention' } });
+        const other = await txn.createNode({ labels: ['Paper'], properties: { title: 'Sourdough' } });
+        const good = await txn.createEdge(alice.id, paper.id, 'REVIEWED');
+        const weak = await txn.createEdge(alice.id, other.id, 'REVIEWED');
+        await txn.setEdgeProperty(good.id, 'note', 'thorough and well argued');
+        await txn.setEdgeProperty(weak.id, 'note', 'mostly about bread');
+      });
+
+      const result = await db.query(
+        "MATCH (a:Person)-[x:REVIEWED]->(p:Paper) WHERE x.note @@ 'thorough' RETURN p.title AS t"
+      );
+      expect(result.rows.length).toBe(1);
+      expect(result.rows[0]!.t).toBe('Attention');
+    });
+  });
+
   describe('Fuzzy full-text search', () => {
     beforeEach(async () => {
       db = new Database(dbPath, { create: true });

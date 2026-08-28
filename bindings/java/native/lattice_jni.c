@@ -1432,6 +1432,56 @@ Java_io_latticedb_Native_hasNodeFtsIndex(JNIEnv *env, jclass cls, jlong db_handl
     return exists ? JNI_TRUE : JNI_FALSE;
 }
 
+JNIEXPORT void JNICALL
+Java_io_latticedb_Native_createEdgeFtsIndex(JNIEnv *env, jclass cls, jlong db_handle,
+                                            jstring edge_type, jstring property) {
+    init_cache(env);
+    (void)cls;
+    size_t t_len = 0, p_len = 0;
+    char *t = jstring_to_utf8(env, edge_type, &t_len);
+    if ((*env)->ExceptionCheck(env)) { free(t); return; }
+    char *pr = jstring_to_utf8(env, property, &p_len);
+    if ((*env)->ExceptionCheck(env)) { free(t); free(pr); return; }
+    lattice_error rc = lattice_edge_fts_index_create(
+        (lattice_database *)(uintptr_t)db_handle, t ? t : "", pr ? pr : "");
+    free(t); free(pr);
+    check(env, rc);
+}
+
+JNIEXPORT void JNICALL
+Java_io_latticedb_Native_dropEdgeFtsIndex(JNIEnv *env, jclass cls, jlong db_handle,
+                                          jstring edge_type, jstring property) {
+    init_cache(env);
+    (void)cls;
+    size_t t_len = 0, p_len = 0;
+    char *t = jstring_to_utf8(env, edge_type, &t_len);
+    if ((*env)->ExceptionCheck(env)) { free(t); return; }
+    char *pr = jstring_to_utf8(env, property, &p_len);
+    if ((*env)->ExceptionCheck(env)) { free(t); free(pr); return; }
+    lattice_error rc = lattice_edge_fts_index_drop(
+        (lattice_database *)(uintptr_t)db_handle, t ? t : "", pr ? pr : "");
+    free(t); free(pr);
+    check(env, rc);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_io_latticedb_Native_hasEdgeFtsIndex(JNIEnv *env, jclass cls, jlong db_handle,
+                                         jstring edge_type, jstring property) {
+    init_cache(env);
+    (void)cls;
+    size_t t_len = 0, p_len = 0;
+    char *t = jstring_to_utf8(env, edge_type, &t_len);
+    if ((*env)->ExceptionCheck(env)) { free(t); return JNI_FALSE; }
+    char *pr = jstring_to_utf8(env, property, &p_len);
+    if ((*env)->ExceptionCheck(env)) { free(t); free(pr); return JNI_FALSE; }
+    bool exists = false;
+    lattice_error rc = lattice_edge_fts_index_exists(
+        (lattice_database *)(uintptr_t)db_handle, t ? t : "", pr ? pr : "", &exists);
+    free(t); free(pr);
+    if (!check(env, rc)) return JNI_FALSE;
+    return exists ? JNI_TRUE : JNI_FALSE;
+}
+
 /* Returns Object[2] = { long[] nodeIds, float[] scores }. fuzzy=1 uses the
  * fuzzy variant with max_distance/min_term_length. */
 static jobject fts_search(JNIEnv *env, jlong db_handle, jlong txn_handle, jint use_txn,

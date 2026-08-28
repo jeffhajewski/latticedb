@@ -135,6 +135,12 @@ pub const QueryPlanner = struct {
     /// on `title`. The slices point into the query's own syntax tree, which
     /// outlives planning.
     pattern_labels: std.StringHashMap([]const []const u8),
+    /// The types each edge variable was written with in its MATCH pattern.
+    ///
+    /// The edge equivalent of `pattern_labels`. `r.note @@ "x"` needs a type for
+    /// the same reason `d.title @@ "x"` needs a label: two edge types can each
+    /// declare an index on `note`.
+    pattern_edge_types: std.StringHashMap([]const []const u8),
     /// A specific explanation for the most recent planning failure.
     ///
     /// A plan error otherwise reaches the user as "could not create execution
@@ -177,6 +183,7 @@ pub const QueryPlanner = struct {
             .storage = storage,
             .bindings = std.StringHashMap(VarBinding).init(allocator),
             .pattern_labels = std.StringHashMap([]const []const u8).init(allocator),
+            .pattern_edge_types = std.StringHashMap([]const []const u8).init(allocator),
             .edge_bindings = std.StringHashMap(EdgeBinding).init(allocator),
             .hidden_binding_names = .empty,
             .next_slot = 0,
@@ -192,6 +199,7 @@ pub const QueryPlanner = struct {
         self.hidden_binding_names.deinit(self.allocator);
         self.bindings.deinit();
         self.pattern_labels.deinit();
+        self.pattern_edge_types.deinit();
         self.edge_bindings.deinit();
     }
 
@@ -203,6 +211,7 @@ pub const QueryPlanner = struct {
         self.clearHiddenBindingNames();
         self.bindings.clearRetainingCapacity();
         self.pattern_labels.clearRetainingCapacity();
+        self.pattern_edge_types.clearRetainingCapacity();
         self.edge_bindings.clearRetainingCapacity();
         self.next_slot = 0;
         self.output_columns = 0;
@@ -529,6 +538,11 @@ pub const QueryPlanner = struct {
                         edge_slot = try self.allocateSlot();
                         try self.bindVariable(name, edge_slot.?, .edge);
                         edge_var_name = name;
+                        // Every type the pattern named, because `-[r:A|B]->` has
+                        // to try each in turn the way a multi-label node does.
+                        self.pattern_edge_types.put(name, edge_pattern.types) catch {
+                            return PlannerError.OutOfMemory;
+                        };
 
                         // Store edge binding metadata for DELETE support
                         if (edge_pattern.types.len > 0) {
@@ -1020,27 +1034,57 @@ pub const QueryPlanner = struct {
     /// can each declare one on `title`. The label comes from the pattern the
     /// variable was written in, which is where property index planning already
     /// takes it from.
-    fn resolveFtsIndex(self: *Self, info: FtsSearchInfo) PlannerError![]const u8 {
+    /// Which declared index `x.prop @@ ...` means.
+    ///
+    /// A property name does not identify an index on its own, because two labels
+    /// — or two edge types — can each declare one on `title`. The scope comes
+    /// from the pattern the variable was written in, which is where property
+    /// index planning already takes it from.
+    fn resolveFtsIndex(self: *Self, info: FtsSearchInfo) PlannerError!fts_ops.Search {
         const database = self.storage.database orelse return PlannerError.MissingStorage;
         const property = info.property_name orelse return PlannerError.InvalidQuery;
         const variable = info.variable_name orelse return PlannerError.InvalidQuery;
 
-        const labels = self.pattern_labels.get(variable) orelse &[_][]const u8{};
-        if (labels.len == 0) {
-            self.setPlanDetail(
-                "`{s}.{s} @@ ...` needs a label to say which full-text index it means. Write it in the pattern, as in ({s}:Label).",
-                .{ variable, property, variable },
-            );
+        const binding = self.bindings.get(variable) orelse return PlannerError.InvalidQuery;
+        const is_edge = binding.kind == .edge;
+
+        const scopes = if (is_edge)
+            self.pattern_edge_types.get(variable) orelse &[_][]const u8{}
+        else
+            self.pattern_labels.get(variable) orelse &[_][]const u8{};
+
+        if (scopes.len == 0) {
+            if (is_edge) {
+                self.setPlanDetail(
+                    "`{s}.{s} @@ ...` needs a relationship type to say which full-text index it means. Write it in the pattern, as in -[{s}:TYPE]->.",
+                    .{ variable, property, variable },
+                );
+            } else {
+                self.setPlanDetail(
+                    "`{s}.{s} @@ ...` needs a label to say which full-text index it means. Write it in the pattern, as in ({s}:Label).",
+                    .{ variable, property, variable },
+                );
+            }
             return PlannerError.UnlabeledFtsMatch;
         }
 
-        for (labels) |label| {
-            if (database.hasNodeFtsIndex(label, property) catch false) return label;
+        for (scopes) |scope| {
+            const declared = if (is_edge)
+                database.hasEdgeFtsIndex(scope, property) catch false
+            else
+                database.hasNodeFtsIndex(scope, property) catch false;
+            if (declared) {
+                return .{
+                    .kind = if (is_edge) .edge else .node,
+                    .scope = scope,
+                    .property = property,
+                };
+            }
         }
 
         self.setPlanDetail(
             "No full-text index is declared for {s}.{s}. Declare one before searching it.",
-            .{ labels[0], property },
+            .{ scopes[0], property },
         );
         return PlannerError.MissingFtsIndex;
     }
@@ -1063,15 +1107,19 @@ pub const QueryPlanner = struct {
             return PlannerError.OutOfMemory;
         };
         for (infos, 0..) |info, i| {
-            const label = try self.resolveFtsIndex(info);
-            const property = info.property_name orelse return PlannerError.InvalidQuery;
             if (info.query_text == null and info.param_name == null) return PlannerError.InvalidQuery;
-            searches[i] = .{
-                .label = label,
-                .property = property,
-                .param_name = info.param_name,
-                .literal_query = info.query_text,
-            };
+            var search = try self.resolveFtsIndex(info);
+            search.param_name = info.param_name;
+            search.literal_query = info.query_text;
+            searches[i] = search;
+        }
+
+        // Every disjunct has to search the same kind of thing, because one
+        // operator filters one slot and a slot holds a node or an edge, not
+        // either. Mixing them would need two scans joined, which is a different
+        // shape than this.
+        for (searches[1..]) |search| {
+            if (search.kind != searches[0].kind) return PlannerError.InvalidQuery;
         }
 
         const fts_search = fts_ops.FtsSearchWithInput.init(
@@ -1799,6 +1847,7 @@ pub const QueryPlanner = struct {
         // What comes through a WITH is an alias rather than a node written with a
         // label, so the labels that were in scope before it no longer describe it.
         self.pattern_labels.clearRetainingCapacity();
+        self.pattern_edge_types.clearRetainingCapacity();
         self.next_slot = 0;
 
         for (with_clause.items, 0..) |item, i| {

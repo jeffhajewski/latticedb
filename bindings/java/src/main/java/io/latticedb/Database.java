@@ -209,6 +209,26 @@ public final class Database implements AutoCloseable {
     }
 
     /**
+     * Declares a full-text index over one relationship type/property pair.
+     *
+     * <p>A Cypher {@code -[x:TYPE]->} pattern with {@code x.property @@ "query"}
+     * searches it.
+     */
+    public void createEdgeFtsIndex(String edgeType, String property) {
+        Native.createEdgeFtsIndex(handle(), edgeType, property);
+    }
+
+    /** Removes a declared relationship full-text index. */
+    public void dropEdgeFtsIndex(String edgeType, String property) {
+        Native.dropEdgeFtsIndex(handle(), edgeType, property);
+    }
+
+    /** Whether an index is declared for this relationship type and property. */
+    public boolean hasEdgeFtsIndex(String edgeType, String property) {
+        return Native.hasEdgeFtsIndex(handle(), edgeType, property);
+    }
+
+    /**
      * Searches one declared full-text index.
      *
      * <p>Throws {@link ErrorCode#UNSUPPORTED} when no index is declared for this

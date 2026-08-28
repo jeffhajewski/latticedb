@@ -429,6 +429,32 @@ export class Database {
   }
 
   /**
+   * Declare a full-text index over one relationship type/property pair.
+   *
+   * A Cypher `-[x:TYPE]->` pattern with `x.property @@ "query"` searches it.
+   */
+  async createEdgeFtsIndex(edgeType: string, property: string): Promise<void> {
+    this.ensureOpen();
+    this.ffi!.createEdgeFtsIndex(this.dbHandle!, edgeType, property);
+  }
+
+  /**
+   * Remove a declared relationship full-text index.
+   */
+  async dropEdgeFtsIndex(edgeType: string, property: string): Promise<void> {
+    this.ensureOpen();
+    this.ffi!.dropEdgeFtsIndex(this.dbHandle!, edgeType, property);
+  }
+
+  /**
+   * Whether an index is declared for this relationship type and property.
+   */
+  async hasEdgeFtsIndex(edgeType: string, property: string): Promise<boolean> {
+    this.ensureOpen();
+    return this.ffi!.hasEdgeFtsIndex(this.dbHandle!, edgeType, property);
+  }
+
+  /**
    * Fuzzy full-text search with typo tolerance.
    *
    * @param label - Node label whose index to search

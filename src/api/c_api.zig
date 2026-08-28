@@ -1805,6 +1805,58 @@ pub export fn lattice_node_fts_index_exists(
     return .ok;
 }
 
+pub export fn lattice_edge_fts_index_create(
+    db: ?*lattice_database,
+    edge_type: [*c]const u8,
+    property: [*c]const u8,
+) lattice_error {
+    const db_handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
+    const type_slice = cStrToSlice(edge_type) orelse return .err_invalid_arg;
+    const property_slice = cStrToSlice(property) orelse return .err_invalid_arg;
+
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active = ensureActiveDbLocked(db_handle);
+    if (active != .ok) return active;
+    db_handle.db.createEdgeFtsIndex(type_slice, property_slice) catch |err| return mapDatabaseError(err);
+    return .ok;
+}
+
+pub export fn lattice_edge_fts_index_drop(
+    db: ?*lattice_database,
+    edge_type: [*c]const u8,
+    property: [*c]const u8,
+) lattice_error {
+    const db_handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
+    const type_slice = cStrToSlice(edge_type) orelse return .err_invalid_arg;
+    const property_slice = cStrToSlice(property) orelse return .err_invalid_arg;
+
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active = ensureActiveDbLocked(db_handle);
+    if (active != .ok) return active;
+    db_handle.db.dropEdgeFtsIndex(type_slice, property_slice) catch |err| return mapDatabaseError(err);
+    return .ok;
+}
+
+pub export fn lattice_edge_fts_index_exists(
+    db: ?*lattice_database,
+    edge_type: [*c]const u8,
+    property: [*c]const u8,
+    exists_out: *bool,
+) lattice_error {
+    const db_handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
+    const type_slice = cStrToSlice(edge_type) orelse return .err_invalid_arg;
+    const property_slice = cStrToSlice(property) orelse return .err_invalid_arg;
+
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active = ensureActiveDbLocked(db_handle);
+    if (active != .ok) return active;
+    exists_out.* = db_handle.db.hasEdgeFtsIndex(type_slice, property_slice) catch |err| return mapDatabaseError(err);
+    return .ok;
+}
+
 pub export fn lattice_nodes_find_by_label_property(
     txn: ?*lattice_txn,
     label: [*c]const u8,

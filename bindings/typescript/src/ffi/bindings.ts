@@ -476,6 +476,22 @@ export interface LatticeBindings {
     property: string,
     exists_out: Buffer
   ) => number;
+  lattice_edge_fts_index_create: (
+    db: unknown,
+    edge_type: string,
+    property: string
+  ) => number;
+  lattice_edge_fts_index_drop: (
+    db: unknown,
+    edge_type: string,
+    property: string
+  ) => number;
+  lattice_edge_fts_index_exists: (
+    db: unknown,
+    edge_type: string,
+    property: string,
+    exists_out: Buffer
+  ) => number;
   lattice_fts_result_count: (result: unknown) => number;
   lattice_fts_result_get: (
     result: unknown,
@@ -1010,6 +1026,22 @@ function createBindings(): LatticeBindings {
       'str',
     ]),
     lattice_node_fts_index_exists: lib.func('lattice_node_fts_index_exists', 'int', [
+      DatabasePtr,
+      'str',
+      'str',
+      koffi.out(koffi.pointer('bool')),
+    ]),
+    lattice_edge_fts_index_create: lib.func('lattice_edge_fts_index_create', 'int', [
+      DatabasePtr,
+      'str',
+      'str',
+    ]),
+    lattice_edge_fts_index_drop: lib.func('lattice_edge_fts_index_drop', 'int', [
+      DatabasePtr,
+      'str',
+      'str',
+    ]),
+    lattice_edge_fts_index_exists: lib.func('lattice_edge_fts_index_exists', 'int', [
       DatabasePtr,
       'str',
       'str',

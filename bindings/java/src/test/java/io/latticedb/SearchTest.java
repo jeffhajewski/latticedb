@@ -5,6 +5,7 @@ import org.junit.jupiter.api.io.TempDir;
 
 import java.nio.file.Path;
 import java.util.List;
+import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.*;
 
@@ -54,6 +55,33 @@ class SearchTest {
                     tx.batchInsertVectors("Bulk", new float[][]{{1, 1, 1}, {2, 2, 2}, {3, 3, 3}}));
             assertEquals(3, ids.size());
             assertEquals(3, db.getNodesByLabel("Bulk").size());
+        }
+    }
+
+    @Test
+    void edgeFtsSearchThroughCypher() {
+        try (Database db = Database.open(dir.resolve("edgefts.db").toString(),
+                OpenOptions.defaults().create(true))) {
+            db.createEdgeFtsIndex("REVIEWED", "note");
+            assertTrue(db.hasEdgeFtsIndex("REVIEWED", "note"));
+
+            db.write(tx -> {
+                Node alice = tx.createNode(List.of("Person"), Map.of("name", "Alice"));
+                Node paper = tx.createNode(List.of("Paper"), Map.of("title", "Attention"));
+                Node other = tx.createNode(List.of("Paper"), Map.of("title", "Sourdough"));
+                Edge good = tx.createEdge(alice.id(), paper.id(), "REVIEWED");
+                Edge weak = tx.createEdge(alice.id(), other.id(), "REVIEWED");
+                tx.setEdgeProperty(good.id(), "note", "thorough and well argued");
+                tx.setEdgeProperty(weak.id(), "note", "mostly about bread");
+                return null;
+            });
+
+            QueryResult rows = db.query(
+                    "MATCH (a:Person)-[x:REVIEWED]->(p:Paper) "
+                            + "WHERE x.note @@ 'thorough' RETURN p.title AS t",
+                    Map.of());
+            assertEquals(1, rows.rows().size());
+            assertEquals("Attention", rows.rows().get(0).get("t"));
         }
     }
 

@@ -71,6 +71,34 @@ MATCH (d) WHERE d.title @@ "bread" RETURN d
 Write it in the pattern, as in (d:Label).
 ```
 
+## Relationships
+
+A relationship property works the same way, with the relationship type standing
+in for the label:
+
+```python
+db.create_edge_fts_index("REVIEWED", "note")
+```
+
+```cypher
+MATCH (a:Person)-[x:REVIEWED]->(p:Paper)
+WHERE x.note @@ "thorough"
+RETURN p.title
+```
+
+The pattern has to name the type, for the same reason a node pattern has to name
+a label — two relationship types can each declare an index on `note`:
+
+```
+`x.note @@ ...` needs a relationship type to say which full-text index it means.
+Write it in the pattern, as in -[x:TYPE]->.
+```
+
+A single `@@` predicate searches either nodes or relationships, not both at once.
+`WHERE d.title @@ "x" OR x.note @@ "x"` is not a union of two index scans, because
+one scan filters one variable; that query still works, through the row filter,
+but it is not planned as a single scan.
+
 ## Searching several properties
 
 `OR` searches each index and returns the union:

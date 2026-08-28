@@ -686,6 +686,42 @@ class Database:
         check_error(code)
         return bool(exists.value)
 
+    def create_edge_fts_index(self, edge_type: str, prop: str) -> None:
+        """
+        Declare a full-text index over one relationship type/property pair.
+
+        A Cypher `-[x:TYPE]->` pattern with `x.property @@ "query"` searches it.
+        """
+        if self._handle is None:
+            raise RuntimeError("Database is not open")
+        lib = get_lib()
+        code = lib._lib.lattice_edge_fts_index_create(
+            self._handle, edge_type.encode("utf-8"), prop.encode("utf-8")
+        )
+        check_error(code)
+
+    def drop_edge_fts_index(self, edge_type: str, prop: str) -> None:
+        """Remove a declared relationship full-text index."""
+        if self._handle is None:
+            raise RuntimeError("Database is not open")
+        lib = get_lib()
+        code = lib._lib.lattice_edge_fts_index_drop(
+            self._handle, edge_type.encode("utf-8"), prop.encode("utf-8")
+        )
+        check_error(code)
+
+    def has_edge_fts_index(self, edge_type: str, prop: str) -> bool:
+        """Whether an index is declared for this relationship type and property."""
+        if self._handle is None:
+            raise RuntimeError("Database is not open")
+        lib = get_lib()
+        exists = ctypes.c_bool(False)
+        code = lib._lib.lattice_edge_fts_index_exists(
+            self._handle, edge_type.encode("utf-8"), prop.encode("utf-8"), byref(exists)
+        )
+        check_error(code)
+        return bool(exists.value)
+
     def fts_search(
         self,
         label: str,

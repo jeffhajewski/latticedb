@@ -403,6 +403,27 @@ lattice_error lattice_node_fts_index_exists(
     bool* exists_out
 );
 
+/* The same over a relationship type and property. A Cypher
+ * `-[x:TYPE]->` pattern with `x.property @@ "query"` searches this index. */
+lattice_error lattice_edge_fts_index_create(
+    lattice_database* db,
+    const char* edge_type,
+    const char* property
+);
+
+lattice_error lattice_edge_fts_index_drop(
+    lattice_database* db,
+    const char* edge_type,
+    const char* property
+);
+
+lattice_error lattice_edge_fts_index_exists(
+    lattice_database* db,
+    const char* edge_type,
+    const char* property,
+    bool* exists_out
+);
+
 /* Find visible node IDs through an explicit label/property equality index.
  * Returns LATTICE_ERROR_UNSUPPORTED if the requested index does not exist.
  * The caller owns *node_ids_out and must use lattice_free_node_ids(). */

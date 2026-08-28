@@ -112,6 +112,12 @@ final class Native {
 
     static native boolean hasNodeFtsIndex(long db, String label, String property);
 
+    static native void createEdgeFtsIndex(long db, String edgeType, String property);
+
+    static native void dropEdgeFtsIndex(long db, String edgeType, String property);
+
+    static native boolean hasEdgeFtsIndex(long db, String edgeType, String property);
+
     /** Returns Object[2]: long[] nodeIds, float[] scores. */
     static native Object[] ftsSearch(long db, String label, String property,
                                      String query, int limit);

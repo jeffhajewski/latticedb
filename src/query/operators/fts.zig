@@ -19,6 +19,9 @@ const NodeId = types.NodeId;
 const scorer = @import("../../fts/scorer.zig");
 const ScoredDoc = scorer.ScoredDoc;
 
+const fts_catalog = @import("../../fts/catalog.zig");
+const FtsEntityKind = fts_catalog.FtsEntityKind;
+
 const database_mod = @import("../../storage/database.zig");
 const Database = database_mod.Database;
 
@@ -48,7 +51,10 @@ pub const NO_RESULT_LIMIT: u32 = std.math.maxInt(u32);
 /// variable was written in, so by the time the operator runs the index is known
 /// to exist.
 pub const Search = struct {
-    label: []const u8,
+    /// Whether this searches a node index or an edge one.
+    kind: FtsEntityKind,
+    /// The label for a node index, the relationship type for an edge one.
+    scope: []const u8,
     property: []const u8,
     /// Parameter name holding the query text, for `@@ $param`
     param_name: ?[]const u8 = null,
@@ -174,8 +180,8 @@ pub const FtsSearchWithInput = struct {
 
             const hits = self.database.ftsSearchIndexInTxn(
                 ctx.txn,
-                .node,
-                search.label,
+                search.kind,
+                search.scope,
                 search.property,
                 query_text,
                 self.limit,
@@ -211,9 +217,13 @@ pub const FtsSearchWithInput = struct {
             }
         }
 
+        // A slot holds a node or an edge, and which one decides where the
+        // document id comes from. Reading it as a node id regardless would make
+        // an edge search silently match nothing.
+        const searching_edges = self.searches.len > 0 and self.searches[0].kind == .edge;
         while (try self.input.next(ctx)) |row| {
             const slot_val = row.getSlot(self.output_slot) orelse continue;
-            const doc_id = slot_val.asNodeId() orelse continue;
+            const doc_id = (if (searching_edges) slot_val.asEdgeId() else slot_val.asNodeId()) orelse continue;
             if (!allowed_docs.contains(doc_id)) continue;
 
             const gop = self.rows_by_doc.getOrPut(self.allocator, doc_id) catch return OperatorError.OutOfMemory;

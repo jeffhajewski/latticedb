@@ -384,6 +384,46 @@ func (db *DB) HasNodeFTSIndex(label, property string) (bool, error) {
 	return bool(exists), nil
 }
 
+func (db *DB) CreateEdgeFTSIndex(edgeType, property string) error {
+	if db == nil || db.ptr == nil {
+		return &Error{Code: ErrorInvalidArg, Message: "database is not open"}
+	}
+	cType := C.CString(edgeType)
+	defer C.free(unsafe.Pointer(cType))
+	cProperty := C.CString(property)
+	defer C.free(unsafe.Pointer(cProperty))
+
+	return errorFromCode(ErrorCode(C.lattice_edge_fts_index_create(db.ptr, cType, cProperty)))
+}
+
+func (db *DB) DropEdgeFTSIndex(edgeType, property string) error {
+	if db == nil || db.ptr == nil {
+		return &Error{Code: ErrorInvalidArg, Message: "database is not open"}
+	}
+	cType := C.CString(edgeType)
+	defer C.free(unsafe.Pointer(cType))
+	cProperty := C.CString(property)
+	defer C.free(unsafe.Pointer(cProperty))
+
+	return errorFromCode(ErrorCode(C.lattice_edge_fts_index_drop(db.ptr, cType, cProperty)))
+}
+
+func (db *DB) HasEdgeFTSIndex(edgeType, property string) (bool, error) {
+	if db == nil || db.ptr == nil {
+		return false, &Error{Code: ErrorInvalidArg, Message: "database is not open"}
+	}
+	cType := C.CString(edgeType)
+	defer C.free(unsafe.Pointer(cType))
+	cProperty := C.CString(property)
+	defer C.free(unsafe.Pointer(cProperty))
+
+	var exists C.bool
+	if err := errorFromCode(ErrorCode(C.lattice_edge_fts_index_exists(db.ptr, cType, cProperty, &exists))); err != nil {
+		return false, err
+	}
+	return bool(exists), nil
+}
+
 func (db *DB) CreateEdgePropertyIndex(edgeType, property string) error {
 	if db == nil || db.ptr == nil {
 		return &Error{Code: ErrorInvalidArg, Message: "database is not open"}

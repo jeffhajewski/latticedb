@@ -1244,7 +1244,12 @@ pub const ExpressionEvaluator = struct {
         const slot = ctx.variables.get(variable.name) orelse {
             return self.ftsMatchLiteral(b, row, ctx);
         };
-        const node_id = row.slots[slot].asNodeId() orelse {
+        // The slot says whether this is a node or an edge. Both can carry a
+        // declared index over a property, and reading the slot as one kind
+        // regardless would make the other silently never match.
+        const slot_value = row.slots[slot];
+        const is_edge = slot_value.asEdgeId() != null;
+        const doc_id = (if (is_edge) slot_value.asEdgeId() else slot_value.asNodeId()) orelse {
             return self.ftsMatchLiteral(b, row, ctx);
         };
 
@@ -1258,17 +1263,15 @@ pub const ExpressionEvaluator = struct {
         // which is why the planner prefers an index scan when it can build one.
         // Correctness first: a filter that agrees with the scan beats a fast
         // filter that disagrees with it.
-        const matched = database.ftsNodeMatches(
-            ctx.txn,
-            node_id,
-            property_access.property,
-            query,
-            FTS_FILTER_LIMIT,
-        ) catch {
+        const matched = (if (is_edge)
+            database.ftsEdgeMatches(ctx.txn, doc_id, property_access.property, query, FTS_FILTER_LIMIT)
+        else
+            database.ftsNodeMatches(ctx.txn, doc_id, property_access.property, query, FTS_FILTER_LIMIT)) catch {
             return .{ .null_val = {} };
         };
 
-        // No index declared for this property on any label the node carries. The
+        // No index declared for this property on any label the node carries, or
+        // on the edge's type. The
         // planner reports this as an error when it can see the whole condition;
         // here the condition is a larger expression and there is no way to raise
         // one, so the honest answer is the unknown that a null already means in

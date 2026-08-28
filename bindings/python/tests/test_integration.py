@@ -1460,3 +1460,32 @@ class TestQueryTransactionMode:
 
             after = db.query("MATCH (n) RETURN count(n)")._rows[0]["count(n)"]
             assert before == after
+
+
+class TestEdgeFtsOperations:
+    """Full-text search over relationship properties."""
+
+    def test_edge_fts_index_and_cypher_search(self, tmp_path):
+        """A relationship property is searchable through its declared index."""
+        db_path = tmp_path / "edge_fts.db"
+
+        with Database(db_path, create=True) as db:
+            db.create_edge_fts_index("REVIEWED", "note")
+            assert db.has_edge_fts_index("REVIEWED", "note")
+
+            with db.write() as txn:
+                alice = txn.create_node(labels=["Person"], properties={"name": "Alice"})
+                paper = txn.create_node(labels=["Paper"], properties={"title": "Attention"})
+                other = txn.create_node(labels=["Paper"], properties={"title": "Sourdough"})
+                good = txn.create_edge(alice.id, paper.id, "REVIEWED")
+                weak = txn.create_edge(alice.id, other.id, "REVIEWED")
+                txn.set_edge_property(good.id, "note", "thorough and well argued")
+                txn.set_edge_property(weak.id, "note", "mostly about bread")
+                txn.commit()
+
+            result = db.query(
+                "MATCH (a:Person)-[x:REVIEWED]->(p:Paper) "
+                "WHERE x.note @@ 'thorough' RETURN p.title AS t"
+            )
+            titles = [row["t"] for row in result]
+            assert titles == ["Attention"]

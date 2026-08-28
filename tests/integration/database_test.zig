@@ -5288,3 +5288,114 @@ test "database: a disjunction of full-text matches is planned as one union" {
         try std.testing.expectEqual(@as(usize, 3), r.rowCount());
     }
 }
+
+test "database: @@ searches a declared edge index" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    try db.createEdgeFtsIndex("REVIEWED", "note");
+
+    const alice = try db.createNode(null, &[_][]const u8{"Person"});
+    try db.setNodeProperty(null, alice, "name", .{ .string_val = "Alice" });
+    const paper = try db.createNode(null, &[_][]const u8{"Paper"});
+    try db.setNodeProperty(null, paper, "title", .{ .string_val = "Attention" });
+    const other = try db.createNode(null, &[_][]const u8{"Paper"});
+    try db.setNodeProperty(null, other, "title", .{ .string_val = "Sourdough" });
+
+    const good = try db.createEdgeAndGetId(null, alice, paper, "REVIEWED");
+    try db.setEdgePropertyById(null, good, "note", .{ .string_val = "thorough and well argued" });
+    const weak = try db.createEdgeAndGetId(null, alice, other, "REVIEWED");
+    try db.setEdgePropertyById(null, weak, "note", .{ .string_val = "mostly about bread" });
+
+    // The property on the left of `@@` belongs to the relationship, and the
+    // relationship type is what selects the index.
+    {
+        var r = try db.query(
+            "MATCH (a:Person)-[x:REVIEWED]->(p:Paper) WHERE x.note @@ 'thorough' RETURN p.title AS t",
+        );
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 1), r.rowCount());
+        try std.testing.expectEqualStrings("Attention", rowString(&r, 0, 0));
+    }
+
+    // A term in the other edge's note finds that edge and no other.
+    {
+        var r = try db.query(
+            "MATCH (a:Person)-[x:REVIEWED]->(p:Paper) WHERE x.note @@ 'bread' RETURN p.title AS t",
+        );
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 1), r.rowCount());
+        try std.testing.expectEqualStrings("Sourdough", rowString(&r, 0, 0));
+    }
+
+    // Inside an OR the predicate goes through the row filter rather than a scan,
+    // and has to agree with it.
+    {
+        var r = try db.query(
+            "MATCH (a:Person)-[x:REVIEWED]->(p:Paper) WHERE x.note @@ 'thorough' OR x.note @@ 'zzznotfound' RETURN p.title AS t",
+        );
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 1), r.rowCount());
+    }
+}
+
+test "database: an edge full-text match with no type to resolve against says so" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    try db.createEdgeFtsIndex("REVIEWED", "note");
+    const a = try db.createNode(null, &[_][]const u8{"Person"});
+    const b = try db.createNode(null, &[_][]const u8{"Paper"});
+    const e = try db.createEdgeAndGetId(null, a, b, "REVIEWED");
+    try db.setEdgePropertyById(null, e, "note", .{ .string_val = "thorough" });
+
+    // Two relationship types can each declare an index on `note`, so an untyped
+    // pattern does not say which is meant — the same reason an unlabelled node
+    // pattern does not.
+    var failed = try db.queryDetailed("MATCH (a)-[x]->(b) WHERE x.note @@ 'thorough' RETURN a AS a");
+    defer failed.deinit();
+    switch (failed) {
+        .success => return error.TestExpectedFailure,
+        .failure => |f| {
+            try std.testing.expect(std.mem.indexOf(u8, f.message, "relationship type") != null);
+        },
+    }
+}
+
+test "database: an edge search sees the transaction's own uncommitted writes" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    try db.createEdgeFtsIndex("REVIEWED", "note");
+
+    var txn = try db.beginTransaction(.read_write);
+    const a = try db.createNode(&txn, &[_][]const u8{"Person"});
+    const b = try db.createNode(&txn, &[_][]const u8{"Paper"});
+    const e = try db.createEdgeAndGetId(&txn, a, b, "REVIEWED");
+    try db.setEdgePropertyById(&txn, e, "note", .{ .string_val = "thorough and well argued" });
+
+    // Written but not committed, so only the overlay knows about it. Without the
+    // edge half of that merge this returns nothing.
+    const staged = try db.ftsSearchIndexInTxn(&txn, .edge, "REVIEWED", "note", "thorough", 10);
+    defer db.freeFtsSearchResults(staged);
+    try std.testing.expectEqual(@as(usize, 1), staged.len);
+    try std.testing.expectEqual(e, staged[0].doc_id);
+
+    try db.commitTransaction(&txn);
+
+    const committed = try db.ftsSearchIndexInTxn(null, .edge, "REVIEWED", "note", "thorough", 10);
+    defer db.freeFtsSearchResults(committed);
+    try std.testing.expectEqual(@as(usize, 1), committed.len);
+}

@@ -5,6 +5,7 @@
 //! primary API for database operations.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 const lattice = @import("lattice");
@@ -1325,17 +1326,18 @@ pub const Database = struct {
         };
         defer self.allocator.free(temp_path);
 
-        // The source comes from wherever this database lives; the destination is
-        // a path on a real disk by definition. For a file-backed database those
-        // are the same filesystem, but for an in-memory one they are not, and
-        // writing the backup into memory and then renaming a file that was never
-        // created is not a useful thing to do.
-        const vfs_handle = self.vfs.vfs();
+        // The destination is a path on a real disk by definition. For a
+        // file-backed database that is the same filesystem the source lives on,
+        // but for an in-memory one it is not, and writing the backup into
+        // memory and then renaming a file that was never created is not a
+        // useful thing to do.
         var dest_backend = PosixVfs.init(self.allocator);
         const dest_vfs = dest_backend.vfs();
 
-        var source = vfs_handle.open(self.path, .{ .read = true }) catch return DatabaseError.IoError;
-        defer source.close();
+        // Read through the handle the database already holds rather than
+        // opening a second one. The lock a live database takes is mandatory on
+        // Windows, so a second handle could not read the file at all.
+        const source = self.page_manager.file;
 
         const total_bytes = source.size() catch return DatabaseError.IoError;
 
@@ -1408,11 +1410,8 @@ pub const Database = struct {
 
         _ = try self.quiesceForCopy();
 
-        const vfs_handle = self.vfs.vfs();
-        var source = vfs_handle.open(self.path, .{ .read = true }) catch {
-            return DatabaseError.IoError;
-        };
-        defer source.close();
+        // The database's own handle, for the reason `backup` gives.
+        const source = self.page_manager.file;
 
         const total = source.size() catch return DatabaseError.IoError;
         const bytes = allocator.alloc(u8, @intCast(total)) catch {
@@ -1442,8 +1441,9 @@ pub const Database = struct {
         /// databases out of object storage: nothing touches the local disk.
         in_memory: bool = true,
         /// Directory to hold the file the bytes are written to, when
-        /// `in_memory` is false. Defaults to `/tmp`.
-        temp_dir: []const u8 = "/tmp",
+        /// `in_memory` is false. Null picks the platform temporary directory:
+        /// `$TMPDIR` or `/tmp` on POSIX, `%TEMP%` on Windows.
+        temp_dir: ?[]const u8 = null,
         /// Take a lock on the materialised file. Ignored in memory, where there
         /// is no second process to exclude. See `OpenOptions.lock`.
         lock: bool = true,
@@ -1462,6 +1462,26 @@ pub const Database = struct {
         /// Only meaningful with `in_memory`.
         borrow_bytes: bool = false,
     };
+
+    /// Where to materialise a deserialised database when the caller did not
+    /// name a directory.
+    ///
+    /// Windows has no `/tmp`, and even on POSIX a caller may have been given
+    /// somewhere else to write through `$TMPDIR`.
+    fn defaultTempDir() []const u8 {
+        const names: []const [:0]const u8 = if (builtin.os.tag == .windows)
+            &.{ "TEMP", "TMP" }
+        else
+            &.{"TMPDIR"};
+
+        for (names) |name| {
+            const value = std.c.getenv(name.ptr) orelse continue;
+            const dir = std.mem.span(value);
+            if (dir.len != 0) return dir;
+        }
+
+        return if (builtin.os.tag == .windows) "." else "/tmp";
+    }
 
     /// Open a database from bytes produced by `serialize`.
     ///
@@ -1495,7 +1515,7 @@ pub const Database = struct {
         const path = std.fmt.allocPrint(
             allocator,
             "{s}/lattice-deserialized-{x}.lattice",
-            .{ options.temp_dir, suffix },
+            .{ options.temp_dir orelse defaultTempDir(), suffix },
         ) catch return DatabaseError.OutOfMemory;
         defer allocator.free(path);
 

@@ -8,6 +8,7 @@
 //! - Query execution correctness
 
 const std = @import("std");
+const builtin = @import("builtin");
 const lattice = @import("lattice");
 
 const Database = lattice.storage.database.Database;
@@ -3818,6 +3819,20 @@ test "database: a restore refuses to overwrite unless asked" {
     );
 }
 
+/// Assert that nothing exists on disk at `path`.
+///
+/// The ":memory:" sentinel is not a name Windows can be asked about at all: a
+/// colon cannot appear in a filename, so the probe comes back as a malformed
+/// request rather than as "no such file". Nothing is lost by skipping it there,
+/// because no file could have been created under that name either.
+fn expectNothingOnDisk(path: []const u8) !void {
+    if (builtin.os.tag == .windows and std.mem.startsWith(u8, path, ":memory:")) return;
+    try std.testing.expectError(
+        error.FileNotFound,
+        @import("compat").fs.cwd().access(path, .{}),
+    );
+}
+
 /// Open a database with the standard test configuration.
 fn openForLocking(path: []const u8, options: OpenOptions) !*Database {
     var opts = options;
@@ -3891,6 +3906,13 @@ test "database: readers share a database with each other" {
 }
 
 test "database: locking can be turned off for filesystems that lack it" {
+    // Windows file locks are mandatory rather than advisory: the lock the first
+    // handle takes covers the whole file and stops any other handle from
+    // reading a byte of it, whether or not that handle asked for a lock itself.
+    // The escape hatch is still honoured there, in that the second handle takes
+    // no lock, but it cannot be observed while another handle holds one.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
     const path = "/tmp/lattice_lock_off.ltdb";
 
     @import("compat").fs.cwd().deleteFile(path) catch {};
@@ -4049,10 +4071,7 @@ test "database: a deserialized database is writable and leaves nothing behind" {
 
     // Closing removed the file it was using. A workflow that runs per request
     // must not leave a temporary database behind every time.
-    try std.testing.expectError(
-        error.FileNotFound,
-        @import("compat").fs.cwd().access(backing_path, .{}),
-    );
+    try expectNothingOnDisk(backing_path);
 
     // Changes made after deserializing come back out, and do not reach into the
     // bytes they came from.
@@ -4143,14 +4162,8 @@ test "database: an in-memory database touches no files" {
     // The whole point is that nothing lands on disk, so check rather than
     // assume. A path is a path, and it would be easy to create a real file
     // literally called ":memory:" without noticing.
-    try std.testing.expectError(
-        error.FileNotFound,
-        @import("compat").fs.cwd().access(":memory:", .{}),
-    );
-    try std.testing.expectError(
-        error.FileNotFound,
-        @import("compat").fs.cwd().access(":memory:-wal", .{}),
-    );
+    try expectNothingOnDisk(":memory:");
+    try expectNothingOnDisk(":memory:-wal");
 }
 
 test "database: an in-memory database keeps its transactions" {

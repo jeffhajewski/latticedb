@@ -31,6 +31,10 @@ public final class KnowledgeGraphExample {
         try (Database db = Database.open(path,
                 OpenOptions.defaults().create(true).enableVectors(true).vectorDimensions(dims))) {
 
+            // The chunk text is searchable because an index is declared over the
+            // property that holds it.
+            db.createNodeFtsIndex("Chunk", "text");
+
             // --- Build the graph ---
             try (Transaction txn = db.beginWrite()) {
                 Node alice = txn.createNode(List.of("Person"),
@@ -53,7 +57,6 @@ public final class KnowledgeGraphExample {
 
                     txn.setVector(chunk.id(), "embedding",
                             Embedding.hashEmbed(doc[1], dims));
-                    txn.ftsIndex(chunk.id(), doc[1]);
 
                     txn.createEdge(chunk.id(), document.id(), "PART_OF");
                     txn.createEdge(document.id(),
@@ -80,7 +83,7 @@ public final class KnowledgeGraphExample {
 
             // --- Full-text search ---
             System.out.println("\nFTS 'transformer attention':");
-            db.ftsSearch("transformer attention", FTSSearchOptions.defaults())
+            db.ftsSearch("Chunk", "text", "transformer attention", FTSSearchOptions.defaults())
                 .forEach(r -> System.out.printf("  node %d (score %.4f)%n",
                         r.nodeId(), r.score()));
         }

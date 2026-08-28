@@ -349,26 +349,32 @@ func (db *DB) VectorSearch(vector []float32, opts VectorSearchOptions) ([]Vector
 	return out, nil
 }
 
-func (db *DB) FTSSearch(query string, opts FTSSearchOptions) ([]FTSSearchResult, error) {
+// FTSSearch searches one declared full-text index.
+//
+// It returns an error rather than an empty result when no index is declared for
+// this label and property, because a mistyped property name and a query that
+// found nothing are different situations.
+func (db *DB) FTSSearch(label, property, query string, opts FTSSearchOptions) ([]FTSSearchResult, error) {
 	if db == nil || db.raw == nil {
 		return nil, ErrDatabaseClosed
 	}
 	opts = opts.withDefaults()
 
-	results, err := db.raw.FTSSearch(query, opts.Limit)
+	results, err := db.raw.FTSSearch(label, property, query, opts.Limit)
 	if err != nil {
 		return nil, wrapError(err)
 	}
 	return convertFTSResults(results), nil
 }
 
-func (db *DB) FTSSearchFuzzy(query string, opts FTSSearchOptions) ([]FTSSearchResult, error) {
+// FTSSearchFuzzy searches one declared index, tolerating typos in the query.
+func (db *DB) FTSSearchFuzzy(label, property, query string, opts FTSSearchOptions) ([]FTSSearchResult, error) {
 	if db == nil || db.raw == nil {
 		return nil, ErrDatabaseClosed
 	}
 	opts = opts.withDefaults()
 
-	results, err := db.raw.FTSSearchFuzzy(query, opts.Limit, opts.MaxDistance, opts.MinTermLength)
+	results, err := db.raw.FTSSearchFuzzy(label, property, query, opts.Limit, opts.MaxDistance, opts.MinTermLength)
 	if err != nil {
 		return nil, wrapError(err)
 	}

@@ -187,17 +187,47 @@ public final class Database implements AutoCloseable {
         return zipVectorResults(out);
     }
 
-    public List<FTSSearchResult> ftsSearch(String query, FTSSearchOptions opts) {
+    /**
+     * Declares a full-text index over one label/property pair.
+     *
+     * <p>The property holds the text. Declaring reads it from every node already
+     * carrying the label, and writes maintain it from then on. Only string
+     * properties are indexed.
+     */
+    public void createNodeFtsIndex(String label, String property) {
+        Native.createNodeFtsIndex(handle(), label, property);
+    }
+
+    /** Removes a declared full-text index and everything it stored. */
+    public void dropNodeFtsIndex(String label, String property) {
+        Native.dropNodeFtsIndex(handle(), label, property);
+    }
+
+    /** Whether a full-text index is declared for this label and property. */
+    public boolean hasNodeFtsIndex(String label, String property) {
+        return Native.hasNodeFtsIndex(handle(), label, property);
+    }
+
+    /**
+     * Searches one declared full-text index.
+     *
+     * <p>Throws {@link ErrorCode#UNSUPPORTED} when no index is declared for this
+     * label and property, rather than returning an empty list: a mistyped
+     * property name and a query that found nothing are different situations.
+     */
+    public List<FTSSearchResult> ftsSearch(String label, String property,
+                                           String query, FTSSearchOptions opts) {
         int limit = opts == null ? 10 : opts.limit();
-        Object[] out = Native.ftsSearch(handle(), query, limit);
+        Object[] out = Native.ftsSearch(handle(), label, property, query, limit);
         return zipFtsResults(out);
     }
 
-    public List<FTSSearchResult> ftsSearchFuzzy(String query, FTSSearchOptions opts) {
+    public List<FTSSearchResult> ftsSearchFuzzy(String label, String property,
+                                                String query, FTSSearchOptions opts) {
         int limit = opts == null ? 10 : opts.limit();
         int maxDistance = opts == null ? 0 : opts.maxDistance();
         int minTermLength = opts == null ? 0 : opts.minTermLength();
-        Object[] out = Native.ftsSearchFuzzy(handle(), query, limit,
+        Object[] out = Native.ftsSearchFuzzy(handle(), label, property, query, limit,
                 maxDistance, minTermLength);
         return zipFtsResults(out);
     }

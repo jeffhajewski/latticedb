@@ -861,18 +861,11 @@ class LatticeLib:
         self._lib.lattice_vector_result_free.argtypes = [LatticeVectorResult]
         self._lib.lattice_vector_result_free.restype = None
 
-        # lattice_fts_index
-        self._lib.lattice_fts_index.argtypes = [
-            LatticeTxn,
-            LatticeNodeId,
-            c_char_p,
-            c_size_t,
-        ]
-        self._lib.lattice_fts_index.restype = c_int
-
         # lattice_fts_search
         self._lib.lattice_fts_search.argtypes = [
             LatticeDatabase,
+            c_char_p,
+            c_char_p,
             c_char_p,
             c_size_t,
             c_uint32,
@@ -884,6 +877,8 @@ class LatticeLib:
         self._lib.lattice_fts_search_txn.argtypes = [
             LatticeTxn,
             c_char_p,
+            c_char_p,
+            c_char_p,
             c_size_t,
             c_uint32,
             POINTER(LatticeFtsResult),
@@ -893,6 +888,8 @@ class LatticeLib:
         # lattice_fts_search_fuzzy
         self._lib.lattice_fts_search_fuzzy.argtypes = [
             LatticeDatabase,
+            c_char_p,
+            c_char_p,
             c_char_p,
             c_size_t,
             c_uint32,
@@ -906,6 +903,8 @@ class LatticeLib:
         self._lib.lattice_fts_search_fuzzy_txn.argtypes = [
             LatticeTxn,
             c_char_p,
+            c_char_p,
+            c_char_p,
             c_size_t,
             c_uint32,
             c_uint32,
@@ -913,6 +912,31 @@ class LatticeLib:
             POINTER(LatticeFtsResult),
         ]
         self._lib.lattice_fts_search_fuzzy_txn.restype = c_int
+
+        # lattice_node_fts_index_create
+        self._lib.lattice_node_fts_index_create.argtypes = [
+            LatticeDatabase,
+            c_char_p,
+            c_char_p,
+        ]
+        self._lib.lattice_node_fts_index_create.restype = c_int
+
+        # lattice_node_fts_index_drop
+        self._lib.lattice_node_fts_index_drop.argtypes = [
+            LatticeDatabase,
+            c_char_p,
+            c_char_p,
+        ]
+        self._lib.lattice_node_fts_index_drop.restype = c_int
+
+        # lattice_node_fts_index_exists
+        self._lib.lattice_node_fts_index_exists.argtypes = [
+            LatticeDatabase,
+            c_char_p,
+            c_char_p,
+            POINTER(ctypes.c_bool),
+        ]
+        self._lib.lattice_node_fts_index_exists.restype = c_int
 
         # lattice_fts_result_count
         self._lib.lattice_fts_result_count.argtypes = [LatticeFtsResult]

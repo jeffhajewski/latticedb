@@ -301,13 +301,6 @@ func (tx *Tx) BatchInsert(label string, vectors [][]float32) ([]NodeID, error) {
 	return tx.BatchInsertVectors(label, vectors)
 }
 
-func (tx *Tx) FTSIndex(nodeID NodeID, text string) error {
-	if err := tx.ensureWritable(); err != nil {
-		return err
-	}
-	return wrapError(tx.raw.FTSIndex(uint64(nodeID), text))
-}
-
 func (tx *Tx) PublishStream(stream, kind string, payload Value) error {
 	if err := tx.ensureWritable(); err != nil {
 		return err

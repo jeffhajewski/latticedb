@@ -674,21 +674,21 @@ void lattice_vector_result_free(lattice_vector_result* result);
 /*
  * Full-text search operations
  *
- * BM25-scored full-text search:
- *   1. Index documents with lattice_fts_index()
- *   2. Search with lattice_fts_search()
- *   3. Get result count with lattice_fts_result_count()
- *   4. Iterate results with lattice_fts_result_get()
- *   5. Free with lattice_fts_result_free()
+ * BM25-scored full-text search over a declared index:
+ *   1. Declare an index over the property holding the text, with
+ *      lattice_node_fts_index_create()
+ *   2. Write that property; the index is maintained from then on
+ *   3. Search with lattice_fts_search()
+ *   4. Get result count with lattice_fts_result_count()
+ *   5. Iterate results with lattice_fts_result_get()
+ *   6. Free with lattice_fts_result_free()
  *
  * Example:
- *   // Index a document
- *   const char* text = "The quick brown fox jumps over the lazy dog";
- *   lattice_fts_index(txn, node_id, text, strlen(text));
+ *   lattice_node_fts_index_create(db, "Article", "text");
+ *   // ... write Article.text on some nodes ...
  *
- *   // Search
  *   lattice_fts_result* results;
- *   lattice_fts_search(db, "quick fox", 9, 10, &results);
+ *   lattice_fts_search(db, "Article", "text", "quick fox", 9, 10, &results);
  *   uint32_t count = lattice_fts_result_count(results);
  *   for (uint32_t i = 0; i < count; i++) {
  *       lattice_node_id node_id;
@@ -696,19 +696,23 @@ void lattice_vector_result_free(lattice_vector_result* result);
  *       lattice_fts_result_get(results, i, &node_id, &score);
  *   }
  *   lattice_fts_result_free(results);
+ *
+ * lattice_fts_index() is gone. It put text into a single index shared by every
+ * node, which meant the text a search matched was not stored anywhere the
+ * database could show you, and every property name searched the same text.
+ * Text that was indexed that way and never written to a property cannot be
+ * migrated automatically: store it in a property and declare an index over it.
+ *
+ * Searching a label and property with no declared index returns
+ * LATTICE_ERROR_UNSUPPORTED rather than an empty result, so a mistyped property
+ * name does not look like a query that found nothing.
  */
 
-/* Index a text document for full-text search */
-lattice_error lattice_fts_index(
-    lattice_txn* txn,
-    lattice_node_id node_id,
-    const char* text,
-    size_t text_len
-);
-
-/* Search for documents matching a text query */
+/* Search one declared index for documents matching a text query */
 lattice_error lattice_fts_search(
     lattice_database* db,
+    const char* label,
+    const char* property,
     const char* query,
     size_t query_len,
     uint32_t limit,
@@ -717,6 +721,8 @@ lattice_error lattice_fts_search(
 
 lattice_error lattice_fts_search_txn(
     lattice_txn* txn,
+    const char* label,
+    const char* property,
     const char* query,
     size_t query_len,
     uint32_t limit,
@@ -725,9 +731,15 @@ lattice_error lattice_fts_search_txn(
 
 /* Search with fuzzy matching (typo tolerance).
  * max_distance: max Levenshtein edit distance (0 = default 2)
- * min_term_length: min term length for fuzzy expansion (0 = default 4) */
+ * min_term_length: min term length for fuzzy expansion (0 = default 4)
+ *
+ * Text written in the current transaction and not yet committed is matched by
+ * term presence rather than edit distance, so a typo will not find a document
+ * this transaction has only just written. */
 lattice_error lattice_fts_search_fuzzy(
     lattice_database* db,
+    const char* label,
+    const char* property,
     const char* query,
     size_t query_len,
     uint32_t limit,
@@ -738,6 +750,8 @@ lattice_error lattice_fts_search_fuzzy(
 
 lattice_error lattice_fts_search_fuzzy_txn(
     lattice_txn* txn,
+    const char* label,
+    const char* property,
     const char* query,
     size_t query_len,
     uint32_t limit,

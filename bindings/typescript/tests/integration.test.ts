@@ -810,6 +810,7 @@ describeIfNative('Database Integration', () => {
     beforeEach(async () => {
       db = new Database(dbPath, { create: true, enableVectors: true, vectorDimensions: 4 });
       await db.open();
+      await db.createNodeFtsIndex('Document', 'text');
     });
 
     function beginManualTransaction(readOnly: boolean): Transaction {
@@ -889,25 +890,25 @@ describeIfNative('Database Integration', () => {
       try {
         const doc = await writer.createNode({ labels: ['Document'] });
         await writer.setVector(doc.id, 'embedding', queryVec);
-        await writer.ftsIndex(doc.id, 'machine learning systems');
+        await writer.setProperty(doc.id, 'text', 'machine learning systems');
 
         const writerVector = await writer.vectorSearch(queryVec, { k: 5 });
         expect(writerVector.length).toBe(1);
         expect(writerVector[0]?.nodeId).toBe(doc.id);
 
-        const writerFts = await writer.ftsSearch('machine learning', { limit: 5 });
+        const writerFts = await writer.ftsSearch('Document', 'text', 'machine learning', { limit: 5 });
         expect(writerFts.length).toBe(1);
         expect(writerFts[0]?.nodeId).toBe(doc.id);
 
         expect(await reader.vectorSearch(queryVec, { k: 5 })).toEqual([]);
-        expect(await reader.ftsSearch('machine learning', { limit: 5 })).toEqual([]);
+        expect(await reader.ftsSearch('Document', 'text', 'machine learning', { limit: 5 })).toEqual([]);
         expect(await db.vectorSearch(queryVec, { k: 5 })).toEqual([]);
-        expect(await db.ftsSearch('machine learning', { limit: 5 })).toEqual([]);
+        expect(await db.ftsSearch('Document', 'text', 'machine learning', { limit: 5 })).toEqual([]);
 
         writer.commit();
 
         expect(await reader.vectorSearch(queryVec, { k: 5 })).toEqual([]);
-        expect(await reader.ftsSearch('machine learning', { limit: 5 })).toEqual([]);
+        expect(await reader.ftsSearch('Document', 'text', 'machine learning', { limit: 5 })).toEqual([]);
 
         reader.rollback();
 
@@ -916,7 +917,7 @@ describeIfNative('Database Integration', () => {
           expect(afterVector.length).toBe(1);
           expect(afterVector[0]?.nodeId).toBe(doc.id);
 
-          const afterFts = await afterCommit.ftsSearch('machine learning', { limit: 5 });
+          const afterFts = await afterCommit.ftsSearch('Document', 'text', 'machine learning', { limit: 5 });
           expect(afterFts.length).toBe(1);
           expect(afterFts[0]?.nodeId).toBe(doc.id);
         });
@@ -1051,6 +1052,7 @@ describeIfNative('Database Integration', () => {
     beforeEach(async () => {
       db = new Database(dbPath, { create: true });
       await db.open();
+      await db.createNodeFtsIndex('Document', 'text');
     });
 
     test('index and search text', async () => {
@@ -1059,23 +1061,23 @@ describeIfNative('Database Integration', () => {
           labels: ['Document'],
           properties: { title: 'Machine Learning Basics' },
         });
-        await txn.ftsIndex(doc1.id, 'Machine learning is a subset of artificial intelligence');
+        await txn.setProperty(doc1.id, 'text', 'Machine learning is a subset of artificial intelligence');
 
         const doc2 = await txn.createNode({
           labels: ['Document'],
           properties: { title: 'Deep Learning Guide' },
         });
-        await txn.ftsIndex(doc2.id, 'Deep learning uses neural networks for complex pattern recognition');
+        await txn.setProperty(doc2.id, 'text', 'Deep learning uses neural networks for complex pattern recognition');
 
         const doc3 = await txn.createNode({
           labels: ['Document'],
           properties: { title: 'Web Development' },
         });
-        await txn.ftsIndex(doc3.id, 'Building responsive web applications with JavaScript');
+        await txn.setProperty(doc3.id, 'text', 'Building responsive web applications with JavaScript');
       });
 
       // Search for "learning"
-      const results = await db.ftsSearch('learning', { limit: 10 });
+      const results = await db.ftsSearch('Document', 'text', 'learning', { limit: 10 });
 
       expect(results.length).toBe(2); // Should find docs 1 and 2
       expect(results[0]!.nodeId).toBeDefined();
@@ -1085,10 +1087,10 @@ describeIfNative('Database Integration', () => {
     test('search returns no results for unmatched terms', async () => {
       await db.write(async (txn) => {
         const doc = await txn.createNode({ labels: ['Document'] });
-        await txn.ftsIndex(doc.id, 'The quick brown fox jumps over the lazy dog');
+        await txn.setProperty(doc.id, 'text', 'The quick brown fox jumps over the lazy dog');
       });
 
-      const results = await db.ftsSearch('elephant', { limit: 10 });
+      const results = await db.ftsSearch('Document', 'text', 'elephant', { limit: 10 });
       expect(results.length).toBe(0);
     });
   });
@@ -1097,6 +1099,7 @@ describeIfNative('Database Integration', () => {
     beforeEach(async () => {
       db = new Database(dbPath, { create: true });
       await db.open();
+      await db.createNodeFtsIndex('Document', 'text');
     });
 
     test('fuzzy search finds results despite typos', async () => {
@@ -1105,17 +1108,17 @@ describeIfNative('Database Integration', () => {
           labels: ['Document'],
           properties: { title: 'Machine Learning Basics' },
         });
-        await txn.ftsIndex(doc1.id, 'Machine learning is a subset of artificial intelligence');
+        await txn.setProperty(doc1.id, 'text', 'Machine learning is a subset of artificial intelligence');
 
         const doc2 = await txn.createNode({
           labels: ['Document'],
           properties: { title: 'Web Development' },
         });
-        await txn.ftsIndex(doc2.id, 'Building responsive web applications with JavaScript');
+        await txn.setProperty(doc2.id, 'text', 'Building responsive web applications with JavaScript');
       });
 
       // Search with typos: "machne lerning" instead of "machine learning"
-      const results = await db.ftsSearchFuzzy('machne lerning', { limit: 10 });
+      const results = await db.ftsSearchFuzzy('Document', 'text', 'machne lerning', { limit: 10 });
 
       expect(results.length).toBeGreaterThanOrEqual(1);
       expect(results[0]!.nodeId).toBeDefined();
@@ -1128,17 +1131,17 @@ describeIfNative('Database Integration', () => {
           labels: ['Document'],
           properties: { title: 'Machine Learning' },
         });
-        await txn.ftsIndex(doc.id, 'Machine learning is a powerful technology');
+        await txn.setProperty(doc.id, 'text', 'Machine learning is a powerful technology');
       });
 
       // With max_distance=1, a 2-edit typo should not match
-      const resultsTight = await db.ftsSearchFuzzy('machne', {
+      const resultsTight = await db.ftsSearchFuzzy('Document', 'text', 'machne', {
         limit: 10,
         maxDistance: 1,
       });
 
       // With default distance (2), it should match
-      const resultsLoose = await db.ftsSearchFuzzy('machne', {
+      const resultsLoose = await db.ftsSearchFuzzy('Document', 'text', 'machne', {
         limit: 10,
         maxDistance: 2,
       });

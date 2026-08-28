@@ -101,7 +101,8 @@ pub fn expandPrefixTerms(
     const upper_bound = prefixUpperBound(prefix, &upper_buf);
 
     // Iterate dictionary terms in range [prefix, upper_bound)
-    var iter = try dictionary.iterateRange(prefix, upper_bound);
+    var iter: Dictionary.DictionaryIterator = undefined;
+    try dictionary.iterateRange(prefix, upper_bound, &iter);
     defer iter.deinit();
 
     var count: u32 = 0;

@@ -2853,6 +2853,11 @@ test "c_api: txn-scoped vector and fts searches hide uncommitted changes" {
         @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
+    try std.testing.expectEqual(
+        lattice_error.ok,
+        c_api.lattice_node_fts_index_create(db, "Document", "text"),
+    );
+
     var write_txn: ?*lattice_txn = null;
     var read_txn: ?*lattice_txn = null;
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &write_txn));
@@ -2866,9 +2871,13 @@ test "c_api: txn-scoped vector and fts searches hide uncommitted changes" {
         lattice_error.ok,
         c_api.lattice_node_set_vector(write_txn, doc, "embedding", &query_vector, query_vector.len),
     );
+    const fts_val = lattice_value{ .value_type = .string, .data = .{ .string_val = .{
+        .ptr = "machine learning systems",
+        .len = "machine learning systems".len,
+    } } };
     try std.testing.expectEqual(
         lattice_error.ok,
-        c_api.lattice_fts_index(write_txn, doc, "machine learning systems", "machine learning systems".len),
+        c_api.lattice_node_set_property(write_txn, doc, "text", &fts_val),
     );
 
     var writer_vector: ?*lattice_vector_result = null;
@@ -2882,7 +2891,7 @@ test "c_api: txn-scoped vector and fts searches hide uncommitted changes" {
     var writer_fts: ?*lattice_fts_result = null;
     try std.testing.expectEqual(
         lattice_error.ok,
-        c_api.lattice_fts_search_txn(write_txn, "machine learning", "machine learning".len, 5, &writer_fts),
+        c_api.lattice_fts_search_txn(write_txn, "Document", "text", "machine learning", "machine learning".len, 5, &writer_fts),
     );
     defer c_api.lattice_fts_result_free(writer_fts);
     try std.testing.expectEqual(@as(u32, 1), c_api.lattice_fts_result_count(writer_fts));
@@ -2906,7 +2915,7 @@ test "c_api: txn-scoped vector and fts searches hide uncommitted changes" {
     var read_fts: ?*lattice_fts_result = null;
     try std.testing.expectEqual(
         lattice_error.ok,
-        c_api.lattice_fts_search_txn(read_txn, "machine learning", "machine learning".len, 5, &read_fts),
+        c_api.lattice_fts_search_txn(read_txn, "Document", "text", "machine learning", "machine learning".len, 5, &read_fts),
     );
     defer c_api.lattice_fts_result_free(read_fts);
     try std.testing.expectEqual(@as(u32, 0), c_api.lattice_fts_result_count(read_fts));
@@ -2914,7 +2923,7 @@ test "c_api: txn-scoped vector and fts searches hide uncommitted changes" {
     var public_fts: ?*lattice_fts_result = null;
     try std.testing.expectEqual(
         lattice_error.ok,
-        c_api.lattice_fts_search(db, "machine learning", "machine learning".len, 5, &public_fts),
+        c_api.lattice_fts_search(db, "Document", "text", "machine learning", "machine learning".len, 5, &public_fts),
     );
     defer c_api.lattice_fts_result_free(public_fts);
     try std.testing.expectEqual(@as(u32, 0), c_api.lattice_fts_result_count(public_fts));
@@ -2932,7 +2941,7 @@ test "c_api: txn-scoped vector and fts searches hide uncommitted changes" {
     var stale_fts: ?*lattice_fts_result = null;
     try std.testing.expectEqual(
         lattice_error.ok,
-        c_api.lattice_fts_search_txn(read_txn, "machine learning", "machine learning".len, 5, &stale_fts),
+        c_api.lattice_fts_search_txn(read_txn, "Document", "text", "machine learning", "machine learning".len, 5, &stale_fts),
     );
     defer c_api.lattice_fts_result_free(stale_fts);
     try std.testing.expectEqual(@as(u32, 0), c_api.lattice_fts_result_count(stale_fts));
@@ -2953,7 +2962,7 @@ test "c_api: txn-scoped vector and fts searches hide uncommitted changes" {
     var after_fts: ?*lattice_fts_result = null;
     try std.testing.expectEqual(
         lattice_error.ok,
-        c_api.lattice_fts_search_txn(after_txn, "machine learning", "machine learning".len, 5, &after_fts),
+        c_api.lattice_fts_search_txn(after_txn, "Document", "text", "machine learning", "machine learning".len, 5, &after_fts),
     );
     defer c_api.lattice_fts_result_free(after_fts);
     try std.testing.expectEqual(@as(u32, 1), c_api.lattice_fts_result_count(after_fts));

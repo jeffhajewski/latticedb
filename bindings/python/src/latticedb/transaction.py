@@ -750,35 +750,10 @@ class Transaction:
             if result_ptr.value:
                 lib._lib.lattice_vector_result_free(result_ptr)
 
-    def fts_index(
-        self,
-        node_id: int,
-        text: str,
-    ) -> None:
-        """
-        Index text for full-text search on a node.
-
-        Args:
-            node_id: The node ID to associate with the text.
-            text: The text content to index.
-        """
-        if self._read_only:
-            raise RuntimeError("Cannot index text in read-only transaction")
-        if self._handle is None:
-            raise RuntimeError("Transaction not started")
-
-        lib = get_lib()
-        text_bytes = text.encode("utf-8")
-        code = lib._lib.lattice_fts_index(
-            self._handle,
-            node_id,
-            text_bytes,
-            len(text_bytes),
-        )
-        check_error(code)
-
     def fts_search(
         self,
+        label: str,
+        prop: str,
         query: str,
         *,
         limit: int = 10,
@@ -795,6 +770,8 @@ class Transaction:
 
         code = lib._lib.lattice_fts_search_txn(
             self._handle,
+            label.encode("utf-8"),
+            prop.encode("utf-8"),
             query_bytes,
             len(query_bytes),
             limit,
@@ -820,6 +797,8 @@ class Transaction:
 
     def fts_search_fuzzy(
         self,
+        label: str,
+        prop: str,
         query: str,
         *,
         limit: int = 10,
@@ -838,6 +817,8 @@ class Transaction:
 
         code = lib._lib.lattice_fts_search_fuzzy_txn(
             self._handle,
+            label.encode("utf-8"),
+            prop.encode("utf-8"),
             query_bytes,
             len(query_bytes),
             limit,

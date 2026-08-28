@@ -561,21 +561,6 @@ func (tx *Tx) BatchInsert(label string, vectors [][]float32) ([]uint64, error) {
 	return out, nil
 }
 
-func (tx *Tx) FTSIndex(nodeID uint64, text string) error {
-	var textPtr unsafe.Pointer
-	if len(text) > 0 {
-		textPtr = C.CBytes([]byte(text))
-		defer C.free(textPtr)
-	}
-
-	return errorFromCode(ErrorCode(C.lattice_fts_index(
-		tx.ptr,
-		C.lattice_node_id(nodeID),
-		(*C.char)(textPtr),
-		C.size_t(len(text)),
-	)))
-}
-
 func (tx *Tx) PublishStream(stream, kind string, payload any) error {
 	_, err := tx.PublishStreamGetSequence(stream, kind, payload)
 	return err
@@ -990,12 +975,12 @@ func (db *DB) VectorSearch(vector []float32, k uint32, efSearch uint16) ([]Vecto
 	return out, nil
 }
 
-func (db *DB) FTSSearch(query string, limit uint32) ([]FTSSearchResult, error) {
-	return db.ftsSearch(query, limit, 0, 0, false)
+func (db *DB) FTSSearch(label, property, query string, limit uint32) ([]FTSSearchResult, error) {
+	return db.ftsSearch(label, property, query, limit, 0, 0, false)
 }
 
-func (db *DB) FTSSearchFuzzy(query string, limit, maxDistance, minTermLength uint32) ([]FTSSearchResult, error) {
-	return db.ftsSearch(query, limit, maxDistance, minTermLength, true)
+func (db *DB) FTSSearchFuzzy(label, property, query string, limit, maxDistance, minTermLength uint32) ([]FTSSearchResult, error) {
+	return db.ftsSearch(label, property, query, limit, maxDistance, minTermLength, true)
 }
 
 func (db *DB) ReadStream(stream string, afterSequence uint64, limit uint, timeoutMs uint32) ([]StreamRecord, error) {
@@ -1084,18 +1069,25 @@ func (db *DB) GetStreamOffset(stream, consumer string) (uint64, bool, error) {
 	return uint64(sequence), bool(exists), nil
 }
 
-func (db *DB) ftsSearch(query string, limit, maxDistance, minTermLength uint32, fuzzy bool) ([]FTSSearchResult, error) {
+func (db *DB) ftsSearch(label, property, query string, limit, maxDistance, minTermLength uint32, fuzzy bool) ([]FTSSearchResult, error) {
 	var queryPtr unsafe.Pointer
 	if len(query) > 0 {
 		queryPtr = C.CBytes([]byte(query))
 		defer C.free(queryPtr)
 	}
 
+	cLabel := C.CString(label)
+	defer C.free(unsafe.Pointer(cLabel))
+	cProperty := C.CString(property)
+	defer C.free(unsafe.Pointer(cProperty))
+
 	var result *C.lattice_fts_result
 	var rc C.lattice_error
 	if fuzzy {
 		rc = C.lattice_fts_search_fuzzy(
 			db.ptr,
+			cLabel,
+			cProperty,
 			(*C.char)(queryPtr),
 			C.size_t(len(query)),
 			C.uint32_t(limit),
@@ -1106,6 +1098,8 @@ func (db *DB) ftsSearch(query string, limit, maxDistance, minTermLength uint32, 
 	} else {
 		rc = C.lattice_fts_search(
 			db.ptr,
+			cLabel,
+			cProperty,
 			(*C.char)(queryPtr),
 			C.size_t(len(query)),
 			C.uint32_t(limit),

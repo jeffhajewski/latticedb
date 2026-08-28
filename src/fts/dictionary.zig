@@ -237,6 +237,9 @@ pub const Dictionary = struct {
         /// every step, so a copy of `inner` alone would be left pointing at a
         /// buffer that died with the call that built it.
         scoped_iter: ScopedTree.Iterator,
+        /// The view the walk came from, to take the scope prefix back off the
+        /// keys it returns.
+        view: ScopedTree,
 
         const IterSelf = @This();
 
@@ -256,8 +259,16 @@ pub const Dictionary = struct {
                 if (item.value.len < @sizeOf(DictionaryEntry)) {
                     return DictionaryError.InvalidData;
                 }
+                // Keys come out of the tree carrying the prefix that scopes
+                // them to one index. Callers want the term, and one of them
+                // measures edit distance against it: four bytes of index
+                // identity on the front puts every term far outside any
+                // sensible distance, so nothing ever matches.
+                const term = self.view.callerKey(item.key) orelse {
+                    return DictionaryError.InvalidData;
+                };
                 return Item{
-                    .term = item.key,
+                    .term = term,
                     .entry = DictionaryEntry.deserialize(item.value),
                 };
             }
@@ -273,29 +284,32 @@ pub const Dictionary = struct {
 
     /// Create an iterator over all dictionary entries
     /// Iterator must be deinit'd when done
-    pub fn iterate(self: *Self) DictionaryError!DictionaryIterator {
-        // For a scoped view this walks only this index's terms, which is what
-        // makes iterating a dictionary mean one index rather than all of them.
-        var iter = DictionaryIterator{ .scoped_iter = undefined };
-        self.tree.iterateAll(&iter.scoped_iter) catch |err| {
+    /// Walk this index's terms, writing the iterator into `out`.
+    ///
+    /// The iterator carries the bounds its walk compares against, so it cannot be
+    /// returned by value: copying the struct moves those buffers and leaves the
+    /// underlying tree iterator comparing against the copy that was left behind.
+    /// This function used to do exactly that, and it went unnoticed because the
+    /// only caller was fuzzy search, which ran against the unscoped index where
+    /// there are no bounds to dangle. Scoping fuzzy search is what surfaced it.
+    pub fn iterate(self: *Self, out: *DictionaryIterator) DictionaryError!void {
+        out.view = self.tree;
+        self.tree.iterateAll(&out.scoped_iter) catch |err| {
             return mapBTreeError(err);
         };
-        return iter;
     }
 
-    /// Create an iterator over dictionary entries in a key range
-    /// Both start_key and end_key are optional (null means unbounded)
-    /// Iterator must be deinit'd when done
+    /// The same over a key range. Both bounds are optional; null is unbounded.
     pub fn iterateRange(
         self: *Self,
         start_key: ?[]const u8,
         end_key: ?[]const u8,
-    ) DictionaryError!DictionaryIterator {
-        var iter = DictionaryIterator{ .scoped_iter = undefined };
-        self.tree.rangeOwned(start_key, end_key, &iter.scoped_iter) catch |err| {
+        out: *DictionaryIterator,
+    ) DictionaryError!void {
+        out.view = self.tree;
+        self.tree.rangeOwned(start_key, end_key, &out.scoped_iter) catch |err| {
             return mapBTreeError(err);
         };
-        return iter;
     }
 
 };

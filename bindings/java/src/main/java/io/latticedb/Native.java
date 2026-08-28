@@ -106,17 +106,25 @@ final class Native {
     static native Object[] vectorSearchTxn(long txn, float[] vector, int k, int efSearch);
 
     /* Full-text search */
-    static native void ftsIndex(long txn, long nodeId, String text);
+    static native void createNodeFtsIndex(long db, String label, String property);
+
+    static native void dropNodeFtsIndex(long db, String label, String property);
+
+    static native boolean hasNodeFtsIndex(long db, String label, String property);
 
     /** Returns Object[2]: long[] nodeIds, float[] scores. */
-    static native Object[] ftsSearch(long db, String query, int limit);
+    static native Object[] ftsSearch(long db, String label, String property,
+                                     String query, int limit);
 
-    static native Object[] ftsSearchFuzzy(long db, String query, int limit,
+    static native Object[] ftsSearchFuzzy(long db, String label, String property,
+                                          String query, int limit,
                                           int maxDistance, int minTermLength);
 
-    static native Object[] ftsSearchTxn(long txn, String query, int limit);
+    static native Object[] ftsSearchTxn(long txn, String label, String property,
+                                        String query, int limit);
 
-    static native Object[] ftsSearchFuzzyTxn(long txn, String query, int limit,
+    static native Object[] ftsSearchFuzzyTxn(long txn, String label, String property,
+                                             String query, int limit,
                                              int maxDistance, int minTermLength);
 
     /* Streams */

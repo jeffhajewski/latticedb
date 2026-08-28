@@ -61,32 +61,36 @@ class SearchTest {
     void ftsSearchAndFuzzy() {
         try (Database db = Database.open(dir.resolve("f.db").toString(),
                 OpenOptions.defaults().create(true))) {
+            db.createNodeFtsIndex("Doc", "text");
+            assertTrue(db.hasNodeFtsIndex("Doc", "text"));
+
             db.write(tx -> {
                 Node a = tx.createNode(List.of("Doc"));
-                tx.ftsIndex(a.id(), "The quick brown fox jumps over the lazy dog");
+                tx.setProperty(a.id(), "text",
+                        "The quick brown fox jumps over the lazy dog");
                 Node b = tx.createNode(List.of("Doc"));
-                tx.ftsIndex(b.id(), "Completely different words appear here");
+                tx.setProperty(b.id(), "text", "Completely different words appear here");
                 return null;
             });
 
-            List<FTSSearchResult> hits = db.ftsSearch("quick fox",
+            List<FTSSearchResult> hits = db.ftsSearch("Doc", "text", "quick fox",
                     FTSSearchOptions.defaults());
             assertEquals(1, hits.size());
             assertEquals(1, hits.get(0).nodeId());
             assertTrue(hits.get(0).score() > 0);
 
             // typo tolerance: "quck" should match via fuzzy search
-            List<FTSSearchResult> fuzzy = db.ftsSearchFuzzy("quck fox",
+            List<FTSSearchResult> fuzzy = db.ftsSearchFuzzy("Doc", "text", "quck fox",
                     FTSSearchOptions.defaults());
             assertFalse(fuzzy.isEmpty());
 
             // A null options value consistently selects binding defaults.
-            assertFalse(db.ftsSearchFuzzy("quck fox", null).isEmpty());
+            assertFalse(db.ftsSearchFuzzy("Doc", "text", "quck fox", null).isEmpty());
             try (Transaction tx = db.beginRead()) {
-                assertFalse(tx.ftsSearchFuzzy("quck fox", null).isEmpty());
+                assertFalse(tx.ftsSearchFuzzy("Doc", "text", "quck fox", null).isEmpty());
             }
 
-            List<FTSSearchResult> none = db.ftsSearch("zebra",
+            List<FTSSearchResult> none = db.ftsSearch("Doc", "text", "zebra",
                     FTSSearchOptions.defaults());
             assertTrue(none.isEmpty());
         }

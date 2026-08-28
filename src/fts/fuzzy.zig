@@ -166,7 +166,8 @@ pub fn expandFuzzyTerms(
     errdefer matches.deinit(allocator);
 
     // Iterate all dictionary terms
-    var iter = try dictionary.iterate();
+    var iter: Dictionary.DictionaryIterator = undefined;
+    try dictionary.iterate(&iter);
     defer iter.deinit();
 
     while (try iter.next()) |item| {

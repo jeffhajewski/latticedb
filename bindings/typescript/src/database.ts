@@ -368,11 +368,18 @@ export class Database {
   /**
    * Full-text search.
    *
+   * @param label - Node label whose index to search
+   * @param property - Property whose index to search
    * @param query - Search query
    * @param options - Search options
    * @returns Matching nodes with scores
+   * @throws If no index is declared for this label and property. That is
+   *   deliberately not an empty result: a mistyped property name and a query
+   *   that found nothing are different situations.
    */
   async ftsSearch(
+    label: string,
+    property: string,
     query: string,
     options?: FtsSearchOptions
   ): Promise<Array<{ nodeId: bigint; score: number }>> {
@@ -380,7 +387,7 @@ export class Database {
     const ffi = this.ffi!;
     const limit = options?.limit ?? 10;
 
-    const resultHandle = ffi.ftsSearch(this.dbHandle!, query, limit);
+    const resultHandle = ffi.ftsSearch(this.dbHandle!, label, property, query, limit);
     try {
       const count = ffi.ftsResultCount(resultHandle);
       const results: Array<{ nodeId: bigint; score: number }> = [];
@@ -394,13 +401,45 @@ export class Database {
   }
 
   /**
+   * Declare a full-text index over one label/property pair.
+   *
+   * The property holds the text. Declaring reads it from every node already
+   * carrying the label, and writes maintain it from then on. Only string
+   * properties are indexed.
+   */
+  async createNodeFtsIndex(label: string, property: string): Promise<void> {
+    this.ensureOpen();
+    this.ffi!.createNodeFtsIndex(this.dbHandle!, label, property);
+  }
+
+  /**
+   * Remove a declared full-text index and everything it stored.
+   */
+  async dropNodeFtsIndex(label: string, property: string): Promise<void> {
+    this.ensureOpen();
+    this.ffi!.dropNodeFtsIndex(this.dbHandle!, label, property);
+  }
+
+  /**
+   * Whether a full-text index is declared for this label and property.
+   */
+  async hasNodeFtsIndex(label: string, property: string): Promise<boolean> {
+    this.ensureOpen();
+    return this.ffi!.hasNodeFtsIndex(this.dbHandle!, label, property);
+  }
+
+  /**
    * Fuzzy full-text search with typo tolerance.
    *
+   * @param label - Node label whose index to search
+   * @param property - Property whose index to search
    * @param query - Search query
    * @param options - Search options including maxDistance and minTermLength
    * @returns Matching nodes with scores
    */
   async ftsSearchFuzzy(
+    label: string,
+    property: string,
     query: string,
     options?: FtsSearchOptions & { maxDistance?: number; minTermLength?: number }
   ): Promise<Array<{ nodeId: bigint; score: number }>> {
@@ -410,7 +449,7 @@ export class Database {
     const maxDistance = options?.maxDistance ?? 0;
     const minTermLength = options?.minTermLength ?? 0;
 
-    const resultHandle = ffi.ftsSearchFuzzy(this.dbHandle!, query, limit, maxDistance, minTermLength);
+    const resultHandle = ffi.ftsSearchFuzzy(this.dbHandle!, label, property, query, limit, maxDistance, minTermLength);
     try {
       const count = ffi.ftsResultCount(resultHandle);
       const results: Array<{ nodeId: bigint; score: number }> = [];

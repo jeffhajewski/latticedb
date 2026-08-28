@@ -995,24 +995,25 @@ class TestFtsOperations:
         db_path = tmp_path / "test.db"
 
         with Database(db_path, create=True) as db:
-            # Create nodes and index text
+            db.create_node_fts_index("Document", "text")
+            # Create nodes; writing the property maintains the index
             with db.write() as txn:
                 node1 = txn.create_node(labels=["Document"])
                 txn.set_property(node1.id, "title", "Introduction to Machine Learning")
-                txn.fts_index(node1.id, "Machine learning is a subset of artificial intelligence")
+                txn.set_property(node1.id, "text", "Machine learning is a subset of artificial intelligence")
 
                 node2 = txn.create_node(labels=["Document"])
                 txn.set_property(node2.id, "title", "Deep Learning Guide")
-                txn.fts_index(node2.id, "Deep learning uses neural networks for complex tasks")
+                txn.set_property(node2.id, "text", "Deep learning uses neural networks for complex tasks")
 
                 node3 = txn.create_node(labels=["Document"])
                 txn.set_property(node3.id, "title", "Python Programming")
-                txn.fts_index(node3.id, "Python is a popular programming language")
+                txn.set_property(node3.id, "text", "Python is a popular programming language")
 
                 txn.commit()
 
             # Search for "machine learning"
-            results = db.fts_search("machine learning", limit=10)
+            results = db.fts_search("Document", "text", "machine learning", limit=10)
 
             # Should find at least one result
             assert len(results) >= 1
@@ -1026,13 +1027,14 @@ class TestFtsOperations:
         db_path = tmp_path / "test.db"
 
         with Database(db_path, create=True) as db:
+            db.create_node_fts_index("Document", "text")
             with db.write() as txn:
                 node = txn.create_node(labels=["Document"])
-                txn.fts_index(node.id, "The quick brown fox")
+                txn.set_property(node.id, "text", "The quick brown fox")
                 txn.commit()
 
             # Search for something not in the index
-            results = db.fts_search("elephant zebra", limit=10)
+            results = db.fts_search("Document", "text", "elephant zebra", limit=10)
 
             # Should return empty list
             assert len(results) == 0
@@ -1042,7 +1044,8 @@ class TestFtsOperations:
         db_path = tmp_path / "test.db"
 
         with Database(db_path, create=True) as db:
-            results = db.fts_search("anything", limit=10)
+            db.create_node_fts_index("Document", "text")
+            results = db.fts_search("Document", "text", "anything", limit=10)
 
             # Should return empty list
             assert len(results) == 0
@@ -1056,16 +1059,17 @@ class TestFtsFuzzyOperations:
         db_path = tmp_path / "test.db"
 
         with Database(db_path, create=True) as db:
+            db.create_node_fts_index("Document", "text")
             with db.write() as txn:
                 node1 = txn.create_node(labels=["Document"])
-                txn.fts_index(node1.id, "Machine learning is a subset of artificial intelligence")
+                txn.set_property(node1.id, "text", "Machine learning is a subset of artificial intelligence")
 
                 node2 = txn.create_node(labels=["Document"])
-                txn.fts_index(node2.id, "Python is a popular programming language")
+                txn.set_property(node2.id, "text", "Python is a popular programming language")
                 txn.commit()
 
             # Search with typos: "machne lerning" instead of "machine learning"
-            results = db.fts_search_fuzzy("machne lerning", limit=10)
+            results = db.fts_search_fuzzy("Document", "text", "machne lerning", limit=10)
 
             # Should find the machine learning document
             assert len(results) >= 1
@@ -1077,19 +1081,20 @@ class TestFtsFuzzyOperations:
         db_path = tmp_path / "test.db"
 
         with Database(db_path, create=True) as db:
+            db.create_node_fts_index("Document", "text")
             with db.write() as txn:
                 node1 = txn.create_node(labels=["Document"])
-                txn.fts_index(node1.id, "Machine learning is a powerful technology")
+                txn.set_property(node1.id, "text", "Machine learning is a powerful technology")
                 txn.commit()
 
             # With max_distance=1, a 2-edit typo should not match
             results_tight = db.fts_search_fuzzy(
-                "machne", limit=10, max_distance=1
+                "Document", "text", "machne", limit=10, max_distance=1
             )
 
             # With default distance (2), it should match
             results_loose = db.fts_search_fuzzy(
-                "machne", limit=10, max_distance=2
+                "Document", "text", "machne", limit=10, max_distance=2
             )
 
             # Loose should find at least as many results as tight
@@ -1161,36 +1166,37 @@ class TestTransactionScopedVisibility:
         query_vec = np.array([1.0, 0.0, 0.0, 0.0], dtype=np.float32)
 
         with Database(db_path, create=True, enable_vectors=True, vector_dimensions=4) as db:
+            db.create_node_fts_index("Document", "text")
             with db.write() as writer:
                 with db.read() as reader:
                     doc = writer.create_node(labels=["Document"])
                     writer.set_vector(doc.id, "embedding", query_vec)
-                    writer.fts_index(doc.id, "machine learning systems")
+                    writer.set_property(doc.id, "text", "machine learning systems")
 
                     writer_vector = writer.vector_search(query_vec, k=5)
                     assert len(writer_vector) == 1
                     assert writer_vector[0].node_id == doc.id
 
-                    writer_fts = writer.fts_search("machine learning", limit=5)
+                    writer_fts = writer.fts_search("Document", "text", "machine learning", limit=5)
                     assert len(writer_fts) == 1
                     assert writer_fts[0].node_id == doc.id
 
                     assert reader.vector_search(query_vec, k=5) == []
-                    assert reader.fts_search("machine learning", limit=5) == []
+                    assert reader.fts_search("Document", "text", "machine learning", limit=5) == []
                     assert db.vector_search(query_vec, k=5) == []
-                    assert db.fts_search("machine learning", limit=5) == []
+                    assert db.fts_search("Document", "text", "machine learning", limit=5) == []
 
                     writer.commit()
 
                     assert reader.vector_search(query_vec, k=5) == []
-                    assert reader.fts_search("machine learning", limit=5) == []
+                    assert reader.fts_search("Document", "text", "machine learning", limit=5) == []
 
             with db.read() as after_commit:
                 after_vector = after_commit.vector_search(query_vec, k=5)
                 assert len(after_vector) == 1
                 assert after_vector[0].node_id == doc.id
 
-                after_fts = after_commit.fts_search("machine learning", limit=5)
+                after_fts = after_commit.fts_search("Document", "text", "machine learning", limit=5)
                 assert len(after_fts) == 1
                 assert after_fts[0].node_id == doc.id
 

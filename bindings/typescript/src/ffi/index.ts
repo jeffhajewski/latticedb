@@ -1222,24 +1222,46 @@ export class LatticeFFI {
   // ============================================================
 
   /**
-   * Index a document for full-text search.
+   * Declare a full-text index over one label/property pair.
    */
-  ftsIndex(txn: TransactionHandle, nodeId: bigint, text: string): void {
-    const err = this.bindings.lattice_fts_index(txn, nodeId, text, Buffer.byteLength(text, 'utf8'));
+  createNodeFtsIndex(db: DatabaseHandle, label: string, property: string): void {
+    const err = this.bindings.lattice_node_fts_index_create(db, label, property);
     this.checkError(err);
   }
 
   /**
-   * Search for documents.
+   * Remove a declared full-text index and everything it stored.
+   */
+  dropNodeFtsIndex(db: DatabaseHandle, label: string, property: string): void {
+    const err = this.bindings.lattice_node_fts_index_drop(db, label, property);
+    this.checkError(err);
+  }
+
+  /**
+   * Whether an index is declared for this label and property.
+   */
+  hasNodeFtsIndex(db: DatabaseHandle, label: string, property: string): boolean {
+    const out = Buffer.alloc(1);
+    const err = this.bindings.lattice_node_fts_index_exists(db, label, property, out);
+    this.checkError(err);
+    return out[0] !== 0;
+  }
+
+  /**
+   * Search one declared index.
    */
   ftsSearch(
     db: DatabaseHandle,
+    label: string,
+    property: string,
     query: string,
     limit: number
   ): FtsResultHandle {
     const resultOut: unknown[] = [null];
     const err = this.bindings.lattice_fts_search(
       db,
+      label,
+      property,
       query,
       Buffer.byteLength(query, 'utf8'),
       limit,
@@ -1250,16 +1272,20 @@ export class LatticeFFI {
   }
 
   /**
-   * Search for documents within `txn`.
+   * Search one declared index within `txn`.
    */
   ftsSearchInTxn(
     txn: TransactionHandle,
+    label: string,
+    property: string,
     query: string,
     limit: number
   ): FtsResultHandle {
     const resultOut: unknown[] = [null];
     const err = this.bindings.lattice_fts_search_txn(
       txn,
+      label,
+      property,
       query,
       Buffer.byteLength(query, 'utf8'),
       limit,
@@ -1270,10 +1296,12 @@ export class LatticeFFI {
   }
 
   /**
-   * Search for documents with fuzzy matching.
+   * Search one declared index with fuzzy matching.
    */
   ftsSearchFuzzy(
     db: DatabaseHandle,
+    label: string,
+    property: string,
     query: string,
     limit: number,
     maxDistance: number = 0,
@@ -1282,6 +1310,8 @@ export class LatticeFFI {
     const resultOut: unknown[] = [null];
     const err = this.bindings.lattice_fts_search_fuzzy(
       db,
+      label,
+      property,
       query,
       Buffer.byteLength(query, 'utf8'),
       limit,
@@ -1294,10 +1324,12 @@ export class LatticeFFI {
   }
 
   /**
-   * Search for documents with fuzzy matching within `txn`.
+   * Search one declared index with fuzzy matching within `txn`.
    */
   ftsSearchFuzzyInTxn(
     txn: TransactionHandle,
+    label: string,
+    property: string,
     query: string,
     limit: number,
     maxDistance: number = 0,
@@ -1306,6 +1338,8 @@ export class LatticeFFI {
     const resultOut: unknown[] = [null];
     const err = this.bindings.lattice_fts_search_fuzzy_txn(
       txn,
+      label,
+      property,
       query,
       Buffer.byteLength(query, 'utf8'),
       limit,
@@ -1317,9 +1351,6 @@ export class LatticeFFI {
     return resultOut[0];
   }
 
-  /**
-   * Get the count of FTS results.
-   */
   ftsResultCount(result: FtsResultHandle): number {
     return this.bindings.lattice_fts_result_count(result);
   }

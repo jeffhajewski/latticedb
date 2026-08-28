@@ -1297,18 +1297,20 @@ test "database: fts search returns relevant results" {
         @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
-    // Create documents
+    // The text lives in the property the index is declared over.
+    try db.createNodeFtsIndex("Document", "text");
+
     const doc1 = try db.createNode(null, &[_][]const u8{"Document"});
-    try db.ftsIndexDocument(doc1, "The quick brown fox jumps over the lazy dog");
+    try db.setNodeProperty(null, doc1, "text", .{ .string_val = "The quick brown fox jumps over the lazy dog" });
 
     const doc2 = try db.createNode(null, &[_][]const u8{"Document"});
-    try db.ftsIndexDocument(doc2, "A lazy cat sleeps on the couch");
+    try db.setNodeProperty(null, doc2, "text", .{ .string_val = "A lazy cat sleeps on the couch" });
 
     const doc3 = try db.createNode(null, &[_][]const u8{"Document"});
-    try db.ftsIndexDocument(doc3, "Quick reflexes are important for athletes");
+    try db.setNodeProperty(null, doc3, "text", .{ .string_val = "Quick reflexes are important for athletes" });
 
     // Search for "quick"
-    const results = try db.ftsSearch("quick", 10);
+    const results = try db.ftsSearchIndex(.node, "Document", "text", "quick", 10);
     defer db.freeFtsSearchResults(results);
 
     try std.testing.expectEqual(@as(usize, 2), results.len); // doc1 and doc3
@@ -1335,10 +1337,11 @@ test "database: fts handles document updates" {
 
     // Create and index document
     const doc = try db.createNode(null, &[_][]const u8{"Document"});
-    try db.ftsIndexDocument(doc, "original content about apples");
+    try db.createNodeFtsIndex("Document", "text");
+    try db.setNodeProperty(null, doc, "text", .{ .string_val = "original content about apples" });
 
     // Search for "apples"
-    const results1 = try db.ftsSearch("apples", 10);
+    const results1 = try db.ftsSearchIndex(.node, "Document", "text", "apples", 10);
     defer db.freeFtsSearchResults(results1);
     try std.testing.expectEqual(@as(usize, 1), results1.len);
 
@@ -1367,18 +1370,19 @@ test "database: fts fuzzy search finds documents with typos" {
 
     // Create and index documents
     const doc1 = try db.createNode(null, &[_][]const u8{"Document"});
-    try db.ftsIndexDocument(doc1, "the database engine is fast");
+    try db.createNodeFtsIndex("Document", "text");
+    try db.setNodeProperty(null, doc1, "text", .{ .string_val = "the database engine is fast" });
 
     const doc2 = try db.createNode(null, &[_][]const u8{"Document"});
-    try db.ftsIndexDocument(doc2, "machine learning models");
+    try db.setNodeProperty(null, doc2, "text", .{ .string_val = "machine learning models" });
 
     // Exact search should find "database"
-    const exact_results = try db.ftsSearch("database", 10);
+    const exact_results = try db.ftsSearchIndex(.node, "Document", "text", "database", 10);
     defer db.freeFtsSearchResults(exact_results);
     try std.testing.expectEqual(@as(usize, 1), exact_results.len);
 
     // Fuzzy search with a typo: "databse" should still find "database"
-    const fuzzy_results = try db.ftsSearchFuzzy("databse", 10, 2, 4);
+    const fuzzy_results = try db.ftsSearchIndexFuzzy(null, .node, "Document", "text", "databse", 10, 2, 4);
     defer db.freeFtsSearchResults(fuzzy_results);
     try std.testing.expectEqual(@as(usize, 1), fuzzy_results.len);
     try std.testing.expectEqual(doc1, fuzzy_results[0].doc_id);
@@ -4635,17 +4639,22 @@ test "database: full-text scores mean the same thing after reopening" {
         });
         defer db.close();
 
+        try db.createNodeFtsIndex("Doc", "text");
+
         var txn = try db.beginTransaction(.read_write);
         var i: usize = 0;
-        while (i < 40) : (i += 1) _ = try db.createNode(&txn, &[_][]const u8{"Doc"});
+        while (i < 40) : (i += 1) {
+            const node = try db.createNode(&txn, &[_][]const u8{"Doc"});
+            const text = switch (node) {
+                1 => short,
+                2 => long,
+                else => "unrelated filler text",
+            };
+            try db.setNodeProperty(&txn, node, "text", .{ .string_val = text });
+        }
         try db.commitTransaction(&txn);
 
-        try db.ftsIndexDocument(1, short);
-        try db.ftsIndexDocument(2, long);
-        var id: u64 = 3;
-        while (id <= 40) : (id += 1) try db.ftsIndexDocument(id, "unrelated filler text");
-
-        const hits = try db.ftsSearch("zebra", 10);
+        const hits = try db.ftsSearchIndex(.node, "Doc", "text", "zebra", 10);
         defer db.freeFtsSearchResults(hits);
         try std.testing.expectEqual(@as(usize, 2), hits.len);
         for (hits) |h| {
@@ -4667,7 +4676,7 @@ test "database: full-text scores mean the same thing after reopening" {
         });
         defer db.close();
 
-        const hits = try db.ftsSearch("zebra", 10);
+        const hits = try db.ftsSearchIndex(.node, "Doc", "text", "zebra", 10);
         defer db.freeFtsSearchResults(hits);
         try std.testing.expectEqual(@as(usize, 2), hits.len);
 
@@ -4690,17 +4699,22 @@ test "database: a shorter document scores higher for the same term" {
     });
     defer db.close();
 
+    try db.createNodeFtsIndex("Doc", "text");
+
     var txn = try db.beginTransaction(.read_write);
     var i: usize = 0;
-    while (i < 30) : (i += 1) _ = try db.createNode(&txn, &[_][]const u8{"Doc"});
+    while (i < 30) : (i += 1) {
+        const node = try db.createNode(&txn, &[_][]const u8{"Doc"});
+        const text = switch (node) {
+            1 => "zebra",
+            2 => "zebra " ++ ("filler " ** 60),
+            else => "unrelated filler text",
+        };
+        try db.setNodeProperty(&txn, node, "text", .{ .string_val = text });
+    }
     try db.commitTransaction(&txn);
 
-    try db.ftsIndexDocument(1, "zebra");
-    try db.ftsIndexDocument(2, "zebra " ++ ("filler " ** 60));
-    var id: u64 = 3;
-    while (id <= 30) : (id += 1) try db.ftsIndexDocument(id, "unrelated filler text");
-
-    const hits = try db.ftsSearch("zebra", 10);
+    const hits = try db.ftsSearchIndex(.node, "Doc", "text", "zebra", 10);
     defer db.freeFtsSearchResults(hits);
 
     try std.testing.expectEqual(@as(usize, 2), hits.len);

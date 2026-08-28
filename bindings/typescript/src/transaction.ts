@@ -254,17 +254,6 @@ export class Transaction {
   }
 
   /**
-   * Index text for full-text search.
-   *
-   * @param nodeId - The node ID
-   * @param text - Text to index
-   */
-  async ftsIndex(nodeId: bigint, text: string): Promise<void> {
-    this.ensureWritable();
-    this.ffi.ftsIndex(this.txnHandle!, nodeId, text);
-  }
-
-  /**
    * Create an edge between two nodes.
    *
    * @param sourceId - Source node ID
@@ -603,13 +592,15 @@ export class Transaction {
    * Search full-text documents inside this transaction.
    */
   async ftsSearch(
+    label: string,
+    property: string,
     query: string,
     options?: FtsSearchOptions
   ): Promise<Array<{ nodeId: bigint; score: number }>> {
     this.ensureActive();
     const limit = options?.limit ?? 10;
 
-    const resultHandle = this.ffi.ftsSearchInTxn(this.txnHandle!, query, limit);
+    const resultHandle = this.ffi.ftsSearchInTxn(this.txnHandle!, label, property, query, limit);
     try {
       const count = this.ffi.ftsResultCount(resultHandle);
       const results: Array<{ nodeId: bigint; score: number }> = [];
@@ -626,6 +617,8 @@ export class Transaction {
    * Search full-text documents with fuzzy matching inside this transaction.
    */
   async ftsSearchFuzzy(
+    label: string,
+    property: string,
     query: string,
     options?: FtsSearchOptions & { maxDistance?: number; minTermLength?: number }
   ): Promise<Array<{ nodeId: bigint; score: number }>> {
@@ -636,6 +629,8 @@ export class Transaction {
 
     const resultHandle = this.ffi.ftsSearchFuzzyInTxn(
       this.txnHandle!,
+      label,
+      property,
       query,
       limit,
       maxDistance,

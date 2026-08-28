@@ -87,7 +87,10 @@ fn createNode(txn: ?*lattice_txn, label: []const u8, qid: []const u8, props: []c
     const kind_val = stringValue("node");
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_property(txn, nid, "recordKind", &kind_val));
 
-    // FTS index (skip internal labels)
+    // The searchable text is assembled from several fields, which used to go
+    // straight into the index and be stored nowhere. It is a property now, and
+    // an index is declared over that property, which is the migration this
+    // release asks of anyone who was indexing derived text.
     if (!std.mem.eql(u8, label, "Job") and
         !std.mem.eql(u8, label, "Schema") and
         !std.mem.eql(u8, label, "Migration") and
@@ -96,7 +99,8 @@ fn createNode(txn: ?*lattice_txn, label: []const u8, qid: []const u8, props: []c
         const searchable = if (props.len > 2048) props[0..2048] else props;
         var fts_buf: [4096]u8 = undefined;
         const fts_text = try std.fmt.bufPrint(&fts_buf, "quipunodeall {s} {s} {s}", .{ qid, label, searchable });
-        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_fts_index(txn, nid, fts_text.ptr, fts_text.len));
+        const fts_val = stringValue(fts_text);
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_property(txn, nid, "searchText", &fts_val));
     }
 
     // Vector embedding (Message, MemoryCard, Fact, Preference, Procedure, Core)
@@ -250,6 +254,12 @@ fn runTest(page_size: u32, conversation_count: usize) !struct { ok: usize, fail:
     };
 
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open_v2(TEST_DB_PATH, &options, &db));
+    // Declared before any writing, so the index is maintained as the documents
+    // arrive rather than built afterwards. That is the path the original panic
+    // was on.
+    for ([_][*:0]const u8{ "Session", "Turn", "Message" }) |label| {
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_fts_index_create(db, label, "searchText"));
+    }
     defer {
         _ = c_api.lattice_close(db);
         cleanupDb(TEST_DB_PATH);

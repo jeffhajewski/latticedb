@@ -644,21 +644,72 @@ class Database:
             if result_ptr.value:
                 lib._lib.lattice_vector_result_free(result_ptr)
 
+    def create_node_fts_index(self, label: str, prop: str) -> None:
+        """
+        Declare a full-text index over one label/property pair.
+
+        The property holds the text. Declaring the index reads it from every node
+        already carrying the label, and writes maintain it from then on. Only
+        string properties are indexed.
+
+        Args:
+            label: Node label the index covers.
+            prop: Property holding the text.
+        """
+        if self._handle is None:
+            raise RuntimeError("Database is not open")
+        lib = get_lib()
+        code = lib._lib.lattice_node_fts_index_create(
+            self._handle, label.encode("utf-8"), prop.encode("utf-8")
+        )
+        check_error(code)
+
+    def drop_node_fts_index(self, label: str, prop: str) -> None:
+        """Remove a declared full-text index and everything it stored."""
+        if self._handle is None:
+            raise RuntimeError("Database is not open")
+        lib = get_lib()
+        code = lib._lib.lattice_node_fts_index_drop(
+            self._handle, label.encode("utf-8"), prop.encode("utf-8")
+        )
+        check_error(code)
+
+    def has_node_fts_index(self, label: str, prop: str) -> bool:
+        """Whether a full-text index is declared for this label and property."""
+        if self._handle is None:
+            raise RuntimeError("Database is not open")
+        lib = get_lib()
+        exists = ctypes.c_bool(False)
+        code = lib._lib.lattice_node_fts_index_exists(
+            self._handle, label.encode("utf-8"), prop.encode("utf-8"), byref(exists)
+        )
+        check_error(code)
+        return bool(exists.value)
+
     def fts_search(
         self,
+        label: str,
+        prop: str,
         query: str,
         *,
         limit: int = 10,
     ) -> List[FtsSearchResult]:
         """
-        Full-text search using BM25 scoring.
+        Full-text search of one declared index, using BM25 scoring.
 
         Args:
+            label: Node label whose index to search.
+            prop: Property whose index to search.
             query: Search query text.
             limit: Maximum number of results to return.
 
         Returns:
             List of search results with node IDs and BM25 scores, sorted by relevance.
+
+        Raises:
+            LatticeError: If no index is declared for this label and property. That
+                is deliberately not an empty result: a mistyped property name and a
+                query that found nothing are different situations.
         """
         if self._handle is None:
             raise RuntimeError("Database is not open")
@@ -672,6 +723,8 @@ class Database:
         # Call the C API
         code = lib._lib.lattice_fts_search(
             self._handle,
+            label.encode("utf-8"),
+            prop.encode("utf-8"),
             query_bytes,
             len(query_bytes),
             limit,
@@ -704,6 +757,8 @@ class Database:
 
     def fts_search_fuzzy(
         self,
+        label: str,
+        prop: str,
         query: str,
         *,
         limit: int = 10,
@@ -711,9 +766,11 @@ class Database:
         min_term_length: int = 0,
     ) -> List[FtsSearchResult]:
         """
-        Fuzzy full-text search using BM25 scoring with typo tolerance.
+        Fuzzy full-text search of one declared index, with typo tolerance.
 
         Args:
+            label: Node label whose index to search.
+            prop: Property whose index to search.
             query: Search query text.
             limit: Maximum number of results to return.
             max_distance: Maximum edit distance for fuzzy matching (0 = default 2).
@@ -734,6 +791,8 @@ class Database:
         # Call the C API
         code = lib._lib.lattice_fts_search_fuzzy(
             self._handle,
+            label.encode("utf-8"),
+            prop.encode("utf-8"),
             query_bytes,
             len(query_bytes),
             limit,

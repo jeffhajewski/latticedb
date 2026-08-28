@@ -585,25 +585,6 @@ const TxnVectorState = union(enum) {
     }
 };
 
-const TxnFtsDocState = union(enum) {
-    absent: void,
-    text: []u8,
-
-    fn clone(self: TxnFtsDocState, allocator: Allocator) Allocator.Error!TxnFtsDocState {
-        return switch (self) {
-            .absent => .{ .absent = {} },
-            .text => |text| .{ .text = try allocator.dupe(u8, text) },
-        };
-    }
-
-    fn deinit(self: *TxnFtsDocState, allocator: Allocator) void {
-        switch (self.*) {
-            .absent => {},
-            .text => |text| allocator.free(text),
-        }
-        self.* = undefined;
-    }
-};
 
 const TxnStreamAppend = struct {
     stream: []u8,
@@ -645,7 +626,6 @@ const TxnOverlay = struct {
     node_states: std.AutoHashMapUnmanaged(NodeId, TxnNodeState) = .{},
     edge_states: std.AutoHashMapUnmanaged(EdgeId, TxnEdgeState) = .{},
     vector_states: std.AutoHashMapUnmanaged(NodeId, TxnVectorState) = .{},
-    fts_docs: std.AutoHashMapUnmanaged(NodeId, TxnFtsDocState) = .{},
     stream_appends: std.ArrayListUnmanaged(TxnStreamAppend) = .empty,
     stream_offsets: std.ArrayListUnmanaged(TxnStreamOffset) = .empty,
     stream_trims: std.ArrayListUnmanaged(TxnStreamTrim) = .empty,
@@ -678,11 +658,6 @@ const TxnOverlay = struct {
         }
         self.vector_states.deinit(allocator);
 
-        var fts_iter = self.fts_docs.iterator();
-        while (fts_iter.next()) |entry| {
-            entry.value_ptr.deinit(allocator);
-        }
-        self.fts_docs.deinit(allocator);
 
         for (self.stream_appends.items) |*append| {
             append.deinit(allocator);
@@ -1864,12 +1839,6 @@ pub const Database = struct {
                 try self.storeVectorOverlayState(reader_overlay, node_id, state);
             }
 
-            var fts_iter = overlay.fts_docs.iterator();
-            while (fts_iter.next()) |fts_entry| {
-                const node_id = fts_entry.key_ptr.*;
-                if (reader_overlay.fts_docs.contains(node_id)) continue;
-                try self.storeFtsDocOverlayState(reader_overlay, node_id, .{ .absent = {} });
-            }
         }
     }
 
@@ -2315,14 +2284,6 @@ pub const Database = struct {
                     }
                 },
                 .value => |vector| try self.setNodeVector(entry.key_ptr.*, vector),
-            }
-        }
-
-        var fts_iter = overlay.fts_docs.iterator();
-        while (fts_iter.next()) |entry| {
-            switch (entry.value_ptr.*) {
-                .absent => {},
-                .text => |text| try self.ftsIndexDocument(entry.key_ptr.*, text),
             }
         }
 
@@ -3479,6 +3440,56 @@ pub const Database = struct {
         return self.ftsSearchDefinitionInTxn(txn, definition, query_text, limit);
     }
 
+    /// Search one declared index, tolerating typos in the query.
+    ///
+    /// The transactional form used to take `max_distance` and `min_term_length`,
+    /// discard both, and run an exact search. A query for `quck` found nothing
+    /// inside a transaction and the intended document outside one, with the
+    /// arguments that were supposed to control that sitting unused. Both forms go
+    /// through the same fuzzy matcher now.
+    ///
+    /// Uncommitted text is matched by term presence rather than edit distance, so
+    /// a typo will not find a document this transaction has only just written.
+    /// That is worth saying out loud rather than hiding: fuzzy matching against
+    /// pending text needs the tokenizer to run over it, which is what committing
+    /// does.
+    pub fn ftsSearchIndexFuzzy(
+        self: *Self,
+        txn: ?*Transaction,
+        kind: FtsEntityKind,
+        scope: []const u8,
+        property: []const u8,
+        query_text: []const u8,
+        limit: u32,
+        max_distance: u32,
+        min_term_length: u32,
+    ) DatabaseError![]FtsSearchResult {
+        const definition = try self.ftsDefinitionFor(kind, scope, property, false);
+        var catalog = self.ftsCatalog() orelse return DatabaseError.MissingIndex;
+        if (!(catalog.has(definition) catch |err| return mapFtsCatalogError(err))) {
+            return DatabaseError.MissingIndex;
+        }
+
+        var index = self.ftsIndexFor(definition);
+        const config = fuzzy_mod.FuzzyConfig{
+            .max_distance = max_distance,
+            .min_term_length = min_term_length,
+        };
+        const base = index.searchFuzzy(query_text, config, limit) catch |err| return mapFtsError(err);
+
+        const overlay = blk: {
+            if (definition.kind != .node) break :blk null;
+            const t = txn orelse break :blk null;
+            const found = self.getTxnOverlay(t) orelse break :blk null;
+            if (found.node_states.count() == 0) break :blk null;
+            break :blk found;
+        };
+        const pending = overlay orelse return base;
+        defer self.freeFtsSearchResults(base);
+
+        return self.mergePendingFts(definition, pending, base, query_text, limit);
+    }
+
     /// The search itself, once the definition is known to exist.
     ///
     /// Callers that already hold a definition use this rather than turning it back
@@ -3513,13 +3524,30 @@ pub const Database = struct {
         const base_results = index.search(query_text, limit +| extra) catch |err| return mapFtsError(err);
         defer self.freeFtsSearchResults(base_results);
 
+        return self.mergePendingFts(definition, pending, base_results, query_text, limit);
+    }
+
+    /// Reconcile indexed results with what an open transaction has pending.
+    ///
+    /// A node the transaction has written is scored from its pending text rather
+    /// than the indexed text, and drops out if that text no longer matches. Nodes
+    /// the transaction wrote that the index has never seen are scored and added.
+    /// `base` stays the caller's to free.
+    fn mergePendingFts(
+        self: *Self,
+        definition: FtsDefinition,
+        pending: *TxnOverlay,
+        base: []const FtsSearchResult,
+        query_text: []const u8,
+        limit: u32,
+    ) DatabaseError![]FtsSearchResult {
         var merged: std.ArrayListUnmanaged(FtsSearchResult) = .empty;
         errdefer merged.deinit(self.allocator);
 
         var seen: std.AutoHashMapUnmanaged(NodeId, void) = .{};
         defer seen.deinit(self.allocator);
 
-        for (base_results) |result| {
+        for (base) |result| {
             try seen.put(self.allocator, result.doc_id, {});
             if (pending.node_states.get(result.doc_id)) |state| {
                 if (try self.pendingFtsScore(definition, state, query_text)) |score| {
@@ -4733,24 +4761,6 @@ pub const Database = struct {
             return;
         }
         overlay.vector_states.put(self.allocator, node_id, state) catch {
-            var owned_state = state;
-            owned_state.deinit(self.allocator);
-            return DatabaseError.OutOfMemory;
-        };
-    }
-
-    fn storeFtsDocOverlayState(
-        self: *Self,
-        overlay: *TxnOverlay,
-        node_id: NodeId,
-        state: TxnFtsDocState,
-    ) DatabaseError!void {
-        if (overlay.fts_docs.getPtr(node_id)) |existing| {
-            existing.deinit(self.allocator);
-            existing.* = state;
-            return;
-        }
-        overlay.fts_docs.put(self.allocator, node_id, state) catch {
             var owned_state = state;
             owned_state.deinit(self.allocator);
             return DatabaseError.OutOfMemory;
@@ -6111,24 +6121,10 @@ pub const Database = struct {
     // ========================================================================
     // Full-Text Search Operations
     // ========================================================================
-
-    /// Search for documents matching a text query using BM25 scoring.
-    /// Returns node IDs and scores sorted by relevance (highest first).
-    pub fn ftsSearch(
-        self: *Self,
-        query_text: []const u8,
-        limit: u32,
-    ) DatabaseError![]FtsSearchResult {
-        const fts = &(self.fts_index orelse return DatabaseError.IoError);
-
-        return fts.search(query_text, limit) catch |err| {
-            return switch (err) {
-                FtsError.TokenizerError => DatabaseError.IoError,
-                FtsError.OutOfMemory => DatabaseError.OutOfMemory,
-                else => DatabaseError.IoError,
-            };
-        };
-    }
+    //
+    // Searching is `ftsSearchIndex` and its transactional form, declared beside
+    // the rest of the index catalog. There is no unscoped search: a query names
+    // the label and property whose index answers it.
 
     fn overlayFtsScore(self: *Self, query_text: []const u8, text: []const u8) DatabaseError!f32 {
         const lower_query = self.allocator.dupe(u8, query_text) catch return DatabaseError.OutOfMemory;
@@ -6149,154 +6145,14 @@ pub const Database = struct {
         return score;
     }
 
-    pub fn ftsSearchInTxn(
-        self: *Self,
-        txn: ?*Transaction,
-        query_text: []const u8,
-        limit: u32,
-    ) DatabaseError![]FtsSearchResult {
-        if (txn) |t| {
-            if (self.getTxnOverlay(t)) |overlay| {
-                if (overlay.fts_docs.count() == 0) {
-                    return self.ftsSearch(query_text, limit);
-                }
-
-                const extra: u32 = @intCast(overlay.fts_docs.count());
-                const base_results = try self.ftsSearch(query_text, limit +| extra);
-                defer self.freeFtsSearchResults(base_results);
-
-                var merged: std.ArrayListUnmanaged(FtsSearchResult) = .empty;
-                errdefer merged.deinit(self.allocator);
-
-                var seen: std.AutoHashMapUnmanaged(NodeId, void) = .{};
-                defer seen.deinit(self.allocator);
-
-                for (base_results) |result| {
-                    try seen.put(self.allocator, result.doc_id, {});
-                    if (overlay.fts_docs.get(result.doc_id)) |state| {
-                        switch (state) {
-                            .absent => continue,
-                            .text => |text| {
-                                const score = try self.overlayFtsScore(query_text, text);
-                                if (score > 0) {
-                                    merged.append(self.allocator, .{
-                                        .doc_id = result.doc_id,
-                                        .score = score,
-                                    }) catch return DatabaseError.OutOfMemory;
-                                }
-                            },
-                        }
-                        continue;
-                    }
-                    merged.append(self.allocator, result) catch return DatabaseError.OutOfMemory;
-                }
-
-                var overlay_iter = overlay.fts_docs.iterator();
-                while (overlay_iter.next()) |entry| {
-                    if (seen.contains(entry.key_ptr.*)) continue;
-                    switch (entry.value_ptr.*) {
-                        .absent => {},
-                        .text => |text| {
-                            const score = try self.overlayFtsScore(query_text, text);
-                            if (score > 0) {
-                                merged.append(self.allocator, .{
-                                    .doc_id = entry.key_ptr.*,
-                                    .score = score,
-                                }) catch return DatabaseError.OutOfMemory;
-                            }
-                        },
-                    }
-                }
-
-                std.mem.sort(FtsSearchResult, merged.items, {}, FtsSearchResult.lessThan);
-                if (merged.items.len > limit) {
-                    merged.items.len = limit;
-                }
-                return merged.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
-            }
-        }
-
-        return self.ftsSearch(query_text, limit);
-    }
-
-    /// Search for documents matching a text query with fuzzy (typo-tolerant) matching.
-    pub fn ftsSearchFuzzy(
-        self: *Self,
-        query_text: []const u8,
-        limit: u32,
-        max_distance: u32,
-        min_term_length: u32,
-    ) DatabaseError![]FtsSearchResult {
-        const fts = &(self.fts_index orelse return DatabaseError.IoError);
-        const config = fuzzy_mod.FuzzyConfig{ .max_distance = max_distance, .min_term_length = min_term_length };
-
-        return fts.searchFuzzy(query_text, config, limit) catch |err| {
-            return switch (err) {
-                FtsError.TokenizerError => DatabaseError.IoError,
-                FtsError.OutOfMemory => DatabaseError.OutOfMemory,
-                else => DatabaseError.IoError,
-            };
-        };
-    }
-
-    pub fn ftsSearchFuzzyInTxn(
-        self: *Self,
-        txn: ?*Transaction,
-        query_text: []const u8,
-        limit: u32,
-        max_distance: u32,
-        min_term_length: u32,
-    ) DatabaseError![]FtsSearchResult {
-        _ = max_distance;
-        _ = min_term_length;
-        return self.ftsSearchInTxn(txn, query_text, limit);
-    }
-
-    /// Free FTS search results allocated by ftsSearch.
+    /// Free FTS search results.
+    ///
+    /// They are a plain slice from this allocator. This used to reach through the
+    /// unscoped index to call free on its behalf, which stopped meaning anything
+    /// once every index was built per search.
     pub fn freeFtsSearchResults(self: *Self, results: []FtsSearchResult) void {
-        if (self.fts_index) |*fts| {
-            fts.freeResults(results);
-        }
-    }
-
-    /// Index a text document for full-text search.
-    /// The document is associated with the given node ID.
-    pub fn ftsIndexDocument(
-        self: *Self,
-        node_id: NodeId,
-        text: []const u8,
-    ) DatabaseError!void {
-        if (self.read_only) return DatabaseError.PermissionDenied;
-
-        const fts = &(self.fts_index orelse return DatabaseError.IoError);
-
-        _ = fts.indexDocument(node_id, text) catch |err| {
-            return switch (err) {
-                FtsError.TokenizerError => DatabaseError.IoError,
-                FtsError.OutOfMemory => DatabaseError.OutOfMemory,
-                else => DatabaseError.IoError,
-            };
-        };
-    }
-
-    pub fn ftsIndexDocumentInTxn(
-        self: *Self,
-        txn: ?*Transaction,
-        node_id: NodeId,
-        text: []const u8,
-    ) DatabaseError!void {
-        if (txn) |t| {
-            if (!t.isActive()) return DatabaseError.TransactionNotActive;
-            if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
-            if (self.getTxnOverlay(t)) |overlay| {
-                try self.storeFtsDocOverlayState(overlay, node_id, .{
-                    .text = self.allocator.dupe(u8, text) catch return DatabaseError.OutOfMemory,
-                });
-                overlay.markDirty();
-                return;
-            }
-        }
-        try self.ftsIndexDocument(node_id, text);
+        if (results.len == 0) return;
+        self.allocator.free(results);
     }
 
     // ========================================================================
@@ -8663,13 +8519,15 @@ test "getNodesByLabel returns every node with the requested label for reopen ind
     try std.testing.expectEqual(@as(usize, 0), missing.len);
 }
 
-test "ftsIndexDocument handles multi-KiB markdown-shaped documents" {
+test "indexing multi-KiB markdown-shaped documents" {
     // Regression: `nullclaw onboard --memory latticedb` tripped a
-    // `panic: integer overflow` inside `lattice_fts_index` when it
+    // `panic: integer overflow` inside the indexing path when it
     // reached AGENTS.md (9242 bytes). Reproduce the exact shape of the
     // failing flow — Database open with fts enabled, a sequence of
     // stores ranging from ~1 KiB to ~9 KiB of realistic markdown
-    // tokens — and assert each call returns cleanly.
+    // tokens — and assert each call returns cleanly. The text arrives
+    // as a property now rather than through a separate indexing call,
+    // which is the only part of the flow that changed.
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_fts_db_large_test.ltdb";
     @import("compat").fs.cwd().deleteFile(path) catch {};
@@ -8687,6 +8545,8 @@ test "ftsIndexDocument handles multi-KiB markdown-shaped documents" {
         @import("compat").fs.cwd().deleteFile(path) catch {};
         @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
+
+    try db.createNodeFtsIndex("Entry", "body");
 
     // Scaffold a family of varied documents that together exercise the
     // per-call and cumulative FTS code paths. Vocabulary grows with
@@ -8720,7 +8580,7 @@ test "ftsIndexDocument handles multi-KiB markdown-shaped documents" {
         }
 
         const node_id = try db.createNode(null, &[_][]const u8{"Entry"});
-        try db.ftsIndexDocument(node_id, buf[0..target]);
+        try db.setNodeProperty(null, node_id, "body", .{ .string_val = buf[0..target] });
     }
 }
 
@@ -8746,6 +8606,8 @@ test "transactional commit across graph fts and vector indexes leaves no pinned 
         @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
+    try db.createNodeFtsIndex("Entry", "body");
+
     var txn = try db.beginTransaction(.read_write);
     var committed = false;
     errdefer if (!committed) db.abortTransaction(&txn) catch {};
@@ -8765,7 +8627,7 @@ test "transactional commit across graph fts and vector indexes leaves no pinned 
             "lattice commit pin cleanup graph fts vector document {d:04} token_{d:04}",
             .{ i, i },
         );
-        try db.ftsIndexDocumentInTxn(&txn, node_id, text);
+        try db.setNodeProperty(&txn, node_id, "body", .{ .string_val = text });
 
         const base: f32 = @floatFromInt(i);
         const vector = [_]f32{ base, base + 0.25, base + 0.5, base + 0.75 };

@@ -167,12 +167,6 @@ public final class Transaction implements AutoCloseable {
         Native.nodeSetVector(handle, nodeId, key, vector);
     }
 
-    /** Indexes text on a node for BM25 full-text search. */
-    public void ftsIndex(long nodeId, String text) {
-        ensureWritable();
-        Native.ftsIndex(handle, nodeId, text);
-    }
-
     /**
      * Finds node ids through a required explicit equality index. Throws
      * {@link ErrorCode#UNSUPPORTED} when the index does not exist.
@@ -291,17 +285,25 @@ public final class Transaction implements AutoCloseable {
                 Native.vectorSearchTxn(handle, vector, k, efSearch));
     }
 
-    /** Full-text search within this transaction's snapshot. */
-    public List<FTSSearchResult> ftsSearch(String query, FTSSearchOptions opts) {
+    /** Searches one declared index within this transaction's snapshot. */
+    public List<FTSSearchResult> ftsSearch(String label, String property,
+                                           String query, FTSSearchOptions opts) {
         ensureActive();
-        return Database.zipFtsResults(Native.ftsSearchTxn(handle, query,
+        return Database.zipFtsResults(Native.ftsSearchTxn(handle, label, property, query,
                 opts == null ? 10 : opts.limit()));
     }
 
-    /** Fuzzy full-text search within this transaction's snapshot. */
-    public List<FTSSearchResult> ftsSearchFuzzy(String query, FTSSearchOptions opts) {
+    /**
+     * Fuzzy search of one declared index within this transaction's snapshot.
+     *
+     * <p>Text this transaction has written but not committed is matched by term
+     * presence rather than edit distance, so a typo will not find a document the
+     * transaction has only just written.
+     */
+    public List<FTSSearchResult> ftsSearchFuzzy(String label, String property,
+                                                String query, FTSSearchOptions opts) {
         ensureActive();
-        Object[] out = Native.ftsSearchFuzzyTxn(handle, query,
+        Object[] out = Native.ftsSearchFuzzyTxn(handle, label, property, query,
                 opts == null ? 10 : opts.limit(),
                 opts == null ? 0 : opts.maxDistance(),
                 opts == null ? 0 : opts.minTermLength());

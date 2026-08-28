@@ -1383,49 +1383,91 @@ Java_io_latticedb_Native_vectorSearchTxn(JNIEnv *env, jclass cls, jlong txn_hand
 /* ------------------------------------------------------------------ */
 
 JNIEXPORT void JNICALL
-Java_io_latticedb_Native_ftsIndex(JNIEnv *env, jclass cls, jlong txn_handle,
-                                  jlong node_id, jstring text) {
+Java_io_latticedb_Native_createNodeFtsIndex(JNIEnv *env, jclass cls, jlong db_handle,
+                                            jstring label, jstring property) {
     init_cache(env);
     (void)cls;
-    size_t len = 0;
-    char *buf = text ? jstring_to_utf8(env, text, &len) : NULL;
-    if ((*env)->ExceptionCheck(env)) return;
-    lattice_error rc = lattice_fts_index((lattice_txn *)(uintptr_t)txn_handle,
-        (lattice_node_id)node_id, buf ? buf : "", len);
-    free(buf);
+    size_t l_len = 0, p_len = 0;
+    char *l = jstring_to_utf8(env, label, &l_len);
+    if ((*env)->ExceptionCheck(env)) { free(l); return; }
+    char *pr = jstring_to_utf8(env, property, &p_len);
+    if ((*env)->ExceptionCheck(env)) { free(l); free(pr); return; }
+    lattice_error rc = lattice_node_fts_index_create(
+        (lattice_database *)(uintptr_t)db_handle, l ? l : "", pr ? pr : "");
+    free(l); free(pr);
     check(env, rc);
+}
+
+JNIEXPORT void JNICALL
+Java_io_latticedb_Native_dropNodeFtsIndex(JNIEnv *env, jclass cls, jlong db_handle,
+                                          jstring label, jstring property) {
+    init_cache(env);
+    (void)cls;
+    size_t l_len = 0, p_len = 0;
+    char *l = jstring_to_utf8(env, label, &l_len);
+    if ((*env)->ExceptionCheck(env)) { free(l); return; }
+    char *pr = jstring_to_utf8(env, property, &p_len);
+    if ((*env)->ExceptionCheck(env)) { free(l); free(pr); return; }
+    lattice_error rc = lattice_node_fts_index_drop(
+        (lattice_database *)(uintptr_t)db_handle, l ? l : "", pr ? pr : "");
+    free(l); free(pr);
+    check(env, rc);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_io_latticedb_Native_hasNodeFtsIndex(JNIEnv *env, jclass cls, jlong db_handle,
+                                         jstring label, jstring property) {
+    init_cache(env);
+    (void)cls;
+    size_t l_len = 0, p_len = 0;
+    char *l = jstring_to_utf8(env, label, &l_len);
+    if ((*env)->ExceptionCheck(env)) { free(l); return JNI_FALSE; }
+    char *pr = jstring_to_utf8(env, property, &p_len);
+    if ((*env)->ExceptionCheck(env)) { free(l); free(pr); return JNI_FALSE; }
+    bool exists = false;
+    lattice_error rc = lattice_node_fts_index_exists(
+        (lattice_database *)(uintptr_t)db_handle, l ? l : "", pr ? pr : "", &exists);
+    free(l); free(pr);
+    if (!check(env, rc)) return JNI_FALSE;
+    return exists ? JNI_TRUE : JNI_FALSE;
 }
 
 /* Returns Object[2] = { long[] nodeIds, float[] scores }. fuzzy=1 uses the
  * fuzzy variant with max_distance/min_term_length. */
 static jobject fts_search(JNIEnv *env, jlong db_handle, jlong txn_handle, jint use_txn,
+                          jstring label, jstring property,
                           jstring query, jint limit, jint fuzzy,
                           jint max_distance, jint min_term_length) {
-    size_t qlen = 0;
+    size_t qlen = 0, l_len = 0, p_len = 0;
     char *q = query ? jstring_to_utf8(env, query, &qlen) : NULL;
-    if ((*env)->ExceptionCheck(env)) return NULL;
+    if ((*env)->ExceptionCheck(env)) { free(q); return NULL; }
+    char *l = jstring_to_utf8(env, label, &l_len);
+    if ((*env)->ExceptionCheck(env)) { free(q); free(l); return NULL; }
+    char *pr = jstring_to_utf8(env, property, &p_len);
+    if ((*env)->ExceptionCheck(env)) { free(q); free(l); free(pr); return NULL; }
+
     lattice_fts_result *res = NULL;
     lattice_error rc;
     if (fuzzy) {
         if (use_txn) {
             rc = lattice_fts_search_fuzzy_txn((lattice_txn *)(uintptr_t)txn_handle,
-                q ? q : "", qlen, (uint32_t)limit, (uint32_t)max_distance,
+                l, pr, q ? q : "", qlen, (uint32_t)limit, (uint32_t)max_distance,
                 (uint32_t)min_term_length, &res);
         } else {
             rc = lattice_fts_search_fuzzy((lattice_database *)(uintptr_t)db_handle,
-                q ? q : "", qlen, (uint32_t)limit, (uint32_t)max_distance,
+                l, pr, q ? q : "", qlen, (uint32_t)limit, (uint32_t)max_distance,
                 (uint32_t)min_term_length, &res);
         }
     } else {
         if (use_txn) {
             rc = lattice_fts_search_txn((lattice_txn *)(uintptr_t)txn_handle,
-                q ? q : "", qlen, (uint32_t)limit, &res);
+                l, pr, q ? q : "", qlen, (uint32_t)limit, &res);
         } else {
             rc = lattice_fts_search((lattice_database *)(uintptr_t)db_handle,
-                q ? q : "", qlen, (uint32_t)limit, &res);
+                l, pr, q ? q : "", qlen, (uint32_t)limit, &res);
         }
     }
-    free(q);
+    free(q); free(l); free(pr);
     if (!check(env, rc)) return NULL;
 
     uint32_t n = res ? lattice_fts_result_count(res) : 0;
@@ -1466,32 +1508,38 @@ static jobject fts_search(JNIEnv *env, jlong db_handle, jlong txn_handle, jint u
 
 JNIEXPORT jobjectArray JNICALL
 Java_io_latticedb_Native_ftsSearch(JNIEnv *env, jclass cls, jlong db_handle,
+                                   jstring label, jstring property,
                                    jstring query, jint limit) {
     init_cache(env); (void)cls;
-    return fts_search(env, db_handle, 0, 0, query, limit, 0, 0, 0);
+    return fts_search(env, db_handle, 0, 0, label, property, query, limit, 0, 0, 0);
 }
 
 JNIEXPORT jobjectArray JNICALL
 Java_io_latticedb_Native_ftsSearchFuzzy(JNIEnv *env, jclass cls, jlong db_handle,
+                                        jstring label, jstring property,
                                         jstring query, jint limit, jint max_distance,
                                         jint min_term_length) {
     init_cache(env); (void)cls;
-    return fts_search(env, db_handle, 0, 0, query, limit, 1, max_distance, min_term_length);
+    return fts_search(env, db_handle, 0, 0, label, property, query, limit, 1,
+                      max_distance, min_term_length);
 }
 
 JNIEXPORT jobjectArray JNICALL
 Java_io_latticedb_Native_ftsSearchTxn(JNIEnv *env, jclass cls, jlong txn_handle,
+                                      jstring label, jstring property,
                                       jstring query, jint limit) {
     init_cache(env); (void)cls;
-    return fts_search(env, 0, txn_handle, 1, query, limit, 0, 0, 0);
+    return fts_search(env, 0, txn_handle, 1, label, property, query, limit, 0, 0, 0);
 }
 
 JNIEXPORT jobjectArray JNICALL
 Java_io_latticedb_Native_ftsSearchFuzzyTxn(JNIEnv *env, jclass cls, jlong txn_handle,
+                                           jstring label, jstring property,
                                            jstring query, jint limit, jint max_distance,
                                            jint min_term_length) {
     init_cache(env); (void)cls;
-    return fts_search(env, 0, txn_handle, 1, query, limit, 1, max_distance, min_term_length);
+    return fts_search(env, 0, txn_handle, 1, label, property, query, limit, 1,
+                      max_distance, min_term_length);
 }
 
 /* ------------------------------------------------------------------ */

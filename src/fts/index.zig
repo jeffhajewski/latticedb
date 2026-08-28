@@ -472,7 +472,8 @@ pub const FtsIndex = struct {
         }
 
         {
-            var iter = self.dictionary.iterate() catch {
+            var iter: Dictionary.DictionaryIterator = undefined;
+            self.dictionary.iterate(&iter) catch {
                 return FtsError.DictionaryError;
             };
             defer iter.deinit();

@@ -2475,222 +2475,189 @@ pub export fn lattice_vector_result_free(
 // ============================================================================
 
 /// Index a text document for full-text search.
-pub export fn lattice_fts_index(
+/// Search one declared index using BM25 scoring.
+///
+/// `lattice_fts_index` used to put text straight into a single index shared by
+/// every node. It is gone: text is indexed by declaring an index over the
+/// property that holds it, with `lattice_node_fts_index_create`, after which
+/// writes maintain it.
+pub export fn lattice_fts_search(
+    db: ?*lattice_database,
+    label: [*c]const u8,
+    property: [*c]const u8,
+    query_text: [*c]const u8,
+    query_len: usize,
+    limit: u32,
+    result_out: *?*lattice_fts_result,
+) lattice_error {
+    const db_handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
+    const label_slice = cStrToSlice(label) orelse return .err_invalid_arg;
+    const property_slice = cStrToSlice(property) orelse return .err_invalid_arg;
+
+    if (query_text == null or query_len == 0 or limit == 0) return .err_invalid_arg;
+
+    const query_slice = query_text[0..query_len];
+
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active_db_result = ensureActiveDbLocked(db_handle);
+    if (active_db_result != .ok) return active_db_result;
+
+    const results = db_handle.db.ftsSearchIndex(
+        .node,
+        label_slice,
+        property_slice,
+        query_slice,
+        limit,
+    ) catch |err| {
+        return mapDatabaseError(err);
+    };
+
+    return wrapFtsResults(db_handle, results, result_out);
+}
+
+pub export fn lattice_fts_search_txn(
     txn: ?*lattice_txn,
-    node_id: lattice_node_id,
-    text: [*c]const u8,
-    text_len: usize,
+    label: [*c]const u8,
+    property: [*c]const u8,
+    query_text: [*c]const u8,
+    query_len: usize,
+    limit: u32,
+    result_out: *?*lattice_fts_result,
 ) lattice_error {
     const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const label_slice = cStrToSlice(label) orelse return .err_invalid_arg;
+    const property_slice = cStrToSlice(property) orelse return .err_invalid_arg;
+    if (query_text == null or query_len == 0 or limit == 0) return .err_invalid_arg;
 
-    if (text == null or text_len == 0) return .err_invalid_arg;
-
-    const text_slice = text[0..text_len];
+    const query_slice = query_text[0..query_len];
 
     const active_txn_result = lockActiveTxnDb(txn_handle);
     if (active_txn_result != .ok) return active_txn_result;
     defer unlockTxnDb(txn_handle);
 
-    if (txn_handle.txn.mode == .read_only) return .err_read_only;
-
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
-    txn_handle.db_handle.db.ftsIndexDocumentInTxn(txn_ptr, node_id, text_slice) catch |err| {
-        return mapDatabaseError(err);
-    };
-
-    return .ok;
-}
-
-/// Search for documents matching a text query using BM25 scoring.
-pub export fn lattice_fts_search(
-    db: ?*lattice_database,
-    query_text: [*c]const u8,
-    query_len: usize,
-    limit: u32,
-    result_out: *?*lattice_fts_result,
-) lattice_error {
-    const db_handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
-
-    if (query_text == null or query_len == 0 or limit == 0) return .err_invalid_arg;
-
-    const query_slice = query_text[0..query_len];
-
-    db_handle.mutex.lock();
-    defer db_handle.mutex.unlock();
-    const active_db_result = ensureActiveDbLocked(db_handle);
-    if (active_db_result != .ok) return active_db_result;
-
-    // Perform the search
-    const results = db_handle.db.ftsSearch(query_slice, limit) catch |err| {
-        return mapDatabaseError(err);
-    };
-
-    // Create result handle
-    const result_handle = global_allocator.create(FtsResultHandle) catch {
-        db_handle.db.freeFtsSearchResults(results);
-        return .err_out_of_memory;
-    };
-    result_handle.* = FtsResultHandle{
-        .header = HandleHeader.init(.fts_result),
-        .results = results,
-        .count = results.len,
-        .db_handle = db_handle,
-        .counted_child = true,
-    };
-    const register_result = registerHandle(FtsResultHandle, result_handle);
-    if (register_result != .ok) {
-        db_handle.db.freeFtsSearchResults(results);
-        global_allocator.destroy(result_handle);
-        return register_result;
-    }
-    db_handle.active_children += 1;
-
-    result_out.* = toOpaque(lattice_fts_result, result_handle);
-    return .ok;
-}
-
-pub export fn lattice_fts_search_txn(
-    txn: ?*lattice_txn,
-    query_text: [*c]const u8,
-    query_len: usize,
-    limit: u32,
-    result_out: *?*lattice_fts_result,
-) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
-    if (query_text == null or query_len == 0 or limit == 0) return .err_invalid_arg;
-
-    const query_slice = query_text[0..query_len];
-
-    const db_handle = txn_handle.db_handle;
-    db_handle.mutex.lock();
-    defer db_handle.mutex.unlock();
-    const active_txn_result = ensureActiveTxnLocked(txn_handle);
-    if (active_txn_result != .ok) return active_txn_result;
-
-    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
-    const results = txn_handle.db_handle.db.ftsSearchInTxn(txn_ptr, query_slice, limit) catch |err| {
-        return mapDatabaseError(err);
-    };
-
-    const result_handle = global_allocator.create(FtsResultHandle) catch {
-        txn_handle.db_handle.db.freeFtsSearchResults(results);
-        return .err_out_of_memory;
-    };
-    result_handle.* = FtsResultHandle{
-        .header = HandleHeader.init(.fts_result),
-        .results = results,
-        .count = results.len,
-        .db_handle = txn_handle.db_handle,
-        .counted_child = true,
-    };
-    const register_result = registerHandle(FtsResultHandle, result_handle);
-    if (register_result != .ok) {
-        txn_handle.db_handle.db.freeFtsSearchResults(results);
-        global_allocator.destroy(result_handle);
-        return register_result;
-    }
-    db_handle.active_children += 1;
-
-    result_out.* = toOpaque(lattice_fts_result, result_handle);
-    return .ok;
-}
-
-/// Search for documents matching a text query with fuzzy (typo-tolerant) matching.
-pub export fn lattice_fts_search_fuzzy(
-    db: ?*lattice_database,
-    query_text: [*c]const u8,
-    query_len: usize,
-    limit: u32,
-    max_distance: u32,
-    min_term_length: u32,
-    result_out: *?*lattice_fts_result,
-) lattice_error {
-    const db_handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
-
-    if (query_text == null or query_len == 0 or limit == 0) return .err_invalid_arg;
-
-    const query_slice = query_text[0..query_len];
-
-    const eff_max_dist = if (max_distance == 0) 2 else max_distance;
-    const eff_min_len = if (min_term_length == 0) 4 else min_term_length;
-
-    db_handle.mutex.lock();
-    defer db_handle.mutex.unlock();
-    const active_db_result = ensureActiveDbLocked(db_handle);
-    if (active_db_result != .ok) return active_db_result;
-
-    const results = db_handle.db.ftsSearchFuzzy(query_slice, limit, eff_max_dist, eff_min_len) catch |err| {
-        return mapDatabaseError(err);
-    };
-
-    const result_handle = global_allocator.create(FtsResultHandle) catch {
-        db_handle.db.freeFtsSearchResults(results);
-        return .err_out_of_memory;
-    };
-    result_handle.* = FtsResultHandle{
-        .header = HandleHeader.init(.fts_result),
-        .results = results,
-        .count = results.len,
-        .db_handle = db_handle,
-        .counted_child = true,
-    };
-    const register_result = registerHandle(FtsResultHandle, result_handle);
-    if (register_result != .ok) {
-        db_handle.db.freeFtsSearchResults(results);
-        global_allocator.destroy(result_handle);
-        return register_result;
-    }
-    db_handle.active_children += 1;
-
-    result_out.* = toOpaque(lattice_fts_result, result_handle);
-    return .ok;
-}
-
-pub export fn lattice_fts_search_fuzzy_txn(
-    txn: ?*lattice_txn,
-    query_text: [*c]const u8,
-    query_len: usize,
-    limit: u32,
-    max_distance: u32,
-    min_term_length: u32,
-    result_out: *?*lattice_fts_result,
-) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
-    if (query_text == null or query_len == 0 or limit == 0) return .err_invalid_arg;
-
-    const query_slice = query_text[0..query_len];
-
-    const db_handle = txn_handle.db_handle;
-    db_handle.mutex.lock();
-    defer db_handle.mutex.unlock();
-    const active_txn_result = ensureActiveTxnLocked(txn_handle);
-    if (active_txn_result != .ok) return active_txn_result;
-
-    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
-    const results = txn_handle.db_handle.db.ftsSearchFuzzyInTxn(
+    const results = txn_handle.db_handle.db.ftsSearchIndexInTxn(
         txn_ptr,
+        .node,
+        label_slice,
+        property_slice,
         query_slice,
         limit,
-        max_distance,
-        min_term_length,
     ) catch |err| {
         return mapDatabaseError(err);
     };
 
+    return wrapFtsResults(txn_handle.db_handle, results, result_out);
+}
+
+pub export fn lattice_fts_search_fuzzy(
+    db: ?*lattice_database,
+    label: [*c]const u8,
+    property: [*c]const u8,
+    query_text: [*c]const u8,
+    query_len: usize,
+    limit: u32,
+    max_distance: u32,
+    min_term_length: u32,
+    result_out: *?*lattice_fts_result,
+) lattice_error {
+    const db_handle = toHandle(DatabaseHandle, db) orelse return .err_invalid_arg;
+    const label_slice = cStrToSlice(label) orelse return .err_invalid_arg;
+    const property_slice = cStrToSlice(property) orelse return .err_invalid_arg;
+    if (query_text == null or query_len == 0 or limit == 0) return .err_invalid_arg;
+
+    const query_slice = query_text[0..query_len];
+    const eff_max_dist: u32 = if (max_distance == 0) 2 else max_distance;
+    const eff_min_len: u32 = if (min_term_length == 0) 4 else min_term_length;
+
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active_db_result = ensureActiveDbLocked(db_handle);
+    if (active_db_result != .ok) return active_db_result;
+
+    const results = db_handle.db.ftsSearchIndexFuzzy(
+        null,
+        .node,
+        label_slice,
+        property_slice,
+        query_slice,
+        limit,
+        eff_max_dist,
+        eff_min_len,
+    ) catch |err| {
+        return mapDatabaseError(err);
+    };
+
+    return wrapFtsResults(db_handle, results, result_out);
+}
+
+pub export fn lattice_fts_search_fuzzy_txn(
+    txn: ?*lattice_txn,
+    label: [*c]const u8,
+    property: [*c]const u8,
+    query_text: [*c]const u8,
+    query_len: usize,
+    limit: u32,
+    max_distance: u32,
+    min_term_length: u32,
+    result_out: *?*lattice_fts_result,
+) lattice_error {
+    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const label_slice = cStrToSlice(label) orelse return .err_invalid_arg;
+    const property_slice = cStrToSlice(property) orelse return .err_invalid_arg;
+    if (query_text == null or query_len == 0 or limit == 0) return .err_invalid_arg;
+
+    const query_slice = query_text[0..query_len];
+    const eff_max_dist: u32 = if (max_distance == 0) 2 else max_distance;
+    const eff_min_len: u32 = if (min_term_length == 0) 4 else min_term_length;
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
+
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+    const results = txn_handle.db_handle.db.ftsSearchIndexFuzzy(
+        txn_ptr,
+        .node,
+        label_slice,
+        property_slice,
+        query_slice,
+        limit,
+        eff_max_dist,
+        eff_min_len,
+    ) catch |err| {
+        return mapDatabaseError(err);
+    };
+
+    return wrapFtsResults(txn_handle.db_handle, results, result_out);
+}
+
+/// Hand a result set to the caller as a counted child handle.
+///
+/// The four search entry points differed only in which search they called, and
+/// each carried its own copy of this bookkeeping. One of them getting the
+/// unwinding wrong on an allocation failure would have leaked a result set or
+/// left the child count too high.
+fn wrapFtsResults(
+    db_handle: *DatabaseHandle,
+    results: []FtsSearchResult,
+    result_out: *?*lattice_fts_result,
+) lattice_error {
     const result_handle = global_allocator.create(FtsResultHandle) catch {
-        txn_handle.db_handle.db.freeFtsSearchResults(results);
+        db_handle.db.freeFtsSearchResults(results);
         return .err_out_of_memory;
     };
     result_handle.* = FtsResultHandle{
         .header = HandleHeader.init(.fts_result),
         .results = results,
         .count = results.len,
-        .db_handle = txn_handle.db_handle,
+        .db_handle = db_handle,
         .counted_child = true,
     };
     const register_result = registerHandle(FtsResultHandle, result_handle);
     if (register_result != .ok) {
-        txn_handle.db_handle.db.freeFtsSearchResults(results);
+        db_handle.db.freeFtsSearchResults(results);
         global_allocator.destroy(result_handle);
         return register_result;
     }
@@ -2700,7 +2667,6 @@ pub export fn lattice_fts_search_fuzzy_txn(
     return .ok;
 }
 
-/// Get the number of FTS search results.
 pub export fn lattice_fts_result_count(
     result: ?*lattice_fts_result,
 ) u32 {

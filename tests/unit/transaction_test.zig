@@ -1594,20 +1594,22 @@ test "txn-aware searches: vector and fts reads stay snapshot-scoped" {
     });
     defer db.close();
 
+    try db.createNodeFtsIndex("Document", "text");
+
     var write_txn = try db.beginTransaction(.read_write);
     var read_txn = try db.beginTransaction(.read_only);
 
     const doc = try db.createNode(&write_txn, &[_][]const u8{"Document"});
     const query_vector = [_]f32{ 1.0, 0.0, 0.0, 0.0 };
     try db.setNodeVectorInTxn(&write_txn, doc, &query_vector);
-    try db.ftsIndexDocumentInTxn(&write_txn, doc, "machine learning systems");
+    try db.setNodeProperty(&write_txn, doc, "text", .{ .string_val = "machine learning systems" });
 
     const writer_vector = try db.vectorSearchInTxn(&write_txn, &query_vector, 5, null);
     defer db.freeVectorSearchResults(writer_vector);
     try std.testing.expectEqual(@as(usize, 1), writer_vector.len);
     try std.testing.expectEqual(doc, writer_vector[0].node_id);
 
-    const writer_fts = try db.ftsSearchInTxn(&write_txn, "machine learning", 5);
+    const writer_fts = try db.ftsSearchIndexInTxn(&write_txn, .node, "Document", "text", "machine learning", 5);
     defer db.freeFtsSearchResults(writer_fts);
     try std.testing.expectEqual(@as(usize, 1), writer_fts.len);
     try std.testing.expectEqual(doc, writer_fts[0].doc_id);
@@ -1616,7 +1618,7 @@ test "txn-aware searches: vector and fts reads stay snapshot-scoped" {
     defer db.freeVectorSearchResults(read_vector);
     try std.testing.expectEqual(@as(usize, 0), read_vector.len);
 
-    const read_fts = try db.ftsSearchInTxn(&read_txn, "machine learning", 5);
+    const read_fts = try db.ftsSearchIndexInTxn(&read_txn, .node, "Document", "text", "machine learning", 5);
     defer db.freeFtsSearchResults(read_fts);
     try std.testing.expectEqual(@as(usize, 0), read_fts.len);
 
@@ -1624,7 +1626,7 @@ test "txn-aware searches: vector and fts reads stay snapshot-scoped" {
     defer db.freeVectorSearchResults(public_vector);
     try std.testing.expectEqual(@as(usize, 0), public_vector.len);
 
-    const public_fts = try db.ftsSearch("machine learning", 5);
+    const public_fts = try db.ftsSearchIndex(.node, "Document", "text", "machine learning", 5);
     defer db.freeFtsSearchResults(public_fts);
     try std.testing.expectEqual(@as(usize, 0), public_fts.len);
 
@@ -1634,7 +1636,7 @@ test "txn-aware searches: vector and fts reads stay snapshot-scoped" {
     defer db.freeVectorSearchResults(stale_vector);
     try std.testing.expectEqual(@as(usize, 0), stale_vector.len);
 
-    const stale_fts = try db.ftsSearchInTxn(&read_txn, "machine learning", 5);
+    const stale_fts = try db.ftsSearchIndexInTxn(&read_txn, .node, "Document", "text", "machine learning", 5);
     defer db.freeFtsSearchResults(stale_fts);
     try std.testing.expectEqual(@as(usize, 0), stale_fts.len);
     try db.commitTransaction(&read_txn);
@@ -1647,7 +1649,7 @@ test "txn-aware searches: vector and fts reads stay snapshot-scoped" {
     try std.testing.expectEqual(@as(usize, 1), visible_vector.len);
     try std.testing.expectEqual(doc, visible_vector[0].node_id);
 
-    const visible_fts = try db.ftsSearchInTxn(&after_commit, "machine learning", 5);
+    const visible_fts = try db.ftsSearchIndexInTxn(&after_commit, .node, "Document", "text", "machine learning", 5);
     defer db.freeFtsSearchResults(visible_fts);
     try std.testing.expectEqual(@as(usize, 1), visible_fts.len);
     try std.testing.expectEqual(doc, visible_fts[0].doc_id);

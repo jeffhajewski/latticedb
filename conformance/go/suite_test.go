@@ -84,7 +84,7 @@ type Database interface {
 	Update(func(Tx) error) error
 	Query(cypher string, params map[string]Value) (QueryResult, error)
 	VectorSearch(vector []float32, opts VectorSearchOptions) ([]VectorSearchResult, error)
-	FTSSearch(query string, opts FTSSearchOptions) ([]FTSSearchResult, error)
+	FTSSearch(label, property, query string, opts FTSSearchOptions) ([]FTSSearchResult, error)
 	CreateNodeFTSIndex(label, property string) error
 	HasNodeFTSIndex(label, property string) (bool, error)
 	CacheClear() error
@@ -101,7 +101,6 @@ type Tx interface {
 	SetProperty(nodeID uint64, key string, value Value) error
 	GetProperty(nodeID uint64, key string) (Value, bool, error)
 	SetVector(nodeID uint64, key string, vector []float32) error
-	FTSIndex(nodeID uint64, text string) error
 	CreateEdge(sourceID, targetID uint64, edgeType string, opts CreateEdgeOptions) (Edge, error)
 	GetEdgeProperty(edgeID uint64, key string) (Value, bool, error)
 	SetEdgeProperty(edgeID uint64, key string, value Value) error
@@ -584,10 +583,9 @@ func TestConformanceSearchSemanticsAndQueryCache(t *testing.T) {
 		t.Fatalf("unexpected initial cache stats: %#v", initialStats)
 	}
 
-	// `d.text @@ ...` searches the index declared for Document.text. Declaring it
-	// before the writes means maintenance covers them as they happen. The
-	// FTSIndex calls below feed the older per-node index that db.FTSSearch still
-	// reads; the two are separate stores.
+	// `d.text @@ ...` and db.FTSSearch both read the index declared for
+	// Document.text. Declaring it before the writes means maintenance covers them
+	// as they happen.
 	if err := db.CreateNodeFTSIndex("Document", "text"); err != nil {
 		t.Fatalf("declare fts index: %v", err)
 	}
@@ -627,9 +625,6 @@ func TestConformanceSearchSemanticsAndQueryCache(t *testing.T) {
 		if err := tx.SetProperty(docNear.ID, "text", "graph databases and traversal"); err != nil {
 			return err
 		}
-		if err := tx.FTSIndex(docNear.ID, "graph databases and traversal"); err != nil {
-			return err
-		}
 		nearDocID = docNear.ID
 
 		docFar, err := tx.CreateNode(CreateNodeOptions{
@@ -643,9 +638,6 @@ func TestConformanceSearchSemanticsAndQueryCache(t *testing.T) {
 			return err
 		}
 		if err := tx.SetProperty(docFar.ID, "text", "cooking recipes and ingredients"); err != nil {
-			return err
-		}
-		if err := tx.FTSIndex(docFar.ID, "cooking recipes and ingredients"); err != nil {
 			return err
 		}
 		farDocID = docFar.ID
@@ -686,7 +678,7 @@ func TestConformanceSearchSemanticsAndQueryCache(t *testing.T) {
 	requireSingleStringResult(t, vectorQuery, "category", "Databases")
 	requireSingleStringResult(t, vectorQuery, "document", "Doc Candidate")
 
-	ftsResults, err := db.FTSSearch("graph databases", FTSSearchOptions{Limit: 5})
+	ftsResults, err := db.FTSSearch("Document", "text", "graph databases", FTSSearchOptions{Limit: 5})
 	if err != nil {
 		t.Fatalf("direct fts search: %v", err)
 	}

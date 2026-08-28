@@ -420,14 +420,10 @@ export interface LatticeBindings {
   lattice_vector_result_free: (result: unknown) => void;
 
   // Full-text search operations
-  lattice_fts_index: (
-    txn: unknown,
-    node_id: bigint,
-    text: string,
-    text_len: number
-  ) => number;
   lattice_fts_search: (
     db: unknown,
+    label: string,
+    property: string,
     query: string,
     query_len: number,
     limit: number,
@@ -435,6 +431,8 @@ export interface LatticeBindings {
   ) => number;
   lattice_fts_search_txn: (
     txn: unknown,
+    label: string,
+    property: string,
     query: string,
     query_len: number,
     limit: number,
@@ -442,6 +440,8 @@ export interface LatticeBindings {
   ) => number;
   lattice_fts_search_fuzzy: (
     db: unknown,
+    label: string,
+    property: string,
     query: string,
     query_len: number,
     limit: number,
@@ -451,12 +451,30 @@ export interface LatticeBindings {
   ) => number;
   lattice_fts_search_fuzzy_txn: (
     txn: unknown,
+    label: string,
+    property: string,
     query: string,
     query_len: number,
     limit: number,
     max_distance: number,
     min_term_length: number,
     result_out: unknown[]
+  ) => number;
+  lattice_node_fts_index_create: (
+    db: unknown,
+    label: string,
+    property: string
+  ) => number;
+  lattice_node_fts_index_drop: (
+    db: unknown,
+    label: string,
+    property: string
+  ) => number;
+  lattice_node_fts_index_exists: (
+    db: unknown,
+    label: string,
+    property: string,
+    exists_out: Buffer
   ) => number;
   lattice_fts_result_count: (result: unknown) => number;
   lattice_fts_result_get: (
@@ -941,14 +959,10 @@ function createBindings(): LatticeBindings {
     ]),
 
     // Full-text search operations
-    lattice_fts_index: lib.func('lattice_fts_index', 'int', [
-      TxnPtr,
-      'uint64', // node_id
-      'str', // text
-      'uintptr_t', // text_len (size_t)
-    ]),
     lattice_fts_search: lib.func('lattice_fts_search', 'int', [
       DatabasePtr,
+      'str', // label
+      'str', // property
       'str', // query
       'uintptr_t', // query_len (size_t)
       'uint32', // limit
@@ -956,6 +970,8 @@ function createBindings(): LatticeBindings {
     ]),
     lattice_fts_search_txn: lib.func('lattice_fts_search_txn', 'int', [
       TxnPtr,
+      'str', // label
+      'str', // property
       'str', // query
       'uintptr_t', // query_len (size_t)
       'uint32', // limit
@@ -963,6 +979,8 @@ function createBindings(): LatticeBindings {
     ]),
     lattice_fts_search_fuzzy: tryFunc(lib, 'lattice_fts_search_fuzzy', 'int', [
       DatabasePtr,
+      'str', // label
+      'str', // property
       'str', // query
       'uintptr_t', // query_len (size_t)
       'uint32', // limit
@@ -972,12 +990,30 @@ function createBindings(): LatticeBindings {
     ]),
     lattice_fts_search_fuzzy_txn: tryFunc(lib, 'lattice_fts_search_fuzzy_txn', 'int', [
       TxnPtr,
+      'str', // label
+      'str', // property
       'str', // query
       'uintptr_t', // query_len (size_t)
       'uint32', // limit
       'uint32', // max_distance
       'uint32', // min_term_length
       koffi.out(FtsResultPtrPtr), // result_out
+    ]),
+    lattice_node_fts_index_create: lib.func('lattice_node_fts_index_create', 'int', [
+      DatabasePtr,
+      'str',
+      'str',
+    ]),
+    lattice_node_fts_index_drop: lib.func('lattice_node_fts_index_drop', 'int', [
+      DatabasePtr,
+      'str',
+      'str',
+    ]),
+    lattice_node_fts_index_exists: lib.func('lattice_node_fts_index_exists', 'int', [
+      DatabasePtr,
+      'str',
+      'str',
+      koffi.out(koffi.pointer('bool')),
     ]),
     lattice_fts_result_count: lib.func('lattice_fts_result_count', 'uint32', [
       FtsResultPtr,

@@ -507,6 +507,10 @@ func TestBatchInsertVectorsVectorSearchAndFTS(t *testing.T) {
 		}
 	}()
 
+	if err := db.CreateNodeFTSIndex("Document", "text"); err != nil {
+		t.Fatalf("declare fts index: %v", err)
+	}
+
 	var nodeIDs []NodeID
 	err = db.Update(func(tx *Tx) error {
 		ids, err := tx.BatchInsertVectors("Document", [][]float32{
@@ -522,13 +526,13 @@ func TestBatchInsertVectorsVectorSearchAndFTS(t *testing.T) {
 		if err := tx.SetProperty(ids[0], "title", "Attention Is All You Need"); err != nil {
 			return err
 		}
-		if err := tx.FTSIndex(ids[0], "transformer self attention neural networks"); err != nil {
+		if err := tx.SetProperty(ids[0], "text", "transformer self attention neural networks"); err != nil {
 			return err
 		}
 		if err := tx.SetProperty(ids[1], "title", "LSM Trees"); err != nil {
 			return err
 		}
-		if err := tx.FTSIndex(ids[1], "log structured merge trees storage engines"); err != nil {
+		if err := tx.SetProperty(ids[1], "text", "log structured merge trees storage engines"); err != nil {
 			return err
 		}
 
@@ -539,7 +543,7 @@ func TestBatchInsertVectorsVectorSearchAndFTS(t *testing.T) {
 		if err := tx.SetVector(node.ID, "embedding", []float32{0.0, 0.0, 1.0, 0.0}); err != nil {
 			return err
 		}
-		if err := tx.FTSIndex(node.ID, "graph databases for ai agents"); err != nil {
+		if err := tx.SetProperty(node.ID, "text", "graph databases for ai agents"); err != nil {
 			return err
 		}
 		return nil
@@ -559,7 +563,7 @@ func TestBatchInsertVectorsVectorSearchAndFTS(t *testing.T) {
 		t.Fatalf("expected exact match first, got %d", results[0].NodeID)
 	}
 
-	ftsResults, err := db.FTSSearch("transformer attention", FTSSearchOptions{Limit: 5})
+	ftsResults, err := db.FTSSearch("Document", "text", "transformer attention", FTSSearchOptions{Limit: 5})
 	if err != nil {
 		t.Fatalf("fts search: %v", err)
 	}
@@ -570,7 +574,7 @@ func TestBatchInsertVectorsVectorSearchAndFTS(t *testing.T) {
 		t.Fatalf("expected transformer document first, got %d", ftsResults[0].NodeID)
 	}
 
-	fuzzyResults, err := db.FTSSearchFuzzy("transfomer attentin", FTSSearchOptions{
+	fuzzyResults, err := db.FTSSearchFuzzy("Document", "text", "transfomer attentin", FTSSearchOptions{
 		Limit:       5,
 		MaxDistance: 2,
 	})

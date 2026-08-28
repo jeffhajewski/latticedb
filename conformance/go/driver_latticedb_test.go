@@ -87,8 +87,8 @@ func (db *latticeDB) HasNodeFTSIndex(label, property string) (bool, error) {
 	return db.db.HasNodeFTSIndex(label, property)
 }
 
-func (db *latticeDB) FTSSearch(query string, opts FTSSearchOptions) ([]FTSSearchResult, error) {
-	results, err := db.db.FTSSearch(query, latticedb.FTSSearchOptions{
+func (db *latticeDB) FTSSearch(label, property, query string, opts FTSSearchOptions) ([]FTSSearchResult, error) {
+	results, err := db.db.FTSSearch(label, property, query, latticedb.FTSSearchOptions{
 		Limit:         opts.Limit,
 		MaxDistance:   opts.MaxDistance,
 		MinTermLength: opts.MinTermLength,
@@ -183,10 +183,6 @@ func (tx *latticeTx) GetProperty(nodeID uint64, key string) (Value, bool, error)
 
 func (tx *latticeTx) SetVector(nodeID uint64, key string, vector []float32) error {
 	return tx.tx.SetVector(latticedb.NodeID(nodeID), key, vector)
-}
-
-func (tx *latticeTx) FTSIndex(nodeID uint64, text string) error {
-	return tx.tx.FTSIndex(latticedb.NodeID(nodeID), text)
 }
 
 func (tx *latticeTx) CreateEdge(sourceID, targetID uint64, edgeType string, opts CreateEdgeOptions) (Edge, error) {

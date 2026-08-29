@@ -404,6 +404,28 @@ pub fn build(b: *std.Build) void {
     const graph_bench_step = b.step("graph-benchmark", "Run DFS graph traversal benchmarks (LatticeDB vs SQLite)");
     graph_bench_step.dependOn(&run_graph_bench.step);
 
+    // Compile every benchmark without running one.
+    //
+    // The benchmarks are built by no other step, so an API they use can be
+    // removed and everything stays green: `zig build` does not reach them and
+    // neither does `zig build test`. They are only run by benchmark.yml, which
+    // fires on tags, so the first report comes from a release. That is how
+    // v0.15.0 was tagged with benchmarks that had not compiled for several
+    // commits.
+    //
+    // This step is compile-only so it can sit in the ordinary test run without
+    // paying for a benchmark's runtime.
+    const bench_build_step = b.step("benchmark-build", "Compile all benchmarks without running them");
+    for ([_]*std.Build.Step.Compile{
+        bench_exe,
+        fts_bench_exe,
+        vector_bench_exe,
+        sqlite_bench_exe,
+        graph_bench_exe,
+    }) |exe| {
+        bench_build_step.dependOn(&exe.step);
+    }
+
     // Fuzz test module - imports the library module
     const fuzz_module = b.createModule(.{
         .root_source_file = b.path("tests/fuzz/main.zig"),

@@ -45,6 +45,12 @@ jobs:
       - name: Run deterministic fuzz corpus
         run: zig build fuzz
 
+      # Compile-only. The benchmarks are built by no other step, so an API they
+      # use can be removed and every check stays green; benchmark.yml runs on
+      # tags, which made a release the first place that showed up.
+      - name: Compile benchmarks
+        run: zig build benchmark-build
+
       - name: Build shared library
         run: |
           case "${{ matrix.os }}-$(uname -m)" in

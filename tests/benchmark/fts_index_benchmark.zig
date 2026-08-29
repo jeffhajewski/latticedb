@@ -95,6 +95,10 @@ fn benchmarkScale(allocator: std.mem.Allocator, docs: usize) !BenchmarkResult {
         @import("compat").fs.cwd().deleteFile(path) catch {};
     }
 
+    // Declared before the writes, so each setNodeProperty maintains the index.
+    // That is what this benchmark now times: indexing happens as text arrives.
+    try db.createNodeFtsIndex("Doc", "body");
+
     const node_ids = try createNodes(db, docs);
     defer allocator.free(node_ids);
 
@@ -113,7 +117,7 @@ fn benchmarkScale(allocator: std.mem.Allocator, docs: usize) !BenchmarkResult {
         );
 
         const start = @import("compat").nanoTimestamp();
-        try db.ftsIndexDocument(node_id, text);
+        try db.setNodeProperty(null, node_id, "body", .{ .string_val = text });
         const end = @import("compat").nanoTimestamp();
 
         const elapsed: u64 = @intCast(end - start);
@@ -123,7 +127,7 @@ fn benchmarkScale(allocator: std.mem.Allocator, docs: usize) !BenchmarkResult {
     }
 
     const search_start = @import("compat").nanoTimestamp();
-    const results = try db.ftsSearch("connection", 10);
+    const results = try db.ftsSearchIndex(.node, "Doc", "body", "connection", 10);
     const search_end = @import("compat").nanoTimestamp();
     defer db.freeFtsSearchResults(results);
 
@@ -154,7 +158,7 @@ fn printHeader() void {
     std.debug.print("Workload:\n", .{});
     std.debug.print("  • One indexed document per node\n", .{});
     std.debug.print("  • Every document shares the same common terms\n", .{});
-    std.debug.print("  • Times only Database.ftsIndexDocument() per document\n", .{});
+    std.debug.print("  • Times writing the indexed property, which is what indexes it\n", .{});
     std.debug.print("  • Uses WAL disabled to isolate the posting-list append path\n", .{});
     std.debug.print("\n", .{});
 }

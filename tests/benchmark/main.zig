@@ -153,7 +153,7 @@ const FtsSearchContext = struct {
     query: []const u8,
 
     fn run(self: *@This()) void {
-        const results = self.db.ftsSearch(self.query, 10) catch return;
+        const results = self.db.ftsSearchIndex(.node, "Document", "body", self.query, 10) catch return;
         self.db.freeFtsSearchResults(results);
     }
 };
@@ -259,7 +259,7 @@ fn createFtsData(db: *Database, node_ids: []const u64, allocator: std.mem.Alloca
         const text_buf = try allocator.alloc(u8, base_text.len + 20);
         defer allocator.free(text_buf);
         const text = std.fmt.bufPrint(text_buf, "{s} {d}", .{ base_text, i }) catch base_text;
-        db.ftsIndexDocument(node_id, text) catch |err| {
+        db.setNodeProperty(null, node_id, "body", .{ .string_val = text }) catch |err| {
             std.debug.print("    FTS index error at doc {d}: {any}\n", .{ i, err });
             return err;
         };
@@ -448,6 +448,12 @@ pub fn main() !void {
         // Debug: Check if FTS index was initialized
         std.debug.print("  FTS config.enable_fts: {}\n", .{fts_db.config.enable_fts});
         std.debug.print("  FTS index initialized: {}\n", .{fts_db.fts_index != null});
+
+        // The index is declared first so writing the property maintains it.
+        fts_db.createNodeFtsIndex("Document", "body") catch |err| {
+            std.debug.print("  Failed to declare FTS index: {any}\n", .{err});
+            return;
+        };
 
         // Create some nodes for FTS indexing
         const fts_node_ids = createNodes(fts_db, 100, "Document") catch |err| {

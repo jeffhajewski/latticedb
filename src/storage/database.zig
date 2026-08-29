@@ -3490,6 +3490,32 @@ pub const Database = struct {
         return self.mergePendingFts(definition, pending, base, query_text, limit);
     }
 
+    /// Roughly how many entities a query would match in one declared index.
+    ///
+    /// Used to choose between two full-text predicates that could each be the way
+    /// into the data. Seeking the rarer one and filtering by the other reads far
+    /// less than the reverse.
+    ///
+    /// Null when there is no opinion to offer: no index declared, or nothing left
+    /// of the query after the analyzer. Uncommitted writes are not counted, so a
+    /// transaction that has just written a great deal is estimated from what is
+    /// committed. That skews the choice rather than the answer, which the filter
+    /// above the seek still checks.
+    pub fn ftsEstimateMatches(
+        self: *Self,
+        kind: FtsEntityKind,
+        scope: []const u8,
+        property: []const u8,
+        query_text: []const u8,
+    ) ?u32 {
+        const definition = self.ftsDefinitionFor(kind, scope, property, false) catch return null;
+        var catalog = self.ftsCatalog() orelse return null;
+        if (!(catalog.has(definition) catch return null)) return null;
+
+        var index = self.ftsIndexFor(definition);
+        return index.estimateMatches(query_text) catch null;
+    }
+
     /// The search itself, once the definition is known to exist.
     ///
     /// Callers that already hold a definition use this rather than turning it back

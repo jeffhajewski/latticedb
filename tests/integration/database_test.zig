@@ -5469,3 +5469,147 @@ test "database: a full-text predicate becomes the access path, not a filter" {
         try std.testing.expectEqual(@as(usize, 1), r.rowCount());
     }
 }
+
+test "database: the index estimates how many documents a query would match" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    try db.createNodeFtsIndex("Doc", "title");
+
+    var txn = try db.beginTransaction(.read_write);
+    var i: usize = 0;
+    while (i < 20) : (i += 1) {
+        const node = try db.createNode(&txn, &[_][]const u8{"Doc"});
+        // "loaf" on every document, "ciabatta" on exactly one.
+        const title = if (i == 0) "ciabatta loaf" else "focaccia loaf";
+        try db.setNodeProperty(&txn, node, "title", .{ .string_val = title });
+    }
+    try db.commitTransaction(&txn);
+
+    // The dictionary already counts documents per term, so this is a lookup
+    // rather than a counting pass.
+    try std.testing.expectEqual(@as(?u32, 20), db.ftsEstimateMatches(.node, "Doc", "title", "loaf"));
+    try std.testing.expectEqual(@as(?u32, 1), db.ftsEstimateMatches(.node, "Doc", "title", "ciabatta"));
+
+    // Search is AND, so the rarest term bounds the result: a query for both
+    // cannot match more documents than the scarcer of them appears in.
+    try std.testing.expectEqual(@as(?u32, 1), db.ftsEstimateMatches(.node, "Doc", "title", "loaf ciabatta"));
+    try std.testing.expectEqual(@as(?u32, 1), db.ftsEstimateMatches(.node, "Doc", "title", "ciabatta loaf"));
+
+    // A term nobody used means nothing matches, which is exact rather than a
+    // guess, and makes such a predicate the best possible way into the data.
+    try std.testing.expectEqual(@as(?u32, 0), db.ftsEstimateMatches(.node, "Doc", "title", "zzznotfound"));
+    try std.testing.expectEqual(@as(?u32, 0), db.ftsEstimateMatches(.node, "Doc", "title", "loaf zzznotfound"));
+
+    // No opinion where there is no index.
+    try std.testing.expectEqual(@as(?u32, null), db.ftsEstimateMatches(.node, "Doc", "body", "loaf"));
+}
+
+test "database: two ANDed full-text predicates give the same answer either way round" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    try db.createNodeFtsIndex("Doc", "title");
+    try db.createNodeFtsIndex("Doc", "body");
+
+    var txn = try db.beginTransaction(.read_write);
+    var i: usize = 0;
+    while (i < 60) : (i += 1) {
+        const node = try db.createNode(&txn, &[_][]const u8{"Doc"});
+        try db.setNodeProperty(&txn, node, "name", .{ .string_val = if (i == 0) "hit" else "miss" });
+        try db.setNodeProperty(&txn, node, "title", .{ .string_val = "loaf" });
+        try db.setNodeProperty(&txn, node, "body", .{ .string_val = if (i == 0) "ciabatta" else "focaccia" });
+    }
+    try db.commitTransaction(&txn);
+
+    // Which predicate is written first decided which index was read, and reading
+    // the common one first meant materialising the whole corpus to discard it.
+    // Both orderings now start from the rarer term, and both have to agree.
+    {
+        var r = try db.query("MATCH (d:Doc) WHERE d.body @@ 'ciabatta' AND d.title @@ 'loaf' RETURN d.name AS n");
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 1), r.rowCount());
+        try std.testing.expectEqualStrings("hit", rowString(&r, 0, 0));
+    }
+    {
+        var r = try db.query("MATCH (d:Doc) WHERE d.title @@ 'loaf' AND d.body @@ 'ciabatta' RETURN d.name AS n");
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 1), r.rowCount());
+        try std.testing.expectEqualStrings("hit", rowString(&r, 0, 0));
+    }
+
+    // A predicate matching nothing is the most selective there is, and must not
+    // be mistaken for one there is no information about.
+    {
+        var r = try db.query("MATCH (d:Doc) WHERE d.title @@ 'loaf' AND d.body @@ 'zzznotfound' RETURN d.name AS n");
+        defer r.deinit();
+        try std.testing.expectEqual(@as(usize, 0), r.rowCount());
+    }
+}
+
+test "database: choosing between full-text indexes does not drop a label filter" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    // Two indexes on two different labels, both reachable from one pattern.
+    try db.createNodeFtsIndex("Article", "title");
+    try db.createNodeFtsIndex("Draft", "body");
+    try db.createNodeFtsIndex("Draft", "title");
+
+    var txn = try db.beginTransaction(.read_write);
+
+    // Bulk, so that searching Article.title looks expensive and searching
+    // Draft.body looks cheap. The cross-label candidate has to be the tempting
+    // one, or the planner would decline it for reasons that have nothing to do
+    // with labels and this test would pass without proving anything.
+    var i: usize = 0;
+    while (i < 40) : (i += 1) {
+        const filler = try db.createNode(&txn, &[_][]const u8{ "Article", "Draft" });
+        try db.setNodeProperty(&txn, filler, "name", .{ .string_val = "filler" });
+        try db.setNodeProperty(&txn, filler, "title", .{ .string_val = "alpha" });
+        try db.setNodeProperty(&txn, filler, "body", .{ .string_val = "common" });
+    }
+
+    const both = try db.createNode(&txn, &[_][]const u8{ "Article", "Draft" });
+    try db.setNodeProperty(&txn, both, "name", .{ .string_val = "both" });
+    try db.setNodeProperty(&txn, both, "title", .{ .string_val = "alpha" });
+    try db.setNodeProperty(&txn, both, "body", .{ .string_val = "beta" });
+
+    // A draft that is not an article. It is in the Draft.body index, so an access
+    // path chosen from that index produces it, and only the Article label filter
+    // keeps it out of the answer.
+    const draft_only = try db.createNode(&txn, &[_][]const u8{"Draft"});
+    try db.setNodeProperty(&txn, draft_only, "name", .{ .string_val = "draft-only" });
+    try db.setNodeProperty(&txn, draft_only, "title", .{ .string_val = "alpha" });
+    try db.setNodeProperty(&txn, draft_only, "body", .{ .string_val = "beta" });
+    try db.commitTransaction(&txn);
+
+    // Draft.body @@ 'beta' matches two documents; Article.title @@ 'alpha'
+    // matches forty-one. So the cheaper-looking way in is the one on the label
+    // whose filter would still be needed.
+    try std.testing.expectEqual(@as(?u32, 41), db.ftsEstimateMatches(.node, "Article", "title", "alpha"));
+    try std.testing.expectEqual(@as(?u32, 2), db.ftsEstimateMatches(.node, "Draft", "body", "beta"));
+
+    // The access path guarantees whichever label its index covers, and the
+    // planner skips exactly that label's filter. If candidates could span two
+    // labels, the skipped filter would not match the chosen path and the draft
+    // would come back too.
+    var r = try db.query(
+        "MATCH (d:Article:Draft) WHERE d.title @@ 'alpha' AND d.body @@ 'beta' RETURN d.name AS n",
+    );
+    defer r.deinit();
+    try std.testing.expectEqual(@as(usize, 1), r.rowCount());
+    try std.testing.expectEqualStrings("both", rowString(&r, 0, 0));
+}

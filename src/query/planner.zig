@@ -426,25 +426,53 @@ pub const QueryPlanner = struct {
                         // A declared full-text index answers the question and
                         // names the label, so seeking it replaces the label scan
                         // rather than sitting on top of one.
-                        var fts_seek: ?fts_ops.Search = null;
+                        var fts_candidates: [MAX_FTS_DISJUNCTS][]const fts_ops.Search = undefined;
+                        var fts_candidate_count: usize = 0;
                         if (indexed_property == null) {
                             if (node_var_name) |variable_name| {
                                 if (where_hint) |condition| {
-                                    if (self.findWhereFtsSeek(variable_name, condition)) |info| {
-                                        if (self.resolveFtsIndex(info)) |resolved| {
-                                            var search = resolved;
-                                            search.param_name = info.param_name;
-                                            search.literal_query = info.query_text;
-                                            // Only when the index covers a label
-                                            // this pattern actually asks for.
-                                            for (node_pattern.labels, 0..) |label_name, label_idx| {
-                                                if (std.mem.eql(u8, label_name, search.scope)) {
-                                                    fts_seek = search;
-                                                    scan_label_index = label_idx;
-                                                    break;
-                                                }
+                                    var seek_infos: [MAX_FTS_DISJUNCTS]FtsSearchInfo = undefined;
+                                    var seek_count: usize = 0;
+                                    self.collectWhereFtsSeeks(variable_name, condition, &seek_infos, &seek_count);
+
+                                    // Every candidate has to cover the same label.
+                                    //
+                                    // The label the access path guarantees is the
+                                    // one whose filter is skipped below. Which
+                                    // candidate runs is decided when the query
+                                    // runs, so candidates on different labels
+                                    // would mean skipping a filter for a label the
+                                    // chosen one does not guarantee, and returning
+                                    // entities that lack it. Keeping them to one
+                                    // label costs nothing in practice: two
+                                    // properties of the same label is the shape
+                                    // this exists for.
+                                    var seek_label: ?[]const u8 = null;
+                                    for (seek_infos[0..seek_count]) |info| {
+                                        const resolved = self.resolveFtsIndex(info) catch continue;
+                                        var search = resolved;
+                                        search.param_name = info.param_name;
+                                        search.literal_query = info.query_text;
+                                        if (seek_label) |chosen_label| {
+                                            if (!std.mem.eql(u8, chosen_label, search.scope)) continue;
+                                        }
+                                        // Only when the index covers a label this
+                                        // pattern actually asks for.
+                                        for (node_pattern.labels, 0..) |label_name, label_idx| {
+                                            if (!std.mem.eql(u8, label_name, search.scope)) continue;
+                                            const group = self.allocator.alloc(fts_ops.Search, 1) catch {
+                                                return PlannerError.OutOfMemory;
+                                            };
+                                            group[0] = search;
+                                            fts_candidates[fts_candidate_count] = group;
+                                            fts_candidate_count += 1;
+                                            if (seek_label == null) {
+                                                seek_label = search.scope;
+                                                scan_label_index = label_idx;
                                             }
-                                        } else |_| {}
+                                            break;
+                                        }
+                                        if (fts_candidate_count == fts_candidates.len) break;
                                     }
                                 }
                             }
@@ -456,15 +484,15 @@ pub const QueryPlanner = struct {
                             else => return PlannerError.InternalError,
                         };
 
-                        var new_op: Operator = if (fts_seek) |search| blk: {
-                            const searches = self.allocator.alloc(fts_ops.Search, 1) catch {
+                        var new_op: Operator = if (fts_candidate_count > 0) blk: {
+                            const owned = self.allocator.alloc([]const fts_ops.Search, fts_candidate_count) catch {
                                 return PlannerError.OutOfMemory;
                             };
-                            searches[0] = search;
+                            @memcpy(owned, fts_candidates[0..fts_candidate_count]);
                             const seek = fts_ops.FtsIndexSeek.init(
                                 self.allocator,
                                 slot,
-                                searches,
+                                owned,
                                 fts_ops.NO_RESULT_LIMIT,
                                 database,
                             ) catch return PlannerError.OutOfMemory;
@@ -730,26 +758,43 @@ pub const QueryPlanner = struct {
     /// Only conjunctive positions count. Under an OR the predicate does not
     /// constrain which entities the query is about — the other side may admit
     /// rows the index never names — so seeking would drop them.
-    fn findWhereFtsSeek(
+    /// Every full-text predicate on `variable_name` that could be the access path.
+    ///
+    /// Only conjunctive positions count. Under an OR the predicate does not
+    /// constrain which entities the query is about — the other side may admit rows
+    /// the index never names — so seeking would drop them.
+    ///
+    /// Several are collected rather than the first because they are rarely equally
+    /// cheap. `d.title @@ "the" AND d.body @@ "sourdough"` can start from a term
+    /// most documents share or from one a handful do, and the operator picks
+    /// between them when it runs, where the query text is known even if it came
+    /// from a parameter.
+    fn collectWhereFtsSeeks(
         self: *Self,
         variable_name: []const u8,
         expr: *const ast.Expression,
-    ) ?FtsSearchInfo {
+        out: *[MAX_FTS_DISJUNCTS]FtsSearchInfo,
+        count: *usize,
+    ) void {
         const binary = switch (expr.*) {
             .binary => |binary| binary,
-            else => return null,
+            else => return,
         };
 
         if (binary.operator == .and_) {
-            return self.findWhereFtsSeek(variable_name, binary.left) orelse
-                self.findWhereFtsSeek(variable_name, binary.right);
+            self.collectWhereFtsSeeks(variable_name, binary.left, out, count);
+            self.collectWhereFtsSeeks(variable_name, binary.right, out, count);
+            return;
         }
-        if (binary.operator != .fts_match) return null;
+        if (binary.operator != .fts_match) return;
+        if (count.* >= out.len) return;
 
-        const info = self.extractFtsInfo(binary.*) orelse return null;
-        const named = info.variable_name orelse return null;
-        if (!std.mem.eql(u8, named, variable_name)) return null;
-        return info;
+        const info = self.extractFtsInfo(binary.*) orelse return;
+        const named = info.variable_name orelse return;
+        if (!std.mem.eql(u8, named, variable_name)) return;
+
+        out[count.*] = info;
+        count.* += 1;
     }
 
     fn findWherePropertyIndex(

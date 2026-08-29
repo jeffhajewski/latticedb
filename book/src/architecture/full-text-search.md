@@ -780,7 +780,7 @@ different kind discriminators.
 
 1. **English-only stemming** - Porter stemmer for English only (other languages skip stemming)
 2. **One property per index** - Searching several fields as one document means storing the combined text in a property and indexing that. The reasoning is in the design note: an index spanning `title` and `body` would make `d.title @@ "x"` match on body text, which is the confusion per-property indexes exist to remove.
-3. **No cost-based choice between two indexes** - `d.title @@ "x" AND d.body @@ "y"` seeks whichever the planner meets first and filters by the other. The dictionary already stores `doc_freq`, so seeking the rarer term is available but not yet implemented.
+3. **Selectivity is per term, not per phrase** - the estimate that chooses between two indexes is the rarest term's document frequency, which bounds an AND query correctly but says nothing about how often the terms occur *together*. Two predicates whose terms are individually common but jointly rare estimate as common.
 4. **Fuzzy matching does not reach uncommitted text** - Text written in the current transaction is matched by term presence rather than edit distance, because fuzzy expansion walks the committed dictionary.
 
 ### Implemented Features
@@ -1136,6 +1136,45 @@ Reusing a search within one execution is the same assumption the scanning
 operators have always made — they search once when they open and use that result
 for every row they emit. The cache matches that granularity rather than inventing
 a stricter or a looser rule.
+
+### Choosing between two ways in
+
+`d.title @@ "the" AND d.body @@ "sourdough"` offers two ways into the data, and
+they are not equally cheap. Starting from a word most documents share means
+reading the corpus to discard it; starting from a rare one means reading almost
+nothing.
+
+The dictionary already records, for every term, how many documents contain it. An
+AND query cannot match more documents than its rarest term appears in, so the
+minimum of those counts is a real upper bound rather than a guess — and a term
+absent from the dictionary gives zero, which is exact. Each candidate costs one
+B-tree lookup per term to estimate.
+
+The choice is made when the query runs, not when it is planned, for two reasons.
+A query whose text arrives as a parameter has nothing to estimate at plan time.
+And a cached plan would carry a decision made against whatever the data looked
+like when it was first planned.
+
+Choosing at execution is safe because the filter above the seek applies the whole
+condition regardless of which candidate was read, so the choice can only affect
+how much work is done, never which rows come back.
+
+Candidates are confined to one label. The label the access path guarantees is the
+one whose filter the planner skips, and which candidate runs is not known until it
+runs; candidates spanning two labels would mean skipping a filter the chosen path
+does not satisfy. That was a real defect during development — a pattern asking for
+two labels returned entities carrying only one — and it survived two tests that
+passed for an unrelated reason before a negative control exposed it.
+
+Measured on eight thousand documents, one matching row:
+
+| query | before | after |
+|---|---:|---:|
+| rare predicate written first | 4.3 ms | 4.3 ms |
+| common predicate written first | 244 ms | 4.2 ms |
+
+The point is not only the 59x. It is that the two rows now agree: how the author
+ordered the predicates no longer decides what the query costs.
 
 ### Disjunctions
 

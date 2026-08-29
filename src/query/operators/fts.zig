@@ -80,8 +80,16 @@ pub const Search = struct {
 pub const FtsIndexSeek = struct {
     /// Slot to bind each matching entity into
     output_slot: u8,
-    /// The searches whose results this unions, as in FtsSearchWithInput
-    searches: []const Search,
+    /// The ways into the data this could take, of which it takes one.
+    ///
+    /// Each candidate is a group of searches to union, so a plain `@@` is one
+    /// candidate holding one search. Several candidates mean several `@@`
+    /// predicates joined by AND, any one of which could be the access path: the
+    /// rest are left to the filter above, which applies the whole condition
+    /// regardless of which was chosen.
+    candidates: []const []const Search,
+    /// Which candidate `open` chose, for tests and explain output.
+    chosen: usize,
     limit: u32,
     database: *Database,
     results: ?[]ScoredDoc,
@@ -94,14 +102,15 @@ pub const FtsIndexSeek = struct {
     pub fn init(
         allocator: Allocator,
         output_slot: u8,
-        searches: []const Search,
+        candidates: []const []const Search,
         limit: u32,
         database: *Database,
     ) !*Self {
         const self = try allocator.create(Self);
         self.* = Self{
             .output_slot = output_slot,
-            .searches = searches,
+            .candidates = candidates,
+            .chosen = 0,
             .limit = limit,
             .database = database,
             .results = null,
@@ -110,6 +119,57 @@ pub const FtsIndexSeek = struct {
             .allocator = allocator,
         };
         return self;
+    }
+
+    /// How many entities a candidate would produce, as far as the index knows.
+    ///
+    /// Null when no search in the group could be estimated, which is the honest
+    /// answer for a query whose text is not known until it runs and whose terms
+    /// the analyzer discarded. A group's searches are unioned, so their estimates
+    /// add: searching two properties can only return more than searching one.
+    fn estimateCandidate(
+        self: *Self,
+        ctx: *ExecutionContext,
+        searches: []const Search,
+    ) ?u64 {
+        var total: ?u64 = null;
+        for (searches) |search| {
+            const query_text = if (search.literal_query) |lit|
+                lit
+            else if (search.param_name) |pname| blk: {
+                const value = ctx.getParameter(pname) orelse return null;
+                break :blk extractTextFromParam(value) orelse return null;
+            } else return null;
+
+            const one = self.database.ftsEstimateMatches(
+                search.kind,
+                search.scope,
+                search.property,
+                query_text,
+            ) orelse return null;
+            total = (total orelse 0) + one;
+        }
+        return total;
+    }
+
+    /// The candidate that looks cheapest to read.
+    ///
+    /// Ties and unknowns keep the first candidate, which is the order the query
+    /// was written in. Choosing arbitrarily when there is nothing to choose on
+    /// would make the plan depend on something the author cannot see.
+    fn chooseCandidate(self: *Self, ctx: *ExecutionContext) usize {
+        if (self.candidates.len <= 1) return 0;
+
+        var best_index: usize = 0;
+        var best: ?u64 = self.estimateCandidate(ctx, self.candidates[0]);
+        for (self.candidates[1..], 1..) |candidate, i| {
+            const estimate = self.estimateCandidate(ctx, candidate) orelse continue;
+            if (best == null or estimate < best.?) {
+                best = estimate;
+                best_index = i;
+            }
+        }
+        return best_index;
     }
 
     pub fn operator(self: *Self) Operator {
@@ -126,7 +186,14 @@ pub const FtsIndexSeek = struct {
     fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.current_row = ctx.allocRow() catch return OperatorError.OutOfMemory;
-        self.results = try runSearches(self.database, ctx, self.searches, self.limit, self.allocator);
+        self.chosen = self.chooseCandidate(ctx);
+        self.results = try runSearches(
+            self.database,
+            ctx,
+            self.candidates[self.chosen],
+            self.limit,
+            self.allocator,
+        );
         self.current_index = 0;
     }
 
@@ -141,7 +208,8 @@ pub const FtsIndexSeek = struct {
         self.current_index += 1;
 
         row.clear();
-        const searching_edges = self.searches.len > 0 and self.searches[0].kind == .edge;
+        const chosen = self.candidates[self.chosen];
+        const searching_edges = chosen.len > 0 and chosen[0].kind == .edge;
         row.setSlot(self.output_slot, if (searching_edges)
             .{ .edge_ref = hit.doc_id }
         else

@@ -514,6 +514,45 @@ pub const FtsIndex = struct {
 
     /// Search with a text query
     /// Returns scored documents sorted by relevance (highest first)
+    /// Roughly how many documents this query would match.
+    ///
+    /// The dictionary already records, for every term, how many documents contain
+    /// it. Search is AND by default, so the rarest term bounds the result: a query
+    /// for two words cannot match more documents than the scarcer of them appears
+    /// in. That makes the minimum a real upper bound rather than a guess.
+    ///
+    /// A term absent from the dictionary gives zero, which is exact — an AND query
+    /// naming a word nobody used matches nothing.
+    ///
+    /// Null means there is nothing to go on: no usable tokens after the analyzer
+    /// has run. Callers should treat that as "no opinion" rather than as zero.
+    ///
+    /// This is a B-tree lookup per term against data the index already keeps, so
+    /// it costs microseconds and needs no counting pass.
+    pub fn estimateMatches(self: *Self, query_text: []const u8) FtsError!?u32 {
+        var tok = Tokenizer.init(self.allocator, query_text, self.config.tokenizer);
+        const tokens = tok.tokenizeAll() catch return FtsError.TokenizerError;
+        defer self.allocator.free(tokens);
+
+        var estimate: ?u32 = null;
+        for (tokens) |token| {
+            // The same normalisation search does, so the terms looked up here are
+            // the terms that would actually be searched.
+            var lower_buf: [64]u8 = undefined;
+            if (token.text.len > lower_buf.len) continue;
+            for (token.text, 0..) |c, i| lower_buf[i] = std.ascii.toLower(c);
+            const normalized = lower_buf[0..token.text.len];
+
+            const entry = self.dictionary.get(normalized) catch {
+                return FtsError.DictionaryError;
+            };
+            const freq: u32 = if (entry) |e| e.doc_freq else 0;
+            estimate = if (estimate) |current| @min(current, freq) else freq;
+            if (estimate == 0) return 0;
+        }
+        return estimate;
+    }
+
     pub fn search(
         self: *Self,
         query_text: []const u8,

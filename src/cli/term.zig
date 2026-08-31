@@ -18,29 +18,24 @@
 //!     would appear as literal `←[K` text.
 
 const std = @import("std");
-const builtin = @import("builtin");
-
-const is_windows = builtin.os.tag == .windows;
 
 /// Raw mode, and the promise to put the terminal back.
-pub const RawMode = if (is_windows) WindowsRawMode else PosixRawMode;
+///
+/// One implementation today. A Windows port adds a second and selects between
+/// them on the target; see the note at the bottom of this file.
+pub const RawMode = PosixRawMode;
 
 /// A source of bytes for the key decoder.
-pub const Source = if (is_windows) WindowsSource else PosixSource;
+pub const Source = PosixSource;
 
 /// Whether input is a terminal at all.
 ///
 /// When it is not — a pipe, a file, a test harness — the REPL reads lines
 /// plainly and never enters raw mode.
+/// A Windows port answers this with GetConsoleMode succeeding on the input
+/// handle: only a console has a console mode, so a redirected stdin fails it,
+/// which is the question being asked.
 pub fn stdinIsTty() bool {
-    if (is_windows) {
-        var mode: DWORD = undefined;
-        const handle = GetStdHandle(STD_INPUT_HANDLE);
-        if (handle == INVALID_HANDLE_VALUE) return false;
-        // Only a console has a console mode. A redirected stdin fails here,
-        // which is exactly the question being asked.
-        return GetConsoleMode(handle, &mode).toBool();
-    }
     if (@hasDecl(std.posix, "isatty")) {
         return std.posix.isatty(std.posix.STDIN_FILENO);
     }
@@ -103,108 +98,30 @@ const PosixSource = struct {
 // ============================================================================
 // Windows
 //
-// std.os.windows in this Zig version exposes almost none of the console API, so
-// the handful of calls needed are declared here rather than waiting for it.
+// Not implemented. This is the whole of what a Windows port has to supply:
+// a `WindowsRawMode` with `enableIfTty` and `restore`, and a `WindowsSource`
+// with `readByte` and `readByteTimeout`. Nothing above this file changes —
+// key.zig already decodes the escape sequences a Windows console emits in
+// virtual-terminal mode, and is tested against exactly those byte sequences.
+//
+// Two things worth knowing before starting.
+//
+// Raw mode has to arrange input *and* output. Input must arrive unbuffered,
+// unechoed, one byte at a time, with escape sequences passed through rather
+// than digested into console events — that is ENABLE_VIRTUAL_TERMINAL_INPUT
+// with ENABLE_LINE_INPUT and ENABLE_ECHO_INPUT cleared. Output must then
+// interpret the escape sequences the line editor writes to move the cursor and
+// clear the line, which is ENABLE_VIRTUAL_TERMINAL_PROCESSING on the output
+// handle. On a POSIX terminal that second half is simply true, so it is the
+// half a port tends to forget; without it the redraw prints its own escapes as
+// text.
+//
+// `readByteTimeout` is the only place the two platforms differ in shape rather
+// than spelling. It exists so a lone Escape keypress can be told from the start
+// of a sequence. POSIX answers that with poll; Windows would use
+// WaitForSingleObject on the console handle.
+//
+// Note that std.os.windows in this Zig version exposes almost none of the
+// console API — one kernel32 extern in total — so GetStdHandle, GetConsoleMode,
+// SetConsoleMode, ReadFile and WaitForSingleObject need declaring.
 // ============================================================================
-
-const HANDLE = std.os.windows.HANDLE;
-const DWORD = std.os.windows.DWORD;
-const BOOL = std.os.windows.BOOL;
-
-const STD_INPUT_HANDLE: DWORD = @bitCast(@as(i32, -10));
-const STD_OUTPUT_HANDLE: DWORD = @bitCast(@as(i32, -11));
-const INVALID_HANDLE_VALUE: HANDLE = @ptrFromInt(std.math.maxInt(usize));
-
-const ENABLE_PROCESSED_INPUT: DWORD = 0x0001;
-const ENABLE_LINE_INPUT: DWORD = 0x0002;
-const ENABLE_ECHO_INPUT: DWORD = 0x0004;
-const ENABLE_VIRTUAL_TERMINAL_INPUT: DWORD = 0x0200;
-const ENABLE_VIRTUAL_TERMINAL_PROCESSING: DWORD = 0x0004;
-
-const WAIT_OBJECT_0: DWORD = 0;
-
-extern "kernel32" fn GetStdHandle(nStdHandle: DWORD) callconv(.winapi) HANDLE;
-extern "kernel32" fn GetConsoleMode(hConsoleHandle: HANDLE, lpMode: *DWORD) callconv(.winapi) BOOL;
-extern "kernel32" fn SetConsoleMode(hConsoleHandle: HANDLE, dwMode: DWORD) callconv(.winapi) BOOL;
-extern "kernel32" fn ReadFile(
-    hFile: HANDLE,
-    lpBuffer: [*]u8,
-    nNumberOfBytesToRead: DWORD,
-    lpNumberOfBytesRead: *DWORD,
-    lpOverlapped: ?*anyopaque,
-) callconv(.winapi) BOOL;
-extern "kernel32" fn WaitForSingleObject(hHandle: HANDLE, dwMilliseconds: DWORD) callconv(.winapi) DWORD;
-
-const WindowsRawMode = struct {
-    enabled: bool = false,
-    input: HANDLE = undefined,
-    output: HANDLE = undefined,
-    original_input: DWORD = 0,
-    original_output: DWORD = 0,
-
-    pub fn enableIfTty() !WindowsRawMode {
-        if (!stdinIsTty()) return .{};
-
-        const input = GetStdHandle(STD_INPUT_HANDLE);
-        const output = GetStdHandle(STD_OUTPUT_HANDLE);
-        if (input == INVALID_HANDLE_VALUE or output == INVALID_HANDLE_VALUE) return .{};
-
-        var original_input: DWORD = 0;
-        var original_output: DWORD = 0;
-        if (!GetConsoleMode(input, &original_input).toBool()) return .{};
-        if (!GetConsoleMode(output, &original_output).toBool()) return .{};
-
-        // Input: no line buffering, no echo, and escape sequences delivered as
-        // bytes rather than turned into console events. ENABLE_PROCESSED_INPUT
-        // stays on so Ctrl-C keeps raising an interrupt, matching the POSIX side
-        // where ISIG is deliberately left enabled.
-        var raw_input = original_input;
-        raw_input &= ~(ENABLE_LINE_INPUT | ENABLE_ECHO_INPUT);
-        raw_input |= ENABLE_VIRTUAL_TERMINAL_INPUT | ENABLE_PROCESSED_INPUT;
-        if (!SetConsoleMode(input, raw_input).toBool()) return .{};
-
-        // Output: interpret the cursor movement and erase sequences the line
-        // editor writes. Without this the redraw prints its own escapes.
-        const raw_output = original_output | ENABLE_VIRTUAL_TERMINAL_PROCESSING;
-        if (!SetConsoleMode(output, raw_output).toBool()) {
-            _ = SetConsoleMode(input, original_input);
-            return .{};
-        }
-
-        return .{
-            .enabled = true,
-            .input = input,
-            .output = output,
-            .original_input = original_input,
-            .original_output = original_output,
-        };
-    }
-
-    pub fn restore(self: *WindowsRawMode) void {
-        if (!self.enabled) return;
-        _ = SetConsoleMode(self.input, self.original_input);
-        _ = SetConsoleMode(self.output, self.original_output);
-        self.enabled = false;
-    }
-};
-
-const WindowsSource = struct {
-    pub fn readByte(_: *WindowsSource) !?u8 {
-        const handle = GetStdHandle(STD_INPUT_HANDLE);
-        if (handle == INVALID_HANDLE_VALUE) return null;
-        var buf: [1]u8 = undefined;
-        var read: DWORD = 0;
-        if (!ReadFile(handle, &buf, 1, &read, null).toBool()) return null;
-        if (read == 0) return null;
-        return buf[0];
-    }
-
-    pub fn readByteTimeout(self: *WindowsSource, timeout_ms: u32) !?u8 {
-        const handle = GetStdHandle(STD_INPUT_HANDLE);
-        if (handle == INVALID_HANDLE_VALUE) return null;
-        // The console handle signals when input is available, which is the same
-        // question poll answers on the other side.
-        if (WaitForSingleObject(handle, timeout_ms) != WAIT_OBJECT_0) return null;
-        return self.readByte();
-    }
-};

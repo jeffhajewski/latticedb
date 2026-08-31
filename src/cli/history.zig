@@ -3,7 +3,6 @@
 //! Provides in-memory history with optional file persistence.
 
 const std = @import("std");
-const builtin = @import("builtin");
 
 /// Managed array list for allocator tracking
 fn ManagedArrayList(comptime T: type) type {
@@ -140,29 +139,8 @@ pub const History = struct {
     }
 
     /// Get the default history file path
-    /// Where the history file lives.
-    ///
-    /// POSIX puts per-user state in a dotfile under $HOME. Windows has no HOME
-    /// and no dotfile convention: per-user application data belongs under
-    /// %APPDATA%, with %USERPROFILE% as the fallback for setups that lack it.
-    /// Getting this wrong is quiet — history simply stops persisting, with
-    /// nothing printed — so it is worth being explicit about rather than
-    /// letting the POSIX path fail to resolve.
     pub fn getDefaultPath(allocator: std.mem.Allocator) ?[]const u8 {
-        const dir = homeDirectory(allocator) orelse return null;
-        defer allocator.free(dir);
-
-        const sep = std.fs.path.sep_str;
-        const name = if (builtin.os.tag == .windows) "lattice_history" else ".lattice_history";
-        return std.fmt.allocPrint(allocator, "{s}{s}{s}", .{ dir, sep, name }) catch null;
-    }
-
-    /// The directory that per-user state belongs in. Caller owns the result.
-    fn homeDirectory(allocator: std.mem.Allocator) ?[]const u8 {
-        if (builtin.os.tag == .windows) {
-            return windowsEnv(allocator, "APPDATA") orelse windowsEnv(allocator, "USERPROFILE");
-        }
-
+        // Try $HOME/.lattice_history
         const home = if (@hasDecl(std.posix, "getenv"))
             std.posix.getenv("HOME")
         else if (@hasDecl(std, "c"))
@@ -170,8 +148,10 @@ pub const History = struct {
         else
             null;
 
-        const path = home orelse return null;
-        return allocator.dupe(u8, path) catch null;
+        if (home) |path| {
+            return std.fmt.allocPrint(allocator, "{s}/.lattice_history", .{path}) catch null;
+        }
+        return null;
     }
 };
 
@@ -215,28 +195,3 @@ test "history duplicate suppression" {
 
     try std.testing.expectEqual(@as(usize, 1), history.count());
 }
-
-/// Read an environment variable on Windows.
-///
-/// `std.posix.getenv` is not available there, and the environment is UTF-16, so
-/// this goes to the API directly and converts. WTF-8 rather than UTF-8 on the way
-/// out, because Windows permits unpaired surrogates in these values and refusing
-/// them would be worse than carrying them.
-fn windowsEnv(allocator: std.mem.Allocator, comptime key: []const u8) ?[]const u8 {
-    if (builtin.os.tag != .windows) return null;
-
-    const key_w = std.unicode.utf8ToUtf16LeStringLiteral(key);
-    var buf: [std.fs.max_path_bytes]u16 = undefined;
-    const len = GetEnvironmentVariableW(key_w, &buf, buf.len);
-    // Zero means unset or unreadable; a length at or past the buffer means the
-    // value is longer than any path we would build from it.
-    if (len == 0 or len >= buf.len) return null;
-
-    return std.unicode.wtf16LeToWtf8Alloc(allocator, buf[0..len]) catch null;
-}
-
-extern "kernel32" fn GetEnvironmentVariableW(
-    lpName: [*:0]const u16,
-    lpBuffer: [*]u16,
-    nSize: u32,
-) callconv(.winapi) u32;

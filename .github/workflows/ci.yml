@@ -20,9 +20,7 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest, macos-14]
-        # Running the suite on windows-latest needs the tests' hardcoded /tmp
-        # paths replaced first — there are about six hundred of them. Until then
-        # the windows-build job below at least keeps the code compiling there.
+        # TODO: Add windows-latest once vfs.zig/database.zig are ported from POSIX APIs
 
     steps:
       - uses: actions/checkout@v4
@@ -258,33 +256,6 @@ jobs:
           PKG_CONFIG_PATH: /tmp/lattice-install/lib/pkgconfig
           LD_LIBRARY_PATH: /tmp/lattice-install/lib
         run: go test ./...
-
-  # ============================================
-  # Windows cross-compilation
-  #
-  # This proves the code type-checks for Windows, which is what regressed before
-  # and what is cheap to protect. It does not prove the REPL behaves on a real
-  # console: whether the terminal delivers the escape sequences the decoder
-  # expects, and whether Ctrl-C and encoding do the right thing, can only be
-  # learned by running there. That needs the test suite to stop assuming /tmp.
-  # ============================================
-  windows-build:
-    name: Windows Cross-Compile
-    runs-on: ubuntu-latest
-
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Zig
-        uses: mlugg/setup-zig@v2
-        with:
-          version: ${{ env.ZIG_VERSION }}
-
-      - name: Build for x86_64-windows
-        run: zig build -Dtarget=x86_64-windows-gnu
-
-      - name: Build for aarch64-windows
-        run: zig build -Dtarget=aarch64-windows-gnu
 
   # ============================================
   # Go conformance suite

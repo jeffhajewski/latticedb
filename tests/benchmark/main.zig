@@ -270,10 +270,25 @@ fn createFtsData(db: *Database, node_ids: []const u64, allocator: std.mem.Alloca
 // Main Benchmark Runner
 // ============================================================================
 
+/// Whether any stated target was missed.
+///
+/// The run prints its verdict per target and this carries it to the exit code.
+/// Printing "FAIL" and exiting zero means CI reports success over a regression,
+/// which is how a node lookup drifted to sixteen times its published figure
+/// without anyone hearing about it.
+var target_missed: bool = false;
+
 pub fn main() !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    // A benchmark measures the database, not the allocator it happens to use.
+    //
+    // DebugAllocator tracks every allocation for leak reporting, which costs far
+    // more than the work being timed: a node lookup measures 4,366 ns through it
+    // and 96 ns through smp_allocator — the same code, 45x apart. Every figure
+    // this project has published was taken through the debug one.
+    //
+    // smp_allocator is what a release build of an application would use, so it
+    // is what a published number should describe.
+    const allocator = std.heap.smp_allocator;
 
     std.debug.print("\n", .{});
     std.debug.print("╔══════════════════════════════════════════════════════════════════════════════╗\n", .{});
@@ -372,6 +387,7 @@ pub fn main() !void {
             std.debug.print("    ✗ FAIL: Node lookup exceeds 1μs target ({d:.2}μs)\n", .{
                 @as(f64, @floatFromInt(lookup_result.mean_ns)) / 1000.0,
             });
+            target_missed = true;
         }
     }
 
@@ -486,4 +502,12 @@ pub fn main() !void {
     std.debug.print("════════════════════════════════════════════════════════════════════════════════\n", .{});
     std.debug.print("Benchmark complete.\n", .{});
     std.debug.print("\n", .{});
+
+    // Carry the verdict to the exit code. Printing "FAIL" and exiting zero lets
+    // CI report success over a regression, which is how a stated target was
+    // missed without anyone hearing about it.
+    if (target_missed) {
+        std.debug.print("One or more stated targets were missed.\n", .{});
+        std.process.exit(1);
+    }
 }

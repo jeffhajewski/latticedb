@@ -252,13 +252,32 @@ pub fn build(b: *std.Build) void {
     const crash_test_step = b.step("crash-test", "Run crash recovery tests");
     crash_test_step.dependOn(&run_crash_tests.step);
 
+    // The library as a benchmark must measure it.
+    //
+    // The benchmark modules pin themselves to ReleaseFast, but they import the
+    // shared `lib_module`, which follows -Doptimize and therefore defaults to
+    // Debug. So `zig build benchmark` compiled optimised benchmark code against
+    // an unoptimised database and called the result a performance figure. That
+    // is what benchmark.yml runs.
+    //
+    // A separate module pinned to ReleaseFast means a benchmark measures release
+    // code whatever the command line says, and cannot silently drift again.
+    const bench_lib_module = b.createModule(.{
+        .root_source_file = b.path("src/main.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+    });
+    bench_lib_module.addImport("lattice", bench_lib_module);
+    bench_lib_module.addImport("compat", compat_module);
+    bench_lib_module.link_libc = true;
+
     // Benchmark module - imports the library module
     const bench_module = b.createModule(.{
         .root_source_file = b.path("tests/benchmark/main.zig"),
         .target = target,
         .optimize = .ReleaseFast, // Always optimize benchmarks
         .imports = &.{
-            .{ .name = "lattice", .module = lib_module },
+            .{ .name = "lattice", .module = bench_lib_module },
         },
     });
     bench_module.addImport("compat", compat_module);
@@ -282,7 +301,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseFast,
         .imports = &.{
-            .{ .name = "lattice", .module = lib_module },
+            .{ .name = "lattice", .module = bench_lib_module },
         },
     });
     stress_module.addImport("compat", compat_module);
@@ -306,7 +325,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseFast,
         .imports = &.{
-            .{ .name = "lattice", .module = lib_module },
+            .{ .name = "lattice", .module = bench_lib_module },
         },
     });
     fts_bench_module.addImport("compat", compat_module);
@@ -332,7 +351,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseFast,
         .imports = &.{
-            .{ .name = "lattice", .module = lib_module },
+            .{ .name = "lattice", .module = bench_lib_module },
         },
     });
     vector_bench_module.addImport("compat", compat_module);
@@ -358,7 +377,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseFast,
         .imports = &.{
-            .{ .name = "lattice", .module = lib_module },
+            .{ .name = "lattice", .module = bench_lib_module },
         },
     });
     sqlite_bench_module.addImport("compat", compat_module);
@@ -383,7 +402,7 @@ pub fn build(b: *std.Build) void {
         .target = target,
         .optimize = .ReleaseFast,
         .imports = &.{
-            .{ .name = "lattice", .module = lib_module },
+            .{ .name = "lattice", .module = bench_lib_module },
         },
     });
     graph_bench_module.addImport("compat", compat_module);

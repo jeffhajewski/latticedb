@@ -675,9 +675,16 @@ fn stressTestVectorSearch(allocator: Allocator, vector_count: usize, dimensions:
 // ============================================================================
 
 pub fn main() !void {
-    var gpa = std.heap.DebugAllocator(.{}){};
-    defer _ = gpa.deinit();
-    const allocator = gpa.allocator();
+    // A benchmark measures the database, not the allocator it happens to use.
+    //
+    // DebugAllocator tracks every allocation for leak reporting, which costs far
+    // more than the work being timed: a node lookup measures 4,366 ns through it
+    // and 96 ns through smp_allocator — the same code, 45x apart. Every figure
+    // this project has published was taken through the debug one.
+    //
+    // smp_allocator is what a release build of an application would use, so it
+    // is what a published number should describe.
+    const allocator = std.heap.smp_allocator;
 
     std.debug.print("\n", .{});
     std.debug.print("╔══════════════════════════════════════════════════════════════════════════════╗\n", .{});

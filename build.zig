@@ -140,6 +140,19 @@ pub fn build(b: *std.Build) void {
     });
     const run_cli_args_tests = b.addRunArtifact(cli_args_tests);
 
+    // The key decoder is pure: bytes in, keys out, no platform and no terminal.
+    // That is what lets it be tested from a byte slice, and what lets Windows
+    // reuse it unchanged.
+    const cli_key_test_module = b.createModule(.{
+        .root_source_file = b.path("src/cli/key.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const cli_key_tests = b.addTest(.{
+        .root_module = cli_key_test_module,
+    });
+    const run_cli_key_tests = b.addRunArtifact(cli_key_tests);
+
     // ReleaseSmall: strip symbols, disable unwind tables, omit frame pointers
     if (optimize == .ReleaseSmall) {
         for ([_]*std.Build.Module{ lib_module, shared_lib_module, cli_module }) |mod| {
@@ -197,6 +210,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_unit_tests.step);
     test_step.dependOn(&run_lib_tests.step);
     test_step.dependOn(&run_cli_args_tests.step);
+    test_step.dependOn(&run_cli_key_tests.step);
 
     // Integration test module - imports the library module
     const import_export_module = b.createModule(.{

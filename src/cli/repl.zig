@@ -8,6 +8,7 @@ const lattice = @import("lattice");
 const output = @import("output.zig");
 const args_mod = @import("args.zig");
 const history_mod = @import("history.zig");
+const key_mod = @import("key.zig");
 
 const Database = lattice.storage.database.Database;
 const QueryResult = lattice.storage.database.QueryResult;
@@ -74,6 +75,63 @@ fn readByteStdin() !?u8 {
     return buf[0];
 }
 
+/// Bytes from standard input, for the key decoder to consume.
+///
+/// This is the whole of what reading a key needs from the operating system: one
+/// blocking read, and one that gives up after a while so a lone Escape can be
+/// told from the start of a sequence. A Windows build supplies the same two
+/// functions over ReadFile and WaitForSingleObject; nothing above this changes.
+const StdinSource = struct {
+    pub fn readByte(_: *StdinSource) !?u8 {
+        return readByteStdin();
+    }
+
+    pub fn readByteTimeout(self: *StdinSource, timeout_ms: u32) !?u8 {
+        var fds = [_]std.posix.pollfd{.{
+            .fd = std.posix.STDIN_FILENO,
+            .events = std.posix.POLL.IN,
+            .revents = 0,
+        }};
+        const ready = std.posix.poll(&fds, @intCast(timeout_ms)) catch return null;
+        if (ready == 0) return null;
+        return self.readByte();
+    }
+};
+
+/// Where the character before `cursor` starts.
+///
+/// Continuation bytes have their top two bits set to 10, so walking back over
+/// them lands on the byte that begins the character. Stepping back one byte
+/// instead would leave the cursor inside a character and corrupt it on the next
+/// edit.
+fn prevCharBoundary(line: []const u8, cursor: usize) usize {
+    if (cursor == 0) return 0;
+    var i = cursor - 1;
+    while (i > 0 and line[i] & 0xc0 == 0x80) i -= 1;
+    return i;
+}
+
+/// Where the character at `cursor` ends.
+fn nextCharBoundary(line: []const u8, cursor: usize) usize {
+    if (cursor >= line.len) return line.len;
+    const len = std.unicode.utf8ByteSequenceLength(line[cursor]) catch 1;
+    return @min(cursor + len, line.len);
+}
+
+/// How many terminal columns `slice` occupies.
+///
+/// Counted as characters rather than bytes, because that is what the terminal
+/// moves the cursor by. Characters that draw two columns wide — CJK, some
+/// emoji — still count as one here, so the cursor can sit a column out on those;
+/// correcting it needs a width table, which is a larger piece of work than this.
+fn columnCount(slice: []const u8) usize {
+    var n: usize = 0;
+    for (slice) |b| {
+        if (b & 0xc0 != 0x80) n += 1;
+    }
+    return n;
+}
+
 fn readLineFromStdin(line_buf: *ManagedArrayList(u8), max_len: usize) !void {
     while (line_buf.items.len < max_len) {
         const byte = (try readByteStdin()) orelse {
@@ -84,6 +142,12 @@ fn readLineFromStdin(line_buf: *ManagedArrayList(u8), max_len: usize) !void {
         try line_buf.append(byte);
     }
     return error.StreamTooLong;
+}
+
+/// Drop `line[from..to]`, which is one character's worth of bytes.
+fn removeRange(line_buf: *ManagedArrayList(u8), from: usize, to: usize) void {
+    var i = from;
+    while (i < to) : (i += 1) _ = line_buf.orderedRemove(from);
 }
 
 fn setLineBuffer(line_buf: *ManagedArrayList(u8), value: []const u8) !void {
@@ -98,7 +162,8 @@ fn refreshInputLine(stdout: anytype, prompt: []const u8, line: []const u8, curso
     try stdout.writeAll("\x1b[K");
 
     if (cursor <= line.len) {
-        const move_left = line.len - cursor;
+        // In columns, not bytes: a multi-byte character is one column.
+        const move_left = columnCount(line[cursor..]);
         if (move_left > 0) {
             try stdout.print("\x1b[{d}D", .{move_left});
         }
@@ -266,115 +331,130 @@ pub const Repl = struct {
         var browsing_history = false;
         defer if (history_scratch) |scratch| self.allocator.free(scratch);
 
+        // Bytes come from the platform; keys come from the decoder. Everything
+        // below deals in keys, so a Windows byte source drops in underneath
+        // without touching any of it.
+        var source = StdinSource{};
+        var keys = key_mod.Reader(StdinSource).init(&source);
+
         while (true) {
-            const key = (try readByteStdin()) orelse return .eof;
-            switch (key) {
-                '\r', '\n' => {
+            switch (try keys.readKey()) {
+                .eof => return .eof,
+                .enter => {
                     try stdout.writeAll("\r\n");
                     return .line;
                 },
-                7 => { // Ctrl-G: cancel current line
-                    line_buf.items.len = 0;
-                    try refreshInputLine(stdout, prompt, line_buf.items, 0);
-                    try stdout.writeAll("\r\n");
-                    return .canceled;
+                .ctrl => |c| switch (c) {
+                    'g' => { // Ctrl-G: cancel current line
+                        line_buf.items.len = 0;
+                        try refreshInputLine(stdout, prompt, line_buf.items, 0);
+                        try stdout.writeAll("\r\n");
+                        return .canceled;
+                    },
+                    'd' => { // Ctrl-D: EOF on empty input, else delete under cursor
+                        if (line_buf.items.len == 0) return .eof;
+                        if (cursor < line_buf.items.len) {
+                            removeRange(line_buf, cursor, nextCharBoundary(line_buf.items, cursor));
+                            try refreshInputLine(stdout, prompt, line_buf.items, cursor);
+                        }
+                    },
+                    'a' => { // Ctrl-A: start of line
+                        if (cursor > 0) {
+                            try moveCursorLeft(stdout, columnCount(line_buf.items[0..cursor]));
+                            cursor = 0;
+                        }
+                    },
+                    'e' => { // Ctrl-E: end of line
+                        if (cursor < line_buf.items.len) {
+                            try moveCursorRight(stdout, columnCount(line_buf.items[cursor..]));
+                            cursor = line_buf.items.len;
+                        }
+                    },
+                    else => {},
                 },
-                4 => { // Ctrl-D: EOF on empty input, otherwise delete under cursor
-                    if (line_buf.items.len == 0) return .eof;
-                    if (cursor < line_buf.items.len) {
-                        _ = line_buf.orderedRemove(cursor);
+                .backspace => {
+                    if (cursor > 0) {
+                        const start_of_char = prevCharBoundary(line_buf.items, cursor);
+                        removeRange(line_buf, start_of_char, cursor);
+                        cursor = start_of_char;
                         try refreshInputLine(stdout, prompt, line_buf.items, cursor);
                     }
                 },
-                1 => { // Ctrl-A
+                .delete => {
+                    if (cursor < line_buf.items.len) {
+                        removeRange(line_buf, cursor, nextCharBoundary(line_buf.items, cursor));
+                        try refreshInputLine(stdout, prompt, line_buf.items, cursor);
+                    }
+                },
+                .left => {
                     if (cursor > 0) {
-                        try moveCursorLeft(stdout, cursor);
+                        cursor = prevCharBoundary(line_buf.items, cursor);
+                        try moveCursorLeft(stdout, 1);
+                    }
+                },
+                .right => {
+                    if (cursor < line_buf.items.len) {
+                        cursor = nextCharBoundary(line_buf.items, cursor);
+                        try moveCursorRight(stdout, 1);
+                    }
+                },
+                .home => {
+                    if (cursor > 0) {
+                        try moveCursorLeft(stdout, columnCount(line_buf.items[0..cursor]));
                         cursor = 0;
                     }
                 },
-                5 => { // Ctrl-E
+                .end => {
                     if (cursor < line_buf.items.len) {
-                        try moveCursorRight(stdout, line_buf.items.len - cursor);
+                        try moveCursorRight(stdout, columnCount(line_buf.items[cursor..]));
                         cursor = line_buf.items.len;
                     }
                 },
-                8, 127 => { // Backspace
-                    if (cursor > 0) {
-                        _ = line_buf.orderedRemove(cursor - 1);
-                        cursor -= 1;
-                        if (cursor == line_buf.items.len) {
-                            try stdout.writeByte('\x08');
-                            try stdout.writeAll("\x1b[K");
-                        } else {
-                            try refreshInputLine(stdout, prompt, line_buf.items, cursor);
-                        }
+                .up => { // previous history entry
+                    if (!browsing_history) {
+                        history_scratch = try self.allocator.dupe(u8, line_buf.items);
+                        browsing_history = true;
                     }
-                },
-                27 => { // Escape sequence
-                    const b1 = (try readByteStdin()) orelse continue;
-                    if (b1 != '[') continue;
-                    const b2 = (try readByteStdin()) orelse continue;
-                    switch (b2) {
-                        'A' => { // Up: previous history entry
-                            if (!browsing_history) {
-                                history_scratch = try self.allocator.dupe(u8, line_buf.items);
-                                browsing_history = true;
-                            }
-                            if (self.history.previous()) |entry| {
-                                try setLineBuffer(line_buf, entry);
-                                cursor = line_buf.items.len;
-                                try refreshInputLine(stdout, prompt, line_buf.items, cursor);
-                            }
-                        },
-                        'B' => { // Down: next history entry
-                            if (browsing_history) {
-                                if (self.history.next()) |entry| {
-                                    try setLineBuffer(line_buf, entry);
-                                } else if (history_scratch) |scratch| {
-                                    try setLineBuffer(line_buf, scratch);
-                                    browsing_history = false;
-                                } else {
-                                    line_buf.items.len = 0;
-                                    browsing_history = false;
-                                }
-                                cursor = line_buf.items.len;
-                                try refreshInputLine(stdout, prompt, line_buf.items, cursor);
-                            }
-                        },
-                        'C' => { // Right
-                            if (cursor < line_buf.items.len) {
-                                cursor += 1;
-                                try moveCursorRight(stdout, 1);
-                            }
-                        },
-                        'D' => { // Left
-                            if (cursor > 0) {
-                                cursor -= 1;
-                                try moveCursorLeft(stdout, 1);
-                            }
-                        },
-                        '3' => { // Delete: ESC [ 3 ~
-                            const b3 = (try readByteStdin()) orelse continue;
-                            if (b3 == '~' and cursor < line_buf.items.len) {
-                                _ = line_buf.orderedRemove(cursor);
-                                try refreshInputLine(stdout, prompt, line_buf.items, cursor);
-                            }
-                        },
-                        else => {},
-                    }
-                },
-                else => {
-                    if (key < 32) continue;
-                    if (cursor == line_buf.items.len) {
-                        try line_buf.append(key);
-                        cursor += 1;
-                        try stdout.writeByte(key);
-                    } else {
-                        try line_buf.insert(cursor, key);
-                        cursor += 1;
+                    if (self.history.previous()) |entry| {
+                        try setLineBuffer(line_buf, entry);
+                        cursor = line_buf.items.len;
                         try refreshInputLine(stdout, prompt, line_buf.items, cursor);
                     }
                 },
+                .down => { // next history entry
+                    if (browsing_history) {
+                        if (self.history.next()) |entry| {
+                            try setLineBuffer(line_buf, entry);
+                        } else if (history_scratch) |scratch| {
+                            try setLineBuffer(line_buf, scratch);
+                            browsing_history = false;
+                        } else {
+                            line_buf.items.len = 0;
+                            browsing_history = false;
+                        }
+                        cursor = line_buf.items.len;
+                        try refreshInputLine(stdout, prompt, line_buf.items, cursor);
+                    }
+                },
+                .char => |cp| {
+                    var utf8: [4]u8 = undefined;
+                    const n = std.unicode.utf8Encode(cp, &utf8) catch continue;
+                    if (cursor == line_buf.items.len) {
+                        try line_buf.appendSlice(utf8[0..n]);
+                        cursor += n;
+                        try stdout.writeAll(utf8[0..n]);
+                    } else {
+                        for (utf8[0..n], 0..) |b, i| {
+                            try line_buf.insert(cursor + i, b);
+                        }
+                        cursor += n;
+                        try refreshInputLine(stdout, prompt, line_buf.items, cursor);
+                    }
+                },
+                // Nothing is bound to these yet. They are named rather than left
+                // to a catch-all so that adding a binding is a compile error
+                // away, not a silent omission.
+                .tab, .escape, .page_up, .page_down, .unknown => {},
             }
         }
     }

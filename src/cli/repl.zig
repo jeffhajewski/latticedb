@@ -9,6 +9,7 @@ const output = @import("output.zig");
 const args_mod = @import("args.zig");
 const history_mod = @import("history.zig");
 const key_mod = @import("key.zig");
+const term = @import("term.zig");
 
 const Database = lattice.storage.database.Database;
 const QueryResult = lattice.storage.database.QueryResult;
@@ -27,76 +28,11 @@ const LineReadAction = enum {
     eof,
 };
 
-const RawTerminalMode = struct {
-    enabled: bool = false,
-    original: std.posix.termios = undefined,
-
-    fn enableIfTty() !RawTerminalMode {
-        if (!stdinIsTty()) {
-            return .{};
-        }
-
-        const original = try std.posix.tcgetattr(std.posix.STDIN_FILENO);
-        var raw = original;
-        raw.lflag.ECHO = false;
-        raw.lflag.ICANON = false;
-        raw.lflag.IEXTEN = false;
-        // Keep ISIG enabled so Ctrl-C still behaves as expected.
-        raw.iflag.ICRNL = false;
-        raw.iflag.IXON = false;
-        raw.cc[@intFromEnum(std.posix.V.MIN)] = 1;
-        raw.cc[@intFromEnum(std.posix.V.TIME)] = 0;
-
-        try std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, raw);
-        return .{
-            .enabled = true,
-            .original = original,
-        };
-    }
-
-    fn restore(self: *RawTerminalMode) void {
-        if (!self.enabled) return;
-        std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, self.original) catch {};
-        self.enabled = false;
-    }
-};
-
-fn stdinIsTty() bool {
-    if (@hasDecl(std.posix, "isatty")) {
-        return std.posix.isatty(std.posix.STDIN_FILENO);
-    }
-    return std.c.isatty(std.c.STDIN_FILENO) != 0;
-}
-
+/// One byte from standard input, whatever the platform calls that.
 fn readByteStdin() !?u8 {
-    var buf: [1]u8 = undefined;
-    const n = try std.posix.read(std.posix.STDIN_FILENO, &buf);
-    if (n == 0) return null;
-    return buf[0];
+    var source = term.Source{};
+    return source.readByte();
 }
-
-/// Bytes from standard input, for the key decoder to consume.
-///
-/// This is the whole of what reading a key needs from the operating system: one
-/// blocking read, and one that gives up after a while so a lone Escape can be
-/// told from the start of a sequence. A Windows build supplies the same two
-/// functions over ReadFile and WaitForSingleObject; nothing above this changes.
-const StdinSource = struct {
-    pub fn readByte(_: *StdinSource) !?u8 {
-        return readByteStdin();
-    }
-
-    pub fn readByteTimeout(self: *StdinSource, timeout_ms: u32) !?u8 {
-        var fds = [_]std.posix.pollfd{.{
-            .fd = std.posix.STDIN_FILENO,
-            .events = std.posix.POLL.IN,
-            .revents = 0,
-        }};
-        const ready = std.posix.poll(&fds, @intCast(timeout_ms)) catch return null;
-        if (ready == 0) return null;
-        return self.readByte();
-    }
-};
 
 /// Where the character before `cursor` starts.
 ///
@@ -307,7 +243,7 @@ pub const Repl = struct {
         const prompt = promptFor(in_multiline);
         line_buf.items.len = 0;
 
-        if (!stdinIsTty()) {
+        if (!term.stdinIsTty()) {
             try stdout.writeAll(prompt);
             readLineFromStdin(line_buf, 65536) catch |err| {
                 if (err == error.EndOfStream) return .eof;
@@ -320,7 +256,7 @@ pub const Repl = struct {
     }
 
     fn readLineInteractive(self: *Self, prompt: []const u8, line_buf: *ManagedArrayList(u8), stdout: anytype) !LineReadAction {
-        var raw_mode = try RawTerminalMode.enableIfTty();
+        var raw_mode = try term.RawMode.enableIfTty();
         defer raw_mode.restore();
 
         try stdout.writeAll(prompt);
@@ -334,8 +270,8 @@ pub const Repl = struct {
         // Bytes come from the platform; keys come from the decoder. Everything
         // below deals in keys, so a Windows byte source drops in underneath
         // without touching any of it.
-        var source = StdinSource{};
-        var keys = key_mod.Reader(StdinSource).init(&source);
+        var source = term.Source{};
+        var keys = key_mod.Reader(term.Source).init(&source);
 
         while (true) {
             switch (try keys.readKey()) {

@@ -19,6 +19,8 @@ TARGETS=(
     "aarch64-linux-gnu"
     "x86_64-macos"
     "aarch64-macos"
+    "x86_64-windows-gnu"
+    "aarch64-windows-gnu"
 )
 
 echo "Building LatticeDB $VERSION for all platforms..."
@@ -49,6 +51,16 @@ for target in "${TARGETS[@]}"; do
         -Doptimize=ReleaseFast \
         --prefix "$target_dir" \
         --search-prefix "$PROJECT_ROOT"
+
+    # Windows keeps the DLL beside the executables and leaves only the import
+    # library under lib/. Everything downstream looks in lib/, and the debug
+    # database has no place in a release archive.
+    case "$target" in
+        *-windows-*)
+            mv "$target_dir/bin/lattice.dll" "$target_dir/lib/"
+            rm -f "$target_dir"/bin/*.pdb
+            ;;
+    esac
 
     # Copy header
     cp "$PROJECT_ROOT/include/lattice.h" "$target_dir/include/"

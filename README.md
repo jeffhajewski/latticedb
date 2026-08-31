@@ -46,6 +46,8 @@ npm install @hajewski/latticedb
 
 Published package tarballs are expected to bundle `liblattice` on supported platforms. Source checkouts can stage the native library into the package with `LATTICE_BUNDLE_LIB_DIR=/path/to/lib npm run bundle:native`.
 
+Electron apps run the bindings in the main process and must unpack the native library from `app.asar`; see [Electron](bindings/typescript/README.md#electron).
+
 **Java**
 
 Requires JDK 21+. See [bindings/java/README.md](bindings/java/README.md) for the Maven build, which compiles the JNI bridge and stages `liblattice` from `zig-out/lib`. A runnable knowledge-graph example is in [bindings/java/src/main/java/io/latticedb/examples](bindings/java/src/main/java/io/latticedb/examples).

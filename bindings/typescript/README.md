@@ -426,6 +426,109 @@ try {
 }
 ```
 
+## Electron
+
+These bindings run in Electron's **main process** (or a utility process). They
+call into `liblattice` through koffi, which requires Node integration, so a
+sandboxed renderer cannot open a database — expose the database over IPC instead.
+
+koffi ships prebuilt binaries, so `electron-rebuild` is not needed.
+
+### Unpack the native library from asar
+
+`liblattice.{dylib,so,dll}` is a plain shared library, not a `.node` addon, so
+Electron packagers do **not** unpack it automatically. Left inside `app.asar` it
+is invisible to `dlopen()` / `LoadLibraryW()` even though `fs.existsSync()`
+reports it as present. Unpack it:
+
+electron-builder:
+
+```json
+{
+  "build": {
+    "asarUnpack": ["**/node_modules/@hajewski/latticedb/lib/**"]
+  }
+}
+```
+
+`@electron/packager` (Electron Forge):
+
+```js
+module.exports = {
+  packagerConfig: {
+    asar: { unpack: "**/node_modules/@hajewski/latticedb/lib/**" },
+  },
+};
+```
+
+Nothing else is required at runtime: the loader rewrites any `app.asar` path to
+its `app.asar.unpacked` twin. The same glob is exported as
+`ELECTRON_ASAR_UNPACK_GLOB` for packager configs generated from code.
+
+### Bundlers
+
+Electron Forge's Webpack and Vite templates rewrite `__dirname`, which breaks the
+lookup of the library bundled beside the module. Either mark the package external
+so it is required from `node_modules` at runtime (webpack `externals`, Vite
+`build.rollupOptions.external`), or ship the library through `extraResources` and
+let the loader find it under `process.resourcesPath`:
+
+```json
+{
+  "build": {
+    "extraResources": [
+      { "from": "node_modules/@hajewski/latticedb/lib/darwin-arm64", "to": "lib" }
+    ]
+  }
+}
+```
+
+Pick the source directory for the platform you are building; Linux bundles carry
+a libc suffix (`linux-x64-gnu`, `linux-x64-musl`). The loader also accepts
+`resources/lib/<platform>-<arch>/`, `resources/<platform>-<arch>/`, and the
+library sitting next to the executable (electron-builder `extraFiles`).
+
+`LATTICE_LIB_PATH` remains the explicit escape hatch — set it before the first
+`db.open()` if the library lives somewhere else entirely.
+
+### Diagnosing packaging problems
+
+```typescript
+import { isElectronRuntime, resolveLibraryPath } from "@hajewski/latticedb";
+
+console.log(isElectronRuntime(), resolveLibraryPath());
+```
+
+`resolveLibraryPath()` runs the full search without loading anything and returns
+the path the loader would use, or `null`. When the library exists only inside a
+packed archive, opening a database fails with an error naming the archived path
+and the `asarUnpack` glob to add.
+
+### Windows
+
+Both Windows architectures are supported. Published package tarballs are
+expected to bundle `lib/win32-x64/lattice.dll` and `lib/win32-arm64/lattice.dll`,
+and koffi ships matching prebuilt `win32_x64` and `win32_arm64` binaries, so
+nothing has to be compiled at install time.
+
+Standalone release archives for Windows are `.zip` rather than `.tar.gz`, if you
+would rather take `lattice.dll` from a release and ship it through
+`extraResources`.
+
+Building the library from a source checkout:
+
+```bash
+# From the package directory; picks the target for the host architecture
+npm run bundle:native
+
+# Or cross-compile one explicitly from the repository root
+zig build shared -Dtarget=aarch64-windows-gnu -Doptimize=ReleaseFast
+```
+
+Note that `zig build shared` installs `lattice.dll` into `zig-out/bin` and leaves
+only the import library `lattice.lib` in `zig-out/lib`. `bundle:native` and the
+runtime loader both account for this; hand-written copy steps usually do not.
+
 ## Building from Source
 
 Requires Node.js 18+ and the LatticeDB native library.
@@ -445,8 +548,9 @@ npm test
 
 ## Requirements
 
-- Node.js 18+
-- The native LatticeDB library (`liblattice.dylib` / `liblattice.so`)
+- Node.js 18+, or Electron 23+ (main process, Node 18 — see [Electron](#electron))
+- The native LatticeDB library (`liblattice.dylib` / `liblattice.so` /
+  `lattice.dll`)
 
 ## License
 

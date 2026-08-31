@@ -33,7 +33,13 @@ for target_dir in "$BUILD_DIR"/*; do
     fi
 
     target=$(basename "$target_dir")
-    archive_name="latticedb-$VERSION-$target.tar.gz"
+
+    # Zip for Windows, which a Windows user can open without installing
+    # anything first; a tarball everywhere else.
+    case "$target" in
+        *-windows-*) archive_name="latticedb-$VERSION-$target.zip" ;;
+        *) archive_name="latticedb-$VERSION-$target.tar.gz" ;;
+    esac
 
     echo "Creating $archive_name..."
 
@@ -43,8 +49,14 @@ for target_dir in "$BUILD_DIR"/*; do
     mkdir -p "$tmp_pkg/latticedb-$VERSION"
     cp -r "$target_dir/bin" "$target_dir/lib" "$target_dir/include" "$target_dir/VERSION" "$tmp_pkg/latticedb-$VERSION/"
 
-    # Create tarball
-    tar -czf "$RELEASE_DIR/$archive_name" -C "$tmp_pkg" "latticedb-$VERSION"
+    case "$target" in
+        *-windows-*)
+            (cd "$tmp_pkg" && zip -qr "$RELEASE_DIR/$archive_name" "latticedb-$VERSION")
+            ;;
+        *)
+            tar -czf "$RELEASE_DIR/$archive_name" -C "$tmp_pkg" "latticedb-$VERSION"
+            ;;
+    esac
 
     rm -rf "$tmp_pkg"
 done
@@ -52,7 +64,7 @@ done
 # Generate checksums
 echo ""
 echo "Generating checksums..."
-(cd "$RELEASE_DIR" && shasum -a 256 *.tar.gz > SHA256SUMS)
+(cd "$RELEASE_DIR" && shopt -s nullglob && shasum -a 256 *.tar.gz *.zip > SHA256SUMS)
 
 echo ""
 echo "Release packages created in: $RELEASE_DIR"

@@ -12,6 +12,7 @@ Targets:
     x86_64-macos
     aarch64-macos
     x86_64-windows-gnu
+    aarch64-windows-gnu
 """
 
 import argparse
@@ -44,6 +45,7 @@ ZIG_TARGETS = {
     "macos-x86_64": "x86_64-macos",
     "macos-aarch64": "aarch64-macos",
     "windows-x86_64": "x86_64-windows-gnu",
+    "windows-aarch64": "aarch64-windows-gnu",
 }
 
 
@@ -92,15 +94,21 @@ def build_library(target: str) -> Path:
         print(f"Build failed:\n{result.stderr}", file=sys.stderr)
         sys.exit(1)
 
-    # Find built library
+    # Find built library. Windows puts the DLL beside the executables and
+    # leaves only the import library under lib/.
     lib_name = get_lib_name(target)
-    lib_path = PROJECT_ROOT / "zig-out" / "lib" / lib_name
+    candidates = [
+        PROJECT_ROOT / "zig-out" / "lib" / lib_name,
+        PROJECT_ROOT / "zig-out" / "bin" / lib_name,
+    ]
 
-    if not lib_path.exists():
-        print(f"Built library not found: {lib_path}", file=sys.stderr)
-        sys.exit(1)
+    for lib_path in candidates:
+        if lib_path.exists():
+            return lib_path
 
-    return lib_path
+    searched = ", ".join(str(path) for path in candidates)
+    print(f"Built library not found in: {searched}", file=sys.stderr)
+    sys.exit(1)
 
 
 def resolve_library_source(

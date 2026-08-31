@@ -4,6 +4,8 @@
 //! and database management commands.
 
 const std = @import("std");
+const builtin = @import("builtin");
+const compat = @import("compat");
 const lattice = @import("lattice");
 const output = @import("output.zig");
 const args_mod = @import("args.zig");
@@ -26,11 +28,15 @@ const LineReadAction = enum {
     eof,
 };
 
-const RawTerminalMode = struct {
+/// Puts the terminal in raw mode for the duration of a line edit, so the
+/// editor sees each keystroke instead of a finished line.
+const RawTerminalMode = if (builtin.os.tag == .windows) WindowsRawMode else PosixRawMode;
+
+const PosixRawMode = struct {
     enabled: bool = false,
     original: std.posix.termios = undefined,
 
-    fn enableIfTty() !RawTerminalMode {
+    fn enableIfTty() !PosixRawMode {
         if (!stdinIsTty()) {
             return .{};
         }
@@ -53,25 +59,94 @@ const RawTerminalMode = struct {
         };
     }
 
-    fn restore(self: *RawTerminalMode) void {
+    fn restore(self: *PosixRawMode) void {
         if (!self.enabled) return;
         std.posix.tcsetattr(std.posix.STDIN_FILENO, .FLUSH, self.original) catch {};
         self.enabled = false;
     }
 };
 
-fn stdinIsTty() bool {
-    if (@hasDecl(std.posix, "isatty")) {
-        return std.posix.isatty(std.posix.STDIN_FILENO);
+/// Console flags and calls Windows needs for the same job. `std.os.windows`
+/// spells out the output-side flag but neither the input flags nor the two
+/// console mode calls, so they are declared here.
+const win = struct {
+    const windows = std.os.windows;
+
+    const ENABLE_LINE_INPUT: windows.DWORD = 0x0002;
+    const ENABLE_ECHO_INPUT: windows.DWORD = 0x0004;
+    const ENABLE_VIRTUAL_TERMINAL_INPUT: windows.DWORD = 0x0200;
+
+    extern "kernel32" fn GetConsoleMode(handle: windows.HANDLE, mode: *windows.DWORD) callconv(.winapi) windows.BOOL;
+    extern "kernel32" fn SetConsoleMode(handle: windows.HANDLE, mode: windows.DWORD) callconv(.winapi) windows.BOOL;
+
+    /// The current console mode, or null when the handle is not a console.
+    fn getMode(handle: windows.HANDLE) ?windows.DWORD {
+        var mode: windows.DWORD = 0;
+        if (!GetConsoleMode(handle, &mode).toBool()) return null;
+        return mode;
     }
-    return std.c.isatty(std.c.STDIN_FILENO) != 0;
+
+    fn setMode(handle: windows.HANDLE, mode: windows.DWORD) bool {
+        return SetConsoleMode(handle, mode).toBool();
+    }
+};
+
+const WindowsRawMode = struct {
+    enabled: bool = false,
+    original_input: win.windows.DWORD = 0,
+    original_output: win.windows.DWORD = 0,
+    output_changed: bool = false,
+
+    fn enableIfTty() !WindowsRawMode {
+        const input = compat.fs.stdin().handle();
+        // Doubles as the tty check: a redirected stdin has no console mode.
+        const original_input = win.getMode(input) orelse return .{};
+
+        // Line assembly and echo become our job, and virtual terminal input
+        // delivers the arrow keys as the escape sequences the editor parses.
+        var raw = original_input & ~(win.ENABLE_LINE_INPUT | win.ENABLE_ECHO_INPUT);
+        raw |= win.ENABLE_VIRTUAL_TERMINAL_INPUT;
+        if (!win.setMode(input, raw)) return .{};
+
+        var self = WindowsRawMode{ .enabled = true, .original_input = original_input };
+
+        // The editor redraws the line with ANSI escapes, which the classic
+        // console swallows until it is told to interpret them.
+        const out = compat.fs.stdoutFile().handle();
+        if (win.getMode(out)) |original_output| {
+            const with_vt = original_output | win.windows.ENABLE_VIRTUAL_TERMINAL_PROCESSING;
+            if (with_vt != original_output and win.setMode(out, with_vt)) {
+                self.original_output = original_output;
+                self.output_changed = true;
+            }
+        }
+
+        return self;
+    }
+
+    fn restore(self: *WindowsRawMode) void {
+        if (!self.enabled) return;
+        _ = win.setMode(compat.fs.stdin().handle(), self.original_input);
+        if (self.output_changed) {
+            _ = win.setMode(compat.fs.stdoutFile().handle(), self.original_output);
+        }
+        self.enabled = false;
+    }
+};
+
+fn stdinIsTty() bool {
+    return compat.fs.stdin().isTty();
 }
 
 fn readByteStdin() !?u8 {
     var buf: [1]u8 = undefined;
-    const n = try std.posix.read(std.posix.STDIN_FILENO, &buf);
-    if (n == 0) return null;
-    return buf[0];
+    while (true) {
+        const n = compat.fs.stdin().readSome(&buf) catch |err| switch (err) {
+            error.EndOfStream => return null,
+            else => return err,
+        };
+        if (n != 0) return buf[0];
+    }
 }
 
 fn readLineFromStdin(line_buf: *ManagedArrayList(u8), max_len: usize) !void {

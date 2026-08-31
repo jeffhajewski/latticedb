@@ -73,3 +73,9 @@ dist/release/
 :memory:-wal
 .zig-cache-global/
 .zig-global-cache/
+
+# Agent harness: coordination state and the generated board are machine-local.
+# The harness code and config in .claude/harness are tracked.
+.claude/state/
+.claude/PROGRESS.md
+.claude/settings.local.json

@@ -1,0 +1,7 @@
+{
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "typeRoots": ["../../bindings/typescript/node_modules/@types"],
+    "types": ["node"]
+  }
+}

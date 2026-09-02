@@ -22,6 +22,24 @@ npm install @hajewski/latticedb
 
 Requires Node.js 18+. The native shared library must be available on the system.
 
+## Java
+
+The Java bindings are built from a source checkout. They require JDK 21+, Maven,
+Zig, and a C compiler. Build the native library, then build and test the JNI
+bridge:
+
+```bash
+git clone https://github.com/jeffhajewski/latticedb.git
+cd latticedb
+zig build
+cd bindings/java
+mvn test
+```
+
+Maven compiles the JNI bridge and stages it with `liblattice` for the tests. See
+the [Java bindings README](https://github.com/jeffhajewski/latticedb/tree/main/bindings/java)
+for configuration and example commands.
+
 ## Building from Source
 
 LatticeDB is written in Zig with zero dependencies.

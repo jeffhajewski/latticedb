@@ -84,6 +84,15 @@ pub const PageManager = struct {
     read_only: bool,
     /// Whether this handle took the file lock, so it knows to let go.
     holds_lock: bool,
+    /// Pages in the file, header included.
+    ///
+    /// Kept here rather than asked of the file, because every HNSW neighbour
+    /// list and every vector read checks its page id against it, and a syscall
+    /// per check made vector search several times slower. It is right as long
+    /// as every write goes through this struct, which the file lock guarantees
+    /// across processes. Atomic because readers check pages while the writer
+    /// allocates them.
+    page_count: std.atomic.Value(u32),
 
     const Self = @This();
 
@@ -131,6 +140,7 @@ pub const PageManager = struct {
             .page_size = options.page_size,
             .read_only = options.read_only,
             .holds_lock = holds_lock,
+            .page_count = .init(0),
         };
 
         const file_size = file.size() catch return PageManagerError.IoError;
@@ -201,6 +211,10 @@ pub const PageManager = struct {
         if (file_size < self.page_size or file_size % self.page_size != 0) {
             return PageManagerError.InvalidHeader;
         }
+        const page_count = std.math.cast(u32, file_size / self.page_size) orelse {
+            return PageManagerError.InvalidHeader;
+        };
+        self.page_count.store(page_count, .release);
 
         if (!self.read_only and self.header.format_version < FORMAT_VERSION) {
             self.header.format_version = FORMAT_VERSION;
@@ -226,6 +240,7 @@ pub const PageManager = struct {
         @memcpy(buf[0..header_bytes.len], header_bytes);
 
         self.file.write(0, buf) catch return PageManagerError.IoError;
+        self.noteWritten(0);
     }
 
     /// Allocate a new page.
@@ -255,6 +270,7 @@ pub const PageManager = struct {
         header_ptr.* = PageHeader.init(.free);
 
         self.file.write(offset, zeros) catch return PageManagerError.IoError;
+        self.noteWritten(page_id);
 
         try self.writeHeader();
 
@@ -307,6 +323,7 @@ pub const PageManager = struct {
         // Write the page
         const offset = self.pageOffset(page_id);
         self.file.write(offset, buf) catch return PageManagerError.IoError;
+        self.noteWritten(page_id);
 
         // Update freelist head
         self.header.freelist_page = page_id;
@@ -346,6 +363,9 @@ pub const PageManager = struct {
 
         const offset = self.pageOffset(page_id);
         self.file.write(offset, buf) catch return PageManagerError.IoError;
+        // Recovery replays pages past the end of the file when the crash came
+        // before the file's growth reached disk, and the write grows it.
+        self.noteWritten(page_id);
     }
 
     /// Sync all changes to disk.
@@ -418,6 +438,12 @@ pub const PageManager = struct {
         try self.writeHeader();
         try self.sync();
 
+        // The tail is gone as far as the database is concerned once the
+        // freelist no longer reaches it, so the count drops before the file
+        // does. If the truncate then fails, the next allocation reuses the
+        // space, and the leftover pages are only as leaked as a crash here
+        // would leave them.
+        self.page_count.store(tail_start, .release);
         const new_size = @as(u64, tail_start) * self.page_size;
         self.file.truncate(new_size) catch return PageManagerError.IoError;
         try self.sync();
@@ -457,8 +483,12 @@ pub const PageManager = struct {
 
     /// Get current page count.
     pub fn pageCount(self: *const Self) u32 {
-        const file_size = self.file.size() catch return 1;
-        return @intCast(file_size / self.page_size);
+        return self.page_count.load(.acquire);
+    }
+
+    /// Record that a page has been written, which grows the file to reach it.
+    fn noteWritten(self: *Self, page_id: PageId) void {
+        _ = self.page_count.fetchMax(page_id +| 1, .release);
     }
 
     /// Calculate file offset for a page.

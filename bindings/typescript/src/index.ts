@@ -52,6 +52,10 @@ import {
 } from './embedding';
 export {
   isLibraryAvailable,
+  getLibraryPath,
+  resolveLibraryPath,
+  isElectronRuntime,
+  ELECTRON_ASAR_UNPACK_GLOB,
   LatticeError,
   LatticeQueryError,
   QueryErrorStage,

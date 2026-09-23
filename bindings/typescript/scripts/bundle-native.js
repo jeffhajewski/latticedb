@@ -16,9 +16,21 @@ const targets = [
   { zigTarget: 'x86_64-macos', platformDir: 'darwin-x64', libName: 'liblattice.dylib' },
   { zigTarget: 'aarch64-macos', platformDir: 'darwin-arm64', libName: 'liblattice.dylib' },
   { zigTarget: 'x86_64-windows-gnu', platformDir: 'win32-x64', libName: 'lattice.dll' },
+  { zigTarget: 'aarch64-windows-gnu', platformDir: 'win32-arm64', libName: 'lattice.dll' },
 ];
 
-const publishTargets = targets.filter((target) => target.platformDir !== 'win32-x64');
+function isWindowsTarget(target) {
+  return target.platformDir.startsWith('win32-');
+}
+
+/**
+ * Where `zig build shared` leaves the shared library, relative to the install
+ * prefix. Zig installs a Windows DLL beside the executables and leaves only the
+ * import library under lib/.
+ */
+function outputDirs(target) {
+  return isWindowsTarget(target) ? ['bin', 'lib'] : ['lib'];
+}
 
 function findRepoRoot(startDir) {
   const explicitRoot = process.env.LATTICE_REPO_ROOT;
@@ -154,30 +166,52 @@ function buildTarget(target) {
     process.exit(result.status || 1);
   }
 
-  const builtLibrary = path.join(repoRoot, 'zig-out', 'lib', target.libName);
-  if (!fs.existsSync(builtLibrary)) {
-    throw new Error(`Built library not found: ${builtLibrary}`);
+  const searched = outputDirs(target).map((dir) =>
+    path.join(repoRoot, 'zig-out', dir, target.libName)
+  );
+  const builtLibrary = searched.find((candidate) => fs.existsSync(candidate));
+  if (!builtLibrary) {
+    throw new Error(`Built library not found: ${searched.join(', ')}`);
   }
   return builtLibrary;
 }
 
+/**
+ * Library locations to accept under a staged install directory.
+ *
+ * A Windows install prefix holds the DLL in bin/ and only the import library in
+ * lib/, so a caller pointing at the staged lib/ directory still gets the DLL.
+ */
+function stagedCandidates(dir, target) {
+  const candidates = [path.join(dir, target.libName)];
+  if (isWindowsTarget(target)) {
+    candidates.push(path.join(dir, '..', 'bin', target.libName));
+  }
+  return candidates;
+}
+
+function resolveStaged(dir, target) {
+  const candidates = stagedCandidates(dir, target);
+  const found = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!found) {
+    throw new Error(`Bundled library not found: ${candidates.join(', ')}`);
+  }
+  return found;
+}
+
 function resolveSourceLibrary(target, args) {
   if (args.libPath) {
-    const explicitPath = fs.statSync(args.libPath).isDirectory()
-      ? path.join(args.libPath, target.libName)
-      : args.libPath;
-    if (!fs.existsSync(explicitPath)) {
-      throw new Error(`Bundled library not found: ${explicitPath}`);
+    if (fs.statSync(args.libPath).isDirectory()) {
+      return resolveStaged(args.libPath, target);
     }
-    return explicitPath;
+    if (!fs.existsSync(args.libPath)) {
+      throw new Error(`Bundled library not found: ${args.libPath}`);
+    }
+    return args.libPath;
   }
 
   if (args.libDir) {
-    const explicitPath = path.join(args.libDir, target.libName);
-    if (!fs.existsSync(explicitPath)) {
-      throw new Error(`Bundled library not found: ${explicitPath}`);
-    }
-    return explicitPath;
+    return resolveStaged(args.libDir, target);
   }
 
   return buildTarget(target);
@@ -198,7 +232,7 @@ function copyTargetLibrary(target, sourceLibrary) {
 
 function main() {
   const args = parseArgs(process.argv.slice(2));
-  const selectedTargets = args.mode === 'all' ? publishTargets : [getCurrentTarget()];
+  const selectedTargets = args.mode === 'all' ? targets : [getCurrentTarget()];
 
   cleanLibRoot();
 

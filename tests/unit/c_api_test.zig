@@ -131,17 +131,10 @@ test "c_api: open page_size option is applied to new database files" {
 
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
-        _ = c_api.lattice_close(db);
+        if (db != null) _ = c_api.lattice_close(db);
         @import("compat").fs.cwd().deleteFile(path) catch {};
         @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
-
-    var file = try @import("compat").fs.cwd().openFile(path, .{});
-    defer file.close();
-    var header: CoreFileHeader = undefined;
-    const header_bytes = std.mem.asBytes(&header);
-    try std.testing.expectEqual(header_bytes.len, try file.preadAll(header_bytes, 0));
-    try std.testing.expectEqual(@as(u32, 32768), header.page_size);
 
     var txn: ?*lattice_txn = null;
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
@@ -161,6 +154,19 @@ test "c_api: open page_size option is applied to new database files" {
         c_api.lattice_node_set_property(txn, node_id, key.ptr, &property),
     );
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+
+    // The header is read once the database has let go of the file: the lock an
+    // open database holds is mandatory on Windows, so a second handle cannot
+    // read a byte of it.
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_close(db));
+    db = null;
+
+    var file = try @import("compat").fs.cwd().openFile(path, .{});
+    defer file.close();
+    var header: CoreFileHeader = undefined;
+    const header_bytes = std.mem.asBytes(&header);
+    try std.testing.expectEqual(header_bytes.len, try file.preadAll(header_bytes, 0));
+    try std.testing.expectEqual(@as(u32, 32768), header.page_size);
 }
 
 test "c_api: zero page_size in open options keeps default page size" {
@@ -181,10 +187,15 @@ test "c_api: zero page_size in open options keeps default page size" {
 
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer {
-        _ = c_api.lattice_close(db);
+        if (db != null) _ = c_api.lattice_close(db);
         @import("compat").fs.cwd().deleteFile(path) catch {};
         @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
+
+    // Closed before the header is read, for the reason the page_size test above
+    // gives.
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_close(db));
+    db = null;
 
     var file = try @import("compat").fs.cwd().openFile(path, .{});
     defer file.close();

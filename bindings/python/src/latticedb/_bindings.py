@@ -46,7 +46,7 @@ def _find_library() -> Optional[Path]:
     1. LATTICE_LIB_PATH environment variable (explicit path)
     2. Package lib directory (bundled in wheel)
     3. LATTICE_PREFIX environment variable (installed prefix)
-    4. Development build directory (zig-out/lib)
+    4. Development build directory (zig-out/lib, plus zig-out/bin on Windows)
     5. pkg-config lattice libdir
     6. Homebrew/system library paths
     """
@@ -76,10 +76,14 @@ def _find_library() -> Optional[Path]:
         if prefix_lib.exists():
             return prefix_lib
 
-    # 4. Development: relative to bindings (zig-out/lib)
-    dev_path = Path(__file__).parent.parent.parent.parent.parent / "zig-out" / "lib" / lib_name
-    if dev_path.exists():
-        return dev_path
+    # 4. Development: relative to bindings (zig-out/lib). Windows keeps the DLL
+    # beside the executables and leaves only the import library under lib/.
+    zig_out = Path(__file__).parent.parent.parent.parent.parent / "zig-out"
+    dev_dirs = [zig_out / "bin", zig_out / "lib"] if sys.platform == "win32" else [zig_out / "lib"]
+    for dev_dir in dev_dirs:
+        dev_path = dev_dir / lib_name
+        if dev_path.exists():
+            return dev_path
 
     # 5. pkg-config metadata
     try:

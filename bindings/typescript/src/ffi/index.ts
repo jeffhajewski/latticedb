@@ -14,7 +14,13 @@ import {
 } from './types';
 import type { PropertyValue, StreamRecord } from '../types';
 
-export { isLibraryAvailable, getLibraryPath } from './library';
+export {
+  isLibraryAvailable,
+  getLibraryPath,
+  resolveLibraryPath,
+  isElectronRuntime,
+  ELECTRON_ASAR_UNPACK_GLOB,
+} from './library';
 export { LatticeErrorCode, QueryErrorStage, LatticeTxnMode, LatticeValueType } from './types';
 
 /**

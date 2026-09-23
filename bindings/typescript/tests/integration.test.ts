@@ -8,7 +8,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { Database } from '../src/database';
+import { Database, deserialize } from '../src/database';
 import { Transaction } from '../src/transaction';
 import { isLibraryAvailable, LatticeErrorCode, LatticeQueryError, QueryErrorStage } from '../src/ffi';
 
@@ -1343,6 +1343,82 @@ describeIfNative('Database Integration', () => {
       await expect(db.write(async (txn) => {
         txn.publishStream('events', 'hidden');
       })).rejects.toMatchObject({ code: LatticeErrorCode.Unsupported });
+    });
+  });
+
+  describe('Serialize and deserialize', () => {
+    let dbPath: string;
+    let db: Database;
+
+    beforeEach(async () => {
+      dbPath = tempDbPath();
+      db = new Database(dbPath, { create: true });
+      await db.open();
+    });
+
+    afterEach(async () => {
+      if (db.isOpen()) {
+        await db.close();
+      }
+      cleanupDb(dbPath);
+    });
+
+    test('round-trips a graph through bytes', async () => {
+      await db.write(async (txn) => {
+        const alice = await txn.createNode({
+          labels: ['Person'],
+          properties: { name: 'Alice', age: 30 },
+        });
+        const bob = await txn.createNode({
+          labels: ['Person'],
+          properties: { name: 'Bob', age: 25 },
+        });
+        await txn.createEdge(alice.id, bob.id, 'KNOWS');
+      });
+
+      // Serializing reads the live database file. Doing that through a second
+      // handle fails outright on Windows, where file locks are mandatory.
+      const bytes = db.serialize();
+      expect(bytes.byteLength).toBeGreaterThan(0);
+
+      const restored = deserialize(bytes);
+      try {
+        const result = await restored.query(
+          'MATCH (n:Person) RETURN n.name, n.age ORDER BY n.age'
+        );
+        expect(result.rows).toEqual([
+          { 'n.name': 'Bob', 'n.age': BigInt(25) },
+          { 'n.name': 'Alice', 'n.age': BigInt(30) },
+        ]);
+      } finally {
+        await restored.close();
+      }
+    });
+
+    test('deserialized database is independent of the original', async () => {
+      await db.write(async (txn) => {
+        await txn.createNode({ labels: ['Note'], properties: { text: 'original' } });
+      });
+
+      const restored = deserialize(db.serialize());
+      try {
+        await restored.write(async (txn) => {
+          await txn.createNode({ labels: ['Note'], properties: { text: 'added' } });
+        });
+
+        const restoredCount = await restored.query('MATCH (n:Note) RETURN n.text');
+        expect(restoredCount.rows).toHaveLength(2);
+
+        const originalCount = await db.query('MATCH (n:Note) RETURN n.text');
+        expect(originalCount.rows).toHaveLength(1);
+      } finally {
+        await restored.close();
+      }
+    });
+
+    test('serialize rejects a closed database', async () => {
+      await db.close();
+      expect(() => db.serialize()).toThrow(/not open/i);
     });
   });
 });

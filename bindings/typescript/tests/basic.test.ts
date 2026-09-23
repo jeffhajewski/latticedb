@@ -183,24 +183,28 @@ describe('Library availability', () => {
       const library = await import('../src/ffi/library');
       const candidates = library.getBundledLibraryCandidates();
       expect(candidates.length).toBeGreaterThan(0);
-      const fakeLibrary = candidates[0]!;
-      const hadExisting = fs.existsSync(fakeLibrary);
-      const existingContents = hadExisting ? fs.readFileSync(fakeLibrary) : null;
+      const bundled = candidates[0]!;
 
-      fs.mkdirSync(path.dirname(fakeLibrary), { recursive: true });
-      fs.writeFileSync(fakeLibrary, '');
+      if (fs.existsSync(bundled)) {
+        // The package already carries a real library, as it does after
+        // `npm run bundle:native` and in the published tarball. It must not be
+        // overwritten to force a load failure: Windows locks a loaded DLL, and
+        // a parallel test worker may be holding this one. Precedence over the
+        // repo-local build is observable without touching the file.
+        expect(library.resolveLibraryPath()).toBe(bundled);
+        return;
+      }
+
+      fs.mkdirSync(path.dirname(bundled), { recursive: true });
+      fs.writeFileSync(bundled, '');
 
       try {
         expect(() => library.getLibrary()).toThrow(
-          new RegExp(fakeLibrary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
+          new RegExp(bundled.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'))
         );
         expect(library.getLibraryPath()).toBeNull();
       } finally {
-        if (hadExisting && existingContents !== null) {
-          fs.writeFileSync(fakeLibrary, existingContents);
-        } else {
-          fs.rmSync(fakeLibrary, { force: true });
-        }
+        fs.rmSync(bundled, { force: true });
       }
     } finally {
       if (previousPrefix === undefined) {
@@ -238,6 +242,17 @@ describe('Library availability', () => {
       jest.resetModules();
 
       const library = await import('../src/ffi/library');
+      const bundled = library.getBundledLibraryCandidates().find((candidate) =>
+        fs.existsSync(candidate)
+      );
+
+      if (bundled) {
+        // A bundled package library outranks LATTICE_PREFIX by design, so the
+        // prefix is only reachable when the package carries no library.
+        expect(library.resolveLibraryPath()).toBe(bundled);
+        return;
+      }
+
       expect(() => library.getLibrary()).toThrow(new RegExp(fakeLibrary.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
       expect(library.getLibraryPath()).toBeNull();
     } finally {

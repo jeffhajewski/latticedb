@@ -6,6 +6,7 @@ If you want the fastest possible first run:
 
 - use [cli/README.md](cli/README.md) for a copy-paste CLI walkthrough
 - use [../docs/getting_started.md](../docs/getting_started.md) for the shortest path by language
+- use [sample-graph/README.md](sample-graph/README.md) for a generated 1,072-node citation graph to query against
 
 ## Graph, Vector, and Full-Text Retrieval Demo
 

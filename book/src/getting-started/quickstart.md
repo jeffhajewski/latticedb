@@ -131,6 +131,68 @@ for (const row of results.rows) {
 await db.close();
 ```
 
+## Java
+
+The Java binding requires JDK 21+, Maven, Zig, and a C compiler. Build the
+shared library from the repository root, then build and test the binding from
+`bindings/java`; see the [Java API reference](../api/java.md#installing) for
+the commands and native-library configuration.
+
+```java
+import io.latticedb.Database;
+import io.latticedb.Embedding;
+import io.latticedb.FTSSearchOptions;
+import io.latticedb.Node;
+import io.latticedb.OpenOptions;
+import io.latticedb.QueryResult;
+
+import java.util.List;
+import java.util.Map;
+
+int dimensions = 128;
+try (Database db = Database.open("knowledge.db",
+        OpenOptions.defaults()
+                .create(true)
+                .enableVectors(true)
+                .vectorDimensions(dimensions))) {
+
+    // Build a graph
+    db.write(tx -> {
+        Node alice = tx.createNode(List.of("Person"),
+                Map.of("name", "Alice", "field", "ML"));
+        Node document = tx.createNode(List.of("Document"),
+                Map.of("title", "Attention Is All You Need"));
+        String text = "The transformer architecture uses self-attention";
+        Node chunk = tx.createNode(List.of("Chunk"), Map.of("text", text));
+
+        tx.setVector(chunk.id(), "embedding", Embedding.hashEmbed(text, dimensions));
+        tx.ftsIndex(chunk.id(), text);
+        tx.createEdge(chunk.id(), document.id(), "PART_OF");
+        tx.createEdge(document.id(), alice.id(), "AUTHORED_BY");
+        return null;
+    });
+
+    // Query: vector search + text match + graph traversal
+    QueryResult results = db.query("""
+            MATCH (chunk:Chunk)-[:PART_OF]->(doc:Document)-[:AUTHORED_BY]->(author:Person)
+            WHERE chunk.embedding <=> $query < 0.5
+            RETURN doc.title AS title, chunk.text AS text, author.name AS author
+            ORDER BY chunk.embedding <=> $query
+            LIMIT 5
+            """, Map.of("query", Embedding.hashEmbed("transformer attention mechanism", dimensions)));
+
+    for (Map<String, Object> row : results.rows()) {
+        System.out.println(row.get("title") + " by " + row.get("author"));
+    }
+
+    // Full-text search
+    for (var hit : db.ftsSearch("self-attention transformer",
+            FTSSearchOptions.defaults())) {
+        System.out.printf("Node %d: score=%.4f%n", hit.nodeId(), hit.score());
+    }
+}
+```
+
 ## Next Steps
 
 - [Core Concepts](./concepts.md) — understand the data model

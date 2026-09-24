@@ -53,6 +53,17 @@ cd bindings/python
 uv run --extra dev pytest tests -q
 ```
 
+## Java Binding Tests
+
+JDK 21+, Maven, and a C compiler are required. Build the shared library before
+running the Maven tests:
+
+```bash
+zig build shared
+cd bindings/java
+mvn --batch-mode clean test
+```
+
 ## Release Checks
 
 Before tagging a release, validate version consistency and the binding smoke
@@ -64,4 +75,5 @@ zig build test
 zig build integration-test
 zig build shared
 cd bindings/typescript && npm test -- --runInBand
+cd bindings/java && mvn --batch-mode clean test
 ```

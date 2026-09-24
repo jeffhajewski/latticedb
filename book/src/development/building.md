@@ -55,6 +55,23 @@ npm install
 npm run build
 ```
 
+### Java
+
+The Java bindings require JDK 21+, Maven, and a C compiler. Maven compiles the
+JNI bridge and stages it next to the shared LatticeDB library:
+
+```bash
+# Build the shared library first
+zig build
+
+# Build and test the Java bindings
+cd bindings/java
+mvn test
+```
+
+Use `mvn compile exec:java@run-example` to run the bundled knowledge-graph
+example after building the shared library.
+
 ## Project Structure
 
 ```text
@@ -75,5 +92,6 @@ include/
 bindings/
 ├── python/         # Python bindings
 ├── typescript/     # TypeScript/Node.js bindings
-└── go/             # Go bindings
+├── go/             # Go bindings
+└── java/           # Java/JNI bindings
 ```

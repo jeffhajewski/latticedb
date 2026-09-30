@@ -1392,7 +1392,7 @@ test "import/export JSON batching rolls back failed batch" {
 
     try std.testing.expectError(
         ImportExportError.DatabaseError,
-        importJsonContent(allocator, &db, json_content, 2, false),
+        importJsonContent(allocator, db, json_content, 2, false),
     );
     try std.testing.expectEqual(@as(u64, 0), db.nodeCount());
 }
@@ -1421,7 +1421,7 @@ test "import/export JSON skip preserves valid records" {
         \\]}
     ;
 
-    const stats = try importJsonContent(allocator, &db, json_content, 2, true);
+    const stats = try importJsonContent(allocator, db, json_content, 2, true);
     try std.testing.expectEqual(@as(u64, 2), stats.nodes_imported);
     try std.testing.expectEqual(@as(u64, 1), stats.nodes_failed);
     try std.testing.expectEqual(@as(u64, 2), db.nodeCount());
@@ -1451,7 +1451,7 @@ test "import/export CSV batching rolls back failed batch" {
 
     try std.testing.expectError(
         ImportExportError.DatabaseError,
-        importNodesCsv(allocator, &db, csv_content, 2, false),
+        importNodesCsv(allocator, db, csv_content, 2, false),
     );
     try std.testing.expectEqual(@as(u64, 0), db.nodeCount());
 }
@@ -1483,7 +1483,7 @@ test "import/export JSON roundtrip" {
         \\]}
     ;
 
-    const import_stats = try importJsonContent(allocator, &db, json_content, 1000, false);
+    const import_stats = try importJsonContent(allocator, db, json_content, 1000, false);
     try std.testing.expectEqual(@as(u64, 2), import_stats.nodes_imported);
     try std.testing.expectEqual(@as(u64, 1), import_stats.edges_imported);
 

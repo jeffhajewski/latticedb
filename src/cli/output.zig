@@ -84,10 +84,10 @@ pub const Value = union(enum) {
     }
 
     pub fn width(self: Value, allocator: std.mem.Allocator) !usize {
-        var buf = ManagedArrayList(u8).init(allocator);
+        var buf: std.Io.Writer.Allocating = .init(allocator);
         defer buf.deinit();
-        try self.format(buf.writer());
-        return buf.items.len;
+        try self.format(&buf.writer);
+        return buf.written().len;
     }
 };
 
@@ -189,24 +189,24 @@ pub const TableFormatter = struct {
         for (self.col_widths, 0..) |w, i| {
             try writer.writeByte(' ');
 
-            var buf = ManagedArrayList(u8).init(self.allocator);
+            var buf: std.Io.Writer.Allocating = .init(self.allocator);
             defer buf.deinit();
 
             if (row) |r| {
                 if (i < r.len) {
-                    try r[i].format(buf.writer());
+                    try r[i].format(&buf.writer);
                 }
             } else {
                 // Header row
                 if (i < self.columns.len) {
-                    try buf.appendSlice(self.columns[i]);
+                    try buf.writer.writeAll(self.columns[i]);
                 }
             }
 
-            try writer.writeAll(buf.items);
+            try writer.writeAll(buf.written());
 
             // Padding
-            const padding = w - buf.items.len;
+            const padding = w - buf.written().len;
             for (0..padding) |_| try writer.writeByte(' ');
             try writer.writeAll(" │");
         }
@@ -413,11 +413,11 @@ test "table formatter" {
     try table.addRow(&.{ .{ .string_val = "Alice" }, .{ .int_val = 30 } });
     try table.addRow(&.{ .{ .string_val = "Bob" }, .{ .int_val = 25 } });
 
-    var buf = ManagedArrayList(u8).init(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
     defer buf.deinit();
 
-    try table.render(buf.writer());
-    try std.testing.expect(buf.items.len > 0);
+    try table.render(&buf.writer);
+    try std.testing.expect(buf.written().len > 0);
 }
 
 test "json formatter" {
@@ -427,9 +427,9 @@ test "json formatter" {
 
     try json.addRow(&.{ .{ .string_val = "Alice" }, .{ .int_val = 30 } });
 
-    var buf = ManagedArrayList(u8).init(allocator);
+    var buf: std.Io.Writer.Allocating = .init(allocator);
     defer buf.deinit();
 
-    try json.render(buf.writer());
-    try std.testing.expect(std.mem.indexOf(u8, buf.items, "\"Alice\"") != null);
+    try json.render(&buf.writer);
+    try std.testing.expect(std.mem.indexOf(u8, buf.written(), "\"Alice\"") != null);
 }

@@ -236,6 +236,11 @@ pub fn build(b: *std.Build) void {
     integration_test_module.addImport("compat", compat_module);
     integration_test_module.link_libc = true;
 
+    // The CLI tests run the built binary, so they are handed its path.
+    const integration_options = b.addOptions();
+    integration_options.addOptionPath("cli_path", cli.getEmittedBin());
+    integration_test_module.addOptions("build_options", integration_options);
+
     // Integration tests
     const integration_tests = b.addTest(.{
         .root_module = integration_test_module,

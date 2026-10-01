@@ -150,6 +150,11 @@ jobs:
   python-test:
     name: Python Tests
     needs: [zig-build, zig-build-windows]
+    # `needs` waits on every leg of a job, so without this a Zig failure on any
+    # one platform would skip the binding tests on all of them. Each leg only
+    # uses its own platform's library: when that one is missing its download
+    # fails, and the other platforms still report.
+    if: ${{ !cancelled() }}
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -196,6 +201,7 @@ jobs:
   typescript-test:
     name: TypeScript Tests
     needs: [zig-build, zig-build-windows]
+    if: ${{ !cancelled() }} # see python-test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -245,6 +251,7 @@ jobs:
   go-test:
     name: Go Repo-Local Tests
     needs: zig-build
+    if: ${{ !cancelled() }} # see python-test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -275,6 +282,7 @@ jobs:
   java-test:
     name: Java Tests
     needs: zig-build
+    if: ${{ !cancelled() }} # see python-test
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false

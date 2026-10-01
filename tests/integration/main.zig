@@ -13,6 +13,7 @@ const embedding_test = @import("embedding_test.zig");
 const query_mutation_test = @import("query_mutation_test.zig");
 const import_export_test = @import("import_export_test.zig");
 const stream_test = @import("stream_test.zig");
+const cli_test = @import("cli_test.zig");
 
 // Re-export tests from all modules
 test {
@@ -28,6 +29,8 @@ test {
     _ = import_export_test;
     // Durable stream and graph changefeed tests
     _ = stream_test;
+    // The command-line tool, run as a separate process
+    _ = cli_test;
 }
 
 test "integration test runner initialized" {

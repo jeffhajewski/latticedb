@@ -169,6 +169,14 @@ pub const Repl = struct {
         var in_multiline = false;
 
         while (self.running) {
+            // Both writers are buffered by the caller and a buffer only drains
+            // when it fills or the process exits, so whatever the last command
+            // printed has to be pushed out before waiting for the next one.
+            // Standard output goes first so an error lands after the results it
+            // interrupted, and the prompt after both.
+            try stdout.flush();
+            try stderr.flush();
+
             const action = try self.readLine(in_multiline, &line_buf, stdout);
             switch (action) {
                 .eof => {
@@ -245,6 +253,7 @@ pub const Repl = struct {
 
         if (!term.stdinIsTty()) {
             try stdout.writeAll(prompt);
+            try stdout.flush();
             readLineFromStdin(line_buf, 65536) catch |err| {
                 if (err == error.EndOfStream) return .eof;
                 return err;
@@ -274,6 +283,8 @@ pub const Repl = struct {
         var keys = key_mod.Reader(term.Source).init(&source);
 
         while (true) {
+            // The prompt, the echo of the last key, or the redraw it caused.
+            try stdout.flush();
             switch (try keys.readKey()) {
                 .eof => return .eof,
                 .enter => {

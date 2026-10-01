@@ -423,8 +423,8 @@ test "buffer_pool: flush all writes dirty pages" {
         try std.testing.expectEqual(@as(usize, 2), stats.dirty_frames);
     }
 
-    // Flush all
-    try bp.flushAll();
+    // Flush all, which reports the two it wrote
+    try std.testing.expectEqual(@as(u32, 2), try bp.flushAll());
 
     // Check no dirty pages remain
     {

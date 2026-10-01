@@ -104,7 +104,14 @@ jobs:
         run: zig build -Dtarget=x86_64-windows-gnu
 
       - name: Run unit tests
-        run: zig build test -Dtarget=x86_64-windows-gnu
+        # This step runs several test binaries at once, and on Windows Zig 0.16
+        # starts each with inheritable pipes and nothing to stop a sibling
+        # started at the same moment from inheriting them too. A binary that
+        # finishes then sees no end of output until that sibling exits, and the
+        # build runner gives up on it after 60 seconds of silence unless a
+        # longer test timeout is set. Linux and macOS are not affected: Zig
+        # marks the pipes close-on-exec there for exactly this reason.
+        run: zig build test -Dtarget=x86_64-windows-gnu --test-timeout 10m
 
       - name: Run integration tests
         run: zig build integration-test -Dtarget=x86_64-windows-gnu

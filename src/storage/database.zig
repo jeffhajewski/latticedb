@@ -1276,32 +1276,17 @@ pub const Database = struct {
         _ = checkpointer.checkpoint(policy.mode) catch {};
     }
 
-    /// Flush all durable state and remove contiguous freelist pages from EOF.
-    ///
-    /// Compaction is an exclusive maintenance operation. It never relocates a
-    /// live page, so stable IDs and persisted page references remain unchanged.
-    /// Copy this database to `dest_path` without closing it.
-    ///
-    /// The copy is a complete database on its own: a full checkpoint first
-    /// flushes every dirty page into the main file, so the write-ahead log is
-    /// redundant by the time the bytes are read and the destination needs no log
-    /// beside it.
-    ///
-    /// Exclusive for its duration, like compact. A file copy taken while writes
-    /// land underneath it is torn in ways no checksum on the source would catch,
-    /// so an open transaction is refused rather than worked around. The
-    /// checkpoint uses `.full` rather than `.truncate` so frame numbering is left
-    /// alone for anything following the log.
-    ///
-    /// The destination is written beside the target and renamed into place, so an
-    /// interrupted backup never leaves a partial file that looks usable.
     /// Fold everything pending into the database file, so that the bytes on disk
     /// are a complete database on their own.
     ///
-    /// The checkpoint is `.full` rather than `.truncate` so frame numbering is
-    /// left alone for anything following the log. Derived state that lives in
-    /// memory until asked, notably the vector index, has to be persisted first
-    /// or the copy comes out missing an index it claims to have.
+    /// With a log, committed pages are folded in by a checkpoint, which is `.full`
+    /// rather than `.truncate` so frame numbering is left alone for anything
+    /// following the log. Without one there is nothing to checkpoint: committed
+    /// pages sit dirty in the buffer pool until they are evicted, so they are
+    /// written back directly, or the copy is missing whatever has not been
+    /// evicted yet. Derived state that lives in memory until asked, notably the
+    /// vector index, has to be persisted first or the copy comes out missing an
+    /// index it claims to have.
     ///
     /// Returns the number of pages flushed.
     fn quiesceForCopy(self: *Self) DatabaseError!u32 {
@@ -1311,9 +1296,21 @@ pub const Database = struct {
         if (try self.checkpoint(.full)) |stats| {
             return stats.pages_flushed;
         }
-        return 0;
+        return self.buffer_pool.flushAll() catch DatabaseError.IoError;
     }
 
+    /// Copy this database to `dest_path` without closing it.
+    ///
+    /// The copy is a complete database on its own: every committed page is
+    /// flushed into the main file first, so the write-ahead log is redundant by
+    /// the time the bytes are read and the destination needs no log beside it.
+    ///
+    /// Exclusive for its duration, like compact. A file copy taken while writes
+    /// land underneath it is torn in ways no checksum on the source would catch,
+    /// so an open transaction is refused rather than worked around.
+    ///
+    /// The destination is written beside the target and renamed into place, so an
+    /// interrupted backup never leaves a partial file that looks usable.
     pub fn backup(self: *Self, dest_path: []const u8) DatabaseError!BackupStats {
         if (self.txn_overlays.count() != 0) return DatabaseError.TransactionConflict;
 
@@ -1600,6 +1597,10 @@ pub const Database = struct {
         return replicate_mod.replicate(self, dest_dir);
     }
 
+    /// Flush all durable state and remove contiguous freelist pages from EOF.
+    ///
+    /// Compaction is an exclusive maintenance operation. It never relocates a
+    /// live page, so stable IDs and persisted page references remain unchanged.
     pub fn compact(self: *Self) DatabaseError!CompactStats {
         if (self.read_only) return DatabaseError.ReadOnly;
         if (self.txn_overlays.count() != 0) return DatabaseError.TransactionConflict;

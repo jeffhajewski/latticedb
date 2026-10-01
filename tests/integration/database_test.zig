@@ -4028,6 +4028,84 @@ test "database: a serialized database round-trips through bytes" {
     }
 }
 
+/// Without a log there are no explicit transactions, so writes arrive as
+/// queries, each committed on its own.
+fn createNodesByQuery(db: *Database, n: usize) !void {
+    var buf: [64]u8 = undefined;
+    var i: usize = 0;
+    while (i < n) : (i += 1) {
+        const cypher = try std.fmt.bufPrint(&buf, "CREATE (p:Person {{i: {d}}})", .{i});
+        var result = try db.query(cypher);
+        result.deinit();
+    }
+}
+
+test "database: serialize without a log includes every committed write" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_serialize_nowal.ltdb";
+
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+
+    const db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false, .enable_vector = false },
+    });
+    defer db.close();
+
+    // Nothing is synced or closed before the copy. Without a log there is no
+    // checkpoint to fold these in, so they are still dirty in the buffer pool.
+    try createNodesByQuery(db, 50);
+
+    const bytes = try db.serialize(allocator);
+    defer allocator.free(bytes);
+
+    const copy = try Database.deserialize(allocator, bytes, .{
+        .config = .{ .enable_fts = false, .enable_vector = false },
+    });
+    defer copy.close();
+
+    var result = try copy.query("MATCH (p:Person) RETURN p.i AS i");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 50), result.rowCount());
+}
+
+test "database: backup without a log includes every committed write" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_backup_nowal.ltdb";
+    const dest = "/tmp/lattice_backup_nowal_copy.ltdb";
+    const dest_wal = "/tmp/lattice_backup_nowal_copy.ltdb-wal";
+
+    for ([_][]const u8{ path, dest, dest_wal }) |p| {
+        @import("compat").fs.cwd().deleteFile(p) catch {};
+    }
+    defer for ([_][]const u8{ path, dest, dest_wal }) |p| {
+        @import("compat").fs.cwd().deleteFile(p) catch {};
+    };
+
+    {
+        const db = try Database.open(allocator, path, .{
+            .create = true,
+            .config = .{ .enable_wal = false, .enable_fts = false, .enable_vector = false },
+        });
+        defer db.close();
+
+        try createNodesByQuery(db, 50);
+
+        const stats = try db.backup(dest);
+        try std.testing.expect(stats.pages_flushed > 0);
+    }
+
+    const copy = try Database.open(allocator, dest, .{
+        .config = .{ .enable_fts = false, .enable_vector = false },
+    });
+    defer copy.close();
+
+    var result = try copy.query("MATCH (p:Person) RETURN p.i AS i");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 50), result.rowCount());
+}
+
 test "database: a deserialized database is writable and leaves nothing behind" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_serialize_rw.ltdb";

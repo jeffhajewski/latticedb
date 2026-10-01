@@ -141,14 +141,14 @@ pub const BufferPool = struct {
     /// Returns an error if flushing fails - data may not be persisted.
     /// Call this before deinit() if you need durability guarantees.
     pub fn close(self: *Self) BufferPoolError!void {
-        try self.flushAll();
+        _ = try self.flushAll();
     }
 
     /// Clean up the buffer pool, flushing dirty pages (best effort).
     /// For guaranteed durability, call close() first and handle errors.
     pub fn deinit(self: *Self) void {
         // Flush all dirty pages before cleanup (best effort)
-        self.flushAll() catch {};
+        _ = self.flushAll() catch 0;
 
         // Free all frame data buffers
         for (self.frames) |*frame| {
@@ -271,8 +271,9 @@ pub const BufferPool = struct {
         }
     }
 
-    /// Flush all dirty pages to disk.
-    pub fn flushAll(self: *Self) !void {
+    /// Flush all dirty pages to disk, returning how many were written.
+    pub fn flushAll(self: *Self) !u32 {
+        var flushed: u32 = 0;
         for (self.frames) |*frame| {
             if (frame.page_id != NULL_PAGE and frame.dirty) {
                 // Acquire shared latch for reading
@@ -286,9 +287,11 @@ pub const BufferPool = struct {
                         return BufferPoolError.IoError;
                     };
                     frame.dirty = false;
+                    flushed += 1;
                 }
             }
         }
+        return flushed;
     }
 
     /// Flush and evict every cached page, then remove the physical free tail.

@@ -94,7 +94,6 @@ pub fn build(b: *std.Build) void {
             .{ .name = "lattice", .module = lib_module },
         },
     });
-    unit_test_module.addImport("cli_main", cli_main_test_module);
     unit_test_module.addImport("compat", compat_module);
     unit_test_module.link_libc = true;
 
@@ -152,6 +151,14 @@ pub fn build(b: *std.Build) void {
         .root_module = cli_key_test_module,
     });
     const run_cli_key_tests = b.addRunArtifact(cli_key_tests);
+
+    // The rest of the CLI: main.zig and the files it pulls in. Importing the CLI
+    // into another test module does not run these, because a test binary only
+    // collects the tests of its own module.
+    const cli_main_tests = b.addTest(.{
+        .root_module = cli_main_test_module,
+    });
+    const run_cli_main_tests = b.addRunArtifact(cli_main_tests);
 
     // ReleaseSmall: strip symbols, disable unwind tables, omit frame pointers
     if (optimize == .ReleaseSmall) {
@@ -211,6 +218,7 @@ pub fn build(b: *std.Build) void {
     test_step.dependOn(&run_lib_tests.step);
     test_step.dependOn(&run_cli_args_tests.step);
     test_step.dependOn(&run_cli_key_tests.step);
+    test_step.dependOn(&run_cli_main_tests.step);
 
     // Integration test module - imports the library module
     const import_export_module = b.createModule(.{

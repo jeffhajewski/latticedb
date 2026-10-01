@@ -9,6 +9,16 @@ const output = @import("output.zig");
 const repl_mod = @import("repl.zig");
 const import_export = @import("import_export.zig");
 
+// A file's tests reach the test binary only once something analyzes the file,
+// and much of the CLI is generic code no test instantiates, so the files are
+// named here. args.zig and key.zig are test roots of their own.
+test {
+    _ = output;
+    _ = repl_mod;
+    _ = import_export;
+    _ = @import("history.zig");
+}
+
 const Args = args_mod.Args;
 const Command = args_mod.Command;
 const OutputFormat = args_mod.OutputFormat;
@@ -217,6 +227,9 @@ fn runUpdateShellCommand(io: std.Io, stderr: anytype, shell_command: []const u8)
 
 test "update runner uses supplied io for process spawning" {
     if (!std.process.can_spawn) return error.SkipZigTest;
+    // The updater is a bash pipeline, which a Windows machine has only if
+    // something else installed it. Updating there needs a path of its own.
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
 
     var stderr_buf: [256]u8 = undefined;
     var stderr_stream = @import("compat").fixedBufferStream(&stderr_buf);

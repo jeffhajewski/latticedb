@@ -62,6 +62,7 @@
 - [Python](./api/python.md)
 - [TypeScript / Node.js](./api/typescript.md)
 - [Go](./api/go.md)
+- [Java](./api/java.md)
 
 # Architecture
 

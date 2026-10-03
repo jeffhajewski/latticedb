@@ -60,6 +60,7 @@ zig build integration-test
 zig build shared
 cd bindings/python && uv run --extra dev pytest tests -q
 cd bindings/typescript && npm test -- --runInBand
+cd bindings/java && mvn --batch-mode clean test
 ```
 
 Storage changes that affect durability, page layout, large values, recovery, or

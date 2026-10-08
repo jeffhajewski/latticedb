@@ -86,6 +86,50 @@ fn openCrashTestDb(allocator: std.mem.Allocator, path: []const u8, create: bool)
 // Tests
 // ============================================================================
 
+test "fragmented vector replacements and removals replay from WAL" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_vectors.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+    const config = DatabaseConfig{
+        .enable_fts = false,
+        .enable_vector = true,
+        .vector_dimensions = 1536,
+        .auto_checkpoint = null,
+    };
+    var original = [_]f32{0} ** 1536;
+    original[0] = 1;
+    var replacement = [_]f32{0} ** 1536;
+    replacement[1] = 1;
+    var keep_id: NodeId = undefined;
+    var remove_id: NodeId = undefined;
+    {
+        var db = try Database.open(allocator, path, .{ .create = true, .config = config });
+        defer db.close();
+        var txn = try db.beginTransaction(.read_write);
+        keep_id = try db.createNode(&txn, &.{"EvidenceChunk"});
+        remove_id = try db.createNode(&txn, &.{"EvidenceChunk"});
+        try db.setNodeVectorInTxn(&txn, keep_id, &original);
+        try db.setNodeVectorInTxn(&txn, remove_id, &original);
+        try db.commitTransaction(&txn);
+        txn = try db.beginTransaction(.read_write);
+        try db.setNodeVectorInTxn(&txn, keep_id, &replacement);
+        try db.deleteNode(&txn, remove_id);
+        try db.commitTransaction(&txn);
+    }
+    // Discard all persisted trees/vector pages so the answer must come from WAL.
+    try simulateCrash(path);
+    var db = try Database.open(allocator, path, .{ .config = config });
+    defer db.close();
+    try std.testing.expect(try db.nodeExists(keep_id));
+    try std.testing.expect(!try db.nodeExists(remove_id));
+    const results = try db.vectorSearch(&replacement, 10, null);
+    defer db.freeVectorSearchResults(results);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqual(keep_id, results[0].node_id);
+    try std.testing.expectApproxEqAbs(@as(f32, 0), results[0].distance, 0.00001);
+}
+
 test "committed transaction recovered after crash" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_crash_committed.ltdb";

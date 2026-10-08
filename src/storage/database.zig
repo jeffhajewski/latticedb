@@ -586,7 +586,6 @@ const TxnVectorState = union(enum) {
     }
 };
 
-
 const TxnStreamAppend = struct {
     stream: []u8,
     kind: []u8,
@@ -658,7 +657,6 @@ const TxnOverlay = struct {
             entry.value_ptr.deinit(allocator);
         }
         self.vector_states.deinit(allocator);
-
 
         for (self.stream_appends.items) |*append| {
             append.deinit(allocator);
@@ -1061,27 +1059,6 @@ pub const Database = struct {
         self.label_index = LabelIndex.init(allocator, &self.label_tree);
         self.initializePropertyIndex();
 
-        // 7b. Run WAL recovery if needed
-        if (self.wal) |*wal| {
-            var rm = recovery_mod.RecoveryManager.initWithLogicalContext(allocator, .{
-                .node_store = &self.node_store,
-                .edge_store = &self.edge_store,
-                .symbol_table = &self.symbol_table,
-                .label_index = &self.label_index,
-                .stream_trees = self.streamTrees(),
-            });
-            const stats = rm.recover(wal, &self.page_manager) catch |err| switch (err) {
-                error.MidLogCorruption => return DatabaseError.InvalidDatabase,
-                else => return DatabaseError.IoError,
-            };
-            // Persist recovered state if any redo operations were applied
-            if (stats.redo_operations > 0) {
-                try self.rebuildPropertyIndexes();
-                try self.rebuildFtsIndexes();
-                self.saveTreeRoots() catch {};
-            }
-        }
-
         // 8. Initialize FTS (optional)
         self.fts_index = null;
         if (options.config.enable_fts) {
@@ -1146,6 +1123,37 @@ pub const Database = struct {
                         }
                     }
                 }
+            }
+        }
+
+        // Recovery needs real empty tree pages, not the zeroed allocation
+        // placeholders. Persist the initial structure before accepting writes;
+        // subsequent transactions remain durable through the WAL.
+        if (is_new and !options.read_only) {
+            try self.sync();
+            self.page_manager.sync() catch return DatabaseError.IoError;
+        }
+
+        // Recover only after the vector index is available for logical redo.
+        if (self.wal) |*wal| {
+            var rm = recovery_mod.RecoveryManager.initWithLogicalContext(allocator, .{
+                .node_store = &self.node_store,
+                .edge_store = &self.edge_store,
+                .symbol_table = &self.symbol_table,
+                .label_index = &self.label_index,
+                .stream_trees = self.streamTrees(),
+                .hnsw_index = if (self.hnsw_index) |*hnsw| hnsw else null,
+            });
+            const stats = rm.recover(wal, &self.page_manager) catch |err| switch (err) {
+                error.MidLogCorruption => return DatabaseError.InvalidDatabase,
+                else => return DatabaseError.IoError,
+            };
+            // Persist recovered state if any redo operations were applied
+            if (stats.redo_operations > 0) {
+                try self.rebuildPropertyIndexes();
+                try self.rebuildFtsIndexes();
+                try self.sync();
+                self.page_manager.sync() catch return DatabaseError.IoError;
             }
         }
 
@@ -1859,7 +1867,6 @@ pub const Database = struct {
                 const state = try self.readBaseVectorState(node_id);
                 try self.storeVectorOverlayState(reader_overlay, node_id, state);
             }
-
         }
     }
 
@@ -1876,6 +1883,22 @@ pub const Database = struct {
         var edge_iter = overlay.edge_states.iterator();
         while (edge_iter.next()) |entry| {
             try self.logCommittedEdgeState(txn, entry.key_ptr.*, entry.value_ptr.*);
+        }
+
+        var vector_iter = overlay.vector_states.iterator();
+        while (vector_iter.next()) |entry| {
+            const vector: ?[]const f32 = switch (entry.value_ptr.*) {
+                .absent => null,
+                .value => |value| value,
+            };
+            const payload = wal_payload.serializeVectorMutationAlloc(
+                self.allocator,
+                entry.key_ptr.*,
+                vector,
+            ) catch return DatabaseError.OutOfMemory;
+            defer self.allocator.free(payload);
+            const tm = &(self.txn_manager orelse return DatabaseError.TransactionsNotEnabled);
+            _ = tm.logOperation(txn, .update, payload) catch |err| return mapTxnError(err);
         }
 
         for (overlay.stream_appends.items) |append| {
@@ -3338,7 +3361,8 @@ pub const Database = struct {
         try self.populateFtsDefinition(definition);
         catalog.create(definition) catch |err| return mapFtsCatalogError(err);
         self.fts_declared = true;
-        try self.saveTreeRoots();
+        try self.sync();
+        self.page_manager.sync() catch return DatabaseError.IoError;
         if (self.query_cache) |cache| cache.bumpSchemaVersion();
     }
 

@@ -135,10 +135,18 @@ The key insight: we buffer multiple records in memory, only hitting disk when:
 1. The frame buffer is full (4KB of records accumulated)
 2. A transaction commits (durability guarantee)
 
-Logical WAL records can be larger than a single frame. Large graph, stream, and
+Logical WAL records can be larger than a single frame. Large graph, stream, vector, and
 property payloads are fragmented into physical `large_fragment` records and
 reassembled by recovery before redo. The logical payload limit is `64 MiB`; a
 record above that limit returns `ValueTooLarge`.
+
+Vector replacements and removals are logical transaction records too. Recovery
+replays them into the vector index only for committed transactions; an index that
+cannot replay a vector record causes open to fail rather than return incomplete
+search results. Open with vector support and the same dimensions as the writer.
+The initial empty tree pages and out-of-transaction FTS declarations are persisted
+before writes rely on them. Recovered indexes and their roots are flushed before
+open returns, so recovery does not require a later clean close to survive.
 
 ## Commit Protocol
 

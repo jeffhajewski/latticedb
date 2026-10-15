@@ -111,6 +111,7 @@ pub const LogicalRecoveryContext = struct {
     symbol_table: *SymbolTable,
     label_index: *LabelIndex,
     stream_trees: ?stream_store.TreeSet = null,
+    hnsw_index: ?*lattice.vector.hnsw.HnswIndex = null,
 };
 
 // ============================================================================
@@ -214,7 +215,10 @@ pub const RecoveryManager = struct {
         defer txn_states.deinit();
 
         var redo_list: std.ArrayListUnmanaged(RedoEntry) = .empty;
-        defer redo_list.deinit(self.allocator);
+        defer {
+            for (redo_list.items) |entry| self.allocator.free(entry.payload);
+            redo_list.deinit(self.allocator);
+        }
 
         try self.analysisPass(wal, &txn_states, &redo_list, &stats);
 
@@ -365,8 +369,6 @@ pub const RecoveryManager = struct {
             // Only redo if transaction committed
             const txn_info = txn_states.get(entry.txn_id) orelse continue;
             if (txn_info.state != .committed) {
-                // Free the payload since we won't use it
-                self.allocator.free(entry.payload);
                 continue;
             }
 
@@ -383,7 +385,6 @@ pub const RecoveryManager = struct {
                             var buf: [4096]u8 align(4096) = undefined;
                             @memcpy(buf[0..page_data.len], page_data);
                             pm.writePage(page_id, &buf) catch {
-                                self.allocator.free(entry.payload);
                                 return RecoveryError.IoError;
                             };
                             stats.redo_operations += 1;
@@ -400,7 +401,16 @@ pub const RecoveryManager = struct {
 
                 .update => {
                     if (self.logical_ctx) |ctx| {
-                        self.redoUpdate(ctx, entry.payload) catch {};
+                        if (entry.payload.len > 0 and
+                            (entry.payload[0] == @intFromEnum(wal_payload.PayloadType.vector_set) or
+                                entry.payload[0] == @intFromEnum(wal_payload.PayloadType.vector_remove)))
+                        {
+                            self.redoVector(ctx, entry.payload) catch {
+                                return RecoveryError.IoError;
+                            };
+                        } else {
+                            self.redoUpdate(ctx, entry.payload) catch {};
+                        }
                     }
                     stats.redo_operations += 1;
                 },
@@ -414,8 +424,6 @@ pub const RecoveryManager = struct {
 
                 else => {},
             }
-
-            self.allocator.free(entry.payload);
         }
     }
 
@@ -472,6 +480,19 @@ pub const RecoveryManager = struct {
                 type_id,
                 &[_]node_mod.Property{},
             ) catch {};
+        }
+    }
+
+    fn redoVector(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) !void {
+        // Silently skipping this record would acknowledge a recovered database
+        // with missing committed vectors. Refuse an incompatible open instead.
+        const hnsw = ctx.hnsw_index orelse return RecoveryError.InvalidRecord;
+        const mutation = try wal_payload.deserializeVectorMutation(self.allocator, payload);
+        defer if (mutation.vector) |vector| self.allocator.free(vector);
+        if (mutation.vector) |vector| {
+            try hnsw.insert(mutation.node_id, vector);
+        } else {
+            try hnsw.remove(mutation.node_id);
         }
     }
 

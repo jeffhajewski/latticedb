@@ -27,6 +27,8 @@ pub const PayloadType = enum(u8) {
     label_add = 0x06,
     label_remove = 0x07,
     edge_property_update = 0x08,
+    vector_set = 0x09,
+    vector_remove = 0x0a,
     stream_append = 0x20,
     stream_offset_set = 0x21,
     stream_trim = 0x22,
@@ -1083,4 +1085,82 @@ test "label_add: buffer too small" {
 
     const result = serializeLabelAdd(&buf, 42, "Employee");
     try std.testing.expectError(PayloadError.BufferTooSmall, result);
+}
+
+/// Encode a vector replacement or removal for transaction recovery.
+/// Format: type(u8) + node_id(u64) + dimensions(u16) + float32 little-endian values.
+pub fn serializeVectorMutationAlloc(
+    allocator: Allocator,
+    node_id: u64,
+    vector: ?[]const f32,
+) Allocator.Error![]u8 {
+    const dimensions = if (vector) |values| values.len else 0;
+    const buf = try allocator.alloc(u8, 11 + dimensions * 4);
+    buf[0] = @intFromEnum(if (vector != null) PayloadType.vector_set else PayloadType.vector_remove);
+    std.mem.writeInt(u64, buf[1..9], node_id, .little);
+    std.mem.writeInt(u16, buf[9..11], @intCast(dimensions), .little);
+    if (vector) |values| {
+        for (values, 0..) |value, i| {
+            std.mem.writeInt(u32, buf[11 + i * 4 ..][0..4], @bitCast(value), .little);
+        }
+    }
+    return buf;
+}
+
+/// Owned vector state reconstructed from a logical WAL record.
+pub const VectorMutation = struct {
+    node_id: u64,
+    /// Null means remove. Caller owns a non-null vector.
+    vector: ?[]f32,
+};
+
+/// Decode and validate a vector WAL record, returning owned float values.
+pub fn deserializeVectorMutation(
+    allocator: Allocator,
+    bytes: []const u8,
+) (PayloadError || Allocator.Error)!VectorMutation {
+    if (bytes.len < 11) return PayloadError.InvalidPayload;
+    const remove = bytes[0] == @intFromEnum(PayloadType.vector_remove);
+    if (!remove and bytes[0] != @intFromEnum(PayloadType.vector_set)) return PayloadError.UnexpectedPayloadType;
+    const dimensions = std.mem.readInt(u16, bytes[9..11], .little);
+    if (bytes.len != 11 + @as(usize, dimensions) * 4) return PayloadError.InvalidPayload;
+    const node_id = std.mem.readInt(u64, bytes[1..9], .little);
+    if (remove) {
+        if (dimensions != 0) return PayloadError.InvalidPayload;
+        return .{ .node_id = node_id, .vector = null };
+    }
+    if (!types.isValidVectorDimensions(dimensions)) return PayloadError.InvalidPayload;
+    const vector = try allocator.alloc(f32, dimensions);
+    for (vector, 0..) |*value, i| {
+        value.* = @bitCast(std.mem.readInt(u32, bytes[11 + i * 4 ..][0..4], .little));
+    }
+    return .{ .node_id = node_id, .vector = vector };
+}
+
+test "vector mutation payload rejects malformed records" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(PayloadError.InvalidPayload, deserializeVectorMutation(allocator, &.{}));
+    const vector = [_]f32{ 0.25, -0.5, 1.0 };
+    const bytes = try serializeVectorMutationAlloc(allocator, 42, &vector);
+    defer allocator.free(bytes);
+    const decoded = try deserializeVectorMutation(allocator, bytes);
+    defer allocator.free(decoded.vector.?);
+    try std.testing.expectEqual(@as(u64, 42), decoded.node_id);
+    try std.testing.expectEqualSlices(f32, &vector, decoded.vector.?);
+    try std.testing.expectError(PayloadError.InvalidPayload, deserializeVectorMutation(allocator, bytes[0 .. bytes.len - 1]));
+    std.mem.writeInt(u16, bytes[9..11], 0, .little);
+    try std.testing.expectError(PayloadError.InvalidPayload, deserializeVectorMutation(allocator, bytes[0..11]));
+    bytes[0] = @intFromEnum(PayloadType.node_insert);
+    try std.testing.expectError(PayloadError.UnexpectedPayloadType, deserializeVectorMutation(allocator, bytes));
+}
+
+test "vector removal payload cannot contain vector data" {
+    const allocator = std.testing.allocator;
+    const bytes = try serializeVectorMutationAlloc(allocator, 42, null);
+    defer allocator.free(bytes);
+    const decoded = try deserializeVectorMutation(allocator, bytes);
+    try std.testing.expectEqual(@as(u64, 42), decoded.node_id);
+    try std.testing.expect(decoded.vector == null);
+    std.mem.writeInt(u16, bytes[9..11], 1, .little);
+    try std.testing.expectError(PayloadError.InvalidPayload, deserializeVectorMutation(allocator, bytes));
 }

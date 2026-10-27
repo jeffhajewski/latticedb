@@ -726,41 +726,37 @@ footer .footer-links {
 <!-- Release Notes -->
 <section class="release-notes">
   <div class="container">
-    <h2>What's new in 0.15.0</h2>
-    <p class="caption">Databases you can hand around as bytes, databases that never touch a disk, and a query that used to sort the wrong rows.</p>
+    <h2>What's new in 0.16.0</h2>
+    <p class="caption">Windows, packaged Electron apps, and vectors that come back after a crash.</p>
     <div class="release-grid">
       <div class="release-card">
-        <h3>Databases as Bytes</h3>
+        <h3>Windows</h3>
         <ul>
-          <li><code>serialize</code> hands back the whole database; <code>deserialize</code> opens one</li>
-          <li>Keep many small databases in S3 or Azure Blob Storage</li>
-          <li>Pending writes are folded in, so the bytes need no log beside them</li>
-          <li>Your own client does the transfer, with your credentials</li>
+          <li>The library, CLI, and bindings for x64 and ARM64</li>
+          <li>Zip archives, wheels, and <code>lattice.dll</code> bundled on npm</li>
+          <li>Backup and serialize work under Windows file locks</li>
+          <li>The test suites run on Windows on every pull request</li>
         </ul>
       </div>
       <div class="release-card">
-        <h3>In-Memory Databases</h3>
+        <h3>Packaged Electron Apps</h3>
         <ul>
-          <li>Open <code>:memory:</code> and nothing touches the disk</li>
-          <li>Transactions, the write-ahead log, and serialization all work</li>
-          <li>Load without a second copy of the bytes in Python and TypeScript</li>
-          <li>A 100 KB database costs about 360 KB in memory</li>
+          <li>The library loads from <code>app.asar.unpacked</code></li>
+          <li>A missing library names the <code>asarUnpack</code> entry to add</li>
+          <li><code>resolveLibraryPath()</code> checks your own packaging</li>
         </ul>
       </div>
       <div class="release-card">
-        <h3>Sorting by an Aggregate</h3>
+        <h3>Vectors</h3>
         <ul>
-          <li><code>ORDER BY</code> over <code>count()</code> returned the wrong rows, with no error</li>
-          <li>Sorting now happens after aggregation, not before it</li>
-          <li><code>LIMIT</code> takes the genuine top N</li>
-          <li>Ordering by a column that is not projected is refused</li>
+          <li>Committed vectors come back after a process crash</li>
+          <li>Uncommitted ones stay gone</li>
+          <li>Inserts about 3x faster, searches about 2.6x faster</li>
         </ul>
       </div>
     </div>
     <p class="release-meta">
-      <a href="https://docs.latticedb.org/guides/backup-and-replication">Backup, replication, and object storage</a>
-      <span aria-hidden="true"> | </span>
-      <a href="https://github.com/jeffhajewski/latticedb/blob/main/docs/release_notes_0.15.0.md">Read the 0.15.0 release notes</a>
+      <a href="https://github.com/jeffhajewski/latticedb/blob/main/docs/release_notes_0.16.0.md">Read the 0.16.0 release notes</a>
     </p>
   </section>
 

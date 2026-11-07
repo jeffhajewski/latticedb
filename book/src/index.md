@@ -47,7 +47,7 @@ LIMIT 10
 - Single-file storage with write-ahead log for crash recovery
 - Durable streams and semantic graph changefeeds
 - Zero configuration — open a file and start working
-- Clean C API; Python, TypeScript, and Go bindings wrap it
+- Clean C API; Python, TypeScript, Go, and Java bindings wrap it
 
 ## Use Cases
 

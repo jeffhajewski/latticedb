@@ -628,7 +628,8 @@ lattice_error lattice_node_set_vector(
  * Batch insert operations
  */
 
-/* Node spec for batch insert: label + vector */
+/* Node spec for batch insert: label + vector. An empty label ("") creates
+ * an unlabeled node, as lattice_node_create does; NULL is rejected. */
 typedef struct {
     const char* label;
     const float* vector;

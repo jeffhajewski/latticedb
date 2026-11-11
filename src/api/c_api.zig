@@ -2745,9 +2745,10 @@ pub export fn lattice_batch_insert(
         const label_slice = cStrToSlice(spec.label) orelse return .err_invalid_arg;
         const vector_slice = cEmbeddingVectorToSlice(spec.vector, spec.dimensions) orelse return .err_invalid_arg;
 
-        // Create node
-        const labels = [_][]const u8{label_slice};
-        const node_id = txn_handle.db_handle.db.createNode(txn_ptr, &labels) catch |err| {
+        // Create node. An empty label means no label, as in lattice_node_create.
+        const one_label = [_][]const u8{label_slice};
+        const labels: []const []const u8 = if (label_slice.len == 0) &.{} else &one_label;
+        const node_id = txn_handle.db_handle.db.createNode(txn_ptr, labels) catch |err| {
             return mapAnyError(err);
         };
 

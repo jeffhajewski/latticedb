@@ -3703,3 +3703,49 @@ test "c_api: enum values a C caller made up are rejected, not trusted" {
     try std.testing.expectEqual(lattice_error.err_invalid_arg, c_api.lattice_embedding_client_create(&config, &client));
     try std.testing.expect(client == null);
 }
+
+test "c_api: batch insert treats an empty label as no label" {
+    const path = "/tmp/lattice_capi_batch_empty_label_test.db";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = true,
+        .vector_dimensions = 2,
+    };
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer removeScratchDb(path);
+    defer _ = c_api.lattice_close(db);
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+    const vec = [_]f32{ 1, 0 };
+    const specs = [_]c_api.lattice_node_with_vector{
+        .{ .label = "", .vector = &vec, .dimensions = 2 },
+        .{ .label = "Doc", .vector = &vec, .dimensions = 2 },
+    };
+    var ids: [2]lattice_node_id = undefined;
+    var created: u32 = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_batch_insert(txn, &specs, 2, &ids, &created));
+    try std.testing.expectEqual(@as(u32, 2), created);
+
+    const expected = [_][]const u8{ "", "Doc" };
+    for (ids, expected) |id, want| {
+        var labels: [*c]u8 = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_get_labels(txn, id, &labels));
+        defer c_api.lattice_free_string(labels);
+        try std.testing.expectEqualStrings(want, std.mem.span(labels));
+    }
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+
+    // No node carries a label named "".
+    var empty_ids: ?[*]lattice_node_id = null;
+    var empty_count: usize = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_get_nodes_by_label(db, "", 0, &empty_ids, &empty_count));
+    defer c_api.lattice_free_node_ids(empty_ids, empty_count);
+    try std.testing.expectEqual(@as(usize, 0), empty_count);
+}

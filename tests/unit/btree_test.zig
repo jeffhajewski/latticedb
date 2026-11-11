@@ -1017,3 +1017,99 @@ test "btree: random workload with keys up to the maximum size matches a model" {
         try randomLongKeyWorkload(std.testing.allocator, seed, 3000);
     }
 }
+
+// ============================================================================
+// Contract: a failed insert leaves the tree exactly as it was
+// ============================================================================
+
+fn expectLongKeyTreeHolds(tree: *BTree, count: usize) !void {
+    var key_buf: [256]u8 = undefined;
+    try helpers.validateBTreeInvariants(tree);
+    try std.testing.expectEqual(count, try helpers.countBTreeEntries(tree));
+    for (0..count) |i| {
+        try std.testing.expect(try tree.contains(longSplitKey(&key_buf, i)));
+    }
+}
+
+test "btree: an insert failing at any allocation during a split leaves the tree unchanged" {
+    const allocator = std.testing.allocator;
+    const split_index = try firstInsertThatRaisesHeightToThree(allocator);
+
+    // Fail the first, second, ... allocation of the insert that splits a
+    // leaf, its parent and the root, until the insert gets through.
+    var fail_offset: usize = 0;
+    while (true) : (fail_offset += 1) {
+        var db = try helpers.TempDb.initWithPoolSize(allocator, "split_oom_atomic", 1024 * 1024);
+        defer db.deinit();
+
+        var failing_state = std.testing.FailingAllocator.init(allocator, .{});
+        var tree = try BTree.init(failing_state.allocator(), db.bp);
+        var key_buf: [256]u8 = undefined;
+        for (0..split_index) |i| try tree.insert(longSplitKey(&key_buf, i), "value");
+
+        failing_state.fail_index = failing_state.alloc_index + fail_offset;
+        const result = tree.insert(longSplitKey(&key_buf, split_index), "value");
+        try std.testing.expectEqual(@as(usize, 0), db.bp.getStats().pinned_frames);
+
+        if (!failing_state.has_induced_failure) {
+            try result;
+            try expectLongKeyTreeHolds(&tree, split_index + 1);
+            break;
+        }
+
+        try std.testing.expectError(BTreeError.OutOfMemory, result);
+        try expectLongKeyTreeHolds(&tree, split_index);
+
+        failing_state.fail_index = std.math.maxInt(usize);
+        try tree.insert(longSplitKey(&key_buf, split_index), "value");
+        try expectLongKeyTreeHolds(&tree, split_index + 1);
+    }
+    try std.testing.expect(fail_offset >= 3);
+}
+
+test "btree: an insert running out of buffer frames during a split leaves the tree unchanged" {
+    const allocator = std.testing.allocator;
+    const split_index = try firstInsertThatRaisesHeightToThree(allocator);
+    const frame_count = 16;
+
+    // Hold more and more of a small pool pinned so the split runs out of
+    // frames at every step it fetches one.
+    var saw_failure = false;
+    var held_count: usize = 0;
+    while (held_count < frame_count) : (held_count += 1) {
+        var db = try helpers.TempDb.initWithPoolSize(allocator, "split_frames_atomic", frame_count * 4096);
+        defer db.deinit();
+
+        var tree = try db.createBTree();
+        var key_buf: [256]u8 = undefined;
+        for (0..split_index) |i| try tree.insert(longSplitKey(&key_buf, i), "value");
+
+        // Pin pages that are not part of the tree.
+        var held: [frame_count]*lattice.storage.buffer_pool.BufferFrame = undefined;
+        var pinned: usize = 0;
+        defer for (held[0..pinned]) |frame| db.bp.unpinPage(frame, false);
+        while (pinned < held_count) : (pinned += 1) {
+            const page_id = try db.pm.allocatePage();
+            held[pinned] = try db.bp.fetchPage(page_id, .shared);
+        }
+
+        const result = tree.insert(longSplitKey(&key_buf, split_index), "value");
+        if (result) |_| {
+            for (held[0..pinned]) |frame| db.bp.unpinPage(frame, false);
+            pinned = 0;
+            try expectLongKeyTreeHolds(&tree, split_index + 1);
+            continue;
+        } else |err| {
+            try std.testing.expectEqual(BTreeError.BufferPoolFull, err);
+            saw_failure = true;
+        }
+
+        for (held[0..pinned]) |frame| db.bp.unpinPage(frame, false);
+        pinned = 0;
+        try std.testing.expectEqual(@as(usize, 0), db.bp.getStats().pinned_frames);
+        try expectLongKeyTreeHolds(&tree, split_index);
+        try tree.insert(longSplitKey(&key_buf, split_index), "value");
+        try expectLongKeyTreeHolds(&tree, split_index + 1);
+    }
+    try std.testing.expect(saw_failure);
+}

@@ -823,6 +823,17 @@ pub const BTree = struct {
         self.bp.pm.updateHeader(&header_copy) catch return BTreeError.IoError;
     }
 
+    /// Index of the child to descend into for `key`: the first key greater
+    /// than `key`, or num_keys for the right child.
+    fn findChildIndex(self: *Self, buf: []const u8, key: []const u8) u16 {
+        const num_keys = InternalNode.getNumKeys(buf);
+        var i: u16 = 0;
+        while (i < num_keys) : (i += 1) {
+            if (self.comparator(key, InternalNode.getKey(buf, i)) == .lt) return i;
+        }
+        return num_keys;
+    }
+
     /// Find the child page to descend into for a given key
     fn findChild(self: *Self, buf: []const u8, key: []const u8) PageId {
         const num_keys = InternalNode.getNumKeys(buf);
@@ -844,116 +855,277 @@ pub const BTree = struct {
     // Insert
     // ========================================================================
 
-    /// Insert a key-value pair into the tree
+    /// Insert a key-value pair into the tree.
+    ///
+    /// Either the pair is inserted and the tree is consistent, or an error is
+    /// returned and no page of the tree has changed. A split is planned in
+    /// full first: the split points of the leaf and of every ancestor that
+    /// overflows, the memory to rebuild them, and the new pages, are all
+    /// obtained before the first page is modified. Only then is the plan
+    /// applied, and applying it cannot fail.
     pub fn insert(self: *Self, key: []const u8, value: []const u8) BTreeError!void {
         if (key.len > maxKeySize(self.page_size)) return BTreeError.PageFull;
 
-        // Try simple insert first
-        const result = try self.insertRecursive(self.root_page, key, value);
+        var path = InsertPath{};
+        defer path.release(self.bp);
+        try self.descendForInsert(key, &path);
 
-        // If root split, create new root
-        if (result.split) |split_info| {
-            defer self.allocator.free(@constCast(split_info.key));
-            try self.createNewRoot(split_info.key, result.page_id, split_info.new_page);
-        }
-    }
+        const leaf = path.frames[path.len - 1];
+        const search = LeafNode.searchSlot(leaf.data, key, self.comparator);
+        if (search.found) return BTreeError.DuplicateKey;
 
-    const SplitInfo = struct {
-        key: []const u8, // First key of new page (allocated, caller must free)
-        new_page: PageId,
-    };
-
-    const InsertResult = struct {
-        page_id: PageId,
-        split: ?SplitInfo,
-    };
-
-    fn insertRecursive(self: *Self, page_id: PageId, key: []const u8, value: []const u8) BTreeError!InsertResult {
-        const frame = self.bp.fetchPage(page_id, .exclusive) catch return BTreeError.BufferPoolFull;
-        const header: *const PageHeader = @ptrCast(@alignCast(frame.data.ptr));
-
-        if (header.page_type == .btree_leaf) {
-            // Insert into leaf
-            return self.insertIntoLeaf(frame, key, value);
-        }
-
-        // Internal node - find child and recurse
-        const child_page = self.findChild(frame.data, key);
-        self.bp.unpinPage(frame, false);
-
-        const child_result = try self.insertRecursive(child_page, key, value);
-
-        // If child split, insert the split key into this internal node
-        if (child_result.split) |split_info| {
-            defer self.allocator.free(@constCast(split_info.key));
-
-            const frame2 = self.bp.fetchPage(page_id, .exclusive) catch return BTreeError.BufferPoolFull;
-            return self.insertIntoInternal(frame2, split_info.key, split_info.new_page);
-        }
-
-        return .{ .page_id = page_id, .split = null };
-    }
-
-    fn insertIntoLeaf(self: *Self, frame: *BufferFrame, key: []const u8, value: []const u8) BTreeError!InsertResult {
-        const buf = frame.data;
-        const page_id = frame.page_id;
-
-        // Check if key already exists
-        const search = LeafNode.searchSlot(buf, key, self.comparator);
-        if (search.found) {
-            self.bp.unpinPage(frame, false);
-            return BTreeError.DuplicateKey;
-        }
-
-        var prepared = self.prepareStoredValue(key, value) catch |err| {
-            self.bp.unpinPage(frame, false);
-            return err;
-        };
+        var prepared = try self.prepareStoredValue(key, value);
         defer prepared.deinit(self);
         var overflow_published = false;
         errdefer if (!overflow_published) prepared.rollback(self);
 
-        // Calculate space needed: slot(2) + key_len(2) + val_len(2) + key + value.
-        // Use usize for the math so comically large values do not wrap u16
-        // before we compare against the per-page upper bound; a key/value
-        // pair that cannot physically fit in an empty page is rejected
-        // with `PageFull` instead of panicking inside `insertLeafEntry`.
-        const entry_size_usize = storedLeafEntrySize(key, prepared.value) orelse {
-            self.bp.unpinPage(frame, false);
-            return BTreeError.PageFull;
-        };
-        const max_leaf_entry = maxLeafEntrySize(self.page_size);
-        if (entry_size_usize > max_leaf_entry) {
-            self.bp.unpinPage(frame, false);
-            return BTreeError.PageFull;
-        }
+        // A key/value pair that cannot physically fit in an empty page is
+        // rejected with `PageFull` instead of panicking inside the write.
+        const entry_size = storedLeafEntrySize(key, prepared.value) orelse return BTreeError.PageFull;
+        if (entry_size > maxLeafEntrySize(self.page_size)) return BTreeError.PageFull;
 
-        const space_needed_usize = std.math.add(usize, LEAF_SLOT_SIZE, entry_size_usize) catch {
-            self.bp.unpinPage(frame, false);
-            return BTreeError.PageFull;
-        };
-        const space_needed: u16 = @intCast(space_needed_usize);
-        const free_space = LeafNode.getFreeSpace(buf, self.page_size);
-
-        if (free_space >= space_needed) {
-            // Fits in current page
-            self.insertLeafEntryStored(buf, search.slot, key, prepared.value, prepared.overflow) catch |err| {
-                self.bp.unpinPage(frame, false);
-                return err;
-            };
+        if (LeafNode.getFreeSpace(leaf.data, self.page_size) >= LEAF_SLOT_SIZE + entry_size) {
+            try self.insertLeafEntryStored(leaf.data, search.slot, key, prepared.value, prepared.overflow);
             overflow_published = true;
-            self.bp.unpinPage(frame, true);
-            return .{ .page_id = page_id, .split = null };
+            path.dirty[path.len - 1] = true;
+            return;
         }
 
-        // Need to split
-        const result = try self.splitLeafAndInsert(
-            frame,
+        try self.splitAndInsert(
+            &path,
             search.slot,
             .{ .key = key, .value = prepared.value, .overflow = prepared.overflow },
             &overflow_published,
         );
-        return result;
+    }
+
+    /// The pages from the root to a leaf, pinned exclusive for an insert.
+    const InsertPath = struct {
+        frames: [MAX_TREE_HEIGHT]*BufferFrame = undefined,
+        /// child_index[i] is the child of frames[i] that leads to frames[i + 1].
+        child_index: [MAX_TREE_HEIGHT]u16 = undefined,
+        dirty: [MAX_TREE_HEIGHT]bool = [_]bool{false} ** MAX_TREE_HEIGHT,
+        len: usize = 0,
+
+        fn release(self: *InsertPath, bp: *BufferPool) void {
+            var i = self.len;
+            while (i > 0) {
+                i -= 1;
+                bp.unpinPage(self.frames[i], self.dirty[i]);
+            }
+            self.len = 0;
+        }
+    };
+
+    fn descendForInsert(self: *Self, key: []const u8, path: *InsertPath) BTreeError!void {
+        var page_id = self.root_page;
+        while (true) {
+            if (path.len == MAX_TREE_HEIGHT) return BTreeError.InvalidPage;
+            const frame = self.bp.fetchPage(page_id, .exclusive) catch return BTreeError.BufferPoolFull;
+            path.frames[path.len] = frame;
+            path.len += 1;
+
+            const header: *const PageHeader = @ptrCast(@alignCast(frame.data.ptr));
+            switch (header.page_type) {
+                .btree_leaf => return,
+                .btree_internal => {
+                    const index = self.findChildIndex(frame.data, key);
+                    path.child_index[path.len - 1] = index;
+                    page_id = internalChildAt(frame.data, index);
+                },
+                else => return BTreeError.InvalidPage,
+            }
+        }
+    }
+
+    /// Split the leaf at the end of `path` to insert `new_entry` at `slot`,
+    /// splitting ancestors as far up as needed. See `insert` for the
+    /// all-or-nothing contract.
+    fn splitAndInsert(
+        self: *Self,
+        path: *InsertPath,
+        slot: u16,
+        new_entry: StoredEntry,
+        overflow_published: *bool,
+    ) BTreeError!void {
+        const leaf_depth = path.len - 1;
+        const leaf = path.frames[leaf_depth];
+
+        // ---- Plan. Nothing below modifies a page until "Apply". ----
+
+        var leaf_image = try self.leafImageInserting(leaf.data, slot, new_entry);
+        defer leaf_image.deinit(self.allocator);
+        const leaf_split = try self.chooseLeafSplitPoint(leaf_image.entries);
+
+        // Walk up while the separator does not fit its parent, choosing each
+        // ancestor's split by bytes. images[s] is the s-th ancestor above the
+        // leaf that splits.
+        var images: [MAX_TREE_HEIGHT]InternalImage = undefined;
+        var promotions: [MAX_TREE_HEIGHT]usize = undefined;
+        var split_count: usize = 0;
+        defer for (images[0..split_count]) |*image| image.deinit(self.allocator);
+
+        var separator: []const u8 = leaf_image.entries[leaf_split].key;
+        var depth = leaf_depth; // depth of the node whose split produced `separator`
+        var absorbed = false;
+        while (depth > 0) {
+            const parent = path.frames[depth - 1];
+            const need = INTERNAL_SLOT_SIZE + 2 + separator.len;
+            if (InternalNode.getFreeSpace(parent.data, self.page_size) >= need) {
+                absorbed = true;
+                break;
+            }
+            images[split_count] = try self.internalImageInserting(
+                parent.data,
+                path.child_index[depth - 1],
+                separator,
+                NULL_PAGE, // filled in once the new right sibling exists
+            );
+            split_count += 1;
+            const promotion = self.chooseInternalPromotion(images[split_count - 1].keys) orelse
+                return BTreeError.PageFull;
+            promotions[split_count - 1] = promotion;
+            separator = images[split_count - 1].keys[promotion];
+            depth -= 1;
+        }
+        const new_root = !absorbed;
+
+        // The right sibling's back pointer changes too, so pin it now.
+        const old_next = LeafNode.getNextLeaf(leaf.data);
+        var next_frame: ?*BufferFrame = null;
+        if (old_next != NULL_PAGE) {
+            next_frame = self.bp.fetchPage(old_next, .exclusive) catch return BTreeError.BufferPoolFull;
+        }
+        var next_dirty = false;
+        defer if (next_frame) |frame| self.bp.unpinPage(frame, next_dirty);
+
+        // Reserve every page the split needs: the new leaf, one per splitting
+        // ancestor, and a new root if the old one splits.
+        const pages_needed = 1 + split_count + @intFromBool(new_root);
+        var new_frames: [MAX_TREE_HEIGHT + 2]*BufferFrame = undefined;
+        var reserved: usize = 0;
+        var applied = false;
+        defer for (new_frames[0..reserved]) |frame| {
+            if (applied) {
+                self.bp.unpinPage(frame, true);
+            } else {
+                self.markPageFreeInPlace(frame) catch {};
+            }
+        };
+        while (reserved < pages_needed) {
+            const page_id = self.bp.pm.allocatePage() catch return BTreeError.IoError;
+            new_frames[reserved] = self.bp.fetchPage(page_id, .exclusive) catch {
+                self.bp.pm.freePage(page_id) catch {};
+                return BTreeError.BufferPoolFull;
+            };
+            reserved += 1;
+        }
+
+        // ---- Apply. Every size and page was checked above. ----
+        applied = true;
+
+        const new_leaf = new_frames[0];
+        const old_prev = LeafNode.getPrevLeaf(leaf.data);
+        LeafNode.init(new_leaf.data);
+        LeafNode.init(leaf.data);
+        path.dirty[leaf_depth] = true;
+        for (leaf_image.entries[0..leaf_split], 0..) |entry, i| {
+            try self.insertLeafEntryStored(leaf.data, @intCast(i), entry.key, entry.value, entry.overflow);
+        }
+        for (leaf_image.entries[leaf_split..], 0..) |entry, i| {
+            try self.insertLeafEntryStored(new_leaf.data, @intCast(i), entry.key, entry.value, entry.overflow);
+        }
+        overflow_published.* = true;
+
+        LeafNode.setPrevLeaf(leaf.data, old_prev);
+        LeafNode.setNextLeaf(leaf.data, new_leaf.page_id);
+        LeafNode.setPrevLeaf(new_leaf.data, leaf.page_id);
+        LeafNode.setNextLeaf(new_leaf.data, old_next);
+        if (next_frame) |frame| {
+            LeafNode.setPrevLeaf(frame.data, new_leaf.page_id);
+            next_dirty = true;
+        }
+
+        var right_page = new_leaf.page_id;
+        separator = leaf_image.entries[leaf_split].key;
+        depth = leaf_depth;
+        for (images[0..split_count], promotions[0..split_count], 1..) |*image, promotion, frame_index| {
+            const parent = path.frames[depth - 1];
+            const sibling = new_frames[frame_index];
+            image.children[path.child_index[depth - 1] + 1] = right_page;
+
+            path.dirty[depth - 1] = true;
+            try self.writeInternalParts(
+                parent.data,
+                image.level,
+                image.keys[0..promotion],
+                image.children[0 .. promotion + 1],
+            );
+            try self.writeInternalParts(
+                sibling.data,
+                image.level,
+                image.keys[promotion + 1 ..],
+                image.children[promotion + 1 ..],
+            );
+
+            right_page = sibling.page_id;
+            separator = image.keys[promotion];
+            depth -= 1;
+        }
+
+        if (!new_root) {
+            path.dirty[depth - 1] = true;
+            try self.insertInternalEntry(path.frames[depth - 1].data, path.child_index[depth - 1], separator, right_page);
+            return;
+        }
+
+        const old_root = path.frames[0];
+        const old_root_header: *const PageHeader = @ptrCast(@alignCast(old_root.data.ptr));
+        const level: u16 = if (old_root_header.page_type == .btree_leaf) 1 else InternalNode.getLevel(old_root.data) + 1;
+        const root_frame = new_frames[pages_needed - 1];
+        InternalNode.init(root_frame.data, level);
+        // slot[0] = (separator, old root), right child = its new sibling.
+        InternalNode.setRightChild(root_frame.data, old_root.page_id);
+        try self.insertInternalEntry(root_frame.data, 0, separator, right_page);
+        self.root_page = root_frame.page_id;
+    }
+
+    /// Copy of a leaf's entries with `new_entry` inserted at `slot`. Keys and
+    /// values of existing entries are copied out of the page so the page
+    /// can be rebuilt; `new_entry` is referenced, not copied.
+    fn leafImageInserting(self: *Self, buf: []const u8, slot: u16, new_entry: StoredEntry) BTreeError!LeafImage {
+        const num_entries = LeafNode.getNumEntries(buf);
+        var data_len: usize = 0;
+        for (0..num_entries) |i| {
+            const entry = LeafNode.getStoredEntry(buf, @intCast(i));
+            data_len += entry.key.len + entry.value.len;
+        }
+
+        const data = self.allocator.alloc(u8, data_len) catch return BTreeError.OutOfMemory;
+        errdefer self.allocator.free(data);
+        const entries = self.allocator.alloc(StoredEntry, @as(usize, num_entries) + 1) catch return BTreeError.OutOfMemory;
+        errdefer self.allocator.free(entries);
+
+        var data_offset: usize = 0;
+        var out: usize = 0;
+        for (0..num_entries) |i| {
+            if (i == slot) {
+                entries[out] = new_entry;
+                out += 1;
+            }
+            const source = LeafNode.getStoredEntry(buf, @intCast(i));
+            const key_copy = data[data_offset..][0..source.key.len];
+            @memcpy(key_copy, source.key);
+            data_offset += source.key.len;
+            const value_copy = data[data_offset..][0..source.value.len];
+            @memcpy(value_copy, source.value);
+            data_offset += source.value.len;
+            entries[out] = .{ .key = key_copy, .value = value_copy, .overflow = source.overflow };
+            out += 1;
+        }
+        if (slot == num_entries) entries[out] = new_entry;
+
+        return .{ .data = data, .entries = entries };
     }
 
     /// Maximum (key_len + value_len + per-entry framing) that a leaf page
@@ -1088,176 +1260,6 @@ pub const BTree = struct {
         return @intCast(best_split orelse return BTreeError.PageFull);
     }
 
-    fn splitLeafAndInsert(
-        self: *Self,
-        frame: *BufferFrame,
-        slot: u16,
-        new_entry: StoredEntry,
-        overflow_published: *bool,
-    ) BTreeError!InsertResult {
-        const old_buf = frame.data;
-        const old_page_id = frame.page_id;
-
-        // Get all entries including the new one, sorted
-        const num_entries = LeafNode.getNumEntries(old_buf);
-        const total = num_entries + 1;
-
-        // IMPORTANT: Read sibling pointers BEFORE reinitializing old_buf
-        const old_next = LeafNode.getNextLeaf(old_buf);
-        const old_prev = LeafNode.getPrevLeaf(old_buf);
-
-        // Calculate total size needed for key/value data copies
-        var total_data_size: usize = 0;
-        for (0..num_entries) |i| {
-            const entry = LeafNode.getStoredEntry(old_buf, @intCast(i));
-            total_data_size += entry.key.len + entry.value.len;
-        }
-
-        // Allocate temporary storage for entries and their data
-        // We must copy entry data because entries point into old_buf which we reinitialize
-        var entries = self.allocator.alloc(StoredEntry, total) catch {
-            self.bp.unpinPage(frame, false);
-            return BTreeError.OutOfMemory;
-        };
-        defer self.allocator.free(entries);
-
-        var data_buffer = self.allocator.alloc(u8, total_data_size) catch {
-            self.bp.unpinPage(frame, false);
-            return BTreeError.OutOfMemory;
-        };
-        defer self.allocator.free(data_buffer);
-
-        // Collect existing entries, copying their data to avoid aliasing
-        var data_offset: usize = 0;
-        var j: usize = 0;
-        for (0..num_entries) |i| {
-            if (i == slot) {
-                // New entry doesn't need copying - it comes from outside old_buf
-                entries[j] = new_entry;
-                j += 1;
-            }
-            const entry = LeafNode.getStoredEntry(old_buf, @intCast(i));
-            // Copy key
-            const key_copy = data_buffer[data_offset..][0..entry.key.len];
-            @memcpy(key_copy, entry.key);
-            data_offset += entry.key.len;
-            // Copy value
-            const value_copy = data_buffer[data_offset..][0..entry.value.len];
-            @memcpy(value_copy, entry.value);
-            data_offset += entry.value.len;
-            entries[j] = .{ .key = key_copy, .value = value_copy, .overflow = entry.overflow };
-            j += 1;
-        }
-        if (slot == num_entries) {
-            entries[j] = new_entry;
-        }
-
-        const split_point = self.chooseLeafSplitPoint(entries) catch |err| {
-            self.bp.unpinPage(frame, false);
-            return err;
-        };
-
-        // Allocate new leaf page after validating the split so allocation
-        // failures cannot leave the original page partially rewritten.
-        const new_page_id = self.bp.pm.allocatePage() catch {
-            self.bp.unpinPage(frame, false);
-            return BTreeError.IoError;
-        };
-        const new_frame = self.bp.fetchPage(new_page_id, .exclusive) catch {
-            self.bp.pm.freePage(new_page_id) catch {};
-            self.bp.unpinPage(frame, false);
-            return BTreeError.BufferPoolFull;
-        };
-        const new_buf = new_frame.data;
-        var old_frame_pinned = true;
-        var new_frame_pinned = true;
-        var split_pages_dirty = false;
-        errdefer {
-            if (new_frame_pinned) self.bp.unpinPage(new_frame, split_pages_dirty);
-            if (old_frame_pinned) self.bp.unpinPage(frame, split_pages_dirty);
-        }
-
-        // Initialize new leaf
-        LeafNode.init(new_buf);
-        split_pages_dirty = true;
-
-        // Reinitialize old leaf - now safe because we copied all data
-        LeafNode.init(old_buf);
-
-        // Write first half to old page
-        for (0..split_point) |i| {
-            try self.insertLeafEntryStored(old_buf, @intCast(i), entries[i].key, entries[i].value, entries[i].overflow);
-        }
-
-        // Write second half to new page
-        for (split_point..total) |i| {
-            try self.insertLeafEntryStored(new_buf, @intCast(i - split_point), entries[i].key, entries[i].value, entries[i].overflow);
-        }
-
-        overflow_published.* = true;
-
-        // Update sibling pointers
-        LeafNode.setNextLeaf(old_buf, new_page_id);
-        LeafNode.setPrevLeaf(old_buf, old_prev);
-        LeafNode.setPrevLeaf(new_buf, old_page_id);
-        LeafNode.setNextLeaf(new_buf, old_next);
-
-        // Update old_next's prev pointer if it exists
-        if (old_next != NULL_PAGE) {
-            const next_frame = self.bp.fetchPage(old_next, .exclusive) catch return BTreeError.BufferPoolFull;
-            LeafNode.setPrevLeaf(next_frame.data, new_page_id);
-            self.bp.unpinPage(next_frame, true);
-        }
-
-        // Copy split key for caller (first key of new page)
-        const split_key = LeafNode.getKey(new_buf, 0);
-        const split_key_copy = self.allocator.alloc(u8, split_key.len) catch return BTreeError.OutOfMemory;
-        @memcpy(split_key_copy, split_key);
-
-        self.bp.unpinPage(new_frame, true);
-        new_frame_pinned = false;
-        self.bp.unpinPage(frame, true);
-        old_frame_pinned = false;
-
-        return .{
-            .page_id = old_page_id,
-            .split = .{
-                .key = split_key_copy,
-                .new_page = new_page_id,
-            },
-        };
-    }
-
-    fn insertIntoInternal(self: *Self, frame: *BufferFrame, key: []const u8, new_child: PageId) BTreeError!InsertResult {
-        const buf = frame.data;
-        const page_id = frame.page_id;
-
-        // Find insertion position
-        const num_keys = InternalNode.getNumKeys(buf);
-        var insert_pos: u16 = 0;
-        while (insert_pos < num_keys) : (insert_pos += 1) {
-            const node_key = InternalNode.getKey(buf, insert_pos);
-            if (self.comparator(key, node_key) == .lt) break;
-        }
-
-        // Calculate space needed
-        const space_needed: usize = INTERNAL_SLOT_SIZE + 2 + key.len; // slot + key_len(2) + key
-        const free_space = InternalNode.getFreeSpace(buf, self.page_size);
-
-        if (free_space >= space_needed) {
-            // Fits in current page
-            self.insertInternalEntry(buf, insert_pos, key, new_child) catch |err| {
-                self.bp.unpinPage(frame, false);
-                return err;
-            };
-            self.bp.unpinPage(frame, true);
-            return .{ .page_id = page_id, .split = null };
-        }
-
-        // Need to split internal node
-        return self.splitInternalAndInsert(frame, insert_pos, key, new_child);
-    }
-
     fn insertInternalEntry(self: *Self, buf: []u8, slot: u16, key: []const u8, child: PageId) BTreeError!void {
         const num_keys = InternalNode.getNumKeys(buf);
 
@@ -1358,64 +1360,6 @@ pub const BTree = struct {
         InternalNode.setNumKeys(buf, num_keys + 1);
     }
 
-    fn splitInternalAndInsert(self: *Self, frame: *BufferFrame, slot: u16, key: []const u8, new_child: PageId) BTreeError!InsertResult {
-        const old_buf = frame.data;
-        const old_page_id = frame.page_id;
-        var old_frame_pinned = true;
-        var old_frame_dirty = false;
-        errdefer if (old_frame_pinned) self.bp.unpinPage(frame, old_frame_dirty);
-
-        // Build the combined key/child image and choose the promotion point
-        // by bytes before touching any page. Splitting by key count can put
-        // more bytes on one side than a page holds once keys are long.
-        var image = try self.internalImageInserting(old_buf, slot, key, new_child);
-        defer image.deinit(self.allocator);
-        const promotion = self.chooseInternalPromotion(image.keys) orelse return BTreeError.PageFull;
-
-        const promoted_key_copy = self.allocator.dupe(u8, image.keys[promotion]) catch return BTreeError.OutOfMemory;
-        errdefer self.allocator.free(promoted_key_copy);
-
-        // Allocate new internal page
-        const new_page_id = self.bp.pm.allocatePage() catch return BTreeError.IoError;
-        const new_frame = self.bp.fetchPage(new_page_id, .exclusive) catch {
-            self.bp.pm.freePage(new_page_id) catch {};
-            return BTreeError.BufferPoolFull;
-        };
-        var new_frame_pinned = true;
-        var new_frame_dirty = false;
-        errdefer if (new_frame_pinned) self.bp.unpinPage(new_frame, new_frame_dirty);
-
-        // Old page keeps keys[0..promotion] and children[0..promotion]; the
-        // promoted key moves up; the new page takes the rest.
-        new_frame_dirty = true;
-        try self.writeInternalParts(
-            new_frame.data,
-            image.level,
-            image.keys[promotion + 1 ..],
-            image.children[promotion + 1 ..],
-        );
-        old_frame_dirty = true;
-        try self.writeInternalParts(
-            old_buf,
-            image.level,
-            image.keys[0..promotion],
-            image.children[0 .. promotion + 1],
-        );
-
-        self.bp.unpinPage(new_frame, true);
-        new_frame_pinned = false;
-        self.bp.unpinPage(frame, true);
-        old_frame_pinned = false;
-
-        return .{
-            .page_id = old_page_id,
-            .split = .{
-                .key = promoted_key_copy,
-                .new_page = new_page_id,
-            },
-        };
-    }
-
     /// Write a key/child slot into an internal node being built in order.
     /// Fails rather than writing outside the page if the key does not fit.
     fn insertInternalEntryDirect(self: *Self, buf: []u8, slot: u16, key: []const u8, child: PageId) BTreeError!void {
@@ -1442,40 +1386,6 @@ pub const BTree = struct {
         // Set the slot (no shifting needed when building sequentially)
         InternalNode.setSlot(buf, slot, new_offset, child);
         InternalNode.setNumKeys(buf, num_keys + 1);
-    }
-
-    fn createNewRoot(self: *Self, split_key: []const u8, left_child: PageId, right_child: PageId) BTreeError!void {
-        // Allocate new root page
-        const new_root = self.bp.pm.allocatePage() catch return BTreeError.IoError;
-        const frame = self.bp.fetchPage(new_root, .exclusive) catch return BTreeError.BufferPoolFull;
-
-        // Get level of old root
-        const old_frame = self.bp.fetchPage(left_child, .shared) catch {
-            self.bp.unpinPage(frame, false);
-            return BTreeError.BufferPoolFull;
-        };
-        const old_header: *const PageHeader = @ptrCast(@alignCast(old_frame.data.ptr));
-        const new_level: u16 = if (old_header.page_type == .btree_leaf) 1 else InternalNode.getLevel(old_frame.data) + 1;
-        self.bp.unpinPage(old_frame, false);
-
-        // Initialize new root as internal node
-        InternalNode.init(frame.data, new_level);
-
-        // insertInternalEntry expects: child parameter = NEW child (right of split key)
-        // The "old" right_child becomes slot[0].child (left of the key)
-        // So we set left_child as initial right_child, then insert with right_child
-        InternalNode.setRightChild(frame.data, left_child);
-
-        // Insert split_key with right_child as the new child
-        // This will: slot[0] = (split_key, left_child), right_child = right_child
-        self.insertInternalEntry(frame.data, 0, split_key, right_child) catch |err| {
-            self.bp.unpinPage(frame, false);
-            self.bp.pm.freePage(new_root) catch {};
-            return err;
-        };
-
-        self.bp.unpinPage(frame, true);
-        self.root_page = new_root;
     }
 
     // ========================================================================

@@ -1,5 +1,7 @@
 // The layered engine. The Database orchestrates; the transaction manager only
 // writes log records, and the log writes its own file outside the buffer pool.
+// Every flush of the pool is copied to the journal before the pages are
+// written in place, so the database file moves from one whole image to the next.
 digraph engine_stack {
   bgcolor="transparent"
   rankdir=TB
@@ -21,7 +23,8 @@ digraph engine_stack {
 
   wal  [label="WAL\nown -wal file"]
   pool [label="Buffer Pool\npage caching in RAM" width=4.6]
-  pgm  [label="Page Manager\nallocation, checksums" width=4.6]
+  pgm  [label="Page Manager\nallocation, checksums" width=2.6]
+  jnl  [label="Journal\nown -journal file" width=1.8]
   vfs  [label="Virtual File System\nfile I/O" width=6.4]
   os   [label="Operating System" fillcolor="#f6f8fa" color="#c7d0da" width=6.4]
 
@@ -37,10 +40,13 @@ digraph engine_stack {
   ckpt -> pgm
   ckpt -> wal
   pool -> pgm
+  pool -> jnl
   pgm  -> vfs
   wal  -> vfs
+  jnl  -> vfs
   vfs  -> os
 
   { rank=same; btree; txn; ckpt }
   { rank=same; pool; wal }
+  { rank=same; pgm; jnl }
 }

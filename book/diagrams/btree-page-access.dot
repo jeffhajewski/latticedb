@@ -30,8 +30,8 @@ digraph btree_page_access {
     color="#dbe3ec" penwidth=1.1 style=rounded margin=14
 
     l_in  [label="Page bytes" fillcolor="#dbe9f8"]
-    l_out [label="Search and insert at\ncalculated offsets" fillcolor="#dbe9f8"]
-    l_note [label="get() returns a copy of the value\lsplits, merges and deletes rebuild\lthe page from a temporary entry list\l"
+    l_out [label="Search, insert and delete\nat calculated offsets" fillcolor="#dbe9f8"]
+    l_note [label="get() returns a copy of the value\l(getBorrowed() lends it instead);\lsplits, merges and redistribution\lrebuild pages from a temporary\lentry list\l"
             fillcolor="#f6f8fa" color="#c7d0da" fontsize=10]
 
     l_in -> l_out [label="  direct access" color="#4a90d9"]

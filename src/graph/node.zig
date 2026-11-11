@@ -406,8 +406,9 @@ fn deserializeNode(allocator: Allocator, node_id: NodeId, data: []const u8) !Nod
     // Read properties
     const num_props = try reader.readInt(u16, .little);
     const properties = try allocator.alloc(Property, num_props);
+    var filled: usize = 0;
     errdefer {
-        for (properties) |*prop| {
+        for (properties[0..filled]) |*prop| {
             var val = prop.value;
             val.deinit(allocator);
         }
@@ -417,6 +418,7 @@ fn deserializeNode(allocator: Allocator, node_id: NodeId, data: []const u8) !Nod
     for (properties) |*prop| {
         prop.key_id = try reader.readInt(u16, .little);
         prop.value = try deserializeValue(allocator, reader);
+        filled += 1;
     }
 
     return Node{
@@ -424,6 +426,17 @@ fn deserializeNode(allocator: Allocator, node_id: NodeId, data: []const u8) !Nod
         .labels = labels,
         .properties = properties,
     };
+}
+
+/// Read a u32 length or count whose items take at least `min_item_size`
+/// bytes each, refusing one the rest of the record cannot hold. A corrupt
+/// length would otherwise allocate up to 4 GiB (16 GiB for a vector)
+/// before the short read was noticed.
+fn readLength(reader: anytype, min_item_size: usize) error{EndOfStream}!u32 {
+    const len = try reader.readInt(u32, .little);
+    const remaining = reader.stream.buffer.len - reader.stream.pos;
+    if (@as(usize, len) * min_item_size > remaining) return error.EndOfStream;
+    return len;
 }
 
 /// Deserialize a property value
@@ -436,30 +449,28 @@ fn deserializeValue(allocator: Allocator, reader: anytype) !PropertyValue {
         2 => PropertyValue{ .int_val = try reader.readInt(i64, .little) },
         3 => PropertyValue{ .float_val = @bitCast(try reader.readInt(u64, .little)) },
         4 => blk: {
-            const len = try reader.readInt(u32, .little);
+            const len = try readLength(reader, 1);
             const str = try allocator.alloc(u8, len);
             errdefer allocator.free(str);
             const bytes_read = try reader.readAll(str);
             if (bytes_read != len) {
-                allocator.free(str);
                 return error.EndOfStream;
             }
             break :blk PropertyValue{ .string_val = str };
         },
         5 => blk: {
-            const len = try reader.readInt(u32, .little);
+            const len = try readLength(reader, 1);
             const bytes = try allocator.alloc(u8, len);
             errdefer allocator.free(bytes);
             const bytes_read = try reader.readAll(bytes);
             if (bytes_read != len) {
-                allocator.free(bytes);
                 return error.EndOfStream;
             }
             break :blk PropertyValue{ .bytes_val = bytes };
         },
         6 => blk: {
             // Vector
-            const len = try reader.readInt(u32, .little);
+            const len = try readLength(reader, 4);
             const vec = try allocator.alloc(f32, len);
             errdefer allocator.free(vec);
             for (0..len) |i| {
@@ -469,13 +480,15 @@ fn deserializeValue(allocator: Allocator, reader: anytype) !PropertyValue {
         },
         7 => blk: {
             // List
-            const count = try reader.readInt(u32, .little);
+            // Every value takes at least its one-byte tag.
+            const count = try readLength(reader, 1);
             if (count == 0) {
                 break :blk PropertyValue{ .list_val = &[_]PropertyValue{} };
             }
             const list = try allocator.alloc(PropertyValue, count);
+            var filled: usize = 0;
             errdefer {
-                for (list) |*item| {
+                for (list[0..filled]) |*item| {
                     var mutable = item.*;
                     mutable.deinit(allocator);
                 }
@@ -483,18 +496,21 @@ fn deserializeValue(allocator: Allocator, reader: anytype) !PropertyValue {
             }
             for (0..count) |i| {
                 list[i] = try deserializeValue(allocator, reader);
+                filled += 1;
             }
             break :blk PropertyValue{ .list_val = list };
         },
         8 => blk: {
             // Map
-            const count = try reader.readInt(u32, .little);
+            // Every entry takes at least a key length and a value tag.
+            const count = try readLength(reader, 5);
             if (count == 0) {
                 break :blk PropertyValue{ .map_val = &[_]PropertyValue.MapEntry{} };
             }
             const map = try allocator.alloc(PropertyValue.MapEntry, count);
+            var filled: usize = 0;
             errdefer {
-                for (map) |*entry| {
+                for (map[0..filled]) |*entry| {
                     allocator.free(entry.key);
                     var mutable = entry.value;
                     mutable.deinit(allocator);
@@ -503,17 +519,17 @@ fn deserializeValue(allocator: Allocator, reader: anytype) !PropertyValue {
             }
             for (0..count) |i| {
                 // Read key
-                const key_len = try reader.readInt(u32, .little);
+                const key_len = try readLength(reader, 1);
                 const key = try allocator.alloc(u8, key_len);
                 errdefer allocator.free(key);
                 const key_bytes_read = try reader.readAll(key);
                 if (key_bytes_read != key_len) {
-                    allocator.free(key);
                     return error.EndOfStream;
                 }
                 // Read value
                 const value = try deserializeValue(allocator, reader);
                 map[i] = .{ .key = key, .value = value };
+                filled += 1;
             }
             break :blk PropertyValue{ .map_val = map };
         },
@@ -804,4 +820,42 @@ test "property value nested list/map serialization" {
     try std.testing.expectEqual(@as(i64, 1), items[0].int_val);
     try std.testing.expectEqual(@as(i64, 2), items[1].int_val);
     try std.testing.expectEqual(@as(i64, 3), items[2].int_val);
+}
+
+test "a truncated or corrupt node record fails cleanly" {
+    const allocator = std.testing.allocator;
+
+    var nested = [_]PropertyValue{ .{ .string_val = "a" }, .{ .string_val = "bc" } };
+    var entries = [_]PropertyValue.MapEntry{
+        .{ .key = "k1", .value = .{ .string_val = "v1" } },
+        .{ .key = "k2", .value = .{ .list_val = &nested } },
+    };
+    const properties = [_]Property{
+        .{ .key_id = 1, .value = .{ .string_val = "first" } },
+        .{ .key_id = 2, .value = .{ .list_val = &nested } },
+        .{ .key_id = 3, .value = .{ .map_val = &entries } },
+        .{ .key_id = 4, .value = .{ .bytes_val = "xyz" } },
+    };
+    var buf: [256]u8 = undefined;
+    const data = try serializeNode(&[_]SymbolId{7}, &properties, &buf);
+
+    // Every proper prefix is an error, and whatever was decoded before the
+    // cut is freed exactly once (the testing allocator checks both).
+    for (0..data.len) |cut| {
+        if (deserializeNode(allocator, 1, data[0..cut])) |node| {
+            var owned = node;
+            owned.deinit(allocator);
+            return error.TestUnexpectedResult;
+        } else |_| {}
+    }
+
+    // A length the record cannot hold is refused before allocating it.
+    var corrupt: [16]u8 = undefined;
+    var stream = @import("compat").fixedBufferStream(&corrupt);
+    const writer = stream.writer();
+    try writer.writeByte(4);
+    try writer.writeInt(u32, std.math.maxInt(u32), .little);
+    try writer.writeAll("abc");
+    var reader_stream = @import("compat").fixedBufferStream(corrupt[0..stream.pos]);
+    try std.testing.expectError(error.EndOfStream, deserializeValue(std.testing.failing_allocator, reader_stream.reader()));
 }

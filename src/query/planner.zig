@@ -291,7 +291,7 @@ pub const QueryPlanner = struct {
                         }
                         if (aggregates) continue;
                         switch (query.clauses[lookahead]) {
-                            .order_by => |o| input_for_return = try self.planOrderBy(o, input_for_return, r),
+                            .order_by => |o| input_for_return = try self.planOrderBy(o, input_for_return, r, query.clauses[lookahead + 1 ..]),
                             .skip => |s| input_for_return = try self.planSkip(s, input_for_return),
                             .limit => |l| input_for_return = try self.planLimit(l, input_for_return),
                             else => unreachable,
@@ -304,7 +304,7 @@ pub const QueryPlanner = struct {
                         var i = first_trailing;
                         while (i < lookahead) : (i += 1) {
                             switch (query.clauses[i]) {
-                                .order_by => |o| current_op = try self.planOrderByOnOutput(o, current_op, r),
+                                .order_by => |o| current_op = try self.planOrderByOnOutput(o, current_op, r, query.clauses[i + 1 .. lookahead]),
                                 .skip => |sk| current_op = try self.planSkip(sk, current_op),
                                 .limit => |l| current_op = try self.planLimit(l, current_op),
                                 else => unreachable,
@@ -314,7 +314,7 @@ pub const QueryPlanner = struct {
 
                     clause_idx = lookahead - 1;
                 },
-                .order_by => |o| current_op = try self.planOrderBy(o, current_op, null),
+                .order_by => |o| current_op = try self.planOrderBy(o, current_op, null, query.clauses[clause_idx + 1 ..]),
                 .limit => |l| current_op = try self.planLimit(l, current_op),
                 .skip => |s| current_op = try self.planSkip(s, current_op),
                 .create => |c| current_op = try self.planCreate(c, current_op),
@@ -1751,6 +1751,7 @@ pub const QueryPlanner = struct {
         order: *const ast.OrderByClause,
         input: ?Operator,
         ret: *const ast.ReturnClause,
+        following: []const ast.Clause,
     ) PlannerError!Operator {
         const input_op = input orelse return PlannerError.InvalidQuery;
 
@@ -1774,7 +1775,7 @@ pub const QueryPlanner = struct {
             };
         }
 
-        const sort = limit_ops.Sort.init(self.allocator, input_op, sort_items) catch {
+        const sort = limit_ops.Sort.initBounded(self.allocator, input_op, sort_items, try self.sortBounds(following)) catch {
             return PlannerError.OutOfMemory;
         };
 
@@ -1787,6 +1788,7 @@ pub const QueryPlanner = struct {
         order: *const ast.OrderByClause,
         input: ?Operator,
         ret: ?*const ast.ReturnClause,
+        following: []const ast.Clause,
     ) PlannerError!Operator {
         const input_op = input orelse return PlannerError.InvalidQuery;
 
@@ -1802,11 +1804,32 @@ pub const QueryPlanner = struct {
             };
         }
 
-        const sort = limit_ops.Sort.init(self.allocator, input_op, sort_items) catch {
+        const sort = limit_ops.Sort.initBounded(self.allocator, input_op, sort_items, try self.sortBounds(following)) catch {
             return PlannerError.OutOfMemory;
         };
 
         return sort.operator();
+    }
+
+    /// The SKIP and LIMIT clauses that directly follow an ORDER BY, which
+    /// tell the sort how many rows it has to keep.
+    fn sortBounds(self: *Self, following: []const ast.Clause) PlannerError![]const limit_ops.RowBound {
+        var count: usize = 0;
+        while (count < following.len) : (count += 1) {
+            switch (following[count]) {
+                .skip, .limit => {},
+                else => break,
+            }
+        }
+        const bounds = self.allocator.alloc(limit_ops.RowBound, count) catch return PlannerError.OutOfMemory;
+        for (following[0..count], bounds) |clause, *bound| {
+            bound.* = switch (clause) {
+                .skip => |sk| .{ .skip = sk.count },
+                .limit => |l| .{ .limit = l.count },
+                else => unreachable,
+            };
+        }
+        return bounds;
     }
 
     /// Plan a LIMIT clause

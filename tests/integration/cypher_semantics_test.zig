@@ -1141,3 +1141,96 @@ test "cypher: property and label reads in a transaction see its own writes" {
     try db.abortTransaction(&txn);
     try std.testing.expectEqual(@as(i64, 1), try queryCount(db, "MATCH (:P)-[:R]->(q:Q) RETURN count(q)"));
 }
+
+// ============================================================================
+// ORDER BY
+// ============================================================================
+
+test "cypher: ORDER BY orders values of different types consistently" {
+    const path = "/tmp/lattice_cs_order_mixed.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    var result = try db.query("UNWIND [3, 'a', null, true, 1.5, [1], 2, 'b', false] AS x RETURN x ORDER BY x");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 9), result.rowCount());
+    try std.testing.expect(result.rows[0].values[0] == .list_val);
+    try expectString(result, 1, 0, "a");
+    try expectString(result, 2, 0, "b");
+    try std.testing.expect(result.rows[3].values[0].bool_val == false);
+    try std.testing.expect(result.rows[4].values[0].bool_val == true);
+    try std.testing.expectEqual(@as(f64, 1.5), result.rows[5].values[0].float_val);
+    try expectInt(result, 6, 0, 2);
+    try expectInt(result, 7, 0, 3);
+    try expectNull(result, 8, 0);
+}
+
+test "cypher: ORDER BY compares integers and floats by exact value" {
+    const path = "/tmp/lattice_cs_order_exact.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    // 2^53 + 1 is not a float; converting it rounds to 2^53 and ties.
+    var result = try db.query("UNWIND [9007199254740993, 9007199254740992.0] AS x RETURN x ORDER BY x");
+    defer result.deinit();
+    try std.testing.expect(result.rows[0].values[0] == .float_val);
+    try expectInt(result, 1, 0, 9007199254740993);
+}
+
+test "cypher: an error in an ORDER BY key fails the query" {
+    const path = "/tmp/lattice_cs_order_error.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    try std.testing.expectError(QueryError.ExecutionError, db.query("UNWIND [1, 0, 2] AS x RETURN x ORDER BY 10 / x"));
+}
+
+test "cypher: ORDER BY with SKIP and LIMIT returns the same rows as sorting everything" {
+    const path = "/tmp/lattice_cs_order_topk.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    // Every key repeats, some are null, and the second key ties too, so
+    // the order of equal rows is tested along with the order of keys.
+    try run(db, "UNWIND range(0, 199) AS i CREATE (:S {i: i, k: (i * 37) % 50})");
+    try run(db, "MATCH (s:S) WHERE s.i % 9 = 0 SET s.k = null");
+
+    const order = "MATCH (s:S) RETURN s.i ORDER BY s.k DESC, s.i % 3";
+    var full = try db.query(order);
+    defer full.deinit();
+    try std.testing.expectEqual(@as(usize, 200), full.rowCount());
+    const Case = struct { suffix: []const u8, skip: usize, limit: usize };
+    const cases = [_]Case{
+        .{ .suffix = " LIMIT 1", .skip = 0, .limit = 1 },
+        .{ .suffix = " LIMIT 10", .skip = 0, .limit = 10 },
+        .{ .suffix = " SKIP 7 LIMIT 13", .skip = 7, .limit = 13 },
+        .{ .suffix = " SKIP 195 LIMIT 10", .skip = 195, .limit = 5 },
+        .{ .suffix = " LIMIT 500", .skip = 0, .limit = 200 },
+        .{ .suffix = " LIMIT 0", .skip = 0, .limit = 0 },
+        .{ .suffix = " SKIP 190", .skip = 190, .limit = 10 },
+    };
+    for (cases) |case| {
+        var buf: [128]u8 = undefined;
+        const cypher = try std.fmt.bufPrint(&buf, "{s}{s}", .{ order, case.suffix });
+        var bounded = try db.query(cypher);
+        defer bounded.deinit();
+        try std.testing.expectEqual(case.limit, bounded.rowCount());
+        for (0..case.limit) |r| {
+            try std.testing.expectEqual(full.rows[case.skip + r].values[0].int_val, bounded.rows[r].values[0].int_val);
+        }
+    }
+
+    // A limit given as a parameter bounds the sort the same way.
+    var params = std.StringHashMap(lattice.core.types.PropertyValue).init(std.testing.allocator);
+    defer params.deinit();
+    try params.put("n", .{ .int_val = 4 });
+    var with_param = try db.queryWithParams(order ++ " LIMIT $n", &params);
+    defer with_param.deinit();
+    try std.testing.expectEqual(@as(usize, 4), with_param.rowCount());
+    for (0..4) |r| try std.testing.expectEqual(full.rows[r].values[0].int_val, with_param.rows[r].values[0].int_val);
+
+    // Rows the limit drops are still produced, so writes below the sort
+    // all happen.
+    try run(db, "UNWIND range(1, 5) AS i CREATE (t:T {i: i}) RETURN t.i ORDER BY t.i LIMIT 0");
+    try std.testing.expectEqual(@as(i64, 5), try queryCount(db, "MATCH (t:T) RETURN count(t)"));
+}

@@ -1,5 +1,6 @@
-// Clock replacement: the hand sweeps frames, clearing use bits until it finds
-// an unpinned frame whose use count is already zero.
+// Clock replacement: the hand sweeps frames, passing over pinned and dirty
+// ones and clearing use bits, until it finds a clean, unpinned frame whose use
+// bit is already clear. Dirty frames are never evicted; they wait for a flush.
 digraph buffer_pool_clock {
   layout="circo"
   bgcolor="transparent"
@@ -9,10 +10,10 @@ digraph buffer_pool_clock {
         fontcolor="#1a1a1a" margin="0.16,0.10"]
   edge [color="#6b7280" penwidth=1.2 arrowsize=0.7]
 
-  f1 [label="Frame 1\luse 0\lpin 0\l" fillcolor="#eaf5ea" color="#2f7d32" penwidth=1.7]
-  f2 [label="Frame 2\luse 0\l"]
+  f1 [label="Frame 1\luse 0\lpin 0\lclean\l" fillcolor="#eaf5ea" color="#2f7d32" penwidth=1.7]
+  f2 [label="Frame 2\luse 0\ldirty: passed over\l" fillcolor="#fdf0ea" color="#c2703f"]
   f3 [label="Frame 3\luse 1\l"]
-  f4 [label="Frame 4\luse 1\l"]
+  f4 [label="Frame 4\lpin 1: passed over\l"]
 
   f1 -> f2 -> f3 -> f4 -> f1 [color="#4a90d9"]
 

@@ -92,6 +92,27 @@ fn lexerFuzzRunner(_: std.mem.Allocator, smith: *std.testing.Smith) !void {
     try fuzzLexer(input[0..len]);
 }
 
+/// Fuzz `=~`: the first input byte splits pattern from text. Patterns come
+/// from queries and parameters, so compiling and matching must neither crash
+/// nor take long, whatever the pattern.
+fn regexFuzzRunner(allocator: std.mem.Allocator, smith: *std.testing.Smith) !void {
+    var input: [512]u8 = undefined;
+    const len = smith.slice(&input);
+    if (len == 0) return;
+    const split = @min(@as(usize, input[0]), len - 1);
+    const pattern = input[1 .. 1 + split];
+    const text = input[1 + split .. len];
+    _ = lattice.query.regex.fullMatch(allocator, pattern, text) catch |err| switch (err) {
+        error.InvalidPattern, error.PatternTooComplex => return,
+        error.OutOfMemory => return err,
+    };
+}
+
+test "fuzz: regex handles arbitrary patterns and text" {
+    const allocator = std.testing.allocator;
+    try std.testing.fuzz(allocator, regexFuzzRunner, .{});
+}
+
 test "fuzz: parser handles arbitrary input" {
     const allocator = std.testing.allocator;
     try std.testing.fuzz(allocator, parserFuzzRunner, .{});

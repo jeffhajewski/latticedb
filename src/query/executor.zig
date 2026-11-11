@@ -27,6 +27,8 @@ const Transaction = txn_mod.Transaction;
 const database_mod = lattice.storage.database;
 const Database = database_mod.Database;
 
+const regex = @import("regex.zig");
+
 // ============================================================================
 // Constants
 // ============================================================================
@@ -348,6 +350,11 @@ pub const ExecutionContext = struct {
     /// record what it looked up. Null until the first search needs it.
     fts_cache: ?*FtsFilterCache = null,
 
+    /// Patterns `=~` has compiled during this execution. A pointer for the
+    /// same reason as `fts_cache`; null when it could not be allocated, and
+    /// then each match compiles its pattern.
+    regex_cache: ?*regex.Cache = null,
+
     const Self = @This();
 
     /// Create a new execution context
@@ -358,6 +365,12 @@ pub const ExecutionContext = struct {
     fn newFtsCache(allocator: Allocator) ?*FtsFilterCache {
         const cache = allocator.create(FtsFilterCache) catch return null;
         cache.* = FtsFilterCache.init(allocator);
+        return cache;
+    }
+
+    fn newRegexCache(allocator: Allocator) ?*regex.Cache {
+        const cache = allocator.create(regex.Cache) catch return null;
+        cache.* = regex.Cache.init(allocator);
         return cache;
     }
 
@@ -372,6 +385,7 @@ pub const ExecutionContext = struct {
             .database = null,
             .txn = null,
             .fts_cache = newFtsCache(allocator),
+            .regex_cache = newRegexCache(allocator),
         };
     }
 
@@ -387,6 +401,7 @@ pub const ExecutionContext = struct {
             .database = null,
             .txn = null,
             .fts_cache = newFtsCache(allocator),
+            .regex_cache = newRegexCache(allocator),
         };
     }
 
@@ -396,6 +411,11 @@ pub const ExecutionContext = struct {
             cache.deinit();
             self.allocator.destroy(cache);
             self.fts_cache = null;
+        }
+        if (self.regex_cache) |cache| {
+            cache.deinit();
+            self.allocator.destroy(cache);
+            self.regex_cache = null;
         }
         self.row_arena.deinit();
         self.parameters.deinit();

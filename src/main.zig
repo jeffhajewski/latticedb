@@ -67,6 +67,7 @@ pub const query = struct {
     pub const semantic = @import("query/semantic.zig");
     pub const executor = @import("query/executor.zig");
     pub const expression = @import("query/expression.zig");
+    pub const regex = @import("query/regex.zig");
     pub const planner = @import("query/planner.zig");
     pub const cache = @import("query/cache.zig");
 

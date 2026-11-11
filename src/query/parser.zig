@@ -213,6 +213,7 @@ pub const TokenType = enum {
     caret,
     vector_distance, // <=>
     fts_match, // @@
+    regex_match, // =~
     // Punctuation
     lparen,
     rparen,
@@ -1484,7 +1485,7 @@ pub const Parser = struct {
             .kw_or => .or_,
             .kw_xor => .xor,
             .kw_and => .and_,
-            .eq, .neq, .kw_in, .kw_contains => .equality,
+            .eq, .neq, .kw_in, .kw_contains, .regex_match => .equality,
             .kw_starts, .kw_ends => .equality,
             .lt, .lte, .gt, .gte, .vector_distance, .fts_match => .comparison,
             .plus, .dash => .term,
@@ -1590,6 +1591,7 @@ pub const Parser = struct {
             .caret => .pow,
             .vector_distance => .vector_distance,
             .fts_match => .fts_match,
+            .regex_match => .regex_match,
             else => null,
         };
     }

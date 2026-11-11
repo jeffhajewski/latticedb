@@ -909,3 +909,27 @@ test "cypher: a variable cannot be matched as a different kind" {
     try std.testing.expectError(QueryError.SemanticError, db.query("MATCH ()-[r]->() MATCH (r) RETURN r"));
     try std.testing.expectError(QueryError.SemanticError, db.query("UNWIND [1] AS x MATCH (x) RETURN x"));
 }
+
+// ============================================================================
+// Regular expressions
+// ============================================================================
+
+test "cypher: =~ matches a regular expression against the whole string" {
+    const path = "/tmp/lattice_cs_regex.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try run(db, "CREATE (:W {name: 'Alice'}), (:W {name: 'alice'}), (:W {name: 'Malice'}), (:W {name: 'Bob'})");
+
+    try expectNames(db, "MATCH (w:W) WHERE w.name =~ 'A.*' RETURN w.name", &.{"Alice"});
+    try expectNames(db, "MATCH (w:W) WHERE w.name =~ '(?i)alice' RETURN w.name ORDER BY w.name", &.{ "Alice", "alice" });
+    try expectNames(db, "MATCH (w:W) WHERE w.name=~'.*lice' AND NOT w.name =~ 'M.*' RETURN w.name ORDER BY w.name", &.{ "Alice", "alice" });
+    {
+        var result = try db.query("UNWIND [1] AS x RETURN 'abc' =~ '(a|ab)c' AS a, null =~ 'a' AS b, 'x' =~ 'x|y' AS c");
+        defer result.deinit();
+        try std.testing.expectEqual(true, result.rows[0].values[0].bool_val);
+        try expectNull(result, 0, 1);
+        try std.testing.expectEqual(true, result.rows[0].values[2].bool_val);
+    }
+    // A pattern the engine does not accept fails the query.
+    try std.testing.expectError(QueryError.ExecutionError, db.query("MATCH (w:W) WHERE w.name =~ '(' RETURN w"));
+}

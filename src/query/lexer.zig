@@ -72,7 +72,13 @@ pub const Lexer = struct {
             '%' => return self.makeTokenAt(.percent, start),
             '^' => return self.makeTokenAt(.caret, start),
             '|' => return self.makeTokenAt(.pipe, start),
-            '=' => return self.makeTokenAt(.eq, start),
+            '=' => {
+                if (self.peek() == '~') {
+                    _ = self.advance();
+                    return self.makeTokenAt(.regex_match, start); // =~
+                }
+                return self.makeTokenAt(.eq, start);
+            },
             '-' => return self.scanDash(start),
             '<' => return self.scanLessThan(start),
             '>' => return self.scanGreaterThan(start),
@@ -421,6 +427,20 @@ test "tokenize vector distance operator" {
     try std.testing.expectEqual(TokenType.identifier, lexer.nextToken().token_type);
     try std.testing.expectEqual(TokenType.vector_distance, lexer.nextToken().token_type);
     try std.testing.expectEqual(TokenType.parameter, lexer.nextToken().token_type);
+}
+
+test "tokenize regex match operator" {
+    var lexer = Lexer.init("n.name =~ 'A.*' AND x = ~y");
+
+    try std.testing.expectEqual(TokenType.identifier, lexer.nextToken().token_type);
+    try std.testing.expectEqual(TokenType.dot, lexer.nextToken().token_type);
+    try std.testing.expectEqual(TokenType.identifier, lexer.nextToken().token_type);
+    try std.testing.expectEqual(TokenType.regex_match, lexer.nextToken().token_type);
+    try std.testing.expectEqual(TokenType.string, lexer.nextToken().token_type);
+    try std.testing.expectEqual(TokenType.kw_and, lexer.nextToken().token_type);
+    try std.testing.expectEqual(TokenType.identifier, lexer.nextToken().token_type);
+    // `= ~` with a space between is not the operator.
+    try std.testing.expectEqual(TokenType.eq, lexer.nextToken().token_type);
 }
 
 test "tokenize fts match operator" {

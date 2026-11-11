@@ -695,15 +695,22 @@ pub const FtsIndex = struct {
     }
 
     /// Search for multiple terms (AND semantics - documents must contain all terms)
-    /// Uses skip pointer optimization for efficient intersection
     fn searchMultiTerm(self: *Self, terms: []const []const u8, limit: u32) FtsError![]ScoredDoc {
-        // Use optimized skip pointer intersection
-        return self.searchMultiTermWithSkip(terms, limit);
+        return self.searchMultiTermAnd(terms, limit);
     }
 
-    /// Optimized multi-term AND search using skip pointers
-    /// Uses the smallest posting list to drive intersection
-    fn searchMultiTermWithSkip(self: *Self, terms: []const []const u8, limit: u32) FtsError![]ScoredDoc {
+    /// Multi-term AND search.
+    ///
+    /// The rarest term's list supplies the candidates, and every other list is
+    /// read through once and matched against them by doc_id. Nothing here relies
+    /// on a posting list being in doc_id order, because they are not: an update
+    /// removes the document's postings and appends the new ones at the tail, and
+    /// a transaction commits its documents in hash order. Lists written that way
+    /// by earlier releases are already on disk, so search has to be correct over
+    /// them rather than only over lists written from now on. A merge that walks
+    /// the lists in step with `skipTo` silently drops any document stored behind
+    /// its cursor.
+    fn searchMultiTermAnd(self: *Self, terms: []const []const u8, limit: u32) FtsError![]ScoredDoc {
         if (terms.len == 0) {
             return &[_]ScoredDoc{};
         }
@@ -746,68 +753,83 @@ pub const FtsIndex = struct {
             }
         }.lessThan);
 
-        // Use smallest posting list to drive intersection
-        const driver = term_infos[0];
-        var driver_iter = self.posting_store.iterate(driver.dict_entry.posting_page) catch {
-            return FtsError.PostingError;
+        // A document the rarest term's list names, with what is known about it
+        // so far. `matched` counts the terms found for it, in term order, so a
+        // document missing one term can never be counted for a later one.
+        const Candidate = struct {
+            doc_id: DocId,
+            doc_length: u32,
+            score: f32,
+            matched: u32,
         };
-        defer driver_iter.deinit();
 
-        // Create iterators for other terms
-        var other_iters: [31]posting_mod.PostingIterator = undefined;
-        var num_other_iters: usize = 0;
+        var candidates: ArrayListUnmanaged(Candidate) = .empty;
+        defer candidates.deinit(self.allocator);
+        var slot_by_doc: std.AutoHashMapUnmanaged(DocId, u32) = .empty;
+        defer slot_by_doc.deinit(self.allocator);
 
-        for (term_infos[1..]) |info| {
-            other_iters[num_other_iters] = self.posting_store.iterate(info.dict_entry.posting_page) catch continue;
-            num_other_iters += 1;
-        }
-        defer {
-            for (other_iters[0..num_other_iters]) |*iter| {
-                iter.deinit();
+        const driver = term_infos[0];
+        {
+            var driver_iter = self.posting_store.iterate(driver.dict_entry.posting_page) catch {
+                return FtsError.PostingError;
+            };
+            defer driver_iter.deinit();
+
+            while (driver_iter.next() catch return FtsError.PostingError) |entry| {
+                // No length means the document is gone; it cannot be scored.
+                const doc_length = self.doc_lengths.getLength(entry.doc_id) catch continue;
+                const slot = slot_by_doc.getOrPut(self.allocator, entry.doc_id) catch {
+                    return FtsError.OutOfMemory;
+                };
+                if (slot.found_existing) continue;
+                slot.value_ptr.* = @intCast(candidates.items.len);
+                candidates.append(self.allocator, .{
+                    .doc_id = entry.doc_id,
+                    .doc_length = doc_length,
+                    .score = self.scorer.scoreTerm(
+                        self.doc_lengths.stats,
+                        entry.term_freq,
+                        driver.dict_entry.doc_freq,
+                        doc_length,
+                    ),
+                    .matched = 1,
+                }) catch return FtsError.OutOfMemory;
             }
         }
 
-        // Intersection with skip pointers
+        var terms_matched: u32 = 1;
+        for (term_infos[1..]) |info| {
+            var iter = self.posting_store.iterate(info.dict_entry.posting_page) catch continue;
+            defer iter.deinit();
+
+            var any_matched = false;
+            while (iter.next() catch return FtsError.PostingError) |entry| {
+                const slot = slot_by_doc.get(entry.doc_id) orelse continue;
+                const candidate = &candidates.items[slot];
+                // Missed an earlier term, or already counted for this one.
+                if (candidate.matched != terms_matched) continue;
+                candidate.matched += 1;
+                candidate.score += self.scorer.scoreTerm(
+                    self.doc_lengths.stats,
+                    entry.term_freq,
+                    info.dict_entry.doc_freq,
+                    candidate.doc_length,
+                );
+                any_matched = true;
+            }
+            terms_matched += 1;
+            // Nothing has every term so far, so nothing can have them all.
+            if (!any_matched) break;
+        }
+
         var results: ArrayListUnmanaged(ScoredDoc) = .empty;
         errdefer results.deinit(self.allocator);
 
-        while (driver_iter.next() catch null) |driver_entry| {
-            const doc_id = driver_entry.doc_id;
-            var all_match = true;
-            var total_score: f32 = 0.0;
-
-            // Score from driver term
-            const driver_doc_length = self.doc_lengths.getLength(doc_id) catch {
-                continue;
-            };
-            total_score += self.scorer.scoreTerm(
-                        self.doc_lengths.stats,
-                driver_entry.term_freq,
-                driver.dict_entry.doc_freq,
-                driver_doc_length,
-            );
-
-            // Check other terms using skipTo
-            for (other_iters[0..num_other_iters], term_infos[1..][0..num_other_iters]) |*iter, info| {
-                const other_entry = iter.skipTo(doc_id) catch null;
-                if (other_entry == null or other_entry.?.doc_id != doc_id) {
-                    all_match = false;
-                    break;
-                }
-
-                // Add score contribution
-                total_score += self.scorer.scoreTerm(
-                        self.doc_lengths.stats,
-                    other_entry.?.term_freq,
-                    info.dict_entry.doc_freq,
-                    driver_doc_length,
-                );
-            }
-
-            if (all_match) {
+        for (candidates.items) |candidate| {
+            if (candidate.matched == terms_matched) {
                 results.append(self.allocator, .{
-                    .doc_id = doc_id,
-                    .score = total_score,
+                    .doc_id = candidate.doc_id,
+                    .score = candidate.score,
                 }) catch {
                     return FtsError.OutOfMemory;
                 };
@@ -2397,4 +2419,137 @@ test "fts prefix search" {
     defer index.freeResults(results6);
     try std.testing.expectEqual(@as(usize, 1), results6.len);
     try std.testing.expectEqual(@as(DocId, 1), results6[0].doc_id);
+}
+
+/// An index over a scratch file, with a reverse index so documents can be
+/// removed and re-indexed the way the database does on update.
+const AndSearchFixture = struct {
+    posix_vfs: lattice.storage.vfs.PosixVfs,
+    pm: lattice.storage.page_manager.PageManager,
+    bp: BufferPool,
+    dict_tree: BTree,
+    lengths_tree: BTree,
+    reverse_tree: BTree,
+    index: FtsIndex,
+    db_path: []const u8,
+
+    fn create(allocator: Allocator, db_path: []const u8) !*AndSearchFixture {
+        const self = try allocator.create(AndSearchFixture);
+        errdefer allocator.destroy(self);
+        self.db_path = db_path;
+        self.posix_vfs = lattice.storage.vfs.PosixVfs.init(allocator);
+        const vfs_impl = self.posix_vfs.vfs();
+        vfs_impl.delete(db_path) catch {};
+        self.pm = try lattice.storage.page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+        errdefer self.pm.deinit();
+        self.bp = try BufferPool.init(allocator, &self.pm, 256 * 4096);
+        errdefer self.bp.deinit();
+        self.dict_tree = try BTree.init(allocator, &self.bp);
+        self.lengths_tree = try BTree.init(allocator, &self.bp);
+        self.reverse_tree = try BTree.init(allocator, &self.bp);
+        self.index = FtsIndex.init(allocator, &self.bp, &self.dict_tree, &self.lengths_tree, &self.reverse_tree, .{});
+        return self;
+    }
+
+    fn destroy(self: *AndSearchFixture, allocator: Allocator) void {
+        self.bp.deinit();
+        self.pm.deinit();
+        self.posix_vfs.vfs().delete(self.db_path) catch {};
+        allocator.destroy(self);
+    }
+
+    /// What the database does when an indexed property changes.
+    fn replace(self: *AndSearchFixture, doc_id: DocId, text: []const u8) !void {
+        try self.index.removeDocument(doc_id);
+        _ = try self.index.indexDocument(doc_id, text);
+    }
+
+    fn postingDocIds(self: *AndSearchFixture, allocator: Allocator, term: []const u8) ![]DocId {
+        const entry = (try self.index.dictionary.get(term)).?;
+        var ids: ArrayListUnmanaged(DocId) = .empty;
+        errdefer ids.deinit(allocator);
+        var iter = try self.index.posting_store.iterate(entry.posting_page);
+        defer iter.deinit();
+        while (try iter.next()) |posting| try ids.append(allocator, posting.doc_id);
+        return ids.toOwnedSlice(allocator);
+    }
+};
+
+fn resultsContain(results: []const ScoredDoc, doc_id: DocId) bool {
+    for (results) |result| {
+        if (result.doc_id == doc_id) return true;
+    }
+    return false;
+}
+
+test "fts AND search finds a document re-indexed after an update" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_and_update_test.db");
+    defer fx.destroy(allocator);
+
+    _ = try fx.index.indexDocument(1, "banana");
+    _ = try fx.index.indexDocument(2, "apple banana");
+    _ = try fx.index.indexDocument(3, "apple");
+    try fx.replace(1, "apple banana");
+
+    // An update appends the re-indexed document at the tail, so the lists are
+    // no longer in doc_id order. Databases written by 0.16.0 already hold lists
+    // like this, so search has to cope with them rather than assume order.
+    const apple = try fx.postingDocIds(allocator, "apple");
+    defer allocator.free(apple);
+    try std.testing.expectEqualSlices(DocId, &[_]DocId{ 2, 3, 1 }, apple);
+
+    const results = try fx.index.search("apple banana", 10);
+    defer fx.index.freeResults(results);
+    try std.testing.expectEqual(@as(usize, 2), results.len);
+    try std.testing.expect(resultsContain(results, 1));
+    try std.testing.expect(resultsContain(results, 2));
+}
+
+test "fts AND search over unordered multi-page posting lists matches a scan" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_and_unordered_test.db");
+    defer fx.destroy(allocator);
+
+    // Enough documents that "alpha" spans more than one posting page and every
+    // page carries skip pointers.
+    const doc_count = 3000;
+    var has_alpha = [_]bool{false} ** (doc_count + 1);
+    var has_beta = [_]bool{false} ** (doc_count + 1);
+
+    var text_buf: [64]u8 = undefined;
+    for (1..doc_count + 1) |i| {
+        has_alpha[i] = i % 2 == 0;
+        has_beta[i] = i % 3 == 0;
+        const text = try std.fmt.bufPrint(&text_buf, "{s} {s} filler", .{
+            if (has_alpha[i]) "alpha" else "gamma",
+            if (has_beta[i]) "beta" else "delta",
+        });
+        _ = try fx.index.indexDocument(@intCast(i), text);
+    }
+
+    // Rewrite a spread of documents, flipping which terms they hold, so both
+    // lists end up with re-added documents far out of order.
+    var i: usize = 1;
+    while (i <= doc_count) : (i += 7) {
+        has_alpha[i] = !has_alpha[i];
+        has_beta[i] = i % 5 != 0;
+        const text = try std.fmt.bufPrint(&text_buf, "{s} {s} filler", .{
+            if (has_alpha[i]) "alpha" else "gamma",
+            if (has_beta[i]) "beta" else "delta",
+        });
+        try fx.replace(@intCast(i), text);
+    }
+
+    const results = try fx.index.search("alpha beta", std.math.maxInt(u32));
+    defer fx.index.freeResults(results);
+
+    var expected: usize = 0;
+    for (1..doc_count + 1) |doc| {
+        if (has_alpha[doc] and has_beta[doc]) {
+            expected += 1;
+            try std.testing.expect(resultsContain(results, @intCast(doc)));
+        }
+    }
+    try std.testing.expectEqual(expected, results.len);
 }

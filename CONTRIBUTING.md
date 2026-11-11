@@ -22,10 +22,13 @@ This guide covers how to set up your development environment, build the project,
   node --version  # Should show v18 or higher
   ```
 
+- **NumPy** - A dependency of the Python bindings; `pip install -e ".[dev]"` installs it
+
 ### Optional
 
-- **NumPy** - Required for vector operations in Python bindings
 - **pytest** - Required for running Python tests
+- **Go 1.22+** - For the Go bindings (`bindings/go/go.mod`)
+- **JDK 21+ and Maven** - For the Java bindings
 - **Graphviz** - Only needed to regenerate documentation diagrams (`brew install graphviz`)
 
 ## Project Structure
@@ -40,12 +43,18 @@ latticedb/
 │   ├── query/             # Cypher parser and executor
 │   ├── vector/            # HNSW vector index
 │   ├── fts/               # Full-text search
+│   ├── transaction/       # Transaction manager
+│   ├── stream/            # Durable streams and the graph changefeed
+│   ├── concurrency/       # Locking primitives
 │   └── cli/               # CLI tool
 ├── include/               # C header files
 │   └── lattice.h
 ├── bindings/
 │   ├── python/            # Python bindings
-│   └── typescript/        # TypeScript/Node.js bindings
+│   ├── typescript/        # TypeScript/Node.js bindings
+│   ├── go/                # Go bindings (cgo)
+│   └── java/              # Java bindings (JNI)
+├── conformance/           # Cross-engine conformance suite (Go)
 ├── tests/
 │   ├── unit/              # Zig unit tests and focused regressions
 │   ├── integration/       # Integration tests
@@ -65,15 +74,18 @@ latticedb/
 zig build
 ```
 
-This builds:
+This builds and installs into `zig-out/`:
 - `zig-out/lib/liblattice.a` - Static library
+- the shared library (`zig-out/lib/liblattice.dylib` or `.so`; `zig-out/bin/lattice.dll` on Windows)
 - `zig-out/bin/lattice` - CLI executable
+- `zig-out/include/lattice.h` - C header
+- `zig-out/lib/pkgconfig/lattice.pc` - pkg-config file used by the Go bindings
 
 ### Build Specific Targets
 
 ```bash
-zig build lib      # Static library only
-zig build cli      # CLI executable only
+zig build lib      # Compile the static library (installs nothing)
+zig build cli      # Build and install the CLI executable only
 ```
 
 ### Build Shared Library (for Python bindings)
@@ -84,10 +96,10 @@ The Python bindings require a shared library:
 zig build shared
 ```
 
-This creates the shared library in `zig-out/lib/`:
-- macOS: `liblattice.dylib`
-- Linux: `liblattice.so`
-- Windows: `lattice.dll`
+This creates the shared library:
+- macOS: `zig-out/lib/liblattice.dylib`
+- Linux: `zig-out/lib/liblattice.so`
+- Windows: `zig-out/bin/lattice.dll`
 
 ### Release Builds
 
@@ -119,7 +131,7 @@ This runs:
    pip install -e ".[dev]"
    ```
 
-2. **Run unit tests** (don't require native library):
+2. **Run unit tests** (most don't require the native library; the `hash_embed` tests are skipped without it):
 
    ```bash
    pytest tests/test_basic.py -v
@@ -177,11 +189,9 @@ zig build fuzz -- --fuzz
 - Unit tests: Always run, test Python types and data structures
 - Integration tests: Skipped if library unavailable, test full database operations
 
-Example output when library is not built:
-```
-tests/test_basic.py: 13 passed
-tests/test_integration.py: 21 skipped (Native library not found)
-```
+When the library is not built, `test_basic.py` runs everything except the tests
+that need the library, and `test_integration.py` reports its tests as skipped
+("Native library not found").
 
 ## Development Workflow
 
@@ -211,7 +221,9 @@ tests/test_integration.py: 21 skipped (Native library not found)
 4. For Python: Add wrapper in `database.py` or `transaction.py`
 5. For TypeScript: Add or update the FFI signature in `bindings/typescript/src/ffi/`
 6. For TypeScript: Add TypeScript wrapper in the appropriate source file
-7. Add tests for all bindings
+7. For Go: Add the cgo call in `bindings/go/internal/cgo/` and the wrapper in `bindings/go/`
+8. For Java: Add the JNI function in `bindings/java/native/lattice_jni.c`, the `native` declaration in `Native.java`, and the wrapper
+9. Add tests for all bindings
 
 ### Changing Documentation Diagrams
 
@@ -271,7 +283,7 @@ full release flow.
 
 - Use TypeScript strict mode
 - Provide type definitions for all public APIs
-- Format with Prettier
+- Run `npm run lint` (ESLint)
 
 ## Pull Request Process
 

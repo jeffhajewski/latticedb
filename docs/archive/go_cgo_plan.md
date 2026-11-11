@@ -1,8 +1,11 @@
 # Go cgo Plan
 
+> **Status: built and archived.** The Go binding in `bindings/go` implements this plan; its
+> layout differs slightly (`types.go` instead of `value.go`/`query.go`). See `bindings/go/README.md`.
+
 This plan assumes the nested-value C ABI contract in [c_api_nested_values.md](c_api_nested_values.md) lands first.
 
-For the engine-level behavior a future pure-Go implementation should match, see [13_engine_conformance.md](13_engine_conformance.md).
+For the engine-level behavior a future pure-Go implementation should match, see [13_engine_conformance.md](../13_engine_conformance.md).
 
 ## Goal
 

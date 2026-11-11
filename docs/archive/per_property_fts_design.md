@@ -1,5 +1,10 @@
 # Per-Property Full-Text Search
 
+> **Status: built in 0.15.0 and archived.** Two parts of the scope below changed: edge full-text
+> indexes were built, and `OR` returns a best-score union rather than two scores. `compact` does not
+> reclaim an old index's pages in the middle of the file; it only truncates free pages at the end.
+> See the 0.15.0 release notes and the book's Full-Text Search pages.
+
 ## The problem
 
 `@@` looks like it searches a property and does not:

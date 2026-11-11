@@ -1,5 +1,11 @@
 # Blob Storage and In-Memory Databases
 
+> **Status (0.16.0): partly built.** `serialize`/`deserialize` (buffer-based, not the
+> reader/writer form specified below), `:memory:` databases and borrowed deserialization are
+> built. Presigned upload, the signer layer and `BlobStore` are not. An in-memory database's
+> page cache is a fixed 64 frames, not sized from the database as described below. See the
+> book's [In-Memory Databases](../book/src/configuration/in-memory.md) page.
+
 Two people have asked for the same shape of thing: many small graph databases
 rather than one large one, kept in object storage, pulled down per unit of work,
 mutated, and pushed back. One of them wants to skip the local filesystem

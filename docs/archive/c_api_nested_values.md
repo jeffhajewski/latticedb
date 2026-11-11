@@ -1,5 +1,9 @@
 # C API Nested Values Contract
 
+> **Status: built and archived.** `LIST` and `MAP` are part of the C ABI; `include/lattice.h` is the
+> contract. The "Known Remaining Limitation" below is obsolete: CLI JSON import now reads lists,
+> maps, numeric arrays and hex strings (see `docs/13_engine_conformance.md`).
+
 This document defines the public contract for promoting `LIST` and `MAP` into the stable C ABI.
 
 ## Why this change exists

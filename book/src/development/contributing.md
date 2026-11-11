@@ -23,7 +23,9 @@ zig build test    # Verify everything builds and passes
 - Follow existing Zig conventions in the codebase
 - All allocation goes through explicit allocator parameters
 - Fail fast: detect and report corruption, don't hide it
-- Keep the C API as the contract: all bindings wrap `include/lattice.h`
+- Keep the C API as the contract: all bindings wrap `include/lattice.h` (Java
+  through a JNI bridge). If you change the C API, update every binding — Python,
+  TypeScript, Go and Java — in the same branch.
 
 ## Testing
 
@@ -40,6 +42,9 @@ Run the full test suite before submitting:
 zig build test
 zig build integration-test
 ```
+
+[CONTRIBUTING.md](https://github.com/jeffhajewski/latticedb/blob/main/CONTRIBUTING.md)
+in the repository has the full development setup.
 
 ## Pull Requests
 

@@ -6,8 +6,8 @@ The goal is not to freeze Zig internals. The goal is to freeze the observable da
 
 This document sits alongside, not above, the existing binding contracts:
 
-- [c_api_nested_values.md](c_api_nested_values.md) defines the C ABI nested-value contract.
-- [go_cgo_plan.md](go_cgo_plan.md) defines the current Go binding plan and public Go surface.
+- [archive/c_api_nested_values.md](archive/c_api_nested_values.md) records the C ABI nested-value contract (now built; `include/lattice.h` is authoritative).
+- [archive/go_cgo_plan.md](archive/go_cgo_plan.md) records the Go binding plan (now built; see `bindings/go/README.md`).
 
 ## Purpose
 
@@ -108,7 +108,7 @@ The logical value model is:
 - `LIST`
 - `MAP`
 
-The detailed nested-value contract lives in [c_api_nested_values.md](c_api_nested_values.md). At the engine level the important points are:
+The detailed nested-value contract lives in [archive/c_api_nested_values.md](archive/c_api_nested_values.md). At the engine level the important points are:
 
 - lists are ordered and heterogeneous
 - maps are string-keyed nested values

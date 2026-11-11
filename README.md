@@ -57,7 +57,7 @@ Requires JDK 21+. See [bindings/java/README.md](bindings/java/README.md) for the
 See [bindings/go/README.md](bindings/go/README.md) for the current cgo workflow. The default consumer path uses installed `pkg-config` metadata; in-repo development can use `-tags repolocal` against `zig-out/lib`.
 There is also a runnable graph/vector/text retrieval example in [examples/go](examples/go).
 
-Recent binding-surface cleanups moved embedding helpers into dedicated modules and subpackages. See [docs/client_api_migration.md](docs/client_api_migration.md) for the preferred imports and current compatibility aliases.
+Version 0.5 moved embedding helpers into dedicated modules and subpackages. See [docs/client_api_migration.md](docs/client_api_migration.md) for the preferred imports and current compatibility aliases.
 
 ## Start Here
 
@@ -464,7 +464,7 @@ zig build -Doptimize=ReleaseFast   # optimized build
 ## Documentation
 
 The full documentation lives at **[docs.latticedb.org](https://docs.latticedb.org)** — the Cypher
-reference, the C, Python, TypeScript, and Go API references, guides, and the storage engine
+reference, the C, Python, TypeScript, Go, and Java API references, guides, and the storage engine
 internals. [latticedb.org](https://latticedb.org) is the project site.
 
 The links below are the in-repo copies and design notes.
@@ -475,6 +475,11 @@ The links below are the in-repo copies and design notes.
 - [Examples Overview](examples/README.md)
 - [CLI Quickstart](examples/cli/README.md)
 - [Architecture Overview](docs/00_introduction.md)
+- [0.16.0 Release Notes](docs/release_notes_0.16.0.md)
+- [0.15.0 Release Notes](docs/release_notes_0.15.0.md)
+- [0.14.0 Release Notes](docs/release_notes_0.14.0.md)
+- [0.13.0 Release Notes](docs/release_notes_0.13.0.md)
+- [0.12.0 Release Notes](docs/release_notes_0.12.0.md)
 - [0.11.1 Release Notes](docs/release_notes_0.11.1.md)
 - [0.11.0 Release Notes](docs/release_notes_0.11.0.md)
 - [0.10.0 Release Notes](docs/release_notes_0.10.0.md)

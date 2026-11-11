@@ -1,6 +1,7 @@
 # Building from Source
 
-LatticeDB is written in Zig with zero external dependencies.
+LatticeDB is written in Zig with no external dependencies beyond the C library it
+links. (The SQLite comparison benchmarks also need the system `sqlite3` headers.)
 
 ## Prerequisites
 
@@ -17,10 +18,10 @@ zig build                  # build everything
 ## Build Targets
 
 ```bash
-zig build                      # Build everything
-zig build lib                  # Build static library only
-zig build cli                  # Build CLI tool only
-zig build shared               # Build shared library for bindings
+zig build                      # Build and install everything: static and shared library, CLI, header, lattice.pc
+zig build lib                  # Compile the static library only (installs nothing to zig-out)
+zig build cli                  # Build and install the CLI only
+zig build shared               # Build and install the shared library, header and lattice.pc for bindings
 ```
 
 ## Optimized Builds
@@ -55,6 +56,22 @@ npm install
 npm run build
 ```
 
+### Go
+
+```bash
+zig build shared
+cd bindings/go
+go test -tags repolocal ./...   # repolocal links against include/ and zig-out/lib
+```
+
+### Java
+
+```bash
+zig build shared
+cd bindings/java
+mvn test                        # JDK 21+ and Maven; compiles the JNI bridge
+```
+
 ## Project Structure
 
 ```text
@@ -63,8 +80,10 @@ src/
 ├── storage/        # B+Tree, page management, WAL
 ├── vector/         # HNSW index, vector operations
 ├── fts/            # Full-text search, tokenizer
+├── graph/          # Node, edge, label and property-index storage
 ├── query/          # Cypher parser, planner, executor
-├── transaction/    # Transaction management, MVCC
+├── stream/         # Durable streams and the graph changefeed
+├── transaction/    # Transaction manager, WAL payloads
 ├── concurrency/    # Locking, latches
 ├── api/            # C API bindings
 └── cli/            # CLI tool
@@ -75,5 +94,9 @@ include/
 bindings/
 ├── python/         # Python bindings
 ├── typescript/     # TypeScript/Node.js bindings
-└── go/             # Go bindings
+├── go/             # Go bindings
+└── java/           # Java bindings (JNI)
+
+conformance/
+└── go/             # Engine conformance suite, run against the C API
 ```

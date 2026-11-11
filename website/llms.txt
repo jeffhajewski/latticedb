@@ -5,8 +5,9 @@
 > text search, and ACID transactions live in one local engine behind one Cypher query layer —
 > think SQLite, but for connected data you want to query by relationship, semantics, and text.
 
-LatticeDB is written in Zig, has no runtime dependencies, and embeds in-process with C, Python,
-and TypeScript/Node.js bindings. It is MIT licensed and developed at
+LatticeDB is written in Zig, its core has no runtime dependencies, and it embeds in-process with
+C, Python, TypeScript/Node.js, Go, and Java bindings (the Python package needs NumPy, and the
+TypeScript package uses koffi). It is MIT licensed and developed at
 https://github.com/jeffhajewski/latticedb.
 
 It is not a server. There is no daemon, no network hop, and no separate vector store to keep in
@@ -51,6 +52,8 @@ sync — a database is one file on disk.
 - [C API](https://docs.latticedb.org/api/c): the core embedding interface
 - [Python](https://docs.latticedb.org/api/python): the `latticedb` package on PyPI
 - [TypeScript / Node.js](https://docs.latticedb.org/api/typescript): the `@hajewski/latticedb` package on npm
+- [Go](https://docs.latticedb.org/api/go): the cgo binding in `bindings/go`
+- [Java](https://docs.latticedb.org/api/java): the JNI binding, built from source
 
 ## Architecture
 

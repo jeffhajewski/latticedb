@@ -1330,6 +1330,9 @@ pub const QueryPlanner = struct {
                 ) catch null;
             },
             .function_call => |call| blk: {
+                if (call.star) {
+                    break :blk std.fmt.allocPrint(self.allocator, "{s}(*)", .{call.name}) catch null;
+                }
                 if (call.arguments.len != 1) break :blk call.name;
                 const arg = self.columnNameForExpression(call.arguments[0]) orelse break :blk call.name;
                 break :blk std.fmt.allocPrint(

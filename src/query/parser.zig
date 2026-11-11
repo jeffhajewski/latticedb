@@ -1425,7 +1425,12 @@ pub const Parser = struct {
         var args: std.ArrayList(*ast.Expression) = .empty;
         const has_distinct = self.match(.kw_distinct);
 
-        if (!self.check(.rparen)) {
+        // `count(*)` is the one call that takes `*`, and it counts rows. That
+        // is what an argument-less count already does, so it parses to one.
+        var star = false;
+        if (!has_distinct and std.ascii.eqlIgnoreCase(name, "count") and self.match(.star)) {
+            star = true;
+        } else if (!self.check(.rparen)) {
             const first = self.parseExpression() orelse return null;
             args.append(self.arena.allocator(), first) catch return null;
 
@@ -1444,6 +1449,7 @@ pub const Parser = struct {
             .name = name,
             .arguments = args.toOwnedSlice(self.arena.allocator()) catch return null,
             .distinct = has_distinct,
+            .star = star,
             .location = loc,
         };
 

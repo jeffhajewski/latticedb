@@ -187,3 +187,37 @@ test "cypher: integer division or remainder by zero fails the query" {
     try std.testing.expectError(QueryError.ExecutionError, db.query("UNWIND [0] AS z RETURN 7 % z"));
     try std.testing.expectError(QueryError.ExecutionError, db.query("UNWIND [0] AS z RETURN 7 / z"));
 }
+
+// ============================================================================
+// count(*)
+// ============================================================================
+
+test "cypher: count(*) counts rows" {
+    const path = "/tmp/lattice_cs_count_star.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try seedRare(db);
+
+    {
+        var result = try db.query("MATCH (n:Rare) RETURN count(*)");
+        defer result.deinit();
+        try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+        try std.testing.expectEqualStrings("count(*)", result.columns[0]);
+        try expectInt(result, 0, 0, 3);
+    }
+    {
+        // Unlike count(n.x), count(*) counts the node with no x.
+        var result = try db.query("MATCH (n:Rare) RETURN count(*) AS rows, count(n.x) AS xs");
+        defer result.deinit();
+        try expectInt(result, 0, 0, 3);
+        try expectInt(result, 0, 1, 2);
+    }
+    {
+        var result = try db.query("MATCH (n:Rare) RETURN n.x > 3 AS big, count(*) AS c ORDER BY c DESC");
+        defer result.deinit();
+        // Groups true, false and null, one row each.
+        try std.testing.expectEqual(@as(usize, 3), result.rowCount());
+        for (0..3) |i| try expectInt(result, i, 1, 1);
+    }
+    try std.testing.expectEqual(@as(i64, 0), try queryCount(db, "MATCH (n:Nothing) RETURN count(*)"));
+}

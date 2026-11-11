@@ -1071,3 +1071,34 @@ test "expression: division or remainder by zero is an error" {
     try expectCypherError("7.5 % 0", error.DivisionByZero);
     try expectCypherError("7 % 0.0", error.DivisionByZero);
 }
+
+test "parser: count(*) parses as an argument-less count" {
+    var parser = Parser.init(std.testing.allocator, "MATCH (n) RETURN count(*), COUNT(*) AS c");
+    defer parser.deinit();
+
+    const result = parser.parse();
+    try std.testing.expect(result.query != null);
+    try std.testing.expectEqual(@as(usize, 0), result.errors.len);
+
+    const ret = result.query.?.clauses[1].return_;
+    for (ret.items) |item| {
+        const call = item.expression.function_call;
+        try std.testing.expect(call.star);
+        try std.testing.expect(!call.distinct);
+        try std.testing.expectEqual(@as(usize, 0), call.arguments.len);
+    }
+}
+
+test "parser: * is not an argument to anything but count" {
+    const sources = [_][]const u8{
+        "MATCH (n) RETURN sum(*)",
+        "MATCH (n) RETURN count(DISTINCT *)",
+        "MATCH (n) RETURN count(*, n)",
+    };
+    for (sources) |source| {
+        var parser = Parser.init(std.testing.allocator, source);
+        defer parser.deinit();
+        const result = parser.parse();
+        try std.testing.expect(result.query == null);
+    }
+}

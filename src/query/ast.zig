@@ -356,6 +356,9 @@ pub const FunctionCall = struct {
     name: []const u8,
     arguments: []*Expression,
     distinct: bool = false,
+    /// Written as `count(*)`. It takes no arguments and counts rows, the same
+    /// as `count()`; the flag only keeps the spelling for the column name.
+    star: bool = false,
     location: SourceLocation,
 };
 

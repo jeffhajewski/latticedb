@@ -3749,3 +3749,43 @@ test "c_api: batch insert treats an empty label as no label" {
     defer c_api.lattice_free_node_ids(empty_ids, empty_count);
     try std.testing.expectEqual(@as(usize, 0), empty_count);
 }
+
+test "c_api: set_vector rejects a key other than embedding" {
+    const path = "/tmp/lattice_capi_set_vector_key_test.db";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = true,
+        .vector_dimensions = 2,
+    };
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer removeScratchDb(path);
+    defer _ = c_api.lattice_close(db);
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+    var node: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "N", &node));
+    const first = [_]f32{ 1, 0 };
+    const second = [_]f32{ 0, 1 };
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_vector(txn, node, "embedding", &first, 2));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_vector(txn, node, "", &first, 2));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_vector(txn, node, null, &first, 2));
+    // Used to succeed and overwrite the one vector the node has.
+    try std.testing.expectEqual(lattice_error.err_unsupported, c_api.lattice_node_set_vector(txn, node, "title_vec", &second, 2));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+
+    var results: ?*lattice_vector_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_vector_search(db, &first, 2, 1, 0, &results));
+    defer c_api.lattice_vector_result_free(results);
+    var found: lattice_node_id = 0;
+    var distance: f32 = 1;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_vector_result_get(results, 0, &found, &distance));
+    try std.testing.expectEqual(node, found);
+    try std.testing.expect(distance < 1e-3);
+}

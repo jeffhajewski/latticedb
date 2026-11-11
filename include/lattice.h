@@ -615,7 +615,9 @@ lattice_error lattice_stream_trim(
     uint64_t through_sequence
 );
 
-/* Set a vector on a node */
+/* Set a vector on a node. A node holds one vector, read in Cypher as
+ * `n.embedding`; `key` must be "embedding", "" or NULL, and any other key
+ * returns LATTICE_ERROR_UNSUPPORTED. */
 lattice_error lattice_node_set_vector(
     lattice_txn* txn,
     lattice_node_id node_id,

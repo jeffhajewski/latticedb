@@ -2680,9 +2680,12 @@ pub export fn lattice_node_set_vector(
     const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
     defer releaseTxn(txn_handle);
 
-    // Key is currently ignored - vectors are stored by node_id
-    // In future, we could support multiple vectors per node with different keys
-    _ = key;
+    // A node has one vector, which Cypher reads as `n.embedding`. Any other
+    // key used to be accepted and ignored, so a second vector under another
+    // name silently replaced the first.
+    if (cStrToSlice(key)) |key_slice| {
+        if (key_slice.len != 0 and !std.mem.eql(u8, key_slice, "embedding")) return .err_unsupported;
+    }
 
     // Convert C pointer to Zig slice
     const vector_slice = cEmbeddingVectorToSlice(vector, dimensions) orelse return .err_invalid_arg;

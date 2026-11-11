@@ -1092,8 +1092,14 @@ pub const Parser = struct {
                 self.advance();
             }
 
-            // Optional types
+            // Optional types: `:A`, or alternatives `:A|B` (also `:A|:B`).
+            // A relationship has exactly one type, so `:A:B` could match
+            // nothing; it is rejected rather than read as alternation.
             while (self.match(.colon)) {
+                if (types_list.items.len > 0) {
+                    self.errorAtCurrent("A relationship has one type; use '|' to match any of several");
+                    return null;
+                }
                 if (!self.check(.identifier)) {
                     self.errorAtCurrent("Expected relationship type after ':'");
                     return null;
@@ -1103,6 +1109,7 @@ pub const Parser = struct {
 
                 // Handle multiple types with |
                 while (self.match(.pipe)) {
+                    _ = self.match(.colon);
                     if (!self.check(.identifier)) {
                         self.errorAtCurrent("Expected relationship type after '|'");
                         return null;

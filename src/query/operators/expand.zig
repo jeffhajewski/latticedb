@@ -14,6 +14,10 @@ const ExecutionContext = executor.ExecutionContext;
 
 const edge_mod = @import("../../graph/edge.zig");
 
+const core_types = @import("../../core/types.zig");
+const NodeId = core_types.NodeId;
+const EdgeId = core_types.EdgeId;
+
 const symbols = @import("../../graph/symbols.zig");
 const SymbolId = symbols.SymbolId;
 
@@ -35,6 +39,53 @@ pub const ExpandDirection = enum {
 };
 
 // ============================================================================
+// Shared pattern rules
+// ============================================================================
+
+/// What a relationship pattern requires of the edges it matches, beyond its
+/// direction. Shared by the single-hop and variable-length expands.
+pub const EdgeConstraints = struct {
+    /// The relationship types the pattern accepts, as in `[:A|B]`. Empty
+    /// accepts every type. A type the database has never seen is passed as
+    /// `NULL_SYMBOL`, which no edge carries.
+    types: []const SymbolId = &.{},
+
+    /// Whether an edge of type `edge_type` matches the pattern's types.
+    pub fn acceptsType(self: EdgeConstraints, edge_type: SymbolId) bool {
+        if (self.types.len <= 1) return true; // the fetch already filtered
+        for (self.types) |t| {
+            if (t == edge_type) return true;
+        }
+        return false;
+    }
+};
+
+/// The edges leaving (or, with `incoming`, entering) `node_id` that could
+/// match `types`. With one type the storage layer filters; with several, the
+/// caller filters each edge through `EdgeConstraints.acceptsType`.
+///
+/// The slice belongs to `database.allocator`.
+pub fn fetchEdgeRefs(
+    database: *Database,
+    ctx: *ExecutionContext,
+    node_id: NodeId,
+    types: []const SymbolId,
+    incoming: bool,
+) OperatorError![]edge_mod.EdgeRef {
+    if (types.len == 1) {
+        const edge_type = types[0];
+        return (if (incoming)
+            database.getIncomingEdgeRefsByTypeInTxn(ctx.txn, node_id, edge_type)
+        else
+            database.getOutgoingEdgeRefsByTypeInTxn(ctx.txn, node_id, edge_type)) catch return OperatorError.StorageError;
+    }
+    return (if (incoming)
+        database.getIncomingEdgeRefsInTxn(ctx.txn, node_id)
+    else
+        database.getOutgoingEdgeRefsInTxn(ctx.txn, node_id)) catch return OperatorError.StorageError;
+}
+
+// ============================================================================
 // Expand Operator
 // ============================================================================
 
@@ -48,8 +99,8 @@ pub const Expand = struct {
     target_slot: u8,
     /// Slot to output the edge ID (optional)
     edge_slot: ?u8,
-    /// Edge type to filter by (null means all types)
-    edge_type: ?SymbolId,
+    /// Types, uniqueness and expand-into rules for the pattern
+    constraints: EdgeConstraints,
     /// Direction to traverse
     direction: ExpandDirection,
     /// Database for txn-aware traversal
@@ -82,7 +133,7 @@ pub const Expand = struct {
         source_slot: u8,
         target_slot: u8,
         edge_slot: ?u8,
-        edge_type: ?SymbolId,
+        constraints: EdgeConstraints,
         direction: ExpandDirection,
         database: *Database,
     ) !*Self {
@@ -92,7 +143,7 @@ pub const Expand = struct {
             .source_slot = source_slot,
             .target_slot = target_slot,
             .edge_slot = edge_slot,
-            .edge_type = edge_type,
+            .constraints = constraints,
             .direction = direction,
             .database = database,
             .current_input = null,
@@ -189,15 +240,18 @@ pub const Expand = struct {
             index_ptr = &self.outgoing_index;
         }
 
-        if (index_ptr.* < edges.len) {
+        while (index_ptr.* < edges.len) {
             const edge = edges[index_ptr.*];
             index_ptr.* += 1;
-            // Build output row - copy ALL populated slots from input
-            output_row.clear();
-            output_row.copyFrom(input_row);
+
+            if (!self.constraints.acceptsType(edge.edge_type)) continue;
 
             // Following an incoming edge means the other end is its source.
             const target_id = if (self.readingIncoming()) edge.source else edge.target;
+
+            // Build output row - copy ALL populated slots from input
+            output_row.clear();
+            output_row.copyFrom(input_row);
             output_row.setSlot(self.target_slot, .{ .node_ref = target_id });
 
             // Set edge slot if requested
@@ -219,29 +273,13 @@ pub const Expand = struct {
 
         // Start appropriate iterator based on direction
         switch (self.direction) {
-            .outgoing => {
-                if (self.edge_type) |edge_type| {
-                    self.outgoing_edges = self.database.getOutgoingEdgeRefsByTypeInTxn(ctx.txn, node_id, edge_type) catch return OperatorError.StorageError;
-                } else {
-                    self.outgoing_edges = self.database.getOutgoingEdgeRefsInTxn(ctx.txn, node_id) catch return OperatorError.StorageError;
-                }
+            .outgoing, .both => {
+                self.outgoing_edges = try fetchEdgeRefs(self.database, ctx, node_id, self.constraints.types, false);
                 self.outgoing_index = 0;
             },
             .incoming => {
-                if (self.edge_type) |edge_type| {
-                    self.incoming_edges = self.database.getIncomingEdgeRefsByTypeInTxn(ctx.txn, node_id, edge_type) catch return OperatorError.StorageError;
-                } else {
-                    self.incoming_edges = self.database.getIncomingEdgeRefsInTxn(ctx.txn, node_id) catch return OperatorError.StorageError;
-                }
+                self.incoming_edges = try fetchEdgeRefs(self.database, ctx, node_id, self.constraints.types, true);
                 self.incoming_index = 0;
-            },
-            .both => {
-                if (self.edge_type) |edge_type| {
-                    self.outgoing_edges = self.database.getOutgoingEdgeRefsByTypeInTxn(ctx.txn, node_id, edge_type) catch return OperatorError.StorageError;
-                } else {
-                    self.outgoing_edges = self.database.getOutgoingEdgeRefsInTxn(ctx.txn, node_id) catch return OperatorError.StorageError;
-                }
-                self.outgoing_index = 0;
             },
         }
     }
@@ -252,11 +290,7 @@ pub const Expand = struct {
 
         const node_id = source_val.asNodeId() orelse return;
 
-        if (self.edge_type) |edge_type| {
-            self.incoming_edges = self.database.getIncomingEdgeRefsByTypeInTxn(ctx.txn, node_id, edge_type) catch return OperatorError.StorageError;
-        } else {
-            self.incoming_edges = self.database.getIncomingEdgeRefsInTxn(ctx.txn, node_id) catch return OperatorError.StorageError;
-        }
+        self.incoming_edges = try fetchEdgeRefs(self.database, ctx, node_id, self.constraints.types, true);
         self.incoming_index = 0;
     }
 

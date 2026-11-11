@@ -12,8 +12,8 @@ const OperatorError = executor.OperatorError;
 const Row = executor.Row;
 const ExecutionContext = executor.ExecutionContext;
 
-const types = @import("../../core/types.zig");
-const NodeId = types.NodeId;
+const core_types = @import("../../core/types.zig");
+const NodeId = core_types.NodeId;
 
 const edge_mod = @import("../../graph/edge.zig");
 
@@ -25,6 +25,8 @@ const Database = database_mod.Database;
 
 const expand_ops = @import("expand.zig");
 const ExpandDirection = expand_ops.ExpandDirection;
+const EdgeConstraints = expand_ops.EdgeConstraints;
+const fetchEdgeRefs = expand_ops.fetchEdgeRefs;
 
 // ============================================================================
 // Path Frame for DFS traversal
@@ -71,8 +73,8 @@ pub const VariableLengthExpand = struct {
     source_slot: u8,
     /// Slot to output the target node ID
     target_slot: u8,
-    /// Edge type to filter by (null means all types)
-    edge_type: ?SymbolId,
+    /// Relationship types the pattern accepts
+    constraints: EdgeConstraints,
     /// Direction to traverse
     direction: ExpandDirection,
     /// Database reference for txn-aware traversal
@@ -108,7 +110,7 @@ pub const VariableLengthExpand = struct {
         input: Operator,
         source_slot: u8,
         target_slot: u8,
-        edge_type: ?SymbolId,
+        constraints: EdgeConstraints,
         direction: ExpandDirection,
         database: *Database,
         min_hops: u32,
@@ -119,7 +121,7 @@ pub const VariableLengthExpand = struct {
             .input = input,
             .source_slot = source_slot,
             .target_slot = target_slot,
-            .edge_type = edge_type,
+            .constraints = constraints,
             .direction = direction,
             .database = database,
             .min_hops = min_hops,
@@ -246,18 +248,10 @@ pub const VariableLengthExpand = struct {
         // Start iterator based on direction
         switch (self.direction) {
             .outgoing, .both => {
-                if (self.edge_type) |edge_type| {
-                    frame.outgoing_edges = self.database.getOutgoingEdgeRefsByTypeInTxn(ctx.txn, node_id, edge_type) catch return OperatorError.StorageError;
-                } else {
-                    frame.outgoing_edges = self.database.getOutgoingEdgeRefsInTxn(ctx.txn, node_id) catch return OperatorError.StorageError;
-                }
+                frame.outgoing_edges = try fetchEdgeRefs(self.database, ctx, node_id, self.constraints.types, false);
             },
             .incoming => {
-                if (self.edge_type) |edge_type| {
-                    frame.incoming_edges = self.database.getIncomingEdgeRefsByTypeInTxn(ctx.txn, node_id, edge_type) catch return OperatorError.StorageError;
-                } else {
-                    frame.incoming_edges = self.database.getIncomingEdgeRefsInTxn(ctx.txn, node_id) catch return OperatorError.StorageError;
-                }
+                frame.incoming_edges = try fetchEdgeRefs(self.database, ctx, node_id, self.constraints.types, true);
                 frame.in_incoming_phase = true;
             },
         }
@@ -287,11 +281,7 @@ pub const VariableLengthExpand = struct {
                 edges = frame.incoming_edges orelse {
                     if (self.direction == .both and !frame.in_incoming_phase) {
                         frame.in_incoming_phase = true;
-                        if (self.edge_type) |edge_type| {
-                            frame.incoming_edges = self.database.getIncomingEdgeRefsByTypeInTxn(ctx.txn, frame.node_id, edge_type) catch return OperatorError.StorageError;
-                        } else {
-                            frame.incoming_edges = self.database.getIncomingEdgeRefsInTxn(ctx.txn, frame.node_id) catch return OperatorError.StorageError;
-                        }
+                        frame.incoming_edges = try fetchEdgeRefs(self.database, ctx, frame.node_id, self.constraints.types, true);
                         frame.incoming_index = 0;
                         continue;
                     }
@@ -302,11 +292,7 @@ pub const VariableLengthExpand = struct {
                 edges = frame.outgoing_edges orelse {
                     if (self.direction == .both and !frame.in_incoming_phase) {
                         frame.in_incoming_phase = true;
-                        if (self.edge_type) |edge_type| {
-                            frame.incoming_edges = self.database.getIncomingEdgeRefsByTypeInTxn(ctx.txn, frame.node_id, edge_type) catch return OperatorError.StorageError;
-                        } else {
-                            frame.incoming_edges = self.database.getIncomingEdgeRefsInTxn(ctx.txn, frame.node_id) catch return OperatorError.StorageError;
-                        }
+                        frame.incoming_edges = try fetchEdgeRefs(self.database, ctx, frame.node_id, self.constraints.types, true);
                         frame.incoming_index = 0;
                         continue;
                     }
@@ -319,11 +305,7 @@ pub const VariableLengthExpand = struct {
                 // Switch to incoming if doing both directions
                 if (self.direction == .both and !frame.in_incoming_phase) {
                     frame.in_incoming_phase = true;
-                    if (self.edge_type) |edge_type| {
-                        frame.incoming_edges = self.database.getIncomingEdgeRefsByTypeInTxn(ctx.txn, frame.node_id, edge_type) catch return OperatorError.StorageError;
-                    } else {
-                        frame.incoming_edges = self.database.getIncomingEdgeRefsInTxn(ctx.txn, frame.node_id) catch return OperatorError.StorageError;
-                    }
+                    frame.incoming_edges = try fetchEdgeRefs(self.database, ctx, frame.node_id, self.constraints.types, true);
                     frame.incoming_index = 0;
                     continue;
                 }
@@ -332,6 +314,7 @@ pub const VariableLengthExpand = struct {
 
             const edge = edges[index_ptr.*];
             index_ptr.* += 1;
+            if (!self.constraints.acceptsType(edge.edge_type)) continue;
 
             // Get target node based on direction
             const target_id = if (frame.in_incoming_phase) edge.source else edge.target;

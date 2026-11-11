@@ -490,3 +490,45 @@ test "cypher: UNWIND of an expression that fails fails the query" {
     try std.testing.expectError(QueryError.ExecutionError, db.query("UNWIND $missing AS x RETURN x"));
     try std.testing.expectError(QueryError.ExecutionError, db.query("UNWIND [1 / 0] AS x RETURN x"));
 }
+
+// ============================================================================
+// Relationship patterns
+// ============================================================================
+
+/// a-[:A]->b, a-[:B]->c, a-[:C]->d, b-[:B]->d
+fn seedTypes(db: *Database) !void {
+    try run(db, "CREATE (a:P {name: 'a'}), (b:P {name: 'b'}), (c:P {name: 'c'}), (d:P {name: 'd'}), " ++
+        "(a)-[:A]->(b), (a)-[:B]->(c), (a)-[:C]->(d), (b)-[:B]->(d)");
+}
+
+fn expectNames(db: *Database, cypher: []const u8, expected: []const []const u8) !void {
+    var result = try db.query(cypher);
+    defer result.deinit();
+    try std.testing.expectEqual(expected.len, result.rowCount());
+    for (expected, 0..) |name, i| {
+        switch (result.rows[i].values[0]) {
+            .string_val => |s| try std.testing.expectEqualStrings(name, s),
+            else => return error.UnexpectedValueType,
+        }
+    }
+}
+
+test "cypher: a relationship pattern can name alternative types" {
+    const path = "/tmp/lattice_cs_type_alternation.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try seedTypes(db);
+
+    try expectNames(db, "MATCH (s:P {name: 'a'})-[:A|B]->(x) RETURN x.name ORDER BY x.name", &.{ "b", "c" });
+    // The older `:A|:C` spelling means the same.
+    try expectNames(db, "MATCH (s:P {name: 'a'})-[r:A|:C]->(x) RETURN type(r) ORDER BY x.name", &.{ "A", "C" });
+    try expectNames(db, "MATCH (s:P {name: 'd'})<-[:A|B|C]-(x) RETURN x.name ORDER BY x.name", &.{ "a", "b" });
+    try expectNames(db, "MATCH (s:P {name: 'a'})-[:A|Unknown]-(x) RETURN x.name", &.{"b"});
+    try expectNames(db, "MATCH (s:P {name: 'a'})-[:A|B*2]->(x) RETURN x.name", &.{"d"});
+
+    // `:A:B` would ask for an edge with two types, which none has.
+    try std.testing.expectError(QueryError.ParseError, db.query("MATCH (s)-[:A:B]->(x) RETURN x"));
+    // CREATE and MERGE have to know which single type to make.
+    try std.testing.expectError(QueryError.SemanticError, db.query("MATCH (a:P {name: 'a'}), (b:P {name: 'b'}) CREATE (a)-[:A|B]->(b)"));
+    try std.testing.expectError(QueryError.SemanticError, db.query("MATCH (a:P {name: 'a'}), (b:P {name: 'b'}) MERGE (a)-[:A|B]->(b)"));
+}

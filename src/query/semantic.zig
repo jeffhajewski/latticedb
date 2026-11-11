@@ -605,11 +605,14 @@ pub const SemanticAnalyzer = struct {
             }
         }
 
-        if (edge.types.len > 1) {
-            self.addError(
+        // MATCH may name several types to accept any of them. A relationship
+        // that CREATE or MERGE might make needs exactly one.
+        if (edge.types.len > 1 and !std.mem.eql(u8, clause_name, "MATCH")) {
+            self.addErrorFmt(
                 .unsupported_pattern,
                 edge.location,
-                "Relationship type alternation (|) is not supported yet",
+                "{s} relationships need exactly one type; '|' is only allowed in MATCH",
+                .{clause_name},
             );
         }
 
@@ -1187,9 +1190,18 @@ test "MATCH variable-length range with min greater than max is rejected semantic
     }
 }
 
-test "MATCH relationship type alternation is rejected semantically" {
+test "relationship type alternation is accepted in MATCH only" {
     const allocator = std.testing.allocator;
-    const source = "MATCH (a)-[:REL_A|REL_B]->(b) RETURN b";
+    {
+        var parser = Parser.init(allocator, "MATCH (a)-[:REL_A|REL_B]->(b) RETURN b");
+        defer parser.deinit();
+        const query = parser.parse().query orelse return error.TestUnexpectedResult;
+        var analyzer = SemanticAnalyzer.init(allocator);
+        defer analyzer.deinit();
+        try std.testing.expect(analyzer.analyze(query).success);
+    }
+
+    const source = "MATCH (a), (b) MERGE (a)-[:REL_A|REL_B]->(b)";
 
     var parser = Parser.init(allocator, source);
     defer parser.deinit();

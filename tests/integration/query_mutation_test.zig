@@ -351,18 +351,18 @@ test "query: semicolon-terminated queries execute end-to-end" {
     try expectString(result, 0, 1, "Bob");
 }
 
-test "query: MATCH relationship type alternation is rejected" {
-    const path = "/tmp/lattice_qm_match_type_alternation_rejected.ltdb";
+test "query: MATCH relationship type alternation matches any listed type" {
+    const path = "/tmp/lattice_qm_match_type_alternation.ltdb";
     var db = try openTestDb(path, .{});
     defer cleanupTestDb(db, path);
 
     var seed = try db.query("CREATE (a:Person {name: \"Alice\"})-[:REL_A]->(b:Person {name: \"Bob\"})");
     seed.deinit();
 
-    try std.testing.expectError(
-        QueryError.SemanticError,
-        db.query("MATCH (a)-[:REL_A|REL_B]->(b) RETURN b"),
-    );
+    var result = try db.query("MATCH (a)-[:REL_A|REL_B]->(b) RETURN b.name");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try expectString(result, 0, 0, "Bob");
 }
 
 test "query: CREATE relationship type alternation is rejected" {

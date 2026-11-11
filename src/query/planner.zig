@@ -632,16 +632,8 @@ pub const QueryPlanner = struct {
                         }
                     }
 
-                    // Determine edge type
-                    var edge_type: ?SymbolId = null;
-                    if (edge_pattern.types.len > 0) {
-                        const symbol_table = self.storage.symbol_table orelse return PlannerError.MissingStorage;
-                        edge_type = symbol_table.lookup(edge_pattern.types[0]) catch |err| switch (err) {
-                            // Unknown relationship type should behave like an empty match, not a planning error.
-                            symbols.SymbolError.NotFound => symbols.NULL_SYMBOL,
-                            else => return PlannerError.InternalError,
-                        };
-                    }
+                    // Every type the pattern accepts, as in `-[:A|B]->`.
+                    const edge_types = try self.resolveEdgeTypes(edge_pattern.types);
 
                     // Map direction
                     const expand_dir: expand_ops.ExpandDirection = switch (edge_pattern.direction) {
@@ -661,7 +653,7 @@ pub const QueryPlanner = struct {
                             op.?,
                             source_slot,
                             target_slot,
-                            edge_type,
+                            .{ .types = edge_types },
                             expand_dir,
                             database,
                             quant.min_hops,
@@ -678,7 +670,7 @@ pub const QueryPlanner = struct {
                             source_slot,
                             target_slot,
                             edge_slot,
-                            edge_type,
+                            .{ .types = edge_types },
                             expand_dir,
                             database,
                         ) catch {
@@ -720,6 +712,23 @@ pub const QueryPlanner = struct {
         }
 
         return op orelse PlannerError.InvalidQuery;
+    }
+
+    /// Resolve a relationship pattern's type names to symbol ids.
+    ///
+    /// A type the database has never seen resolves to `NULL_SYMBOL`, which no
+    /// edge carries, so it matches nothing rather than failing the plan.
+    fn resolveEdgeTypes(self: *Self, names: []const []const u8) PlannerError![]const SymbolId {
+        if (names.len == 0) return &.{};
+        const symbol_table = self.storage.symbol_table orelse return PlannerError.MissingStorage;
+        const ids = self.allocator.alloc(SymbolId, names.len) catch return PlannerError.OutOfMemory;
+        for (names, ids) |name, *id| {
+            id.* = symbol_table.lookup(name) catch |err| switch (err) {
+                symbols.SymbolError.NotFound => symbols.NULL_SYMBOL,
+                else => return PlannerError.InternalError,
+            };
+        }
+        return ids;
     }
 
     fn isIndependentExpression(expr: *const ast.Expression) bool {

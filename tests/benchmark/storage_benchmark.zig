@@ -88,6 +88,25 @@ fn benchCrc() void {
     const elapsed = now() - start;
     std.mem.doNotOptimizeAway(acc);
     report("crc32c of one 4 KB page", elapsed, iters);
+
+    // The portable fallback and the routine 0.16.0 used, for comparison.
+    if (@hasDecl(page, "crc32c")) {
+        const start_sw = now();
+        for (0..iters) |i| {
+            buf[8] = @truncate(i);
+            acc ^= ~page.crc32c.updateSoftware(0xFFFF_FFFF, buf[8..]);
+        }
+        std.mem.doNotOptimizeAway(acc);
+        report("crc32c 4 KB, slicing-by-8 fallback", now() - start_sw, iters);
+    }
+    const ref_iters = iters / 10;
+    const start_ref = now();
+    for (0..ref_iters) |i| {
+        buf[8] = @truncate(i);
+        acc ^= std.hash.crc.Crc32Iscsi.hash(buf[8..]);
+    }
+    std.mem.doNotOptimizeAway(acc);
+    report("crc32c 4 KB, byte-wise (0.16.0)", now() - start_ref, ref_iters);
 }
 
 fn benchPageAlloc() !void {

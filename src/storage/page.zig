@@ -143,9 +143,41 @@ pub const FileFlags = struct {
     pub const LARGE_FILE_MODE: u32 = 0x10;
 };
 
-/// Calculate CRC32C checksum (Castagnoli polynomial)
+/// Calculate CRC32C checksum (Castagnoli polynomial).
+///
+/// Bit-identical to `std.hash.crc.Crc32Iscsi`, which every release up to
+/// 0.16.0 used, but computed with the CPU's CRC instruction where there is one
+/// (see crc32c.zig).
 pub fn calculateChecksum(data: []const u8) u32 {
-    return std.hash.crc.Crc32Iscsi.hash(data);
+    return crc32c.hash(data);
+}
+
+pub const crc32c = @import("crc32c.zig");
+
+test {
+    _ = crc32c;
+}
+
+test "page checksums match the 0.16.0 byte-wise CRC32C" {
+    var prng = std.Random.DefaultPrng.init(0x0160);
+    const random = prng.random();
+    var buf: [65536]u8 align(4096) = undefined;
+    for ([_]usize{ 4096, 8192, 16384, 32768, 65535 }) |page_size| {
+        for (0..20) |round| {
+            switch (round % 4) {
+                0 => random.bytes(buf[0..page_size]),
+                1 => @memset(buf[0..page_size], 0),
+                2 => @memset(buf[0..page_size], 0xFF),
+                else => {
+                    @memset(buf[0..page_size], 0);
+                    buf[random.uintLessThan(usize, page_size)] = random.int(u8);
+                },
+            }
+            // The page manager checksums bytes 8..end; the WAL whole frames.
+            try std.testing.expectEqual(std.hash.crc.Crc32Iscsi.hash(buf[8..page_size]), calculateChecksum(buf[8..page_size]));
+            try std.testing.expectEqual(std.hash.crc.Crc32Iscsi.hash(buf[0..page_size]), calculateChecksum(buf[0..page_size]));
+        }
+    }
 }
 
 test "page header size" {

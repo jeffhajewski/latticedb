@@ -303,6 +303,7 @@ pub const VariableLengthExpand = struct {
         const input_row = self.current_input orelse return;
         const source_val = input_row.getSlot(self.source_slot) orelse return OperatorError.UnboundVariable;
         const source_id = source_val.asNodeId() orelse return OperatorError.TypeError;
+        self.bound_target = try self.constraints.boundTarget(input_row, self.target_slot);
 
         // Zero-hop quantifiers include the source node itself.
         if (self.min_hops == 0 and self.reachesTarget(source_id)) {

@@ -155,14 +155,56 @@ pub const SemanticAnalyzer = struct {
         for (clause.patterns) |pattern| {
             for (pattern.elements) |element| {
                 switch (element) {
-                    .node => |n| self.registerNodeVariable(n),
+                    .node => |n| self.registerMatchNode(n),
                     .edge => |e| {
                         self.validateEdgePattern(e, true, "MATCH");
+                        if (e.variable) |name| {
+                            if (self.variables.get(name)) |info| {
+                                self.addErrorFmt(
+                                    .duplicate_variable,
+                                    e.location,
+                                    "Variable '{s}' is already bound to {s}; a relationship variable cannot be matched again",
+                                    .{ name, kindPhrase(info.kind) },
+                                );
+                                continue;
+                            }
+                        }
                         self.registerEdgeVariable(e);
                     },
                 }
             }
         }
+    }
+
+    /// A MATCH node may name a node variable that is already bound, by this
+    /// clause or an earlier one: the pattern then matches that same node, as
+    /// in `MATCH (a)-->(b)-->(a)` or `MATCH (a:X) MATCH (a)-->(b)`.
+    fn registerMatchNode(self: *Self, node: *const ast.NodePattern) void {
+        if (node.variable) |name| {
+            if (self.variables.get(name)) |info| {
+                if (info.kind != .node) {
+                    self.addErrorFmt(
+                        .duplicate_variable,
+                        node.location,
+                        "Variable '{s}' is already bound to {s}, not a node",
+                        .{ name, kindPhrase(info.kind) },
+                    );
+                }
+                if (node.properties) |props| {
+                    for (props) |prop| self.analyzeExpression(prop.value);
+                }
+                return;
+            }
+        }
+        self.registerNodeVariable(node);
+    }
+
+    fn kindPhrase(kind: VariableKind) []const u8 {
+        return switch (kind) {
+            .node => "a node",
+            .edge => "a relationship",
+            .alias => "a value",
+        };
     }
 
     fn analyzeWhereClause(self: *Self, clause: *const ast.WhereClause) void {
@@ -967,9 +1009,28 @@ test "unbound variable error" {
     }
 }
 
+test "a node variable may be matched again" {
+    const allocator = std.testing.allocator;
+    const sources = [_][]const u8{
+        "MATCH (n), (n:Person) RETURN n",
+        "MATCH (a)-->(b)-->(a) RETURN a, b",
+        "MATCH (a:X) MATCH (a)-->(b) RETURN b",
+        "MATCH (a) WITH a MATCH (a)-->(c) RETURN c",
+    };
+    for (sources) |source| {
+        var parser = Parser.init(allocator, source);
+        defer parser.deinit();
+        const query = parser.parse().query orelse return error.TestUnexpectedResult;
+        var analyzer = SemanticAnalyzer.init(allocator);
+        defer analyzer.deinit();
+        const result = analyzer.analyze(query);
+        try std.testing.expect(result.success);
+    }
+}
+
 test "duplicate variable error" {
     const allocator = std.testing.allocator;
-    const source = "MATCH (n), (n:Person) RETURN n";
+    const source = "MATCH ()-[r]->() MATCH ()-[r]->() RETURN r";
 
     var parser = Parser.init(allocator, source);
     defer parser.deinit();

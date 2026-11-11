@@ -780,3 +780,84 @@ test "cypher: deleting a relationship matched twice deletes it once" {
     try run(db, "MATCH (:T)-[r]-(:T) DELETE r");
     try std.testing.expectEqual(@as(i64, 0), try queryCount(db, "MATCH (n:T)-[r]-() RETURN count(r)"));
 }
+
+// ============================================================================
+// Reusing a node variable
+// ============================================================================
+
+/// A triangle a -> b -> c -> a, a tail c -> d, and Dan who knows nobody.
+fn seedTriangle(db: *Database) !void {
+    try run(db, "CREATE (a:P {name: 'a'}), (b:P {name: 'b'}), (c:P {name: 'c'}), (d:P {name: 'd'}), " ++
+        "(e:Q {name: 'e'}), (a)-[:R]->(b), (b)-[:R]->(c), (c)-[:R]->(a), (c)-[:R]->(d)");
+}
+
+test "cypher: a pattern can return to a node it already bound" {
+    const path = "/tmp/lattice_cs_reuse_cycle.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try seedTriangle(db);
+
+    // Each rotation of the triangle closes on its start.
+    try expectNames(db, "MATCH (a)-[:R]->(b)-[:R]->(c)-[:R]->(a) RETURN a.name ORDER BY a.name", &.{ "a", "b", "c" });
+    // A variable-length closing hop.
+    try expectNames(db, "MATCH (a {name: 'a'})-[:R*1..3]->(a) RETURN a.name", &.{"a"});
+    // Comma-separated patterns share the variable.
+    try expectNames(db, "MATCH (a)-[:R]->(b), (b)-[:R]->(c) WHERE a.name = 'a' RETURN c.name", &.{"c"});
+    // The same variable again adds its labels as a check.
+    try std.testing.expectEqual(@as(i64, 0), try queryCount(db, "MATCH (n:P), (n:Q) RETURN count(*)"));
+    try std.testing.expectEqual(@as(i64, 4), try queryCount(db, "MATCH (n:P), (n) RETURN count(*)"));
+}
+
+test "cypher: a later MATCH or a MATCH after WITH continues from a bound node" {
+    const path = "/tmp/lattice_cs_reuse_clauses.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try seedTriangle(db);
+
+    try expectNames(db, "MATCH (a:P {name: 'c'}) MATCH (a)-[:R]->(b) RETURN b.name ORDER BY b.name", &.{ "a", "d" });
+    try expectNames(db, "MATCH (a:P {name: 'c'}) WITH a MATCH (a)-[:R]->(b) RETURN b.name ORDER BY b.name", &.{ "a", "d" });
+    // Expanding into a node bound by an earlier clause.
+    try expectNames(db, "MATCH (x {name: 'a'}) MATCH (y)-[:R]->(x) RETURN y.name", &.{"c"});
+    // Inline properties on the reused node filter it.
+    try std.testing.expectEqual(@as(i64, 0), try queryCount(db, "MATCH (a {name: 'c'}) MATCH (a {name: 'b'}) RETURN count(*)"));
+}
+
+test "cypher: WITH carries each variable's own value" {
+    const path = "/tmp/lattice_cs_with_slots.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try run(db, "CREATE (c:P {name: 'c'})-[:R {w: 1}]->(d:P {name: 'd'})");
+
+    // `b` used to come out of the WITH as `a`.
+    try expectNames(db, "MATCH (a)-[:R]->(b) WITH b RETURN b.name", &.{"d"});
+    try expectNames(db, "MATCH (a)-[:R]->(b) WITH b, a RETURN a.name", &.{"c"});
+    try expectNames(db, "MATCH (a)-[:R]->(b) WITH b AS a, a AS b RETURN a.name", &.{"d"});
+    try expectNames(db, "MATCH (a)-[:R]->(b) WITH a, count(b) AS n RETURN a.name", &.{"c"});
+    // A predicate before the WITH on a variable it drops.
+    try expectNames(db, "MATCH (n)-[r:R]->(m) WHERE r.w = 1 WITH m RETURN m.name", &.{"d"});
+    try expectNames(db, "MATCH (:P {name: 'c'})-[:R]->(m) WITH m RETURN m.name", &.{"d"});
+    // A name bound again after the WITH dropped it.
+    try std.testing.expectEqual(@as(i64, 2), try queryCount(db, "MATCH (a:P) WITH count(a) AS c MATCH (a:P) RETURN count(a)"));
+}
+
+test "cypher: a relationship carried through WITH is still a relationship" {
+    const path = "/tmp/lattice_cs_with_edge.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try seedTriangle(db);
+
+    // Planned as a node delete before, which failed with a type error.
+    try run(db, "MATCH (:P {name: 'c'})-[r:R]->(:P {name: 'd'}) WITH r DELETE r");
+    try std.testing.expectEqual(@as(i64, 3), try queryCount(db, "MATCH ()-[r:R]->() RETURN count(r)"));
+}
+
+test "cypher: a variable cannot be matched as a different kind" {
+    const path = "/tmp/lattice_cs_reuse_errors.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try seedTriangle(db);
+
+    try std.testing.expectError(QueryError.SemanticError, db.query("MATCH ()-[r]->() MATCH ()-[r]->() RETURN r"));
+    try std.testing.expectError(QueryError.SemanticError, db.query("MATCH ()-[r]->() MATCH (r) RETURN r"));
+    try std.testing.expectError(QueryError.SemanticError, db.query("UNWIND [1] AS x MATCH (x) RETURN x"));
+}

@@ -53,6 +53,10 @@ pub const EdgeConstraints = struct {
     /// binds one relationship twice in a pattern, so an edge already in any of
     /// these slots is skipped.
     distinct_from: []const u8 = &.{},
+    /// The far end is already bound in the target slot, as in
+    /// `MATCH (a)-->(b)-->(a)` or a variable bound by an earlier clause. Only
+    /// edges that lead to that node match, and the slot keeps its value.
+    target_bound: bool = false,
 
     /// Whether an edge of type `edge_type` matches the pattern's types.
     pub fn acceptsType(self: EdgeConstraints, edge_type: SymbolId) bool {
@@ -73,6 +77,14 @@ pub const EdgeConstraints = struct {
             }
         }
         return false;
+    }
+
+    /// The node the target slot is bound to, when the pattern expands into a
+    /// bound node.
+    pub fn boundTarget(self: EdgeConstraints, row: *const Row, target_slot: u8) OperatorError!?NodeId {
+        if (!self.target_bound) return null;
+        const value = row.getSlot(target_slot) orelse return OperatorError.UnboundVariable;
+        return value.asNodeId() orelse return OperatorError.TypeError;
     }
 };
 
@@ -256,6 +268,8 @@ pub const Expand = struct {
             index_ptr = &self.outgoing_index;
         }
 
+        const bound_target = try self.constraints.boundTarget(input_row, self.target_slot);
+
         while (index_ptr.* < edges.len) {
             const edge = edges[index_ptr.*];
             index_ptr.* += 1;
@@ -268,6 +282,9 @@ pub const Expand = struct {
 
             // Following an incoming edge means the other end is its source.
             const target_id = if (self.readingIncoming()) edge.source else edge.target;
+            if (bound_target) |want| {
+                if (target_id != want) continue;
+            }
 
             // Build output row - copy ALL populated slots from input
             output_row.clear();

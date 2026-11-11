@@ -151,7 +151,24 @@ pub const QueryPlanner = struct {
     detail_len: usize = 0,
     edge_bindings: std.StringHashMap(EdgeBinding),
     hidden_binding_names: std.ArrayList([]u8),
+    /// One past the highest slot allocated so far.
     next_slot: u8,
+    /// The slot each variable name was first bound to in this query.
+    ///
+    /// Expressions find a variable's slot by name when the query runs, from
+    /// one name-to-slot map for the whole query. A name therefore has to keep
+    /// its slot across WITH scopes: `MATCH (a)-->(b) WITH b` once moved `b`
+    /// to slot 0, where the WITH, reading `b` by name, then found `a`.
+    name_slots: std.StringHashMap(u8),
+    /// Bindings a WITH dropped from scope that its own expressions read.
+    /// Registered for execution, but invisible to later clauses.
+    outer_bindings: std.StringHashMap(VarBinding),
+    /// Slots in use in the current scope.
+    used_slots: u16 = 0,
+    /// Slots used at any point of the query.
+    ever_used_slots: u16 = 0,
+    /// A name that had to be bound to a second slot, which the plan refuses.
+    slot_conflict: ?[]const u8 = null,
     /// Number of output columns from the RETURN clause (set during planning)
     output_columns: u8 = 0,
     /// Explicit output column names from RETURN aliases.
@@ -189,6 +206,8 @@ pub const QueryPlanner = struct {
             .edge_bindings = std.StringHashMap(EdgeBinding).init(allocator),
             .hidden_binding_names = .empty,
             .next_slot = 0,
+            .name_slots = std.StringHashMap(u8).init(allocator),
+            .outer_bindings = std.StringHashMap(VarBinding).init(allocator),
             .output_columns = 0,
             .output_column_names = [_]?[]const u8{null} ** MAX_SLOTS,
             .last_scan_kind = .none,
@@ -203,6 +222,8 @@ pub const QueryPlanner = struct {
         self.pattern_labels.deinit();
         self.pattern_edge_types.deinit();
         self.edge_bindings.deinit();
+        self.name_slots.deinit();
+        self.outer_bindings.deinit();
     }
 
     /// Plan a complete query
@@ -210,6 +231,11 @@ pub const QueryPlanner = struct {
         _ = analysis; // Used for validation, already done
 
         // Reset bindings for this query
+        self.name_slots.clearRetainingCapacity();
+        self.outer_bindings.clearRetainingCapacity();
+        self.used_slots = 0;
+        self.ever_used_slots = 0;
+        self.slot_conflict = null;
         self.clearHiddenBindingNames();
         self.bindings.clearRetainingCapacity();
         self.pattern_labels.clearRetainingCapacity();
@@ -299,6 +325,17 @@ pub const QueryPlanner = struct {
                 .merge => |m| current_op = try self.planMerge(m, current_op),
                 .unwind => |u| current_op = try self.planUnwind(u, current_op),
             }
+        }
+
+        if (self.slot_conflict) |name| {
+            self.setPlanDetail("Variable '{s}' is bound again where its earlier slot is taken; use a different name", .{name});
+            return PlannerError.InvalidQuery;
+        }
+        // Expressions a WITH evaluated still read the bindings it dropped.
+        var outer = self.outer_bindings.iterator();
+        while (outer.next()) |entry| {
+            if (self.bindings.contains(entry.key_ptr.*)) continue;
+            self.bindings.put(entry.key_ptr.*, entry.value_ptr.*) catch return PlannerError.OutOfMemory;
         }
 
         return current_op orelse PlannerError.InvalidQuery;
@@ -401,32 +438,43 @@ pub const QueryPlanner = struct {
         var op = input;
         var prev_node_slot: ?u8 = null;
 
-        for (pattern.elements) |element| {
+        for (pattern.elements, 0..) |element, element_index| {
             switch (element) {
                 .node => |node_pattern| {
+                    // A node variable bound earlier (in this clause or a
+                    // previous one) is that same node: no scan, only checks.
+                    const bound_slot: ?u8 = if (node_pattern.variable) |name| self.boundNodeSlot(name) else null;
+
                     // If prev_node_slot is set, this node follows an edge.
                     // Use the target slot from the Expand operator instead of allocating a new slot.
                     const slot = if (prev_node_slot != null and op != null)
                         prev_node_slot.? // Use target slot from preceding edge's Expand
+                    else if (bound_slot) |bound|
+                        bound
                     else
-                        try self.allocateSlot();
+                        try self.allocateNamedSlot(node_pattern.variable);
                     var node_var_name: ?[]const u8 = null;
 
                     // Bind variable if present
                     if (node_pattern.variable) |name| {
-                        try self.bindVariable(name, slot, .node);
                         node_var_name = name;
-                        self.pattern_labels.put(name, node_pattern.labels) catch {
-                            return PlannerError.OutOfMemory;
-                        };
+                        if (bound_slot == null) {
+                            try self.bindVariable(name, slot, .node);
+                        }
+                        if (bound_slot == null or node_pattern.labels.len > 0) {
+                            self.pattern_labels.put(name, node_pattern.labels) catch {
+                                return PlannerError.OutOfMemory;
+                            };
+                        }
                     }
 
                     // Determine if we need to create a scan or filter
                     const is_target_of_edge = prev_node_slot != null and op != null;
 
-                    if (is_target_of_edge) {
-                        // This node is the target of an edge - data comes from Expand operator.
-                        // If labels are specified, add a filter to check them.
+                    if (is_target_of_edge or (bound_slot != null and op != null)) {
+                        // The node comes from the input: the target of an
+                        // Expand, or a node bound earlier. Labels the pattern
+                        // names are checked with filters.
                         if (node_pattern.labels.len > 0) {
                             const symbol_table = self.storage.symbol_table orelse return PlannerError.MissingStorage;
                             const label_id = symbol_table.lookup(node_pattern.labels[0]) catch |err| switch (err) {
@@ -671,13 +719,20 @@ pub const QueryPlanner = struct {
                 .edge => |edge_pattern| {
                     // Need previous node to expand from
                     const source_slot = prev_node_slot orelse return PlannerError.InvalidQuery;
-                    const target_slot = try self.allocateSlot();
+                    // When the far end is a bound node, expand into it.
+                    const next_node: ?*const ast.NodePattern = if (element_index + 1 < pattern.elements.len) switch (pattern.elements[element_index + 1]) {
+                        .node => |n| n,
+                        .edge => null,
+                    } else null;
+                    const next_variable: ?[]const u8 = if (next_node) |n| n.variable else null;
+                    const bound_target: ?u8 = if (next_variable) |name| self.boundNodeSlot(name) else null;
+                    const target_slot = bound_target orelse try self.allocateNamedSlot(next_variable);
 
                     // Optional edge variable
                     var edge_slot: ?u8 = null;
                     var edge_var_name: ?[]const u8 = null;
                     if (edge_pattern.variable) |name| {
-                        edge_slot = try self.allocateSlot();
+                        edge_slot = try self.allocateNamedSlot(name);
                         try self.bindVariable(name, edge_slot.?, .edge);
                         edge_var_name = name;
                         // Every type the pattern named, because `-[r:A|B]->` has
@@ -734,7 +789,7 @@ pub const QueryPlanner = struct {
                             op.?,
                             source_slot,
                             target_slot,
-                            .{ .types = edge_types, .distinct_from = distinct_from },
+                            .{ .types = edge_types, .distinct_from = distinct_from, .target_bound = bound_target != null },
                             expand_dir,
                             database,
                             quant.min_hops,
@@ -751,7 +806,7 @@ pub const QueryPlanner = struct {
                             source_slot,
                             target_slot,
                             edge_slot,
-                            .{ .types = edge_types, .distinct_from = distinct_from },
+                            .{ .types = edge_types, .distinct_from = distinct_from, .target_bound = bound_target != null },
                             expand_dir,
                             database,
                         ) catch {
@@ -1507,6 +1562,17 @@ pub const QueryPlanner = struct {
 
     /// Plan a RETURN clause with aggregations
     fn planAggregateReturn(self: *Self, ret: *const ast.ReturnClause, input_op: Operator) PlannerError!Operator {
+        return self.planAggregateReturnInto(ret, input_op, null);
+    }
+
+    /// Plan an aggregating projection whose item i goes to `slots[i]`, or to
+    /// slot i when `slots` is null.
+    fn planAggregateReturnInto(
+        self: *Self,
+        ret: *const ast.ReturnClause,
+        input_op: Operator,
+        slots: ?[]const u8,
+    ) PlannerError!Operator {
         self.output_columns = @intCast(ret.items.len);
 
         // Separate items into grouping keys and aggregates
@@ -1521,7 +1587,7 @@ pub const QueryPlanner = struct {
         defer proj_items.deinit(self.allocator);
 
         for (ret.items, 0..) |item, i| {
-            const slot: u8 = @intCast(i);
+            const slot: u8 = if (slots) |given| given[i] else @intCast(i);
             self.output_column_names[i] = columnName(self, item);
 
             if (self.isDirectAggregate(item.expression)) |agg_info| {
@@ -1795,7 +1861,7 @@ pub const QueryPlanner = struct {
                                 need_create = false;
                             } else {
                                 // New variable - allocate slot and bind
-                                slot = try self.allocateSlot();
+                                slot = try self.allocateNamedSlot(name);
                                 try self.bindVariable(name, slot, .node);
                             }
                         } else {
@@ -1837,7 +1903,7 @@ pub const QueryPlanner = struct {
                             // Bind edge variable if present
                             var edge_slot: ?u8 = null;
                             if (pe.edge_pattern.variable) |edge_name| {
-                                const edge_var_slot = try self.allocateSlot();
+                                const edge_var_slot = try self.allocateNamedSlot(edge_name);
                                 try self.bindVariable(edge_name, edge_var_slot, .edge);
                                 edge_slot = edge_var_slot;
                             }
@@ -2069,17 +2135,34 @@ pub const QueryPlanner = struct {
         const input_op = input orelse return PlannerError.InvalidQuery;
         try self.checkProjectionWidth("WITH", with_clause.items.len);
 
-        // Preserve upstream bindings referenced by WITH expressions so runtime
-        // evaluation can resolve them even after WITH scope rebinding.
-        var required_input_bindings: std.ArrayList(VarBinding) = .empty;
-        defer required_input_bindings.deinit(self.allocator);
-        for (with_clause.items) |item| {
-            try self.collectReferencedBindings(item.expression, &required_input_bindings);
+        // The slot each item goes to. A name keeps the slot it already had
+        // (see `name_slots`); other items take slots no earlier scope used
+        // where there are any.
+        const items = with_clause.items;
+        const out_slots = self.allocator.alloc(u8, items.len) catch return PlannerError.OutOfMemory;
+        const placed = self.allocator.alloc(bool, items.len) catch return PlannerError.OutOfMemory;
+        @memset(placed, false);
+        var taken: u16 = 0;
+        for (items, 0..) |item, i| {
+            const name = withItemName(item) orelse continue;
+            const slot = self.name_slots.get(name) orelse continue;
+            if (taken & slotBit(slot) != 0) continue;
+            out_slots[i] = slot;
+            placed[i] = true;
+            taken |= slotBit(slot);
+        }
+        for (items, 0..) |_, i| {
+            if (placed[i]) continue;
+            var free = all_slots & ~taken & ~self.ever_used_slots;
+            if (free == 0) free = all_slots & ~taken;
+            if (free == 0) return PlannerError.TooManyVariables;
+            out_slots[i] = @ctz(free);
+            taken |= slotBit(out_slots[i]);
         }
 
         // Check for aggregates (same logic as RETURN)
         var has_aggregates = false;
-        for (with_clause.items) |item| {
+        for (items) |item| {
             if (aggregate_ops.containsAggregate(item.expression)) {
                 has_aggregates = true;
                 break;
@@ -2092,22 +2175,22 @@ pub const QueryPlanner = struct {
             const ret = self.allocator.create(ast.ReturnClause) catch return PlannerError.OutOfMemory;
             ret.* = .{
                 .distinct = with_clause.distinct,
-                .items = with_clause.items,
+                .items = items,
                 .location = with_clause.location,
             };
-            op = try self.planAggregateReturn(ret, input_op);
+            op = try self.planAggregateReturnInto(ret, input_op, out_slots);
         } else {
             // Simple projection
-            var items = self.allocator.alloc(project_ops.ProjectItem, with_clause.items.len) catch {
+            var project_items = self.allocator.alloc(project_ops.ProjectItem, items.len) catch {
                 return PlannerError.OutOfMemory;
             };
-            for (with_clause.items, 0..) |item, i| {
-                items[i] = .{
+            for (items, 0..) |item, i| {
+                project_items[i] = .{
                     .expr = item.expression,
-                    .output_slot = @intCast(i),
+                    .output_slot = out_slots[i],
                 };
             }
-            const project = project_ops.Project.init(self.allocator, input_op, items) catch {
+            const project = project_ops.Project.init(self.allocator, input_op, project_items) catch {
                 return PlannerError.OutOfMemory;
             };
             op = project.operator();
@@ -2121,28 +2204,37 @@ pub const QueryPlanner = struct {
             op = distinct.operator();
         }
 
+        // What each item carries on: a node or relationship variable stays
+        // one, anything else is a value.
+        const item_kinds = self.allocator.alloc(semantic.VariableKind, items.len) catch {
+            return PlannerError.OutOfMemory;
+        };
+        for (items, item_kinds) |item, *kind| {
+            kind.* = .alias;
+            if (item.expression.* == .variable) {
+                if (self.bindings.get(item.expression.variable.name)) |binding| kind.* = binding.kind;
+            }
+        }
+
+        // Expressions before the WITH, its own included, still read the
+        // bindings it does not carry on. They stay registered for execution,
+        // out of later clauses' scope.
+        var upstream = self.bindings.iterator();
+        while (upstream.next()) |entry| {
+            self.outer_bindings.put(entry.key_ptr.*, entry.value_ptr.*) catch return PlannerError.OutOfMemory;
+        }
+
         // Reset bindings to WITH aliases (WITH introduces a new scope)
         self.bindings.clearRetainingCapacity();
         // What comes through a WITH is an alias rather than a node written with a
         // label, so the labels that were in scope before it no longer describe it.
         self.pattern_labels.clearRetainingCapacity();
         self.pattern_edge_types.clearRetainingCapacity();
-        self.next_slot = 0;
+        self.used_slots = taken;
 
-        for (with_clause.items, 0..) |item, i| {
-            const name = item.alias orelse getExpressionName(item.expression) orelse continue;
-            try self.bindVariable(name, @intCast(i), .node);
-            self.next_slot = @intCast(i + 1);
-        }
-
-        // Keep upstream bindings used by WITH expressions available for execution.
-        for (required_input_bindings.items) |binding| {
-            if (!self.bindings.contains(binding.name)) {
-                try self.bindVariable(binding.name, binding.slot, binding.kind);
-                if (binding.slot >= self.next_slot) {
-                    self.next_slot = binding.slot + 1;
-                }
-            }
+        for (items, 0..) |item, i| {
+            const name = withItemName(item) orelse continue;
+            try self.bindVariable(name, out_slots[i], item_kinds[i]);
         }
 
         // Add WHERE filter if present
@@ -2154,6 +2246,13 @@ pub const QueryPlanner = struct {
         }
 
         return op;
+    }
+
+    /// The name a WITH item is known by afterwards: its alias, or the
+    /// variable it passes on.
+    fn withItemName(item: ast.ReturnItem) ?[]const u8 {
+        if (item.alias) |alias| return alias;
+        return getVariableName(item.expression);
     }
 
     /// Plan a MERGE clause (node pattern or simple relationship pattern).
@@ -2263,7 +2362,7 @@ pub const QueryPlanner = struct {
                         if (binding.kind != .edge) return PlannerError.InvalidQuery;
                         break :blk binding.slot;
                     }
-                    const slot = try self.allocateSlot();
+                    const slot = try self.allocateNamedSlot(name);
                     try self.bindVariable(name, slot, .edge);
                     break :blk slot;
                 }
@@ -2429,7 +2528,7 @@ pub const QueryPlanner = struct {
         // Standalone UNWIND uses a synthetic single-row input.
         const input_op = input orelse try self.singleRow();
 
-        const slot = try self.allocateSlot();
+        const slot = try self.allocateNamedSlot(unwind_clause.variable);
         try self.bindVariable(unwind_clause.variable, slot, .alias);
 
         const unwind = unwind_ops.Unwind.init(
@@ -2440,34 +2539,6 @@ pub const QueryPlanner = struct {
         ) catch return PlannerError.OutOfMemory;
 
         return unwind.operator();
-    }
-
-    fn collectReferencedBindings(self: *Self, expr: *const ast.Expression, out: *std.ArrayList(VarBinding)) PlannerError!void {
-        switch (expr.*) {
-            .variable => |v| {
-                const binding = self.bindings.get(v.name) orelse return PlannerError.InvalidQuery;
-                for (out.items) |existing| {
-                    if (std.mem.eql(u8, existing.name, binding.name)) return;
-                }
-                out.append(self.allocator, binding) catch return PlannerError.OutOfMemory;
-            },
-            .property_access => |pa| try self.collectReferencedBindings(pa.object, out),
-            .binary => |b| {
-                try self.collectReferencedBindings(b.left, out);
-                try self.collectReferencedBindings(b.right, out);
-            },
-            .unary => |u| try self.collectReferencedBindings(u.operand, out),
-            .function_call => |f| {
-                for (f.arguments) |arg| try self.collectReferencedBindings(arg, out);
-            },
-            .list => |l| {
-                for (l.elements) |elem| try self.collectReferencedBindings(elem, out);
-            },
-            .map => |m| {
-                for (m.entries) |entry| try self.collectReferencedBindings(entry.value, out);
-            },
-            .literal, .parameter => {},
-        }
     }
 
     fn bindInternalVariable(self: *Self, slot: u8, kind: semantic.VariableKind) PlannerError![]const u8 {
@@ -2496,14 +2567,44 @@ pub const QueryPlanner = struct {
         self.hidden_binding_names.clearRetainingCapacity();
     }
 
-    /// Allocate a new variable slot
+    const all_slots: u16 = std.math.maxInt(u16) >> (16 - MAX_SLOTS);
+
+    /// Allocate a new variable slot.
+    ///
+    /// A slot no earlier scope used is preferred, so that two names rarely
+    /// share a slot across WITH scopes (see `name_slots`); once those run
+    /// out, any slot free in the current scope.
     fn allocateSlot(self: *Self) PlannerError!u8 {
-        if (self.next_slot >= MAX_SLOTS) {
-            return PlannerError.TooManyVariables;
-        }
-        const slot = self.next_slot;
-        self.next_slot += 1;
+        var free = all_slots & ~self.ever_used_slots;
+        if (free == 0) free = all_slots & ~self.used_slots;
+        if (free == 0) return PlannerError.TooManyVariables;
+        const slot: u8 = @ctz(free);
+        self.markSlot(slot);
         return slot;
+    }
+
+    /// Allocate the slot for a variable about to be bound: the slot the name
+    /// had earlier in the query, if it is free in this scope.
+    fn allocateNamedSlot(self: *Self, name: ?[]const u8) PlannerError!u8 {
+        if (name) |n| {
+            if (self.name_slots.get(n)) |slot| {
+                if (self.used_slots & slotBit(slot) == 0) {
+                    self.markSlot(slot);
+                    return slot;
+                }
+            }
+        }
+        return self.allocateSlot();
+    }
+
+    fn slotBit(slot: u8) u16 {
+        return @as(u16, 1) << @intCast(slot);
+    }
+
+    fn markSlot(self: *Self, slot: u8) void {
+        self.used_slots |= slotBit(slot);
+        self.ever_used_slots |= slotBit(slot);
+        if (slot >= self.next_slot) self.next_slot = slot + 1;
     }
 
     /// Bind a variable name to a slot
@@ -2515,6 +2616,13 @@ pub const QueryPlanner = struct {
         }) catch {
             return PlannerError.OutOfMemory;
         };
+        self.markSlot(slot);
+        const first = self.name_slots.getOrPut(name) catch return PlannerError.OutOfMemory;
+        if (!first.found_existing) {
+            first.value_ptr.* = slot;
+        } else if (first.value_ptr.* != slot and self.slot_conflict == null) {
+            self.slot_conflict = name;
+        }
     }
 
     fn setPlanDetail(self: *Self, comptime fmt: []const u8, args: anytype) void {
@@ -2531,6 +2639,13 @@ pub const QueryPlanner = struct {
     pub fn planErrorDetail(self: *const Self) ?[]const u8 {
         if (self.detail_len == 0) return null;
         return self.detail_buf[0..self.detail_len];
+    }
+
+    /// The slot of a node variable that is already bound.
+    fn boundNodeSlot(self: *const Self, name: []const u8) ?u8 {
+        const binding = self.bindings.get(name) orelse return null;
+        if (binding.kind != .node) return null;
+        return binding.slot;
     }
 
     /// Get the slot for a variable
@@ -2552,16 +2667,6 @@ pub const QueryPlanner = struct {
 fn getVariableName(expr: *const ast.Expression) ?[]const u8 {
     return switch (expr.*) {
         .variable => |v| v.name,
-        else => null,
-    };
-}
-
-/// Get a name for an expression (variable name or property access path)
-fn getExpressionName(expr: *const ast.Expression) ?[]const u8 {
-    return switch (expr.*) {
-        .variable => |v| v.name,
-        .property_access => |pa| pa.property,
-        .function_call => |f| f.name,
         else => null,
     };
 }

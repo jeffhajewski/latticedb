@@ -836,7 +836,8 @@ lattice_error lattice_hash_embed(
 /* Free a hash embedding vector */
 void lattice_hash_embed_free(float* vector, uint32_t dimensions);
 
-/* Create an HTTP embedding client */
+/* Create an HTTP embedding client. The strings in `config` are copied; the
+ * caller's buffers need not outlive this call. */
 lattice_error lattice_embedding_client_create(
     const lattice_embedding_config* config,
     lattice_embedding_client** client_out

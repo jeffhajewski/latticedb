@@ -292,6 +292,10 @@ const StreamBatchHandle = struct {
 const EmbeddingClientHandle = struct {
     header: HandleHeader,
     client: embedding_mod.EmbeddingClient,
+    /// The client's endpoint, model and API key, copied out of the caller's
+    /// config: the client keeps slices of them, and the caller's buffers need
+    /// not outlive the create call.
+    config_arena: std.heap.ArenaAllocator,
 };
 
 // ============================================================================
@@ -4071,24 +4075,44 @@ pub export fn lattice_embedding_client_create(
         .openai => .openai,
     };
 
-    const api_key: ?[]const u8 = cStrToSlice(cfg.api_key);
+    const api_key_borrowed: ?[]const u8 = cStrToSlice(cfg.api_key);
 
     const timeout = if (cfg.timeout_ms == 0) @as(u32, 30_000) else cfg.timeout_ms;
 
-    const handle = global_allocator.create(EmbeddingClientHandle) catch return .err_out_of_memory;
+    var config_arena = std.heap.ArenaAllocator.init(global_allocator);
+    const owned = config_arena.allocator();
+    const endpoint_copy = owned.dupe(u8, endpoint) catch {
+        config_arena.deinit();
+        return .err_out_of_memory;
+    };
+    const model_copy = owned.dupe(u8, model) catch {
+        config_arena.deinit();
+        return .err_out_of_memory;
+    };
+    const api_key_copy: ?[]const u8 = if (api_key_borrowed) |key| owned.dupe(u8, key) catch {
+        config_arena.deinit();
+        return .err_out_of_memory;
+    } else null;
+
+    const handle = global_allocator.create(EmbeddingClientHandle) catch {
+        config_arena.deinit();
+        return .err_out_of_memory;
+    };
     handle.* = .{
         .header = HandleHeader.init(.embedding_client),
         .client = embedding_mod.EmbeddingClient.init(global_allocator, .{
-            .endpoint = endpoint,
-            .model = model,
+            .endpoint = endpoint_copy,
+            .model = model_copy,
             .api_format = api_format,
-            .api_key = api_key,
+            .api_key = api_key_copy,
             .timeout_ms = timeout,
         }),
+        .config_arena = config_arena,
     };
     const register_result = registerHandle(EmbeddingClientHandle, handle);
     if (register_result != .ok) {
         handle.client.deinit();
+        handle.config_arena.deinit();
         global_allocator.destroy(handle);
         return register_result;
     }
@@ -4143,6 +4167,7 @@ pub export fn lattice_embedding_client_free(
     const handle = toHandle(EmbeddingClientHandle, client) orelse return;
     unregisterHandle(EmbeddingClientHandle, handle);
     handle.client.deinit();
+    handle.config_arena.deinit();
     global_allocator.destroy(handle);
 }
 

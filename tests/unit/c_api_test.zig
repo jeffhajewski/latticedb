@@ -3635,3 +3635,31 @@ test "c_api: edge result types are NUL-terminated" {
 
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
 }
+
+test "c_api: embedding client keeps its own copy of the config strings" {
+    // Port 9 (discard) is not listening, so a request with the real endpoint
+    // fails to connect (IO). Had the client kept the caller's buffer, it would
+    // read the overwritten bytes and fail to parse a URI (INVALID_ARG).
+    const endpoint = try std.testing.allocator.dupeZ(u8, "http://127.0.0.1:9/api/embeddings");
+    const model = try std.testing.allocator.dupeZ(u8, "nomic-embed-text");
+    const config = c_api.lattice_embedding_config{
+        .endpoint = endpoint.ptr,
+        .model = model.ptr,
+        .api_format = .ollama,
+        .api_key = null,
+        .timeout_ms = 2000,
+    };
+    var client: ?*c_api.lattice_embedding_client = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_embedding_client_create(&config, &client));
+    defer c_api.lattice_embedding_client_free(client);
+
+    @memset(endpoint, ' ');
+    @memset(model, ' ');
+    std.testing.allocator.free(endpoint);
+    std.testing.allocator.free(model);
+
+    var vector: ?[*]f32 = null;
+    var dims: u32 = 0;
+    const text = "hello";
+    try std.testing.expectEqual(lattice_error.err_io, c_api.lattice_embedding_client_embed(client, text, text.len, &vector, &dims));
+}

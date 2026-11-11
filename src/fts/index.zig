@@ -1007,6 +1007,13 @@ pub const FtsIndex = struct {
     /// Search with prefix/wildcard matching
     /// Terms ending with * are expanded to all matching dictionary terms
     /// Example: "optim*" matches "optimize", "optimization", "optimizer"
+    ///
+    /// Every query word is required. Words are split the way the tokenizer
+    /// splits them, so "bar," asks for "bar"; words the tokenizer would drop
+    /// (too short, stop words) are dropped here too. A prefix shorter than
+    /// `min_prefix_length` is a requirement nothing can meet. A document counts
+    /// once per query word however many of a prefix's expansions it contains.
+    /// Words starting with '-' are ignored.
     pub fn searchWithPrefix(
         self: *Self,
         query_text: []const u8,
@@ -1021,55 +1028,46 @@ pub const FtsIndex = struct {
         var doc_term_counts = std.AutoHashMap(DocId, u32).init(self.allocator);
         defer doc_term_counts.deinit();
 
-        // Parse query manually to detect wildcards
-        var i: usize = 0;
+        // Documents matched by the query word being processed, with its score.
+        var word_docs = std.AutoHashMap(DocId, f32).init(self.allocator);
+        defer word_docs.deinit();
+
         var total_terms: u32 = 0;
 
-        while (i < query_text.len) {
-            // Skip whitespace
-            while (i < query_text.len and std.ascii.isWhitespace(query_text[i])) {
-                i += 1;
-            }
-            if (i >= query_text.len) break;
+        var chunks = std.mem.tokenizeAny(u8, query_text, " \t\r\n");
+        while (chunks.next()) |chunk| {
+            // Exclusions are not supported by this search.
+            if (chunk[0] == '-') continue;
 
-            // Check for exclusion prefix (skip for now - basic implementation)
-            if (query_text[i] == '-') {
-                // Skip excluded terms
-                i += 1;
-                while (i < query_text.len and !std.ascii.isWhitespace(query_text[i])) {
-                    i += 1;
+            const wildcard = prefix_mod.hasWildcard(chunk);
+            const body = prefix_mod.extractPrefix(chunk);
+
+            var i: usize = 0;
+            while (i < body.len) {
+                while (i < body.len and !tokenizer_mod.isWordChar(body[i])) i += 1;
+                if (i >= body.len) break;
+                const start = i;
+                while (i < body.len and tokenizer_mod.isWordChar(body[i])) i += 1;
+                const word = body[start..i];
+                // Only the word the '*' is attached to is a prefix.
+                const is_prefix = wildcard and i == body.len;
+
+                var lower_buf: [64]u8 = undefined;
+                if (word.len > lower_buf.len) {
+                    if (is_prefix) return &[_]ScoredDoc{};
+                    continue;
                 }
-                continue;
-            }
+                for (word, 0..) |c, j| lower_buf[j] = std.ascii.toLower(c);
+                const normalized = lower_buf[0..word.len];
 
-            // Find end of term (including potential *)
-            const start = i;
-            while (i < query_text.len and !std.ascii.isWhitespace(query_text[i])) {
-                i += 1;
-            }
+                word_docs.clearRetainingCapacity();
+                if (is_prefix) {
+                    total_terms += 1;
+                    if (normalized.len < prefix_config.min_prefix_length) return &[_]ScoredDoc{};
 
-            if (i > start) {
-                const term = query_text[start..i];
-                total_terms += 1;
-
-                // Check if this is a wildcard term
-                if (prefix_mod.hasWildcard(term)) {
-                    const prefix = prefix_mod.extractPrefix(term);
-
-                    // Normalize to lowercase
-                    var lower_buf: [64]u8 = undefined;
-                    if (prefix.len > 64 or prefix.len < prefix_config.min_prefix_length) {
-                        continue;
-                    }
-                    for (prefix, 0..) |c, j| {
-                        lower_buf[j] = std.ascii.toLower(c);
-                    }
-                    const normalized_prefix = lower_buf[0..prefix.len];
-
-                    // Expand prefix to matching terms
                     const prefix_matches = prefix_mod.expandPrefixTerms(
                         self.allocator,
-                        normalized_prefix,
+                        normalized,
                         &self.dictionary,
                         prefix_config,
                     ) catch {
@@ -1077,79 +1075,34 @@ pub const FtsIndex = struct {
                     };
                     defer prefix_mod.freeMatches(self.allocator, prefix_matches);
 
-                    // Score documents from each prefix match
                     for (prefix_matches) |match| {
-                        if (match.entry.posting_page == 0) continue;
-
-                        var iter = self.posting_store.iterate(match.entry.posting_page) catch continue;
-                        defer iter.deinit();
-
-                        while (iter.next() catch null) |posting| {
-                            const doc_length = self.doc_lengths.getLength(posting.doc_id) catch continue;
-
-                            // Score without penalty (exact prefix match)
-                            const score = self.scorer.scoreTerm(
-                                self.doc_lengths.stats,
-                                posting.term_freq,
-                                match.entry.doc_freq,
-                                doc_length,
-                            );
-
-                            // Accumulate scores
-                            const current = doc_scores.get(posting.doc_id) orelse 0.0;
-                            doc_scores.put(posting.doc_id, current + score) catch continue;
-
-                            // Track term presence for AND semantics
-                            const count = doc_term_counts.get(posting.doc_id) orelse 0;
-                            if (count < total_terms) {
-                                doc_term_counts.put(posting.doc_id, count + 1) catch continue;
-                            }
-                        }
+                        try self.addTermScores(match.entry, &word_docs);
                     }
                 } else {
-                    // Regular term - exact match
-                    var lower_buf: [64]u8 = undefined;
-                    if (term.len > 64 or term.len < self.config.tokenizer.min_token_length) {
-                        continue;
-                    }
-                    for (term, 0..) |c, j| {
-                        lower_buf[j] = std.ascii.toLower(c);
-                    }
-                    const normalized = lower_buf[0..term.len];
-
-                    // Skip stop words
+                    if (word.len < self.config.tokenizer.min_token_length or
+                        word.len > self.config.tokenizer.max_token_length) continue;
                     if (self.config.tokenizer.remove_stop_words and
                         stopwords_mod.isStopWord(normalized, self.config.tokenizer.language))
                     {
-                        total_terms -= 1; // Don't count stop words
                         continue;
                     }
+                    total_terms += 1;
 
-                    // Look up in dictionary
-                    const dict_entry = self.dictionary.get(normalized) catch continue orelse continue;
-                    if (dict_entry.posting_page == 0) continue;
+                    const dict_entry = (self.dictionary.get(normalized) catch {
+                        return FtsError.DictionaryError;
+                    }) orelse return &[_]ScoredDoc{};
+                    try self.addTermScores(dict_entry, &word_docs);
+                }
 
-                    var iter = self.posting_store.iterate(dict_entry.posting_page) catch continue;
-                    defer iter.deinit();
+                // A required word nothing matched rules out every document.
+                if (word_docs.count() == 0) return &[_]ScoredDoc{};
 
-                    while (iter.next() catch null) |posting| {
-                        const doc_length = self.doc_lengths.getLength(posting.doc_id) catch continue;
-
-                        const score = self.scorer.scoreTerm(
-                            self.doc_lengths.stats,
-                            posting.term_freq,
-                            dict_entry.doc_freq,
-                            doc_length,
-                        );
-
-                        const current = doc_scores.get(posting.doc_id) orelse 0.0;
-                        doc_scores.put(posting.doc_id, current + score) catch continue;
-
-                        const count = doc_term_counts.get(posting.doc_id) orelse 0;
-                        if (count < total_terms) {
-                            doc_term_counts.put(posting.doc_id, count + 1) catch continue;
-                        }
-                    }
+                var it = word_docs.iterator();
+                while (it.next()) |hit| {
+                    const score = doc_scores.getOrPut(hit.key_ptr.*) catch return FtsError.OutOfMemory;
+                    score.value_ptr.* = if (score.found_existing) score.value_ptr.* + hit.value_ptr.* else hit.value_ptr.*;
+                    const count = doc_term_counts.getOrPut(hit.key_ptr.*) catch return FtsError.OutOfMemory;
+                    count.value_ptr.* = if (count.found_existing) count.value_ptr.* + 1 else 1;
                 }
             }
         }
@@ -1192,6 +1145,24 @@ pub const FtsIndex = struct {
             return trimmed;
         }
         return result_slice;
+    }
+
+    /// Add one dictionary term's BM25 score to every document in its postings.
+    fn addTermScores(self: *Self, entry: DictionaryEntry, scores: *std.AutoHashMap(DocId, f32)) FtsError!void {
+        if (entry.posting_page == 0) return;
+        var iter = self.posting_store.iterate(entry.posting_page) catch return FtsError.PostingError;
+        defer iter.deinit();
+        while (iter.next() catch return FtsError.PostingError) |posting| {
+            const doc_length = self.doc_lengths.getLength(posting.doc_id) catch continue;
+            const score = self.scorer.scoreTerm(
+                self.doc_lengths.stats,
+                posting.term_freq,
+                entry.doc_freq,
+                doc_length,
+            );
+            const slot = scores.getOrPut(posting.doc_id) catch return FtsError.OutOfMemory;
+            slot.value_ptr.* = if (slot.found_existing) slot.value_ptr.* + score else score;
+        }
     }
 
     /// Search with explicit mode (AND or OR)
@@ -2777,6 +2748,39 @@ test "fts quoted phrase with a stop word matches as indexed" {
     _ = try fx.index.indexDocument(2, "America bank holiday");
 
     const results = try fx.index.searchWithMode("\"bank of america\"", .@"and", 10);
+    defer fx.index.freeResults(results);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqual(@as(DocId, 1), results[0].doc_id);
+}
+
+test "fts prefix search counts a document once per query word" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_prefix_count_test.db");
+    defer fx.destroy(allocator);
+
+    // Doc 1 has two words under "optim" and no "zebra"; it must not stand in
+    // for a document holding both query words.
+    _ = try fx.index.indexDocument(1, "optimize optimization");
+    _ = try fx.index.indexDocument(2, "zebra optimizer");
+
+    for ([_][]const u8{ "zebra optim*", "optim* zebra" }) |query| {
+        const results = try fx.index.searchWithPrefix(query, .{}, 10);
+        defer fx.index.freeResults(results);
+        try std.testing.expectEqual(@as(usize, 1), results.len);
+        try std.testing.expectEqual(@as(DocId, 2), results[0].doc_id);
+    }
+}
+
+test "fts prefix search splits words the way the tokenizer does" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_prefix_split_test.db");
+    defer fx.destroy(allocator);
+
+    _ = try fx.index.indexDocument(1, "database systems");
+    _ = try fx.index.indexDocument(2, "datastore management");
+
+    // Punctuation is not part of a word, and a stop word asks for nothing.
+    const results = try fx.index.searchWithPrefix("the systems, data*", .{}, 10);
     defer fx.index.freeResults(results);
     try std.testing.expectEqual(@as(usize, 1), results.len);
     try std.testing.expectEqual(@as(DocId, 1), results[0].doc_id);

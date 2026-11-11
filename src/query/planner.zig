@@ -1290,8 +1290,7 @@ pub const QueryPlanner = struct {
                 .expr = item.expression,
                 .output_slot = @intCast(i),
             };
-            self.output_column_names[i] = item.alias orelse
-                self.columnNameForExpression(item.expression);
+            self.output_column_names[i] = columnName(self, item);
         }
 
         const project = project_ops.Project.init(self.allocator, input_op, items) catch {
@@ -1323,6 +1322,19 @@ pub const QueryPlanner = struct {
         return PlannerError.TooManyVariables;
     }
 
+    /// Name a RETURN item's result column.
+    ///
+    /// An alias wins. Otherwise the column is named after the expression,
+    /// falling back to the expression's text as written. A column must never
+    /// be left unnamed here, because the caller would then name it after
+    /// whichever variable happens to share its slot.
+    fn columnName(self: *Self, item: ast.ReturnItem) ?[]const u8 {
+        if (item.alias) |alias| return alias;
+        if (self.columnNameForExpression(item.expression)) |name| return name;
+        if (item.text.len > 0) return item.text;
+        return null;
+    }
+
     /// Name an unaliased RETURN item after the expression it projects.
     ///
     /// Cypher names a result column after the text that produced it, so
@@ -1349,8 +1361,8 @@ pub const QueryPlanner = struct {
                 if (call.star) {
                     break :blk std.fmt.allocPrint(self.allocator, "{s}(*)", .{call.name}) catch null;
                 }
-                if (call.arguments.len != 1) break :blk call.name;
-                const arg = self.columnNameForExpression(call.arguments[0]) orelse break :blk call.name;
+                if (call.arguments.len != 1) break :blk null;
+                const arg = self.columnNameForExpression(call.arguments[0]) orelse break :blk null;
                 break :blk std.fmt.allocPrint(
                     self.allocator,
                     "{s}({s})",
@@ -1378,8 +1390,7 @@ pub const QueryPlanner = struct {
 
         for (ret.items, 0..) |item, i| {
             const slot: u8 = @intCast(i);
-            self.output_column_names[i] = item.alias orelse
-                self.columnNameForExpression(item.expression);
+            self.output_column_names[i] = columnName(self, item);
 
             if (self.isDirectAggregate(item.expression)) |agg_info| {
                 // Direct aggregate function call: count(n), sum(n.val), etc.

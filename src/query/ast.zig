@@ -102,6 +102,9 @@ pub const ReturnClause = struct {
 pub const ReturnItem = struct {
     expression: *Expression,
     alias: ?[]const u8,
+    /// The item's expression as written in the query, without its alias.
+    /// An unaliased item's result column is named after it.
+    text: []const u8 = "",
 };
 
 /// ORDER BY clause

@@ -368,3 +368,36 @@ test "cypher: a variable bound to null reads as null" {
     try std.testing.expectEqual(@as(i64, 1), try queryCount(db, "UNWIND [1, null] AS v WITH v WHERE v IS NULL RETURN count(*)"));
     try std.testing.expectEqual(@as(i64, 1), try queryCount(db, "MATCH (n:Rare) WITH n.x AS x WHERE x IS NULL RETURN count(x IS NULL)"));
 }
+
+// ============================================================================
+// Column names
+// ============================================================================
+
+test "cypher: an unaliased expression column is named by its text" {
+    const path = "/tmp/lattice_cs_column_text.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    {
+        // The column used to be called `y`, after the variable that shared
+        // its slot.
+        var result = try db.query("UNWIND [1] AS y RETURN null = null");
+        defer result.deinit();
+        try std.testing.expectEqualStrings("null = null", result.columns[0]);
+    }
+    {
+        var result = try db.query("UNWIND [1] AS y RETURN y, y + 1, coalesce(null, y), y AS z, 'a'");
+        defer result.deinit();
+        try std.testing.expectEqualStrings("y", result.columns[0]);
+        try std.testing.expectEqualStrings("y + 1", result.columns[1]);
+        try std.testing.expectEqualStrings("coalesce(null, y)", result.columns[2]);
+        try std.testing.expectEqualStrings("z", result.columns[3]);
+        try std.testing.expectEqualStrings("'a'", result.columns[4]);
+    }
+    {
+        var result = try db.query("UNWIND [1, 2] AS y RETURN y % 2 = 0, count(*)");
+        defer result.deinit();
+        try std.testing.expectEqualStrings("y % 2 = 0", result.columns[0]);
+        try std.testing.expectEqualStrings("count(*)", result.columns[1]);
+    }
+}

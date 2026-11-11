@@ -464,7 +464,9 @@ pub const Parser = struct {
     }
 
     fn parseReturnItem(self: *Self) ?ast.ReturnItem {
+        const first = self.current.text;
         const expr = self.parseExpression() orelse return null;
+        const text = sourceSpan(first, self.previous.text);
         var alias: ?[]const u8 = null;
 
         if (self.match(.kw_as)) {
@@ -479,7 +481,19 @@ pub const Parser = struct {
         return .{
             .expression = expr,
             .alias = alias,
+            .text = text,
         };
+    }
+
+    /// The source text from the start of `first` to the end of `last`.
+    ///
+    /// Token text is a slice of the query source, so two tokens in order
+    /// bound the source between them.
+    fn sourceSpan(first: []const u8, last: []const u8) []const u8 {
+        const start = @intFromPtr(first.ptr);
+        const end = @intFromPtr(last.ptr) + last.len;
+        if (end < start) return first;
+        return first.ptr[0 .. end - start];
     }
 
     fn parseOrderByClause(self: *Self) ?ast.Clause {

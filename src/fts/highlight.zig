@@ -76,9 +76,12 @@ const SnippetRegion = struct {
 
 /// Find all matches of query terms in document text.
 ///
-/// Query terms should already be normalized/stemmed if stemming is used.
-/// This function re-tokenizes the document and finds tokens whose
-/// stemmed form matches any query term.
+/// Query terms should already be normalized the way the index normalizes
+/// them (`tokenizer.normalizeTerm`). This function re-tokenizes the document
+/// and finds tokens whose normalized form matches any query term. Pass the
+/// config the index reads with (`FtsIndex.analysis`), so a highlighted word
+/// is one the search matched: the same word splitting, case and accent
+/// folding, and stemming only where the index stems.
 ///
 /// Returns matches sorted by start position.
 pub fn findMatches(
@@ -110,16 +113,11 @@ pub fn findMatches(
 
     var tokenizer = Tokenizer.init(allocator, text, doc_config);
 
-    var stem_buf: [64]u8 = undefined;
+    var term_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
 
     while (tokenizer.next()) |token| {
-        // Normalize/stem the token to match against query terms
-        const normalized = tokenizer_mod.normalizeAndStemWithLanguage(
-            token.text,
-            &stem_buf,
-            tokenizer_config.use_stemming,
-            tokenizer_config.language,
-        );
+        // Normalize the token as indexing does to match against query terms
+        const normalized = tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &term_buf) orelse continue;
 
         // Check if this token matches any query term
         if (term_set.contains(normalized)) {

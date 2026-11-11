@@ -5557,6 +5557,61 @@ test "database: uncommitted text matches full-text queries by whole terms" {
     try std.testing.expectEqual(b, committed[0].doc_id);
 }
 
+test "database: full-text search finds non-ASCII words whole, before and after reopen" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_fts_unicode_words_reopen_test.ltdb";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var muller: u64 = 0;
+    {
+        const db = try Database.open(allocator, path, .{
+            .create = true,
+            .config = .{ .enable_fts = true, .enable_vector = false },
+        });
+        defer db.close();
+        try db.createNodeFtsIndex("Person", "name");
+
+        var txn = try db.beginTransaction(.read_write);
+        muller = try db.createNode(&txn, &[_][]const u8{"Person"});
+        try db.setNodeProperty(&txn, muller, "name", .{ .string_val = "Herr Müller" });
+        const zoller = try db.createNode(&txn, &[_][]const u8{"Person"});
+        try db.setNodeProperty(&txn, zoller, "name", .{ .string_val = "Frau Zöller" });
+        try db.commitTransaction(&txn);
+
+        // Pending text is analysed the way the index analyses it.
+        var pending = try db.beginTransaction(.read_write);
+        const angstrom = try db.createNode(&pending, &[_][]const u8{"Person"});
+        try db.setNodeProperty(&pending, angstrom, "name", .{ .string_val = "Anders Ångström" });
+        const staged = try db.ftsSearchIndexInTxn(&pending, .node, "Person", "name", "angstrom", 10);
+        defer db.freeFtsSearchResults(staged);
+        try std.testing.expectEqual(@as(usize, 1), staged.len);
+        try std.testing.expectEqual(angstrom, staged[0].doc_id);
+        try db.commitTransaction(&pending);
+    }
+
+    const db = try Database.open(allocator, path, .{
+        .create = false,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+    for ([_][]const u8{ "Müller", "MULLER", "müller" }) |query| {
+        const found = try db.ftsSearchIndexInTxn(null, .node, "Person", "name", query, 10);
+        defer db.freeFtsSearchResults(found);
+        try std.testing.expectEqual(@as(usize, 1), found.len);
+        try std.testing.expectEqual(muller, found[0].doc_id);
+    }
+    // 0.16.0 indexed both names as "ller", so each found the other.
+    const fragment = try db.ftsSearchIndexInTxn(null, .node, "Person", "name", "ller", 10);
+    defer db.freeFtsSearchResults(fragment);
+    try std.testing.expectEqual(@as(usize, 0), fragment.len);
+    const committed = try db.ftsSearchIndexInTxn(null, .node, "Person", "name", "ÅNGSTRÖM", 10);
+    defer db.freeFtsSearchResults(committed);
+    try std.testing.expectEqual(@as(usize, 1), committed.len);
+}
+
 test "database: a full-text predicate becomes the access path, not a filter" {
     const allocator = std.testing.allocator;
     const db = try Database.open(allocator, ":memory:", .{

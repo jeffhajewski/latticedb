@@ -212,6 +212,10 @@ pub const FtsIndex = struct {
     lengths_tree: *BTree,
     reverse_tree: ?*BTree,
 
+    /// The tokenizer settings the stored terms were written with, once read;
+    /// see `analysis`.
+    analysis_cache: ?TokenizerConfig = null,
+
     const Self = @This();
 
     /// Initialize a new FTS index
@@ -263,6 +267,82 @@ pub const FtsIndex = struct {
     }
 
     // ========================================================================
+    // Analysis
+    // ========================================================================
+
+    /// The tokenizer settings this index's terms are written and read with.
+    ///
+    /// They are recorded in the index when its first document goes in, from
+    /// `config.tokenizer`, and from then on win over the config, so a word is
+    /// always looked up as the term it was stored as even if the config
+    /// changes between opens. An index 0.16.0 built has no record; its terms
+    /// came from the ASCII-only tokenizer, so it keeps that tokenizer
+    /// (`ascii_only`) and its stored terms stay findable. An empty index has
+    /// nothing stored and uses the config as it is.
+    pub fn analysis(self: *Self) FtsError!TokenizerConfig {
+        if (self.analysis_cache) |cached| return cached;
+        const recorded = self.doc_lengths.getAnalysis() catch return FtsError.ScorerError;
+        const result = if (recorded) |r|
+            decodeAnalysis(self.config.tokenizer, r)
+        else if (self.doc_lengths.stats.total_docs == 0)
+            freshAnalysis(self.config.tokenizer)
+        else
+            legacyAnalysis(self.config.tokenizer);
+        self.analysis_cache = result;
+        return result;
+    }
+
+    /// The settings to index a document with. An empty index (a new one, or
+    /// one every document has left) takes the config's settings and records
+    /// them; otherwise the recorded or legacy settings stand.
+    fn analysisForWrite(self: *Self) FtsError!TokenizerConfig {
+        if (self.doc_lengths.stats.total_docs != 0) return self.analysis();
+        const fresh = freshAnalysis(self.config.tokenizer);
+        const encoded = encodeAnalysis(fresh);
+        const recorded = self.doc_lengths.getAnalysis() catch return FtsError.ScorerError;
+        if (recorded == null or !std.mem.eql(u8, &recorded.?, &encoded)) {
+            self.doc_lengths.putAnalysis(encoded) catch return FtsError.ScorerError;
+        }
+        self.analysis_cache = fresh;
+        return fresh;
+    }
+
+    const ANALYSIS_VERSION: u8 = 1;
+    const ANALYSIS_ACCENTS: u8 = 1;
+    const ANALYSIS_STEMMING: u8 = 2;
+
+    fn freshAnalysis(config: TokenizerConfig) TokenizerConfig {
+        var result = config;
+        result.ascii_only = false;
+        return result;
+    }
+
+    fn legacyAnalysis(config: TokenizerConfig) TokenizerConfig {
+        var result = config;
+        result.ascii_only = true;
+        result.remove_accents = false;
+        result.use_stemming = false;
+        return result;
+    }
+
+    /// Version, flags, language, reserved.
+    fn encodeAnalysis(config: TokenizerConfig) [scorer_mod.DocLengthStore.ANALYSIS_LEN]u8 {
+        var flags: u8 = 0;
+        if (config.remove_accents) flags |= ANALYSIS_ACCENTS;
+        if (config.use_stemming) flags |= ANALYSIS_STEMMING;
+        return .{ ANALYSIS_VERSION, flags, @intFromEnum(config.language), 0 };
+    }
+
+    fn decodeAnalysis(config: TokenizerConfig, recorded: [scorer_mod.DocLengthStore.ANALYSIS_LEN]u8) TokenizerConfig {
+        var result = freshAnalysis(config);
+        // A later version's record is read as far as this one understands it.
+        result.remove_accents = recorded[1] & ANALYSIS_ACCENTS != 0;
+        result.use_stemming = recorded[1] & ANALYSIS_STEMMING != 0;
+        if (std.enums.fromInt(tokenizer_mod.Language, recorded[2])) |language| result.language = language;
+        return result;
+    }
+
+    // ========================================================================
     // Indexing Operations
     // ========================================================================
 
@@ -279,8 +359,19 @@ pub const FtsIndex = struct {
         doc_id: DocId,
         text: []const u8,
     ) FtsError!u32 {
+        return self.indexDocumentAnalyzed(doc_id, text, try self.analysisForWrite());
+    }
+
+    /// `indexDocument` with the tokenizer settings given rather than the
+    /// index's own; tests use it to build an index the way 0.16.0 did.
+    fn indexDocumentAnalyzed(
+        self: *Self,
+        doc_id: DocId,
+        text: []const u8,
+        tokenizer_config: TokenizerConfig,
+    ) FtsError!u32 {
         // 1. Tokenize text
-        var tok = Tokenizer.init(self.allocator, text, self.config.tokenizer);
+        var tok = Tokenizer.init(self.allocator, text, tokenizer_config);
         const tokens = tok.tokenizeAll() catch {
             return FtsError.TokenizerError;
         };
@@ -302,16 +393,8 @@ pub const FtsIndex = struct {
         }
 
         for (tokens) |token| {
-            // Normalize to lowercase
-            var lower_buf: [64]u8 = undefined;
-            const normalized = if (token.text.len <= 64) blk: {
-                for (token.text, 0..) |c, i| {
-                    lower_buf[i] = std.ascii.toLower(c);
-                }
-                break :blk lower_buf[0..token.text.len];
-            } else {
-                continue; // Skip tokens > 64 chars
-            };
+            var lower_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
+            const normalized = tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &lower_buf) orelse continue;
 
             const result = term_infos.getOrPut(normalized) catch {
                 return FtsError.OutOfMemory;
@@ -456,6 +539,7 @@ pub const FtsIndex = struct {
         self.dictionary.tree.clear(self.allocator) catch return FtsError.BTreeError;
         self.doc_lengths.tree.clear(self.allocator) catch return FtsError.BTreeError;
         self.doc_lengths.stats = .{ .total_docs = 0, .total_tokens = 0, .avg_doc_length = 0 };
+        self.analysis_cache = null;
         if (self.reverse_index) |*ri| {
             ri.tree.clear(self.allocator) catch return FtsError.BTreeError;
         }
@@ -615,7 +699,8 @@ pub const FtsIndex = struct {
     /// This is a B-tree lookup per term against data the index already keeps, so
     /// it costs microseconds and needs no counting pass.
     pub fn estimateMatches(self: *Self, query_text: []const u8) FtsError!?u32 {
-        var tok = Tokenizer.init(self.allocator, query_text, self.config.tokenizer);
+        const tokenizer_config = try self.analysis();
+        var tok = Tokenizer.init(self.allocator, query_text, tokenizer_config);
         const tokens = tok.tokenizeAll() catch return FtsError.TokenizerError;
         defer self.allocator.free(tokens);
 
@@ -623,10 +708,8 @@ pub const FtsIndex = struct {
         for (tokens) |token| {
             // The same normalisation search does, so the terms looked up here are
             // the terms that would actually be searched.
-            var lower_buf: [64]u8 = undefined;
-            if (token.text.len > lower_buf.len) continue;
-            for (token.text, 0..) |c, i| lower_buf[i] = std.ascii.toLower(c);
-            const normalized = lower_buf[0..token.text.len];
+            var lower_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
+            const normalized = tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &lower_buf) orelse continue;
 
             const entry = self.dictionary.get(normalized) catch {
                 return FtsError.DictionaryError;
@@ -644,7 +727,8 @@ pub const FtsIndex = struct {
         limit: u32,
     ) FtsError![]ScoredDoc {
         // Tokenize query
-        var tok = Tokenizer.init(self.allocator, query_text, self.config.tokenizer);
+        const tokenizer_config = try self.analysis();
+        var tok = Tokenizer.init(self.allocator, query_text, tokenizer_config);
         const tokens = tok.tokenizeAll() catch {
             return FtsError.TokenizerError;
         };
@@ -663,13 +747,8 @@ pub const FtsIndex = struct {
             if (num_terms >= 32) break;
 
             // Normalize
-            var lower_buf: [64]u8 = undefined;
-            if (token.text.len <= 64) {
-                for (token.text, 0..) |c, i| {
-                    lower_buf[i] = std.ascii.toLower(c);
-                }
-                const normalized = lower_buf[0..token.text.len];
-
+            var lower_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
+            if (tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &lower_buf)) |normalized| {
                 // Check if already added
                 var found = false;
                 for (query_term_buf[0..num_terms]) |t| {
@@ -965,7 +1044,8 @@ pub const FtsIndex = struct {
         return top.finish(self.allocator);
     }
 
-    /// Score text that is not in the index yet against a query, by term presence.
+    /// Matches text that is not in the index yet against one query, by term
+    /// presence.
     ///
     /// The query and the text go through the tokenizer and normalisation that
     /// indexing and search use, so a pending document matches a query exactly
@@ -973,40 +1053,81 @@ pub const FtsIndex = struct {
     /// The score is the number of distinct query terms, or 0 when any is
     /// missing or the query has no searchable terms. It is not BM25, so it only
     /// decides which pending documents match, not how they rank against
-    /// indexed ones.
+    /// indexed ones. The query is analysed once, so scoring many pending
+    /// documents costs only their own tokenizing.
+    pub const PresenceMatcher = struct {
+        query_arena: std.heap.ArenaAllocator,
+        scratch: std.heap.ArenaAllocator,
+        config: TokenizerConfig,
+        /// Distinct query terms.
+        terms: []const []const u8,
+
+        pub fn deinit(self: *PresenceMatcher) void {
+            self.scratch.deinit();
+            self.query_arena.deinit();
+        }
+
+        pub fn score(self: *PresenceMatcher, text: []const u8) FtsError!f32 {
+            if (self.terms.len == 0) return 0;
+            _ = self.scratch.reset(.retain_capacity);
+            const arena = self.scratch.allocator();
+
+            var text_terms = StringHashMap(void).init(arena);
+            var tok = Tokenizer.init(arena, text, self.config);
+            while (tok.next()) |token| {
+                var term_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
+                const term = tokenizer_mod.normalizeTerm(self.config, token.text, &term_buf) orelse continue;
+                if (text_terms.contains(term)) continue;
+                const owned = arena.dupe(u8, term) catch return FtsError.OutOfMemory;
+                text_terms.put(owned, {}) catch return FtsError.OutOfMemory;
+            }
+            for (self.terms) |term| {
+                if (!text_terms.contains(term)) return 0;
+            }
+            return @floatFromInt(self.terms.len);
+        }
+    };
+
+    /// A matcher for `query_text` against text this index would take in now.
+    pub fn presenceMatcher(self: *Self, query_text: []const u8) FtsError!PresenceMatcher {
+        // Text that goes in now is analysed as indexing would analyse it.
+        const tokenizer_config = if (self.doc_lengths.stats.total_docs == 0)
+            freshAnalysis(self.config.tokenizer)
+        else
+            try self.analysis();
+
+        var query_arena = std.heap.ArenaAllocator.init(self.allocator);
+        errdefer query_arena.deinit();
+        const arena = query_arena.allocator();
+
+        var terms: ArrayListUnmanaged([]const u8) = .empty;
+        var tok = Tokenizer.init(arena, query_text, tokenizer_config);
+        next_token: while (tok.next()) |token| {
+            var term_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
+            const term = tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &term_buf) orelse continue;
+            for (terms.items) |seen| {
+                if (std.mem.eql(u8, seen, term)) continue :next_token;
+            }
+            const owned = arena.dupe(u8, term) catch return FtsError.OutOfMemory;
+            terms.append(arena, owned) catch return FtsError.OutOfMemory;
+        }
+        return .{
+            .query_arena = query_arena,
+            .scratch = std.heap.ArenaAllocator.init(self.allocator),
+            .config = tokenizer_config,
+            .terms = terms.items,
+        };
+    }
+
+    /// `presenceMatcher(query_text).score(text)`, for a single document.
     pub fn termPresenceScore(
-        allocator: Allocator,
-        config: FtsConfig,
+        self: *Self,
         query_text: []const u8,
         text: []const u8,
     ) FtsError!f32 {
-        var arena_state = std.heap.ArenaAllocator.init(allocator);
-        defer arena_state.deinit();
-        const arena = arena_state.allocator();
-
-        var text_terms = StringHashMap(void).init(arena);
-        var text_tok = Tokenizer.init(arena, text, config.tokenizer);
-        while (text_tok.next()) |token| {
-            if (token.text.len > 64) continue;
-            const term = arena.alloc(u8, token.text.len) catch return FtsError.OutOfMemory;
-            for (token.text, 0..) |c, i| term[i] = std.ascii.toLower(c);
-            text_terms.put(term, {}) catch return FtsError.OutOfMemory;
-        }
-
-        var query_terms = StringHashMap(void).init(arena);
-        var query_tok = Tokenizer.init(arena, query_text, config.tokenizer);
-        while (query_tok.next()) |token| {
-            if (token.text.len > 64) continue;
-            var lower_buf: [64]u8 = undefined;
-            for (token.text, 0..) |c, i| lower_buf[i] = std.ascii.toLower(c);
-            const term = lower_buf[0..token.text.len];
-            if (!text_terms.contains(term)) return 0;
-            if (!query_terms.contains(term)) {
-                const owned = arena.dupe(u8, term) catch return FtsError.OutOfMemory;
-                query_terms.put(owned, {}) catch return FtsError.OutOfMemory;
-            }
-        }
-        return @floatFromInt(query_terms.count());
+        var matcher = try self.presenceMatcher(query_text);
+        defer matcher.deinit();
+        return matcher.score(text);
     }
 
     /// Free search results
@@ -1038,7 +1159,8 @@ pub const FtsIndex = struct {
         limit: u32,
     ) FtsError![]ScoredDoc {
         // Tokenize query
-        var tok = Tokenizer.init(self.allocator, query_text, self.config.tokenizer);
+        const tokenizer_config = try self.analysis();
+        var tok = Tokenizer.init(self.allocator, query_text, tokenizer_config);
         const tokens = tok.tokenizeAll() catch {
             return FtsError.TokenizerError;
         };
@@ -1061,13 +1183,8 @@ pub const FtsIndex = struct {
         // Process each query term
         for (tokens) |token| {
             // Normalize token
-            var lower_buf: [64]u8 = undefined;
-            const normalized = if (token.text.len <= 64) blk: {
-                for (token.text, 0..) |c, i| {
-                    lower_buf[i] = std.ascii.toLower(c);
-                }
-                break :blk lower_buf[0..token.text.len];
-            } else continue;
+            var lower_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
+            const normalized = tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &lower_buf) orelse continue;
 
             word_best.clearRetainingCapacity();
 
@@ -1188,6 +1305,13 @@ pub const FtsIndex = struct {
 
         var total_terms: u32 = 0;
 
+        const tokenizer_config = try self.analysis();
+        // Every word, so the checks below can tell which is the prefix.
+        var split_config = tokenizer_config;
+        split_config.min_token_length = 1;
+        split_config.max_token_length = std.math.maxInt(u8);
+        split_config.remove_stop_words = false;
+
         var chunks = std.mem.tokenizeAny(u8, query_text, " \t\r\n");
         while (chunks.next()) |chunk| {
             // Exclusions are not supported by this search.
@@ -1196,26 +1320,25 @@ pub const FtsIndex = struct {
             const wildcard = prefix_mod.hasWildcard(chunk);
             const body = prefix_mod.extractPrefix(chunk);
 
-            var i: usize = 0;
-            while (i < body.len) {
-                while (i < body.len and !tokenizer_mod.isWordChar(body[i])) i += 1;
-                if (i >= body.len) break;
-                const start = i;
-                while (i < body.len and tokenizer_mod.isWordChar(body[i])) i += 1;
-                const word = body[start..i];
+            var words = Tokenizer.init(self.allocator, body, split_config);
+            while (words.next()) |token| {
+                const word = token.text;
                 // Only the word the '*' is attached to is a prefix.
-                const is_prefix = wildcard and i == body.len;
+                const is_prefix = wildcard and token.byte_offset + word.len == body.len;
 
-                var lower_buf: [64]u8 = undefined;
-                if (word.len > lower_buf.len) {
+                // A prefix is folded but not stemmed: a stem is not a prefix
+                // of the stems of longer words.
+                var lower_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
+                var fold_config = tokenizer_config;
+                fold_config.use_stemming = false;
+                const folded = tokenizer_mod.normalizeTerm(fold_config, word, &lower_buf) orelse {
                     if (is_prefix) return &[_]ScoredDoc{};
                     continue;
-                }
-                for (word, 0..) |c, j| lower_buf[j] = std.ascii.toLower(c);
-                const normalized = lower_buf[0..word.len];
+                };
 
                 word_docs.clearRetainingCapacity();
                 if (is_prefix) {
+                    const normalized = folded;
                     total_terms += 1;
                     if (normalized.len < prefix_config.min_prefix_length) return &[_]ScoredDoc{};
 
@@ -1233,14 +1356,17 @@ pub const FtsIndex = struct {
                         try self.addTermScores(match.entry, &word_docs);
                     }
                 } else {
-                    if (word.len < self.config.tokenizer.min_token_length or
-                        word.len > self.config.tokenizer.max_token_length) continue;
-                    if (self.config.tokenizer.remove_stop_words and
-                        stopwords_mod.isStopWord(normalized, self.config.tokenizer.language))
+                    if (word.len < tokenizer_config.min_token_length or
+                        word.len > tokenizer_config.max_token_length) continue;
+                    if (tokenizer_config.remove_stop_words and
+                        stopwords_mod.isStopWord(folded, tokenizer_config.language))
                     {
                         continue;
                     }
                     total_terms += 1;
+
+                    var term_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
+                    const normalized = tokenizer_mod.normalizeTerm(tokenizer_config, word, &term_buf) orelse continue;
 
                     const dict_entry = (self.dictionary.get(normalized) catch {
                         return FtsError.DictionaryError;
@@ -1601,6 +1727,7 @@ pub const FtsIndex = struct {
         num_terms.* = 0;
         num_excluded.* = 0;
         num_phrases.* = 0;
+        const tokenizer_config = try self.analysis();
 
         var i: usize = 0;
         while (i < query_text.len) {
@@ -1632,16 +1759,14 @@ pub const FtsIndex = struct {
                     // and "Bank of America" would never match.
                     const body_start = i;
                     while (i < query_text.len and query_text[i] != '"') i += 1;
-                    var tok = Tokenizer.init(self.allocator, query_text[body_start..i], self.config.tokenizer);
+                    var tok = Tokenizer.init(self.allocator, query_text[body_start..i], tokenizer_config);
                     while (tok.next()) |token| {
                         if (phrase_lens[phrase_idx] >= MAX_PHRASE_TERMS) break;
-                        if (token.text.len > 64) continue;
-                        const normalized = self.allocator.alloc(u8, token.text.len) catch {
+                        var term_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
+                        const term = tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &term_buf) orelse continue;
+                        const normalized = self.allocator.dupe(u8, term) catch {
                             return FtsError.OutOfMemory;
                         };
-                        for (token.text, 0..) |c, j| {
-                            normalized[j] = std.ascii.toLower(c);
-                        }
                         phrases_buf[phrase_idx][phrase_lens[phrase_idx]] = normalized;
                         phrase_lens[phrase_idx] += 1;
                     }
@@ -1678,41 +1803,31 @@ pub const FtsIndex = struct {
                 continue;
             }
 
-            // Find word end (regular term)
+            // A run up to whitespace or a quote is split into words by the
+            // tokenizer, as indexing splits text, so "bread," asks for
+            // "bread" and "e-mail" for "e" and "mail" (both required: '-'
+            // excludes only at the start of the run). A leading '-' applies
+            // to every word of the run.
             const start = i;
-            while (i < query_text.len and (std.ascii.isAlphanumeric(query_text[i]) or query_text[i] == '_')) {
+            while (i < query_text.len and !std.ascii.isWhitespace(query_text[i]) and query_text[i] != '"') {
                 i += 1;
             }
 
-            if (i > start) {
-                const word = query_text[start..i];
-
-                // Skip "OR" keyword and stop words
-                if (std.ascii.eqlIgnoreCase(word, "OR") or
-                    std.ascii.eqlIgnoreCase(word, "AND") or
-                    std.ascii.eqlIgnoreCase(word, "NOT"))
+            var words = Tokenizer.init(self.allocator, query_text[start..i], tokenizer_config);
+            while (words.next()) |token| {
+                // Operators are not search terms.
+                if (std.ascii.eqlIgnoreCase(token.text, "OR") or
+                    std.ascii.eqlIgnoreCase(token.text, "AND") or
+                    std.ascii.eqlIgnoreCase(token.text, "NOT"))
                 {
                     continue;
                 }
 
-                // Skip if too short
-                if (word.len < self.config.tokenizer.min_token_length) continue;
-
-                // Normalize to lowercase
-                const normalized = self.allocator.alloc(u8, word.len) catch {
+                var term_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
+                const term = tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &term_buf) orelse continue;
+                const normalized = self.allocator.dupe(u8, term) catch {
                     return FtsError.OutOfMemory;
                 };
-                for (word, 0..) |c, j| {
-                    normalized[j] = std.ascii.toLower(c);
-                }
-
-                // Check stop words (language-aware)
-                if (self.config.tokenizer.remove_stop_words and
-                    stopwords_mod.isStopWord(normalized, self.config.tokenizer.language))
-                {
-                    self.allocator.free(normalized);
-                    continue;
-                }
 
                 // Add to appropriate list
                 if (is_excluded) {
@@ -1801,7 +1916,8 @@ pub const FtsIndex = struct {
         }
 
         // Tokenize phrase
-        var tok = Tokenizer.init(self.allocator, phrase_text, self.config.tokenizer);
+        const tokenizer_config = try self.analysis();
+        var tok = Tokenizer.init(self.allocator, phrase_text, tokenizer_config);
         const tokens = tok.tokenizeAll() catch {
             return FtsError.TokenizerError;
         };
@@ -1813,14 +1929,9 @@ pub const FtsIndex = struct {
 
         // Single word "phrase" is just a regular search
         if (tokens.len == 1) {
-            var lower_buf: [64]u8 = undefined;
-            if (tokens[0].text.len <= 64) {
-                for (tokens[0].text, 0..) |c, i| {
-                    lower_buf[i] = std.ascii.toLower(c);
-                }
-                return self.searchSingleTerm(lower_buf[0..tokens[0].text.len], limit);
-            }
-            return &[_]ScoredDoc{};
+            var lower_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
+            const term = tokenizer_mod.normalizeTerm(tokenizer_config, tokens[0].text, &lower_buf) orelse return &[_]ScoredDoc{};
+            return self.searchSingleTerm(term, limit);
         }
 
         // Collect normalized terms
@@ -1834,14 +1945,12 @@ pub const FtsIndex = struct {
 
         for (tokens) |token| {
             if (num_terms >= 32) break;
-            if (token.text.len > 64) continue;
+            var term_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
+            const term = tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &term_buf) orelse continue;
 
-            const normalized = self.allocator.alloc(u8, token.text.len) catch {
+            const normalized = self.allocator.dupe(u8, term) catch {
                 return FtsError.OutOfMemory;
             };
-            for (token.text, 0..) |c, i| {
-                normalized[i] = std.ascii.toLower(c);
-            }
             phrase_terms[num_terms] = normalized;
             num_terms += 1;
         }
@@ -2978,15 +3087,17 @@ test "fts fuzzy search scores a query word by its best match" {
 
 test "fts term presence matches whole terms the way search does" {
     const allocator = std.testing.allocator;
-    const config = FtsConfig{};
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_term_presence_test.db");
+    defer fx.destroy(allocator);
+    const index = &fx.index;
 
-    try std.testing.expectEqual(@as(f32, 0), try FtsIndex.termPresenceScore(allocator, config, "cat", "concatenate strings"));
-    try std.testing.expectEqual(@as(f32, 1), try FtsIndex.termPresenceScore(allocator, config, "Cat", "the cat sat"));
+    try std.testing.expectEqual(@as(f32, 0), try index.termPresenceScore("cat", "concatenate strings"));
+    try std.testing.expectEqual(@as(f32, 1), try index.termPresenceScore("Cat", "the cat sat"));
     // Punctuation is not part of a term, and stop words ask for nothing.
-    try std.testing.expectEqual(@as(f32, 1), try FtsIndex.termPresenceScore(allocator, config, "bread,", "about bread"));
-    try std.testing.expectEqual(@as(f32, 1), try FtsIndex.termPresenceScore(allocator, config, "the bread", "about bread"));
-    try std.testing.expectEqual(@as(f32, 0), try FtsIndex.termPresenceScore(allocator, config, "bread butter", "about bread"));
-    try std.testing.expectEqual(@as(f32, 2), try FtsIndex.termPresenceScore(allocator, config, "bread butter bread", "butter on bread"));
+    try std.testing.expectEqual(@as(f32, 1), try index.termPresenceScore("bread,", "about bread"));
+    try std.testing.expectEqual(@as(f32, 1), try index.termPresenceScore("the bread", "about bread"));
+    try std.testing.expectEqual(@as(f32, 0), try index.termPresenceScore("bread butter", "about bread"));
+    try std.testing.expectEqual(@as(f32, 2), try index.termPresenceScore("bread butter bread", "butter on bread"));
 }
 
 /// What a single-term search should return: every posting scored with its
@@ -3093,4 +3204,132 @@ test "fts batched scoring and bounded ranking match a full scan and sort" {
             try expectSameRanking(want, got, limit);
         }
     }
+}
+
+test "fts a new index finds non-ASCII words whole, however they are cased or accented" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_unicode_words_test.db");
+    defer fx.destroy(allocator);
+
+    _ = try fx.index.indexDocument(1, "Herr Müller wohnt in München");
+    _ = try fx.index.indexDocument(2, "Frau Zöller wohnt in Köln");
+    _ = try fx.index.indexDocument(3, "Встреча в Москве");
+
+    const Case = struct { query: []const u8, want: []const DocId };
+    const cases = [_]Case{
+        .{ .query = "Müller", .want = &.{1} },
+        .{ .query = "MULLER", .want = &.{1} },
+        .{ .query = "muenchen munchen", .want = &.{} },
+        .{ .query = "münchen", .want = &.{1} },
+        // 0.16.0 stored "ller" for both names, so each found the other.
+        .{ .query = "ller", .want = &.{} },
+        .{ .query = "москве", .want = &.{3} },
+    };
+    for (cases) |c| {
+        const got = try fx.index.search(c.query, 10);
+        defer fx.index.freeResults(got);
+        try std.testing.expectEqual(c.want.len, got.len);
+        for (c.want, got) |w, g| try std.testing.expectEqual(w, g.doc_id);
+    }
+
+    // The same analysis reaches every query form.
+    const fuzzy = try fx.index.searchFuzzy("Mûller", .{ .max_distance = 1 }, 10);
+    defer fx.index.freeResults(fuzzy);
+    try std.testing.expectEqual(@as(usize, 1), fuzzy.len);
+    const prefix = try fx.index.searchWithPrefix("MÜN*", .{}, 10);
+    defer fx.index.freeResults(prefix);
+    try std.testing.expectEqual(@as(usize, 1), prefix.len);
+    const mode = try fx.index.searchWithMode("Köln -Müller", .@"and", 10);
+    defer fx.index.freeResults(mode);
+    try std.testing.expectEqual(@as(usize, 1), mode.len);
+    try std.testing.expectEqual(@as(DocId, 2), mode[0].doc_id);
+    try std.testing.expectEqual(@as(f32, 1), try fx.index.termPresenceScore("MÜLLER", "müller"));
+}
+
+test "fts an index 0.16.0 built keeps its ASCII tokenizer until it is emptied" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_legacy_analysis_test.db");
+    defer fx.destroy(allocator);
+
+    // Written as 0.16.0 wrote it: ASCII-only terms and no recorded analysis.
+    const legacy = FtsIndex.legacyAnalysis(fx.index.config.tokenizer);
+    _ = try fx.index.indexDocumentAnalyzed(1, "Herr Müller", legacy);
+    _ = try fx.index.indexDocumentAnalyzed(2, "Frau Zöller", legacy);
+
+    // Reopened by this version.
+    var reopened = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{});
+    try std.testing.expect((try reopened.analysis()).ascii_only);
+    // Its stored terms are still found, by the same queries as before.
+    {
+        const got = try reopened.search("Müller", 10);
+        defer reopened.freeResults(got);
+        try std.testing.expectEqual(@as(usize, 2), got.len);
+    }
+    // New documents go in the same way, so old and new stay consistent.
+    _ = try reopened.indexDocument(3, "Herr Müller");
+    {
+        const got = try reopened.search("Müller", 10);
+        defer reopened.freeResults(got);
+        try std.testing.expectEqual(@as(usize, 3), got.len);
+    }
+
+    // Once every document has left, the next one records this version's
+    // analysis and the index splits words properly from then on.
+    for ([_]DocId{ 1, 2, 3 }) |doc| try reopened.removeDocument(doc);
+    _ = try reopened.indexDocument(4, "Herr Müller");
+    _ = try reopened.indexDocument(5, "Frau Zöller");
+    var again = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{});
+    try std.testing.expect(!(try again.analysis()).ascii_only);
+    const got = try again.search("Müller", 10);
+    defer again.freeResults(got);
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    try std.testing.expectEqual(@as(DocId, 4), got[0].doc_id);
+}
+
+test "fts the recorded analysis wins over a changed config" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_recorded_analysis_test.db");
+    defer fx.destroy(allocator);
+
+    var stemming = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{
+        .tokenizer = .{ .use_stemming = true },
+    });
+    _ = try stemming.indexDocument(1, "she runs daily");
+
+    // Opened with stemming off: the stored term is "run", and the query must
+    // still be stemmed to find it.
+    var plain = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{});
+    try std.testing.expect((try plain.analysis()).use_stemming);
+    const got = try plain.search("running", 10);
+    defer plain.freeResults(got);
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+
+    // And highlighting with the index's analysis marks the word search matched.
+    var term_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
+    const term = tokenizer_mod.normalizeTerm(try plain.analysis(), "running", &term_buf).?;
+    const highlight = @import("highlight.zig");
+    const matches = try highlight.findMatches(allocator, "she runs daily", &.{term}, try plain.analysis());
+    defer allocator.free(matches);
+    try std.testing.expectEqual(@as(usize, 1), matches.len);
+    try std.testing.expectEqual(@as(u32, 4), matches[0].start);
+}
+
+test "fts query words split on punctuation and non-ASCII without stalling" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_mode_punctuation_test.db");
+    defer fx.destroy(allocator);
+
+    _ = try fx.index.indexDocument(1, "bread and butter");
+    _ = try fx.index.indexDocument(2, "bread and jam");
+
+    // A comma, or a byte the query parser did not treat as a word or a
+    // separator, used to leave it looping on the same character.
+    const got = try fx.index.searchWithMode("bread, butter", .@"and", 10);
+    defer fx.index.freeResults(got);
+    try std.testing.expectEqual(@as(usize, 1), got.len);
+    try std.testing.expectEqual(@as(DocId, 1), got[0].doc_id);
+
+    const accented = try fx.index.searchWithMode("bread café", .@"or", 10);
+    defer fx.index.freeResults(accented);
+    try std.testing.expectEqual(@as(usize, 2), accented.len);
 }

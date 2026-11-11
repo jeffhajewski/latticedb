@@ -3901,9 +3901,14 @@ pub const Database = struct {
         var seen: std.AutoHashMapUnmanaged(NodeId, void) = .{};
         defer seen.deinit(self.allocator);
 
+        // The query is analysed once for every pending document.
+        var index = self.ftsIndexFor(definition);
+        var matcher = index.presenceMatcher(query_text) catch |err| return mapFtsError(err);
+        defer matcher.deinit();
+
         for (base) |result| {
             try seen.put(self.allocator, result.doc_id, {});
-            if (try self.pendingFtsFor(definition, pending, result.doc_id, query_text)) |staged| {
+            if (try self.pendingFtsFor(definition, pending, result.doc_id, &matcher)) |staged| {
                 if (staged.score) |score| {
                     merged.append(self.allocator, .{ .doc_id = result.doc_id, .score = score }) catch {
                         return DatabaseError.OutOfMemory;
@@ -3919,7 +3924,7 @@ pub const Database = struct {
                 var overlay_iter = pending.node_states.iterator();
                 while (overlay_iter.next()) |entry| {
                     if (seen.contains(entry.key_ptr.*)) continue;
-                    if (try self.pendingNodeFtsScore(definition, entry.value_ptr.*, query_text)) |score| {
+                    if (try self.pendingNodeFtsScore(definition, entry.value_ptr.*, &matcher)) |score| {
                         merged.append(self.allocator, .{ .doc_id = entry.key_ptr.*, .score = score }) catch {
                             return DatabaseError.OutOfMemory;
                         };
@@ -3930,7 +3935,7 @@ pub const Database = struct {
                 var overlay_iter = pending.edge_states.iterator();
                 while (overlay_iter.next()) |entry| {
                     if (seen.contains(entry.key_ptr.*)) continue;
-                    if (try self.pendingEdgeFtsScore(definition, entry.value_ptr.*, query_text)) |score| {
+                    if (try self.pendingEdgeFtsScore(definition, entry.value_ptr.*, &matcher)) |score| {
                         merged.append(self.allocator, .{ .doc_id = entry.key_ptr.*, .score = score }) catch {
                             return DatabaseError.OutOfMemory;
                         };
@@ -3955,16 +3960,16 @@ pub const Database = struct {
         definition: FtsDefinition,
         pending: *TxnOverlay,
         doc_id: NodeId,
-        query_text: []const u8,
+        matcher: *FtsIndex.PresenceMatcher,
     ) DatabaseError!?struct { score: ?f32 } {
         switch (definition.kind) {
             .node => {
                 const state = pending.node_states.get(doc_id) orelse return null;
-                return .{ .score = try self.pendingNodeFtsScore(definition, state, query_text) };
+                return .{ .score = try self.pendingNodeFtsScore(definition, state, matcher) };
             },
             .edge => {
                 const state = pending.edge_states.get(doc_id) orelse return null;
-                return .{ .score = try self.pendingEdgeFtsScore(definition, state, query_text) };
+                return .{ .score = try self.pendingEdgeFtsScore(definition, state, matcher) };
             },
         }
     }
@@ -3975,12 +3980,13 @@ pub const Database = struct {
         self: *Self,
         definition: FtsDefinition,
         state: TxnEdgeState,
-        query_text: []const u8,
+        matcher: *FtsIndex.PresenceMatcher,
     ) DatabaseError!?f32 {
+        _ = self;
         if (!state.exists) return null;
         if (state.edge_type != definition.scope_id) return null;
         const text = ftsTextOf(definition, state.properties) orelse return null;
-        const score = try self.overlayFtsScore(query_text, text);
+        const score = try overlayFtsScore(matcher, text);
         return if (score > 0) score else null;
     }
 
@@ -3990,12 +3996,13 @@ pub const Database = struct {
         self: *Self,
         definition: FtsDefinition,
         state: TxnNodeState,
-        query_text: []const u8,
+        matcher: *FtsIndex.PresenceMatcher,
     ) DatabaseError!?f32 {
+        _ = self;
         if (!state.exists) return null;
         if (!containsSymbolId(state.labels, definition.scope_id)) return null;
         const text = ftsTextOf(definition, state.properties) orelse return null;
-        const score = try self.overlayFtsScore(query_text, text);
+        const score = try overlayFtsScore(matcher, text);
         return if (score > 0) score else null;
     }
 
@@ -6687,8 +6694,8 @@ pub const Database = struct {
     /// Score uncommitted text by whole-term presence, with the tokenizer the
     /// index uses. Matching substrings instead let "cat" find "concatenate",
     /// and kept stop words and punctuation that indexing drops.
-    fn overlayFtsScore(self: *Self, query_text: []const u8, text: []const u8) DatabaseError!f32 {
-        return FtsIndex.termPresenceScore(self.allocator, self.config.fts_config, query_text, text) catch |err| return mapFtsError(err);
+    fn overlayFtsScore(matcher: *FtsIndex.PresenceMatcher, text: []const u8) DatabaseError!f32 {
+        return matcher.score(text) catch |err| return mapFtsError(err);
     }
 
     /// Free FTS search results.

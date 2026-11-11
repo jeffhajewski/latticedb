@@ -144,6 +144,28 @@ pub const DocLengthStore = struct {
         self.tree.insert(&STATS_KEY, bytes) catch {};
     }
 
+    /// Key the index's analyzer settings are stored under (see
+    /// `FtsIndex.analysis`). Six bytes, like the stats key, so it cannot
+    /// collide with a document key; 0.16.0 never looks it up.
+    const ANALYSIS_KEY = [_]u8{ 0x00, 'a', 'n', 'l', 'y', 'z' };
+    pub const ANALYSIS_LEN = 4;
+
+    /// The analyzer settings recorded for this index, or null if none were.
+    pub fn getAnalysis(self: *Self) ScorerError!?[ANALYSIS_LEN]u8 {
+        const value = (self.tree.get(&ANALYSIS_KEY) catch |err| return mapBTreeError(err)) orelse return null;
+        defer self.tree.freeValue(value);
+        if (value.len < ANALYSIS_LEN) return null;
+        return value[0..ANALYSIS_LEN].*;
+    }
+
+    /// Record the analyzer settings this index's terms are written with.
+    pub fn putAnalysis(self: *Self, value: [ANALYSIS_LEN]u8) ScorerError!void {
+        self.tree.delete(&ANALYSIS_KEY) catch |err| {
+            if (err != BTreeError.KeyNotFound) return mapBTreeError(err);
+        };
+        self.tree.insert(&ANALYSIS_KEY, &value) catch |err| return mapBTreeError(err);
+    }
+
     /// Set document length (updates stats)
     pub fn setLength(self: *Self, doc_id: DocId, length: u32) ScorerError!void {
         var key_buf: [8]u8 = undefined;

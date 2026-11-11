@@ -61,6 +61,34 @@ fn simulateCrash(path: []const u8) !void {
     try file.setLength(4096);
 }
 
+/// Leave the files exactly as a killed process would.
+///
+/// Copies the database and its WAL while the handle is still open, so the copy
+/// holds what had been written at that moment and nothing `close()` adds
+/// later: no final root save, no flush. Opening the copy is what the next
+/// process sees after `kill -9`.
+fn copyAsIfKilled(allocator: std.mem.Allocator, src: []const u8, dst: []const u8) !void {
+    try copyFile(allocator, src, dst);
+
+    var src_wal_buf: [256]u8 = undefined;
+    var dst_wal_buf: [256]u8 = undefined;
+    const src_wal = try std.fmt.bufPrint(&src_wal_buf, "{s}-wal", .{src});
+    const dst_wal = try std.fmt.bufPrint(&dst_wal_buf, "{s}-wal", .{dst});
+    try copyFile(allocator, src_wal, dst_wal);
+}
+
+fn copyFile(allocator: std.mem.Allocator, src: []const u8, dst: []const u8) !void {
+    const fs = @import("compat").fs;
+    const in = try fs.cwd().openFile(src, .{});
+    defer in.close();
+    const bytes = try in.readToEndAlloc(allocator, 1 << 30);
+    defer allocator.free(bytes);
+
+    const out = try fs.cwd().createFile(dst, .{ .truncate = true });
+    defer out.close();
+    try out.pwriteAll(bytes, 0);
+}
+
 /// Clean up database and WAL files.
 fn cleanup(path: []const u8) void {
     @import("compat").fs.cwd().deleteFile(path) catch {};
@@ -85,6 +113,102 @@ fn openCrashTestDb(allocator: std.mem.Allocator, path: []const u8, create: bool)
 // ============================================================================
 // Tests
 // ============================================================================
+
+test "committed nodes survive a kill after an automatic checkpoint" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_autockpt.ltdb";
+    const killed = "/tmp/lattice_crash_autockpt_killed.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+    cleanup(killed);
+    defer cleanup(killed);
+
+    // Enough single-node commits to split the node tree's root several times
+    // and to cross the checkpoint threshold many times over.
+    const config = DatabaseConfig{
+        .enable_fts = false,
+        .enable_vector = false,
+        .auto_checkpoint = .{ .max_wal_frames = 64 },
+    };
+    const count = 1500;
+    const ids = try allocator.alloc(NodeId, count);
+    defer allocator.free(ids);
+
+    {
+        var db = try Database.open(allocator, path, .{ .create = true, .config = config });
+        defer db.close();
+        for (ids, 0..) |*id, i| {
+            var txn = try db.beginTransaction(.read_write);
+            id.* = try db.createNode(&txn, &.{"Person"});
+            try db.setNodeProperty(&txn, id.*, "seq", .{ .int_val = @intCast(i) });
+            try db.commitTransaction(&txn);
+        }
+        // The checkpoints really ran: the log holds far fewer frames than
+        // 1500 commits wrote.
+        try std.testing.expect(db.wal.?.header.frame_count < 200);
+        try copyAsIfKilled(allocator, path, killed);
+    }
+
+    var db = try Database.open(allocator, killed, .{ .config = config });
+    defer db.close();
+    for (ids) |id| {
+        try std.testing.expect(try db.nodeExists(id));
+    }
+    const people = try db.getNodesByLabel("Person");
+    defer allocator.free(people);
+    try std.testing.expectEqual(@as(usize, count), people.len);
+
+    // The id allocator must not hand out an id that is already taken.
+    var txn = try db.beginTransaction(.read_write);
+    const fresh = try db.createNode(&txn, &.{"Person"});
+    try db.commitTransaction(&txn);
+    for (ids) |id| try std.testing.expect(id != fresh);
+}
+
+test "committed vectors survive a kill after an automatic checkpoint" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_autockpt_vec.ltdb";
+    const killed = "/tmp/lattice_crash_autockpt_vec_killed.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+    cleanup(killed);
+    defer cleanup(killed);
+
+    const dims = 8;
+    const config = DatabaseConfig{
+        .enable_fts = false,
+        .enable_vector = true,
+        .vector_dimensions = dims,
+        .auto_checkpoint = .{ .max_wal_frames = 64 },
+    };
+    const count = 400;
+    const ids = try allocator.alloc(NodeId, count);
+    defer allocator.free(ids);
+
+    {
+        var db = try Database.open(allocator, path, .{ .create = true, .config = config });
+        defer db.close();
+        for (ids, 0..) |*id, i| {
+            var vector = [_]f32{0} ** dims;
+            vector[i % dims] = 1;
+            vector[(i + 1) % dims] = @floatFromInt(i + 1);
+            var txn = try db.beginTransaction(.read_write);
+            id.* = try db.createNode(&txn, &.{"Chunk"});
+            try db.setNodeVectorInTxn(&txn, id.*, &vector);
+            try db.commitTransaction(&txn);
+        }
+        try std.testing.expect(db.wal.?.header.frame_count < 200);
+        try copyAsIfKilled(allocator, path, killed);
+    }
+
+    var db = try Database.open(allocator, killed, .{ .config = config });
+    defer db.close();
+    // Every vector is reachable: a search wide enough to return them all does.
+    var probe = [_]f32{1} ** dims;
+    const results = try db.vectorSearch(&probe, count, count);
+    defer db.freeVectorSearchResults(results);
+    try std.testing.expectEqual(@as(usize, count), results.len);
+}
 
 test "fragmented vector replacements and removals replay from WAL" {
     const allocator = std.testing.allocator;

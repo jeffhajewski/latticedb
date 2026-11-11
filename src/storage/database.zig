@@ -1236,6 +1236,28 @@ pub const Database = struct {
     pub fn checkpoint(self: *Self, mode: checkpoint_mod.CheckpointMode) DatabaseError!?checkpoint_mod.CheckpointStats {
         if (self.read_only) return null;
         const wal = if (self.wal) |*w| w else return null;
+        return try self.runCheckpoint(wal, mode);
+    }
+
+    /// The one place a checkpoint is run from, so that every checkpoint leaves
+    /// a file that can be opened without the log.
+    ///
+    /// Two pieces of state are not in the buffer pool and would otherwise be
+    /// left behind: the HNSW node map, which lives in memory until it is
+    /// written into its tree, and the tree root page numbers in the file
+    /// header. A `.truncate` checkpoint that skipped them emptied the log
+    /// while the header still named the roots from the last `sync`, and a
+    /// process that died after that reopened onto the old roots with nothing
+    /// to replay.
+    fn runCheckpoint(
+        self: *Self,
+        wal: *WalManager,
+        mode: checkpoint_mod.CheckpointMode,
+    ) DatabaseError!checkpoint_mod.CheckpointStats {
+        if (mode != .passive) {
+            // Into tree pages first, so the flush below carries them.
+            try self.persistHnswIndex();
+        }
 
         var checkpointer = checkpoint_mod.Checkpointer.init(
             self.allocator,
@@ -1243,9 +1265,23 @@ pub const Database = struct {
             &self.page_manager,
             wal,
         );
+        checkpointer.after_flush = .{ .context = self, .call = saveTreeRootsAfterFlush };
         return checkpointer.checkpoint(mode) catch {
             return DatabaseError.IoError;
         };
+    }
+
+    fn saveTreeRootsAfterFlush(context: *anyopaque) anyerror!void {
+        const self: *Self = @ptrCast(@alignCast(context));
+        if (!self.treeRootsNeedSaving()) return;
+
+        // Pages before header. The two cannot change atomically, so pick the
+        // order whose failure is the smaller one: a header that names a root
+        // page which never reached the disk cannot be opened at all, while
+        // the old header over the new pages is the state every crash between
+        // checkpoints already leaves.
+        self.page_manager.sync() catch return DatabaseError.IoError;
+        try self.saveTreeRoots();
     }
 
     /// Checkpoint if the WAL has grown enough and it is safe to do so.
@@ -1275,13 +1311,7 @@ pub const Database = struct {
         // should not be retried on every single commit.
         self.last_auto_checkpoint_ns = now;
 
-        var checkpointer = checkpoint_mod.Checkpointer.init(
-            self.allocator,
-            &self.buffer_pool,
-            &self.page_manager,
-            wal,
-        );
-        _ = checkpointer.checkpoint(policy.mode) catch {};
+        _ = self.runCheckpoint(wal, policy.mode) catch {};
     }
 
     /// Fold everything pending into the database file, so that the bytes on disk
@@ -3058,6 +3088,22 @@ pub const Database = struct {
     }
 
     fn saveTreeRoots(self: *Self) DatabaseError!void {
+        var header = self.headerWithCurrentRoots();
+        self.page_manager.updateHeader(&header) catch {
+            return DatabaseError.IoError;
+        };
+    }
+
+    /// Whether a tree root or the vector segment has moved since the header
+    /// was last written.
+    fn treeRootsNeedSaving(self: *Self) bool {
+        const current = self.headerWithCurrentRoots();
+        const saved = self.page_manager.getHeader();
+        return !std.mem.eql(PageId, &current.tree_roots, &saved.tree_roots) or
+            current.vector_segment_page != saved.vector_segment_page;
+    }
+
+    fn headerWithCurrentRoots(self: *Self) page_mod.FileHeader {
         var header = self.page_manager.getHeader().*;
 
         header.setTreeRoot(.node, self.node_tree.getRootPage());
@@ -3101,9 +3147,7 @@ pub const Database = struct {
             header.vector_segment_page = vs.first_page;
         }
 
-        self.page_manager.updateHeader(&header) catch {
-            return DatabaseError.IoError;
-        };
+        return header;
     }
 
     fn propertyIndexDefinition(

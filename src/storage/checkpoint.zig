@@ -79,8 +79,21 @@ pub const Checkpointer = struct {
     checkpoint_in_progress: bool,
     /// Statistics from last checkpoint
     last_stats: ?CheckpointStats,
+    /// Runs once every dirty page has been written and before the database
+    /// file is synced. Not called for `.passive`, which may skip pages.
+    after_flush: ?AfterFlushHook = null,
 
     const Self = @This();
+
+    /// State that lives outside the buffer pool has to reach the file in the
+    /// same checkpoint as the pages it describes, or truncating the log
+    /// throws away the only other copy of it. The B+Tree root page numbers in
+    /// the file header are that kind of state: a root split moves the root in
+    /// memory only.
+    pub const AfterFlushHook = struct {
+        context: *anyopaque,
+        call: *const fn (context: *anyopaque) anyerror!void,
+    };
 
     /// Initialize the checkpointer
     pub fn init(allocator: Allocator, bp: *BufferPool, pm: *PageManager, wal: *WalManager) Self {
@@ -124,6 +137,14 @@ pub const Checkpointer = struct {
             .passive => try self.flushPassive(),
             .full, .truncate => try self.flushFull(),
         };
+
+        // The pages are written, so the header may now name them. A failure
+        // here stops before the log is touched.
+        if (mode != .passive) {
+            if (self.after_flush) |hook| {
+                hook.call(hook.context) catch return CheckpointError.IoError;
+            }
+        }
 
         // 4. Record the coming reset, then sync the database file. The counter
         //    has to be durable before the log is truncated in step 8, because a

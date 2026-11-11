@@ -343,3 +343,118 @@ test "incremental hnsw saves keep the tree equal to the node map" {
     try index.saveToTree(&tree);
     try expectTreeMatches(&index, &vs, &tree, &db);
 }
+
+fn bruteForceTopIds(allocator: std.mem.Allocator, query: []const f32, vectors: []const [16]f32, alive: []const bool, k: usize) ![]u64 {
+    const Pair = struct { id: u64, d: f32 };
+    var all: std.ArrayListUnmanaged(Pair) = .empty;
+    defer all.deinit(allocator);
+    for (vectors, alive, 0..) |*v, live, i| {
+        if (!live) continue;
+        try all.append(allocator, .{ .id = i + 1, .d = hnsw_mod.cosineDistance(query, v) });
+    }
+    std.mem.sort(Pair, all.items, {}, struct {
+        fn lt(_: void, a: Pair, b: Pair) bool {
+            return a.d < b.d;
+        }
+    }.lt);
+    const out = try allocator.alloc(u64, k);
+    for (out, all.items[0..k]) |*o, p| o.* = p.id;
+    return out;
+}
+
+/// Recall of `index`, whose ids are the vector's position + 1 + `id_offset`.
+fn recallAt10(allocator: std.mem.Allocator, index: *HnswIndex, vectors: []const [16]f32, alive: []const bool, random: std.Random, id_offset: u64) !f64 {
+    var hits: usize = 0;
+    const queries = 100;
+    for (0..queries) |_| {
+        var q: [16]f32 = undefined;
+        for (&q) |*x| x.* = random.float(f32) * 2.0 - 1.0;
+        const truth = try bruteForceTopIds(allocator, &q, vectors, alive, 10);
+        defer allocator.free(truth);
+        const results = try index.search(&q, 10, 32);
+        defer index.freeResults(results);
+        for (truth) |t| {
+            for (results) |r| {
+                if (r.node_id == t + id_offset) {
+                    hits += 1;
+                    break;
+                }
+            }
+        }
+    }
+    return @as(f64, @floatFromInt(hits)) / (queries * 10.0);
+}
+
+test "hnsw recall holds up under delete and re-insert churn" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.initWithPoolSize(allocator, "hnsw_churn_recall", 32 * 1024 * 1024);
+    defer db.deinit();
+
+    var vs = try VectorStorage.init(allocator, db.bp, 16);
+    defer vs.deinit();
+    var index = HnswIndex.init(allocator, db.bp, &vs, .{
+        .dimensions = 16,
+        .m = 6,
+        .m_max0 = 12,
+        .ef_construction = 40,
+        .metric = .cosine,
+    });
+    defer index.deinit();
+    var tree = try db.createBTree();
+
+    const n = 1500;
+    var prng = std.Random.DefaultPrng.init(11);
+    const random = prng.random();
+    const vectors = try allocator.alloc([16]f32, n);
+    defer allocator.free(vectors);
+    const alive = try allocator.alloc(bool, n);
+    defer allocator.free(alive);
+    for (vectors, alive, 1..) |*v, *live, id| {
+        for (v) |*x| x.* = random.float(f32) * 2.0 - 1.0;
+        try index.insert(id, v);
+        live.* = true;
+    }
+    const fresh = try recallAt10(allocator, &index, vectors, alive, random, 0);
+
+    // Twenty rounds, each removing a fifth of the index and inserting as
+    // many back, so every node is touched several times over.
+    for (0..20) |_| {
+        for (0..n / 5) |_| {
+            const i = random.uintLessThan(usize, n);
+            if (!alive[i]) continue;
+            try index.remove(i + 1);
+            alive[i] = false;
+        }
+        for (vectors, alive, 1..) |*v, *live, id| {
+            if (live.* or random.boolean()) continue;
+            try index.insert(id, v);
+            live.* = true;
+        }
+        try index.saveToTree(&tree);
+    }
+
+    // Compare with an index built from scratch over the same live vectors,
+    // asked the same queries.
+    var rebuilt = HnswIndex.init(allocator, db.bp, &vs, index.config);
+    defer rebuilt.deinit();
+    for (vectors, alive, 1..) |*v, live, id| {
+        if (live) try rebuilt.insert(id + n, v);
+    }
+    var query_seed = std.Random.DefaultPrng.init(12);
+    const churned = try recallAt10(allocator, &index, vectors, alive, query_seed.random(), 0);
+    query_seed = std.Random.DefaultPrng.init(12);
+    const baseline = try recallAt10(allocator, &rebuilt, vectors, alive, query_seed.random(), n);
+    std.debug.print("\n    recall@10: first build {d:.3}; after churn {d:.3}; rebuilt from scratch {d:.3}\n", .{ fresh, churned, baseline });
+    try std.testing.expect(churned >= baseline - 0.03);
+
+    // Every live node is still reachable: searching for its own vector
+    // finds it.
+    var missing: usize = 0;
+    for (vectors, alive, 1..) |*v, live, id| {
+        if (!live) continue;
+        const results = try index.search(v, 1, 32);
+        defer index.freeResults(results);
+        if (results.len == 0 or results[0].node_id != id) missing += 1;
+    }
+    try std.testing.expect(missing <= n / 200);
+}

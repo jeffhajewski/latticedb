@@ -697,6 +697,9 @@ pub const HnswIndex = struct {
     /// save rewrites the whole map.
     needs_full_save: bool = true,
 
+    /// Removed ids that some list may still name; see `detach`.
+    dangling: std.AutoHashMapUnmanaged(u64, void) = .empty,
+
     const Self = @This();
     const PAGE_SIZE: usize = 4096;
 
@@ -743,6 +746,7 @@ pub const HnswIndex = struct {
 
     /// Deinitialize the index
     pub fn deinit(self: *Self) void {
+        self.dangling.deinit(self.allocator);
         self.unsaved.deinit(self.allocator);
         self.journal.deinit(self.allocator);
         self.connection_pool.deinit();
@@ -1001,6 +1005,8 @@ pub const HnswIndex = struct {
                 if (selected.items.len >= max_neighbors) break;
                 if (used[idx]) continue;
                 if (candidate.node_id == target_id) continue;
+                // A link to an id no longer in the index is no neighbour.
+                if (!self.nodes.contains(candidate.node_id)) continue;
                 selected.append(candidate.node_id) catch return HnswError.OutOfMemory;
             }
         }
@@ -1213,8 +1219,10 @@ pub const HnswIndex = struct {
             // Find minimum
             for (batch_buf[0..count], dist_buf[0..count]) |be, dist| {
                 if (dist < current_dist) {
+                    const next_node = self.getNode(be.neighbor_id) orelse continue;
+                    if (layer > next_node.max_layer) continue;
                     current = be.neighbor_id;
-                    current_node = self.getNode(be.neighbor_id) orelse continue;
+                    current_node = next_node;
                     current_dist = dist;
                     improved = true;
                 }
@@ -1305,6 +1313,7 @@ pub const HnswIndex = struct {
 
             // Explore neighbors
             const node = self.getNode(closest.node_id) orelse continue;
+            if (layer > node.max_layer) continue;
             const neighbors = try self.connection_pool.getConnectionsInto(node.connections_loc, layer, &sl_conn_buf);
 
             // Phase 1: Filter — collect unvisited neighbor IDs, mark visited
@@ -1411,6 +1420,14 @@ pub const HnswIndex = struct {
             break :blk norm_buf[0..vector.len];
         } else vector;
 
+        // Links to a removed id that `detach` could not reach would point at
+        // this id again, possibly on layers it no longer reaches. Clear them
+        // first; this is the rare case of an id removed and then re-added
+        // before the next save.
+        if (self.dangling.contains(vector_id) and !self.nodes.contains(vector_id)) {
+            try self.unlinkDangling();
+        }
+
         const snapshot = self.beginMutation();
         defer self.endMutation();
 
@@ -1462,7 +1479,7 @@ pub const HnswIndex = struct {
             self.nodes.put(vector_id, existing) catch {};
             self.markUnsaved(vector_id);
         }
-        _ = (try self.detach(vector_id)) orelse return HnswError.NotFound;
+        _ = (try self.detach(vector_id, .replace)) orelse return HnswError.NotFound;
         try self.connection_pool.resetSlot(existing.connections_loc);
         try self.insertGraph(vector_id, existing.vector_loc, existing.connections_loc, existing.max_layer, store_vector);
     }
@@ -1602,36 +1619,52 @@ pub const HnswIndex = struct {
         self.max_layer = if (new_entry_point == null) 0 else new_max_layer;
     }
 
-    fn detach(self: *Self, vector_id: u64) HnswError!?HnswNodeEntry {
-        const removed = self.nodes.fetchRemove(vector_id) orelse return null;
-        const removed_entry = removed.value;
+    const DetachMode = enum {
+        /// The id leaves the index.
+        remove,
+        /// The id is re-inserted straight away with a new vector, so links
+        /// to it stay valid.
+        replace,
+    };
+
+    /// Take a node out of the graph and repair the neighbours it leaves.
+    ///
+    /// Links run both ways for most pairs, so the nodes that point at the
+    /// removed one are found from its own lists rather than by scanning every
+    /// node. Each of them drops the link and, having lost a neighbour, takes
+    /// the closest of the removed node's other neighbours in its place, with
+    /// a link back so it does not lose an incoming one either. This keeps
+    /// out-degree and reachability from decaying under churn.
+    ///
+    /// A node can also point at the removed one without being pointed back
+    /// at, when the removed node pruned it. Those links are left until the
+    /// next save, or until enough have built up (see `remove`), and are then
+    /// dropped in one pass (`unlinkDangling`); search
+    /// already skips ids that are not in the node map, and saving them never
+    /// reaches the tree, so a saved index is the same as before.
+    fn detach(self: *Self, vector_id: u64, mode: DetachMode) HnswError!?HnswNodeEntry {
+        const removed_entry = self.nodes.get(vector_id) orelse return null;
+
+        if (mode == .remove) {
+            // Remember the id before changing anything, so a failure to
+            // remember it cannot leave links to it behind.
+            self.dangling.put(self.allocator, vector_id, {}) catch return HnswError.OutOfMemory;
+        }
+        _ = self.nodes.remove(vector_id);
         self.markUnsaved(vector_id);
 
-        var iter = self.nodes.iterator();
-        while (iter.next()) |entry| {
-            var layer: u16 = 0;
-            while (layer <= entry.value_ptr.max_layer) : (layer += 1) {
-                const layer_u8: u8 = @intCast(layer);
-                const connections = try self.getConnections(entry.value_ptr.connections_loc, layer_u8);
-                defer self.allocator.free(connections);
-
-                if (std.mem.indexOfScalar(u64, connections, vector_id) == null) continue;
-                try self.journalList(entry.value_ptr.connections_loc, layer_u8, connections);
-
-                var write_index: usize = 0;
-                for (connections) |neighbor| {
-                    if (neighbor != vector_id) {
-                        connections[write_index] = neighbor;
-                        write_index += 1;
-                    }
-                }
-
-                try self.setConnections(
-                    entry.value_ptr.connections_loc,
-                    entry.key_ptr.*,
-                    layer_u8,
-                    connections[0..write_index],
-                );
+        var own_buf: [MAX_NEIGHBORS]u64 = undefined;
+        var list_buf: [MAX_NEIGHBORS]u64 = undefined;
+        var layer: u16 = 0;
+        while (layer <= removed_entry.max_layer) : (layer += 1) {
+            const layer_u8: u8 = @intCast(layer);
+            const own = try self.connection_pool.getConnectionsInto(removed_entry.connections_loc, layer_u8, &own_buf);
+            for (own) |neighbor_id| {
+                const neighbor = self.nodes.get(neighbor_id) orelse continue;
+                if (layer_u8 > neighbor.max_layer) continue;
+                const list = try self.connection_pool.getConnectionsInto(neighbor.connections_loc, layer_u8, &list_buf);
+                if (std.mem.indexOfScalar(u64, list, vector_id) == null) continue;
+                try self.repairNeighbor(neighbor_id, neighbor, layer_u8, list, vector_id, own);
             }
         }
 
@@ -1651,9 +1684,125 @@ pub const HnswIndex = struct {
         return removed_entry;
     }
 
+    /// `node_id` pointed at `removed_id` on `layer`. Drop that link (and any
+    /// other link to an id no longer in the index), and if that leaves room,
+    /// link to the closest of the removed node's neighbours instead.
+    fn repairNeighbor(
+        self: *Self,
+        node_id: u64,
+        node: HnswNodeEntry,
+        layer: u8,
+        list: []const u64,
+        removed_id: u64,
+        removed_neighbors: []const u64,
+    ) HnswError!void {
+        var kept_buf: [MAX_NEIGHBORS]u64 = undefined;
+        var kept: usize = 0;
+        for (list) |id| {
+            if (id == removed_id or !self.nodes.contains(id)) continue;
+            kept_buf[kept] = id;
+            kept += 1;
+        }
+
+        const max_conn: u16 = if (layer == 0) self.config.m_max0 else self.config.m;
+        var replacement: ?u64 = null;
+        if (kept < max_conn) {
+            const node_vec = self.vector_storage.borrowByLocation(node.vector_loc) catch return HnswError.StorageError;
+            defer node_vec.release();
+
+            // The removed node's neighbours, nearest first.
+            var candidates_buf: [MAX_NEIGHBORS]SearchResult = undefined;
+            var candidate_count: usize = 0;
+            for (removed_neighbors) |candidate_id| {
+                if (candidate_id == node_id or candidate_id == removed_id) continue;
+                if (std.mem.indexOfScalar(u64, kept_buf[0..kept], candidate_id) != null) continue;
+                const candidate = self.nodes.get(candidate_id) orelse continue;
+                if (layer > candidate.max_layer) continue;
+                candidates_buf[candidate_count] = .{
+                    .node_id = candidate_id,
+                    .distance = try self.distanceTo(node_vec.data, candidate.vector_loc),
+                };
+                candidate_count += 1;
+            }
+            const candidates = candidates_buf[0..candidate_count];
+            std.mem.sort(SearchResult, candidates, {}, struct {
+                fn lessThan(_: void, a: SearchResult, b: SearchResult) bool {
+                    return a.distance < b.distance;
+                }
+            }.lessThan);
+
+            // Take the nearest one that covers a direction the remaining
+            // neighbours do not, by the same rule as neighbour selection: it
+            // is closer to this node than to any neighbour it keeps.
+            for (candidates) |candidate| {
+                const candidate_entry = self.nodes.get(candidate.node_id).?;
+                const candidate_vec = self.vector_storage.borrowByLocation(candidate_entry.vector_loc) catch return HnswError.StorageError;
+                defer candidate_vec.release();
+                var diverse = true;
+                for (kept_buf[0..kept]) |kept_id| {
+                    const kept_entry = self.nodes.get(kept_id).?;
+                    if (try self.distanceTo(candidate_vec.data, kept_entry.vector_loc) <= candidate.distance) {
+                        diverse = false;
+                        break;
+                    }
+                }
+                if (diverse) {
+                    replacement = candidate.node_id;
+                    break;
+                }
+            }
+            if (replacement) |id| {
+                kept_buf[kept] = id;
+                kept += 1;
+            }
+        }
+
+        try self.writeList(node.connections_loc, layer, list, kept_buf[0..kept]);
+
+        if (replacement) |id| {
+            const candidate = self.nodes.get(id).?;
+            try self.addConnection(candidate.connections_loc, id, layer, node_id, max_conn);
+        }
+    }
+
+    /// Drop links to removed ids that `detach` could not reach through the
+    /// removed nodes' own lists. One pass over every list, run before the
+    /// node map is saved, so a saved graph never names an id it lacks.
+    fn unlinkDangling(self: *Self) HnswError!void {
+        if (self.dangling.count() == 0) return;
+
+        var list_buf: [MAX_NEIGHBORS]u64 = undefined;
+        var kept_buf: [MAX_NEIGHBORS]u64 = undefined;
+        var iter = self.nodes.iterator();
+        while (iter.next()) |entry| {
+            var layer: u16 = 0;
+            while (layer <= entry.value_ptr.max_layer) : (layer += 1) {
+                const layer_u8: u8 = @intCast(layer);
+                const list = try self.connection_pool.getConnectionsInto(entry.value_ptr.connections_loc, layer_u8, &list_buf);
+                var kept: usize = 0;
+                for (list) |id| {
+                    // A removed id that was inserted again is valid again.
+                    if (self.dangling.contains(id) and !self.nodes.contains(id)) continue;
+                    kept_buf[kept] = id;
+                    kept += 1;
+                }
+                if (kept == list.len) continue;
+                try self.writeList(entry.value_ptr.connections_loc, layer_u8, list, kept_buf[0..kept]);
+            }
+        }
+        self.dangling.clearRetainingCapacity();
+    }
+
     /// Remove a vector from the index and release its storage for reuse.
     /// All or nothing, like `insert`.
     pub fn remove(self: *Self, vector_id: u64) HnswError!void {
+        // Leftover links to removed ids take up list slots until they are
+        // dropped. Drop them once they would make up about 3% of the index,
+        // so the cost is a few list reads per removal and lists stay full.
+        if (self.dangling.count() >= 64 and self.dangling.count() * 32 >= self.nodes.count()) {
+            try self.unlinkDangling();
+        }
+
         const snapshot = self.beginMutation();
         defer self.endMutation();
 
@@ -1663,7 +1812,7 @@ pub const HnswIndex = struct {
             self.nodes.put(vector_id, removed_entry) catch {};
             self.markUnsaved(vector_id);
         }
-        _ = try self.detach(vector_id);
+        _ = try self.detach(vector_id, .remove);
         self.vector_storage.delete(removed_entry.vector_loc, vector_id) catch return HnswError.StorageError;
         // Nothing refers to the slot any more; failing to mark it free only
         // means it is not reused.
@@ -1744,6 +1893,7 @@ pub const HnswIndex = struct {
     }
 
     pub fn resetForRebuild(self: *Self) void {
+        self.dangling.clearRetainingCapacity();
         self.unsaved.clearRetainingCapacity();
         self.needs_full_save = true;
         self.nodes.clearRetainingCapacity();
@@ -1763,6 +1913,7 @@ pub const HnswIndex = struct {
     /// ends up holding exactly the node map, so loading is unaffected.
     pub fn saveToTree(self: *Self, tree: *BTree) HnswError!void {
         if (!self.dirty) return;
+        try self.unlinkDangling();
         if (self.needs_full_save) return self.saveAllToTree(tree);
 
         try self.saveMetadata(tree);

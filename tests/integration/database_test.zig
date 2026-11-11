@@ -5491,6 +5491,41 @@ test "database: an edge search sees the transaction's own uncommitted writes" {
     try std.testing.expectEqual(@as(usize, 1), committed.len);
 }
 
+test "database: a node and an edge full-text index cannot share a name and property" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    // Labels and relationship types share symbols, and index storage is keyed
+    // by symbol and property, so these two would be one index underneath.
+    try db.createNodeFtsIndex("Review", "text");
+    try std.testing.expectError(error.AlreadyExists, db.createEdgeFtsIndex("Review", "text"));
+    try std.testing.expect(!(try db.hasEdgeFtsIndex("Review", "text")));
+
+    // The other order too, and a different property is still fine.
+    try db.createEdgeFtsIndex("Cites", "note");
+    try std.testing.expectError(error.AlreadyExists, db.createNodeFtsIndex("Cites", "note"));
+    try db.createEdgeFtsIndex("Review", "body");
+
+    const node = try db.createNode(null, &[_][]const u8{"Review"});
+    try db.setNodeProperty(null, node, "text", .{ .string_val = "alpha" });
+    const other = try db.createNode(null, &[_][]const u8{"Review"});
+    const edge = try db.createEdgeAndGetId(null, node, other, "Review");
+    try db.setEdgePropertyById(null, edge, "text", .{ .string_val = "beta" });
+
+    // Edge text is not in the node index, and the node keeps its own length.
+    const beta = try db.ftsSearchIndex(.node, "Review", "text", "beta", 10);
+    defer db.freeFtsSearchResults(beta);
+    try std.testing.expectEqual(@as(usize, 0), beta.len);
+    const alpha = try db.ftsSearchIndex(.node, "Review", "text", "alpha", 10);
+    defer db.freeFtsSearchResults(alpha);
+    try std.testing.expectEqual(@as(usize, 1), alpha.len);
+    try std.testing.expectEqual(node, alpha[0].doc_id);
+}
+
 test "database: a full-text predicate becomes the access path, not a filter" {
     const allocator = std.testing.allocator;
     const db = try Database.open(allocator, ":memory:", .{

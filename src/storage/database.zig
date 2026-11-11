@@ -3627,6 +3627,17 @@ pub const Database = struct {
         if (catalog.has(definition) catch |err| return mapFtsCatalogError(err)) {
             return DatabaseError.AlreadyExists;
         }
+        // Labels and relationship types share one symbol table, and an index's
+        // storage is keyed by symbol and property alone, so `(:Review).text` and
+        // `[:Review].text` would write the same keys: each would return the
+        // other's ids and overwrite the other's document lengths. Telling them
+        // apart needs a different key layout, which databases already written
+        // cannot have, so the second of the pair is refused instead.
+        var other_kind = definition;
+        other_kind.kind = if (kind == .node) .edge else .node;
+        if (catalog.has(other_kind) catch |err| return mapFtsCatalogError(err)) {
+            return DatabaseError.AlreadyExists;
+        }
         try self.populateFtsDefinition(definition);
         catalog.create(definition) catch |err| return mapFtsCatalogError(err);
         self.fts_declared = true;
@@ -4094,6 +4105,11 @@ pub const Database = struct {
         return null;
     }
 
+    /// Declare a full-text index on a node property.
+    ///
+    /// `AlreadyExists` if this index exists, or if an edge index is declared on
+    /// a relationship type with the same name and the same property: the two
+    /// would share storage.
     pub fn createNodeFtsIndex(self: *Self, label: []const u8, property: []const u8) DatabaseError!void {
         try self.createFtsIndex(.node, label, property);
     }
@@ -4106,6 +4122,11 @@ pub const Database = struct {
         return self.hasFtsIndex(.node, label, property);
     }
 
+    /// Declare a full-text index on a relationship property.
+    ///
+    /// `AlreadyExists` if this index exists, or if a node index is declared on
+    /// a label with the same name and the same property: the two would share
+    /// storage.
     pub fn createEdgeFtsIndex(self: *Self, edge_type: []const u8, property: []const u8) DatabaseError!void {
         try self.createFtsIndex(.edge, edge_type, property);
     }

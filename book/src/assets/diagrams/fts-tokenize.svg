@@ -1,80 +1,81 @@
-<svg width="359" height="591"
- viewBox="0.00 0.00 269.00 443.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 439.1)">
+<svg width="449" height="609"
+ viewBox="0.00 0.00 337.00 457.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 452.6)">
 <title>fts_tokenize</title>
 <!-- in -->
 <g id="node1" class="node">
 <title>in</title>
-<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M239.06,-435.1C239.06,-435.1 22.12,-435.1 22.12,-435.1 16.12,-435.1 10.12,-429.1 10.12,-423.1 10.12,-423.1 10.12,-411.1 10.12,-411.1 10.12,-405.1 16.12,-399.1 22.12,-399.1 22.12,-399.1 239.06,-399.1 239.06,-399.1 245.06,-399.1 251.06,-405.1 251.06,-411.1 251.06,-411.1 251.06,-423.1 251.06,-423.1 251.06,-429.1 245.06,-435.1 239.06,-435.1"/>
-<text xml:space="preserve" text-anchor="middle" x="130.59" y="-413.4" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">&quot;Hello, World! This is a TEST.&quot;</text>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M272.81,-448.6C272.81,-448.6 55.87,-448.6 55.87,-448.6 49.87,-448.6 43.88,-442.6 43.88,-436.6 43.88,-436.6 43.88,-424.6 43.88,-424.6 43.88,-418.6 49.88,-412.6 55.88,-412.6 55.88,-412.6 272.81,-412.6 272.81,-412.6 278.81,-412.6 284.81,-418.6 284.81,-424.6 284.81,-424.6 284.81,-436.6 284.81,-436.6 284.81,-442.6 278.81,-448.6 272.81,-448.6"/>
+<text xml:space="preserve" text-anchor="middle" x="164.34" y="-426.9" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">&quot;Hello, World! This is a TEST.&quot;</text>
 </g>
 <!-- s1 -->
 <g id="node2" class="node">
 <title>s1</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M249.18,-373.1C249.18,-373.1 12,-373.1 12,-373.1 6,-373.1 0,-367.1 0,-361.1 0,-361.1 0,-339.38 0,-339.38 0,-333.38 6,-327.38 12,-327.38 12,-327.38 249.18,-327.38 249.18,-327.38 255.18,-327.38 261.18,-333.38 261.18,-339.38 261.18,-339.38 261.18,-361.1 261.18,-361.1 261.18,-367.1 255.18,-373.1 249.18,-373.1"/>
-<text xml:space="preserve" text-anchor="start" x="15.84" y="-353.29" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">1. Split on non&#45;alphanumeric</text>
-<text xml:space="preserve" text-anchor="start" x="15.84" y="-339.79" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;Hello &#160;World &#160;This &#160;is &#160;a &#160;TEST</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M316.68,-386.6C316.68,-386.6 12,-386.6 12,-386.6 6,-386.6 0,-380.6 0,-374.6 0,-374.6 0,-339.38 0,-339.38 0,-333.38 6,-327.38 12,-327.38 12,-327.38 316.68,-327.38 316.68,-327.38 322.68,-327.38 328.68,-333.38 328.68,-339.38 328.68,-339.38 328.68,-374.6 328.68,-374.6 328.68,-380.6 322.68,-386.6 316.68,-386.6"/>
+<text xml:space="preserve" text-anchor="start" x="15.84" y="-366.79" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">1. Split on anything but ASCII A&#45;Z a&#45;z 0&#45;9 _</text>
+<text xml:space="preserve" text-anchor="start" x="15.84" y="-353.29" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;Hello &#160;World &#160;This &#160;is &#160;a &#160;TEST</text>
+<text xml:space="preserve" text-anchor="start" x="15.84" y="-339.79" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;(non&#45;ASCII bytes split too: café → caf)</text>
 </g>
 <!-- in&#45;&gt;s1 -->
 <g id="edge1" class="edge">
 <title>in&#45;&gt;s1</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M130.59,-398.72C130.59,-393.47 130.59,-387.56 130.59,-381.72"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="133.04,-381.99 130.59,-374.99 128.14,-381.99 133.04,-381.99"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M164.34,-412.27C164.34,-407.2 164.34,-401.46 164.34,-395.66"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="166.79,-395.84 164.34,-388.84 161.89,-395.84 166.79,-395.84"/>
 </g>
 <!-- s2 -->
 <g id="node3" class="node">
 <title>s2</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M239.06,-301.38C239.06,-301.38 22.12,-301.38 22.12,-301.38 16.12,-301.38 10.12,-295.38 10.12,-289.38 10.12,-289.38 10.12,-254.16 10.12,-254.16 10.12,-248.16 16.12,-242.16 22.12,-242.16 22.12,-242.16 239.06,-242.16 239.06,-242.16 245.06,-242.16 251.06,-248.16 251.06,-254.16 251.06,-254.16 251.06,-289.38 251.06,-289.38 251.06,-295.38 245.06,-301.38 239.06,-301.38"/>
-<text xml:space="preserve" text-anchor="start" x="25.97" y="-281.57" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">2. Length filter (2…64)</text>
-<text xml:space="preserve" text-anchor="start" x="25.97" y="-268.07" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;Hello &#160;World &#160;This &#160;is &#160;TEST</text>
-<text xml:space="preserve" text-anchor="start" x="25.97" y="-254.57" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;(&quot;a&quot; dropped)</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M272.81,-301.38C272.81,-301.38 55.87,-301.38 55.87,-301.38 49.87,-301.38 43.88,-295.38 43.88,-289.38 43.88,-289.38 43.88,-254.16 43.88,-254.16 43.88,-248.16 49.88,-242.16 55.88,-242.16 55.88,-242.16 272.81,-242.16 272.81,-242.16 278.81,-242.16 284.81,-248.16 284.81,-254.16 284.81,-254.16 284.81,-289.38 284.81,-289.38 284.81,-295.38 278.81,-301.38 272.81,-301.38"/>
+<text xml:space="preserve" text-anchor="start" x="59.72" y="-281.57" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">2. Length filter (2…64)</text>
+<text xml:space="preserve" text-anchor="start" x="59.72" y="-268.07" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;Hello &#160;World &#160;This &#160;is &#160;TEST</text>
+<text xml:space="preserve" text-anchor="start" x="59.72" y="-254.57" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;(&quot;a&quot; dropped)</text>
 </g>
 <!-- s1&#45;&gt;s2 -->
 <g id="edge2" class="edge">
 <title>s1&#45;&gt;s2</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M130.59,-327.12C130.59,-321.85 130.59,-316.07 130.59,-310.31"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="133.04,-310.62 130.59,-303.62 128.14,-310.62 133.04,-310.62"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M164.34,-326.88C164.34,-321.53 164.34,-315.88 164.34,-310.32"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="166.79,-310.38 164.34,-303.38 161.89,-310.38 166.79,-310.38"/>
 </g>
 <!-- s3 -->
 <g id="node4" class="node">
 <title>s3</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M239.06,-216.16C239.06,-216.16 22.12,-216.16 22.12,-216.16 16.12,-216.16 10.12,-210.16 10.12,-204.16 10.12,-204.16 10.12,-182.44 10.12,-182.44 10.12,-176.44 16.12,-170.44 22.12,-170.44 22.12,-170.44 239.06,-170.44 239.06,-170.44 245.06,-170.44 251.06,-176.44 251.06,-182.44 251.06,-182.44 251.06,-204.16 251.06,-204.16 251.06,-210.16 245.06,-216.16 239.06,-216.16"/>
-<text xml:space="preserve" text-anchor="start" x="25.97" y="-196.35" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">3. Lowercase</text>
-<text xml:space="preserve" text-anchor="start" x="25.97" y="-182.85" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;hello &#160;world &#160;this &#160;is &#160;test</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M303.18,-216.16C303.18,-216.16 25.5,-216.16 25.5,-216.16 19.5,-216.16 13.5,-210.16 13.5,-204.16 13.5,-204.16 13.5,-168.94 13.5,-168.94 13.5,-162.94 19.5,-156.94 25.5,-156.94 25.5,-156.94 303.18,-156.94 303.18,-156.94 309.18,-156.94 315.18,-162.94 315.18,-168.94 315.18,-168.94 315.18,-204.16 315.18,-204.16 315.18,-210.16 309.18,-216.16 303.18,-216.16"/>
+<text xml:space="preserve" text-anchor="start" x="29.34" y="-196.35" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">3. Drop stop words (compared lowercased)</text>
+<text xml:space="preserve" text-anchor="start" x="29.34" y="-182.85" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;Hello &#160;World &#160;TEST</text>
+<text xml:space="preserve" text-anchor="start" x="29.34" y="-169.35" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;(&quot;this&quot;, &quot;is&quot; dropped)</text>
 </g>
 <!-- s2&#45;&gt;s3 -->
 <g id="edge3" class="edge">
 <title>s2&#45;&gt;s3</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M130.59,-241.86C130.59,-236.31 130.59,-230.48 130.59,-224.88"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="133.04,-225 130.59,-218 128.14,-225 133.04,-225"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M164.34,-241.66C164.34,-236.31 164.34,-230.66 164.34,-225.1"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="166.79,-225.16 164.34,-218.16 161.89,-225.16 166.79,-225.16"/>
 </g>
 <!-- s4 -->
 <g id="node5" class="node">
 <title>s4</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M218.81,-144.44C218.81,-144.44 42.38,-144.44 42.38,-144.44 36.37,-144.44 30.38,-138.44 30.38,-132.44 30.38,-132.44 30.38,-97.22 30.38,-97.22 30.38,-91.22 36.38,-85.22 42.38,-85.22 42.38,-85.22 218.81,-85.22 218.81,-85.22 224.81,-85.22 230.81,-91.22 230.81,-97.22 230.81,-97.22 230.81,-132.44 230.81,-132.44 230.81,-138.44 224.81,-144.44 218.81,-144.44"/>
-<text xml:space="preserve" text-anchor="start" x="46.22" y="-124.63" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">4. Drop stop words</text>
-<text xml:space="preserve" text-anchor="start" x="46.22" y="-111.13" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;hello &#160;world &#160;test</text>
-<text xml:space="preserve" text-anchor="start" x="46.22" y="-97.63" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;(&quot;this&quot;, &quot;is&quot; dropped)</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M269.43,-130.94C269.43,-130.94 59.25,-130.94 59.25,-130.94 53.25,-130.94 47.25,-124.94 47.25,-118.94 47.25,-118.94 47.25,-97.22 47.25,-97.22 47.25,-91.22 53.25,-85.22 59.25,-85.22 59.25,-85.22 269.43,-85.22 269.43,-85.22 275.43,-85.22 281.43,-91.22 281.43,-97.22 281.43,-97.22 281.43,-118.94 281.43,-118.94 281.43,-124.94 275.43,-130.94 269.43,-130.94"/>
+<text xml:space="preserve" text-anchor="start" x="63.09" y="-111.13" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">4. Index lowercases each token</text>
+<text xml:space="preserve" text-anchor="start" x="63.09" y="-97.63" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;hello &#160;world &#160;test</text>
 </g>
 <!-- s3&#45;&gt;s4 -->
 <g id="edge4" class="edge">
 <title>s3&#45;&gt;s4</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M130.59,-170.18C130.59,-164.91 130.59,-159.13 130.59,-153.37"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="133.04,-153.68 130.59,-146.68 128.14,-153.68 133.04,-153.68"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M164.34,-156.64C164.34,-151.09 164.34,-145.26 164.34,-139.66"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="166.79,-139.78 164.34,-132.78 161.89,-139.78 166.79,-139.78"/>
 </g>
 <!-- out -->
 <g id="node6" class="node">
 <title>out</title>
-<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.2" d="M205.31,-59.22C205.31,-59.22 55.88,-59.22 55.88,-59.22 49.88,-59.22 43.88,-53.22 43.88,-47.22 43.88,-47.22 43.88,-12 43.88,-12 43.88,-6 49.88,0 55.88,0 55.88,0 205.31,0 205.31,0 211.31,0 217.31,-6 217.31,-12 217.31,-12 217.31,-47.22 217.31,-47.22 217.31,-53.22 211.31,-59.22 205.31,-59.22"/>
-<text xml:space="preserve" text-anchor="start" x="59.72" y="-39.41" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Token{&quot;hello&quot;, pos 0}</text>
-<text xml:space="preserve" text-anchor="start" x="59.72" y="-25.91" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Token{&quot;world&quot;, pos 1}</text>
-<text xml:space="preserve" text-anchor="start" x="59.72" y="-12.41" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Token{&quot;test&quot;, &#160;pos 2}</text>
+<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.2" d="M239.06,-59.22C239.06,-59.22 89.63,-59.22 89.63,-59.22 83.62,-59.22 77.62,-53.22 77.62,-47.22 77.62,-47.22 77.62,-12 77.62,-12 77.62,-6 83.62,0 89.62,0 89.62,0 239.06,0 239.06,0 245.06,0 251.06,-6 251.06,-12 251.06,-12 251.06,-47.22 251.06,-47.22 251.06,-53.22 245.06,-59.22 239.06,-59.22"/>
+<text xml:space="preserve" text-anchor="start" x="93.47" y="-39.41" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Token{&quot;hello&quot;, pos 0}</text>
+<text xml:space="preserve" text-anchor="start" x="93.47" y="-25.91" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Token{&quot;world&quot;, pos 1}</text>
+<text xml:space="preserve" text-anchor="start" x="93.47" y="-12.41" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Token{&quot;test&quot;, &#160;pos 2}</text>
 </g>
 <!-- s4&#45;&gt;out -->
 <g id="edge5" class="edge">
 <title>s4&#45;&gt;out</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M130.59,-84.72C130.59,-79.37 130.59,-73.72 130.59,-68.16"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="133.04,-68.22 130.59,-61.22 128.14,-68.22 133.04,-68.22"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M164.34,-84.96C164.34,-79.69 164.34,-73.91 164.34,-68.15"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="166.79,-68.46 164.34,-61.46 161.89,-68.46 166.79,-68.46"/>
 </g>
 </g>
 </svg>

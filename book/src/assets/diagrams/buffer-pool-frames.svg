@@ -1,15 +1,16 @@
-<svg width="605" height="260"
- viewBox="0.00 0.00 454.00 195.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 190.55)">
+<svg width="605" height="277"
+ viewBox="0.00 0.00 454.00 208.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 204.05)">
 <title>buffer_pool_frames</title>
 <!-- table -->
 <g id="node1" class="node">
 <title>table</title>
-<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M217.41,-186.55C217.41,-186.55 12,-186.55 12,-186.55 6,-186.55 0,-180.55 0,-174.55 0,-174.55 0,-130.15 0,-130.15 0,-124.15 6,-118.15 12,-118.15 12,-118.15 217.41,-118.15 217.41,-118.15 223.41,-118.15 229.41,-124.15 229.41,-130.15 229.41,-130.15 229.41,-174.55 229.41,-174.55 229.41,-180.55 223.41,-186.55 217.41,-186.55"/>
-<text xml:space="preserve" text-anchor="start" x="10.08" y="-168.9" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Page Table &#160;&#160;(PageId → FrameId)</text>
+<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M217.41,-200.05C217.41,-200.05 12,-200.05 12,-200.05 6,-200.05 0,-194.05 0,-188.05 0,-188.05 0,-130.15 0,-130.15 0,-124.15 6,-118.15 12,-118.15 12,-118.15 217.41,-118.15 217.41,-118.15 223.41,-118.15 229.41,-124.15 229.41,-130.15 229.41,-130.15 229.41,-188.05 229.41,-188.05 229.41,-194.05 223.41,-200.05 217.41,-200.05"/>
+<text xml:space="preserve" text-anchor="start" x="10.08" y="-182.4" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Page Table &#160;&#160;(PageId → FrameId)</text>
+<text xml:space="preserve" text-anchor="start" x="10.08" y="-168.9" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;page 12 → frame 0</text>
 <text xml:space="preserve" text-anchor="start" x="10.08" y="-155.4" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;page 5 &#160;→ frame 2</text>
-<text xml:space="preserve" text-anchor="start" x="10.08" y="-141.9" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;page 12 → frame 0</text>
-<text xml:space="preserve" text-anchor="start" x="10.08" y="-128.4" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;page 3 &#160;→ frame 7</text>
+<text xml:space="preserve" text-anchor="start" x="10.08" y="-141.9" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;page 8 &#160;→ frame 4</text>
+<text xml:space="preserve" text-anchor="start" x="10.08" y="-128.4" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;page 1 &#160;→ frame 5</text>
 </g>
 <!-- f0 -->
 <g id="node2" class="node">
@@ -19,7 +20,7 @@
 <text xml:space="preserve" text-anchor="start" x="18.7" y="-48.7" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">pg 12</text>
 <text xml:space="preserve" text-anchor="start" x="18.7" y="-35.95" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">pin 2</text>
 <text xml:space="preserve" text-anchor="start" x="18.7" y="-23.2" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">dirty Y</text>
-<text xml:space="preserve" text-anchor="start" x="18.7" y="-10.45" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">use 3</text>
+<text xml:space="preserve" text-anchor="start" x="18.7" y="-10.45" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">use 1</text>
 </g>
 <!-- table&#45;&gt;f0 -->
 <!-- f2 -->
@@ -35,8 +36,8 @@
 <!-- table&#45;&gt;f2 -->
 <g id="edge2" class="edge">
 <title>table&#45;&gt;f2</title>
-<path fill="none" stroke="#4a90d9" stroke-width="1.1" d="M137.41,-117.66C144.27,-107.49 151.91,-96.15 159.18,-85.36"/>
-<polygon fill="#4a90d9" stroke="#4a90d9" stroke-width="1.1" points="160.98,-86.76 162.73,-80.1 157.21,-84.22 160.98,-86.76"/>
+<path fill="none" stroke="#4a90d9" stroke-width="1.1" d="M140.31,-117.81C146.98,-107.31 154.22,-95.91 161.05,-85.18"/>
+<polygon fill="#4a90d9" stroke="#4a90d9" stroke-width="1.1" points="162.77,-86.7 164.34,-79.99 158.93,-84.26 162.77,-86.7"/>
 </g>
 <!-- f1 -->
 <g id="node3" class="node">
@@ -69,7 +70,7 @@
 <text xml:space="preserve" text-anchor="start" x="318.7" y="-48.7" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">pg 8</text>
 <text xml:space="preserve" text-anchor="start" x="318.7" y="-35.95" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">pin 0</text>
 <text xml:space="preserve" text-anchor="start" x="318.7" y="-23.2" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">dirty Y</text>
-<text xml:space="preserve" text-anchor="start" x="318.7" y="-10.45" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">use 2</text>
+<text xml:space="preserve" text-anchor="start" x="318.7" y="-10.45" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">use 0</text>
 </g>
 <!-- f3&#45;&gt;f4 -->
 <!-- f5 -->
@@ -80,7 +81,7 @@
 <text xml:space="preserve" text-anchor="start" x="393.7" y="-48.7" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">pg 1</text>
 <text xml:space="preserve" text-anchor="start" x="393.7" y="-35.95" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">pin 3</text>
 <text xml:space="preserve" text-anchor="start" x="393.7" y="-23.2" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">dirty N</text>
-<text xml:space="preserve" text-anchor="start" x="393.7" y="-10.45" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">use 5</text>
+<text xml:space="preserve" text-anchor="start" x="393.7" y="-10.45" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">use 1</text>
 </g>
 <!-- f4&#45;&gt;f5 -->
 </g>

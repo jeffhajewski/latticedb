@@ -1,82 +1,83 @@
-<svg width="480" height="385"
- viewBox="0.00 0.00 360.00 289.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 284.81)">
+<svg width="483" height="403"
+ viewBox="0.00 0.00 362.00 302.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 297.56)">
 <title>fsync_durability</title>
 <g id="clust1" class="cluster">
 <title>cluster_without</title>
-<path fill="none" stroke="#dbe3ec" stroke-width="1.1" d="M20,-8C20,-8 160,-8 160,-8 166,-8 172,-14 172,-20 172,-20 172,-260.81 172,-260.81 172,-266.81 166,-272.81 160,-272.81 160,-272.81 20,-272.81 20,-272.81 14,-272.81 8,-266.81 8,-260.81 8,-260.81 8,-20 8,-20 8,-14 14,-8 20,-8"/>
-<text xml:space="preserve" text-anchor="middle" x="90" y="-257.41" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#6b7280">write() only</text>
+<path fill="none" stroke="#dbe3ec" stroke-width="1.1" d="M20,-14.38C20,-14.38 160,-14.38 160,-14.38 166,-14.38 172,-20.38 172,-26.38 172,-26.38 172,-273.56 172,-273.56 172,-279.56 166,-285.56 160,-285.56 160,-285.56 20,-285.56 20,-285.56 14,-285.56 8,-279.56 8,-273.56 8,-273.56 8,-26.38 8,-26.38 8,-20.38 14,-14.38 20,-14.38"/>
+<text xml:space="preserve" text-anchor="middle" x="90" y="-270.16" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#6b7280">write() only</text>
 </g>
 <g id="clust2" class="cluster">
 <title>cluster_with</title>
-<path fill="none" stroke="#dbe3ec" stroke-width="1.1" d="M192,-8C192,-8 332,-8 332,-8 338,-8 344,-14 344,-20 344,-20 344,-260.81 344,-260.81 344,-266.81 338,-272.81 332,-272.81 332,-272.81 192,-272.81 192,-272.81 186,-272.81 180,-266.81 180,-260.81 180,-260.81 180,-20 180,-20 180,-14 186,-8 192,-8"/>
-<text xml:space="preserve" text-anchor="middle" x="262" y="-257.41" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#6b7280">write() + fsync()</text>
+<path fill="none" stroke="#dbe3ec" stroke-width="1.1" d="M192,-8C192,-8 334,-8 334,-8 340,-8 346,-14 346,-20 346,-20 346,-273.56 346,-273.56 346,-279.56 340,-285.56 334,-285.56 334,-285.56 192,-285.56 192,-285.56 186,-285.56 180,-279.56 180,-273.56 180,-273.56 180,-20 180,-20 180,-14 186,-8 192,-8"/>
+<text xml:space="preserve" text-anchor="middle" x="263" y="-270.16" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#6b7280">write() + fsync()</text>
 </g>
 <!-- w1 -->
 <g id="node1" class="node">
 <title>w1</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M146.4,-238.06C146.4,-238.06 33.6,-238.06 33.6,-238.06 27.6,-238.06 21.6,-232.06 21.6,-226.06 21.6,-226.06 21.6,-214.06 21.6,-214.06 21.6,-208.06 27.6,-202.06 33.6,-202.06 33.6,-202.06 146.4,-202.06 146.4,-202.06 152.4,-202.06 158.4,-208.06 158.4,-214.06 158.4,-214.06 158.4,-226.06 158.4,-226.06 158.4,-232.06 152.4,-238.06 146.4,-238.06"/>
-<text xml:space="preserve" text-anchor="middle" x="90" y="-215.03" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Application</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M146.4,-250.81C146.4,-250.81 33.6,-250.81 33.6,-250.81 27.6,-250.81 21.6,-244.81 21.6,-238.81 21.6,-238.81 21.6,-226.81 21.6,-226.81 21.6,-220.81 27.6,-214.81 33.6,-214.81 33.6,-214.81 146.4,-214.81 146.4,-214.81 152.4,-214.81 158.4,-220.81 158.4,-226.81 158.4,-226.81 158.4,-238.81 158.4,-238.81 158.4,-244.81 152.4,-250.81 146.4,-250.81"/>
+<text xml:space="preserve" text-anchor="middle" x="90" y="-227.78" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Application</text>
 </g>
 <!-- w2 -->
 <g id="node2" class="node">
 <title>w2</title>
-<path fill="#fdf0ea" stroke="#c2703f" stroke-width="1.2" d="M146.4,-154.81C146.4,-154.81 33.6,-154.81 33.6,-154.81 27.6,-154.81 21.6,-148.81 21.6,-142.81 21.6,-142.81 21.6,-124.03 21.6,-124.03 21.6,-118.03 27.6,-112.03 33.6,-112.03 33.6,-112.03 146.4,-112.03 146.4,-112.03 152.4,-112.03 158.4,-118.03 158.4,-124.03 158.4,-124.03 158.4,-142.81 158.4,-142.81 158.4,-148.81 152.4,-154.81 146.4,-154.81"/>
-<text xml:space="preserve" text-anchor="middle" x="90" y="-134.77" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">OS buffer (RAM)</text>
-<text xml:space="preserve" text-anchor="middle" x="90" y="-122.02" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">data sits here</text>
+<path fill="#fdf0ea" stroke="#c2703f" stroke-width="1.2" d="M146.4,-167.56C146.4,-167.56 33.6,-167.56 33.6,-167.56 27.6,-167.56 21.6,-161.56 21.6,-155.56 21.6,-155.56 21.6,-136.78 21.6,-136.78 21.6,-130.78 27.6,-124.78 33.6,-124.78 33.6,-124.78 146.4,-124.78 146.4,-124.78 152.4,-124.78 158.4,-130.78 158.4,-136.78 158.4,-136.78 158.4,-155.56 158.4,-155.56 158.4,-161.56 152.4,-167.56 146.4,-167.56"/>
+<text xml:space="preserve" text-anchor="middle" x="90" y="-147.52" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">OS buffer (RAM)</text>
+<text xml:space="preserve" text-anchor="middle" x="90" y="-134.77" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">data sits here</text>
 </g>
 <!-- w1&#45;&gt;w2 -->
 <g id="edge1" class="edge">
 <title>w1&#45;&gt;w2</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M90,-201.52C90,-190.59 90,-176.24 90,-163.62"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="92.45,-163.89 90,-156.89 87.55,-163.89 92.45,-163.89"/>
-<text xml:space="preserve" text-anchor="middle" x="106.5" y="-174.56" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;write()</text>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M90,-214.27C90,-203.34 90,-188.99 90,-176.37"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="92.45,-176.64 90,-169.64 87.55,-176.64 92.45,-176.64"/>
+<text xml:space="preserve" text-anchor="middle" x="106.5" y="-187.31" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;write()</text>
 </g>
 <!-- w3 -->
 <g id="node3" class="node">
 <title>w3</title>
-<path fill="#fbe9e7" stroke="#b4382c" stroke-width="1.2" stroke-dasharray="5,2" d="M146.4,-64.78C146.4,-64.78 33.6,-64.78 33.6,-64.78 27.6,-64.78 21.6,-58.78 21.6,-52.78 21.6,-52.78 21.6,-34 21.6,-34 21.6,-28 27.6,-22 33.6,-22 33.6,-22 146.4,-22 146.4,-22 152.4,-22 158.4,-28 158.4,-34 158.4,-34 158.4,-52.78 158.4,-52.78 158.4,-58.78 152.4,-64.78 146.4,-64.78"/>
-<text xml:space="preserve" text-anchor="middle" x="90" y="-44.74" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Power failure</text>
-<text xml:space="preserve" text-anchor="middle" x="90" y="-31.99" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">loses it</text>
+<path fill="#fbe9e7" stroke="#b4382c" stroke-width="1.2" stroke-dasharray="5,2" d="M146.4,-71.16C146.4,-71.16 33.6,-71.16 33.6,-71.16 27.6,-71.16 21.6,-65.16 21.6,-59.16 21.6,-59.16 21.6,-40.38 21.6,-40.38 21.6,-34.38 27.6,-28.38 33.6,-28.38 33.6,-28.38 146.4,-28.38 146.4,-28.38 152.4,-28.38 158.4,-34.38 158.4,-40.38 158.4,-40.38 158.4,-59.16 158.4,-59.16 158.4,-65.16 152.4,-71.16 146.4,-71.16"/>
+<text xml:space="preserve" text-anchor="middle" x="90" y="-51.12" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Power failure</text>
+<text xml:space="preserve" text-anchor="middle" x="90" y="-38.37" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">loses it</text>
 </g>
 <!-- w2&#45;&gt;w3 -->
 <g id="edge2" class="edge">
 <title>w2&#45;&gt;w3</title>
-<path fill="none" stroke="#b4382c" stroke-width="1.1" stroke-dasharray="5,2" d="M90,-111.56C90,-100.27 90,-86.13 90,-73.75"/>
-<polygon fill="#b4382c" stroke="#b4382c" stroke-width="1.1" points="92.45,-73.77 90,-66.77 87.55,-73.77 92.45,-73.77"/>
+<path fill="none" stroke="#b4382c" stroke-width="1.1" stroke-dasharray="5,2" d="M90,-124.22C90,-111.26 90,-94.44 90,-80.16"/>
+<polygon fill="#b4382c" stroke="#b4382c" stroke-width="1.1" points="92.45,-80.32 90,-73.32 87.55,-80.32 92.45,-80.32"/>
 </g>
 <!-- f1 -->
 <g id="node4" class="node">
 <title>f1</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M318.4,-238.06C318.4,-238.06 205.6,-238.06 205.6,-238.06 199.6,-238.06 193.6,-232.06 193.6,-226.06 193.6,-226.06 193.6,-214.06 193.6,-214.06 193.6,-208.06 199.6,-202.06 205.6,-202.06 205.6,-202.06 318.4,-202.06 318.4,-202.06 324.4,-202.06 330.4,-208.06 330.4,-214.06 330.4,-214.06 330.4,-226.06 330.4,-226.06 330.4,-232.06 324.4,-238.06 318.4,-238.06"/>
-<text xml:space="preserve" text-anchor="middle" x="262" y="-215.03" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Application</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M319.4,-250.81C319.4,-250.81 206.6,-250.81 206.6,-250.81 200.6,-250.81 194.6,-244.81 194.6,-238.81 194.6,-238.81 194.6,-226.81 194.6,-226.81 194.6,-220.81 200.6,-214.81 206.6,-214.81 206.6,-214.81 319.4,-214.81 319.4,-214.81 325.4,-214.81 331.4,-220.81 331.4,-226.81 331.4,-226.81 331.4,-238.81 331.4,-238.81 331.4,-244.81 325.4,-250.81 319.4,-250.81"/>
+<text xml:space="preserve" text-anchor="middle" x="263" y="-227.78" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Application</text>
 </g>
 <!-- f2 -->
 <g id="node5" class="node">
 <title>f2</title>
-<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M318.4,-151.42C318.4,-151.42 205.6,-151.42 205.6,-151.42 199.6,-151.42 193.6,-145.42 193.6,-139.42 193.6,-139.42 193.6,-127.42 193.6,-127.42 193.6,-121.42 199.6,-115.42 205.6,-115.42 205.6,-115.42 318.4,-115.42 318.4,-115.42 324.4,-115.42 330.4,-121.42 330.4,-127.42 330.4,-127.42 330.4,-139.42 330.4,-139.42 330.4,-145.42 324.4,-151.42 318.4,-151.42"/>
-<text xml:space="preserve" text-anchor="middle" x="262" y="-128.4" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">OS buffer (empty)</text>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M319.4,-164.17C319.4,-164.17 206.6,-164.17 206.6,-164.17 200.6,-164.17 194.6,-158.17 194.6,-152.17 194.6,-152.17 194.6,-140.17 194.6,-140.17 194.6,-134.17 200.6,-128.17 206.6,-128.17 206.6,-128.17 319.4,-128.17 319.4,-128.17 325.4,-128.17 331.4,-134.17 331.4,-140.17 331.4,-140.17 331.4,-152.17 331.4,-152.17 331.4,-158.17 325.4,-164.17 319.4,-164.17"/>
+<text xml:space="preserve" text-anchor="middle" x="263" y="-141.15" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">OS buffer (empty)</text>
 </g>
 <!-- f1&#45;&gt;f2 -->
 <g id="edge3" class="edge">
 <title>f1&#45;&gt;f2</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M262,-201.52C262,-189.61 262,-173.64 262,-160.28"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="264.45,-160.6 262,-153.6 259.55,-160.6 264.45,-160.6"/>
-<text xml:space="preserve" text-anchor="middle" x="278.5" y="-174.56" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;write()</text>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M263,-214.27C263,-202.36 263,-186.39 263,-173.03"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="265.45,-173.35 263,-166.35 260.55,-173.35 265.45,-173.35"/>
+<text xml:space="preserve" text-anchor="middle" x="279.5" y="-187.31" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;write()</text>
 </g>
 <!-- f3 -->
 <g id="node6" class="node">
 <title>f3</title>
-<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.2" d="M318.4,-64.78C318.4,-64.78 205.6,-64.78 205.6,-64.78 199.6,-64.78 193.6,-58.78 193.6,-52.78 193.6,-52.78 193.6,-34 193.6,-34 193.6,-28 199.6,-22 205.6,-22 205.6,-22 318.4,-22 318.4,-22 324.4,-22 330.4,-28 330.4,-34 330.4,-34 330.4,-52.78 330.4,-52.78 330.4,-58.78 324.4,-64.78 318.4,-64.78"/>
-<text xml:space="preserve" text-anchor="middle" x="262" y="-44.74" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Disk (persistent)</text>
-<text xml:space="preserve" text-anchor="middle" x="262" y="-31.99" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">data is safe</text>
+<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.2" d="M320.47,-77.53C320.47,-77.53 205.53,-77.53 205.53,-77.53 199.53,-77.53 193.53,-71.53 193.53,-65.53 193.53,-65.53 193.53,-34 193.53,-34 193.53,-28 199.53,-22 205.53,-22 205.53,-22 320.47,-22 320.47,-22 326.47,-22 332.47,-28 332.47,-34 332.47,-34 332.47,-65.53 332.47,-65.53 332.47,-71.53 326.47,-77.53 320.47,-77.53"/>
+<text xml:space="preserve" text-anchor="middle" x="263" y="-57.49" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Storage device</text>
+<text xml:space="preserve" text-anchor="middle" x="263" y="-44.74" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">durable if the device</text>
+<text xml:space="preserve" text-anchor="middle" x="263" y="-31.99" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">honours the flush</text>
 </g>
 <!-- f2&#45;&gt;f3 -->
 <g id="edge4" class="edge">
 <title>f2&#45;&gt;f3</title>
-<path fill="none" stroke="#2f7d32" stroke-width="1.1" d="M262,-115.03C262,-103.27 262,-87.46 262,-73.77"/>
-<polygon fill="#2f7d32" stroke="#2f7d32" stroke-width="1.1" points="264.45,-73.82 262,-66.82 259.55,-73.82 264.45,-73.82"/>
-<text xml:space="preserve" text-anchor="middle" x="280" y="-84.53" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;fsync()</text>
+<path fill="none" stroke="#2f7d32" stroke-width="1.1" d="M263,-127.85C263,-116.31 263,-100.7 263,-86.55"/>
+<polygon fill="#2f7d32" stroke="#2f7d32" stroke-width="1.1" points="265.45,-86.64 263,-79.64 260.55,-86.64 265.45,-86.64"/>
+<text xml:space="preserve" text-anchor="middle" x="281" y="-97.28" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;fsync()</text>
 </g>
 </g>
 </svg>

@@ -8,12 +8,16 @@ The Page Manager handles the lowest level of database storage: fixed-size pages.
 
 ### Simplicity
 
-Every piece of data lives in a 4KB page. This uniformity simplifies everything:
+Every piece of data in the database file lives in a fixed-size page. The size is
+4096 bytes by default and is chosen when the database is created (anything from
+4096 to 65535 bytes, through `page_size` in the open options or the C API). It is
+stored in the file header and fixed for the life of the file. This uniformity
+simplifies everything:
 
 <img class="diagram" src="../assets/diagrams/page-manager-file-layout.svg"
-     alt="The database file as a row of fixed 4 KB pages: page 0 is the header at offset 0, pages 1 and 2 hold B+Tree data at offsets 4096 and 8192, page 3 is free at offset 12288">
+     alt="The database file as a row of fixed-size pages, shown at the default 4 KB: page 0 is the header at offset 0, pages 1 and 2 hold B+Tree data at offsets 4096 and 8192, page 3 is free at offset 12288">
 
-To read page N: `offset = N * 4096`
+To read page N: `offset = N * page_size`
 
 ### Alignment with Hardware
 
@@ -21,10 +25,13 @@ To read page N: `offset = N * 4096`
 - **OS pages**: Most operating systems use 4KB virtual memory pages
 - **Disk sectors**: Traditional HDDs use 512B or 4KB sectors
 
-4KB aligns well with all of these, enabling:
+4KB aligns well with all of these, which in general enables:
 - Direct I/O (bypassing OS cache)
 - Atomic writes on some hardware
 - Efficient memory mapping
+
+LatticeDB uses neither direct I/O nor memory mapping today; pages are read and
+written through the [VFS](./vfs.md) into the buffer pool.
 
 ### Efficient Caching
 
@@ -34,26 +41,48 @@ Fixed-size pages make the buffer pool trivial - every frame is the same size, no
 
 ### Page 0: File Header
 
-The first page is special - it contains metadata about the database:
+The first page is special - it contains metadata about the database. It is the
+`FileHeader` extern struct from `src/storage/page.zig` (200 bytes, all integers
+little-endian); the rest of page 0 is zero.
 
 | Offset | Size | Field |
 |--------|------|-------|
-| 0–3 | 4 B | Magic number — `0x4C415454` (`"LATT"`) |
-| 4–5 | 2 B | Format version |
+| 0–3 | 4 B | Magic number — `0x4C544442` (`"LTDB"`) |
+| 4–5 | 2 B | Format version (currently 3) |
 | 6–7 | 2 B | Minimum reader version |
-| 8–11 | 4 B | Page size (4096) |
-| 12–15 | 4 B | Freelist head page |
-| 16–23 | 8 B | Created timestamp |
-| 24–31 | 8 B | Modified timestamp |
-| 32–47 | 16 B | File UUID |
-| 48 → | — | Reserved / padding |
+| 8–11 | 4 B | Page size |
+| 12–15 | 4 B | Flags |
+| 16–23 | 8 B | Node count |
+| 24–31 | 8 B | Edge count |
+| 32–35 | 4 B | Legacy B+Tree root page (unused, kept for compatibility) |
+| 36–39 | 4 B | Vector segment page |
+| 40–43 | 4 B | FTS segment page |
+| 44–47 | 4 B | Freelist head page |
+| 48–51 | 4 B | Schema page |
+| 52–115 | 64 B | `tree_roots[16]` — root page of each B+Tree |
+| 116–119 | 4 B | Padding |
+| 120–127 | 8 B | WAL frame count |
+| 128–131 | 4 B | `checkpoint_seq` — how many times the WAL has been reset |
+| 132–135 | 4 B | Reserved |
+| 136–151 | 16 B | File UUID |
+| 152–159 | 8 B | Created timestamp |
+| 160–167 | 8 B | Modified timestamp |
+| 168–199 | 32 B | Application id |
 
 Key fields:
 
 - **Magic number**: Identifies this as a Lattice database file. Opening a random file will fail fast.
 - **Format version**: Allows future changes to the format
 - **Freelist head**: Points to the first free page (for allocation)
+- **Tree roots**: The root page of each of the engine's B+Trees (nodes, edges,
+  labels, symbols, FTS, HNSW, streams, property indexes), indexed by `TreeIndex`.
+  The roots are written back here when the database syncs or closes.
+- **Checkpoint sequence**: Incremented by every checkpoint that truncates the WAL,
+  so anything following the log can tell frame 40 of one run from frame 40 of the next
 - **File UUID**: Unique identifier, used to match WAL files
+
+The header page is written raw: unlike every other page it has no page header and
+no checksum.
 
 ### Data Pages
 
@@ -61,21 +90,27 @@ Every other page starts with a common header:
 
 | Offset | Size | Field |
 |--------|------|-------|
-| 0–3 | 4 B | Checksum — CRC32 of bytes 8–4095 |
-| 4 | 1 B | Page type — `btree_internal`, `btree_leaf`, and so on |
-| 5 | 1 B | Flags |
-| 6–7 | 2 B | Reserved |
-| 8–4095 | 4088 B | Page-specific data |
+| 0 | 1 B | Page type — `btree_internal`, `btree_leaf`, and so on |
+| 1 | 1 B | Flags |
+| 2–3 | 2 B | Reserved |
+| 4–7 | 4 B | Checksum — CRC32C of bytes 8 to the end of the page |
+| 8 → | page size − 8 | Page-specific data |
 
 ## Page Types
 
 ```zig
 pub const PageType = enum(u8) {
-    free = 0,           // Unallocated, on freelist
-    btree_internal = 1, // B+Tree internal node
-    btree_leaf = 2,     // B+Tree leaf node
-    overflow = 3,       // Large value overflow
-    freelist = 4,       // Freelist continuation
+    free = 0x00,              // Unallocated, on freelist
+    btree_internal = 0x01,    // B+Tree internal node
+    btree_leaf = 0x02,        // B+Tree leaf node
+    overflow = 0x03,          // Large value overflow
+    vector_data = 0x04,       // Stored vectors
+    hnsw_layer = 0x05,        // HNSW neighbour lists
+    fts_dictionary = 0x06,
+    fts_posting = 0x07,       // FTS posting lists
+    freelist = 0x08,
+    schema = 0x09,
+    segment_directory = 0x0A,
 };
 ```
 
@@ -90,8 +125,14 @@ Free pages are linked together in a freelist:
 
 ### Allocating a Page
 
+The snippets in this section are simplified from `src/storage/page_manager.zig`:
+`allocPage` and `allocZeroedPage` stand in for the page-sized, 4096-aligned buffer
+the real code allocates (and frees) inline, and error mapping is left out.
+
 ```zig
 pub fn allocatePage(self: *Self) !PageId {
+    if (self.read_only) return error.PermissionDenied;
+
     // 1. Try freelist first
     if (self.header.freelist_page != NULL_PAGE) {
         return self.allocateFromFreelist();
@@ -100,12 +141,14 @@ pub fn allocatePage(self: *Self) !PageId {
     // 2. Allocate at end of file
     const page_id = self.pageCount();
 
-    // 3. Extend file with zeroed page
-    var zeros: [4096]u8 = [_]u8{0} ** 4096;
-    const header: *PageHeader = @ptrCast(&zeros);
+    // 3. Extend file with a zeroed page (type free, checksum 0)
+    const zeros = try allocZeroedPage(self.page_size);
+    const header: *PageHeader = @ptrCast(zeros.ptr);
     header.* = PageHeader.init(.free);
+    try self.file.write(self.pageOffset(page_id), zeros);
 
-    try self.file.write(page_id * 4096, &zeros);
+    // 4. Rewrite the file header (modified timestamp)
+    try self.writeHeader();
 
     return page_id;
 }
@@ -118,8 +161,8 @@ fn allocateFromFreelist(self: *Self) !PageId {
     const page_id = self.header.freelist_page;
 
     // Read the free page to get next pointer
-    var buf: [4096]u8 = undefined;
-    try self.readPageRaw(page_id, &buf);
+    const buf = try allocPage(self.page_size);
+    try self.readPageRaw(page_id, buf);
 
     // Next pointer is stored after the 8-byte header
     const next_free = std.mem.readInt(u32, buf[8..12], .little);
@@ -140,8 +183,8 @@ pub fn freePage(self: *Self, page_id: PageId) !void {
     if (page_id == 0) return error.InvalidPageId;
 
     // 2. Set up page as free, pointing to current freelist head
-    var buf: [4096]u8 = [_]u8{0} ** 4096;
-    const header: *PageHeader = @ptrCast(&buf);
+    const buf = try allocZeroedPage(self.page_size);
+    const header: *PageHeader = @ptrCast(buf.ptr);
     header.* = PageHeader.init(.free);
 
     // Store old freelist head as next pointer
@@ -149,7 +192,7 @@ pub fn freePage(self: *Self, page_id: PageId) !void {
 
     // 3. Calculate checksum and write
     header.checksum = calculateChecksum(buf[8..]);
-    try self.file.write(page_id * 4096, &buf);
+    try self.file.write(self.pageOffset(page_id), buf);
 
     // 4. Update freelist head to this page
     self.header.freelist_page = page_id;
@@ -173,7 +216,9 @@ the new end of the file.
 
 ## Checksums
 
-Every page has a CRC32 checksum that covers bytes 8-4095 (everything after the checksum field itself).
+Every page except the header page carries a CRC32C (Castagnoli) checksum in bytes
+4–7 of its page header. It covers bytes 8 to the end of the page — everything after
+the page header — so the page type and flags in bytes 0–1 are not covered.
 
 ### Why Checksums?
 
@@ -181,13 +226,15 @@ Every page has a CRC32 checksum that covers bytes 8-4095 (everything after the c
 2. **Detect torn writes**: Partial page writes from crashes
 3. **Validate reads**: Catch errors before using bad data
 
+The detection has two gaps worth knowing. A stored checksum of 0 means "not
+checked", and pages are allocated with a checksum of 0 until they are first written
+through `writePage`. And the header page has no checksum at all.
+
 ### Checksum Calculation
 
 ```zig
 pub fn calculateChecksum(data: []const u8) u32 {
-    var crc = std.hash.Crc32.init();
-    crc.update(data);
-    return crc.final();
+    return std.hash.crc.Crc32Iscsi.hash(data); // CRC32C
 }
 ```
 
@@ -195,12 +242,16 @@ pub fn calculateChecksum(data: []const u8) u32 {
 
 ```zig
 pub fn writePage(self: *Self, page_id: PageId, buf: []u8) !void {
-    // Calculate checksum of everything after the checksum field
-    const header: *PageHeader = @ptrCast(buf.ptr);
+    if (self.read_only) return error.PermissionDenied;
+    if (buf.len != self.page_size) return error.InvalidPageId;
+    if (page_id == 0) return error.InvalidPageId; // the header is not a data page
+
+    // Calculate checksum of everything after the 8-byte page header
+    const header: *PageHeader = @ptrCast(@alignCast(buf.ptr));
     header.checksum = calculateChecksum(buf[8..]);
 
     // Write to disk
-    try self.file.write(page_id * 4096, buf);
+    try self.file.write(self.pageOffset(page_id), buf);
 }
 ```
 
@@ -208,10 +259,10 @@ pub fn writePage(self: *Self, page_id: PageId, buf: []u8) !void {
 
 ```zig
 pub fn readPage(self: *Self, page_id: PageId, buf: []u8) !void {
-    try self.file.read(page_id * 4096, buf);
+    try self.readPageRaw(page_id, buf); // reads page_size bytes at pageOffset(page_id)
 
     // Verify checksum
-    const header: *const PageHeader = @ptrCast(buf.ptr);
+    const header: *const PageHeader = @ptrCast(@alignCast(buf.ptr));
     const expected = calculateChecksum(buf[8..]);
 
     if (header.checksum != expected and header.checksum != 0) {
@@ -220,7 +271,8 @@ pub fn readPage(self: *Self, page_id: PageId, buf: []u8) !void {
 }
 ```
 
-Note: Checksum of 0 is allowed for newly allocated pages that haven't been written yet.
+Note: A stored checksum of 0 skips verification. Newly allocated pages carry 0
+until they are first written through `writePage`.
 
 ## Read-Only Mode
 
@@ -241,30 +293,55 @@ Useful for:
 - Read replicas
 - Forensic analysis
 
+## File Locking
+
+The page manager locks the file before it reads anything. A read-write open takes
+an exclusive lock and a read-only open takes a shared one, using `tryLock`, so a
+conflicting holder makes the open fail at once with `DatabaseLocked` rather than
+wait. A reader is therefore refused while another process has the database open
+for writing. The `lock` option turns this off for filesystems where locking does
+not work; it does not make cross-process sharing safe.
+
+## Format Upgrades
+
+Opening a file whose format version is older than the engine's (3) **read-write**
+rewrites its header to the current format version and minimum reader version. That
+happens silently, and afterwards an older engine refuses the file with
+`VersionTooNew`. A read-only open leaves the header alone.
+
 ## Error Handling
 
 ```zig
 pub const PageManagerError = error{
     InvalidHeader,      // File header is malformed
     InvalidMagic,       // Not a Lattice database file
+    InvalidPageSize,    // Page size outside 4096..65535
     VersionTooNew,      // File created by newer version
     ChecksumMismatch,   // Data corruption detected
     InvalidPageId,      // Page ID out of range
     PageNotAllocated,   // Accessing unallocated page
     IoError,            // Underlying I/O failed
     PermissionDenied,   // Write to read-only database
+    OutOfMemory,        // Page buffer allocation failed
+    Unexpected,
     FileNotFound,       // Database file doesn't exist
     DiskFull,           // No space for new pages
+    DatabaseLocked,     // Another process holds a conflicting lock
 };
 ```
 
 ## Thread Safety
 
-The Page Manager itself is NOT thread-safe. Each operation directly touches the file. In a multi-threaded context, the Buffer Pool provides thread-safe access by:
+The Page Manager itself is NOT thread-safe (only its page count is atomic, so
+readers can check page ids while a writer allocates). Each operation directly
+touches the file. In a multi-threaded context, the Buffer Pool sits in front of it:
 
 1. Caching pages in memory
-2. Using latches (reader-writer locks) per page
-3. Serializing writes through its own mutex
+2. Using latches (reader-writer locks) per frame
+3. Guarding its page table with a mutex
+
+Writes are serialised above both layers: a database allows one read-write
+transaction at a time, and the C API serialises the calls on a handle.
 
 ## Usage Pattern
 
@@ -299,17 +376,21 @@ try pm.sync();
 
 ## Key Design Decisions
 
-### Fixed 4KB Pages
+### Fixed-Size Pages, 4KB by Default
 
-Chosen for hardware alignment. Could be made configurable (stored in header), but 4KB works well for most cases.
+4KB is the default for hardware alignment. The size can be raised at creation (up
+to 65535 bytes), for example to fit larger values inline; it is stored in the
+header and the same for every page in the file.
 
 ### Freelist in Pages
 
 The freelist uses the free pages themselves for storage. No external data structure needed. Elegant and space-efficient.
 
-### Checksum After Header
+### Checksum Covers the Body, Not the Header
 
-Checksum doesn't cover itself (circular dependency). By placing checksum first, we can compute it over the rest of the page in one pass.
+The checksum doesn't cover itself (circular dependency). It sits in bytes 4–7 and
+covers bytes 8 onward, the whole page after its 8-byte header, in one pass. The
+price of that choice is that the page type and flags in bytes 0–1 are unprotected.
 
 ### No Internal Fragmentation Tracking
 

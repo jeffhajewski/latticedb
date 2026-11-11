@@ -23,6 +23,33 @@ If you crash:
 
 This is the **write-ahead** rule: log first, then data.
 
+### How LatticeDB applies it
+
+LatticeDB logs *logical* changes — "create node 42 with label Person", "set
+property name on edge 7" — not page images, and it logs them at commit rather than
+as each statement runs. Inside a transaction, writes go to an in-memory overlay
+and nothing reaches the log or the stores. At commit the database:
+
+1. appends the overlay's changes to the log as records (buffered, not yet synced),
+2. applies the overlay to the stores, which dirties pages in the buffer pool,
+3. appends `TXN_COMMIT` and fsyncs the log — the commit is durable from here,
+4. runs an automatic checkpoint if the log has grown past its threshold, and
+   returns.
+
+The database file catches up later, when the buffer pool evicts a dirty page or a
+checkpoint or sync flushes it. Pages carry no LSN, and the buffer pool does not wait
+for the log before writing a page, so the ordering is not enforced page by page:
+the changes are applied in step 2, before the fsync in step 3, and a page evicted
+in that window reaches the database file before the commit record is on disk.
+Recovery is redo-only (see [Recovery](./recovery.md)), so it has no undo pass to
+take such a page back.
+
+If you crash:
+- **Before the commit record is on disk**: the transaction does not count;
+  recovery skips its records
+- **After the commit record is on disk**: recovery re-executes its records against
+  the stores, so the change survives even if no page was written
+
 ## Why Append-Only Sequential Writes Are Special
 
 The WAL relies on a key property: **sequential append is much safer than random writes**.
@@ -44,35 +71,44 @@ The WAL's safety depends on one critical system call: **fsync** (or fdatasync).
 
 ```c
 write(fd, data, len);  // Data goes to OS buffer cache
-fsync(fd);             // Forces data to physical disk platters
+fsync(fd);             // Asks the OS to push the data to the storage device
 ```
 
-Without fsync, your "written" data might sit in RAM for seconds or minutes. A power failure loses it. fsync is a **durability barrier** - when it returns, data is on persistent storage.
+Without fsync, your "written" data might sit in RAM for seconds or minutes. A power failure loses it. fsync is a **durability barrier** - when it returns, the operating system has handed the data to the device. How far that goes depends on the platform: on macOS plain `fsync` does not force the drive's write cache (that needs `F_FULLFSYNC`, which LatticeDB does not use). See [Virtual File System](./vfs.md#sync-fsync).
 
 This is expensive (milliseconds, not microseconds), so we batch multiple records into frames before syncing.
 
 ## WAL Structure
 
-The WAL file is a 4 KB header followed by a sequence of 4 KB frames.
+The WAL is a separate file next to the database, named `<database>-wal`. It is a
+4 KB header followed by a sequence of frames. A frame is the size of a database
+page (4096 bytes by default, up to 65535); the size is recorded in the WAL header,
+and an existing log keeps the frame size it was created with.
 
 **WAL header (4 KB)**
 
 | Field | Purpose |
 |-------|---------|
 | `magic` | `0x574C4F47` (`"WLOG"`) |
-| `database_uuid` | Binds this WAL to one database file |
+| `frame_size` | Size of every frame in this file |
 | `frame_count` | How many frames have been written |
 | `checkpoint_lsn` | Where recovery starts replaying |
-| `checksum` | Detects header corruption |
+| `database_uuid` | Binds this WAL to one database file |
+| `version` | WAL format version (currently 2) |
+| `checksum` | CRC32C of the rest of the header |
 
-**Frame header (32 bytes, at the start of every 4 KB frame)**
+**Frame header (32 bytes, at the start of every frame)**
 
 | Field | Purpose |
 |-------|---------|
 | `frame_number` | Position of this frame in the file |
 | `record_count` | How many records the frame carries |
 | `data_size` | Bytes of the frame actually used |
-| `checksum` | CRC32 over the frame's data area |
+| `prev_frame_lsn` | LSN of the last record in the previous frame |
+| `checksum` | CRC32C over the frame's data area |
+
+Each record has its own 32-byte header — `record_type`, `flags`, `payload_size`,
+`txn_id`, `lsn`, `prev_lsn` — followed by its payload.
 
 The remainder of each frame holds records back to back, then unused space. A frame
 carrying a single-statement transaction might look like this:
@@ -97,10 +133,12 @@ LSN 6: TXN_COMMIT (txn 1)
 LSN 7: TXN_ABORT (txn 2)
 ```
 
-LSN serves multiple purposes:
+LSN serves two purposes:
 1. **Ordering**: Total order of all operations
 2. **Recovery point**: "Replay from LSN 42"
-3. **Page tracking**: Each data page stores the LSN of the last modification
+
+Data pages do not record an LSN. Nothing compares a page's state with the log;
+recovery decides what to redo from transaction outcomes alone.
 
 ## The prev_lsn Chain
 
@@ -124,16 +162,22 @@ Transaction 1: LSN 5 → LSN 4 → LSN 2 → LSN 1
 Transaction 2: LSN 3 (just one operation)
 ```
 
-Why? **Rollback**. To abort transaction 1, follow the chain backward, undoing each operation.
+The chain is the classic tool for rolling a transaction back from the log. LatticeDB
+writes it but nothing reads it today: an abort discards the transaction's in-memory
+overlay, and recovery has no undo pass.
 
 ## Write Flow
 
 <img class="diagram" src="../assets/diagrams/wal-write-flow.svg"
-     alt="A write flows from the application to a transaction, then to the WAL manager which assigns an LSN, builds a record and appends it to the frame buffer. A full buffer flushes the frame; a commit flushes the frame and calls fsync, after which it is safe to return to the application">
+     alt="Writes inside a transaction go to its in-memory overlay and do not touch the log. At commit the database logs the overlay: the WAL manager assigns LSNs and appends records to the frame buffer, writing a frame to the file whenever it fills. The overlay is then applied to the stores in the buffer pool, TXN_COMMIT is appended and the last frame is written and fsynced, which makes the commit durable. An automatic checkpoint may then run before commit returns to the application">
 
 The key insight: we buffer multiple records in memory, only hitting disk when:
-1. The frame buffer is full (4KB of records accumulated)
-2. A transaction commits (durability guarantee)
+1. The frame buffer is full (a frame's worth of records accumulated) — the frame is
+   written, but not fsynced
+2. A transaction commits or aborts — the frame is written and the file is fsynced
+
+`TXN_BEGIN` is appended when a transaction starts, and sits in the frame buffer
+until something flushes it.
 
 Logical WAL records can be larger than a single frame. Large graph, stream, vector, and
 property payloads are fragmented into physical `large_fragment` records and
@@ -150,26 +194,31 @@ open returns, so recovery does not require a later clean close to survive.
 
 ## Commit Protocol
 
-When you call `COMMIT`:
+When you call `COMMIT` on a transaction that changed something:
 
 ```
-1. Write TXN_COMMIT record to WAL buffer
-2. Flush current frame to disk
-3. Call fsync() - WAIT for disk acknowledgment
-4. Return "committed" to application
+1. Append the overlay's changes as logical records (frame buffer; full frames written)
+2. Apply the overlay to the stores (dirty pages in the buffer pool)
+3. Append TXN_COMMIT, write the current frame, and fsync() - WAIT for the device
+4. Checkpoint automatically if the log has reached its frame threshold (best effort:
+   a failed checkpoint does not fail the commit)
+5. Return "committed" to the application
 ```
 
-After step 3, even if power fails immediately, the commit record is on disk. Recovery will see the commit and know the transaction succeeded.
+After step 3, even if power fails immediately, the commit record is on disk. Recovery will see the commit and redo the transaction's records.
 
-If we crash before step 3? The commit record might be lost. Recovery won't see a commit for that transaction, so it will be rolled back. **No partial commits ever escape to the application.**
+If we crash before step 3? The commit record might be lost. Recovery won't see a commit for that transaction, so it skips its records. The application was never told the commit succeeded. Because step 2 runs before step 3, though, a page that the buffer pool evicted in between can already hold some of those changes, and recovery does not undo it.
 
-## Recovery: Redo and Undo
+A read-only transaction, or one that changed nothing, skips steps 1 and 2 but still
+appends `TXN_COMMIT` and fsyncs.
 
-On startup after a crash, we need to:
+## Recovery: Redo Only
+
+On startup, we need to:
 
 1. **Find the end of valid log** - Scan frames, verify checksums, find last valid record
-2. **Redo committed transactions** - Replay all operations from committed transactions
-3. **Undo uncommitted transactions** - Roll back any transaction without a commit record
+2. **Redo committed transactions** - Re-execute the logical records of every transaction with a commit record
+3. **Skip everything else** - Records of transactions without a commit record are ignored; there is no undo pass
 
 | LSN | Record | Transaction |
 |----:|--------|------------:|
@@ -185,7 +234,7 @@ The process crashes after LSN 6.
 | Transaction | Has `TXN_COMMIT`? | Recovery action |
 |------------:|-------------------|-----------------|
 | 1 | Yes | Redo — `x=1` is permanent |
-| 2 | No | Undo — `y=2` and `z=3` are rolled back |
+| 2 | No | Skip — `y=2` and `z=3` are never applied |
 
 ## Why Frames?
 
@@ -193,7 +242,7 @@ Why not just append individual records?
 
 **Reason 1: Atomicity**
 
-A 4KB write is more likely to be atomic than arbitrary-sized writes. Many storage systems guarantee 512-byte or 4KB atomic writes. By aligning to page boundaries, we reduce torn write risk.
+A page-sized write at a page-aligned offset is more likely to be atomic than arbitrary-sized writes. Many storage systems guarantee 512-byte or 4KB atomic writes. Frames start after the 4 KB header at multiples of the frame size, which reduces torn write risk.
 
 **Reason 2: Batching**
 
@@ -212,9 +261,9 @@ format used for normal records.
 
 ## The Checksum
 
-We use CRC32 to detect corruption:
+We use CRC32C (the Castagnoli polynomial, the same function as page checksums) to detect corruption:
 
-Every frame stores a CRC32 of its data area in its header:
+Every frame stores a CRC32C of its data area in its header:
 
 | Frame region | Contents |
 |--------------|----------|
@@ -224,7 +273,7 @@ Every frame stores a CRC32 of its data area in its header:
 On read the checksum is recomputed and compared:
 
 1. Read the frame.
-2. Compute `CRC32(data)`.
+2. Compute `CRC32C(data)`.
 3. Compare against the stored checksum.
 4. On mismatch, corruption is detected and replay stops.
 
@@ -269,8 +318,21 @@ pub const WalRecordType = enum(u8) {
 
     // Compensation (for undo during recovery)
     clr = 0x50,
+
+    // Physical record used to fragment a larger logical WAL record
+    large_fragment = 0x60,
 };
 ```
+
+Not every type is in use. Transactions write `txn_begin`, `txn_commit`,
+`txn_abort`, `insert`, `update` and `delete`, plus `large_fragment` for big
+records. The first byte of an `insert`/`update`/`delete` payload says which logical
+operation it is (node insert, delete or property update; edge insert, delete or
+property update; label add or remove; vector set or remove; stream append, offset
+or trim). Checkpoints write `checkpoint_begin`/`checkpoint_end`, which recovery
+treats as informational. `savepoint` and `savepoint_rollback` are only written by
+the transaction manager's internal savepoint calls, and `page_write` and `clr` are
+reserved: nothing writes them.
 
 ## WalManager API
 
@@ -289,17 +351,20 @@ while (try iter.next(&buf)) |record| {
 
 // Update checkpoint position
 try wal.setCheckpointLsn(lsn);
+
+// Reset to an empty, header-only log (truncate checkpoints)
+try wal.truncateToEmpty();
 ```
 
 ## Summary
 
 | Concept | Purpose |
 |---------|---------|
-| Write-ahead rule | Log before data = crash safety |
+| Write-ahead rule | Commit record durable before commit returns = crash safety |
 | Sequential append | Simpler crash states than random writes |
-| fsync | Durability barrier to physical storage |
+| fsync | Durability barrier to the storage device |
 | LSN | Universal ordering of all operations |
-| prev_lsn chain | Enables transaction rollback |
+| prev_lsn chain | Per-transaction back links (written, not yet used) |
 | Frames | Atomic-ish writes + batching |
 | Checksums | Detect corruption and torn writes |
 | UUID | Match WAL to correct database file |

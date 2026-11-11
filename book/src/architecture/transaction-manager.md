@@ -4,6 +4,11 @@
 
 A transaction is a **logical unit of work** - a group of operations that should either all succeed or all fail together.
 
+This chapter explains the internal transaction machinery: the `TxnManager` in
+`src/transaction/manager.zig` and how the `Database` uses it. It is not by itself
+the public contract. For what a transaction guarantees to an application, see
+[Transactions and Durability](../guides/transactions.md).
+
 | | Without transactions | With transactions |
 |---|---|---|
 | Step 1 | Debit Alice $100 — succeeds | `BEGIN` |
@@ -18,10 +23,17 @@ Transactions guarantee four properties:
 
 | Property | Meaning | How We Achieve It |
 |----------|---------|-------------------|
-| **A**tomicity | All or nothing | WAL + rollback |
+| **A**tomicity | All or nothing | Per-transaction overlay + commit record |
 | **C**onsistency | Valid state to valid state | Application logic |
-| **I**solation | Transactions don't interfere | Timestamps + MVCC |
+| **I**solation | Transactions don't interfere | One writer at a time; snapshot copies for other open transactions |
 | **D**urability | Committed = permanent | WAL + fsync |
+
+The public contract permits one live read-write transaction per database. Starting
+a second one while the first is open fails with `TransactionConflict` (in C,
+`LATTICE_ERROR_LOCK_TIMEOUT`) instead of waiting. The transaction manager also
+hands out MVCC-style timestamps (`start_ts`, `commit_ts`), and
+`src/transaction/mvcc.zig` holds version-chain machinery, but the storage layer
+does not use either; they are an internal target, not a guarantee.
 
 ## The Core Data Structures
 
@@ -75,20 +87,34 @@ pub const TxnManager = struct {
 
 When you start a transaction:
 
-1. Lock the manager mutex.
-2. Assign `txn_id = 1`.
-3. Assign `start_ts = 1`.
-4. `appendRecord(TXN_BEGIN)` — the WAL returns `lsn = 1`.
-5. Create a `TxnEntry` with `last_lsn = 1`.
-6. Store it in `active_txns`.
-7. Unlock the mutex.
-8. Return `Transaction { id = 1, ... }` to the caller.
+`Database.beginTransaction` first refuses a second read-write transaction while one
+is open. Then the transaction manager:
 
-The `start_ts` is crucial for isolation - it determines what data this transaction can "see".
+1. Locks the manager mutex.
+2. Assigns `txn_id = 1`.
+3. Assigns `start_ts = 1`.
+4. `appendRecord(TXN_BEGIN)` — the WAL returns `lsn = 1`. The record sits in the
+   frame buffer; nothing is synced yet.
+5. Creates a `TxnEntry` with `last_lsn = 1`.
+6. Stores it in `active_txns`.
+7. Unlocks the mutex.
+8. Returns `Transaction { id = 1, ... }` to the caller.
+
+The database then creates an empty overlay for the transaction. That happens for
+read-only transactions too.
+
+`start_ts` is recorded but nothing in the storage layer reads it.
 
 ### 2. Operations
 
-Each modification goes through `logOperation`:
+Writes inside a transaction do not go to the log as they happen. Creating a node,
+setting a property or deleting an edge records the new state in the transaction's
+overlay, an in-memory map from node, edge and vector ids to their pending state,
+plus lists of stream appends, offsets and trims. Reads in the same transaction look
+in the overlay first.
+
+The log is written at commit, when the database turns each overlay entry into one
+or more records and passes them to `logOperation`:
 
 1. Check `txn.canWrite()`.
 2. Look up the `TxnEntry`.
@@ -98,6 +124,10 @@ Each modification goes through `logOperation`:
 5. Return `lsn = 2` to the caller.
 
 Notice how `prev_lsn` points to the previous operation. This builds a **backward chain**.
+
+(A write with no transaction at all, through the Zig API's `null` transaction, goes
+straight to the stores and is not logged. It reaches the file only when its pages
+are flushed.)
 
 ### 3. COMMIT
 
@@ -115,17 +145,38 @@ Commit makes everything permanent:
 
 **The critical point**: We only return success to the application AFTER `fsync()` completes. This is the durability guarantee.
 
-Graph, vector, FTS, and stream mutations are staged in a transaction overlay
-until commit. At commit time the database logs the semantic graph state needed
-for recovery, stages graph changefeed records, flushes the WAL, and then applies
-the overlay to the base stores. Large property updates avoid carrying both old
-and new full values in commit-time WAL records when redo does not require both;
-the changefeed uses summary maps for values that would exceed stream/WAL sizing
-limits.
+Those are the transaction manager's steps. `Database.commitTransaction` wraps them.
+For a transaction whose overlay holds changes, it runs, in order:
+
+1. Copy the pre-commit state of every node, edge and vector the overlay changes
+   into each other open transaction's overlay (see
+   [Timestamps and Isolation](#timestamps-and-isolation)).
+2. Stage graph changefeed records and assign stream sequence numbers.
+3. Log the overlay: append its logical records (`logOperation`); nothing is synced.
+4. Apply the overlay to the base stores — graph stores, label index, vector index,
+   streams, and the full-text and property indexes that follow from them. This
+   dirties pages in the buffer pool.
+5. `tm.commit`: append `TXN_COMMIT` and fsync the WAL (the steps above).
+6. Discard the overlay, clear the active writer, and wake stream readers if streams changed.
+7. Run an automatic checkpoint if the WAL has reached its threshold (best effort).
+
+A transaction with no changes, read-only or not, goes straight to step 5.
+
+Two consequences of applying before the fsync: the buffer pool can evict a page
+holding the new state before the commit record is on disk, and if the fsync fails,
+commit returns an error with the overlay already applied in memory.
+
+Large property updates avoid carrying both old and new full values in commit-time
+WAL records when redo does not require both; the changefeed uses summary maps for
+values that would exceed stream/WAL sizing limits.
 
 ### 4. ABORT
 
-Abort discards everything:
+Abort discards everything. At the database level that means dropping the
+transaction's overlay: nothing it staged ever reached the stores. (The transaction
+manager also keeps a per-transaction undo log, replayed on abort only for writes
+that bypassed the overlay; ordinary transactional writes do not.) Then the
+transaction manager:
 
 1. `appendRecord(TXN_ABORT)`.
 2. `wal.sync()`.
@@ -155,66 +206,58 @@ whole log:
 - Transaction 1: 6 → 4 → 2 → 1
 - Transaction 2: 5 → 3
 
-**Why is this useful?**
+**What is it for?** In a classic ARIES design the chain drives rollback and undo
+during recovery without scanning the whole log. LatticeDB writes it, but nothing
+reads it today: abort discards the overlay, and recovery identifies uncommitted
+transactions by scanning the log forward and has no undo pass.
 
-1. **Rollback**: To abort transaction 1, follow 6->4->2->1, undoing each operation
-2. **Recovery**: After crash, find uncommitted transactions by following chains
-3. **No scanning**: Don't need to scan entire WAL to find a transaction's operations
+## Savepoints (Internal, Incomplete)
 
-## Savepoints: Partial Rollback
-
-Sometimes you want to undo part of a transaction, not all of it:
-
-```
-BEGIN;
-    INSERT user Alice;           -- LSN 2
-    SAVEPOINT before_orders;     -- Remember this point
-    INSERT order #1;             -- LSN 4
-    INSERT order #2;             -- LSN 5
-    -- Oops, orders were wrong
-    ROLLBACK TO before_orders;   -- Undo LSN 4, 5
-    INSERT order #3;             -- LSN 7
-COMMIT;
-```
-
-### How Savepoints Work
-
-<img class="diagram" src="../assets/diagrams/savepoint-stack.svg"
-     alt="A savepoint named before_orders records lsn 3 and undo position 0. The undo log holds two inserts at positions 1 and 2, and rolling back to the savepoint truncates the log back to the recorded undo position">
-
-When we rollback to savepoint:
-1. Find the savepoint by name
-2. Log `SAVEPOINT_ROLLBACK` to WAL
-3. Truncate undo_log to `undo_position`
-4. Remove savepoints created after this one
+`TxnManager` has `savepoint` and `rollbackToSavepoint`, but nothing above it calls
+them: there is no savepoint API in the database layer, the C API, the bindings or
+Cypher. They are also incomplete. Rolling back to a savepoint logs
+`SAVEPOINT_ROLLBACK` and truncates the transaction manager's undo log, but it does
+not touch the transaction's overlay, and recovery ignores savepoint records, so
+nothing is actually undone.
 
 ## Timestamps and Isolation
 
 Every transaction gets two timestamps:
 
 ```
-start_ts:  Assigned at BEGIN - determines what data is visible
-commit_ts: Assigned at COMMIT - marks when changes become visible to others
+start_ts:  Assigned at BEGIN
+commit_ts: Assigned at COMMIT
 ```
+
+They are the hooks an MVCC design would use to decide visibility. The storage layer
+does not consult them. Isolation comes from two simpler mechanisms instead:
+
+1. **One writer.** Only one read-write transaction can be open at a time, so
+   writers never interleave.
+2. **Snapshot copies at commit.** Uncommitted writes live only in the writer's
+   overlay, so nobody else can see them. When the writer commits, the database
+   first copies the pre-commit state of every node, edge and vector it changed into
+   each other open transaction's overlay (unless that overlay already has an entry
+   for it). Those transactions read their overlay first, so they keep seeing the
+   values from before the commit.
 
 ### Snapshot Isolation Example
 
-| Timestamp | Transaction | Event |
-|----------:|-------------|-------|
-| 1 | Txn A | `BEGIN` — `start_ts = 1` |
-| 2 | Txn A | `INSERT x = 100` |
-| 3 | Txn B | `BEGIN` — `start_ts = 3` |
-| 4 | Txn A | `COMMIT` — `commit_ts = 4` |
+| Step | Transaction | Event |
+|----:|-------------|-------|
+| 1 | Txn A | `BEGIN` (read-write) |
+| 2 | Txn A | `SET x = 100` — staged in A's overlay |
+| 3 | Txn B | `BEGIN` (read-only) |
+| 4 | Txn A | `COMMIT` — the old `x` is copied into B's overlay, then A's change is applied |
 | 5 | Txn B | Reads `x` |
-
-Txn B began at `ts = 3`, before Txn A committed at `ts = 4`, so its snapshot does not
-include `x = 100` even though the read happens afterwards.
 
 **Question**: What does Txn B see when it reads x?
 
-With **snapshot isolation**: Txn B started at ts=3, before Txn A committed at ts=4. So Txn B does NOT see x=100. It sees whatever x was before Txn A.
+Txn B was open when Txn A committed, so its overlay received the old value of `x`
+at step 4. B does NOT see x=100; it sees whatever x was before Txn A.
 
-This is why we track `start_ts` and `commit_ts` - they determine visibility.
+The copies cover node, edge and vector state only. How long-lived concurrent readers
+behave beyond that is not part of the public contract.
 
 ## Read-Only Transactions
 
@@ -229,10 +272,12 @@ const result = tm.logOperation(&txn, .insert, "data");
 ```
 
 Why have read-only transactions?
-1. **No WAL writes** - faster, no disk I/O for reads
-2. **No locks needed** - can always proceed
-3. **Never abort due to conflicts** - just reads a snapshot
-4. **Helps garbage collection** - we know this txn won't modify old versions
+1. **No single-writer conflict** - any number can be open alongside the one writer
+2. **A stable view** - they receive snapshot copies when a writer commits, as above
+3. **Nothing to log** - their overlay stays empty, so commit has nothing to apply
+
+They are not free of log I/O, though: `begin` appends `TXN_BEGIN`, and `commit`
+appends `TXN_COMMIT` and fsyncs the WAL, the same as for a read-write transaction.
 
 ## Thread Safety
 
@@ -264,9 +309,14 @@ stats.oldest_active_id // Oldest running transaction
 stats.current_ts       // Current timestamp
 ```
 
-`oldest_active_id` is important for garbage collection - we can't clean up any data that this transaction might still need to see.
+`oldest_active_id` is what garbage collection of old versions would need. The
+engine keeps no old versions to collect, so nothing uses it yet.
 
 ## API Summary
+
+This is the internal API the `Database` drives; applications use
+`Database.beginTransaction`, `commitTransaction` and `abortTransaction` (or the
+bindings' equivalents) instead.
 
 ```zig
 var tm = TxnManager.init(allocator, &wal);
@@ -274,18 +324,9 @@ var tm = TxnManager.init(allocator, &wal);
 // Start a transaction
 var txn = try tm.begin(.read_write, .snapshot);
 
-// Log operations
+// Log operations (the database does this at commit, from the overlay)
 _ = try tm.logOperation(&txn, .insert, payload);
 _ = try tm.logOperation(&txn, .update, payload);
-
-// Create savepoint
-try tm.savepoint(&txn, "before_danger");
-
-// More operations
-_ = try tm.logOperation(&txn, .delete, payload);
-
-// Rollback to savepoint if needed
-try tm.rollbackToSavepoint(&txn, "before_danger");
 
 // Commit or abort
 try tm.commit(&txn);  // or tm.abort(&txn)
@@ -294,6 +335,9 @@ try tm.commit(&txn);  // or tm.abort(&txn)
 ## Integration
 
 <img class="diagram" src="../assets/diagrams/txn-manager-integration.svg"
-     alt="The layering: the application calls TxnManager, which handles transaction lifecycle, prev_lsn chains and active transaction tracking; TxnManager calls WalManager for logging and fsync on commit; below that sit the buffer pool and B+Tree holding the data">
+     alt="The layering: the application calls the Database, which keeps a per-transaction overlay, enforces the single writer and copies snapshots into other open transactions at commit. The Database calls TxnManager, which handles transaction ids, begin, commit and abort records and prev_lsn chains, and TxnManager calls WalManager for logging and fsync on commit and abort. Separately, the Database applies committed overlays to the B+Trees and buffer pool">
 
-The Transaction Manager is the **coordinator** - it doesn't store data itself, but ensures that all operations follow ACID rules by orchestrating the WAL, tracking state, and enforcing invariants.
+The Transaction Manager is the **log-facing half** of transactions - it doesn't store
+data itself, and it does not touch the B+Trees. It assigns ids, writes the begin,
+commit and abort records, and makes the commit durable. The `Database` owns the
+other half: the overlays, the single-writer rule, and applying committed changes.

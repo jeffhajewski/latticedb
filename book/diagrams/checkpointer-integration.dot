@@ -14,9 +14,9 @@ digraph checkpointer_integration {
 
   pool [label="BufferPool\lframes\ldirty tracking\llatches\l"
         fontname="Menlo,Consolas,monospace" fontsize=11]
-  pgm  [label="PageManager\lwritePage\lsync\l"
+  pgm  [label="PageManager\lwritePage\ladvanceCheckpointSeq\lsync\l"
         fontname="Menlo,Consolas,monospace" fontsize=11]
-  wal  [label="WalManager\lappend\lsync\lsetLsn\l"
+  wal  [label="WalManager\lappendRecord\lsync\lsetCheckpointLsn\ltruncateToEmpty\l"
         fontname="Menlo,Consolas,monospace" fontsize=11]
 
   ckpt -> pool

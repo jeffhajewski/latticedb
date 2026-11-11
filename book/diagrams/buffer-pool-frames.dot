@@ -1,4 +1,5 @@
 // The page table maps page ids to frames; frames hold the cached page bytes.
+// The use count is effectively a bit: a hit sets it to 1, the clock clears it.
 digraph buffer_pool_frames {
   bgcolor="transparent"
   rankdir=TB
@@ -10,15 +11,15 @@ digraph buffer_pool_frames {
         fontcolor="#1a1a1a" margin="0.14,0.10"]
   edge [color="#6b7280" penwidth=1.1 arrowsize=0.65]
 
-  table [label="Page Table   (PageId → FrameId)\l   page 5  → frame 2\l   page 12 → frame 0\l   page 3  → frame 7\l"
+  table [label="Page Table   (PageId → FrameId)\l   page 12 → frame 0\l   page 5  → frame 2\l   page 8  → frame 4\l   page 1  → frame 5\l"
          fillcolor="#dbe9f8" fontsize=11]
 
-  f0 [label="Frame 0\lpg 12\lpin 2\ldirty Y\luse 3\l" fillcolor="#fdf0ea" color="#c2703f"]
+  f0 [label="Frame 0\lpg 12\lpin 2\ldirty Y\luse 1\l" fillcolor="#fdf0ea" color="#c2703f"]
   f1 [label="Frame 1\lfree\lpin 0\ldirty N\luse 0\l" fillcolor="#f6f8fa" color="#c7d0da"]
   f2 [label="Frame 2\lpg 5\lpin 1\ldirty N\luse 1\l"]
   f3 [label="Frame 3\lfree\lpin 0\ldirty N\luse 0\l" fillcolor="#f6f8fa" color="#c7d0da"]
-  f4 [label="Frame 4\lpg 8\lpin 0\ldirty Y\luse 2\l" fillcolor="#fdf0ea" color="#c2703f"]
-  f5 [label="Frame 5\lpg 1\lpin 3\ldirty N\luse 5\l"]
+  f4 [label="Frame 4\lpg 8\lpin 0\ldirty Y\luse 0\l" fillcolor="#fdf0ea" color="#c2703f"]
+  f5 [label="Frame 5\lpg 1\lpin 3\ldirty N\luse 1\l"]
 
   table -> f0 [style=invis]
   table -> f2 [color="#4a90d9"]

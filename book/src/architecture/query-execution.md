@@ -5,7 +5,7 @@
 Lattice executes Cypher queries using the **Volcano iterator model**—a pull-based execution engine where operators form a tree and data flows upward one row at a time. This design enables lazy evaluation, memory efficiency, and composable query plans.
 
 <img class="diagram" src="../assets/diagrams/query-pipeline.svg"
-     alt="The query pipeline: a Cypher string passes through the lexer producing tokens, the parser producing an AST, the semantic analyzer producing a validated AST with variable bindings, the planner producing an operator tree, and the executor producing result rows">
+     alt="The query pipeline: a Cypher string is first looked up in the query cache. On a miss it passes through the lexer producing tokens, the parser producing an AST and the semantic analyzer producing a validated AST with variable bindings, which are stored in the cache; on a hit those stages are skipped. The planner produces an operator tree. A write query with no caller transaction begins an automatic read-write transaction, the executor produces result rows, and the transaction is committed, or aborted on error">
 
 ## The Volcano Iterator Model
 
@@ -35,20 +35,27 @@ pub const Operator = struct {
 Data flows **upward** through the operator tree. The root operator "pulls" from its children:
 
 <img class="diagram" src="../assets/diagrams/volcano-operator-tree.svg"
-     alt="A Volcano operator tree. The executor calls next on Limit, which pulls from Project, which pulls from Filter, which pulls from LabelScan, which reads from storage">
+     alt="A Volcano operator tree. The executor calls next on Project, which pulls from Limit, which pulls from Filter, which pulls from LabelScan, which reads from storage">
 
 When the executor calls `root.next()`:
-1. Limit calls Project.next()
-2. Project calls Filter.next()
+1. Project calls Limit.next()
+2. Limit checks its count (returns null if the limit is reached), then calls Filter.next()
 3. Filter calls LabelScan.next()
-4. LabelScan reads from B+Tree, returns row
+4. LabelScan returns a row for the next node id it collected from storage
 5. Filter evaluates predicate—if false, pulls another row
-6. Project evaluates expressions, transforms row
-7. Limit checks count, returns row (or null if limit reached)
+6. Limit counts the row and passes it up
+7. Project evaluates expressions, transforms row
+
+Without aggregation, `ORDER BY`, `SKIP` and `LIMIT` are planned *under* the
+projection, so they can still see variables the projection drops (`RETURN n.name
+ORDER BY n.age`). With aggregation they go on top, because they may refer to
+aggregated values that only exist after grouping.
 
 ### Lazy Evaluation
 
-Work happens only when `next()` is called. For `LIMIT 10`, we might scan millions of nodes but only process 10 matching rows. Unused rows are never materialized.
+Rows are produced only when `next()` is called. Scans collect the node ids they
+will visit when they open, but building, filtering and projecting each row
+happens on demand: with `LIMIT 10`, evaluation stops after 10 matching rows.
 
 ## Rows and Slots
 
@@ -78,13 +85,18 @@ pub const SlotValue = union(enum) {
 
 ### Why Slots Instead of Named Variables?
 
-Performance. Looking up `slots[3]` is O(1). The planner assigns each variable to a numbered slot:
+Performance. Looking up `slots[3]` is O(1). The planner assigns each variable to
+a numbered slot. For `(p:Person)-[r:KNOWS]->(f:Person)` it allocates the
+relationship's target node before the relationship itself:
 
 | Pattern element | Slot |
 |-----------------|-----:|
 | `(p:Person)` | 0 |
-| `[r:KNOWS]` | 1 |
-| `(f:Person)` | 2 |
+| `(f:Person)` | 1 |
+| `[r:KNOWS]` | 2 |
+
+A row has 16 slots, so a query can bind at most 16 variables (including
+internal ones the planner adds).
 
 The execution context maintains the mapping from names to slots for expression evaluation.
 
@@ -99,20 +111,28 @@ Rows store **references** (NodeId, EdgeId), not full objects. Properties are fet
 **AllNodesScan**: Iterates every node in the database.
 
 ```
-open():  Create B+Tree iterator (null start key = first entry)
-next():  Read entry, extract NodeId from key, set output slot
-close(): Release iterator, unpin pages
+open():  Collect every node id visible to the transaction into a slice
+next():  Take the next id from the slice, set output slot
+close(): Free the slice
 ```
 
 **LabelScan**: Iterates nodes with a specific label.
 
 ```
-open():  Create LabelIndex iterator for the label
-next():  Get next NodeId from index, set output slot
-close(): Release iterator
+open():  Collect the ids of nodes carrying the label (label index, plus the
+         transaction's own changes) into a slice
+next():  Take the next id from the slice, set output slot
+close(): Free the slice
 ```
 
-Both produce rows with a single slot containing a node reference.
+**PropertyIndexScan**: Used instead of a label scan when an explicit property
+index covers an equality on the pattern's label (inline `{k: v}` or a `WHERE`
+equality right after the `MATCH`). It evaluates the value once at open and
+reads the matching ids from the index.
+
+All three produce rows with a single slot containing a node reference. Because
+they hold id slices rather than open B+Tree iterators, no pages stay pinned
+between `next()` calls.
 
 ### Filter Operator
 
@@ -166,15 +186,15 @@ State:
     source_slot      = slot containing the source node
     target_slot      = slot to write target node
     edge_slot        = slot to write edge (optional)
-    edge_iterator    = current iterator over edges
+    edges            = edge references for the current input (a slice)
     current_input    = row being expanded
 
 next():
     loop:
-        if edge_iterator.next() returns edge:
+        if edges has another edge ref:
             output_row = copy input row
             output_row[target_slot] = edge.target
-            output_row[edge_slot] = edge (if requested)
+            output_row[edge_slot] = edge id (if requested)
             return output_row
 
         // Exhausted edges for current input, get next input
@@ -182,8 +202,11 @@ next():
         if null: return null
 
         source = current_input[source_slot]
-        edge_iterator = edgeStore.getOutgoing(source)
+        edges = database.getOutgoingEdgeRefs[ByType]InTxn(txn, source[, type])
 ```
+
+`VariableLengthExpand` handles `-[*min..max]->` patterns. When the target node
+carries labels, the planner adds a `LabelFilter` above the expand.
 
 This is a **one-to-many** operator: one input row can produce multiple output rows.
 
@@ -245,33 +268,29 @@ This breaks the streaming model but is necessary for ordering.
 
 ### Vector Search Operator
 
-Performs k-NN search using the HNSW index.
+The planner turns a `WHERE` of the form `x.prop <=> $q` or `x.prop <=> $q <
+threshold` (or `<=`; the query may also be a literal list) into a
+**VectorSearchWithInput** placed over the pattern's scan. It does not replace
+the scan:
 
-```zig
-fn open(self: *VectorSearch, ctx: *ExecutionContext) !void {
-    // Execute search upfront
-    self.results = try self.index.search(self.query_vector, self.k, null);
-}
-
-fn next(self: *VectorSearch, ctx: *ExecutionContext) !?*Row {
-    while (self.current < self.results.len) {
-        const result = self.results[self.current];
-        self.current += 1;
-
-        // Apply distance threshold
-        if (self.threshold) |t| {
-            if (result.distance > t) continue;
-        }
-
-        self.row.setSlot(self.output_slot, .{ .node_ref = result.node_id });
-        self.row.setDistance(self.output_slot, result.distance);
-        return self.row;
-    }
-    return null;
-}
+```text
+open():
+    results = database.vectorSearchInTxn(txn, query, k = 100, default ef_search)
+    allowed = node ids in results within the threshold
+    drain the input, keeping the rows whose node is in `allowed`
+next():
+    emit kept rows in distance order, storing each row's distance
 ```
 
-The distance is stored in the row for use in expressions or sorting.
+The candidate set is the **100 nearest vectors** in the whole index, a value
+fixed in the planner. The pattern's label scan still runs, and a node the scan
+produces that is not among those 100 is dropped even if it is within the
+threshold. The property name in `x.prop` is not used to choose an index: a
+database has one vector index.
+
+The distance is stored in the row for use in expressions or sorting. (A leaf
+`VectorSearch` operator, which emits the search results directly, also exists
+in `vector.zig`, but the planner does not use it.)
 
 ### FTS Operators
 
@@ -310,6 +329,8 @@ The full reasoning, including the measurements that motivated the seek, is in
 ### Mutation Operators
 
 Mutation operators modify the graph structure. Unlike read operators, they have side effects.
+The snippets below are simplified; the real operators call `Database` methods
+with the execution context's transaction.
 
 **CreateNode**: Creates new nodes with labels and properties.
 
@@ -375,11 +396,35 @@ MATCH (n:Person {name: "Alice"}) SET n:Admin:Verified
 MATCH (n:Person {name: "Alice"}) REMOVE n.city
 ```
 
-**RemoveLabel**: Removes labels from nodes.
+**RemoveLabels**: Removes labels from nodes.
 
 ```cypher
 MATCH (n:Person {name: "Alice"}) REMOVE n:Verified
 ```
+
+The remaining mutation operators are **CreateEdge**, **DeleteEdge**,
+**SetPropertiesReplace** (`SET n = {...}`), **SetPropertiesMerge**
+(`SET n += {...}`), and **MergeNode** / **MergeEdge** for `MERGE`.
+
+### Operator Inventory
+
+| File | Operators |
+|------|-----------|
+| `scan.zig` | AllNodesScan, LabelScan, PropertyIndexScan |
+| `source.zig` | SingleRow (one empty row: the input of a query that starts with `UNWIND` or `RETURN`) |
+| `filter.zig` | Filter, LabelFilter |
+| `expand.zig` | Expand |
+| `var_expand.zig` | VariableLengthExpand |
+| `cross_product.zig` | CrossProduct (disconnected patterns) |
+| `project.zig` | Project |
+| `aggregate.zig` | Aggregate (`count`, `count(*)`, `sum`, `avg`, `min`, `max`, `collect`) |
+| `distinct.zig` | Distinct |
+| `limit.zig` | Limit, Skip, Sort |
+| `materialize.zig` | Materialize (drains its input before mutations run, so reads release their pages first) |
+| `unwind.zig` | Unwind |
+| `vector.zig` | VectorSearchWithInput (and the unused leaf VectorSearch) |
+| `fts.zig` | FtsIndexSeek, FtsSearchWithInput |
+| `mutation.zig` | CreateNode, CreateEdge, DeleteNode, DeleteEdge, SetProperty, SetLabels, SetPropertiesReplace, SetPropertiesMerge, RemoveProperty, RemoveLabels, MergeNode, MergeEdge |
 
 ## Expression Evaluation
 
@@ -405,35 +450,49 @@ pub fn evaluate(expr: *const Expression, row: *const Row, ctx: *ExecutionContext
 
 **Logical**: `AND`, `OR`, `NOT`, `XOR` (with short-circuit evaluation)
 
-**Arithmetic**: `+`, `-`, `*`, `/`, `%`, `^`
+**Arithmetic**: `+`, `-`, `*`, `/`, `%`, `^`, unary `-`
 
-**String**: `CONTAINS`, `STARTS WITH`, `ENDS WITH`
+**String**: `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `=~` (regular expression match)
+
+**List**: `IN`
 
 **Null handling**: `IS NULL`, `IS NOT NULL`
 
-**Functions**: `id()`, `coalesce()`, `abs()`, `size()`, `toInteger()`, `toFloat()`
+**Functions** (names are case-sensitive):
+- Graph and type: `id()`, `labels()`, `type()`, `properties()`
+- Numeric and conversion: `abs()`, `toInteger()`, `toFloat()`, `toString()`, `coalesce()`
+- String: `toUpper()`, `toLower()`, `trim()`, `replace()`, `substring()`, `split()`
+- List: `size()`, `head()`, `last()`, `tail()`, `range()`
+
+**Aggregates** (planned as an `Aggregate` operator): `count()`, `count(*)`,
+`sum()`, `avg()`, `min()`, `max()`, `collect()`
 
 **Vector Search**: `<=>` (vector distance operator)
 ```cypher
--- k-NN search with distance threshold
+// k-NN search with distance threshold
 MATCH (c:Chunk) WHERE c.embedding <=> $query < 0.5 RETURN c
 ```
 
 **Full-Text Search**: `@@` (FTS match operator)
 ```cypher
--- BM25-scored full-text search
+// BM25-scored full-text search
 MATCH (d:Doc) WHERE d.text @@ $search RETURN d
 MATCH (d:Doc) WHERE d.text @@ "neural networks" RETURN d
 ```
 
 These operators are recognized by the planner and converted to specialized search
-operators that use the HNSW and FTS indexes directly, rather than scanning all
-nodes.
+operators that use the HNSW and FTS indexes.
 
-For full-text search that holds only in conjunctive positions — the whole `WHERE`,
-or a branch of an `AND`. Under an `OR` the planner keeps the label scan on
-purpose, because the other branch can admit entities the index never names and
-seeking would silently drop them.
+For full-text search, an `FtsIndexSeek` reads the index instead of scanning,
+but only in conjunctive positions — the whole `WHERE`, or a branch of an `AND`.
+Under an `OR` the planner keeps the label scan on purpose, because the other
+branch can admit entities the index never names and seeking would silently drop
+them.
+
+Vector search does not avoid the scan. The `<=>` pattern is recognised only when
+it is the whole `WHERE` clause; it is then planned as `VectorSearchWithInput`
+over the label (or all-nodes) scan, keeping only nodes among the 100 nearest vectors (see
+[Vector Search Operator](#vector-search-operator)).
 
 ### Type Coercion
 
@@ -442,11 +501,15 @@ Numeric operations promote integers to floats when mixed:
 42 + 3.14  →  45.14 (float)
 ```
 
-Null propagates through most operations:
+Null propagates through most operations, and comparisons follow Cypher's
+three-valued logic:
 ```
-null + 1   →  null
-null = null → true (special case for equality)
+null + 1    →  null
+null = null →  null (use IS NULL to test for null)
 ```
+
+A `WHERE` keeps a row only when its predicate is `true`; `false` and `null`
+both drop it.
 
 ## The Query Planner
 
@@ -454,26 +517,34 @@ The planner transforms an AST into an operator tree by walking the query clauses
 
 ### Planning Algorithm
 
+Simplified from `QueryPlanner.plan` in `planner.zig`:
+
 ```zig
 pub fn plan(query: *Query) !Operator {
     var current: ?Operator = null;
 
-    for (query.clauses) |clause| {
+    for (query.clauses, 0..) |clause, i| {
         current = switch (clause) {
-            .match => try planMatch(clause.match, current),
+            // The following WHERE is passed in so an index can be chosen
+            .match => try planMatch(clause.match, current, whereAfter(i)),
             .where => try planWhere(clause.where, current),
+            // Also plans the ORDER BY / SKIP / LIMIT that follow it:
+            // underneath the projection, or on top if it aggregates
+            .return_ => try planReturnAndTrailing(clause.return_, current),
+            .order_by => try planOrderBy(clause.order_by, current),
+            .limit => try planLimit(clause.limit, current),
+            .skip => try planSkip(clause.skip, current),
             .create => try planCreate(clause.create, current),
             .delete => try planDelete(clause.delete, current),
             .set => try planSet(clause.set, current),
             .remove => try planRemove(clause.remove, current),
-            .return_ => try planReturn(clause.return_, current),
-            .order_by => try planOrderBy(clause.order_by, current),
-            .limit => try planLimit(clause.limit, current),
-            .skip => try planSkip(clause.skip, current),
+            .with => try planWith(clause.with, current),
+            .merge => try planMerge(clause.merge, current),
+            .unwind => try planUnwind(clause.unwind, current),
         };
     }
 
-    return current.?;
+    return current orelse error.InvalidQuery;
 }
 ```
 
@@ -486,8 +557,8 @@ MATCH (p:Person) WHERE p.age > 30 RETURN p.name LIMIT 10
 Produces:
 
 ```text
-Limit(count=10)
-  └── Project([p.name → slot 0])
+Project([p.name → slot 0])
+  └── Limit(count=10)
         └── Filter(p.age > 30)
               └── LabelScan(label="Person", output=slot 0)
 ```
@@ -502,13 +573,14 @@ Produces:
 
 ```text
 Project([a.name → slot 0, b.name → slot 1])
-  └── Expand(source=0, target=1, type="KNOWS", dir=outgoing)
-        └── LabelScan(label="Person", output=slot 0)
+  └── LabelFilter(slot 1, label="Person")
+        └── Expand(source=0, target=1, type="KNOWS", dir=outgoing)
+              └── LabelScan(label="Person", output=slot 0)
 ```
 
 ### Variable Binding
 
-The planner allocates slots for variables:
+The planner allocates slots for variables. For `(a)-[r]->(b)`:
 
 | Variable | Slot | Kind |
 |----------|------|------|
@@ -525,9 +597,14 @@ Runtime state for query execution:
 ```zig
 pub const ExecutionContext = struct {
     allocator: Allocator,
-    row_arena: ArenaAllocator,          // Fast row allocation
-    parameters: StringHashMap(Value),   // Query parameters ($name)
-    variables: StringHashMap(u8),       // Variable → slot mapping
+    row_arena: ArenaAllocator,                  // Fast row allocation
+    parameters: StringHashMap(PropertyValue),   // Query parameters ($name)
+    variables: StringHashMap(u8),               // Variable → slot mapping
+    node_store: ?*NodeStore,                    // Property lookups
+    symbol_table: ?*SymbolTable,                // Property key resolution
+    database: ?*Database,                       // Mutations and searches
+    txn: ?*Transaction,                         // Transaction reads and writes go through
+    fts_cache: ?*FtsFilterCache = null,         // Full-text results reused within one execution
 };
 ```
 
@@ -579,27 +656,34 @@ This enables flexible query plans without special-casing combinations.
 ### Operator Lifecycle
 
 ```
-1. Planner creates operators (heap allocated)
+1. Planner creates operators in a per-query arena
 2. Executor calls open() on root (cascades down)
 3. Executor calls next() repeatedly (rows flow up)
 4. Executor calls close() on root (cascades down)
-5. Executor calls deinit() on root (frees operators bottom-up)
+5. The query arena is freed, taking the operators with it
 ```
 
-### Iterator Cleanup
+Every operator has a `deinit()` in its vtable, but `Database.query()` does not
+need it: the operators, the plan and intermediate evaluation results all live in
+the query's arena.
 
-Operators holding B+Tree or index iterators **must** release them in `close()`:
+### Resource Cleanup
+
+Operators release what they acquired in `open()` from `close()`. For the scans
+that is the id slice they collected:
 
 ```zig
-fn close(self: *LabelScan, ctx: *ExecutionContext) void {
-    if (self.iterator) |*iter| {
-        iter.deinit();  // Unpins pages in buffer pool
-        self.iterator = null;
+fn close(ptr: *anyopaque, _: *ExecutionContext) void {
+    const self: *LabelScan = @ptrCast(@alignCast(ptr));
+    if (self.node_ids) |node_ids| {
+        self.database.allocator.free(node_ids);
+        self.node_ids = null;
     }
 }
 ```
 
-Failing to do this leaks pinned pages.
+Operators that do hold storage resources across calls must release them here,
+or pinned pages leak.
 
 ## Future Optimizations
 
@@ -635,13 +719,13 @@ The `Database.query()` method provides the primary interface for executing Cyphe
 ### Basic Usage
 
 ```zig
-// Open database
-var db = try Database.open(allocator, "mydb.ltdb", .{ .create = true });
+// Open database (returns *Database)
+const db = try Database.open(allocator, "mydb.ltdb", .{ .create = true });
 defer db.close();
 
-// Create some data
-_ = try db.createNode(&[_][]const u8{"Person"});
-_ = try db.createNode(&[_][]const u8{"Person"});
+// Create some data (null = no explicit transaction)
+_ = try db.createNode(null, &[_][]const u8{"Person"});
+_ = try db.createNode(null, &[_][]const u8{"Person"});
 
 // Execute a query
 var result = try db.query("MATCH (n:Person) RETURN n");
@@ -667,12 +751,17 @@ for (result.rows) |row| {
 ```zig
 /// A single value in a query result
 pub const ResultValue = union(enum) {
-    null_val: void,      // NULL
-    bool_val: bool,      // true/false
-    int_val: i64,        // integers
-    float_val: f64,      // floating point
-    string_val: []const u8,  // strings
-    node_id: NodeId,     // node reference
+    null_val: void,                 // NULL
+    bool_val: bool,                 // true/false
+    int_val: i64,                   // integers
+    float_val: f64,                 // floating point
+    string_val: []const u8,         // strings
+    node_id: NodeId,                // node reference
+    edge_id: EdgeId,                // relationship reference
+    bytes_val: []const u8,          // byte strings
+    vector_val: []const f32,        // vectors
+    list_val: []const ResultValue,  // lists
+    map_val: []const MapEntry,      // maps
 };
 
 /// A row in a query result
@@ -710,7 +799,8 @@ Example error handling:
 
 ```zig
 const result = db.query("MATCH (n RETURN n");  // Missing )
-if (result) |r| {
+if (result) |res| {
+    var r = res; // deinit needs a mutable QueryResult
     defer r.deinit();
     // process results
 } else |err| switch (err) {
@@ -725,24 +815,43 @@ if (result) |r| {
 When you call `db.query(cypher)`, the following happens:
 
 ```text
-1. Parser.init(allocator, cypher)
+1. normalizeCypher(cypher), then look it up in the query cache
+   ├── hit:  reuse the cached AST and variable bindings (skip 2 and 3)
+   └── miss: run 2 and 3, then store the result in the cache
+
+2. Parser.init(allocator, cypher)
    └── parser.parse() → AST (or ParseError)
 
-2. SemanticAnalyzer.init(allocator)
+3. SemanticAnalyzer.init(allocator)
    └── analyzer.analyze(ast) → AnalysisResult (or SemanticError)
 
-3. QueryPlanner.init(allocator, storage_context)
+4. QueryPlanner.init(query_arena, storage_context)
    └── planner.plan(ast, analysis) → Operator tree (or PlanError)
 
-4. ExecutionContext.init(allocator)
-   └── Register variable bindings from planner
+5. If no transaction was passed, the query writes, and the database is
+   writable: begin a read-write transaction
 
-5. execute(allocator, root_operator, context)
+6. ExecutionContext.initWithStorage(...)
+   └── Register variable bindings from planner, attach the transaction
+
+7. execute(query_arena, root_operator, context)
    └── Pull rows through operator tree → executor.QueryResult
 
-6. convertResult(exec_result, planner)
+8. convertResult(exec_result, planner)
    └── Transform to user-friendly QueryResult
+
+9. Commit the automatic transaction (it is aborted if any step fails)
 ```
+
+The query cache holds up to 128 entries by default (`enable_query_cache`,
+`query_cache_size`). It caches parsed and analysed queries, not plans: every
+execution is planned afresh, so planning decisions follow the current indexes
+and data. Schema changes, such as creating or dropping an index, invalidate the
+cache.
+
+The automatic transaction is why a single write query is atomic. Only one
+read-write transaction may be open at a time, so a write query run while
+another writer is open fails rather than waits.
 
 The `StorageContext` connects the planner to database storage:
 
@@ -752,6 +861,9 @@ const storage_ctx = StorageContext{
     .label_index = &self.label_index,   // Label → NodeId index
     .edge_store = &self.edge_store,     // Edge storage
     .symbol_table = &self.symbol_table, // String interning
+    .hnsw_index = ...,                  // Vector index, if enabled
+    .fts_index = ...,                   // Full-text index, if enabled
+    .database = self,                   // Transaction-aware reads and writes
 };
 ```
 
@@ -769,11 +881,15 @@ const storage_ctx = StorageContext{
 | `src/query/executor.zig` | Operator interface, Row, ExecutionContext |
 | `src/query/expression.zig` | Expression evaluator |
 | `src/query/planner.zig` | AST to operator tree transformation |
-| `src/query/operators/scan.zig` | AllNodesScan, LabelScan |
-| `src/query/operators/filter.zig` | Filter operator |
+| `src/query/cache.zig` | Parsed-query cache |
+| `src/query/operators/scan.zig` | AllNodesScan, LabelScan, PropertyIndexScan |
+| `src/query/operators/filter.zig` | Filter, LabelFilter |
 | `src/query/operators/project.zig` | Project operator |
 | `src/query/operators/expand.zig` | Edge traversal |
+| `src/query/operators/var_expand.zig` | Variable-length traversal |
+| `src/query/operators/aggregate.zig` | Aggregation |
 | `src/query/operators/vector.zig` | HNSW k-NN search |
 | `src/query/operators/fts.zig` | Full-text search |
 | `src/query/operators/limit.zig` | Limit, Skip, Sort |
-| `src/query/operators/mutation.zig` | CREATE, DELETE, SET, REMOVE |
+| `src/query/operators/mutation.zig` | CREATE, DELETE, SET, REMOVE, MERGE |
+| `src/query/operators/*.zig` | Others: see [Operator Inventory](#operator-inventory) |

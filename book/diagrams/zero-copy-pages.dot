@@ -1,4 +1,5 @@
-// Zero-copy page access: no object materialisation between disk and reader.
+// Page access without node objects: searches and in-place inserts work on the
+// page bytes; values handed out and page rebuilds still copy.
 digraph zero_copy_pages {
   bgcolor="transparent"
   rankdir=TB
@@ -29,7 +30,10 @@ digraph zero_copy_pages {
     fontname="Helvetica,Arial,sans-serif" fontsize=12 fontcolor="#6b7280"
     color="#dbe3ec" penwidth=1.1 style=rounded margin=14
     b1 [label="Page bytes" fillcolor="#dbe9f8"]
-    b2 [label="Modify bytes in place" fillcolor="#dbe9f8"]
+    b2 [label="Search and modify\nbytes in place" fillcolor="#dbe9f8"]
+    b3 [label="Where copies still happen:\lvalues returned to callers;\lsplits, merges and deletes\lrebuilding a page\l"
+        fillcolor="#f6f8fa" color="#c7d0da" fontsize=10]
     b1 -> b2 [label="  access via offsets" color="#4a90d9"]
+    b2 -> b3 [style=dashed color="#c7d0da"]
   }
 }

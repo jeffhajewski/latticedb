@@ -1,44 +1,61 @@
-<svg width="491" height="269"
- viewBox="0.00 0.00 368.00 202.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 198.31)">
+<svg width="724" height="268"
+ viewBox="0.00 0.00 543.00 201.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 196.81)">
 <title>graph_storage_btrees</title>
 <g id="clust1" class="cluster">
 <title>cluster_layer</title>
-<path fill="#f7fafd" stroke="#4a90d9" stroke-width="1.3" d="M20,-8C20,-8 340,-8 340,-8 346,-8 352,-14 352,-20 352,-20 352,-174.31 352,-174.31 352,-180.31 346,-186.31 340,-186.31 340,-186.31 20,-186.31 20,-186.31 14,-186.31 8,-180.31 8,-174.31 8,-174.31 8,-20 8,-20 8,-14 14,-8 20,-8"/>
-<text xml:space="preserve" text-anchor="middle" x="180" y="-169.96" font-family="Helvetica,Arial,sans-serif" font-size="13.00" fill="#1a1a1a">Graph Storage Layer</text>
+<path fill="#f7fafd" stroke="#4a90d9" stroke-width="1.3" d="M20,-8C20,-8 515,-8 515,-8 521,-8 527,-14 527,-20 527,-20 527,-172.81 527,-172.81 527,-178.81 521,-184.81 515,-184.81 515,-184.81 20,-184.81 20,-184.81 14,-184.81 8,-178.81 8,-172.81 8,-172.81 8,-20 8,-20 8,-14 14,-8 20,-8"/>
+<text xml:space="preserve" text-anchor="middle" x="267.5" y="-168.46" font-family="Helvetica,Arial,sans-serif" font-size="13.00" fill="#1a1a1a">Graph Storage Layer</text>
 </g>
 <!-- symbols -->
 <g id="node1" class="node">
 <title>symbols</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M156,-148.81C156,-148.81 36,-148.81 36,-148.81 30,-148.81 24,-142.81 24,-136.81 24,-136.81 24,-102.28 24,-102.28 24,-96.28 30,-90.28 36,-90.28 36,-90.28 156,-90.28 156,-90.28 162,-90.28 168,-96.28 168,-102.28 168,-102.28 168,-136.81 168,-136.81 168,-142.81 162,-148.81 156,-148.81"/>
-<text xml:space="preserve" text-anchor="middle" x="96" y="-128.77" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">SYMBOLS</text>
-<text xml:space="preserve" text-anchor="middle" x="96" y="-116.02" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">string → id</text>
-<text xml:space="preserve" text-anchor="middle" x="96" y="-101.77" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">id → string</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M156,-147.31C156,-147.31 36,-147.31 36,-147.31 30,-147.31 24,-141.31 24,-135.31 24,-135.31 24,-115.03 24,-115.03 24,-109.03 30,-103.03 36,-103.03 36,-103.03 156,-103.03 156,-103.03 162,-103.03 168,-109.03 168,-115.03 168,-115.03 168,-135.31 168,-135.31 168,-141.31 162,-147.31 156,-147.31"/>
+<text xml:space="preserve" text-anchor="middle" x="96" y="-127.27" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">SYMBOLS</text>
+<text xml:space="preserve" text-anchor="middle" x="96" y="-114.52" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">string → id</text>
 </g>
-<!-- nodes -->
+<!-- symrev -->
 <g id="node2" class="node">
-<title>nodes</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M323.52,-141.69C323.52,-141.69 202.47,-141.69 202.47,-141.69 196.47,-141.69 190.47,-135.69 190.47,-129.69 190.47,-129.69 190.47,-109.41 190.47,-109.41 190.47,-103.41 196.47,-97.41 202.47,-97.41 202.47,-97.41 323.52,-97.41 323.52,-97.41 329.52,-97.41 335.52,-103.41 335.52,-109.41 335.52,-109.41 335.52,-129.69 335.52,-129.69 335.52,-135.69 329.52,-141.69 323.52,-141.69"/>
-<text xml:space="preserve" text-anchor="middle" x="263" y="-121.65" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">NODES</text>
-<text xml:space="preserve" text-anchor="middle" x="263" y="-108.9" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">node_id → NodeData</text>
+<title>symrev</title>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M331.65,-147.31C331.65,-147.31 202.35,-147.31 202.35,-147.31 196.35,-147.31 190.35,-141.31 190.35,-135.31 190.35,-135.31 190.35,-115.03 190.35,-115.03 190.35,-109.03 196.35,-103.03 202.35,-103.03 202.35,-103.03 331.65,-103.03 331.65,-103.03 337.65,-103.03 343.65,-109.03 343.65,-115.03 343.65,-115.03 343.65,-135.31 343.65,-135.31 343.65,-141.31 337.65,-147.31 331.65,-147.31"/>
+<text xml:space="preserve" text-anchor="middle" x="267" y="-127.27" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">SYMBOLS_REVERSE</text>
+<text xml:space="preserve" text-anchor="middle" x="267" y="-114.52" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">id → string</text>
 </g>
-<!-- symbols&#45;&gt;nodes -->
+<!-- symbols&#45;&gt;symrev -->
 <!-- edges_t -->
-<g id="node3" class="node">
+<g id="node4" class="node">
 <title>edges_t</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M158.28,-68.28C158.28,-68.28 35.72,-68.28 35.72,-68.28 29.72,-68.28 23.72,-62.28 23.72,-56.28 23.72,-56.28 23.72,-36 23.72,-36 23.72,-30 29.72,-24 35.72,-24 35.72,-24 158.28,-24 158.28,-24 164.28,-24 170.28,-30 170.28,-36 170.28,-36 170.28,-56.28 170.28,-56.28 170.28,-62.28 164.28,-68.28 158.28,-68.28"/>
-<text xml:space="preserve" text-anchor="middle" x="97" y="-48.24" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">EDGES</text>
-<text xml:space="preserve" text-anchor="middle" x="97" y="-35.49" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">composite key → data</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M159,-74.66C159,-74.66 39,-74.66 39,-74.66 33,-74.66 27,-68.66 27,-62.66 27,-62.66 27,-42.38 27,-42.38 27,-36.38 33,-30.38 39,-30.38 39,-30.38 159,-30.38 159,-30.38 165,-30.38 171,-36.38 171,-42.38 171,-42.38 171,-62.66 171,-62.66 171,-68.66 165,-74.66 159,-74.66"/>
+<text xml:space="preserve" text-anchor="middle" x="99" y="-54.62" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">EDGES</text>
+<text xml:space="preserve" text-anchor="middle" x="99" y="-41.87" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">traversal key → ∅</text>
 </g>
 <!-- symbols&#45;&gt;edges_t -->
+<!-- nodes -->
+<g id="node3" class="node">
+<title>nodes</title>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M498.52,-147.31C498.52,-147.31 377.48,-147.31 377.48,-147.31 371.48,-147.31 365.48,-141.31 365.48,-135.31 365.48,-135.31 365.48,-115.03 365.48,-115.03 365.48,-109.03 371.48,-103.03 377.48,-103.03 377.48,-103.03 498.52,-103.03 498.52,-103.03 504.52,-103.03 510.52,-109.03 510.52,-115.03 510.52,-115.03 510.52,-135.31 510.52,-135.31 510.52,-141.31 504.52,-147.31 498.52,-147.31"/>
+<text xml:space="preserve" text-anchor="middle" x="438" y="-127.27" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">NODES</text>
+<text xml:space="preserve" text-anchor="middle" x="438" y="-114.52" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">node_id → NodeData</text>
+</g>
+<!-- symrev&#45;&gt;nodes -->
+<!-- edge_ids -->
+<g id="node5" class="node">
+<title>edge_ids</title>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M327,-81.03C327,-81.03 207,-81.03 207,-81.03 201,-81.03 195,-75.03 195,-69.03 195,-69.03 195,-36 195,-36 195,-30 201,-24 207,-24 207,-24 327,-24 327,-24 333,-24 339,-30 339,-36 339,-36 339,-69.03 339,-69.03 339,-75.03 333,-81.03 327,-81.03"/>
+<text xml:space="preserve" text-anchor="middle" x="267" y="-60.99" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">EDGE_ID</text>
+<text xml:space="preserve" text-anchor="middle" x="267" y="-48.24" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">edge_id → payload</text>
+<text xml:space="preserve" text-anchor="middle" x="267" y="-33.99" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">(key 0: next_edge_id)</text>
+</g>
+<!-- symrev&#45;&gt;edge_ids -->
 <!-- labels -->
-<g id="node4" class="node">
+<g id="node6" class="node">
 <title>labels</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M324,-68.28C324,-68.28 204,-68.28 204,-68.28 198,-68.28 192,-62.28 192,-56.28 192,-56.28 192,-36 192,-36 192,-30 198,-24 204,-24 204,-24 324,-24 324,-24 330,-24 336,-30 336,-36 336,-36 336,-56.28 336,-56.28 336,-62.28 330,-68.28 324,-68.28"/>
-<text xml:space="preserve" text-anchor="middle" x="264" y="-48.24" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">LABEL_INDEX</text>
-<text xml:space="preserve" text-anchor="middle" x="264" y="-35.49" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">(label, node) → ∅</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M495,-74.66C495,-74.66 375,-74.66 375,-74.66 369,-74.66 363,-68.66 363,-62.66 363,-62.66 363,-42.38 363,-42.38 363,-36.38 369,-30.38 375,-30.38 375,-30.38 495,-30.38 495,-30.38 501,-30.38 507,-36.38 507,-42.38 507,-42.38 507,-62.66 507,-62.66 507,-68.66 501,-74.66 495,-74.66"/>
+<text xml:space="preserve" text-anchor="middle" x="435" y="-54.62" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">LABEL_INDEX</text>
+<text xml:space="preserve" text-anchor="middle" x="435" y="-41.87" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">(label, node) → ∅</text>
 </g>
 <!-- nodes&#45;&gt;labels -->
-<!-- edges_t&#45;&gt;labels -->
+<!-- edges_t&#45;&gt;edge_ids -->
+<!-- edge_ids&#45;&gt;labels -->
 </g>
 </svg>

@@ -1,4 +1,6 @@
-// A Cypher string becomes result rows through five stages.
+// A Cypher string becomes result rows. A query-cache hit skips lexing, parsing
+// and analysis; a write query with no caller transaction runs inside an
+// automatic read-write transaction.
 digraph query_pipeline {
   bgcolor="transparent"
   rankdir=TB
@@ -15,18 +17,24 @@ digraph query_pipeline {
      fillcolor="#f6f8fa" color="#c7d0da"
      fontname="Menlo,Consolas,monospace" fontsize=11]
 
+  cache    [label="Query cache\n(normalized text → AST + bindings)" fillcolor="#f6f8fa" color="#c7d0da"]
   lexer    [label="Lexer"]
   parser   [label="Parser"]
   semantic [label="Semantic Analyzer"]
   planner  [label="Planner"]
+  txn      [label="Auto transaction\n(write query, no caller txn)"
+            fillcolor="#f6f8fa" color="#c7d0da" style="filled,rounded,dashed"]
   executor [label="Executor" fillcolor="#dbe9f8"]
 
-  q        -> lexer
+  q        -> cache
+  cache    -> lexer    [label="  miss"]
   lexer    -> parser   [label="  tokens"]
   parser   -> semantic [label="  AST"]
-  semantic -> planner  [label="  validated AST + variable bindings"]
-  planner  -> executor [label="  operator tree"]
+  semantic -> planner  [label="  validated AST + variable bindings\n  (stored in the cache)"]
+  cache    -> planner  [label="  hit" style=dashed]
+  planner  -> txn      [label="  operator tree"]
+  txn      -> executor [label="  begin read-write"]
 
   rows [label="Result rows" fillcolor="#eaf5ea" color="#2f7d32"]
-  executor -> rows [color="#2f7d32"]
+  executor -> rows [color="#2f7d32" label="  then commit (abort on error)"]
 }

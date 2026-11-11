@@ -1,4 +1,5 @@
-// The layered engine: each tier depends only on the tier beneath it.
+// The layered engine. The Database orchestrates; the transaction manager only
+// writes log records, and the log writes its own file outside the buffer pool.
 digraph engine_stack {
   bgcolor="transparent"
   rankdir=TB
@@ -7,31 +8,39 @@ digraph engine_stack {
   fontname="Helvetica,Arial,sans-serif"
   node [shape=box style="filled,rounded" fillcolor="#eef4fb" color="#4a90d9"
         penwidth=1.2 fontname="Helvetica,Arial,sans-serif" fontsize=12
-        fontcolor="#1a1a1a" margin="0.24,0.13" width=2.4]
+        fontcolor="#1a1a1a" margin="0.24,0.13" width=2.2]
   edge [color="#6b7280" penwidth=1.1 arrowsize=0.7]
 
-  app  [label="Application" fillcolor="#f6f8fa" color="#c7d0da" width=4.6]
-  txn  [label="Transaction Manager\nACID guarantees, isolation" fillcolor="#dbe9f8" width=4.6]
+  app  [label="Application" fillcolor="#f6f8fa" color="#c7d0da" width=6.4]
+  db   [label="Database\ngraph · vector · FTS · streams · query\nper-transaction overlays, single writer"
+        fillcolor="#dbe9f8" width=6.4]
 
-  btree [label="B+Tree\nordered data"]
-  wal   [label="WAL\ndurability"]
-  ckpt  [label="Checkpointer\nrecovery bounds"]
+  btree [label="B+Trees\nordered data"]
+  txn   [label="Transaction Manager\nbegin / commit records"]
+  ckpt  [label="Checkpointer\nflush pages, reset log"]
 
+  wal  [label="WAL\nown -wal file"]
   pool [label="Buffer Pool\npage caching in RAM" width=4.6]
   pgm  [label="Page Manager\nallocation, checksums" width=4.6]
-  vfs  [label="Virtual File System\nfile I/O" width=4.6]
-  os   [label="Operating System" fillcolor="#f6f8fa" color="#c7d0da" width=4.6]
+  vfs  [label="Virtual File System\nfile I/O" width=6.4]
+  os   [label="Operating System" fillcolor="#f6f8fa" color="#c7d0da" width=6.4]
 
-  app -> txn
-  txn -> btree
+  app -> db
+  db -> btree
+  db -> txn
+  db -> ckpt
+  db -> pool [label="  vector and\l  posting pages\l" fontname="Helvetica,Arial,sans-serif"
+              fontsize=10 fontcolor="#6b7280"]
   txn -> wal
-  txn -> ckpt
   btree -> pool
-  wal   -> pool
-  ckpt  -> pool
+  ckpt -> pool
+  ckpt -> pgm
+  ckpt -> wal
   pool -> pgm
   pgm  -> vfs
+  wal  -> vfs
   vfs  -> os
 
-  { rank=same; btree; wal; ckpt }
+  { rank=same; btree; txn; ckpt }
+  { rank=same; pool; wal }
 }

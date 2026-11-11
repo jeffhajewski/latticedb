@@ -107,7 +107,7 @@ checkpointing.
 
 ### Why locks always succeed
 
-A file-backed database takes a lock and refuses a second opener, because two
+A file-backed database takes a lock and refuses a conflicting opener, because two
 processes writing one file corrupt it. No other process can reach memory this one
 owns, so there is nothing to exclude, and every lock request in the memory backend
 succeeds.

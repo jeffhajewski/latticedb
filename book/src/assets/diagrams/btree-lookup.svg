@@ -1,50 +1,50 @@
-<svg width="453" height="204"
- viewBox="0.00 0.00 340.00 153.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<svg width="528" height="204"
+ viewBox="0.00 0.00 396.00 153.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 <g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 148.5)">
 <title>btree_lookup</title>
 <!-- root -->
 <g id="node1" class="node">
 <title>root</title>
-<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M269.17,-144.5C269.17,-144.5 147.25,-144.5 147.25,-144.5 141.25,-144.5 135.25,-138.5 135.25,-132.5 135.25,-132.5 135.25,-120.5 135.25,-120.5 135.25,-114.5 141.25,-108.5 147.25,-108.5 147.25,-108.5 269.17,-108.5 269.17,-108.5 275.17,-108.5 281.17,-114.5 281.17,-120.5 281.17,-120.5 281.17,-132.5 281.17,-132.5 281.17,-138.5 275.17,-144.5 269.17,-144.5"/>
-<text xml:space="preserve" text-anchor="middle" x="208.21" y="-122.22" font-family="Menlo,Consolas,monospace" font-size="12.00" fill="#1a1a1a">[cat] &#160;&#160;&#160;&#160;[fish]</text>
+<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M251.17,-144.5C251.17,-144.5 129.25,-144.5 129.25,-144.5 123.25,-144.5 117.25,-138.5 117.25,-132.5 117.25,-132.5 117.25,-120.5 117.25,-120.5 117.25,-114.5 123.25,-108.5 129.25,-108.5 129.25,-108.5 251.17,-108.5 251.17,-108.5 257.17,-108.5 263.17,-114.5 263.17,-120.5 263.17,-120.5 263.17,-132.5 263.17,-132.5 263.17,-138.5 257.17,-144.5 251.17,-144.5"/>
+<text xml:space="preserve" text-anchor="middle" x="190.21" y="-122.22" font-family="Menlo,Consolas,monospace" font-size="12.00" fill="#1a1a1a">[cat] &#160;&#160;&#160;&#160;[fish]</text>
 </g>
 <!-- left -->
 <g id="node2" class="node">
 <title>left</title>
-<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.6" d="M126.42,-36C126.42,-36 12,-36 12,-36 6,-36 0,-30 0,-24 0,-24 0,-12 0,-12 0,-6 6,0 12,0 12,0 126.42,0 126.42,0 132.42,0 138.42,-6 138.42,-12 138.42,-12 138.42,-24 138.42,-24 138.42,-30 132.42,-36 126.42,-36"/>
-<text xml:space="preserve" text-anchor="middle" x="69.21" y="-13.72" font-family="Menlo,Consolas,monospace" font-size="12.00" fill="#1a1a1a">cow:v1 &#160;&#160;dog:v2</text>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M66.42,-36C66.42,-36 12,-36 12,-36 6,-36 0,-30 0,-24 0,-24 0,-12 0,-12 0,-6 6,0 12,0 12,0 66.42,0 66.42,0 72.42,0 78.42,-6 78.42,-12 78.42,-12 78.42,-24 78.42,-24 78.42,-30 72.42,-36 66.42,-36"/>
+<text xml:space="preserve" text-anchor="middle" x="39.21" y="-13.72" font-family="Menlo,Consolas,monospace" font-size="12.00" fill="#1a1a1a">… &lt; cat</text>
 </g>
 <!-- root&#45;&gt;left -->
 <g id="edge1" class="edge">
 <title>root&#45;&gt;left</title>
-<path fill="none" stroke="#4a90d9" stroke-width="1.4" d="M172.48,-107.93C159.77,-101.02 145.65,-92.57 133.71,-83.5 118.03,-71.59 102.37,-56.04 90.4,-43.19"/>
-<polygon fill="#4a90d9" stroke="#4a90d9" stroke-width="1.4" points="92.47,-41.82 85.93,-38.31 88.86,-45.13 92.47,-41.82"/>
-<text xml:space="preserve" text-anchor="start" x="133.71" y="-74" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;&quot;dog&quot; &gt; &quot;cat&quot;</text>
-<text xml:space="preserve" text-anchor="start" x="133.71" y="-62.75" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;&quot;dog&quot; &lt; &quot;fish&quot;</text>
+<path fill="none" stroke="#c7d0da" stroke-width="1.1" stroke-dasharray="5,2" d="M165.28,-107.91C139.41,-89.67 98.88,-61.08 70.79,-41.27"/>
+<polygon fill="#c7d0da" stroke="#c7d0da" stroke-width="1.1" points="72.42,-39.43 65.29,-37.4 69.6,-43.43 72.42,-39.43"/>
 </g>
 <!-- mid -->
 <g id="node3" class="node">
 <title>mid</title>
-<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M223.21,-36C223.21,-36 193.21,-36 193.21,-36 187.21,-36 181.21,-30 181.21,-24 181.21,-24 181.21,-12 181.21,-12 181.21,-6 187.21,0 193.21,0 193.21,0 223.21,0 223.21,0 229.21,0 235.21,-6 235.21,-12 235.21,-12 235.21,-24 235.21,-24 235.21,-30 229.21,-36 223.21,-36"/>
-<text xml:space="preserve" text-anchor="middle" x="208.21" y="-13.72" font-family="Menlo,Consolas,monospace" font-size="12.00" fill="#1a1a1a">…</text>
+<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.6" d="M247.42,-36C247.42,-36 133,-36 133,-36 127,-36 121,-30 121,-24 121,-24 121,-12 121,-12 121,-6 127,0 133,0 133,0 247.42,0 247.42,0 253.42,0 259.42,-6 259.42,-12 259.42,-12 259.42,-24 259.42,-24 259.42,-30 253.42,-36 247.42,-36"/>
+<text xml:space="preserve" text-anchor="middle" x="190.21" y="-13.72" font-family="Menlo,Consolas,monospace" font-size="12.00" fill="#1a1a1a">cow:v1 &#160;&#160;dog:v2</text>
 </g>
 <!-- root&#45;&gt;mid -->
 <g id="edge2" class="edge">
 <title>root&#45;&gt;mid</title>
-<path fill="none" stroke="#c7d0da" stroke-width="1.1" stroke-dasharray="5,2" d="M208.21,-107.91C208.21,-90.7 208.21,-64.28 208.21,-44.71"/>
-<polygon fill="#c7d0da" stroke="#c7d0da" stroke-width="1.1" points="210.66,-44.92 208.21,-37.92 205.76,-44.92 210.66,-44.92"/>
+<path fill="none" stroke="#4a90d9" stroke-width="1.4" d="M190.21,-107.91C190.21,-90.96 190.21,-65.07 190.21,-45.59"/>
+<polygon fill="#4a90d9" stroke="#4a90d9" stroke-width="1.4" points="192.66,-45.73 190.21,-38.73 187.76,-45.73 192.66,-45.73"/>
+<text xml:space="preserve" text-anchor="start" x="190.21" y="-74" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;&quot;dog&quot; ≥ &quot;cat&quot;</text>
+<text xml:space="preserve" text-anchor="start" x="190.21" y="-62.75" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;&quot;dog&quot; &lt; &quot;fish&quot;</text>
 </g>
 <!-- right -->
 <g id="node4" class="node">
 <title>right</title>
-<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M320.21,-36C320.21,-36 290.21,-36 290.21,-36 284.21,-36 278.21,-30 278.21,-24 278.21,-24 278.21,-12 278.21,-12 278.21,-6 284.21,0 290.21,0 290.21,0 320.21,0 320.21,0 326.21,0 332.21,-6 332.21,-12 332.21,-12 332.21,-24 332.21,-24 332.21,-30 326.21,-36 320.21,-36"/>
-<text xml:space="preserve" text-anchor="middle" x="305.21" y="-13.72" font-family="Menlo,Consolas,monospace" font-size="12.00" fill="#1a1a1a">…</text>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M376.17,-36C376.17,-36 314.25,-36 314.25,-36 308.25,-36 302.25,-30 302.25,-24 302.25,-24 302.25,-12 302.25,-12 302.25,-6 308.25,0 314.25,0 314.25,0 376.17,0 376.17,0 382.17,0 388.17,-6 388.17,-12 388.17,-12 388.17,-24 388.17,-24 388.17,-30 382.17,-36 376.17,-36"/>
+<text xml:space="preserve" text-anchor="middle" x="345.21" y="-13.72" font-family="Menlo,Consolas,monospace" font-size="12.00" fill="#1a1a1a">≥ fish …</text>
 </g>
 <!-- root&#45;&gt;right -->
 <g id="edge3" class="edge">
 <title>root&#45;&gt;right</title>
-<path fill="none" stroke="#c7d0da" stroke-width="1.1" stroke-dasharray="5,2" d="M224.23,-107.91C240.47,-90.08 265.71,-62.37 283.69,-42.62"/>
-<polygon fill="#c7d0da" stroke="#c7d0da" stroke-width="1.1" points="285.47,-44.31 288.37,-37.49 281.84,-41.02 285.47,-44.31"/>
+<path fill="none" stroke="#c7d0da" stroke-width="1.1" stroke-dasharray="5,2" d="M224.16,-108.06C237.28,-100.92 252.23,-92.28 265.21,-83.5 284.09,-70.73 304.05,-54.65 319.31,-41.73"/>
+<polygon fill="#c7d0da" stroke="#c7d0da" stroke-width="1.1" points="320.54,-43.9 324.28,-37.49 317.36,-40.17 320.54,-43.9"/>
 </g>
 </g>
 </svg>

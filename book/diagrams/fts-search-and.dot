@@ -1,4 +1,4 @@
-// Multi-term AND: accumulate per-document scores, then require every term.
+// Multi-term AND: intersect posting lists, driven by the rarest term.
 digraph fts_search_and {
   bgcolor="transparent"
   rankdir=TB
@@ -11,9 +11,9 @@ digraph fts_search_and {
   edge [color="#6b7280" penwidth=1.1 arrowsize=0.7]
 
   q [label="query: \"database optimization\"" fillcolor="#f6f8fa" color="#c7d0da"]
-  s1 [label="1. Tokenize\l   → [\"database\", \"optimization\"]\l"]
-  s2 [label="2. Walk each posting list\l   doc_scores[doc_id] += score\l   doc_term_count[doc_id] += 1\l"]
-  s3 [label="3. Keep only documents where\l   term_count == num_query_terms\l" fillcolor="#dbe9f8"]
+  s1 [label="1. Tokenize, lowercase, dedupe (≤ 32 terms)\l   → [\"database\", \"optimization\"]\l"]
+  s2 [label="2. Look up each term in the dictionary\l   any term missing → no results\l   order terms by doc_freq, rarest first\l"]
+  s3 [label="3. Walk the rarest term's posting list\l   for each doc_id: skipTo(doc_id) in the others\l   in every list → keep, score = Σ BM25\l   stop after 2 × K matches\l" fillcolor="#dbe9f8"]
   s4 [label="4. Sort by score, return top K\l" fillcolor="#eaf5ea" color="#2f7d32"]
 
   q -> s1 -> s2 -> s3 -> s4

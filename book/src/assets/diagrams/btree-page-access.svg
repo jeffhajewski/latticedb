@@ -1,69 +1,83 @@
-<svg width="504" height="373"
- viewBox="0.00 0.00 378.00 280.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 276.03)">
+<svg width="587" height="385"
+ viewBox="0.00 0.00 440.00 289.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 285.06)">
 <title>btree_page_access</title>
 <g id="clust1" class="cluster">
 <title>cluster_traditional</title>
-<path fill="none" stroke="#dbe3ec" stroke-width="1.1" d="M20,-8C20,-8 192,-8 192,-8 198,-8 204,-14 204,-20 204,-20 204,-252.03 204,-252.03 204,-258.03 198,-264.03 192,-264.03 192,-264.03 20,-264.03 20,-264.03 14,-264.03 8,-258.03 8,-252.03 8,-252.03 8,-20 8,-20 8,-14 14,-8 20,-8"/>
-<text xml:space="preserve" text-anchor="middle" x="106" y="-248.63" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#6b7280">Traditional</text>
+<path fill="none" stroke="#dbe3ec" stroke-width="1.1" d="M20,-15.52C20,-15.52 192,-15.52 192,-15.52 198,-15.52 204,-21.52 204,-27.52 204,-27.52 204,-261.06 204,-261.06 204,-267.06 198,-273.06 192,-273.06 192,-273.06 20,-273.06 20,-273.06 14,-273.06 8,-267.06 8,-261.06 8,-261.06 8,-27.51 8,-27.51 8,-21.51 14,-15.52 20,-15.52"/>
+<text xml:space="preserve" text-anchor="middle" x="106" y="-257.66" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#6b7280">Traditional</text>
 </g>
 <g id="clust2" class="cluster">
 <title>cluster_lattice</title>
-<path fill="none" stroke="#dbe3ec" stroke-width="1.1" d="M224,-93.25C224,-93.25 350,-93.25 350,-93.25 356,-93.25 362,-99.25 362,-105.25 362,-105.25 362,-252.03 362,-252.03 362,-258.03 356,-264.03 350,-264.03 350,-264.03 224,-264.03 224,-264.03 218,-264.03 212,-258.03 212,-252.03 212,-252.03 212,-105.25 212,-105.25 212,-99.25 218,-93.25 224,-93.25"/>
-<text xml:space="preserve" text-anchor="middle" x="287" y="-248.63" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#6b7280">LatticeDB</text>
+<path fill="none" stroke="#dbe3ec" stroke-width="1.1" d="M224,-8C224,-8 412,-8 412,-8 418,-8 424,-14 424,-20 424,-20 424,-261.06 424,-261.06 424,-267.06 418,-273.06 412,-273.06 412,-273.06 224,-273.06 224,-273.06 218,-273.06 212,-267.06 212,-261.06 212,-261.06 212,-20 212,-20 212,-14 218,-8 224,-8"/>
+<text xml:space="preserve" text-anchor="middle" x="318" y="-257.66" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#6b7280">LatticeDB</text>
 </g>
 <!-- t_in -->
 <g id="node1" class="node">
 <title>t_in</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M138.4,-229.28C138.4,-229.28 73.6,-229.28 73.6,-229.28 67.6,-229.28 61.6,-223.28 61.6,-217.28 61.6,-217.28 61.6,-205.28 61.6,-205.28 61.6,-199.28 67.6,-193.28 73.6,-193.28 73.6,-193.28 138.4,-193.28 138.4,-193.28 144.4,-193.28 150.4,-199.28 150.4,-205.28 150.4,-205.28 150.4,-217.28 150.4,-217.28 150.4,-223.28 144.4,-229.28 138.4,-229.28"/>
-<text xml:space="preserve" text-anchor="middle" x="106" y="-206.25" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Page bytes</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M138.4,-238.31C138.4,-238.31 73.6,-238.31 73.6,-238.31 67.6,-238.31 61.6,-232.31 61.6,-226.31 61.6,-226.31 61.6,-214.31 61.6,-214.31 61.6,-208.31 67.6,-202.31 73.6,-202.31 73.6,-202.31 138.4,-202.31 138.4,-202.31 144.4,-202.31 150.4,-208.31 150.4,-214.31 150.4,-214.31 150.4,-226.31 150.4,-226.31 150.4,-232.31 144.4,-238.31 138.4,-238.31"/>
+<text xml:space="preserve" text-anchor="middle" x="106" y="-215.28" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Page bytes</text>
 </g>
 <!-- t_obj -->
 <g id="node2" class="node">
 <title>t_obj</title>
-<path fill="#f6f8fa" stroke="#4a90d9" stroke-width="1.2" d="M177.78,-150.03C177.78,-150.03 34.23,-150.03 34.23,-150.03 28.22,-150.03 22.22,-144.03 22.22,-138.03 22.22,-138.03 22.22,-119.25 22.22,-119.25 22.22,-113.25 28.22,-107.25 34.22,-107.25 34.22,-107.25 177.78,-107.25 177.78,-107.25 183.78,-107.25 189.78,-113.25 189.78,-119.25 189.78,-119.25 189.78,-138.03 189.78,-138.03 189.78,-144.03 183.78,-150.03 177.78,-150.03"/>
-<text xml:space="preserve" text-anchor="middle" x="106" y="-129.99" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Node struct</text>
-<text xml:space="preserve" text-anchor="middle" x="106" y="-117.24" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">keys[] · values[] · children[]</text>
+<path fill="#f6f8fa" stroke="#4a90d9" stroke-width="1.2" d="M177.78,-159.06C177.78,-159.06 34.23,-159.06 34.23,-159.06 28.22,-159.06 22.22,-153.06 22.22,-147.06 22.22,-147.06 22.22,-128.28 22.22,-128.28 22.22,-122.28 28.22,-116.28 34.22,-116.28 34.22,-116.28 177.78,-116.28 177.78,-116.28 183.78,-116.28 189.78,-122.28 189.78,-128.28 189.78,-128.28 189.78,-147.06 189.78,-147.06 189.78,-153.06 183.78,-159.06 177.78,-159.06"/>
+<text xml:space="preserve" text-anchor="middle" x="106" y="-139.02" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Node struct</text>
+<text xml:space="preserve" text-anchor="middle" x="106" y="-126.27" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">keys[] · values[] · children[]</text>
 </g>
 <!-- t_in&#45;&gt;t_obj -->
 <g id="edge1" class="edge">
 <title>t_in&#45;&gt;t_obj</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M106,-192.78C106,-182.89 106,-170.26 106,-158.91"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="108.45,-159.2 106,-152.2 103.55,-159.2 108.45,-159.2"/>
-<text xml:space="preserve" text-anchor="middle" x="132.25" y="-167.78" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;deserialise</text>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M106,-201.81C106,-191.92 106,-179.29 106,-167.94"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="108.45,-168.23 106,-161.23 103.55,-168.23 108.45,-168.23"/>
+<text xml:space="preserve" text-anchor="middle" x="132.25" y="-176.81" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;deserialise</text>
 </g>
 <!-- t_out -->
 <g id="node3" class="node">
 <title>t_out</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M138.4,-58C138.4,-58 73.6,-58 73.6,-58 67.6,-58 61.6,-52 61.6,-46 61.6,-46 61.6,-34 61.6,-34 61.6,-28 67.6,-22 73.6,-22 73.6,-22 138.4,-22 138.4,-22 144.4,-22 150.4,-28 150.4,-34 150.4,-34 150.4,-46 150.4,-46 150.4,-52 144.4,-58 138.4,-58"/>
-<text xml:space="preserve" text-anchor="middle" x="106" y="-34.98" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Page bytes</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M138.4,-65.52C138.4,-65.52 73.6,-65.52 73.6,-65.52 67.6,-65.52 61.6,-59.52 61.6,-53.52 61.6,-53.52 61.6,-41.52 61.6,-41.52 61.6,-35.52 67.6,-29.52 73.6,-29.52 73.6,-29.52 138.4,-29.52 138.4,-29.52 144.4,-29.52 150.4,-35.52 150.4,-41.52 150.4,-41.52 150.4,-53.52 150.4,-53.52 150.4,-59.52 144.4,-65.52 138.4,-65.52"/>
+<text xml:space="preserve" text-anchor="middle" x="106" y="-42.49" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Page bytes</text>
 </g>
 <!-- t_obj&#45;&gt;t_out -->
 <g id="edge2" class="edge">
 <title>t_obj&#45;&gt;t_out</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M106,-106.67C106,-94.7 106,-79.61 106,-66.91"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="108.45,-67.23 106,-60.23 103.55,-67.23 108.45,-67.23"/>
-<text xml:space="preserve" text-anchor="middle" x="127" y="-75.75" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;serialise</text>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M106,-115.78C106,-103.45 106,-87.74 106,-74.6"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="108.45,-74.66 106,-67.66 103.55,-74.66 108.45,-74.66"/>
+<text xml:space="preserve" text-anchor="middle" x="127" y="-90.78" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;serialise</text>
 </g>
 <!-- l_in -->
 <g id="node4" class="node">
 <title>l_in</title>
-<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M315.4,-229.28C315.4,-229.28 250.6,-229.28 250.6,-229.28 244.6,-229.28 238.6,-223.28 238.6,-217.28 238.6,-217.28 238.6,-205.28 238.6,-205.28 238.6,-199.28 244.6,-193.28 250.6,-193.28 250.6,-193.28 315.4,-193.28 315.4,-193.28 321.4,-193.28 327.4,-199.28 327.4,-205.28 327.4,-205.28 327.4,-217.28 327.4,-217.28 327.4,-223.28 321.4,-229.28 315.4,-229.28"/>
-<text xml:space="preserve" text-anchor="middle" x="283" y="-206.25" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Page bytes</text>
+<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M350.4,-238.31C350.4,-238.31 285.6,-238.31 285.6,-238.31 279.6,-238.31 273.6,-232.31 273.6,-226.31 273.6,-226.31 273.6,-214.31 273.6,-214.31 273.6,-208.31 279.6,-202.31 285.6,-202.31 285.6,-202.31 350.4,-202.31 350.4,-202.31 356.4,-202.31 362.4,-208.31 362.4,-214.31 362.4,-214.31 362.4,-226.31 362.4,-226.31 362.4,-232.31 356.4,-238.31 350.4,-238.31"/>
+<text xml:space="preserve" text-anchor="middle" x="318" y="-215.28" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Page bytes</text>
 </g>
 <!-- l_out -->
 <g id="node5" class="node">
 <title>l_out</title>
-<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M336.27,-150.03C336.27,-150.03 237.72,-150.03 237.72,-150.03 231.72,-150.03 225.72,-144.03 225.72,-138.03 225.72,-138.03 225.72,-119.25 225.72,-119.25 225.72,-113.25 231.72,-107.25 237.72,-107.25 237.72,-107.25 336.27,-107.25 336.27,-107.25 342.27,-107.25 348.27,-113.25 348.27,-119.25 348.27,-119.25 348.27,-138.03 348.27,-138.03 348.27,-144.03 342.27,-150.03 336.27,-150.03"/>
-<text xml:space="preserve" text-anchor="middle" x="287" y="-129.99" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Read and write at</text>
-<text xml:space="preserve" text-anchor="middle" x="287" y="-117.24" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">calculated offsets</text>
+<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M373.65,-159.06C373.65,-159.06 262.35,-159.06 262.35,-159.06 256.35,-159.06 250.35,-153.06 250.35,-147.06 250.35,-147.06 250.35,-128.28 250.35,-128.28 250.35,-122.28 256.35,-116.28 262.35,-116.28 262.35,-116.28 373.65,-116.28 373.65,-116.28 379.65,-116.28 385.65,-122.28 385.65,-128.28 385.65,-128.28 385.65,-147.06 385.65,-147.06 385.65,-153.06 379.65,-159.06 373.65,-159.06"/>
+<text xml:space="preserve" text-anchor="middle" x="318" y="-139.02" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Search and insert at</text>
+<text xml:space="preserve" text-anchor="middle" x="318" y="-126.27" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">calculated offsets</text>
 </g>
 <!-- l_in&#45;&gt;l_out -->
 <g id="edge3" class="edge">
 <title>l_in&#45;&gt;l_out</title>
-<path fill="none" stroke="#4a90d9" stroke-width="1.1" d="M283.87,-192.78C284.36,-182.89 284.98,-170.26 285.55,-158.91"/>
-<polygon fill="#4a90d9" stroke="#4a90d9" stroke-width="1.1" points="287.98,-159.31 285.88,-152.2 283.09,-159.07 287.98,-159.31"/>
-<text xml:space="preserve" text-anchor="middle" x="317.37" y="-167.78" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;direct access</text>
+<path fill="none" stroke="#4a90d9" stroke-width="1.1" d="M318,-201.81C318,-191.92 318,-179.29 318,-167.94"/>
+<polygon fill="#4a90d9" stroke="#4a90d9" stroke-width="1.1" points="320.45,-168.23 318,-161.23 315.55,-168.23 320.45,-168.23"/>
+<text xml:space="preserve" text-anchor="middle" x="350.25" y="-176.81" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;direct access</text>
+</g>
+<!-- l_note -->
+<g id="node6" class="node">
+<title>l_note</title>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M398.02,-73.03C398.02,-73.03 237.97,-73.03 237.97,-73.03 231.97,-73.03 225.97,-67.03 225.97,-61.03 225.97,-61.03 225.97,-34 225.97,-34 225.97,-28 231.97,-22 237.97,-22 237.97,-22 398.02,-22 398.02,-22 404.02,-22 410.02,-28 410.02,-34 410.02,-34 410.02,-61.03 410.02,-61.03 410.02,-67.03 404.02,-73.03 398.02,-73.03"/>
+<text xml:space="preserve" text-anchor="start" x="240.38" y="-54.89" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#1a1a1a">get() returns a copy of the value</text>
+<text xml:space="preserve" text-anchor="start" x="240.38" y="-43.64" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#1a1a1a">splits, merges and deletes rebuild</text>
+<text xml:space="preserve" text-anchor="start" x="240.38" y="-32.39" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#1a1a1a">the page from a temporary entry list</text>
+</g>
+<!-- l_out&#45;&gt;l_note -->
+<g id="edge4" class="edge">
+<title>l_out&#45;&gt;l_note</title>
+<path fill="none" stroke="#c7d0da" stroke-width="1.1" stroke-dasharray="5,2" d="M318,-115.78C318,-105.64 318,-93.2 318,-81.8"/>
+<polygon fill="#c7d0da" stroke="#c7d0da" stroke-width="1.1" points="320.45,-81.99 318,-74.99 315.55,-81.99 320.45,-81.99"/>
 </g>
 </g>
 </svg>

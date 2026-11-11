@@ -29,10 +29,10 @@ Each frame holds one page:
 ```zig
 pub const BufferFrame = struct {
     page_id: PageId,                    // Which page is here (0 = empty)
-    data: []align(4096) u8,             // The actual 4KB page data
+    data: []align(4096) u8,             // The page bytes (page_size long)
     pin_count: atomic(u32),             // Reference count
     dirty: bool,                        // Modified since read?
-    usage_count: u8,                    // For Clock eviction
+    usage_count: u8,                    // For Clock eviction (0 or 1)
     latch: RwLatch,                     // Reader-writer lock
 };
 ```
@@ -72,45 +72,39 @@ Write latch:   "I'm modifying, exclusive access"
 
 ## Fetching a Page
 
+Simplified from `src/storage/buffer_pool.zig` (error cleanup left out):
+
 ```zig
 pub fn fetchPage(self: *Self, page_id: PageId, mode: LatchMode) !*BufferFrame {
     self.mutex.lock();
-    defer self.mutex.unlock();
 
     // 1. Check if already in buffer pool
     if (self.page_table.get(page_id)) |frame_id| {
         const frame = &self.frames[frame_id];
-        frame.pin_count.fetchAdd(1, .monotonic);
-        frame.usage_count = @min(frame.usage_count + 1, 255);
-        acquireLatch(frame, mode);
+        _ = frame.pin_count.fetchAdd(1, .monotonic);
+        frame.usage_count = 1;            // a hit sets the use bit
+        self.mutex.unlock();
+        self.acquireLatch(frame, mode);   // latch outside the mutex
         return frame;
     }
 
-    // 2. Not in pool - need to load from disk
-    const frame = try self.findVictimFrame();
+    // 2. Not in pool - take a free frame or evict one (flushing it if dirty)
+    const frame_id = try self.getFreeFrame();
+    const frame = &self.frames[frame_id];
 
-    // 3. If victim is dirty, flush it first
-    if (frame.dirty) {
-        try self.pm.writePage(frame.page_id, frame.data);
-        frame.dirty = false;
-    }
-
-    // 4. Update page table
-    if (frame.page_id != NULL_PAGE) {
-        self.page_table.remove(frame.page_id);
-    }
-    self.page_table.put(page_id, frame_id);
-
-    // 5. Read page from disk
-    try self.pm.readPage(page_id, frame.data);
-
-    // 6. Set up frame
+    // 3. Claim the frame and publish it in the page table
     frame.page_id = page_id;
-    frame.pin_count.store(1, .monotonic);
     frame.dirty = false;
     frame.usage_count = 1;
-    acquireLatch(frame, mode);
+    _ = frame.pin_count.fetchAdd(1, .monotonic);
+    try self.page_table.put(page_id, frame_id);
+    self.mutex.unlock();
 
+    // 4. Read page from disk, outside the mutex
+    try self.pm.readPage(page_id, frame.data);
+
+    // 5. Latch and return
+    self.acquireLatch(frame, mode);
     return frame;
 }
 ```
@@ -122,53 +116,62 @@ When the buffer pool is full, we need to evict a page to make room. We use the C
 ### Why Clock?
 
 - **LRU (Least Recently Used)** is optimal but expensive - requires updating timestamps on every access
-- **Clock** approximates LRU cheaply using a usage bit
+- **Clock** approximates LRU cheaply using a usage bit. `usage_count` is a `u8`,
+  but a hit sets it to 1 rather than incrementing it, so it behaves as a bit
 
 ### How It Works
 
 Imagine the frames arranged in a circle with a clock hand:
 
 <img class="diagram" src="../assets/diagrams/buffer-pool-clock.svg"
-     alt="Four frames arranged in a ring. The clock hand points at frame 1, which has a use count of zero and a pin count of zero and is therefore the eviction candidate; frames 3 and 4 have non-zero use counts and are skipped">
+     alt="Four frames arranged in a ring. The clock hand points at frame 1, which has a use count of zero and a pin count of zero and is therefore the eviction candidate; frames 3 and 4 have their use bit set and would only be skipped once">
 
 **To find a victim:**
 
+Simplified from `getFreeFrame`, which runs with the pool mutex held:
+
 ```zig
-fn findVictimFrame(self: *Self) !*BufferFrame {
+fn getFreeFrame(self: *Self) !FrameId {
     // Try free list first
-    if (self.free_list.pop()) |frame_id| {
-        return &self.frames[frame_id];
-    }
+    if (self.free_list.pop()) |frame_id| return frame_id;
 
-    // Clock sweep
-    var attempts: usize = 0;
-    while (attempts < self.frame_count * 2) {
+    // Clock sweep: at most two full rotations
+    var iterations: usize = 0;
+    while (iterations < self.frame_count * 2) : (iterations += 1) {
         const frame = &self.frames[self.clock_hand];
-
-        // Move hand
-        self.clock_hand = (self.clock_hand + 1) % self.frame_count;
-        attempts += 1;
+        const frame_id: FrameId = @intCast(self.clock_hand);
 
         // Skip pinned pages
         if (frame.pin_count.load(.monotonic) > 0) {
+            self.advanceClock();
             continue;
         }
 
         // Second chance: if used recently, clear and skip
         if (frame.usage_count > 0) {
             frame.usage_count -= 1;
+            self.advanceClock();
             continue;
         }
 
-        // Found victim!
-        return frame;
+        // Found victim: write it back if dirty, then drop it from the table
+        if (frame.dirty) try self.pm.writePage(frame.page_id, frame.data);
+        _ = self.page_table.remove(frame.page_id);
+        frame.page_id = NULL_PAGE;
+        frame.dirty = false;
+        self.advanceClock();
+        return frame_id;
     }
 
-    return error.BufferPoolFull;  // All pages pinned
+    return error.BufferPoolFull;  // Nothing evictable
 }
 ```
 
-**The key insight:** Usage count gives pages a "second chance". Recently used pages survive one clock sweep. Only pages that haven't been used in a full rotation get evicted.
+**The key insight:** The use bit gives pages a "second chance". A recently used page survives one pass of the hand. Only pages that haven't been used since the hand last passed get evicted.
+
+Eviction can happen at any time, so a dirty page may be written to the database
+file long before, or long after, the transaction that dirtied it commits. Nothing
+in the pool waits for the log.
 
 ## Unpinning Pages
 
@@ -176,13 +179,13 @@ When done with a page:
 
 ```zig
 pub fn unpinPage(self: *Self, frame: *BufferFrame, dirty: bool) void {
-    // Release latch
-    frame.latch.release();
-
     // Mark dirty if modified
     if (dirty) {
         frame.dirty = true;
     }
+
+    // Release whichever latch is held (read from the latch state)
+    self.releaseLatch(frame);
 
     // Decrement pin count
     _ = frame.pin_count.fetchSub(1, .monotonic);
@@ -198,10 +201,13 @@ Always unpin! Failure to unpin causes:
 
 Writing dirty pages to disk:
 
+Simplified (both take a shared latch on the frame, spinning until it is free,
+before writing it):
+
 ```zig
 // Flush one page
 pub fn flushPage(self: *Self, page_id: PageId) !void {
-    const frame = self.getFrame(page_id) orelse return;
+    const frame = self.lookupFrame(page_id) orelse return; // under the mutex
 
     if (frame.dirty) {
         try self.pm.writePage(frame.page_id, frame.data);
@@ -209,16 +215,22 @@ pub fn flushPage(self: *Self, page_id: PageId) !void {
     }
 }
 
-// Flush all dirty pages
-pub fn flushAll(self: *Self) !void {
+// Flush all dirty pages, returning how many were written
+pub fn flushAll(self: *Self) !u32 {
+    var flushed: u32 = 0;
     for (self.frames) |*frame| {
         if (frame.page_id != NULL_PAGE and frame.dirty) {
             try self.pm.writePage(frame.page_id, frame.data);
             frame.dirty = false;
+            flushed += 1;
         }
     }
+    return flushed;
 }
 ```
+
+Flushing writes pages; it does not fsync the database file. That is the page
+manager's `sync`, which a checkpoint issues after its flush.
 
 ## Thread Safety
 
@@ -243,7 +255,9 @@ The buffer pool is thread-safe:
 
 The page table mutex is held only long enough to find the frame and bump the pin
 count. Reading the page data happens under the per-frame latch, so two readers of
-the same page overlap rather than serialising.
+the same page overlap rather than serialising. On a miss the mutex is likewise
+released after the frame is claimed and entered in the page table, and the disk
+read happens outside it.
 
 Multiple threads can read the same page concurrently (shared latch).
 
@@ -252,27 +266,37 @@ Multiple threads can read the same page concurrently (shared latch).
 Page buffers are 4KB-aligned:
 
 ```zig
-const data = try allocator.alignedAlloc(u8, 4096, page_size);
+const page_alignment = comptime Alignment.fromByteUnits(4096);
+const data = try allocator.alignedAlloc(u8, page_alignment, page_size);
 ```
 
 Why?
 
-1. **Direct I/O**: Some systems require aligned buffers for O_DIRECT
+1. **Direct I/O**: Some systems require aligned buffers for O_DIRECT (LatticeDB
+   does not use O_DIRECT today)
 2. **SIMD**: Aligned data enables vectorized operations
 3. **Cache lines**: Better CPU cache utilization
 
 ## Sizing the Buffer Pool
 
 ```zig
-// 64MB buffer pool = 16,384 pages
+// 64MB buffer pool = 16,384 pages at 4 KB
 var bp = try BufferPool.init(allocator, &pm, 64 * 1024 * 1024);
 ```
+
+The pool holds `pool_size / page_size` frames. A file-backed database sizes it
+from, in order of priority:
+
+1. The `LATTICE_BUFFER_POOL_MB` environment variable, if set to a positive number
+2. An explicit size: `buffer_pool_size` in the Zig `DatabaseConfig`, or
+   `cache_size_mb` in the C open options (`LATTICE_OPEN_OPTIONS_DEFAULT` sets 100)
+3. Otherwise automatic sizing: 16 MB, plus 12 MB when full-text search is enabled
+   (the Zig default) and 12 MB more when vectors are enabled
 
 Guidelines:
 - **More is better** (to a point)
 - **Working set**: Should fit frequently accessed pages
 - **Available RAM**: Leave room for OS and other processes
-- **Typical**: 25-75% of available RAM
 
 ### In-memory databases are different
 

@@ -1,5 +1,6 @@
 // A checkpoint flushes dirty frames to the database file and advances
-// checkpoint_lsn so recovery can ignore everything before it.
+// checkpoint_lsn so recovery can ignore everything before it; a truncate
+// checkpoint (the automatic default) then resets the WAL to its header.
 digraph checkpoint_before_after {
   bgcolor="transparent"
   rankdir=TB
@@ -30,7 +31,7 @@ digraph checkpoint_before_after {
 
     b_file [label="Database file\lold page versions\l" fillcolor="#f6f8fa" color="#c7d0da"]
     b_wal  [label="WAL\lreplay needs every record\l" fillcolor="#fdf0ea" color="#c2703f"]
-    b3 -> b_file [label="  only in RAM" color="#c2703f" style=dashed]
+    b8 -> b_file [label="  only in RAM" color="#c2703f" style=dashed]
     b_file -> b_wal [style=invis]
   }
 
@@ -51,8 +52,8 @@ digraph checkpoint_before_after {
     a5 -> a3 [style=invis]
 
     a_file [label="Database file\lcurrent page versions\l" fillcolor="#eaf5ea" color="#2f7d32"]
-    a_wal  [label="WAL\lreplay starts at checkpoint_lsn\l" fillcolor="#eaf5ea" color="#2f7d32"]
-    a3 -> a_file [label="  flushed" color="#2f7d32"]
+    a_wal  [label="WAL\ltruncate (default): header only\lfull / passive: replay starts\l  at checkpoint_lsn\l" fillcolor="#eaf5ea" color="#2f7d32"]
+    a8 -> a_file [label="  flushed" color="#2f7d32"]
     a_file -> a_wal [style=invis]
   }
 }

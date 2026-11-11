@@ -1,10 +1,10 @@
-// A write becomes a WAL record before it becomes a page change; commit is the
-// point at which the frame is forced to disk.
+// Writes inside a transaction stay in its overlay. At commit the overlay is
+// logged, applied, and then the commit record is forced to disk.
 digraph wal_write_flow {
   bgcolor="transparent"
   rankdir=TB
   nodesep=0.4
-  ranksep=0.45
+  ranksep=0.4
   fontname="Helvetica,Arial,sans-serif"
   node [shape=box style="filled,rounded" fillcolor="#eef4fb" color="#4a90d9"
         penwidth=1.2 fontname="Helvetica,Arial,sans-serif" fontsize=12
@@ -13,21 +13,20 @@ digraph wal_write_flow {
         fontname="Helvetica,Arial,sans-serif" fontsize=10 fontcolor="#6b7280"]
 
   app [label="Application" fillcolor="#f6f8fa" color="#c7d0da"]
-  txn [label="Transaction\nINSERT(k, v)"]
-  wal [label="WAL Manager\l  1. assign LSN\l  2. build record\l  3. append to frame buffer\l"
+  overlay [label="Transaction overlay (RAM)\nCREATE / SET / DELETE staged here\nno log records yet"]
+  log [label="1. Log the overlay\l   WAL manager assigns LSNs, appends records\l   to the frame buffer; a full frame is\l   written to the -wal file (no fsync)\l"
        fillcolor="#dbe9f8" fontname="Menlo,Consolas,monospace" fontsize=11]
-
-  gate [shape=diamond style="filled" fillcolor="#f6f8fa" color="#c7d0da"
-        label="what triggered\nthe flush?" fontsize=11 margin="0.05,0.05"]
-
-  full   [label="Frame buffer full\nflush frame to disk"]
-  commit [label="Commit requested\nflush frame + fsync"
+  apply [label="2. Apply the overlay\nstores change; pages dirty in the buffer pool"]
+  commit [label="3. TXN_COMMIT\nwrite the frame + fsync\n(durable from here)"
           fillcolor="#eaf5ea" color="#2f7d32"]
-  done   [label="Safe to return\nto the application"
-          fillcolor="#eaf5ea" color="#2f7d32" penwidth=1.5]
+  done [label="Commit returns\nto the application"
+        fillcolor="#eaf5ea" color="#2f7d32" penwidth=1.5]
+  ckpt [label="4. Auto-checkpoint, best effort\nif the log reached its threshold"
+        fillcolor="#f6f8fa" color="#c7d0da"]
 
-  app -> txn -> wal -> gate
-  gate -> full   [label="  buffer full"]
-  gate -> commit [label="  COMMIT" color="#2f7d32"]
-  commit -> done [color="#2f7d32"]
+  app -> overlay [label="  writes"]
+  overlay -> log [label="  COMMIT"]
+  log -> apply -> commit
+  commit -> ckpt [color="#2f7d32"]
+  ckpt -> done [color="#2f7d32"]
 }

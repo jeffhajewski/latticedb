@@ -2,21 +2,21 @@
  viewBox="0.00 0.00 437.00 276.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 <g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 271.75)">
 <title>volcano_operator_tree</title>
-<!-- limit -->
-<g id="node1" class="node">
-<title>limit</title>
-<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M260.09,-267.75C260.09,-267.75 176.09,-267.75 176.09,-267.75 170.09,-267.75 164.09,-261.75 164.09,-255.75 164.09,-255.75 164.09,-243.75 164.09,-243.75 164.09,-237.75 170.09,-231.75 176.09,-231.75 176.09,-231.75 260.09,-231.75 260.09,-231.75 266.09,-231.75 272.09,-237.75 272.09,-243.75 272.09,-243.75 272.09,-255.75 272.09,-255.75 272.09,-261.75 266.09,-267.75 260.09,-267.75"/>
-<text xml:space="preserve" text-anchor="middle" x="218.09" y="-245.47" font-family="Menlo,Consolas,monospace" font-size="12.00" fill="#1a1a1a">Limit</text>
-</g>
 <!-- proj -->
-<g id="node2" class="node">
+<g id="node1" class="node">
 <title>proj</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M260.09,-190.5C260.09,-190.5 176.09,-190.5 176.09,-190.5 170.09,-190.5 164.09,-184.5 164.09,-178.5 164.09,-178.5 164.09,-166.5 164.09,-166.5 164.09,-160.5 170.09,-154.5 176.09,-154.5 176.09,-154.5 260.09,-154.5 260.09,-154.5 266.09,-154.5 272.09,-160.5 272.09,-166.5 272.09,-166.5 272.09,-178.5 272.09,-178.5 272.09,-184.5 266.09,-190.5 260.09,-190.5"/>
-<text xml:space="preserve" text-anchor="middle" x="218.09" y="-168.22" font-family="Menlo,Consolas,monospace" font-size="12.00" fill="#1a1a1a">Project</text>
+<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M260.09,-267.75C260.09,-267.75 176.09,-267.75 176.09,-267.75 170.09,-267.75 164.09,-261.75 164.09,-255.75 164.09,-255.75 164.09,-243.75 164.09,-243.75 164.09,-237.75 170.09,-231.75 176.09,-231.75 176.09,-231.75 260.09,-231.75 260.09,-231.75 266.09,-231.75 272.09,-237.75 272.09,-243.75 272.09,-243.75 272.09,-255.75 272.09,-255.75 272.09,-261.75 266.09,-267.75 260.09,-267.75"/>
+<text xml:space="preserve" text-anchor="middle" x="218.09" y="-245.47" font-family="Menlo,Consolas,monospace" font-size="12.00" fill="#1a1a1a">Project</text>
 </g>
-<!-- limit&#45;&gt;proj -->
+<!-- limit -->
+<g id="node2" class="node">
+<title>limit</title>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M260.09,-190.5C260.09,-190.5 176.09,-190.5 176.09,-190.5 170.09,-190.5 164.09,-184.5 164.09,-178.5 164.09,-178.5 164.09,-166.5 164.09,-166.5 164.09,-160.5 170.09,-154.5 176.09,-154.5 176.09,-154.5 260.09,-154.5 260.09,-154.5 266.09,-154.5 272.09,-160.5 272.09,-166.5 272.09,-166.5 272.09,-178.5 272.09,-178.5 272.09,-184.5 266.09,-190.5 260.09,-190.5"/>
+<text xml:space="preserve" text-anchor="middle" x="218.09" y="-168.22" font-family="Menlo,Consolas,monospace" font-size="12.00" fill="#1a1a1a">Limit</text>
+</g>
+<!-- proj&#45;&gt;limit -->
 <g id="edge1" class="edge">
-<title>limit&#45;&gt;proj</title>
+<title>proj&#45;&gt;limit</title>
 <path fill="none" stroke="#6b7280" stroke-width="1.1" d="M218.09,-231.3C218.09,-221.8 218.09,-209.87 218.09,-199.31"/>
 <polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="220.54,-199.52 218.09,-192.52 215.64,-199.52 220.54,-199.52"/>
 <text xml:space="preserve" text-anchor="middle" x="242.47" y="-207.25" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;pulls from</text>
@@ -27,9 +27,9 @@
 <path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M260.09,-113.25C260.09,-113.25 176.09,-113.25 176.09,-113.25 170.09,-113.25 164.09,-107.25 164.09,-101.25 164.09,-101.25 164.09,-89.25 164.09,-89.25 164.09,-83.25 170.09,-77.25 176.09,-77.25 176.09,-77.25 260.09,-77.25 260.09,-77.25 266.09,-77.25 272.09,-83.25 272.09,-89.25 272.09,-89.25 272.09,-101.25 272.09,-101.25 272.09,-107.25 266.09,-113.25 260.09,-113.25"/>
 <text xml:space="preserve" text-anchor="middle" x="218.09" y="-90.97" font-family="Menlo,Consolas,monospace" font-size="12.00" fill="#1a1a1a">Filter</text>
 </g>
-<!-- proj&#45;&gt;filter -->
+<!-- limit&#45;&gt;filter -->
 <g id="edge2" class="edge">
-<title>proj&#45;&gt;filter</title>
+<title>limit&#45;&gt;filter</title>
 <path fill="none" stroke="#6b7280" stroke-width="1.1" d="M218.09,-154.05C218.09,-144.55 218.09,-132.62 218.09,-122.06"/>
 <polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="220.54,-122.27 218.09,-115.27 215.64,-122.27 220.54,-122.27"/>
 <text xml:space="preserve" text-anchor="middle" x="242.47" y="-130" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;pulls from</text>
@@ -63,9 +63,9 @@
 <title>caller</title>
 <text xml:space="preserve" text-anchor="middle" x="60.09" y="-245.88" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280">executor calls next()</text>
 </g>
-<!-- caller&#45;&gt;limit -->
+<!-- caller&#45;&gt;proj -->
 <g id="edge4" class="edge">
-<title>caller&#45;&gt;limit</title>
+<title>caller&#45;&gt;proj</title>
 <path fill="none" stroke="#4a90d9" stroke-width="1.1" stroke-dasharray="5,2" d="M119.96,-249.75C131.68,-249.75 143.4,-249.75 155.12,-249.75"/>
 <polygon fill="#4a90d9" stroke="#4a90d9" stroke-width="1.1" points="154.99,-252.2 161.99,-249.75 154.99,-247.3 154.99,-252.2"/>
 </g>

@@ -1,40 +1,95 @@
-<svg width="328" height="311"
- viewBox="0.00 0.00 246.00 233.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 228.91)">
+<svg width="804" height="461"
+ viewBox="0.00 0.00 603.00 346.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 341.66)">
 <title>vector_search_stack</title>
 <!-- embed -->
 <g id="node1" class="node">
 <title>embed</title>
-<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" stroke-dasharray="5,2" d="M199.56,-224.91C199.56,-224.91 38.25,-224.91 38.25,-224.91 32.25,-224.91 26.25,-218.91 26.25,-212.91 26.25,-212.91 26.25,-192.69 26.25,-192.69 26.25,-186.69 32.25,-180.69 38.25,-180.69 38.25,-180.69 199.56,-180.69 199.56,-180.69 205.56,-180.69 211.56,-186.69 211.56,-192.69 211.56,-192.69 211.56,-212.91 211.56,-212.91 211.56,-218.91 205.56,-224.91 199.56,-224.91"/>
-<text xml:space="preserve" text-anchor="middle" x="118.91" y="-204.15" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">EmbeddingClient (optional)</text>
-<text xml:space="preserve" text-anchor="middle" x="118.91" y="-191.4" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">HTTP to Ollama, OpenAI, …</text>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" stroke-dasharray="5,2" d="M386.18,-337.66C386.18,-337.66 224.87,-337.66 224.87,-337.66 218.87,-337.66 212.87,-331.66 212.87,-325.66 212.87,-325.66 212.87,-305.44 212.87,-305.44 212.87,-299.44 218.87,-293.44 224.87,-293.44 224.87,-293.44 386.18,-293.44 386.18,-293.44 392.18,-293.44 398.18,-299.44 398.18,-305.44 398.18,-305.44 398.18,-325.66 398.18,-325.66 398.18,-331.66 392.18,-337.66 386.18,-337.66"/>
+<text xml:space="preserve" text-anchor="middle" x="305.53" y="-316.9" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">EmbeddingClient (optional)</text>
+<text xml:space="preserve" text-anchor="middle" x="305.53" y="-304.15" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">HTTP to Ollama, OpenAI, …</text>
 </g>
 <!-- hnsw -->
 <g id="node2" class="node">
 <title>hnsw</title>
-<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M212.69,-129.44C212.69,-129.44 25.13,-129.44 25.13,-129.44 19.12,-129.44 13.12,-123.44 13.12,-117.44 13.12,-117.44 13.12,-97.22 13.12,-97.22 13.12,-91.22 19.12,-85.22 25.12,-85.22 25.12,-85.22 212.69,-85.22 212.69,-85.22 218.69,-85.22 224.69,-91.22 224.69,-97.22 224.69,-97.22 224.69,-117.44 224.69,-117.44 224.69,-123.44 218.69,-129.44 212.69,-129.44"/>
-<text xml:space="preserve" text-anchor="middle" x="118.91" y="-108.68" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">HnswIndex</text>
-<text xml:space="preserve" text-anchor="middle" x="118.91" y="-95.93" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">multi&#45;layer graph, O(log n) search</text>
+<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M399.31,-242.19C399.31,-242.19 211.75,-242.19 211.75,-242.19 205.75,-242.19 199.75,-236.19 199.75,-230.19 199.75,-230.19 199.75,-209.97 199.75,-209.97 199.75,-203.97 205.75,-197.97 211.75,-197.97 211.75,-197.97 399.31,-197.97 399.31,-197.97 405.31,-197.97 411.31,-203.97 411.31,-209.97 411.31,-209.97 411.31,-230.19 411.31,-230.19 411.31,-236.19 405.31,-242.19 399.31,-242.19"/>
+<text xml:space="preserve" text-anchor="middle" x="305.53" y="-221.43" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">HnswIndex</text>
+<text xml:space="preserve" text-anchor="middle" x="305.53" y="-208.68" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">multi&#45;layer graph, O(log n) search</text>
 </g>
 <!-- embed&#45;&gt;hnsw -->
 <g id="edge1" class="edge">
 <title>embed&#45;&gt;hnsw</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" stroke-dasharray="5,2" d="M118.91,-180.12C118.91,-167.73 118.91,-152.01 118.91,-138.44"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="121.36,-138.56 118.91,-131.56 116.46,-138.56 121.36,-138.56"/>
-<text xml:space="preserve" text-anchor="middle" x="131.66" y="-151.19" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;[]f32</text>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" stroke-dasharray="5,2" d="M305.53,-292.87C305.53,-280.48 305.53,-264.76 305.53,-251.19"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="307.98,-251.31 305.53,-244.31 303.08,-251.31 307.98,-251.31"/>
+<text xml:space="preserve" text-anchor="middle" x="318.28" y="-263.94" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;[]f32</text>
 </g>
 <!-- store -->
 <g id="node3" class="node">
 <title>store</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M225.81,-44.22C225.81,-44.22 12,-44.22 12,-44.22 6,-44.22 0,-38.22 0,-32.22 0,-32.22 0,-12 0,-12 0,-6 6,0 12,0 12,0 225.81,0 225.81,0 231.81,0 237.81,-6 237.81,-12 237.81,-12 237.81,-32.22 237.81,-32.22 237.81,-38.22 231.81,-44.22 225.81,-44.22"/>
-<text xml:space="preserve" text-anchor="middle" x="118.91" y="-23.46" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">VectorStorage</text>
-<text xml:space="preserve" text-anchor="middle" x="118.91" y="-10.71" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">page&#45;based, backed by the buffer pool</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M189.06,-134.72C189.06,-134.72 12,-134.72 12,-134.72 6,-134.72 0,-128.72 0,-122.72 0,-122.72 0,-89.75 0,-89.75 0,-83.75 6,-77.75 12,-77.75 12,-77.75 189.06,-77.75 189.06,-77.75 195.06,-77.75 201.06,-83.75 201.06,-89.75 201.06,-89.75 201.06,-122.72 201.06,-122.72 201.06,-128.72 195.06,-134.72 189.06,-134.72"/>
+<text xml:space="preserve" text-anchor="middle" x="100.53" y="-113.96" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">VectorStorage</text>
+<text xml:space="preserve" text-anchor="middle" x="100.53" y="-101.21" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">vector_data pages</text>
+<text xml:space="preserve" text-anchor="middle" x="100.53" y="-88.46" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">(+ overflow pages &gt; 1016 dims)</text>
 </g>
 <!-- hnsw&#45;&gt;store -->
 <g id="edge2" class="edge">
 <title>hnsw&#45;&gt;store</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M118.91,-84.9C118.91,-75.27 118.91,-63.73 118.91,-53.25"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="121.36,-53.42 118.91,-46.42 116.46,-53.42 121.36,-53.42"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M266,-197.52C235.7,-180.98 193.4,-157.9 159.16,-139.22"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="160.76,-137.3 153.44,-136.1 158.41,-141.61 160.76,-137.3"/>
+</g>
+<!-- pool -->
+<g id="node4" class="node">
+<title>pool</title>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M372.73,-134.72C372.73,-134.72 238.33,-134.72 238.33,-134.72 232.33,-134.72 226.33,-128.72 226.33,-122.72 226.33,-122.72 226.33,-89.75 226.33,-89.75 226.33,-83.75 232.33,-77.75 238.33,-77.75 238.33,-77.75 372.73,-77.75 372.73,-77.75 378.73,-77.75 384.73,-83.75 384.73,-89.75 384.73,-89.75 384.73,-122.72 384.73,-122.72 384.73,-128.72 378.73,-134.72 372.73,-134.72"/>
+<text xml:space="preserve" text-anchor="middle" x="305.53" y="-113.96" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Connection pool</text>
+<text xml:space="preserve" text-anchor="middle" x="305.53" y="-101.21" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">hnsw_layer pages</text>
+<text xml:space="preserve" text-anchor="middle" x="305.53" y="-88.46" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">(neighbour lists)</text>
+</g>
+<!-- hnsw&#45;&gt;pool -->
+<g id="edge3" class="edge">
+<title>hnsw&#45;&gt;pool</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M305.53,-197.52C305.53,-182.24 305.53,-161.38 305.53,-143.56"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="307.98,-143.76 305.53,-136.76 303.08,-143.76 307.98,-143.76"/>
+</g>
+<!-- reg -->
+<g id="node5" class="node">
+<title>reg</title>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M583.18,-135.47C583.18,-135.47 421.88,-135.47 421.88,-135.47 415.88,-135.47 409.88,-129.47 409.88,-123.47 409.88,-123.47 409.88,-89 409.88,-89 409.88,-83 415.88,-77 421.88,-77 421.88,-77 583.18,-77 583.18,-77 589.18,-77 595.18,-83 595.18,-89 595.18,-89 595.18,-123.47 595.18,-123.47 595.18,-129.47 589.18,-135.47 583.18,-135.47"/>
+<text xml:space="preserve" text-anchor="middle" x="502.53" y="-114.71" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Node registry</text>
+<text xml:space="preserve" text-anchor="middle" x="502.53" y="-101.96" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">hnsw_node_tree B+Tree</text>
+<text xml:space="preserve" text-anchor="middle" x="502.53" y="-89.21" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">(vector id → layer, locations)</text>
+</g>
+<!-- hnsw&#45;&gt;reg -->
+<g id="edge4" class="edge">
+<title>hnsw&#45;&gt;reg</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M343.51,-197.52C372.2,-181.23 412.08,-158.59 444.72,-140.06"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="445.66,-142.34 450.54,-136.75 443.24,-138.08 445.66,-142.34"/>
+<text xml:space="preserve" text-anchor="middle" x="452.2" y="-168.47" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;saved on sync,</text>
+<text xml:space="preserve" text-anchor="middle" x="452.2" y="-157.22" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;loaded on open</text>
+</g>
+<!-- bp -->
+<g id="node6" class="node">
+<title>bp</title>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M372.73,-36C372.73,-36 238.33,-36 238.33,-36 232.33,-36 226.33,-30 226.33,-24 226.33,-24 226.33,-12 226.33,-12 226.33,-6 232.33,0 238.33,0 238.33,0 372.73,0 372.73,0 378.73,0 384.73,-6 384.73,-12 384.73,-12 384.73,-24 384.73,-24 384.73,-30 378.73,-36 372.73,-36"/>
+<text xml:space="preserve" text-anchor="middle" x="305.53" y="-12.97" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Buffer pool</text>
+</g>
+<!-- store&#45;&gt;bp -->
+<g id="edge5" class="edge">
+<title>store&#45;&gt;bp</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M167.09,-77.24C196.03,-65.06 229.35,-51.05 256.05,-39.81"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="256.71,-42.19 262.22,-37.22 254.81,-37.68 256.71,-42.19"/>
+</g>
+<!-- pool&#45;&gt;bp -->
+<g id="edge6" class="edge">
+<title>pool&#45;&gt;bp</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M305.53,-77.48C305.53,-67.04 305.53,-55.23 305.53,-44.96"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="307.98,-45.08 305.53,-38.08 303.08,-45.08 307.98,-45.08"/>
+</g>
+<!-- reg&#45;&gt;bp -->
+<g id="edge7" class="edge">
+<title>reg&#45;&gt;bp</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M436.66,-76.4C409.41,-64.47 378.4,-50.9 353.38,-39.95"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="354.4,-37.72 347.01,-37.16 352.44,-42.21 354.4,-37.72"/>
 </g>
 </g>
 </svg>

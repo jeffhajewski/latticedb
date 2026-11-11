@@ -12,7 +12,7 @@ digraph buffer_pool_clock {
   f1 [label="Frame 1\luse 0\lpin 0\l" fillcolor="#eaf5ea" color="#2f7d32" penwidth=1.7]
   f2 [label="Frame 2\luse 0\l"]
   f3 [label="Frame 3\luse 1\l"]
-  f4 [label="Frame 4\luse 2\l"]
+  f4 [label="Frame 4\luse 1\l"]
 
   f1 -> f2 -> f3 -> f4 -> f1 [color="#4a90d9"]
 

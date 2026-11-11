@@ -24,31 +24,22 @@ Tests get the same benefit, and run without touching a disk.
 ### 2. Portability
 
 Different operating systems have different file APIs:
-- Linux: `pread`, `pwrite`, `fsync`
+- Linux and macOS: `pread`, `pwrite`, `fsync`
 - Windows: `ReadFile`, `WriteFile`, `FlushFileBuffers`
-- Embedded: Custom flash drivers
 
-The VFS hides these differences. We implement one VFS per platform, and the rest of the database doesn't care.
+The rest of the database only sees the VFS interface. There is one file-backed
+implementation, `PosixVfs`, despite its name: it is written against Zig's
+standard-library file API (positioned reads and writes, sync, locks) rather than
+raw system calls, so the per-platform differences live in Zig's standard library.
+`defaultVfs` returns it unconditionally.
 
-### 3. Injection of Failures
+### 3. A Seam for Failure Injection
 
-For testing crash recovery, we need to simulate failures:
-
-```zig
-const FaultyVfs = struct {
-    inner: Vfs,
-    fail_after_n_writes: usize,
-    write_count: usize,
-
-    pub fn write(self: *Self, offset: u64, data: []const u8) !void {
-        self.write_count += 1;
-        if (self.write_count > self.fail_after_n_writes) {
-            return error.SimulatedCrash;
-        }
-        return self.inner.write(offset, data);
-    }
-};
-```
+A backend that fails on purpose — say, after the Nth write — could be dropped in
+behind the same interface to test crash recovery. None exists today. The crash
+tests in `tests/crash/` simulate a crash differently: after a normal close they
+reset the database file to its header page, leave the log in place, and check that
+reopening replays the committed transactions.
 
 ## The Interface
 
@@ -60,12 +51,15 @@ pub const File = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        read:     fn(ptr, offset: u64, buf: []u8) Error!usize,
-        write:    fn(ptr, offset: u64, data: []const u8) Error!void,
-        sync:     fn(ptr) Error!void,
-        size:     fn(ptr) Error!u64,
+        read:     fn(ptr, offset: u64, buf: []u8) VfsError!usize,
+        write:    fn(ptr, offset: u64, data: []const u8) VfsError!void,
+        sync:     fn(ptr) VfsError!void,
+        truncate: fn(ptr, size: u64) VfsError!void,
+        size:     fn(ptr) VfsError!u64,
         close:    fn(ptr) void,
-        truncate: fn(ptr, size: u64) Error!void,
+        lock:     fn(ptr, mode: LockMode) VfsError!void,
+        tryLock:  fn(ptr, mode: LockMode) VfsError!bool,
+        unlock:   fn(ptr) void,
     };
 
     // Convenience methods that call vtable
@@ -84,8 +78,8 @@ pub const Vfs = struct {
     vtable: *const VTable,
 
     pub const VTable = struct {
-        open:   fn(ptr, path: []const u8, flags: OpenFlags) Error!File,
-        delete: fn(ptr, path: []const u8) Error!void,
+        open:   fn(ptr, path: []const u8, flags: OpenFlags) VfsError!File,
+        delete: fn(ptr, path: []const u8) VfsError!void,
         exists: fn(ptr, path: []const u8) bool,
     };
 };
@@ -99,8 +93,16 @@ pub const OpenFlags = struct {
     write: bool = false,    // Open for writing
     create: bool = false,   // Create if doesn't exist
     exclusive: bool = false, // Fail if exists (with create)
+    truncate: bool = false, // Truncate file to zero length
 };
 ```
+
+### Locks
+
+`LockMode` is `shared` or `exclusive`. The page manager uses `tryLock` when it
+opens a database: a read-write open takes the file exclusively and a read-only
+open shares it, and a conflicting holder makes the open fail with
+`DatabaseLocked` instead of waiting.
 
 ## Key Operations
 
@@ -116,10 +118,10 @@ const bytes_read = try file.read(8192, buffer[0..4096]);
 try file.write(8192, data[0..4096]);
 ```
 
-This maps directly to page-based access:
+This maps directly to page-based access (shown for the default 4096-byte page):
 - Page 0 is at offset 0
 - Page 1 is at offset 4096
-- Page N is at offset N * 4096
+- Page N is at offset N * page_size
 
 ### Sync (fsync)
 
@@ -129,69 +131,80 @@ The most important operation for durability:
 try file.sync();
 ```
 
-This forces all pending writes to physical storage. Without it, data might sit in OS buffers and be lost on power failure.
+This asks the operating system to push all pending writes for the file to the
+storage device. Without it, data might sit in OS buffers and be lost on power
+failure.
 
 <img class="diagram" src="../assets/diagrams/fsync-durability.svg"
-     alt="With write() alone, data sits in an OS buffer in RAM and a power failure loses it. With write() followed by fsync(), the buffer is flushed and the data reaches persistent disk">
+     alt="With write() alone, data sits in an OS buffer in RAM and a power failure loses it. With write() followed by fsync(), the OS buffer is flushed to the storage device; the data is durable to the extent the device honours the flush">
 
-## The POSIX Implementation
+How far the flush goes depends on the platform. `sync` is Zig's standard
+`File.sync`, which is plain `fsync` on Linux and macOS and `NtFlushBuffersFile` on
+Windows. On macOS plain `fsync` hands the data to the drive but does not force the
+drive's own write cache out (that needs `F_FULLFSYNC`, which is not used), so a
+power loss there can still lose writes the drive had acknowledged.
 
-For Unix-like systems (Linux, macOS):
+## The File Implementation
+
+`PosixVfs` opens files through Zig's standard file API. `compat.fs` is a thin
+shim in `src/compat.zig` that papers over differences between Zig versions. The
+snippets in this section are simplified from `src/storage/vfs.zig`:
 
 ```zig
 pub const PosixVfs = struct {
     allocator: Allocator,
 
-    pub fn open(self: *Self, path: []const u8, flags: OpenFlags) !File {
-        var posix_flags: u32 = 0;
-
-        if (flags.read and flags.write) {
-            posix_flags |= O_RDWR;
-        } else if (flags.write) {
-            posix_flags |= O_WRONLY;
-        } else {
-            posix_flags |= O_RDONLY;
-        }
-
-        if (flags.create) posix_flags |= O_CREAT;
-        if (flags.exclusive) posix_flags |= O_EXCL;
-
-        const fd = try std.posix.open(path, posix_flags, 0o644);
-        // ... wrap in File struct
+    pub fn openFile(self: *Self, path: []const u8, flags: OpenFlags) VfsError!File {
+        const cwd = compat.fs.cwd();
+        const handle = if (flags.create)
+            cwd.createFile(path, .{ .read = flags.read, .truncate = flags.truncate,
+                                   .exclusive = flags.exclusive })
+        else
+            cwd.openFile(path, .{ .mode = if (flags.write) .read_write else .read_only });
+        // ... map std errors to VfsError, wrap the handle in a PosixFile
     }
 };
 ```
 
+(The real `openFile` also opens an existing file instead of re-creating it when
+`create` is set without `truncate` or `exclusive`.)
+
 ### Read Implementation
 
-Uses `pread` for positioned reading (thread-safe, no seeking):
+Positioned reads, so there is no shared file cursor to seek:
 
 ```zig
-fn read(self: *PosixFile, offset: u64, buf: []u8) !usize {
-    return std.posix.pread(self.fd, buf, offset);
+pub fn readAt(self: *PosixFile, offset: u64, buf: []u8) VfsError!usize {
+    return self.handle.preadAll(buf, offset) catch |err| switch (err) {
+        error.InputOutput => VfsError.IoError,
+        else => VfsError.Unexpected,
+    };
 }
 ```
 
 ### Write Implementation
 
-Uses `pwrite` for positioned writing:
+Positioned writes. A handle opened without `write` refuses them:
 
 ```zig
-fn write(self: *PosixFile, offset: u64, data: []const u8) !void {
-    var written: usize = 0;
-    while (written < data.len) {
-        const n = try std.posix.pwrite(self.fd, data[written..], offset + written);
-        if (n == 0) return error.DiskFull;
-        written += n;
-    }
+pub fn writeAt(self: *PosixFile, offset: u64, data: []const u8) VfsError!void {
+    if (!self.writable) return VfsError.NotOpenForWriting;
+    self.handle.pwriteAll(data, offset) catch |err| return switch (err) {
+        error.InputOutput => VfsError.IoError,
+        error.NoSpaceLeft => VfsError.DiskFull,
+        else => VfsError.Unexpected,
+    };
 }
 ```
 
 ### Sync Implementation
 
 ```zig
-fn sync(self: *PosixFile) !void {
-    try std.posix.fsync(self.fd);
+pub fn syncFile(self: *PosixFile) VfsError!void {
+    self.handle.sync() catch |err| return switch (err) {
+        error.InputOutput => VfsError.IoError,
+        else => VfsError.Unexpected,
+    };
 }
 ```
 
@@ -235,7 +248,7 @@ modified.
 
 Every lock succeeds. A lock exists to keep a second process off a database, and no
 other process can reach memory this one owns. That is a decision rather than an
-omission: file-backed databases take a real lock and refuse a second opener, and
+omission: file-backed databases take a real lock and refuse a conflicting opener, and
 this backend declines to pretend there is anything to exclude.
 
 ### What it costs
@@ -272,22 +285,16 @@ pub const VfsError = error{
     FileLocked,        // Another process has it
     InvalidPath,       // Bad path string
     AlreadyExists,     // Exclusive create failed
+    NotOpenForWriting, // Write or truncate on a read-only handle
+    Unexpected,        // Anything not mapped above
 };
 ```
 
-These are translated from OS-specific error codes:
-
-```zig
-fn mapPosixError(err: std.posix.Error) VfsError {
-    return switch (err) {
-        .ENOENT => VfsError.FileNotFound,
-        .EACCES, .EPERM => VfsError.PermissionDenied,
-        .ENOSPC => VfsError.DiskFull,
-        .EIO => VfsError.IoError,
-        // ...
-    };
-}
-```
+Each `PosixFile` method translates the standard library's errors itself, as in the
+snippets above: `FileNotFound` and `PathAlreadyExists` keep their meaning,
+`AccessDenied` becomes `PermissionDenied`, `NoSpaceLeft` becomes `DiskFull`,
+`InputOutput` becomes `IoError`, and anything else becomes `IoError` or
+`Unexpected`. There is no single mapping table.
 
 ## Usage Pattern
 
@@ -318,10 +325,13 @@ try file.sync();
 
 ## Why Not Just Use std.fs?
 
-Zig's standard library has file operations, but:
+`PosixVfs` *is* Zig's standard library underneath, including its positioned reads
+and writes. The layer exists for what the standard library does not give:
 
-1. **No positioned I/O** - `std.fs.File` uses streaming with seek, which isn't thread-safe
-2. **No vtable pattern** - Can't swap implementations
-3. **Different error types** - We want database-specific errors
+1. **A swappable implementation** - The vtable is what lets `MemoryVfs` stand in for
+   the disk
+2. **Database-specific errors** - One small error set instead of every std error
+3. **One place to absorb std changes** - File API changes between Zig versions are
+   handled in `compat.zig` and the VFS, not throughout the engine
 
 The VFS is a thin layer, but it gives us control where we need it.

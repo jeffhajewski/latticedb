@@ -1,4 +1,5 @@
-// The vector path: optional embedding client, HNSW index, page-backed storage.
+// The vector path: optional embedding client, HNSW index, and the three
+// page-backed structures the index persists into.
 digraph vector_search_stack {
   bgcolor="transparent"
   rankdir=TB
@@ -14,8 +15,17 @@ digraph vector_search_stack {
   embed [label="EmbeddingClient (optional)\nHTTP to Ollama, OpenAI, …"
          fillcolor="#f6f8fa" color="#c7d0da" style="filled,rounded,dashed"]
   hnsw  [label="HnswIndex\nmulti-layer graph, O(log n) search" fillcolor="#dbe9f8"]
-  store [label="VectorStorage\npage-based, backed by the buffer pool"]
+  store [label="VectorStorage\nvector_data pages\n(+ overflow pages > 1016 dims)"]
+  pool  [label="Connection pool\nhnsw_layer pages\n(neighbour lists)"]
+  reg   [label="Node registry\nhnsw_node_tree B+Tree\n(vector id → layer, locations)"]
+  bp    [label="Buffer pool" fillcolor="#f6f8fa" color="#c7d0da"]
 
   embed -> hnsw  [label="  []f32" style=dashed]
   hnsw  -> store
+  hnsw  -> pool
+  hnsw  -> reg   [label="  saved on sync,\n  loaded on open"]
+  { rank=same; store; pool; reg }
+  store -> bp
+  pool  -> bp
+  reg   -> bp
 }

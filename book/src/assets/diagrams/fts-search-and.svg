@@ -1,64 +1,66 @@
-<svg width="349" height="447"
- viewBox="0.00 0.00 262.00 335.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 330.66)">
+<svg width="485" height="483"
+ viewBox="0.00 0.00 364.00 362.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 357.66)">
 <title>fts_search_and</title>
 <!-- q -->
 <g id="node1" class="node">
 <title>q</title>
-<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M232.31,-326.66C232.31,-326.66 22.12,-326.66 22.12,-326.66 16.12,-326.66 10.12,-320.66 10.12,-314.66 10.12,-314.66 10.12,-302.66 10.12,-302.66 10.12,-296.66 16.12,-290.66 22.12,-290.66 22.12,-290.66 232.31,-290.66 232.31,-290.66 238.31,-290.66 244.31,-296.66 244.31,-302.66 244.31,-302.66 244.31,-314.66 244.31,-314.66 244.31,-320.66 238.31,-326.66 232.31,-326.66"/>
-<text xml:space="preserve" text-anchor="middle" x="127.22" y="-304.96" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">query: &quot;database optimization&quot;</text>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M282.93,-353.66C282.93,-353.66 72.75,-353.66 72.75,-353.66 66.75,-353.66 60.75,-347.66 60.75,-341.66 60.75,-341.66 60.75,-329.66 60.75,-329.66 60.75,-323.66 66.75,-317.66 72.75,-317.66 72.75,-317.66 282.93,-317.66 282.93,-317.66 288.93,-317.66 294.93,-323.66 294.93,-329.66 294.93,-329.66 294.93,-341.66 294.93,-341.66 294.93,-347.66 288.93,-353.66 282.93,-353.66"/>
+<text xml:space="preserve" text-anchor="middle" x="177.84" y="-331.96" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">query: &quot;database optimization&quot;</text>
 </g>
 <!-- s1 -->
 <g id="node2" class="node">
 <title>s1</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M242.43,-264.66C242.43,-264.66 12,-264.66 12,-264.66 6,-264.66 0,-258.66 0,-252.66 0,-252.66 0,-230.94 0,-230.94 0,-224.94 6,-218.94 12,-218.94 12,-218.94 242.43,-218.94 242.43,-218.94 248.43,-218.94 254.43,-224.94 254.43,-230.94 254.43,-230.94 254.43,-252.66 254.43,-252.66 254.43,-258.66 248.43,-264.66 242.43,-264.66"/>
-<text xml:space="preserve" text-anchor="start" x="15.84" y="-244.85" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">1. Tokenize</text>
-<text xml:space="preserve" text-anchor="start" x="15.84" y="-231.35" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;→ [&quot;database&quot;, &quot;optimization&quot;]</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M326.81,-291.66C326.81,-291.66 28.87,-291.66 28.87,-291.66 22.88,-291.66 16.88,-285.66 16.88,-279.66 16.88,-279.66 16.88,-257.94 16.88,-257.94 16.88,-251.94 22.88,-245.94 28.88,-245.94 28.88,-245.94 326.81,-245.94 326.81,-245.94 332.81,-245.94 338.81,-251.94 338.81,-257.94 338.81,-257.94 338.81,-279.66 338.81,-279.66 338.81,-285.66 332.81,-291.66 326.81,-291.66"/>
+<text xml:space="preserve" text-anchor="start" x="32.72" y="-271.85" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">1. Tokenize, lowercase, dedupe (≤ 32 terms)</text>
+<text xml:space="preserve" text-anchor="start" x="32.72" y="-258.35" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;→ [&quot;database&quot;, &quot;optimization&quot;]</text>
 </g>
 <!-- q&#45;&gt;s1 -->
 <g id="edge1" class="edge">
 <title>q&#45;&gt;s1</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M127.22,-290.28C127.22,-285.03 127.22,-279.12 127.22,-273.28"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="129.67,-273.55 127.22,-266.55 124.77,-273.55 129.67,-273.55"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M177.84,-317.28C177.84,-312.03 177.84,-306.12 177.84,-300.28"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="180.29,-300.55 177.84,-293.55 175.39,-300.55 180.29,-300.55"/>
 </g>
 <!-- s2 -->
 <g id="node3" class="node">
 <title>s2</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M232.31,-192.94C232.31,-192.94 22.12,-192.94 22.12,-192.94 16.12,-192.94 10.12,-186.94 10.12,-180.94 10.12,-180.94 10.12,-145.72 10.12,-145.72 10.12,-139.72 16.12,-133.72 22.12,-133.72 22.12,-133.72 232.31,-133.72 232.31,-133.72 238.31,-133.72 244.31,-139.72 244.31,-145.72 244.31,-145.72 244.31,-180.94 244.31,-180.94 244.31,-186.94 238.31,-192.94 232.31,-192.94"/>
-<text xml:space="preserve" text-anchor="start" x="25.97" y="-173.13" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">2. Walk each posting list</text>
-<text xml:space="preserve" text-anchor="start" x="25.97" y="-159.63" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;doc_scores[doc_id] += score</text>
-<text xml:space="preserve" text-anchor="start" x="25.97" y="-146.13" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;doc_term_count[doc_id] += 1</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M316.68,-219.94C316.68,-219.94 39,-219.94 39,-219.94 33,-219.94 27,-213.94 27,-207.94 27,-207.94 27,-172.72 27,-172.72 27,-166.72 33,-160.72 39,-160.72 39,-160.72 316.68,-160.72 316.68,-160.72 322.68,-160.72 328.68,-166.72 328.68,-172.72 328.68,-172.72 328.68,-207.94 328.68,-207.94 328.68,-213.94 322.68,-219.94 316.68,-219.94"/>
+<text xml:space="preserve" text-anchor="start" x="42.84" y="-200.13" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">2. Look up each term in the dictionary</text>
+<text xml:space="preserve" text-anchor="start" x="42.84" y="-186.63" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;any term missing → no results</text>
+<text xml:space="preserve" text-anchor="start" x="42.84" y="-173.13" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;order terms by doc_freq, rarest first</text>
 </g>
 <!-- s1&#45;&gt;s2 -->
 <g id="edge2" class="edge">
 <title>s1&#45;&gt;s2</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M127.22,-218.68C127.22,-213.41 127.22,-207.63 127.22,-201.87"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="129.67,-202.18 127.22,-195.18 124.77,-202.18 129.67,-202.18"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M177.84,-245.68C177.84,-240.41 177.84,-234.63 177.84,-228.87"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="180.29,-229.18 177.84,-222.18 175.39,-229.18 180.29,-229.18"/>
 </g>
 <!-- s3 -->
 <g id="node4" class="node">
 <title>s3</title>
-<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M239.06,-107.72C239.06,-107.72 15.37,-107.72 15.37,-107.72 9.38,-107.72 3.37,-101.72 3.37,-95.72 3.37,-95.72 3.37,-74 3.37,-74 3.37,-68 9.37,-62 15.37,-62 15.37,-62 239.06,-62 239.06,-62 245.05,-62 251.06,-68 251.06,-74 251.06,-74 251.06,-95.72 251.06,-95.72 251.06,-101.72 245.06,-107.72 239.06,-107.72"/>
-<text xml:space="preserve" text-anchor="start" x="19.22" y="-87.91" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">3. Keep only documents where</text>
-<text xml:space="preserve" text-anchor="start" x="19.22" y="-74.41" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;term_count == num_query_terms</text>
+<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M343.68,-134.72C343.68,-134.72 12,-134.72 12,-134.72 6,-134.72 0,-128.72 0,-122.72 0,-122.72 0,-74 0,-74 0,-68 6,-62 12,-62 12,-62 343.68,-62 343.68,-62 349.68,-62 355.68,-68 355.68,-74 355.68,-74 355.68,-122.72 355.68,-122.72 355.68,-128.72 349.68,-134.72 343.68,-134.72"/>
+<text xml:space="preserve" text-anchor="start" x="15.84" y="-114.91" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">3. Walk the rarest term&#39;s posting list</text>
+<text xml:space="preserve" text-anchor="start" x="15.84" y="-101.41" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;for each doc_id: skipTo(doc_id) in the others</text>
+<text xml:space="preserve" text-anchor="start" x="15.84" y="-87.91" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;in every list → keep, score = Σ BM25</text>
+<text xml:space="preserve" text-anchor="start" x="15.84" y="-74.41" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;stop after 2 × K matches</text>
 </g>
 <!-- s2&#45;&gt;s3 -->
 <g id="edge3" class="edge">
 <title>s2&#45;&gt;s3</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M127.22,-133.42C127.22,-127.87 127.22,-122.04 127.22,-116.44"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="129.67,-116.56 127.22,-109.56 124.77,-116.56 129.67,-116.56"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M177.84,-160.37C177.84,-154.98 177.84,-149.25 177.84,-143.53"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="180.29,-143.87 177.84,-136.87 175.39,-143.87 180.29,-143.87"/>
 </g>
 <!-- s4 -->
 <g id="node5" class="node">
 <title>s4</title>
-<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.2" d="M232.31,-36C232.31,-36 22.12,-36 22.12,-36 16.12,-36 10.12,-30 10.12,-24 10.12,-24 10.12,-12 10.12,-12 10.12,-6 16.12,0 22.12,0 22.12,0 232.31,0 232.31,0 238.31,0 244.31,-6 244.31,-12 244.31,-12 244.31,-24 244.31,-24 244.31,-30 238.31,-36 232.31,-36"/>
-<text xml:space="preserve" text-anchor="start" x="25.97" y="-14.3" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">4. Sort by score, return top K</text>
+<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.2" d="M282.93,-36C282.93,-36 72.75,-36 72.75,-36 66.75,-36 60.75,-30 60.75,-24 60.75,-24 60.75,-12 60.75,-12 60.75,-6 66.75,0 72.75,0 72.75,0 282.93,0 282.93,0 288.93,0 294.93,-6 294.93,-12 294.93,-12 294.93,-24 294.93,-24 294.93,-30 288.93,-36 282.93,-36"/>
+<text xml:space="preserve" text-anchor="start" x="76.59" y="-14.3" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">4. Sort by score, return top K</text>
 </g>
 <!-- s3&#45;&gt;s4 -->
 <g id="edge4" class="edge">
 <title>s3&#45;&gt;s4</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M127.22,-61.54C127.22,-56.15 127.22,-50.35 127.22,-44.82"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="129.67,-45.11 127.22,-38.11 124.77,-45.11 129.67,-45.11"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M177.84,-61.85C177.84,-56 177.84,-50.05 177.84,-44.51"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="180.29,-44.89 177.84,-37.89 175.39,-44.89 180.29,-44.89"/>
 </g>
 </g>
 </svg>

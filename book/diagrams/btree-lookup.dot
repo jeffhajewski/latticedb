@@ -11,12 +11,14 @@ digraph btree_lookup {
   edge [color="#6b7280" penwidth=1.1 arrowsize=0.7
         fontname="Helvetica,Arial,sans-serif" fontsize=10 fontcolor="#6b7280"]
 
-  root  [label="[cat]     [fish]" fillcolor="#dbe9f8"]
-  left  [label="cow:v1   dog:v2" color="#2f7d32" fillcolor="#eaf5ea" penwidth=1.6]
-  mid   [label="…" fillcolor="#f6f8fa" color="#c7d0da"]
-  right [label="…" fillcolor="#f6f8fa" color="#c7d0da"]
+  ordering=out
 
-  root -> left  [label="  \"dog\" > \"cat\"\l  \"dog\" < \"fish\"\l" color="#4a90d9" penwidth=1.4]
-  root -> mid   [style=dashed color="#c7d0da"]
+  root  [label="[cat]     [fish]" fillcolor="#dbe9f8"]
+  left  [label="… < cat" fillcolor="#f6f8fa" color="#c7d0da"]
+  mid   [label="cow:v1   dog:v2" color="#2f7d32" fillcolor="#eaf5ea" penwidth=1.6]
+  right [label="≥ fish …" fillcolor="#f6f8fa" color="#c7d0da"]
+
+  root -> left  [style=dashed color="#c7d0da"]
+  root -> mid   [label="  \"dog\" ≥ \"cat\"\l  \"dog\" < \"fish\"\l" color="#4a90d9" penwidth=1.4]
   root -> right [style=dashed color="#c7d0da"]
 }

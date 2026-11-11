@@ -1,4 +1,6 @@
 // Without fsync a write can sit in an OS buffer and be lost on power failure.
+// fsync hands it to the device; whether the device cache is flushed too depends
+// on the platform (plain fsync on macOS does not force it).
 digraph fsync_durability {
   bgcolor="transparent"
   rankdir=TB
@@ -29,7 +31,7 @@ digraph fsync_durability {
     color="#dbe3ec" penwidth=1.1 style=rounded margin=14
     f1 [label="Application"]
     f2 [label="OS buffer (empty)" fillcolor="#f6f8fa" color="#c7d0da"]
-    f3 [label="Disk (persistent)\ndata is safe" fillcolor="#eaf5ea" color="#2f7d32"]
+    f3 [label="Storage device\ndurable if the device\nhonours the flush" fillcolor="#eaf5ea" color="#2f7d32"]
     f1 -> f2 [label="  write()"]
     f2 -> f3 [label="  fsync()" color="#2f7d32"]
   }

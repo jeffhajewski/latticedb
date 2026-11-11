@@ -1,6 +1,6 @@
-// The graph is decomposed into four B+Trees, each tuned to one access pattern.
-// They are components of the storage layer, not stages in a flow, so they are
-// drawn as a container rather than a tree of edges.
+// The core graph is decomposed into six B+Trees, each tuned to one access
+// pattern. They are components of the storage layer, not stages in a flow, so
+// they are drawn as a container rather than a tree of edges.
 digraph graph_storage_btrees {
   bgcolor="transparent"
   rankdir=TB
@@ -18,14 +18,17 @@ digraph graph_storage_btrees {
     fontname="Helvetica,Arial,sans-serif" fontsize=13 fontcolor="#1a1a1a"
     color="#4a90d9" penwidth=1.3 style=rounded bgcolor="#f7fafd" margin=16
 
-    symbols [label="SYMBOLS\nstring → id\nid → string"]
-    nodes   [label="NODES\nnode_id → NodeData"]
-    edges_t [label="EDGES\ncomposite key → data"]
-    labels  [label="LABEL_INDEX\n(label, node) → ∅"]
+    symbols  [label="SYMBOLS\nstring → id"]
+    symrev   [label="SYMBOLS_REVERSE\nid → string"]
+    nodes    [label="NODES\nnode_id → NodeData"]
+    edges_t  [label="EDGES\ntraversal key → ∅"]
+    edge_ids [label="EDGE_ID\nedge_id → payload\n(key 0: next_edge_id)"]
+    labels   [label="LABEL_INDEX\n(label, node) → ∅"]
 
-    { rank=same; symbols -> nodes }
-    { rank=same; edges_t -> labels }
+    { rank=same; symbols -> symrev -> nodes }
+    { rank=same; edges_t -> edge_ids -> labels }
     symbols -> edges_t
+    symrev  -> edge_ids
     nodes   -> labels
   }
 }

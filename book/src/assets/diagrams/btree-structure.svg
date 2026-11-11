@@ -1,12 +1,12 @@
-<svg width="631" height="164"
- viewBox="0.00 0.00 473.00 123.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<svg width="853" height="164"
+ viewBox="0.00 0.00 640.00 123.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 <g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 119)">
 <title>btree_structure</title>
 <!-- root -->
 <g id="node1" class="node">
 <title>root</title>
-<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M300.92,-115C300.92,-115 164,-115 164,-115 158,-115 152,-109 152,-103 152,-103 152,-91 152,-91 152,-85 158,-79 164,-79 164,-79 300.92,-79 300.92,-79 306.92,-79 312.92,-85 312.92,-91 312.92,-91 312.92,-103 312.92,-103 312.92,-109 306.92,-115 300.92,-115"/>
-<text xml:space="preserve" text-anchor="middle" x="232.46" y="-92.72" font-family="Menlo,Consolas,monospace" font-size="12.00" fill="#1a1a1a">[30] &#160;&#160;[60] &#160;&#160;[90]</text>
+<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M383.92,-115C383.92,-115 247,-115 247,-115 241,-115 235,-109 235,-103 235,-103 235,-91 235,-91 235,-85 241,-79 247,-79 247,-79 383.92,-79 383.92,-79 389.92,-79 395.92,-85 395.92,-91 395.92,-91 395.92,-103 395.92,-103 395.92,-109 389.92,-115 383.92,-115"/>
+<text xml:space="preserve" text-anchor="middle" x="315.46" y="-92.72" font-family="Menlo,Consolas,monospace" font-size="12.00" fill="#1a1a1a">[30] &#160;&#160;[60] &#160;&#160;[90]</text>
 </g>
 <!-- leaf1 -->
 <g id="node2" class="node">
@@ -17,8 +17,8 @@
 <!-- root&#45;&gt;leaf1 -->
 <g id="edge1" class="edge">
 <title>root&#45;&gt;leaf1</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M194.57,-78.53C169.78,-67.1 137.26,-52.1 111.05,-40.02"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="112.39,-37.94 105.01,-37.23 110.34,-42.39 112.39,-37.94"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M258.42,-78.43C220.18,-66.65 169.76,-51.12 130.05,-38.89"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="131.26,-36.7 123.85,-36.98 129.82,-41.39 131.26,-36.7"/>
 </g>
 <!-- leaf2 -->
 <g id="node3" class="node">
@@ -29,8 +29,8 @@
 <!-- root&#45;&gt;leaf2 -->
 <g id="edge2" class="edge">
 <title>root&#45;&gt;leaf2</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M232.46,-78.53C232.46,-68.58 232.46,-55.94 232.46,-44.87"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="234.91,-45.07 232.46,-38.07 230.01,-45.07 234.91,-45.07"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M296.63,-78.53C285.06,-67.8 270.1,-53.92 257.54,-42.27"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="259.24,-40.5 252.44,-37.54 255.91,-44.09 259.24,-40.5"/>
 </g>
 <!-- leaf3 -->
 <g id="node4" class="node">
@@ -41,22 +41,41 @@
 <!-- root&#45;&gt;leaf3 -->
 <g id="edge3" class="edge">
 <title>root&#45;&gt;leaf3</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M270.35,-78.53C295.14,-67.1 327.66,-52.1 353.87,-40.02"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="354.58,-42.39 359.91,-37.23 352.53,-37.94 354.58,-42.39"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M334.52,-78.53C346.33,-67.7 361.64,-53.67 374.43,-41.95"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="375.74,-44.06 379.25,-37.53 372.43,-40.45 375.74,-44.06"/>
+</g>
+<!-- leaf4 -->
+<g id="node5" class="node">
+<title>leaf4</title>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M619.92,-36C619.92,-36 513,-36 513,-36 507,-36 501,-30 501,-24 501,-24 501,-12 501,-12 501,-6 507,0 513,0 513,0 619.92,0 619.92,0 625.92,0 631.92,-6 631.92,-12 631.92,-12 631.92,-24 631.92,-24 631.92,-30 625.92,-36 619.92,-36"/>
+<text xml:space="preserve" text-anchor="middle" x="566.46" y="-13.72" font-family="Menlo,Consolas,monospace" font-size="12.00" fill="#1a1a1a">90:val &#160;95:val</text>
+</g>
+<!-- root&#45;&gt;leaf4 -->
+<g id="edge4" class="edge">
+<title>root&#45;&gt;leaf4</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M372.73,-78.43C411.04,-66.68 461.53,-51.19 501.36,-38.97"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="501.87,-41.38 507.84,-36.98 500.43,-36.69 501.87,-41.38"/>
 </g>
 <!-- leaf1&#45;&gt;leaf2 -->
-<g id="edge4" class="edge">
+<g id="edge5" class="edge">
 <title>leaf1&#45;&gt;leaf2</title>
 <path fill="none" stroke="#4a90d9" stroke-width="1.1" stroke-dasharray="5,2" d="M139.86,-18C145.97,-18 152.07,-18 158.17,-18"/>
 <polygon fill="#4a90d9" stroke="#4a90d9" stroke-width="1.1" points="140.01,-15.55 133.01,-18 140.01,-20.45 140.01,-15.55"/>
 <polygon fill="#4a90d9" stroke="#4a90d9" stroke-width="1.1" points="157.83,-20.45 164.83,-18 157.83,-15.55 157.83,-20.45"/>
 </g>
 <!-- leaf2&#45;&gt;leaf3 -->
-<g id="edge5" class="edge">
+<g id="edge6" class="edge">
 <title>leaf2&#45;&gt;leaf3</title>
 <path fill="none" stroke="#4a90d9" stroke-width="1.1" stroke-dasharray="5,2" d="M306.86,-18C312.97,-18 319.07,-18 325.17,-18"/>
 <polygon fill="#4a90d9" stroke="#4a90d9" stroke-width="1.1" points="307.01,-15.55 300.01,-18 307.01,-20.45 307.01,-15.55"/>
 <polygon fill="#4a90d9" stroke="#4a90d9" stroke-width="1.1" points="324.83,-20.45 331.83,-18 324.83,-15.55 324.83,-20.45"/>
+</g>
+<!-- leaf3&#45;&gt;leaf4 -->
+<g id="edge7" class="edge">
+<title>leaf3&#45;&gt;leaf4</title>
+<path fill="none" stroke="#4a90d9" stroke-width="1.1" stroke-dasharray="5,2" d="M473.86,-18C479.97,-18 486.07,-18 492.17,-18"/>
+<polygon fill="#4a90d9" stroke="#4a90d9" stroke-width="1.1" points="474.01,-15.55 467.01,-18 474.01,-20.45 474.01,-15.55"/>
+<polygon fill="#4a90d9" stroke="#4a90d9" stroke-width="1.1" points="491.83,-20.45 498.83,-18 491.83,-15.55 491.83,-20.45"/>
 </g>
 </g>
 </svg>

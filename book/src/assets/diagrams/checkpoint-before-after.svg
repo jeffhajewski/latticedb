@@ -1,133 +1,135 @@
-<svg width="603" height="481"
- viewBox="0.00 0.00 452.00 361.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 356.84)">
+<svg width="603" height="515"
+ viewBox="0.00 0.00 452.00 386.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 382.34)">
 <title>checkpoint_before_after</title>
 <g id="clust1" class="cluster">
 <title>cluster_before</title>
-<path fill="none" stroke="#dbe3ec" stroke-width="1.1" d="M20,-8C20,-8 188,-8 188,-8 194,-8 200,-14 200,-20 200,-20 200,-332.84 200,-332.84 200,-338.84 194,-344.84 188,-344.84 188,-344.84 20,-344.84 20,-344.84 14,-344.84 8,-338.84 8,-332.84 8,-332.84 8,-20 8,-20 8,-14 14,-8 20,-8"/>
-<text xml:space="preserve" text-anchor="middle" x="104" y="-329.44" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#6b7280">Before checkpoint</text>
+<path fill="none" stroke="#dbe3ec" stroke-width="1.1" d="M20,-20.75C20,-20.75 188,-20.75 188,-20.75 194,-20.75 200,-26.75 200,-32.75 200,-32.75 200,-358.34 200,-358.34 200,-364.34 194,-370.34 188,-370.34 188,-370.34 20,-370.34 20,-370.34 14,-370.34 8,-364.34 8,-358.34 8,-358.34 8,-32.75 8,-32.75 8,-26.75 14,-20.75 20,-20.75"/>
+<text xml:space="preserve" text-anchor="middle" x="104" y="-354.94" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#6b7280">Before checkpoint</text>
 </g>
 <g id="clust4" class="cluster">
 <title>cluster_after</title>
-<path fill="none" stroke="#dbe3ec" stroke-width="1.1" d="M220,-8C220,-8 424,-8 424,-8 430,-8 436,-14 436,-20 436,-20 436,-332.84 436,-332.84 436,-338.84 430,-344.84 424,-344.84 424,-344.84 220,-344.84 220,-344.84 214,-344.84 208,-338.84 208,-332.84 208,-332.84 208,-20 208,-20 208,-14 214,-8 220,-8"/>
-<text xml:space="preserve" text-anchor="middle" x="322" y="-329.44" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#6b7280">After checkpoint</text>
+<path fill="none" stroke="#dbe3ec" stroke-width="1.1" d="M220,-8C220,-8 424,-8 424,-8 430,-8 436,-14 436,-20 436,-20 436,-358.34 436,-358.34 436,-364.34 430,-370.34 424,-370.34 424,-370.34 220,-370.34 220,-370.34 214,-370.34 208,-364.34 208,-358.34 208,-358.34 208,-20 208,-20 208,-14 214,-8 220,-8"/>
+<text xml:space="preserve" text-anchor="middle" x="322" y="-354.94" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#6b7280">After checkpoint</text>
 </g>
 <!-- b_pool -->
 <g id="node1" class="node">
 <title>b_pool</title>
-<text xml:space="preserve" text-anchor="middle" x="78" y="-290.22" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280">Buffer pool (RAM)</text>
+<text xml:space="preserve" text-anchor="middle" x="68" y="-315.72" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280">Buffer pool (RAM)</text>
 </g>
 <!-- b5 -->
 <g id="node2" class="node">
 <title>b5</title>
-<polygon fill="#fdf0ea" stroke="#c2703f" stroke-width="1.2" points="105,-253.09 51,-253.09 51,-214.63 105,-214.63 105,-253.09"/>
-<text xml:space="preserve" text-anchor="start" x="59.64" y="-237.11" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">page 5</text>
-<text xml:space="preserve" text-anchor="start" x="59.64" y="-224.36" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">dirty</text>
+<polygon fill="#fdf0ea" stroke="#c2703f" stroke-width="1.2" points="84,-278.59 30,-278.59 30,-240.13 84,-240.13 84,-278.59"/>
+<text xml:space="preserve" text-anchor="start" x="38.64" y="-262.61" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">page 5</text>
+<text xml:space="preserve" text-anchor="start" x="38.64" y="-249.86" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">dirty</text>
 </g>
 <!-- b_pool&#45;&gt;b5 -->
 <!-- b12 -->
 <g id="node3" class="node">
 <title>b12</title>
-<polygon fill="#fdf0ea" stroke="#c2703f" stroke-width="1.2" points="187.64,-253.09 128.36,-253.09 128.36,-214.63 187.64,-214.63 187.64,-253.09"/>
-<text xml:space="preserve" text-anchor="start" x="137" y="-237.11" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">page 12</text>
-<text xml:space="preserve" text-anchor="start" x="137" y="-224.36" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">dirty</text>
+<polygon fill="#fdf0ea" stroke="#c2703f" stroke-width="1.2" points="166.64,-278.59 107.36,-278.59 107.36,-240.13 166.64,-240.13 166.64,-278.59"/>
+<text xml:space="preserve" text-anchor="start" x="116" y="-262.61" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">page 12</text>
+<text xml:space="preserve" text-anchor="start" x="116" y="-249.86" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">dirty</text>
 </g>
 <!-- b5&#45;&gt;b12 -->
 <!-- b3 -->
 <g id="node4" class="node">
 <title>b3</title>
-<polygon fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" points="108,-191.63 54,-191.63 54,-153.17 108,-153.17 108,-191.63"/>
-<text xml:space="preserve" text-anchor="start" x="62.64" y="-175.65" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">page 3</text>
-<text xml:space="preserve" text-anchor="start" x="62.64" y="-162.9" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">clean</text>
+<polygon fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" points="79,-217.13 25,-217.13 25,-178.67 79,-178.67 79,-217.13"/>
+<text xml:space="preserve" text-anchor="start" x="33.64" y="-201.15" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">page 3</text>
+<text xml:space="preserve" text-anchor="start" x="33.64" y="-188.4" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">clean</text>
 </g>
 <!-- b5&#45;&gt;b3 -->
 <!-- b8 -->
 <g id="node5" class="node">
 <title>b8</title>
-<polygon fill="#fdf0ea" stroke="#c2703f" stroke-width="1.2" points="186,-191.63 132,-191.63 132,-153.17 186,-153.17 186,-191.63"/>
-<text xml:space="preserve" text-anchor="start" x="140.64" y="-175.65" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">page 8</text>
-<text xml:space="preserve" text-anchor="start" x="140.64" y="-162.9" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">dirty</text>
+<polygon fill="#fdf0ea" stroke="#c2703f" stroke-width="1.2" points="157,-217.13 103,-217.13 103,-178.67 157,-178.67 157,-217.13"/>
+<text xml:space="preserve" text-anchor="start" x="111.64" y="-201.15" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">page 8</text>
+<text xml:space="preserve" text-anchor="start" x="111.64" y="-188.4" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">dirty</text>
 </g>
 <!-- b3&#45;&gt;b8 -->
 <!-- b_file -->
 <g id="node6" class="node">
 <title>b_file</title>
-<polygon fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" points="151.64,-119.92 32.36,-119.92 32.36,-81.46 151.64,-81.46 151.64,-119.92"/>
-<text xml:space="preserve" text-anchor="start" x="41" y="-103.94" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">Database file</text>
-<text xml:space="preserve" text-anchor="start" x="41" y="-91.19" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">old page versions</text>
+<polygon fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" points="181.64,-145.42 62.36,-145.42 62.36,-106.96 181.64,-106.96 181.64,-145.42"/>
+<text xml:space="preserve" text-anchor="start" x="71" y="-129.44" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">Database file</text>
+<text xml:space="preserve" text-anchor="start" x="71" y="-116.69" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">old page versions</text>
 </g>
-<!-- b3&#45;&gt;b_file -->
+<!-- b8&#45;&gt;b_file -->
 <g id="edge5" class="edge">
-<title>b3&#45;&gt;b_file</title>
-<path fill="none" stroke="#c2703f" stroke-width="1.1" stroke-dasharray="5,2" d="M83.95,-152.72C85.13,-145.22 86.52,-136.43 87.8,-128.29"/>
-<polygon fill="#c2703f" stroke="#c2703f" stroke-width="1.1" points="90.02,-128.84 88.78,-122.07 85.52,-128.13 90.02,-128.84"/>
-<text xml:space="preserve" text-anchor="middle" x="117.16" y="-132.67" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;only in RAM</text>
+<title>b8&#45;&gt;b_file</title>
+<path fill="none" stroke="#c2703f" stroke-width="1.1" stroke-dasharray="5,2" d="M127.86,-178.22C127,-170.72 125.99,-161.93 125.05,-153.79"/>
+<polygon fill="#c2703f" stroke="#c2703f" stroke-width="1.1" points="127.34,-153.77 124.34,-147.58 122.82,-154.29 127.34,-153.77"/>
+<text xml:space="preserve" text-anchor="middle" x="156.48" y="-158.17" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;only in RAM</text>
 </g>
 <!-- b_wal -->
 <g id="node7" class="node">
 <title>b_wal</title>
-<polygon fill="#fdf0ea" stroke="#c2703f" stroke-width="1.2" points="187.64,-58.46 20.36,-58.46 20.36,-20 187.64,-20 187.64,-58.46"/>
-<text xml:space="preserve" text-anchor="start" x="29" y="-42.48" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">WAL</text>
-<text xml:space="preserve" text-anchor="start" x="29" y="-29.73" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">replay needs every record</text>
+<polygon fill="#fdf0ea" stroke="#c2703f" stroke-width="1.2" points="187.64,-71.21 20.36,-71.21 20.36,-32.75 187.64,-32.75 187.64,-71.21"/>
+<text xml:space="preserve" text-anchor="start" x="29" y="-55.23" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">WAL</text>
+<text xml:space="preserve" text-anchor="start" x="29" y="-42.48" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">replay needs every record</text>
 </g>
 <!-- b_file&#45;&gt;b_wal -->
 <!-- a_pool -->
 <g id="node8" class="node">
 <title>a_pool</title>
-<text xml:space="preserve" text-anchor="middle" x="314" y="-290.22" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280">Buffer pool (RAM)</text>
+<text xml:space="preserve" text-anchor="middle" x="268" y="-315.72" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280">Buffer pool (RAM)</text>
 </g>
 <!-- a5 -->
 <g id="node9" class="node">
 <title>a5</title>
-<polygon fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" points="341,-253.09 287,-253.09 287,-214.63 341,-214.63 341,-253.09"/>
-<text xml:space="preserve" text-anchor="start" x="295.64" y="-237.11" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">page 5</text>
-<text xml:space="preserve" text-anchor="start" x="295.64" y="-224.36" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">clean</text>
+<polygon fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" points="292,-278.59 238,-278.59 238,-240.13 292,-240.13 292,-278.59"/>
+<text xml:space="preserve" text-anchor="start" x="246.64" y="-262.61" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">page 5</text>
+<text xml:space="preserve" text-anchor="start" x="246.64" y="-249.86" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">clean</text>
 </g>
 <!-- a_pool&#45;&gt;a5 -->
 <!-- a12 -->
 <g id="node10" class="node">
 <title>a12</title>
-<polygon fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" points="423.64,-253.09 364.36,-253.09 364.36,-214.63 423.64,-214.63 423.64,-253.09"/>
-<text xml:space="preserve" text-anchor="start" x="373" y="-237.11" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">page 12</text>
-<text xml:space="preserve" text-anchor="start" x="373" y="-224.36" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">clean</text>
+<polygon fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" points="374.64,-278.59 315.36,-278.59 315.36,-240.13 374.64,-240.13 374.64,-278.59"/>
+<text xml:space="preserve" text-anchor="start" x="324" y="-262.61" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">page 12</text>
+<text xml:space="preserve" text-anchor="start" x="324" y="-249.86" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">clean</text>
 </g>
 <!-- a5&#45;&gt;a12 -->
 <!-- a3 -->
 <g id="node11" class="node">
 <title>a3</title>
-<polygon fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" points="343,-191.63 289,-191.63 289,-153.17 343,-153.17 343,-191.63"/>
-<text xml:space="preserve" text-anchor="start" x="297.64" y="-175.65" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">page 3</text>
-<text xml:space="preserve" text-anchor="start" x="297.64" y="-162.9" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">clean</text>
+<polygon fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" points="279,-217.13 225,-217.13 225,-178.67 279,-178.67 279,-217.13"/>
+<text xml:space="preserve" text-anchor="start" x="233.64" y="-201.15" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">page 3</text>
+<text xml:space="preserve" text-anchor="start" x="233.64" y="-188.4" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">clean</text>
 </g>
 <!-- a5&#45;&gt;a3 -->
 <!-- a8 -->
 <g id="node12" class="node">
 <title>a8</title>
-<polygon fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" points="421,-191.63 367,-191.63 367,-153.17 421,-153.17 421,-191.63"/>
-<text xml:space="preserve" text-anchor="start" x="375.64" y="-175.65" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">page 8</text>
-<text xml:space="preserve" text-anchor="start" x="375.64" y="-162.9" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">clean</text>
+<polygon fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" points="357,-217.13 303,-217.13 303,-178.67 357,-178.67 357,-217.13"/>
+<text xml:space="preserve" text-anchor="start" x="311.64" y="-201.15" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">page 8</text>
+<text xml:space="preserve" text-anchor="start" x="311.64" y="-188.4" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">clean</text>
 </g>
 <!-- a3&#45;&gt;a8 -->
 <!-- a_file -->
 <g id="node13" class="node">
 <title>a_file</title>
-<polygon fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.2" points="392.64,-119.92 249.36,-119.92 249.36,-81.46 392.64,-81.46 392.64,-119.92"/>
-<text xml:space="preserve" text-anchor="start" x="258" y="-103.94" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">Database file</text>
-<text xml:space="preserve" text-anchor="start" x="258" y="-91.19" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">current page versions</text>
+<polygon fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.2" points="399.64,-145.42 256.36,-145.42 256.36,-106.96 399.64,-106.96 399.64,-145.42"/>
+<text xml:space="preserve" text-anchor="start" x="265" y="-129.44" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">Database file</text>
+<text xml:space="preserve" text-anchor="start" x="265" y="-116.69" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">current page versions</text>
 </g>
-<!-- a3&#45;&gt;a_file -->
+<!-- a8&#45;&gt;a_file -->
 <g id="edge11" class="edge">
-<title>a3&#45;&gt;a_file</title>
-<path fill="none" stroke="#2f7d32" stroke-width="1.1" d="M317.34,-152.72C317.87,-145.3 318.49,-136.61 319.07,-128.54"/>
-<polygon fill="#2f7d32" stroke="#2f7d32" stroke-width="1.1" points="321.34,-128.73 319.54,-122.08 316.8,-128.4 321.34,-128.73"/>
-<text xml:space="preserve" text-anchor="middle" x="337.55" y="-132.67" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;flushed</text>
+<title>a8&#45;&gt;a_file</title>
+<path fill="none" stroke="#2f7d32" stroke-width="1.1" d="M329.46,-178.22C329.25,-170.8 329,-162.11 328.77,-154.04"/>
+<polygon fill="#2f7d32" stroke="#2f7d32" stroke-width="1.1" points="331.05,-154.02 328.59,-147.59 326.5,-154.15 331.05,-154.02"/>
+<text xml:space="preserve" text-anchor="middle" x="347.87" y="-158.17" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;flushed</text>
 </g>
 <!-- a_wal -->
 <g id="node14" class="node">
 <title>a_wal</title>
-<polygon fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.2" points="423.64,-58.46 220.36,-58.46 220.36,-20 423.64,-20 423.64,-58.46"/>
-<text xml:space="preserve" text-anchor="start" x="229" y="-42.48" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">WAL</text>
-<text xml:space="preserve" text-anchor="start" x="229" y="-29.73" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">replay starts at checkpoint_lsn</text>
+<polygon fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.2" points="423.64,-83.96 220.36,-83.96 220.36,-20 423.64,-20 423.64,-83.96"/>
+<text xml:space="preserve" text-anchor="start" x="229" y="-67.98" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">WAL</text>
+<text xml:space="preserve" text-anchor="start" x="229" y="-55.23" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">truncate (default): header only</text>
+<text xml:space="preserve" text-anchor="start" x="229" y="-42.48" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a">full / passive: replay starts</text>
+<text xml:space="preserve" text-anchor="start" x="229" y="-29.73" font-family="Menlo,Consolas,monospace" font-size="10.00" fill="#1a1a1a"> &#160;at checkpoint_lsn</text>
 </g>
 <!-- a_file&#45;&gt;a_wal -->
 </g>

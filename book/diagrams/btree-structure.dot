@@ -17,14 +17,18 @@ digraph btree_structure {
   leaf1 [label="10:val  20:val"]
   leaf2 [label="30:val  50:val"]
   leaf3 [label="60:val  80:val"]
+  leaf4 [label="90:val  95:val"]
 
+  // Three separators, four children: < 30, 30..59, 60..89, >= 90.
   root -> leaf1
   root -> leaf2
   root -> leaf3
+  root -> leaf4
 
   // Sibling pointers: the linked list that makes range scans sequential.
   { rank=same
     leaf1 -> leaf2 [dir=both color="#4a90d9" style=dashed constraint=false]
     leaf2 -> leaf3 [dir=both color="#4a90d9" style=dashed constraint=false]
+    leaf3 -> leaf4 [dir=both color="#4a90d9" style=dashed constraint=false]
   }
 }

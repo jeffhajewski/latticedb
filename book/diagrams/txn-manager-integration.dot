@@ -1,22 +1,31 @@
-// Where the transaction manager sits: above the log, below the application.
+// Where the transaction manager sits: the Database owns overlays and applies
+// committed changes; the transaction manager only writes log records.
 digraph txn_manager_integration {
   bgcolor="transparent"
   rankdir=TB
-  nodesep=0.3
+  nodesep=0.4
   ranksep=0.45
   fontname="Helvetica,Arial,sans-serif"
   node [shape=box style="filled,rounded" fillcolor="#eef4fb" color="#4a90d9"
         penwidth=1.2 fontname="Helvetica,Arial,sans-serif" fontsize=12
         fontcolor="#1a1a1a" margin="0.24,0.14" width=3.4]
-  edge [color="#6b7280" penwidth=1.1 arrowsize=0.7]
+  edge [color="#6b7280" penwidth=1.1 arrowsize=0.7
+        fontname="Helvetica,Arial,sans-serif" fontsize=10 fontcolor="#6b7280"]
 
   app [label="Application" fillcolor="#f6f8fa" color="#c7d0da"]
-  tm  [label="TxnManager\l  transaction lifecycle\l  prev_lsn chains\l  active transaction tracking\l"
+  db  [label="Database\l  per-transaction overlays\l  single read-write transaction\l  snapshot copies at commit\l"
        fillcolor="#dbe9f8" fontname="Menlo,Consolas,monospace" fontsize=11]
-  wal [label="WalManager\l  durability through logging\l  fsync on commit\l"
+  tm  [label="TxnManager\l  transaction ids\l  BEGIN / COMMIT / ABORT records\l  prev_lsn chains\l"
        fontname="Menlo,Consolas,monospace" fontsize=11]
-  storage [label="BufferPool + B+Tree\l  data storage\l  page management\l  visibility checks for MVCC\l"
+  wal [label="WalManager\l  frames, CRC32C\l  fsync on commit and abort\l"
+       fontname="Menlo,Consolas,monospace" fontsize=11]
+  storage [label="B+Trees + buffer pool\l  graph, index and stream data\l"
            fontname="Menlo,Consolas,monospace" fontsize=11]
 
-  app -> tm -> wal -> storage
+  app -> db
+  db -> tm  [label="  begin, log overlay,\l  commit, abort\l"]
+  tm -> wal
+  db -> storage [label="  apply overlay\l  at commit\l"]
+
+  { rank=same; tm; storage }
 }

@@ -1,47 +1,47 @@
-<svg width="467" height="456"
- viewBox="0.00 0.00 350.00 342.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 338.25)">
+<svg width="472" height="500"
+ viewBox="0.00 0.00 354.00 375.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 371.31)">
 <title>zero_copy_pages</title>
 <g id="clust1" class="cluster">
 <title>cluster_trad</title>
-<path fill="none" stroke="#dbe3ec" stroke-width="1.1" d="M20,-8C20,-8 146,-8 146,-8 152,-8 158,-14 158,-20 158,-20 158,-314.25 158,-314.25 158,-320.25 152,-326.25 146,-326.25 146,-326.25 20,-326.25 20,-326.25 14,-326.25 8,-320.25 8,-314.25 8,-314.25 8,-20 8,-20 8,-14 14,-8 20,-8"/>
-<text xml:space="preserve" text-anchor="middle" x="83" y="-310.85" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#6b7280">Traditional</text>
+<path fill="none" stroke="#dbe3ec" stroke-width="1.1" d="M20,-8C20,-8 146,-8 146,-8 152,-8 158,-14 158,-20 158,-20 158,-347.31 158,-347.31 158,-353.31 152,-359.31 146,-359.31 146,-359.31 20,-359.31 20,-359.31 14,-359.31 8,-353.31 8,-347.31 8,-347.31 8,-20 8,-20 8,-14 14,-8 20,-8"/>
+<text xml:space="preserve" text-anchor="middle" x="83" y="-343.91" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#6b7280">Traditional</text>
 </g>
 <g id="clust2" class="cluster">
 <title>cluster_ours</title>
-<path fill="none" stroke="#dbe3ec" stroke-width="1.1" d="M178,-162.25C178,-162.25 322,-162.25 322,-162.25 328,-162.25 334,-168.25 334,-174.25 334,-174.25 334,-314.25 334,-314.25 334,-320.25 328,-326.25 322,-326.25 322,-326.25 178,-326.25 178,-326.25 172,-326.25 166,-320.25 166,-314.25 166,-314.25 166,-174.25 166,-174.25 166,-168.25 172,-162.25 178,-162.25"/>
-<text xml:space="preserve" text-anchor="middle" x="250" y="-310.85" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#6b7280">LatticeDB</text>
+<path fill="none" stroke="#dbe3ec" stroke-width="1.1" d="M178,-93.25C178,-93.25 326,-93.25 326,-93.25 332,-93.25 338,-99.25 338,-105.25 338,-105.25 338,-347.31 338,-347.31 338,-353.31 332,-359.31 326,-359.31 326,-359.31 178,-359.31 178,-359.31 172,-359.31 166,-353.31 166,-347.31 166,-347.31 166,-105.25 166,-105.25 166,-99.25 172,-93.25 178,-93.25"/>
+<text xml:space="preserve" text-anchor="middle" x="252" y="-343.91" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#6b7280">LatticeDB</text>
 </g>
 <!-- a1 -->
 <g id="node1" class="node">
 <title>a1</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M115.4,-291.5C115.4,-291.5 50.6,-291.5 50.6,-291.5 44.6,-291.5 38.6,-285.5 38.6,-279.5 38.6,-279.5 38.6,-267.5 38.6,-267.5 38.6,-261.5 44.6,-255.5 50.6,-255.5 50.6,-255.5 115.4,-255.5 115.4,-255.5 121.4,-255.5 127.4,-261.5 127.4,-267.5 127.4,-267.5 127.4,-279.5 127.4,-279.5 127.4,-285.5 121.4,-291.5 115.4,-291.5"/>
-<text xml:space="preserve" text-anchor="middle" x="83" y="-268.48" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Page bytes</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M115.4,-324.56C115.4,-324.56 50.6,-324.56 50.6,-324.56 44.6,-324.56 38.6,-318.56 38.6,-312.56 38.6,-312.56 38.6,-300.56 38.6,-300.56 38.6,-294.56 44.6,-288.56 50.6,-288.56 50.6,-288.56 115.4,-288.56 115.4,-288.56 121.4,-288.56 127.4,-294.56 127.4,-300.56 127.4,-300.56 127.4,-312.56 127.4,-312.56 127.4,-318.56 121.4,-324.56 115.4,-324.56"/>
+<text xml:space="preserve" text-anchor="middle" x="83" y="-301.53" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Page bytes</text>
 </g>
 <!-- a2 -->
 <g id="node2" class="node">
 <title>a2</title>
-<path fill="#f6f8fa" stroke="#4a90d9" stroke-width="1.2" d="M131.9,-212.25C131.9,-212.25 34.1,-212.25 34.1,-212.25 28.1,-212.25 22.1,-206.25 22.1,-200.25 22.1,-200.25 22.1,-188.25 22.1,-188.25 22.1,-182.25 28.1,-176.25 34.1,-176.25 34.1,-176.25 131.9,-176.25 131.9,-176.25 137.9,-176.25 143.9,-182.25 143.9,-188.25 143.9,-188.25 143.9,-200.25 143.9,-200.25 143.9,-206.25 137.9,-212.25 131.9,-212.25"/>
-<text xml:space="preserve" text-anchor="middle" x="83" y="-189.22" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Object in memory</text>
+<path fill="#f6f8fa" stroke="#4a90d9" stroke-width="1.2" d="M131.9,-241.92C131.9,-241.92 34.1,-241.92 34.1,-241.92 28.1,-241.92 22.1,-235.92 22.1,-229.92 22.1,-229.92 22.1,-217.92 22.1,-217.92 22.1,-211.92 28.1,-205.92 34.1,-205.92 34.1,-205.92 131.9,-205.92 131.9,-205.92 137.9,-205.92 143.9,-211.92 143.9,-217.92 143.9,-217.92 143.9,-229.92 143.9,-229.92 143.9,-235.92 137.9,-241.92 131.9,-241.92"/>
+<text xml:space="preserve" text-anchor="middle" x="83" y="-218.89" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Object in memory</text>
 </g>
 <!-- a1&#45;&gt;a2 -->
 <g id="edge1" class="edge">
 <title>a1&#45;&gt;a2</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M83,-254.97C83,-245 83,-232.31 83,-221.2"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="85.45,-221.37 83,-214.37 80.55,-221.37 85.45,-221.37"/>
-<text xml:space="preserve" text-anchor="middle" x="109.25" y="-230" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;deserialise</text>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M83,-288.06C83,-277.18 83,-262.99 83,-250.81"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="85.45,-251.05 83,-244.05 80.55,-251.05 85.45,-251.05"/>
+<text xml:space="preserve" text-anchor="middle" x="109.25" y="-263.06" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;deserialise</text>
 </g>
 <!-- a3 -->
 <g id="node3" class="node">
 <title>a3</title>
-<path fill="#f6f8fa" stroke="#4a90d9" stroke-width="1.2" d="M103.03,-137.25C103.03,-137.25 62.97,-137.25 62.97,-137.25 56.97,-137.25 50.98,-131.25 50.98,-125.25 50.98,-125.25 50.98,-113.25 50.98,-113.25 50.98,-107.25 56.98,-101.25 62.98,-101.25 62.98,-101.25 103.03,-101.25 103.03,-101.25 109.03,-101.25 115.03,-107.25 115.03,-113.25 115.03,-113.25 115.03,-125.25 115.03,-125.25 115.03,-131.25 109.03,-137.25 103.03,-137.25"/>
-<text xml:space="preserve" text-anchor="middle" x="83" y="-114.22" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Modify</text>
+<path fill="#f6f8fa" stroke="#4a90d9" stroke-width="1.2" d="M103.03,-156.39C103.03,-156.39 62.97,-156.39 62.97,-156.39 56.97,-156.39 50.98,-150.39 50.98,-144.39 50.98,-144.39 50.98,-132.39 50.98,-132.39 50.98,-126.39 56.98,-120.39 62.98,-120.39 62.98,-120.39 103.03,-120.39 103.03,-120.39 109.03,-120.39 115.03,-126.39 115.03,-132.39 115.03,-132.39 115.03,-144.39 115.03,-144.39 115.03,-150.39 109.03,-156.39 103.03,-156.39"/>
+<text xml:space="preserve" text-anchor="middle" x="83" y="-133.36" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Modify</text>
 </g>
 <!-- a2&#45;&gt;a3 -->
 <g id="edge2" class="edge">
 <title>a2&#45;&gt;a3</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M83,-175.95C83,-167.11 83,-156.16 83,-146.32"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="85.45,-146.34 83,-139.34 80.55,-146.34 85.45,-146.34"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M83,-205.61C83,-194.04 83,-178.61 83,-165.55"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="85.45,-165.63 83,-158.63 80.55,-165.63 85.45,-165.63"/>
 </g>
 <!-- a4 -->
 <g id="node4" class="node">
@@ -52,28 +52,44 @@
 <!-- a3&#45;&gt;a4 -->
 <g id="edge3" class="edge">
 <title>a3&#45;&gt;a4</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M83,-100.72C83,-90.75 83,-78.06 83,-66.95"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="85.45,-67.12 83,-60.12 80.55,-67.12 85.45,-67.12"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M83,-120.16C83,-105.31 83,-83.66 83,-66.76"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="85.45,-67.07 83,-60.07 80.55,-67.07 85.45,-67.07"/>
 <text xml:space="preserve" text-anchor="middle" x="104" y="-75.75" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;serialise</text>
 </g>
 <!-- b1 -->
 <g id="node5" class="node">
 <title>b1</title>
-<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M266.4,-291.5C266.4,-291.5 201.6,-291.5 201.6,-291.5 195.6,-291.5 189.6,-285.5 189.6,-279.5 189.6,-279.5 189.6,-267.5 189.6,-267.5 189.6,-261.5 195.6,-255.5 201.6,-255.5 201.6,-255.5 266.4,-255.5 266.4,-255.5 272.4,-255.5 278.4,-261.5 278.4,-267.5 278.4,-267.5 278.4,-279.5 278.4,-279.5 278.4,-285.5 272.4,-291.5 266.4,-291.5"/>
-<text xml:space="preserve" text-anchor="middle" x="234" y="-268.48" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Page bytes</text>
+<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M270.4,-324.56C270.4,-324.56 205.6,-324.56 205.6,-324.56 199.6,-324.56 193.6,-318.56 193.6,-312.56 193.6,-312.56 193.6,-300.56 193.6,-300.56 193.6,-294.56 199.6,-288.56 205.6,-288.56 205.6,-288.56 270.4,-288.56 270.4,-288.56 276.4,-288.56 282.4,-294.56 282.4,-300.56 282.4,-300.56 282.4,-312.56 282.4,-312.56 282.4,-318.56 276.4,-324.56 270.4,-324.56"/>
+<text xml:space="preserve" text-anchor="middle" x="238" y="-301.53" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Page bytes</text>
 </g>
 <!-- b2 -->
 <g id="node6" class="node">
 <title>b2</title>
-<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M308.27,-212.25C308.27,-212.25 191.72,-212.25 191.72,-212.25 185.72,-212.25 179.72,-206.25 179.72,-200.25 179.72,-200.25 179.72,-188.25 179.72,-188.25 179.72,-182.25 185.72,-176.25 191.72,-176.25 191.72,-176.25 308.27,-176.25 308.27,-176.25 314.27,-176.25 320.27,-182.25 320.27,-188.25 320.27,-188.25 320.27,-200.25 320.27,-200.25 320.27,-206.25 314.27,-212.25 308.27,-212.25"/>
-<text xml:space="preserve" text-anchor="middle" x="250" y="-189.22" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Modify bytes in place</text>
+<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M300.27,-245.31C300.27,-245.31 195.72,-245.31 195.72,-245.31 189.72,-245.31 183.72,-239.31 183.72,-233.31 183.72,-233.31 183.72,-214.53 183.72,-214.53 183.72,-208.53 189.72,-202.53 195.72,-202.53 195.72,-202.53 300.27,-202.53 300.27,-202.53 306.27,-202.53 312.27,-208.53 312.27,-214.53 312.27,-214.53 312.27,-233.31 312.27,-233.31 312.27,-239.31 306.27,-245.31 300.27,-245.31"/>
+<text xml:space="preserve" text-anchor="middle" x="248" y="-225.27" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Search and modify</text>
+<text xml:space="preserve" text-anchor="middle" x="248" y="-212.52" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">bytes in place</text>
 </g>
 <!-- b1&#45;&gt;b2 -->
 <g id="edge4" class="edge">
 <title>b1&#45;&gt;b2</title>
-<path fill="none" stroke="#4a90d9" stroke-width="1.1" d="M237.63,-254.97C239.72,-244.9 242.38,-232.06 244.69,-220.87"/>
-<polygon fill="#4a90d9" stroke="#4a90d9" stroke-width="1.1" points="247.03,-221.69 246.05,-214.34 242.23,-220.7 247.03,-221.69"/>
-<text xml:space="preserve" text-anchor="middle" x="286.08" y="-230" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;access via offsets</text>
+<path fill="none" stroke="#4a90d9" stroke-width="1.1" d="M240.17,-288.06C241.4,-278.17 242.96,-265.54 244.37,-254.19"/>
+<polygon fill="#4a90d9" stroke="#4a90d9" stroke-width="1.1" points="246.77,-254.72 245.2,-247.47 241.91,-254.11 246.77,-254.72"/>
+<text xml:space="preserve" text-anchor="middle" x="286.42" y="-263.06" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;access via offsets</text>
+</g>
+<!-- b3 -->
+<g id="node7" class="node">
+<title>b3</title>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M312.15,-169.53C312.15,-169.53 191.85,-169.53 191.85,-169.53 185.85,-169.53 179.85,-163.53 179.85,-157.53 179.85,-157.53 179.85,-119.25 179.85,-119.25 179.85,-113.25 185.85,-107.25 191.85,-107.25 191.85,-107.25 312.15,-107.25 312.15,-107.25 318.15,-107.25 324.15,-113.25 324.15,-119.25 324.15,-119.25 324.15,-157.53 324.15,-157.53 324.15,-163.53 318.15,-169.53 312.15,-169.53"/>
+<text xml:space="preserve" text-anchor="start" x="194.25" y="-151.39" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#1a1a1a">Where copies still happen:</text>
+<text xml:space="preserve" text-anchor="start" x="194.25" y="-140.14" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#1a1a1a">values returned to callers;</text>
+<text xml:space="preserve" text-anchor="start" x="194.25" y="-128.89" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#1a1a1a">splits, merges and deletes</text>
+<text xml:space="preserve" text-anchor="start" x="194.25" y="-117.64" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#1a1a1a">rebuilding a page</text>
+</g>
+<!-- b2&#45;&gt;b3 -->
+<g id="edge5" class="edge">
+<title>b2&#45;&gt;b3</title>
+<path fill="none" stroke="#c7d0da" stroke-width="1.1" stroke-dasharray="5,2" d="M248.99,-202.27C249.34,-195.03 249.74,-186.64 250.13,-178.39"/>
+<polygon fill="#c7d0da" stroke="#c7d0da" stroke-width="1.1" points="252.57,-178.67 250.46,-171.56 247.68,-178.44 252.57,-178.67"/>
 </g>
 </g>
 </svg>

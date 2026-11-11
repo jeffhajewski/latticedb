@@ -38,35 +38,26 @@ Notice "The", "the", and "over" are missing—they're **stop words**.
 ### How It Works
 
 <img class="diagram" src="../assets/diagrams/fts-tokenize.svg"
-     alt="Tokenizing the string Hello, World! This is a TEST. Step one splits on non-alphanumeric characters, step two applies a length filter dropping the single letter a, step three lowercases, and step four drops the stop words this and is, leaving hello, world and test with their positions">
+     alt="Tokenizing the string Hello, World! This is a TEST. Step one splits on anything that is not an ASCII letter, digit or underscore, so bytes of non-ASCII characters also split words. Step two applies a length filter dropping the single letter a. Step three drops the stop words this and is, comparing in lowercase. Step four is the index lowercasing what remains, leaving hello, world and test with their positions">
+
+The tokenizer works on bytes and is **ASCII-only**. A word character is an ASCII
+letter, an ASCII digit or `_`; every other byte, including each byte of a
+multi-byte UTF-8 character, separates words. So `café` is indexed as `caf`,
+`naïve` as `na` and `ve`, and text written entirely in Cyrillic, Greek or CJK
+characters produces no tokens at all. `snake_case` stays one token.
+
+The tokenizer returns each token's original text. Lowercasing is done by the
+index when it stores a term and when it looks one up, using ASCII case folding.
 
 ### Stop Words
 
-Stop words are common words that add little search value. Lattice supports stop word filtering for **11 languages**:
+Stop words are common words that add little search value. Lattice ships one
+stop-word list: about 100 **English** words (the, and, is, a, to, of, in, that,
+it, …), in `src/fts/stopwords.zig`.
 
-| Language | Example Stop Words |
-|----------|-------------------|
-| English | the, and, is, a, to, of, in, that, it |
-| German | der, die, das, und, ist, in, zu, den |
-| French | le, la, les, de, et, en, que, un |
-| Spanish | el, la, los, de, en, que, y, es |
-| Italian | il, la, lo, i, di, e, che, un |
-| Portuguese | o, a, os, de, e, que, em, um |
-| Dutch | de, het, een, en, van, in, is |
-| Swedish | och, i, att, det, en, som, av |
-| Norwegian | og, i, det, er, en, at, til |
-| Danish | og, i, at, det, en, er, til |
-| Finnish | ja, on, ei, ole, oli, se, han |
-| Russian | и, в, не, на, что, он, с, как |
-
-Set the language in your tokenizer config:
-
-```zig
-var tokenizer = Tokenizer.init(allocator, text, .{
-    .remove_stop_words = true,
-    .language = .german,  // Use German stop words
-});
-```
+The tokenizer config has a `language` field, and the list is looked up by
+language, but every language currently returns the English list. Setting
+`.language = .german` changes nothing.
 
 ### Configuration
 
@@ -74,17 +65,18 @@ var tokenizer = Tokenizer.init(allocator, text, .{
 pub const TokenizerConfig = struct {
     min_token_length: u8 = 2,      // Skip tokens shorter than this
     max_token_length: u8 = 64,     // Skip tokens longer than this
-    lowercase: bool = true,         // Convert to lowercase
-    remove_accents: bool = true,    // Remove diacritics (planned)
+    lowercase: bool = true,         // Compare stop words in lowercase
+    remove_accents: bool = true,    // Not implemented; has no effect
     remove_stop_words: bool = true, // Filter common words
-    use_stemming: bool = false,     // Apply Porter stemmer
-    language: Language = .english,  // Language for stop words
+    use_stemming: bool = false,     // Read only by highlighting (see below)
+    language: Language = .english,  // Every language uses the English stop words
 };
 ```
 
 ### Porter Stemmer
 
-When `use_stemming` is enabled, tokens are reduced to their root forms:
+The engine includes an English Porter stemmer, which reduces tokens to their
+root forms:
 
 | Input token | Stemmed |
 |-------------|---------|
@@ -93,11 +85,14 @@ When `use_stemming` is enabled, tokens are reduced to their root forms:
 | `optimization` | `optim` |
 | `databases` | `databas` |
 
-**Why stem?** Stemming improves recall by matching morphological variants:
-- Query "run" matches documents containing "running", "runs", "runner"
-- Query "connect" matches "connected", "connecting", "connection"
+**Indexing and search do not stem.** The index stores and looks up lowercased
+tokens only, whatever `use_stemming` says, so a search for `run` does not find
+`running`. The only reader of `use_stemming` is search highlighting, described
+below. The C API, the bindings and Cypher do not expose it; a Zig caller can
+set it through the database's `fts_config`, but that still does not change what
+is indexed or searched.
 
-**Note:** Currently only English stemming is supported. For other languages, words are returned unchanged when stemming is enabled. Future versions may add Snowball stemmers for additional languages.
+For non-English languages the stemmer returns words unchanged.
 
 Use `normalizeAndStem()` or `normalizeAndStemWithLanguage()` for manual stemming:
 
@@ -128,12 +123,13 @@ The dictionary maps tokens to integer IDs and tracks statistics.
 | `database` | 3 | 12 | 44 |
 | `search` | 4 | 8 | 45 |
 
-### Why TokenIds?
+### What the TokenId is for
 
-Storing the full token string everywhere would waste space. Instead:
-- Dictionary stores: `"database"` → `TokenId 3`
-- Posting lists store: `TokenId 3` (4 bytes instead of 8)
-- Reduced I/O and memory usage
+The dictionary entry's `posting_page` is what leads from a token to its
+postings. The `token_id` is only a label: it is written into the header of the
+token's posting pages and never used to find anything. Each `FtsIndex` instance
+starts numbering from the same first value (the database builds one per
+search), so the same id can label different tokens.
 
 ### Storage Format
 
@@ -189,38 +185,37 @@ For the token "database" (TokenId 3):
 
 ### Page Layout
 
-Each posting list page is 4096 bytes:
+Each posting list page is 4096 bytes. This is the current (V2) layout:
 
-| Region | Size | Contents |
-|--------|------|----------|
-| `PageHeader` | 8 B | `page_type = FTS_POSTING` |
-| `PostingPageHeader` | 20 B | see below |
-| Skip pointers | 16 B each, optional | `[doc_id, byte_offset, entry_count] × N` |
-| Posting data | variable, varint encoded | `[doc_id: varint][term_freq: varint]` repeated |
+| Region | Bytes | Contents |
+|--------|-------|----------|
+| `PageHeader` | 0–7 | `page_type = fts_posting`; page-header flag `0x01` marks the V2 layout |
+| `PostingPageHeader` | 8–31 (24 B) | see below |
+| Skip-pointer area | 32–283 (252 B) | fixed reserve: up to 15 pointers of 16 B `[doc_id, byte_offset, entry_count]` |
+| Posting data | 284 → | varint encoded entries, see below |
+
+Each entry is `[doc_id: varint][term_freq: varint]`. When the index stores
+positions, the entry continues with `[position_count: varint][position: varint]
+× position_count`. Doc ids and positions are stored as absolute values, not as
+deltas.
 
 **PostingPageHeader fields**
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `token_id` | u32 | Which token this list belongs to |
+| `token_id` | u32 | Label of the token this list belongs to |
 | `num_entries` | u32 | Postings held in this page |
 | `next_page` | u32 | Overflow page, 0 for none |
-| `num_skip_ptrs` | u16 | Number of skip pointers |
-| `flags` | u16 | `0x01` = positions present |
-| `data_start` | u32 | Byte offset where posting data begins |
+| `num_skip_pointers` | u16 | Number of skip pointers in use |
+| `flags` | u16 | `0x01` = entries carry positions (for phrase queries) |
+| `data_start` | u32 | Byte offset where posting data begins (284) |
+| `data_end` | u32 | Byte offset where posting data currently ends |
 
-### PostingPageHeader Explained
-
-The `PostingPageHeader` is metadata at the start of each posting page:
-
-| Field | Bytes | Purpose |
-|-------|-------|---------|
-| `token_id` | 4 | Identifies which token this posting list belongs to |
-| `num_entries` | 4 | How many (doc_id, term_freq) pairs are in this page |
-| `next_page` | 4 | PageId of overflow page if list doesn't fit (0 = no overflow) |
-| `num_skip_pointers` | 2 | Count of skip pointers for fast seeking |
-| `flags` | 2 | Bit flags: 0x01 = positions stored for phrase queries |
-| `data_start` | 4 | Byte offset where posting entries begin (after skip pointers) |
+The older V1 layout has a 20-byte header without `data_end` and room for 16 skip
+pointers. Posting data starts at byte 284 in both, so a V1 page is upgraded in
+place the first time an entry is appended to it. Creating any posting page also
+raises the file header's `format_version` and `min_reader_version` to at
+least 2.
 
 ### Varint Encoding
 
@@ -264,7 +259,10 @@ When a posting list exceeds one page, it chains to overflow pages:
 
 ### Skip Pointers
 
-Skip pointers enable O(log n) seeking within posting lists, dramatically speeding up multi-term AND queries.
+Skip pointers let a seek within a posting page binary-search to roughly the
+right place instead of scanning from the start, which speeds up multi-term AND
+queries. They are per page: each page has its own fixed reserve of at most 15,
+so entries beyond the 15th interval on a page are reached by scanning.
 
 **Structure:**
 | Field | Size | Offset |
@@ -305,9 +303,9 @@ For AND queries like "database optimization":
 4. Skip pointers let large lists jump ahead efficiently
 
 ```
-Query: "the database" (AND)
+Query: "system database" (AND)
 
-"the":      10,000 documents
+"system":   10,000 documents
 "database":    100 documents  ← Driver (smallest)
 
 Without skip pointers: 10,000 + 100 = 10,100 iterations
@@ -427,7 +425,33 @@ Total Score for Document 42 = 4.96 + 5.10 = 10.06
 ### Multi-Term Search (AND Semantics)
 
 <img class="diagram" src="../assets/diagrams/fts-search-and.svg"
-     alt="Multi-term AND search: tokenize into database and optimization, walk each posting list accumulating both a score and a term count per document, keep only documents whose term count equals the number of query terms, then sort and return the top K">
+     alt="Multi-term AND search: tokenize into database and optimization, look each term up in the dictionary and order them rarest first, walk the rarest term's posting list and skip each other list forward to the same document, keep documents present in every list with their summed BM25 score, stop after twice K matches, then sort and return the top K">
+
+A query is split into at most 32 distinct lowercased terms. A document matches
+only if it contains every term, so a term that is not in the dictionary at all
+means nothing matches. The rarest term (lowest `doc_freq`) drives the walk; each
+other list is advanced with `skipTo` to the driver's current document.
+
+The walk stops once it has collected `2 × limit` matching documents, in the
+driver list's order, and the best `limit` of those are returned. With a finite
+limit the results are therefore the best of the first matches found, not
+necessarily the global top K. Cypher `@@` searches with no limit, so it sees
+every match.
+
+### Which operations are reachable
+
+`FtsIndex` implements more query forms than the database exposes:
+
+| Entry point | Query form |
+|-------------|------------|
+| Cypher `x.prop @@ text`, `lattice_fts_search` | plain AND of the terms (`search()`) |
+| `lattice_fts_search_fuzzy` | fuzzy match (`searchFuzzy()`) |
+| `FtsIndex` only | OR, `-term` exclusion, phrases and quoted phrases, prefix (`term*`) |
+
+Through `@@` and `lattice_fts_search`, quotes and a leading `-` are treated as
+separators like any other punctuation: `"database -mysql"` searches for
+documents containing both `database` and `mysql`. The sections below on OR,
+exclusion, phrase and prefix search describe the component, for use from Zig.
 
 ### OR Search
 
@@ -457,7 +481,11 @@ const results = try fts.searchWithMode("database -mysql -oracle", .@"and", 10);
 ```
 
 <img class="diagram" src="../assets/diagrams/fts-search-exclusion.svg"
-     alt="Exclusion search for database minus mysql: parse into positive terms and excluded terms, search the positive terms for candidates, build the set of document ids containing mysql, then remove those candidates">
+     alt="Exclusion search for database minus mysql: parse into positive terms and excluded terms, search the positive terms for up to twice K candidates, build the set of document ids containing mysql, then remove those candidates and return the top K, which can be fewer than K">
+
+Exclusion is applied after the candidate search, which is capped at `2 × limit`
+candidates, so a query whose best matches are mostly excluded can return fewer
+than `limit` results even when more qualifying documents exist.
 
 ### Phrase Search
 
@@ -465,7 +493,7 @@ Phrase search finds documents where terms appear **adjacent and in order**:
 
 ```zig
 // Enable position storage in config
-var fts = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, .{
+var fts = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{
     .store_positions = true,
 });
 
@@ -476,10 +504,13 @@ const results = try fts.searchPhrase("quick brown fox", 10);
 ```
 Query: "quick brown fox" (phrase)
 
-Document 1: "The quick brown fox jumps"     ← MATCHES (adjacent: pos 1,2,3)
+Document 1: "The quick brown fox jumps"     ← MATCHES (adjacent: pos 0,1,2)
 Document 2: "A quick red brown fox"         ← NO MATCH (not adjacent)
 Document 3: "The brown quick fox"           ← NO MATCH (wrong order)
 ```
+
+Positions count only the tokens that were kept, so stop words and too-short
+words (`The`, `A`) take no position.
 
 **How it works:**
 
@@ -487,18 +518,22 @@ Document 3: "The brown quick fox"           ← NO MATCH (wrong order)
 
    | Term | Postings |
    |------|----------|
-   | `quick` | doc 1 @ 1, doc 2 @ 1 |
-   | `brown` | doc 1 @ 2, doc 2 @ 3 |
-   | `fox` | doc 1 @ 3, doc 2 @ 4 |
+   | `quick` | doc 1 @ 0, doc 2 @ 0 |
+   | `brown` | doc 1 @ 1, doc 2 @ 2 |
+   | `fox` | doc 1 @ 2, doc 2 @ 3 |
 
 2. For each candidate document, check that the positions are adjacent:
 
    | Document | Positions | Adjacent? |
    |----------|-----------|-----------|
-   | doc 1 | `quick@1`, `brown@2`, `fox@3` | Yes — 1+1=2 and 1+2=3, so it matches |
-   | doc 2 | `quick@1`, `brown@3`, `fox@4` | No — 1+1=2 but `brown` is at 3 |
+   | doc 1 | `quick@0`, `brown@1`, `fox@2` | Yes — 0+1=1 and 0+2=2, so it matches |
+   | doc 2 | `quick@0`, `brown@2`, `fox@3` | No — 0+1=1 but `brown` is at 2 |
 
-**Note:** Phrase queries require `store_positions = true` in FtsConfig. Without positions, `searchPhrase()` falls back to AND semantics.
+**Note:** Phrase queries require `store_positions = true` in FtsConfig, which is
+off by default and is not exposed by the C API or the bindings. Without
+positions, `searchPhrase()` falls back to AND semantics, and quoted phrases
+given to `searchWithMode()` are dropped: a query made only of phrases returns
+nothing, and one mixing phrases and terms searches the terms alone.
 
 ### Quoted Phrase Syntax
 
@@ -739,7 +774,7 @@ what one document costs whenever it is indexed.
 ### Indexing one document
 
 <img class="diagram" src="../assets/diagrams/fts-index-document.svg"
-     alt="Indexing document 42 with the text The quick database optimization guide: tokenize into four terms, count their frequencies, then for each term get or create a dictionary entry, allocate a posting page if needed, append the posting and increment doc_freq, then store the document length of 4 and update the average document length">
+     alt="Indexing document 42 with the text The quick database optimization guide: tokenize into four terms, count their frequencies, then for each term get or create a dictionary entry, allocate a posting page if needed, append the posting and increment doc_freq, then store the document length of 4 and update the corpus totals, and finally record the document's terms in the reverse index so the document can be removed later">
 
 ---
 
@@ -778,28 +813,35 @@ different kind discriminators.
 
 ### Current Limitations
 
-1. **English-only stemming** - Porter stemmer for English only (other languages skip stemming)
-2. **One property per index** - Searching several fields as one document means storing the combined text in a property and indexing that. The reasoning is in the design note: an index spanning `title` and `body` would make `d.title @@ "x"` match on body text, which is the confusion per-property indexes exist to remove.
-3. **Selectivity is per term, not per phrase** - the estimate that chooses between two indexes is the rarest term's document frequency, which bounds an AND query correctly but says nothing about how often the terms occur *together*. Two predicates whose terms are individually common but jointly rare estimate as common.
-4. **Fuzzy matching does not reach uncommitted text** - Text written in the current transaction is matched by term presence rather than edit distance, because fuzzy expansion walks the committed dictionary.
+1. **No stemming in the index** - Indexing and search match lowercased tokens exactly; the Porter stemmer is used only by highlighting
+2. **English stop words only** - The `language` setting does not change the stop-word list
+3. **ASCII-only tokenization** - Non-ASCII bytes separate words, so accented words are split and non-Latin scripts are not indexed
+4. **Plain AND through the database** - `@@` and `lattice_fts_search` support neither OR within one query, `-term`, phrases nor prefixes; those exist only on `FtsIndex`
+5. **Approximate top K with a finite limit** - A multi-term search stops after `2 × limit` matches, so the best `limit` of those are returned rather than the corpus-wide best
+6. **One property per index** - Searching several fields as one document means storing the combined text in a property and indexing that. The reasoning is in the design note: an index spanning `title` and `body` would make `d.title @@ "x"` match on body text, which is the confusion per-property indexes exist to remove.
+7. **Selectivity is per term, not per phrase** - the estimate that chooses between two indexes is the rarest term's document frequency, which bounds an AND query correctly but says nothing about how often the terms occur *together*. Two predicates whose terms are individually common but jointly rare estimate as common.
+8. **Fuzzy matching does not reach uncommitted text** - Text written in the current transaction is matched by term presence rather than edit distance, because fuzzy expansion walks the committed dictionary.
 
 ### Implemented Features
 
-1. **Phrase queries** - `searchPhrase("quick brown fox")` with position verification
-2. **Boolean queries** - AND (default), OR (`searchOr`), NOT (`-term` syntax)
-3. **Porter stemming** - `use_stemming=true` reduces words to roots (English)
-4. **Position indexing** - `store_positions=true` for phrase queries
-5. **Skip pointers** - O(log n) posting list intersection for multi-term queries
-6. **Quoted phrase syntax** - Parse `"exact phrase"` in regular search() calls
-7. **Fuzzy search** - Levenshtein distance for typo tolerance via `searchFuzzy()`
-8. **Multi-language stop words** - 11 languages supported (EN, DE, FR, ES, IT, PT, NL, SV, NO, DA, FI, RU)
-9. **Prefix/wildcard search** - `searchWithPrefix("optim*")` expands to matching terms
-10. **Search highlighting** - `highlight()` returns snippets with matched terms marked
+Items marked *(FtsIndex)* are implemented in the component but not reachable
+through the database, the C API or Cypher.
+
+1. **Phrase queries** *(FtsIndex)* - `searchPhrase("quick brown fox")` with position verification
+2. **Boolean queries** - AND (default, everywhere); OR (`searchOr`) and NOT (`-term` syntax) *(FtsIndex)*
+3. **Porter stemmer (English)** - available as `normalizeAndStem()` and to highlighting; not applied by indexing or search
+4. **Position indexing** *(FtsIndex)* - `store_positions=true` for phrase queries
+5. **Skip pointers** - per-page skip pointers speed up multi-term intersection
+6. **Quoted phrase syntax** *(FtsIndex)* - Parse `"exact phrase"` in `searchWithMode()` calls
+7. **Fuzzy search** - Levenshtein distance for typo tolerance via `searchFuzzy()` and `lattice_fts_search_fuzzy`
+8. **Stop words** - one English list
+9. **Prefix/wildcard search** *(FtsIndex)* - `searchWithPrefix("optim*")` expands to matching terms
+10. **Search highlighting** *(Zig module only)* - `highlight()` returns snippets with matched terms marked
 11. **Document deletion** - `removeDocument()` with reverse index properly cleans posting lists and stats
-2. **Per-property indexes** - one index per label and property, declared and then maintained by writes (sections 13 to 15)
-3. **Relationship indexes** - the same over a relationship type and property
-4. **Index seek as the access path** - a full-text predicate reads the index instead of filtering a label scan (section 16)
-5. **Corpus statistics on disk** - document count and average length survive a reopen, so scores do not depend on what the session happened to index
+12. **Per-property indexes** - one index per label and property, declared and then maintained by writes (sections 13 to 15)
+13. **Relationship indexes** - the same over a relationship type and property
+14. **Index seek as the access path** - a full-text predicate reads the index instead of filtering a label scan (section 16)
+15. **Corpus statistics on disk** - document count and average length survive a reopen, so scores do not depend on what the session happened to index
 
 ### Planned Features
 
@@ -831,8 +873,8 @@ pub fn main() !void {
     var dict_tree = try BTree.init(allocator, &bp);
     var lengths_tree = try BTree.init(allocator, &bp);
 
-    // Create FTS index with phrase query support
-    var fts = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, .{
+    // Create FTS index with phrase query support (no reverse index tree)
+    var fts = FtsIndex.init(allocator, &bp, &dict_tree, &lengths_tree, null, .{
         .store_positions = true,  // Enable phrase queries
     });
 
@@ -890,24 +932,31 @@ All on-disk structures use `extern struct` with compile-time size assertions:
 
 ```zig
 /// Good: Self-documenting, compile-time verified
-pub const PostingPageHeader = extern struct {
+pub const PostingPageHeaderV2 = extern struct {
     token_id: TokenId,
     num_entries: u32,
     next_page: PageId,
     num_skip_pointers: u16,
     flags: u16,
     data_start: u32,
+    data_end: u32,
+
+    pub const OFFSET: usize = @sizeOf(PageHeader);
 
     comptime {
-        std.debug.assert(@sizeOf(PostingPageHeader) == 20);
+        std.debug.assert(@sizeOf(PostingPageHeaderV2) == 24);
     }
 
-    pub fn read(data: []const u8) PostingPageHeader {
-        return std.mem.bytesAsValue(PostingPageHeader, data[OFFSET..][0..@sizeOf(PostingPageHeader)]).*;
+    pub fn read(data: []const u8) PostingPageHeaderV2 {
+        return std.mem.bytesAsValue(
+            PostingPageHeaderV2,
+            data[OFFSET..][0..@sizeOf(PostingPageHeaderV2)],
+        ).*;
     }
 
-    pub fn write(self: *const PostingPageHeader, data: []u8) void {
-        @memcpy(data[OFFSET..][0..@sizeOf(PostingPageHeader)], std.mem.asBytes(self));
+    pub fn write(self: *const PostingPageHeaderV2, data: []u8) void {
+        const dest = data[OFFSET..][0..@sizeOf(PostingPageHeaderV2)];
+        @memcpy(dest, std.mem.asBytes(self));
     }
 };
 ```
@@ -998,11 +1047,16 @@ found by a search of `body`.
 Every key written for an index carries a four-byte prefix naming it:
 
 ```
-[kind (1), scope_id (2 BE), property_id (1)]  ++  the key the store wanted
+[scope_id (2 BE), property_id (2 BE)]  ++  the key the store wanted
 ```
 
 So `bread` in `Document.title` and `bread` in `Document.body` are two different
 keys in one tree, and a range over a prefix walks one index's terms and stops.
+
+Unlike the catalog key, the prefix carries no kind byte. Labels and
+relationship types are interned in the same symbol table, so a node index on
+label `X` and an edge index on relationship type `X` over the same property
+would get the same prefix and share entries.
 
 ### Why a view rather than a prefix argument
 
@@ -1194,8 +1248,8 @@ query still answers correctly, through the row filter.
 
 | File | Purpose |
 |------|---------|
-| `src/fts/tokenizer.zig` | Text tokenization, normalization, language config |
-| `src/fts/stopwords.zig` | Multi-language stop word lists (11 languages) |
+| `src/fts/tokenizer.zig` | ASCII text tokenization, normalization, language config |
+| `src/fts/stopwords.zig` | English stop word list (used for every language) |
 | `src/fts/dictionary.zig` | Token → TokenId mapping via B+Tree, range iteration |
 | `src/fts/posting.zig` | Posting list storage with varint encoding, entry removal |
 | `src/fts/scorer.zig` | BM25 scoring, document length storage |

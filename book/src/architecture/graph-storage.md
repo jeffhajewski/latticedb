@@ -27,7 +27,11 @@ How do you store a graph in a B+Tree (which is fundamentally a key-value store)?
 The key insight: **decompose the graph into multiple B+Trees, each optimized for a specific access pattern.**
 
 <img class="diagram" src="../assets/diagrams/graph-storage-btrees.svg"
-     alt="The graph storage layer decomposed into four B+Trees: SYMBOLS mapping strings to ids and back, NODES mapping node id to node data, EDGES keyed by a composite key, and LABEL_INDEX mapping a label and node pair to an empty value">
+     alt="The graph storage layer decomposed into six B+Trees: SYMBOLS mapping strings to ids, SYMBOLS_REVERSE mapping ids back to strings, NODES mapping node id to node data, EDGES holding traversal keys with empty values, EDGE_ID mapping an edge id to the edge payload, and LABEL_INDEX mapping a label and node pair to an empty value">
+
+The core graph uses these six trees. The database keeps further trees beside
+them for property indexes, full-text search, vectors and streams; the
+[Summary](#summary) lists the graph-related ones.
 
 ## String Interning (Symbol Table)
 
@@ -143,8 +147,8 @@ const node_id = try store.create(&labels, &properties);
 var node = try store.get(node_id);
 defer node.deinit(allocator);
 
-// Check existence
-if (store.exists(node_id)) { ... }
+// Check existence (can fail with an I/O error, so it needs `try`)
+if (try store.exists(node_id)) { ... }
 
 // Update a node
 try store.update(node_id, &new_labels, &new_properties);
@@ -183,6 +187,32 @@ Payload entry:
 This keeps traversal efficient in either direction without duplicating large
 edge properties. The stable `edge_id` lets callers update properties by ID and
 lets the storage layer restore or delete the exact edge during WAL recovery.
+
+### Edge-ID Index
+
+The edge-ID tree is a separate B+Tree from the traversal tree. Unlike the
+traversal keys, its keys are **little-endian** u64 edge IDs, because it is only
+ever probed by exact ID, never prefix-scanned in ID order.
+
+| Key | Value |
+|-----|-------|
+| `0` (`EDGE_ID_META_KEY`) | `next_edge_id: u64`, little-endian |
+| `edge_id` (≥ 1) | Edge payload, see below |
+
+Key 0 is reserved: it stores the next edge ID to hand out, so IDs survive a
+reopen and are never reused. Edge IDs therefore start at 1. If the metadata
+entry is missing, the store derives it from the largest edge ID in the tree and
+writes it back.
+
+**Edge payload** (all integers little-endian)
+
+| Field | Type | Notes |
+|-------|------|-------|
+| `source` | u64 | Source node id |
+| `target` | u64 | Target node id |
+| `edge_type` | u16 | Interned edge type |
+| `num_properties` | u16 | |
+| `properties` | `PropertyEntry` × `num_properties` | Same encoding as node properties |
 
 ### Key Format
 
@@ -242,7 +272,7 @@ const properties = [_]Property{
 };
 const edge_id = try store.createAndGetId(alice_id, bob_id, knows_id, &properties);
 
-// Get an edge
+// Get an edge (the lowest edge ID among parallel edges; use getById for an exact edge)
 var edge = try store.get(alice_id, bob_id, knows_id);
 defer edge.deinit(allocator);
 
@@ -255,7 +285,8 @@ try store.delete(alice_id, bob_id, knows_id);
 // Iterate all outgoing edges from a node
 var iter = try store.getOutgoing(alice_id);
 defer iter.deinit();
-while (try iter.next()) |edge| {
+while (try iter.next()) |e| {
+    var edge = e; // deinit needs a mutable Edge
     defer edge.deinit(allocator);
     // Process edge...
 }
@@ -275,6 +306,22 @@ const in_count = try store.countIncoming(bob_id);
 // Property updates use the stable edge ID through the database layer
 try db.setEdgePropertyById(null, edge_id, "since", .{ .int_val = 2020 });
 ```
+
+The C API exposes typed traversal with a caller-provided limit:
+
+```c
+lattice_edge_get_outgoing_by_type(txn, alice_id, "KNOWS", 100, &edges);
+lattice_edge_get_incoming_by_type(txn, bob_id, "KNOWS", 100, &edges);
+```
+
+For these APIs, `limit == 0` means unlimited. The limit is applied while
+collecting visible edge references, before edge type strings are materialized
+for the result handle.
+
+`lattice_edge_scan(txn, edge_type_or_null, limit, &edges)` walks native edge
+identities once via the edge-ID index. It is intended for administrative work
+such as index rebuilds, consistency checks, and export jobs, not for hot-path
+graph expansion. Use node-local traversal for request-path graph walks.
 
 ## Label Index
 
@@ -359,6 +406,7 @@ Creating edge (Alice)-[:KNOWS]->(Bob):
    - Allocate edge_id = 1
    - Insert traversal keys: (1, OUT, 1002, 2, 1) → ∅ and (2, IN, 1002, 1, 1) → ∅
    - Insert payload: 1 → serialized edge data and properties
+   - Update edge-ID key 0: next_edge_id = 2
 ```
 
 ## Performance Characteristics
@@ -368,7 +416,7 @@ Creating edge (Alice)-[:KNOWS]->(Bob):
 | Create node | O(log n) | One B+Tree insert + label index inserts |
 | Get node | O(log n) | Single B+Tree lookup |
 | Delete node | O(log n) | One B+Tree delete |
-| Create edge | O(log n) | Two traversal inserts + one edge-ID payload insert |
+| Create edge | O(log n) | Two traversal inserts + one edge-ID payload insert + `next_edge_id` update |
 | Get edge | O(log n + k) | Prefix scan to edge ID, then payload lookup |
 | Delete edge | O(log n) | Two traversal deletes + one edge-ID payload delete |
 | Check label | O(log n) | Single B+Tree lookup |
@@ -380,7 +428,10 @@ Where n = total items in the respective B+Tree.
 
 ## Current Limitations
 
-The public database API is not yet fully transaction-isolated end-to-end. The transaction manager contains snapshot-oriented MVCC machinery above this layer, but this chapter only describes the underlying graph-storage structures.
+The stores described here have no notion of transactions. Isolation is
+provided above them by the database layer (a single writer plus per-transaction
+overlays; see [Transaction Manager](./transaction-manager.md)); this chapter only
+describes the underlying graph-storage structures.
 
 1. **Property updates rewrite records**: No in-place partial property update at the storage-record level
 

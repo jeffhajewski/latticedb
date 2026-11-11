@@ -1,5 +1,6 @@
 // Volcano model: the executor pulls from the root, and each operator pulls from
-// its child. Rows flow upward, demand flows downward.
+// its child. Rows flow upward, demand flows downward. Without aggregation,
+// LIMIT (with ORDER BY and SKIP) is planned under the projection.
 digraph volcano_operator_tree {
   bgcolor="transparent"
   rankdir=TB
@@ -12,13 +13,13 @@ digraph volcano_operator_tree {
   edge [color="#6b7280" penwidth=1.1 arrowsize=0.7
         fontname="Helvetica,Arial,sans-serif" fontsize=10 fontcolor="#6b7280"]
 
-  limit  [label="Limit" fillcolor="#dbe9f8"]
-  proj   [label="Project"]
+  proj   [label="Project" fillcolor="#dbe9f8"]
+  limit  [label="Limit"]
   filter [label="Filter"]
   scan   [label="LabelScan"]
 
-  limit  -> proj   [label="  pulls from"]
-  proj   -> filter [label="  pulls from"]
+  proj   -> limit  [label="  pulls from"]
+  limit  -> filter [label="  pulls from"]
   filter -> scan   [label="  pulls from"]
 
   caller [shape=plaintext style="" fillcolor="transparent"
@@ -28,6 +29,6 @@ digraph volcano_operator_tree {
            fontname="Helvetica,Arial,sans-serif" fontsize=10 fontcolor="#6b7280"
            label="reads from storage"]
 
-  { rank=same; caller -> limit [color="#4a90d9" style=dashed] }
+  { rank=same; caller -> proj [color="#4a90d9" style=dashed] }
   { rank=same; scan -> storage [color="#4a90d9" style=dashed] }
 }

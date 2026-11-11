@@ -5216,23 +5216,56 @@ pub const Database = struct {
         return self.collectVisibleNodeIds(txn);
     }
 
+    /// Ids of the nodes that carry `label_id` as `txn` sees them, ascending.
+    ///
+    /// Committed members come from the label index, which the commit path
+    /// keeps in step with the node store. The transaction's overlay then
+    /// decides every node it holds a state for: that covers the writer's own
+    /// creates, deletes and label changes, and the pre-images a reader's
+    /// overlay receives when a writer commits under it. A node in the
+    /// overlay counts only if its overlay state exists and has the label;
+    /// any other node counts if the index lists it.
     pub fn getNodesByLabelIdInTxn(self: *Self, txn: ?*Transaction, label_id: symbols_mod.SymbolId) DatabaseError![]NodeId {
-        const visible_ids = try self.collectVisibleNodeIds(txn);
-        defer self.allocator.free(visible_ids);
+        const committed = self.label_index.getNodesByLabel(label_id) catch |err| return switch (err) {
+            label_index_mod.LabelIndexError.OutOfMemory => DatabaseError.OutOfMemory,
+            else => DatabaseError.IoError,
+        };
+
+        const t = txn orelse return committed;
+        const overlay = self.getTxnOverlay(t) orelse return committed;
+        if (overlay.node_states.count() == 0) return committed;
+        defer self.allocator.free(committed);
 
         var matches: std.ArrayListUnmanaged(NodeId) = .empty;
         errdefer matches.deinit(self.allocator);
+        matches.ensureTotalCapacity(self.allocator, committed.len) catch return DatabaseError.OutOfMemory;
 
-        for (visible_ids) |node_id| {
-            var state = (try self.readVisibleNodeState(txn, node_id)) orelse continue;
-            defer state.deinit(self.allocator);
-            if (!state.exists) continue;
-            if (containsSymbolId(state.labels, label_id)) {
-                matches.append(self.allocator, node_id) catch return DatabaseError.OutOfMemory;
+        for (committed) |node_id| {
+            if (overlay.node_states.getPtr(node_id)) |state| {
+                if (!state.exists or !containsSymbolId(state.labels, label_id)) continue;
             }
+            matches.appendAssumeCapacity(node_id);
         }
 
+        // Nodes the index does not list but the overlay gives the label to:
+        // created or relabelled in this transaction, or deleted by a writer
+        // that committed after this reader's snapshot.
+        var added = false;
+        var overlay_iter = overlay.node_states.iterator();
+        while (overlay_iter.next()) |entry| {
+            const state = entry.value_ptr;
+            if (!state.exists or !containsSymbolId(state.labels, label_id)) continue;
+            if (std.sort.binarySearch(NodeId, committed, entry.key_ptr.*, orderNodeId) != null) continue;
+            matches.append(self.allocator, entry.key_ptr.*) catch return DatabaseError.OutOfMemory;
+            added = true;
+        }
+        if (added) std.mem.sort(NodeId, matches.items, {}, std.sort.asc(NodeId));
+
         return matches.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+    }
+
+    fn orderNodeId(target: NodeId, item: NodeId) std.math.Order {
+        return std.math.order(target, item);
     }
 
     fn edgeStateToRef(edge_id: EdgeId, state: TxnEdgeState) EdgeRef {
@@ -7879,22 +7912,7 @@ pub const Database = struct {
             };
         };
 
-        const visible_ids = try self.collectVisibleNodeIds(txn);
-        defer self.allocator.free(visible_ids);
-
-        var matches: std.ArrayListUnmanaged(NodeId) = .empty;
-        errdefer matches.deinit(self.allocator);
-
-        for (visible_ids) |node_id| {
-            var state = (try self.readVisibleNodeState(txn, node_id)) orelse continue;
-            defer state.deinit(self.allocator);
-            if (!state.exists) continue;
-            if (containsSymbolId(state.labels, label_id)) {
-                matches.append(self.allocator, node_id) catch return DatabaseError.OutOfMemory;
-            }
-        }
-
-        return matches.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+        return self.getNodesByLabelIdInTxn(txn, label_id);
     }
 
     // ========================================================================

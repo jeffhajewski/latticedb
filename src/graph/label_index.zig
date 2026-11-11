@@ -143,10 +143,8 @@ pub const LabelIndex = struct {
         errdefer results.deinit(self.allocator);
 
         while (true) {
-            const entry = iter.next() catch |err| {
-                results.deinit(self.allocator);
-                return mapBTreeError(err);
-            };
+            // The errdefer above frees `results` on this path.
+            const entry = iter.next() catch |err| return mapBTreeError(err);
 
             if (entry) |e| {
                 const key = LabelKey.fromBytes(e.key);

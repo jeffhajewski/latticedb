@@ -2006,3 +2006,111 @@ test "rollback: label removal is undone on abort" {
     }
     try std.testing.expectEqual(@as(usize, 2), restored_labels.len);
 }
+
+fn expectLabelMembers(db: *Database, txn: ?*Transaction, label: []const u8, expected: []const u64) !void {
+    const allocator = std.testing.allocator;
+    const sorted = try allocator.dupe(u64, expected);
+    defer allocator.free(sorted);
+    std.mem.sort(u64, sorted, {}, std.sort.asc(u64));
+
+    const ids = try db.getNodesByLabelInTxn(txn, label);
+    defer allocator.free(ids);
+    try std.testing.expectEqualSlices(u64, sorted, ids);
+}
+
+fn expectLabelCount(db: *Database, txn: ?*Transaction, cypher: []const u8, expected: i64) !void {
+    var result = if (txn) |t| try db.queryInTxn(t, cypher) else try db.query(cypher);
+    defer result.deinit();
+    try expectSingleIntResult(&result, expected);
+}
+
+test "txn-aware reads: label scans see the transaction's own creates, deletes and label changes" {
+    if (!databaseSupportsTransactions()) {
+        return error.SkipZigTest;
+    }
+
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_txn_label_scan_overlay_test.ltdb";
+
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = true,
+            .enable_fts = false,
+            .enable_vector = false,
+        },
+    });
+    defer db.close();
+
+    // Committed starting state.
+    var setup = try db.beginTransaction(.read_write);
+    const a1 = try db.createNode(&setup, &[_][]const u8{"A"});
+    const a2 = try db.createNode(&setup, &[_][]const u8{"A"});
+    const ab = try db.createNode(&setup, &[_][]const u8{ "A", "B" });
+    const b_only = try db.createNode(&setup, &[_][]const u8{"B"});
+    const a_deleted = try db.createNode(&setup, &[_][]const u8{"A"});
+    const a_unlabelled = try db.createNode(&setup, &[_][]const u8{"A"});
+    const b_gains_a = try db.createNode(&setup, &[_][]const u8{"B"});
+    try db.commitTransaction(&setup);
+
+    const committed_a = [_]u64{ a1, a2, ab, a_deleted, a_unlabelled };
+    try expectLabelMembers(db, null, "A", &committed_a);
+
+    // A reader that starts before the writer keeps its snapshot throughout.
+    var reader = try db.beginTransaction(.read_only);
+
+    var writer = try db.beginTransaction(.read_write);
+    const created = try db.createNode(&writer, &[_][]const u8{"A"});
+    const created_then_deleted = try db.createNode(&writer, &[_][]const u8{"A"});
+    try db.deleteNode(&writer, created_then_deleted);
+    const created_then_labelled = try db.createNode(&writer, &[_][]const u8{"C"});
+    try db.addNodeLabel(&writer, created_then_labelled, "A");
+    const created_then_unlabelled = try db.createNode(&writer, &[_][]const u8{ "A", "C" });
+    try db.removeNodeLabel(&writer, created_then_unlabelled, "A");
+    try db.deleteNode(&writer, a_deleted);
+    try db.removeNodeLabel(&writer, a_unlabelled, "A");
+    try db.addNodeLabel(&writer, b_gains_a, "A");
+    // A property write puts a1 in the overlay without touching its labels.
+    try db.setNodeProperty(&writer, a1, "touched", .{ .bool_val = true });
+    // A label the scan is not about changes nothing for it.
+    try db.addNodeLabel(&writer, a2, "D");
+    _ = b_only;
+
+    const writer_a = [_]u64{ a1, a2, ab, b_gains_a, created, created_then_labelled };
+    try expectLabelMembers(db, &writer, "A", &writer_a);
+    try expectLabelCount(db, &writer, "MATCH (n:A) RETURN count(n)", writer_a.len);
+    try expectLabelCount(db, &writer, "MATCH (n:C) RETURN count(n)", 2);
+    try expectLabelCount(db, &writer, "MATCH (n:D) RETURN count(n)", 1);
+
+    // Neither the reader nor a transaction-less read sees uncommitted work.
+    try expectLabelMembers(db, &reader, "A", &committed_a);
+    try expectLabelMembers(db, null, "A", &committed_a);
+    try expectLabelCount(db, &reader, "MATCH (n:A) RETURN count(n)", committed_a.len);
+    try expectLabelCount(db, &reader, "MATCH (n:C) RETURN count(n)", 0);
+
+    try db.commitTransaction(&writer);
+
+    // The reader still answers from its snapshot, including the node the
+    // writer deleted and the one it took the label from.
+    try expectLabelMembers(db, &reader, "A", &committed_a);
+    try expectLabelCount(db, &reader, "MATCH (n:A) RETURN count(n)", committed_a.len);
+    try expectLabelCount(db, &reader, "MATCH (n:D) RETURN count(n)", 0);
+    try db.commitTransaction(&reader);
+
+    // New readers see the committed result.
+    var after = try db.beginTransaction(.read_only);
+    defer db.commitTransaction(&after) catch {};
+    try expectLabelMembers(db, &after, "A", &writer_a);
+    try expectLabelMembers(db, null, "A", &writer_a);
+    try expectLabelCount(db, &after, "MATCH (n:A) RETURN count(n)", writer_a.len);
+    try expectLabelCount(db, null, "MATCH (n:A) RETURN count(n)", writer_a.len);
+
+    var limited = try db.queryInTxn(&after, "MATCH (n:A) RETURN n LIMIT 2");
+    defer limited.deinit();
+    try std.testing.expectEqual(@as(usize, 2), limited.rows.len);
+}

@@ -1,5 +1,6 @@
-// The database file is a flat array of fixed-size 4 KB pages; page id times
-// 4096 gives the byte offset directly.
+// The database file is a flat array of fixed-size pages, shown at the default
+// 4 KB; page id times the page size gives the byte offset directly. The size
+// is chosen when the file is created (4096 to 65535 bytes) and never changes.
 digraph page_manager_file_layout {
   bgcolor="transparent"
   rankdir=LR

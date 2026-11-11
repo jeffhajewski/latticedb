@@ -1,6 +1,7 @@
 # Data Export
 
-Use the CLI to export graph data from a `.lattice` database file.
+Use the CLI to export graph data from a `.lattice` database file, and `lattice
+import` to load it into another.
 
 ## Basic Usage
 
@@ -21,6 +22,12 @@ lattice export knowledge.db --file=backup.jsonl
 lattice export knowledge.db --file=graph.dot
 ```
 
+JSON, JSONL and CSV exports can be read back with `lattice import`. DOT is for
+looking at, not for importing.
+
+An export that fails removes the file it was writing, so a file that exists is
+complete.
+
 ## CSV Export
 
 CSV export writes two files (nodes and edges), using the `--file` value as a base name:
@@ -31,37 +38,130 @@ lattice export knowledge.db --file=backup.csv
 
 This generates:
 
-- `backup_nodes.csv`
-- `backup_edges.csv`
+- `backup_nodes.csv`, with `_id`, `_labels` (separated by `;`), a column per
+  property, and `_vector` when the export includes vectors
+- `backup_edges.csv`, with `_source`, `_target`, `_type` and a column per property
 
-## Label Filtering
+Property columns are named `<key>:json` and hold each value in the JSON
+encoding described below, so every type reads back as itself. An empty cell
+means the node or edge does not have that property. Fields are quoted as RFC
+4180 describes when they need it:
 
-Use `--labels` to export only nodes with selected labels (comma-separated). Matching edges between exported nodes are included.
+```text
+_id,_labels,age:json,name:json
+1,"Person",29,"""Carol"""
+2,"Person",35,"""Dan"""
+```
+
+To import the pair, give `lattice import` the same `--file` value; it reads both
+files and connects the edges to the nodes through the `_id` column:
+
+```bash
+lattice import copy.db --file=backup.csv
+```
+
+A label that CSV cannot hold (empty, containing `;`, or with leading or trailing
+spaces) makes a CSV export fail; use JSON for such a graph.
+
+## Choosing What to Export
+
+Use `--labels` to export only nodes with selected labels (comma-separated). Edges
+between exported nodes are included.
 
 ```bash
 lattice export knowledge.db --file=people.json --labels=Person
 lattice export knowledge.db --file=content.dot --labels=Document,Chunk
 ```
 
+Use `--query` to export what a Cypher query returns: every node and
+relationship in its rows (including inside lists and maps), plus the endpoints
+of each relationship, so the file imports on its own.
+
+```bash
+lattice export knowledge.db --file=knows.json --query="MATCH (a:Person)-[k:KNOWS]->(b:Person) RETURN k"
+```
+
+The query must return nodes or relationships themselves. One whose rows hold
+only other values is refused:
+
+```text
+Error: Export failed: the query returned no nodes or relationships to export. Return them, for example MATCH (n:Person) RETURN n.
+```
+
+`--labels` and `--query` cannot be used together. `lattice dump` accepts both
+options too.
+
+## Vectors
+
+When the database is opened with its vector index, exports include each node's
+vector, and JSON exports and dumps record the dimensions:
+
+```bash
+lattice export embeddings.db --enable-vector --vector-dims=3 --file=docs.json
+```
+
+```json
+{"version":2,"vector_dimensions":3,"nodes":[{"id":"1","labels":["Doc"],"properties":{"title":"cafe"},"vector":[0.6,0.8,0.0]}],"edges":[]}
+```
+
+The database file does not record how many dimensions its vectors have, so
+without `--enable-vector` and `--vector-dims` the export leaves vectors out and
+prints a warning saying so. Under the cosine metric a vector is stored
+normalised, so the exported vector is the unit-length one: a node given
+`[3, 4, 0]` exports as `[0.6,0.8,0.0]`.
+
+Importing a file that holds vectors needs the target database opened with
+vectors of the same dimensions. A JSON import checks this before writing
+anything (here `copy.db` was created with four dimensions); JSONL and CSV
+imports fail at the first node whose vector does not fit:
+
+```text
+Error: Import failed: the vectors in docs.json do not have the 4 dimensions copy.db was opened with.
+```
+
+## The JSON Format
+
+JSON exports start with `"version": 2`. Values are written so their type
+survives the round trip. Strings, integers, booleans, null, lists and maps are
+plain JSON; floats always have a decimal point or an exponent (`2.0`, not `2`).
+The types JSON has no notation for are written as an object with one `$` key:
+
+| Value | Written as |
+|-------|------------|
+| Bytes | `{"$bytes": "3q2+7w=="}` (base64) |
+| A vector-valued property | `{"$vector": [1.5, 2.5]}` |
+| NaN, infinity | `{"$float": "NaN"}`, `{"$float": "Infinity"}`, `{"$float": "-Infinity"}` |
+| A map whose only key starts with `$` | `{"$map": {"$ref": "x"}}` |
+
+A node's own embedding is the separate `"vector"` field, not a property.
+
+JSONL uses the same encoding, one node or edge per line with a `"kind"` field,
+and no version or dimensions line.
+
+### Files written by 0.16.0 and earlier
+
+A JSON file with no `"version"` field is read as the old format, so exports
+from earlier releases still import, with one difference: a string is always
+imported as a string. Earlier releases exported bytes as hex strings, which
+cannot be told apart from a string like `"cafe"`, so bytes in an old export come
+back as strings. A numeric array in an old file is still read as a vector
+property, as it was then. A file with a version newer than this release knows
+is refused rather than misread.
+
 ## What Is Not Exported
 
-Export writes labels, properties and edges. It does not write vector embeddings
-(and `lattice dump` does not either), full-text or property index definitions,
-or anything else about how the database was configured. Byte values come out as
-hex strings. Importing an export therefore gives you the graph but not its
-vectors, and every node gets a new ID.
+Exports hold nodes, labels, properties, edges and, when asked for, vectors.
+They do not hold full-text or property index definitions, or anything else
+about how the database was configured, and every node gets a new ID when an
+export is imported.
 
 To copy a whole database, use `lattice backup` (see
 [Backup and Replication](./backup-and-replication.md)) or `serialize()` from a
 binding.
 
-The `--query` option is accepted but ignored in this release: the whole graph,
-or the labels chosen with `--labels`, is exported. To save the result of a
-query, run it with `lattice exec --format=json`.
-
 ## Choosing a Format
 
 - `.json`: single structured snapshot of the graph, for interchange.
-- `.jsonl`: append/stream-friendly format for pipelines.
+- `.jsonl`: one record per line, for pipelines.
 - `.csv`: tabular extraction for spreadsheets and BI tooling.
 - `.dot`: graph visualization with Graphviz-compatible tooling.

@@ -80,6 +80,37 @@ Pick `--vector-dims` to match whatever produces your embeddings. OpenAI's
 `text-embedding-3-small` gives you 1536 numbers per vector, so that is the number you
 would use.
 
+### Opening a database that stores vectors
+
+The file does not record how many dimensions its vectors have, so every command
+that opens a database accepts `--enable-vector` and `--vector-dims` as well, and
+you pass the same values you created it with. Two situations need them:
+
+- **Moving vectors in or out.** `export`, `dump` and `import` include node
+  vectors only when the database is opened with its vector index.
+- **Opening after a crash.** If a process stopped without closing the database,
+  the write-ahead log can still hold committed vector changes, and replaying
+  them needs the vector index. Without the options, a command that replays the
+  log (any command that can write, such as `exec`, `import` or `checkpoint`)
+  fails and says what to do:
+
+```text
+Error: Failed to open database embeddings.lattice: IoError. If it stores vectors, its write-ahead log may hold vector changes that can only be replayed with vectors enabled. Retry with --enable-vector --vector-dims=<n>, where <n> is the number of dimensions the database was created with.
+```
+
+Retry with the options and the log is replayed and emptied (see
+[Flushing pending writes](#flushing-pending-writes) for why to do this before
+running the read-only commands after a crash). Dimensions that do
+not match the ones the database was created with are refused too:
+
+```bash
+lattice count embeddings.lattice --enable-vector --vector-dims=4
+```
+
+```text
+Error: Failed to open database embeddings.lattice: InvalidArgument. With --enable-vector, check that the database has a vector index and that --vector-dims matches the number of dimensions it was created with.
+```
+
 ## Running queries
 
 There are two ways to run Cypher. Use `exec` for one query, and `query` when you want
@@ -167,7 +198,7 @@ lattice info social.lattice
 ```text
 Database: social.lattice
 ─────────────────────────────
-Size:         68 KB
+Size:         64 KB
 Nodes:        2
 Edges:        1
 Format:       v3
@@ -179,7 +210,7 @@ FTS:          enabled
 
 ### Importing
 
-`import` reads JSON or CSV:
+`import` reads JSON, JSONL or CSV, chosen by the file extension:
 
 ```bash
 lattice import social.lattice --file=people.json
@@ -207,43 +238,99 @@ JSON should have a `nodes` array and an `edges` array:
 ```
 
 In JSON, `id` is a name local to the file: edges refer to nodes by it, and each
-node gets a fresh ID in the database.
+node gets a fresh ID in the database. A node can also carry a `"vector"` array,
+which is stored as its embedding; that needs the database opened with
+`--enable-vector` and the matching `--vector-dims`. Files that `export` writes
+also have a `"version"` field and write some values in a tagged form; see
+[Data Export](../guides/data-export.md) for the format.
 
-CSV takes one file per import, either nodes or edges, told apart by the header.
-In a node file `_labels` holds the labels separated by `;`, and every column not
-starting with an underscore becomes a property:
+JSONL is what `export` writes to a `.jsonl` file: one record per line, each a
+node (`"kind":"node"`) or an edge (`"kind":"edge"`), with edges naming nodes
+from earlier lines.
+
+CSV files are read as RFC 4180 describes: a quoted field can hold commas, line
+breaks and doubled quotes (`""`). Columns are found by name in the header. A
+nodes file has an `_id` column, `_labels` with the labels separated by `;`, an
+optional `_vector`, and a column per property:
 
 ```text
 _id,_labels,name,age
-n1,"Person;Employee",Alice,30
+n1,"Person;Employee","Smith, Jr",30
+n2,Person,"Ann ""The Hat"" Lee",41
 ```
 
-The CSV importer is simpler than the JSON one:
-
-- `_id` is ignored, so nothing can refer to it. In an edge file, `_source` and
-  `_target` must be the numeric IDs the nodes have in the database; a value like
-  `n1` makes the import fail.
-- Columns other than `_source`, `_target` and `_type` in an edge file are ignored,
-  so edges imported from CSV have no properties.
-- Quotes do not protect a comma inside a value; `"Smith, Jr"` is split in two.
+An edges file has `_source`, `_target` and `_type`, and a column per property:
 
 ```text
-_source,_target,_type
-1,2,KNOWS
+_source,_target,_type,since
+n1,n2,KNOWS,2020
 ```
 
-Use JSON when you need edge properties or references between records in the
-same file.
+A property column holds plain text, read as an integer, a float, or else a
+string. A column named `<key>:json` holds a value in the JSON export encoding
+instead, which is how a list, a map, bytes or a string that looks like a number
+gets through CSV; `export` writes every property column that way.
+
+How an edges file names its nodes depends on how you import it. Give `import`
+the `--file` value an export was given, and it imports `<base>_nodes.csv` and
+`<base>_edges.csv` together, matching `_source` and `_target` against the nodes
+file's `_id` values:
+
+```bash
+lattice import social.lattice --file=people.csv
+```
+
+```text
+Importing people_nodes.csv and people_edges.csv into social.lattice...
+Import complete
+  Nodes imported: 2
+  Edges imported: 1
+```
+
+An edges file imported on its own names nodes by their numeric database IDs, and
+an ID that is not a node in the database is an error.
+
+#### When a record is wrong
+
+Without further options, `import` stops at the first record it cannot import and
+says which one it was and why:
+
+```text
+Error: Import failed at nodes[1]: its "labels" is not an array
+Nothing was imported. Use --on-error=skip to import the records that are valid.
+```
+
+Records are named by where they are: `nodes[1]` and `edges[0]` in JSON, `line 12`
+in JSONL and CSV, `edges file line 4` when a CSV pair is imported together. A
+record is imported whole or not at all: a property that cannot be read or
+stored, a label or property of the wrong JSON type, or an edge whose endpoint
+names no node fails the record.
 
 Two options are worth knowing about for large imports:
 
 | Option | What it does |
 |--------|--------------|
-| `--batch-size=<n>` | Commit every N items instead of all at once (default 1000) |
-| `--on-error=skip` | Skip records that fail instead of giving up on the whole import |
+| `--batch-size=<n>` | Commit every N records (default 1000) |
+| `--on-error=skip` | Leave out records that fail instead of stopping |
 
-`--on-error=skip` applies records one at a time, so the good rows still land. That is
-slower, but it means one bad row in a large file does not cost you the import.
+When an import stops, batches committed before the failing one stay in the
+database, and the message says how many records they held. With
+`--on-error=skip`, each record is committed on its own, so a bad one leaves
+nothing behind, and every record left out is listed (up to 20, then a count):
+
+```text
+Skipped nodes[1]: its "labels" is not an array
+Skipped edges[0]: target "n9" is not the id of any node in the file
+Importing bad.json into bad.lattice...
+Import complete
+  Nodes imported: 1
+  Nodes failed:   1
+  Edges imported: 0
+  Edges failed:   1
+```
+
+Committing record by record is slower, but one bad row in a large file does not
+cost you the import.
 
 ### Exporting
 
@@ -256,8 +343,22 @@ lattice export social.lattice --file=people.csv --labels=Person
 lattice export social.lattice --file=graph.dot
 ```
 
+JSON, JSONL and CSV exports import back with `import`. Every node gets a new ID
+when they do.
+
 CSV export writes two files named after the one you give:
-`--file=people.csv` produces `people_nodes.csv` and `people_edges.csv`.
+`--file=people.csv` produces `people_nodes.csv` and `people_edges.csv`:
+
+```text
+_id,_labels,age:json,name:json
+1,"Person",29,"""Carol"""
+2,"Person",35,"""Dan"""
+```
+
+```text
+_source,_target,_type,since:json
+1,2,KNOWS,2021
+```
 
 DOT is the format Graphviz reads, so you can turn a small graph into a picture:
 
@@ -269,10 +370,29 @@ digraph G {
 }
 ```
 
-You can narrow what gets exported with `--labels=Person,Company`. The command
-also accepts `--query="..."`, but in this release it ignores it and exports the
-whole graph (or the labels you chose); run the query with `exec --format=json`
-to save its result instead.
+You can narrow what gets exported in one of two ways. `--labels=Person,Company`
+exports the nodes with any of those labels and the edges between them.
+`--query` exports what a query returns: the nodes and relationships in its rows,
+plus the endpoints of every relationship, so the file imports on its own:
+
+```bash
+lattice export social.lattice --file=knows.json --query="MATCH (a:Person)-[k:KNOWS]->(b:Person) RETURN k"
+```
+
+The query has to return nodes or relationships, not just their properties
+(`RETURN p`, not `RETURN p.name`); otherwise the export fails and says so.
+`--labels` and `--query` cannot be combined.
+
+To include node vectors, open the database with `--enable-vector` and its
+`--vector-dims`. Exporting a database that has a vector index without them
+still works, with a warning that the vectors are left out:
+
+```text
+Warning: embeddings.lattice has a vector index, and vectors are not included without --enable-vector --vector-dims=<n>, where <n> is the number of dimensions the database was created with.
+```
+
+An export that fails removes the file it was writing rather than leave a
+partial one behind.
 
 ### Dumping
 
@@ -284,7 +404,10 @@ lattice dump social.lattice > snapshot.json
 
 Because the ordering is fixed, two dumps of the same data produce identical files. That
 makes `dump` useful in tests and for spotting what changed between two databases with a
-plain `diff`.
+plain `diff`. It uses the same format as a JSON export, with each edge's ID added,
+and it takes `--labels`, `--query` and the vector options the same way `export`
+does. The summary line (`Dumped 2 nodes, 1 edges`) goes to standard error, so
+it does not end up in the file.
 
 ## Looking after a database
 
@@ -298,7 +421,7 @@ lattice check social.lattice
 
 ```text
 Database file checks passed
-  Pages checked: 16
+  Pages checked: 15
   Note: sibling WAL file exists but was not validated
 ```
 
@@ -474,6 +597,13 @@ moment the flush happens rather than let it land mid-request.
 This is not the same as `compact`. Checkpointing shrinks the log, not the
 database file.
 
+After a crash, run a command that writes, such as `checkpoint`, before anything
+else. The commands that only read (`info`, `count`, `labels`, `types`,
+`schema`, `check`, `export` and `dump`) open the file read-only and do not
+replay the log, so until something has replayed it they report what the file
+held before the crash, not what was committed. If the database stores vectors,
+give `checkpoint` the vector options as well.
+
 ### Reclaiming space
 
 Deleting a lot of data leaves free pages behind, and the file stays the same size
@@ -486,8 +616,8 @@ lattice compact social.lattice
 
 ```text
 Compacted database: social.lattice
-  Pages before:    17
-  Pages after:     17
+  Pages before:    16
+  Pages after:     16
   Pages removed:   0
   Bytes reclaimed: 0
 ```
@@ -570,6 +700,13 @@ somewhere else:
 lattice exec social.lattice --query="MATCH (p:Person) RETURN p.name" --format=json | jq
 ```
 
+Output redirected to a file can be appended to with `>>`, for example to keep a
+log of counts taken over time:
+
+```bash
+lattice count social.lattice --format=csv >> counts.csv
+```
+
 ## Every command at a glance
 
 | Command | What it does |
@@ -584,7 +721,7 @@ lattice exec social.lattice --query="MATCH (p:Person) RETURN p.name" --format=js
 | `check <path>` | Verify page checksums in the main file |
 | `query <path>` | Open an interactive Cypher shell |
 | `exec <path>` | Run one query and exit |
-| `import <path>` | Load data from JSON or CSV |
+| `import <path>` | Load data from JSON, JSONL, or CSV |
 | `export <path>` | Write data to JSON, JSONL, CSV, or DOT |
 | `dump <path>` | Print the whole database as canonical JSON |
 | `labels <path>` | List node labels and their counts |

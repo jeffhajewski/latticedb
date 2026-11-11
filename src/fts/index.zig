@@ -738,59 +738,37 @@ pub const FtsIndex = struct {
             return &[_]ScoredDoc{};
         }
 
-        // Collect unique query terms (max 32 terms)
-        var query_term_buf: [32][]const u8 = undefined;
-        var query_term_allocs: [32][]u8 = undefined;
-        var num_terms: usize = 0;
-
-        for (tokens) |token| {
-            if (num_terms >= 32) break;
-
-            // Normalize
-            var lower_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
-            if (tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &lower_buf)) |normalized| {
-                // Check if already added
-                var found = false;
-                for (query_term_buf[0..num_terms]) |t| {
-                    if (std.mem.eql(u8, t, normalized)) {
-                        found = true;
-                        break;
-                    }
-                }
-                if (!found) {
-                    // Allocate copy for query_terms
-                    const copy = self.allocator.dupe(u8, normalized) catch {
-                        // Clean up allocated terms
-                        for (query_term_allocs[0..num_terms]) |t| {
-                            self.allocator.free(t);
-                        }
-                        return FtsError.OutOfMemory;
-                    };
-                    query_term_buf[num_terms] = copy;
-                    query_term_allocs[num_terms] = copy;
-                    num_terms += 1;
-                }
-            }
-        }
-
-        // Defer cleanup
+        // Collect the distinct query terms. Every one of them is required, so
+        // there is no cap on how many: ignoring the ones past some count would
+        // answer a broader query than the one asked.
+        var query_terms: ArrayListUnmanaged([]const u8) = .empty;
         defer {
-            for (query_term_allocs[0..num_terms]) |t| {
-                self.allocator.free(t);
-            }
+            for (query_terms.items) |t| self.allocator.free(t);
+            query_terms.deinit(self.allocator);
         }
 
-        if (num_terms == 0) {
+        next_token: for (tokens) |token| {
+            var lower_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
+            const normalized = tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &lower_buf) orelse continue;
+            for (query_terms.items) |t| {
+                if (std.mem.eql(u8, t, normalized)) continue :next_token;
+            }
+            query_terms.ensureUnusedCapacity(self.allocator, 1) catch return FtsError.OutOfMemory;
+            const copy = self.allocator.dupe(u8, normalized) catch return FtsError.OutOfMemory;
+            query_terms.appendAssumeCapacity(copy);
+        }
+
+        if (query_terms.items.len == 0) {
             return &[_]ScoredDoc{};
         }
 
         // For single term query, do simple posting list scan
-        if (num_terms == 1) {
-            return self.searchSingleTerm(query_term_buf[0], limit);
+        if (query_terms.items.len == 1) {
+            return self.searchSingleTerm(query_terms.items[0], limit);
         }
 
         // For multi-term query, combine results
-        return self.searchMultiTerm(query_term_buf[0..num_terms], limit);
+        return self.searchMultiTerm(query_terms.items, limit);
     }
 
     /// Search for a single term
@@ -914,12 +892,10 @@ pub const FtsIndex = struct {
             dict_entry: DictionaryEntry,
         };
 
-        var term_infos_buf: [32]SearchTermInfo = undefined;
-        var num_valid_terms: usize = 0;
+        const term_infos = self.allocator.alloc(SearchTermInfo, terms.len) catch return FtsError.OutOfMemory;
+        defer self.allocator.free(term_infos);
 
-        for (terms) |term| {
-            if (num_valid_terms >= 32) break;
-
+        for (terms, term_infos) |term, *info| {
             // Every term is required, so one that no document has rules out
             // every document. Skipping it would answer a broader query than the
             // one asked, and disagree with `estimateMatches`, which says zero.
@@ -928,19 +904,13 @@ pub const FtsIndex = struct {
             }) orelse return &[_]ScoredDoc{};
             if (dict_entry.posting_page == 0) return &[_]ScoredDoc{};
 
-            term_infos_buf[num_valid_terms] = .{
+            info.* = .{
                 .term = term,
                 .dict_entry = dict_entry,
             };
-            num_valid_terms += 1;
-        }
-
-        if (num_valid_terms == 0) {
-            return &[_]ScoredDoc{};
         }
 
         // Sort by doc_freq ascending (smallest list first)
-        const term_infos = term_infos_buf[0..num_valid_terms];
         std.mem.sort(SearchTermInfo, term_infos, {}, struct {
             fn lessThan(_: void, a: SearchTermInfo, b: SearchTermInfo) bool {
                 return a.dict_entry.doc_freq < b.dict_entry.doc_freq;
@@ -1934,32 +1904,30 @@ pub const FtsIndex = struct {
             return self.searchSingleTerm(term, limit);
         }
 
-        // Collect normalized terms
-        var phrase_terms: [32][]u8 = undefined;
-        var num_terms: usize = 0;
+        // Collect normalized terms, all of them: a phrase cut short matches
+        // documents the whole phrase does not.
+        var phrase_terms: ArrayListUnmanaged([]const u8) = .empty;
         defer {
-            for (phrase_terms[0..num_terms]) |t| {
-                self.allocator.free(t);
-            }
+            for (phrase_terms.items) |t| self.allocator.free(t);
+            phrase_terms.deinit(self.allocator);
         }
 
         for (tokens) |token| {
-            if (num_terms >= 32) break;
             var term_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
             const term = tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &term_buf) orelse continue;
 
+            phrase_terms.ensureUnusedCapacity(self.allocator, 1) catch return FtsError.OutOfMemory;
             const normalized = self.allocator.dupe(u8, term) catch {
                 return FtsError.OutOfMemory;
             };
-            phrase_terms[num_terms] = normalized;
-            num_terms += 1;
+            phrase_terms.appendAssumeCapacity(normalized);
         }
 
-        if (num_terms < 2) {
+        if (phrase_terms.items.len < 2) {
             return &[_]ScoredDoc{};
         }
 
-        return self.searchPhraseTerms(phrase_terms[0..num_terms], limit);
+        return self.searchPhraseTerms(phrase_terms.items, limit);
     }
 
     /// Search for phrase with pre-tokenized terms
@@ -2788,6 +2756,47 @@ test "fts search finds documents behind a posting page that deletes emptied" {
     const both = try fx.index.search("common even", std.math.maxInt(u32));
     defer fx.index.freeResults(both);
     try std.testing.expectEqual(@as(usize, (doc_count - removed) / 2), both.len);
+}
+
+/// `count` distinct letter-only words ("wxaa wxab ..."), separated by spaces.
+fn s3DistinctWords(buf: []u8, count: usize) []const u8 {
+    var len: usize = 0;
+    for (0..count) |i| {
+        if (i > 0) {
+            buf[len] = ' ';
+            len += 1;
+        }
+        const word = [_]u8{ 'w', 'x', @intCast('a' + i / 26), @intCast('a' + i % 26) };
+        @memcpy(buf[len..][0..word.len], &word);
+        len += word.len;
+    }
+    return buf[0..len];
+}
+
+test "fts AND search and phrase search require every term of a long query" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/s3_lattice_fts_long_query_test.db");
+    defer fx.destroy(allocator);
+    fx.index.config.store_positions = true;
+
+    var all_buf: [512]u8 = undefined;
+    var some_buf: [512]u8 = undefined;
+    const all = s3DistinctWords(&all_buf, 40);
+    const first_32 = s3DistinctWords(&some_buf, 32);
+
+    // Document 2 has the first 32 words and none of the rest.
+    _ = try fx.index.indexDocument(1, all);
+    _ = try fx.index.indexDocument(2, first_32);
+
+    const and_results = try fx.index.search(all, 10);
+    defer fx.index.freeResults(and_results);
+    try std.testing.expectEqual(@as(usize, 1), and_results.len);
+    try std.testing.expectEqual(@as(DocId, 1), and_results[0].doc_id);
+
+    const phrase_results = try fx.index.searchPhrase(all, 10);
+    defer fx.index.freeResults(phrase_results);
+    try std.testing.expectEqual(@as(usize, 1), phrase_results.len);
+    try std.testing.expectEqual(@as(DocId, 1), phrase_results[0].doc_id);
 }
 
 test "fts AND search with a term no document contains matches nothing" {

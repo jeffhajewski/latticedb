@@ -87,6 +87,9 @@ const HandleHeader = struct {
     /// The handle has left the registry; the last unpin frees its memory.
     /// Guarded by `handle_registry_mutex`.
     detached: bool,
+    /// What the caller holds in place of this handle's address; see
+    /// "Handle tokens". Set by `registerHandle`.
+    token: usize,
 
     fn init(kind: HandleKind) HandleHeader {
         return .{
@@ -95,12 +98,12 @@ const HandleHeader = struct {
             .state = .active,
             .pins = 0,
             .detached = false,
+            .token = 0,
         };
     }
 };
 
 var handle_registry_mutex: Mutex = .{};
-var handle_registry: std.AutoHashMapUnmanaged(usize, HandleKind) = .{};
 
 /// Internal database handle wrapping the Zig Database
 const DatabaseHandle = struct {
@@ -121,8 +124,6 @@ const TxnHandle = struct {
     db_handle: *DatabaseHandle,
     txn: Transaction, // Actual Transaction struct from TxnManager
     counted_child: bool,
-    /// The value handed to the caller in place of this handle's address.
-    token: usize,
 };
 
 /// Internal query handle storing prepared query state
@@ -954,13 +955,75 @@ fn kindForHandle(comptime T: type) HandleKind {
     @compileError("unknown C API handle type");
 }
 
+// ============================================================================
+// Handle tokens
+// ============================================================================
+//
+// Handles reach the caller as tokens, not as the addresses of the structs
+// behind them. The registry maps a live token to its struct.
+//
+// The registry used to be keyed by address, and that is only a check while
+// the allocator never hands a freed address out again. Allocators that do
+// (std.heap.smp_allocator, for one) put the next handle of the same size at
+// the address just freed, so a stale handle (a double free, a use after free,
+// a transaction reused after commit) would pass the check and act on somebody
+// else's handle. Tokens come from a range no allocation can occupy and are not
+// reissued until the sequence wraps, so a token that is not live is always a
+// handle that has gone, whatever the allocator does with the memory.
+//
+// On 64-bit targets a token is 1<<62 | kind<<56 | seq<<3: each kind has its
+// own range, so an ended transaction is told apart from garbage, and the
+// sequence wraps after 2^53 handles. Nothing dereferences a token; bindings
+// only pass it back.
+
+const token_stride: usize = 8;
+const token_seq_count: usize = if (@sizeOf(usize) >= 8) 1 << 53 else 1 << 16;
+
+/// 32-bit targets have no address range to spare, so tokens there are
+/// addresses inside this array, which is never read or written. All kinds
+/// share it, and tokens are reissued after 2^16 further handles.
+var token_space: [if (@sizeOf(usize) >= 8) 0 else token_seq_count * token_stride]u8 align(token_stride) = undefined;
+
+fn tokenBase(kind: HandleKind) usize {
+    if (@sizeOf(usize) >= 8) return (1 << 62) | (@as(usize, @intFromEnum(kind)) << 56);
+    return @intFromPtr(&token_space);
+}
+
+/// Whether `addr` lies in the token range of `kind`, live or not.
+fn isTokenOf(kind: HandleKind, addr: usize) bool {
+    const base = tokenBase(kind);
+    if (addr < base) return false;
+    const offset = addr - base;
+    return offset < token_seq_count * token_stride and offset % token_stride == 0;
+}
+
+const HandleEntry = struct {
+    kind: HandleKind,
+    ptr: *anyopaque,
+};
+
+/// Live handles by token. Guarded by `handle_registry_mutex`.
+var handle_registry: std.AutoHashMapUnmanaged(usize, HandleEntry) = .{};
+var next_token_seq: usize = 0;
+
+/// Give a new handle its token and make it live. The caller hands the
+/// token out with `toOpaque`.
 fn registerHandle(comptime T: type, handle: *T) lattice_error {
+    const kind = kindForHandle(T);
     handle_registry_mutex.lock();
     defer handle_registry_mutex.unlock();
 
-    handle_registry.put(global_allocator, @intFromPtr(handle), kindForHandle(T)) catch {
+    // Skipping live tokens only matters once the sequence has wrapped.
+    var token: usize = undefined;
+    while (true) {
+        token = tokenBase(kind) + (next_token_seq % token_seq_count) * token_stride;
+        next_token_seq +%= 1;
+        if (!handle_registry.contains(token)) break;
+    }
+    handle_registry.put(global_allocator, token, .{ .kind = kind, .ptr = handle }) catch {
         return .err_out_of_memory;
     };
+    handle.header.token = token;
     return .ok;
 }
 
@@ -968,34 +1031,39 @@ fn unregisterHandle(comptime T: type, handle: *T) void {
     handle_registry_mutex.lock();
     defer handle_registry_mutex.unlock();
 
-    const addr = @intFromPtr(handle);
-    if (handle_registry.get(addr)) |kind| {
-        if (kind == kindForHandle(T)) {
-            _ = handle_registry.remove(addr);
+    const token = handle.header.token;
+    if (handle_registry.get(token)) |entry| {
+        if (entry.kind == kindForHandle(T) and entry.ptr == @as(*anyopaque, handle)) {
+            _ = handle_registry.remove(token);
         }
     }
 }
 
-/// Cast opaque C pointer to an internal handle after address-based liveness
-/// validation. This rejects stale pointers before dereferencing freed memory.
+/// The struct behind a live token of kind `T`, or null. Called with
+/// `handle_registry_mutex` held.
+fn lookupLocked(comptime T: type, addr: usize) ?*T {
+    const entry = handle_registry.get(addr) orelse return null;
+    if (entry.kind != kindForHandle(T)) return null;
+    const handle: *T = @ptrCast(@alignCast(entry.ptr));
+    if (handle.header.magic != HandleMagic or handle.header.kind != kindForHandle(T)) return null;
+    return handle;
+}
+
+/// Resolve an opaque C handle to its internal struct. A token that is not
+/// live, or is of another kind, gives null.
 fn toHandle(comptime T: type, ptr: anytype) ?*T {
     const addr = @intFromPtr(ptr);
     if (addr == 0) return null;
 
     handle_registry_mutex.lock();
-    const registered = if (handle_registry.get(addr)) |kind|
-        kind == kindForHandle(T)
-    else
-        false;
-    handle_registry_mutex.unlock();
+    defer handle_registry_mutex.unlock();
+    return lookupLocked(T, addr);
+}
 
-    if (!registered) return null;
-
-    const handle: *T = @ptrCast(@alignCast(ptr));
-    if (handle.header.magic != HandleMagic or handle.header.kind != kindForHandle(T)) {
-        return null;
-    }
-    return handle;
+/// What the caller is given for `handle`: its token.
+fn toOpaque(comptime T: type, handle: anytype) *T {
+    std.debug.assert(handle.header.token != 0);
+    return @ptrFromInt(handle.header.token);
 }
 
 /// Look up a database handle and pin it for the rest of the calling function,
@@ -1013,11 +1081,7 @@ fn acquireDb(ptr: ?*lattice_database) ?*DatabaseHandle {
 
     handle_registry_mutex.lock();
     defer handle_registry_mutex.unlock();
-    const kind = handle_registry.get(addr) orelse return null;
-    if (kind != .database) return null;
-
-    const handle: *DatabaseHandle = @ptrCast(@alignCast(ptr));
-    if (handle.header.magic != HandleMagic or handle.header.kind != .database) return null;
+    const handle = lookupLocked(DatabaseHandle, addr) orelse return null;
     handle.header.pins += 1;
     return handle;
 }
@@ -1037,57 +1101,27 @@ fn releaseDb(handle: *DatabaseHandle) void {
 fn detachDb(handle: *DatabaseHandle) void {
     handle_registry_mutex.lock();
     defer handle_registry_mutex.unlock();
-    _ = handle_registry.remove(@intFromPtr(handle));
+    _ = handle_registry.remove(handle.header.token);
     handle.header.detached = true;
 }
 
 // ============================================================================
-// Transaction handle tokens
+// Ended transactions
 // ============================================================================
 //
-// A transaction handle reaches the caller as a token, not as the address of
-// its TxnHandle, so the TxnHandle can be freed as soon as the transaction ends.
-//
-// lattice.h promises that using a handle after commit or rollback returns
-// LATTICE_ERROR_TXN_ABORTED. That used to be kept by holding every finished
-// TxnHandle, and its registry entry, until the database closed: memory and
-// registry size grew with every transaction ever run. Just freeing them would
-// break the promise in a worse way than crashing: the allocator hands the same
-// address to the next transaction, and a stale pointer would then drive
-// somebody else's transaction. Tokens come from a range no allocation can
-// occupy and are not reissued until the counter wraps (2^59 transactions on
-// 64-bit targets), so a token that is not live is always a transaction that
-// has ended. Nothing dereferences a token; bindings only pass it back.
-
-const txn_token_stride: usize = 8;
-const txn_token_count: usize = if (@sizeOf(usize) >= 8) 1 << 59 else 1 << 16;
-
-/// 32-bit targets have no address range to spare, so tokens there are
-/// addresses inside this array, which is never read or written. They are
-/// reissued after 2^16 further transactions.
-var txn_token_space: [if (@sizeOf(usize) >= 8) 0 else txn_token_count * txn_token_stride]u8 align(txn_token_stride) = undefined;
-
-fn txnTokenBase() usize {
-    return if (@sizeOf(usize) >= 8) 1 << 62 else @intFromPtr(&txn_token_space);
-}
-
-fn isTxnToken(addr: usize) bool {
-    const base = txnTokenBase();
-    if (addr < base) return false;
-    const offset = addr - base;
-    return offset < txn_token_count * txn_token_stride and offset % txn_token_stride == 0;
-}
-
-/// Live transactions by token. Guarded by `handle_registry_mutex`.
-var txn_registry: std.AutoHashMapUnmanaged(usize, *TxnHandle) = .{};
-var next_txn_seq: usize = 0;
+// lattice.h promises that using a transaction handle after commit or rollback
+// returns LATTICE_ERROR_TXN_ABORTED. That used to be kept by holding every
+// finished TxnHandle, and its registry entry, until the database closed:
+// memory and registry size grew with every transaction ever run. Now the
+// TxnHandle is freed when the transaction ends, and a transaction token that
+// is no longer live resolves to the stand-in below.
 
 /// Stands in for every ended transaction. A stale token resolves to it and
 /// takes the path a retained closed handle used to, so callers get the same
 /// errors in the same order as before. Its database is permanently closed;
 /// every path checks that before touching `db`, which is never set.
 var retired_db_handle: DatabaseHandle = .{
-    .header = .{ .magic = HandleMagic, .kind = .database, .state = .closed, .pins = 0, .detached = false },
+    .header = .{ .magic = HandleMagic, .kind = .database, .state = .closed, .pins = 0, .detached = false, .token = 0 },
     .db = undefined,
     .mutex = .{},
     .active_children = 0,
@@ -1095,7 +1129,7 @@ var retired_db_handle: DatabaseHandle = .{
     .closing = .init(true),
 };
 var retired_txn_handle: TxnHandle = .{
-    .header = .{ .magic = HandleMagic, .kind = .txn, .state = .closed, .pins = 0, .detached = false },
+    .header = .{ .magic = HandleMagic, .kind = .txn, .state = .closed, .pins = 0, .detached = false, .token = 0 },
     .db_handle = &retired_db_handle,
     .txn = .{
         .id = 0,
@@ -1106,30 +1140,12 @@ var retired_txn_handle: TxnHandle = .{
         .commit_ts = 0,
     },
     .counted_child = false,
-    .token = 0,
 };
-
-/// Give a new transaction handle its token and make it live.
-fn registerTxn(handle: *TxnHandle) lattice_error {
-    handle_registry_mutex.lock();
-    defer handle_registry_mutex.unlock();
-
-    // Skipping live tokens only matters once the counter has wrapped.
-    var token: usize = undefined;
-    while (true) {
-        token = txnTokenBase() + (next_txn_seq % txn_token_count) * txn_token_stride;
-        next_txn_seq +%= 1;
-        if (!txn_registry.contains(token)) break;
-    }
-    txn_registry.put(global_allocator, token, handle) catch return .err_out_of_memory;
-    handle.token = token;
-    return .ok;
-}
 
 /// Resolve a caller's transaction token and pin it, and its database, for the
 /// rest of the calling function, which must `releaseTxn` it. An ended
 /// transaction resolves to `retired_txn_handle`; anything else that is not a
-/// live token is rejected.
+/// live transaction token is rejected.
 ///
 /// The pins are what make freeing safe: a commit on one thread can end a
 /// transaction another thread is still using, and the memory stays until that
@@ -1140,12 +1156,14 @@ fn acquireTxn(ptr: ?*lattice_txn) ?*TxnHandle {
 
     handle_registry_mutex.lock();
     defer handle_registry_mutex.unlock();
-    if (txn_registry.get(addr)) |handle| {
+    if (lookupLocked(TxnHandle, addr)) |handle| {
         handle.header.pins += 1;
         handle.db_handle.header.pins += 1;
         return handle;
     }
-    if (isTxnToken(addr)) return &retired_txn_handle;
+    // On 32-bit targets kinds share one range, and only a live token can be
+    // told apart from the others.
+    if (isTokenOf(.txn, addr) and !handle_registry.contains(addr)) return &retired_txn_handle;
     return null;
 }
 
@@ -1182,7 +1200,7 @@ fn retireTxnHandleLocked(txn_handle: *TxnHandle) void {
 
     handle_registry_mutex.lock();
     defer handle_registry_mutex.unlock();
-    _ = txn_registry.remove(txn_handle.token);
+    _ = handle_registry.remove(txn_handle.header.token);
     txn_handle.header.detached = true;
 }
 
@@ -1210,11 +1228,6 @@ fn lockActiveTxnDb(txn_handle: *TxnHandle) lattice_error {
 
 fn unlockTxnDb(txn_handle: *TxnHandle) void {
     txn_handle.db_handle.mutex.unlock();
-}
-
-/// Cast internal handle to opaque C pointer
-fn toOpaque(comptime T: type, handle: *anyopaque) *T {
-    return @ptrCast(handle);
 }
 
 fn buildOpenOptionsV1(options: ?*const lattice_open_options) OpenOptions {
@@ -1359,7 +1372,7 @@ fn adoptDatabase(db: *Database, db_out: *?*lattice_database) lattice_error {
         return register_result;
     }
 
-    db_out.* = @ptrCast(handle);
+    db_out.* = toOpaque(lattice_database, handle);
     return .ok;
 }
 
@@ -1516,15 +1529,14 @@ pub export fn lattice_begin(
                             .commit_ts = 0,
                         },
                         .counted_child = true,
-                        .token = 0,
                     };
-                    const register_result = registerTxn(txn_handle);
+                    const register_result = registerHandle(TxnHandle, txn_handle);
                     if (register_result != .ok) {
                         global_allocator.destroy(txn_handle);
                         return register_result;
                     }
                     db_handle.active_children += 1;
-                    out.* = @ptrFromInt(txn_handle.token);
+                    out.* = toOpaque(lattice_txn, txn_handle);
                     return .ok;
                 }
                 return .err_unsupported;
@@ -1546,9 +1558,8 @@ pub export fn lattice_begin(
         .db_handle = db_handle,
         .txn = txn,
         .counted_child = true,
-        .token = 0,
     };
-    const register_result = registerTxn(txn_handle);
+    const register_result = registerHandle(TxnHandle, txn_handle);
     if (register_result != .ok) {
         var mutable_txn = txn;
         db_handle.db.abortTransaction(&mutable_txn) catch {};
@@ -1557,7 +1568,7 @@ pub export fn lattice_begin(
     }
     db_handle.active_children += 1;
 
-    out.* = @ptrFromInt(txn_handle.token);
+    out.* = toOpaque(lattice_txn, txn_handle);
     return .ok;
 }
 
@@ -2484,7 +2495,7 @@ fn wrapStreamBatch(batch: StreamBatch, batch_out: *?*lattice_stream_batch) latti
         return register_result;
     }
 
-    batch_out.* = @ptrCast(handle);
+    batch_out.* = toOpaque(lattice_stream_batch, handle);
     return .ok;
 }
 
@@ -3601,7 +3612,7 @@ pub export fn lattice_query_prepare(
     }
     db_handle.active_children += 1;
 
-    query_out.* = @ptrCast(query_handle);
+    query_out.* = toOpaque(lattice_query, query_handle);
     return .ok;
 }
 
@@ -3722,7 +3733,7 @@ pub export fn lattice_query_execute(
         return register_result;
     }
 
-    result_out.* = @ptrCast(result_handle);
+    result_out.* = toOpaque(lattice_result, result_handle);
     return .ok;
 }
 
@@ -4052,7 +4063,7 @@ pub export fn lattice_embedding_client_create(
         return register_result;
     }
 
-    client_out.* = @ptrCast(handle);
+    client_out.* = toOpaque(lattice_embedding_client, handle);
     return .ok;
 }
 
@@ -4162,7 +4173,7 @@ test "finished transaction handles are freed, not kept until close" {
         fn count() usize {
             handle_registry_mutex.lock();
             defer handle_registry_mutex.unlock();
-            return handle_registry.count() + txn_registry.count();
+            return handle_registry.count();
         }
     }.count;
 

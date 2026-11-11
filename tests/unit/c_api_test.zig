@@ -24,6 +24,7 @@ const lattice_query = c_api.lattice_query;
 const lattice_result = c_api.lattice_result;
 const lattice_vector_result = c_api.lattice_vector_result;
 const lattice_fts_result = c_api.lattice_fts_result;
+const lattice_edge_result = c_api.lattice_edge_result;
 const lattice_stream_batch = c_api.lattice_stream_batch;
 const lattice_error = c_api.lattice_error;
 const lattice_list = c_api.lattice_list;
@@ -3520,4 +3521,73 @@ test "c_api: ending a transaction while another thread uses it is safe" {
     }
 
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_close(db));
+}
+
+test "c_api: a freed handle never reaches a later handle of the same kind" {
+    // An allocator that reuses memory puts the second handle where the first
+    // one was. Freeing or using the first again must not touch the second.
+    const path = "/tmp/lattice_capi_stale_handle_no_alias_test.db";
+    const db = try openScratchDb(path);
+    defer removeScratchDb(path);
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+    var node: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &node));
+    var other: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Thing", &other));
+    var edge: lattice_edge_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, node, other, "OWNS", &edge));
+
+    var first_query: ?*lattice_query = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_prepare(db, "MATCH (n:Person) RETURN n", &first_query));
+    var first_result: ?*lattice_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_execute(first_query, txn, &first_result));
+    c_api.lattice_result_free(first_result);
+    c_api.lattice_query_free(first_query);
+
+    var query: ?*lattice_query = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_prepare(db, "MATCH (n:Person) RETURN n", &query));
+    var result: ?*lattice_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_execute(query, txn, &result));
+    try std.testing.expect(query != first_query);
+    try std.testing.expect(result != first_result);
+
+    // Stale handles: rejected, and freeing them again does nothing.
+    try std.testing.expect(!c_api.lattice_result_next(first_result));
+    try std.testing.expectEqual(@as(u32, 0), c_api.lattice_result_column_count(first_result));
+    var stale_result: ?*lattice_result = null;
+    try std.testing.expectEqual(lattice_error.err_invalid_arg, c_api.lattice_query_execute(first_query, txn, &stale_result));
+    c_api.lattice_result_free(first_result);
+    c_api.lattice_query_free(first_query);
+
+    var edges_first: ?*lattice_edge_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_get_outgoing(txn, node, &edges_first));
+    c_api.lattice_edge_result_free(edges_first);
+    var edges: ?*lattice_edge_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_get_outgoing(txn, node, &edges));
+    c_api.lattice_edge_result_free(edges_first);
+    try std.testing.expectEqual(@as(u32, 1), c_api.lattice_edge_result_count(edges));
+    c_api.lattice_edge_result_free(edges);
+
+    // The live handles still work.
+    try std.testing.expectEqual(@as(u32, 1), c_api.lattice_result_column_count(result));
+    try std.testing.expect(c_api.lattice_result_next(result));
+    try std.testing.expect(!c_api.lattice_result_next(result));
+    c_api.lattice_result_free(result);
+    c_api.lattice_query_free(query);
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+
+    // A closed database handle stays closed when another is opened.
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_close(db));
+    const second_path = "/tmp/lattice_capi_stale_handle_no_alias_second_test.db";
+    const second = try openScratchDb(second_path);
+    defer removeScratchDb(second_path);
+    try std.testing.expect(second != db);
+    try std.testing.expectEqual(lattice_error.err_invalid_arg, c_api.lattice_close(db));
+    var second_txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.err_invalid_arg, c_api.lattice_begin(db, .read_only, &second_txn));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(second, .read_only, &second_txn));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_rollback(second_txn));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_close(second));
 }

@@ -11,6 +11,7 @@ db = latticedb.Database(
     enable_vectors=True,
     vector_dimensions=1536,
 )
+db.open()  # or use it as a context manager: with latticedb.Database(...) as db:
 ```
 
 ## Decided at creation, and permanent
@@ -93,6 +94,7 @@ file. The default is sensible and the same page explains when it is not.
 
 ```python
 db = latticedb.Database("graph.lattice", create=True, cache_size_mb=64)
+db.open()
 ```
 
 ```typescript

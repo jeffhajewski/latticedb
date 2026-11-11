@@ -70,7 +70,7 @@ To use vector search:
 3. Search by similarity using `vector_search()` or the `<=>` operator in Cypher
 
 ```python
-# Store an embedding
+# Store an embedding. A node has one vector; Cypher reads it as n.embedding.
 txn.set_vector(node.id, "embedding", vector)
 
 # Search by similarity
@@ -105,7 +105,7 @@ results = db.fts_search("Chunk", "text", "transformer attention")
 results = db.fts_search_fuzzy("Chunk", "text", "transformr atention")
 
 # Or in Cypher
-db.query('MATCH (n) WHERE n.text @@ "transformer attention" RETURN n')
+db.query('MATCH (n:Chunk) WHERE n.text @@ "transformer attention" RETURN n')
 ```
 
 ## Transactions
@@ -158,7 +158,10 @@ A database does not have to be on disk at all. Open `:memory:` and it lives
 entirely in memory:
 
 ```python
-db = latticedb.Database(":memory:")
+import latticedb
+
+with latticedb.Database(":memory:") as db:
+    db.query("CREATE (n:Note {text: 'hello'})")
 ```
 
 Everything works the same — transactions, indexes, vector and text search — and it

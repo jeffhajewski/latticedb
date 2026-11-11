@@ -137,9 +137,12 @@ interface DatabaseOptions {
   create?: boolean;          // Create if not exists (default: false)
   readOnly?: boolean;        // Open read-only (default: false)
   cacheSizeMb?: number;      // Cache size in MB (default: 100)
+  enableWal?: boolean;       // WAL-backed transactions and crash recovery (default: true)
+  enableAdjacencyCache?: boolean; // In-memory graph adjacency cache (default: false)
   enableVectors?: boolean;   // Preferred vector config flag
   enableVector?: boolean;    // Deprecated compatibility alias
   vectorDimensions?: number; // Vector dimensions (default: 128)
+  lock?: boolean;            // Take a file lock (default: true)
 }
 ```
 
@@ -287,7 +290,7 @@ Connect to Ollama, OpenAI, or compatible APIs:
 ```typescript
 import { EmbeddingClient, EmbeddingApiFormat } from "@hajewski/latticedb/embedding";
 
-// Ollama (default)
+// Ollama (default). The endpoint is the full URL the client POSTs to.
 const client = new EmbeddingClient({
   endpoint: "http://localhost:11434/api/embeddings",
 });

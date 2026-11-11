@@ -77,10 +77,10 @@ ORDER BY n.field, n.age DESC
 Use `LIMIT` and `SKIP` for pagination:
 
 ```cypher
--- First 10 results
+// First 10 results
 MATCH (n:Person) RETURN n.name LIMIT 10
 
--- Skip first 10, return next 10
+// Skip first 10, return next 10
 MATCH (n:Person) RETURN n.name SKIP 10 LIMIT 10
 ```
 

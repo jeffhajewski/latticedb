@@ -18,7 +18,7 @@ MATCH (a)-[*min..max]->(b)
 ### Fixed Range
 
 ```cypher
--- Friends of friends (exactly 2 hops)
+// Friends of friends (exactly 2 hops)
 MATCH (a:Person {name: "Alice"})-[:KNOWS*2]->(b:Person)
 RETURN b.name
 ```
@@ -26,7 +26,7 @@ RETURN b.name
 ### Bounded Range
 
 ```cypher
--- Reachable within 1 to 3 hops
+// Reachable within 1 to 3 hops
 MATCH (a:Person {name: "Alice"})-[:KNOWS*1..3]->(b:Person)
 RETURN DISTINCT b.name
 ```
@@ -34,7 +34,7 @@ RETURN DISTINCT b.name
 ### Open-Ended
 
 ```cypher
--- All reachable nodes (2+ hops)
+// All reachable nodes (2+ hops)
 MATCH (a:Person {name: "Alice"})-[*2..]->(b)
 RETURN b
 ```
@@ -42,7 +42,7 @@ RETURN b
 ### Any Length
 
 ```cypher
--- All nodes reachable at any depth
+// All nodes reachable at any depth
 MATCH (a:Person {name: "Alice"})-[*]->(b)
 RETURN DISTINCT b
 ```

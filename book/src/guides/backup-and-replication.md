@@ -246,10 +246,12 @@ Pass `:memory:` as the path and the database has no files behind it at all:
 
 ```python
 db = latticedb.Database(":memory:")
+db.open()
 ```
 
 ```typescript
 const db = new Database(':memory:');
+await db.open();
 ```
 
 ```go

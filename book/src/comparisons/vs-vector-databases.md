@@ -15,11 +15,10 @@ A vector database answers one question well: which chunks are semantically neare
 The usual response is to run a vector store plus a relational database plus a search index, and keep three systems consistent. LatticeDB's argument is that these are one question and should be one query.
 
 ```cypher
-MATCH (chunk:Chunk)
-WHERE chunk.embedding <=> $query_vector < 0.3
-   OR chunk.text @@ 'connection pool exhausted'
-MATCH (chunk)-[:PART_OF]->(doc:Document)-[:AUTHORED_BY]->(author:Person)
-WHERE doc.version = $current_version
+MATCH (chunk:Chunk)-[:PART_OF]->(doc:Document)-[:AUTHORED_BY]->(author:Person)
+WHERE (chunk.embedding <=> $query_vector < 0.3
+       OR chunk.text @@ 'connection pool exhausted')
+  AND doc.version = $current_version
 RETURN doc.title, author.name, chunk.text
 ORDER BY chunk.embedding <=> $query_vector
 LIMIT 10

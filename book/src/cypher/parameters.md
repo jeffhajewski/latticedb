@@ -93,7 +93,7 @@ lattice_query_bind_vector(query, "embedding", vec, 128);
 Parameterized queries are cached by their query text. The same query with different parameter values reuses the cached plan, improving performance for repeated queries.
 
 ```python
-# These share the same cached plan:
+# These share the same cache entry:
 db.query("MATCH (n) WHERE n.name = $name RETURN n", parameters={"name": "Alice"})
 db.query("MATCH (n) WHERE n.name = $name RETURN n", parameters={"name": "Bob"})
 ```

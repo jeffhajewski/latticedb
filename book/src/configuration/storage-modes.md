@@ -18,6 +18,7 @@ changes. That sameness is deliberate and worth relying on.
 
 ```python
 db = latticedb.Database("graph.lattice", create=True)
+db.open()  # or use it as a context manager: with latticedb.Database(...) as db:
 ```
 
 The normal case. One file holds everything: nodes, edges, properties, indexes, and
@@ -34,6 +35,7 @@ different instants. Use `backup`, or stop the process first. See
 
 ```python
 db = latticedb.Database(":memory:")
+db.open()
 ```
 
 ```typescript

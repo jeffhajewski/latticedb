@@ -10,7 +10,7 @@ LatticeDB is a single-file local database for connected, semantic, and textual d
 - **Sub-millisecond.** 0.13 us node lookups. 0.83 ms vector search at 1M vectors with 100% recall.
 
 ```cypher
--- Find chunks similar to a query, traverse to their document, then to the author
+// Find chunks similar to a query, traverse to their document, then to the author
 MATCH (chunk:Chunk)-[:PART_OF]->(doc:Document)-[:AUTHORED_BY]->(author:Person)
 WHERE chunk.embedding <=> $query_vector < 0.3
   AND doc.content @@ "neural networks"

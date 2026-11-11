@@ -472,8 +472,8 @@ lattice_hash_embed_free(vector, dims);
 
 ```c
 lattice_embedding_config config = {
-    .endpoint = "http://localhost:11434",
-    .model = NULL,  // use default
+    .endpoint = "http://localhost:11434/api/embeddings",  // the full URL to POST to
+    .model = "nomic-embed-text",  // required; NULL is rejected with LATTICE_ERROR_INVALID_ARG
     .api_format = LATTICE_EMBEDDING_OLLAMA,
     .api_key = NULL,
     .timeout_ms = 0  // default 30s
@@ -677,7 +677,7 @@ tells you that something failed but not what. These functions describe the
 failure, and they read from the query handle:
 
 ```c
-if (lattice_query_prepare(db, cypher, &query) != LATTICE_OK) {
+if (lattice_query_execute(query, txn, &result) != LATTICE_OK) {
     printf("%s: %s\n",
            lattice_query_last_error_code(query),      // e.g. "invalid_operator_types"
            lattice_query_last_error_message(query));  // human-readable text

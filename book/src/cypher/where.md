@@ -59,7 +59,7 @@ MATCH (n:Person) WHERE n.email IS NOT NULL RETURN n
 Properties in the MATCH pattern act as equality filters:
 
 ```cypher
--- These are equivalent:
+// These are equivalent:
 MATCH (n:Person {name: "Alice"}) RETURN n
 MATCH (n:Person) WHERE n.name = "Alice" RETURN n
 ```

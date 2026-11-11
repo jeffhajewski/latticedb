@@ -171,6 +171,7 @@ Size:         68 KB
 Nodes:        2
 Edges:        1
 Format:       v3
+Vector:       disabled
 FTS:          enabled
 ```
 
@@ -214,8 +215,8 @@ n1,"Person;Employee",Alice,30
 ```
 
 ```text
-_source,_target,_type,since
-n1,n2,KNOWS,2020
+_source,_target,_type
+1,2,KNOWS
 ```
 
 Two options are worth knowing about for large imports:

@@ -14,20 +14,24 @@ To use embeddings:
 ## Enabling Vector Storage
 
 ```python
+from latticedb import Database
+
 db = Database(
     "mydb.db",
     create=True,
-    enable_vector=True,
+    enable_vectors=True,
     vector_dimensions=128,  # Must match your embedding dimensions
 )
+db.open()
 ```
 
 ```typescript
 const db = new Database("mydb.db", {
   create: true,
-  enableVector: true,
+  enableVectors: true,
   vectorDimensions: 128,
 });
+await db.open();
 ```
 
 ## Hash Embeddings (Built-in)
@@ -38,7 +42,7 @@ const db = new Database("mydb.db", {
 
 **Python:**
 ```python
-from latticedb import hash_embed
+from latticedb.embedding import hash_embed
 
 vec = hash_embed("hello world", dimensions=128)
 # Returns a numpy array of shape (128,)
@@ -46,7 +50,7 @@ vec = hash_embed("hello world", dimensions=128)
 
 **TypeScript:**
 ```typescript
-import { hashEmbed } from "@hajewski/latticedb";
+import { hashEmbed } from "@hajewski/latticedb/embedding";
 
 const vec = hashEmbed("hello world", 128);
 // Returns a Float32Array of length 128
@@ -59,17 +63,17 @@ For production-quality semantic embeddings, use the HTTP client to connect to an
 ### Ollama
 
 ```python
-from latticedb import EmbeddingClient
+from latticedb.embedding import EmbeddingClient
 
-with EmbeddingClient("http://localhost:11434") as client:
+with EmbeddingClient("http://localhost:11434/api/embeddings") as client:
     vec = client.embed("hello world")
 ```
 
 ```typescript
-import { EmbeddingClient } from "@hajewski/latticedb";
+import { EmbeddingClient } from "@hajewski/latticedb/embedding";
 
 const client = new EmbeddingClient({
-  endpoint: "http://localhost:11434",
+  endpoint: "http://localhost:11434/api/embeddings",
 });
 const vec = client.embed("hello world");
 client.close();
@@ -78,10 +82,10 @@ client.close();
 ### OpenAI
 
 ```python
-from latticedb import EmbeddingClient, EmbeddingApiFormat
+from latticedb.embedding import EmbeddingClient, EmbeddingApiFormat
 
 with EmbeddingClient(
-    "https://api.openai.com/v1",
+    "https://api.openai.com/v1/embeddings",
     model="text-embedding-3-small",
     api_format=EmbeddingApiFormat.OPENAI,
     api_key="sk-...",
@@ -90,10 +94,10 @@ with EmbeddingClient(
 ```
 
 ```typescript
-import { EmbeddingClient, EmbeddingApiFormat } from "@hajewski/latticedb";
+import { EmbeddingClient, EmbeddingApiFormat } from "@hajewski/latticedb/embedding";
 
 const client = new EmbeddingClient({
-  endpoint: "https://api.openai.com/v1",
+  endpoint: "https://api.openai.com/v1/embeddings",
   model: "text-embedding-3-small",
   apiFormat: EmbeddingApiFormat.OpenAI,
   apiKey: "sk-...",
@@ -107,6 +111,8 @@ client.close();
 Attach a vector to a node within a write transaction:
 
 ```python
+from latticedb.embedding import hash_embed
+
 with db.write() as txn:
     node = txn.create_node(labels=["Chunk"], properties={"text": "some text"})
     embedding = hash_embed("some text", dimensions=128)
@@ -144,7 +150,7 @@ import numpy as np
 
 with db.write() as txn:
     vectors = np.random.rand(10000, 128).astype(np.float32)
-    node_ids = txn.batch_insert("Document", vectors)
+    node_ids = txn.batch_insert_vectors("Document", vectors)
     txn.commit()
 ```
 

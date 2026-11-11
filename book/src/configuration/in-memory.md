@@ -4,6 +4,7 @@ Pass `:memory:` as the path and the database has no files behind it at all.
 
 ```python
 db = latticedb.Database(":memory:")
+db.open()  # or: with latticedb.Database(":memory:") as db:
 ```
 
 ```typescript
@@ -51,15 +52,16 @@ and this swaps the implementation rather than adding a second path through the
 engine. If something works against a file it works here.
 
 ```python
-db = latticedb.Database(":memory:")
+import latticedb
 
-with db.write() as txn:
-    alice = txn.create_node(labels=["Person"], properties={"name": "Alice"})
-    bob = txn.create_node(labels=["Person"], properties={"name": "Bob"})
-    txn.create_edge(alice.id, bob.id, "KNOWS")
-    txn.commit()
+with latticedb.Database(":memory:") as db:
+    with db.write() as txn:
+        alice = txn.create_node(labels=["Person"], properties={"name": "Alice"})
+        bob = txn.create_node(labels=["Person"], properties={"name": "Bob"})
+        txn.create_edge(alice.id, bob.id, "KNOWS")
+        txn.commit()
 
-rows = db.query("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name")
+    rows = db.query("MATCH (a:Person)-[:KNOWS]->(b:Person) RETURN a.name, b.name")
 ```
 
 ## Three things that differ
@@ -97,6 +99,8 @@ Each has its own storage, so a shared path name means nothing:
 ```python
 a = latticedb.Database(":memory:")
 b = latticedb.Database(":memory:")   # a completely separate database
+a.open()
+b.open()
 ```
 
 There is no way to share one between handles, and no equivalent of SQLite's shared

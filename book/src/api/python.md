@@ -71,6 +71,8 @@ Database(
     create: bool = False,        # Create if doesn't exist
     read_only: bool = False,     # Open in read-only mode
     cache_size_mb: int = 100,    # Page cache size
+    enable_wal: bool = True,     # WAL-backed transactions and crash recovery
+    enable_adjacency_cache: bool = False, # In-memory graph adjacency cache
     enable_vectors: bool | None = None, # Preferred vector config flag
     enable_vector: bool | None = None,  # Deprecated compatibility alias
     vector_dimensions: int = 128,# Vector dimensions
@@ -79,7 +81,10 @@ Database(
 ```
 
 ```python
+import latticedb
+
 db = latticedb.Database(":memory:")
+db.open()
 ```
 
 ### In-memory databases
@@ -160,6 +165,7 @@ Insert many nodes with vectors in a single efficient call:
 
 ```python
 import numpy as np
+from latticedb import Database
 
 with Database("vectors.db", create=True, enable_vectors=True, vector_dimensions=128) as db:
     with db.write() as txn:
@@ -187,6 +193,8 @@ results = db.fts_search_fuzzy("Person", "bio", "machne lerning", limit=10)
 
 # Control fuzzy matching sensitivity
 results = db.fts_search_fuzzy(
+    "Person",
+    "bio",
     "machne",
     limit=10,
     max_distance=2,      # Max edit distance (default: 2)
@@ -216,13 +224,13 @@ Connect to Ollama, OpenAI, or compatible APIs:
 ```python
 from latticedb.embedding import EmbeddingClient, EmbeddingApiFormat
 
-# Ollama (default)
-with EmbeddingClient("http://localhost:11434") as client:
+# Ollama (default). The endpoint is the full URL the client POSTs to.
+with EmbeddingClient("http://localhost:11434/api/embeddings") as client:
     vec = client.embed("hello world")
 
 # OpenAI-compatible API
 with EmbeddingClient(
-    "https://api.openai.com/v1",
+    "https://api.openai.com/v1/embeddings",
     model="text-embedding-3-small",
     api_format=EmbeddingApiFormat.OPENAI,
     api_key="sk-...",
@@ -320,7 +328,7 @@ db.cache_clear()
 ## Error Handling
 
 ```python
-from latticedb import LatticeError, LatticeNotFoundError, LatticeIOError
+from latticedb import Database, LatticeError, LatticeNotFoundError, LatticeIOError
 
 try:
     with Database("nonexistent.db") as db:

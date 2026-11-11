@@ -10,9 +10,9 @@ you get a real database with nothing to create and nothing to clean up:
 ```python
 from latticedb import Database
 
-db = Database(":memory:")
-db.query("CREATE (a:Person {name: 'Alice'})")
-print(db.query("MATCH (p:Person) RETURN p.name"))
+with Database(":memory:") as db:
+    db.query("CREATE (a:Person {name: 'Alice'})")
+    print(db.query("MATCH (p:Person) RETURN p.name"))
 ```
 
 Everything works the same as a database on disk — transactions, indexes, vector
@@ -25,14 +25,15 @@ Swap `":memory:"` for a filename when you want to keep the results.
 ## Python
 
 ```python
-from latticedb import Database, hash_embed
+from latticedb import Database
+from latticedb.embedding import hash_embed
 
-with Database("knowledge.db", create=True, enable_vector=True, vector_dimensions=128) as db:
+with Database("knowledge.db", create=True, enable_vectors=True, vector_dimensions=128) as db:
 
     # --- Build the graph ---
     db.create_node_fts_index("Chunk", "text")
 
-with db.write() as txn:
+    with db.write() as txn:
         # Create authors
         alice = txn.create_node(labels=["Person"], properties={"name": "Alice", "field": "ML"})
         bob = txn.create_node(labels=["Person"], properties={"name": "Bob", "field": "Systems"})
@@ -47,7 +48,7 @@ with db.write() as txn:
             doc = txn.create_node(labels=["Document"], properties={"title": title})
             chunk = txn.create_node(labels=["Chunk"], properties={"text": text})
 
-            # The chunk's text is indexed because Chunk.text is declared below.
+            # The chunk's text is indexed because Chunk.text was declared above.
             txn.set_vector(chunk.id, "embedding", hash_embed(text, dimensions=128))
 
             txn.create_edge(chunk.id, doc.id, "PART_OF")
@@ -84,11 +85,12 @@ with db.write() as txn:
 ## TypeScript
 
 ```typescript
-import { Database, hashEmbed } from "@hajewski/latticedb";
+import { Database } from "@hajewski/latticedb";
+import { hashEmbed } from "@hajewski/latticedb/embedding";
 
 const db = new Database("knowledge.db", {
   create: true,
-  enableVector: true,
+  enableVectors: true,
   vectorDimensions: 128,
 });
 await db.open();

@@ -38,7 +38,7 @@ await db.write(async (txn) => {
 
   await txn.createEdge(alice.id, bob.id, "KNOWS");
 
-  // Index text for full-text search
+  // Writing the indexed property is what makes it searchable
   await txn.setProperty(alice.id, "bio", "Alice works on machine learning research");
   await txn.setProperty(bob.id, "bio", "Bob studies deep learning and neural networks");
 
@@ -98,6 +98,8 @@ interface DatabaseOptions {
   create?: boolean;          // Create if not exists (default: false)
   readOnly?: boolean;        // Open read-only (default: false)
   cacheSizeMb?: number;      // Cache size in MB (default: 100)
+  enableWal?: boolean;       // WAL-backed transactions and crash recovery (default: true)
+  enableAdjacencyCache?: boolean; // In-memory graph adjacency cache (default: false)
   enableVectors?: boolean;   // Preferred vector config flag
   enableVector?: boolean;    // Deprecated compatibility alias
   vectorDimensions?: number; // Vector dimensions (default: 128)
@@ -257,16 +259,16 @@ Connect to Ollama, OpenAI, or compatible APIs:
 ```typescript
 import { EmbeddingClient, EmbeddingApiFormat } from "@hajewski/latticedb/embedding";
 
-// Ollama (default)
+// Ollama (default). The endpoint is the full URL the client POSTs to.
 const client = new EmbeddingClient({
-  endpoint: "http://localhost:11434",
+  endpoint: "http://localhost:11434/api/embeddings",
 });
 const vec = client.embed("hello world");
 client.close();
 
 // OpenAI-compatible API
 const openaiClient = new EmbeddingClient({
-  endpoint: "https://api.openai.com/v1",
+  endpoint: "https://api.openai.com/v1/embeddings",
   model: "text-embedding-3-small",
   apiFormat: EmbeddingApiFormat.OpenAI,
   apiKey: "sk-...",
@@ -309,11 +311,11 @@ await db.write(async (txn) => {
 ```typescript
 await db.write(async (txn) => {
   await txn.publishStream("jobs", { id: 1, status: "queued" }, "job.queued");
-  await txn.setStreamOffset("jobs", "worker-a", 1);
+  await txn.setStreamOffset("jobs", "worker-a", 1n);
 });
 
-const records = await db.readStream("jobs", { afterSequence: 0, limit: 100 });
-const changes = await db.changes({ afterSequence: 0, limit: 100 });
+const records = await db.readStream("jobs", { afterSequence: 0n, limit: 100 });
+const changes = await db.changes({ afterSequence: 0n, limit: 100 });
 ```
 
 ### Cypher Queries

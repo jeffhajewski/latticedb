@@ -7,7 +7,7 @@ LatticeDB uses the Cypher query language for graph operations. Cypher is a decla
 Nodes are written in parentheses, edges in square brackets:
 
 ```cypher
--- Match a pattern
+// Match a pattern
 MATCH (person:Person)-[:KNOWS]->(friend:Person)
 WHERE person.name = "Alice"
 RETURN friend.name

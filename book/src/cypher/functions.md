@@ -62,12 +62,12 @@ RETURN n.name, toFloat(n.age) AS float_age
 Numeric operations automatically promote integers to floats when mixed:
 
 ```cypher
-RETURN 42 + 3.14   -- Returns 45.14 (float)
+RETURN 42 + 3.14   // Returns 45.14 (float)
 ```
 
 Null propagates through most operations:
 
 ```cypher
-RETURN null + 1     -- Returns null
-RETURN null = null  -- Returns true (special case)
+RETURN null + 1     // Returns null
+RETURN null = null  // Returns null
 ```

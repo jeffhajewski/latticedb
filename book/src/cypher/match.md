@@ -59,15 +59,15 @@ Variables are used in `WHERE`, `RETURN`, `SET`, and other clauses to reference m
 Match edges between nodes:
 
 ```cypher
--- Outgoing edge
+// Outgoing edge
 MATCH (a:Person)-[:KNOWS]->(b:Person)
 RETURN a.name, b.name
 
--- Incoming edge
+// Incoming edge
 MATCH (a:Person)<-[:KNOWS]-(b:Person)
 RETURN a.name, b.name
 
--- Either direction
+// Either direction
 MATCH (a:Person)-[:KNOWS]-(b:Person)
 RETURN a.name, b.name
 ```
@@ -104,16 +104,16 @@ RETURN chunk.text, doc.title, author.name
 Match paths of varying length:
 
 ```cypher
--- 1 to 3 hops
+// 1 to 3 hops
 MATCH (a)-[*1..3]->(b) RETURN b
 
--- Exactly 2 hops
+// Exactly 2 hops
 MATCH (a)-[*2]->(b) RETURN b
 
--- 2 or more hops
+// 2 or more hops
 MATCH (a)-[*2..]->(b) RETURN b
 
--- Any number of hops
+// Any number of hops
 MATCH (a)-[*]->(b) RETURN b
 ```
 

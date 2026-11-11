@@ -86,7 +86,7 @@ with Database("knowledge.db", create=True, enable_vectors=True, vector_dimension
     # --- Build the graph ---
     db.create_node_fts_index("Chunk", "text")
 
-with db.write() as txn:
+    with db.write() as txn:
         # Create authors
         alice = txn.create_node(labels=["Person"], properties={"name": "Alice", "field": "ML"})
         bob = txn.create_node(labels=["Person"], properties={"name": "Bob", "field": "Systems"})
@@ -189,6 +189,7 @@ await db.close();
 ### Go
 
 ```go
+// import latticeembedding "github.com/jeffhajewski/latticedb/bindings/go/embedding"
 db, err := latticedb.Open("knowledge.db", latticedb.OpenOptions{
     Create: true,
     EnableVectors: true,
@@ -211,7 +212,7 @@ err = db.Update(func(tx *latticedb.Tx) error {
     if err != nil {
         return err
     }
-    embedding, err := latticedb.HashEmbed("The transformer architecture uses self-attention...", 128)
+    embedding, err := latticeembedding.Hash("The transformer architecture uses self-attention...", 128)
     if err != nil {
         return err
     }

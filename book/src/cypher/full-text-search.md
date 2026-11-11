@@ -150,7 +150,7 @@ A query with no `LIMIT` returns every match. Writing `LIMIT` still limits.
 The query is a space-separated list of terms, and all of them must match:
 
 ```cypher
--- Both "neural" and "networks" must appear
+// Both "neural" and "networks" must appear
 MATCH (d:Document) WHERE d.text @@ "neural networks" RETURN d
 ```
 

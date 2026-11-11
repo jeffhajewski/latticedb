@@ -34,7 +34,7 @@ await db.write(async (txn) => {
   await txn.publishStream("jobs", { id: 1 }, "job.queued");
 });
 
-const records = await db.readStream("jobs", { afterSequence: 0, limit: 100 });
+const records = await db.readStream("jobs", { afterSequence: 0n, limit: 100 });
 ```
 
 ## Graph Changefeed

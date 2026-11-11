@@ -8,6 +8,7 @@ The `cache_size_mb` parameter controls how many database pages are cached in mem
 
 ```python
 db = Database("mydb.db", cache_size_mb=200)  # 200 MB cache
+db.open()
 ```
 
 **Guidelines:**
@@ -49,7 +50,7 @@ import numpy as np
 with db.write() as txn:
     # Fast: ~248 inserts/sec at 1M scale
     vectors = np.random.rand(10000, 128).astype(np.float32)
-    node_ids = txn.batch_insert("Document", vectors)
+    node_ids = txn.batch_insert_vectors("Document", vectors)
     txn.commit()
 ```
 
@@ -60,11 +61,11 @@ Batch insert is significantly faster than individual node creation because it am
 Use parameterized queries to enable plan caching:
 
 ```python
-# Good: plan is cached and reused
+# Good: parsed once, reused
 for name in names:
     db.query("MATCH (n:Person) WHERE n.name = $name RETURN n", parameters={"name": name})
 
-# Bad: new plan compiled for each query
+# Bad: every distinct query text is parsed again
 for name in names:
     db.query(f"MATCH (n:Person) WHERE n.name = '{name}' RETURN n")
 ```
@@ -100,11 +101,11 @@ See [Full-Text Search](./full-text-search.md#performance).
 Use specific labels for nodes you query frequently. Label scans are fast because they use a dedicated index:
 
 ```cypher
--- Fast: scans only Chunk nodes
-MATCH (c:Chunk) WHERE c.embedding <=> $q < 0.5 RETURN c
+// Fast: scans only Chunk nodes
+MATCH (c:Chunk) WHERE c.source = "web" RETURN c
 
--- Slower: scans all nodes
-MATCH (n) WHERE n.embedding <=> $q < 0.5 RETURN n
+// Slower: scans all nodes
+MATCH (n) WHERE n.source = "web" RETURN n
 ```
 
 ## Transaction Scope

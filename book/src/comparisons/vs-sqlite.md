@@ -52,10 +52,9 @@ Doing hybrid retrieval on SQLite means composing three things: FTS5 for text, `s
 In LatticeDB, all three are the same query:
 
 ```cypher
-MATCH (chunk:Chunk)
+MATCH (chunk:Chunk)-[:PART_OF]->(doc:Document)-[:AUTHORED_BY]->(author:Person)
 WHERE chunk.embedding <=> $query_vector < 0.3
   AND chunk.text @@ 'transaction isolation'
-MATCH (chunk)-[:PART_OF]->(doc:Document)-[:AUTHORED_BY]->(author:Person)
 RETURN doc.title, author.name, chunk.text
 ORDER BY chunk.embedding <=> $query_vector
 LIMIT 10

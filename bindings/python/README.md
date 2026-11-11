@@ -50,7 +50,7 @@ with Database("knowledge.db", create=True, enable_vectors=True, vector_dimension
     # Create nodes, edges, and index content
     db.create_node_fts_index("Person", "bio")
 
-with db.write() as txn:
+    with db.write() as txn:
         alice = txn.create_node(
             labels=["Person"],
             properties={"name": "Alice", "age": 30},
@@ -101,9 +101,12 @@ Database(
     create: bool = False,        # Create if doesn't exist
     read_only: bool = False,     # Open in read-only mode
     cache_size_mb: int = 100,    # Page cache size
+    enable_wal: bool = True,     # WAL-backed transactions and crash recovery
+    enable_adjacency_cache: bool = False, # In-memory graph adjacency cache
     enable_vectors: bool | None = None, # Preferred vector config flag
     enable_vector: bool | None = None,  # Deprecated compatibility alias
-    vector_dimensions: int = 128 # Vector dimensions
+    vector_dimensions: int = 128, # Vector dimensions
+    lock: bool = True,           # Take a file lock (exclusive for read-write, shared for read-only)
 )
 ```
 
@@ -162,6 +165,7 @@ Insert many nodes with vectors in a single efficient call:
 
 ```python
 import numpy as np
+from latticedb import Database
 
 with Database("vectors.db", create=True, enable_vectors=True, vector_dimensions=128) as db:
     with db.write() as txn:
@@ -210,6 +214,8 @@ results = db.fts_search_fuzzy("Person", "bio", "machne lerning", limit=10)
 
 # Control fuzzy matching sensitivity
 results = db.fts_search_fuzzy(
+    "Person",
+    "bio",
     "machne",
     limit=10,
     max_distance=2,      # Max edit distance (default: 2)
@@ -239,7 +245,7 @@ Connect to Ollama, OpenAI, or compatible APIs:
 ```python
 from latticedb.embedding import EmbeddingClient, EmbeddingApiFormat
 
-# Ollama (default)
+# Ollama (default). The endpoint is the full URL the client POSTs to.
 with EmbeddingClient("http://localhost:11434/api/embeddings") as client:
     vec = client.embed("hello world")
 
@@ -314,6 +320,8 @@ an explicit cursor. Reads do not acknowledge records; commit offsets separately
 when your consumer has processed a batch.
 
 ```python
+from latticedb import Database
+
 with Database("events.db", create=True) as db:
     with db.write() as txn:
         txn.publish_stream("jobs", {"id": 1, "status": "queued"}, kind="job.queued")
@@ -346,7 +354,7 @@ Nested `list` and `dict` values are not currently exposed by the public bindings
 ## Error Handling
 
 ```python
-from latticedb import LatticeError, LatticeNotFoundError, LatticeIOError
+from latticedb import Database, LatticeError, LatticeNotFoundError, LatticeIOError
 
 try:
     with Database("nonexistent.db") as db:

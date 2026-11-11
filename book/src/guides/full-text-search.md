@@ -35,6 +35,8 @@ with db.write() as txn:
 ```
 
 ```typescript
+await db.createNodeFtsIndex("Document", "text");
+
 await db.write(async (txn) => {
   const node = await txn.createNode({
     labels: ["Document"],
@@ -92,6 +94,8 @@ results = db.fts_search_fuzzy("Document", "text", "machin lerning", limit=10)
 
 ```python
 results = db.fts_search_fuzzy(
+    "Document",
+    "text",
     "machne",
     limit=10,
     max_distance=2,      # Max edit distance (default: 2)

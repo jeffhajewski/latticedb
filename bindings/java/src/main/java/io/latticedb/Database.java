@@ -76,14 +76,29 @@ public final class Database implements AutoCloseable {
         return handle != 0;
     }
 
+    /**
+     * Closes the database. Throws {@link ErrorCode#INVALID_ARG} while a
+     * transaction or result from it is still open; the database then stays
+     * open, so end those and close again. An {@link ErrorCode#IO} failure
+     * still closes it.
+     */
     @Override
     public synchronized void close() {
         if (handle == 0) {
             return;
         }
-        long h = handle;
+        try {
+            Native.close(handle);
+        } catch (LatticeException e) {
+            // Only a refused close leaves the native database open. Keeping
+            // the handle lets the caller finish what is open and try again;
+            // dropping it would strand the file lock and the unflushed log.
+            if (e.getErrorCode() == ErrorCode.IO) {
+                handle = 0;
+            }
+            throw e;
+        }
         handle = 0;
-        Native.close(h);
     }
 
     // Synchronized against close(): without this, one thread can read a

@@ -56,6 +56,26 @@ class DatabaseLifecycleTest {
     }
 
     @Test
+    void refusedCloseKeepsTheDatabaseOpen() {
+        Database db = Database.open(dbPath(), OpenOptions.defaults().create(true));
+        Transaction txn = db.beginWrite();
+        LatticeException refused = assertThrows(LatticeException.class, db::close);
+        assertEquals(ErrorCode.INVALID_ARG, refused.getErrorCode());
+        assertTrue(db.isOpen());
+
+        txn.createNode(java.util.List.of("AfterRefusedClose"));
+        txn.commit();
+        db.close();
+        assertFalse(db.isOpen());
+
+        try (Database reopened = Database.open(dbPath())) {
+            long count = reopened.read(t -> (long) t.query(
+                    "MATCH (n:AfterRefusedClose) RETURN count(n) AS c").rows().get(0).get("c"));
+            assertEquals(1L, count);
+        }
+    }
+
+    @Test
     void readOnlyDatabaseRejectsWrites() {
         try (Database db = Database.open(dbPath(),
                 OpenOptions.defaults().create(true).readOnly(false))) {

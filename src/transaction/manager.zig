@@ -356,6 +356,34 @@ pub const TxnManager = struct {
         self.aborted_count += 1;
     }
 
+    /// End a transaction without writing anything to the log.
+    ///
+    /// For a database handle that has stopped trusting its log, where an
+    /// abort record could land after a commit record of unknown fate.
+    pub fn discard(self: *Self, txn: *Transaction) TxnError!void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (txn.state != .active) {
+            return TxnError.NotActive;
+        }
+        const entry = self.active_txns.getPtr(txn.id) orelse {
+            return TxnError.NotFound;
+        };
+
+        txn.state = .aborted;
+        entry.savepoints.deinit(self.allocator);
+        for (entry.undo_log.items) |undo_entry| {
+            if (undo_entry.prev_data) |data| {
+                self.allocator.free(data);
+            }
+        }
+        entry.undo_log.deinit(self.allocator);
+        _ = self.active_txns.remove(txn.id);
+
+        self.aborted_count += 1;
+    }
+
     /// Create a savepoint for partial rollback
     pub fn savepoint(self: *Self, txn: *Transaction, name: []const u8) TxnError!void {
         self.mutex.lock();

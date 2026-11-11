@@ -885,6 +885,14 @@ pub const Database = struct {
     /// When the last automatic checkpoint ran, for the minimum-interval check.
     last_auto_checkpoint_ns: i128,
     active_writer_txn_id: ?u64,
+    /// Set when a commit that is already in the log could not be applied, or
+    /// when the log could not be synced. What this handle holds in memory no
+    /// longer matches the log, so it refuses new transactions and stops
+    /// writing checkpoints; reopening replays the log and puts things right.
+    failed: bool = false,
+    /// Test hook: fail the next commit after its commit record is durable,
+    /// in place of applying it.
+    fail_next_apply_for_testing: bool = false,
     stream_mutex: @import("compat").Mutex,
     stream_cond: @import("compat").Condition,
     stream_epoch: u64,
@@ -1204,6 +1212,8 @@ pub const Database = struct {
         self.txn_overlays = std.AutoHashMap(u64, TxnOverlay).init(allocator);
         self.last_auto_checkpoint_ns = @import("compat").nanoTimestamp();
         self.active_writer_txn_id = null;
+        self.failed = false;
+        self.fail_next_apply_for_testing = false;
         self.stream_epoch = 0;
 
         // 10. Initialize Adjacency Cache (optional)
@@ -1295,6 +1305,7 @@ pub const Database = struct {
     /// means the caller decides when the log is truncated.
     fn checkpointLeftoverLog(self: *Self) void {
         if (self.read_only) return;
+        if (self.failed) return;
         if (self.config.auto_checkpoint == null) return;
         const wal = if (self.wal) |*w| w else return;
         if (wal.header.frame_count == 0) return;
@@ -1316,6 +1327,10 @@ pub const Database = struct {
         wal: *WalManager,
         mode: checkpoint_mod.CheckpointMode,
     ) DatabaseError!checkpoint_mod.CheckpointStats {
+        // The trees of a failed handle are missing a committed transaction
+        // that only the log still holds.
+        if (self.failed) return DatabaseError.IoError;
+
         // A transaction with records already in the log would lose its
         // beginning to a checkpoint, and recovery would then drop its commit.
         if (self.txn_manager) |*tm| {
@@ -1757,7 +1772,7 @@ pub const Database = struct {
 
         // 8c. HNSW index
         if (self.hnsw_index) |*hnsw| {
-            if (!self.read_only) {
+            if (!self.read_only and !self.failed) {
                 self.persistHnswIndex() catch {};
             }
             hnsw.deinit();
@@ -1769,7 +1784,7 @@ pub const Database = struct {
         // 6. Symbol table (no explicit deinit needed)
 
         // 5. B+Trees - save root pages before closing (best effort)
-        if (!self.read_only) {
+        if (!self.read_only and !self.failed) {
             self.saveTreeRoots() catch {};
         }
 
@@ -1814,6 +1829,7 @@ pub const Database = struct {
     /// Begin a new transaction
     /// Returns a Transaction handle that must be passed to mutating operations
     pub fn beginTransaction(self: *Self, mode: TxnMode) DatabaseError!Transaction {
+        if (self.failed) return DatabaseError.IoError;
         if (self.txn_manager) |*tm| {
             if (mode == .read_write and self.active_writer_txn_id != null) {
                 return DatabaseError.TransactionConflict;
@@ -1837,12 +1853,28 @@ pub const Database = struct {
         return DatabaseError.TransactionsNotEnabled;
     }
 
-    /// Commit a transaction, making all changes durable
+    /// Commit a transaction, making all changes durable.
+    ///
+    /// The order is: write the transaction's records, write and sync its
+    /// commit record, then apply the changes to the trees. The sync is the
+    /// commit point. Applying first, as this used to, meant a failure
+    /// partway through left half a transaction visible in this process and
+    /// in the next checkpoint while the log said it had never committed.
+    ///
+    /// Past the commit point there is no way back: the transaction is
+    /// durable and recovery will redo it. If applying it here fails, or the
+    /// sync itself fails and the outcome is unknown, the handle marks itself
+    /// failed and returns an error. The caller reopens, and recovery
+    /// produces the state the log describes.
     pub fn commitTransaction(self: *Self, txn: *Transaction) DatabaseError!void {
         if (self.txn_manager) |*tm| {
+            if (self.failed) return DatabaseError.IoError;
+
             var should_broadcast_streams = false;
+            var has_changes = false;
             if (self.txn_overlays.getPtr(txn.id)) |overlay| {
                 if (overlay.hasChanges()) {
+                    has_changes = true;
                     try self.captureTxnSnapshotsForCommit(txn.id, overlay);
                     try self.stageGraphChangefeed(overlay);
                     try self.assignStreamSequences(overlay);
@@ -1850,23 +1882,36 @@ pub const Database = struct {
                         overlay.stream_offsets.items.len > 0 or
                         overlay.stream_trims.items.len > 0;
                     try self.logTxnOverlayForCommit(txn, overlay);
-                    try self.applyTxnOverlay(txn.id, overlay);
                 }
             }
+
             tm.commit(txn) catch |err| {
-                return switch (err) {
-                    TxnError.NotActive => DatabaseError.TransactionNotActive,
-                    TxnError.NotFound => DatabaseError.NotFound,
-                    else => DatabaseError.IoError,
-                };
+                switch (err) {
+                    TxnError.NotActive => return DatabaseError.TransactionNotActive,
+                    TxnError.NotFound => return DatabaseError.NotFound,
+                    else => {
+                        // The commit record may or may not have reached the
+                        // disk. Nothing more may be appended after it.
+                        if (has_changes) self.failed = true;
+                        return DatabaseError.IoError;
+                    },
+                }
             };
-            if (self.txn_overlays.fetchRemove(txn.id)) |entry| {
-                var overlay = entry.value;
-                overlay.deinit(self.allocator);
+
+            if (has_changes) {
+                const overlay = self.txn_overlays.getPtr(txn.id).?;
+                const applied = if (self.fail_next_apply_for_testing) blk: {
+                    self.fail_next_apply_for_testing = false;
+                    break :blk DatabaseError.IoError;
+                } else self.applyTxnOverlay(txn.id, overlay);
+                applied catch {
+                    self.failed = true;
+                    self.releaseTxnState(txn.id);
+                    return DatabaseError.IoError;
+                };
             }
-            if (self.active_writer_txn_id == txn.id) {
-                self.active_writer_txn_id = null;
-            }
+
+            self.releaseTxnState(txn.id);
             if (should_broadcast_streams) {
                 self.stream_mutex.lock();
                 self.stream_epoch +%= 1;
@@ -1877,6 +1922,17 @@ pub const Database = struct {
             return;
         }
         return DatabaseError.TransactionsNotEnabled;
+    }
+
+    /// Drop a finished transaction's overlay and its claim on the writer slot.
+    fn releaseTxnState(self: *Self, txn_id: u64) void {
+        if (self.txn_overlays.fetchRemove(txn_id)) |entry| {
+            var overlay = entry.value;
+            overlay.deinit(self.allocator);
+        }
+        if (self.active_writer_txn_id == txn_id) {
+            self.active_writer_txn_id = null;
+        }
     }
 
     /// Abort a transaction, rolling back all changes
@@ -1902,20 +1958,18 @@ pub const Database = struct {
                 }
             }
 
-            tm.abort(txn) catch |err| {
+            // On a failed handle the log must stay as it is: an abort
+            // record written after a commit record whose sync failed would
+            // decide an outcome nobody knows.
+            const ended = if (self.failed) tm.discard(txn) else tm.abort(txn);
+            ended catch |err| {
                 return switch (err) {
                     TxnError.NotActive => DatabaseError.TransactionNotActive,
                     TxnError.NotFound => DatabaseError.NotFound,
                     else => DatabaseError.IoError,
                 };
             };
-            if (self.txn_overlays.fetchRemove(txn.id)) |entry| {
-                var overlay = entry.value;
-                overlay.deinit(self.allocator);
-            }
-            if (self.active_writer_txn_id == txn.id) {
-                self.active_writer_txn_id = null;
-            }
+            self.releaseTxnState(txn.id);
             return;
         }
         return DatabaseError.TransactionsNotEnabled;

@@ -482,6 +482,55 @@ test "a checkpoint is refused while a transaction has records in the log" {
     _ = try db.checkpoint(.truncate);
 }
 
+test "a commit is durable before it is applied, and a failed apply stops the handle" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_commit_point.ltdb";
+    const killed = "/tmp/lattice_crash_commit_point_killed.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+    cleanup(killed);
+    defer cleanup(killed);
+
+    var before: NodeId = undefined;
+    var during: NodeId = undefined;
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+        defer db.close();
+
+        var txn = try db.beginTransaction(.read_write);
+        before = try db.createNode(&txn, &.{"Person"});
+        try db.commitTransaction(&txn);
+
+        // This commit reaches the log and then fails where it would have
+        // been applied to the trees.
+        txn = try db.beginTransaction(.read_write);
+        during = try db.createNode(&txn, &.{"Person"});
+        db.fail_next_apply_for_testing = true;
+        try std.testing.expectError(error.IoError, db.commitTransaction(&txn));
+
+        // The handle no longer matches its log, so it takes no more work,
+        // and it does not write that state into the file.
+        try std.testing.expectError(error.IoError, db.beginTransaction(.read_only));
+        try std.testing.expectError(error.IoError, db.beginTransaction(.read_write));
+        try std.testing.expectError(error.IoError, db.checkpoint(.truncate));
+        try std.testing.expect(!try db.nodeExists(during));
+
+        try copyAsIfKilled(allocator, path, killed);
+    }
+
+    // The commit record was durable before the failure, so both a kill and a
+    // close leave a database that recovers the transaction.
+    for ([_][]const u8{ killed, path }) |reopened| {
+        var db = try openCrashTestDb(allocator, reopened, false);
+        defer db.close();
+        try std.testing.expect(try db.nodeExists(before));
+        try std.testing.expect(try db.nodeExists(during));
+        var txn = try db.beginTransaction(.read_write);
+        _ = try db.createNode(&txn, &.{"Person"});
+        try db.commitTransaction(&txn);
+    }
+}
+
 test "fragmented vector replacements and removals replay from WAL" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_crash_vectors.ltdb";

@@ -1085,7 +1085,7 @@ lattice_error lattice_query_execute(
  * Cleared automatically before each execute call.
  */
 lattice_query_error_stage lattice_query_last_error_stage(lattice_query* query);
-const char* lattice_query_last_error_message(lattice_query* query);
+const char* lattice_query_last_error_message(lattice_query* query); /* nullable */
 const char* lattice_query_last_error_code(lattice_query* query); /* nullable */
 /* Whether executing this query could change the database.
  * Bindings use this to choose between a read-only and a read-write

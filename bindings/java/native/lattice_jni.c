@@ -41,6 +41,12 @@ static jclass CLS_FLOAT = NULL;
 static jclass CLS_INTEGER = NULL;
 static jmethodID MID_INT_INIT = NULL;
 static jclass CLS_NUMBER = NULL;
+static jclass CLS_SHORT = NULL;
+static jclass CLS_BYTE = NULL;
+static jclass CLS_ATOMIC_INTEGER = NULL;
+static jclass CLS_ATOMIC_LONG = NULL;
+static jclass CLS_BIG_INTEGER = NULL;
+static jmethodID MID_BIG_INTEGER_LONG_VALUE_EXACT = NULL;
 static jmethodID MID_NUMBER_DOUBLE_VALUE = NULL;
 static jmethodID MID_NUMBER_LONG_VALUE = NULL;
 static jclass CLS_BYTE_ARRAY = NULL;
@@ -115,6 +121,11 @@ static void init_cache(JNIEnv *env) {
     } while (0)
     CACHE_CLASS(CLS_FLOAT, "java/lang/Float");
     CACHE_CLASS(CLS_NUMBER, "java/lang/Number");
+    CACHE_CLASS(CLS_SHORT, "java/lang/Short");
+    CACHE_CLASS(CLS_BYTE, "java/lang/Byte");
+    CACHE_CLASS(CLS_ATOMIC_INTEGER, "java/util/concurrent/atomic/AtomicInteger");
+    CACHE_CLASS(CLS_ATOMIC_LONG, "java/util/concurrent/atomic/AtomicLong");
+    CACHE_CLASS(CLS_BIG_INTEGER, "java/math/BigInteger");
     CACHE_CLASS(CLS_BYTE_ARRAY, "[B");
     CACHE_CLASS(CLS_FLOAT_ARRAY, "[F");
     CACHE_CLASS(CLS_LIST, "java/util/List");
@@ -130,6 +141,8 @@ static void init_cache(JNIEnv *env) {
         "doubleValue", "()D");
     MID_NUMBER_LONG_VALUE = (*env)->GetMethodID(env, CLS_NUMBER,
         "longValue", "()J");
+    MID_BIG_INTEGER_LONG_VALUE_EXACT = (*env)->GetMethodID(env, CLS_BIG_INTEGER,
+        "longValueExact", "()J");
     MID_COLLECTION_ITERATOR = (*env)->GetMethodID(env, CLS_COLLECTION,
         "iterator", "()Ljava/util/Iterator;");
     MID_ITERATOR_HAS_NEXT = (*env)->GetMethodID(env, CLS_ITERATOR,
@@ -176,18 +189,26 @@ static int check(JNIEnv *env, lattice_error code) {
     return 1;
 }
 
-/* Build and throw a QueryException from the prepared-query diagnostics. */
-static void throw_query_error(JNIEnv *env, lattice_query *q) {
+static jstring utf8_to_jstring(JNIEnv *env, const char *ptr, size_t len);
+
+/* Build and throw a QueryException from the prepared-query diagnostics.
+ * `rc` is the code the failing call returned. When the query carries no
+ * diagnostics (a finished transaction, say) the message falls back to the
+ * code's own text rather than an empty string. Text goes through
+ * utf8_to_jstring: NewStringUTF expects modified UTF-8 and mangles characters
+ * outside the BMP. */
+static void throw_query_error(JNIEnv *env, lattice_query *q, lattice_error rc) {
     jint stage = (jint)lattice_query_last_error_stage(q);
     const char *msg = lattice_query_last_error_message(q);
     const char *diag = lattice_query_last_error_code(q);
-    jint code = -1; /* generic */
+    if (msg == NULL || msg[0] == '\0') msg = lattice_error_message(rc);
+    jint code = (jint)rc;
     jboolean has_loc = lattice_query_last_error_has_location(q) ? JNI_TRUE : JNI_FALSE;
     jint line = (jint)lattice_query_last_error_line(q);
     jint column = (jint)lattice_query_last_error_column(q);
     jint length = (jint)lattice_query_last_error_length(q);
-    jstring jmsg = (*env)->NewStringUTF(env, msg ? msg : "");
-    jstring jdiag = diag ? (*env)->NewStringUTF(env, diag) : NULL;
+    jstring jmsg = utf8_to_jstring(env, msg ? msg : "", msg ? strlen(msg) : 0);
+    jstring jdiag = diag ? utf8_to_jstring(env, diag, strlen(diag)) : NULL;
     jobject ex = (*env)->NewObject(env, CLS_QUERY_EXCEPTION, MID_QUERY_EXCEPTION_INIT,
         code, stage, jmsg, jdiag, has_loc, line, column, length);
     if (ex != NULL) (*env)->Throw(env, ex);
@@ -326,15 +347,28 @@ static int fill_value_inner(JNIEnv *env, lattice_value *dst, jobject value) {
     /* Numbers: integral types -> INT, floating types -> FLOAT */
     if ((*env)->IsInstanceOf(env, value, CLS_NUMBER)) {
         memset(dst, 0, sizeof(*dst));
-        if ((*env)->IsInstanceOf(env, value, CLS_DOUBLE) ||
-            (*env)->IsInstanceOf(env, value, CLS_FLOAT)) {
-            dst->type = LATTICE_VALUE_FLOAT;
-            dst->data.float_val = (*env)->CallDoubleMethod(env, value,
-                                                            MID_NUMBER_DOUBLE_VALUE);
-        } else {
+        /* Only the fixed-width integer types are INT. Anything else, such
+         * as BigDecimal, goes through doubleValue(): longValue() would drop
+         * the fraction of 1.5. A BigInteger must fit in 64 bits. */
+        if ((*env)->IsInstanceOf(env, value, CLS_BIG_INTEGER)) {
+            dst->type = LATTICE_VALUE_INT;
+            dst->data.int_val = (*env)->CallLongMethod(env, value,
+                                                        MID_BIG_INTEGER_LONG_VALUE_EXACT);
+            return (*env)->ExceptionCheck(env) ? 0 : 1;
+        }
+        if ((*env)->IsInstanceOf(env, value, CLS_LONG) ||
+            (*env)->IsInstanceOf(env, value, CLS_INTEGER) ||
+            (*env)->IsInstanceOf(env, value, CLS_SHORT) ||
+            (*env)->IsInstanceOf(env, value, CLS_BYTE) ||
+            (*env)->IsInstanceOf(env, value, CLS_ATOMIC_INTEGER) ||
+            (*env)->IsInstanceOf(env, value, CLS_ATOMIC_LONG)) {
             dst->type = LATTICE_VALUE_INT;
             dst->data.int_val = (*env)->CallLongMethod(env, value,
                                                         MID_NUMBER_LONG_VALUE);
+        } else {
+            dst->type = LATTICE_VALUE_FLOAT;
+            dst->data.float_val = (*env)->CallDoubleMethod(env, value,
+                                                            MID_NUMBER_DOUBLE_VALUE);
         }
         return 1;
     }
@@ -1016,7 +1050,17 @@ Java_io_latticedb_Native_batchInsert(JNIEnv *env, jclass cls, jlong txn_handle,
     size_t lb_len = 0;
     char *lb = jstring_to_utf8(env, label, &lb_len);
     if ((*env)->ExceptionCheck(env)) return NULL;
+    if (vectors == NULL) {
+        free(lb);
+        throw_lattice(env, LATTICE_ERROR_INVALID_ARG);
+        return NULL;
+    }
     jsize count = (*env)->GetArrayLength(env, vectors);
+    if (count == 0) {
+        /* Nothing to insert; the C call rejects an empty batch. */
+        free(lb);
+        return (*env)->NewLongArray(env, 0);
+    }
     lattice_node_with_vector *nodes = NULL;
     float **copies = NULL;
     if (count > 0) {
@@ -1830,7 +1874,7 @@ Java_io_latticedb_Native_queryExecute(JNIEnv *env, jclass cls, jlong query_handl
     lattice_error rc = lattice_query_execute((lattice_query *)(uintptr_t)query_handle,
         (lattice_txn *)(uintptr_t)txn_handle, &result);
     if (rc != LATTICE_OK) {
-        throw_query_error(env, (lattice_query *)(uintptr_t)query_handle);
+        throw_query_error(env, (lattice_query *)(uintptr_t)query_handle, rc);
         return 0;
     }
     return (jlong)(uintptr_t)result;
@@ -1873,7 +1917,7 @@ Java_io_latticedb_Native_resultColumnName(JNIEnv *env, jclass cls, jlong result_
     init_cache(env); (void)cls;
     const char *name = lattice_result_column_name(
         (lattice_result *)(uintptr_t)result_handle, (uint32_t)index);
-    return name ? (*env)->NewStringUTF(env, name) : NULL;
+    return name ? utf8_to_jstring(env, name, strlen(name)) : NULL;
 }
 
 JNIEXPORT jobject JNICALL

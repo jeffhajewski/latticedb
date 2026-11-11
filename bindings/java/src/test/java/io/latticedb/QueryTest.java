@@ -72,6 +72,33 @@ class QueryTest {
     }
 
     @Test
+    void queryErrorCarriesTheNativeCode() {
+        try (Database db = seeded("qc.db")) {
+            QueryException ex = assertThrows(QueryException.class,
+                    () -> db.query("MATCH (n RETURN n"));
+            assertNotEquals(ErrorCode.UNKNOWN, ex.getCode());
+            assertFalse(ex.getMessage().isEmpty());
+        }
+    }
+
+    @Test
+    void decimalParametersKeepTheirFraction() {
+        try (Database db = seeded("bd.db")) {
+            QueryResult result = db.query("CREATE (n:Num {v: $x}) RETURN n.v AS v",
+                    Map.of("x", new java.math.BigDecimal("1.5")));
+            assertEquals(1.5, ((Number) result.rows().get(0).get("v")).doubleValue(), 0.0);
+        }
+    }
+
+    @Test
+    void emptyVectorBatchInsertsNothing() {
+        try (Database db = seeded("eb.db")) {
+            List<Long> ids = db.write(tx -> tx.batchInsertVectors("Bulk", new float[0][]));
+            assertTrue(ids.isEmpty());
+        }
+    }
+
+    @Test
     void semanticErrorHasStage() {
         try (Database db = seeded("se.db")) {
             QueryException ex = assertThrows(QueryException.class,

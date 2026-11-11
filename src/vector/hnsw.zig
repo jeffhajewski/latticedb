@@ -1258,6 +1258,29 @@ pub const HnswIndex = struct {
     // ========================================================================
 
     /// Insert a vector into the index
+    /// Whether the index already holds exactly this vector for this node.
+    ///
+    /// Recovery replays every vector write since the last checkpoint, and
+    /// most of them are already in the file. Inserting one of those again
+    /// would go down the replacement path, which unlinks the node from its
+    /// neighbours and links it afresh. Doing that for every node in the log
+    /// leaves the graph worse connected than the one that was saved.
+    pub fn holdsVector(self: *Self, vector_id: u64, vector: []const f32) bool {
+        if (vector.len != self.config.dimensions) return false;
+        const existing = self.nodes.get(vector_id) orelse return false;
+
+        var norm_buf: [4096]f32 = undefined;
+        const stored_form = if (self.config.metric == .cosine) blk: {
+            @memcpy(norm_buf[0..vector.len], vector);
+            simd_distance.normalize(norm_buf[0..vector.len]);
+            break :blk norm_buf[0..vector.len];
+        } else vector;
+
+        const borrowed = self.vector_storage.borrowByLocation(existing.vector_loc) catch return false;
+        defer borrowed.release();
+        return std.mem.eql(u8, std.mem.sliceAsBytes(borrowed.data), std.mem.sliceAsBytes(stored_form));
+    }
+
     pub fn insert(self: *Self, vector_id: u64, vector: []const f32) HnswError!void {
         if (!types.isValidVectorDimensions(self.config.dimensions) or vector.len != self.config.dimensions) {
             return HnswError.DimensionMismatch;

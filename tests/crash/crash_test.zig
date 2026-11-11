@@ -2085,3 +2085,71 @@ test "a flush interrupted partway is finished from the journal at the next open"
     defer allocator.free(people);
     try std.testing.expectEqual(@as(usize, total), people.len);
 }
+
+test "committed vectors and indexed text survive a kill while the buffer pool is evicting" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_evict_search.ltdb";
+    const killed = "/tmp/lattice_crash_evict_search_killed.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+    cleanup(killed);
+    defer cleanup(killed);
+
+    const dims = 8;
+    const config = DatabaseConfig{
+        .enable_fts = true,
+        .enable_vector = true,
+        .vector_dimensions = dims,
+        .buffer_pool_size = 64 * 4096,
+        .auto_checkpoint = .{ .max_wal_frames = 150 },
+    };
+    const count = 900;
+    const ids = try allocator.alloc(NodeId, count);
+    defer allocator.free(ids);
+
+    var db = try Database.open(allocator, path, .{ .create = true, .config = config });
+    defer db.close();
+    try db.createNodeFtsIndex("Chunk", "text");
+
+    for (ids, 0..) |*id, i| {
+        var vector = [_]f32{0} ** dims;
+        vector[i % dims] = 1;
+        vector[(i + 3) % dims] = @floatFromInt(i + 1);
+        var text_buf: [96]u8 = undefined;
+        const text = try std.fmt.bufPrint(&text_buf, "shared marker{d} filler words to give the posting lists some bulk", .{i});
+
+        var txn = try db.beginTransaction(.read_write);
+        id.* = try db.createNode(&txn, &.{"Chunk"});
+        try db.setNodeProperty(&txn, id.*, "text", .{ .string_val = text });
+        try db.setNodeVectorInTxn(&txn, id.*, &vector);
+        try db.commitTransaction(&txn);
+
+        if (i % 149 != 148 and i != count - 1) continue;
+
+        cleanup(killed);
+        try copyAsIfKilled(allocator, path, killed);
+        var reopened = try Database.open(allocator, killed, .{ .config = config });
+        defer reopened.close();
+
+        const committed = i + 1;
+        for (ids[0..committed]) |node_id| try std.testing.expect(try reopened.nodeExists(node_id));
+
+        // Every vector is reachable.
+        var probe = [_]f32{1} ** dims;
+        const nearest = try reopened.vectorSearch(&probe, @intCast(committed), @intCast(@min(committed, 65535)));
+        defer reopened.freeVectorSearchResults(nearest);
+        try std.testing.expectEqual(committed, nearest.len);
+
+        // Every document is indexed: all of them hold "shared", and each
+        // holds its own marker.
+        const everyone = try reopened.ftsSearchIndex(.node, "Chunk", "text", "shared", @intCast(committed + 10));
+        defer reopened.freeFtsSearchResults(everyone);
+        try std.testing.expectEqual(committed, everyone.len);
+        var marker_buf: [32]u8 = undefined;
+        const marker = try std.fmt.bufPrint(&marker_buf, "marker{d}", .{i});
+        const one = try reopened.ftsSearchIndex(.node, "Chunk", "text", marker, 10);
+        defer reopened.freeFtsSearchResults(one);
+        try std.testing.expectEqual(@as(usize, 1), one.len);
+        try std.testing.expectEqual(ids[i], one[0].doc_id);
+    }
+}

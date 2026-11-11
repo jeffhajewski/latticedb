@@ -1358,8 +1358,10 @@ pub const Database = struct {
         if (self.buffer_pool.dirtyCount() * 2 < self.buffer_pool.frame_count) return;
         if (self.buffer_pool.hasPinnedFrames()) return;
 
-        // The vector index is not written here: it is rewritten whole, and
-        // the log still holds every vector change since the last checkpoint.
+        // The vector index's node map lives in memory, and the pages it
+        // describes are among those about to be written. An image with the
+        // pages and without the map is not a whole image.
+        self.persistHnswIndex() catch return;
         self.saveTreeRoots() catch return;
         if (self.wal) |*wal| wal.sync() catch return;
         _ = self.buffer_pool.flushAll() catch {};

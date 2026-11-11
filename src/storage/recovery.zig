@@ -532,6 +532,9 @@ pub const RecoveryManager = struct {
         const mutation = try wal_payload.deserializeVectorMutation(self.allocator, payload);
         defer if (mutation.vector) |vector| self.allocator.free(vector);
         if (mutation.vector) |vector| {
+            // Already in the file, from a flush after this record was
+            // written: leave the graph as it was saved.
+            if (hnsw.holdsVector(mutation.node_id, vector)) return;
             try hnsw.insert(mutation.node_id, vector);
         } else {
             try hnsw.remove(mutation.node_id);

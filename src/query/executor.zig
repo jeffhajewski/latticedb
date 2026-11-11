@@ -355,6 +355,11 @@ pub const ExecutionContext = struct {
     /// then each match compiles its pattern.
     regex_cache: ?*regex.Cache = null,
 
+    /// Whether nothing writes to the stores while this query runs, so a
+    /// node record read once can be read again from memory. False unless
+    /// the caller knows the query only reads.
+    stable_reads: bool = false,
+
     const Self = @This();
 
     /// Create a new execution context

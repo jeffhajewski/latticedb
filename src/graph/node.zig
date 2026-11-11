@@ -207,6 +207,55 @@ pub const NodeStore = struct {
         return NodeError.NotFound;
     }
 
+    /// One property of a node, decoded into `allocator`, or null when the
+    /// node has no property `key_id`.
+    ///
+    /// `get` decodes and copies every label and property of the node; a
+    /// query reading `n.name` needs one value, so this walks the stored
+    /// record and decodes only that one.
+    pub fn getProperty(self: *Self, node_id: NodeId, key_id: SymbolId, allocator: Allocator) NodeError!?PropertyValue {
+        var key_buf: [8]u8 = undefined;
+        std.mem.writeInt(u64, &key_buf, node_id, .little);
+
+        const serialized = (self.tree.get(&key_buf) catch |err| return mapBTreeError(err)) orelse
+            return NodeError.NotFound;
+        defer self.tree.freeValue(serialized);
+        return decodeProperty(allocator, serialized, key_id);
+    }
+
+    /// `getProperty` through a cache of the last record read, so reading
+    /// several properties of one node finds it in the B-tree once.
+    ///
+    /// The cache's buffer comes from `allocator`, which must outlive it
+    /// (a query arena). The caller must not use a cache across a write to
+    /// the store.
+    pub fn getPropertyCached(
+        self: *Self,
+        cache: *RecordCache,
+        node_id: NodeId,
+        key_id: SymbolId,
+        allocator: Allocator,
+    ) NodeError!?PropertyValue {
+        if (cache.node_id != node_id) {
+            cache.node_id = null;
+            var key_buf: [8]u8 = undefined;
+            std.mem.writeInt(u64, &key_buf, node_id, .little);
+            const serialized = (self.tree.get(&key_buf) catch |err| return mapBTreeError(err)) orelse
+                return NodeError.NotFound;
+            defer self.tree.freeValue(serialized);
+            if (serialized.len > cache.buffer.len) {
+                const new_len = @max(serialized.len, 2 * cache.buffer.len, 256);
+                allocator.free(cache.buffer);
+                cache.buffer = &.{};
+                cache.buffer = allocator.alloc(u8, new_len) catch return NodeError.OutOfMemory;
+            }
+            @memcpy(cache.buffer[0..serialized.len], serialized);
+            cache.len = serialized.len;
+            cache.node_id = node_id;
+        }
+        return decodeProperty(allocator, cache.buffer[0..cache.len], key_id);
+    }
+
     /// Update a node's properties
     pub fn update(self: *Self, node_id: NodeId, labels: []const SymbolId, properties: []const Property) NodeError!void {
         var key_buf: [8]u8 = undefined;
@@ -426,6 +475,67 @@ fn deserializeNode(allocator: Allocator, node_id: NodeId, data: []const u8) !Nod
         .labels = labels,
         .properties = properties,
     };
+}
+
+/// The stored record of the node read last; see `NodeStore.getPropertyCached`.
+pub const RecordCache = struct {
+    node_id: ?NodeId = null,
+    buffer: []u8 = &.{},
+    len: usize = 0,
+};
+
+fn decodeProperty(allocator: Allocator, serialized: []const u8, key_id: SymbolId) NodeError!?PropertyValue {
+    return findSerializedProperty(allocator, serialized, key_id) catch |err| switch (err) {
+        error.OutOfMemory => NodeError.OutOfMemory,
+        else => NodeError.InvalidData,
+    };
+}
+
+/// Decode the value of property `key_id` from a serialized node, skipping
+/// the labels and every other property without allocating.
+fn findSerializedProperty(allocator: Allocator, data: []const u8, key_id: SymbolId) !?PropertyValue {
+    var stream = @import("compat").fixedBufferStream(data);
+    const reader = stream.reader();
+
+    const num_labels = try reader.readInt(u16, .little);
+    try skipBytes(&stream, @as(usize, num_labels) * 2);
+
+    const num_props = try reader.readInt(u16, .little);
+    for (0..num_props) |_| {
+        const prop_key = try reader.readInt(u16, .little);
+        if (prop_key == key_id) return try deserializeValue(allocator, reader);
+        try skipValue(&stream);
+    }
+    return null;
+}
+
+fn skipBytes(stream: anytype, n: usize) error{EndOfStream}!void {
+    if (n > stream.buffer.len - stream.pos) return error.EndOfStream;
+    stream.pos += n;
+}
+
+/// Move past one serialized value (see `serializeValue` for the format).
+fn skipValue(stream: anytype) error{ EndOfStream, InvalidData }!void {
+    const reader = stream.reader();
+    switch (try reader.readByte()) {
+        0 => {},
+        1 => try skipBytes(stream, 1),
+        2, 3 => try skipBytes(stream, 8),
+        4, 5 => try skipBytes(stream, try reader.readInt(u32, .little)),
+        6 => try skipBytes(stream, @as(usize, try reader.readInt(u32, .little)) * 4),
+        7 => {
+            const count = try reader.readInt(u32, .little);
+            for (0..count) |_| try skipValue(stream);
+        },
+        8 => {
+            const count = try reader.readInt(u32, .little);
+            for (0..count) |_| {
+                try skipBytes(stream, try reader.readInt(u32, .little));
+                try skipValue(stream);
+            }
+        },
+        else => return error.InvalidData,
+    }
 }
 
 /// Read a u32 length or count whose items take at least `min_item_size`
@@ -820,6 +930,48 @@ test "property value nested list/map serialization" {
     try std.testing.expectEqual(@as(i64, 1), items[0].int_val);
     try std.testing.expectEqual(@as(i64, 2), items[1].int_val);
     try std.testing.expectEqual(@as(i64, 3), items[2].int_val);
+}
+
+test "one property is read from a serialized node past every value kind" {
+    const allocator = std.testing.allocator;
+
+    var nested = [_]PropertyValue{ .{ .int_val = 1 }, .{ .string_val = "two" } };
+    var entries = [_]PropertyValue.MapEntry{.{ .key = "k", .value = .{ .list_val = &nested } }};
+    var vector = [_]f32{ 0.5, -1.5 };
+    const labels = [_]SymbolId{ 3, 4, 5 };
+    const properties = [_]Property{
+        .{ .key_id = 10, .value = .{ .null_val = {} } },
+        .{ .key_id = 11, .value = .{ .bool_val = true } },
+        .{ .key_id = 12, .value = .{ .int_val = -7 } },
+        .{ .key_id = 13, .value = .{ .float_val = 2.5 } },
+        .{ .key_id = 14, .value = .{ .string_val = "name" } },
+        .{ .key_id = 15, .value = .{ .bytes_val = "\x00\x01" } },
+        .{ .key_id = 16, .value = .{ .vector_val = &vector } },
+        .{ .key_id = 17, .value = .{ .list_val = &nested } },
+        .{ .key_id = 18, .value = .{ .map_val = &entries } },
+        .{ .key_id = 19, .value = .{ .string_val = "last" } },
+    };
+    var buf: [512]u8 = undefined;
+    const data = try serializeNode(&labels, &properties, &buf);
+
+    // Every property comes back equal to what a full decode gives.
+    var node = try deserializeNode(allocator, 1, data);
+    defer node.deinit(allocator);
+    for (node.properties) |prop| {
+        var found = (try findSerializedProperty(allocator, data, prop.key_id)).?;
+        defer found.deinit(allocator);
+        var want_buf: [128]u8 = undefined;
+        var got_buf: [128]u8 = undefined;
+        var want = @import("compat").fixedBufferStream(&want_buf);
+        var got = @import("compat").fixedBufferStream(&got_buf);
+        try serializeValue(want.writer(), prop.value);
+        try serializeValue(got.writer(), found);
+        try std.testing.expectEqualSlices(u8, want_buf[0..want.pos], got_buf[0..got.pos]);
+    }
+    try std.testing.expect((try findSerializedProperty(allocator, data, 99)) == null);
+
+    // A record cut short is an error, not a wrong answer.
+    try std.testing.expectError(error.EndOfStream, findSerializedProperty(allocator, data[0 .. data.len - 2], 19));
 }
 
 test "a truncated or corrupt node record fails cleanly" {

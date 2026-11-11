@@ -6495,6 +6495,66 @@ pub const Database = struct {
         return null;
     }
 
+    /// One property of a node as `txn` sees it, decoded into `allocator`;
+    /// null when the node does not exist or lacks the property.
+    ///
+    /// For the query engine's per-row reads: it takes a resolved key id and
+    /// decodes only the one value, where getNodePropertyInTxn copies the
+    /// whole node and looks the key up again. `cache`, when given, keeps the
+    /// last committed record read (see NodeStore.getPropertyCached); pass
+    /// one only while nothing writes to the store.
+    pub fn getNodePropertyByKeyInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        node_id: NodeId,
+        key_id: symbols_mod.SymbolId,
+        allocator: Allocator,
+        cache: ?*node_mod.RecordCache,
+    ) DatabaseError!?PropertyValue {
+        if (txn) |t| {
+            if (self.getTxnOverlay(t)) |overlay| {
+                if (overlay.node_states.getPtr(node_id)) |state| {
+                    if (!state.exists) return null;
+                    for (state.properties) |prop| {
+                        if (prop.key_id == key_id) return prop.value.clone(allocator) catch return DatabaseError.OutOfMemory;
+                    }
+                    return null;
+                }
+            }
+        }
+        const found = if (cache) |c|
+            self.node_store.getPropertyCached(c, node_id, key_id, allocator)
+        else
+            self.node_store.getProperty(node_id, key_id, allocator);
+        return found catch |err| switch (err) {
+            node_mod.NodeError.NotFound => null,
+            node_mod.NodeError.OutOfMemory => DatabaseError.OutOfMemory,
+            else => DatabaseError.IoError,
+        };
+    }
+
+    /// Whether a node has a label as `txn` sees it, answered from the label
+    /// index rather than by reading the node. False for a node that does
+    /// not exist.
+    pub fn nodeHasLabelInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        node_id: NodeId,
+        label_id: symbols_mod.SymbolId,
+    ) DatabaseError!bool {
+        if (txn) |t| {
+            if (self.getTxnOverlay(t)) |overlay| {
+                if (overlay.node_states.getPtr(node_id)) |state| {
+                    return state.exists and containsSymbolId(state.labels, label_id);
+                }
+            }
+        }
+        return self.label_index.contains(label_id, node_id) catch |err| switch (err) {
+            label_index_mod.LabelIndexError.OutOfMemory => DatabaseError.OutOfMemory,
+            else => DatabaseError.IoError,
+        };
+    }
+
     // ========================================================================
     // Vector Operations
     // ========================================================================
@@ -8359,6 +8419,7 @@ pub const Database = struct {
         var exec_ctx = ExecutionContext.initWithStorage(self.allocator, &self.node_store, &self.symbol_table);
         exec_ctx.database = self;
         exec_ctx.txn = if (auto_txn) |*t| t else txn;
+        exec_ctx.stable_reads = !ast_query.writesData();
         defer exec_ctx.deinit();
 
         var binding_iter = planner.bindings.iterator();

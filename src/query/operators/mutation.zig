@@ -1286,6 +1286,7 @@ fn mapEvalError(err: EvalError) OperatorError {
         EvalError.TypeError => OperatorError.TypeError,
         EvalError.UnboundVariable => OperatorError.UnboundVariable,
         EvalError.PropertyNotFound => OperatorError.PropertyNotFound,
+        EvalError.StorageError => OperatorError.StorageError,
         else => OperatorError.EvaluationError,
     };
 }

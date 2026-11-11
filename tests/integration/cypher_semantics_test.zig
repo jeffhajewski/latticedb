@@ -1057,3 +1057,87 @@ test "cypher: keywords can name properties, labels, types and map keys" {
     var result = try db.query("UNWIND [1] AS x RETURN {limit: 1}.limit AS a");
     result.deinit();
 }
+
+// ============================================================================
+// Reads inside a transaction
+// ============================================================================
+
+fn runIn(db: *Database, txn: *lattice.transaction.manager.Transaction, cypher: []const u8) !void {
+    var result = try db.queryInTxn(txn, cypher);
+    result.deinit();
+}
+
+fn expectString(result: QueryResult, row: usize, col: usize, expected: []const u8) !void {
+    switch (result.rows[row].values[col]) {
+        .string_val => |v| try std.testing.expectEqualStrings(expected, v),
+        else => return error.UnexpectedValueType,
+    }
+}
+
+test "cypher: property and label reads in a transaction see its own writes" {
+    const path = "/tmp/lattice_cs_txn_reads.ltdb";
+    const compat_fs = @import("compat").fs;
+    compat_fs.cwd().deleteFile(path) catch {};
+    compat_fs.cwd().deleteFile(path ++ "-wal") catch {};
+    const db = try Database.open(std.testing.allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = true },
+    });
+    defer {
+        db.close();
+        compat_fs.cwd().deleteFile(path) catch {};
+        compat_fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    try run(db, "CREATE (:P {name: 'a', n: 1})-[:R]->(:Q {name: 'b'})");
+
+    var txn = try db.beginTransaction(.read_write);
+    var open = true;
+    defer if (open) db.abortTransaction(&txn) catch {};
+
+    try runIn(db, &txn, "MATCH (p:P) SET p.n = 2, p.extra = 'x'");
+    try runIn(db, &txn, "CREATE (:P {name: 'c', n: 3})");
+    try runIn(db, &txn, "MATCH (q:Q) REMOVE q:Q SET q:Z");
+    {
+        var result = try db.queryInTxn(&txn, "MATCH (p:P) RETURN p.name, p.n, p.extra ORDER BY p.name");
+        defer result.deinit();
+        try std.testing.expectEqual(@as(usize, 2), result.rowCount());
+        try expectString(result, 0, 0, "a");
+        try expectInt(result, 0, 1, 2);
+        try expectString(result, 0, 2, "x");
+        try expectString(result, 1, 0, "c");
+        try expectInt(result, 1, 1, 3);
+        try expectNull(result, 1, 2);
+    }
+    {
+        // The label on the far end of an expansion is checked as the
+        // transaction sees it.
+        var with_z = try db.queryInTxn(&txn, "MATCH (:P)-[:R]->(q:Z) RETURN q.name");
+        defer with_z.deinit();
+        try std.testing.expectEqual(@as(usize, 1), with_z.rowCount());
+        try expectString(with_z, 0, 0, "b");
+        var with_q = try db.queryInTxn(&txn, "MATCH (:P)-[:R]->(q:Q) RETURN q.name");
+        defer with_q.deinit();
+        try std.testing.expectEqual(@as(usize, 0), with_q.rowCount());
+    }
+    {
+        // A node deleted earlier in the transaction has no properties.
+        var result = try db.queryInTxn(&txn, "MATCH (c:P {name: 'c'}) WITH c DELETE c RETURN c.name");
+        defer result.deinit();
+        try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+        try expectNull(result, 0, 0);
+    }
+
+    // Nothing above is visible outside the transaction, and none of it
+    // survives the abort.
+    {
+        var result = try db.query("MATCH (p:P) RETURN p.n, p.extra");
+        defer result.deinit();
+        try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+        try expectInt(result, 0, 0, 1);
+        try expectNull(result, 0, 1);
+    }
+    open = false;
+    try db.abortTransaction(&txn);
+    try std.testing.expectEqual(@as(i64, 1), try queryCount(db, "MATCH (:P)-[:R]->(q:Q) RETURN count(q)"));
+}

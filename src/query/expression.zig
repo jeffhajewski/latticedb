@@ -15,6 +15,8 @@ const types = @import("../core/types.zig");
 const NodeId = types.NodeId;
 const EdgeId = types.EdgeId;
 const PropertyValue = types.PropertyValue;
+const SymbolId = @import("../graph/symbols.zig").SymbolId;
+const NodeRecordCache = @import("../graph/node.zig").RecordCache;
 
 const vector_distance = @import("../vector/distance.zig");
 const fts_ops = @import("operators/fts.zig");
@@ -65,6 +67,8 @@ pub const EvalError = error{
     IntegerOverflow,
     /// range() would produce more than `MAX_RANGE_LENGTH` elements
     RangeTooLarge,
+    /// Reading the database failed
+    StorageError,
 };
 
 /// The most elements one range() call may produce.
@@ -281,6 +285,29 @@ fn truthValue(value: EvalResult) TruthValue {
     return if (value.isTruthy()) .true_ else .false_;
 }
 
+/// A failed database read as an evaluation error. Reads used to turn these
+/// into null, which made a damaged page look like a missing property.
+fn storageError(err: anyerror) EvalError {
+    return if (err == error.OutOfMemory) EvalError.OutOfMemory else EvalError.StorageError;
+}
+
+/// An EvalResult taking over a value decoded into `allocator`. Scalars and
+/// strings are used in place; lists and maps are converted, which copies
+/// them, and the decoded original is freed.
+fn evalResultFromOwned(value: PropertyValue, allocator: Allocator) EvalResult {
+    switch (value) {
+        .string_val => |v| return .{ .string_val = v },
+        .bytes_val => |v| return .{ .bytes_val = v },
+        .vector_val => |v| return .{ .vector_val = v },
+        .list_val, .map_val => {
+            var owned = value;
+            defer owned.deinit(allocator);
+            return EvalResult.fromPropertyValue(value, allocator);
+        },
+        else => return EvalResult.fromPropertyValue(value, allocator),
+    }
+}
+
 // ============================================================================
 // Expression Evaluator
 // ============================================================================
@@ -289,6 +316,25 @@ fn truthValue(value: EvalResult) TruthValue {
 pub const ExpressionEvaluator = struct {
     /// Allocator for evaluation temporaries
     allocator: Allocator,
+
+    /// Property keys this evaluator has already resolved to symbol ids.
+    ///
+    /// Resolving a name is a B-tree lookup plus an allocation, and an
+    /// operator evaluates the same few `n.prop` expressions on every row.
+    /// Only keys that exist are remembered: a key that is missing now can be
+    /// created by a SET later in the same query, while an id, once given
+    /// out, keeps its name.
+    key_cache: [KEY_CACHE_SIZE]KeyCacheEntry = undefined,
+    key_cache_len: u8 = 0,
+    key_cache_next: u8 = 0,
+
+    /// The record of the node whose property was read last, so that
+    /// `n.a, n.b, n.c` on one row finds `n` in the B-tree once. Used only
+    /// when the query does not write (`ExecutionContext.stable_reads`).
+    node_record: NodeRecordCache = .{},
+
+    const KEY_CACHE_SIZE = 8;
+    const KeyCacheEntry = struct { name: []const u8, id: SymbolId };
 
     const Self = @This();
 
@@ -378,7 +424,8 @@ pub const ExpressionEvaluator = struct {
             // Special pseudo-property for vector embeddings stored outside node properties.
             if (std.mem.eql(u8, pa.property, "embedding")) {
                 if (ctx.database) |database| {
-                    if (database.getNodeVectorInTxn(ctx.txn, node_id) catch return .{ .null_val = {} }) |vector| {
+                    const found = database.getNodeVectorInTxn(ctx.txn, node_id) catch |err| return storageError(err);
+                    if (found) |vector| {
                         // The database's copy was never freed, leaking one
                         // vector per row; evaluation temporaries live in
                         // the evaluator's allocator.
@@ -389,31 +436,19 @@ pub const ExpressionEvaluator = struct {
                 }
             }
 
-            // Get the node store and symbol table from context
             const database = ctx.database orelse return .{ .null_val = {} };
             const symbol_table = ctx.symbol_table orelse return .{ .null_val = {} };
 
-            // Look up the property key symbol ID
-            const key_id = symbol_table.lookup(pa.property) catch {
-                // Property key not found in symbol table means no node has this property
-                return .{ .null_val = {} };
-            };
+            // A key no node has ever used cannot be set on this one.
+            const key_id = (try self.propertyKeyId(symbol_table, pa.property)) orelse return .{ .null_val = {} };
 
-            // Get the node from storage
-            var node = database.getNodeInTxn(ctx.txn, node_id) catch {
-                return .{ .null_val = {} };
-            } orelse return .{ .null_val = {} };
-            defer node.deinit(ctx.allocator);
-
-            // Find the property with matching key_id
-            for (node.properties) |prop| {
-                if (prop.key_id == key_id) {
-                    return EvalResult.fromPropertyValue(prop.value, self.allocator);
-                }
-            }
-
-            // Property not found on this node
-            return .{ .null_val = {} };
+            // Decode just this property, straight into the evaluator's
+            // allocator. A node that no longer exists has no properties.
+            const record_cache = if (ctx.stable_reads) &self.node_record else null;
+            const found = database.getNodePropertyByKeyInTxn(ctx.txn, node_id, key_id, self.allocator, record_cache) catch |err|
+                return storageError(err);
+            const value = found orelse return .{ .null_val = {} };
+            return evalResultFromOwned(value, self.allocator);
         }
 
         // Handle edge property access
@@ -423,9 +458,8 @@ pub const ExpressionEvaluator = struct {
             // Get the database from context
             const database = ctx.database orelse return .{ .null_val = {} };
 
-            var prop = database.getEdgePropertyByIdInTxn(ctx.txn, edge_id, pa.property) catch {
-                return .{ .null_val = {} };
-            } orelse return .{ .null_val = {} };
+            var prop = (database.getEdgePropertyByIdInTxn(ctx.txn, edge_id, pa.property) catch |err|
+                return storageError(err)) orelse return .{ .null_val = {} };
             defer prop.deinit(ctx.allocator);
 
             return EvalResult.fromPropertyValue(prop, self.allocator);
@@ -433,6 +467,26 @@ pub const ExpressionEvaluator = struct {
 
         // Unknown object type
         return .{ .null_val = {} };
+    }
+
+    /// The symbol id of property key `name`, or null when no such key exists.
+    fn propertyKeyId(self: *Self, symbol_table: anytype, name: []const u8) EvalError!?SymbolId {
+        for (self.key_cache[0..self.key_cache_len]) |entry| {
+            if (std.mem.eql(u8, entry.name, name)) return entry.id;
+        }
+        const id = symbol_table.lookup(name) catch |err| return switch (err) {
+            error.NotFound => null,
+            error.OutOfMemory => EvalError.OutOfMemory,
+            else => EvalError.StorageError,
+        };
+        if (self.key_cache_len < KEY_CACHE_SIZE) {
+            self.key_cache[self.key_cache_len] = .{ .name = name, .id = id };
+            self.key_cache_len += 1;
+        } else {
+            self.key_cache[self.key_cache_next] = .{ .name = name, .id = id };
+            self.key_cache_next = (self.key_cache_next + 1) % KEY_CACHE_SIZE;
+        }
+        return id;
     }
 
     /// Evaluate a binary expression

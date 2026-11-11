@@ -107,6 +107,15 @@ pub const LabelIndex = struct {
         return self.tree.contains(&key_bytes) catch false;
     }
 
+    /// Check if a node has a label, reporting a storage failure instead of
+    /// answering false.
+    pub fn contains(self: *Self, label_id: SymbolId, node_id: NodeId) LabelIndexError!bool {
+        const key = LabelKey{ .label_id = label_id, .node_id = node_id };
+        const key_bytes = key.toBytes();
+
+        return self.tree.contains(&key_bytes) catch |err| mapBTreeError(err);
+    }
+
     /// Add multiple labels to a node
     pub fn addLabels(self: *Self, labels: []const SymbolId, node_id: NodeId) LabelIndexError!void {
         for (labels) |label_id| {

@@ -329,12 +329,13 @@ Current export behavior establishes several logical invariants worth preserving 
 
 ### Import Compatibility Boundary
 
-Current CLI import compatibility is intentionally narrower than the logical value model.
+CLI export writes JSON format version 2, which `import` reads back with every value type intact.
 
-- The JSON import path maps `null`, booleans, numbers and strings to `NULL`, `BOOL`, numeric and `STRING`.
-- It also maps arrays to `LIST`, objects to `MAP`, arrays of numbers to `VECTOR`, and any string of even length made only of hex digits to `BYTES`.
-- These rules are lossy. A string such as `"2024"` or `"cafe"` is imported as two bytes, not as a string, and a list of numbers cannot be imported as a `LIST`.
-- Only the scalar mappings are part of the guaranteed import contract. Cross-engine compatibility should therefore target the direct property/query APIs and canonical dump/export behavior, not full-fidelity nested-value interchange through the current CLI JSON import format.
+- `null`, booleans, integers, strings, lists and maps are plain JSON. Floats always carry a decimal point or an exponent, so `2.0` reads back as a float.
+- Bytes, vector-valued properties and non-finite floats are written as single-key tagged objects (`{"$bytes": "<base64>"}`, `{"$vector": [...]}`, `{"$float": "NaN"}`), and a map whose only key starts with `$` is wrapped in `{"$map": ...}`.
+- A string is always imported as a string.
+- A file with no `"version"` field is read as version 1, what 0.16.0 and earlier wrote. There an array of numbers still reads as a `VECTOR`, and bytes, which version 1 wrote as hex strings, come back as strings. A version newer than the importer knows is refused.
+- Node vectors (the HNSW embedding, not a vector property) are exported and imported only when the database is opened with `--enable-vector` and its dimensions.
 
 ## Deliberately Unspecified Areas
 

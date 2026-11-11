@@ -28,6 +28,8 @@ const json_field_target = "target";
 const json_field_type = "type";
 const json_record_kind_edge = "edge";
 const json_record_kind_node = "node";
+const json_field_vector = "vector";
+const json_field_vector_dimensions = "vector_dimensions";
 
 const csv_edges_header = "_source,_target,_type";
 const csv_nodes_header = "_id,_labels";
@@ -223,6 +225,7 @@ pub fn importJsonContent(
         error.UnsupportedVersion => return ImportExportError.UnsupportedVersion,
         else => return ImportExportError.InvalidFormat,
     };
+    try checkVectorsCanBeImported(db, root.object);
 
     // Map from string IDs to NodeIds
     var id_map = std.StringHashMap(NodeId).init(allocator);
@@ -266,6 +269,34 @@ pub fn importJsonContent(
 
     try batcher.flush(&stats);
     return stats;
+}
+
+/// Refuse, before anything is written, a file whose vectors this handle cannot store.
+fn checkVectorsCanBeImported(db: *Database, root: std.json.ObjectMap) ImportExportError!void {
+    const nodes_val = root.get(json_field_nodes) orelse return;
+    if (nodes_val != .array) return;
+    var has_vectors = false;
+    for (nodes_val.array.items) |node_val| {
+        if (node_val == .object and node_val.object.get(json_field_vector) != null) {
+            has_vectors = true;
+            break;
+        }
+    }
+    if (!has_vectors) return;
+
+    const dims = vectorDimensions(db) orelse return ImportExportError.VectorsNotEnabled;
+    if (root.get(json_field_vector_dimensions)) |declared| {
+        const text = jsonNumberText(declared) orelse return ImportExportError.InvalidFormat;
+        const declared_dims = std.fmt.parseInt(u32, text, decimal_base) catch return ImportExportError.InvalidFormat;
+        if (declared_dims != dims) return ImportExportError.VectorDimensionMismatch;
+    }
+}
+
+/// The dimensions of the vector index this handle has open, or null when it
+/// was opened without one.
+pub fn vectorDimensions(db: *const Database) ?u16 {
+    const storage = db.vector_storage orelse return null;
+    return storage.dimensions;
 }
 
 fn importNode(
@@ -319,6 +350,27 @@ fn importNode(
             }
         }
     }
+
+    if (obj.get(json_field_vector)) |vector_val| {
+        try importNodeVector(allocator, db, txn, node_id, vector_val);
+    }
+}
+
+fn importNodeVector(
+    allocator: std.mem.Allocator,
+    db: *Database,
+    txn: ?*Transaction,
+    node_id: NodeId,
+    vector_val: std.json.Value,
+) !void {
+    if (vector_val == .null) return;
+    if (vector_val != .array) return error.InvalidFormat;
+    const vector = try jsonToVector(allocator, vector_val.array.items);
+    defer allocator.free(vector);
+
+    const dims = vectorDimensions(db) orelse return error.VectorsNotEnabled;
+    if (vector.len != dims) return error.VectorDimensionMismatch;
+    db.setNodeVectorInTxn(txn, node_id, vector) catch return error.DatabaseError;
 }
 
 fn importEdge(
@@ -620,6 +672,10 @@ pub const ImportExportError = error{
     InvalidNodeId,
     MissingRequiredField,
     UnsupportedVersion,
+    /// The file holds vectors and the database was opened without them.
+    VectorsNotEnabled,
+    /// The file's vectors have a different number of dimensions than the database's.
+    VectorDimensionMismatch,
 };
 
 /// Export database to JSON format
@@ -635,7 +691,7 @@ pub fn exportJson(
     var exported_nodes = try buildNodeIdSet(allocator, node_ids);
     defer exported_nodes.deinit();
 
-    try writer.print("{{\"" ++ json_field_version ++ "\":{d},\"" ++ json_field_nodes ++ "\":[", .{@intFromEnum(current_format_version)});
+    try writeJsonHeader(db, writer);
 
     var first_node = true;
     for (node_ids) |node_id| {
@@ -695,7 +751,7 @@ pub fn dumpCanonicalJson(
     var exported_nodes = try buildNodeIdSet(allocator, node_ids);
     defer exported_nodes.deinit();
 
-    try writer.print("{{\"" ++ json_field_version ++ "\":{d},\"" ++ json_field_nodes ++ "\":[", .{@intFromEnum(current_format_version)});
+    try writeJsonHeader(db, writer);
     for (node_ids, 0..) |node_id, i| {
         if (i > 0) try writer.writeByte(',');
         try writeNodeJsonCanonical(allocator, db, writer, node_id);
@@ -799,6 +855,26 @@ pub fn exportDot(
     return stats;
 }
 
+/// Open a JSON export: the format version, the vector dimensions when the
+/// handle has vectors, and the start of the nodes array.
+fn writeJsonHeader(db: *const Database, writer: anytype) !void {
+    try writer.print("{{\"" ++ json_field_version ++ "\":{d},", .{@intFromEnum(current_format_version)});
+    if (vectorDimensions(db)) |dims| {
+        try writer.print("\"" ++ json_field_vector_dimensions ++ "\":{d},", .{dims});
+    }
+    try writer.writeAll("\"" ++ json_field_nodes ++ "\":[");
+}
+
+/// Write a node's vector as a "vector" field, when the handle has vectors and
+/// the node has one.
+fn writeNodeVectorField(db: *Database, writer: anytype, node_id: NodeId) !void {
+    if (db.vector_storage == null) return;
+    const vector = (db.getNodeVectorInTxn(null, node_id) catch |err| return mapDatabaseError(err)) orelse return;
+    defer db.allocator.free(vector);
+    try writer.writeAll(",\"" ++ json_field_vector ++ "\":");
+    try writeJsonVector(writer, vector);
+}
+
 fn writeJsonStringContent(writer: anytype, s: []const u8) !void {
     for (s) |c| {
         switch (c) {
@@ -876,7 +952,9 @@ fn writeNodeJson(
         try writePropertyValueJson(writer, prop.value);
     }
 
-    try writer.writeAll("}}");
+    try writer.writeByte('}');
+    try writeNodeVectorField(db, writer, node_id);
+    try writer.writeByte('}');
 }
 
 fn writeNodeJsonCanonical(
@@ -911,7 +989,9 @@ fn writeNodeJsonCanonical(
     const props = db.getNodeProperties(node_id) catch |err| return mapDatabaseError(err);
     defer db.freePropertyEntries(props);
     try writeSortedPropertyEntriesJson(allocator, writer, props);
-    try writer.writeAll("}}");
+    try writer.writeByte('}');
+    try writeNodeVectorField(db, writer, node_id);
+    try writer.writeByte('}');
 }
 
 fn writeEdgeJson(db: *Database, writer: anytype, edge: Database.EdgeInfo) !void {
@@ -990,7 +1070,9 @@ fn writeNodeJsonlRecord(
         try writePropertyValueJson(writer, prop.value);
     }
 
-    try writer.writeAll("}}");
+    try writer.writeByte('}');
+    try writeNodeVectorField(db, writer, node_id);
+    try writer.writeByte('}');
 }
 
 fn writeEdgeJsonlRecord(db: *Database, writer: anytype, edge: Database.EdgeInfo) !void {

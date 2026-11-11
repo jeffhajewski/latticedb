@@ -284,3 +284,44 @@ test "cli: help for every command that opens a database lists the vector options
         }
     }
 }
+
+fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const file = try compat.fs.cwd().openFile(path, .{});
+    defer file.close();
+    return file.readToEndAlloc(allocator, 1 << 30);
+}
+
+test "cli: export includes vectors when told the dimensions, and warns when it leaves them out" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_cli_export_vectors.ltdb";
+    const out = "/tmp/lattice_cli_export_vectors.json";
+    deleteDatabaseFiles(path);
+    defer deleteDatabaseFiles(path);
+    defer compat.fs.cwd().deleteFile(out) catch {};
+
+    {
+        var db = try Database.open(allocator, path, .{
+            .create = true,
+            .config = .{ .enable_fts = false, .enable_vector = true, .vector_dimensions = 4 },
+        });
+        defer db.close();
+        const node = try db.createNode(null, &.{"Chunk"});
+        try db.setNodeVector(node, &[_]f32{ 1, 0, 0, 0 });
+    }
+
+    const without = try runCli(allocator, &.{ "export", path, "--file=" ++ out });
+    defer without.deinit(allocator);
+    try std.testing.expect(without.succeeded());
+    try std.testing.expect(std.mem.indexOf(u8, without.stderr, "--enable-vector") != null);
+    const plain = try readFileAlloc(allocator, out);
+    defer allocator.free(plain);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "\"vector\"") == null);
+
+    const with = try runCli(allocator, &.{ "export", path, "--file=" ++ out, "--enable-vector", "--vector-dims=4" });
+    defer with.deinit(allocator);
+    try std.testing.expect(with.succeeded());
+    try std.testing.expectEqual(@as(usize, 0), with.stderr.len);
+    const full = try readFileAlloc(allocator, out);
+    defer allocator.free(full);
+    try std.testing.expect(std.mem.indexOf(u8, full, "\"vector\":[1.0,0.0,0.0,0.0]") != null);
+}

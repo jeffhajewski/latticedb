@@ -756,3 +756,97 @@ test "import_export: JSON import reads 0.16.0 files and refuses versions it does
         import_export.importJsonContent(allocator, db, "{\"version\":3,\"nodes\":[]}", 1000, false),
     );
 }
+
+const test_vector_dims = 4;
+
+fn openVectorTestDb(path: []const u8) !*Database {
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    return try Database.open(std.testing.allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = false,
+            .enable_fts = false,
+            .enable_vector = true,
+            .vector_dimensions = test_vector_dims,
+        },
+    });
+}
+
+fn exportAlloc(
+    allocator: std.mem.Allocator,
+    db: *Database,
+    comptime exporter: anytype,
+) ![]u8 {
+    var list: std.ArrayList(u8) = .empty;
+    errdefer list.deinit(allocator);
+    _ = try exporter(allocator, db, @import("compat").arrayListWriterWithAllocator(&list, allocator), null);
+    return list.toOwnedSlice(allocator);
+}
+
+test "import_export: export writes node vectors and import restores them" {
+    const allocator = std.testing.allocator;
+    const source_path = "/tmp/lattice_export_vectors_source.ltdb";
+    const imported_path = "/tmp/lattice_export_vectors_imported.ltdb";
+    const source = try openVectorTestDb(source_path);
+    defer cleanupTestDb(source, source_path);
+    const imported = try openVectorTestDb(imported_path);
+    defer cleanupTestDb(imported, imported_path);
+
+    // Unit vectors along an axis are stored exactly as given.
+    const with_vector = try source.createNode(null, &.{"Chunk"});
+    const without_vector = try source.createNode(null, &.{"Chunk"});
+    try source.setNodeVector(with_vector, &[_]f32{ 0, 1, 0, 0 });
+    _ = try source.createEdgeAndGetId(null, with_vector, without_vector, rel_type);
+
+    const first = try exportAlloc(allocator, source, import_export.exportJson);
+    defer allocator.free(first);
+    try std.testing.expect(std.mem.indexOf(u8, first, "\"vector_dimensions\":4") != null);
+    try std.testing.expect(std.mem.indexOf(u8, first, "\"vector\":[0.0,1.0,0.0,0.0]") != null);
+
+    _ = try import_export.importJsonContent(allocator, imported, first, 1000, false);
+    const vector = (try imported.getNodeVectorInTxn(null, 1)).?;
+    defer allocator.free(vector);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 0, 1, 0, 0 }, vector);
+    try std.testing.expect((try imported.getNodeVectorInTxn(null, 2)) == null);
+
+    const second = try exportAlloc(allocator, imported, import_export.exportJson);
+    defer allocator.free(second);
+    try std.testing.expectEqualStrings(first, second);
+
+    const jsonl = try exportAlloc(allocator, source, import_export.exportJsonl);
+    defer allocator.free(jsonl);
+    try std.testing.expect(std.mem.indexOf(u8, jsonl, "\"vector\":[0.0,1.0,0.0,0.0]") != null);
+
+    const dump = try exportAlloc(allocator, source, import_export.dumpCanonicalJson);
+    defer allocator.free(dump);
+    try std.testing.expect(std.mem.indexOf(u8, dump, "\"vector\":[0.0,1.0,0.0,0.0]") != null);
+}
+
+test "import_export: importing vectors needs a database opened with matching vectors" {
+    const allocator = std.testing.allocator;
+    const plain_path = "/tmp/lattice_import_vectors_plain.ltdb";
+    const plain = try openTestDb(plain_path);
+    defer cleanupTestDb(plain, plain_path);
+
+    const with_vectors =
+        \\{"version":2,"vector_dimensions":4,"nodes":[{"id":"a","labels":[],"properties":{},"vector":[1,0,0,0]}],"edges":[]}
+    ;
+    try std.testing.expectError(
+        import_export.ImportExportError.VectorsNotEnabled,
+        import_export.importJsonContent(allocator, plain, with_vectors, 1000, false),
+    );
+    // Refused before anything was written.
+    try std.testing.expectEqual(@as(u64, 0), plain.nodeCount());
+
+    const vector_path = "/tmp/lattice_import_vectors_mismatch.ltdb";
+    const vector_db = try openVectorTestDb(vector_path);
+    defer cleanupTestDb(vector_db, vector_path);
+    const three_dims =
+        \\{"version":2,"vector_dimensions":3,"nodes":[{"id":"a","labels":[],"properties":{},"vector":[1,0,0]}],"edges":[]}
+    ;
+    try std.testing.expectError(
+        import_export.ImportExportError.VectorDimensionMismatch,
+        import_export.importJsonContent(allocator, vector_db, three_dims, 1000, false),
+    );
+    try std.testing.expectEqual(@as(u64, 0), vector_db.nodeCount());
+}

@@ -938,8 +938,8 @@ fn failOpen(stderr: anytype, path: []const u8, err: anyerror, vectors_enabled: b
     if ((err == DatabaseError.IoError or err == DatabaseError.InvalidArgument) and vectors_enabled) {
         return failCommand(
             stderr,
-            "Failed to open database {s}: {s}. Check that --vector-dims matches the number of dimensions " ++
-                "the database was created with.",
+            "Failed to open database {s}: {s}. With --enable-vector, check that the database has a vector " ++
+                "index and that --vector-dims matches the number of dimensions it was created with.",
             .{ path, @errorName(err) },
         );
     }
@@ -1235,7 +1235,25 @@ fn cmdImport(
             },
         }
     } else |err| {
-        return failCommand(stderr, "Import failed: {s}", .{@errorName(err)});
+        return switch (err) {
+            error.VectorsNotEnabled => failCommand(
+                stderr,
+                "Import failed: {s} contains vectors, and {s} was opened without them. Retry with --enable-vector " ++
+                    "--vector-dims=<n>, where <n> is the vector_dimensions the file declares.",
+                .{ file, path },
+            ),
+            error.VectorDimensionMismatch => failCommand(
+                stderr,
+                "Import failed: the vectors in {s} do not have the {d} dimensions {s} was opened with.",
+                .{ file, import_export.vectorDimensions(db) orelse 0, path },
+            ),
+            error.UnsupportedVersion => failCommand(
+                stderr,
+                "Import failed: {s} was written in an export format version this lattice does not know. Upgrade lattice.",
+                .{file},
+            ),
+            else => failCommand(stderr, "Import failed: {s}", .{@errorName(err)}),
+        };
     }
 }
 
@@ -1255,6 +1273,7 @@ fn cmdExport(
     defer db.close();
 
     output.printInfo(stdout, "Exporting {s} to {s}...", .{ path, file });
+    warnIfVectorsLeftOut(stderr, db, path);
 
     const ExportKind = enum { json, jsonl, csv, dot };
     const export_kind: ExportKind = blk: {
@@ -1360,6 +1379,20 @@ fn cmdExport(
     }
 }
 
+/// Say so when a database has vectors that an export or dump will not include.
+///
+/// Vectors can only be read through the vector index, and its dimensions are
+/// not recorded where opening the file could find them, so they are included
+/// only when the command was told the dimensions.
+fn warnIfVectorsLeftOut(stderr: anytype, db: *Database, path: []const u8) void {
+    if (!db.hasPersistedVectorIndex() or import_export.vectorDimensions(db) != null) return;
+    stderr.print(
+        "Warning: {s} has a vector index, and vectors are not included without --enable-vector " ++
+            "--vector-dims=<n>, where <n> is the number of dimensions the database was created with.\n",
+        .{path},
+    ) catch {};
+}
+
 fn cmdDump(
     allocator: std.mem.Allocator,
     stdout: anytype,
@@ -1372,6 +1405,7 @@ fn cmdDump(
     defer db.close();
 
     // Dump to stdout as canonical JSON
+    warnIfVectorsLeftOut(stderr, db, parsed_args.path.?);
     const stats = import_export.dumpCanonicalJson(allocator, db, stdout, parsed_args.label_filter);
 
     if (stats) |s| {

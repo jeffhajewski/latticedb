@@ -386,6 +386,24 @@ pub const DatabaseConfig = struct {
     /// hand.
     auto_checkpoint: ?checkpoint_mod.AutoCheckpointConfig = .{},
 
+    /// On macOS, make every sync ask the drive to flush its cache
+    /// (F_FULLFSYNC). Plain fsync there returns once the drive has the data,
+    /// so a commit survives a process or OS crash but not necessarily a power
+    /// cut. Off by default because it costs several milliseconds per commit.
+    /// No effect on other platforms, where fsync already asks for the flush.
+    /// `LATTICE_FULL_FSYNC=1` in the environment turns it on for bindings
+    /// that cannot set this field.
+    full_fsync: bool = false,
+
+    pub fn effectiveFullFsync(self: DatabaseConfig) bool {
+        if (std.c.getenv("LATTICE_FULL_FSYNC")) |value| {
+            const text = std.mem.span(value);
+            if (std.mem.eql(u8, text, "1") or std.ascii.eqlIgnoreCase(text, "true")) return true;
+            if (std.mem.eql(u8, text, "0") or std.ascii.eqlIgnoreCase(text, "false")) return false;
+        }
+        return self.full_fsync;
+    }
+
     /// Compute effective buffer pool size based on enabled features.
     /// Priority: LATTICE_BUFFER_POOL_MB env var > explicit buffer_pool_size > auto-sizing.
     /// Auto-sizing:
@@ -929,6 +947,10 @@ pub const Database = struct {
         else
             Backend{ .posix = PosixVfs.init(allocator) };
         errdefer self.vfs.deinit();
+        switch (self.vfs) {
+            .posix => |*posix| posix.full_fsync = options.config.effectiveFullFsync(),
+            .memory => {},
+        }
 
         // 2. Open/create PageManager
         //
@@ -1141,6 +1163,8 @@ pub const Database = struct {
         if (is_new and !options.read_only) {
             try self.sync();
             self.page_manager.sync() catch return DatabaseError.IoError;
+            // The files are durable; make their names durable too.
+            if (self.vfs == .posix) PosixVfs.syncParentDir(path);
         }
 
         // Recover only after the vector index is available for logical redo.
@@ -1230,6 +1254,11 @@ pub const Database = struct {
 
         // Flush buffer pool
         self.buffer_pool.close() catch {
+            return DatabaseError.IoError;
+        };
+        // Written is not durable. Without this, nothing fsynced the data
+        // file at all when the WAL is off.
+        self.page_manager.sync() catch {
             return DatabaseError.IoError;
         };
 

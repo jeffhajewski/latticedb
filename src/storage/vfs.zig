@@ -6,6 +6,7 @@
 //! - Portable file operations across platforms
 
 const std = @import("std");
+const builtin = @import("builtin");
 const compat = @import("compat");
 const Allocator = std.mem.Allocator;
 
@@ -153,6 +154,9 @@ pub const Vfs = struct {
 /// POSIX-based VFS implementation.
 pub const PosixVfs = struct {
     allocator: Allocator,
+    /// On macOS, sync files with F_FULLFSYNC instead of fsync. See
+    /// `PosixFile.syncFile`. Applies to files opened after it is set.
+    full_fsync: bool = false,
 
     const Self = @This();
 
@@ -224,9 +228,29 @@ pub const PosixVfs = struct {
             .handle = opened,
             .allocator = self.allocator,
             .writable = flags.write,
+            .full_fsync = self.full_fsync,
         };
 
         return file.file();
+    }
+
+    /// Make a newly created file's directory entry durable.
+    ///
+    /// fsync on a file covers its contents, not the name that leads to it. A
+    /// database or log created just before a power cut can be complete on
+    /// disk and still missing from its directory. Best effort: a directory
+    /// that cannot be opened or synced is not a reason to fail the open.
+    pub fn syncParentDir(path: []const u8) void {
+        if (builtin.os.tag == .windows) return;
+        const dir = std.fs.path.dirname(path) orelse ".";
+        var buf: [std.fs.max_path_bytes:0]u8 = undefined;
+        if (dir.len >= buf.len) return;
+        @memcpy(buf[0..dir.len], dir);
+        buf[dir.len] = 0;
+        const fd = std.c.open(buf[0..dir.len :0].ptr, .{ .ACCMODE = .RDONLY });
+        if (fd < 0) return;
+        _ = std.c.fsync(fd);
+        _ = std.c.close(fd);
     }
 
     /// Delete a file.
@@ -254,6 +278,7 @@ pub const PosixFile = struct {
     handle: compat.fs.File,
     allocator: Allocator,
     writable: bool,
+    full_fsync: bool = false,
 
     const Self = @This();
 
@@ -353,7 +378,17 @@ pub const PosixFile = struct {
     }
 
     /// Sync file to disk.
+    ///
+    /// On macOS, fsync hands the data to the drive but does not ask the drive
+    /// to write out its own cache, so a power cut can still lose it.
+    /// F_FULLFSYNC does ask, and costs correspondingly more, which is why it
+    /// is a setting. Filesystems that do not support it fall back to fsync.
     pub fn syncFile(self: *Self) VfsError!void {
+        if (comptime builtin.os.tag.isDarwin()) {
+            if (self.full_fsync) {
+                if (std.c.fcntl(self.handle.handle(), std.c.F.FULLFSYNC, @as(c_int, 0)) != -1) return;
+            }
+        }
         self.handle.sync() catch |err| {
             return switch (err) {
                 error.InputOutput => VfsError.IoError,

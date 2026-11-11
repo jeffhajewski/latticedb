@@ -129,14 +129,15 @@ pub const SymbolTable = struct {
 
     /// Look up a symbol ID by string
     pub fn lookup(self: *Self, string: []const u8) SymbolError!SymbolId {
-        const result = self.forward.get(string) catch |err| {
+        const result = self.forward.getBorrowed(string) catch |err| {
             return mapBTreeError(err);
         };
 
-        if (result) |value| {
-            defer self.forward.freeValue(value);
-            if (value.len == 2) {
-                return std.mem.readInt(u16, value[0..2], .little);
+        if (result) |borrowed| {
+            var value = borrowed;
+            defer value.release();
+            if (value.bytes.len == 2) {
+                return std.mem.readInt(u16, value.bytes[0..2], .little);
             }
         }
 

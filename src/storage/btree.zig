@@ -548,6 +548,59 @@ pub const BTree = struct {
         }
     }
 
+    /// A value lent by `getBorrowed`. Call `release` when done with `bytes`.
+    pub const BorrowedValue = struct {
+        bytes: []const u8,
+        tree: *BTree,
+        frame: ?*BufferFrame,
+        owned: ?[]u8,
+
+        /// Unpin the leaf the value lives in, or free the materialized
+        /// overflow value. `bytes` is invalid afterwards.
+        pub fn release(self: *BorrowedValue) void {
+            if (self.frame) |frame| self.tree.bp.unpinPage(frame, false);
+            if (self.owned) |owned| self.tree.allocator.free(owned);
+            self.frame = null;
+            self.owned = null;
+            self.bytes = &[_]u8{};
+        }
+    };
+
+    /// Look up a key and lend its value instead of copying it, for callers
+    /// that only read the value (decode it, or copy a few bytes out). An
+    /// inline value is a slice of its leaf, which stays pinned with a shared
+    /// latch until `release`; an overflow value is materialized as `get`
+    /// would and freed by `release`.
+    ///
+    /// Release before inserting into or deleting from this tree: a write
+    /// that reaches the pinned leaf waits for its latch, which never comes.
+    pub fn getBorrowed(self: *Self, key: []const u8) BTreeError!?BorrowedValue {
+        var page_id = self.root_page;
+        while (true) {
+            const frame = self.bp.fetchPage(page_id, .shared) catch return BTreeError.BufferPoolFull;
+            const header: *const PageHeader = @ptrCast(@alignCast(frame.data.ptr));
+            if (header.page_type == .btree_leaf) {
+                const result = LeafNode.searchSlot(frame.data, key, self.comparator);
+                if (!result.found) {
+                    self.bp.unpinPage(frame, false);
+                    return null;
+                }
+                const stored = LeafNode.getStoredValue(frame.data, result.slot);
+                if (!stored.overflow) {
+                    return .{ .bytes = stored.value, .tree = self, .frame = frame, .owned = null };
+                }
+                const owned = self.materializeStoredValue(stored) catch |err| {
+                    self.bp.unpinPage(frame, false);
+                    return err;
+                };
+                self.bp.unpinPage(frame, false);
+                return .{ .bytes = owned, .tree = self, .frame = null, .owned = owned };
+            }
+            page_id = self.findChild(frame.data, key);
+            self.bp.unpinPage(frame, false);
+        }
+    }
+
     /// Check whether a key exists without materializing its value.
     pub fn contains(self: *Self, key: []const u8) BTreeError!bool {
         var page_id = self.root_page;

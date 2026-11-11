@@ -1198,3 +1198,42 @@ test "btree: delete and reinsert beside a fresh split frees and allocates no pag
     try std.testing.expectEqual(count, try helpers.countBTreeEntries(&tree));
     try helpers.validateBTreeInvariants(&tree);
 }
+
+// ============================================================================
+// Contract: getBorrowed lends the stored value and releases its pin
+// ============================================================================
+
+test "btree: getBorrowed returns inline and overflow values and releases the leaf" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "get_borrowed");
+    defer db.deinit();
+    var tree = try db.createBTree();
+
+    const big = try allocator.alloc(u8, 20_000);
+    defer allocator.free(big);
+    for (big, 0..) |*b, i| b.* = @truncate(i *% 31);
+    try tree.insert("inline", "small value");
+    try tree.insert("overflow", big);
+
+    {
+        var value = (try tree.getBorrowed("inline")).?;
+        defer value.release();
+        try std.testing.expectEqualStrings("small value", value.bytes);
+        try std.testing.expectEqual(@as(usize, 1), db.bp.getStats().pinned_frames);
+    }
+    {
+        var value = (try tree.getBorrowed("overflow")).?;
+        defer value.release();
+        try std.testing.expectEqualSlices(u8, big, value.bytes);
+        try std.testing.expectEqual(@as(usize, 0), db.bp.getStats().pinned_frames);
+    }
+    try std.testing.expect((try tree.getBorrowed("missing")) == null);
+    try std.testing.expectEqual(@as(usize, 0), db.bp.getStats().pinned_frames);
+
+    // Released leaves can be written again.
+    try tree.delete("inline");
+    try tree.insert("inline", "changed");
+    var value = (try tree.getBorrowed("inline")).?;
+    defer value.release();
+    try std.testing.expectEqualStrings("changed", value.bytes);
+}

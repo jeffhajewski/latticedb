@@ -154,6 +154,20 @@ fn benchTree() !void {
     }
     report("btree get hit, warm pool", now() - start, lookups.len * 5);
 
+    if (@hasDecl(BTree, "getBorrowed")) {
+        start = now();
+        var total: usize = 0;
+        for (0..5) |_| {
+            for (lookups) |id| {
+                var v = (try tree.getBorrowed(leKey(&key_buf, id))).?;
+                total += v.bytes.len;
+                v.release();
+            }
+        }
+        std.mem.doNotOptimizeAway(total);
+        report("btree getBorrowed hit, warm pool", now() - start, lookups.len * 5);
+    }
+
     start = now();
     var found: usize = 0;
     for (0..5) |_| {

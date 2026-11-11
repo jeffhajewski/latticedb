@@ -192,13 +192,14 @@ pub const NodeStore = struct {
         var key_buf: [8]u8 = undefined;
         std.mem.writeInt(u64, &key_buf, node_id, .little);
 
-        const data = self.tree.get(&key_buf) catch |err| {
+        const data = self.tree.getBorrowed(&key_buf) catch |err| {
             return mapBTreeError(err);
         };
 
-        if (data) |serialized| {
-            defer self.tree.freeValue(serialized);
-            return deserializeNode(self.allocator, node_id, serialized) catch {
+        if (data) |borrowed| {
+            var value = borrowed;
+            defer value.release();
+            return deserializeNode(self.allocator, node_id, value.bytes) catch {
                 return NodeError.InvalidData;
             };
         }

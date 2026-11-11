@@ -428,14 +428,13 @@ pub const EdgeStore = struct {
     /// Get an edge by stable edge_id.
     pub fn getById(self: *Self, edge_id: EdgeId) EdgeError!Edge {
         const id_key = edgeIdToKey(edge_id);
-        const edge_data = self.edge_id_index.get(&id_key) catch |err| {
+        const edge_data = self.edge_id_index.getBorrowed(&id_key) catch |err| {
             return mapBTreeError(err);
         };
-        if (edge_data == null or edge_data.?.len == 0) {
-            return EdgeError.NotFound;
-        }
-        defer self.edge_id_index.freeValue(edge_data.?);
-        return deserializeEdge(self.allocator, edge_id, edge_data.?) catch {
+        var value = edge_data orelse return EdgeError.NotFound;
+        defer value.release();
+        if (value.bytes.len == 0) return EdgeError.NotFound;
+        return deserializeEdge(self.allocator, edge_id, value.bytes) catch {
             return EdgeError.InvalidData;
         };
     }

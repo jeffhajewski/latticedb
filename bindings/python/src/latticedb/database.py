@@ -396,8 +396,12 @@ class Database:
 
             if writes:
                 # The rollback in `finally` would otherwise discard the write.
+                # Only a successful commit ends the transaction: after a failed
+                # one it is still open and holds the writer slot, so leave it
+                # for `finally` to roll back.
                 code = lib._lib.lattice_commit(txn_ptr)
-                txn_ptr = c_void_p()
+                if code == LATTICE_OK:
+                    txn_ptr = c_void_p()
                 check_error(code)
 
             return QueryResult(columns=columns, _rows=rows)

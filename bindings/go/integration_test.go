@@ -999,3 +999,47 @@ func TestEdgeFullTextSearch(t *testing.T) {
 		t.Fatalf("expected Attention, got %v", got)
 	}
 }
+
+func TestUpdateRollsBackAfterFailedCommit(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "failed-commit.db")
+	db, err := Open(dbPath, OpenOptions{Create: true})
+	if err != nil {
+		t.Fatalf("open db: %v", err)
+	}
+	defer db.Close()
+
+	// A failed commit leaves the transaction open on the C side. Stand in for
+	// an I/O failure by reporting one without committing.
+	injected := &Error{Code: ErrorIO, Message: "injected commit failure"}
+	commitTx = func(*Tx) error { return injected }
+	updateErr := db.Update(func(tx *Tx) error {
+		_, err := tx.CreateNode(CreateNodeOptions{Labels: []string{"Lost"}})
+		return err
+	})
+	_, queryErr := db.Query("CREATE (n:LostToo)", nil)
+	commitTx = (*Tx).Commit
+
+	if !errors.Is(updateErr, injected) {
+		t.Fatalf("Update error = %v, want the commit failure", updateErr)
+	}
+	if !errors.Is(queryErr, injected) {
+		t.Fatalf("Query error = %v, want the commit failure", queryErr)
+	}
+
+	// Had either call left its transaction open, it would still hold the
+	// single writer slot and this would fail with LOCK_TIMEOUT.
+	if err := db.Update(func(tx *Tx) error {
+		_, err := tx.CreateNode(CreateNodeOptions{Labels: []string{"Kept"}})
+		return err
+	}); err != nil {
+		t.Fatalf("write after failed commit: %v", err)
+	}
+
+	result, err := db.Query("MATCH (n) RETURN count(n) AS c", nil)
+	if err != nil {
+		t.Fatalf("count nodes: %v", err)
+	}
+	if got := result.Rows[0]["c"]; got != int64(1) {
+		t.Fatalf("node count = %v, want 1 (only the write that committed)", got)
+	}
+}

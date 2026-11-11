@@ -179,6 +179,10 @@ func (db *DB) View(fn func(*Tx) error) error {
 	return rollbackErr
 }
 
+// commitTx commits the transaction Update opened. It is a variable so tests
+// can make a commit fail.
+var commitTx = (*Tx).Commit
+
 func (db *DB) Update(fn func(*Tx) error) error {
 	tx, err := db.BeginWrite()
 	if err != nil {
@@ -194,7 +198,15 @@ func (db *DB) Update(fn func(*Tx) error) error {
 		return runErr
 	}
 
-	return tx.Commit()
+	commitErr := commitTx(tx)
+	if commitErr != nil && tx.IsActive() {
+		// A failed commit leaves the transaction open, and an open writer
+		// blocks every later write. Nobody else holds tx, so end it here.
+		if rollbackErr := tx.Rollback(); rollbackErr != nil {
+			return errors.Join(commitErr, rollbackErr)
+		}
+	}
+	return commitErr
 }
 
 func (db *DB) Query(cypher string, params map[string]Value) (QueryResult, error) {

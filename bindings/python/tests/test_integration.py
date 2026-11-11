@@ -1461,6 +1461,26 @@ class TestQueryTransactionMode:
             after = db.query("MATCH (n) RETURN count(n)")._rows[0]["count(n)"]
             assert before == after
 
+    def test_failed_commit_rolls_back_and_frees_the_writer(self, tmp_path, monkeypatch):
+        from latticedb._bindings import LATTICE_ERROR_IO, get_lib
+
+        db_path = tmp_path / "test.db"
+        lib = get_lib()
+
+        with Database(db_path, create=True) as db:
+            # A commit that fails leaves the transaction open on the C side.
+            # Stand in for an I/O failure: report it without committing.
+            monkeypatch.setattr(lib._lib, "lattice_commit", lambda txn: LATTICE_ERROR_IO)
+            with pytest.raises(LatticeError):
+                db.query("CREATE (n:Lost)")
+            monkeypatch.undo()
+
+            # Had query() dropped that transaction, it would still hold the
+            # single writer slot and this would fail with LOCK_TIMEOUT.
+            db.query("CREATE (n:Kept)")
+            assert db.query("MATCH (n:Lost) RETURN count(n)")._rows[0]["count(n)"] == 0
+            assert db.query("MATCH (n:Kept) RETURN count(n)")._rows[0]["count(n)"] == 1
+
 
 class TestEdgeFtsOperations:
     """Full-text search over relationship properties."""

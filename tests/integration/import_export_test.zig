@@ -1084,3 +1084,188 @@ test "import_export: an edge whose node is missing fails, naming the record and 
     try std.testing.expectEqual(@as(usize, 2), diagnostics.messages.items.len);
     try std.testing.expect(std.mem.startsWith(u8, diagnostics.messages.items[1], "line 3: _source \"x\" is not a node id."));
 }
+
+test "import_export: a property that cannot be imported fails its record, and skipping leaves none of it" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_import_bad_property.ltdb";
+    const wal_path = path ++ "-wal";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(wal_path) catch {};
+    // With a log, so imports run in transactions and a failed record rolls back.
+    const db = try Database.open(allocator, path, .{ .create = true, .config = .{ .enable_fts = false } });
+    defer {
+        db.close();
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(wal_path) catch {};
+    }
+
+    const json_content =
+        \\{"version":2,"nodes":[
+        \\  {"id":"a","labels":["P"],"properties":{"name":"Alice"}},
+        \\  {"id":"b","labels":["P"],"properties":{"name":"Bob","blob":{"$bytes":"not base64!"}}},
+        \\  {"id":"c","labels":["P",7]}
+        \\],"edges":[
+        \\  {"source":"a","target":"b","type":"KNOWS"}
+        \\]}
+    ;
+
+    // Stopping at the first bad record is the default; the value is not left out quietly.
+    var diagnostics = import_export.Diagnostics.init(allocator);
+    defer diagnostics.deinit();
+    try std.testing.expectError(
+        import_export.ImportExportError.DatabaseError,
+        import_export.importJsonContent(allocator, db, json_content, .{ .diagnostics = &diagnostics }),
+    );
+    try std.testing.expectEqualStrings(
+        "nodes[1]: property \"blob\" does not hold a value lattice can store",
+        diagnostics.messages.items[0],
+    );
+    try std.testing.expectEqual(@as(u64, 0), db.nodeCount());
+
+    // Skipping drops the whole record, not just the bad value, and an edge to
+    // a skipped node is skipped too.
+    diagnostics.deinit();
+    diagnostics = import_export.Diagnostics.init(allocator);
+    const stats = try import_export.importJsonContent(allocator, db, json_content, .{
+        .on_error_skip = true,
+        .diagnostics = &diagnostics,
+    });
+    try std.testing.expectEqual(@as(u64, 1), stats.nodes_imported);
+    try std.testing.expectEqual(@as(u64, 2), stats.nodes_failed);
+    try std.testing.expectEqual(@as(u64, 1), stats.edges_failed);
+    try std.testing.expectEqual(@as(u64, 1), db.nodeCount());
+    try std.testing.expectEqualStrings("nodes[2]: its \"labels\" are not all strings", diagnostics.messages.items[1]);
+}
+
+/// A graph with every property type, nodes with several labels and none,
+/// parallel edges with their own properties, a self loop, and vectors.
+fn buildRoundTripGraph(db: *Database) !void {
+    const list = [_]PropertyValue{ .{ .int_val = 1 }, .{ .string_val = "a" }, .{ .null_val = {} }, .{ .float_val = 2.0 } };
+    const map = [_]PropertyValue.MapEntry{
+        .{ .key = "a", .value = .{ .int_val = 1 } },
+        .{ .key = "b", .value = .{ .list_val = &.{ .{ .bool_val = false }, .{ .string_val = "x" } } } },
+    };
+    const dollar_map = [_]PropertyValue.MapEntry{.{ .key = "$bytes", .value = .{ .string_val = "AAEC" } }};
+
+    const alice = try db.createNode(null, &.{ person_label, employee_label });
+    const acme = try db.createNode(null, &.{company_label});
+    const loner = try db.createNode(null, &.{});
+
+    try db.setNodeProperty(null, alice, "null", .{ .null_val = {} });
+    try db.setNodeProperty(null, alice, "yes", .{ .bool_val = true });
+    try db.setNodeProperty(null, alice, "no", .{ .bool_val = false });
+    try db.setNodeProperty(null, alice, "int", .{ .int_val = -42 });
+    try db.setNodeProperty(null, alice, "big", .{ .int_val = std.math.maxInt(i64) });
+    try db.setNodeProperty(null, alice, "float", .{ .float_val = 1.5 });
+    try db.setNodeProperty(null, alice, "whole", .{ .float_val = 1.0 });
+    try db.setNodeProperty(null, alice, "tiny", .{ .float_val = 1e-300 });
+    try db.setNodeProperty(null, alice, "nan", .{ .float_val = std.math.nan(f64) });
+    try db.setNodeProperty(null, alice, "inf", .{ .float_val = -std.math.inf(f64) });
+    try db.setNodeProperty(null, alice, "hexlike", .{ .string_val = "cafe" });
+    try db.setNodeProperty(null, alice, "digits", .{ .string_val = "2024" });
+    try db.setNodeProperty(null, alice, "text", .{ .string_val = "Smith, \"Alice\"\nJr. \u{00e9}\t" });
+    try db.setNodeProperty(null, alice, "empty", .{ .string_val = "" });
+    try db.setNodeProperty(null, alice, "bytes", .{ .bytes_val = &[_]u8{ 0, 1, 255 } });
+    try db.setNodeProperty(null, alice, "nobytes", .{ .bytes_val = &.{} });
+    try db.setNodeProperty(null, alice, "list", .{ .list_val = &list });
+    try db.setNodeProperty(null, alice, "nolist", .{ .list_val = &.{} });
+    try db.setNodeProperty(null, alice, "map", .{ .map_val = &map });
+    try db.setNodeProperty(null, alice, "dollar", .{ .map_val = &dollar_map });
+    try db.setNodeProperty(null, alice, "embedding", .{ .vector_val = &[_]f32{ 0.5, 1, -2 } });
+    try db.setNodeProperty(null, acme, "name", .{ .string_val = "Acme; Inc" });
+
+    try db.setNodeVector(alice, &[_]f32{ 1, 0, 0, 0 });
+    try db.setNodeVector(acme, &[_]f32{ 0, 0, 0, -1 });
+
+    const first = try db.createEdgeAndGetId(null, alice, acme, works_at_type);
+    const second = try db.createEdgeAndGetId(null, alice, acme, works_at_type);
+    _ = try db.createEdgeAndGetId(null, alice, acme, rel_type);
+    const self_loop = try db.createEdgeAndGetId(null, loner, loner, rel_type);
+    try db.setEdgePropertyById(null, first, since_property, .{ .int_val = first_since_year });
+    try db.setEdgePropertyById(null, first, "rate", .{ .float_val = 3.0 });
+    try db.setEdgePropertyById(null, second, since_property, .{ .int_val = second_since_year });
+    try db.setEdgePropertyById(null, second, "note", .{ .string_val = "part,time" });
+    try db.setEdgePropertyById(null, self_loop, "bytes", .{ .bytes_val = &[_]u8{7} });
+}
+
+test "import_export: every format round trips a graph unchanged" {
+    const allocator = std.testing.allocator;
+    const source_path = "/tmp/lattice_roundtrip_all_source.ltdb";
+    const source = try openVectorTestDb(source_path);
+    defer cleanupTestDb(source, source_path);
+    try buildRoundTripGraph(source);
+
+    const source_dump = try exportAlloc(allocator, source, import_export.dumpCanonicalJson);
+    defer allocator.free(source_dump);
+
+    const Format = enum { json, jsonl, csv };
+    inline for (.{ Format.json, Format.jsonl, Format.csv }) |format| {
+        const path = "/tmp/lattice_roundtrip_all_" ++ @tagName(format) ++ ".ltdb";
+        const imported = try openVectorTestDb(path);
+        defer cleanupTestDb(imported, path);
+
+        switch (format) {
+            .json, .jsonl => {
+                const exporter = if (format == .json) import_export.exportJson else import_export.exportJsonl;
+                const first = try exportAlloc(allocator, source, exporter);
+                defer allocator.free(first);
+                const stats = if (format == .json)
+                    try import_export.importJsonContent(allocator, imported, first, .{})
+                else
+                    try import_export.importJsonlContent(allocator, imported, first, .{});
+                try std.testing.expectEqual(@as(u64, 3), stats.nodes_imported);
+                try std.testing.expectEqual(@as(u64, 4), stats.edges_imported);
+                const again = try exportAlloc(allocator, imported, exporter);
+                defer allocator.free(again);
+                try std.testing.expectEqualStrings(first, again);
+            },
+            .csv => {
+                const first = try exportCsvAlloc(allocator, source);
+                defer first.deinit(allocator);
+                const stats = try import_export.importCsvPairContent(allocator, imported, first.nodes, first.edges, .{});
+                try std.testing.expectEqual(@as(u64, 3), stats.nodes_imported);
+                try std.testing.expectEqual(@as(u64, 4), stats.edges_imported);
+                const again = try exportCsvAlloc(allocator, imported);
+                defer again.deinit(allocator);
+                try std.testing.expectEqualStrings(first.nodes, again.nodes);
+                try std.testing.expectEqualStrings(first.edges, again.edges);
+            },
+        }
+
+        const imported_dump = try exportAlloc(allocator, imported, import_export.dumpCanonicalJson);
+        defer allocator.free(imported_dump);
+        try std.testing.expectEqualStrings(source_dump, imported_dump);
+    }
+}
+
+test "import_export: JSONL import names the line of a bad record" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_jsonl_bad_line.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    var diagnostics = import_export.Diagnostics.init(allocator);
+    defer diagnostics.deinit();
+    const content =
+        \\{"kind":"node","id":"1","labels":["P"],"properties":{}}
+        \\
+        \\{"kind":"vertex","id":"2"}
+        \\{"kind":"edge","source":"1","target":"9","type":"R","properties":{}}
+        \\{"kind":"edge","source":"1","target":"1","type":"R","properties":{}}
+    ;
+    const stats = try import_export.importJsonlContent(allocator, db, content, .{
+        .on_error_skip = true,
+        .diagnostics = &diagnostics,
+    });
+    try std.testing.expectEqual(@as(u64, 1), stats.nodes_imported);
+    try std.testing.expectEqual(@as(u64, 1), stats.edges_imported);
+    try std.testing.expectEqual(@as(usize, 2), diagnostics.messages.items.len);
+    try std.testing.expectEqualStrings(
+        "line 3: its \"kind\" is \"vertex\", not \"node\" or \"edge\"",
+        diagnostics.messages.items[0],
+    );
+    try std.testing.expectEqualStrings(
+        "line 4: target \"9\" is not the id of any node in the file",
+        diagnostics.messages.items[1],
+    );
+}

@@ -440,3 +440,38 @@ test "cli: import stops at an edge whose node is missing, and says which" {
     try std.testing.expect(std.mem.indexOf(u8, skipped.stderr, "Skipped line 2") != null);
     try std.testing.expect(std.mem.indexOf(u8, skipped.stdout, "Edges imported: 1") != null);
 }
+
+test "cli: output redirected with >> is appended to the file" {
+    const allocator = std.testing.allocator;
+    const out = "/tmp/lattice_cli_append.txt";
+    defer compat.fs.cwd().deleteFile(out) catch {};
+    try writeFile(out, "first line\n");
+
+    const result = try std.process.run(allocator, io, .{
+        .argv = &.{ "/bin/sh", "-c", "\"$0\" version >> \"$1\"", build_options.cli_path, out },
+    });
+    defer allocator.free(result.stdout);
+    defer allocator.free(result.stderr);
+
+    const content = try readFileAlloc(allocator, out);
+    defer allocator.free(content);
+    try std.testing.expect(std.mem.startsWith(u8, content, "first line\nLatticeDB"));
+}
+
+test "cli: a failed export leaves no file behind" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_cli_failed_export.ltdb";
+    const out = "/tmp/lattice_cli_failed_export.json";
+    defer deleteDatabaseFiles(path);
+    defer compat.fs.cwd().deleteFile(out) catch {};
+
+    try createEmptyDatabase(allocator, path);
+    const node = try runCli(allocator, &.{ "exec", path, "--query=CREATE (:Person {name: 'Alice'})" });
+    defer node.deinit(allocator);
+
+    // The query returns a name, not a node, so there is nothing to export.
+    const failed = try runCli(allocator, &.{ "export", path, "--file=" ++ out, "--query=MATCH (n) RETURN n.name" });
+    defer failed.deinit(allocator);
+    try std.testing.expect(!failed.succeeded());
+    try std.testing.expectError(error.FileNotFound, compat.fs.cwd().access(out, .{}));
+}

@@ -3,6 +3,7 @@
 //! Provides interactive and batch operations for database management.
 
 const std = @import("std");
+const compat = @import("compat");
 const lattice = @import("lattice");
 const args_mod = @import("args.zig");
 const output = @import("output.zig");
@@ -68,13 +69,15 @@ pub fn main(init: std.process.Init) !u8 {
     const argv = try collectProcessArgs(allocator, init.minimal.args);
     defer freeProcessArgs(allocator, argv);
 
+    // Streaming, not positional: output redirected with >> must append, and
+    // output to a file opened at an offset must not start back at zero.
     var stdout_buffer: [4096]u8 = undefined;
-    var stdout_writer = std.Io.File.stdout().writer(init.io, &stdout_buffer);
+    var stdout_writer = std.Io.File.stdout().writerStreaming(init.io, &stdout_buffer);
     const stdout = &stdout_writer.interface;
     defer stdout.flush() catch {};
 
     var stderr_buffer: [4096]u8 = undefined;
-    var stderr_writer = std.Io.File.stderr().writer(init.io, &stderr_buffer);
+    var stderr_writer = std.Io.File.stderr().writerStreaming(init.io, &stderr_buffer);
     const stderr = &stderr_writer.interface;
     defer stderr.flush() catch {};
 
@@ -1189,10 +1192,11 @@ fn cmdImport(
 
     // Detect file format by extension
     const is_json = std.mem.endsWith(u8, file, ".json");
+    const is_jsonl = std.mem.endsWith(u8, file, ".jsonl");
     const is_csv = std.mem.endsWith(u8, file, ".csv");
 
-    if (!is_json and !is_csv) {
-        return failCommand(stderr, "Unknown file format. Use .json or .csv extension.", .{});
+    if (!is_json and !is_jsonl and !is_csv) {
+        return failCommand(stderr, "Unknown file format. Use a .json, .jsonl, or .csv extension.", .{});
     }
 
     // A CSV export writes <base>_nodes.csv and <base>_edges.csv. Naming the
@@ -1228,6 +1232,8 @@ fn cmdImport(
 
     const stats = if (is_json)
         import_export.importJson(allocator, db, file, import_options)
+    else if (is_jsonl)
+        import_export.importJsonl(allocator, db, file, import_options)
     else if (csv_pair) |pair|
         import_export.importCsvFiles(allocator, db, pair.nodes, pair.edges, import_options)
     else
@@ -1372,13 +1378,15 @@ fn cmdExport(
         };
         defer out_file.close();
 
-        const writer = out_file.deprecatedWriter();
-        const stats = switch (export_kind) {
+        var out_buffer: [export_buffer_size]u8 = undefined;
+        var out_writer = out_file.file.writerStreaming(compat.io, &out_buffer);
+        const writer = &out_writer.interface;
+        const stats = finishExport(switch (export_kind) {
             .json => import_export.exportJson(allocator, db, writer, scope),
             .jsonl => import_export.exportJsonl(allocator, db, writer, scope),
             .dot => import_export.exportDot(allocator, db, writer, scope),
             .csv => unreachable,
-        };
+        }, &.{writer}, &.{file});
 
         if (stats) |s| {
             switch (parsed_args.format) {
@@ -1426,10 +1434,18 @@ fn cmdExport(
         };
         defer edges_file.close();
 
-        const nodes_writer = nodes_file.deprecatedWriter();
-        const edges_writer = edges_file.deprecatedWriter();
+        var nodes_buffer: [export_buffer_size]u8 = undefined;
+        var nodes_file_writer = nodes_file.file.writerStreaming(compat.io, &nodes_buffer);
+        const nodes_writer = &nodes_file_writer.interface;
+        var edges_buffer: [export_buffer_size]u8 = undefined;
+        var edges_file_writer = edges_file.file.writerStreaming(compat.io, &edges_buffer);
+        const edges_writer = &edges_file_writer.interface;
 
-        const stats = import_export.exportCsv(allocator, db, nodes_writer, edges_writer, scope);
+        const stats = finishExport(
+            import_export.exportCsv(allocator, db, nodes_writer, edges_writer, scope),
+            &.{ nodes_writer, edges_writer },
+            &.{ nodes_path, edges_path },
+        );
 
         if (stats) |s| {
             switch (parsed_args.format) {
@@ -1487,6 +1503,28 @@ fn exportScope(
         .success => |result| result_slot.* = result,
     }
     return .{ .query_result = &result_slot.*.? };
+}
+
+const export_buffer_size = 64 * 1024;
+
+/// Flush an export's files, and remove them when it failed, so a failed
+/// export does not leave a file that looks like a complete one.
+fn finishExport(
+    result: anyerror!import_export.ExportStats,
+    writers: []const *std.Io.Writer,
+    paths: []const []const u8,
+) anyerror!import_export.ExportStats {
+    const stats = result catch |err| {
+        for (paths) |path| compat.fs.cwd().deleteFile(path) catch {};
+        return err;
+    };
+    for (writers) |writer| {
+        writer.flush() catch |err| {
+            for (paths) |path| compat.fs.cwd().deleteFile(path) catch {};
+            return err;
+        };
+    }
+    return stats;
 }
 
 fn failExport(stderr: anytype, err: anyerror) anyerror {
@@ -1572,7 +1610,7 @@ fn printUsage(writer: anytype) void {
         \\    exec <path>         Execute a single query
         \\
         \\  Import/Export:
-        \\    import <path>       Import data from JSON/CSV
+        \\    import <path>       Import data from JSON/JSONL/CSV
         \\    export <path>       Export data to JSON/JSONL/CSV/DOT
         \\    dump <path>         Dump full database as canonical JSON
         \\
@@ -1843,10 +1881,10 @@ fn printCommandHelp(writer: anytype, command: Command) void {
         .import => writer.writeAll(
             \\Usage: lattice import <path> --file=<input> [options]
             \\
-            \\Import data from JSON or CSV files.
+            \\Import data from JSON, JSONL, or CSV files, such as those export writes.
             \\
             \\Options:
-            \\  --file=<path>         Input file (JSON or CSV)
+            \\  --file=<path>         Input file (.json, .jsonl, .csv)
             \\  --batch-size=<n>      Commit every N items (default: 1000)
             \\  --on-error=skip       Skip invalid records instead of aborting
             \\  --enable-vector       Open with the vector index. A database that
@@ -1855,8 +1893,10 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\  --vector-dims=<n>     Dimensions the database was created with
             \\                        (default: 128)
             \\
-            \\When --on-error=skip is set, records are applied individually so
-            \\ successful rows are preserved.
+            \\Without --on-error=skip, the import stops at the first invalid record
+            \\and says which it was; batches committed before it are kept. With it,
+            \\each record is committed on its own, an invalid one is left out whole,
+            \\and each one left out is listed.
             \\
             \\JSON format:
             \\  {"nodes": [...], "edges": [...]}

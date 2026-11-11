@@ -38,6 +38,7 @@ const csv_label_separator = ';';
 const csv_trim_chars = " \t\r";
 const label_filter_separator = ',';
 const label_trim_chars = " ";
+const jsonl_trim_chars = " \t\r";
 
 /// Managed array list for allocator tracking
 fn ManagedArrayList(comptime T: type) type {
@@ -63,9 +64,11 @@ const ImportBatcher = struct {
     fn init(db: *Database, batch_size: u32, on_error_skip: bool) Self {
         return .{
             .db = db,
-            .batch_size = @max(batch_size, 1),
-            // Preserve row-level skip semantics by only batching when failures abort.
-            .batching_enabled = batch_size > 1 and !on_error_skip,
+            // A skipped record is rolled back on its own, so skipping commits
+            // each record in a transaction of its own. A record that fails
+            // part way leaves nothing behind.
+            .batch_size = if (on_error_skip) 1 else @max(batch_size, 1),
+            .batching_enabled = true,
         };
     }
 
@@ -365,6 +368,86 @@ pub fn importJsonContent(
     return stats;
 }
 
+/// Import a JSONL export: one record per line, each a node
+/// (`{"kind":"node","id":...}`) or an edge (`{"kind":"edge","source":...}`),
+/// with the fields and value encoding of format version 2. An edge names
+/// nodes by the ids of node records on earlier lines.
+pub fn importJsonl(
+    allocator: std.mem.Allocator,
+    db: *Database,
+    file_path: []const u8,
+    options: ImportOptions,
+) ImportExportError!ImportStats {
+    const content = try readImportFile(allocator, file_path);
+    defer allocator.free(content);
+    return importJsonlContent(allocator, db, content, options);
+}
+
+pub fn importJsonlContent(
+    allocator: std.mem.Allocator,
+    db: *Database,
+    content: []const u8,
+    options: ImportOptions,
+) ImportExportError!ImportStats {
+    var stats = ImportStats{};
+    var batcher = ImportBatcher.init(db, options.batch_size, options.on_error_skip);
+    errdefer if (batcher.hasPendingTransaction()) batcher.abort() catch {};
+
+    // Parsed records stay alive for the whole import: the id map points into them.
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var id_map = std.StringHashMap(NodeId).init(allocator);
+    defer id_map.deinit();
+
+    var lines = std.mem.splitScalar(u8, content, '\n');
+    var line_number: usize = 0;
+    while (lines.next()) |raw_line| {
+        line_number += 1;
+        const line = std.mem.trim(u8, raw_line, jsonl_trim_chars);
+        if (line.len == 0) continue;
+
+        const txn = try batcher.transaction();
+        var problem = Problem{};
+        var kind: ImportItemKind = .node;
+        if (importJsonlRecord(allocator, arena.allocator(), db, txn, line, &id_map, &kind, &problem)) |_| {
+            try batcher.recordSuccess(&stats, kind);
+        } else |err| {
+            try batcher.recordFailure(&stats, kind);
+            noteFailure(options, &stats, &problem, err, "line {d}", .{line_number});
+            if (!options.on_error_skip) {
+                return ImportExportError.DatabaseError;
+            }
+        }
+    }
+
+    try batcher.flush(&stats);
+    return stats;
+}
+
+fn importJsonlRecord(
+    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
+    db: *Database,
+    txn: ?*Transaction,
+    line: []const u8,
+    id_map: *std.StringHashMap(NodeId),
+    kind: *ImportItemKind,
+    problem: *Problem,
+) !void {
+    const parsed = parseJson(arena, line) catch return problem.fail(error.ParseError, "it is not valid JSON", .{});
+    if (parsed.value != .object) return problem.fail(error.InvalidFormat, "it is not an object", .{});
+    const kind_name = try jsonStringField(parsed.value.object, json_field_kind, problem);
+    if (std.mem.eql(u8, kind_name, json_record_kind_node)) {
+        kind.* = .node;
+        return importNode(allocator, db, txn, parsed.value, id_map, .v2, problem);
+    }
+    if (std.mem.eql(u8, kind_name, json_record_kind_edge)) {
+        kind.* = .edge;
+        return importEdge(allocator, db, txn, parsed.value, id_map, .v2, problem);
+    }
+    return problem.fail(error.InvalidFormat, "its \"kind\" is \"{s}\", not \"node\" or \"edge\"", .{kind_name});
+}
+
 /// Refuse, before anything is written, a file whose vectors this handle cannot store.
 fn checkVectorsCanBeImported(db: *Database, root: std.json.ObjectMap) ImportExportError!void {
     const nodes_val = root.get(json_field_nodes) orelse return;
@@ -420,38 +503,72 @@ fn importNode(
     defer labels_list.deinit();
 
     if (obj.get(json_field_labels)) |labels_val| {
-        if (labels_val == .array) {
-            for (labels_val.array.items) |label| {
-                if (label == .string) {
-                    try labels_list.append(label.string);
-                }
-            }
+        if (labels_val != .array) return problem.fail(error.InvalidFormat, "its \"labels\" is not an array", .{});
+        for (labels_val.array.items) |label| {
+            if (label != .string) return problem.fail(error.InvalidFormat, "its \"labels\" are not all strings", .{});
+            try labels_list.append(label.string);
         }
     }
 
-    // Create the node
-    const node_id = db.createNode(txn, labels_list.items) catch {
-        return error.DatabaseError;
+    const node_id = db.createNode(txn, labels_list.items) catch |err| {
+        return problem.fail(error.DatabaseError, "creating the node failed: {s}", .{@errorName(err)});
     };
 
-    // Store the mapping
-    try id_map.put(id_str, node_id);
-
-    // Set properties
     if (obj.get(json_field_properties)) |props_val| {
-        if (props_val == .object) {
-            var iter = props_val.object.iterator();
-            while (iter.next()) |entry| {
-                var prop_val = jsonToPropertyValue(allocator, entry.value_ptr.*, version) catch continue;
-                defer prop_val.deinit(allocator);
-                db.setNodeProperty(txn, node_id, entry.key_ptr.*, prop_val) catch continue;
-            }
-        }
+        try importJsonProperties(allocator, db, txn, .{ .node = node_id }, props_val, version, problem);
     }
 
     if (obj.get(json_field_vector)) |vector_val| {
         try importNodeVector(allocator, db, txn, node_id, vector_val, problem);
     }
+
+    // Edges can name the node once all of it is in.
+    try id_map.put(id_str, node_id);
+}
+
+const PropertyOwner = union(enum) {
+    node: NodeId,
+    edge: EdgeId,
+};
+
+/// Set every property of a record's "properties" object. A value that
+/// cannot be read or stored fails the record rather than leaving it out.
+fn importJsonProperties(
+    allocator: std.mem.Allocator,
+    db: *Database,
+    txn: ?*Transaction,
+    owner: PropertyOwner,
+    props_val: std.json.Value,
+    version: FormatVersion,
+    problem: *Problem,
+) !void {
+    if (props_val != .object) return problem.fail(error.InvalidFormat, "its \"properties\" is not an object", .{});
+    var iter = props_val.object.iterator();
+    while (iter.next()) |entry| {
+        const key = entry.key_ptr.*;
+        var prop_val = jsonToPropertyValue(allocator, entry.value_ptr.*, version) catch |err| {
+            return problem.fail(err, "property \"{s}\" does not hold a value lattice can store", .{key});
+        };
+        defer prop_val.deinit(allocator);
+        try setImportedProperty(db, txn, owner, key, prop_val, problem);
+    }
+}
+
+fn setImportedProperty(
+    db: *Database,
+    txn: ?*Transaction,
+    owner: PropertyOwner,
+    key: []const u8,
+    value: PropertyValue,
+    problem: *Problem,
+) !void {
+    const result = switch (owner) {
+        .node => |id| db.setNodeProperty(txn, id, key, value),
+        .edge => |id| db.setEdgePropertyById(txn, id, key, value),
+    };
+    result catch |err| {
+        return problem.fail(error.DatabaseError, "setting property \"{s}\" failed: {s}", .{ key, @errorName(err) });
+    };
 }
 
 fn importNodeVector(
@@ -521,19 +638,12 @@ fn importEdge(
     );
 
     // Create the edge and retain its stable ID so properties can be applied.
-    const edge_id = db.createEdgeAndGetId(txn, source_id, target_id, edge_type) catch {
-        return error.DatabaseError;
+    const edge_id = db.createEdgeAndGetId(txn, source_id, target_id, edge_type) catch |err| {
+        return problem.fail(error.DatabaseError, "creating the edge failed: {s}", .{@errorName(err)});
     };
 
     if (obj.get(json_field_properties)) |props_val| {
-        if (props_val == .object) {
-            var iter = props_val.object.iterator();
-            while (iter.next()) |entry| {
-                var prop_val = jsonToPropertyValue(allocator, entry.value_ptr.*, version) catch continue;
-                defer prop_val.deinit(allocator);
-                db.setEdgePropertyById(txn, edge_id, entry.key_ptr.*, prop_val) catch continue;
-            }
-        }
+        try importJsonProperties(allocator, db, txn, .{ .edge = edge_id }, props_val, version, problem);
     }
 }
 
@@ -824,7 +934,7 @@ pub fn exportJson(
 
     var first_edge = true;
     for (node_ids) |node_id| {
-        const edges = db.getOutgoingEdges(node_id) catch continue;
+        const edges = db.getOutgoingEdges(node_id) catch |err| return mapDatabaseError(err);
         defer db.freeEdgeInfos(edges);
 
         for (edges) |edge| {
@@ -876,7 +986,7 @@ pub fn dumpCanonicalJson(
 
     var first_edge = true;
     for (node_ids) |node_id| {
-        const edges = db.getOutgoingEdges(node_id) catch continue;
+        const edges = db.getOutgoingEdges(node_id) catch |err| return mapDatabaseError(err);
         defer db.freeEdgeInfos(edges);
 
         std.mem.sort(Database.EdgeInfo, edges, {}, struct {
@@ -921,7 +1031,7 @@ pub fn exportJsonl(
     }
 
     for (node_ids) |node_id| {
-        const edges = db.getOutgoingEdges(node_id) catch continue;
+        const edges = db.getOutgoingEdges(node_id) catch |err| return mapDatabaseError(err);
         defer db.freeEdgeInfos(edges);
 
         for (edges) |edge| {
@@ -954,7 +1064,7 @@ pub fn exportDot(
     }
 
     for (node_ids) |node_id| {
-        const edges = db.getOutgoingEdges(node_id) catch continue;
+        const edges = db.getOutgoingEdges(node_id) catch |err| return mapDatabaseError(err);
         defer db.freeEdgeInfos(edges);
 
         for (edges) |edge| {
@@ -1976,14 +2086,14 @@ fn importNodeCsvRecord(
         return problem.fail(error.InvalidNodeId, "_id \"{s}\" is used by an earlier row", .{id});
     }
 
-    const node_id = db.createNode(txn, labels.items) catch {
-        return error.DatabaseError;
+    const node_id = db.createNode(txn, labels.items) catch |err| {
+        return problem.fail(error.DatabaseError, "creating the node failed: {s}", .{@errorName(err)});
     };
 
     for (values, header.columns) |value, column| {
         if (column != .property or value.len == 0) continue;
         const prop_val = try csvCellValue(arena, value, column.property, problem);
-        db.setNodeProperty(txn, node_id, column.property.key, prop_val) catch continue;
+        try setImportedProperty(db, txn, .{ .node = node_id }, column.property.key, prop_val, problem);
     }
 
     if (vector_cell.len > 0) {
@@ -2060,14 +2170,14 @@ fn importEdgeCsvRecord(
     const source_id = try resolveCsvEndpoint(db, txn, ids, csv_column_source, source_text, problem);
     const target_id = try resolveCsvEndpoint(db, txn, ids, csv_column_target, target_text, problem);
 
-    const edge_id = db.createEdgeAndGetId(txn, source_id, target_id, type_name) catch {
-        return error.DatabaseError;
+    const edge_id = db.createEdgeAndGetId(txn, source_id, target_id, type_name) catch |err| {
+        return problem.fail(error.DatabaseError, "creating the edge failed: {s}", .{@errorName(err)});
     };
 
     for (values, header.columns) |value, column| {
         if (column != .property or value.len == 0) continue;
         const prop_val = try csvCellValue(arena, value, column.property, problem);
-        db.setEdgePropertyById(txn, edge_id, column.property.key, prop_val) catch continue;
+        try setImportedProperty(db, txn, .{ .edge = edge_id }, column.property.key, prop_val, problem);
     }
 }
 

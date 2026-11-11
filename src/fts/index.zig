@@ -2765,6 +2765,31 @@ test "fts AND search over unordered multi-page posting lists matches a scan" {
     try std.testing.expectEqual(expected, results.len);
 }
 
+test "fts search finds documents behind a posting page that deletes emptied" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/s3_lattice_fts_empty_head_test.db");
+    defer fx.destroy(allocator);
+
+    // "common" spans several posting pages; deleting the earliest documents
+    // empties the first of them.
+    const doc_count = 4000;
+    const removed = 2000;
+    var text_buf: [64]u8 = undefined;
+    for (1..doc_count + 1) |i| {
+        const text = try std.fmt.bufPrint(&text_buf, "common {s}", .{if (i % 2 == 0) "even" else "odd"});
+        _ = try fx.index.indexDocument(@intCast(i), text);
+    }
+    for (1..removed + 1) |i| try fx.index.removeDocument(@intCast(i));
+
+    const single = try fx.index.search("common", std.math.maxInt(u32));
+    defer fx.index.freeResults(single);
+    try std.testing.expectEqual(@as(usize, doc_count - removed), single.len);
+
+    const both = try fx.index.search("common even", std.math.maxInt(u32));
+    defer fx.index.freeResults(both);
+    try std.testing.expectEqual(@as(usize, (doc_count - removed) / 2), both.len);
+}
+
 test "fts AND search with a term no document contains matches nothing" {
     const allocator = std.testing.allocator;
     const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_and_unknown_term_test.db");

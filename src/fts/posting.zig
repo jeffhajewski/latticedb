@@ -823,7 +823,10 @@ pub const PostingIterator = struct {
             .skip_pointer_base = header.headerEnd(),
             .last_doc_id = 0,
             .has_positions = header.hasPositions(),
-            .done = header.num_entries == 0,
+            // Not `num_entries == 0`: removals can empty the head page while
+            // later pages still hold entries. Reading follows the chain past
+            // empty pages and decides when the list is finished.
+            .done = false,
         };
     }
 
@@ -1481,6 +1484,81 @@ test "posting store appends thousands of entries without stalling" {
 
     try std.testing.expectEqual(@as(usize, 3000), count);
     try std.testing.expectEqual(@as(DocId, 3000), last_doc);
+}
+
+test "posting iterator reads past a head page that removals emptied" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/s3_lattice_posting_empty_head_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var store = PostingStore.init(allocator, &bp);
+    const head = try store.create(1);
+
+    // Three pages, so that both the head and a page in the middle of the chain
+    // can be emptied.
+    const total: DocId = 4000;
+    for (1..total + 1) |i| {
+        _ = try store.append(head, .{ .doc_id = @intCast(i), .term_freq = 1, .positions = null });
+    }
+
+    var emptied: u32 = 0;
+    var page_id = head;
+    for (0..2) |_| {
+        const frame = try bp.fetchPage(page_id, .shared);
+        const header = PostingPageHeader.read(frame.data);
+        bp.unpinPage(frame, false);
+        try std.testing.expect(header.next_page != 0);
+        emptied += header.num_entries;
+        page_id = header.next_page;
+    }
+    const head_count = emptied;
+
+    // Remove everything the first two pages hold.
+    for (1..head_count + 1) |i| {
+        const removed = try store.removeEntry(head, @intCast(i));
+        try std.testing.expect(removed.found);
+    }
+
+    var iter = try store.iterate(head);
+    defer iter.deinit();
+    var count: usize = 0;
+    var expected: DocId = head_count + 1;
+    while (try iter.next()) |entry| {
+        try std.testing.expectEqual(expected, entry.doc_id);
+        expected += 1;
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, total - head_count), count);
+
+    // The position-reading path walks the chain on its own.
+    var pos_iter = try store.iterate(head);
+    defer pos_iter.deinit();
+    const first = try pos_iter.nextWithPositions(allocator);
+    try std.testing.expect(first != null);
+    try std.testing.expectEqual(@as(DocId, head_count + 1), first.?.doc_id);
+    if (first.?.positions) |p| allocator.free(p);
+
+    var skip_iter = try store.iterate(head);
+    defer skip_iter.deinit();
+    const found = try skip_iter.skipTo(total);
+    try std.testing.expect(found != null);
+    try std.testing.expectEqual(total, found.?.doc_id);
 }
 
 test "posting store releases full pages before appending to overflow tail" {

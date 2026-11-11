@@ -519,7 +519,7 @@ fn compareEvalResults(a: EvalResult, b: EvalResult) i32 {
     }
 }
 
-fn evaluateCountExpression(
+pub fn evaluateCountExpression(
     evaluator: *ExpressionEvaluator,
     expr: *const ast.Expression,
     ctx: *ExecutionContext,

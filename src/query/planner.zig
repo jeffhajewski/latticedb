@@ -238,7 +238,7 @@ pub const QueryPlanner = struct {
                         null;
                     current_op = try self.planMatch(m, current_op, where_hint);
                 },
-                .where => |w| current_op = try self.planWhere(w, current_op),
+                .where => |w| current_op = try self.planWhere(w, current_op, vectorLimitHint(query.clauses[clause_idx + 1 ..])),
                 .return_ => |r| {
                     // Where ORDER BY, SKIP, and LIMIT belong depends on whether
                     // the projection aggregates.
@@ -953,12 +953,17 @@ pub const QueryPlanner = struct {
     /// Plan a WHERE clause
     /// Detects vector distance (<=>)  and FTS match (@@) operators and creates
     /// specialized search operators for them instead of generic filters.
-    fn planWhere(self: *Self, where: *const ast.WhereClause, input: ?Operator) PlannerError!Operator {
+    fn planWhere(
+        self: *Self,
+        where: *const ast.WhereClause,
+        input: ?Operator,
+        limit_hint: VectorLimitHint,
+    ) PlannerError!Operator {
         const input_op = input orelse return PlannerError.InvalidQuery;
 
         // Check for vector search pattern: x.embedding <=> $query [< threshold]
         if (self.detectVectorSearch(where.condition)) |vector_info| {
-            return self.planVectorSearch(input_op, vector_info);
+            return self.planVectorSearch(input_op, vector_info, limit_hint);
         }
 
         // Check for FTS pattern: x.text @@ $query, or a disjunction of them
@@ -981,6 +986,36 @@ pub const QueryPlanner = struct {
         return filter.operator();
     }
 
+    /// The LIMIT and SKIP that bound a vector predicate's answer.
+    const VectorLimitHint = struct {
+        limit: ?*const ast.Expression = null,
+        skip: ?*const ast.Expression = null,
+    };
+
+    /// The LIMIT (and SKIP) of the RETURN that follows a WHERE, when the rows
+    /// the WHERE produces reach that LIMIT in order and one for one: a
+    /// RETURN that neither aggregates nor deduplicates, and no ORDER BY.
+    /// Anything else between them could drop or reorder rows, so no hint.
+    fn vectorLimitHint(rest: []const ast.Clause) VectorLimitHint {
+        if (rest.len == 0) return .{};
+        const ret = switch (rest[0]) {
+            .return_ => |r| r,
+            else => return .{},
+        };
+        if (ret.distinct or returnAggregates(ret)) return .{};
+        var hint = VectorLimitHint{};
+        for (rest[1..]) |clause| {
+            switch (clause) {
+                .skip => |s| hint.skip = s.count,
+                .limit => |l| hint.limit = l.count,
+                .order_by => return .{},
+                else => break,
+            }
+        }
+        if (hint.limit == null) return .{};
+        return hint;
+    }
+
     /// Information extracted from a vector search pattern
     const VectorSearchInfo = struct {
         /// The variable slot being searched (e.g., slot for 'n' in n.embedding)
@@ -989,8 +1024,8 @@ pub const QueryPlanner = struct {
         param_name: ?[]const u8,
         /// Literal query vector (if provided directly)
         query_vector: ?[]const f32,
-        /// Distance threshold (e.g., 0.5 from < 0.5)
-        threshold: ?f32,
+        /// Distance threshold (e.g., 0.5 from < 0.5, or $t)
+        threshold: ?vector_ops.VectorSearchWithInput.Threshold,
         /// The property being searched
         property_name: ?[]const u8,
     };
@@ -1008,14 +1043,19 @@ pub const QueryPlanner = struct {
                     const inner = binary.left.binary;
                     if (inner.operator == .vector_distance) {
                         var info = self.extractVectorInfo(inner.*) orelse return null;
-                        // Extract threshold from right side
-                        if (binary.right.* == .literal) {
-                            const lit = binary.right.literal;
-                            if (lit.value == .float) {
-                                info.threshold = @floatCast(lit.value.float);
-                            } else if (lit.value == .integer) {
-                                info.threshold = @floatFromInt(lit.value.integer);
-                            }
+                        const inclusive = binary.operator == .lte;
+                        // The threshold has to be a number or a parameter.
+                        // Anything else is left to the filter, which evaluates
+                        // the comparison exactly; ignoring it here returned
+                        // rows regardless of the bound.
+                        switch (binary.right.*) {
+                            .literal => |lit| switch (lit.value) {
+                                .float => |f| info.threshold = .{ .value = .{ .literal = @floatCast(f) }, .inclusive = inclusive },
+                                .integer => |i| info.threshold = .{ .value = .{ .literal = @floatFromInt(i) }, .inclusive = inclusive },
+                                else => return null,
+                            },
+                            .parameter => |p| info.threshold = .{ .value = .{ .parameter = p.name }, .inclusive = inclusive },
+                            else => return null,
                         }
                         return info;
                     }
@@ -1069,21 +1109,24 @@ pub const QueryPlanner = struct {
     }
 
     /// Plan a vector search operator
-    fn planVectorSearch(self: *Self, input: Operator, info: VectorSearchInfo) PlannerError!Operator {
+    fn planVectorSearch(self: *Self, input: Operator, info: VectorSearchInfo, limit_hint: VectorLimitHint) PlannerError!Operator {
         _ = self.storage.hnsw_index orelse return PlannerError.MissingStorage;
         const database = self.storage.database orelse return PlannerError.MissingStorage;
 
         const output_slot = info.variable_slot orelse return PlannerError.InvalidQuery;
 
-        const k: u32 = 100; // Default k for search
+        const bound = vector_ops.VectorSearchWithInput.Bound{
+            .threshold = info.threshold,
+            .limit = limit_hint.limit,
+            .skip = limit_hint.skip,
+        };
         const vector_search = if (info.query_vector) |query_vector|
             vector_ops.VectorSearchWithInput.initWithLiteral(
                 self.allocator,
                 input,
                 output_slot,
                 query_vector,
-                k,
-                info.threshold,
+                bound,
                 database,
             ) catch return PlannerError.OutOfMemory
         else blk: {
@@ -1093,8 +1136,7 @@ pub const QueryPlanner = struct {
                 input,
                 output_slot,
                 param_name,
-                k,
-                info.threshold,
+                bound,
                 database,
             ) catch return PlannerError.OutOfMemory;
         };

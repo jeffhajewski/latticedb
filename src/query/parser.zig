@@ -687,7 +687,7 @@ pub const Parser = struct {
             return self.parseSetReplace(var_expr);
         } else if (self.match(.dot)) {
             // SET n.prop = value - property assignment
-            if (!self.check(.identifier)) {
+            if (!self.checkName()) {
                 self.errorAtCurrent("Expected property name after '.'");
                 return null;
             }
@@ -715,7 +715,7 @@ pub const Parser = struct {
         var labels: std.ArrayList([]const u8) = .empty;
 
         // First label
-        if (!self.check(.identifier)) {
+        if (!self.checkName()) {
             self.errorAtCurrent("Expected label name after ':'");
             return null;
         }
@@ -724,7 +724,7 @@ pub const Parser = struct {
 
         // Additional labels (SET n:Label1:Label2)
         while (self.match(.colon)) {
-            if (!self.check(.identifier)) {
+            if (!self.checkName()) {
                 self.errorAtCurrent("Expected label name after ':'");
                 return null;
             }
@@ -805,7 +805,7 @@ pub const Parser = struct {
             return self.parseRemoveLabels(var_expr);
         } else if (self.match(.dot)) {
             // REMOVE n.prop - property removal
-            if (!self.check(.identifier)) {
+            if (!self.checkName()) {
                 self.errorAtCurrent("Expected property name after '.'");
                 return null;
             }
@@ -827,7 +827,7 @@ pub const Parser = struct {
         var labels: std.ArrayList([]const u8) = .empty;
 
         // First label
-        if (!self.check(.identifier)) {
+        if (!self.checkName()) {
             self.errorAtCurrent("Expected label name after ':'");
             return null;
         }
@@ -836,7 +836,7 @@ pub const Parser = struct {
 
         // Additional labels (REMOVE n:Label1:Label2)
         while (self.match(.colon)) {
-            if (!self.check(.identifier)) {
+            if (!self.checkName()) {
                 self.errorAtCurrent("Expected label name after ':'");
                 return null;
             }
@@ -1041,7 +1041,7 @@ pub const Parser = struct {
 
         // Optional labels
         while (self.match(.colon)) {
-            if (!self.check(.identifier)) {
+            if (!self.checkName()) {
                 self.errorAtCurrent("Expected label after ':'");
                 return null;
             }
@@ -1101,7 +1101,7 @@ pub const Parser = struct {
                     self.errorAtCurrent("A relationship has one type; use '|' to match any of several");
                     return null;
                 }
-                if (!self.check(.identifier)) {
+                if (!self.checkName()) {
                     self.errorAtCurrent("Expected relationship type after ':'");
                     return null;
                 }
@@ -1111,7 +1111,7 @@ pub const Parser = struct {
                 // Handle multiple types with |
                 while (self.match(.pipe)) {
                     _ = self.match(.colon);
-                    if (!self.check(.identifier)) {
+                    if (!self.checkName()) {
                         self.errorAtCurrent("Expected relationship type after '|'");
                         return null;
                     }
@@ -1238,7 +1238,7 @@ pub const Parser = struct {
     }
 
     fn parsePropertyEntry(self: *Self) ?ast.PropertyEntry {
-        if (!self.check(.identifier)) {
+        if (!self.checkName()) {
             self.errorAtCurrent("Expected property name");
             return null;
         }
@@ -1307,6 +1307,14 @@ pub const Parser = struct {
         // The lexer emits .dash for '-'. Relationship patterns consume it
         // directly; in an expression it is negation or subtraction.
         if (self.match(.dash)) {
+            // The smallest integer is written as a negated literal whose
+            // digits alone, 9223372036854775808, do not fit in an i64.
+            if (self.check(.integer) and std.mem.eql(u8, self.current.text, "9223372036854775808")) {
+                self.advance();
+                const expr = self.arena.allocator().create(ast.Expression) catch return null;
+                expr.* = .{ .literal = .{ .value = .{ .integer = std.math.minInt(i64) }, .location = loc } };
+                return expr;
+            }
             const operand = self.parsePrecedence(.unary) orelse return null;
             return self.makeUnary(.neg, operand, loc);
         }
@@ -1504,7 +1512,7 @@ pub const Parser = struct {
         // Property access
         if (token == .dot) {
             self.advance();
-            if (!self.check(.identifier)) {
+            if (!self.checkName()) {
                 self.errorAtCurrent("Expected property name after '.'");
                 return null;
             }
@@ -1792,6 +1800,14 @@ pub const Parser = struct {
         if (self.current.token_type == .invalid) {
             self.errorAtCurrent("Invalid token");
         }
+    }
+
+    /// Whether the current token can be a property, label, type or map key
+    /// name. Keywords can: `n.order`, `(:Set)` and `{limit: 1}` name things
+    /// that happen to be spelled like a clause.
+    fn checkName(self: *const Self) bool {
+        if (self.current.token_type == .identifier) return true;
+        return std.mem.startsWith(u8, @tagName(self.current.token_type), "kw_");
     }
 
     fn check(self: *Self, token_type: TokenType) bool {

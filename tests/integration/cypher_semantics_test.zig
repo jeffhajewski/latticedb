@@ -933,3 +933,127 @@ test "cypher: =~ matches a regular expression against the whole string" {
     // A pattern the engine does not accept fails the query.
     try std.testing.expectError(QueryError.ExecutionError, db.query("MATCH (w:W) WHERE w.name =~ '(' RETURN w"));
 }
+
+// ============================================================================
+// Smaller semantic gaps
+// ============================================================================
+
+test "cypher: UNWIND null produces no rows" {
+    const path = "/tmp/lattice_cs_unwind_null.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try run(db, "CREATE (:Post {title: 'untagged'})");
+
+    try std.testing.expectEqual(@as(i64, 0), try queryCount(db, "UNWIND null AS x RETURN count(*)"));
+    // A missing list property used to MERGE a tag named null.
+    try run(db, "MATCH (p:Post) UNWIND p.tags AS t MERGE (:Tag {name: t})");
+    try std.testing.expectEqual(@as(i64, 0), try queryCount(db, "MATCH (t:Tag) RETURN count(t)"));
+}
+
+test "cypher: DELETE of a value is an error, not a no-op" {
+    const path = "/tmp/lattice_cs_delete_value.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    try std.testing.expectError(QueryError.SemanticError, db.query("UNWIND [1] AS x DELETE x"));
+    try std.testing.expectError(QueryError.SemanticError, db.query("MATCH (n) WITH n.x AS v DELETE v"));
+}
+
+test "cypher: the smallest integer can be written as a literal" {
+    const path = "/tmp/lattice_cs_min_int.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    var result = try db.query("UNWIND [1] AS x RETURN -9223372036854775808 AS m, -9223372036854775807 - 1 AS n");
+    defer result.deinit();
+    try expectInt(result, 0, 0, std.math.minInt(i64));
+    try expectInt(result, 0, 1, std.math.minInt(i64));
+}
+
+test "cypher: reading a node's embedding leaks nothing" {
+    const path = "/tmp/lattice_cs_embedding_leak.ltdb";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    const db = try Database.open(std.testing.allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_vector = true, .vector_dimensions = 2 },
+    });
+    defer cleanupTestDb(db, path);
+    const node = try db.createNode(null, &[_][]const u8{"Doc"});
+    try db.setNodeVector(node, &[_]f32{ 1.0, 2.0 });
+
+    // The testing allocator fails the test on a leak.
+    var result = try db.query("MATCH (d:Doc) RETURN d.embedding AS e");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+}
+
+test "cypher: an indexed property equals across integer and float" {
+    const path = "/tmp/lattice_cs_index_numeric.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try db.createNodePropertyIndex("Item", "x");
+    try run(db, "CREATE (:Item {x: 1}), (:Item {x: 2.0}), (:Item {x: 2.5})");
+
+    // Without the index both rows match, as 1 = 1.0 in Cypher.
+    try std.testing.expectEqual(@as(i64, 1), try queryCount(db, "MATCH (i:Item {x: 1.0}) RETURN count(i)"));
+    try std.testing.expectEqual(@as(i64, 1), try queryCount(db, "MATCH (i:Item) WHERE i.x = 2 RETURN count(i)"));
+    try std.testing.expectEqual(@as(i64, 1), try queryCount(db, "MATCH (i:Item {x: 2.5}) RETURN count(i)"));
+    // MERGE finds the integer-valued node instead of creating a twin.
+    try run(db, "MERGE (:Item {x: 1.0})");
+    try std.testing.expectEqual(@as(i64, 3), try queryCount(db, "MATCH (i:Item) RETURN count(i)"));
+}
+
+test "cypher: lists and maps compare by value" {
+    const path = "/tmp/lattice_cs_list_equality.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    var result = try db.query("UNWIND [1] AS x RETURN [1, 2] = [1, 2] AS a, [1, 2] = [1, 3] AS b, [1, 2] <> [2, 1] AS c, " ++
+        "{k: 1, j: 'x'} = {j: 'x', k: 1.0} AS d, [1, null] = [1, null] AS e, [1, null] = [2, null] AS f");
+    defer result.deinit();
+    try std.testing.expectEqual(true, result.rows[0].values[0].bool_val);
+    try std.testing.expectEqual(false, result.rows[0].values[1].bool_val);
+    try std.testing.expectEqual(true, result.rows[0].values[2].bool_val);
+    try std.testing.expectEqual(true, result.rows[0].values[3].bool_val);
+    try expectNull(result, 0, 4);
+    try std.testing.expectEqual(false, result.rows[0].values[5].bool_val);
+}
+
+test "cypher: function names ignore case, toString(null) is null, booleans order" {
+    const path = "/tmp/lattice_cs_function_case.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    var result = try db.query("UNWIND [1] AS x RETURN TOUPPER('a') AS a, toString(null) AS b, false < true AS c, true <= false AS d");
+    defer result.deinit();
+    try std.testing.expectEqualStrings("A", result.rows[0].values[0].string_val);
+    try expectNull(result, 0, 1);
+    try std.testing.expectEqual(true, result.rows[0].values[2].bool_val);
+    try std.testing.expectEqual(false, result.rows[0].values[3].bool_val);
+}
+
+test "cypher: CREATE on a bound node cannot add labels or properties" {
+    const path = "/tmp/lattice_cs_create_bound.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try run(db, "CREATE (:A)");
+
+    // The label used to be dropped without a word.
+    try std.testing.expectError(QueryError.SemanticError, db.query("MATCH (a:A) CREATE (a:B)-[:R]->(:C)"));
+    try std.testing.expectError(QueryError.SemanticError, db.query("MATCH (a:A) CREATE (a {x: 1})-[:R]->(:C)"));
+    try run(db, "MATCH (a:A) CREATE (a)-[:R]->(:C)");
+    try std.testing.expectEqual(@as(i64, 1), try queryCount(db, "MATCH (:A)-[:R]->(c:C) RETURN count(c)"));
+}
+
+test "cypher: keywords can name properties, labels, types and map keys" {
+    const path = "/tmp/lattice_cs_keyword_names.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    try run(db, "CREATE (n:Order {limit: 3, order: 'x'})-[:WITH]->(:Set)");
+    try std.testing.expectEqual(@as(i64, 1), try queryCount(db, "MATCH (n:Order)-[:WITH]->(:Set) WHERE n.limit = 3 AND n.order = 'x' RETURN count(n)"));
+    try run(db, "MATCH (n:Order) SET n.match = 1 REMOVE n.order");
+    try std.testing.expectEqual(@as(i64, 1), try queryCount(db, "MATCH (n:Order) RETURN n.match"));
+    var result = try db.query("UNWIND [1] AS x RETURN {limit: 1}.limit AS a");
+    result.deinit();
+}

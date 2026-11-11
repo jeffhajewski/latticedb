@@ -379,7 +379,12 @@ pub const ExpressionEvaluator = struct {
             if (std.mem.eql(u8, pa.property, "embedding")) {
                 if (ctx.database) |database| {
                     if (database.getNodeVectorInTxn(ctx.txn, node_id) catch return .{ .null_val = {} }) |vector| {
-                        return .{ .vector_val = vector };
+                        // The database's copy was never freed, leaking one
+                        // vector per row; evaluation temporaries live in
+                        // the evaluator's allocator.
+                        defer database.allocator.free(vector);
+                        const owned = self.allocator.dupe(f32, vector) catch return EvalError.OutOfMemory;
+                        return .{ .vector_val = owned };
                     }
                 }
             }
@@ -499,7 +504,9 @@ pub const ExpressionEvaluator = struct {
             .eq => self.compareEqual(left, right),
             .neq => blk: {
                 const eq = self.compareEqual(left, right);
-                break :blk .{ .bool_val = !eq.toBool().? };
+                // Lists and maps can compare as null, when an element is.
+                const known = eq.toBool() orelse break :blk .{ .null_val = {} };
+                break :blk .{ .bool_val = !known };
             },
             .lt => self.compareLessThan(left, right),
             .lte => self.compareLessOrEqual(left, right),
@@ -579,7 +586,7 @@ pub const ExpressionEvaluator = struct {
         ctx: *const ExecutionContext,
     ) EvalError!EvalResult {
         // Built-in functions
-        if (std.mem.eql(u8, f.name, "id")) {
+        if (std.ascii.eqlIgnoreCase(f.name, "id")) {
             if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             return switch (arg) {
@@ -589,7 +596,7 @@ pub const ExpressionEvaluator = struct {
             };
         }
 
-        if (std.mem.eql(u8, f.name, "coalesce")) {
+        if (std.ascii.eqlIgnoreCase(f.name, "coalesce")) {
             for (f.arguments) |arg_expr| {
                 const arg = try self.evaluate(arg_expr, row, ctx);
                 if (!arg.isNull()) return arg;
@@ -597,7 +604,7 @@ pub const ExpressionEvaluator = struct {
             return .{ .null_val = {} };
         }
 
-        if (std.mem.eql(u8, f.name, "abs")) {
+        if (std.ascii.eqlIgnoreCase(f.name, "abs")) {
             if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             return switch (arg) {
@@ -607,7 +614,7 @@ pub const ExpressionEvaluator = struct {
             };
         }
 
-        if (std.mem.eql(u8, f.name, "size")) {
+        if (std.ascii.eqlIgnoreCase(f.name, "size")) {
             if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             return switch (arg) {
@@ -618,7 +625,7 @@ pub const ExpressionEvaluator = struct {
             };
         }
 
-        if (std.mem.eql(u8, f.name, "toInteger")) {
+        if (std.ascii.eqlIgnoreCase(f.name, "toInteger")) {
             if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             return switch (arg) {
@@ -632,7 +639,7 @@ pub const ExpressionEvaluator = struct {
             };
         }
 
-        if (std.mem.eql(u8, f.name, "toFloat")) {
+        if (std.ascii.eqlIgnoreCase(f.name, "toFloat")) {
             if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             return switch (arg) {
@@ -646,7 +653,7 @@ pub const ExpressionEvaluator = struct {
             };
         }
 
-        if (std.mem.eql(u8, f.name, "toString")) {
+        if (std.ascii.eqlIgnoreCase(f.name, "toString")) {
             if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             return switch (arg) {
@@ -660,13 +667,14 @@ pub const ExpressionEvaluator = struct {
                     break :blk .{ .string_val = s };
                 },
                 .bool_val => |b| .{ .string_val = if (b) "true" else "false" },
-                .null_val => .{ .string_val = "null" },
+                // toString(null) is null, like every function of null.
+                .null_val => .{ .null_val = {} },
                 else => .{ .null_val = {} },
             };
         }
 
         // String functions
-        if (std.mem.eql(u8, f.name, "toLower")) {
+        if (std.ascii.eqlIgnoreCase(f.name, "toLower")) {
             if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             return switch (arg) {
@@ -682,7 +690,7 @@ pub const ExpressionEvaluator = struct {
             };
         }
 
-        if (std.mem.eql(u8, f.name, "toUpper")) {
+        if (std.ascii.eqlIgnoreCase(f.name, "toUpper")) {
             if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             return switch (arg) {
@@ -698,7 +706,7 @@ pub const ExpressionEvaluator = struct {
             };
         }
 
-        if (std.mem.eql(u8, f.name, "trim")) {
+        if (std.ascii.eqlIgnoreCase(f.name, "trim")) {
             if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             return switch (arg) {
@@ -708,7 +716,7 @@ pub const ExpressionEvaluator = struct {
             };
         }
 
-        if (std.mem.eql(u8, f.name, "substring")) {
+        if (std.ascii.eqlIgnoreCase(f.name, "substring")) {
             if (f.arguments.len < 2 or f.arguments.len > 3) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             const start_arg = try self.evaluate(f.arguments[1], row, ctx);
@@ -728,7 +736,7 @@ pub const ExpressionEvaluator = struct {
             return .{ .string_val = s[start..] };
         }
 
-        if (std.mem.eql(u8, f.name, "replace")) {
+        if (std.ascii.eqlIgnoreCase(f.name, "replace")) {
             if (f.arguments.len != 3) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             const search_arg = try self.evaluate(f.arguments[1], row, ctx);
@@ -764,7 +772,7 @@ pub const ExpressionEvaluator = struct {
             return .{ .string_val = result_buf.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory };
         }
 
-        if (std.mem.eql(u8, f.name, "split")) {
+        if (std.ascii.eqlIgnoreCase(f.name, "split")) {
             if (f.arguments.len != 2) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             const delim_arg = try self.evaluate(f.arguments[1], row, ctx);
@@ -787,7 +795,7 @@ pub const ExpressionEvaluator = struct {
         }
 
         // List functions
-        if (std.mem.eql(u8, f.name, "head")) {
+        if (std.ascii.eqlIgnoreCase(f.name, "head")) {
             if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             return switch (arg) {
@@ -797,7 +805,7 @@ pub const ExpressionEvaluator = struct {
             };
         }
 
-        if (std.mem.eql(u8, f.name, "tail")) {
+        if (std.ascii.eqlIgnoreCase(f.name, "tail")) {
             if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             return switch (arg) {
@@ -810,7 +818,7 @@ pub const ExpressionEvaluator = struct {
             };
         }
 
-        if (std.mem.eql(u8, f.name, "last")) {
+        if (std.ascii.eqlIgnoreCase(f.name, "last")) {
             if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             return switch (arg) {
@@ -820,7 +828,7 @@ pub const ExpressionEvaluator = struct {
             };
         }
 
-        if (std.mem.eql(u8, f.name, "range")) {
+        if (std.ascii.eqlIgnoreCase(f.name, "range")) {
             if (f.arguments.len < 2 or f.arguments.len > 3) return EvalError.InvalidArgumentCount;
             const start_arg = try self.evaluate(f.arguments[0], row, ctx);
             const end_arg = try self.evaluate(f.arguments[1], row, ctx);
@@ -850,7 +858,7 @@ pub const ExpressionEvaluator = struct {
         }
 
         // Type/graph functions
-        if (std.mem.eql(u8, f.name, "type")) {
+        if (std.ascii.eqlIgnoreCase(f.name, "type")) {
             if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             return switch (arg) {
@@ -869,7 +877,7 @@ pub const ExpressionEvaluator = struct {
             };
         }
 
-        if (std.mem.eql(u8, f.name, "labels")) {
+        if (std.ascii.eqlIgnoreCase(f.name, "labels")) {
             if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             return switch (arg) {
@@ -892,7 +900,7 @@ pub const ExpressionEvaluator = struct {
             };
         }
 
-        if (std.mem.eql(u8, f.name, "properties")) {
+        if (std.ascii.eqlIgnoreCase(f.name, "properties")) {
             if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             if (arg == .node_ref) {
@@ -979,7 +987,7 @@ pub const ExpressionEvaluator = struct {
     // Comparison helpers
     // ========================================================================
 
-    fn compareEqual(_: *Self, left: EvalResult, right: EvalResult) EvalResult {
+    fn compareEqual(self: *Self, left: EvalResult, right: EvalResult) EvalResult {
         const result = switch (left) {
             .bool_val => |l| switch (right) {
                 .bool_val => |r| l == r,
@@ -1011,13 +1019,75 @@ pub const ExpressionEvaluator = struct {
                 .edge_ref => |r| l == r,
                 else => false,
             },
-            else => false,
+            // Lists and maps used to compare unequal even to themselves.
+            .list_val => |l| switch (right) {
+                .list_val => |r| return self.listsEqual(l, r),
+                else => false,
+            },
+            .map_val => |l| switch (right) {
+                .map_val => |r| return self.mapsEqual(l, r),
+                else => false,
+            },
+            .vector_val => |l| switch (right) {
+                .vector_val => |r| l.len == r.len and for (l, r) |a, b| {
+                    if (a != b) break false;
+                } else true,
+                else => false,
+            },
+            .null_val => return .{ .null_val = {} },
         };
         return .{ .bool_val = result };
     }
 
+    /// `=` between elements of a list or map, where a null is unknown.
+    fn elementsEqual(self: *Self, left: EvalResult, right: EvalResult) EvalResult {
+        if (left.isNull() or right.isNull()) return .{ .null_val = {} };
+        return self.compareEqual(left, right);
+    }
+
+    /// Lists are equal when they have the same length and their elements
+    /// are equal in order. A pair known to differ makes them unequal; else
+    /// a null element makes the answer null, as `[1, null] = [1, null]` is.
+    fn listsEqual(self: *Self, left: []const EvalResult, right: []const EvalResult) EvalResult {
+        if (left.len != right.len) return .{ .bool_val = false };
+        var unknown = false;
+        for (left, right) |a, b| {
+            const eq = self.elementsEqual(a, b).toBool() orelse {
+                unknown = true;
+                continue;
+            };
+            if (!eq) return .{ .bool_val = false };
+        }
+        if (unknown) return .{ .null_val = {} };
+        return .{ .bool_val = true };
+    }
+
+    /// Maps are equal when they have the same keys and equal values under
+    /// each, in any order.
+    fn mapsEqual(self: *Self, left: []const EvalResult.MapEntry, right: []const EvalResult.MapEntry) EvalResult {
+        if (left.len != right.len) return .{ .bool_val = false };
+        var unknown = false;
+        for (left) |entry| {
+            const other = for (right) |candidate| {
+                if (std.mem.eql(u8, candidate.key, entry.key)) break candidate;
+            } else return .{ .bool_val = false };
+            const eq = self.elementsEqual(entry.value, other.value).toBool() orelse {
+                unknown = true;
+                continue;
+            };
+            if (!eq) return .{ .bool_val = false };
+        }
+        if (unknown) return .{ .null_val = {} };
+        return .{ .bool_val = true };
+    }
+
     fn compareLessThan(_: *Self, left: EvalResult, right: EvalResult) EvalResult {
         const result: ?bool = switch (left) {
+            // false < true, as Cypher orders booleans.
+            .bool_val => |l| switch (right) {
+                .bool_val => |r| !l and r,
+                else => null,
+            },
             .int_val => |l| switch (right) {
                 .int_val => |r| l < r,
                 .float_val => |r| @as(f64, @floatFromInt(l)) < r,

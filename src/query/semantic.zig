@@ -274,6 +274,14 @@ pub const SemanticAnalyzer = struct {
                         if (n.variable) |name| {
                             if (!self.variables.contains(name)) {
                                 self.registerNodeVariable(n);
+                            } else if (n.labels.len > 0 or n.properties != null) {
+                                // These were ignored without a word.
+                                self.addErrorFmt(
+                                    .duplicate_variable,
+                                    n.location,
+                                    "'{s}' is already bound; CREATE cannot give it labels or properties (use SET)",
+                                    .{name},
+                                );
                             }
                         } else {
                             self.registerNodeVariable(n);
@@ -316,6 +324,17 @@ pub const SemanticAnalyzer = struct {
             // Verify it's a variable reference (not a complex expression)
             if (expr.* != .variable) {
                 self.addError(.invalid_delete_target, expr.getLocation(), "DELETE requires variable references");
+            } else if (self.variables.get(expr.variable.name)) |info| {
+                // A value (from UNWIND or a computed WITH item) was skipped
+                // without a word.
+                if (info.kind == .alias) {
+                    self.addErrorFmt(
+                        .invalid_delete_target,
+                        expr.getLocation(),
+                        "DELETE needs a node or relationship; '{s}' is a value",
+                        .{expr.variable.name},
+                    );
+                }
             }
         }
     }
@@ -957,7 +976,7 @@ fn isNumeric(t: InferredType) bool {
 }
 
 fn isOrderable(t: InferredType) bool {
-    return t == .integer or t == .float or t == .string;
+    return t == .integer or t == .float or t == .string or t == .boolean;
 }
 
 // ============================================================================

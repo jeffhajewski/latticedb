@@ -2003,6 +2003,9 @@ pub const QueryPlanner = struct {
                 ) catch return PlannerError.OutOfMemory;
 
                 op = delete_edge.operator();
+            } else {
+                self.setPlanDetail("DELETE needs a node or relationship; '{s}' is a value", .{var_name});
+                return PlannerError.InvalidQuery;
             }
         }
 

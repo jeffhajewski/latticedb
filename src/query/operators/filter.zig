@@ -209,9 +209,13 @@ pub const LabelFilter = struct {
             const node_id = slot_value.asNodeId() orelse continue;
 
             // Look up the node to check its labels
-            var node = database.getNodeInTxn(ctx.txn, node_id) catch {
-                continue; // Node not found, skip
-            } orelse continue;
+            // A node that no longer exists has no labels. A storage error is
+            // an error: skipping the row hid it as a missing match.
+            const found = database.getNodeInTxn(ctx.txn, node_id) catch |err| return switch (err) {
+                error.OutOfMemory => OperatorError.OutOfMemory,
+                else => OperatorError.StorageError,
+            };
+            var node = found orelse continue;
             defer node.deinit(ctx.allocator);
 
             // Check if the node has the required label

@@ -139,6 +139,10 @@ pub const Unwind = struct {
                     self.current_list = list;
                     self.list_index = 0;
                 },
+                // UNWIND null produces no rows, as UNWIND [] does. One null
+                // row made `UNWIND n.tags AS t MERGE (:Tag {name: t})` run
+                // for nodes with no tags.
+                .null_val => continue,
                 else => {
                     // Not a list — treat as single-element (Cypher behavior)
                     // Produce one row with the value itself

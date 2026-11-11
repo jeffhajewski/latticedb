@@ -21,6 +21,7 @@ const EvalResult = expression_mod.EvalResult;
 const EvalError = expression_mod.EvalError;
 
 const ast = @import("../ast.zig");
+const scan_ops = @import("scan.zig");
 
 const types = lattice.core.types;
 const NodeId = types.NodeId;
@@ -1591,13 +1592,7 @@ pub const MergeNode = struct {
             for (props) |prop| {
                 const indexed = self.database.hasNodePropertyIndex(label, prop.key) catch false;
                 if (!indexed) continue;
-                return self.database.findNodesByLabelProperty(
-                    ctx.txn,
-                    label,
-                    prop.key,
-                    prop.value,
-                    std.math.maxInt(usize),
-                ) catch return OperatorError.StorageError;
+                return scan_ops.findNodesByIndexedValue(self.database, ctx, label, prop.key, prop.value);
             }
         }
         if (self.labels.len > 0) {

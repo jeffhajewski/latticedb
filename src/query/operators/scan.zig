@@ -217,6 +217,54 @@ pub const LabelScan = struct {
 
 /// Scans an explicit label/property equality index. The value expression is
 /// evaluated once at open time, allowing both literals and query parameters.
+/// The nodes with `label` whose indexed `property` equals `value`, as
+/// Cypher compares: 1 and 1.0 are equal.
+///
+/// The index keys a value by a digest of its type and bits, so an integer
+/// and the float of the same number land under different keys. The other
+/// form is looked up as well and the two lists merged. The result is owned
+/// by `database.allocator`.
+pub fn findNodesByIndexedValue(
+    database: *Database,
+    ctx: *const ExecutionContext,
+    label: []const u8,
+    property: []const u8,
+    value: types.PropertyValue,
+) OperatorError![]NodeId {
+    const first = database.findNodesByLabelProperty(ctx.txn, label, property, value, std.math.maxInt(usize)) catch return OperatorError.StorageError;
+    const other: types.PropertyValue = switch (value) {
+        .int_val => |i| blk: {
+            const f: f64 = @floatFromInt(i);
+            // Only when the float is exactly this integer.
+            if (f >= 0x1p63 or @as(i64, @intFromFloat(f)) != i) return first;
+            break :blk .{ .float_val = f };
+        },
+        .float_val => |f| blk: {
+            if (!std.math.isFinite(f) or @trunc(f) != f or f < -0x1p63 or f >= 0x1p63) return first;
+            break :blk .{ .int_val = @intFromFloat(f) };
+        },
+        else => return first,
+    };
+    defer database.allocator.free(first);
+    const second = database.findNodesByLabelProperty(ctx.txn, label, property, other, std.math.maxInt(usize)) catch return OperatorError.StorageError;
+    defer database.allocator.free(second);
+
+    const merged = database.allocator.alloc(NodeId, first.len + second.len) catch return OperatorError.OutOfMemory;
+    @memcpy(merged[0..first.len], first);
+    @memcpy(merged[first.len..], second);
+    std.mem.sort(NodeId, merged, {}, std.sort.asc(NodeId));
+    var kept: usize = 0;
+    for (merged) |id| {
+        if (kept > 0 and merged[kept - 1] == id) continue;
+        merged[kept] = id;
+        kept += 1;
+    }
+    if (kept == merged.len) return merged;
+    // The caller frees the slice it gets, so it must be the allocation.
+    defer database.allocator.free(merged);
+    return database.allocator.dupe(NodeId, merged[0..kept]) catch OperatorError.OutOfMemory;
+}
+
 pub const PropertyIndexScan = struct {
     output_slot: u8,
     label: []const u8,
@@ -271,13 +319,7 @@ pub const PropertyIndexScan = struct {
         const empty_row = Row.init();
         const evaluated = evaluator.evaluate(self.value_expression, &empty_row, ctx) catch return OperatorError.EvaluationError;
         const value = evaluated.toPropertyValue(temporary_allocator);
-        self.node_ids = self.database.findNodesByLabelProperty(
-            ctx.txn,
-            self.label,
-            self.property,
-            value,
-            std.math.maxInt(usize),
-        ) catch return OperatorError.StorageError;
+        self.node_ids = try findNodesByIndexedValue(self.database, ctx, self.label, self.property, value);
         self.current_index = 0;
     }
 

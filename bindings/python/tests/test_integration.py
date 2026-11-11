@@ -1502,6 +1502,42 @@ class TestQueryTransactionMode:
             assert db.query("MATCH (n:Kept) RETURN count(n)")._rows[0]["count(n)"] == 1
 
 
+    def test_get_node_frees_an_empty_label_string(self, tmp_path, monkeypatch):
+        from latticedb._bindings import get_lib
+
+        lib = get_lib()
+        real_free = lib._lib.lattice_free_string
+        freed = []
+
+        def counting_free(ptr):
+            freed.append(1)
+            real_free(ptr)
+
+        with Database(tmp_path / "test.db", create=True) as db:
+            with db.write() as txn:
+                node = txn.create_node(labels=[])
+                monkeypatch.setattr(lib._lib, "lattice_free_string", counting_free)
+                fetched = txn.get_node(node.id)
+                monkeypatch.undo()
+                txn.commit()
+            assert fetched is not None
+            assert fetched.labels == []
+            assert freed == [1]
+
+    def test_integers_outside_64_bits_are_rejected(self, tmp_path):
+        with Database(tmp_path / "test.db", create=True) as db:
+            for too_big in (2**63, -(2**63) - 1, 2**64):
+                with pytest.raises(OverflowError):
+                    db.query("CREATE (n:Big {v: $v})", parameters={"v": too_big})
+            # The edges of the range still go through unchanged.
+            assert db.query("MATCH (n:Big) RETURN count(n)")._rows[0]["count(n)"] == 0
+            for edge in (2**63 - 1, -(2**63)):
+                rows = db.query(
+                    "CREATE (n:Edge {v: $v}) RETURN n.v AS v", parameters={"v": edge}
+                )._rows
+                assert rows[0]["v"] == edge
+
+
 class TestEdgeFtsOperations:
     """Full-text search over relationship properties."""
 

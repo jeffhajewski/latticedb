@@ -136,7 +136,8 @@ class Database:
         code = lib._lib.lattice_serialize(self._handle, byref(out), byref(length))
         check_error(code)
         try:
-            return bytes(bytearray(out[: length.value]))
+            # One copy; slicing the POINTER would build a list of ints first.
+            return ctypes.string_at(out, length.value)
         finally:
             lib._lib.lattice_free_bytes(out, length)
 

@@ -316,14 +316,17 @@ class Transaction:
             return None
         check_error(code)
 
-        # Parse comma-separated labels
+        # Parse comma-separated labels. A node without labels comes back as an
+        # allocated empty string, which still has to be freed.
         labels: List[str] = []
-        if labels_ptr.value:
-            labels_str = labels_ptr.value.decode("utf-8")
-            if labels_str:
-                labels = labels_str.split(",")
-            # Free the allocated string
-            lib._lib.lattice_free_string(labels_ptr)
+        raw = labels_ptr.value
+        if raw is not None:
+            try:
+                labels_str = raw.decode("utf-8")
+                if labels_str:
+                    labels = labels_str.split(",")
+            finally:
+                lib._lib.lattice_free_string(labels_ptr)
 
         return Node(
             id=node_id,

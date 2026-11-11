@@ -1441,6 +1441,9 @@ def _python_to_value(py_val: Any, c_value: LatticeValue, refs: list[Any]) -> Non
         c_value.type = LATTICE_VALUE_BOOL
         c_value.data.bool_val = py_val
     elif isinstance(py_val, int):
+        # ctypes stores an out-of-range int modulo 2**64 without complaint.
+        if not -(2**63) <= py_val < 2**63:
+            raise OverflowError(f"integer {py_val} does not fit in a signed 64-bit value")
         c_value.type = LATTICE_VALUE_INT
         c_value.data.int_val = py_val
     elif isinstance(py_val, float):

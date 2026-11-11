@@ -5219,7 +5219,8 @@ pub const Database = struct {
 
     fn readBaseVectorState(self: *Self, node_id: NodeId) DatabaseError!TxnVectorState {
         var hnsw = self.hnsw_index orelse return .{ .absent = {} };
-        var vector_storage = self.vector_storage orelse return .{ .absent = {} };
+        // By pointer: borrowing can fill the storage's scratch buffers.
+        const vector_storage = if (self.vector_storage) |*vs| vs else return .{ .absent = {} };
         if (hnsw.getNode(node_id)) |entry| {
             const borrowed = vector_storage.borrowByLocation(entry.vector_loc) catch return DatabaseError.IoError;
             defer borrowed.release();

@@ -1240,10 +1240,37 @@ pub const FtsIndex = struct {
         for (terms_buf[0..num_terms], 0..) |t, i| {
             const_terms[i] = t;
         }
+        var num_const_terms: usize = num_terms;
+        // Without stored positions a phrase cannot be checked for adjacency,
+        // so in AND mode it asks for its words, as `searchPhrase` does. Dropping
+        // it instead would answer a phrase-only query with nothing at all.
+        if (num_phrases > 0 and !self.config.store_positions and mode == .@"and") {
+            for (0..num_phrases) |p| {
+                for (phrases_buf[p][0..phrase_lens[p]]) |word| {
+                    if (num_const_terms >= const_terms.len) break;
+                    const duplicate = for (const_terms[0..num_const_terms]) |t| {
+                        if (std.mem.eql(u8, t, word)) break true;
+                    } else false;
+                    if (duplicate) continue;
+                    const_terms[num_const_terms] = word;
+                    num_const_terms += 1;
+                }
+            }
+        }
         var const_excluded: [32][]const u8 = undefined;
         for (excluded_buf[0..num_excluded], 0..) |t, i| {
             const_excluded[i] = t;
         }
+
+        // Each sub-search below is narrowed afterwards: by another phrase, by
+        // the plain terms, or by the exclusions. Cutting one short beforehand
+        // ranks and truncates a set that is not yet the answer, so a document
+        // that would have survived the narrowing can be dropped for scoring
+        // below others that do not. Only a lone term search with nothing to
+        // filter it may stop at `limit`.
+        const unbounded = std.math.maxInt(u32);
+        const narrowed = num_excluded > 0 or (num_phrases > 0 and self.config.store_positions);
+        const term_limit: u32 = if (narrowed) unbounded else limit;
 
         // Get initial candidates based on terms and phrases
         var candidates: []ScoredDoc = undefined;
@@ -1255,7 +1282,7 @@ pub const FtsIndex = struct {
             for (phrases_buf[0][0..phrase_lens[0]], 0..) |t, i| {
                 const_phrase[i] = t;
             }
-            candidates = try self.searchPhraseTerms(const_phrase[0..phrase_lens[0]], limit *| 4);
+            candidates = try self.searchPhraseTerms(const_phrase[0..phrase_lens[0]], unbounded);
             candidates_owned = true;
 
             // Intersect with additional phrases
@@ -1264,7 +1291,7 @@ pub const FtsIndex = struct {
                 for (phrases_buf[p][0..phrase_lens[p]], 0..) |t, i| {
                     next_phrase[i] = t;
                 }
-                const phrase_results = try self.searchPhraseTerms(next_phrase[0..phrase_lens[p]], limit *| 4);
+                const phrase_results = try self.searchPhraseTerms(next_phrase[0..phrase_lens[p]], unbounded);
                 defer self.allocator.free(phrase_results);
 
                 // Build set of phrase matches
@@ -1295,13 +1322,13 @@ pub const FtsIndex = struct {
             if (num_terms > 0) {
                 const term_results = switch (mode) {
                     .@"and" => if (num_terms == 1)
-                        try self.searchSingleTerm(const_terms[0], limit *| 4)
+                        try self.searchSingleTerm(const_terms[0], unbounded)
                     else
-                        try self.searchMultiTerm(const_terms[0..num_terms], limit *| 4),
+                        try self.searchMultiTerm(const_terms[0..num_terms], unbounded),
                     .@"or" => if (num_terms == 1)
-                        try self.searchSingleTerm(const_terms[0], limit *| 4)
+                        try self.searchSingleTerm(const_terms[0], unbounded)
                     else
-                        try self.searchMultiTermOr(const_terms[0..num_terms], limit *| 4),
+                        try self.searchMultiTermOr(const_terms[0..num_terms], unbounded),
                 };
                 defer self.allocator.free(term_results);
 
@@ -1347,17 +1374,17 @@ pub const FtsIndex = struct {
                     return FtsError.OutOfMemory;
                 };
             }
-        } else if (num_terms > 0) {
+        } else if (num_const_terms > 0) {
             // No phrases (or positions not stored), just use term search
             candidates = switch (mode) {
-                .@"and" => if (num_terms == 1)
-                    try self.searchSingleTerm(const_terms[0], limit *| 2)
+                .@"and" => if (num_const_terms == 1)
+                    try self.searchSingleTerm(const_terms[0], term_limit)
                 else
-                    try self.searchMultiTerm(const_terms[0..num_terms], limit *| 2),
-                .@"or" => if (num_terms == 1)
-                    try self.searchSingleTerm(const_terms[0], limit *| 2)
+                    try self.searchMultiTerm(const_terms[0..num_const_terms], term_limit),
+                .@"or" => if (num_const_terms == 1)
+                    try self.searchSingleTerm(const_terms[0], term_limit)
                 else
-                    try self.searchMultiTermOr(const_terms[0..num_terms], limit *| 2),
+                    try self.searchMultiTermOr(const_terms[0..num_const_terms], term_limit),
             };
             candidates_owned = true;
         } else {
@@ -2605,4 +2632,55 @@ test "fts AND search ranks every match before applying the limit" {
             try std.testing.expectEqual(want.score, got.score);
         }
     }
+}
+
+test "fts searchWithMode applies exclusions before the limit" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_mode_exclusion_limit_test.db");
+    defer fx.destroy(allocator);
+
+    // The three short documents outscore the long one for "apple", and every
+    // one of them has the excluded word. The long one is the only answer.
+    _ = try fx.index.indexDocument(1, "apple banana");
+    _ = try fx.index.indexDocument(2, "apple banana");
+    _ = try fx.index.indexDocument(3, "apple banana");
+    _ = try fx.index.indexDocument(4, "apple cherry grape lemon mango olive peach");
+
+    for ([_]QueryMode{ .@"and", .@"or" }) |mode| {
+        const results = try fx.index.searchWithMode("apple -banana", mode, 1);
+        defer fx.index.freeResults(results);
+        try std.testing.expectEqual(@as(usize, 1), results.len);
+        try std.testing.expectEqual(@as(DocId, 4), results[0].doc_id);
+    }
+}
+
+test "fts searchWithMode intersects a phrase with terms before the limit" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_mode_phrase_limit_test.db");
+    defer fx.destroy(allocator);
+    fx.index.config.store_positions = true;
+
+    // Five short documents hold the phrase and outscore the long one, which is
+    // the only document that also holds "zebra".
+    for (1..6) |id| _ = try fx.index.indexDocument(@intCast(id), "quick brown");
+    _ = try fx.index.indexDocument(6, "quick brown cherry grape lemon mango olive zebra");
+
+    const results = try fx.index.searchWithMode("\"quick brown\" zebra", .@"and", 1);
+    defer fx.index.freeResults(results);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqual(@as(DocId, 6), results[0].doc_id);
+}
+
+test "fts searchWithMode treats a phrase as its words when positions are not stored" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_mode_phrase_no_positions_test.db");
+    defer fx.destroy(allocator);
+
+    _ = try fx.index.indexDocument(1, "quick brown fox");
+    _ = try fx.index.indexDocument(2, "quick red fox");
+
+    const results = try fx.index.searchWithMode("\"quick brown\"", .@"and", 10);
+    defer fx.index.freeResults(results);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqual(@as(DocId, 1), results[0].doc_id);
 }

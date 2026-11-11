@@ -255,7 +255,7 @@ pub const QueryPlanner = struct {
                     // to indicate anything had gone wrong.
                     const aggregates = returnAggregates(r);
 
-                    var input_for_return = current_op;
+                    var input_for_return: ?Operator = current_op orelse try self.singleRow();
                     var lookahead = clause_idx + 1;
                     const first_trailing = lookahead;
                     while (lookahead < query.clauses.len) : (lookahead += 1) {
@@ -295,7 +295,7 @@ pub const QueryPlanner = struct {
                 .delete => |d| current_op = try self.planDelete(d, current_op),
                 .set => |s| current_op = try self.planSet(s, current_op),
                 .remove => |r| current_op = try self.planRemove(r, current_op),
-                .with => |w| current_op = try self.planWith(w, current_op),
+                .with => |w| current_op = try self.planWith(w, current_op orelse try self.singleRow()),
                 .merge => |m| current_op = try self.planMerge(m, current_op),
                 .unwind => |u| current_op = try self.planUnwind(u, current_op),
             }
@@ -2273,15 +2273,18 @@ pub const QueryPlanner = struct {
         return kvs.toOwnedSlice(self.allocator) catch return PlannerError.OutOfMemory;
     }
 
+    /// The input for a clause that opens a query without reading anything:
+    /// one row with nothing bound, so `RETURN 1` and `UNWIND [1, 2] AS x`
+    /// evaluate their expressions exactly once.
+    fn singleRow(self: *Self) PlannerError!Operator {
+        const single = source_ops.SingleRow.init(self.allocator) catch return PlannerError.OutOfMemory;
+        return single.operator();
+    }
+
     /// Plan an UNWIND clause (expand list into rows)
     fn planUnwind(self: *Self, unwind_clause: *const ast.UnwindClause, input: ?Operator) PlannerError!Operator {
         // Standalone UNWIND uses a synthetic single-row input.
-        const input_op = if (input) |op|
-            op
-        else blk: {
-            const single = source_ops.SingleRow.init(self.allocator) catch return PlannerError.OutOfMemory;
-            break :blk single.operator();
-        };
+        const input_op = input orelse try self.singleRow();
 
         const slot = try self.allocateSlot();
         try self.bindVariable(unwind_clause.variable, slot, .alias);

@@ -285,3 +285,49 @@ test "cypher: integer overflow fails the query" {
     defer result.deinit();
     try expectInt(result, 0, 0, 9223372036854775806);
 }
+
+// ============================================================================
+// Queries that start with RETURN or WITH
+// ============================================================================
+
+test "cypher: a leading RETURN or WITH evaluates against one empty row" {
+    const path = "/tmp/lattice_cs_leading_return.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    {
+        var result = try db.query("RETURN 1");
+        defer result.deinit();
+        try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+        try expectInt(result, 0, 0, 1);
+    }
+    {
+        var result = try db.query("RETURN 1 + 2 AS three, -7 % 2 AS rem, null = null AS unknown");
+        defer result.deinit();
+        try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+        try std.testing.expectEqualStrings("three", result.columns[0]);
+        try expectInt(result, 0, 0, 3);
+        try expectInt(result, 0, 1, -1);
+        try expectNull(result, 0, 2);
+    }
+    {
+        var result = try db.query("WITH 2 AS x RETURN x * 3 AS y");
+        defer result.deinit();
+        try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+        try expectInt(result, 0, 0, 6);
+    }
+    {
+        var result = try db.query("WITH 2 AS x WHERE x > 5 RETURN x");
+        defer result.deinit();
+        try std.testing.expectEqual(@as(usize, 0), result.rowCount());
+    }
+    try std.testing.expectEqual(@as(i64, 1), try queryCount(db, "RETURN count(*)"));
+    {
+        var params = std.StringHashMap(lattice.core.types.PropertyValue).init(std.testing.allocator);
+        defer params.deinit();
+        try params.put("p", .{ .int_val = 41 });
+        var result = try db.queryWithParams("RETURN $p + 1 AS answer", &params);
+        defer result.deinit();
+        try expectInt(result, 0, 0, 42);
+    }
+}

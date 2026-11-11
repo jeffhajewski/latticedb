@@ -16,9 +16,15 @@ This finds chunks whose embedding is within distance 0.5 of the query vector, so
 
 ## How It Works
 
-`n.embedding` is the node's vector — the one stored with `set_vector`, whatever key
-was passed there. A node has one vector, and `embedding` is the only property name
-that reads it.
+`n.embedding` is the node's vector, the one stored with `set_vector`. A node has
+one vector, and `embedding` is the only property name that reads it; `set_vector`
+accepts `"embedding"` (or an empty key) and rejects any other key as unsupported.
+Once committed, the vector reads back normalised to unit length, because the index
+stores only the normalised copy: a stored `[3, 4, 0, 0]` returns as
+`[0.6, 0.8, 0, 0]`.
+
+A query vector must have the database's dimensions and finite components. A
+vector containing NaN or infinity fails the query, as it fails `set_vector`.
 
 When the query planner encounters `<=>` in a `WHERE` clause, it runs one HNSW
 search for the **100 nearest vectors in the whole database**, then keeps the rows of
@@ -33,8 +39,10 @@ consequences:
 - **The threshold is inclusive**: `< 0.5` keeps a distance of exactly 0.5, the same
   as `<= 0.5`.
 
-When you need an exact top-k, or more than 100 results, use the `vector_search`
-API (`db.vector_search(vector, k=...)`) instead.
+When you need the nearest `k` for a `k` you choose, or more than 100 results, use
+the `vector_search` API (`db.vector_search(vector, k=...)`) instead. A `k` larger
+than `ef_search` widens the search to `k`, so asking for 500 neighbours returns 500
+when the database holds that many.
 
 ## Distance Metric
 

@@ -34,9 +34,15 @@ const db = new Database("mydb.db", {
 await db.open();
 ```
 
-A node holds one vector. `set_vector` takes a key argument, but the key is not
-used: setting a second vector on a node replaces the first, and Cypher reads the
-vector as `n.embedding` whatever key you passed.
+A node holds one vector, and Cypher reads it as `n.embedding`. `set_vector` takes
+a key argument, which must be `"embedding"` (an empty key also works); any other
+key is rejected with an unsupported-operation error rather than stored under that
+name. Setting a vector on a node that already has one replaces it.
+
+Every component must be a finite number: a vector containing NaN or infinity is
+rejected with an invalid-argument error, both when stored and when used as a
+search query. Under the cosine metric the database keeps only the normalised
+(unit-length) copy of a vector, so a committed vector reads back normalised.
 
 ## Hash Embeddings (Built-in)
 
@@ -66,7 +72,12 @@ For production-quality semantic embeddings, use the HTTP client to connect to an
 
 The endpoint is the full URL the client POSTs to; nothing is appended to it. Give
 Ollama's `/api/embeddings` path or OpenAI's `/v1/embeddings` path, not the
-server's base URL.
+server's base URL: given `http://localhost:11434` alone, the client POSTs to `/`
+on that server, which does not serve embeddings, and `embed` fails. The client
+copies the endpoint, model and API key when it is created.
+
+The client accepts a timeout setting (`timeout_ms` in Python, `timeoutMs` in
+TypeScript), but it is not applied: a request waits as long as the server takes.
 
 ### Ollama
 

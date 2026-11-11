@@ -142,9 +142,9 @@ With `ml = 1/ln 2`, about half of all vectors reach layer 1 or higher, a
 quarter reach layer 2, and so on. (The HNSW paper suggests `ml = 1/ln M`, which
 for M = 16 is ≈ 0.36 and puts about 6% of vectors above layer 0.)
 
-`m_max0` must not exceed 64, so `m` must not exceed 32 when `m_max0 = 2 × m`:
-neighbour lists are read into fixed 64-entry buffers during insert and search,
-and a longer list fails with a storage error.
+`m` and `m_max0` are capped at 64: neighbour lists are read into fixed 64-entry
+buffers during insert and search, so `init` lowers a larger value to 64. With
+`m_max0 = 2 × m`, that makes 32 the largest `m` that keeps the usual ratio.
 
 **What a database lets you change.** These fields matter only when you build an
 `HnswIndex` yourself. A database created with vector support always builds its
@@ -188,7 +188,20 @@ for (results) |result| {
 
 `search(query, k, ef_override)` returns up to `k` results ordered by
 distance; pass a value for `ef_override` to change the beam width for one
-query.
+query. The beam is never narrower than `k`: the search uses `max(ef, k)`
+(capped at 65535), so asking for more neighbours than `ef_search` still returns
+`k` of them.
+
+The index itself accepts any `f32` values, so that recovery can replay a log
+written by an older release. The database rejects a vector with a NaN or
+infinite component, whether stored or used as a query, with `InvalidArgument`
+(`LATTICE_ERROR_INVALID_ARG` through the C API): such a value makes every
+distance to it NaN or infinite and breaks the ordering the search relies on.
+
+`insert` and `remove` are all or nothing. Every neighbour-list write records the
+list's previous contents, and a failure part way (out of memory, a full buffer
+pool, an I/O error) puts the lists, the node map entry, the entry point, the top
+layer and the vector count back as they were.
 
 ### Distance Metrics
 
@@ -202,7 +215,11 @@ For text embeddings from most models (OpenAI, Cohere, etc.), use `.cosine`.
 
 With `.cosine`, the index normalizes each vector before storing it and
 normalizes each query, then computes the distance as `1 - a·b`. The index's
-copy of a vector is therefore its unit-length version.
+copy of a vector is therefore its unit-length version, and it is the only copy
+the file keeps: a committed vector reads back normalised (`n.embedding` in
+Cypher, `getNodeVectorInTxn` in Zig). A vector a transaction has set but not yet
+committed is scored the same way, normalised on both sides, so it ranks among
+committed results on the same scale.
 
 ## Vector Storage
 
@@ -251,9 +268,16 @@ The graph itself is stored apart from the vectors:
 - **The node registry** maps each vector ID to its top layer, its vector
   location and its connection slot. It is kept in memory while the database is
   open and written to a dedicated B+Tree (`hnsw_node_tree`), together with the
-  entry point and layer count, whenever the database syncs (including on close).
-  On open the registry is loaded from that tree and validated; if the tree is
-  missing or fails validation, the index is rebuilt from the stored vectors.
+  entry point and layer count, before every flush of the buffer pool: at each
+  checkpoint, at `sync` and close, and at the early flushes a large transaction
+  triggers. So the file never holds vector pages newer than the registry that
+  describes them. A save writes only the entries added, changed or removed since
+  the last one (the whole registry after a rebuild). On open the registry is
+  loaded from that tree and validated; if the tree is missing or fails
+  validation, the index is rebuilt from the stored vectors.
+- **Free vector records** are kept in an in-memory list, built by one walk of the
+  vector page chain the first time a store needs it, so storing a vector reuses
+  a deleted record without scanning the chain.
 
 ## Performance Characteristics
 
@@ -261,8 +285,18 @@ The graph itself is stored apart from the vectors:
 |-----------|------------|-------|
 | Insert | O(log n) | Builds graph connections |
 | Search (k-NN) | O(log n) | Independent of k for small k |
-| Delete | O(n) | Scans every node's neighbour lists to drop references to the deleted vector; neighbours are not reconnected |
+| Delete | Local, plus an occasional full pass | Repairs the removed vector's neighbours (see below) |
 | Memory | O(n × m × layers) | ~1KB per vector at m=16 |
+
+Removing a vector, which includes replacing one, finds the nodes that link to it
+through its own neighbour lists. Each drops the link and, if that leaves room,
+takes the nearest of the removed node's other neighbours that passes the same
+diversity rule as neighbour selection. Links from nodes the removed one had
+pruned from its own lists cannot be found that way; those ids are remembered and
+dropped in one pass over every list before the next save, or sooner once they
+reach about 3% of the index, or before the same id is inserted again. Search
+skips ids that are no longer in the index, so a saved graph never names a
+missing one.
 
 ### Tuning Guidelines
 
@@ -274,6 +308,9 @@ Through a database, `ef_search` is the only knob:
 **For faster search:**
 - Decrease `ef_search` (e.g., 32)
 - Accept lower recall
+
+A `k` larger than `ef_search` widens the beam to `k` on its own, so there is no
+need to raise `ef_search` just to get more results.
 
 When you build an `HnswIndex` directly, you can also raise `ef_construction`
 (e.g., 400) for a better-connected graph, or raise `m` up to 32 (with
@@ -356,6 +393,9 @@ lattice.vector.distance.normalize(vec);  // in-place
 
 Implementation details:
 - Processes 8 floats at a time (AVX-256 compatible)
+- The dot product and squared Euclidean distance unroll four SIMD steps into
+  four independent accumulators, so long vectors are not held to the latency of
+  one chain of adds; fused multiply-add is not used
 - Handles non-aligned remainder with scalar fallback
 - Works on ARM NEON (128-bit, processed as 2×4)
 
@@ -364,11 +404,11 @@ Implementation details:
 1. **Fixed index settings per database**: `m`, `ef_construction` and the metric
    (cosine) cannot be changed for a database's index; only `ef_search` is
    exposed, per query.
-2. **Registry saved at sync**: the node registry is written to `hnsw_node_tree`
-   when the database syncs or closes, not on every insert. If it is missing or
-   invalid on open, the whole graph is rebuilt from the stored vectors.
-3. **Deletes are O(n)** and do not repair the neighbourhoods of the removed
-   vector's neighbours.
+2. **Registry saved at flush**: the node registry is written to `hnsw_node_tree`
+   before each flush of the buffer pool, not on every insert. If it is missing
+   or invalid on open, the whole graph is rebuilt from the stored vectors.
+3. **Cosine reads back normalised**: the file keeps only the unit-length copy
+   of each vector, so the original magnitude is not recoverable.
 4. **Cypher `<=>` searches a fixed candidate set**: the query planner asks the
    index for the 100 nearest vectors and then keeps those that match the rest of
    the pattern (see [Query Execution](./query-execution.md)). A node outside

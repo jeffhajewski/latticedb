@@ -624,3 +624,135 @@ test "import_export: JSON-family exports fail on unreadable edge properties" {
         import_export.dumpCanonicalJson(allocator, db, canonical_stream.writer(), null),
     );
 }
+
+fn expectStringProperty(db: *Database, node_id: u64, key: []const u8, expected: []const u8) !void {
+    var value = (try db.getNodeProperty(node_id, key)) orelse return error.TestUnexpectedResult;
+    defer value.deinit(std.testing.allocator);
+    if (value != .string_val) {
+        std.debug.print("property {s}: expected string \"{s}\", got {s}\n", .{ key, expected, @tagName(value) });
+        return error.TestUnexpectedResult;
+    }
+    try std.testing.expectEqualStrings(expected, value.string_val);
+}
+
+fn exportJsonAlloc(allocator: std.mem.Allocator, db: *Database) ![]u8 {
+    var list: std.ArrayList(u8) = .empty;
+    errdefer list.deinit(allocator);
+    _ = try import_export.exportJson(allocator, db, @import("compat").arrayListWriterWithAllocator(&list, allocator), null);
+    return list.toOwnedSlice(allocator);
+}
+
+test "import_export: JSON import keeps strings that look like hex or numbers as strings" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_import_hexlike_strings.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    // Unversioned, as written by hand or by 0.16.0.
+    const json_content =
+        \\{"nodes":[{"id":"a","labels":["Thing"],"properties":{"year":"2024","word":"cafe","hex":"DEADBEEF","odd":"abc"}}]}
+    ;
+    _ = try import_export.importJsonContent(allocator, db, json_content, 1000, false);
+
+    try expectStringProperty(db, 1, "year", "2024");
+    try expectStringProperty(db, 1, "word", "cafe");
+    try expectStringProperty(db, 1, "hex", "DEADBEEF");
+    try expectStringProperty(db, 1, "odd", "abc");
+}
+
+test "import_export: JSON export and import keep every value type distinct" {
+    const allocator = std.testing.allocator;
+    const source_path = "/tmp/lattice_export_value_types_source.ltdb";
+    const imported_path = "/tmp/lattice_export_value_types_imported.ltdb";
+    const source = try openTestDb(source_path);
+    defer cleanupTestDb(source, source_path);
+    const imported = try openTestDb(imported_path);
+    defer cleanupTestDb(imported, imported_path);
+
+    const node = try source.createNode(null, &.{person_label});
+    const ints = [_]PropertyValue{ .{ .int_val = 1 }, .{ .int_val = 2 } };
+    const embedding = [_]f32{ 0.1, -2.5, 3.0e-8 };
+    const looks_tagged = [_]PropertyValue.MapEntry{.{ .key = "$bytes", .value = .{ .string_val = "AAAA" } }};
+    try source.setNodeProperty(null, node, "hexlike", .{ .string_val = "cafe" });
+    try source.setNodeProperty(null, node, "bytes", .{ .bytes_val = &[_]u8{ 0xca, 0xfe, 0x00, 0xff } });
+    try source.setNodeProperty(null, node, "empty_bytes", .{ .bytes_val = &[_]u8{} });
+    try source.setNodeProperty(null, node, "whole_float", .{ .float_val = 1.0 });
+    try source.setNodeProperty(null, node, "huge_float", .{ .float_val = 1e300 });
+    try source.setNodeProperty(null, node, "nan", .{ .float_val = std.math.nan(f64) });
+    try source.setNodeProperty(null, node, "int", .{ .int_val = -9223372036854775807 });
+    try source.setNodeProperty(null, node, "ints", .{ .list_val = &ints });
+    try source.setNodeProperty(null, node, "empty_list", .{ .list_val = &.{} });
+    try source.setNodeProperty(null, node, "embedding", .{ .vector_val = &embedding });
+    try source.setNodeProperty(null, node, "looks_tagged", .{ .map_val = &looks_tagged });
+
+    const first = try exportJsonAlloc(allocator, source);
+    defer allocator.free(first);
+    _ = try import_export.importJsonContent(allocator, imported, first, 1000, false);
+    const second = try exportJsonAlloc(allocator, imported);
+    defer allocator.free(second);
+    try std.testing.expectEqualStrings(first, second);
+
+    try expectStringProperty(imported, 1, "hexlike", "cafe");
+
+    var bytes = (try imported.getNodeProperty(1, "bytes")).?;
+    defer bytes.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0xca, 0xfe, 0x00, 0xff }, bytes.bytes_val);
+
+    var empty_bytes = (try imported.getNodeProperty(1, "empty_bytes")).?;
+    defer empty_bytes.deinit(allocator);
+    try std.testing.expect(empty_bytes == .bytes_val);
+
+    var whole = (try imported.getNodeProperty(1, "whole_float")).?;
+    defer whole.deinit(allocator);
+    try std.testing.expect(whole == .float_val);
+    try std.testing.expectEqual(@as(f64, 1.0), whole.float_val);
+
+    var huge = (try imported.getNodeProperty(1, "huge_float")).?;
+    defer huge.deinit(allocator);
+    try std.testing.expectEqual(@as(f64, 1e300), huge.float_val);
+
+    var nan = (try imported.getNodeProperty(1, "nan")).?;
+    defer nan.deinit(allocator);
+    try std.testing.expect(std.math.isNan(nan.float_val));
+
+    var ints_back = (try imported.getNodeProperty(1, "ints")).?;
+    defer ints_back.deinit(allocator);
+    try std.testing.expect(ints_back == .list_val);
+    try std.testing.expectEqual(@as(i64, 2), ints_back.list_val[1].int_val);
+
+    var empty_list = (try imported.getNodeProperty(1, "empty_list")).?;
+    defer empty_list.deinit(allocator);
+    try std.testing.expect(empty_list == .list_val);
+
+    var vector = (try imported.getNodeProperty(1, "embedding")).?;
+    defer vector.deinit(allocator);
+    try std.testing.expect(vector == .vector_val);
+    try std.testing.expectEqualSlices(f32, &embedding, vector.vector_val);
+
+    var map = (try imported.getNodeProperty(1, "looks_tagged")).?;
+    defer map.deinit(allocator);
+    try std.testing.expect(map == .map_val);
+    try std.testing.expectEqualStrings("AAAA", mapValue(map.map_val, "$bytes").?.string_val);
+}
+
+test "import_export: JSON import reads 0.16.0 files and refuses versions it does not know" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_import_format_versions.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    // 0.16.0 wrote vector properties as plain arrays of numbers.
+    const version_one =
+        \\{"nodes":[{"id":"1","labels":[],"properties":{"embedding":[0.5,1,-2],"n":3,"x":2.5}}],"edges":[]}
+    ;
+    _ = try import_export.importJsonContent(allocator, db, version_one, 1000, false);
+    var embedding = (try db.getNodeProperty(1, "embedding")).?;
+    defer embedding.deinit(allocator);
+    try std.testing.expect(embedding == .vector_val);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 0.5, 1, -2 }, embedding.vector_val);
+
+    try std.testing.expectError(
+        import_export.ImportExportError.UnsupportedVersion,
+        import_export.importJsonContent(allocator, db, "{\"version\":3,\"nodes\":[]}", 1000, false),
+    );
+}

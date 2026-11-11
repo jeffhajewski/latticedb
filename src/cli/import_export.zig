@@ -210,7 +210,7 @@ pub fn importJsonContent(
     errdefer if (batcher.hasPendingTransaction()) batcher.abort() catch {};
 
     // Parse JSON
-    const parsed = std.json.parseFromSlice(std.json.Value, allocator, content, .{}) catch {
+    const parsed = parseJson(allocator, content) catch {
         return ImportExportError.ParseError;
     };
     defer parsed.deinit();
@@ -219,6 +219,10 @@ pub fn importJsonContent(
     if (root != .object) {
         return ImportExportError.ParseError;
     }
+    const version = formatVersionOf(root.object) catch |err| switch (err) {
+        error.UnsupportedVersion => return ImportExportError.UnsupportedVersion,
+        else => return ImportExportError.InvalidFormat,
+    };
 
     // Map from string IDs to NodeIds
     var id_map = std.StringHashMap(NodeId).init(allocator);
@@ -229,7 +233,7 @@ pub fn importJsonContent(
         if (nodes_val == .array) {
             for (nodes_val.array.items) |node_val| {
                 const txn = try batcher.transaction();
-                if (importNode(allocator, db, txn, node_val, &id_map)) |_| {
+                if (importNode(allocator, db, txn, node_val, &id_map, version)) |_| {
                     try batcher.recordSuccess(&stats, .node);
                 } else |_| {
                     try batcher.recordFailure(&stats, .node);
@@ -248,7 +252,7 @@ pub fn importJsonContent(
         if (edges_val == .array) {
             for (edges_val.array.items) |edge_val| {
                 const txn = try batcher.transaction();
-                if (importEdge(allocator, db, txn, edge_val, &id_map)) |_| {
+                if (importEdge(allocator, db, txn, edge_val, &id_map, version)) |_| {
                     try batcher.recordSuccess(&stats, .edge);
                 } else |_| {
                     try batcher.recordFailure(&stats, .edge);
@@ -270,6 +274,7 @@ fn importNode(
     txn: ?*Transaction,
     node_val: std.json.Value,
     id_map: *std.StringHashMap(NodeId),
+    version: FormatVersion,
 ) !void {
     if (node_val != .object) return error.InvalidFormat;
 
@@ -308,7 +313,7 @@ fn importNode(
         if (props_val == .object) {
             var iter = props_val.object.iterator();
             while (iter.next()) |entry| {
-                var prop_val = jsonToPropertyValue(allocator, entry.value_ptr.*) catch continue;
+                var prop_val = jsonToPropertyValue(allocator, entry.value_ptr.*, version) catch continue;
                 defer prop_val.deinit(allocator);
                 db.setNodeProperty(txn, node_id, entry.key_ptr.*, prop_val) catch continue;
             }
@@ -322,6 +327,7 @@ fn importEdge(
     txn: ?*Transaction,
     edge_val: std.json.Value,
     id_map: *const std.StringHashMap(NodeId),
+    version: FormatVersion,
 ) !void {
     if (edge_val != .object) return error.InvalidFormat;
 
@@ -358,7 +364,7 @@ fn importEdge(
         if (props_val == .object) {
             var iter = props_val.object.iterator();
             while (iter.next()) |entry| {
-                var prop_val = jsonToPropertyValue(allocator, entry.value_ptr.*) catch continue;
+                var prop_val = jsonToPropertyValue(allocator, entry.value_ptr.*, version) catch continue;
                 defer prop_val.deinit(allocator);
                 db.setEdgePropertyById(txn, edge_id, entry.key_ptr.*, prop_val) catch continue;
             }
@@ -366,123 +372,241 @@ fn importEdge(
     }
 }
 
-fn jsonToPropertyValue(allocator: std.mem.Allocator, val: std.json.Value) !PropertyValue {
+/// Versions of the JSON export format.
+///
+/// Version 1 is what 0.16.0 and earlier wrote, with no "version" field. It
+/// wrote bytes as bare hex strings, which nothing can tell apart from a string
+/// that happens to look like hex, and floats with no fractional part as
+/// integers. Version 2 writes every value so that its type survives the trip:
+/// strings are always strings, floats always carry a decimal point or an
+/// exponent, and the types JSON has no notation for are written as an object
+/// with a single "$"-prefixed key:
+///
+///   {"$bytes": "<base64>"}      bytes
+///   {"$vector": [0.5, 1.0]}     a vector-valued property
+///   {"$float": "NaN"}           NaN, "Infinity" or "-Infinity"
+///   {"$map": {...}}             a map that would otherwise read as one of these
+///
+/// A map is wrapped in "$map" only when it has exactly one key and that key
+/// starts with "$", so ordinary maps are written as plain objects.
+pub const FormatVersion = enum(u8) {
+    v1 = 1,
+    v2 = 2,
+};
+
+/// The version this build writes.
+pub const current_format_version: FormatVersion = .v2;
+
+const json_field_version = "version";
+const tag_bytes = "$bytes";
+const tag_vector = "$vector";
+const tag_float = "$float";
+const tag_map = "$map";
+
+/// Read the "version" field of an export, defaulting to 1 when it is absent.
+fn formatVersionOf(root: std.json.ObjectMap) !FormatVersion {
+    const value = root.get(json_field_version) orelse return .v1;
+    const text = switch (value) {
+        .number_string => |n| n,
+        .integer => |i| return versionFromInt(i),
+        else => return error.InvalidFormat,
+    };
+    const number = std.fmt.parseInt(i64, text, decimal_base) catch return error.InvalidFormat;
+    return versionFromInt(number);
+}
+
+fn versionFromInt(number: i64) !FormatVersion {
+    return switch (number) {
+        1 => .v1,
+        2 => .v2,
+        else => error.UnsupportedVersion,
+    };
+}
+
+/// Parse an export's JSON text, keeping numbers as text so that each one can
+/// be read at the precision its destination needs.
+fn parseJson(allocator: std.mem.Allocator, text: []const u8) !std.json.Parsed(std.json.Value) {
+    return std.json.parseFromSlice(std.json.Value, allocator, text, .{ .parse_numbers = false });
+}
+
+fn jsonNumberText(val: std.json.Value) ?[]const u8 {
+    return switch (val) {
+        .number_string => |n| n,
+        else => null,
+    };
+}
+
+/// Why a value in an import file could not be read.
+const ValueError = error{ InvalidFormat, OutOfMemory };
+
+fn jsonToPropertyValue(allocator: std.mem.Allocator, val: std.json.Value, version: FormatVersion) ValueError!PropertyValue {
     return switch (val) {
         .null => .{ .null_val = {} },
         .bool => |b| .{ .bool_val = b },
         .integer => |i| .{ .int_val = i },
         .float => |f| .{ .float_val = f },
-        .string => |s| blk: {
-            if (isHexBytesString(s)) {
-                break :blk .{ .bytes_val = try decodeHexBytes(allocator, s) };
-            }
-            break :blk .{ .string_val = try allocator.dupe(u8, s) };
-        },
+        .number_string => |n| try parseJsonNumber(n),
+        // A string is a string. Version 1 wrote bytes as hex strings, but so
+        // is "cafe", so a hex-looking string cannot be taken for bytes.
+        .string => |s| .{ .string_val = try allocator.dupe(u8, s) },
         .array => |array| blk: {
-            if (isNumericJsonArray(array.items)) {
-                const vector = try allocator.alloc(f32, array.items.len);
-                errdefer allocator.free(vector);
-
-                for (array.items, 0..) |item, i| {
-                    vector[i] = switch (item) {
-                        .integer => |n| @floatFromInt(n),
-                        .float => |n| @floatCast(n),
-                        else => unreachable,
-                    };
-                }
-
-                break :blk .{ .vector_val = vector };
+            // Version 1 wrote vector properties as plain arrays of numbers, and
+            // 0.16.0 read every such array back as a vector.
+            if (version == .v1 and array.items.len > 0 and isNumericJsonArray(array.items)) {
+                break :blk .{ .vector_val = try jsonToVector(allocator, array.items) };
             }
-
-            const list = try allocator.alloc(PropertyValue, array.items.len);
-            var initialized: usize = 0;
-            errdefer {
-                for (list[0..initialized]) |*item| {
-                    item.deinit(allocator);
-                }
-                allocator.free(list);
-            }
-
-            for (array.items, 0..) |item, i| {
-                list[i] = try jsonToPropertyValue(allocator, item);
-                initialized += 1;
-            }
-
-            break :blk .{ .list_val = list };
+            break :blk .{ .list_val = try jsonToList(allocator, array.items, version) };
         },
         .object => |object| blk: {
-            const map = try allocator.alloc(PropertyValue.MapEntry, object.count());
-            var initialized: usize = 0;
-            errdefer {
-                for (map[0..initialized]) |*entry| {
-                    allocator.free(entry.key);
-                    entry.value.deinit(allocator);
+            if (version != .v1) {
+                if (taggedValue(object)) |tagged| {
+                    break :blk try decodeTaggedValue(allocator, tagged.tag, tagged.value, version);
                 }
-                allocator.free(map);
             }
-
-            var iter = object.iterator();
-            while (iter.next()) |entry| {
-                const key = try allocator.dupe(u8, entry.key_ptr.*);
-                errdefer allocator.free(key);
-
-                const value = try jsonToPropertyValue(allocator, entry.value_ptr.*);
-                errdefer {
-                    var owned_value = value;
-                    owned_value.deinit(allocator);
-                }
-
-                map[initialized] = .{
-                    .key = key,
-                    .value = value,
-                };
-                initialized += 1;
-            }
-
-            break :blk .{ .map_val = map };
+            break :blk .{ .map_val = try jsonToMap(allocator, object, version) };
         },
-        else => error.InvalidFormat,
     };
+}
+
+fn parseJsonNumber(text: []const u8) ValueError!PropertyValue {
+    if (std.json.isNumberFormattedLikeAnInteger(text)) {
+        return .{ .int_val = std.fmt.parseInt(i64, text, decimal_base) catch return error.InvalidFormat };
+    }
+    return .{ .float_val = std.fmt.parseFloat(f64, text) catch return error.InvalidFormat };
+}
+
+const TaggedValue = struct {
+    tag: []const u8,
+    value: std.json.Value,
+};
+
+/// An object with exactly one key that starts with "$" is a tagged value.
+fn taggedValue(object: std.json.ObjectMap) ?TaggedValue {
+    if (object.count() != 1) return null;
+    var iter = object.iterator();
+    const entry = iter.next().?;
+    if (!std.mem.startsWith(u8, entry.key_ptr.*, "$")) return null;
+    return .{ .tag = entry.key_ptr.*, .value = entry.value_ptr.* };
+}
+
+fn decodeTaggedValue(
+    allocator: std.mem.Allocator,
+    tag: []const u8,
+    value: std.json.Value,
+    version: FormatVersion,
+) ValueError!PropertyValue {
+    if (std.mem.eql(u8, tag, tag_bytes)) {
+        if (value != .string) return error.InvalidFormat;
+        return .{ .bytes_val = try decodeBase64(allocator, value.string) };
+    }
+    if (std.mem.eql(u8, tag, tag_vector)) {
+        if (value != .array) return error.InvalidFormat;
+        return .{ .vector_val = try jsonToVector(allocator, value.array.items) };
+    }
+    if (std.mem.eql(u8, tag, tag_float)) {
+        return .{ .float_val = try nonFiniteFloat(f64, value) };
+    }
+    if (std.mem.eql(u8, tag, tag_map)) {
+        if (value != .object) return error.InvalidFormat;
+        return .{ .map_val = try jsonToMap(allocator, value.object, version) };
+    }
+    return error.InvalidFormat;
+}
+
+fn decodeBase64(allocator: std.mem.Allocator, text: []const u8) ValueError![]const u8 {
+    const decoder = std.base64.standard.Decoder;
+    const size = decoder.calcSizeForSlice(text) catch return error.InvalidFormat;
+    const bytes = try allocator.alloc(u8, size);
+    errdefer allocator.free(bytes);
+    decoder.decode(bytes, text) catch return error.InvalidFormat;
+    return bytes;
+}
+
+/// Read one float, as a number or as a tagged non-finite value.
+fn jsonToFloat(comptime T: type, val: std.json.Value) ValueError!T {
+    switch (val) {
+        .number_string => |n| return std.fmt.parseFloat(T, n) catch error.InvalidFormat,
+        .integer => |i| return @floatFromInt(i),
+        .float => |f| return @floatCast(f),
+        .object => |object| {
+            const tagged = taggedValue(object) orelse return error.InvalidFormat;
+            if (!std.mem.eql(u8, tagged.tag, tag_float)) return error.InvalidFormat;
+            return nonFiniteFloat(T, tagged.value);
+        },
+        else => return error.InvalidFormat,
+    }
+}
+
+fn nonFiniteFloat(comptime T: type, val: std.json.Value) ValueError!T {
+    if (val != .string) return error.InvalidFormat;
+    if (std.mem.eql(u8, val.string, "NaN")) return std.math.nan(T);
+    if (std.mem.eql(u8, val.string, "Infinity")) return std.math.inf(T);
+    if (std.mem.eql(u8, val.string, "-Infinity")) return -std.math.inf(T);
+    return error.InvalidFormat;
+}
+
+/// Read an array of numbers as f32 components. Each is parsed from its text
+/// straight to f32, so a component written at f32 precision reads back exactly.
+fn jsonToVector(allocator: std.mem.Allocator, items: []const std.json.Value) ValueError![]const f32 {
+    const vector = try allocator.alloc(f32, items.len);
+    errdefer allocator.free(vector);
+    for (items, 0..) |item, i| {
+        vector[i] = try jsonToFloat(f32, item);
+    }
+    return vector;
+}
+
+fn jsonToList(allocator: std.mem.Allocator, items: []const std.json.Value, version: FormatVersion) ValueError![]const PropertyValue {
+    const list = try allocator.alloc(PropertyValue, items.len);
+    var initialized: usize = 0;
+    errdefer {
+        for (list[0..initialized]) |*item| {
+            item.deinit(allocator);
+        }
+        allocator.free(list);
+    }
+
+    for (items, 0..) |item, i| {
+        list[i] = try jsonToPropertyValue(allocator, item, version);
+        initialized += 1;
+    }
+    return list;
+}
+
+fn jsonToMap(allocator: std.mem.Allocator, object: std.json.ObjectMap, version: FormatVersion) ValueError![]const PropertyValue.MapEntry {
+    const map = try allocator.alloc(PropertyValue.MapEntry, object.count());
+    var initialized: usize = 0;
+    errdefer {
+        for (map[0..initialized]) |*entry| {
+            allocator.free(entry.key);
+            entry.value.deinit(allocator);
+        }
+        allocator.free(map);
+    }
+
+    var iter = object.iterator();
+    while (iter.next()) |entry| {
+        const key = try allocator.dupe(u8, entry.key_ptr.*);
+        errdefer allocator.free(key);
+
+        const value = try jsonToPropertyValue(allocator, entry.value_ptr.*, version);
+        map[initialized] = .{
+            .key = key,
+            .value = value,
+        };
+        initialized += 1;
+    }
+    return map;
 }
 
 fn isNumericJsonArray(items: []const std.json.Value) bool {
     for (items) |item| {
         switch (item) {
-            .integer, .float => {},
+            .integer, .float, .number_string => {},
             else => return false,
         }
     }
     return true;
-}
-
-fn isHexBytesString(s: []const u8) bool {
-    if (s.len == 0 or s.len % 2 != 0) return false;
-    for (s) |c| {
-        if (hexNibble(c) == null) return false;
-    }
-    return true;
-}
-
-fn decodeHexBytes(allocator: std.mem.Allocator, s: []const u8) ![]const u8 {
-    const bytes = try allocator.alloc(u8, s.len / 2);
-    errdefer allocator.free(bytes);
-
-    for (bytes, 0..) |*byte, i| {
-        const hi = hexNibble(s[i * 2]) orelse return error.InvalidFormat;
-        const lo = hexNibble(s[i * 2 + 1]) orelse return error.InvalidFormat;
-        byte.* = (hi << 4) | lo;
-    }
-
-    return bytes;
-}
-
-fn hexNibble(c: u8) ?u8 {
-    return switch (c) {
-        '0'...'9' => c - '0',
-        'a'...'f' => c - 'a' + 10,
-        'A'...'F' => c - 'A' + 10,
-        else => null,
-    };
 }
 
 /// Import/Export errors
@@ -495,6 +619,7 @@ pub const ImportExportError = error{
     UnsupportedFormat,
     InvalidNodeId,
     MissingRequiredField,
+    UnsupportedVersion,
 };
 
 /// Export database to JSON format
@@ -510,7 +635,7 @@ pub fn exportJson(
     var exported_nodes = try buildNodeIdSet(allocator, node_ids);
     defer exported_nodes.deinit();
 
-    try writer.writeAll("{\"" ++ json_field_nodes ++ "\":[");
+    try writer.print("{{\"" ++ json_field_version ++ "\":{d},\"" ++ json_field_nodes ++ "\":[", .{@intFromEnum(current_format_version)});
 
     var first_node = true;
     for (node_ids) |node_id| {
@@ -570,7 +695,7 @@ pub fn dumpCanonicalJson(
     var exported_nodes = try buildNodeIdSet(allocator, node_ids);
     defer exported_nodes.deinit();
 
-    try writer.writeAll("{\"" ++ json_field_nodes ++ "\":[");
+    try writer.print("{{\"" ++ json_field_version ++ "\":{d},\"" ++ json_field_nodes ++ "\":[", .{@intFromEnum(current_format_version)});
     for (node_ids, 0..) |node_id, i| {
         if (i > 0) try writer.writeByte(',');
         try writeNodeJsonCanonical(allocator, db, writer, node_id);
@@ -923,48 +1048,7 @@ fn writeEdgeDot(writer: anytype, edge: Database.EdgeInfo) !void {
 }
 
 fn writePropertyValueJson(writer: anytype, val: PropertyValue) !void {
-    switch (val) {
-        .null_val => try writer.writeAll("null"),
-        .bool_val => |b| try writer.writeAll(if (b) "true" else "false"),
-        .int_val => |i| try writer.print("{d}", .{i}),
-        .float_val => |f| try writer.print("{d}", .{f}),
-        .string_val => |s| try writeJsonString(writer, s),
-        .bytes_val => |bytes| {
-            // Encode bytes as hex string
-            try writer.writeByte('"');
-            for (bytes) |b| {
-                try writer.print("{x:0>2}", .{b});
-            }
-            try writer.writeByte('"');
-        },
-        .vector_val => |vec| {
-            // Output vector as JSON array of floats
-            try writer.writeByte('[');
-            for (vec, 0..) |f, i| {
-                if (i > 0) try writer.writeByte(',');
-                try writer.print("{d}", .{f});
-            }
-            try writer.writeByte(']');
-        },
-        .list_val => |list| {
-            try writer.writeByte('[');
-            for (list, 0..) |item, i| {
-                if (i > 0) try writer.writeByte(',');
-                try writePropertyValueJson(writer, item);
-            }
-            try writer.writeByte(']');
-        },
-        .map_val => |entries| {
-            try writer.writeByte('{');
-            for (entries, 0..) |entry, i| {
-                if (i > 0) try writer.writeByte(',');
-                try writeJsonString(writer, entry.key);
-                try writer.writeByte(':');
-                try writePropertyValueJson(writer, entry.value);
-            }
-            try writer.writeByte('}');
-        },
-    }
+    try writeValueJson(null, writer, val);
 }
 
 fn writePropertyValueJsonCanonical(
@@ -972,51 +1056,116 @@ fn writePropertyValueJsonCanonical(
     writer: anytype,
     val: PropertyValue,
 ) !void {
+    try writeValueJson(allocator, writer, val);
+}
+
+/// Write a value in the version 2 encoding (see `FormatVersion`).
+///
+/// With an allocator, map keys are written in sorted order, for output that
+/// must not depend on the order properties were stored in.
+fn writeValueJson(sort_allocator: ?std.mem.Allocator, writer: anytype, val: PropertyValue) !void {
     switch (val) {
         .null_val => try writer.writeAll("null"),
         .bool_val => |b| try writer.writeAll(if (b) "true" else "false"),
         .int_val => |i| try writer.print("{d}", .{i}),
-        .float_val => |f| try writer.print("{d}", .{f}),
+        .float_val => |f| try writeJsonFloat(f64, writer, f),
         .string_val => |s| try writeJsonString(writer, s),
         .bytes_val => |bytes| {
-            try writer.writeByte('"');
-            for (bytes) |b| try writer.print("{x:0>2}", .{b});
-            try writer.writeByte('"');
+            try writer.writeAll("{\"" ++ tag_bytes ++ "\":\"");
+            try writeBase64(writer, bytes);
+            try writer.writeAll("\"}");
         },
         .vector_val => |vec| {
-            try writer.writeByte('[');
-            for (vec, 0..) |f, i| {
-                if (i > 0) try writer.writeByte(',');
-                try writer.print("{d}", .{f});
-            }
-            try writer.writeByte(']');
+            try writer.writeAll("{\"" ++ tag_vector ++ "\":");
+            try writeJsonVector(writer, vec);
+            try writer.writeByte('}');
         },
         .list_val => |list| {
             try writer.writeByte('[');
             for (list, 0..) |item, i| {
                 if (i > 0) try writer.writeByte(',');
-                try writePropertyValueJsonCanonical(allocator, writer, item);
+                try writeValueJson(sort_allocator, writer, item);
             }
             try writer.writeByte(']');
         },
         .map_val => |entries| {
-            const sorted_entries = try allocator.dupe(PropertyValue.MapEntry, entries);
-            defer allocator.free(sorted_entries);
-            std.mem.sort(PropertyValue.MapEntry, sorted_entries, {}, struct {
-                fn lessThan(_: void, a: PropertyValue.MapEntry, b: PropertyValue.MapEntry) bool {
-                    return std.mem.order(u8, a.key, b.key) == .lt;
-                }
-            }.lessThan);
+            // A map shaped like a tagged value is wrapped so it reads back as a map.
+            const wrap = entries.len == 1 and std.mem.startsWith(u8, entries[0].key, "$");
+            if (wrap) try writer.writeAll("{\"" ++ tag_map ++ "\":");
+
+            var ordered = entries;
+            var sorted: ?[]PropertyValue.MapEntry = null;
+            defer if (sorted) |owned| sort_allocator.?.free(owned);
+            if (sort_allocator) |allocator| {
+                const copy = try allocator.dupe(PropertyValue.MapEntry, entries);
+                std.mem.sort(PropertyValue.MapEntry, copy, {}, struct {
+                    fn lessThan(_: void, a: PropertyValue.MapEntry, b: PropertyValue.MapEntry) bool {
+                        return std.mem.order(u8, a.key, b.key) == .lt;
+                    }
+                }.lessThan);
+                sorted = copy;
+                ordered = copy;
+            }
 
             try writer.writeByte('{');
-            for (sorted_entries, 0..) |entry, i| {
+            for (ordered, 0..) |entry, i| {
                 if (i > 0) try writer.writeByte(',');
                 try writeJsonString(writer, entry.key);
                 try writer.writeByte(':');
-                try writePropertyValueJsonCanonical(allocator, writer, entry.value);
+                try writeValueJson(sort_allocator, writer, entry.value);
             }
             try writer.writeByte('}');
+
+            if (wrap) try writer.writeByte('}');
         },
+    }
+}
+
+fn writeJsonVector(writer: anytype, vec: []const f32) !void {
+    try writer.writeByte('[');
+    for (vec, 0..) |f, i| {
+        if (i > 0) try writer.writeByte(',');
+        try writeJsonFloat(f32, writer, f);
+    }
+    try writer.writeByte(']');
+}
+
+/// Write a float so that it reads back as a float of the same value.
+///
+/// The shortest decimal that round-trips is used, with ".0" added when it would
+/// otherwise look like an integer, and scientific notation when the decimal
+/// form would be long. JSON has no notation for NaN or the infinities, so those
+/// are written as tagged values.
+fn writeJsonFloat(comptime T: type, writer: anytype, f: T) !void {
+    if (std.math.isNan(f)) return writer.writeAll("{\"" ++ tag_float ++ "\":\"NaN\"}");
+    if (std.math.isInf(f)) {
+        return writer.writeAll(if (f > 0)
+            "{\"" ++ tag_float ++ "\":\"Infinity\"}"
+        else
+            "{\"" ++ tag_float ++ "\":\"-Infinity\"}");
+    }
+
+    const max_decimal_len = 24;
+    var buf: [512]u8 = undefined;
+    const decimal = std.fmt.bufPrint(&buf, "{d}", .{f}) catch unreachable;
+    if (decimal.len <= max_decimal_len) {
+        try writer.writeAll(decimal);
+        if (std.mem.indexOfAny(u8, decimal, ".e") == null) try writer.writeAll(".0");
+        return;
+    }
+    try writer.writeAll(std.fmt.bufPrint(&buf, "{e}", .{f}) catch unreachable);
+}
+
+fn writeBase64(writer: anytype, bytes: []const u8) !void {
+    const encoder = std.base64.standard.Encoder;
+    // Whole groups of three bytes encode to whole groups of four characters.
+    const chunk_len = 3 * 64;
+    var buf: [4 * 64]u8 = undefined;
+    var offset: usize = 0;
+    while (offset < bytes.len) {
+        const end = @min(offset + chunk_len, bytes.len);
+        try writer.writeAll(encoder.encode(&buf, bytes[offset..end]));
+        offset = end;
     }
 }
 

@@ -829,6 +829,9 @@ pub const FtsIndex = struct {
             if (!any_matched) break;
         }
 
+        // Every match is ranked before the limit applies. Stopping once there
+        // were "enough" matches in posting order would keep the first ones
+        // stored rather than the best scoring ones.
         var results: ArrayListUnmanaged(ScoredDoc) = .empty;
         errdefer results.deinit(self.allocator);
 
@@ -840,16 +843,6 @@ pub const FtsIndex = struct {
                 }) catch {
                     return FtsError.OutOfMemory;
                 };
-
-                // Early exit if we have enough results (before sorting)
-                // This is an optimization for large result sets.
-                //
-                // Saturating, because a caller asking for every match passes the
-                // largest u32 there is and doubling it overflows. That is not a
-                // theoretical caller: a query with no LIMIT means every row.
-                if (results.items.len >= limit *| 2) {
-                    break;
-                }
             }
         }
 
@@ -2583,4 +2576,33 @@ test "fts AND search with a term no document contains matches nothing" {
     const results = try fx.index.search("apple pie", 10);
     defer fx.index.freeResults(results);
     try std.testing.expectEqual(@as(usize, 0), results.len);
+}
+
+test "fts AND search ranks every match before applying the limit" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_and_ranking_test.db");
+    defer fx.destroy(allocator);
+
+    // Every document has both terms; the last one in doc_id order is the
+    // shortest, so BM25 ranks it first.
+    _ = try fx.index.indexDocument(1, "apple banana cherry grape lemon mango olive");
+    _ = try fx.index.indexDocument(2, "apple banana cherry grape lemon mango");
+    _ = try fx.index.indexDocument(3, "apple banana cherry grape lemon");
+    _ = try fx.index.indexDocument(4, "apple banana cherry grape");
+    _ = try fx.index.indexDocument(5, "apple banana");
+
+    const all = try fx.index.search("apple banana", std.math.maxInt(u32));
+    defer fx.index.freeResults(all);
+    try std.testing.expectEqual(@as(usize, 5), all.len);
+    try std.testing.expectEqual(@as(DocId, 5), all[0].doc_id);
+
+    for (1..5) |limit| {
+        const top = try fx.index.search("apple banana", @intCast(limit));
+        defer fx.index.freeResults(top);
+        try std.testing.expectEqual(limit, top.len);
+        for (top, all[0..limit]) |got, want| {
+            try std.testing.expectEqual(want.doc_id, got.doc_id);
+            try std.testing.expectEqual(want.score, got.score);
+        }
+    }
 }

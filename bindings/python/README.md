@@ -34,8 +34,9 @@ zig build install --prefix /tmp/lattice-install
 export LATTICE_PREFIX=/tmp/lattice-install
 ```
 
-`LATTICE_PREFIX` is searched under `<prefix>/lib`. On Windows, `zig build install`
-puts `lattice.dll` in `<prefix>/bin`, so point `LATTICE_LIB_PATH` at the DLL instead.
+`LATTICE_PREFIX` is searched under `<prefix>/lib`. On Windows, where `zig build install`
+puts `lattice.dll` in `<prefix>/bin` and only the import library in `<prefix>/lib`,
+`<prefix>/bin` is searched first, then `<prefix>/lib`.
 
 Alternatively, discovery can use `pkg-config`:
 
@@ -121,11 +122,11 @@ Constructing a `Database` does not open it. Use it as a context manager
 - `open()` / `close()` - Open/close the database (also works as context manager)
 - `read()` - Start a read-only transaction (context manager)
 - `write()` - Start a read-write transaction (context manager)
-- `query(cypher, parameters=None)` - Execute a Cypher query
+- `query(cypher, parameters=None)` - Execute a Cypher query in its own transaction, read-write only if the query writes. If the commit fails, the transaction is rolled back before the error is raised, so the writer slot is free for the next write
 - `get_nodes_by_label(label)` - IDs of every node with a label
 - `vector_search(vector, *, k=10, ef_search=64)` - k-NN vector search
 - `create_node_fts_index(label, prop)` / `drop_node_fts_index(label, prop)` / `has_node_fts_index(label, prop)` - Manage full-text indexes on node properties
-- `create_edge_fts_index(edge_type, prop)` / `drop_edge_fts_index(...)` / `has_edge_fts_index(...)` - Manage full-text indexes on edge properties
+- `create_edge_fts_index(edge_type, prop)` / `drop_edge_fts_index(...)` / `has_edge_fts_index(...)` - Manage full-text indexes on edge properties. A node index and a relationship index cannot share a name and property: the second raises `LatticeAlreadyExistsError`
 - `fts_search(label, prop, query, *, limit=10)` - Full-text search over one declared index
 - `fts_search_fuzzy(label, prop, query, *, limit=10, max_distance=0, min_term_length=0)` - Fuzzy full-text search (0 selects the defaults, 2 and 4)
 - `create_node_property_index(label, property_key)` / `drop_node_property_index(...)` - Manage explicit node equality indexes
@@ -164,7 +165,7 @@ database from bytes produced by `serialize()`; it takes the same options as
 - `create_node(labels=[], properties=None)` - Create a node
 - `delete_node(node_id)` - Delete a node
 - `set_property(node_id, key, value)` - Set a property on a node. If a full-text index is declared for one of the node's labels and this property, the index is kept current.
-- `set_vector(node_id, key, vector)` - Set the node's vector embedding. A node has one vector; `key` is accepted but not used, and Cypher reads the vector as `n.embedding`.
+- `set_vector(node_id, key, vector)` - Set the node's vector embedding. A node has one vector, which Cypher reads as `n.embedding`; `key` must be `"embedding"` (or `""`), and any other key raises `LatticeUnsupportedError`. A vector with NaN or infinite components raises `LatticeInvalidArgError`.
 - `batch_insert_vectors(label, vectors)` - Insert vector-bearing nodes in one call
 - `batch_insert(label, vectors)` - Deprecated compatibility alias for `batch_insert_vectors`
 - `create_edge(source_id, target_id, edge_type, properties=None)` - Create an edge
@@ -362,7 +363,7 @@ graph events such as `node.insert`, `node.property_set`, `edge.delete`, and
 
 - `None` - Null value
 - `bool` - Boolean
-- `int` - 64-bit integer
+- `int` - 64-bit integer; a value outside the signed 64-bit range raises `OverflowError`
 - `float` - 64-bit float
 - `str` - UTF-8 string
 - `bytes` - Binary data

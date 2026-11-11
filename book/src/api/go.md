@@ -149,7 +149,9 @@ to something empty", which a zero value alone could not tell you.
 
 If you would rather manage the transaction yourself, `BeginRead`, `BeginWrite`,
 `Commit`, and `Rollback` are available. `Update` and `View` are safer, because
-they cannot leave a transaction open on an early return.
+they cannot leave a transaction open on an early return. `Update` also rolls
+back when the commit itself fails; a manual `Commit` that returns an error leaves
+the transaction open, holding the writer slot, until you call `Rollback`.
 
 ## Queries
 
@@ -218,7 +220,10 @@ values search more of the index and find more of the true nearest neighbours.
 different settings.
 
 Store a vector on a node with `tx.SetVector(nodeID, "embedding", vector)`, and
-load many at once with `tx.BatchInsertVectors`.
+load many at once with `tx.BatchInsertVectors`. A node has one vector, which
+Cypher reads as `n.embedding`; a key other than `"embedding"` (or `""`) returns
+`ErrorUnsupported`, and a vector with NaN or infinite components
+`ErrorInvalidArg`. A `K` larger than `EfSearch` widens the search to `K`.
 
 ## Full-text search
 

@@ -21,7 +21,31 @@ typedef struct lattice_result lattice_result;
 typedef struct lattice_vector_result lattice_vector_result;
 typedef struct lattice_fts_result lattice_fts_result;
 typedef struct lattice_edge_result lattice_edge_result;
+typedef struct lattice_stream_batch lattice_stream_batch;
 ```
+
+A handle is an opaque token, not the address of anything: pass it back to the
+API, but never dereference or reinterpret it. Each handle gets a token that is
+not reused (until a sequence of 2^53 handles wraps on 64-bit targets), so a
+handle used after it was freed is rejected rather than reaching whatever the
+allocator put in its place. A transaction handle used after commit or rollback
+returns `LATTICE_ERROR_TXN_ABORTED`, also after the database is closed; any other
+freed handle returns `LATTICE_ERROR_INVALID_ARG`.
+
+Every call that reaches a database takes that database's lock, so a database
+handle and its transactions can be called from several threads; the calls take
+turns. That includes database-level calls such as `lattice_vector_search`,
+`lattice_get_nodes_by_label`, the stream reads and the query cache calls, and a
+handle stays valid for the whole of a call even if another thread commits or
+closes it meanwhile. A waiting `lattice_stream_read` releases the lock while it
+waits, so writers can commit what it is waiting for. Only one read-write
+transaction can be open at a time (see below).
+
+Enum arguments are checked: a value outside the declared set is rejected with
+`LATTICE_ERROR_INVALID_ARG` (`lattice_begin` with an unknown mode,
+`lattice_embedding_client_create` with an unknown format, a value of unknown
+type), and `lattice_error_message` returns `"Unknown error"` for a code it does
+not know.
 
 ### IDs
 
@@ -103,6 +127,14 @@ lattice_error err = lattice_open("mydb.ltdb", &opts, &db);
 ```c
 lattice_close(db);
 ```
+
+Close refuses with `LATTICE_ERROR_INVALID_ARG` while a transaction or result
+handle that depends on the database is still open, and the database stays open
+so you can finish them and close again. A `lattice_stream_read` waiting on the
+database in another thread does not hold the close up: it is woken and returns
+`LATTICE_ERROR_INVALID_ARG` before the database is freed. Once close starts, it
+always consumes the handle; `LATTICE_ERROR_IO` reports that the final sync or
+checkpoint failed, and the handle must not be used again.
 
 ### Open Options
 
@@ -205,6 +237,15 @@ Transaction modes:
 - `LATTICE_TXN_READ_ONLY` — read-only, can run concurrently
 - `LATTICE_TXN_READ_WRITE` — read-write, serialized
 
+Any other mode value is rejected with `LATTICE_ERROR_INVALID_ARG`.
+
+A successful commit or rollback frees the transaction handle. If
+`lattice_commit` fails for any reason other than the transaction having already
+ended (`LATTICE_ERROR_TXN_ABORTED`), the transaction stays open: retry the commit
+or call `lattice_rollback`. Until you do, it holds the single writer slot, so
+later writes fail with `LATTICE_ERROR_LOCK_TIMEOUT` and `lattice_close` is
+refused.
+
 ## Node Operations
 
 ### Create a Node
@@ -258,6 +299,11 @@ lattice_free_string(labels);
 float vector[128] = { /* ... */ };
 lattice_node_set_vector(txn, node_id, "embedding", vector, 128);
 ```
+
+A node holds one vector, which Cypher reads as `n.embedding`. The key must be
+`"embedding"`, `""` or `NULL`; any other key returns `LATTICE_ERROR_UNSUPPORTED`.
+A vector whose length is not the database's dimensions, or with a NaN or
+infinite component, returns `LATTICE_ERROR_INVALID_ARG`.
 
 ### Explicit Property Indexes
 
@@ -373,6 +419,10 @@ for (uint32_t i = 0; i < count; i++) {
 lattice_edge_result_free(edges);
 ```
 
+The type comes back as a pointer and a length. The bytes are also
+NUL-terminated, so the pointer can be used as a C string; it stays valid until
+the result is freed.
+
 Typed traversal accepts a limit. Pass `0` for no limit:
 
 ```c
@@ -401,6 +451,9 @@ uint32_t count;
 lattice_batch_insert(txn, nodes, 1000, ids, &count);
 ```
 
+An empty label (`""`) creates an unlabeled node, as `lattice_node_create` does; a
+`NULL` label is rejected.
+
 ## Vector Search
 
 ```c
@@ -420,7 +473,9 @@ lattice_vector_result_free(results);
 
 Parameters:
 - `k` — number of nearest neighbors to return
-- `ef_search` — HNSW search parameter (0 = default 64). Higher values improve recall at the cost of latency.
+- `ef_search` — HNSW search parameter (0 = default 64). Higher values improve recall at the cost of latency. The search uses `max(ef_search, k)`, so a `k` above `ef_search` still returns `k` results when the database holds that many.
+
+A query vector with a NaN or infinite component returns `LATTICE_ERROR_INVALID_ARG`.
 
 ## Full-Text Search
 
@@ -431,6 +486,11 @@ Parameters:
    node already carrying the label; writes maintain it from then on. */
 lattice_node_fts_index_create(db, "Document", "text");
 ```
+
+Labels and relationship types share one namespace, so a node index and a
+relationship index (`lattice_edge_fts_index_create`) on the same name and
+property would share storage: declaring the second one returns
+`LATTICE_ERROR_ALREADY_EXISTS`.
 
 ### Search
 
@@ -456,6 +516,10 @@ lattice_fts_search_fuzzy(db, "Document", "text", "quik fox", 8, 10, 2, 4, &resul
 // max_distance=2, min_term_length=4
 ```
 
+Plain search requires every term; a term no document contains gives no results.
+Fuzzy search matches documents containing any of the words, or a near spelling
+of one.
+
 ## Embeddings
 
 ### Hash Embeddings (Built-in)
@@ -476,7 +540,7 @@ lattice_embedding_config config = {
     .model = "nomic-embed-text",  // required; NULL is rejected with LATTICE_ERROR_INVALID_ARG
     .api_format = LATTICE_EMBEDDING_OLLAMA,
     .api_key = NULL,
-    .timeout_ms = 0  // default 30s
+    .timeout_ms = 0  // accepted, but not currently applied
 };
 
 lattice_embedding_client* client;
@@ -490,6 +554,11 @@ lattice_hash_embed_free(vector, dims);
 
 lattice_embedding_client_free(client);
 ```
+
+The client POSTs to `endpoint` exactly as given, with nothing appended, and
+copies the endpoint, model and API key when it is created, so the caller's
+strings can be freed afterwards. `timeout_ms` is stored but no timeout is
+applied to the request.
 
 ## Durable Streams
 
@@ -750,7 +819,7 @@ lattice_query_cache_stats(db, &entries, &hits, &misses);
 // Get version string
 const char* version = lattice_version();  // e.g. "0.16.0"
 
-// Get error message
+// Get error message ("Unknown error" for a code the library does not define)
 const char* msg = lattice_error_message(LATTICE_ERROR_NOT_FOUND);
 ```
 

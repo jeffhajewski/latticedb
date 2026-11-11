@@ -40,6 +40,11 @@ try (Database db = Database.open("graph.lattice",
 an in-memory database, and `Database.deserialize(bytes)` opens one from the bytes
 `db.serialize()` returned.
 
+`close()` is refused with `ErrorCode.INVALID_ARG` while a transaction or result
+from the database is still open. The `Database` then keeps its handle, so you can
+finish what is open and call `close()` again. A close that fails with
+`ErrorCode.IO` has still closed the database.
+
 ## Transactions
 
 `read` and `write` run a function in a transaction; `write` commits when the
@@ -80,8 +85,10 @@ List<VectorSearchResult> near =
 `Transaction` has its own `query`, `ftsSearch`, `ftsSearchFuzzy` and `queryVector`
 for searching inside a transaction, including its uncommitted writes.
 
-A node has one vector: `setVector(nodeId, key, vector)` accepts a key but does not
-use it, and Cypher reads the vector as `n.embedding`.
+A node has one vector, which Cypher reads as `n.embedding`. `setVector(nodeId,
+key, vector)` takes a key that must be `"embedding"` (or `""`); any other key
+fails with `ErrorCode.UNSUPPORTED`, and a vector with NaN or infinite components
+with `ErrorCode.INVALID_ARG`.
 
 ## Values
 
@@ -97,14 +104,18 @@ use it, and Cypher reads the vector as `n.embedding`.
 | list | `List<Object>` |
 | map | `Map<String, Object>` |
 
-Any `Number`, `List` or `Map` is accepted on input.
+Any `Number`, `List` or `Map` is accepted on input. `Long`, `Integer`, `Short`,
+`Byte`, `AtomicInteger`, `AtomicLong` and a `BigInteger` that fits in 64 bits
+are stored as int (a larger `BigInteger` throws `ArithmeticException`); every
+other `Number`, `BigDecimal` included, is stored as float.
 
 ## Errors
 
 Errors are unchecked. `LatticeException` carries an `ErrorCode` (`getErrorCode()`)
 and the native code (`getNativeCode()`). A failed query throws `QueryException`
-(also unchecked) with the error code, the stage, the diagnostic code and the
-source location. `DATABASE_LOCKED` means
+(also unchecked) with the error code the call returned, the stage, the
+diagnostic code and the source location; when the query has no diagnostic
+message, the message is that code's. `DATABASE_LOCKED` means
 another process holds the file; `LOCK_TIMEOUT` means another write transaction is
 open in this one.
 

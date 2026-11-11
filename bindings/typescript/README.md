@@ -30,8 +30,9 @@ zig build install --prefix /tmp/lattice-install
 export LATTICE_PREFIX=/tmp/lattice-install
 ```
 
-`LATTICE_PREFIX` is searched under `<prefix>/lib`. On Windows, `zig build install`
-puts `lattice.dll` in `<prefix>/bin`, so point `LATTICE_LIB_PATH` at the DLL instead.
+`LATTICE_PREFIX` is searched under `<prefix>/lib`. On Windows, where `zig build install`
+puts `lattice.dll` in `<prefix>/bin` and only the import library in `<prefix>/lib`,
+`<prefix>/bin` is searched first, then `<prefix>/lib`.
 
 Alternatively, discovery can use `pkg-config`:
 
@@ -161,12 +162,12 @@ Node IDs, edge IDs and stream sequence numbers are `bigint`.
 - `await db.getNodesByLabel(label)` - IDs of every node with a label
 - `await db.vectorSearch(vector, options?)` - k-NN vector search
 - `await db.createNodeFtsIndex(label, property)` / `dropNodeFtsIndex(...)` / `hasNodeFtsIndex(...)` - Manage full-text indexes on node properties
-- `await db.createEdgeFtsIndex(edgeType, property)` / `dropEdgeFtsIndex(...)` / `hasEdgeFtsIndex(...)` - Manage full-text indexes on edge properties
+- `await db.createEdgeFtsIndex(edgeType, property)` / `dropEdgeFtsIndex(...)` / `hasEdgeFtsIndex(...)` - Manage full-text indexes on edge properties. A node index and a relationship index cannot share a name and property: the second is rejected as already existing
 - `await db.ftsSearch(label, property, query, options?)` - Full-text search over one declared index
 - `await db.ftsSearchFuzzy(label, property, query, options?)` - Fuzzy full-text search
 - `await db.createNodePropertyIndex(label, property)` / `dropNodePropertyIndex(...)` - Manage explicit node equality indexes
 - `await db.createEdgePropertyIndex(edgeType, property)` / `dropEdgePropertyIndex(...)` - Manage explicit edge equality indexes
-- `await db.readStream(stream, options?)` - Read durable stream records by cursor
+- `await db.readStream(stream, options?)` - Read durable stream records by cursor. With `timeoutMs > 0` the wait runs on a worker thread, so the event loop keeps running and a commit from the same process can end the wait
 - `await db.getStreamOffset(stream, consumer)` - Read a committed consumer offset
 - `await db.changes(options?)` - Read the built-in graph changefeed
 - `await db.cacheClear()` - Clear the query cache
@@ -183,7 +184,7 @@ Node IDs, edge IDs and stream sequence numbers are `bigint`.
 
 - `await txn.getNode(nodeId)` - Get a node by ID, returns `Node` or `null`
 - `await txn.nodeExists(nodeId)` - Check if a node exists
-- `await txn.getProperty(nodeId, key)` - Get a property value
+- `await txn.getProperty(nodeId, key)` - Get a property value, or `null` when the node does not have it
 - `await txn.getOutgoingEdges(nodeId)` - Get outgoing edges from a node
 - `await txn.getIncomingEdges(nodeId)` - Get incoming edges to a node
 - `await txn.getOutgoingEdgesByType(nodeId, edgeType, ...)` / `getIncomingEdgesByType(...)` - Edges of one type
@@ -199,7 +200,7 @@ Node IDs, edge IDs and stream sequence numbers are `bigint`.
 - `await txn.createNode({ labels, properties })` - Create a node
 - `await txn.deleteNode(nodeId)` - Delete a node
 - `await txn.setProperty(nodeId, key, value)` - Set a property. If a full-text index is declared for one of the node's labels and this property, the index is kept current.
-- `await txn.setVector(nodeId, key, vector)` - Set the node's vector embedding. A node has one vector; `key` is accepted but not used, and Cypher reads the vector as `n.embedding`.
+- `await txn.setVector(nodeId, key, vector)` - Set the node's vector embedding. A node has one vector, which Cypher reads as `n.embedding`; `key` must be `"embedding"` (or `""`), and any other key is rejected with an unsupported-operation error. A vector with NaN or infinite components is rejected as an invalid argument.
 - `await txn.batchInsertVectors(label, vectors)` - Insert vector-bearing nodes in one call
 - `await txn.batchInsert(label, vectors)` - Deprecated compatibility alias for `batchInsertVectors`
 - `await txn.createEdge(sourceId, targetId, edgeType, options?)` - Create an edge

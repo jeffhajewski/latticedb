@@ -172,7 +172,8 @@ For a larger end-to-end example, see [examples/go](../../examples/go).
   - `[]any`
   - `map[string]any`
 - Query results are materialized into `[]map[string]Value`.
-- A node has one vector. `Tx.SetVector` accepts a key but does not use it, and Cypher reads the vector as `n.embedding`.
+- A node has one vector, which Cypher reads as `n.embedding`. `Tx.SetVector` takes a key that must be `"embedding"` (or `""`); any other key returns `ErrorUnsupported`, and a vector with NaN or infinite components returns `ErrorInvalidArg`.
+- `DB.Update` (and `DB.Query` for a query that writes) rolls the transaction back when its commit fails, so a failed commit does not keep the single writer slot.
 - Create explicit equality indexes with `DB.CreateNodePropertyIndex` or
   `DB.CreateEdgePropertyIndex`, then query them from an active transaction with
   `Tx.FindNodesByLabelProperty` or `Tx.FindEdgesByTypeProperty`. Lookup limits

@@ -91,4 +91,6 @@ mvn -q compile exec:java@run-example -Dexec.args=/tmp/knowledge.db
 Property values map to Java types as follows: null ↔ `null`, bool ↔ `Boolean`,
 int ↔ `Long`, float ↔ `Double`, string ↔ `String`, bytes ↔ `byte[]`,
 vector ↔ `float[]`, list ↔ `List<Object>`, map ↔ `Map<String,Object>`
-(any `Number`, `List`, or `Map` is accepted on input).
+(any `Number`, `List`, or `Map` is accepted on input; the fixed-width integer
+types and a `BigInteger` that fits in 64 bits are stored as int, every other
+`Number`, `BigDecimal` included, as float).

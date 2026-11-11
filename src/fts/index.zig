@@ -110,6 +110,91 @@ pub const FtsStats = struct {
     avg_doc_length: f32,
 };
 
+/// The best `limit` scored documents, kept in a bounded min-heap.
+///
+/// Equal scores rank in the order they were added, which is what a stable
+/// descending sort followed by truncation gives, so results match the full sort
+/// this replaces exactly.
+const TopK = struct {
+    items: []Item,
+    len: usize = 0,
+    limit: usize,
+    next_seq: u64 = 0,
+
+    const Item = struct { doc: ScoredDoc, seq: u64 };
+
+    /// `expected` bounds the heap's size when fewer items than `limit` will come.
+    fn init(allocator: Allocator, limit: u32, expected: usize) FtsError!TopK {
+        const cap = @min(@as(usize, limit), expected);
+        return .{
+            .items = allocator.alloc(Item, cap) catch return FtsError.OutOfMemory,
+            .limit = cap,
+        };
+    }
+
+    fn deinit(self: *TopK, allocator: Allocator) void {
+        allocator.free(self.items);
+    }
+
+    /// Whether `a` ranks below `b`: lower score, or equal score added later.
+    fn worse(a: Item, b: Item) bool {
+        if (a.doc.score != b.doc.score) return a.doc.score < b.doc.score;
+        return a.seq > b.seq;
+    }
+
+    fn add(self: *TopK, doc: ScoredDoc) void {
+        const item = Item{ .doc = doc, .seq = self.next_seq };
+        self.next_seq += 1;
+        if (self.limit == 0) return;
+        if (self.len < self.limit) {
+            // Sift up: the root is the worst item kept.
+            var i = self.len;
+            self.len += 1;
+            while (i > 0) {
+                const parent = (i - 1) / 2;
+                if (!worse(item, self.items[parent])) break;
+                self.items[i] = self.items[parent];
+                i = parent;
+            }
+            self.items[i] = item;
+            return;
+        }
+        if (!worse(self.items[0], item)) return;
+        self.siftDown(item);
+    }
+
+    /// Replace the root with `item` and restore the heap.
+    fn siftDown(self: *TopK, item: Item) void {
+        var i: usize = 0;
+        while (true) {
+            const left = 2 * i + 1;
+            if (left >= self.len) break;
+            var child = left;
+            if (left + 1 < self.len and worse(self.items[left + 1], self.items[left])) child = left + 1;
+            if (!worse(self.items[child], item)) break;
+            self.items[i] = self.items[child];
+            i = child;
+        }
+        self.items[i] = item;
+    }
+
+    /// The kept documents, best first. Owned by the caller.
+    fn finish(self: *TopK, allocator: Allocator) FtsError![]ScoredDoc {
+        if (self.len == 0) return &[_]ScoredDoc{};
+        const out = allocator.alloc(ScoredDoc, self.len) catch return FtsError.OutOfMemory;
+        // Repeatedly take the worst off the heap into the back of `out`.
+        var n = self.len;
+        while (n > 0) {
+            n -= 1;
+            out[n] = self.items[0].doc;
+            const last = self.items[self.len - 1];
+            self.len -= 1;
+            if (self.len > 0) self.siftDown(last);
+        }
+        return out;
+    }
+};
+
 /// Full-Text Search Index
 pub const FtsIndex = struct {
     allocator: Allocator,
@@ -630,6 +715,11 @@ pub const FtsIndex = struct {
     }
 
     /// Search for a single term
+    ///
+    /// Reads the posting list, then looks up every document's length in one
+    /// sorted pass over the lengths tree, and keeps the best `limit` in a
+    /// bounded heap. Ties keep posting order, as the stable sort this replaces
+    /// did.
     fn searchSingleTerm(self: *Self, term: []const u8, limit: u32) FtsError![]ScoredDoc {
         // Get dictionary entry
         const dict_entry = self.dictionary.get(term) catch {
@@ -643,55 +733,75 @@ pub const FtsIndex = struct {
             return &[_]ScoredDoc{};
         }
 
-        // Iterate posting list and score documents
-        var results: ArrayListUnmanaged(ScoredDoc) = .empty;
-        errdefer results.deinit(self.allocator);
+        var list = try self.readPostingsWithLengths(dict_entry.posting_page);
+        defer list.deinit(self.allocator);
 
-        var iter = self.posting_store.iterate(dict_entry.posting_page) catch {
-            return FtsError.PostingError;
-        };
+        var top = try TopK.init(self.allocator, limit, list.postings.len);
+        defer top.deinit(self.allocator);
+
+        for (list.postings.items(.doc_id), list.postings.items(.term_freq), list.lengths) |doc_id, term_freq, length| {
+            // No length means the document was removed; it cannot be scored.
+            const doc_length = length orelse continue;
+            top.add(.{
+                .doc_id = doc_id,
+                .score = self.scorer.scoreTerm(
+                    self.doc_lengths.stats,
+                    term_freq,
+                    dict_entry.doc_freq,
+                    doc_length,
+                ),
+            });
+        }
+        return top.finish(self.allocator);
+    }
+
+    const Posting = struct { doc_id: DocId, term_freq: u32 };
+
+    /// Every (doc_id, term_freq) in a posting list, in list order.
+    fn readPostings(self: *Self, posting_page: lattice.core.types.PageId) FtsError!std.MultiArrayList(Posting) {
+        var postings: std.MultiArrayList(Posting) = .empty;
+        errdefer postings.deinit(self.allocator);
+        var iter = self.posting_store.iterate(posting_page) catch return FtsError.PostingError;
         defer iter.deinit();
-
-        while (iter.next() catch null) |entry| {
-            // Get document length for scoring
-            const doc_length = self.doc_lengths.getLength(entry.doc_id) catch {
-                continue; // Skip documents not found (may have been deleted)
-            };
-
-            const score = self.scorer.scoreTerm(
-                self.doc_lengths.stats,
-                entry.term_freq,
-                dict_entry.doc_freq,
-                doc_length,
-            );
-
-            results.append(self.allocator, .{
-                .doc_id = entry.doc_id,
-                .score = score,
-            }) catch {
+        while (iter.next() catch return FtsError.PostingError) |entry| {
+            postings.append(self.allocator, .{ .doc_id = entry.doc_id, .term_freq = entry.term_freq }) catch {
                 return FtsError.OutOfMemory;
             };
         }
+        return postings;
+    }
 
-        // Sort by score descending
-        std.mem.sort(ScoredDoc, results.items, {}, ScoredDoc.lessThan);
-
-        // Return top K
-        const result_slice = results.toOwnedSlice(self.allocator) catch {
-            return FtsError.OutOfMemory;
+    /// Lengths of the given documents, null where a document has none.
+    /// Caller frees the result.
+    fn lookupLengths(self: *Self, doc_ids: []const DocId) FtsError![]?u32 {
+        const lengths = self.allocator.alloc(?u32, doc_ids.len) catch return FtsError.OutOfMemory;
+        errdefer self.allocator.free(lengths);
+        const order = self.allocator.alloc(u32, doc_ids.len) catch return FtsError.OutOfMemory;
+        defer self.allocator.free(order);
+        self.doc_lengths.getLengths(doc_ids, lengths, order) catch |err| return switch (err) {
+            error.OutOfMemory => FtsError.OutOfMemory,
+            else => FtsError.ScorerError,
         };
+        return lengths;
+    }
 
-        if (result_slice.len > limit) {
-            // Shrink to limit - allocate new smaller slice
-            const trimmed = self.allocator.alloc(ScoredDoc, limit) catch {
-                self.allocator.free(result_slice);
-                return FtsError.OutOfMemory;
-            };
-            @memcpy(trimmed, result_slice[0..limit]);
-            self.allocator.free(result_slice);
-            return trimmed;
+    /// A posting list read into memory with each document's length beside
+    /// it, looked up in one sorted pass rather than one tree descent per
+    /// posting. A null length means the document was removed.
+    const PostingsWithLengths = struct {
+        postings: std.MultiArrayList(Posting),
+        lengths: []?u32,
+
+        fn deinit(self: *PostingsWithLengths, allocator: Allocator) void {
+            self.postings.deinit(allocator);
+            allocator.free(self.lengths);
         }
-        return result_slice;
+    };
+
+    fn readPostingsWithLengths(self: *Self, posting_page: lattice.core.types.PageId) FtsError!PostingsWithLengths {
+        var postings = try self.readPostings(posting_page);
+        errdefer postings.deinit(self.allocator);
+        return .{ .postings = postings, .lengths = try self.lookupLengths(postings.items(.doc_id)) };
     }
 
     /// Search for multiple terms (AND semantics - documents must contain all terms)
@@ -758,18 +868,21 @@ pub const FtsIndex = struct {
             }
         }.lessThan);
 
-        // A document the rarest term's list names, with what is known about it
-        // so far. `matched` counts the terms found for it, in term order, so a
-        // document missing one term can never be counted for a later one.
+        // A document the rarest term's list names. `matched` counts the terms
+        // found for it, in term order, so a document missing one term can never
+        // be counted for a later one. Its term frequencies are kept, one row of
+        // `term_freqs` per candidate, and only documents that match every term
+        // have their lengths looked up and are scored.
         const Candidate = struct {
             doc_id: DocId,
-            doc_length: u32,
-            score: f32,
             matched: u32,
         };
 
+        const num_terms = term_infos.len;
         var candidates: ArrayListUnmanaged(Candidate) = .empty;
         defer candidates.deinit(self.allocator);
+        var term_freqs: ArrayListUnmanaged(u32) = .empty;
+        defer term_freqs.deinit(self.allocator);
         var slot_by_doc: std.AutoHashMapUnmanaged(DocId, u32) = .empty;
         defer slot_by_doc.deinit(self.allocator);
 
@@ -781,8 +894,6 @@ pub const FtsIndex = struct {
             defer driver_iter.deinit();
 
             while (driver_iter.next() catch return FtsError.PostingError) |entry| {
-                // No length means the document is gone; it cannot be scored.
-                const doc_length = self.doc_lengths.getLength(entry.doc_id) catch continue;
                 const slot = slot_by_doc.getOrPut(self.allocator, entry.doc_id) catch {
                     return FtsError.OutOfMemory;
                 };
@@ -790,20 +901,15 @@ pub const FtsIndex = struct {
                 slot.value_ptr.* = @intCast(candidates.items.len);
                 candidates.append(self.allocator, .{
                     .doc_id = entry.doc_id,
-                    .doc_length = doc_length,
-                    .score = self.scorer.scoreTerm(
-                        self.doc_lengths.stats,
-                        entry.term_freq,
-                        driver.dict_entry.doc_freq,
-                        doc_length,
-                    ),
                     .matched = 1,
                 }) catch return FtsError.OutOfMemory;
+                const row = term_freqs.addManyAsSlice(self.allocator, num_terms) catch return FtsError.OutOfMemory;
+                row[0] = entry.term_freq;
             }
         }
 
         var terms_matched: u32 = 1;
-        for (term_infos[1..]) |info| {
+        for (term_infos[1..], 1..) |info, term_index| {
             var iter = self.posting_store.iterate(info.dict_entry.posting_page) catch {
                 return FtsError.PostingError;
             };
@@ -816,12 +922,7 @@ pub const FtsIndex = struct {
                 // Missed an earlier term, or already counted for this one.
                 if (candidate.matched != terms_matched) continue;
                 candidate.matched += 1;
-                candidate.score += self.scorer.scoreTerm(
-                    self.doc_lengths.stats,
-                    entry.term_freq,
-                    info.dict_entry.doc_freq,
-                    candidate.doc_length,
-                );
+                term_freqs.items[slot * num_terms + term_index] = entry.term_freq;
                 any_matched = true;
             }
             terms_matched += 1;
@@ -832,38 +933,36 @@ pub const FtsIndex = struct {
         // Every match is ranked before the limit applies. Stopping once there
         // were "enough" matches in posting order would keep the first ones
         // stored rather than the best scoring ones.
-        var results: ArrayListUnmanaged(ScoredDoc) = .empty;
-        errdefer results.deinit(self.allocator);
+        var matches: ArrayListUnmanaged(DocId) = .empty;
+        defer matches.deinit(self.allocator);
+        var match_slots: ArrayListUnmanaged(u32) = .empty;
+        defer match_slots.deinit(self.allocator);
+        for (candidates.items, 0..) |candidate, slot| {
+            if (candidate.matched != terms_matched) continue;
+            matches.append(self.allocator, candidate.doc_id) catch return FtsError.OutOfMemory;
+            match_slots.append(self.allocator, @intCast(slot)) catch return FtsError.OutOfMemory;
+        }
 
-        for (candidates.items) |candidate| {
-            if (candidate.matched == terms_matched) {
-                results.append(self.allocator, .{
-                    .doc_id = candidate.doc_id,
-                    .score = candidate.score,
-                }) catch {
-                    return FtsError.OutOfMemory;
-                };
+        const lengths = try self.lookupLengths(matches.items);
+        defer self.allocator.free(lengths);
+
+        var top = try TopK.init(self.allocator, limit, matches.items.len);
+        defer top.deinit(self.allocator);
+        for (matches.items, match_slots.items, lengths) |doc_id, slot, length| {
+            // No length means the document is gone; it cannot be scored.
+            const doc_length = length orelse continue;
+            var score: f32 = 0;
+            for (term_infos, term_freqs.items[slot * num_terms ..][0..num_terms]) |info, tf| {
+                score += self.scorer.scoreTerm(
+                    self.doc_lengths.stats,
+                    tf,
+                    info.dict_entry.doc_freq,
+                    doc_length,
+                );
             }
+            top.add(.{ .doc_id = doc_id, .score = score });
         }
-
-        // Sort by score descending
-        std.mem.sort(ScoredDoc, results.items, {}, ScoredDoc.lessThan);
-
-        // Return top K
-        const result_slice = results.toOwnedSlice(self.allocator) catch {
-            return FtsError.OutOfMemory;
-        };
-
-        if (result_slice.len > limit) {
-            const trimmed = self.allocator.alloc(ScoredDoc, limit) catch {
-                self.allocator.free(result_slice);
-                return FtsError.OutOfMemory;
-            };
-            @memcpy(trimmed, result_slice[0..limit]);
-            self.allocator.free(result_slice);
-            return trimmed;
-        }
-        return result_slice;
+        return top.finish(self.allocator);
     }
 
     /// Score text that is not in the index yet against a query, by term presence.
@@ -996,25 +1095,23 @@ pub const FtsIndex = struct {
                 for (fuzzy_matches) |match| {
                     if (match.entry.posting_page == 0) continue;
 
-                    var iter = self.posting_store.iterate(match.entry.posting_page) catch {
-                        return FtsError.PostingError;
-                    };
-                    defer iter.deinit();
+                    var list = try self.readPostingsWithLengths(match.entry.posting_page);
+                    defer list.deinit(self.allocator);
 
-                    while (iter.next() catch return FtsError.PostingError) |posting| {
-                        const doc_length = self.doc_lengths.getLength(posting.doc_id) catch continue;
+                    for (list.postings.items(.doc_id), list.postings.items(.term_freq), list.lengths) |doc_id, term_freq, length| {
+                        const doc_length = length orelse continue;
 
                         // Score with fuzzy penalty
                         const score = self.scorer.scoreTermFuzzy(
                             self.doc_lengths.stats,
-                            posting.term_freq,
+                            term_freq,
                             match.entry.doc_freq,
                             doc_length,
                             match.distance,
                             fuzzy_config.max_distance,
                         );
 
-                        const best = word_best.getOrPut(posting.doc_id) catch return FtsError.OutOfMemory;
+                        const best = word_best.getOrPut(doc_id) catch return FtsError.OutOfMemory;
                         best.value_ptr.* = if (best.found_existing) @max(best.value_ptr.*, score) else score;
                     }
                 }
@@ -1207,17 +1304,17 @@ pub const FtsIndex = struct {
     /// Add one dictionary term's BM25 score to every document in its postings.
     fn addTermScores(self: *Self, entry: DictionaryEntry, scores: *std.AutoHashMap(DocId, f32)) FtsError!void {
         if (entry.posting_page == 0) return;
-        var iter = self.posting_store.iterate(entry.posting_page) catch return FtsError.PostingError;
-        defer iter.deinit();
-        while (iter.next() catch return FtsError.PostingError) |posting| {
-            const doc_length = self.doc_lengths.getLength(posting.doc_id) catch continue;
+        var list = try self.readPostingsWithLengths(entry.posting_page);
+        defer list.deinit(self.allocator);
+        for (list.postings.items(.doc_id), list.postings.items(.term_freq), list.lengths) |doc_id, term_freq, length| {
+            const doc_length = length orelse continue;
             const score = self.scorer.scoreTerm(
                 self.doc_lengths.stats,
-                posting.term_freq,
+                term_freq,
                 entry.doc_freq,
                 doc_length,
             );
-            const slot = scores.getOrPut(posting.doc_id) catch return FtsError.OutOfMemory;
+            const slot = scores.getOrPut(doc_id) catch return FtsError.OutOfMemory;
             slot.value_ptr.* = if (slot.found_existing) slot.value_ptr.* + score else score;
         }
     }
@@ -1649,31 +1746,8 @@ pub const FtsIndex = struct {
 
         for (terms) |term| {
             const dict_entry = self.dictionary.get(term) catch continue orelse continue;
-            if (dict_entry.posting_page == 0) continue;
-
-            var iter = self.posting_store.iterate(dict_entry.posting_page) catch continue;
-            defer iter.deinit();
-
-            while (iter.next() catch null) |entry| {
-                const doc_length = self.doc_lengths.getLength(entry.doc_id) catch continue;
-
-                const score = self.scorer.scoreTerm(
-                    self.doc_lengths.stats,
-                    entry.term_freq,
-                    dict_entry.doc_freq,
-                    doc_length,
-                );
-
-                // Accumulate score (OR = sum of matching term scores)
-                const result = doc_scores.getOrPut(entry.doc_id) catch {
-                    return FtsError.OutOfMemory;
-                };
-                if (result.found_existing) {
-                    result.value_ptr.* += score;
-                } else {
-                    result.value_ptr.* = score;
-                }
-            }
+            // OR = sum of matching term scores
+            try self.addTermScores(dict_entry, &doc_scores);
         }
 
         // Collect all results (no term count filter for OR)
@@ -2913,4 +2987,110 @@ test "fts term presence matches whole terms the way search does" {
     try std.testing.expectEqual(@as(f32, 1), try FtsIndex.termPresenceScore(allocator, config, "the bread", "about bread"));
     try std.testing.expectEqual(@as(f32, 0), try FtsIndex.termPresenceScore(allocator, config, "bread butter", "about bread"));
     try std.testing.expectEqual(@as(f32, 2), try FtsIndex.termPresenceScore(allocator, config, "bread butter bread", "butter on bread"));
+}
+
+/// What a single-term search should return: every posting scored with its
+/// length looked up one at a time, stably sorted, then cut to `limit`.
+fn referenceSearch(allocator: Allocator, index: *FtsIndex, terms: []const []const u8, limit: usize) ![]ScoredDoc {
+    var scores: std.AutoArrayHashMapUnmanaged(DocId, struct { score: f32, matched: usize }) = .empty;
+    defer scores.deinit(allocator);
+    var entries: [8]DictionaryEntry = undefined;
+    for (terms, 0..) |term, t| entries[t] = (try index.dictionary.get(term)).?;
+    // Score in the order search does: rarest term first, ties by query order.
+    var order: [8]usize = undefined;
+    for (0..terms.len) |t| order[t] = t;
+    std.mem.sort(usize, order[0..terms.len], entries[0..terms.len], struct {
+        fn lessThan(e: []const DictionaryEntry, a: usize, b: usize) bool {
+            return e[a].doc_freq < e[b].doc_freq;
+        }
+    }.lessThan);
+    for (order[0..terms.len]) |t| {
+        var iter = try index.posting_store.iterate(entries[t].posting_page);
+        defer iter.deinit();
+        while (try iter.next()) |p| {
+            const len = index.doc_lengths.getLength(p.doc_id) catch continue;
+            const s = index.scorer.scoreTerm(index.doc_lengths.stats, p.term_freq, entries[t].doc_freq, len);
+            const slot = try scores.getOrPut(allocator, p.doc_id);
+            if (!slot.found_existing) slot.value_ptr.* = .{ .score = 0, .matched = 0 };
+            slot.value_ptr.score += s;
+            slot.value_ptr.matched += 1;
+        }
+    }
+    var out: ArrayListUnmanaged(ScoredDoc) = .empty;
+    errdefer out.deinit(allocator);
+    var it = scores.iterator();
+    while (it.next()) |e| {
+        if (e.value_ptr.matched == terms.len) try out.append(allocator, .{ .doc_id = e.key_ptr.*, .score = e.value_ptr.score });
+    }
+    std.mem.sort(ScoredDoc, out.items, {}, ScoredDoc.lessThan);
+    _ = limit;
+    return out.toOwnedSlice(allocator);
+}
+
+/// `got` must be the first `limit` of `want` up to the order of documents
+/// that tie on score: the same scores in the same order, and each document
+/// one that `want` scores the same.
+fn expectSameRanking(want: []const ScoredDoc, got: []const ScoredDoc, limit: usize) !void {
+    try std.testing.expectEqual(@min(want.len, limit), got.len);
+    for (want[0..got.len], got) |x, y| try std.testing.expectEqual(x.score, y.score);
+    var seen = std.AutoHashMap(DocId, void).init(std.testing.allocator);
+    defer seen.deinit();
+    for (got) |y| {
+        try std.testing.expect(!(try seen.getOrPut(y.doc_id)).found_existing);
+        var found = false;
+        for (want) |x| {
+            if (x.doc_id == y.doc_id) {
+                try std.testing.expectEqual(x.score, y.score);
+                found = true;
+                break;
+            }
+        }
+        try std.testing.expect(found);
+    }
+}
+
+test "fts batched scoring and bounded ranking match a full scan and sort" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_topk_equivalence_test.db");
+    defer fx.destroy(allocator);
+
+    // Two scoped indexes over the same trees with the same doc ids, so a
+    // lookup that strayed out of its scope would read the other's lengths.
+    var a = FtsIndex.initScoped(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{}, .{ 0, 1, 0, 1 });
+    var b = FtsIndex.initScoped(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{}, .{ 0, 1, 0, 2 });
+
+    var prng = std.Random.DefaultPrng.init(7);
+    const rnd = prng.random();
+    var text_buf: [256]u8 = undefined;
+    for (1..2500) |id| {
+        var w: std.Io.Writer = .fixed(&text_buf);
+        // Few distinct lengths, so many documents tie on score.
+        const words = 1 + rnd.uintLessThan(usize, 4);
+        for (0..words) |_| try w.print("{s} ", .{([_][]const u8{ "red", "green", "blue", "cyan" })[rnd.uintLessThan(usize, 4)]});
+        _ = try a.indexDocument(@intCast(id * 7919 % 100_003), w.buffered());
+        _ = try b.indexDocument(@intCast(id * 7919 % 100_003), "red red red red red red red red red");
+    }
+    // Updates put documents out of order in the posting lists.
+    for (1..400) |id| {
+        const doc: DocId = @intCast(id * 7919 % 100_003);
+        try a.removeDocument(doc);
+        _ = try a.indexDocument(doc, if (id % 2 == 0) "red green" else "blue");
+    }
+
+    const queries = [_][]const []const u8{
+        &.{"red"},  &.{"green"},          &.{"blue"},
+        &.{"cyan"}, &.{ "red", "green" }, &.{ "green", "blue", "cyan" },
+    };
+    for (queries) |terms| {
+        var text: [64]u8 = undefined;
+        var w: std.Io.Writer = .fixed(&text);
+        for (terms) |t| try w.print("{s} ", .{t});
+        for ([_]u32{ 1, 3, 10, 100, std.math.maxInt(u32) }) |limit| {
+            const got = try a.search(w.buffered(), limit);
+            defer a.freeResults(got);
+            const want = try referenceSearch(allocator, &a, terms, limit);
+            defer allocator.free(want);
+            try expectSameRanking(want, got, limit);
+        }
+    }
 }

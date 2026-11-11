@@ -210,6 +210,40 @@ pub const DocLengthStore = struct {
         return ScorerError.NotFound;
     }
 
+    /// Look up the lengths of many documents at once.
+    ///
+    /// `out[i]` receives the length of `doc_ids[i]`, or null when the document
+    /// has none. The lookups run in key order through one tree cursor (see
+    /// `ScopedTree.SortedLookup`), so scoring a long posting list costs roughly
+    /// one leaf visit per leaf of lengths it touches and no allocation per
+    /// document, where `getLength` costs a root-to-leaf descent and a copy of
+    /// the value each time. `order` is scratch of the same length.
+    pub fn getLengths(self: *Self, doc_ids: []const DocId, out: []?u32, order: []u32) ScorerError!void {
+        std.debug.assert(doc_ids.len == out.len and doc_ids.len == order.len);
+        for (order, 0..) |*o, i| o.* = @intCast(i);
+        // Keys are little-endian doc ids compared as bytes, which is the
+        // numeric order of the byte-swapped id.
+        std.mem.sort(u32, order, doc_ids, struct {
+            fn lessThan(ids: []const DocId, a: u32, b: u32) bool {
+                return @byteSwap(ids[a]) < @byteSwap(ids[b]);
+            }
+        }.lessThan);
+
+        var lookup: ScopedTree.SortedLookup = undefined;
+        lookup.init(self.tree) catch |err| return mapBTreeError(err);
+        defer lookup.deinit();
+
+        for (order) |i| {
+            var key_buf: [8]u8 = undefined;
+            std.mem.writeInt(u64, &key_buf, doc_ids[i], .little);
+            const value = lookup.get(&key_buf) catch |err| return mapBTreeError(err);
+            out[i] = if (value) |v| blk: {
+                if (v.len < @sizeOf(DocLengthEntry)) break :blk null;
+                break :blk DocLengthEntry.deserialize(v).length;
+            } else null;
+        }
+    }
+
     /// Remove document and update stats
     pub fn removeDoc(self: *Self, doc_id: DocId) ScorerError!void {
         var key_buf: [8]u8 = undefined;

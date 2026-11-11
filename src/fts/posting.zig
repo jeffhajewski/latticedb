@@ -792,8 +792,16 @@ pub const PostingIterator = struct {
     last_doc_id: DocId, // For delta decoding (not used in simplified version)
     has_positions: bool,
     done: bool,
+    /// Entries decoded ahead by `next`, so a page is pinned once per batch
+    /// rather than once per entry. `entries_read` counts what was decoded,
+    /// so it is ahead of what was returned while the batch is not drained.
+    batch: [BATCH_SIZE]BatchEntry = undefined,
+    batch_len: u16 = 0,
+    batch_pos: u16 = 0,
 
     const Self = @This();
+    const BATCH_SIZE = 128;
+    const BatchEntry = struct { doc_id: DocId, term_freq: u32 };
 
     pub fn init(store: *PostingStore, page_id: PageId) PostingError!Self {
         // Read header to get entry count and flags
@@ -822,6 +830,13 @@ pub const PostingIterator = struct {
     /// Skip to the first entry with doc_id >= target
     /// Returns the entry if found, null if no more entries >= target
     pub fn skipTo(self: *Self, target: DocId) PostingError!?PostingEntry {
+        // Entries already decoded come first; the skip pointers only make sense
+        // from the position the decoding has reached.
+        while (self.batch_pos < self.batch_len) {
+            const e = self.batch[self.batch_pos];
+            self.batch_pos += 1;
+            if (e.doc_id >= target) return .{ .doc_id = e.doc_id, .term_freq = e.term_freq, .positions = null };
+        }
         if (self.done) return null;
 
         // Try to use skip pointers if available
@@ -872,6 +887,7 @@ pub const PostingIterator = struct {
 
     /// Skip to target and return entry with positions
     pub fn skipToWithPositions(self: *Self, target: DocId, allocator: Allocator) PostingError!?PostingEntry {
+        std.debug.assert(self.batch_pos == self.batch_len); // do not mix with next()
         if (self.done) return null;
 
         // Try to use skip pointers if available
@@ -916,12 +932,84 @@ pub const PostingIterator = struct {
     }
 
     /// Get the next posting entry (without positions)
+    ///
+    /// Decodes up to BATCH_SIZE entries per page pin. Do not mix with
+    /// `nextWithPositions` on one iterator.
     pub fn next(self: *Self) PostingError!?PostingEntry {
-        return self.nextInternal(null);
+        if (self.batch_pos == self.batch_len) {
+            try self.refill();
+            if (self.batch_len == 0) return null;
+        }
+        const e = self.batch[self.batch_pos];
+        self.batch_pos += 1;
+        return .{ .doc_id = e.doc_id, .term_freq = e.term_freq, .positions = null };
+    }
+
+    /// Decode the next run of entries, following the chain to the next page
+    /// when this one is used up. Leaves an empty batch at the end of the list.
+    fn refill(self: *Self) PostingError!void {
+        self.batch_len = 0;
+        self.batch_pos = 0;
+        while (!self.done) {
+            const frame = self.store.bp.fetchPage(self.current_page, .shared) catch {
+                return PostingError.BufferPoolError;
+            };
+            const data = frame.data;
+            const header = self.store.readPageMeta(data, false);
+
+            if (self.entries_read >= header.num_entries) {
+                const next_page = header.next_page;
+                self.store.bp.unpinPage(frame, false);
+                if (next_page == 0) {
+                    self.done = true;
+                    return;
+                }
+                const next_frame = self.store.bp.fetchPage(next_page, .shared) catch {
+                    return PostingError.BufferPoolError;
+                };
+                const next_header = self.store.readPageMeta(next_frame.data, false);
+                self.store.bp.unpinPage(next_frame, false);
+                self.current_page = next_page;
+                self.entries_read = 0;
+                self.current_offset = next_header.data_start;
+                self.total_entries = next_header.num_entries;
+                self.data_start = next_header.data_start;
+                self.num_skip_pointers = next_header.num_skip_pointers;
+                self.skip_pointer_base = next_header.headerEnd();
+                self.has_positions = next_header.hasPositions();
+                continue;
+            }
+
+            const page_has_positions = header.hasPositions();
+            var offset = self.current_offset;
+            while (self.entries_read < header.num_entries and self.batch_len < BATCH_SIZE) {
+                const doc_result = decodeVarint(data[offset..]);
+                offset += doc_result.bytes;
+                const freq_result = decodeVarint(data[offset..]);
+                offset += freq_result.bytes;
+                if (page_has_positions) {
+                    const pos_count_result = decodeVarint(data[offset..]);
+                    offset += pos_count_result.bytes;
+                    for (0..@intCast(pos_count_result.value)) |_| {
+                        offset += decodeVarint(data[offset..]).bytes;
+                    }
+                }
+                self.batch[self.batch_len] = .{
+                    .doc_id = doc_result.value,
+                    .term_freq = @intCast(freq_result.value),
+                };
+                self.batch_len += 1;
+                self.entries_read += 1;
+            }
+            self.current_offset = offset;
+            self.store.bp.unpinPage(frame, false);
+            return;
+        }
     }
 
     /// Get the next posting entry with positions (caller must free positions)
     pub fn nextWithPositions(self: *Self, allocator: Allocator) PostingError!?PostingEntry {
+        std.debug.assert(self.batch_pos == self.batch_len); // do not mix with next()
         return self.nextInternal(allocator);
     }
 

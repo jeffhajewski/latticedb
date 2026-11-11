@@ -230,6 +230,40 @@ pub const ScopedTree = struct {
         }
     }
 
+    /// Point lookups made in ascending key order through one iterator.
+    ///
+    /// Each lookup seeks forward from where the last one ended, which is a
+    /// binary search in the leaf already pinned unless the key lies beyond it.
+    /// A run of lookups over a sorted batch of keys therefore touches each leaf
+    /// it needs about once, rather than descending from the root and copying the
+    /// value out for every key as `get` does.
+    ///
+    /// The value returned borrows the pinned leaf and is valid until the next
+    /// call or `deinit`. Keys must not decrease between calls. Built in place,
+    /// because the iterator holds slices of its own bound buffers.
+    pub const SortedLookup = struct {
+        view: Self,
+        iter: Iterator,
+
+        pub fn init(out: *SortedLookup, view: Self) ScopedTreeError!void {
+            out.view = view;
+            try view.rangeOwned(null, null, &out.iter);
+        }
+
+        pub fn get(self: *SortedLookup, key: []const u8) ScopedTreeError!?[]const u8 {
+            var buf: [MAX_KEY_SIZE]u8 = undefined;
+            const stored = try self.view.storedKey(key, &buf);
+            try self.iter.inner.seekForward(stored);
+            const entry = (try self.iter.inner.next()) orelse return null;
+            if (!std.mem.eql(u8, entry.key, stored)) return null;
+            return entry.value;
+        }
+
+        pub fn deinit(self: *SortedLookup) void {
+            self.iter.deinit();
+        }
+    };
+
     /// Strip the prefix from a key an iterator returned.
     pub fn callerKey(self: Self, stored: []const u8) ?[]const u8 {
         if (self.prefix == null) return stored;

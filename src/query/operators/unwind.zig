@@ -168,7 +168,7 @@ fn evalResultToSlot(result: EvalResult, allocator: Allocator) SlotValue {
         .string_val => |v| .{ .property = .{ .string_val = v } },
         .bytes_val => |v| .{ .property = .{ .bytes_val = v } },
         .bool_val => |v| .{ .property = .{ .bool_val = v } },
-        .null_val => .empty,
+        .null_val => .{ .property = .{ .null_val = {} } },
         .list_val, .vector_val, .map_val => .{ .property = result.toPropertyValue(allocator) },
     };
 }

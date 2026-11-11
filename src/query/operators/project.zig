@@ -143,7 +143,7 @@ pub const Project = struct {
 /// Convert an EvalResult to a SlotValue
 fn resultToSlotValue(result: EvalResult, allocator: Allocator) SlotValue {
     return switch (result) {
-        .null_val => .{ .empty = {} },
+        .null_val => .{ .property = .{ .null_val = {} } },
         .node_ref => |id| .{ .node_ref = id },
         .edge_ref => |id| .{ .edge_ref = id },
         .bool_val => |b| .{ .property = .{ .bool_val = b } },
@@ -245,7 +245,10 @@ test "resultToSlotValue converts map to property" {
     try std.testing.expectEqual(true, prop.map_val[1].value.bool_val);
 }
 
-test "resultToSlotValue null produces empty slot" {
+test "resultToSlotValue stores null as a bound null, not an empty slot" {
+    // An empty slot means "never bound", which reading it reports as an error.
+    // A projected null is bound, so it has to read back as null.
     const slot = resultToSlotValue(.{ .null_val = {} }, std.testing.allocator);
-    try std.testing.expect(slot.isEmpty());
+    try std.testing.expect(!slot.isEmpty());
+    try std.testing.expect(slot.asProperty().? == .null_val);
 }

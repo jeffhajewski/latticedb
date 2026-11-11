@@ -331,3 +331,40 @@ test "cypher: a leading RETURN or WITH evaluates against one empty row" {
         try expectInt(result, 0, 0, 42);
     }
 }
+
+// ============================================================================
+// Variables bound to null
+// ============================================================================
+
+test "cypher: a variable bound to null reads as null" {
+    const path = "/tmp/lattice_cs_bound_null.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try seedRare(db);
+
+    {
+        var result = try db.query("UNWIND [1, null] AS v RETURN v");
+        defer result.deinit();
+        try std.testing.expectEqual(@as(usize, 2), result.rowCount());
+        try expectInt(result, 0, 0, 1);
+        try expectNull(result, 1, 0);
+    }
+    {
+        var result = try db.query("MATCH (n:Rare) WITH n.x AS x RETURN x ORDER BY x");
+        defer result.deinit();
+        try std.testing.expectEqual(@as(usize, 3), result.rowCount());
+        try expectInt(result, 0, 0, 1);
+        try expectInt(result, 1, 0, 5);
+        try expectNull(result, 2, 0);
+    }
+    {
+        // The null group key comes out of the aggregate and is read again.
+        var result = try db.query("MATCH (n:Rare) WITH n.x > 3 AS big, count(n) AS c RETURN big, c ORDER BY big");
+        defer result.deinit();
+        try std.testing.expectEqual(@as(usize, 3), result.rowCount());
+        try expectNull(result, 2, 0);
+        try expectInt(result, 2, 1, 1);
+    }
+    try std.testing.expectEqual(@as(i64, 1), try queryCount(db, "UNWIND [1, null] AS v WITH v WHERE v IS NULL RETURN count(*)"));
+    try std.testing.expectEqual(@as(i64, 1), try queryCount(db, "MATCH (n:Rare) WITH n.x AS x WHERE x IS NULL RETURN count(x IS NULL)"));
+}

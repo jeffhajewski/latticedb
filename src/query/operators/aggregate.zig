@@ -483,7 +483,7 @@ pub const Aggregate = struct {
 /// Convert an EvalResult to a SlotValue
 fn resultToSlotValue(result: EvalResult, allocator: Allocator) SlotValue {
     return switch (result) {
-        .null_val => .{ .empty = {} },
+        .null_val => .{ .property = .{ .null_val = {} } },
         .node_ref => |id| .{ .node_ref = id },
         .edge_ref => |id| .{ .edge_ref = id },
         .bool_val => |b| .{ .property = .{ .bool_val = b } },

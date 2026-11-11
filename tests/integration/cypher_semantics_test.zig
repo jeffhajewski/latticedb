@@ -223,6 +223,54 @@ test "cypher: count(*) counts rows" {
 }
 
 // ============================================================================
+// Aggregates
+// ============================================================================
+
+test "cypher: sum of integers is an integer, and overflow fails" {
+    const path = "/tmp/lattice_cs_sum_int.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    {
+        var result = try db.query("UNWIND [10, 25, null] AS x RETURN sum(x) AS s");
+        defer result.deinit();
+        try expectInt(result, 0, 0, 35);
+    }
+    {
+        // Exact past 2^53, where a float sum loses the 1.
+        var result = try db.query("UNWIND [9007199254740992, 1] AS x RETURN sum(x) AS s");
+        defer result.deinit();
+        try expectInt(result, 0, 0, 9007199254740993);
+    }
+    {
+        var result = try db.query("UNWIND [1, 2.5] AS x RETURN sum(x) AS s");
+        defer result.deinit();
+        try std.testing.expectEqual(@as(f64, 3.5), result.rows[0].values[0].float_val);
+    }
+    try std.testing.expectEqual(@as(i64, 0), try queryCount(db, "UNWIND [] AS x RETURN sum(x)"));
+    try std.testing.expectError(QueryError.ExecutionError, db.query("UNWIND [9223372036854775807, 1] AS x RETURN sum(x)"));
+    try std.testing.expectError(QueryError.ExecutionError, db.query("UNWIND [1, 'a'] AS x RETURN sum(x)"));
+}
+
+test "cypher: aggregates skip nulls" {
+    const path = "/tmp/lattice_cs_agg_nulls.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    var result = try db.query("UNWIND [10, null, 30] AS x RETURN avg(x) AS a, collect(x) AS c, min(x) AS lo, max(x) AS hi");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(f64, 20.0), result.rows[0].values[0].float_val);
+    try std.testing.expectEqual(@as(usize, 2), result.rows[0].values[1].list_val.len);
+    try expectInt(result, 0, 2, 10);
+    try expectInt(result, 0, 3, 30);
+
+    var none = try db.query("UNWIND [null] AS x RETURN avg(x) AS a, collect(x) AS c");
+    defer none.deinit();
+    try expectNull(none, 0, 0);
+    try std.testing.expectEqual(@as(usize, 0), none.rows[0].values[1].list_val.len);
+}
+
+// ============================================================================
 // Projection width
 // ============================================================================
 

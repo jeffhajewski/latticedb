@@ -916,11 +916,10 @@ test "database: sum aggregation" {
 
     try std.testing.expectEqual(@as(usize, 1), result.rowCount());
 
+    // A sum of integers is an integer.
     const sum_val = result.rows[0].values[0];
     switch (sum_val) {
-        .float_val => |v| {
-            try std.testing.expectApproxEqAbs(@as(f64, 140.0), v, 0.001);
-        },
+        .int_val => |v| try std.testing.expectEqual(@as(i64, 140), v),
         else => return error.UnexpectedValueType,
     }
 }

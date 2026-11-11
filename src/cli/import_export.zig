@@ -164,6 +164,101 @@ fn mapDatabaseError(err: anyerror) ImportExportError {
     };
 }
 
+/// How an import runs.
+pub const ImportOptions = struct {
+    /// Records per transaction.
+    batch_size: u32 = 1000,
+    /// Skip records that fail instead of stopping at the first.
+    on_error_skip: bool = false,
+    /// Where to describe the records that failed.
+    diagnostics: ?*Diagnostics = null,
+};
+
+/// What went wrong in an import, record by record.
+pub const Diagnostics = struct {
+    allocator: std.mem.Allocator,
+    /// One line per failed record, naming where it is and what was wrong.
+    messages: std.ArrayList([]u8) = .empty,
+    /// Failures beyond `max_messages`, counted but not described.
+    omitted: usize = 0,
+    /// What was committed when the last failure happened. An import that
+    /// stops keeps the batches committed before the failing one.
+    committed: ImportStats = .{},
+
+    pub const max_messages = 20;
+
+    pub fn init(allocator: std.mem.Allocator) Diagnostics {
+        return .{ .allocator = allocator };
+    }
+
+    pub fn deinit(self: *Diagnostics) void {
+        for (self.messages.items) |message| self.allocator.free(message);
+        self.messages.deinit(self.allocator);
+    }
+
+    fn add(self: *Diagnostics, comptime fmt: []const u8, args: anytype) void {
+        if (self.messages.items.len >= max_messages) {
+            self.omitted += 1;
+            return;
+        }
+        const message = std.fmt.allocPrint(self.allocator, fmt, args) catch {
+            self.omitted += 1;
+            return;
+        };
+        self.messages.append(self.allocator, message) catch {
+            self.allocator.free(message);
+            self.omitted += 1;
+        };
+    }
+};
+
+/// Why one record failed, in words, set where the failure is found.
+const Problem = struct {
+    buf: [256]u8 = undefined,
+    len: usize = 0,
+
+    fn set(self: *Problem, comptime fmt: []const u8, args: anytype) void {
+        var writer = std.Io.Writer.fixed(&self.buf);
+        writer.print(fmt, args) catch {
+            const ellipsis = "...";
+            @memcpy(self.buf[self.buf.len - ellipsis.len ..], ellipsis);
+            self.len = self.buf.len;
+            return;
+        };
+        self.len = writer.end;
+    }
+
+    fn fail(self: *Problem, err: anyerror, comptime fmt: []const u8, args: anytype) anyerror {
+        self.set(fmt, args);
+        return err;
+    }
+
+    fn text(self: *const Problem, err: anyerror) []const u8 {
+        if (self.len > 0) return self.buf[0..self.len];
+        return switch (err) {
+            error.InvalidFormat => "it is not in the expected format",
+            error.MissingRequiredField => "a required field is missing",
+            error.DatabaseError => "the database refused it",
+            error.OutOfMemory => "out of memory",
+            else => @errorName(err),
+        };
+    }
+};
+
+/// Note a failed record, and what had been committed when it failed.
+fn noteFailure(
+    options: ImportOptions,
+    stats: *const ImportStats,
+    problem: *const Problem,
+    err: anyerror,
+    comptime where_fmt: []const u8,
+    where_args: anytype,
+) void {
+    const diagnostics = options.diagnostics orelse return;
+    diagnostics.committed = stats.*;
+    diagnostics.add(where_fmt ++ ": {s}", where_args ++ .{problem.text(err)});
+}
+
 /// Import data from a JSON file into the database.
 /// JSON format:
 /// {
@@ -180,8 +275,7 @@ pub fn importJson(
     allocator: std.mem.Allocator,
     db: *Database,
     file_path: []const u8,
-    batch_size: u32,
-    on_error_skip: bool,
+    options: ImportOptions,
 ) ImportExportError!ImportStats {
     const file = @import("compat").fs.cwd().openFile(file_path, .{}) catch {
         return ImportExportError.IoError;
@@ -193,7 +287,7 @@ pub fn importJson(
     };
     defer allocator.free(content);
 
-    return importJsonContent(allocator, db, content, batch_size, on_error_skip);
+    return importJsonContent(allocator, db, content, options);
 }
 
 /// Import JSON from a string content
@@ -201,11 +295,10 @@ pub fn importJsonContent(
     allocator: std.mem.Allocator,
     db: *Database,
     content: []const u8,
-    batch_size: u32,
-    on_error_skip: bool,
+    options: ImportOptions,
 ) ImportExportError!ImportStats {
     var stats = ImportStats{};
-    var batcher = ImportBatcher.init(db, batch_size, on_error_skip);
+    var batcher = ImportBatcher.init(db, options.batch_size, options.on_error_skip);
     errdefer if (batcher.hasPendingTransaction()) batcher.abort() catch {};
 
     // Parse JSON
@@ -231,13 +324,15 @@ pub fn importJsonContent(
     // Import nodes
     if (root.object.get(json_field_nodes)) |nodes_val| {
         if (nodes_val == .array) {
-            for (nodes_val.array.items) |node_val| {
+            for (nodes_val.array.items, 0..) |node_val, index| {
                 const txn = try batcher.transaction();
-                if (importNode(allocator, db, txn, node_val, &id_map, version)) |_| {
+                var problem = Problem{};
+                if (importNode(allocator, db, txn, node_val, &id_map, version, &problem)) |_| {
                     try batcher.recordSuccess(&stats, .node);
-                } else |_| {
+                } else |err| {
                     try batcher.recordFailure(&stats, .node);
-                    if (!on_error_skip) {
+                    noteFailure(options, &stats, &problem, err, "nodes[{d}]", .{index});
+                    if (!options.on_error_skip) {
                         return ImportExportError.DatabaseError;
                     }
                 }
@@ -250,13 +345,15 @@ pub fn importJsonContent(
     // Import edges
     if (root.object.get(json_field_edges)) |edges_val| {
         if (edges_val == .array) {
-            for (edges_val.array.items) |edge_val| {
+            for (edges_val.array.items, 0..) |edge_val, index| {
                 const txn = try batcher.transaction();
-                if (importEdge(allocator, db, txn, edge_val, &id_map, version)) |_| {
+                var problem = Problem{};
+                if (importEdge(allocator, db, txn, edge_val, &id_map, version, &problem)) |_| {
                     try batcher.recordSuccess(&stats, .edge);
-                } else |_| {
+                } else |err| {
                     try batcher.recordFailure(&stats, .edge);
-                    if (!on_error_skip) {
+                    noteFailure(options, &stats, &problem, err, "edges[{d}]", .{index});
+                    if (!options.on_error_skip) {
                         return ImportExportError.DatabaseError;
                     }
                 }
@@ -303,16 +400,20 @@ fn importNode(
     node_val: std.json.Value,
     id_map: *std.StringHashMap(NodeId),
     version: FormatVersion,
+    problem: *Problem,
 ) !void {
-    if (node_val != .object) return error.InvalidFormat;
+    if (node_val != .object) return problem.fail(error.InvalidFormat, "it is not an object", .{});
 
     const obj = node_val.object;
 
     // Get node ID (required)
     const id_str = if (obj.get(json_field_id)) |v| switch (v) {
         .string => |s| s,
-        else => return error.InvalidFormat,
-    } else return error.MissingRequiredField;
+        else => return problem.fail(error.InvalidFormat, "its \"id\" is not a string", .{}),
+    } else return problem.fail(error.MissingRequiredField, "it has no \"id\"", .{});
+    if (id_map.contains(id_str)) {
+        return problem.fail(error.InvalidNodeId, "id \"{s}\" is used by an earlier node", .{id_str});
+    }
 
     // Get labels
     var labels_list = ManagedArrayList([]const u8).init(allocator);
@@ -349,7 +450,7 @@ fn importNode(
     }
 
     if (obj.get(json_field_vector)) |vector_val| {
-        try importNodeVector(allocator, db, txn, node_id, vector_val);
+        try importNodeVector(allocator, db, txn, node_id, vector_val, problem);
     }
 }
 
@@ -359,15 +460,36 @@ fn importNodeVector(
     txn: ?*Transaction,
     node_id: NodeId,
     vector_val: std.json.Value,
+    problem: *Problem,
 ) !void {
     if (vector_val == .null) return;
-    if (vector_val != .array) return error.InvalidFormat;
-    const vector = try jsonToVector(allocator, vector_val.array.items);
+    if (vector_val != .array) return problem.fail(error.InvalidFormat, "its vector is not an array of numbers", .{});
+    const vector = jsonToVector(allocator, vector_val.array.items) catch |err| {
+        return problem.fail(err, "its vector is not an array of numbers", .{});
+    };
     defer allocator.free(vector);
 
-    const dims = vectorDimensions(db) orelse return error.VectorsNotEnabled;
-    if (vector.len != dims) return error.VectorDimensionMismatch;
-    db.setNodeVectorInTxn(txn, node_id, vector) catch return error.DatabaseError;
+    const dims = vectorDimensions(db) orelse return problem.fail(
+        error.VectorsNotEnabled,
+        "it has a vector, and the database was opened without vectors. Retry with --enable-vector --vector-dims={d}",
+        .{vector.len},
+    );
+    if (vector.len != dims) {
+        return problem.fail(
+            error.VectorDimensionMismatch,
+            "its vector has {d} dimensions, and the database's have {d}",
+            .{ vector.len, dims },
+        );
+    }
+    db.setNodeVectorInTxn(txn, node_id, vector) catch |err| {
+        return problem.fail(error.DatabaseError, "storing its vector failed: {s}", .{@errorName(err)});
+    };
+}
+
+fn jsonStringField(obj: std.json.ObjectMap, comptime name: []const u8, problem: *Problem) ![]const u8 {
+    const value = obj.get(name) orelse return problem.fail(error.MissingRequiredField, "it has no \"" ++ name ++ "\"", .{});
+    if (value != .string) return problem.fail(error.InvalidFormat, "its \"" ++ name ++ "\" is not a string", .{});
+    return value.string;
 }
 
 fn importEdge(
@@ -377,32 +499,26 @@ fn importEdge(
     edge_val: std.json.Value,
     id_map: *const std.StringHashMap(NodeId),
     version: FormatVersion,
+    problem: *Problem,
 ) !void {
-    if (edge_val != .object) return error.InvalidFormat;
+    if (edge_val != .object) return problem.fail(error.InvalidFormat, "it is not an object", .{});
 
     const obj = edge_val.object;
+    const source_str = try jsonStringField(obj, json_field_source, problem);
+    const target_str = try jsonStringField(obj, json_field_target, problem);
+    const edge_type = try jsonStringField(obj, json_field_type, problem);
 
-    // Get source ID
-    const source_str = if (obj.get(json_field_source)) |v| switch (v) {
-        .string => |s| s,
-        else => return error.InvalidFormat,
-    } else return error.MissingRequiredField;
-
-    // Get target ID
-    const target_str = if (obj.get(json_field_target)) |v| switch (v) {
-        .string => |s| s,
-        else => return error.InvalidFormat,
-    } else return error.MissingRequiredField;
-
-    // Get edge type
-    const edge_type = if (obj.get(json_field_type)) |v| switch (v) {
-        .string => |s| s,
-        else => return error.InvalidFormat,
-    } else return error.MissingRequiredField;
-
-    // Look up node IDs
-    const source_id = id_map.get(source_str) orelse return error.InvalidNodeId;
-    const target_id = id_map.get(target_str) orelse return error.InvalidNodeId;
+    // Endpoints are named by the ids of nodes in the same file.
+    const source_id = id_map.get(source_str) orelse return problem.fail(
+        error.InvalidNodeId,
+        "source \"{s}\" is not the id of any node in the file",
+        .{source_str},
+    );
+    const target_id = id_map.get(target_str) orelse return problem.fail(
+        error.InvalidNodeId,
+        "target \"{s}\" is not the id of any node in the file",
+        .{target_str},
+    );
 
     // Create the edge and retain its stable ID so properties can be applied.
     const edge_id = db.createEdgeAndGetId(txn, source_id, target_id, edge_type) catch {
@@ -1616,12 +1732,11 @@ pub fn importCsv(
     allocator: std.mem.Allocator,
     db: *Database,
     file_path: []const u8,
-    batch_size: u32,
-    on_error_skip: bool,
+    options: ImportOptions,
 ) ImportExportError!ImportStats {
     const content = try readImportFile(allocator, file_path);
     defer allocator.free(content);
-    return importCsvContent(allocator, db, content, batch_size, on_error_skip);
+    return importCsvContent(allocator, db, content, options);
 }
 
 /// Import a nodes file and an edges file together, as export writes them.
@@ -1631,14 +1746,13 @@ pub fn importCsvFiles(
     db: *Database,
     nodes_path: ?[]const u8,
     edges_path: ?[]const u8,
-    batch_size: u32,
-    on_error_skip: bool,
+    options: ImportOptions,
 ) ImportExportError!ImportStats {
     const nodes_content = if (nodes_path) |path| try readImportFile(allocator, path) else null;
     defer if (nodes_content) |content| allocator.free(content);
     const edges_content = if (edges_path) |path| try readImportFile(allocator, path) else null;
     defer if (edges_content) |content| allocator.free(content);
-    return importCsvPairContent(allocator, db, nodes_content, edges_content, batch_size, on_error_skip);
+    return importCsvPairContent(allocator, db, nodes_content, edges_content, options);
 }
 
 fn readImportFile(allocator: std.mem.Allocator, path: []const u8) ImportExportError![]u8 {
@@ -1652,13 +1766,12 @@ pub fn importCsvContent(
     allocator: std.mem.Allocator,
     db: *Database,
     content: []const u8,
-    batch_size: u32,
-    on_error_skip: bool,
+    options: ImportOptions,
 ) ImportExportError!ImportStats {
     var stats = ImportStats{};
     var ids = CsvIdMap.init(allocator);
     defer ids.deinit();
-    try importCsvTable(allocator, db, content, null, &ids, batch_size, on_error_skip, &stats);
+    try importCsvTable(allocator, db, content, null, &ids, "", options, &stats);
     return stats;
 }
 
@@ -1668,18 +1781,17 @@ pub fn importCsvPairContent(
     db: *Database,
     nodes_content: ?[]const u8,
     edges_content: ?[]const u8,
-    batch_size: u32,
-    on_error_skip: bool,
+    options: ImportOptions,
 ) ImportExportError!ImportStats {
     var stats = ImportStats{};
     var ids = CsvIdMap.init(allocator);
     defer ids.deinit();
     if (nodes_content) |content| {
-        try importCsvTable(allocator, db, content, .nodes, &ids, batch_size, on_error_skip, &stats);
+        try importCsvTable(allocator, db, content, .nodes, &ids, "nodes file ", options, &stats);
     }
     if (edges_content) |content| {
         const resolve: ?*const CsvIdMap = if (nodes_content != null) &ids else null;
-        try importCsvEdgesTable(allocator, db, content, resolve, batch_size, on_error_skip, &stats);
+        try importCsvEdgesTable(allocator, db, content, resolve, "edges file ", options, &stats);
     }
     return stats;
 }
@@ -1690,8 +1802,8 @@ fn importCsvTable(
     content: []const u8,
     expected: ?CsvKind,
     ids: *CsvIdMap,
-    batch_size: u32,
-    on_error_skip: bool,
+    place: []const u8,
+    options: ImportOptions,
     stats: *ImportStats,
 ) ImportExportError!void {
     var header_arena = std.heap.ArenaAllocator.init(allocator);
@@ -1704,8 +1816,8 @@ fn importCsvTable(
         if (kind != header.kind) return ImportExportError.InvalidFormat;
     }
     switch (header.kind) {
-        .nodes => try importCsvNodeRecords(allocator, db, &reader, header, ids, batch_size, on_error_skip, stats),
-        .edges => try importCsvEdgeRecords(allocator, db, &reader, header, null, batch_size, on_error_skip, stats),
+        .nodes => try importCsvNodeRecords(allocator, db, &reader, header, ids, place, options, stats),
+        .edges => try importCsvEdgeRecords(allocator, db, &reader, header, null, place, options, stats),
     }
 }
 
@@ -1714,8 +1826,8 @@ fn importCsvEdgesTable(
     db: *Database,
     content: []const u8,
     ids: ?*const CsvIdMap,
-    batch_size: u32,
-    on_error_skip: bool,
+    place: []const u8,
+    options: ImportOptions,
     stats: *ImportStats,
 ) ImportExportError!void {
     var header_arena = std.heap.ArenaAllocator.init(allocator);
@@ -1725,7 +1837,7 @@ fn importCsvEdgesTable(
         return ImportExportError.ParseError;
     const header = try CsvHeader.parse(header_arena.allocator(), header_record.fields);
     if (header.kind != .edges) return ImportExportError.InvalidFormat;
-    try importCsvEdgeRecords(allocator, db, &reader, header, ids, batch_size, on_error_skip, stats);
+    try importCsvEdgeRecords(allocator, db, &reader, header, ids, place, options, stats);
 }
 
 fn importCsvNodeRecords(
@@ -1734,11 +1846,11 @@ fn importCsvNodeRecords(
     reader: *CsvReader,
     header: CsvHeader,
     ids: *CsvIdMap,
-    batch_size: u32,
-    on_error_skip: bool,
+    place: []const u8,
+    options: ImportOptions,
     stats: *ImportStats,
 ) ImportExportError!void {
-    var batcher = ImportBatcher.init(db, batch_size, on_error_skip);
+    var batcher = ImportBatcher.init(db, options.batch_size, options.on_error_skip);
     errdefer if (batcher.hasPendingTransaction()) batcher.abort() catch {};
     var record_arena = std.heap.ArenaAllocator.init(allocator);
     defer record_arena.deinit();
@@ -1748,11 +1860,13 @@ fn importCsvNodeRecords(
         const record = (reader.next(record_arena.allocator()) catch |err| return mapCsvError(err)) orelse break;
 
         const txn = try batcher.transaction();
-        if (importNodeCsvRecord(record_arena.allocator(), db, txn, record.fields, header, ids)) |_| {
+        var problem = Problem{};
+        if (importNodeCsvRecord(record_arena.allocator(), db, txn, record.fields, header, ids, &problem)) |_| {
             try batcher.recordSuccess(stats, .node);
-        } else |_| {
+        } else |err| {
             try batcher.recordFailure(stats, .node);
-            if (!on_error_skip) {
+            noteFailure(options, stats, &problem, err, "{s}line {d}", .{ place, record.line });
+            if (!options.on_error_skip) {
                 return ImportExportError.DatabaseError;
             }
         }
@@ -1767,11 +1881,11 @@ fn importCsvEdgeRecords(
     reader: *CsvReader,
     header: CsvHeader,
     ids: ?*const CsvIdMap,
-    batch_size: u32,
-    on_error_skip: bool,
+    place: []const u8,
+    options: ImportOptions,
     stats: *ImportStats,
 ) ImportExportError!void {
-    var batcher = ImportBatcher.init(db, batch_size, on_error_skip);
+    var batcher = ImportBatcher.init(db, options.batch_size, options.on_error_skip);
     errdefer if (batcher.hasPendingTransaction()) batcher.abort() catch {};
     var record_arena = std.heap.ArenaAllocator.init(allocator);
     defer record_arena.deinit();
@@ -1781,11 +1895,13 @@ fn importCsvEdgeRecords(
         const record = (reader.next(record_arena.allocator()) catch |err| return mapCsvError(err)) orelse break;
 
         const txn = try batcher.transaction();
-        if (importEdgeCsvRecord(record_arena.allocator(), db, txn, record.fields, header, ids)) |_| {
+        var problem = Problem{};
+        if (importEdgeCsvRecord(record_arena.allocator(), db, txn, record.fields, header, ids, &problem)) |_| {
             try batcher.recordSuccess(stats, .edge);
-        } else |_| {
+        } else |err| {
             try batcher.recordFailure(stats, .edge);
-            if (!on_error_skip) {
+            noteFailure(options, stats, &problem, err, "{s}line {d}", .{ place, record.line });
+            if (!options.on_error_skip) {
                 return ImportExportError.DatabaseError;
             }
         }
@@ -1803,10 +1919,19 @@ fn mapCsvError(err: CsvReader.Error) ImportExportError {
 
 /// Read one property cell: a JSON-encoded value in a typed column, otherwise
 /// an integer, a float, or a string.
-fn csvCellValue(arena: std.mem.Allocator, cell: []const u8, typed: bool) !PropertyValue {
-    if (typed) {
-        const parsed = parseJson(arena, cell) catch return error.InvalidFormat;
-        return jsonToPropertyValue(arena, parsed.value, .v2);
+fn csvCellValue(
+    arena: std.mem.Allocator,
+    cell: []const u8,
+    column: @FieldType(CsvColumn, "property"),
+    problem: *Problem,
+) !PropertyValue {
+    if (column.typed) {
+        const parsed = parseJson(arena, cell) catch {
+            return problem.fail(error.InvalidFormat, "column {s}" ++ csv_typed_suffix ++ " does not hold a JSON value", .{column.key});
+        };
+        return jsonToPropertyValue(arena, parsed.value, .v2) catch |err| {
+            return problem.fail(err, "column {s}" ++ csv_typed_suffix ++ " does not hold a value lattice can store", .{column.key});
+        };
     }
     if (std.fmt.parseInt(i64, cell, decimal_base)) |int_val| {
         return .{ .int_val = int_val };
@@ -1824,8 +1949,11 @@ fn importNodeCsvRecord(
     values: []const []const u8,
     header: CsvHeader,
     ids: *CsvIdMap,
+    problem: *Problem,
 ) !void {
-    if (values.len != header.columns.len) return error.InvalidFormat;
+    if (values.len != header.columns.len) {
+        return problem.fail(error.InvalidFormat, "it has {d} fields, and the header has {d}", .{ values.len, header.columns.len });
+    }
 
     var id: []const u8 = "";
     var labels: std.ArrayList([]const u8) = .empty;
@@ -1844,7 +1972,9 @@ fn importNodeCsvRecord(
             else => {},
         }
     }
-    if (id.len > 0 and ids.contains(id)) return error.DuplicateNodeId;
+    if (id.len > 0 and ids.contains(id)) {
+        return problem.fail(error.InvalidNodeId, "_id \"{s}\" is used by an earlier row", .{id});
+    }
 
     const node_id = db.createNode(txn, labels.items) catch {
         return error.DatabaseError;
@@ -1852,23 +1982,49 @@ fn importNodeCsvRecord(
 
     for (values, header.columns) |value, column| {
         if (column != .property or value.len == 0) continue;
-        const prop_val = try csvCellValue(arena, value, column.property.typed);
+        const prop_val = try csvCellValue(arena, value, column.property, problem);
         db.setNodeProperty(txn, node_id, column.property.key, prop_val) catch continue;
     }
 
     if (vector_cell.len > 0) {
-        const parsed = parseJson(arena, vector_cell) catch return error.InvalidFormat;
-        try importNodeVector(arena, db, txn, node_id, parsed.value);
+        const parsed = parseJson(arena, vector_cell) catch {
+            return problem.fail(error.InvalidFormat, "its _vector is not a JSON array of numbers", .{});
+        };
+        try importNodeVector(arena, db, txn, node_id, parsed.value, problem);
     }
 
     if (id.len > 0) try ids.put(id, node_id);
 }
 
 /// Find the node an edge's `_source` or `_target` names: by the nodes file's
-/// `_id` when one was imported with it, otherwise by database node id.
-fn resolveCsvEndpoint(ids: ?*const CsvIdMap, text: []const u8) !NodeId {
-    if (ids) |map| return map.map.get(text) orelse error.InvalidNodeId;
-    return std.fmt.parseInt(NodeId, text, decimal_base) catch error.InvalidNodeId;
+/// `_id` when one was imported with it, otherwise by database node id. A node
+/// that is not there is an error, not an edge to nowhere.
+fn resolveCsvEndpoint(
+    db: *Database,
+    txn: ?*Transaction,
+    ids: ?*const CsvIdMap,
+    comptime column: []const u8,
+    text: []const u8,
+    problem: *Problem,
+) !NodeId {
+    if (ids) |map| {
+        return map.map.get(text) orelse problem.fail(
+            error.InvalidNodeId,
+            column ++ " \"{s}\" is not the _id of any row in the nodes file",
+            .{text},
+        );
+    }
+    const node_id = std.fmt.parseInt(NodeId, text, decimal_base) catch return problem.fail(
+        error.InvalidNodeId,
+        column ++ " \"{s}\" is not a node id. An edges file imported on its own names nodes by database id; " ++
+            "import it together with its nodes file to use _id values",
+        .{text},
+    );
+    const exists = db.nodeExistsInTxn(txn, node_id) catch |err| {
+        return problem.fail(error.DatabaseError, "looking up node {d} failed: {s}", .{ node_id, @errorName(err) });
+    };
+    if (!exists) return problem.fail(error.InvalidNodeId, column ++ " {d}: there is no node with that id", .{node_id});
+    return node_id;
 }
 
 fn importEdgeCsvRecord(
@@ -1878,8 +2034,11 @@ fn importEdgeCsvRecord(
     values: []const []const u8,
     header: CsvHeader,
     ids: ?*const CsvIdMap,
+    problem: *Problem,
 ) !void {
-    if (values.len != header.columns.len) return error.InvalidFormat;
+    if (values.len != header.columns.len) {
+        return problem.fail(error.InvalidFormat, "it has {d} fields, and the header has {d}", .{ values.len, header.columns.len });
+    }
 
     var source: ?[]const u8 = null;
     var target: ?[]const u8 = null;
@@ -1892,10 +2051,14 @@ fn importEdgeCsvRecord(
             else => {},
         }
     }
-    const type_name = edge_type orelse return error.MissingRequiredField;
-    if (type_name.len == 0) return error.MissingRequiredField;
-    const source_id = try resolveCsvEndpoint(ids, source orelse return error.MissingRequiredField);
-    const target_id = try resolveCsvEndpoint(ids, target orelse return error.MissingRequiredField);
+    const type_name = edge_type orelse "";
+    if (type_name.len == 0) return problem.fail(error.MissingRequiredField, "its _type is empty", .{});
+    const source_text = source orelse "";
+    const target_text = target orelse "";
+    if (source_text.len == 0) return problem.fail(error.MissingRequiredField, "its _source is empty", .{});
+    if (target_text.len == 0) return problem.fail(error.MissingRequiredField, "its _target is empty", .{});
+    const source_id = try resolveCsvEndpoint(db, txn, ids, csv_column_source, source_text, problem);
+    const target_id = try resolveCsvEndpoint(db, txn, ids, csv_column_target, target_text, problem);
 
     const edge_id = db.createEdgeAndGetId(txn, source_id, target_id, type_name) catch {
         return error.DatabaseError;
@@ -1903,7 +2066,7 @@ fn importEdgeCsvRecord(
 
     for (values, header.columns) |value, column| {
         if (column != .property or value.len == 0) continue;
-        const prop_val = try csvCellValue(arena, value, column.property.typed);
+        const prop_val = try csvCellValue(arena, value, column.property, problem);
         db.setEdgePropertyById(txn, edge_id, column.property.key, prop_val) catch continue;
     }
 }
@@ -2156,7 +2319,7 @@ test "import/export JSON batching rolls back failed batch" {
 
     try std.testing.expectError(
         ImportExportError.DatabaseError,
-        importJsonContent(allocator, db, json_content, 2, false),
+        importJsonContent(allocator, db, json_content, .{ .batch_size = 2 }),
     );
     try std.testing.expectEqual(@as(u64, 0), db.nodeCount());
 }
@@ -2185,7 +2348,7 @@ test "import/export JSON skip preserves valid records" {
         \\]}
     ;
 
-    const stats = try importJsonContent(allocator, db, json_content, 2, true);
+    const stats = try importJsonContent(allocator, db, json_content, .{ .batch_size = 2, .on_error_skip = true });
     try std.testing.expectEqual(@as(u64, 2), stats.nodes_imported);
     try std.testing.expectEqual(@as(u64, 1), stats.nodes_failed);
     try std.testing.expectEqual(@as(u64, 2), db.nodeCount());
@@ -2215,7 +2378,7 @@ test "import/export CSV batching rolls back failed batch" {
 
     try std.testing.expectError(
         ImportExportError.DatabaseError,
-        importCsvContent(allocator, db, csv_content, 2, false),
+        importCsvContent(allocator, db, csv_content, .{ .batch_size = 2 }),
     );
     try std.testing.expectEqual(@as(u64, 0), db.nodeCount());
 }
@@ -2247,7 +2410,7 @@ test "import/export JSON roundtrip" {
         \\]}
     ;
 
-    const import_stats = try importJsonContent(allocator, db, json_content, 1000, false);
+    const import_stats = try importJsonContent(allocator, db, json_content, .{});
     try std.testing.expectEqual(@as(u64, 2), import_stats.nodes_imported);
     try std.testing.expectEqual(@as(u64, 1), import_stats.edges_imported);
 

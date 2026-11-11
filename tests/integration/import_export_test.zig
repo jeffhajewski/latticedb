@@ -228,8 +228,7 @@ test "import_export: JSON roundtrip preserves nested property types" {
         allocator,
         imported_db,
         export_buf[0..export_stream.pos],
-        1000,
-        false,
+        .{},
     );
     try std.testing.expectEqual(@as(u64, 1), import_stats.nodes_imported);
     try std.testing.expectEqual(@as(u64, 0), import_stats.nodes_failed);
@@ -640,7 +639,7 @@ test "import_export: JSON import keeps strings that look like hex or numbers as 
     const json_content =
         \\{"nodes":[{"id":"a","labels":["Thing"],"properties":{"year":"2024","word":"cafe","hex":"DEADBEEF","odd":"abc"}}]}
     ;
-    _ = try import_export.importJsonContent(allocator, db, json_content, 1000, false);
+    _ = try import_export.importJsonContent(allocator, db, json_content, .{});
 
     try expectStringProperty(db, 1, "year", "2024");
     try expectStringProperty(db, 1, "word", "cafe");
@@ -675,7 +674,7 @@ test "import_export: JSON export and import keep every value type distinct" {
 
     const first = try exportJsonAlloc(allocator, source);
     defer allocator.free(first);
-    _ = try import_export.importJsonContent(allocator, imported, first, 1000, false);
+    _ = try import_export.importJsonContent(allocator, imported, first, .{});
     const second = try exportJsonAlloc(allocator, imported);
     defer allocator.free(second);
     try std.testing.expectEqualStrings(first, second);
@@ -733,7 +732,7 @@ test "import_export: JSON import reads 0.16.0 files and refuses versions it does
     const version_one =
         \\{"nodes":[{"id":"1","labels":[],"properties":{"embedding":[0.5,1,-2],"n":3,"x":2.5}}],"edges":[]}
     ;
-    _ = try import_export.importJsonContent(allocator, db, version_one, 1000, false);
+    _ = try import_export.importJsonContent(allocator, db, version_one, .{});
     var embedding = (try db.getNodeProperty(1, "embedding")).?;
     defer embedding.deinit(allocator);
     try std.testing.expect(embedding == .vector_val);
@@ -741,7 +740,7 @@ test "import_export: JSON import reads 0.16.0 files and refuses versions it does
 
     try std.testing.expectError(
         import_export.ImportExportError.UnsupportedVersion,
-        import_export.importJsonContent(allocator, db, "{\"version\":3,\"nodes\":[]}", 1000, false),
+        import_export.importJsonContent(allocator, db, "{\"version\":3,\"nodes\":[]}", .{}),
     );
 }
 
@@ -791,7 +790,7 @@ test "import_export: export writes node vectors and import restores them" {
     try std.testing.expect(std.mem.indexOf(u8, first, "\"vector_dimensions\":4") != null);
     try std.testing.expect(std.mem.indexOf(u8, first, "\"vector\":[0.0,1.0,0.0,0.0]") != null);
 
-    _ = try import_export.importJsonContent(allocator, imported, first, 1000, false);
+    _ = try import_export.importJsonContent(allocator, imported, first, .{});
     const vector = (try imported.getNodeVectorInTxn(null, 1)).?;
     defer allocator.free(vector);
     try std.testing.expectEqualSlices(f32, &[_]f32{ 0, 1, 0, 0 }, vector);
@@ -821,7 +820,7 @@ test "import_export: importing vectors needs a database opened with matching vec
     ;
     try std.testing.expectError(
         import_export.ImportExportError.VectorsNotEnabled,
-        import_export.importJsonContent(allocator, plain, with_vectors, 1000, false),
+        import_export.importJsonContent(allocator, plain, with_vectors, .{}),
     );
     // Refused before anything was written.
     try std.testing.expectEqual(@as(u64, 0), plain.nodeCount());
@@ -834,7 +833,7 @@ test "import_export: importing vectors needs a database opened with matching vec
     ;
     try std.testing.expectError(
         import_export.ImportExportError.VectorDimensionMismatch,
-        import_export.importJsonContent(allocator, vector_db, three_dims, 1000, false),
+        import_export.importJsonContent(allocator, vector_db, three_dims, .{}),
     );
     try std.testing.expectEqual(@as(u64, 0), vector_db.nodeCount());
 }
@@ -895,7 +894,7 @@ test "import_export: CSV import reads quoted fields as RFC 4180 describes" {
     const nodes_csv = "_id,_labels,name,bio,quote\n" ++
         "n1,\"Person;Employee\",\"Smith, Alice\",\"line one\nline two\",\"she said \"\"hi\"\"\"\n" ++
         "n2, Person ,Bob,,plain\n";
-    const stats = try import_export.importCsvContent(allocator, db, nodes_csv, 1000, false);
+    const stats = try import_export.importCsvContent(allocator, db, nodes_csv, .{});
     try std.testing.expectEqual(@as(u64, 2), stats.nodes_imported);
 
     try expectStringProperty(db, 1, "name", "Smith, Alice");
@@ -913,7 +912,7 @@ test "import_export: CSV import reads quoted fields as RFC 4180 describes" {
     try std.testing.expectEqual(@as(usize, 2), labels.len);
 
     const edges_csv = "_source,_target,_type\n1,2,\"KNOWS, WELL\"\n";
-    _ = try import_export.importCsvContent(allocator, db, edges_csv, 1000, false);
+    _ = try import_export.importCsvContent(allocator, db, edges_csv, .{});
     const edges = try db.getOutgoingEdges(1);
     defer db.freeEdgeInfos(edges);
     try std.testing.expectEqual(@as(usize, 1), edges.len);
@@ -921,7 +920,7 @@ test "import_export: CSV import reads quoted fields as RFC 4180 describes" {
 
     try std.testing.expectError(
         import_export.ImportExportError.ParseError,
-        import_export.importCsvContent(allocator, db, "_id,_labels,name\nn3,Person,\"unterminated\n", 1000, false),
+        import_export.importCsvContent(allocator, db, "_id,_labels,name\nn3,Person,\"unterminated\n", .{}),
     );
 }
 
@@ -976,7 +975,7 @@ test "import_export: CSV export and import keep properties, types, ids and vecto
     const exported = try exportCsvAlloc(allocator, source);
     defer exported.deinit(allocator);
 
-    const stats = try import_export.importCsvPairContent(allocator, imported, exported.nodes, exported.edges, 1000, false);
+    const stats = try import_export.importCsvPairContent(allocator, imported, exported.nodes, exported.edges, .{});
     try std.testing.expectEqual(@as(u64, 2), stats.nodes_imported);
     try std.testing.expectEqual(@as(u64, 2), stats.edges_imported);
 
@@ -1005,9 +1004,83 @@ test "import_export: CSV import refuses a repeated _id and CSV export a label it
 
     try std.testing.expectError(
         import_export.ImportExportError.DatabaseError,
-        import_export.importCsvContent(allocator, db, "_id,_labels\nn1,A\nn1,B\n", 1000, false),
+        import_export.importCsvContent(allocator, db, "_id,_labels\nn1,A\nn1,B\n", .{}),
     );
 
     _ = try db.createNode(null, &.{"has;semicolon"});
     try std.testing.expectError(import_export.ImportExportError.LabelNotRepresentable, exportCsvAlloc(allocator, db));
+}
+
+test "import_export: an edge whose node is missing fails, naming the record and the id" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_import_missing_endpoint.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    var diagnostics = import_export.Diagnostics.init(allocator);
+    defer diagnostics.deinit();
+
+    // JSON: the edge names an id no node in the file has.
+    try std.testing.expectError(
+        import_export.ImportExportError.DatabaseError,
+        import_export.importJsonContent(allocator, db,
+            \\{"nodes":[{"id":"a","labels":["P"]}],
+            \\ "edges":[{"source":"a","target":"zz","type":"KNOWS"}]}
+        , .{ .diagnostics = &diagnostics }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.messages.items.len);
+    try std.testing.expectEqualStrings(
+        "edges[0]: target \"zz\" is not the id of any node in the file",
+        diagnostics.messages.items[0],
+    );
+    try std.testing.expectEqual(@as(u64, 0), db.edgeCount());
+
+    // A CSV pair: the edge names an _id the nodes file does not have.
+    diagnostics.deinit();
+    diagnostics = import_export.Diagnostics.init(allocator);
+    try std.testing.expectError(
+        import_export.ImportExportError.DatabaseError,
+        import_export.importCsvPairContent(
+            allocator,
+            db,
+            "_id,_labels\nn1,P\n",
+            "_source,_target,_type\nn1,n1,SELF\nn9,n1,KNOWS\n",
+            .{ .diagnostics = &diagnostics },
+        ),
+    );
+    try std.testing.expectEqualStrings(
+        "edges file line 3: _source \"n9\" is not the _id of any row in the nodes file",
+        diagnostics.messages.items[0],
+    );
+
+    // A CSV edges file on its own: endpoints are database ids, which must exist.
+    const node_id = try db.createNode(null, &.{"P"});
+    diagnostics.deinit();
+    diagnostics = import_export.Diagnostics.init(allocator);
+    const edges_before = db.edgeCount();
+    const edges_csv = try std.fmt.allocPrint(allocator, "_source,_target,_type\n{d},{d},KNOWS\n", .{ node_id, node_id + 1000 });
+    defer allocator.free(edges_csv);
+    try std.testing.expectError(
+        import_export.ImportExportError.DatabaseError,
+        import_export.importCsvContent(allocator, db, edges_csv, .{ .diagnostics = &diagnostics }),
+    );
+    const expected = try std.fmt.allocPrint(allocator, "line 2: _target {d}: there is no node with that id", .{node_id + 1000});
+    defer allocator.free(expected);
+    try std.testing.expectEqualStrings(expected, diagnostics.messages.items[0]);
+    try std.testing.expectEqual(edges_before, db.edgeCount());
+
+    // Skipping imports the rest and lists each record it left out.
+    diagnostics.deinit();
+    diagnostics = import_export.Diagnostics.init(allocator);
+    const mixed = try std.fmt.allocPrint(
+        allocator,
+        "_source,_target,_type\n{d},{d},KNOWS\nx,{d},KNOWS\n{d},{d},KNOWS\n",
+        .{ node_id, node_id + 1000, node_id, node_id, node_id },
+    );
+    defer allocator.free(mixed);
+    const stats = try import_export.importCsvContent(allocator, db, mixed, .{ .on_error_skip = true, .diagnostics = &diagnostics });
+    try std.testing.expectEqual(@as(u64, 1), stats.edges_imported);
+    try std.testing.expectEqual(@as(u64, 2), stats.edges_failed);
+    try std.testing.expectEqual(@as(usize, 2), diagnostics.messages.items.len);
+    try std.testing.expect(std.mem.startsWith(u8, diagnostics.messages.items[1], "line 3: _source \"x\" is not a node id."));
 }

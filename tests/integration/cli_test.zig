@@ -407,3 +407,36 @@ test "cli: CSV import resolves _id values and keeps edge properties" {
     defer likes.deinit(allocator);
     try std.testing.expect(std.mem.indexOf(u8, likes.stdout, "0.5") != null);
 }
+
+test "cli: import stops at an edge whose node is missing, and says which" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_cli_missing_endpoint.ltdb";
+    const edges = "/tmp/lattice_cli_missing_endpoint_edges.csv";
+    defer deleteDatabaseFiles(path);
+    defer compat.fs.cwd().deleteFile(edges) catch {};
+
+    try createEmptyDatabase(allocator, path);
+    const node = try runCli(allocator, &.{ "exec", path, "--query=CREATE (:Person {name: 'Alice'})" });
+    defer node.deinit(allocator);
+    try std.testing.expect(node.succeeded());
+
+    // Node 99 does not exist; an edge to it is not imported as an edge to nowhere.
+    try writeFile(edges, "_source,_target,_type\n1,99,KNOWS\n");
+    const failed = try runCli(allocator, &.{ "import", path, "--file=" ++ edges });
+    defer failed.deinit(allocator);
+    try std.testing.expect(!failed.succeeded());
+    try std.testing.expect(std.mem.indexOf(u8, failed.stderr, "line 2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, failed.stderr, "_target 99") != null);
+
+    const count = try runCli(allocator, &.{ "exec", path, "--query=MATCH ()-[r]->() RETURN count(r)", "--format=csv" });
+    defer count.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, count.stdout, "\n0") != null);
+
+    // Skipping goes on past it, and still says what it left out.
+    try writeFile(edges, "_source,_target,_type\n1,99,KNOWS\n1,1,SELF\n");
+    const skipped = try runCli(allocator, &.{ "import", path, "--file=" ++ edges, "--on-error=skip" });
+    defer skipped.deinit(allocator);
+    try std.testing.expect(skipped.succeeded());
+    try std.testing.expect(std.mem.indexOf(u8, skipped.stderr, "Skipped line 2") != null);
+    try std.testing.expect(std.mem.indexOf(u8, skipped.stdout, "Edges imported: 1") != null);
+}

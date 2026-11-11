@@ -1218,14 +1218,29 @@ fn cmdImport(
         output.printInfo(stdout, "Importing {s} into {s}...", .{ file, path });
     }
 
+    var diagnostics = import_export.Diagnostics.init(allocator);
+    defer diagnostics.deinit();
+    const import_options: import_export.ImportOptions = .{
+        .batch_size = parsed_args.batch_size,
+        .on_error_skip = parsed_args.on_error_skip,
+        .diagnostics = &diagnostics,
+    };
+
     const stats = if (is_json)
-        import_export.importJson(allocator, db, file, parsed_args.batch_size, parsed_args.on_error_skip)
+        import_export.importJson(allocator, db, file, import_options)
     else if (csv_pair) |pair|
-        import_export.importCsvFiles(allocator, db, pair.nodes, pair.edges, parsed_args.batch_size, parsed_args.on_error_skip)
+        import_export.importCsvFiles(allocator, db, pair.nodes, pair.edges, import_options)
     else
-        import_export.importCsv(allocator, db, file, parsed_args.batch_size, parsed_args.on_error_skip);
+        import_export.importCsv(allocator, db, file, import_options);
 
     if (stats) |s| {
+        // --on-error=skip goes on past bad records; say which ones it left out.
+        for (diagnostics.messages.items) |message| {
+            try stderr.print("Skipped {s}\n", .{message});
+        }
+        if (diagnostics.omitted > 0) {
+            try stderr.print("Skipped {d} more records.\n", .{diagnostics.omitted});
+        }
         switch (parsed_args.format) {
             .table => {
                 output.printSuccess(stdout, "Import complete", .{});
@@ -1255,6 +1270,20 @@ fn cmdImport(
             },
         }
     } else |err| {
+        if (diagnostics.messages.items.len > 0) {
+            const committed = diagnostics.committed;
+            output.printError(stderr, "Import failed at {s}", .{diagnostics.messages.items[0]});
+            if (committed.nodes_imported + committed.edges_imported > 0) {
+                try stderr.print(
+                    "{d} nodes and {d} edges imported in earlier batches were kept. " ++
+                        "Use --on-error=skip to import the records that are valid.\n",
+                    .{ committed.nodes_imported, committed.edges_imported },
+                );
+            } else {
+                try stderr.writeAll("Nothing was imported. Use --on-error=skip to import the records that are valid.\n");
+            }
+            return error.CommandFailed;
+        }
         return switch (err) {
             error.VectorsNotEnabled => failCommand(
                 stderr,

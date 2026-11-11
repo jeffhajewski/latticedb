@@ -720,3 +720,63 @@ test "cypher: MERGE uses a property index and still sees uncommitted nodes" {
     try std.testing.expectEqual(@as(i64, 60), try queryCount(db, "UNWIND range(1, 60) AS i MERGE (p:Person {id: i}) RETURN count(*)"));
     try std.testing.expectEqual(@as(i64, 60), try queryCount(db, "MATCH (p:Person) RETURN count(p)"));
 }
+
+// ============================================================================
+// DELETE and relationships
+// ============================================================================
+
+test "cypher: DELETE refuses a node that still has relationships" {
+    const path = "/tmp/lattice_cs_delete_connected.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try run(db, "CREATE (x:Q {n: 1})-[:R]->(y:Q {n: 2}), (x)-[:R]->(y), (z:Q {n: 3})");
+
+    // Used to succeed and leave both edges pointing at deleted nodes.
+    var detailed = try db.queryDetailed("MATCH (n:Q) DELETE n");
+    defer detailed.deinit();
+    try std.testing.expect(detailed == .failure);
+    try std.testing.expectEqualStrings("NodeHasRelationships", detailed.failure.code.?);
+    // Nothing was deleted, not even the unconnected node.
+    try std.testing.expectEqual(@as(i64, 3), try queryCount(db, "MATCH (n:Q) RETURN count(n)"));
+
+    // An unconnected node deletes as before.
+    try run(db, "MATCH (n:Q {n: 3}) DELETE n");
+    // Deleting the relationships in the same statement makes it legal.
+    try run(db, "MATCH (n:Q {n: 1})-[r]-() DELETE r, n");
+    try std.testing.expectEqual(@as(i64, 1), try queryCount(db, "MATCH (n:Q) RETURN count(n)"));
+    try std.testing.expectEqual(@as(i64, 0), try queryCount(db, "MATCH (n:Q)-[r]-() RETURN count(r)"));
+}
+
+test "cypher: DETACH DELETE removes parallel edges and self-loops" {
+    const path = "/tmp/lattice_cs_detach_delete.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try run(db, "CREATE (a:S {n: 1})-[:R]->(a), (a)-[:R]->(b:S {n: 2}), (a)-[:R]->(b)");
+
+    var ids = try db.query("MATCH (b:S {n: 2}) RETURN b");
+    defer ids.deinit();
+    const b_id: u64 = switch (ids.rows[0].values[0]) {
+        .node_id => |id| id,
+        .int_val => |id| @intCast(id),
+        else => return error.UnexpectedValueType,
+    };
+
+    try run(db, "MATCH (a:S {n: 1}) DETACH DELETE a");
+    try std.testing.expectEqual(@as(i64, 1), try queryCount(db, "MATCH (n:S) RETURN count(n)"));
+    // Both parallel edges into b are gone.
+    const incoming = try db.getIncomingEdgeRefsInTxn(null, b_id);
+    defer db.allocator.free(incoming);
+    try std.testing.expectEqual(@as(usize, 0), incoming.len);
+}
+
+test "cypher: deleting a relationship matched twice deletes it once" {
+    const path = "/tmp/lattice_cs_delete_rel_twice.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try run(db, "CREATE (a:T)-[:R]->(b:T)");
+
+    // An undirected pattern lists the edge from both ends; the second delete
+    // used to fail the query.
+    try run(db, "MATCH (:T)-[r]-(:T) DELETE r");
+    try std.testing.expectEqual(@as(i64, 0), try queryCount(db, "MATCH (n:T)-[r]-() RETURN count(r)"));
+}

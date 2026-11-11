@@ -345,6 +345,13 @@ pub const CreateEdge = struct {
 // ============================================================================
 
 /// Operator that deletes a node for each input row.
+///
+/// Plain DELETE refuses a node that still has relationships, as Cypher does,
+/// rather than leave edges pointing at a node that no longer exists. The
+/// check sees the whole statement: the operator drains its input first, so
+/// `MATCH (n)-[r]-() DELETE r, n` deletes every `r` (an earlier operator in
+/// the chain) before any node is checked. Only then are nodes deleted and
+/// rows returned. DETACH DELETE removes the node's relationships first.
 pub const DeleteNode = struct {
     /// Input operator
     input: Operator,
@@ -358,6 +365,12 @@ pub const DeleteNode = struct {
     opened: bool,
     /// Allocator for edge info
     allocator: Allocator,
+    /// Input rows, held until every node has been checked and deleted
+    rows: std.ArrayList(Row) = .empty,
+    /// Whether the deletes have run
+    done: bool = false,
+    /// Next row to return
+    output_index: usize = 0,
 
     const Self = @This();
 
@@ -400,6 +413,9 @@ pub const DeleteNode = struct {
         const self: *Self = @ptrCast(@alignCast(ptr));
         try self.input.open(ctx);
         self.opened = true;
+        self.rows.clearRetainingCapacity();
+        self.done = false;
+        self.output_index = 0;
     }
 
     fn next(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!?*Row {
@@ -407,42 +423,78 @@ pub const DeleteNode = struct {
 
         if (!self.opened) return OperatorError.NotInitialized;
 
-        const row = try self.input.next(ctx) orelse return null;
+        if (!self.done) {
+            try self.deleteAll(ctx);
+            self.done = true;
+        }
+        if (self.output_index >= self.rows.items.len) return null;
+        self.output_index += 1;
+        return &self.rows.items[self.output_index - 1];
+    }
 
-        // Get node ID from row
-        const node_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
-        const node_id = node_val.asNodeId() orelse return OperatorError.TypeError;
+    fn deleteAll(self: *Self, ctx: *ExecutionContext) OperatorError!void {
+        while (try self.input.next(ctx)) |row| {
+            self.rows.append(self.allocator, row.*) catch return OperatorError.OutOfMemory;
+        }
 
-        // If detach, delete all connected edges first
+        var seen: std.AutoHashMapUnmanaged(NodeId, void) = .{};
+        defer seen.deinit(self.allocator);
+        var targets: std.ArrayList(NodeId) = .empty;
+        defer targets.deinit(self.allocator);
+        for (self.rows.items) |*row| {
+            const node_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
+            // Deleting null is a no-op, as in Cypher.
+            if (node_val == .property and node_val.property == .null_val) continue;
+            const node_id = node_val.asNodeId() orelse return OperatorError.TypeError;
+            const entry = seen.getOrPut(self.allocator, node_id) catch return OperatorError.OutOfMemory;
+            if (entry.found_existing) continue;
+            targets.append(self.allocator, node_id) catch return OperatorError.OutOfMemory;
+        }
+
         if (self.detach) {
-            self.deleteAllEdges(ctx, node_id) catch {
+            for (targets.items) |node_id| {
+                try self.deleteAllEdges(ctx, node_id);
+            }
+        } else {
+            // Check every node before deleting any, so a refusal leaves the
+            // nodes in place.
+            for (targets.items) |node_id| {
+                if (try self.hasRelationships(ctx, node_id)) return OperatorError.NodeHasRelationships;
+            }
+        }
+
+        for (targets.items) |node_id| {
+            self.database.deleteNode(ctx.txn, node_id) catch {
                 return OperatorError.StorageError;
             };
         }
-
-        // Delete the node
-        self.database.deleteNode(ctx.txn, node_id) catch {
-            return OperatorError.StorageError;
-        };
-
-        return row;
     }
 
-    fn deleteAllEdges(self: *Self, ctx: *ExecutionContext, node_id: NodeId) !void {
-        // Delete outgoing edges
-        const outgoing = try self.database.getOutgoingEdgesInTxn(ctx.txn, node_id, 0);
-        defer self.database.freeEdgeInfos(outgoing);
+    fn hasRelationships(self: *Self, ctx: *ExecutionContext, node_id: NodeId) OperatorError!bool {
+        const outgoing = self.database.getOutgoingEdgeRefsInTxn(ctx.txn, node_id) catch return OperatorError.StorageError;
+        defer self.database.allocator.free(outgoing);
+        if (outgoing.len > 0) return true;
+        const incoming = self.database.getIncomingEdgeRefsInTxn(ctx.txn, node_id) catch return OperatorError.StorageError;
+        defer self.database.allocator.free(incoming);
+        return incoming.len > 0;
+    }
 
-        for (outgoing) |edge| {
-            try self.database.deleteEdge(ctx.txn, edge.source, edge.target, edge.edge_type);
-        }
-
-        // Delete incoming edges
-        const incoming = try self.database.getIncomingEdgesInTxn(ctx.txn, node_id, 0);
-        defer self.database.freeEdgeInfos(incoming);
-
-        for (incoming) |edge| {
-            try self.database.deleteEdge(ctx.txn, edge.source, edge.target, edge.edge_type);
+    /// Delete every relationship of `node_id`, by id, so parallel edges of
+    /// one type between the same nodes are each removed once.
+    fn deleteAllEdges(self: *Self, ctx: *ExecutionContext, node_id: NodeId) OperatorError!void {
+        inline for (.{ false, true }) |incoming| {
+            const refs = (if (incoming)
+                self.database.getIncomingEdgeRefsInTxn(ctx.txn, node_id)
+            else
+                self.database.getOutgoingEdgeRefsInTxn(ctx.txn, node_id)) catch return OperatorError.StorageError;
+            defer self.database.allocator.free(refs);
+            for (refs) |ref| {
+                self.database.deleteEdgeById(ctx.txn, ref.id) catch |err| switch (err) {
+                    // A self-loop is listed both ways; the first pass took it.
+                    error.NotFound => {},
+                    else => return OperatorError.StorageError,
+                };
+            }
         }
     }
 
@@ -457,6 +509,7 @@ pub const DeleteNode = struct {
     fn deinit(ptr: *anyopaque, allocator: Allocator) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.input.deinit(allocator);
+        self.rows.deinit(self.allocator);
         allocator.destroy(self);
     }
 };
@@ -528,8 +581,12 @@ pub const DeleteEdge = struct {
         const edge_val = row.getSlot(self.edge_slot) orelse return OperatorError.UnboundVariable;
         const edge_id = edge_val.asEdgeId() orelse return OperatorError.TypeError;
 
-        self.database.deleteEdgeById(ctx.txn, edge_id) catch {
-            return OperatorError.StorageError;
+        self.database.deleteEdgeById(ctx.txn, edge_id) catch |err| switch (err) {
+            // The edge was matched, so it existed; an earlier row of this
+            // statement deleted it. An undirected pattern lists every edge
+            // twice, and deleting it twice is not an error in Cypher.
+            error.NotFound => {},
+            else => return OperatorError.StorageError,
         };
 
         return row;

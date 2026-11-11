@@ -60,6 +60,8 @@ pub const OperatorError = error{
     PropertyNotFound,
     /// Operation not supported
     Unsupported,
+    /// DELETE of a node that still has relationships (use DETACH DELETE)
+    NodeHasRelationships,
 };
 
 // ============================================================================

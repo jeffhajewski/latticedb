@@ -731,8 +731,13 @@ pub const FtsIndex = struct {
         for (terms) |term| {
             if (num_valid_terms >= 32) break;
 
-            const dict_entry = self.dictionary.get(term) catch continue orelse continue;
-            if (dict_entry.posting_page == 0) continue;
+            // Every term is required, so one that no document has rules out
+            // every document. Skipping it would answer a broader query than the
+            // one asked, and disagree with `estimateMatches`, which says zero.
+            const dict_entry = (self.dictionary.get(term) catch {
+                return FtsError.DictionaryError;
+            }) orelse return &[_]ScoredDoc{};
+            if (dict_entry.posting_page == 0) return &[_]ScoredDoc{};
 
             term_infos_buf[num_valid_terms] = .{
                 .term = term,
@@ -799,7 +804,9 @@ pub const FtsIndex = struct {
 
         var terms_matched: u32 = 1;
         for (term_infos[1..]) |info| {
-            var iter = self.posting_store.iterate(info.dict_entry.posting_page) catch continue;
+            var iter = self.posting_store.iterate(info.dict_entry.posting_page) catch {
+                return FtsError.PostingError;
+            };
             defer iter.deinit();
 
             var any_matched = false;
@@ -2552,4 +2559,28 @@ test "fts AND search over unordered multi-page posting lists matches a scan" {
         }
     }
     try std.testing.expectEqual(expected, results.len);
+}
+
+test "fts AND search with a term no document contains matches nothing" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_and_unknown_term_test.db");
+    defer fx.destroy(allocator);
+
+    _ = try fx.index.indexDocument(1, "apple pie");
+    _ = try fx.index.indexDocument(2, "apple banana");
+
+    // Search is AND, so a word that is in no document rules every one out.
+    // Dropping it instead would answer a different, broader query.
+    for ([_][]const u8{ "apple zebra", "zebra apple", "apple pie zebra" }) |query| {
+        const results = try fx.index.search(query, 10);
+        defer fx.index.freeResults(results);
+        try std.testing.expectEqual(@as(usize, 0), results.len);
+    }
+
+    // A term whose every document was removed has a dictionary entry but no
+    // postings left, which has to mean the same thing.
+    try fx.index.removeDocument(1);
+    const results = try fx.index.search("apple pie", 10);
+    defer fx.index.freeResults(results);
+    try std.testing.expectEqual(@as(usize, 0), results.len);
 }

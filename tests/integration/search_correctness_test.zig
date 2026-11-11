@@ -77,3 +77,17 @@ test "search: full-text AND finds every document one transaction wrote" {
         try std.testing.expectEqual(i % 2 == 0, ftsContains(results, id));
     }
 }
+
+test "search: full-text AND with a word no document has matches nothing" {
+    const allocator = std.testing.allocator;
+    const db = try openFtsDatabase(allocator);
+    defer db.close();
+
+    _ = try createDoc(db, null, "banana");
+    _ = try createDoc(db, null, "apple banana");
+    _ = try createDoc(db, null, "apple");
+
+    const results = try db.ftsSearchIndex(.node, "Doc", "text", "apple zebra", 10);
+    defer freeFtsResults(allocator, results);
+    try std.testing.expectEqual(@as(usize, 0), results.len);
+}

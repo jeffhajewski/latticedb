@@ -1084,6 +1084,12 @@ test "btree: an insert running out of buffer frames during a split leaves the tr
         var key_buf: [256]u8 = undefined;
         for (0..split_index) |i| try tree.insert(longSplitKey(&key_buf, i), "value");
 
+        // The pool grows rather than write a dirty page out on its own, and
+        // building the tree left it grown and dirty. Flush, so that it is back
+        // to its own frames and every one is clean: from here a frame is only
+        // to be had by evicting one, and the pinned ones cannot be evicted.
+        _ = try db.bp.flushAll();
+
         // Pin pages that are not part of the tree.
         var held: [frame_count]*lattice.storage.buffer_pool.BufferFrame = undefined;
         var pinned: usize = 0;

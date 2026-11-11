@@ -120,6 +120,15 @@ pub const LogicalRecoveryContext = struct {
     /// removal means when there is no index to apply it to. Defaults to the
     /// answer that refuses.
     file_has_vectors: bool = true,
+    /// Called between redo operations, when every tree is whole. Lets the
+    /// owner flush, so that replaying a long log does not have to hold all of
+    /// it in dirty pages.
+    between_operations: ?Hook = null,
+
+    pub const Hook = struct {
+        context: *anyopaque,
+        call: *const fn (context: *anyopaque) void,
+    };
 };
 
 // ============================================================================
@@ -439,6 +448,10 @@ pub const RecoveryManager = struct {
                 },
 
                 else => {},
+            }
+
+            if (self.logical_ctx) |ctx| {
+                if (ctx.between_operations) |hook| hook.call(hook.context);
             }
         }
     }

@@ -856,30 +856,14 @@ pub const BTree = struct {
     }
 
     fn markPageFreeInPlace(self: *Self, frame: *BufferFrame) BTreeError!void {
-        var header_copy = self.bp.pm.getHeader().*;
-        const old_freelist_head = header_copy.freelist_page;
         const page_id = frame.page_id;
-
-        // Already the freelist head: freeing it again would link it to itself.
-        if (page_id == old_freelist_head) {
-            self.bp.unpinPage(frame, false);
-            return;
-        }
-
-        @memset(frame.data, 0);
-        const header: *PageHeader = @ptrCast(@alignCast(frame.data.ptr));
-        header.* = PageHeader.init(.free);
-        std.mem.writeInt(u32, frame.data[@sizeOf(PageHeader)..][0..4], old_freelist_head, .little);
-
-        self.bp.pm.writePage(page_id, frame.data) catch {
-            self.bp.unpinPage(frame, false);
-            return BTreeError.IoError;
-        };
         frame.dirty = false;
         self.bp.unpinPage(frame, false);
-
-        header_copy.freelist_page = page_id;
-        self.bp.pm.updateHeader(&header_copy) catch return BTreeError.IoError;
+        self.bp.freePage(page_id) catch |err| switch (err) {
+            // Already free. Freeing it again would link it to itself.
+            error.InvalidPageId => {},
+            else => return BTreeError.IoError,
+        };
     }
 
     /// Index of the child to descend into for `key`: the first key greater
@@ -1172,7 +1156,7 @@ pub const BTree = struct {
         while (reserved < pages_needed) {
             const page_id = self.bp.pm.allocatePage() catch return BTreeError.IoError;
             new_frames[reserved] = self.bp.fetchPage(page_id, .exclusive) catch {
-                self.bp.pm.freePage(page_id) catch {};
+                self.bp.freePage(page_id) catch {};
                 return BTreeError.BufferPoolFull;
             };
             reserved += 1;
@@ -2792,7 +2776,9 @@ test "btree delete merges leaves and returns pages to freelist" {
         try tree.delete(key);
     }
 
-    try std.testing.expect(pm.getHeader().freelist_page != NULL_PAGE);
+    // Freed pages join the freelist at the next flush; until then they are
+    // held for reuse.
+    try std.testing.expect(pm.freelistHeadAfterFlush() != NULL_PAGE);
 
     var iter = try tree.range(null, null);
     defer iter.deinit();

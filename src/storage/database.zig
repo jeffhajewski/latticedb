@@ -43,6 +43,7 @@ const WalManager = wal_mod.WalManager;
 const WalError = wal_mod.WalError;
 
 const recovery_mod = lattice.storage.recovery;
+const journal_mod = lattice.storage.journal;
 const checkpoint_mod = lattice.storage.checkpoint;
 const stream_store_mod = lattice.stream.store;
 const stream_payload_mod = lattice.stream.payload;
@@ -871,6 +872,9 @@ pub const Database = struct {
     vfs: Backend,
     page_manager: PageManager,
     buffer_pool: BufferPool,
+    /// Where the buffer pool records a flush before writing it in place.
+    /// Null for a read-only handle and for a database with no file.
+    journal: ?journal_mod.Journal,
     wal: ?WalManager,
 
     // B+Trees (8 trees for different stores)
@@ -972,6 +976,9 @@ pub const Database = struct {
         self.allocator = allocator;
         self.config = options.config;
         self.read_only = options.read_only;
+        // Read by the flush paths, which recovery reaches before the rest of
+        // this handle is set up.
+        self.failed = false;
         // Only `deserialize` sets this, once its file has actually been opened.
         self.owns_backing_file = false;
 
@@ -1047,7 +1054,27 @@ pub const Database = struct {
         self.buffer_pool = BufferPool.init(allocator, &self.page_manager, effective_pool_size) catch {
             return DatabaseError.BufferPoolFull;
         };
-        errdefer self.buffer_pool.deinit();
+        // An open that is refused leaves the file as it found it.
+        errdefer {
+            self.buffer_pool.abandonDirty();
+            self.buffer_pool.deinit();
+        }
+
+        // 3b. The journal that makes each flush of the pool all-or-nothing.
+        // Anything a crash left in it was applied when the page manager
+        // opened the file.
+        self.journal = null;
+        if (!options.read_only and self.vfs == .posix) {
+            const journal_path = std.fmt.allocPrint(allocator, "{s}-journal", .{path}) catch {
+                return DatabaseError.OutOfMemory;
+            };
+            defer allocator.free(journal_path);
+            self.journal = journal_mod.Journal.open(allocator, self.vfs.vfs(), journal_path) catch {
+                return DatabaseError.IoError;
+            };
+            self.buffer_pool.journal = &self.journal.?;
+        }
+        errdefer if (self.journal) |*journal| journal.deinit();
 
         const opened_new_database = !self.page_manager.getHeader().hasInitializedTrees();
 
@@ -1217,6 +1244,7 @@ pub const Database = struct {
                 .hnsw_index = if (self.hnsw_index) |*hnsw| hnsw else null,
                 .file_has_vectors = header.vector_segment_page != NULL_PAGE or
                     header.getTreeRoot(.hnsw_node) != NULL_PAGE,
+                .between_operations = .{ .context = self, .call = relieveBufferPressureHook },
             });
             const stats = rm.recover(wal, &self.page_manager) catch |err| switch (err) {
                 error.MidLogCorruption => return DatabaseError.InvalidDatabase,
@@ -1285,30 +1313,56 @@ pub const Database = struct {
     /// Returns an error if flushing fails - data may not be persisted.
     pub fn sync(self: *Self) DatabaseError!void {
         if (self.read_only) return;
+        try self.flushPages();
+    }
 
+    /// Bring the database file up to date with memory, as one atomic step.
+    ///
+    /// The log is synced first: the pages may carry transactions whose
+    /// commit records have only been handed to the operating system, and a
+    /// page must never reach the file ahead of the log that explains it.
+    fn flushPages(self: *Self) DatabaseError!void {
         try self.persistHnswIndex();
 
-        // Save B+Tree root pages
+        // The roots go into the header in memory, and the header goes to the
+        // file with the pages.
         self.saveTreeRoots() catch {
             return DatabaseError.IoError;
         };
 
-        // Flush buffer pool
-        self.buffer_pool.close() catch {
-            return DatabaseError.IoError;
-        };
-        // Written is not durable. Without this, nothing fsynced the data
-        // file at all when the WAL is off.
-        self.page_manager.sync() catch {
-            return DatabaseError.IoError;
-        };
-
-        // Sync WAL if present
         if (self.wal) |*wal| {
             wal.sync() catch {
                 return DatabaseError.IoError;
             };
         }
+
+        self.buffer_pool.close() catch {
+            return DatabaseError.IoError;
+        };
+    }
+
+    fn relieveBufferPressureHook(context: *anyopaque) void {
+        const self: *Self = @ptrCast(@alignCast(context));
+        self.relieveBufferPressure();
+    }
+
+    /// Flush early when much of the buffer pool is dirty.
+    ///
+    /// Dirty pages are never evicted, so between flushes the pool grows to
+    /// hold them. This keeps that growth in check during a large commit, a
+    /// long recovery or a run of direct writes. It only acts when no page is
+    /// pinned, which is how it knows no B+Tree operation is half done, so it
+    /// is safe to call from anywhere and does nothing when it cannot act.
+    pub fn relieveBufferPressure(self: *Self) void {
+        if (self.read_only or self.failed) return;
+        if (self.buffer_pool.dirtyCount() * 2 < self.buffer_pool.frame_count) return;
+        if (self.buffer_pool.hasPinnedFrames()) return;
+
+        // The vector index is not written here: it is rewritten whole, and
+        // the log still holds every vector change since the last checkpoint.
+        self.saveTreeRoots() catch return;
+        if (self.wal) |*wal| wal.sync() catch return;
+        _ = self.buffer_pool.flushAll() catch {};
     }
 
     pub fn checkpointWal(self: *Self, mode: checkpoint_mod.CheckpointMode) DatabaseError!void {
@@ -1352,7 +1406,8 @@ pub const Database = struct {
     /// header. A `.truncate` checkpoint that skipped them emptied the log
     /// while the header still named the roots from the last `sync`, and a
     /// process that died after that reopened onto the old roots with nothing
-    /// to replay.
+    /// to replay. Both are put in place here, and the checkpoint's flush
+    /// writes them with the pages they describe.
     fn runCheckpoint(
         self: *Self,
         wal: *WalManager,
@@ -1368,10 +1423,9 @@ pub const Database = struct {
             if (tm.hasLoggedActiveTxn()) return DatabaseError.TransactionConflict;
         }
 
-        if (mode != .passive) {
-            // Into tree pages first, so the flush below carries them.
-            try self.persistHnswIndex();
-        }
+        // Into tree pages and the header first, so the flush carries them.
+        try self.persistHnswIndex();
+        self.saveTreeRoots() catch return DatabaseError.IoError;
 
         var checkpointer = checkpoint_mod.Checkpointer.init(
             self.allocator,
@@ -1379,23 +1433,9 @@ pub const Database = struct {
             &self.page_manager,
             wal,
         );
-        checkpointer.after_flush = .{ .context = self, .call = saveTreeRootsAfterFlush };
         return checkpointer.checkpoint(mode) catch {
             return DatabaseError.IoError;
         };
-    }
-
-    fn saveTreeRootsAfterFlush(context: *anyopaque) anyerror!void {
-        const self: *Self = @ptrCast(@alignCast(context));
-        if (!self.treeRootsNeedSaving()) return;
-
-        // Pages before header. The two cannot change atomically, so pick the
-        // order whose failure is the smaller one: a header that names a root
-        // page which never reached the disk cannot be opened at all, while
-        // the old header over the new pages is the state every crash between
-        // checkpoints already leaves.
-        self.page_manager.sync() catch return DatabaseError.IoError;
-        try self.saveTreeRoots();
     }
 
     /// Checkpoint if the WAL has grown enough and it is safe to do so.
@@ -1824,8 +1864,27 @@ pub const Database = struct {
             wal.deinit();
         }
 
-        // 3. Buffer pool
+        // 3. Buffer pool. Its last flush carries the roots saved above. A
+        //    failed handle writes nothing: what it holds is half a
+        //    transaction that the log will redo in full.
+        if (self.failed) self.buffer_pool.abandonDirty();
+        const final_flush_ok = if (self.buffer_pool.flushAll()) |_| true else |_| false;
+        if (!final_flush_ok) self.buffer_pool.abandonDirty();
         self.buffer_pool.deinit();
+
+        // 3b. Journal. An empty one is removed, so a cleanly closed database
+        //     is its file and nothing else. One that still holds a flush is
+        //     the record of a failure just now, and the next open needs it.
+        if (self.journal) |*journal| {
+            const empty = (journal.file.size() catch 1) == 0;
+            journal.deinit();
+            if (empty) {
+                if (std.fmt.allocPrint(self.allocator, "{s}-journal", .{self.path})) |journal_path| {
+                    defer self.allocator.free(journal_path);
+                    self.vfs.vfs().delete(journal_path) catch {};
+                } else |_| {}
+            }
+        }
 
         // 2. Page manager
         self.page_manager.deinit();
@@ -1943,6 +2002,7 @@ pub const Database = struct {
             }
 
             self.releaseTxnState(txn.id);
+            self.relieveBufferPressure();
             if (should_broadcast_streams) {
                 self.stream_mutex.lock();
                 self.stream_epoch +%= 1;
@@ -2592,6 +2652,7 @@ pub const Database = struct {
     }
 
     fn applyNodeState(self: *Self, node_id: NodeId, state: TxnNodeState) DatabaseError!void {
+        self.relieveBufferPressure();
         const current = try self.readBaseNodeState(node_id);
         defer if (current) |existing| {
             var owned_existing = existing;
@@ -2651,6 +2712,7 @@ pub const Database = struct {
     }
 
     fn applyEdgeState(self: *Self, edge_id: EdgeId, state: TxnEdgeState) DatabaseError!void {
+        self.relieveBufferPressure();
         const current = try self.readBaseEdgeState(edge_id);
         defer if (current) |existing| {
             var owned_existing = existing;
@@ -3256,15 +3318,6 @@ pub const Database = struct {
         self.page_manager.updateHeader(&header) catch {
             return DatabaseError.IoError;
         };
-    }
-
-    /// Whether a tree root or the vector segment has moved since the header
-    /// was last written.
-    fn treeRootsNeedSaving(self: *Self) bool {
-        const current = self.headerWithCurrentRoots();
-        const saved = self.page_manager.getHeader();
-        return !std.mem.eql(PageId, &current.tree_roots, &saved.tree_roots) or
-            current.vector_segment_page != saved.vector_segment_page;
     }
 
     fn headerWithCurrentRoots(self: *Self) page_mod.FileHeader {
@@ -5500,6 +5553,7 @@ pub const Database = struct {
     /// If txn is null, the operation is auto-committed
     pub fn createNode(self: *Self, txn: ?*Transaction, labels: []const []const u8) !NodeId {
         if (self.read_only) return DatabaseError.PermissionDenied;
+        if (txn == null) self.relieveBufferPressure();
 
         // Validate transaction if provided
         if (txn) |t| {
@@ -5608,6 +5662,7 @@ pub const Database = struct {
     /// If txn is null, the operation is auto-committed
     pub fn deleteNode(self: *Self, txn: ?*Transaction, node_id: NodeId) !void {
         if (self.read_only) return DatabaseError.PermissionDenied;
+        if (txn == null) self.relieveBufferPressure();
 
         // Validate transaction if provided
         if (txn) |t| {
@@ -5737,6 +5792,7 @@ pub const Database = struct {
         value: PropertyValue,
     ) !void {
         if (self.read_only) return DatabaseError.PermissionDenied;
+        if (txn == null) self.relieveBufferPressure();
 
         // Validate transaction if provided
         if (txn) |t| {
@@ -5906,6 +5962,7 @@ pub const Database = struct {
         key: []const u8,
     ) !void {
         if (self.read_only) return DatabaseError.PermissionDenied;
+        if (txn == null) self.relieveBufferPressure();
 
         if (txn) |t| {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;
@@ -6036,6 +6093,7 @@ pub const Database = struct {
         label: []const u8,
     ) !void {
         if (self.read_only) return DatabaseError.PermissionDenied;
+        if (txn == null) self.relieveBufferPressure();
 
         if (txn) |t| {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;
@@ -6153,6 +6211,7 @@ pub const Database = struct {
         label: []const u8,
     ) !void {
         if (self.read_only) return DatabaseError.PermissionDenied;
+        if (txn == null) self.relieveBufferPressure();
 
         if (txn) |t| {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;
@@ -6285,6 +6344,7 @@ pub const Database = struct {
         node_id: NodeId,
     ) !void {
         if (self.read_only) return DatabaseError.PermissionDenied;
+        if (txn == null) self.relieveBufferPressure();
 
         if (txn) |t| {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;
@@ -6622,6 +6682,7 @@ pub const Database = struct {
         edge_type: []const u8,
     ) !EdgeId {
         if (self.read_only) return DatabaseError.PermissionDenied;
+        if (txn == null) self.relieveBufferPressure();
 
         // Validate transaction if provided
         if (txn) |t| {
@@ -6713,6 +6774,7 @@ pub const Database = struct {
         edge_type: []const u8,
     ) !void {
         if (self.read_only) return DatabaseError.PermissionDenied;
+        if (txn == null) self.relieveBufferPressure();
 
         // Validate transaction if provided
         if (txn) |t| {
@@ -6809,6 +6871,7 @@ pub const Database = struct {
         edge_id: EdgeId,
     ) !void {
         if (self.read_only) return DatabaseError.PermissionDenied;
+        if (txn == null) self.relieveBufferPressure();
 
         if (txn) |t| {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;
@@ -6894,6 +6957,7 @@ pub const Database = struct {
         value: PropertyValue,
     ) !void {
         if (self.read_only) return DatabaseError.PermissionDenied;
+        if (txn == null) self.relieveBufferPressure();
 
         if (txn) |t| {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;
@@ -7051,6 +7115,7 @@ pub const Database = struct {
         key: []const u8,
     ) !void {
         if (self.read_only) return DatabaseError.PermissionDenied;
+        if (txn == null) self.relieveBufferPressure();
 
         if (txn) |t| {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;

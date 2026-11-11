@@ -9,6 +9,7 @@ const lattice = @import("lattice");
 const Allocator = std.mem.Allocator;
 const vfs = lattice.storage.vfs;
 const page = lattice.storage.page;
+const journal_mod = lattice.storage.journal;
 const types = lattice.core.types;
 
 const File = vfs.File;
@@ -93,6 +94,19 @@ pub const PageManager = struct {
     /// across processes. Atomic because readers check pages while the writer
     /// allocates them.
     page_count: std.atomic.Value(u32),
+    /// Pages freed since the last flush, most recent last.
+    ///
+    /// Freeing a page used to write a freelist link into it on the spot. But
+    /// the database file between flushes is the image the last flush left,
+    /// and in that image the page is still part of a tree. Overwriting it
+    /// corrupted the one copy recovery starts from. A freed page is now only
+    /// remembered here. It can be handed straight back out, and it joins the
+    /// freelist in the file when the next flush writes everything together.
+    deferred_frees: std.ArrayListUnmanaged(PageId) = .empty,
+    deferred_free_set: std.AutoHashMapUnmanaged(PageId, void) = .empty,
+    /// The header in memory differs from the one in the file. Like every
+    /// other page, the header reaches the file only as part of a flush.
+    header_dirty: bool = false,
 
     const Self = @This();
 
@@ -143,6 +157,21 @@ pub const PageManager = struct {
             .page_count = .init(0),
         };
 
+        // A flush that a crash cut short is finished before anything is read
+        // from the file: the header may be one of the pages half written.
+        {
+            const journal_path = std.fmt.allocPrint(allocator, "{s}-journal", .{path}) catch {
+                return PageManagerError.OutOfMemory;
+            };
+            defer allocator.free(journal_path);
+            _ = journal_mod.recover(allocator, vfs_impl, journal_path, file, options.read_only) catch |err| {
+                return switch (err) {
+                    error.OutOfMemory => PageManagerError.OutOfMemory,
+                    else => PageManagerError.IoError,
+                };
+            };
+        }
+
         const file_size = file.size() catch return PageManagerError.IoError;
 
         if (file_size == 0) {
@@ -169,6 +198,8 @@ pub const PageManager = struct {
             self.holds_lock = false;
         }
         self.file.close();
+        self.deferred_frees.deinit(self.allocator);
+        self.deferred_free_set.deinit(self.allocator);
     }
 
     /// Initialize a new database file.
@@ -207,8 +238,10 @@ pub const PageManager = struct {
         self.page_size = self.header.page_size;
         if (!isValidPageSize(self.page_size)) return PageManagerError.InvalidPageSize;
 
+        // A file extended by a write that a crash cut short ends in part of a
+        // page. Nothing refers to it yet, so it is not counted.
         const file_size = self.file.size() catch return PageManagerError.IoError;
-        if (file_size < self.page_size or file_size % self.page_size != 0) {
+        if (file_size < self.page_size) {
             return PageManagerError.InvalidHeader;
         }
         const page_count = std.math.cast(u32, file_size / self.page_size) orelse {
@@ -247,14 +280,21 @@ pub const PageManager = struct {
     pub fn allocatePage(self: *Self) PageManagerError!PageId {
         if (self.read_only) return PageManagerError.PermissionDenied;
 
+        // A page freed since the last flush is the cheapest to reuse: the
+        // file has not heard that it was freed.
+        if (self.deferred_frees.pop()) |page_id| {
+            _ = self.deferred_free_set.remove(page_id);
+            return page_id;
+        }
+
         // Try to get from freelist first
         if (self.header.freelist_page != NULL_PAGE) {
             return self.allocateFromFreelist();
         }
 
-        // Allocate new page at end of file
+        // Allocate new page at end of file. Writing it now only makes the
+        // file longer; nothing in the file refers to the page until a flush.
         const page_id: PageId = self.pageCount();
-        self.header.freelist_page = self.header.freelist_page; // unchanged
 
         // Extend file with zeroed page
         const offset = self.pageOffset(page_id);
@@ -271,8 +311,6 @@ pub const PageManager = struct {
 
         self.file.write(offset, zeros) catch return PageManagerError.IoError;
         self.noteWritten(page_id);
-
-        try self.writeHeader();
 
         return page_id;
     }
@@ -307,14 +345,14 @@ pub const PageManager = struct {
         var next_free = std.mem.readInt(u32, buf[8..12], .little);
         if (next_free == page_id or next_free >= count) next_free = NULL_PAGE;
         self.header.freelist_page = next_free;
-
-        try self.writeHeader();
+        self.header_dirty = true;
 
         return page_id;
     }
 
     fn dropFreelistAndExtend(self: *Self) PageManagerError!PageId {
         self.header.freelist_page = NULL_PAGE;
+        self.header_dirty = true;
         return self.allocatePage();
     }
 
@@ -326,31 +364,104 @@ pub const PageManager = struct {
         // Freeing the head again would make it its own successor, and every
         // later allocation would return the same page.
         if (page_id == self.header.freelist_page) return PageManagerError.InvalidPageId;
+        if (self.deferred_free_set.contains(page_id)) return PageManagerError.InvalidPageId;
+
+        self.deferred_free_set.put(self.allocator, page_id, {}) catch return PageManagerError.OutOfMemory;
+        self.deferred_frees.append(self.allocator, page_id) catch {
+            _ = self.deferred_free_set.remove(page_id);
+            return PageManagerError.OutOfMemory;
+        };
+    }
+
+    /// Pages freed since the last flush, in the order they will be chained
+    /// onto the freelist: each links to the next, the last to the current
+    /// freelist head.
+    pub fn deferredFrees(self: *const Self) []const PageId {
+        return self.deferred_frees.items;
+    }
+
+    pub fn isDeferredFree(self: *const Self, page_id: PageId) bool {
+        return self.deferred_free_set.contains(page_id);
+    }
+
+    /// The freelist head the file will have once the deferred frees are
+    /// written.
+    pub fn freelistHeadAfterFlush(self: *const Self) PageId {
+        return if (self.deferred_frees.items.len > 0) self.deferred_frees.items[0] else self.header.freelist_page;
+    }
+
+    /// Fill `buf` with a free page that links to `next`. This is what a
+    /// freed page looks like in the file.
+    pub fn formatFreePage(buf: []u8, next: PageId) void {
+        @memset(buf, 0);
+        const header_ptr: *PageHeader = @ptrCast(@alignCast(buf.ptr));
+        header_ptr.* = PageHeader.init(.free);
+        std.mem.writeInt(u32, buf[8..12], next, .little);
+    }
+
+    /// The header page as a flush will write it.
+    pub fn headerImage(self: *Self, buf: []u8) void {
+        std.debug.assert(buf.len == self.page_size);
+        var header = self.header;
+        header.modified_timestamp = @intCast(@import("compat").timestamp());
+        header.freelist_page = self.freelistHeadAfterFlush();
+        @memset(buf, 0);
+        const header_bytes = std.mem.asBytes(&header);
+        @memcpy(buf[0..header_bytes.len], header_bytes);
+    }
+
+    /// Stamp a page's checksum, so the same bytes can go to the journal and
+    /// then to the file.
+    pub fn sealPage(self: *const Self, buf: []u8) void {
+        std.debug.assert(buf.len == self.page_size);
+        const header_ptr: *PageHeader = @ptrCast(@alignCast(buf.ptr));
+        header_ptr.checksum = calculateChecksum(buf[8..]);
+    }
+
+    /// Write bytes that are already final, the header page included. For the
+    /// in-place half of a flush.
+    pub fn writeSealed(self: *Self, page_id: PageId, buf: []const u8) PageManagerError!void {
+        if (self.read_only) return PageManagerError.PermissionDenied;
+        if (buf.len != self.page_size) return PageManagerError.InvalidPageId;
+        self.file.write(self.pageOffset(page_id), buf) catch return PageManagerError.IoError;
+        self.noteWritten(page_id);
+    }
+
+    /// The flush that carried the header and the deferred frees is in the
+    /// file and synced.
+    pub fn completeFlush(self: *Self) void {
+        self.header.freelist_page = self.freelistHeadAfterFlush();
+        self.deferred_frees.clearRetainingCapacity();
+        self.deferred_free_set.clearRetainingCapacity();
+        self.header_dirty = false;
+    }
+
+    /// Whether a flush has anything of the page manager's to write.
+    pub fn hasPendingChanges(self: *const Self) bool {
+        return self.header_dirty or self.deferred_frees.items.len > 0;
+    }
+
+    /// Write the deferred frees and the header straight to the file.
+    ///
+    /// This is not atomic, and is for the page manager used on its own,
+    /// without a buffer pool to flush through.
+    pub fn persistDeferredFrees(self: *Self) PageManagerError!void {
+        if (self.read_only) return PageManagerError.PermissionDenied;
+        if (!self.hasPendingChanges()) return;
 
         const page_alignment = comptime std.mem.Alignment.fromByteUnits(4096);
         const buf = self.allocator.alignedAlloc(u8, page_alignment, self.page_size) catch {
             return PageManagerError.OutOfMemory;
         };
         defer self.allocator.free(buf);
-        @memset(buf, 0);
 
-        // Set up page header as free
-        const header_ptr: *PageHeader = @ptrCast(@alignCast(buf.ptr));
-        header_ptr.* = PageHeader.init(.free);
-
-        // Store pointer to current freelist head
-        std.mem.writeInt(u32, buf[8..12], self.header.freelist_page, .little);
-
-        // Calculate and set checksum (covers bytes 8 to end)
-        header_ptr.checksum = calculateChecksum(buf[8..]);
-
-        // Write the page
-        const offset = self.pageOffset(page_id);
-        self.file.write(offset, buf) catch return PageManagerError.IoError;
-        self.noteWritten(page_id);
-
-        // Update freelist head
-        self.header.freelist_page = page_id;
+        const frees = self.deferred_frees.items;
+        for (frees, 0..) |page_id, i| {
+            const next = if (i + 1 < frees.len) frees[i + 1] else self.header.freelist_page;
+            formatFreePage(buf, next);
+            try self.writePage(page_id, buf);
+        }
+        self.completeFlush();
         try self.writeHeader();
     }
 
@@ -406,6 +517,9 @@ pub const PageManager = struct {
     /// leave a freelist pointer beyond EOF.
     pub fn truncateFreeTail(self: *Self) PageManagerError!TruncateStats {
         if (self.read_only) return PageManagerError.PermissionDenied;
+
+        // The scan below reads page types from the file.
+        try self.persistDeferredFrees();
 
         const pages_before = self.pageCount();
         if (pages_before <= 1) {
@@ -490,19 +604,20 @@ pub const PageManager = struct {
     pub fn updateHeader(self: *Self, new_header: *const FileHeader) PageManagerError!void {
         if (self.read_only) return PageManagerError.PermissionDenied;
         self.header = new_header.*;
-        try self.writeHeader();
+        self.header_dirty = true;
     }
 
-    /// Record that the write-ahead log has been reset, and persist that fact.
+    /// Record that the write-ahead log is about to be reset.
     ///
-    /// This has to reach disk before the log is actually truncated. A counter
-    /// that lags the truncation would let a follower carry on believing it has
+    /// This has to reach disk before the log is actually truncated, which the
+    /// checkpoint arranges by calling it ahead of its flush. A counter that
+    /// lags the truncation would let a follower carry on believing it has
     /// frames it no longer has, whereas one that runs ahead only costs a
     /// follower an extra snapshot it did not strictly need.
     pub fn advanceCheckpointSeq(self: *Self) PageManagerError!void {
         if (self.read_only) return PageManagerError.PermissionDenied;
         self.header.checkpoint_seq +%= 1;
-        try self.writeHeader();
+        self.header_dirty = true;
     }
 
     /// Get current page count.

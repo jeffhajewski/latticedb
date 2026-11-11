@@ -1853,3 +1853,235 @@ test "symbol table recovered - edge types resolved after crash" {
         try std.testing.expectEqualStrings("KNOWS", resolved);
     }
 }
+
+test "committed data survives a kill while the buffer pool is evicting" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_evict.ltdb";
+    const killed = "/tmp/lattice_crash_evict_killed.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+    cleanup(killed);
+    defer cleanup(killed);
+
+    // A pool far smaller than the data, so dirty pages are pushed out of it
+    // all the time, between checkpoints that each empty the log. Whatever
+    // eviction writes after a checkpoint lands on top of the image that
+    // checkpoint left, with nothing in the log to rebuild what it displaces.
+    const config = DatabaseConfig{
+        .enable_fts = false,
+        .enable_vector = false,
+        .buffer_pool_size = 48 * 4096,
+        .auto_checkpoint = .{ .max_wal_frames = 300 },
+    };
+    const count = 4000;
+    const snapshots = [_]usize{ 250, 700, 1130, 1500, 1870, 2600, 3140, 3999 };
+    const ids = try allocator.alloc(NodeId, count);
+    defer allocator.free(ids);
+
+    var payload: [300]u8 = undefined;
+    @memset(&payload, 'x');
+
+    var db = try Database.open(allocator, path, .{ .create = true, .config = config });
+    defer db.close();
+    var next_snapshot: usize = 0;
+    for (ids, 0..) |*id, i| {
+        var txn = try db.beginTransaction(.read_write);
+        id.* = try db.createNode(&txn, &.{"Person"});
+        try db.setNodeProperty(&txn, id.*, "seq", .{ .int_val = @intCast(i) });
+        try db.setNodeProperty(&txn, id.*, "pad", .{ .string_val = &payload });
+        try db.commitTransaction(&txn);
+
+        if (next_snapshot < snapshots.len and i == snapshots[next_snapshot]) {
+            next_snapshot += 1;
+            cleanup(killed);
+            try copyAsIfKilled(allocator, path, killed);
+
+            var reopened = try Database.open(allocator, killed, .{ .config = config });
+            defer reopened.close();
+            for (ids[0 .. i + 1], 0..) |committed, seq| {
+                try std.testing.expect(try reopened.nodeExists(committed));
+                var value = (try reopened.getNodeProperty(committed, "seq")).?;
+                defer value.deinit(allocator);
+                try std.testing.expectEqual(@as(i64, @intCast(seq)), value.int_val);
+            }
+            const people = try reopened.getNodesByLabel("Person");
+            defer allocator.free(people);
+            try std.testing.expectEqual(i + 1, people.len);
+        }
+    }
+}
+
+test "committed creates, updates and deletes survive a kill while the buffer pool is evicting" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_evict_mixed.ltdb";
+    const killed = "/tmp/lattice_crash_evict_mixed_killed.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+    cleanup(killed);
+    defer cleanup(killed);
+
+    // Values large enough to live in overflow chains, so that updates and
+    // deletes free pages and later writes reuse them, all between checkpoints
+    // that empty the log, in a pool that cannot hold the data.
+    const config = DatabaseConfig{
+        .enable_fts = false,
+        .enable_vector = false,
+        .buffer_pool_size = 48 * 4096,
+        .auto_checkpoint = .{ .max_wal_frames = 200 },
+    };
+
+    const Expected = struct { id: NodeId, version: i64, alive: bool };
+    var model: std.ArrayListUnmanaged(Expected) = .empty;
+    defer model.deinit(allocator);
+
+    var prng = std.Random.DefaultPrng.init(0x5EED);
+    const random = prng.random();
+    var payload: [6000]u8 = undefined;
+
+    var db = try Database.open(allocator, path, .{ .create = true, .config = config });
+    defer db.close();
+
+    const rounds = 1200;
+    for (0..rounds) |round| {
+        var txn = try db.beginTransaction(.read_write);
+        const choice = random.uintLessThan(u8, 10);
+        if (model.items.len < 20 or choice < 5) {
+            const id = try db.createNode(&txn, &.{"Doc"});
+            const size = 200 + random.uintLessThan(usize, payload.len - 200);
+            @memset(payload[0..size], 'a' + @as(u8, @intCast(round % 26)));
+            try db.setNodeProperty(&txn, id, "version", .{ .int_val = 0 });
+            try db.setNodeProperty(&txn, id, "body", .{ .string_val = payload[0..size] });
+            try model.append(allocator, .{ .id = id, .version = 0, .alive = true });
+        } else {
+            const entry = &model.items[random.uintLessThan(usize, model.items.len)];
+            if (!entry.alive) {
+                // Nothing to do to a deleted node; commit an empty transaction.
+            } else if (choice < 8) {
+                const size = 200 + random.uintLessThan(usize, payload.len - 200);
+                @memset(payload[0..size], 'A' + @as(u8, @intCast(round % 26)));
+                entry.version += 1;
+                try db.setNodeProperty(&txn, entry.id, "version", .{ .int_val = entry.version });
+                try db.setNodeProperty(&txn, entry.id, "body", .{ .string_val = payload[0..size] });
+            } else {
+                try db.deleteNode(&txn, entry.id);
+                entry.alive = false;
+            }
+        }
+        try db.commitTransaction(&txn);
+
+        if (round % 97 != 96 and round != rounds - 1) continue;
+
+        cleanup(killed);
+        try copyAsIfKilled(allocator, path, killed);
+        var reopened = try Database.open(allocator, killed, .{ .config = config });
+        defer reopened.close();
+        var alive: usize = 0;
+        for (model.items) |expected| {
+            try std.testing.expectEqual(expected.alive, try reopened.nodeExists(expected.id));
+            if (!expected.alive) continue;
+            alive += 1;
+            var version = (try reopened.getNodeProperty(expected.id, "version")).?;
+            defer version.deinit(allocator);
+            try std.testing.expectEqual(expected.version, version.int_val);
+            var body = (try reopened.getNodeProperty(expected.id, "body")).?;
+            defer body.deinit(allocator);
+            try std.testing.expect(body.string_val.len >= 200);
+        }
+        const docs = try reopened.getNodesByLabel("Doc");
+        defer allocator.free(docs);
+        try std.testing.expectEqual(alive, docs.len);
+    }
+}
+
+test "a flush interrupted partway is finished from the journal at the next open" {
+    const allocator = std.testing.allocator;
+    const journal_mod = lattice.storage.journal;
+    const path = "/tmp/lattice_crash_torn_flush.ltdb";
+    const torn = "/tmp/lattice_crash_torn_flush_torn.ltdb";
+    const torn_journal = torn ++ "-journal";
+    cleanup(path);
+    defer cleanup(path);
+    cleanup(torn);
+    defer cleanup(torn);
+    @import("compat").fs.cwd().deleteFile(torn_journal) catch {};
+    defer @import("compat").fs.cwd().deleteFile(torn_journal) catch {};
+
+    const config = DatabaseConfig{ .enable_fts = false, .enable_vector = false };
+    const first = 300;
+    const total = 900;
+    const ids = try allocator.alloc(NodeId, total);
+    defer allocator.free(ids);
+    var payload: [300]u8 = undefined;
+    @memset(&payload, 'x');
+
+    // The image before the flush: a closed database.
+    {
+        var db = try Database.open(allocator, path, .{ .create = true, .config = config });
+        defer db.close();
+        for (ids[0..first], 0..) |*id, i| {
+            var txn = try db.beginTransaction(.read_write);
+            id.* = try db.createNode(&txn, &.{"Person"});
+            try db.setNodeProperty(&txn, id.*, "seq", .{ .int_val = @intCast(i) });
+            try db.setNodeProperty(&txn, id.*, "pad", .{ .string_val = &payload });
+            try db.commitTransaction(&txn);
+        }
+    }
+    try copyAsIfKilled(allocator, path, torn);
+
+    // The image after it: the same database with more in it, closed again.
+    {
+        var db = try Database.open(allocator, path, .{ .config = config });
+        defer db.close();
+        for (ids[first..], first..) |*id, i| {
+            var txn = try db.beginTransaction(.read_write);
+            id.* = try db.createNode(&txn, &.{"Person"});
+            try db.setNodeProperty(&txn, id.*, "seq", .{ .int_val = @intCast(i) });
+            try db.setNodeProperty(&txn, id.*, "pad", .{ .string_val = &payload });
+            try db.commitTransaction(&txn);
+        }
+    }
+
+    // What a crash in the middle of the flush between the two leaves behind:
+    // the journal complete, and only some of the pages written in place.
+    const fs = @import("compat").fs;
+    const after_file = try fs.cwd().openFile(path, .{});
+    const after = try after_file.readToEndAlloc(allocator, 1 << 30);
+    after_file.close();
+    defer allocator.free(after);
+    const page_size = 4096;
+    const page_count = after.len / page_size;
+    try std.testing.expect(page_count > 20);
+
+    {
+        var posix = lattice.storage.vfs.PosixVfs.init(allocator);
+        const images = try allocator.alloc(journal_mod.PageImage, page_count);
+        defer allocator.free(images);
+        for (images, 0..) |*image, i| {
+            image.* = .{ .page_id = @intCast(i), .data = after[i * page_size ..][0..page_size] };
+        }
+        var header: FileHeader = undefined;
+        @memcpy(std.mem.asBytes(&header), after[0..@sizeOf(FileHeader)]);
+        var journal = try journal_mod.Journal.open(allocator, posix.vfs(), torn_journal);
+        defer journal.deinit();
+        try journal.write(header.file_uuid, page_size, images);
+
+        const torn_file = try fs.cwd().openFile(torn, .{ .mode = .read_write });
+        defer torn_file.close();
+        var i: usize = 0;
+        while (i < page_count) : (i += 3) {
+            try torn_file.pwriteAll(after[i * page_size ..][0..page_size], i * page_size);
+        }
+    }
+
+    var db = try Database.open(allocator, torn, .{ .config = config });
+    defer db.close();
+    for (ids, 0..) |id, i| {
+        try std.testing.expect(try db.nodeExists(id));
+        var value = (try db.getNodeProperty(id, "seq")).?;
+        defer value.deinit(allocator);
+        try std.testing.expectEqual(@as(i64, @intCast(i)), value.int_val);
+    }
+    const people = try db.getNodesByLabel("Person");
+    defer allocator.free(people);
+    try std.testing.expectEqual(@as(usize, total), people.len);
+}

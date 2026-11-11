@@ -79,21 +79,8 @@ pub const Checkpointer = struct {
     checkpoint_in_progress: bool,
     /// Statistics from last checkpoint
     last_stats: ?CheckpointStats,
-    /// Runs once every dirty page has been written and before the database
-    /// file is synced. Not called for `.passive`, which may skip pages.
-    after_flush: ?AfterFlushHook = null,
 
     const Self = @This();
-
-    /// State that lives outside the buffer pool has to reach the file in the
-    /// same checkpoint as the pages it describes, or truncating the log
-    /// throws away the only other copy of it. The B+Tree root page numbers in
-    /// the file header are that kind of state: a root split moves the root in
-    /// memory only.
-    pub const AfterFlushHook = struct {
-        context: *anyopaque,
-        call: *const fn (context: *anyopaque) anyerror!void,
-    };
 
     /// Initialize the checkpointer
     pub fn init(allocator: Allocator, bp: *BufferPool, pm: *PageManager, wal: *WalManager) Self {
@@ -132,31 +119,34 @@ pub const Checkpointer = struct {
             return CheckpointError.WalError;
         };
 
-        // 3. Flush dirty pages based on mode
-        const pages_flushed = switch (mode) {
-            .passive => try self.flushPassive(),
-            .full, .truncate => try self.flushFull(),
-        };
-
-        // The pages are written, so the header may now name them. A failure
-        // here stops before the log is touched.
-        if (mode != .passive) {
-            if (self.after_flush) |hook| {
-                hook.call(hook.context) catch return CheckpointError.IoError;
-            }
-        }
-
-        // 4. Record the coming reset, then sync the database file. The counter
-        //    has to be durable before the log is truncated in step 8, because a
-        //    follower that misses the reset would keep counting through frame
-        //    numbers that no longer mean what it thinks they do.
+        // 3. Record the coming reset in the header, so that it reaches the
+        //    file in the same flush as the pages. The counter has to be
+        //    durable before the log is truncated in step 8, because a
+        //    follower that misses the reset would keep counting through
+        //    frame numbers that no longer mean what it thinks they do.
         if (mode == .truncate) {
             self.pm.advanceCheckpointSeq() catch {
                 return CheckpointError.IoError;
             };
         }
-        self.pm.sync() catch {
-            return CheckpointError.IoError;
+
+        // 4. Flush every dirty page and the header as one atomic step, which
+        //    also syncs the database file. `.passive` gives way to anything
+        //    holding a dirty page; it then writes nothing at all, because a
+        //    flush of some pages and not others is exactly what must never
+        //    reach the file, and the checkpoint position stays where it was.
+        const pages_flushed: u32 = switch (mode) {
+            .passive => (try self.flushPassive()) orelse {
+                const skipped = CheckpointStats{
+                    .pages_flushed = 0,
+                    .duration_ns = @intCast(@import("compat").nanoTimestamp() - start_time),
+                    .checkpoint_lsn = self.wal.getCheckpointLsn(),
+                    .wal_truncated = false,
+                };
+                self.last_stats = skipped;
+                return skipped;
+            },
+            .full, .truncate => try self.flushFull(),
         };
 
         // 5. Write CHECKPOINT_END to WAL with stats
@@ -201,65 +191,21 @@ pub const Checkpointer = struct {
         return stats;
     }
 
-    /// Flush pages without blocking - skip pages that are currently pinned
-    fn flushPassive(self: *Self) CheckpointError!u32 {
-        var pages_flushed: u32 = 0;
-
+    /// Flush without waiting: null if any dirty page is in use.
+    fn flushPassive(self: *Self) CheckpointError!?u32 {
         for (self.bp.frames) |*frame| {
-            // Skip empty or clean frames
-            if (frame.page_id == 0 or !frame.dirty) {
-                continue;
-            }
-
-            // Skip pinned frames (in use by transactions)
-            if (frame.isPinned()) {
-                continue;
-            }
-
-            // Try to acquire latch without blocking
-            if (frame.latch.tryAcquireShared()) {
-                defer frame.latch.releaseShared();
-
-                if (frame.dirty) {
-                    self.pm.writePage(frame.page_id, frame.data) catch {
-                        return CheckpointError.IoError;
-                    };
-                    frame.dirty = false;
-                    pages_flushed += 1;
-                }
-            }
-            // If we can't get the latch, skip this page (passive mode)
+            if (frame.page_id != 0 and frame.dirty and frame.isPinned()) return null;
         }
-
-        return pages_flushed;
+        for (self.bp.overflow.items) |slot| {
+            const frame = slot orelse continue;
+            if (frame.page_id != 0 and frame.dirty and frame.isPinned()) return null;
+        }
+        return try self.flushFull();
     }
 
     /// Flush all dirty pages, waiting for latches if needed
     fn flushFull(self: *Self) CheckpointError!u32 {
-        var pages_flushed: u32 = 0;
-
-        for (self.bp.frames) |*frame| {
-            // Skip empty or clean frames
-            if (frame.page_id == 0 or !frame.dirty) {
-                continue;
-            }
-
-            // Wait for latch (full mode waits)
-            while (!frame.latch.tryAcquireShared()) {
-                std.atomic.spinLoopHint();
-            }
-            defer frame.latch.releaseShared();
-
-            if (frame.dirty) {
-                self.pm.writePage(frame.page_id, frame.data) catch {
-                    return CheckpointError.IoError;
-                };
-                frame.dirty = false;
-                pages_flushed += 1;
-            }
-        }
-
-        return pages_flushed;
+        return self.bp.flushAll() catch return CheckpointError.IoError;
     }
 
     /// Truncate the WAL file (reset to header only)
@@ -430,19 +376,23 @@ test "checkpoint passive skips pinned pages" {
     frame2.dirty = true;
     bp.unpinPage(frame2, true);
 
-    // Passive checkpoint should only flush page2 (page1 is pinned)
+    // A passive checkpoint gives way to the pinned page. It cannot write
+    // page2 on its own either: some pages and not others is a torn image.
+    // So it writes nothing, and the checkpoint position does not move.
+    const lsn_before = wal.getCheckpointLsn();
     const stats = try checkpointer.checkpoint(.passive);
-
-    // Only 1 page should be flushed (page2), page1 is still pinned
-    try std.testing.expectEqual(@as(u32, 1), stats.pages_flushed);
+    try std.testing.expectEqual(@as(u32, 0), stats.pages_flushed);
+    try std.testing.expectEqual(lsn_before, wal.getCheckpointLsn());
+    try std.testing.expectEqual(lsn_before, stats.checkpoint_lsn);
 
     // Now unpin page1
     bp.unpinPage(frame1, true);
     frame1_pinned = false;
 
-    // Full checkpoint should flush remaining dirty page
-    const stats2 = try checkpointer.checkpoint(.full);
-    try std.testing.expectEqual(@as(u32, 1), stats2.pages_flushed);
+    // With nothing in use, the same request flushes both pages together.
+    const stats2 = try checkpointer.checkpoint(.passive);
+    try std.testing.expectEqual(@as(u32, 2), stats2.pages_flushed);
+    try std.testing.expect(wal.getCheckpointLsn() > lsn_before);
 }
 
 test "checkpoint updates WAL checkpoint_lsn" {

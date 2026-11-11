@@ -1004,7 +1004,9 @@ lattice_error lattice_edge_result_get_id(
     lattice_edge_id* edge_id_out
 );
 
-/* Get an edge from a result set by index */
+/* Get an edge from a result set by index.
+ * *edge_type_out is NUL-terminated and *edge_type_len_out excludes the NUL.
+ * Both stay valid until lattice_edge_result_free(). */
 lattice_error lattice_edge_result_get(
     lattice_edge_result* result,
     uint32_t index,

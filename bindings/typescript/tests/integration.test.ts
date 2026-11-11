@@ -450,6 +450,28 @@ describeIfNative('Database Integration', () => {
       });
     });
 
+    test('edge types are read by length, not to the next NUL', async () => {
+      // Types whose length fills their allocation exactly: nothing guarantees
+      // a zero byte after them, so a reader that stops at NUL picks up
+      // whatever follows. The multibyte one checks the length is in bytes.
+      const types = ['KNOWS_AB', 'LIKES_CD', 'FOLLOWS_EFGHIJKL', 'MÖGEN'];
+      await db.write(async (txn) => {
+        for (const type of types) {
+          for (let i = 0; i < 4; i++) {
+            await txn.createEdge(aliceId, bobId, type);
+          }
+        }
+      });
+
+      await db.read(async (txn) => {
+        const edges = await txn.getOutgoingEdges(aliceId);
+        expect(edges.length).toBe(types.length * 4);
+        for (const edge of edges) {
+          expect(types).toContain(edge.type);
+        }
+      });
+    });
+
     test('get incoming edges', async () => {
       await db.write(async (txn) => {
         await txn.createEdge(aliceId, bobId, 'KNOWS');

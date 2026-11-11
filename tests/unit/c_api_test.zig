@@ -3591,3 +3591,47 @@ test "c_api: a freed handle never reaches a later handle of the same kind" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_rollback(second_txn));
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_close(second));
 }
+
+test "c_api: edge result types are NUL-terminated" {
+    const path = "/tmp/lattice_capi_edge_type_nul_test.db";
+    const db = try openScratchDb(path);
+    defer removeScratchDb(path);
+    defer _ = c_api.lattice_close(db);
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+    var a: lattice_node_id = 0;
+    var b: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "N", &a));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "N", &b));
+    // Lengths that land on and off an allocation boundary.
+    const types = [_][:0]const u8{ "KNOWS", "KNOWS", "EIGHTCHR", "SIXTEEN_CHARS_AB", "KNOWS" };
+    for (types) |edge_type| {
+        var edge: lattice_edge_id = 0;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, a, b, edge_type.ptr, &edge));
+    }
+
+    var edges: ?*lattice_edge_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_get_outgoing(txn, a, &edges));
+    defer c_api.lattice_edge_result_free(edges);
+    const count = c_api.lattice_edge_result_count(edges);
+    try std.testing.expectEqual(@as(u32, types.len), count);
+
+    var seen = [_]usize{0} ** types.len;
+    for (0..count) |i| {
+        var source: lattice_node_id = 0;
+        var target: lattice_node_id = 0;
+        var type_ptr: [*c]const u8 = null;
+        var type_len: c_uint = 0;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_result_get(edges, @intCast(i), &source, &target, &type_ptr, &type_len));
+        try std.testing.expectEqual(@as(u8, 0), type_ptr[type_len]);
+        try std.testing.expectEqual(@as(usize, type_len), std.mem.len(type_ptr));
+        for (types, 0..) |edge_type, t| {
+            if (std.mem.eql(u8, edge_type, type_ptr[0..type_len])) seen[t] += 1;
+        }
+    }
+    // KNOWS matches its three entries each time; the others once.
+    try std.testing.expectEqual([_]usize{ 3, 3, 1, 1, 3 }, seen);
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+}

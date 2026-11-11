@@ -1083,7 +1083,8 @@ class LatticeLib:
             c_uint32,
             POINTER(LatticeNodeId),
             POINTER(LatticeNodeId),
-            POINTER(c_char_p),
+            # A (pointer, length) pair, read by length: not a C string.
+            POINTER(c_void_p),
             POINTER(c_uint32),
         ]
         self._lib.lattice_edge_result_get.restype = c_int

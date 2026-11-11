@@ -1131,7 +1131,7 @@ class Transaction:
 
                 source = c_uint64()
                 target = c_uint64()
-                edge_type_ptr = ctypes.c_char_p()
+                edge_type_ptr = c_void_p()
                 edge_type_len = ctypes.c_uint32()
                 code = lib._lib.lattice_edge_result_get(
                     result_ptr,
@@ -1142,7 +1142,14 @@ class Transaction:
                     byref(edge_type_len),
                 )
                 check_error(code)
-                edge_type = edge_type_ptr.value[:edge_type_len.value].decode("utf-8") if edge_type_ptr.value else ""
+                # Read exactly the reported length. Libraries before 0.16.1
+                # did not NUL-terminate the type, so reading it as a C string
+                # ran past the end of the allocation.
+                edge_type = (
+                    ctypes.string_at(edge_type_ptr.value, edge_type_len.value).decode("utf-8")
+                    if edge_type_ptr.value and edge_type_len.value
+                    else ""
+                )
                 edges.append(Edge(
                     id=edge_id.value,
                     source_id=source.value,

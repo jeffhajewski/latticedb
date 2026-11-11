@@ -270,6 +270,12 @@ const FtsResultHandle = struct {
 const EdgeResultHandle = struct {
     header: HandleHeader,
     edges: []Database.EdgeInfo,
+    /// NUL-terminated copies of the edge types, one per edge, sharing a copy
+    /// between neighbouring edges of the same type. The engine's strings carry
+    /// no terminator, and bindings that read a `const char*` would run past
+    /// them. Allocated in `type_arena`.
+    edge_types_z: [][:0]const u8,
+    type_arena: std.heap.ArenaAllocator,
     count: usize,
     db_handle: *DatabaseHandle,
     counted_child: bool,
@@ -3347,12 +3353,31 @@ pub export fn lattice_free_edge_ids(edge_ids: ?[*]lattice_edge_id, count: usize)
     global_allocator.free(ptr[0..count]);
 }
 
+fn terminatedEdgeTypes(arena: std.mem.Allocator, edges: []const Database.EdgeInfo) ![][:0]const u8 {
+    const out = try arena.alloc([:0]const u8, edges.len);
+    for (edges, 0..) |edge, i| {
+        if (i > 0 and std.mem.eql(u8, out[i - 1], edge.edge_type)) {
+            out[i] = out[i - 1];
+        } else {
+            out[i] = try arena.dupeZ(u8, edge.edge_type);
+        }
+    }
+    return out;
+}
+
 fn finishEdgeResultHandleLocked(
     txn_handle: *TxnHandle,
     edges: []Database.EdgeInfo,
     result_out: *?*lattice_edge_result,
 ) lattice_error {
+    var type_arena = std.heap.ArenaAllocator.init(global_allocator);
+    const edge_types_z = terminatedEdgeTypes(type_arena.allocator(), edges) catch {
+        type_arena.deinit();
+        txn_handle.db_handle.db.freeEdgeInfos(edges);
+        return .err_out_of_memory;
+    };
     const result_handle = global_allocator.create(EdgeResultHandle) catch {
+        type_arena.deinit();
         txn_handle.db_handle.db.freeEdgeInfos(edges);
         return .err_out_of_memory;
     };
@@ -3360,12 +3385,15 @@ fn finishEdgeResultHandleLocked(
     result_handle.* = EdgeResultHandle{
         .header = HandleHeader.init(.edge_result),
         .edges = edges,
+        .edge_types_z = edge_types_z,
+        .type_arena = type_arena,
         .count = edges.len,
         .db_handle = txn_handle.db_handle,
         .counted_child = true,
     };
     const register_result = registerHandle(EdgeResultHandle, result_handle);
     if (register_result != .ok) {
+        result_handle.type_arena.deinit();
         txn_handle.db_handle.db.freeEdgeInfos(edges);
         global_allocator.destroy(result_handle);
         return register_result;
@@ -3550,8 +3578,9 @@ pub export fn lattice_edge_result_get(
     const edge = result_handle.edges[index];
     source_out.* = edge.source;
     target_out.* = edge.target;
-    edge_type_out.* = edge.edge_type.ptr;
-    edge_type_len_out.* = @intCast(edge.edge_type.len);
+    const edge_type = result_handle.edge_types_z[index];
+    edge_type_out.* = edge_type.ptr;
+    edge_type_len_out.* = @intCast(edge_type.len);
 
     return .ok;
 }
@@ -3567,6 +3596,7 @@ pub export fn lattice_edge_result_free(result: ?*lattice_edge_result) void {
 
     // Free the edge infos through database
     result_handle.db_handle.db.freeEdgeInfos(result_handle.edges);
+    result_handle.type_arena.deinit();
 
     // Free the handle itself
     global_allocator.destroy(result_handle);

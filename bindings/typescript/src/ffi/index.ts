@@ -1610,10 +1610,17 @@ export class LatticeFFI {
     );
     this.checkError(err);
 
+    // The type is a (pointer, length) pair. Libraries before 0.16.1 did not
+    // NUL-terminate it, so it is read by its length rather than as a C string.
+    const edgeTypeLen = edgeTypeLenOut.readUInt32LE();
+    const edgeType = edgeTypeOut[0] && edgeTypeLen > 0
+      ? Buffer.from(koffi.decode(edgeTypeOut[0], 'uint8_t', edgeTypeLen) as number[]).toString('utf8')
+      : '';
+
     return {
       source: sourceOut.readBigUInt64LE(),
       target: targetOut.readBigUInt64LE(),
-      edgeType: edgeTypeOut[0] as string,
+      edgeType,
     };
   }
 

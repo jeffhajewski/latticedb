@@ -409,6 +409,26 @@ class TestEdgeOperations:
                 assert edge.edge_type == "KNOWS"
                 txn.commit()
 
+    def test_edge_types_are_read_by_length(self, tmp_path):
+        """Edge types come back exactly, including ones that fill their
+        allocation and multibyte ones whose length is counted in bytes."""
+        db_path = tmp_path / "test.db"
+        types = ["KNOWS_AB", "LIKES_CD", "FOLLOWS_EFGHIJKL", "MÖGEN"]
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                alice = txn.create_node(labels=["Person"])
+                bob = txn.create_node(labels=["Person"])
+                for edge_type in types:
+                    for _ in range(4):
+                        txn.create_edge(alice.id, bob.id, edge_type)
+                txn.commit()
+
+            with db.read() as txn:
+                edges = txn.get_outgoing_edges(alice.id)
+                assert len(edges) == len(types) * 4
+                assert sorted({edge.edge_type for edge in edges}) == sorted(types)
+
     def test_edge_properties(self, tmp_path):
         """Test edge property CRUD by stable edge ID."""
         db_path = tmp_path / "test.db"

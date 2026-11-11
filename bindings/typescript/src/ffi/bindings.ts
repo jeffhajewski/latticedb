@@ -1128,7 +1128,7 @@ function createBindings(): LatticeBindings {
       'uint32', // index
       koffi.out(koffi.pointer('uint64')), // source_out
       koffi.out(koffi.pointer('uint64')), // target_out
-      koffi.out(koffi.pointer('str')), // edge_type_out
+      koffi.out(koffi.pointer('void*')), // edge_type_out: read edge_type_len_out bytes
       koffi.out(koffi.pointer('uint32')), // edge_type_len_out
     ]),
     lattice_edge_result_free: lib.func('lattice_edge_result_free', 'void', [

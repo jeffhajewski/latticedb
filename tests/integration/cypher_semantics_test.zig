@@ -161,3 +161,29 @@ test "cypher: MERGE on an existing property still matches" {
     try run(db, "MERGE (n:Rare {x: 5})");
     try std.testing.expectEqual(@as(i64, 3), try queryCount(db, "MATCH (n:Rare) RETURN count(n)"));
 }
+
+// ============================================================================
+// Integer arithmetic
+// ============================================================================
+
+test "cypher: % takes the sign of the dividend" {
+    const path = "/tmp/lattice_cs_modulo.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    var result = try db.query("UNWIND [-7] AS x RETURN x % 2 AS a, 7 % -2 AS b, x % -2 AS c");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try expectInt(result, 0, 0, -1);
+    try expectInt(result, 0, 1, 1);
+    try expectInt(result, 0, 2, -1);
+}
+
+test "cypher: integer division or remainder by zero fails the query" {
+    const path = "/tmp/lattice_cs_div_zero.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    try std.testing.expectError(QueryError.ExecutionError, db.query("UNWIND [0] AS z RETURN 7 % z"));
+    try std.testing.expectError(QueryError.ExecutionError, db.query("UNWIND [0] AS z RETURN 7 / z"));
+}

@@ -1017,3 +1017,57 @@ test "expression: string operators and arithmetic propagate null" {
     try expectCypherNull("2 % null");
     try expectCypherNull("-null");
 }
+
+fn expectCypherInt(expr_source: []const u8, expected: i64) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalCypher(arena.allocator(), expr_source);
+    if (result != .int_val or result.int_val != expected) {
+        std.debug.print("expected `{s}` to be {d}, got {any}\n", .{ expr_source, expected, result });
+        return error.TestUnexpectedResult;
+    }
+}
+
+fn expectCypherFloat(expr_source: []const u8, expected: f64) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    const result = try evalCypher(arena.allocator(), expr_source);
+    if (result != .float_val or @abs(result.float_val - expected) > 1e-9) {
+        std.debug.print("expected `{s}` to be {d}, got {any}\n", .{ expr_source, expected, result });
+        return error.TestUnexpectedResult;
+    }
+}
+
+fn expectCypherError(expr_source: []const u8, expected: anyerror) !void {
+    var arena = std.heap.ArenaAllocator.init(std.testing.allocator);
+    defer arena.deinit();
+    if (evalCypher(arena.allocator(), expr_source)) |result| {
+        std.debug.print("expected `{s}` to fail with {s}, got {any}\n", .{ expr_source, @errorName(expected), result });
+        return error.TestExpectedError;
+    } else |err| {
+        try std.testing.expectEqual(expected, err);
+    }
+}
+
+test "expression: % takes the sign of the dividend" {
+    try expectCypherInt("-7 % 2", -1);
+    try expectCypherInt("7 % -2", 1);
+    try expectCypherInt("-7 % -2", -1);
+    try expectCypherInt("7 % 2", 1);
+    try expectCypherInt("-6 % 3", 0);
+    try expectCypherFloat("7.5 % 2", 1.5);
+    try expectCypherFloat("-7.5 % 2", -1.5);
+    try expectCypherFloat("7 % 2.5", 2.0);
+    try expectCypherFloat("-7 % 2.5", -2.0);
+}
+
+test "expression: the smallest integer % -1 is 0" {
+    try expectCypherInt("(-9223372036854775807 - 1) % -1", 0);
+}
+
+test "expression: division or remainder by zero is an error" {
+    try expectCypherError("7 % 0", error.DivisionByZero);
+    try expectCypherError("7 / 0", error.DivisionByZero);
+    try expectCypherError("7.5 % 0", error.DivisionByZero);
+    try expectCypherError("7 % 0.0", error.DivisionByZero);
+}

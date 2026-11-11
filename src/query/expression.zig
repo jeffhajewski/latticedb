@@ -1100,16 +1100,28 @@ pub const ExpressionEvaluator = struct {
         };
     }
 
+    /// `%` is a remainder that takes the sign of the dividend, as in Cypher
+    /// (and Java): `-7 % 2` is -1 and `7 % -2` is 1. That is a truncating
+    /// remainder, not the floored modulus `@mod` computes.
     fn arithmeticMod(_: *Self, left: EvalResult, right: EvalResult) EvalError!EvalResult {
-        // Check for modulo by zero
+        // A zero divisor is an error, as it is for `/`.
         switch (right) {
             .int_val => |r| if (r == 0) return EvalError.DivisionByZero,
+            .float_val => |r| if (r == 0.0) return EvalError.DivisionByZero,
             else => {},
         }
 
         return switch (left) {
             .int_val => |l| switch (right) {
-                .int_val => |r| .{ .int_val = @mod(l, r) },
+                // minInt % -1 is 0, but computing it overflows, so answer it
+                // directly. Every other remainder fits.
+                .int_val => |r| .{ .int_val = if (r == -1) 0 else @rem(l, r) },
+                .float_val => |r| .{ .float_val = @rem(@as(f64, @floatFromInt(l)), r) },
+                else => .{ .null_val = {} },
+            },
+            .float_val => |l| switch (right) {
+                .float_val => |r| .{ .float_val = @rem(l, r) },
+                .int_val => |r| .{ .float_val = @rem(l, @as(f64, @floatFromInt(r))) },
                 else => .{ .null_val = {} },
             },
             else => .{ .null_val = {} },

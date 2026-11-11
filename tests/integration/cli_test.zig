@@ -355,3 +355,55 @@ test "cli: export --query exports what the query returns, not the whole graph" {
     defer scalars.deinit(allocator);
     try std.testing.expect(!scalars.succeeded());
 }
+
+fn writeFile(path: []const u8, content: []const u8) !void {
+    const file = try compat.fs.cwd().createFile(path, .{ .truncate = true });
+    defer file.close();
+    try file.deprecatedWriter().writeAll(content);
+}
+
+fn createEmptyDatabase(allocator: std.mem.Allocator, path: []const u8) !void {
+    deleteDatabaseFiles(path);
+    var db = try Database.open(allocator, path, .{ .create = true, .config = .{ .enable_fts = false } });
+    db.close();
+}
+
+test "cli: CSV import resolves _id values and keeps edge properties" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_cli_csv_ids.ltdb";
+    const nodes = "/tmp/lattice_cli_csv_ids_nodes.csv";
+    const edges = "/tmp/lattice_cli_csv_ids_edges.csv";
+    const export_name = "/tmp/lattice_cli_csv_ids.csv";
+    defer deleteDatabaseFiles(path);
+    defer compat.fs.cwd().deleteFile(nodes) catch {};
+    defer compat.fs.cwd().deleteFile(edges) catch {};
+
+    try createEmptyDatabase(allocator, path);
+    try writeFile(nodes, "_id,_labels,name\nalice,Person,Alice\nbob,Person,Bob\n");
+    try writeFile(edges, "_source,_target,_type,since\nalice,bob,KNOWS,2020\n");
+
+    // The --file value a CSV export was given names both of its files.
+    const run = try runCli(allocator, &.{ "import", path, "--file=" ++ export_name });
+    defer run.deinit(allocator);
+    if (!run.succeeded()) {
+        std.debug.print("import failed: {s}\n", .{run.stderr});
+        return error.TestUnexpectedResult;
+    }
+
+    const query = try runCli(allocator, &.{
+        "exec",                                                            path,
+        "--query=MATCH (a)-[r:KNOWS]->(b) RETURN a.name, r.since, b.name", "--format=csv",
+    });
+    defer query.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, query.stdout, "Alice,2020,Bob") != null);
+
+    // An edges file on its own names nodes by database id, and its property
+    // columns are kept too.
+    try writeFile(edges, "_source,_target,_type,weight\n2,1,LIKES,0.5\n");
+    const alone = try runCli(allocator, &.{ "import", path, "--file=" ++ edges });
+    defer alone.deinit(allocator);
+    try std.testing.expect(alone.succeeded());
+    const likes = try runCli(allocator, &.{ "exec", path, "--query=MATCH ()-[r:LIKES]->() RETURN r.weight", "--format=csv" });
+    defer likes.deinit(allocator);
+    try std.testing.expect(std.mem.indexOf(u8, likes.stdout, "0.5") != null);
+}

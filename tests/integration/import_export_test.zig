@@ -924,3 +924,90 @@ test "import_export: CSV import reads quoted fields as RFC 4180 describes" {
         import_export.importCsvContent(allocator, db, "_id,_labels,name\nn3,Person,\"unterminated\n", 1000, false),
     );
 }
+
+const CsvExport = struct {
+    nodes: []u8,
+    edges: []u8,
+
+    fn deinit(self: CsvExport, allocator: std.mem.Allocator) void {
+        allocator.free(self.nodes);
+        allocator.free(self.edges);
+    }
+};
+
+fn exportCsvAlloc(allocator: std.mem.Allocator, db: *Database) !CsvExport {
+    const compat = @import("compat");
+    var nodes: std.ArrayList(u8) = .empty;
+    errdefer nodes.deinit(allocator);
+    var edges: std.ArrayList(u8) = .empty;
+    errdefer edges.deinit(allocator);
+    _ = try import_export.exportCsv(
+        allocator,
+        db,
+        compat.arrayListWriterWithAllocator(&nodes, allocator),
+        compat.arrayListWriterWithAllocator(&edges, allocator),
+        .{},
+    );
+    return .{ .nodes = try nodes.toOwnedSlice(allocator), .edges = try edges.toOwnedSlice(allocator) };
+}
+
+test "import_export: CSV export and import keep properties, types, ids and vectors" {
+    const allocator = std.testing.allocator;
+    const source_path = "/tmp/lattice_csv_roundtrip_source.ltdb";
+    const imported_path = "/tmp/lattice_csv_roundtrip_imported.ltdb";
+    const source = try openVectorTestDb(source_path);
+    defer cleanupTestDb(source, source_path);
+    const imported = try openVectorTestDb(imported_path);
+    defer cleanupTestDb(imported, imported_path);
+
+    const alice = try source.createNode(null, &.{ person_label, employee_label });
+    const bob = try source.createNode(null, &.{});
+    try source.setNodeProperty(null, alice, name_property, .{ .string_val = "Smith, \"Alice\"\nJr." });
+    try source.setNodeProperty(null, alice, "code", .{ .string_val = "2024" });
+    try source.setNodeProperty(null, alice, "blob", .{ .bytes_val = &[_]u8{ 1, 2, 3 } });
+    try source.setNodeProperty(null, alice, "score", .{ .float_val = 2.0 });
+    try source.setNodeProperty(null, bob, "nothing", .{ .null_val = {} });
+    try source.setNodeVector(alice, &[_]f32{ 0, 0, 1, 0 });
+    const first = try source.createEdgeAndGetId(null, alice, bob, rel_type);
+    const second = try source.createEdgeAndGetId(null, alice, bob, rel_type);
+    try source.setEdgePropertyById(null, first, since_property, .{ .int_val = first_since_year });
+    try source.setEdgePropertyById(null, second, status_property, .{ .string_val = "a,b" });
+
+    const exported = try exportCsvAlloc(allocator, source);
+    defer exported.deinit(allocator);
+
+    const stats = try import_export.importCsvPairContent(allocator, imported, exported.nodes, exported.edges, 1000, false);
+    try std.testing.expectEqual(@as(u64, 2), stats.nodes_imported);
+    try std.testing.expectEqual(@as(u64, 2), stats.edges_imported);
+
+    const again = try exportCsvAlloc(allocator, imported);
+    defer again.deinit(allocator);
+    try std.testing.expectEqualStrings(exported.nodes, again.nodes);
+    try std.testing.expectEqualStrings(exported.edges, again.edges);
+
+    try expectStringProperty(imported, 1, "code", "2024");
+    var blob = (try imported.getNodeProperty(1, "blob")).?;
+    defer blob.deinit(allocator);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3 }, blob.bytes_val);
+    var nothing = (try imported.getNodeProperty(2, "nothing")).?;
+    defer nothing.deinit(allocator);
+    try std.testing.expect(nothing == .null_val);
+    const vector = (try imported.getNodeVectorInTxn(null, 1)).?;
+    defer allocator.free(vector);
+    try std.testing.expectEqualSlices(f32, &[_]f32{ 0, 0, 1, 0 }, vector);
+}
+
+test "import_export: CSV import refuses a repeated _id and CSV export a label it cannot hold" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_csv_duplicate_id.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    try std.testing.expectError(
+        import_export.ImportExportError.DatabaseError,
+        import_export.importCsvContent(allocator, db, "_id,_labels\nn1,A\nn1,B\n", 1000, false),
+    );
+
+    _ = try db.createNode(null, &.{"has;semicolon"});
+    try std.testing.expectError(import_export.ImportExportError.LabelNotRepresentable, exportCsvAlloc(allocator, db));
+}

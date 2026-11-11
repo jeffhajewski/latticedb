@@ -1187,12 +1187,6 @@ fn cmdImport(
         return failCommand(stderr, "No import file specified. Use --file=<path>", .{});
     };
 
-    // Open database
-    const db = try openDatabase(allocator, stderr, parsed_args, .read_write);
-    defer db.close();
-
-    output.printInfo(stdout, "Importing {s} into {s}...", .{ file, path });
-
     // Detect file format by extension
     const is_json = std.mem.endsWith(u8, file, ".json");
     const is_csv = std.mem.endsWith(u8, file, ".csv");
@@ -1201,8 +1195,33 @@ fn cmdImport(
         return failCommand(stderr, "Unknown file format. Use .json or .csv extension.", .{});
     }
 
+    // A CSV export writes <base>_nodes.csv and <base>_edges.csv. Naming the
+    // export's own --file value imports both, so edges can refer to nodes by
+    // the _id values the nodes file was written with.
+    var csv_pair_storage: CsvPair = .{};
+    var csv_pair: ?*const CsvPair = null;
+    if (is_csv and !fileExists(file)) {
+        try findCsvPair(stderr, file, &csv_pair_storage);
+        csv_pair = &csv_pair_storage;
+    }
+
+    const db = try openDatabase(allocator, stderr, parsed_args, .read_write);
+    defer db.close();
+
+    if (csv_pair) |pair| {
+        output.printInfo(stdout, "Importing {s} and {s} into {s}...", .{
+            pair.nodes orelse "(no nodes file)",
+            pair.edges orelse "(no edges file)",
+            path,
+        });
+    } else {
+        output.printInfo(stdout, "Importing {s} into {s}...", .{ file, path });
+    }
+
     const stats = if (is_json)
         import_export.importJson(allocator, db, file, parsed_args.batch_size, parsed_args.on_error_skip)
+    else if (csv_pair) |pair|
+        import_export.importCsvFiles(allocator, db, pair.nodes, pair.edges, parsed_args.batch_size, parsed_args.on_error_skip)
     else
         import_export.importCsv(allocator, db, file, parsed_args.batch_size, parsed_args.on_error_skip);
 
@@ -1255,6 +1274,34 @@ fn cmdImport(
             ),
             else => failCommand(stderr, "Import failed: {s}", .{@errorName(err)}),
         };
+    }
+}
+
+const CsvPair = struct {
+    nodes: ?[]const u8 = null,
+    edges: ?[]const u8 = null,
+    nodes_buf: [1024]u8 = undefined,
+    edges_buf: [1024]u8 = undefined,
+};
+
+fn fileExists(path: []const u8) bool {
+    @import("compat").fs.cwd().access(path, .{}) catch return false;
+    return true;
+}
+
+/// The nodes and edges files a CSV export wrote for this --file value.
+fn findCsvPair(stderr: anytype, file: []const u8, pair: *CsvPair) !void {
+    const base = file[0 .. file.len - ".csv".len];
+    const nodes = std.fmt.bufPrint(&pair.nodes_buf, "{s}_nodes.csv", .{base}) catch {
+        return failCommand(stderr, "Path too long", .{});
+    };
+    const edges = std.fmt.bufPrint(&pair.edges_buf, "{s}_edges.csv", .{base}) catch {
+        return failCommand(stderr, "Path too long", .{});
+    };
+    if (fileExists(nodes)) pair.nodes = nodes;
+    if (fileExists(edges)) pair.edges = edges;
+    if (pair.nodes == null and pair.edges == null) {
+        return failCommand(stderr, "Cannot read {s}, nor {s} or {s}", .{ file, nodes, edges });
     }
 }
 

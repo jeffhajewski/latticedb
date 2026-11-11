@@ -33,10 +33,6 @@ const json_record_kind_node = "node";
 const json_field_vector = "vector";
 const json_field_vector_dimensions = "vector_dimensions";
 
-const csv_edges_header = "_source,_target,_type";
-const csv_nodes_header = "_id,_labels";
-const csv_edges_header_line = csv_edges_header ++ "\n";
-const csv_nodes_header_line = csv_nodes_header ++ "\n";
 const csv_field_separator = ',';
 const csv_label_separator = ';';
 const csv_trim_chars = " \t\r";
@@ -679,6 +675,8 @@ pub const ImportExportError = error{
     VectorDimensionMismatch,
     /// An export by query whose rows hold no nodes or edges to export.
     QueryReturnedNoGraph,
+    /// A label CSV cannot hold: empty, containing ';', or with surrounding spaces.
+    LabelNotRepresentable,
 };
 
 /// Export database to JSON format
@@ -1497,9 +1495,123 @@ const CsvReader = struct {
     }
 };
 
-/// Import data from a CSV file.
-/// CSV format for nodes: _id,_labels,prop1,prop2,...
-/// CSV format for edges: _source,_target,_type,prop1,prop2,...
+/// What a CSV column holds, read from its header.
+const CsvColumn = union(enum) {
+    /// `_id`: the node's identifier within the import, which edges refer to.
+    id,
+    /// `_labels`: labels separated by semicolons.
+    labels,
+    /// `_vector`: the node's vector, as a JSON array.
+    vector,
+    /// `_source` and `_target`: the edge's endpoints.
+    source,
+    target,
+    /// `_type`: the edge's type.
+    edge_type,
+    /// Any other column is a property. A `:json` suffix on the header says its
+    /// cells hold values in the JSON export encoding, which is what export
+    /// writes; without it a cell is read as an integer, a float, or else a
+    /// string.
+    property: struct { key: []const u8, typed: bool },
+};
+
+const csv_column_id = "_id";
+const csv_column_labels = "_labels";
+const csv_column_vector = "_vector";
+const csv_column_source = "_source";
+const csv_column_target = "_target";
+const csv_column_type = "_type";
+const csv_typed_suffix = ":json";
+
+const CsvKind = enum { nodes, edges };
+
+const CsvHeader = struct {
+    kind: CsvKind,
+    columns: []const CsvColumn,
+
+    fn parse(arena: std.mem.Allocator, fields: []const []const u8) ImportExportError!CsvHeader {
+        const columns = arena.alloc(CsvColumn, fields.len) catch return ImportExportError.OutOfMemory;
+        var has = std.EnumSet(std.meta.Tag(CsvColumn)).initEmpty();
+        var keys = std.StringHashMap(void).init(arena);
+
+        for (fields, 0..) |name, i| {
+            const column: CsvColumn = if (std.mem.eql(u8, name, csv_column_id))
+                .id
+            else if (std.mem.eql(u8, name, csv_column_labels))
+                .labels
+            else if (std.mem.eql(u8, name, csv_column_vector))
+                .vector
+            else if (std.mem.eql(u8, name, csv_column_source))
+                .source
+            else if (std.mem.eql(u8, name, csv_column_target))
+                .target
+            else if (std.mem.eql(u8, name, csv_column_type))
+                .edge_type
+            else if (std.mem.endsWith(u8, name, csv_typed_suffix))
+                .{ .property = .{ .key = name[0 .. name.len - csv_typed_suffix.len], .typed = true } }
+            else
+                .{ .property = .{ .key = name, .typed = false } };
+
+            switch (column) {
+                .property => |property| {
+                    if (property.key.len == 0) return ImportExportError.InvalidFormat;
+                    const gop = keys.getOrPut(property.key) catch return ImportExportError.OutOfMemory;
+                    if (gop.found_existing) return ImportExportError.InvalidFormat;
+                },
+                else => {
+                    if (has.contains(column)) return ImportExportError.InvalidFormat;
+                    has.insert(column);
+                },
+            }
+            columns[i] = column;
+        }
+
+        if (has.contains(.id)) {
+            if (has.contains(.source) or has.contains(.target) or has.contains(.edge_type)) return ImportExportError.InvalidFormat;
+            return .{ .kind = .nodes, .columns = columns };
+        }
+        if (has.contains(.source) and has.contains(.target) and has.contains(.edge_type)) {
+            if (has.contains(.labels) or has.contains(.vector)) return ImportExportError.InvalidFormat;
+            return .{ .kind = .edges, .columns = columns };
+        }
+        return ImportExportError.InvalidFormat;
+    }
+};
+
+/// Node identifiers from a nodes file, so the edges file imported with it can
+/// refer to nodes by the `_id` values it was written with.
+const CsvIdMap = struct {
+    allocator: std.mem.Allocator,
+    map: std.StringHashMap(NodeId),
+
+    fn init(allocator: std.mem.Allocator) CsvIdMap {
+        return .{ .allocator = allocator, .map = std.StringHashMap(NodeId).init(allocator) };
+    }
+
+    fn deinit(self: *CsvIdMap) void {
+        var keys = self.map.keyIterator();
+        while (keys.next()) |key| self.allocator.free(key.*);
+        self.map.deinit();
+    }
+
+    fn contains(self: *const CsvIdMap, id: []const u8) bool {
+        return self.map.contains(id);
+    }
+
+    fn put(self: *CsvIdMap, id: []const u8, node_id: NodeId) !void {
+        const key = try self.allocator.dupe(u8, id);
+        errdefer self.allocator.free(key);
+        try self.map.put(key, node_id);
+    }
+};
+
+/// Import data from one CSV file, nodes or edges as its header says.
+///
+/// A nodes file has an `_id` column, optional `_labels` and `_vector` columns,
+/// and a column per property. An edges file has `_source`, `_target` and
+/// `_type` columns and a column per property. On its own, an edges file names
+/// its endpoints by database node id; to name them by the `_id` values of a
+/// nodes file, import the two together with `importCsvFiles`.
 pub fn importCsv(
     allocator: std.mem.Allocator,
     db: *Database,
@@ -1507,20 +1619,35 @@ pub fn importCsv(
     batch_size: u32,
     on_error_skip: bool,
 ) ImportExportError!ImportStats {
-    const file = @import("compat").fs.cwd().openFile(file_path, .{}) catch {
-        return ImportExportError.IoError;
-    };
-    defer file.close();
-
-    const content = file.readToEndAlloc(allocator, max_import_file_bytes) catch {
-        return ImportExportError.IoError;
-    };
+    const content = try readImportFile(allocator, file_path);
     defer allocator.free(content);
-
     return importCsvContent(allocator, db, content, batch_size, on_error_skip);
 }
 
-/// Import CSV from a string, telling nodes from edges by the header.
+/// Import a nodes file and an edges file together, as export writes them.
+/// Edges refer to nodes by the nodes file's `_id` values. Either may be null.
+pub fn importCsvFiles(
+    allocator: std.mem.Allocator,
+    db: *Database,
+    nodes_path: ?[]const u8,
+    edges_path: ?[]const u8,
+    batch_size: u32,
+    on_error_skip: bool,
+) ImportExportError!ImportStats {
+    const nodes_content = if (nodes_path) |path| try readImportFile(allocator, path) else null;
+    defer if (nodes_content) |content| allocator.free(content);
+    const edges_content = if (edges_path) |path| try readImportFile(allocator, path) else null;
+    defer if (edges_content) |content| allocator.free(content);
+    return importCsvPairContent(allocator, db, nodes_content, edges_content, batch_size, on_error_skip);
+}
+
+fn readImportFile(allocator: std.mem.Allocator, path: []const u8) ImportExportError![]u8 {
+    const file = @import("compat").fs.cwd().openFile(path, .{}) catch return ImportExportError.IoError;
+    defer file.close();
+    return file.readToEndAlloc(allocator, max_import_file_bytes) catch ImportExportError.IoError;
+}
+
+/// Import one CSV file's text, nodes or edges as its header says.
 pub fn importCsvContent(
     allocator: std.mem.Allocator,
     db: *Database,
@@ -1528,52 +1655,143 @@ pub fn importCsvContent(
     batch_size: u32,
     on_error_skip: bool,
 ) ImportExportError!ImportStats {
-    if (std.mem.startsWith(u8, content, csv_nodes_header)) {
-        return importNodesCsv(allocator, db, content, batch_size, on_error_skip);
-    } else if (std.mem.startsWith(u8, content, csv_edges_header)) {
-        return importEdgesCsv(allocator, db, content, batch_size, on_error_skip);
-    } else {
-        return ImportExportError.InvalidFormat;
-    }
+    var stats = ImportStats{};
+    var ids = CsvIdMap.init(allocator);
+    defer ids.deinit();
+    try importCsvTable(allocator, db, content, null, &ids, batch_size, on_error_skip, &stats);
+    return stats;
 }
 
-fn importNodesCsv(
+/// Import a nodes file's text and an edges file's text together.
+pub fn importCsvPairContent(
     allocator: std.mem.Allocator,
     db: *Database,
-    content: []const u8,
+    nodes_content: ?[]const u8,
+    edges_content: ?[]const u8,
     batch_size: u32,
     on_error_skip: bool,
 ) ImportExportError!ImportStats {
     var stats = ImportStats{};
-    var batcher = ImportBatcher.init(db, batch_size, on_error_skip);
-    errdefer if (batcher.hasPendingTransaction()) batcher.abort() catch {};
+    var ids = CsvIdMap.init(allocator);
+    defer ids.deinit();
+    if (nodes_content) |content| {
+        try importCsvTable(allocator, db, content, .nodes, &ids, batch_size, on_error_skip, &stats);
+    }
+    if (edges_content) |content| {
+        const resolve: ?*const CsvIdMap = if (nodes_content != null) &ids else null;
+        try importCsvEdgesTable(allocator, db, content, resolve, batch_size, on_error_skip, &stats);
+    }
+    return stats;
+}
 
+fn importCsvTable(
+    allocator: std.mem.Allocator,
+    db: *Database,
+    content: []const u8,
+    expected: ?CsvKind,
+    ids: *CsvIdMap,
+    batch_size: u32,
+    on_error_skip: bool,
+    stats: *ImportStats,
+) ImportExportError!void {
     var header_arena = std.heap.ArenaAllocator.init(allocator);
     defer header_arena.deinit();
+    var reader = CsvReader{ .content = content };
+    const header_record = (reader.next(header_arena.allocator()) catch |err| return mapCsvError(err)) orelse
+        return ImportExportError.ParseError;
+    const header = try CsvHeader.parse(header_arena.allocator(), header_record.fields);
+    if (expected) |kind| {
+        if (kind != header.kind) return ImportExportError.InvalidFormat;
+    }
+    switch (header.kind) {
+        .nodes => try importCsvNodeRecords(allocator, db, &reader, header, ids, batch_size, on_error_skip, stats),
+        .edges => try importCsvEdgeRecords(allocator, db, &reader, header, null, batch_size, on_error_skip, stats),
+    }
+}
+
+fn importCsvEdgesTable(
+    allocator: std.mem.Allocator,
+    db: *Database,
+    content: []const u8,
+    ids: ?*const CsvIdMap,
+    batch_size: u32,
+    on_error_skip: bool,
+    stats: *ImportStats,
+) ImportExportError!void {
+    var header_arena = std.heap.ArenaAllocator.init(allocator);
+    defer header_arena.deinit();
+    var reader = CsvReader{ .content = content };
+    const header_record = (reader.next(header_arena.allocator()) catch |err| return mapCsvError(err)) orelse
+        return ImportExportError.ParseError;
+    const header = try CsvHeader.parse(header_arena.allocator(), header_record.fields);
+    if (header.kind != .edges) return ImportExportError.InvalidFormat;
+    try importCsvEdgeRecords(allocator, db, &reader, header, ids, batch_size, on_error_skip, stats);
+}
+
+fn importCsvNodeRecords(
+    allocator: std.mem.Allocator,
+    db: *Database,
+    reader: *CsvReader,
+    header: CsvHeader,
+    ids: *CsvIdMap,
+    batch_size: u32,
+    on_error_skip: bool,
+    stats: *ImportStats,
+) ImportExportError!void {
+    var batcher = ImportBatcher.init(db, batch_size, on_error_skip);
+    errdefer if (batcher.hasPendingTransaction()) batcher.abort() catch {};
     var record_arena = std.heap.ArenaAllocator.init(allocator);
     defer record_arena.deinit();
-
-    var reader = CsvReader{ .content = content };
-    const header = (reader.next(header_arena.allocator()) catch |err| return mapCsvError(err)) orelse
-        return ImportExportError.ParseError;
 
     while (true) {
         _ = record_arena.reset(.retain_capacity);
         const record = (reader.next(record_arena.allocator()) catch |err| return mapCsvError(err)) orelse break;
 
         const txn = try batcher.transaction();
-        if (importNodeCsvRecord(record_arena.allocator(), db, txn, record.fields, header.fields)) |_| {
-            try batcher.recordSuccess(&stats, .node);
+        if (importNodeCsvRecord(record_arena.allocator(), db, txn, record.fields, header, ids)) |_| {
+            try batcher.recordSuccess(stats, .node);
         } else |_| {
-            try batcher.recordFailure(&stats, .node);
+            try batcher.recordFailure(stats, .node);
             if (!on_error_skip) {
                 return ImportExportError.DatabaseError;
             }
         }
     }
 
-    try batcher.flush(&stats);
-    return stats;
+    try batcher.flush(stats);
+}
+
+fn importCsvEdgeRecords(
+    allocator: std.mem.Allocator,
+    db: *Database,
+    reader: *CsvReader,
+    header: CsvHeader,
+    ids: ?*const CsvIdMap,
+    batch_size: u32,
+    on_error_skip: bool,
+    stats: *ImportStats,
+) ImportExportError!void {
+    var batcher = ImportBatcher.init(db, batch_size, on_error_skip);
+    errdefer if (batcher.hasPendingTransaction()) batcher.abort() catch {};
+    var record_arena = std.heap.ArenaAllocator.init(allocator);
+    defer record_arena.deinit();
+
+    while (true) {
+        _ = record_arena.reset(.retain_capacity);
+        const record = (reader.next(record_arena.allocator()) catch |err| return mapCsvError(err)) orelse break;
+
+        const txn = try batcher.transaction();
+        if (importEdgeCsvRecord(record_arena.allocator(), db, txn, record.fields, header, ids)) |_| {
+            try batcher.recordSuccess(stats, .edge);
+        } else |_| {
+            try batcher.recordFailure(stats, .edge);
+            if (!on_error_skip) {
+                return ImportExportError.DatabaseError;
+            }
+        }
+    }
+
+    try batcher.flush(stats);
 }
 
 fn mapCsvError(err: CsvReader.Error) ImportExportError {
@@ -1583,109 +1801,119 @@ fn mapCsvError(err: CsvReader.Error) ImportExportError {
     };
 }
 
+/// Read one property cell: a JSON-encoded value in a typed column, otherwise
+/// an integer, a float, or a string.
+fn csvCellValue(arena: std.mem.Allocator, cell: []const u8, typed: bool) !PropertyValue {
+    if (typed) {
+        const parsed = parseJson(arena, cell) catch return error.InvalidFormat;
+        return jsonToPropertyValue(arena, parsed.value, .v2);
+    }
+    if (std.fmt.parseInt(i64, cell, decimal_base)) |int_val| {
+        return .{ .int_val = int_val };
+    } else |_| if (std.fmt.parseFloat(f64, cell)) |float_val| {
+        return .{ .float_val = float_val };
+    } else |_| {
+        return .{ .string_val = cell };
+    }
+}
+
 fn importNodeCsvRecord(
-    allocator: std.mem.Allocator,
+    arena: std.mem.Allocator,
     db: *Database,
     txn: ?*Transaction,
     values: []const []const u8,
-    headers: []const []const u8,
+    header: CsvHeader,
+    ids: *CsvIdMap,
 ) !void {
-    if (values.len < 2) return error.InvalidFormat;
+    if (values.len != header.columns.len) return error.InvalidFormat;
 
-    // Parse labels (semicolon-separated)
-    var labels_list = ManagedArrayList([]const u8).init(allocator);
-    defer labels_list.deinit();
-
-    if (values[1].len > 0) {
-        var label_parts = std.mem.splitScalar(u8, values[1], csv_label_separator);
-        while (label_parts.next()) |label| {
-            const trimmed = std.mem.trim(u8, label, label_trim_chars);
-            if (trimmed.len > 0) {
-                try labels_list.append(trimmed);
-            }
+    var id: []const u8 = "";
+    var labels: std.ArrayList([]const u8) = .empty;
+    var vector_cell: []const u8 = "";
+    for (values, header.columns) |value, column| {
+        switch (column) {
+            .id => id = value,
+            .labels => {
+                var label_parts = std.mem.splitScalar(u8, value, csv_label_separator);
+                while (label_parts.next()) |label| {
+                    const trimmed = std.mem.trim(u8, label, label_trim_chars);
+                    if (trimmed.len > 0) try labels.append(arena, trimmed);
+                }
+            },
+            .vector => vector_cell = value,
+            else => {},
         }
     }
+    if (id.len > 0 and ids.contains(id)) return error.DuplicateNodeId;
 
-    // Create node
-    const node_id = db.createNode(txn, labels_list.items) catch {
+    const node_id = db.createNode(txn, labels.items) catch {
         return error.DatabaseError;
     };
 
-    // Set properties (columns after _id and _labels)
-    for (headers[2..], 2..) |header, i| {
-        if (i < values.len and values[i].len > 0) {
-            const val = values[i];
-            // Try to parse as number, otherwise use as string
-            const prop_val: PropertyValue = if (std.fmt.parseInt(i64, val, decimal_base)) |int_val|
-                .{ .int_val = int_val }
-            else |_| if (std.fmt.parseFloat(f64, val)) |float_val|
-                .{ .float_val = float_val }
-            else |_|
-                .{ .string_val = val };
-
-            db.setNodeProperty(txn, node_id, header, prop_val) catch continue;
-        }
+    for (values, header.columns) |value, column| {
+        if (column != .property or value.len == 0) continue;
+        const prop_val = try csvCellValue(arena, value, column.property.typed);
+        db.setNodeProperty(txn, node_id, column.property.key, prop_val) catch continue;
     }
+
+    if (vector_cell.len > 0) {
+        const parsed = parseJson(arena, vector_cell) catch return error.InvalidFormat;
+        try importNodeVector(arena, db, txn, node_id, parsed.value);
+    }
+
+    if (id.len > 0) try ids.put(id, node_id);
 }
 
-fn importEdgesCsv(
-    allocator: std.mem.Allocator,
+/// Find the node an edge's `_source` or `_target` names: by the nodes file's
+/// `_id` when one was imported with it, otherwise by database node id.
+fn resolveCsvEndpoint(ids: ?*const CsvIdMap, text: []const u8) !NodeId {
+    if (ids) |map| return map.map.get(text) orelse error.InvalidNodeId;
+    return std.fmt.parseInt(NodeId, text, decimal_base) catch error.InvalidNodeId;
+}
+
+fn importEdgeCsvRecord(
+    arena: std.mem.Allocator,
     db: *Database,
-    content: []const u8,
-    batch_size: u32,
-    on_error_skip: bool,
-) ImportExportError!ImportStats {
-    var stats = ImportStats{};
-    var batcher = ImportBatcher.init(db, batch_size, on_error_skip);
-    errdefer if (batcher.hasPendingTransaction()) batcher.abort() catch {};
+    txn: ?*Transaction,
+    values: []const []const u8,
+    header: CsvHeader,
+    ids: ?*const CsvIdMap,
+) !void {
+    if (values.len != header.columns.len) return error.InvalidFormat;
 
-    var record_arena = std.heap.ArenaAllocator.init(allocator);
-    defer record_arena.deinit();
-
-    var reader = CsvReader{ .content = content };
-    // Skip header
-    _ = (reader.next(record_arena.allocator()) catch |err| return mapCsvError(err)) orelse
-        return ImportExportError.ParseError;
-
-    while (true) {
-        _ = record_arena.reset(.retain_capacity);
-        const record = (reader.next(record_arena.allocator()) catch |err| return mapCsvError(err)) orelse break;
-
-        const txn = try batcher.transaction();
-        if (importEdgeCsvRecord(db, txn, record.fields)) |_| {
-            try batcher.recordSuccess(&stats, .edge);
-        } else |_| {
-            try batcher.recordFailure(&stats, .edge);
-            if (!on_error_skip) {
-                return ImportExportError.DatabaseError;
-            }
+    var source: ?[]const u8 = null;
+    var target: ?[]const u8 = null;
+    var edge_type: ?[]const u8 = null;
+    for (values, header.columns) |value, column| {
+        switch (column) {
+            .source => source = value,
+            .target => target = value,
+            .edge_type => edge_type = value,
+            else => {},
         }
     }
+    const type_name = edge_type orelse return error.MissingRequiredField;
+    if (type_name.len == 0) return error.MissingRequiredField;
+    const source_id = try resolveCsvEndpoint(ids, source orelse return error.MissingRequiredField);
+    const target_id = try resolveCsvEndpoint(ids, target orelse return error.MissingRequiredField);
 
-    try batcher.flush(&stats);
-    return stats;
-}
-
-fn importEdgeCsvRecord(db: *Database, txn: ?*Transaction, values: []const []const u8) !void {
-    if (values.len < 3) return error.InvalidFormat;
-    const source_str = values[0];
-    const target_str = values[1];
-    const edge_type = values[2];
-
-    // Parse node IDs
-    const source_id = std.fmt.parseInt(NodeId, source_str, decimal_base) catch {
-        return error.InvalidNodeId;
-    };
-    const target_id = std.fmt.parseInt(NodeId, target_str, decimal_base) catch {
-        return error.InvalidNodeId;
-    };
-
-    db.createEdge(txn, source_id, target_id, edge_type) catch {
+    const edge_id = db.createEdgeAndGetId(txn, source_id, target_id, type_name) catch {
         return error.DatabaseError;
     };
+
+    for (values, header.columns) |value, column| {
+        if (column != .property or value.len == 0) continue;
+        const prop_val = try csvCellValue(arena, value, column.property.typed);
+        db.setEdgePropertyById(txn, edge_id, column.property.key, prop_val) catch continue;
+    }
 }
 
-/// Export to CSV format
+/// Export to CSV: one file of nodes and one of edges.
+///
+/// Property columns are named `<key>:json` and hold each value in the JSON
+/// export encoding, so every type reads back as itself. A cell left empty
+/// means the property is absent. When the handle has vectors, nodes get a
+/// `_vector` column.
 pub fn exportCsv(
     allocator: std.mem.Allocator,
     db: *Database,
@@ -1697,9 +1925,29 @@ pub fn exportCsv(
     var selection = try Selection.init(allocator, db, scope);
     defer selection.deinit();
     const node_ids = selection.node_ids;
+    const with_vectors = vectorDimensions(db) != null;
 
-    // Write nodes header
-    try nodes_writer.writeAll(csv_nodes_header_line);
+    var cell: std.ArrayList(u8) = .empty;
+    defer cell.deinit(allocator);
+    const cell_writer = @import("compat").arrayListWriterWithAllocator(&cell, allocator);
+
+    // Every property key any exported node has, in a fixed order.
+    var node_keys = PropertyKeySet.init(allocator);
+    defer node_keys.deinit();
+    for (node_ids) |node_id| {
+        const props = db.getNodeProperties(node_id) catch |err| return mapDatabaseError(err);
+        defer db.freePropertyEntries(props);
+        for (props) |prop| try node_keys.add(prop.key);
+    }
+    const node_columns = try node_keys.sorted();
+
+    try nodes_writer.writeAll(csv_column_id ++ "," ++ csv_column_labels);
+    for (node_columns) |key| {
+        try nodes_writer.writeByte(csv_field_separator);
+        try writeCsvPropertyHeader(nodes_writer, &cell, cell_writer, key);
+    }
+    if (with_vectors) try nodes_writer.writeAll("," ++ csv_column_vector);
+    try nodes_writer.writeByte('\n');
 
     for (node_ids) |node_id| {
         const node_labels = db.getNodeLabels(node_id) catch |err| return mapDatabaseError(err);
@@ -1710,34 +1958,155 @@ pub fn exportCsv(
             allocator.free(node_labels);
         }
 
-        try nodes_writer.print("{d},\"", .{node_id});
+        try nodes_writer.print("{d},", .{node_id});
+        cell.clearRetainingCapacity();
         for (node_labels, 0..) |label, i| {
-            if (i > 0) try nodes_writer.writeByte(csv_label_separator);
-            try nodes_writer.writeAll(label);
+            // Labels are separated by semicolons and trimmed on the way back in.
+            if (label.len == 0 or std.mem.indexOfScalar(u8, label, csv_label_separator) != null or
+                std.mem.trim(u8, label, label_trim_chars).len != label.len)
+            {
+                return ImportExportError.LabelNotRepresentable;
+            }
+            if (i > 0) try cell_writer.writeByte(csv_label_separator);
+            try cell_writer.writeAll(label);
         }
-        try nodes_writer.writeAll("\"\n");
+        // Always quoted, which is how an empty label list is told from a missing column.
+        try writeCsvQuoted(nodes_writer, cell.items);
+
+        const props = db.getNodeProperties(node_id) catch |err| return mapDatabaseError(err);
+        defer db.freePropertyEntries(props);
+        for (node_columns) |key| {
+            try nodes_writer.writeByte(csv_field_separator);
+            const value = findProperty(props, key) orelse continue;
+            cell.clearRetainingCapacity();
+            try writeValueJson(null, cell_writer, value);
+            try writeCsvField(nodes_writer, cell.items);
+        }
+
+        if (with_vectors) {
+            try nodes_writer.writeByte(csv_field_separator);
+            if (db.getNodeVectorInTxn(null, node_id) catch |err| return mapDatabaseError(err)) |vector| {
+                defer db.allocator.free(vector);
+                cell.clearRetainingCapacity();
+                try writeJsonVector(cell_writer, vector);
+                try writeCsvField(nodes_writer, cell.items);
+            }
+        }
+        try nodes_writer.writeByte('\n');
         stats.nodes_exported += 1;
     }
 
-    // Write edges header
-    try edges_writer.writeAll(csv_edges_header_line);
+    // Every property key any exported edge has.
+    var edge_keys = PropertyKeySet.init(allocator);
+    defer edge_keys.deinit();
+    for (node_ids) |node_id| {
+        const edges = db.getOutgoingEdges(node_id) catch |err| return mapDatabaseError(err);
+        defer db.freeEdgeInfos(edges);
+        for (edges) |edge| {
+            if (!selection.includesEdge(edge)) continue;
+            const props = db.getEdgeProperties(edge.id) catch |err| return mapDatabaseError(err);
+            defer db.freePropertyEntries(props);
+            for (props) |prop| try edge_keys.add(prop.key);
+        }
+    }
+    const edge_columns = try edge_keys.sorted();
+
+    try edges_writer.writeAll(csv_column_source ++ "," ++ csv_column_target ++ "," ++ csv_column_type);
+    for (edge_columns) |key| {
+        try edges_writer.writeByte(csv_field_separator);
+        try writeCsvPropertyHeader(edges_writer, &cell, cell_writer, key);
+    }
+    try edges_writer.writeByte('\n');
 
     for (node_ids) |node_id| {
-        const edges = db.getOutgoingEdges(node_id) catch continue;
+        const edges = db.getOutgoingEdges(node_id) catch |err| return mapDatabaseError(err);
         defer db.freeEdgeInfos(edges);
 
         for (edges) |edge| {
             if (!selection.includesEdge(edge)) continue;
-            try edges_writer.print("{d},{d},{s}\n", .{
-                edge.source,
-                edge.target,
-                edge.edge_type,
-            });
+            try edges_writer.print("{d},{d},", .{ edge.source, edge.target });
+            try writeCsvField(edges_writer, edge.edge_type);
+
+            const props = db.getEdgeProperties(edge.id) catch |err| return mapDatabaseError(err);
+            defer db.freePropertyEntries(props);
+            for (edge_columns) |key| {
+                try edges_writer.writeByte(csv_field_separator);
+                const value = findProperty(props, key) orelse continue;
+                cell.clearRetainingCapacity();
+                try writeValueJson(null, cell_writer, value);
+                try writeCsvField(edges_writer, cell.items);
+            }
+            try edges_writer.writeByte('\n');
             stats.edges_exported += 1;
         }
     }
 
     return stats;
+}
+
+/// Property keys seen across many nodes or edges, each kept once.
+const PropertyKeySet = struct {
+    arena: std.heap.ArenaAllocator,
+    keys: std.StringArrayHashMapUnmanaged(void) = .empty,
+
+    fn init(allocator: std.mem.Allocator) PropertyKeySet {
+        return .{ .arena = std.heap.ArenaAllocator.init(allocator) };
+    }
+
+    fn deinit(self: *PropertyKeySet) void {
+        self.arena.deinit();
+    }
+
+    fn add(self: *PropertyKeySet, key: []const u8) !void {
+        if (self.keys.contains(key)) return;
+        const allocator = self.arena.allocator();
+        try self.keys.put(allocator, try allocator.dupe(u8, key), {});
+    }
+
+    fn sorted(self: *PropertyKeySet) ![]const []const u8 {
+        const keys = try self.arena.allocator().dupe([]const u8, self.keys.keys());
+        std.mem.sort([]const u8, keys, {}, struct {
+            fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+                return std.mem.order(u8, a, b) == .lt;
+            }
+        }.lessThan);
+        return keys;
+    }
+};
+
+fn findProperty(props: []const Database.PropertyEntry, key: []const u8) ?PropertyValue {
+    for (props) |prop| {
+        if (std.mem.eql(u8, prop.key, key)) return prop.value;
+    }
+    return null;
+}
+
+fn writeCsvPropertyHeader(writer: anytype, cell: *std.ArrayList(u8), cell_writer: anytype, key: []const u8) !void {
+    cell.clearRetainingCapacity();
+    try cell_writer.writeAll(key);
+    try cell_writer.writeAll(csv_typed_suffix);
+    try writeCsvField(writer, cell.items);
+}
+
+/// Write a field, quoting it when it would not otherwise read back the same.
+fn writeCsvField(writer: anytype, value: []const u8) !void {
+    const needs_quotes = value.len == 0 or
+        std.mem.indexOfAny(u8, value, ",\"\r\n") != null or
+        std.mem.trim(u8, value, csv_trim_chars).len != value.len;
+    if (needs_quotes) return writeCsvQuoted(writer, value);
+    try writer.writeAll(value);
+}
+
+fn writeCsvQuoted(writer: anytype, value: []const u8) !void {
+    try writer.writeByte('"');
+    var rest = value;
+    while (std.mem.indexOfScalar(u8, rest, '"')) |quote| {
+        try writer.writeAll(rest[0 .. quote + 1]);
+        try writer.writeByte('"');
+        rest = rest[quote + 1 ..];
+    }
+    try writer.writeAll(rest);
+    try writer.writeByte('"');
 }
 
 /// Import statistics
@@ -1846,7 +2215,7 @@ test "import/export CSV batching rolls back failed batch" {
 
     try std.testing.expectError(
         ImportExportError.DatabaseError,
-        importNodesCsv(allocator, db, csv_content, 2, false),
+        importCsvContent(allocator, db, csv_content, 2, false),
     );
     try std.testing.expectEqual(@as(u64, 0), db.nodeCount());
 }

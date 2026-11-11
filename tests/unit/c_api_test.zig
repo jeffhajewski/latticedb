@@ -3250,3 +3250,160 @@ test "c_api: result set iteration and cleanup" {
 
     _ = c_api.lattice_commit(txn);
 }
+
+// ============================================================================
+// Concurrency: database-level calls against writers and close
+// ============================================================================
+
+const ConcurrentAccessState = struct {
+    db: ?*lattice_database,
+    writer_done: std.atomic.Value(bool) = .init(false),
+    failures: std.atomic.Value(u32) = .init(0),
+    reads: std.atomic.Value(u32) = .init(0),
+
+    fn fail(self: *ConcurrentAccessState) void {
+        _ = self.failures.fetchAdd(1, .monotonic);
+    }
+};
+
+fn concurrentVectorWriter(state: *ConcurrentAccessState, iterations: usize) void {
+    defer state.writer_done.store(true, .release);
+    var i: usize = 0;
+    while (i < iterations) : (i += 1) {
+        var txn: ?*lattice_txn = null;
+        if (c_api.lattice_begin(state.db, .read_write, &txn) != .ok) return state.fail();
+        var node: lattice_node_id = 0;
+        if (c_api.lattice_node_create(txn, "Doc", &node) != .ok) return state.fail();
+        const vector = [_]f32{
+            @floatFromInt(i % 7),
+            1.0,
+            @floatFromInt(i % 3),
+            @as(f32, @floatFromInt(i % 11)) / 11.0,
+        };
+        if (c_api.lattice_node_set_vector(txn, node, "embedding", &vector, vector.len) != .ok) return state.fail();
+        var payload = lattice_value{ .value_type = .int, .data = .{ .int_val = @intCast(i) } };
+        if (c_api.lattice_stream_publish(txn, "events".ptr, "events".len, null, 0, &payload) != .ok) return state.fail();
+        if (c_api.lattice_commit(txn) != .ok) return state.fail();
+    }
+}
+
+fn concurrentDatabaseReader(state: *ConcurrentAccessState) void {
+    const query = [_]f32{ 1.0, 1.0, 1.0, 0.5 };
+    while (!state.writer_done.load(.acquire)) {
+        var vector_result: ?*lattice_vector_result = null;
+        if (c_api.lattice_vector_search(state.db, &query, query.len, 5, 0, &vector_result) != .ok) return state.fail();
+        c_api.lattice_vector_result_free(vector_result);
+
+        var ids: ?[*]lattice_node_id = null;
+        var count: usize = 0;
+        if (c_api.lattice_get_nodes_by_label(state.db, "Doc", 3, &ids, &count) != .ok) return state.fail();
+        c_api.lattice_free_node_ids(ids, count);
+
+        var batch: ?*lattice_stream_batch = null;
+        if (c_api.lattice_stream_read(state.db, "events".ptr, "events".len, 0, 16, 0, &batch) != .ok) return state.fail();
+        c_api.lattice_stream_batch_free(batch);
+
+        var last: u64 = 0;
+        if (c_api.lattice_stream_get_last_sequence(state.db, "events".ptr, "events".len, &last) != .ok) return state.fail();
+        var exists = false;
+        var offset: u64 = 0;
+        if (c_api.lattice_stream_get_offset(state.db, "events".ptr, "events".len, "reader".ptr, "reader".len, &exists, &offset) != .ok) return state.fail();
+
+        var entries: u32 = 0;
+        if (c_api.lattice_query_cache_stats(state.db, &entries, null, null) != .ok) return state.fail();
+        if (c_api.lattice_query_cache_clear(state.db) != .ok) return state.fail();
+
+        _ = state.reads.fetchAdd(1, .monotonic);
+    }
+}
+
+test "c_api: database-level reads are safe against a concurrent writer" {
+    const path = "/tmp/lattice_capi_concurrent_db_reads_test.db";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 16,
+        .page_size = 4096,
+        .enable_vector = true,
+        .vector_dimensions = 4,
+    };
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    const writer_commits = 60;
+    var state = ConcurrentAccessState{ .db = db };
+    var readers: [2]std.Thread = undefined;
+    for (&readers) |*reader| {
+        reader.* = try std.Thread.spawn(.{}, concurrentDatabaseReader, .{&state});
+    }
+    const writer = try std.Thread.spawn(.{}, concurrentVectorWriter, .{ &state, writer_commits });
+    writer.join();
+    for (readers) |reader| reader.join();
+
+    try std.testing.expectEqual(@as(u32, 0), state.failures.load(.monotonic));
+    try std.testing.expect(state.reads.load(.monotonic) > 0);
+
+    var ids: ?[*]lattice_node_id = null;
+    var count: usize = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_get_nodes_by_label(db, "Doc", 3, &ids, &count));
+    defer c_api.lattice_free_node_ids(ids, count);
+    try std.testing.expectEqual(@as(usize, writer_commits), count);
+}
+
+const BlockedStreamReader = struct {
+    db: ?*lattice_database,
+    started: std.atomic.Value(bool) = .init(false),
+    rc: lattice_error = .ok,
+    elapsed_ms: i64 = 0,
+
+    fn run(self: *BlockedStreamReader) void {
+        self.started.store(true, .release);
+        const start = @import("compat").milliTimestamp();
+        var batch: ?*lattice_stream_batch = null;
+        self.rc = c_api.lattice_stream_read(self.db, "events".ptr, "events".len, 0, 10, 5000, &batch);
+        self.elapsed_ms = @import("compat").milliTimestamp() - start;
+        c_api.lattice_stream_batch_free(batch);
+    }
+};
+
+test "c_api: close wakes a stream reader blocked on the database" {
+    const path = "/tmp/lattice_capi_close_wakes_stream_reader_test.db";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer {
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+
+    var reader = BlockedStreamReader{ .db = db };
+    const thread = try std.Thread.spawn(.{}, BlockedStreamReader.run, .{&reader});
+    while (!reader.started.load(.acquire)) std.atomic.spinLoopHint();
+    // Let the reader reach its wait. Closing must neither free the database
+    // under it nor be refused because of it: the reader is woken and leaves.
+    @import("compat").sleep(200 * std.time.ns_per_ms);
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_close(db));
+    thread.join();
+
+    try std.testing.expectEqual(lattice_error.err_invalid_arg, reader.rc);
+    try std.testing.expect(reader.elapsed_ms < 4000);
+}

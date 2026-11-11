@@ -233,7 +233,9 @@ lattice_error lattice_open_v4(
 /* Close a database.
  * Returns LATTICE_ERROR_INVALID_ARG if transaction or result handles that
  * depend on this database are still active. Close those handles first; the
- * database remains open in that case.
+ * database remains open in that case. A lattice_stream_read waiting on this
+ * database in another thread does not hold the close up: it is woken and
+ * returns LATTICE_ERROR_INVALID_ARG before the database is freed.
  * Once finalization begins, this function always consumes the database handle.
  * In particular, LATTICE_ERROR_IO reports a sync/checkpoint failure but the
  * handle is still closed and must not be reused or passed to lattice_close. */
@@ -543,7 +545,10 @@ lattice_error lattice_stream_publish_get_sequence(
 );
 
 /* Read records after a sequence cursor. Reads do not commit offsets. If no
- * records are available, timeout_ms waits for a same-process commit wakeup. */
+ * records are available, timeout_ms waits for a same-process commit wakeup.
+ * The wait does not block other calls on the database. If another thread
+ * closes the database during the wait, the read returns
+ * LATTICE_ERROR_INVALID_ARG promptly and the close goes ahead. */
 lattice_error lattice_stream_read(
     lattice_database* db,
     const char* stream,

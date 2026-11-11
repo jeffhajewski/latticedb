@@ -401,3 +401,30 @@ test "cypher: an unaliased expression column is named by its text" {
         try std.testing.expectEqualStrings("count(*)", result.columns[1]);
     }
 }
+
+// ============================================================================
+// Failing queries release what they acquired
+// ============================================================================
+
+test "cypher: a query that fails while an operator opens leaks nothing" {
+    // The testing allocator reports a leak, so each query failing here used
+    // to fail this test: the label scan's id list was freed only on close,
+    // and an operator that drains its input while opening never closed it.
+    const path = "/tmp/lattice_cs_open_leak.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try seedRare(db);
+    try run(db, "CREATE (n:Other {x: 2})");
+
+    // Aggregate drains its input in open.
+    try std.testing.expectError(QueryError.ExecutionError, db.query("MATCH (n:Rare) RETURN count(n.x / 0)"));
+    // ORDER BY drains its input in open.
+    try std.testing.expectError(QueryError.ExecutionError, db.query("MATCH (n:Rare) RETURN n.x / 0 AS q ORDER BY q"));
+    // DISTINCT drains its input in open.
+    try std.testing.expectError(QueryError.ExecutionError, db.query("MATCH (n:Rare) RETURN DISTINCT n.x / 0"));
+    // A cross product drains its inner side in open.
+    try std.testing.expectError(QueryError.ExecutionError, db.query("MATCH (n:Rare), (m:Other) WITH n, m, m.x / 0 AS q RETURN count(q)"));
+    try std.testing.expectError(QueryError.ExecutionError, db.query("MATCH (m:Other) WITH m, m.x / 0 AS q MATCH (n:Rare) RETURN count(*)"));
+    // The same database still answers.
+    try std.testing.expectEqual(@as(i64, 3), try queryCount(db, "MATCH (n:Rare) RETURN count(n)"));
+}

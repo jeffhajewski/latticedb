@@ -53,8 +53,10 @@ pub const Materialize = struct {
     fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        // Open input and drain all rows
+        // Open input and drain all rows. If draining fails, close the input
+        // here: the caller never closes an operator whose open failed.
         try self.input.open(ctx);
+        errdefer self.input.close(ctx);
 
         while (true) {
             const row = try self.input.next(ctx) orelse break;

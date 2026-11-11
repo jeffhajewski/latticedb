@@ -59,11 +59,15 @@ pub const CrossProduct = struct {
     fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        // Open and materialize inner side
+        // Open and materialize inner side. If that fails, close it here: the
+        // caller never closes an operator whose open failed.
         try self.inner.open(ctx);
-        while (true) {
-            const row = try self.inner.next(ctx) orelse break;
-            self.inner_rows.append(self.allocator, row.clone()) catch return OperatorError.OutOfMemory;
+        {
+            errdefer self.inner.close(ctx);
+            while (true) {
+                const row = try self.inner.next(ctx) orelse break;
+                self.inner_rows.append(self.allocator, row.clone()) catch return OperatorError.OutOfMemory;
+            }
         }
         self.inner.close(ctx);
 

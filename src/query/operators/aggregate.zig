@@ -307,8 +307,10 @@ pub const Aggregate = struct {
     fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        // Open input
+        // Open input. If draining it fails, close it here: the caller never
+        // closes an operator whose open failed.
         try self.input.open(ctx);
+        errdefer self.input.close(ctx);
 
         // Consume all input rows and accumulate
         while (true) {

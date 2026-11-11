@@ -309,8 +309,10 @@ pub const Sort = struct {
     fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
-        // Open input and materialize all rows
+        // Open input and materialize all rows. If that fails, close the input
+        // here: the caller never closes an operator whose open failed.
         try self.input.open(ctx);
+        errdefer self.input.close(ctx);
         self.ctx = ctx;
 
         while (try self.input.next(ctx)) |row| {

@@ -89,7 +89,10 @@ pub fn expandPrefixTerms(
     config: PrefixConfig,
 ) ![]PrefixMatch {
     var matches: std.ArrayListUnmanaged(PrefixMatch) = .empty;
-    errdefer matches.deinit(allocator);
+    errdefer {
+        for (matches.items) |m| allocator.free(m.term);
+        matches.deinit(allocator);
+    }
 
     // Check minimum prefix length
     if (prefix.len < config.min_prefix_length) {
@@ -112,10 +115,16 @@ pub fn expandPrefixTerms(
             continue;
         }
 
-        try matches.append(allocator, .{
-            .term = item.term,
+        // The iterator's term lives in a leaf page that is unpinned once the
+        // walk moves past it, so the match keeps its own copy.
+        const term = try allocator.dupe(u8, item.term);
+        matches.append(allocator, .{
+            .term = term,
             .entry = item.entry,
-        });
+        }) catch |err| {
+            allocator.free(term);
+            return err;
+        };
 
         count += 1;
         if (count >= config.max_expansions) {
@@ -126,8 +135,9 @@ pub fn expandPrefixTerms(
     return matches.toOwnedSlice(allocator);
 }
 
-/// Free prefix match results
+/// Free prefix match results, including each match's copy of its term
 pub fn freeMatches(allocator: Allocator, matches: []PrefixMatch) void {
+    for (matches) |m| allocator.free(m.term);
     allocator.free(matches);
 }
 

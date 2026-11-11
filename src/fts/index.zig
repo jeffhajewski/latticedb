@@ -905,9 +905,15 @@ pub const FtsIndex = struct {
             return &[_]ScoredDoc{};
         }
 
-        // Collect all document scores (handles multiple fuzzy expansions)
+        // A document's score is the sum over query words of its best match for
+        // each word. Taking the best rather than the sum over a word's
+        // expansions keeps a document that happens to contain several spellings
+        // near one query word ("databse" -> "database", "databases") from
+        // outranking one that matches more of the query.
         var doc_scores = std.AutoHashMap(DocId, f32).init(self.allocator);
         defer doc_scores.deinit();
+        var word_best = std.AutoHashMap(DocId, f32).init(self.allocator);
+        defer word_best.deinit();
 
         // Process each query term
         for (tokens) |token| {
@@ -920,53 +926,60 @@ pub const FtsIndex = struct {
                 break :blk lower_buf[0..token.text.len];
             } else continue;
 
+            word_best.clearRetainingCapacity();
+
             // Skip short terms for fuzzy matching
             if (normalized.len < fuzzy_config.min_term_length) {
                 // Try exact match for short terms
-                const results = try self.searchSingleTerm(normalized, limit *| 2);
-                defer self.allocator.free(results);
+                const results = try self.searchSingleTerm(normalized, std.math.maxInt(u32));
+                defer self.freeResults(results);
                 for (results) |doc| {
-                    const current = doc_scores.get(doc.doc_id) orelse 0.0;
-                    doc_scores.put(doc.doc_id, @max(current, doc.score)) catch continue;
+                    word_best.put(doc.doc_id, doc.score) catch return FtsError.OutOfMemory;
                 }
-                continue;
+            } else {
+                // Find fuzzy matches for this term
+                const fuzzy_matches = fuzzy_mod.expandFuzzyTerms(
+                    self.allocator,
+                    normalized,
+                    &self.dictionary,
+                    fuzzy_config.max_distance,
+                ) catch {
+                    return FtsError.DictionaryError;
+                };
+                defer fuzzy_mod.freeMatches(self.allocator, fuzzy_matches);
+
+                // Score documents from each fuzzy match
+                for (fuzzy_matches) |match| {
+                    if (match.entry.posting_page == 0) continue;
+
+                    var iter = self.posting_store.iterate(match.entry.posting_page) catch {
+                        return FtsError.PostingError;
+                    };
+                    defer iter.deinit();
+
+                    while (iter.next() catch return FtsError.PostingError) |posting| {
+                        const doc_length = self.doc_lengths.getLength(posting.doc_id) catch continue;
+
+                        // Score with fuzzy penalty
+                        const score = self.scorer.scoreTermFuzzy(
+                            self.doc_lengths.stats,
+                            posting.term_freq,
+                            match.entry.doc_freq,
+                            doc_length,
+                            match.distance,
+                            fuzzy_config.max_distance,
+                        );
+
+                        const best = word_best.getOrPut(posting.doc_id) catch return FtsError.OutOfMemory;
+                        best.value_ptr.* = if (best.found_existing) @max(best.value_ptr.*, score) else score;
+                    }
+                }
             }
 
-            // Find fuzzy matches for this term
-            const fuzzy_matches = fuzzy_mod.expandFuzzyTerms(
-                self.allocator,
-                normalized,
-                &self.dictionary,
-                fuzzy_config.max_distance,
-            ) catch {
-                return FtsError.DictionaryError;
-            };
-            defer fuzzy_mod.freeMatches(self.allocator, fuzzy_matches);
-
-            // Score documents from each fuzzy match
-            for (fuzzy_matches) |match| {
-                if (match.entry.posting_page == 0) continue;
-
-                var iter = self.posting_store.iterate(match.entry.posting_page) catch continue;
-                defer iter.deinit();
-
-                while (iter.next() catch null) |posting| {
-                    const doc_length = self.doc_lengths.getLength(posting.doc_id) catch continue;
-
-                    // Score with fuzzy penalty
-                    const score = self.scorer.scoreTermFuzzy(
-                        self.doc_lengths.stats,
-                        posting.term_freq,
-                        match.entry.doc_freq,
-                        doc_length,
-                        match.distance,
-                        fuzzy_config.max_distance,
-                    );
-
-                    // Accumulate scores (max for same doc from different terms)
-                    const current = doc_scores.get(posting.doc_id) orelse 0.0;
-                    doc_scores.put(posting.doc_id, current + score) catch continue;
-                }
+            var best_iter = word_best.iterator();
+            while (best_iter.next()) |hit| {
+                const total = doc_scores.getOrPut(hit.key_ptr.*) catch return FtsError.OutOfMemory;
+                total.value_ptr.* = if (total.found_existing) total.value_ptr.* + hit.value_ptr.* else hit.value_ptr.*;
             }
         }
 
@@ -2401,6 +2414,10 @@ const AndSearchFixture = struct {
     db_path: []const u8,
 
     fn create(allocator: Allocator, db_path: []const u8) !*AndSearchFixture {
+        return createWithPool(allocator, db_path, 256);
+    }
+
+    fn createWithPool(allocator: Allocator, db_path: []const u8, frames: usize) !*AndSearchFixture {
         const self = try allocator.create(AndSearchFixture);
         errdefer allocator.destroy(self);
         self.db_path = db_path;
@@ -2409,7 +2426,7 @@ const AndSearchFixture = struct {
         vfs_impl.delete(db_path) catch {};
         self.pm = try lattice.storage.page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
         errdefer self.pm.deinit();
-        self.bp = try BufferPool.init(allocator, &self.pm, 256 * 4096);
+        self.bp = try BufferPool.init(allocator, &self.pm, frames * 4096);
         errdefer self.bp.deinit();
         self.dict_tree = try BTree.init(allocator, &self.bp);
         self.lengths_tree = try BTree.init(allocator, &self.bp);
@@ -2784,4 +2801,59 @@ test "fts prefix search splits words the way the tokenizer does" {
     defer fx.index.freeResults(results);
     try std.testing.expectEqual(@as(usize, 1), results.len);
     try std.testing.expectEqual(@as(DocId, 1), results[0].doc_id);
+}
+
+test "fts prefix and fuzzy matches keep their terms after the walk" {
+    const allocator = std.testing.allocator;
+    // A pool small enough that the dictionary's leaves are evicted while a
+    // search reads posting pages.
+    const fx = try AndSearchFixture.createWithPool(allocator, "/tmp/lattice_fts_expansion_terms_test.db", 24);
+    defer fx.destroy(allocator);
+
+    var text_buf: [64]u8 = undefined;
+    for (0..400) |i| {
+        const text = try std.fmt.bufPrint(&text_buf, "optim{d:0>4} filler{d:0>4}", .{ i, i });
+        _ = try fx.index.indexDocument(@intCast(i + 1), text);
+    }
+
+    const prefix_matches = try prefix_mod.expandPrefixTerms(allocator, "optim", &fx.index.dictionary, .{ .max_expansions = 1000 });
+    defer prefix_mod.freeMatches(allocator, prefix_matches);
+    const fuzzy_matches = try fuzzy_mod.expandFuzzyTerms(allocator, "optim0001", &fx.index.dictionary, 1);
+    defer fuzzy_mod.freeMatches(allocator, fuzzy_matches);
+
+    // Read every posting page to push the dictionary leaves out of the pool.
+    const churn = try fx.index.search("filler0000", 10);
+    defer fx.index.freeResults(churn);
+    for (0..400) |i| {
+        const term = try std.fmt.bufPrint(&text_buf, "filler{d:0>4}", .{i});
+        const r = try fx.index.search(term, 1);
+        fx.index.freeResults(r);
+    }
+
+    try std.testing.expectEqual(@as(usize, 400), prefix_matches.len);
+    for (prefix_matches) |m| try std.testing.expect(std.mem.startsWith(u8, m.term, "optim"));
+    try std.testing.expect(fuzzy_matches.len >= 10);
+    for (fuzzy_matches) |m| try std.testing.expect(std.mem.startsWith(u8, m.term, "optim"));
+}
+
+test "fts fuzzy search scores a query word by its best match" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_fuzzy_best_test.db");
+    defer fx.destroy(allocator);
+
+    // "databse" is one edit from "database" and two from "databases"; doc 1
+    // holds both and must not score above its exact match for one of them.
+    _ = try fx.index.indexDocument(1, "databases database");
+    _ = try fx.index.indexDocument(2, "unrelated words");
+    _ = try fx.index.indexDocument(3, "more unrelated words");
+
+    const exact = try fx.index.search("database", 10);
+    defer fx.index.freeResults(exact);
+    try std.testing.expectEqual(@as(usize, 1), exact.len);
+
+    const fuzzy = try fx.index.searchFuzzy("databse", .{ .max_distance = 3, .min_term_length = 3 }, 10);
+    defer fx.index.freeResults(fuzzy);
+    try std.testing.expectEqual(@as(usize, 1), fuzzy.len);
+    try std.testing.expectEqual(@as(DocId, 1), fuzzy[0].doc_id);
+    try std.testing.expect(fuzzy[0].score <= exact[0].score);
 }

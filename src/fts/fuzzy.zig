@@ -163,7 +163,10 @@ pub fn expandFuzzyTerms(
     max_distance: u32,
 ) ![]FuzzyMatch {
     var matches: std.ArrayListUnmanaged(FuzzyMatch) = .empty;
-    errdefer matches.deinit(allocator);
+    errdefer {
+        for (matches.items) |m| allocator.free(m.term);
+        matches.deinit(allocator);
+    }
 
     // Iterate all dictionary terms
     var iter: Dictionary.DictionaryIterator = undefined;
@@ -173,11 +176,18 @@ pub fn expandFuzzyTerms(
     while (try iter.next()) |item| {
         // Check if within edit distance
         if (levenshteinDistanceBounded(query_term, item.term, max_distance)) |distance| {
-            try matches.append(allocator, .{
-                .term = item.term,
+            // The iterator's term lives in a leaf page that is unpinned once
+            // the walk moves past it, and the sort below compares terms, so
+            // the match keeps its own copy.
+            const term = try allocator.dupe(u8, item.term);
+            matches.append(allocator, .{
+                .term = term,
                 .distance = distance,
                 .entry = item.entry,
-            });
+            }) catch |err| {
+                allocator.free(term);
+                return err;
+            };
         }
     }
 
@@ -194,8 +204,9 @@ pub fn expandFuzzyTerms(
     return matches.toOwnedSlice(allocator);
 }
 
-/// Free fuzzy match results
+/// Free fuzzy match results, including each match's copy of its term
 pub fn freeMatches(allocator: Allocator, matches: []FuzzyMatch) void {
+    for (matches) |m| allocator.free(m.term);
     allocator.free(matches);
 }
 

@@ -1,4 +1,4 @@
-// The five FTS components and what each one hands to the next.
+// The four FTS stages and what each one hands to the next.
 digraph fts_pipeline {
   bgcolor="transparent"
   rankdir=LR
@@ -10,8 +10,8 @@ digraph fts_pipeline {
         fontcolor="#1a1a1a" margin="0.18,0.13"]
   edge [color="#6b7280" penwidth=1.1 arrowsize=0.7]
 
-  tok   [label=<<b>Tokenizer</b><br/><font point-size="10" color="#6b7280">"hello world" →<br/>["hello", "world"]</font>>]
-  dict  [label=<<b>Dictionary</b><br/><font point-size="10" color="#6b7280">B+Tree<br/>"hello" → 1</font>>]
+  tok   [label=<<b>Tokenizer</b><br/><font point-size="10" color="#6b7280">"Hello, world" →<br/>terms "hello", "world"</font>>]
+  dict  [label=<<b>Dictionary</b><br/><font point-size="10" color="#6b7280">B+Tree<br/>"hello" → doc_freq, head page</font>>]
   post  [label=<<b>Posting List</b><br/><font point-size="10" color="#6b7280">pages of doc ids<br/>+ term frequencies</font>>]
   score [label=<<b>Scorer</b><br/><font point-size="10" color="#6b7280">BM25<br/>ranked results</font>> fillcolor="#dbe9f8"]
 

@@ -1,56 +1,56 @@
-<svg width="632" height="79"
- viewBox="0.00 0.00 474.00 59.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<svg width="759" height="79"
+ viewBox="0.00 0.00 569.00 59.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 <g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 54.72)">
 <title>fts_pipeline</title>
 <!-- tok -->
 <g id="node1" class="node">
 <title>tok</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M84.42,-50.72C84.42,-50.72 12,-50.72 12,-50.72 6,-50.72 0,-44.72 0,-38.72 0,-38.72 0,-12 0,-12 0,-6 6,0 12,0 12,0 84.42,0 84.42,0 90.42,0 96.42,-6 96.42,-12 96.42,-12 96.42,-38.72 96.42,-38.72 96.42,-44.72 90.42,-50.72 84.42,-50.72"/>
-<text xml:space="preserve" text-anchor="start" x="20.83" y="-30.96" font-family="Helvetica,Arial,sans-serif" font-weight="bold" font-size="12.00" fill="#1a1a1a">Tokenizer</text>
-<text xml:space="preserve" text-anchor="start" x="14.83" y="-20.86" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280">&quot;hello world&quot; →</text>
-<text xml:space="preserve" text-anchor="start" x="12.96" y="-10.86" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280">[&quot;hello&quot;, &quot;world&quot;]</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M106.17,-50.72C106.17,-50.72 12,-50.72 12,-50.72 6,-50.72 0,-44.72 0,-38.72 0,-38.72 0,-12 0,-12 0,-6 6,0 12,0 12,0 106.17,0 106.17,0 112.17,0 118.17,-6 118.17,-12 118.17,-12 118.17,-38.72 118.17,-38.72 118.17,-44.72 112.17,-50.72 106.17,-50.72"/>
+<text xml:space="preserve" text-anchor="start" x="31.71" y="-30.96" font-family="Helvetica,Arial,sans-serif" font-weight="bold" font-size="12.00" fill="#1a1a1a">Tokenizer</text>
+<text xml:space="preserve" text-anchor="start" x="23.09" y="-20.86" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280">&quot;Hello, world&quot; →</text>
+<text xml:space="preserve" text-anchor="start" x="12.96" y="-10.86" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280">terms &quot;hello&quot;, &quot;world&quot;</text>
 </g>
 <!-- dict -->
 <g id="node2" class="node">
 <title>dict</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M198.84,-50.72C198.84,-50.72 138.42,-50.72 138.42,-50.72 132.42,-50.72 126.42,-44.72 126.42,-38.72 126.42,-38.72 126.42,-12 126.42,-12 126.42,-6 132.42,0 138.42,0 138.42,0 198.84,0 198.84,0 204.84,0 210.84,-6 210.84,-12 210.84,-12 210.84,-38.72 210.84,-38.72 210.84,-44.72 204.84,-50.72 198.84,-50.72"/>
-<text xml:space="preserve" text-anchor="start" x="139.38" y="-30.96" font-family="Helvetica,Arial,sans-serif" font-weight="bold" font-size="12.00" fill="#1a1a1a">Dictionary</text>
-<text xml:space="preserve" text-anchor="start" x="152.5" y="-20.86" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280">B+Tree</text>
-<text xml:space="preserve" text-anchor="start" x="144.25" y="-10.86" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280">&quot;hello&quot; → 1</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M294.09,-50.72C294.09,-50.72 160.17,-50.72 160.17,-50.72 154.17,-50.72 148.17,-44.72 148.17,-38.72 148.17,-38.72 148.17,-12 148.17,-12 148.17,-6 154.17,0 160.17,0 160.17,0 294.09,0 294.09,0 300.09,0 306.09,-6 306.09,-12 306.09,-12 306.09,-38.72 306.09,-38.72 306.09,-44.72 300.09,-50.72 294.09,-50.72"/>
+<text xml:space="preserve" text-anchor="start" x="197.88" y="-30.96" font-family="Helvetica,Arial,sans-serif" font-weight="bold" font-size="12.00" fill="#1a1a1a">Dictionary</text>
+<text xml:space="preserve" text-anchor="start" x="211.01" y="-20.86" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280">B+Tree</text>
+<text xml:space="preserve" text-anchor="start" x="161.13" y="-10.86" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280">&quot;hello&quot; → doc_freq, head page</text>
 </g>
 <!-- tok&#45;&gt;dict -->
 <g id="edge1" class="edge">
 <title>tok&#45;&gt;dict</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M96.69,-25.36C103.48,-25.36 110.48,-25.36 117.32,-25.36"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="117.2,-27.81 124.2,-25.36 117.2,-22.91 117.2,-27.81"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M118.63,-25.36C125.4,-25.36 132.42,-25.36 139.47,-25.36"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="139.09,-27.81 146.09,-25.36 139.09,-22.91 139.09,-27.81"/>
 </g>
 <!-- post -->
 <g id="node3" class="node">
 <title>post</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M336.51,-50.72C336.51,-50.72 252.84,-50.72 252.84,-50.72 246.84,-50.72 240.84,-44.72 240.84,-38.72 240.84,-38.72 240.84,-12 240.84,-12 240.84,-6 246.84,0 252.84,0 252.84,0 336.51,0 336.51,0 342.51,0 348.51,-6 348.51,-12 348.51,-12 348.51,-38.72 348.51,-38.72 348.51,-44.72 342.51,-50.72 336.51,-50.72"/>
-<text xml:space="preserve" text-anchor="start" x="260.55" y="-30.96" font-family="Helvetica,Arial,sans-serif" font-weight="bold" font-size="12.00" fill="#1a1a1a">Posting List</text>
-<text xml:space="preserve" text-anchor="start" x="258.68" y="-20.86" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280">pages of doc ids</text>
-<text xml:space="preserve" text-anchor="start" x="253.8" y="-10.86" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280">+ term frequencies</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M431.76,-50.72C431.76,-50.72 348.09,-50.72 348.09,-50.72 342.09,-50.72 336.09,-44.72 336.09,-38.72 336.09,-38.72 336.09,-12 336.09,-12 336.09,-6 342.09,0 348.09,0 348.09,0 431.76,0 431.76,0 437.76,0 443.76,-6 443.76,-12 443.76,-12 443.76,-38.72 443.76,-38.72 443.76,-44.72 437.76,-50.72 431.76,-50.72"/>
+<text xml:space="preserve" text-anchor="start" x="355.8" y="-30.96" font-family="Helvetica,Arial,sans-serif" font-weight="bold" font-size="12.00" fill="#1a1a1a">Posting List</text>
+<text xml:space="preserve" text-anchor="start" x="353.93" y="-20.86" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280">pages of doc ids</text>
+<text xml:space="preserve" text-anchor="start" x="349.05" y="-10.86" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280">+ term frequencies</text>
 </g>
 <!-- dict&#45;&gt;post -->
 <g id="edge2" class="edge">
 <title>dict&#45;&gt;post</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M211.28,-25.36C218.06,-25.36 225.2,-25.36 232.34,-25.36"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="232.01,-27.81 239.01,-25.36 232.01,-22.91 232.01,-27.81"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M306.64,-25.36C313.59,-25.36 320.56,-25.36 327.34,-25.36"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="327.15,-27.81 334.15,-25.36 327.15,-22.91 327.15,-27.81"/>
 </g>
 <!-- score -->
 <g id="node4" class="node">
 <title>score</title>
-<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M453.93,-50.72C453.93,-50.72 390.51,-50.72 390.51,-50.72 384.51,-50.72 378.51,-44.72 378.51,-38.72 378.51,-38.72 378.51,-12 378.51,-12 378.51,-6 384.51,0 390.51,0 390.51,0 453.93,0 453.93,0 459.93,0 465.93,-6 465.93,-12 465.93,-12 465.93,-38.72 465.93,-38.72 465.93,-44.72 459.93,-50.72 453.93,-50.72"/>
-<text xml:space="preserve" text-anchor="start" x="403.1" y="-30.96" font-family="Helvetica,Arial,sans-serif" font-weight="bold" font-size="12.00" fill="#1a1a1a">Scorer</text>
-<text xml:space="preserve" text-anchor="start" x="409.47" y="-20.86" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280">BM25</text>
-<text xml:space="preserve" text-anchor="start" x="391.47" y="-10.86" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280">ranked results</text>
+<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M549.18,-50.72C549.18,-50.72 485.76,-50.72 485.76,-50.72 479.76,-50.72 473.76,-44.72 473.76,-38.72 473.76,-38.72 473.76,-12 473.76,-12 473.76,-6 479.76,0 485.76,0 485.76,0 549.18,0 549.18,0 555.18,0 561.18,-6 561.18,-12 561.18,-12 561.18,-38.72 561.18,-38.72 561.18,-44.72 555.18,-50.72 549.18,-50.72"/>
+<text xml:space="preserve" text-anchor="start" x="498.35" y="-30.96" font-family="Helvetica,Arial,sans-serif" font-weight="bold" font-size="12.00" fill="#1a1a1a">Scorer</text>
+<text xml:space="preserve" text-anchor="start" x="504.72" y="-20.86" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280">BM25</text>
+<text xml:space="preserve" text-anchor="start" x="486.72" y="-10.86" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280">ranked results</text>
 </g>
 <!-- post&#45;&gt;score -->
 <g id="edge3" class="edge">
 <title>post&#45;&gt;score</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M348.92,-25.36C355.78,-25.36 362.79,-25.36 369.63,-25.36"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="369.5,-27.81 376.5,-25.36 369.5,-22.91 369.5,-27.81"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M444.17,-25.36C451.03,-25.36 458.04,-25.36 464.88,-25.36"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="464.75,-27.81 471.75,-25.36 464.75,-22.91 464.75,-27.81"/>
 </g>
 </g>
 </svg>

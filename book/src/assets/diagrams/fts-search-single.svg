@@ -1,67 +1,66 @@
-<svg width="341" height="500"
- viewBox="0.00 0.00 256.00 375.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 371.16)">
+<svg width="377" height="483"
+ viewBox="0.00 0.00 283.00 362.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 357.66)">
 <title>fts_search_single</title>
 <!-- q -->
 <g id="node1" class="node">
 <title>q</title>
-<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M185.06,-367.16C185.06,-367.16 62.62,-367.16 62.62,-367.16 56.62,-367.16 50.63,-361.16 50.63,-355.16 50.63,-355.16 50.63,-343.16 50.63,-343.16 50.63,-337.16 56.63,-331.16 62.63,-331.16 62.63,-331.16 185.06,-331.16 185.06,-331.16 191.06,-331.16 197.06,-337.16 197.06,-343.16 197.06,-343.16 197.06,-355.16 197.06,-355.16 197.06,-361.16 191.06,-367.16 185.06,-367.16"/>
-<text xml:space="preserve" text-anchor="middle" x="123.84" y="-345.46" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">query: &quot;database&quot;</text>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M198.56,-353.66C198.56,-353.66 76.12,-353.66 76.12,-353.66 70.12,-353.66 64.12,-347.66 64.12,-341.66 64.12,-341.66 64.12,-329.66 64.12,-329.66 64.12,-323.66 70.12,-317.66 76.12,-317.66 76.12,-317.66 198.56,-317.66 198.56,-317.66 204.56,-317.66 210.56,-323.66 210.56,-329.66 210.56,-329.66 210.56,-341.66 210.56,-341.66 210.56,-347.66 204.56,-353.66 198.56,-353.66"/>
+<text xml:space="preserve" text-anchor="middle" x="137.34" y="-331.96" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">query: &quot;database&quot;</text>
 </g>
 <!-- s1 -->
 <g id="node2" class="node">
 <title>s1</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M185.06,-305.16C185.06,-305.16 62.62,-305.16 62.62,-305.16 56.62,-305.16 50.63,-299.16 50.63,-293.16 50.63,-293.16 50.63,-271.44 50.63,-271.44 50.63,-265.44 56.63,-259.44 62.63,-259.44 62.63,-259.44 185.06,-259.44 185.06,-259.44 191.06,-259.44 197.06,-265.44 197.06,-271.44 197.06,-271.44 197.06,-293.16 197.06,-293.16 197.06,-299.16 191.06,-305.16 185.06,-305.16"/>
-<text xml:space="preserve" text-anchor="start" x="66.47" y="-285.35" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">1. Tokenize</text>
-<text xml:space="preserve" text-anchor="start" x="66.47" y="-271.85" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;→ [&quot;database&quot;]</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M198.56,-291.66C198.56,-291.66 76.12,-291.66 76.12,-291.66 70.12,-291.66 64.12,-285.66 64.12,-279.66 64.12,-279.66 64.12,-257.94 64.12,-257.94 64.12,-251.94 70.12,-245.94 76.12,-245.94 76.12,-245.94 198.56,-245.94 198.56,-245.94 204.56,-245.94 210.56,-251.94 210.56,-257.94 210.56,-257.94 210.56,-279.66 210.56,-279.66 210.56,-285.66 204.56,-291.66 198.56,-291.66"/>
+<text xml:space="preserve" text-anchor="start" x="79.97" y="-271.85" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">1. Tokenize</text>
+<text xml:space="preserve" text-anchor="start" x="79.97" y="-258.35" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;→ [&quot;database&quot;]</text>
 </g>
 <!-- q&#45;&gt;s1 -->
 <g id="edge1" class="edge">
 <title>q&#45;&gt;s1</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M123.84,-330.78C123.84,-325.53 123.84,-319.62 123.84,-313.78"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="126.29,-314.05 123.84,-307.05 121.39,-314.05 126.29,-314.05"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M137.34,-317.28C137.34,-312.03 137.34,-306.12 137.34,-300.28"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="139.79,-300.55 137.34,-293.55 134.89,-300.55 139.79,-300.55"/>
 </g>
 <!-- s2 -->
 <g id="node3" class="node">
 <title>s2</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M195.18,-233.44C195.18,-233.44 52.5,-233.44 52.5,-233.44 46.5,-233.44 40.5,-227.44 40.5,-221.44 40.5,-221.44 40.5,-172.72 40.5,-172.72 40.5,-166.72 46.5,-160.72 52.5,-160.72 52.5,-160.72 195.18,-160.72 195.18,-160.72 201.18,-160.72 207.18,-166.72 207.18,-172.72 207.18,-172.72 207.18,-221.44 207.18,-221.44 207.18,-227.44 201.18,-233.44 195.18,-233.44"/>
-<text xml:space="preserve" text-anchor="start" x="56.34" y="-213.63" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">2. Dictionary lookup</text>
-<text xml:space="preserve" text-anchor="start" x="56.34" y="-200.13" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;token_id = 3</text>
-<text xml:space="preserve" text-anchor="start" x="56.34" y="-186.63" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;doc_freq = 50</text>
-<text xml:space="preserve" text-anchor="start" x="56.34" y="-173.13" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;posting_page = 44</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M208.68,-219.94C208.68,-219.94 66,-219.94 66,-219.94 60,-219.94 54,-213.94 54,-207.94 54,-207.94 54,-172.72 54,-172.72 54,-166.72 60,-160.72 66,-160.72 66,-160.72 208.68,-160.72 208.68,-160.72 214.68,-160.72 220.68,-166.72 220.68,-172.72 220.68,-172.72 220.68,-207.94 220.68,-207.94 220.68,-213.94 214.68,-219.94 208.68,-219.94"/>
+<text xml:space="preserve" text-anchor="start" x="69.84" y="-200.13" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">2. Dictionary lookup</text>
+<text xml:space="preserve" text-anchor="start" x="69.84" y="-186.63" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;doc_freq = 50</text>
+<text xml:space="preserve" text-anchor="start" x="69.84" y="-173.13" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;posting_page = 44</text>
 </g>
 <!-- s1&#45;&gt;s2 -->
 <g id="edge2" class="edge">
 <title>s1&#45;&gt;s2</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M123.84,-259C123.84,-253.82 123.84,-248.14 123.84,-242.38"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="126.29,-242.61 123.84,-235.61 121.39,-242.61 126.29,-242.61"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M137.34,-245.68C137.34,-240.41 137.34,-234.63 137.34,-228.87"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="139.79,-229.18 137.34,-222.18 134.89,-229.18 139.79,-229.18"/>
 </g>
 <!-- s3 -->
 <g id="node4" class="node">
 <title>s3</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M235.68,-134.72C235.68,-134.72 12,-134.72 12,-134.72 6,-134.72 0,-128.72 0,-122.72 0,-122.72 0,-74 0,-74 0,-68 6,-62 12,-62 12,-62 235.68,-62 235.68,-62 241.68,-62 247.68,-68 247.68,-74 247.68,-74 247.68,-122.72 247.68,-122.72 247.68,-128.72 241.68,-134.72 235.68,-134.72"/>
-<text xml:space="preserve" text-anchor="start" x="15.84" y="-114.91" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">3. Walk posting list (page 44)</text>
-<text xml:space="preserve" text-anchor="start" x="15.84" y="-101.41" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;for each (doc_id, term_freq):</text>
-<text xml:space="preserve" text-anchor="start" x="15.84" y="-87.91" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;&#160;&#160;look up doc_length</text>
-<text xml:space="preserve" text-anchor="start" x="15.84" y="-74.41" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;&#160;&#160;compute BM25 score</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M252.56,-134.72C252.56,-134.72 22.13,-134.72 22.13,-134.72 16.12,-134.72 10.12,-128.72 10.12,-122.72 10.12,-122.72 10.12,-74 10.12,-74 10.12,-68 16.12,-62 22.12,-62 22.12,-62 252.56,-62 252.56,-62 258.56,-62 264.56,-68 264.56,-74 264.56,-74 264.56,-122.72 264.56,-122.72 264.56,-128.72 258.56,-134.72 252.56,-134.72"/>
+<text xml:space="preserve" text-anchor="start" x="25.97" y="-114.91" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">3. Read posting list (page 44)</text>
+<text xml:space="preserve" text-anchor="start" x="25.97" y="-101.41" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;128 entries per page pin</text>
+<text xml:space="preserve" text-anchor="start" x="25.97" y="-87.91" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;all lengths in one sorted pass</text>
+<text xml:space="preserve" text-anchor="start" x="25.97" y="-74.41" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;compute BM25 for each entry</text>
 </g>
 <!-- s2&#45;&gt;s3 -->
 <g id="edge3" class="edge">
 <title>s2&#45;&gt;s3</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M123.84,-160.34C123.84,-154.97 123.84,-149.38 123.84,-143.86"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="126.29,-143.94 123.84,-136.94 121.39,-143.94 126.29,-143.94"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M137.34,-160.37C137.34,-154.98 137.34,-149.25 137.34,-143.53"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="139.79,-143.87 137.34,-136.87 134.89,-143.87 139.79,-143.87"/>
 </g>
 <!-- s4 -->
 <g id="node5" class="node">
 <title>s4</title>
-<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.2" d="M228.93,-36C228.93,-36 18.75,-36 18.75,-36 12.75,-36 6.75,-30 6.75,-24 6.75,-24 6.75,-12 6.75,-12 6.75,-6 12.75,0 18.75,0 18.75,0 228.93,0 228.93,0 234.93,0 240.93,-6 240.93,-12 240.93,-12 240.93,-24 240.93,-24 240.93,-30 234.93,-36 228.93,-36"/>
-<text xml:space="preserve" text-anchor="start" x="22.59" y="-14.3" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">4. Sort by score, return top K</text>
+<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.2" d="M262.68,-36C262.68,-36 12,-36 12,-36 6,-36 0,-30 0,-24 0,-24 0,-12 0,-12 0,-6 6,0 12,0 12,0 262.68,0 262.68,0 268.68,0 274.68,-6 274.68,-12 274.68,-12 274.68,-24 274.68,-24 274.68,-30 268.68,-36 262.68,-36"/>
+<text xml:space="preserve" text-anchor="start" x="15.84" y="-14.3" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">4. Keep the best K in a bounded heap</text>
 </g>
 <!-- s3&#45;&gt;s4 -->
 <g id="edge4" class="edge">
 <title>s3&#45;&gt;s4</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M123.84,-61.85C123.84,-56 123.84,-50.05 123.84,-44.51"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="126.29,-44.89 123.84,-37.89 121.39,-44.89 126.29,-44.89"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M137.34,-61.85C137.34,-56 137.34,-50.05 137.34,-44.51"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="139.79,-44.89 137.34,-37.89 134.89,-44.89 139.79,-44.89"/>
 </g>
 </g>
 </svg>

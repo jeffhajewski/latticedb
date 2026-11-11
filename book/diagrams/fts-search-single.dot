@@ -1,4 +1,4 @@
-// Single-term search: one dictionary lookup, one posting list walk.
+// Single-term search: one dictionary lookup, one batched posting list read.
 digraph fts_search_single {
   bgcolor="transparent"
   rankdir=TB
@@ -12,9 +12,9 @@ digraph fts_search_single {
 
   q [label="query: \"database\"" fillcolor="#f6f8fa" color="#c7d0da"]
   s1 [label="1. Tokenize\l   → [\"database\"]\l"]
-  s2 [label="2. Dictionary lookup\l   token_id = 3\l   doc_freq = 50\l   posting_page = 44\l"]
-  s3 [label="3. Walk posting list (page 44)\l   for each (doc_id, term_freq):\l     look up doc_length\l     compute BM25 score\l"]
-  s4 [label="4. Sort by score, return top K\l" fillcolor="#eaf5ea" color="#2f7d32"]
+  s2 [label="2. Dictionary lookup\l   doc_freq = 50\l   posting_page = 44\l"]
+  s3 [label="3. Read posting list (page 44)\l   128 entries per page pin\l   all lengths in one sorted pass\l   compute BM25 for each entry\l"]
+  s4 [label="4. Keep the best K in a bounded heap\l" fillcolor="#eaf5ea" color="#2f7d32"]
 
   q -> s1 -> s2 -> s3 -> s4
 }

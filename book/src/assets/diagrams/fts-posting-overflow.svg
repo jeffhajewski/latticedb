@@ -1,30 +1,28 @@
-<svg width="451" height="125"
- viewBox="0.00 0.00 338.00 94.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 89.72)">
+<svg width="451" height="89"
+ viewBox="0.00 0.00 338.00 67.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 63.22)">
 <title>fts_posting_overflow</title>
 <!-- p42 -->
 <g id="node1" class="node">
 <title>p42</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M131.55,-85.72C131.55,-85.72 12,-85.72 12,-85.72 6,-85.72 0,-79.72 0,-73.72 0,-73.72 0,-12 0,-12 0,-6 6,0 12,0 12,0 131.55,0 131.55,0 137.55,0 143.55,-6 143.55,-12 143.55,-12 143.55,-73.72 143.55,-73.72 143.55,-79.72 137.55,-85.72 131.55,-85.72"/>
-<text xml:space="preserve" text-anchor="start" x="14.4" y="-65.91" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Page 42 (first)</text>
-<text xml:space="preserve" text-anchor="start" x="14.4" y="-52.41" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">next_page = 87</text>
-<text xml:space="preserve" text-anchor="start" x="14.4" y="-38.91" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">num_entries = 200</text>
-<text xml:space="preserve" text-anchor="start" x="14.4" y="-12.41" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">entries 1–200</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M131.55,-59.22C131.55,-59.22 12,-59.22 12,-59.22 6,-59.22 0,-53.22 0,-47.22 0,-47.22 0,-12 0,-12 0,-6 6,0 12,0 12,0 131.55,0 131.55,0 137.55,0 143.55,-6 143.55,-12 143.55,-12 143.55,-47.22 143.55,-47.22 143.55,-53.22 137.55,-59.22 131.55,-59.22"/>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-39.41" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Page 42 (head)</text>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-25.91" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">next_page = 87</text>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-12.41" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">num_entries = 200</text>
 </g>
 <!-- p87 -->
 <g id="node2" class="node">
 <title>p87</title>
-<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M317.85,-85.72C317.85,-85.72 191.55,-85.72 191.55,-85.72 185.55,-85.72 179.55,-79.72 179.55,-73.72 179.55,-73.72 179.55,-12 179.55,-12 179.55,-6 185.55,0 191.55,0 191.55,0 317.85,0 317.85,0 323.85,0 329.85,-6 329.85,-12 329.85,-12 329.85,-73.72 329.85,-73.72 329.85,-79.72 323.85,-85.72 317.85,-85.72"/>
-<text xml:space="preserve" text-anchor="start" x="193.95" y="-65.91" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Page 87 (overflow)</text>
-<text xml:space="preserve" text-anchor="start" x="193.95" y="-52.41" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">next_page = 0</text>
-<text xml:space="preserve" text-anchor="start" x="193.95" y="-38.91" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">num_entries = 50</text>
-<text xml:space="preserve" text-anchor="start" x="193.95" y="-12.41" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">entries 201–250</text>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M317.85,-59.22C317.85,-59.22 191.55,-59.22 191.55,-59.22 185.55,-59.22 179.55,-53.22 179.55,-47.22 179.55,-47.22 179.55,-12 179.55,-12 179.55,-6 185.55,0 191.55,0 191.55,0 317.85,0 317.85,0 323.85,0 329.85,-6 329.85,-12 329.85,-12 329.85,-47.22 329.85,-47.22 329.85,-53.22 323.85,-59.22 317.85,-59.22"/>
+<text xml:space="preserve" text-anchor="start" x="193.95" y="-39.41" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Page 87 (overflow)</text>
+<text xml:space="preserve" text-anchor="start" x="193.95" y="-25.91" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">next_page = 0</text>
+<text xml:space="preserve" text-anchor="start" x="193.95" y="-12.41" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">num_entries = 50</text>
 </g>
 <!-- p42&#45;&gt;p87 -->
 <g id="edge1" class="edge">
 <title>p42&#45;&gt;p87</title>
-<path fill="none" stroke="#4a90d9" stroke-width="1.1" d="M144.02,-42.86C152.79,-42.86 161.81,-42.86 170.73,-42.86"/>
-<polygon fill="#4a90d9" stroke="#4a90d9" stroke-width="1.1" points="170.58,-45.31 177.58,-42.86 170.58,-40.41 170.58,-45.31"/>
+<path fill="none" stroke="#4a90d9" stroke-width="1.1" d="M144.02,-29.61C152.79,-29.61 161.81,-29.61 170.73,-29.61"/>
+<polygon fill="#4a90d9" stroke="#4a90d9" stroke-width="1.1" points="170.58,-32.06 177.58,-29.61 170.58,-27.16 170.58,-32.06"/>
 </g>
 </g>
 </svg>

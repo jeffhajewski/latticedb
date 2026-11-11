@@ -1,52 +1,52 @@
-<svg width="395" height="364"
- viewBox="0.00 0.00 296.00 273.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<svg width="431" height="364"
+ viewBox="0.00 0.00 323.00 273.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
 <g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 268.66)">
 <title>fts_search_or</title>
 <!-- q -->
 <g id="node1" class="node">
 <title>q</title>
-<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M245.81,-264.66C245.81,-264.66 42.37,-264.66 42.37,-264.66 36.38,-264.66 30.38,-258.66 30.38,-252.66 30.38,-252.66 30.38,-240.66 30.38,-240.66 30.38,-234.66 36.38,-228.66 42.38,-228.66 42.38,-228.66 245.81,-228.66 245.81,-228.66 251.81,-228.66 257.81,-234.66 257.81,-240.66 257.81,-240.66 257.81,-252.66 257.81,-252.66 257.81,-258.66 251.81,-264.66 245.81,-264.66"/>
-<text xml:space="preserve" text-anchor="middle" x="144.09" y="-242.96" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">query: &quot;mysql postgres&quot; &#160;(OR)</text>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M259.31,-264.66C259.31,-264.66 55.87,-264.66 55.87,-264.66 49.88,-264.66 43.88,-258.66 43.88,-252.66 43.88,-252.66 43.88,-240.66 43.88,-240.66 43.88,-234.66 49.88,-228.66 55.88,-228.66 55.88,-228.66 259.31,-228.66 259.31,-228.66 265.31,-228.66 271.31,-234.66 271.31,-240.66 271.31,-240.66 271.31,-252.66 271.31,-252.66 271.31,-258.66 265.31,-264.66 259.31,-264.66"/>
+<text xml:space="preserve" text-anchor="middle" x="157.59" y="-242.96" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">query: &quot;mysql postgres&quot; &#160;(OR)</text>
 </g>
 <!-- s1 -->
 <g id="node2" class="node">
 <title>s1</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M235.68,-202.66C235.68,-202.66 52.5,-202.66 52.5,-202.66 46.5,-202.66 40.5,-196.66 40.5,-190.66 40.5,-190.66 40.5,-168.94 40.5,-168.94 40.5,-162.94 46.5,-156.94 52.5,-156.94 52.5,-156.94 235.68,-156.94 235.68,-156.94 241.68,-156.94 247.68,-162.94 247.68,-168.94 247.68,-168.94 247.68,-190.66 247.68,-190.66 247.68,-196.66 241.68,-202.66 235.68,-202.66"/>
-<text xml:space="preserve" text-anchor="start" x="56.34" y="-182.85" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">1. Tokenize</text>
-<text xml:space="preserve" text-anchor="start" x="56.34" y="-169.35" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;→ [&quot;mysql&quot;, &quot;postgres&quot;]</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M249.18,-202.66C249.18,-202.66 66,-202.66 66,-202.66 60,-202.66 54,-196.66 54,-190.66 54,-190.66 54,-168.94 54,-168.94 54,-162.94 60,-156.94 66,-156.94 66,-156.94 249.18,-156.94 249.18,-156.94 255.18,-156.94 261.18,-162.94 261.18,-168.94 261.18,-168.94 261.18,-190.66 261.18,-190.66 261.18,-196.66 255.18,-202.66 249.18,-202.66"/>
+<text xml:space="preserve" text-anchor="start" x="69.84" y="-182.85" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">1. Tokenize</text>
+<text xml:space="preserve" text-anchor="start" x="69.84" y="-169.35" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;→ [&quot;mysql&quot;, &quot;postgres&quot;]</text>
 </g>
 <!-- q&#45;&gt;s1 -->
 <g id="edge1" class="edge">
 <title>q&#45;&gt;s1</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M144.09,-228.28C144.09,-223.03 144.09,-217.12 144.09,-211.28"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="146.54,-211.55 144.09,-204.55 141.64,-211.55 146.54,-211.55"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M157.59,-228.28C157.59,-223.03 157.59,-217.12 157.59,-211.28"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="160.04,-211.55 157.59,-204.55 155.14,-211.55 160.04,-211.55"/>
 </g>
 <!-- s2 -->
 <g id="node3" class="node">
 <title>s2</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M249.18,-130.94C249.18,-130.94 39,-130.94 39,-130.94 33,-130.94 27,-124.94 27,-118.94 27,-118.94 27,-83.72 27,-83.72 27,-77.72 33,-71.72 39,-71.72 39,-71.72 249.18,-71.72 249.18,-71.72 255.18,-71.72 261.18,-77.72 261.18,-83.72 261.18,-83.72 261.18,-118.94 261.18,-118.94 261.18,-124.94 255.18,-130.94 249.18,-130.94"/>
-<text xml:space="preserve" text-anchor="start" x="42.84" y="-111.13" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">2. Walk each posting list</text>
-<text xml:space="preserve" text-anchor="start" x="42.84" y="-97.63" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;doc_scores[doc_id] += score</text>
-<text xml:space="preserve" text-anchor="start" x="42.84" y="-84.13" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;no term&#45;count filtering</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M262.68,-130.94C262.68,-130.94 52.5,-130.94 52.5,-130.94 46.5,-130.94 40.5,-124.94 40.5,-118.94 40.5,-118.94 40.5,-83.72 40.5,-83.72 40.5,-77.72 46.5,-71.72 52.5,-71.72 52.5,-71.72 262.68,-71.72 262.68,-71.72 268.68,-71.72 274.68,-77.72 274.68,-83.72 274.68,-83.72 274.68,-118.94 274.68,-118.94 274.68,-124.94 268.68,-130.94 262.68,-130.94"/>
+<text xml:space="preserve" text-anchor="start" x="56.34" y="-111.13" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">2. Walk each posting list</text>
+<text xml:space="preserve" text-anchor="start" x="56.34" y="-97.63" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;doc_scores[doc_id] += score</text>
+<text xml:space="preserve" text-anchor="start" x="56.34" y="-84.13" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;no term&#45;count filtering</text>
 </g>
 <!-- s1&#45;&gt;s2 -->
 <g id="edge2" class="edge">
 <title>s1&#45;&gt;s2</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M144.09,-156.68C144.09,-151.41 144.09,-145.63 144.09,-139.87"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="146.54,-140.18 144.09,-133.18 141.64,-140.18 146.54,-140.18"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M157.59,-156.68C157.59,-151.41 157.59,-145.63 157.59,-139.87"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="160.04,-140.18 157.59,-133.18 155.14,-140.18 160.04,-140.18"/>
 </g>
 <!-- s3 -->
 <g id="node4" class="node">
 <title>s3</title>
-<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.2" d="M276.18,-45.72C276.18,-45.72 12,-45.72 12,-45.72 6,-45.72 0,-39.72 0,-33.72 0,-33.72 0,-12 0,-12 0,-6 6,0 12,0 12,0 276.18,0 276.18,0 282.18,0 288.18,-6 288.18,-12 288.18,-12 288.18,-33.72 288.18,-33.72 288.18,-39.72 282.18,-45.72 276.18,-45.72"/>
+<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.2" d="M303.18,-45.72C303.18,-45.72 12,-45.72 12,-45.72 6,-45.72 0,-39.72 0,-33.72 0,-33.72 0,-12 0,-12 0,-6 6,0 12,0 12,0 303.18,0 303.18,0 309.18,0 315.18,-6 315.18,-12 315.18,-12 315.18,-33.72 315.18,-33.72 315.18,-39.72 309.18,-45.72 303.18,-45.72"/>
 <text xml:space="preserve" text-anchor="start" x="15.84" y="-25.91" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">3. Sort by accumulated score</text>
-<text xml:space="preserve" text-anchor="start" x="15.84" y="-12.41" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;documents matching both rank higher</text>
+<text xml:space="preserve" text-anchor="start" x="15.84" y="-12.41" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;a score sums the terms a document holds</text>
 </g>
 <!-- s2&#45;&gt;s3 -->
 <g id="edge3" class="edge">
 <title>s2&#45;&gt;s3</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M144.09,-71.42C144.09,-65.87 144.09,-60.04 144.09,-54.44"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="146.54,-54.56 144.09,-47.56 141.64,-54.56 146.54,-54.56"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M157.59,-71.42C157.59,-65.87 157.59,-60.04 157.59,-54.44"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="160.04,-54.56 157.59,-47.56 155.14,-54.56 160.04,-54.56"/>
 </g>
 </g>
 </svg>

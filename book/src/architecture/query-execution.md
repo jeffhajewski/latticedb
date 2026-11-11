@@ -456,7 +456,11 @@ pub fn evaluate(expr: *const Expression, row: *const Row, ctx: *ExecutionContext
 
 **List**: `IN`
 
-**Null handling**: `IS NULL`, `IS NOT NULL`
+**Null handling**: `IS NULL`, `IS NOT NULL`, which always give true or false. Every
+other operator follows three-valued logic: a comparison, arithmetic or string
+operation with a null operand is null, `NOT`/`AND`/`OR` are Kleene (`false AND null`
+is false, `true OR null` is true), and Filter keeps a row only when the predicate is
+true
 
 **Functions** (names are case-sensitive):
 - Graph and type: `id()`, `labels()`, `type()`, `properties()`

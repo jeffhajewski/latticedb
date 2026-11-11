@@ -88,9 +88,16 @@ Numeric operations automatically promote integers to floats when mixed:
 RETURN 42 + 3.14   // Returns 45.14 (float)
 ```
 
-Null propagates through most operations:
+Null propagates through comparisons, arithmetic and the string operators, and
+`NOT`, `AND` and `OR` use three-valued logic; `IS NULL` and `IS NOT NULL` are always
+true or false. A `WHERE` keeps a row only when its predicate is true, so
+`WHERE n.x <> 5` skips nodes that have no `x`:
 
 ```cypher
-RETURN null + 1     // Returns null
-RETURN null = null  // Returns null
+RETURN null + 1       // Returns null
+RETURN null = null    // Returns null
+RETURN false AND null // Returns false
+RETURN true OR null   // Returns true
+RETURN NOT null       // Returns null
+RETURN 2 IN [1, null] // Returns null
 ```

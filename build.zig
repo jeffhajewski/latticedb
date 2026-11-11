@@ -398,6 +398,27 @@ pub fn build(b: *std.Build) void {
     const vector_bench_step = b.step("vector-benchmark", "Run HNSW vector performance benchmarks");
     vector_bench_step.dependOn(&run_vector_bench.step);
 
+    // Storage-core micro-benchmarks (checksums, page allocation, B+Tree)
+    const storage_bench_module = b.createModule(.{
+        .root_source_file = b.path("tests/benchmark/storage_benchmark.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .imports = &.{
+            .{ .name = "lattice", .module = bench_lib_module },
+        },
+    });
+    storage_bench_module.addImport("compat", compat_module);
+    storage_bench_module.link_libc = true;
+
+    const storage_bench_exe = b.addExecutable(.{
+        .name = "storage-benchmark",
+        .root_module = storage_bench_module,
+    });
+
+    const run_storage_bench = b.addRunArtifact(storage_bench_exe);
+    const storage_bench_step = b.step("storage-benchmark", "Run storage-core micro-benchmarks");
+    storage_bench_step.dependOn(&run_storage_bench.step);
+
     // SQLite comparison benchmark module
     const sqlite_bench_module = b.createModule(.{
         .root_source_file = b.path("tests/benchmark/sqlite_comparison.zig"),

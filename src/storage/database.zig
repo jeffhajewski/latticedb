@@ -395,6 +395,30 @@ pub const DatabaseConfig = struct {
     /// that cannot set this field.
     full_fsync: bool = false,
 
+    /// When a commit waits for the disk.
+    ///
+    /// `.full`, the default, syncs the log on every commit: a transaction
+    /// that has returned survives a power cut. `.normal` hands the commit to
+    /// the operating system and returns; it survives the process being
+    /// killed, and reaches the disk at the next checkpoint or `sync()`, so a
+    /// power cut or an OS crash can lose the most recent commits. They are
+    /// lost from the end only, and the database stays consistent. Most of
+    /// the time a small write transaction takes is this one fsync.
+    /// `LATTICE_SYNC_MODE=normal` or `full` in the environment overrides it,
+    /// for bindings that cannot set this field.
+    sync_mode: SyncMode = .full,
+
+    pub const SyncMode = enum { full, normal };
+
+    pub fn effectiveSyncMode(self: DatabaseConfig) SyncMode {
+        if (std.c.getenv("LATTICE_SYNC_MODE")) |value| {
+            const text = std.mem.span(value);
+            if (std.ascii.eqlIgnoreCase(text, "normal")) return .normal;
+            if (std.ascii.eqlIgnoreCase(text, "full")) return .full;
+        }
+        return self.sync_mode;
+    }
+
     pub fn effectiveFullFsync(self: DatabaseConfig) bool {
         if (std.c.getenv("LATTICE_FULL_FSYNC")) |value| {
             const text = std.mem.span(value);
@@ -1214,6 +1238,7 @@ pub const Database = struct {
             self.txn_manager = TxnManager.init(allocator, wal);
             // The log can outlive this session, so ids must not start over.
             self.txn_manager.?.next_txn_id = recovered_max_txn_id + 1;
+            self.txn_manager.?.sync_on_commit = options.config.effectiveSyncMode() == .full;
         }
         self.txn_overlays = std.AutoHashMap(u64, TxnOverlay).init(allocator);
         self.last_auto_checkpoint_ns = @import("compat").nanoTimestamp();

@@ -531,6 +531,43 @@ test "a commit is durable before it is applied, and a failed apply stops the han
     }
 }
 
+test "commits in normal sync mode survive a kill" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_sync_normal.ltdb";
+    const killed = "/tmp/lattice_crash_sync_normal_killed.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+    cleanup(killed);
+    defer cleanup(killed);
+
+    // Past the checkpoint threshold several times, so both the commits still
+    // in the log and the ones a checkpoint folded into the file are covered.
+    const config = DatabaseConfig{
+        .enable_fts = false,
+        .enable_vector = false,
+        .sync_mode = .normal,
+        .auto_checkpoint = .{ .max_wal_frames = 64 },
+    };
+    const count = 300;
+    const ids = try allocator.alloc(NodeId, count);
+    defer allocator.free(ids);
+    {
+        var db = try Database.open(allocator, path, .{ .create = true, .config = config });
+        defer db.close();
+        try std.testing.expect(!db.txn_manager.?.sync_on_commit);
+        for (ids) |*id| {
+            var txn = try db.beginTransaction(.read_write);
+            id.* = try db.createNode(&txn, &.{"Person"});
+            try db.commitTransaction(&txn);
+        }
+        try copyAsIfKilled(allocator, path, killed);
+    }
+
+    var db = try Database.open(allocator, killed, .{ .config = config });
+    defer db.close();
+    for (ids) |id| try std.testing.expect(try db.nodeExists(id));
+}
+
 test "fragmented vector replacements and removals replay from WAL" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_crash_vectors.ltdb";

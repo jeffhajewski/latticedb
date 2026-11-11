@@ -680,6 +680,19 @@ pub const WalManager = struct {
         self.file.sync() catch return WalError.IoError;
     }
 
+    /// Hand buffered records to the operating system without waiting for
+    /// them to reach the disk. What has been flushed survives the process
+    /// dying; only `sync` makes it survive the machine losing power.
+    pub fn flush(self: *Self) WalError!void {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+
+        if (self.current_frame_header.record_count > 0) {
+            try self.flushCurrentFrame();
+            self.startNewFrame();
+        }
+    }
+
     /// Get current LSN (for tracking)
     pub fn getCurrentLsn(self: *Self) u64 {
         return self.next_lsn - 1;

@@ -198,6 +198,10 @@ pub const TxnManager = struct {
     aborted_count: u64,
     /// Mutex for thread safety
     mutex: @import("compat").Mutex,
+    /// Whether a commit waits for its record to reach the disk. When false
+    /// the record is handed to the operating system and the next checkpoint
+    /// or sync makes it durable.
+    sync_on_commit: bool = true,
 
     const Self = @This();
 
@@ -289,9 +293,15 @@ pub const TxnManager = struct {
             };
 
             // Sync WAL to ensure durability
-            self.wal.sync() catch {
-                return TxnError.WalError;
-            };
+            if (self.sync_on_commit) {
+                self.wal.sync() catch {
+                    return TxnError.WalError;
+                };
+            } else {
+                self.wal.flush() catch {
+                    return TxnError.WalError;
+                };
+            }
         }
 
         // Assign commit timestamp

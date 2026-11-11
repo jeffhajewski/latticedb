@@ -60,6 +60,8 @@ pub const EvalError = error{
     OutOfMemory,
     /// Invalid operation
     InvalidOperation,
+    /// Integer arithmetic produced a result outside the 64-bit range
+    IntegerOverflow,
 };
 
 // ============================================================================
@@ -228,6 +230,20 @@ pub const EvalResult = union(enum) {
         };
     }
 };
+
+/// Turn an overflowing integer operation into a query error.
+///
+/// Plain `+`, `-` and `*` on i64 are undefined behaviour on overflow in the
+/// ReleaseFast builds that ship, so integer arithmetic goes through the
+/// checked `std.math` functions and lands here.
+fn checkedInt(result: anytype) EvalError!i64 {
+    return result catch |err| {
+        if (err == error.Overflow) return EvalError.IntegerOverflow;
+        // Only divTrunc can fail otherwise, on a zero divisor, and callers
+        // reject that before dividing.
+        return EvalError.DivisionByZero;
+    };
+}
 
 /// A truth value in Cypher's three-valued logic.
 const TruthValue = enum { false_, true_, unknown };
@@ -484,8 +500,8 @@ pub const ExpressionEvaluator = struct {
 
             // Arithmetic operators
             .add => try self.arithmeticAdd(left, right),
-            .sub => self.arithmeticSub(left, right),
-            .mul => self.arithmeticMul(left, right),
+            .sub => try self.arithmeticSub(left, right),
+            .mul => try self.arithmeticMul(left, right),
             .div => self.arithmeticDiv(left, right),
             .mod => self.arithmeticMod(left, right),
             .pow => self.arithmeticPow(left, right),
@@ -521,7 +537,7 @@ pub const ExpressionEvaluator = struct {
                 .unknown => .{ .null_val = {} },
             },
             .neg => switch (operand) {
-                .int_val => |i| .{ .int_val = -i },
+                .int_val => |i| .{ .int_val = try checkedInt(std.math.sub(i64, 0, i)) },
                 .float_val => |f| .{ .float_val = -f },
                 .null_val => .{ .null_val = {} },
                 else => EvalError.TypeError,
@@ -561,7 +577,7 @@ pub const ExpressionEvaluator = struct {
             if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             return switch (arg) {
-                .int_val => |i| .{ .int_val = if (i < 0) -i else i },
+                .int_val => |i| .{ .int_val = if (i < 0) try checkedInt(std.math.sub(i64, 0, i)) else i },
                 .float_val => |fv| .{ .float_val = @abs(fv) },
                 else => EvalError.TypeError,
             };
@@ -1023,7 +1039,7 @@ pub const ExpressionEvaluator = struct {
     fn arithmeticAdd(self: *Self, left: EvalResult, right: EvalResult) EvalError!EvalResult {
         return switch (left) {
             .int_val => |l| switch (right) {
-                .int_val => |r| .{ .int_val = l + r },
+                .int_val => |r| .{ .int_val = try checkedInt(std.math.add(i64, l, r)) },
                 .float_val => |r| .{ .float_val = @as(f64, @floatFromInt(l)) + r },
                 else => .{ .null_val = {} },
             },
@@ -1045,10 +1061,10 @@ pub const ExpressionEvaluator = struct {
         };
     }
 
-    fn arithmeticSub(_: *Self, left: EvalResult, right: EvalResult) EvalResult {
+    fn arithmeticSub(_: *Self, left: EvalResult, right: EvalResult) EvalError!EvalResult {
         return switch (left) {
             .int_val => |l| switch (right) {
-                .int_val => |r| .{ .int_val = l - r },
+                .int_val => |r| .{ .int_val = try checkedInt(std.math.sub(i64, l, r)) },
                 .float_val => |r| .{ .float_val = @as(f64, @floatFromInt(l)) - r },
                 else => .{ .null_val = {} },
             },
@@ -1061,10 +1077,10 @@ pub const ExpressionEvaluator = struct {
         };
     }
 
-    fn arithmeticMul(_: *Self, left: EvalResult, right: EvalResult) EvalResult {
+    fn arithmeticMul(_: *Self, left: EvalResult, right: EvalResult) EvalError!EvalResult {
         return switch (left) {
             .int_val => |l| switch (right) {
-                .int_val => |r| .{ .int_val = l * r },
+                .int_val => |r| .{ .int_val = try checkedInt(std.math.mul(i64, l, r)) },
                 .float_val => |r| .{ .float_val = @as(f64, @floatFromInt(l)) * r },
                 else => .{ .null_val = {} },
             },
@@ -1087,7 +1103,8 @@ pub const ExpressionEvaluator = struct {
 
         return switch (left) {
             .int_val => |l| switch (right) {
-                .int_val => |r| .{ .int_val = @divTrunc(l, r) },
+                // minInt / -1 is the one quotient that does not fit.
+                .int_val => |r| .{ .int_val = try checkedInt(std.math.divTrunc(i64, l, r)) },
                 .float_val => |r| .{ .float_val = @as(f64, @floatFromInt(l)) / r },
                 else => .{ .null_val = {} },
             },

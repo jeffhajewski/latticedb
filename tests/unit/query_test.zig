@@ -1102,3 +1102,22 @@ test "parser: * is not an argument to anything but count" {
         try std.testing.expect(result.query == null);
     }
 }
+
+test "expression: integer overflow is an error" {
+    try expectCypherError("9223372036854775807 + 1", error.IntegerOverflow);
+    try expectCypherError("(-9223372036854775807 - 1) - 1", error.IntegerOverflow);
+    try expectCypherError("4611686018427387904 * 2", error.IntegerOverflow);
+    try expectCypherError("-(-9223372036854775807 - 1)", error.IntegerOverflow);
+    try expectCypherError("abs(-9223372036854775807 - 1)", error.IntegerOverflow);
+    try expectCypherError("(-9223372036854775807 - 1) / -1", error.IntegerOverflow);
+}
+
+test "expression: integer arithmetic at the edge of the range still works" {
+    try expectCypherInt("9223372036854775806 + 1", 9223372036854775807);
+    try expectCypherInt("-9223372036854775807 - 1", -9223372036854775807 - 1);
+    try expectCypherInt("4611686018427387903 * 2", 9223372036854775806);
+    try expectCypherInt("-(-9223372036854775807)", 9223372036854775807);
+    try expectCypherInt("abs(-9223372036854775807)", 9223372036854775807);
+    try expectCypherInt("(-9223372036854775807 - 1) / 1", -9223372036854775807 - 1);
+    try expectCypherInt("-7 / 2", -3);
+}

@@ -269,3 +269,19 @@ test "cypher: more than 16 RETURN or WITH items is a plan error" {
     try std.testing.expect(detailed == .failure);
     try std.testing.expectEqualStrings("RETURN has 17 items, but at most 16 are supported.", detailed.failure.message);
 }
+
+test "cypher: integer overflow fails the query" {
+    const path = "/tmp/lattice_cs_overflow.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    try run(db, "CREATE (n:Big {v: 9223372036854775807})");
+    try std.testing.expectError(QueryError.ExecutionError, db.query("MATCH (n:Big) RETURN n.v + 1"));
+    try std.testing.expectError(QueryError.ExecutionError, db.query("MATCH (n:Big) RETURN n.v * 2"));
+    try std.testing.expectError(QueryError.ExecutionError, db.query("MATCH (n:Big) RETURN -n.v - 2"));
+    try std.testing.expectError(QueryError.ExecutionError, db.query("MATCH (n:Big) WHERE n.v + 1 > 0 RETURN n"));
+
+    var result = try db.query("MATCH (n:Big) RETURN n.v - 1");
+    defer result.deinit();
+    try expectInt(result, 0, 0, 9223372036854775806);
+}

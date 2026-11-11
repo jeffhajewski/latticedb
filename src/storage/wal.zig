@@ -306,6 +306,8 @@ pub const WalManager = struct {
     next_lsn: u64,
     /// Mutex for thread safety
     mutex: @import("compat").Mutex,
+    /// Where a torn tail was cut off when this log was opened, if one was.
+    trimmed_tail_frame: ?u64 = null,
 
     const Self = @This();
 
@@ -405,58 +407,109 @@ pub const WalManager = struct {
             return WalError.UuidMismatch;
         }
 
-        // Validate checksum
+        // The header is rewritten in place every time a frame is flushed, and
+        // its fields and its checksum sit at opposite ends of the 4 KB, so a
+        // write cut short by a power failure leaves them disagreeing.
+        // Refusing the log for that made the whole database unopenable.
+        // Everything checked above still identifies the log; what cannot be
+        // trusted is how many frames it claims and where the last checkpoint
+        // was. Take the count from the file's length, let findLogEnd cut it
+        // back to the frames that verify, and replay from the start.
         const expected = self.header.calculateHeaderChecksum();
-        if (self.header.checksum != expected) {
-            return WalError.ChecksumMismatch;
+        const header_torn = self.header.checksum != expected;
+        if (header_torn) {
+            const file_size = self.file.size() catch return WalError.IoError;
+            self.header.frame_count = if (file_size > WAL_HEADER_SIZE)
+                (file_size - WAL_HEADER_SIZE) / self.frame_size
+            else
+                0;
+            self.header.checkpoint_lsn = 0;
         }
 
         // Find the end of valid frames and set next_lsn
         try self.findLogEnd();
+
+        if (header_torn) {
+            self.writeHeader() catch return WalError.IoError;
+            self.file.sync() catch return WalError.IoError;
+        }
     }
 
     /// Find the end of valid log entries
+    ///
+    /// The header's frame count says how many frames were written, not how
+    /// many survived. After a power failure the last frame can be half
+    /// written, or missing altogether while the header that counts it made
+    /// it to disk. Such a tail is cut off here: left in place, new frames
+    /// were appended after the bad one, and the next recovery saw a damaged
+    /// frame with good ones behind it and refused the database.
+    ///
+    /// A bad frame with valid frames after it is different. That is damage
+    /// in the middle of the log, it is left exactly as found, and recovery
+    /// reports it.
     fn findLogEnd(self: *Self) WalError!void {
         var max_lsn: u64 = 0;
         var frame_num: u64 = 0;
 
         while (frame_num < self.header.frame_count) {
-            const offset = WAL_HEADER_SIZE + frame_num * self.frame_size;
-
-            var frame_buf: [MAX_FRAME_SIZE]u8 = undefined;
-            const frame = frame_buf[0..self.frame_size];
-            const n = self.file.read(offset, frame) catch break;
-            if (n != self.frame_size) break;
-
-            const header = std.mem.bytesAsValue(WalFrameHeader, frame[0..@sizeOf(WalFrameHeader)]);
-            if (header.data_size > self.frameDataSize()) break;
-
-            // Validate checksum
-            const data = frame[@sizeOf(WalFrameHeader)..][0..header.data_size];
-            const expected = calculateChecksum(data);
-            if (header.checksum != expected) break;
-
-            // Find max LSN in this frame
-            var record_offset: usize = 0;
-            while (record_offset < header.data_size) {
-                if (record_offset + @sizeOf(WalRecordHeader) > header.data_size) break;
-                const rec_header = std.mem.bytesAsValue(
-                    WalRecordHeader,
-                    data[record_offset..][0..@sizeOf(WalRecordHeader)],
-                );
-                const record_size = @sizeOf(WalRecordHeader) + @as(usize, rec_header.payload_size);
-                if (record_offset + record_size > header.data_size) break;
-                if (rec_header.lsn > max_lsn) {
-                    max_lsn = rec_header.lsn;
-                }
-                record_offset += record_size;
-            }
-
+            if (!self.frameVerifies(frame_num, &max_lsn)) break;
             frame_num += 1;
+        }
+
+        if (frame_num < self.header.frame_count) {
+            var later = frame_num + 1;
+            var ignored_lsn: u64 = 0;
+            const damage_mid_log = while (later < self.header.frame_count) : (later += 1) {
+                if (self.frameVerifies(later, &ignored_lsn)) break true;
+            } else false;
+
+            if (!damage_mid_log) {
+                self.trimmed_tail_frame = frame_num;
+                self.header.frame_count = frame_num;
+                self.file.truncate(WAL_HEADER_SIZE + frame_num * self.frame_size) catch return WalError.IoError;
+                self.writeHeader() catch return WalError.IoError;
+                self.file.sync() catch return WalError.IoError;
+            }
         }
 
         self.next_lsn = max_lsn + 1;
         self.startNewFrame();
+    }
+
+    /// Whether the frame at this position is one this log wrote in full.
+    /// Raises `max_lsn` to the largest LSN in it.
+    fn frameVerifies(self: *Self, frame_num: u64, max_lsn: *u64) bool {
+        const offset = WAL_HEADER_SIZE + frame_num * self.frame_size;
+
+        var frame_buf: [MAX_FRAME_SIZE]u8 = undefined;
+        const frame = frame_buf[0..self.frame_size];
+        const n = self.file.read(offset, frame) catch return false;
+        if (n != self.frame_size) return false;
+
+        const header = std.mem.bytesAsValue(WalFrameHeader, frame[0..@sizeOf(WalFrameHeader)]);
+        // A frame is only ever written with records in it. One without is
+        // file space the header counted before the data arrived.
+        if (header.record_count == 0 or header.data_size == 0) return false;
+        if (header.data_size > self.frameDataSize()) return false;
+
+        const data = frame[@sizeOf(WalFrameHeader)..][0..header.data_size];
+        if (header.checksum != calculateChecksum(data)) return false;
+
+        var record_offset: usize = 0;
+        while (record_offset < header.data_size) {
+            if (record_offset + @sizeOf(WalRecordHeader) > header.data_size) break;
+            const rec_header = std.mem.bytesAsValue(
+                WalRecordHeader,
+                data[record_offset..][0..@sizeOf(WalRecordHeader)],
+            );
+            const record_size = @sizeOf(WalRecordHeader) + @as(usize, rec_header.payload_size);
+            if (record_offset + record_size > header.data_size) break;
+            if (rec_header.lsn > max_lsn.*) {
+                max_lsn.* = rec_header.lsn;
+            }
+            record_offset += record_size;
+        }
+        return true;
     }
 
     /// Write the WAL header to disk

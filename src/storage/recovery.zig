@@ -230,6 +230,13 @@ pub const RecoveryManager = struct {
 
         try self.analysisPass(wal, &txn_states, &redo_list, &stats);
 
+        // A torn tail that was cut off when the log was opened is the same
+        // event as one met while reading it.
+        if (wal.trimmed_tail_frame) |frame| {
+            stats.stopped_at_corruption = true;
+            if (stats.corrupted_frame == null) stats.corrupted_frame = frame;
+        }
+
         // Count transaction outcomes
         var iter = txn_states.iterator();
         while (iter.next()) |entry| {

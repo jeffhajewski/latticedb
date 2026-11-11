@@ -486,3 +486,155 @@ test "wal: transaction id preserved" {
         }
     }
 }
+
+// ============================================================================
+// Contract: a log damaged at its tail by a power failure still opens
+// ============================================================================
+
+/// Write three frames, one record each, and return how many frames the log holds.
+fn writeThreeFrames(wal: *WalManager) !u64 {
+    _ = try wal.appendRecord(.insert, 1, 0, "first");
+    try wal.sync();
+    _ = try wal.appendRecord(.insert, 1, 0, "second");
+    try wal.sync();
+    _ = try wal.appendRecord(.insert, 1, 0, "third");
+    try wal.sync();
+    return wal.header.frame_count;
+}
+
+fn expectPayloads(wal: *WalManager, expected: []const []const u8) !void {
+    var iter = wal.iterate(1);
+    var payload_buf: [4096]u8 = undefined;
+    for (expected) |payload| {
+        const record = (try iter.next(&payload_buf)) orelse return error.TestExpectedEqual;
+        try std.testing.expectEqualStrings(payload, record.payload);
+    }
+    try std.testing.expect(try iter.next(&payload_buf) == null);
+}
+
+fn frameOffset(wal: *const WalManager, frame: u64) u64 {
+    return wal_mod.WAL_HEADER_SIZE + frame * wal.frame_size;
+}
+
+test "wal: a torn last frame is cut off and new frames replace it" {
+    const allocator = std.testing.allocator;
+    var posix_vfs = PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+    const path = try createTempPath(allocator, "torn_tail");
+    defer allocator.free(path);
+    defer vfs_impl.delete(path) catch {};
+    const uuid = generateUuid();
+
+    {
+        var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+        defer wal.deinit();
+        try std.testing.expectEqual(@as(u64, 3), try writeThreeFrames(&wal));
+        // Damage the data of the last frame, as a write cut short would.
+        const garbage = [_]u8{0xFF} ** 64;
+        try wal.file.write(frameOffset(&wal, 2) + @sizeOf(wal_mod.WalFrameHeader), &garbage);
+    }
+
+    {
+        var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+        defer wal.deinit();
+        try std.testing.expectEqual(@as(?u64, 2), wal.trimmed_tail_frame);
+        try std.testing.expectEqual(@as(u64, 2), wal.header.frame_count);
+        try expectPayloads(&wal, &.{ "first", "second" });
+
+        _ = try wal.appendRecord(.insert, 2, 0, "fourth");
+        try wal.sync();
+    }
+
+    // The new frame took the torn one's place, so the log reads straight
+    // through and nothing looks like damage in the middle.
+    var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+    defer wal.deinit();
+    try std.testing.expectEqual(@as(?u64, null), wal.trimmed_tail_frame);
+    try expectPayloads(&wal, &.{ "first", "second", "fourth" });
+}
+
+test "wal: a header that counts a frame the file does not hold still opens" {
+    const allocator = std.testing.allocator;
+    var posix_vfs = PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+    const path = try createTempPath(allocator, "short_file");
+    defer allocator.free(path);
+    defer vfs_impl.delete(path) catch {};
+    const uuid = generateUuid();
+
+    {
+        var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+        defer wal.deinit();
+        _ = try writeThreeFrames(&wal);
+        // The header reached the disk; half of the last frame did not.
+        try wal.file.truncate(frameOffset(&wal, 2) + wal.frame_size / 2);
+    }
+
+    var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+    defer wal.deinit();
+    try std.testing.expectEqual(@as(u64, 2), wal.header.frame_count);
+    try expectPayloads(&wal, &.{ "first", "second" });
+}
+
+test "wal: a torn header is rebuilt from the frames" {
+    const allocator = std.testing.allocator;
+    var posix_vfs = PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+    const path = try createTempPath(allocator, "torn_header");
+    defer allocator.free(path);
+    defer vfs_impl.delete(path) catch {};
+    const uuid = generateUuid();
+
+    {
+        var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+        defer wal.deinit();
+        _ = try writeThreeFrames(&wal);
+        // The fields of the header from before the last frame, with the
+        // checksum from after it: what a header write cut in half leaves.
+        var stale = wal.header;
+        stale.frame_count = 2;
+        const bytes = std.mem.asBytes(&stale);
+        try wal.file.write(0, bytes[0 .. bytes.len - 4]);
+    }
+
+    {
+        var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+        defer wal.deinit();
+        try std.testing.expectEqual(@as(u64, 3), wal.header.frame_count);
+        try expectPayloads(&wal, &.{ "first", "second", "third" });
+    }
+
+    // The repaired header was written back.
+    var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+    defer wal.deinit();
+    try std.testing.expectEqual(wal.header.checksum, wal.header.calculateHeaderChecksum());
+    try expectPayloads(&wal, &.{ "first", "second", "third" });
+}
+
+test "wal: damage in the middle of the log is left for recovery to report" {
+    const allocator = std.testing.allocator;
+    var posix_vfs = PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+    const path = try createTempPath(allocator, "mid_damage");
+    defer allocator.free(path);
+    defer vfs_impl.delete(path) catch {};
+    const uuid = generateUuid();
+
+    {
+        var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+        defer wal.deinit();
+        _ = try writeThreeFrames(&wal);
+        const garbage = [_]u8{0xFF} ** 64;
+        try wal.file.write(frameOffset(&wal, 1) + @sizeOf(wal_mod.WalFrameHeader), &garbage);
+    }
+
+    var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+    defer wal.deinit();
+    try std.testing.expectEqual(@as(?u64, null), wal.trimmed_tail_frame);
+    try std.testing.expectEqual(@as(u64, 3), wal.header.frame_count);
+
+    var iter = wal.iterate(1);
+    var payload_buf: [4096]u8 = undefined;
+    _ = try iter.next(&payload_buf);
+    try std.testing.expectError(WalError.ChecksumMismatch, iter.next(&payload_buf));
+}

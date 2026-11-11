@@ -278,19 +278,34 @@ pub const PageManager = struct {
     }
 
     /// Allocate a page from the freelist.
+    ///
+    /// The head is checked before it is handed out: it must lie inside the
+    /// file, read back with a valid checksum, and be a free page. A head that
+    /// fails any of these is not trusted, because handing out a live page
+    /// gives it two owners; the freelist is dropped instead, which leaks the
+    /// pages on it (`truncateFreeTail` rebuilds the list from page types)
+    /// but keeps the database able to grow. A next pointer that cannot be a
+    /// free page ends the list the same way.
     fn allocateFromFreelist(self: *Self) PageManagerError!PageId {
         const page_id = self.header.freelist_page;
+        const count = self.pageCount();
+        if (page_id >= count) return self.dropFreelistAndExtend();
 
-        // Read the free page to get next pointer
         const page_alignment = comptime std.mem.Alignment.fromByteUnits(4096);
         const buf = self.allocator.alignedAlloc(u8, page_alignment, self.page_size) catch {
             return PageManagerError.OutOfMemory;
         };
         defer self.allocator.free(buf);
-        try self.readPageRaw(page_id, buf);
+        self.readPage(page_id, buf) catch |err| switch (err) {
+            PageManagerError.ChecksumMismatch => return self.dropFreelistAndExtend(),
+            else => return err,
+        };
+        const header_ptr: *const PageHeader = @ptrCast(@alignCast(buf.ptr));
+        if (header_ptr.page_type != .free) return self.dropFreelistAndExtend();
 
         // Next free page is stored at offset 8 (after PageHeader)
-        const next_free = std.mem.readInt(u32, buf[8..12], .little);
+        var next_free = std.mem.readInt(u32, buf[8..12], .little);
+        if (next_free == page_id or next_free >= count) next_free = NULL_PAGE;
         self.header.freelist_page = next_free;
 
         try self.writeHeader();
@@ -298,10 +313,19 @@ pub const PageManager = struct {
         return page_id;
     }
 
+    fn dropFreelistAndExtend(self: *Self) PageManagerError!PageId {
+        self.header.freelist_page = NULL_PAGE;
+        return self.allocatePage();
+    }
+
     /// Free a page (add to freelist).
     pub fn freePage(self: *Self, page_id: PageId) PageManagerError!void {
         if (self.read_only) return PageManagerError.PermissionDenied;
         if (page_id == 0) return PageManagerError.InvalidPageId; // Can't free header
+        if (page_id >= self.pageCount()) return PageManagerError.InvalidPageId;
+        // Freeing the head again would make it its own successor, and every
+        // later allocation would return the same page.
+        if (page_id == self.header.freelist_page) return PageManagerError.InvalidPageId;
 
         const page_alignment = comptime std.mem.Alignment.fromByteUnits(4096);
         const buf = self.allocator.alignedAlloc(u8, page_alignment, self.page_size) catch {

@@ -590,3 +590,116 @@ test "page_manager: valid pages are those between the header and the end" {
     try std.testing.expect(!pm.isValidPage(4));
     try std.testing.expect(!pm.isValidPage(std.math.maxInt(types.PageId)));
 }
+
+// ============================================================================
+// Contract: the freelist never hands out a page that is not free
+// ============================================================================
+
+const TempPm = struct {
+    posix_vfs: PosixVfs,
+    path: []u8,
+    pm: PageManager,
+
+    fn init(self: *TempPm, allocator: std.mem.Allocator, name: []const u8) !void {
+        self.posix_vfs = PosixVfs.init(allocator);
+        self.path = try createTempPath(allocator, name);
+        errdefer allocator.free(self.path);
+        self.pm = try PageManager.init(allocator, self.posix_vfs.vfs(), self.path, .{ .create = true });
+    }
+
+    fn deinit(self: *TempPm, allocator: std.mem.Allocator) void {
+        self.pm.deinit();
+        self.posix_vfs.vfs().delete(self.path) catch {};
+        allocator.free(self.path);
+    }
+
+    fn setFreelistHead(self: *TempPm, head: types.PageId) !void {
+        var header = self.pm.getHeader().*;
+        header.freelist_page = head;
+        try self.pm.updateHeader(&header);
+    }
+};
+
+test "page_manager: a freelist head past the end of the file is dropped, not fatal" {
+    const allocator = std.testing.allocator;
+    var t: TempPm = undefined;
+    try t.init(allocator, "freelist_past_eof");
+    defer t.deinit(allocator);
+
+    _ = try t.pm.allocatePage();
+    const count = t.pm.pageCount();
+    try t.setFreelistHead(count + 100);
+
+    // The database can still grow, and the bad head is gone.
+    const page_id = try t.pm.allocatePage();
+    try std.testing.expectEqual(count, page_id);
+    try std.testing.expectEqual(types.NULL_PAGE, t.pm.getHeader().freelist_page);
+    try std.testing.expectEqual(count + 1, try t.pm.allocatePage());
+}
+
+test "page_manager: a freelist head that is not a free page is never handed out" {
+    const allocator = std.testing.allocator;
+    var t: TempPm = undefined;
+    try t.init(allocator, "freelist_live_head");
+    defer t.deinit(allocator);
+
+    const live = try t.pm.allocatePage();
+    var buf: [4096]u8 align(4096) = [_]u8{0} ** 4096;
+    const header: *lattice.storage.page.PageHeader = @ptrCast(@alignCast(&buf));
+    header.* = lattice.storage.page.PageHeader.init(.btree_leaf);
+    buf[100] = 0xAB;
+    try t.pm.writePage(live, &buf);
+
+    // A stale header still naming the page as the freelist head, as a crash
+    // or a stray write could leave it.
+    try t.setFreelistHead(live);
+
+    const page_id = try t.pm.allocatePage();
+    try std.testing.expect(page_id != live);
+    try std.testing.expectEqual(types.NULL_PAGE, t.pm.getHeader().freelist_page);
+
+    var check: [4096]u8 align(4096) = undefined;
+    try t.pm.readPage(live, &check);
+    try std.testing.expectEqual(@as(u8, 0xAB), check[100]);
+}
+
+test "page_manager: a free page whose next pointer is out of range ends the freelist" {
+    const allocator = std.testing.allocator;
+    var t: TempPm = undefined;
+    try t.init(allocator, "freelist_bad_next");
+    defer t.deinit(allocator);
+
+    const a = try t.pm.allocatePage();
+    const b = try t.pm.allocatePage();
+    try t.pm.freePage(a);
+
+    // Rewrite `a` as a free page whose next pointer runs past the file.
+    var buf: [4096]u8 align(4096) = [_]u8{0} ** 4096;
+    const header: *lattice.storage.page.PageHeader = @ptrCast(@alignCast(&buf));
+    header.* = lattice.storage.page.PageHeader.init(.free);
+    std.mem.writeInt(u32, buf[8..12], t.pm.pageCount() + 50, .little);
+    try t.pm.writePage(a, &buf);
+
+    try std.testing.expectEqual(a, try t.pm.allocatePage());
+    try std.testing.expectEqual(types.NULL_PAGE, t.pm.getHeader().freelist_page);
+    const next = try t.pm.allocatePage();
+    try std.testing.expect(next != a and next != b);
+}
+
+test "page_manager: freeing the freelist head again is refused" {
+    const allocator = std.testing.allocator;
+    var t: TempPm = undefined;
+    try t.init(allocator, "freelist_double_free");
+    defer t.deinit(allocator);
+
+    const a = try t.pm.allocatePage();
+    try t.pm.freePage(a);
+    try std.testing.expectError(PageManagerError.InvalidPageId, t.pm.freePage(a));
+    try std.testing.expectError(PageManagerError.InvalidPageId, t.pm.freePage(t.pm.pageCount()));
+
+    // Two allocations get two different pages, not the same one twice.
+    const first = try t.pm.allocatePage();
+    const second = try t.pm.allocatePage();
+    try std.testing.expectEqual(a, first);
+    try std.testing.expect(second != first);
+}

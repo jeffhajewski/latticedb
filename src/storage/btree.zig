@@ -807,6 +807,12 @@ pub const BTree = struct {
         const old_freelist_head = header_copy.freelist_page;
         const page_id = frame.page_id;
 
+        // Already the freelist head: freeing it again would link it to itself.
+        if (page_id == old_freelist_head) {
+            self.bp.unpinPage(frame, false);
+            return;
+        }
+
         @memset(frame.data, 0);
         const header: *PageHeader = @ptrCast(@alignCast(frame.data.ptr));
         header.* = PageHeader.init(.free);

@@ -830,31 +830,25 @@ pub const BTree = struct {
     }
 
     /// Index of the child to descend into for `key`: the first key greater
-    /// than `key`, or num_keys for the right child.
+    /// than `key`, or num_keys for the right child. Binary search for that
+    /// upper bound; keys in an internal node are sorted.
     fn findChildIndex(self: *Self, buf: []const u8, key: []const u8) u16 {
-        const num_keys = InternalNode.getNumKeys(buf);
-        var i: u16 = 0;
-        while (i < num_keys) : (i += 1) {
-            if (self.comparator(key, InternalNode.getKey(buf, i)) == .lt) return i;
+        var lo: u16 = 0;
+        var hi: u16 = InternalNode.getNumKeys(buf);
+        while (lo < hi) {
+            const mid = lo + (hi - lo) / 2;
+            if (self.comparator(key, InternalNode.getKey(buf, mid)) == .lt) {
+                hi = mid;
+            } else {
+                lo = mid + 1;
+            }
         }
-        return num_keys;
+        return lo;
     }
 
     /// Find the child page to descend into for a given key
     fn findChild(self: *Self, buf: []const u8, key: []const u8) PageId {
-        const num_keys = InternalNode.getNumKeys(buf);
-
-        // Binary search for the correct child
-        var i: u16 = 0;
-        while (i < num_keys) : (i += 1) {
-            const node_key = InternalNode.getKey(buf, i);
-            if (self.comparator(key, node_key) == .lt) {
-                return InternalNode.getChild(buf, i);
-            }
-        }
-
-        // Key >= all keys, go to rightmost child
-        return InternalNode.getRightChild(buf);
+        return internalChildAt(buf, self.findChildIndex(buf, key));
     }
 
     // ========================================================================
@@ -3112,4 +3106,51 @@ test "btree delete compacts leaf payload space before reinsert" {
     const got_replacement = (try tree.get("c")).?;
     defer tree.freeValue(got_replacement);
     try std.testing.expectEqualSlices(u8, &replacement, got_replacement);
+}
+
+test "findChildIndex binary search matches a linear scan" {
+    var tree = BTree{
+        .bp = undefined,
+        .root_page = NULL_PAGE,
+        .comparator = defaultComparator,
+        .page_size = 4096,
+        .allocator = std.testing.allocator,
+    };
+    var buf: [4096]u8 align(8) = undefined;
+    var prng = std.Random.DefaultPrng.init(99);
+    const random = prng.random();
+
+    for (0..200) |round| {
+        // Sorted distinct keys of 1..3 bytes, from 0 up to ~200 of them.
+        InternalNode.init(&buf, 1);
+        const count = random.uintLessThan(u16, 200);
+        var value: u32 = 0;
+        var written: u16 = 0;
+        while (written < count) : (written += 1) {
+            value += 1 + random.uintLessThan(u32, 300);
+            var key_bytes: [3]u8 = undefined;
+            std.mem.writeInt(u24, &key_bytes, @intCast(value), .big);
+            try tree.insertInternalEntryDirect(&buf, written, &key_bytes, written + 10);
+        }
+        InternalNode.setRightChild(&buf, 9999);
+
+        for (0..300) |_| {
+            var probe: [3]u8 = undefined;
+            std.mem.writeInt(u24, &probe, random.uintLessThan(u24, @intCast(value + 2)), .big);
+            const probe_key = if (round % 3 == 0) probe[0..2] else probe[0..];
+            var expected: u16 = count;
+            for (0..count) |i| {
+                if (defaultComparator(probe_key, InternalNode.getKey(&buf, @intCast(i))) == .lt) {
+                    expected = @intCast(i);
+                    break;
+                }
+            }
+            try std.testing.expectEqual(expected, tree.findChildIndex(&buf, probe_key));
+        }
+        // Exact matches go right of the equal key.
+        for (0..count) |i| {
+            const key = InternalNode.getKey(&buf, @intCast(i));
+            try std.testing.expectEqual(@as(u16, @intCast(i + 1)), tree.findChildIndex(&buf, key));
+        }
+    }
 }

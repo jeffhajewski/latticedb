@@ -264,7 +264,7 @@ pub const VariableLengthExpand = struct {
     fn usable(self: *Self, edge: edge_mod.EdgeRef, input_row: *const Row) bool {
         if (!self.constraints.acceptsType(edge.edge_type)) return false;
         if (self.used_edges.contains(edge.id)) return false;
-        _ = input_row;
+        if (self.constraints.usedEarlier(input_row, edge.id)) return false;
         return true;
     }
 

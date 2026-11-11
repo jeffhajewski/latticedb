@@ -49,12 +49,28 @@ pub const EdgeConstraints = struct {
     /// accepts every type. A type the database has never seen is passed as
     /// `NULL_SYMBOL`, which no edge carries.
     types: []const SymbolId = &.{},
+    /// Slots holding edges matched earlier in the same MATCH. Cypher never
+    /// binds one relationship twice in a pattern, so an edge already in any of
+    /// these slots is skipped.
+    distinct_from: []const u8 = &.{},
 
     /// Whether an edge of type `edge_type` matches the pattern's types.
     pub fn acceptsType(self: EdgeConstraints, edge_type: SymbolId) bool {
         if (self.types.len <= 1) return true; // the fetch already filtered
         for (self.types) |t| {
             if (t == edge_type) return true;
+        }
+        return false;
+    }
+
+    /// Whether the row already binds `edge_id` in one of the pattern's
+    /// earlier relationship slots.
+    pub fn usedEarlier(self: EdgeConstraints, row: *const Row, edge_id: EdgeId) bool {
+        for (self.distinct_from) |slot| {
+            const value = row.getSlot(slot) orelse continue;
+            if (value.asEdgeId()) |id| {
+                if (id == edge_id) return true;
+            }
         }
         return false;
     }
@@ -245,6 +261,10 @@ pub const Expand = struct {
             index_ptr.* += 1;
 
             if (!self.constraints.acceptsType(edge.edge_type)) continue;
+            // An undirected pattern sees a self-loop from both ends. It is one
+            // relationship, so it matches once, in the outgoing half.
+            if (self.in_incoming_phase and edge.source == edge.target) continue;
+            if (self.constraints.usedEarlier(input_row, edge.id)) continue;
 
             // Following an incoming edge means the other end is its source.
             const target_id = if (self.readingIncoming()) edge.source else edge.target;

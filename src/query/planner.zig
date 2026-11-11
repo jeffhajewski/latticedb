@@ -313,12 +313,82 @@ pub const QueryPlanner = struct {
     ) PlannerError!Operator {
         var op = input;
 
+        var edges: std.ArrayList(*const ast.EdgePattern) = .empty;
         for (match.patterns) |pattern| {
-            op = try self.planPattern(pattern, op, where_hint);
+            for (pattern.elements) |element| {
+                switch (element) {
+                    .edge => |edge| edges.append(self.allocator, edge) catch return PlannerError.OutOfMemory,
+                    .node => {},
+                }
+            }
+        }
+        var state = MatchEdges{
+            .edges = edges.items,
+            .slots = self.allocator.alloc(?u8, edges.items.len) catch return PlannerError.OutOfMemory,
+        };
+        @memset(state.slots, null);
+
+        for (match.patterns) |pattern| {
+            op = try self.planPattern(pattern, op, where_hint, &state);
         }
 
         return op orelse PlannerError.InvalidQuery;
     }
+
+    /// The relationships of one MATCH clause, for relationship uniqueness.
+    ///
+    /// Cypher never binds one relationship twice within a MATCH, across all of
+    /// its comma-separated patterns. Each single-hop expand therefore skips
+    /// edges already bound by an earlier relationship of the clause. Only
+    /// relationships whose type sets overlap can collide, so only those get a
+    /// slot to hold their edge, which keeps the extra slots off ordinary
+    /// multi-type paths.
+    ///
+    /// A variable-length relationship's edges are not kept in the row, so a
+    /// later relationship cannot check against them. A variable-length
+    /// relationship does check against earlier single-hop ones, and its own
+    /// path never reuses an edge.
+    const MatchEdges = struct {
+        /// Every relationship pattern of the clause, in order.
+        edges: []const *const ast.EdgePattern,
+        /// The slot each planned single-hop relationship's edge went to.
+        slots: []?u8,
+        /// How many relationships have been planned.
+        planned: usize = 0,
+
+        fn typesOverlap(a: []const []const u8, b: []const []const u8) bool {
+            if (a.len == 0 or b.len == 0) return true;
+            for (a) |x| {
+                for (b) |y| {
+                    if (std.mem.eql(u8, x, y)) return true;
+                }
+            }
+            return false;
+        }
+
+        /// Whether relationship `k` must keep its edge in a slot, because a
+        /// later relationship of the clause could match the same edge.
+        fn needsSlot(self: *const MatchEdges, k: usize) bool {
+            const edge = self.edges[k];
+            if (edge.quantifier != null) return false;
+            for (self.edges[k + 1 ..]) |later| {
+                if (typesOverlap(edge.types, later.types)) return true;
+            }
+            return false;
+        }
+
+        /// The slots of earlier relationships that relationship `k` must not
+        /// repeat.
+        fn distinctFrom(self: *const MatchEdges, allocator: Allocator, k: usize) PlannerError![]const u8 {
+            var slots: std.ArrayList(u8) = .empty;
+            for (self.edges[0..k], self.slots[0..k]) |earlier, slot| {
+                const s = slot orelse continue;
+                if (!typesOverlap(earlier.types, self.edges[k].types)) continue;
+                slots.append(allocator, s) catch return PlannerError.OutOfMemory;
+            }
+            return slots.items;
+        }
+    };
 
     /// Plan a single pattern
     fn planPattern(
@@ -326,6 +396,7 @@ pub const QueryPlanner = struct {
         pattern: ast.Pattern,
         input: ?Operator,
         where_hint: ?*const ast.Expression,
+        match_edges: *MatchEdges,
     ) PlannerError!Operator {
         var op = input;
         var prev_node_slot: ?u8 = null;
@@ -632,6 +703,16 @@ pub const QueryPlanner = struct {
                         }
                     }
 
+                    // Relationship uniqueness within the MATCH clause.
+                    const edge_index = match_edges.planned;
+                    match_edges.planned += 1;
+                    if (edge_slot == null and match_edges.needsSlot(edge_index)) {
+                        edge_slot = try self.allocateSlot();
+                        _ = try self.bindInternalVariable(edge_slot.?, .edge);
+                    }
+                    const distinct_from = try match_edges.distinctFrom(self.allocator, edge_index);
+                    if (edge_pattern.quantifier == null) match_edges.slots[edge_index] = edge_slot;
+
                     // Every type the pattern accepts, as in `-[:A|B]->`.
                     const edge_types = try self.resolveEdgeTypes(edge_pattern.types);
 
@@ -653,7 +734,7 @@ pub const QueryPlanner = struct {
                             op.?,
                             source_slot,
                             target_slot,
-                            .{ .types = edge_types },
+                            .{ .types = edge_types, .distinct_from = distinct_from },
                             expand_dir,
                             database,
                             quant.min_hops,
@@ -670,7 +751,7 @@ pub const QueryPlanner = struct {
                             source_slot,
                             target_slot,
                             edge_slot,
-                            .{ .types = edge_types },
+                            .{ .types = edge_types, .distinct_from = distinct_from },
                             expand_dir,
                             database,
                         ) catch {

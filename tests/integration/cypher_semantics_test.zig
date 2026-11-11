@@ -601,3 +601,41 @@ test "cypher: an unbounded variable-length pattern is not cut off at 100 hops" {
     try std.testing.expectEqual(@as(i64, 119), try queryCount(db, "MATCH (s:C {i: 1})-[:NEXT*]->(x) RETURN count(x)"));
     try std.testing.expectEqual(@as(i64, 120), try queryCount(db, "MATCH (s:C {i: 1})-[:NEXT*]->(x) RETURN max(x.i)"));
 }
+
+// ============================================================================
+// Relationship uniqueness
+// ============================================================================
+
+/// Alice-KNOWS->Bob-KNOWS->Carol, and a LOOP from Alice to herself.
+fn seedKnows(db: *Database) !void {
+    try run(db, "CREATE (a:P {name: 'Alice'}), (b:P {name: 'Bob'}), (c:P {name: 'Carol'}), " ++
+        "(a)-[:KNOWS]->(b), (b)-[:KNOWS]->(c), (a)-[:LOOP]->(a)");
+}
+
+test "cypher: a MATCH never binds one relationship twice" {
+    const path = "/tmp/lattice_cs_rel_uniqueness.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try seedKnows(db);
+
+    // Walking back over the Alice-Bob edge used to return Alice herself.
+    try expectNames(db, "MATCH (a:P {name: 'Alice'})-[:KNOWS]-(b)-[:KNOWS]-(c) RETURN c.name", &.{"Carol"});
+    // Across comma-separated patterns of one MATCH too: two KNOWS edges
+    // make two ordered pairs of distinct edges, not four.
+    try std.testing.expectEqual(@as(i64, 2), try queryCount(db, "MATCH (a)-[:KNOWS]->(b), (c)-[:KNOWS]->(d) RETURN count(*)"));
+    try std.testing.expectEqual(@as(i64, 2), try queryCount(db, "MATCH (a)-[r:KNOWS]->(b), (c)-[s:KNOWS]->(d) RETURN count(*)"));
+    // A variable-length relationship skips edges bound before it.
+    try expectNames(db, "MATCH (x:P {name: 'Alice'})-[:KNOWS]-(y)-[:KNOWS*1..2]-(z) RETURN z.name", &.{"Carol"});
+    // Separate MATCH clauses may reuse an edge.
+    try std.testing.expectEqual(@as(i64, 4), try queryCount(db, "MATCH (a)-[:KNOWS]->(b) MATCH (c)-[:KNOWS]->(d) RETURN count(*)"));
+}
+
+test "cypher: an undirected pattern matches a self-loop once" {
+    const path = "/tmp/lattice_cs_self_loop.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try seedKnows(db);
+
+    try expectNames(db, "MATCH (a:P {name: 'Alice'})-[:LOOP]-(x) RETURN x.name", &.{"Alice"});
+    try expectNames(db, "MATCH (a:P {name: 'Alice'})-[r]-(x) RETURN type(r) ORDER BY x.name", &.{ "LOOP", "KNOWS" });
+}

@@ -27,6 +27,7 @@ const NodeId = types.NodeId;
 const EdgeId = types.EdgeId;
 const PropertyValue = types.PropertyValue;
 const SymbolError = lattice.graph.symbols.SymbolError;
+const SymbolId = lattice.graph.symbols.SymbolId;
 const Transaction = lattice.transaction.manager.Transaction;
 
 const database_mod = lattice.storage.database;
@@ -1321,7 +1322,16 @@ fn clearEdgeProperties(database: *Database, txn: ?*Transaction, edge_id: EdgeId)
 // ============================================================================
 
 /// Operator that implements MERGE for a single node pattern.
-/// Finds an existing node matching labels and properties, or creates one.
+///
+/// Matches every node that carries all of the pattern's labels and has every
+/// pattern property equal to its value, and emits one row per match. A
+/// pattern without labels considers every node. Only when nothing matches is
+/// a node created, with all the labels and properties. A pattern property
+/// whose value is null is an error, as in Cypher: no node could ever match
+/// it, so the merge would create a new node on every run.
+///
+/// Candidates come from a property index on one of the labels when one
+/// exists, otherwise from the label index, otherwise from every node.
 pub const MergeNode = struct {
     /// Optional input operator
     input: ?Operator,
@@ -1345,6 +1355,11 @@ pub const MergeNode = struct {
     merged: bool,
     /// Output row
     current_row: ?*Row,
+    /// The input row the pending matches belong to
+    pending_input: ?*Row,
+    /// Matched nodes not yet emitted for the current input row
+    pending: std.ArrayList(NodeId),
+    pending_index: usize,
     /// Allocator
     allocator: Allocator,
 
@@ -1373,6 +1388,9 @@ pub const MergeNode = struct {
             .opened = false,
             .merged = false,
             .current_row = null,
+            .pending_input = null,
+            .pending = .empty,
+            .pending_index = 0,
             .allocator = allocator,
         };
         return self;
@@ -1408,46 +1426,39 @@ pub const MergeNode = struct {
 
         const output_row = self.current_row orelse return OperatorError.NotInitialized;
 
-        if (self.input) |input| {
-            const input_row = try input.next(ctx) orelse return null;
-            output_row.copyFrom(input_row);
-            const node_id = try self.mergeNode(ctx, input_row);
-            output_row.setSlot(self.output_slot, .{ .node_ref = node_id });
-            return output_row;
+        while (true) {
+            if (self.pending_index < self.pending.items.len) {
+                const node_id = self.pending.items[self.pending_index];
+                self.pending_index += 1;
+                output_row.clear();
+                if (self.pending_input) |input_row| output_row.copyFrom(input_row);
+                output_row.setSlot(self.output_slot, .{ .node_ref = node_id });
+                return output_row;
+            }
+
+            var input_row: ?*Row = null;
+            if (self.input) |input| {
+                input_row = try input.next(ctx) orelse return null;
+            } else {
+                // No input: merge once.
+                if (self.merged) return null;
+                self.merged = true;
+            }
+            self.pending_input = input_row;
+            self.pending.clearRetainingCapacity();
+            self.pending_index = 0;
+            try self.mergeNode(ctx, input_row);
         }
-
-        // No input — single merge
-        if (self.merged) return null;
-        self.merged = true;
-
-        output_row.clear();
-        const node_id = try self.mergeNode(ctx, null);
-        output_row.setSlot(self.output_slot, .{ .node_ref = node_id });
-        return output_row;
     }
 
-    fn mergeNode(self: *Self, ctx: *ExecutionContext, row: ?*const Row) OperatorError!NodeId {
-        // Try to find an existing node matching the pattern
-        if (self.labels.len > 0) {
-            const candidates = self.database.getNodesByLabelInTxn(ctx.txn, self.labels[0]) catch {
-                return OperatorError.StorageError;
-            };
-            defer self.database.allocator.free(candidates);
-
-            for (candidates) |candidate_id| {
-                if (try self.matchesProperties(candidate_id, ctx, row)) {
-                    // ON MATCH: apply on_match properties
-                    try self.applySetItems(candidate_id, self.on_match_props, ctx, row);
-                    return candidate_id;
-                }
-            }
-        }
-
+    /// Find every node the pattern matches, applying ON MATCH to each, or
+    /// create one and apply ON CREATE. Leaves the nodes in `pending`.
+    fn mergeNode(self: *Self, ctx: *ExecutionContext, row: ?*const Row) OperatorError!void {
         var dummy_row = Row.init();
         const eval_row: *const Row = if (row) |r| r else &dummy_row;
 
-        // Evaluate pattern properties before create to avoid silent skips and
-        // accidental creation of partially initialized nodes.
+        // Evaluate the pattern properties once: they drive both the match and
+        // the create.
         var evaluated_pattern: std.ArrayList(EvaluatedProperty) = .empty;
         defer evaluated_pattern.deinit(self.allocator);
         try evaluatePropertyExprList(
@@ -1458,46 +1469,102 @@ pub const MergeNode = struct {
             ctx,
             &evaluated_pattern,
         );
+        for (evaluated_pattern.items) |prop| {
+            if (prop.value == .null_val) return OperatorError.EvaluationError;
+        }
+
+        try self.findMatches(ctx, evaluated_pattern.items);
+
+        if (self.pending.items.len > 0) {
+            for (self.pending.items) |node_id| {
+                try self.applySetItems(node_id, self.on_match_props, ctx, row);
+            }
+            return;
+        }
 
         // Not found — create the node
         const node_id = self.database.createNode(ctx.txn, self.labels) catch {
             return OperatorError.StorageError;
         };
-
-        // Set the pattern properties on the new node
         try applyEvaluatedNodeProperties(self.database, ctx.txn, node_id, evaluated_pattern.items);
-
-        // ON CREATE: apply on_create properties
         try self.applySetItems(node_id, self.on_create_props, ctx, row);
-
-        return node_id;
+        self.pending.append(self.allocator, node_id) catch return OperatorError.OutOfMemory;
     }
 
-    fn matchesProperties(self: *Self, node_id: NodeId, ctx: *ExecutionContext, row: ?*const Row) OperatorError!bool {
-        if (self.properties.len == 0) return true;
+    /// Put every visible node with all the labels and properties in `pending`.
+    fn findMatches(self: *Self, ctx: *ExecutionContext, props: []const EvaluatedProperty) OperatorError!void {
+        const symbol_table = &self.database.symbol_table;
 
-        var dummy_row = Row.init();
-        const eval_row: *const Row = if (row) |r| r else &dummy_row;
-
-        for (self.properties) |prop| {
-            // Evaluate the expected value from the pattern
-            const expected = self.evaluator.evaluate(prop.value_expr, eval_row, ctx) catch |err| {
-                return mapEvalError(err);
+        // A label or property key the database has never seen cannot be on
+        // any node, so nothing matches.
+        const label_ids = self.allocator.alloc(SymbolId, self.labels.len) catch return OperatorError.OutOfMemory;
+        defer self.allocator.free(label_ids);
+        for (self.labels, label_ids) |label, *id| {
+            id.* = symbol_table.lookup(label) catch |err| switch (err) {
+                SymbolError.NotFound => return,
+                else => return OperatorError.StorageError,
             };
-            const expected_pv = evalResultToPropertyValue(expected, self.allocator) orelse return OperatorError.TypeError;
+        }
+        const key_ids = self.allocator.alloc(SymbolId, props.len) catch return OperatorError.OutOfMemory;
+        defer self.allocator.free(key_ids);
+        for (props, key_ids) |prop, *id| {
+            id.* = symbol_table.lookup(prop.key) catch |err| switch (err) {
+                SymbolError.NotFound => return,
+                else => return OperatorError.StorageError,
+            };
+        }
 
-            // Get the actual value from the node
-            const actual = self.database.getNodePropertyInTxn(ctx.txn, node_id, prop.key) catch {
+        const candidates = try self.candidateIds(ctx, props);
+        defer self.database.allocator.free(candidates);
+
+        for (candidates) |candidate_id| {
+            var node = (self.database.getNodeInTxn(ctx.txn, candidate_id) catch {
                 return OperatorError.StorageError;
-            };
-            if (actual == null) return false;
-            var actual_val = actual.?;
-            defer actual_val.deinit(self.database.allocator);
+            }) orelse continue;
+            defer node.deinit(self.database.allocator);
+            if (!nodeMatches(node, label_ids, props, key_ids)) continue;
+            self.pending.append(self.allocator, candidate_id) catch return OperatorError.OutOfMemory;
+        }
+    }
 
-            // Compare values
-            if (!propertyValuesEqual(expected_pv, actual_val)) {
+    /// The smallest candidate set available: a property index lookup, the
+    /// first label's nodes, or every node. Owned by the database allocator.
+    fn candidateIds(self: *Self, ctx: *ExecutionContext, props: []const EvaluatedProperty) OperatorError![]NodeId {
+        for (self.labels) |label| {
+            for (props) |prop| {
+                const indexed = self.database.hasNodePropertyIndex(label, prop.key) catch false;
+                if (!indexed) continue;
+                return self.database.findNodesByLabelProperty(
+                    ctx.txn,
+                    label,
+                    prop.key,
+                    prop.value,
+                    std.math.maxInt(usize),
+                ) catch return OperatorError.StorageError;
+            }
+        }
+        if (self.labels.len > 0) {
+            return self.database.getNodesByLabelInTxn(ctx.txn, self.labels[0]) catch return OperatorError.StorageError;
+        }
+        return self.database.getAllNodeIdsInTxn(ctx.txn) catch return OperatorError.StorageError;
+    }
+
+    fn nodeMatches(
+        node: lattice.graph.node.Node,
+        label_ids: []const SymbolId,
+        props: []const EvaluatedProperty,
+        key_ids: []const SymbolId,
+    ) bool {
+        for (label_ids) |wanted| {
+            if (std.mem.indexOfScalar(SymbolId, node.labels, wanted) == null) return false;
+        }
+        outer: for (props, key_ids) |prop, key_id| {
+            for (node.properties) |actual| {
+                if (actual.key_id != key_id) continue;
+                if (mergeValuesEqual(prop.value, actual.value)) continue :outer;
                 return false;
             }
+            return false;
         }
         return true;
     }
@@ -1529,9 +1596,49 @@ pub const MergeNode = struct {
     fn deinit(ptr: *anyopaque, allocator: Allocator) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         if (self.input) |input| input.deinit(allocator);
+        self.pending.deinit(self.allocator);
         allocator.destroy(self);
     }
 };
+
+/// Equality for MERGE matching, as Cypher's `=` sees it: an integer equals
+/// the float with the same value, and lists and maps compare element by
+/// element.
+fn mergeValuesEqual(a: PropertyValue, b: PropertyValue) bool {
+    switch (a) {
+        .int_val => |av| switch (b) {
+            .int_val => |bv| return av == bv,
+            .float_val => |bv| return @as(f64, @floatFromInt(av)) == bv,
+            else => return false,
+        },
+        .float_val => |av| switch (b) {
+            .float_val => |bv| return av == bv,
+            .int_val => |bv| return av == @as(f64, @floatFromInt(bv)),
+            else => return false,
+        },
+        .list_val => |list| {
+            if (b != .list_val or b.list_val.len != list.len) return false;
+            for (list, b.list_val) |lhs, rhs| {
+                if (!mergeValuesEqual(lhs, rhs)) return false;
+            }
+            return true;
+        },
+        .map_val => |map| {
+            if (b != .map_val or b.map_val.len != map.len) return false;
+            for (map) |entry| {
+                for (b.map_val) |other| {
+                    if (!std.mem.eql(u8, entry.key, other.key)) continue;
+                    if (!mergeValuesEqual(entry.value, other.value)) return false;
+                    break;
+                } else return false;
+            }
+            return true;
+        },
+        .bytes_val => |v| return b == .bytes_val and std.mem.eql(u8, b.bytes_val, v),
+        .vector_val => |v| return b == .vector_val and std.mem.eql(f32, b.vector_val, v),
+        else => return propertyValuesEqual(a, b),
+    }
+}
 
 // ============================================================================
 // MergeEdge Operator

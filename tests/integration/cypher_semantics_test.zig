@@ -639,3 +639,84 @@ test "cypher: an undirected pattern matches a self-loop once" {
     try expectNames(db, "MATCH (a:P {name: 'Alice'})-[:LOOP]-(x) RETURN x.name", &.{"Alice"});
     try expectNames(db, "MATCH (a:P {name: 'Alice'})-[r]-(x) RETURN type(r) ORDER BY x.name", &.{ "LOOP", "KNOWS" });
 }
+
+// ============================================================================
+// MERGE on nodes
+// ============================================================================
+
+test "cypher: MERGE without a label matches any node with the properties" {
+    const path = "/tmp/lattice_cs_merge_no_label.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    // It used to create a node every time.
+    try run(db, "MERGE (n {email: 'x'})");
+    try run(db, "MERGE (n {email: 'x'})");
+    try std.testing.expectEqual(@as(i64, 1), try queryCount(db, "MATCH (n) RETURN count(n)"));
+    try run(db, "CREATE (:User {email: 'y'})");
+    try run(db, "MERGE (n {email: 'y'})");
+    try std.testing.expectEqual(@as(i64, 2), try queryCount(db, "MATCH (n) RETURN count(n)"));
+}
+
+test "cypher: MERGE checks every label" {
+    const path = "/tmp/lattice_cs_merge_labels.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try run(db, "CREATE (:A {k: 1})");
+
+    // A node with only :A used to match `:A:B` and come back without :B.
+    try std.testing.expectEqual(@as(i64, 2), try queryCount(db, "MERGE (n:A:B {k: 1}) RETURN size(labels(n))"));
+    try std.testing.expectEqual(@as(i64, 2), try queryCount(db, "MATCH (n:A) RETURN count(n)"));
+    try std.testing.expectEqual(@as(i64, 1), try queryCount(db, "MATCH (n:B) RETURN count(n)"));
+    // Merging again finds the :A:B node.
+    try run(db, "MERGE (n:A:B {k: 1})");
+    try std.testing.expectEqual(@as(i64, 1), try queryCount(db, "MATCH (n:B) RETURN count(n)"));
+}
+
+test "cypher: MERGE returns every matching node" {
+    const path = "/tmp/lattice_cs_merge_many.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try run(db, "CREATE (:A {k: 1}), (:A {k: 1}), (:A {k: 2})");
+
+    try std.testing.expectEqual(@as(i64, 2), try queryCount(db, "MERGE (n:A {k: 1}) ON MATCH SET n.seen = true RETURN count(n)"));
+    try std.testing.expectEqual(@as(i64, 2), try queryCount(db, "MATCH (n:A) WHERE n.seen RETURN count(n)"));
+    // An integer property matches the equal float, as `=` does.
+    try std.testing.expectEqual(@as(i64, 1), try queryCount(db, "MERGE (n:A {k: 2.0}) RETURN count(n)"));
+    try std.testing.expectEqual(@as(i64, 3), try queryCount(db, "MATCH (n:A) RETURN count(n)"));
+    // Lists compare by value, so a second merge finds the first node.
+    try run(db, "MERGE (n:L {tags: [1, 2]})");
+    try run(db, "MERGE (n:L {tags: [1, 2]})");
+    try std.testing.expectEqual(@as(i64, 1), try queryCount(db, "MATCH (n:L) RETURN count(n)"));
+}
+
+test "cypher: MERGE within one query sees nodes it created earlier" {
+    const path = "/tmp/lattice_cs_merge_rows.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    try std.testing.expectEqual(@as(i64, 5), try queryCount(db, "UNWIND [1, 2, 2, 3, 1] AS i MERGE (p:Person {id: i}) RETURN count(*)"));
+    try std.testing.expectEqual(@as(i64, 3), try queryCount(db, "MATCH (p:Person) RETURN count(p)"));
+}
+
+test "cypher: MERGE with a null property value fails" {
+    const path = "/tmp/lattice_cs_merge_null.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    try std.testing.expectError(QueryError.ExecutionError, db.query("MERGE (n:A {k: null})"));
+    try std.testing.expectEqual(@as(i64, 0), try queryCount(db, "MATCH (n) RETURN count(n)"));
+}
+
+test "cypher: MERGE uses a property index and still sees uncommitted nodes" {
+    const path = "/tmp/lattice_cs_merge_index.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try db.createNodePropertyIndex("Person", "id");
+
+    try run(db, "UNWIND range(1, 50) AS i CREATE (:Person {id: i})");
+    try std.testing.expectEqual(@as(i64, 60), try queryCount(db, "UNWIND range(1, 60) AS i MERGE (p:Person {id: i}) RETURN count(*)"));
+    try std.testing.expectEqual(@as(i64, 60), try queryCount(db, "MATCH (p:Person) RETURN count(p)"));
+    try std.testing.expectEqual(@as(i64, 60), try queryCount(db, "UNWIND range(1, 60) AS i MERGE (p:Person {id: i}) RETURN count(*)"));
+    try std.testing.expectEqual(@as(i64, 60), try queryCount(db, "MATCH (p:Person) RETURN count(p)"));
+}

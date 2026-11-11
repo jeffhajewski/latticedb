@@ -288,12 +288,7 @@ fn cmdInfo(
     const path = parsed_args.path.?;
 
     // Open database
-    const db = Database.open(allocator, path, .{
-        .read_only = true,
-        .lock = !parsed_args.no_lock,
-    }) catch |err| {
-        return failOpen(stderr, path, err);
-    };
+    const db = try openDatabase(allocator, stderr, parsed_args, .read_only);
     defer db.close();
 
     const node_count = db.nodeCount();
@@ -350,15 +345,9 @@ fn cmdCount(
     stderr: anytype,
     parsed_args: *const Args,
 ) !void {
-    const path = parsed_args.path.?;
 
     // Open database
-    var db = Database.open(allocator, path, .{
-        .read_only = true,
-        .lock = !parsed_args.no_lock,
-    }) catch |err| {
-        return failOpen(stderr, path, err);
-    };
+    const db = try openDatabase(allocator, stderr, parsed_args, .read_only);
     defer db.close();
 
     const node_count = db.nodeCount();
@@ -409,12 +398,9 @@ fn cmdQuery(
     stderr: anytype,
     parsed_args: *const Args,
 ) !void {
-    const path = parsed_args.path.?;
 
     // Open database
-    const db = Database.open(allocator, path, .{ .lock = !parsed_args.no_lock }) catch |err| {
-        return failOpen(stderr, path, err);
-    };
+    const db = try openDatabase(allocator, stderr, parsed_args, .read_write);
     defer db.close();
 
     // Start REPL
@@ -428,7 +414,6 @@ fn cmdExec(
     stderr: anytype,
     parsed_args: *const Args,
 ) !void {
-    const path = parsed_args.path.?;
 
     // Get query string from --query or --file
     var query_string: []const u8 = undefined;
@@ -453,9 +438,7 @@ fn cmdExec(
     defer if (query_owned) allocator.free(query_string);
 
     // Open database
-    const db = Database.open(allocator, path, .{ .lock = !parsed_args.no_lock }) catch |err| {
-        return failOpen(stderr, path, err);
-    };
+    const db = try openDatabase(allocator, stderr, parsed_args, .read_write);
     defer db.close();
 
     var detailed = db.queryDetailed(query_string) catch |err| {
@@ -491,15 +474,9 @@ fn cmdLabels(
     stderr: anytype,
     parsed_args: *const Args,
 ) !void {
-    const path = parsed_args.path.?;
 
     // Open database
-    var db = Database.open(allocator, path, .{
-        .read_only = true,
-        .lock = !parsed_args.no_lock,
-    }) catch |err| {
-        return failOpen(stderr, path, err);
-    };
+    const db = try openDatabase(allocator, stderr, parsed_args, .read_only);
     defer db.close();
 
     // Get all labels
@@ -572,15 +549,9 @@ fn cmdTypes(
     stderr: anytype,
     parsed_args: *const Args,
 ) !void {
-    const path = parsed_args.path.?;
 
     // Open database
-    var db = Database.open(allocator, path, .{
-        .read_only = true,
-        .lock = !parsed_args.no_lock,
-    }) catch |err| {
-        return failOpen(stderr, path, err);
-    };
+    const db = try openDatabase(allocator, stderr, parsed_args, .read_only);
     defer db.close();
 
     // Get all edge types
@@ -653,15 +624,9 @@ fn cmdSchema(
     stderr: anytype,
     parsed_args: *const Args,
 ) !void {
-    const path = parsed_args.path.?;
 
     // Open database
-    var db = Database.open(allocator, path, .{
-        .read_only = true,
-        .lock = !parsed_args.no_lock,
-    }) catch |err| {
-        return failOpen(stderr, path, err);
-    };
+    const db = try openDatabase(allocator, stderr, parsed_args, .read_only);
     defer db.close();
 
     // Get all labels
@@ -737,9 +702,7 @@ fn cmdCompact(
     parsed_args: *const Args,
 ) !void {
     const path = parsed_args.path.?;
-    const db = Database.open(allocator, path, .{ .lock = !parsed_args.no_lock }) catch |err| {
-        return failOpen(stderr, path, err);
-    };
+    const db = try openDatabase(allocator, stderr, parsed_args, .read_write);
     defer db.close();
 
     const stats = db.compact() catch |err| {
@@ -779,9 +742,7 @@ fn cmdBackup(
         return failCommand(stderr, "No destination provided. Use --file=<path>", .{});
     };
 
-    const db = Database.open(allocator, path, .{ .lock = !parsed_args.no_lock }) catch |err| {
-        return failOpen(stderr, path, err);
-    };
+    const db = try openDatabase(allocator, stderr, parsed_args, .read_write);
     defer db.close();
 
     const stats = db.backup(dest) catch |err| {
@@ -878,9 +839,7 @@ fn cmdReplicate(
         return failCommand(stderr, "No destination provided. Use --to=<directory>", .{});
     };
 
-    const db = Database.open(allocator, path, .{ .lock = !parsed_args.no_lock }) catch |err| {
-        return failOpen(stderr, path, err);
-    };
+    const db = try openDatabase(allocator, stderr, parsed_args, .read_write);
     defer db.close();
 
     // The CSV header belongs above the rows rather than repeated per pass.
@@ -919,11 +878,42 @@ fn cmdReplicate(
     }
 }
 
+const OpenMode = enum { read_only, read_write };
+
+/// The options every command that opens an existing database passes.
+///
+/// The vector options matter beyond vector search: a database whose log holds
+/// committed vector changes can only be opened with vectors enabled at the
+/// dimensions it was written with, because replaying the log needs the index.
+fn openOptions(parsed_args: *const Args, mode: OpenMode) OpenOptions {
+    return .{
+        .read_only = mode == .read_only,
+        .lock = !parsed_args.no_lock,
+        .config = .{
+            .enable_vector = parsed_args.enable_vector,
+            .vector_dimensions = parsed_args.vector_dims,
+        },
+    };
+}
+
+/// Open the database named on the command line, or explain why it would not.
+fn openDatabase(
+    allocator: std.mem.Allocator,
+    stderr: anytype,
+    parsed_args: *const Args,
+    mode: OpenMode,
+) !*Database {
+    const path = parsed_args.path.?;
+    return Database.open(allocator, path, openOptions(parsed_args, mode)) catch |err| {
+        return failOpen(stderr, path, err, parsed_args.enable_vector);
+    };
+}
+
 /// Report a database that would not open.
 ///
-/// A locked database gets its own wording, because "DatabaseLocked" tells you
-/// what happened and not what to do about it.
-fn failOpen(stderr: anytype, path: []const u8, err: anyerror) anyerror {
+/// The engine's error names say what happened and not what to do about it, so
+/// the ones with a likely remedy get wording that names it.
+fn failOpen(stderr: anytype, path: []const u8, err: anyerror, vectors_enabled: bool) anyerror {
     if (err == DatabaseError.DatabaseLocked) {
         return failCommand(
             stderr,
@@ -931,7 +921,29 @@ fn failOpen(stderr: anytype, path: []const u8, err: anyerror) anyerror {
             .{path},
         );
     }
-    return failCommand(stderr, "Failed to open database: {s}", .{@errorName(err)});
+    if (err == DatabaseError.NotFound or err == error.FileNotFound) {
+        return failCommand(stderr, "Database not found: {s}. Create it first with 'lattice create'.", .{path});
+    }
+    // An unreplayable vector change in the log surfaces as IoError, and so do
+    // dimensions that do not match what the file was written with.
+    if (err == DatabaseError.IoError and !vectors_enabled) {
+        return failCommand(
+            stderr,
+            "Failed to open database {s}: IoError. If it stores vectors, its write-ahead log may hold vector changes " ++
+                "that can only be replayed with vectors enabled. Retry with --enable-vector --vector-dims=<n>, " ++
+                "where <n> is the number of dimensions the database was created with.",
+            .{path},
+        );
+    }
+    if ((err == DatabaseError.IoError or err == DatabaseError.InvalidArgument) and vectors_enabled) {
+        return failCommand(
+            stderr,
+            "Failed to open database {s}: {s}. Check that --vector-dims matches the number of dimensions " ++
+                "the database was created with.",
+            .{ path, @errorName(err) },
+        );
+    }
+    return failCommand(stderr, "Failed to open database {s}: {s}", .{ path, @errorName(err) });
 }
 
 fn cmdRestore(
@@ -1033,9 +1045,7 @@ fn cmdCheckpoint(
     parsed_args: *const Args,
 ) !void {
     const path = parsed_args.path.?;
-    const db = Database.open(allocator, path, .{ .lock = !parsed_args.no_lock }) catch |err| {
-        return failOpen(stderr, path, err);
-    };
+    const db = try openDatabase(allocator, stderr, parsed_args, .read_write);
     defer db.close();
 
     const maybe_stats = db.checkpoint(.truncate) catch |err| {
@@ -1177,9 +1187,7 @@ fn cmdImport(
     };
 
     // Open database
-    var db = Database.open(allocator, path, .{ .lock = !parsed_args.no_lock }) catch |err| {
-        return failOpen(stderr, path, err);
-    };
+    const db = try openDatabase(allocator, stderr, parsed_args, .read_write);
     defer db.close();
 
     output.printInfo(stdout, "Importing {s} into {s}...", .{ file, path });
@@ -1243,12 +1251,7 @@ fn cmdExport(
     };
 
     // Open database
-    var db = Database.open(allocator, path, .{
-        .read_only = true,
-        .lock = !parsed_args.no_lock,
-    }) catch |err| {
-        return failOpen(stderr, path, err);
-    };
+    const db = try openDatabase(allocator, stderr, parsed_args, .read_only);
     defer db.close();
 
     output.printInfo(stdout, "Exporting {s} to {s}...", .{ path, file });
@@ -1363,15 +1366,9 @@ fn cmdDump(
     stderr: anytype,
     parsed_args: *const Args,
 ) !void {
-    const path = parsed_args.path.?;
 
     // Open database
-    var db = Database.open(allocator, path, .{
-        .read_only = true,
-        .lock = !parsed_args.no_lock,
-    }) catch |err| {
-        return failOpen(stderr, path, err);
-    };
+    const db = try openDatabase(allocator, stderr, parsed_args, .read_only);
     defer db.close();
 
     // Dump to stdout as canonical JSON
@@ -1433,7 +1430,9 @@ fn printUsage(writer: anytype) void {
         \\
         \\Options:
         \\  --format=<fmt>        Output format: table, json, csv (default: table)
-        \\  --enable-vector       Enable vector index (for create)
+        \\  --enable-vector       Create or open with the vector index. A database
+        \\                        that stores vectors needs this, with its
+        \\                        dimensions, once its log holds vector changes.
         \\  --vector-dims=<n>     Vector dimensions, 1..4096 (default: 128)
         \\  --enable-fts          Enable full-text search (default: on)
         \\  --no-fts              Disable full-text search
@@ -1490,6 +1489,13 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\
             \\Start an interactive Cypher query shell.
             \\
+            \\Options:
+            \\  --enable-vector       Open with the vector index. A database that
+            \\                        stores vectors needs this once its log holds
+            \\                        vector changes.
+            \\  --vector-dims=<n>     Dimensions the database was created with
+            \\                        (default: 128)
+            \\
             \\REPL Commands:
             \\  .help                 Show REPL help
             \\  .labels               List all node labels
@@ -1520,6 +1526,11 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\Options:
             \\  --file=<path>         Where to write the copy
             \\  --format=<fmt>        Output format: table, json, csv
+            \\  --enable-vector       Open with the vector index. A database that
+            \\                        stores vectors needs this once its log holds
+            \\                        vector changes.
+            \\  --vector-dims=<n>     Dimensions the database was created with
+            \\                        (default: 128)
             \\
             \\Example:
             \\  lattice backup mydb.lattice --file=/backups/mydb-$(date +%F).lattice
@@ -1553,6 +1564,11 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\  --follow              Keep running, shipping on an interval
             \\  --interval=<seconds>  How long to wait between passes (default 10)
             \\  --format=<fmt>        Output format: table, json, csv
+            \\  --enable-vector       Open with the vector index. A database that
+            \\                        stores vectors needs this once its log holds
+            \\                        vector changes.
+            \\  --vector-dims=<n>     Dimensions the database was created with
+            \\                        (default: 128)
             \\
             \\Examples:
             \\  lattice replicate mydb.lattice --to=/mnt/backup/mydb
@@ -1599,6 +1615,11 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\
             \\Options:
             \\  --format=<fmt>        Output format: table, json, csv
+            \\  --enable-vector       Open with the vector index. A database that
+            \\                        stores vectors needs this once its log holds
+            \\                        vector changes.
+            \\  --vector-dims=<n>     Dimensions the database was created with
+            \\                        (default: 128)
             \\
             \\Example:
             \\  lattice checkpoint mydb.lattice
@@ -1613,6 +1634,11 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\
             \\Options:
             \\  --format=<fmt>        Output format: table, json, csv
+            \\  --enable-vector       Open with the vector index. A database that
+            \\                        stores vectors needs this once its log holds
+            \\                        vector changes.
+            \\  --vector-dims=<n>     Dimensions the database was created with
+            \\                        (default: 128)
             \\
             \\Example:
             \\  lattice compact mydb.lattice
@@ -1644,6 +1670,11 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\  --query=<cypher>      The Cypher query to execute
             \\  --file=<path>         Read query from file instead
             \\  --format=<fmt>        Output format: table, json, csv
+            \\  --enable-vector       Open with the vector index. A database that
+            \\                        stores vectors needs this once its log holds
+            \\                        vector changes.
+            \\  --vector-dims=<n>     Dimensions the database was created with
+            \\                        (default: 128)
             \\
             \\Examples:
             \\  lattice exec mydb.lattice --query="MATCH (n) RETURN count(n)"
@@ -1659,6 +1690,11 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\  --file=<path>         Input file (JSON or CSV)
             \\  --batch-size=<n>      Commit every N items (default: 1000)
             \\  --on-error=skip       Skip invalid records instead of aborting
+            \\  --enable-vector       Open with the vector index. A database that
+            \\                        stores vectors needs this once its log holds
+            \\                        vector changes.
+            \\  --vector-dims=<n>     Dimensions the database was created with
+            \\                        (default: 128)
             \\
             \\When --on-error=skip is set, records are applied individually so
             \\ successful rows are preserved.
@@ -1683,6 +1719,11 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\Options:
             \\  --file=<path>         Output file path (.json, .jsonl, .csv, .dot)
             \\  --format=<fmt>        CLI output format: table, json, csv
+            \\  --enable-vector       Open with the vector index. A database that
+            \\                        stores vectors needs this once its log holds
+            \\                        vector changes.
+            \\  --vector-dims=<n>     Dimensions the database was created with
+            \\                        (default: 128)
             \\  --labels=<list>       Filter by labels (comma-separated)
             \\  --query=<cypher>      Export query results instead
             \\
@@ -1694,8 +1735,21 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\
         ) catch {},
         else => {
-            writer.print("Usage: lattice {s} <path>\n\n", .{@tagName(command)}) catch {};
-            writer.print("{s}\n", .{command.description()}) catch {};
+            if (!command.requiresPath()) {
+                writer.print("Usage: lattice {s}\n\n{s}\n", .{ @tagName(command), command.description() }) catch {};
+                return;
+            }
+            writer.print("Usage: lattice {s} <path> [options]\n\n", .{@tagName(command)}) catch {};
+            writer.print("{s}\n\n", .{command.description()}) catch {};
+            writer.writeAll(
+                \\Options:
+                \\  --format=<fmt>        Output format: table, json, csv
+                \\  --enable-vector       Open with the vector index
+                \\  --vector-dims=<n>     Dimensions the database was created with
+                \\                        (default: 128)
+                \\  --no-lock             Skip the file lock, for filesystems without one
+                \\
+            ) catch {};
         },
     }
 }

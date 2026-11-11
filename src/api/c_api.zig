@@ -142,6 +142,10 @@ const QueryHandle = struct {
     last_error_line: u32,
     last_error_column: u32,
     last_error_length: u32,
+    /// The parsed query, pinned in the database's query cache, so prepare
+    /// parses once and lattice_query_writes and every execute reuse it.
+    /// Null when it could not be cached; those calls then parse the text.
+    prepared: ?Database.PreparedQuery = null,
 
     fn init(cypher: []const u8, cypher_owned: bool, db_handle: *DatabaseHandle) QueryHandle {
         return .{
@@ -3664,6 +3668,10 @@ pub export fn lattice_query_prepare(
     }
     db_handle.active_children += 1;
 
+    // Parse now, once. A query that does not parse still prepares: its
+    // error is reported by execute, with its location, as it always was.
+    query_handle.prepared = db_handle.db.prepareCached(cypher_copy);
+
     query_out.* = toOpaque(lattice_query, query_handle);
     return .ok;
 }
@@ -3729,7 +3737,12 @@ pub export fn lattice_query_execute(
     query_handle.clearLastError();
 
     // Execute the query (with or without parameters), retaining structured diagnostics.
-    var detailed = if (query_handle.parameters.count() > 0)
+    const params: ?*const std.StringHashMap(PropertyValue) = if (query_handle.parameters.count() > 0) &query_handle.parameters else null;
+    var detailed = if (query_handle.prepared) |prepared|
+        db_handle.db.executePreparedDetailedInTxn(txn_ptr, prepared, params) catch |err| {
+            return mapQueryError(err);
+        }
+    else if (query_handle.parameters.count() > 0)
         query_handle.db_handle.db.queryWithParamsDetailedInTxn(txn_ptr, query_handle.cypher, &query_handle.parameters) catch |err| {
             return mapQueryError(err);
         }
@@ -3823,6 +3836,7 @@ pub export fn lattice_query_writes(query: ?*lattice_query) bool {
     defer query_handle.db_handle.mutex.unlock();
     if (ensureActiveDbLocked(query_handle.db_handle) != .ok) return false;
 
+    if (query_handle.prepared) |prepared| return prepared.writes();
     return query_handle.db_handle.db.queryWrites(query_handle.cypher);
 }
 
@@ -3857,6 +3871,12 @@ pub export fn lattice_query_free(query: ?*lattice_query) void {
     defer db_handle.mutex.unlock();
     unregisterHandle(QueryHandle, query_handle);
     releaseDbChildLocked(db_handle, &query_handle.counted_child);
+
+    // The database cannot have closed: close refuses while a query is open.
+    if (query_handle.prepared) |prepared| {
+        db_handle.db.releasePrepared(prepared);
+        query_handle.prepared = null;
+    }
 
     // Clean up parameters
     query_handle.deinit();

@@ -3789,3 +3789,100 @@ test "c_api: set_vector rejects a key other than embedding" {
     try std.testing.expectEqual(node, found);
     try std.testing.expect(distance < 1e-3);
 }
+
+fn cacheEntries(db: ?*lattice_database) !u32 {
+    var entries: u32 = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_cache_stats(db, &entries, null, null));
+    return entries;
+}
+
+fn runCount(db: ?*lattice_database, query: ?*lattice_query) !usize {
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &txn));
+    defer _ = c_api.lattice_rollback(txn);
+    var result: ?*lattice_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_execute(query, txn, &result));
+    defer c_api.lattice_result_free(result);
+    var rows: usize = 0;
+    while (c_api.lattice_result_next(result)) rows += 1;
+    return rows;
+}
+
+test "c_api: a prepared query is parsed once and outlives cache clears and eviction" {
+    const path = "/tmp/lattice_capi_prepared_once_test.db";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+    }
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+    var node_id: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &node_id));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "Person", &node_id));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+
+    var read: ?*lattice_query = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_prepare(db, "MATCH (n:Person) RETURN n", &read));
+    defer c_api.lattice_query_free(read);
+    var write: ?*lattice_query = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_prepare(db, "CREATE (n:Person) RETURN n", &write));
+    defer c_api.lattice_query_free(write);
+    try std.testing.expect(!c_api.lattice_query_writes(read));
+    try std.testing.expect(c_api.lattice_query_writes(write));
+
+    // Prepare parsed and cached it; executing it twice looks nothing up.
+    var hits: u64 = 0;
+    var misses: u64 = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_cache_stats(db, null, &hits, &misses));
+    try std.testing.expectEqual(@as(u64, 2), misses);
+    try std.testing.expectEqual(@as(usize, 2), try runCount(db, read));
+    try std.testing.expectEqual(@as(usize, 2), try runCount(db, read));
+    var hits_after: u64 = 0;
+    var misses_after: u64 = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_cache_stats(db, null, &hits_after, &misses_after));
+    try std.testing.expectEqual(hits, hits_after);
+    try std.testing.expectEqual(misses, misses_after);
+
+    // A clear keeps what open queries hold, and frees it once they close.
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_cache_clear(db));
+    try std.testing.expectEqual(@as(u32, 2), try cacheEntries(db));
+    try std.testing.expectEqual(@as(usize, 2), try runCount(db, read));
+
+    // Many other queries evict everything else; the prepared one still runs.
+    var buf: [64]u8 = undefined;
+    for (0..300) |i| {
+        const cypher = try std.fmt.bufPrintZ(&buf, "UNWIND [{d}] AS x RETURN x", .{i});
+        var other: ?*lattice_query = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_prepare(db, cypher.ptr, &other));
+        try std.testing.expectEqual(@as(usize, 1), try runCount(db, other));
+        c_api.lattice_query_free(other);
+    }
+    try std.testing.expectEqual(@as(usize, 2), try runCount(db, read));
+
+    // A query that does not parse still prepares, reads as not writing, and
+    // reports its error with a location when it runs.
+    var broken: ?*lattice_query = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_prepare(db, "MATCH (n RETURN n", &broken));
+    defer c_api.lattice_query_free(broken);
+    try std.testing.expect(!c_api.lattice_query_writes(broken));
+    var ro: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &ro));
+    defer _ = c_api.lattice_rollback(ro);
+    var result: ?*lattice_result = null;
+    try std.testing.expect(c_api.lattice_query_execute(broken, ro, &result) != .ok);
+    try std.testing.expectEqual(lattice_query_error_stage.parse, c_api.lattice_query_last_error_stage(broken));
+    try std.testing.expect(c_api.lattice_query_last_error_has_location(broken));
+}

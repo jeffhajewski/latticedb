@@ -8270,6 +8270,62 @@ pub const Database = struct {
         return .{ .entries = 0, .hits = 0, .misses = 0 };
     }
 
+    /// A query parsed and analysed once, held for repeated execution.
+    ///
+    /// It pins its query-cache entry, so the parse tree stays put until
+    /// releasePrepared, however full the cache gets.
+    pub const PreparedQuery = struct {
+        entry: *cache_mod.CacheEntry,
+
+        /// Whether running the query could change the database.
+        pub fn writes(self: PreparedQuery) bool {
+            return self.entry.query.writesData();
+        }
+    };
+
+    /// Parse and analyse `cypher` once, through the query cache, for a caller
+    /// that will execute it (the C API's prepared queries).
+    ///
+    /// Null when the query cache is off or every entry is pinned, and when
+    /// the query does not parse or analyse: executing the text then parses
+    /// it and reports the error with its location, as before.
+    pub fn prepareCached(self: *Self, cypher: []const u8) ?PreparedQuery {
+        const cache = self.query_cache orelse return null;
+        const normalized_cypher = normalizeCypher(cypher);
+        if (cache.get(normalized_cypher)) |entry| return .{ .entry = entry };
+
+        const outcome = self.parseQuery(normalized_cypher) catch return null;
+        switch (outcome) {
+            .failure => |failure| {
+                var owned = failure;
+                owned.deinit();
+                return null;
+            },
+            .parsed => |parsed| {
+                if (parsed.entry) |entry| return .{ .entry = entry };
+                var owned = parsed;
+                owned.deinit();
+                return null;
+            },
+        }
+    }
+
+    /// Unpin a query from prepareCached.
+    pub fn releasePrepared(self: *Self, prepared: PreparedQuery) void {
+        _ = self;
+        prepared.entry.unpin();
+    }
+
+    /// Execute a query from prepareCached without parsing it again.
+    pub fn executePreparedDetailedInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        prepared: PreparedQuery,
+        params: ?*const std.StringHashMap(types.PropertyValue),
+    ) QueryError!QueryDetailedResult {
+        return self.executeParsed(txn, prepared.entry.query, params);
+    }
+
     /// Internal: Execute a query with optional parameters, using the cache when available.
     fn executeQueryDetailed(
         self: *Self,
@@ -8279,115 +8335,120 @@ pub const Database = struct {
     ) QueryError!QueryDetailedResult {
         const normalized_cypher = normalizeCypher(cypher);
 
-        var cache_entry: ?*cache_mod.CacheEntry = null;
-        defer {
-            if (cache_entry) |entry| entry.unpin();
-        }
-        var uncached_cache_arena: ?std.heap.ArenaAllocator = null;
-        defer {
-            if (uncached_cache_arena) |arena| arena.deinit();
-        }
-
-        var ast_query: *lattice.query.ast.Query = undefined;
-        var analysis_vars: []const VariableInfo = &[_]VariableInfo{};
-
-        // Fallback parser/analyzer for cache miss
-        var parser: ?Parser = null;
-        defer {
-            if (parser) |*p| p.deinit();
-        }
-        var analyzer: ?SemanticAnalyzer = null;
-        defer {
-            if (analyzer) |*a| a.deinit();
-        }
-
-        // Try the cache first
         if (self.query_cache) |cache| {
-            cache_entry = cache.get(normalized_cypher);
-        }
-
-        if (cache_entry) |entry| {
-            // Cache hit: use the cached AST and variables
-            ast_query = entry.query;
-            analysis_vars = entry.variables;
-        } else {
-            // Cache miss: parse and analyze
-            if (self.query_cache != null) {
-                // Parse with a cache-owned arena so the AST can be cached
-                var cache_arena = std.heap.ArenaAllocator.init(self.allocator);
-
-                // Copy source into arena so AST slices remain valid
-                const owned_source = cache_arena.allocator().dupe(u8, normalized_cypher) catch {
-                    cache_arena.deinit();
-                    return QueryError.OutOfMemory;
-                };
-
-                var cache_parser = Parser.initWithArena(self.allocator, owned_source, cache_arena);
-                const parse_result = cache_parser.parse();
-
-                if (parse_result.query == null) {
-                    const failure = self.makeParseFailure(parse_result) catch |err| {
-                        cache_parser.errors.deinit(self.allocator);
-                        cache_parser.arena.deinit();
-                        return err;
-                    };
-                    // Parse failed - clean up and return error
-                    cache_parser.errors.deinit(self.allocator);
-                    cache_parser.arena.deinit();
-                    return failure;
-                }
-                ast_query = parse_result.query.?;
-
-                // Semantic analysis
-                var sem = SemanticAnalyzer.init(self.allocator);
-                const analysis = sem.analyze(ast_query);
-                if (!analysis.success) {
-                    const failure = self.makeSemanticFailure(analysis) catch |err| {
-                        sem.deinit();
-                        cache_parser.errors.deinit(self.allocator);
-                        cache_parser.arena.deinit();
-                        return err;
-                    };
-                    sem.deinit();
-                    cache_parser.errors.deinit(self.allocator);
-                    cache_parser.arena.deinit();
-                    return failure;
-                }
-                analysis_vars = analysis.variables;
-
-                // Store in cache (cache takes ownership of the arena)
-                var arena_to_cache = cache_parser.arena;
-                cache_parser.errors.deinit(self.allocator);
-                cache_entry = self.query_cache.?.put(normalized_cypher, ast_query, analysis_vars, &arena_to_cache);
-                if (cache_entry) |entry| {
-                    ast_query = entry.query;
-                    analysis_vars = entry.variables;
-                } else {
-                    // Cache insertion skipped (e.g., all entries pinned). Keep the
-                    // parser arena alive for this execution path.
-                    uncached_cache_arena = arena_to_cache;
-                }
-
-                sem.deinit();
-            } else {
-                // No cache: standard parse path
-                parser = Parser.init(self.allocator, normalized_cypher);
-                const parse_result = parser.?.parse();
-
-                if (parse_result.query == null) {
-                    return self.makeParseFailure(parse_result);
-                }
-                ast_query = parse_result.query.?;
-
-                analyzer = SemanticAnalyzer.init(self.allocator);
-                const analysis = analyzer.?.analyze(ast_query);
-                if (!analysis.success) {
-                    return self.makeSemanticFailure(analysis);
-                }
-                analysis_vars = analysis.variables;
+            if (cache.get(normalized_cypher)) |entry| {
+                defer entry.unpin();
+                return self.executeParsed(txn, entry.query, params);
             }
         }
 
+        switch (try self.parseQuery(normalized_cypher)) {
+            .failure => |failure| return failure,
+            .parsed => |parsed| {
+                var owned = parsed;
+                defer owned.deinit();
+                return self.executeParsed(txn, owned.query, params);
+            },
+        }
+    }
+
+    /// A parse tree that stays valid until deinit: a pinned cache entry, or
+    /// the parser's own memory when the query could not be cached.
+    const ParsedQuery = struct {
+        query: *lattice.query.ast.Query,
+        entry: ?*cache_mod.CacheEntry = null,
+        arena: ?std.heap.ArenaAllocator = null,
+        parser: ?Parser = null,
+
+        fn deinit(self: *ParsedQuery) void {
+            if (self.entry) |entry| entry.unpin();
+            if (self.arena) |*arena| arena.deinit();
+            if (self.parser) |*parser| parser.deinit();
+        }
+    };
+
+    const ParseOutcome = union(enum) {
+        parsed: ParsedQuery,
+        /// A parse or semantic failure, ready to return to the caller.
+        failure: QueryDetailedResult,
+    };
+
+    /// Parse and analyse a query, storing it in the query cache when there
+    /// is one.
+    fn parseQuery(self: *Self, normalized_cypher: []const u8) QueryError!ParseOutcome {
+        if (self.query_cache) |cache| {
+            // Parse with a cache-owned arena so the AST can be cached
+            var cache_arena = std.heap.ArenaAllocator.init(self.allocator);
+
+            // Copy source into arena so AST slices remain valid
+            const owned_source = cache_arena.allocator().dupe(u8, normalized_cypher) catch {
+                cache_arena.deinit();
+                return QueryError.OutOfMemory;
+            };
+
+            var cache_parser = Parser.initWithArena(self.allocator, owned_source, cache_arena);
+            const parse_result = cache_parser.parse();
+
+            if (parse_result.query == null) {
+                defer {
+                    cache_parser.errors.deinit(self.allocator);
+                    cache_parser.arena.deinit();
+                }
+                return .{ .failure = try self.makeParseFailure(parse_result) };
+            }
+            const ast_query = parse_result.query.?;
+
+            var sem = SemanticAnalyzer.init(self.allocator);
+            defer sem.deinit();
+            const analysis = sem.analyze(ast_query);
+            if (!analysis.success) {
+                defer {
+                    cache_parser.errors.deinit(self.allocator);
+                    cache_parser.arena.deinit();
+                }
+                return .{ .failure = try self.makeSemanticFailure(analysis) };
+            }
+
+            // Store in cache (the cache takes the arena). The variables are
+            // copied into it, so nothing points into `sem` afterwards.
+            var arena_to_cache = cache_parser.arena;
+            cache_parser.errors.deinit(self.allocator);
+            if (cache.put(normalized_cypher, ast_query, analysis.variables, &arena_to_cache)) |entry| {
+                // put leaves an empty arena behind.
+                arena_to_cache.deinit();
+                return .{ .parsed = .{ .query = entry.query, .entry = entry } };
+            }
+            // Not cached (e.g. every entry pinned): the arena lives as long
+            // as this execution.
+            return .{ .parsed = .{ .query = ast_query, .arena = arena_to_cache } };
+        }
+
+        // No cache: standard parse path
+        var parser = Parser.init(self.allocator, normalized_cypher);
+        const parse_result = parser.parse();
+        if (parse_result.query == null) {
+            defer parser.deinit();
+            return .{ .failure = try self.makeParseFailure(parse_result) };
+        }
+        const ast_query = parse_result.query.?;
+
+        var analyzer = SemanticAnalyzer.init(self.allocator);
+        defer analyzer.deinit();
+        const analysis = analyzer.analyze(ast_query);
+        if (!analysis.success) {
+            defer parser.deinit();
+            return .{ .failure = try self.makeSemanticFailure(analysis) };
+        }
+        return .{ .parsed = .{ .query = ast_query, .parser = parser } };
+    }
+
+    /// Plan and run a parsed, analysed query.
+    fn executeParsed(
+        self: *Self,
+        txn: ?*Transaction,
+        ast_query: *lattice.query.ast.Query,
+        params: ?*const std.StringHashMap(types.PropertyValue),
+    ) QueryError!QueryDetailedResult {
         // Plan the query
         const storage_ctx = StorageContext{
             .node_tree = &self.node_tree,
@@ -8408,10 +8469,12 @@ pub const Database = struct {
 
         var planner = QueryPlanner.init(query_alloc, storage_ctx);
 
+        // The planner does not read the analysis; validation has already
+        // happened, when the query was parsed.
         const analysis_result = semantic_mod.AnalysisResult{
             .success = true,
             .errors = &[_]semantic_mod.SemanticError{},
-            .variables = analysis_vars,
+            .variables = &[_]VariableInfo{},
             .errors_dropped = false,
         };
 

@@ -609,8 +609,20 @@ fn cEmbeddingVectorToSlice(ptr: [*c]const f32, dimensions: u32) ?[]const f32 {
     return ptr[0..dimensions];
 }
 
+/// Read a C enum the caller filled in, without trusting it to hold a declared
+/// value. Zig treats an exhaustive enum holding any other value as illegal
+/// behaviour (a panic in safe builds, undefined in ReleaseFast), so its raw
+/// integer is checked first. Null means the value is not one of `E`'s.
+fn checkedEnum(comptime E: type, field: *const E) ?E {
+    comptime std.debug.assert(@sizeOf(E) == @sizeOf(c_int));
+    const raw: c_int = @as(*const c_int, @ptrCast(field)).*;
+    return std.enums.fromInt(E, raw);
+}
+
 fn freeOwnedCValue(c_val: *lattice_value) void {
-    switch (c_val.value_type) {
+    // An unknown type owns nothing this library allocated.
+    const value_type = checkedEnum(lattice_value_type, &c_val.value_type) orelse return;
+    switch (value_type) {
         .string => {
             if (c_val.data.string_val.ptr != null and c_val.data.string_val.len > 0) {
                 global_allocator.free(c_val.data.string_val.ptr[0..c_val.data.string_val.len]);
@@ -844,7 +856,8 @@ fn resultValueToBorrowedCValue(result_val: ResultValue, c_val: *lattice_value, a
 }
 
 fn cValueToOwnedZigValue(c_val: *const lattice_value, allocator: Allocator) ValueConversionError!PropertyValue {
-    return switch (c_val.value_type) {
+    const value_type = checkedEnum(lattice_value_type, &c_val.value_type) orelse return error.InvalidValue;
+    return switch (value_type) {
         .null => .{ .null_val = {} },
         .bool => .{ .bool_val = c_val.data.bool_val },
         .int => .{ .int_val = c_val.data.int_val },
@@ -1519,7 +1532,8 @@ pub export fn lattice_begin(
     if (active_db_result != .ok) return active_db_result;
 
     // Map C API mode to TxnMode
-    const txn_mode: TxnMode = if (mode == .read_only) .read_only else .read_write;
+    const checked_mode = checkedEnum(lattice_txn_mode, &mode) orelse return .err_invalid_arg;
+    const txn_mode: TxnMode = if (checked_mode == .read_only) .read_only else .read_write;
 
     // Actually begin a transaction in the database
     const txn = db_handle.db.beginTransaction(txn_mode) catch |err| {
@@ -3974,7 +3988,8 @@ pub export fn lattice_version() [*c]const u8 {
 
 /// Get error message for error code
 pub export fn lattice_error_message(code: lattice_error) [*c]const u8 {
-    return switch (code) {
+    const known = checkedEnum(lattice_error, &code) orelse return "Unknown error";
+    return switch (known) {
         .ok => "Success",
         .err => "Generic error",
         .err_io => "I/O error",
@@ -4070,7 +4085,8 @@ pub export fn lattice_embedding_client_create(
     const endpoint = cStrToSlice(cfg.endpoint) orelse return .err_invalid_arg;
     const model = cStrToSlice(cfg.model) orelse return .err_invalid_arg;
 
-    const api_format: embedding_mod.ApiFormat = switch (cfg.api_format) {
+    const api_format_c = checkedEnum(lattice_embedding_api_format, &cfg.api_format) orelse return .err_invalid_arg;
+    const api_format: embedding_mod.ApiFormat = switch (api_format_c) {
         .ollama => .ollama,
         .openai => .openai,
     };

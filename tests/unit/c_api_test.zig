@@ -3663,3 +3663,43 @@ test "c_api: embedding client keeps its own copy of the config strings" {
     const text = "hello";
     try std.testing.expectEqual(lattice_error.err_io, c_api.lattice_embedding_client_embed(client, text, text.len, &vector, &dims));
 }
+
+test "c_api: enum values a C caller made up are rejected, not trusted" {
+    // C can pass any int where the header names an enum. Call the exports
+    // the way C does, with plain ints.
+    const error_message: *const fn (c_int) callconv(.c) [*c]const u8 = @ptrCast(&c_api.lattice_error_message);
+    try std.testing.expectEqualStrings("Unknown error", std.mem.span(error_message(-999)));
+    try std.testing.expectEqualStrings("Not found", std.mem.span(error_message(-4)));
+
+    const path = "/tmp/lattice_capi_unknown_enum_test.db";
+    const db = try openScratchDb(path);
+    defer removeScratchDb(path);
+    defer _ = c_api.lattice_close(db);
+
+    const begin: *const fn (?*lattice_database, c_int, ?*?*lattice_txn) callconv(.c) lattice_error = @ptrCast(&c_api.lattice_begin);
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.err_invalid_arg, begin(db, 7, &txn));
+    try std.testing.expect(txn == null);
+    try std.testing.expectEqual(lattice_error.ok, begin(db, 1, &txn));
+
+    var node: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "N", &node));
+    var bogus: lattice_value = undefined;
+    @memset(std.mem.asBytes(&bogus), 0);
+    @as(*c_int, @ptrCast(&bogus.value_type)).* = 99;
+    try std.testing.expectEqual(lattice_error.err_invalid_arg, c_api.lattice_node_set_property(txn, node, "k", &bogus));
+    c_api.lattice_value_free(&bogus); // nothing to free; must not crash
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+
+    var config = c_api.lattice_embedding_config{
+        .endpoint = "http://127.0.0.1:9/api/embeddings",
+        .model = "m",
+        .api_format = .ollama,
+        .api_key = null,
+        .timeout_ms = 0,
+    };
+    @as(*c_int, @ptrCast(&config.api_format)).* = 5;
+    var client: ?*c_api.lattice_embedding_client = null;
+    try std.testing.expectEqual(lattice_error.err_invalid_arg, c_api.lattice_embedding_client_create(&config, &client));
+    try std.testing.expect(client == null);
+}

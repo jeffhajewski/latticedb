@@ -689,6 +689,14 @@ pub const HnswIndex = struct {
     journal: std.ArrayListUnmanaged(JournalEntry) = .empty,
     journaling: bool = false,
 
+    /// Ids whose node-map entry was added, changed or removed since the node
+    /// map was last written to its tree, so a save writes only those.
+    unsaved: std.AutoHashMapUnmanaged(u64, void) = .empty,
+    /// The tree may not match the node map apart from `unsaved`: it has never
+    /// been written, the map was rebuilt, or tracking an id failed. The next
+    /// save rewrites the whole map.
+    needs_full_save: bool = true,
+
     const Self = @This();
     const PAGE_SIZE: usize = 4096;
 
@@ -735,6 +743,7 @@ pub const HnswIndex = struct {
 
     /// Deinitialize the index
     pub fn deinit(self: *Self) void {
+        self.unsaved.deinit(self.allocator);
         self.journal.deinit(self.allocator);
         self.connection_pool.deinit();
         self.nodes.deinit();
@@ -757,6 +766,15 @@ pub const HnswIndex = struct {
     fn endMutation(self: *Self) void {
         self.journaling = false;
         self.journal.clearRetainingCapacity();
+    }
+
+    /// Note that an id's node-map entry no longer matches the tree.
+    fn markUnsaved(self: *Self, vector_id: u64) void {
+        if (self.needs_full_save) return;
+        self.unsaved.put(self.allocator, vector_id, {}) catch {
+            // Without the id the next save cannot know to write it.
+            self.needs_full_save = true;
+        };
     }
 
     /// Remember a list's contents before it is rewritten. Fails before
@@ -1442,6 +1460,7 @@ pub const HnswIndex = struct {
         errdefer {
             self.rollback(snapshot);
             self.nodes.put(vector_id, existing) catch {};
+            self.markUnsaved(vector_id);
         }
         _ = (try self.detach(vector_id)) orelse return HnswError.NotFound;
         try self.connection_pool.resetSlot(existing.connections_loc);
@@ -1500,6 +1519,7 @@ pub const HnswIndex = struct {
 
         // Register node
         self.nodes.put(vector_id, entry) catch return HnswError.OutOfMemory;
+        self.markUnsaved(vector_id);
 
         // First vector becomes entry point
         if (self.entry_point == null) {
@@ -1585,6 +1605,7 @@ pub const HnswIndex = struct {
     fn detach(self: *Self, vector_id: u64) HnswError!?HnswNodeEntry {
         const removed = self.nodes.fetchRemove(vector_id) orelse return null;
         const removed_entry = removed.value;
+        self.markUnsaved(vector_id);
 
         var iter = self.nodes.iterator();
         while (iter.next()) |entry| {
@@ -1640,6 +1661,7 @@ pub const HnswIndex = struct {
         errdefer {
             self.rollback(snapshot);
             self.nodes.put(vector_id, removed_entry) catch {};
+            self.markUnsaved(vector_id);
         }
         _ = try self.detach(vector_id);
         self.vector_storage.delete(removed_entry.vector_loc, vector_id) catch return HnswError.StorageError;
@@ -1722,6 +1744,8 @@ pub const HnswIndex = struct {
     }
 
     pub fn resetForRebuild(self: *Self) void {
+        self.unsaved.clearRetainingCapacity();
+        self.needs_full_save = true;
         self.nodes.clearRetainingCapacity();
         self.connection_pool.pool_heads.clearRetainingCapacity();
         self.entry_point = null;
@@ -1732,9 +1756,52 @@ pub const HnswIndex = struct {
 
     /// Save the HNSW index state to a B+Tree for persistence.
     /// Only writes if the index is dirty.
+    ///
+    /// Writes only the node entries that changed since the last save, plus
+    /// the metadata. The whole map is rewritten the first time, after a
+    /// rebuild, or when change tracking could not keep up. Either way the tree
+    /// ends up holding exactly the node map, so loading is unaffected.
     pub fn saveToTree(self: *Self, tree: *BTree) HnswError!void {
         if (!self.dirty) return;
+        if (self.needs_full_save) return self.saveAllToTree(tree);
 
+        try self.saveMetadata(tree);
+
+        // A failure part way leaves `unsaved` intact for the next attempt;
+        // rewriting an entry that already made it is harmless.
+        var iter = self.unsaved.keyIterator();
+        while (iter.next()) |vector_id| {
+            var key_buf: [8]u8 = undefined;
+            std.mem.writeInt(u64, &key_buf, vector_id.*, .little);
+            tree.delete(&key_buf) catch |err| switch (err) {
+                BTreeError.KeyNotFound => {},
+                else => return HnswError.StorageError,
+            };
+            if (self.nodes.get(vector_id.*)) |entry| {
+                var val_buf: [HnswNodeEntry.SERIALIZED_SIZE]u8 = undefined;
+                entry.serialize(&val_buf);
+                tree.insert(&key_buf, &val_buf) catch return HnswError.StorageError;
+            }
+        }
+
+        self.unsaved.clearRetainingCapacity();
+        self.dirty = false;
+    }
+
+    fn saveMetadata(self: *Self, tree: *BTree) HnswError!void {
+        var meta_buf: [1300]u8 = undefined;
+        const meta_data = self.serializeMetadata(&meta_buf);
+
+        // Delete-then-insert pattern (delete of missing key returns KeyNotFound, which we ignore)
+        tree.delete(&METADATA_KEY) catch |err| switch (err) {
+            BTreeError.KeyNotFound => {},
+            else => return HnswError.StorageError,
+        };
+        tree.insert(&METADATA_KEY, meta_data) catch return HnswError.StorageError;
+    }
+
+    /// Rewrite the whole node map, dropping entries for ids no longer in it.
+    fn saveAllToTree(self: *Self, tree: *BTree) HnswError!void {
         var stale_keys: std.ArrayListUnmanaged(u64) = .empty;
         defer stale_keys.deinit(self.allocator);
 
@@ -1756,16 +1823,7 @@ pub const HnswIndex = struct {
             }
         }
 
-        // 1. Save metadata under sentinel key
-        var meta_buf: [1300]u8 = undefined;
-        const meta_data = self.serializeMetadata(&meta_buf);
-
-        // Delete-then-insert pattern (delete of missing key returns KeyNotFound, which we ignore)
-        tree.delete(&METADATA_KEY) catch |err| switch (err) {
-            BTreeError.KeyNotFound => {},
-            else => return HnswError.StorageError,
-        };
-        tree.insert(&METADATA_KEY, meta_data) catch return HnswError.StorageError;
+        try self.saveMetadata(tree);
 
         for (stale_keys.items) |vector_id| {
             var key_buf: [8]u8 = undefined;
@@ -1776,7 +1834,6 @@ pub const HnswIndex = struct {
             };
         }
 
-        // 2. Save each node entry
         var iter = self.nodes.iterator();
         while (iter.next()) |entry| {
             var key_buf: [8]u8 = undefined;
@@ -1792,6 +1849,8 @@ pub const HnswIndex = struct {
             tree.insert(&key_buf, &val_buf) catch return HnswError.StorageError;
         }
 
+        self.unsaved.clearRetainingCapacity();
+        self.needs_full_save = false;
         self.dirty = false;
     }
 
@@ -1866,6 +1925,9 @@ pub const HnswIndex = struct {
             if (actual_max_layer != self.max_layer) return HnswError.StorageError;
         }
 
+        // The tree now matches the map, so later saves can be incremental.
+        self.unsaved.clearRetainingCapacity();
+        self.needs_full_save = false;
         self.dirty = false;
         return true;
     }

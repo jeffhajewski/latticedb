@@ -253,3 +253,91 @@ test "transactional vector search with the largest k does not overflow" {
     defer db.freeVectorSearchResults(all);
     try std.testing.expectEqual(@as(usize, 2), all.len);
 }
+
+/// The tree must hold exactly the node map, and load back into the same graph.
+fn expectTreeMatches(index: *HnswIndex, vs: *VectorStorage, tree: *helpers.BTree, db: *helpers.TempDb) !void {
+    const allocator = std.testing.allocator;
+    var seen: usize = 0;
+    {
+        var it = try tree.range(null, null);
+        defer it.deinit();
+        while (try it.next()) |e| {
+            if (std.mem.eql(u8, e.key, &([_]u8{0xFF} ** 8))) continue;
+            const id = std.mem.readInt(u64, e.key[0..8], .little);
+            const entry = index.getNode(id) orelse return error.StaleTreeEntry;
+            var buf: [hnsw_mod.HnswNodeEntry.SERIALIZED_SIZE]u8 = undefined;
+            entry.serialize(&buf);
+            try std.testing.expectEqualSlices(u8, &buf, e.value);
+            seen += 1;
+        }
+    }
+    try std.testing.expectEqual(@as(usize, index.nodes.count()), seen);
+
+    var loaded = HnswIndex.init(allocator, db.bp, vs, index.config);
+    defer loaded.deinit();
+    try std.testing.expect(try loaded.loadFromTree(tree));
+    var a = try GraphSnapshot.take(allocator, index);
+    defer a.deinit();
+    var b = try GraphSnapshot.take(allocator, &loaded);
+    defer b.deinit();
+    try a.expectEqual(&b);
+}
+
+test "incremental hnsw saves keep the tree equal to the node map" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "hnsw_incremental_save");
+    defer db.deinit();
+
+    var vs = try VectorStorage.init(allocator, db.bp, DIMS);
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var index = HnswIndex.init(failing.allocator(), db.bp, &vs, .{
+        .dimensions = DIMS,
+        .m = 4,
+        .m_max0 = 8,
+        .ef_construction = 16,
+        .metric = .cosine,
+    });
+    defer index.deinit();
+    var tree = try db.createBTree();
+
+    var prng = std.Random.DefaultPrng.init(3);
+    const random = prng.random();
+    for (1..41) |id| {
+        const v = randomVector(random);
+        try index.insert(id, &v);
+    }
+    try index.saveToTree(&tree);
+    try expectTreeMatches(&index, &vs, &tree, &db);
+
+    for (0..30) |round| {
+        // A mix of new ids, replacements, removals and re-insertions.
+        for (0..5) |_| {
+            const id = random.intRangeAtMost(u64, 1, 60);
+            switch (random.uintLessThan(u8, 3)) {
+                0, 1 => {
+                    const v = randomVector(random);
+                    try index.insert(id, &v);
+                },
+                else => try index.remove(id),
+            }
+        }
+        // A failed insert in between must not leave a trace either.
+        if (round % 3 == 0) {
+            failing.fail_index = failing.alloc_index + 2;
+            const v = randomVector(random);
+            if (index.insert(500 + round, &v)) |_| {} else |_| {}
+            failing.fail_index = std.math.maxInt(usize);
+        }
+        try index.saveToTree(&tree);
+        try expectTreeMatches(&index, &vs, &tree, &db);
+    }
+
+    // A rebuilt map is written out in full, dropping ids it no longer has.
+    index.resetForRebuild();
+    for (1..11) |id| {
+        const v = randomVector(random);
+        try index.insert(id, &v);
+    }
+    try index.saveToTree(&tree);
+    try expectTreeMatches(&index, &vs, &tree, &db);
+}

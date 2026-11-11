@@ -1121,3 +1121,23 @@ test "expression: integer arithmetic at the edge of the range still works" {
     try expectCypherInt("(-9223372036854775807 - 1) / 1", -9223372036854775807 - 1);
     try expectCypherInt("-7 / 2", -3);
 }
+
+// ============================================================================
+// Float-to-integer conversion
+// ============================================================================
+
+test "expression: floats outside the i64 range do not convert to integers" {
+    const expression = lattice.query.expression;
+
+    try std.testing.expectEqual(@as(?i64, 2), expression.floatToInt(2.9));
+    try std.testing.expectEqual(@as(?i64, -2), expression.floatToInt(-2.9));
+    try std.testing.expectEqual(@as(?i64, std.math.minInt(i64)), expression.floatToInt(-9223372036854775808.0));
+    try std.testing.expectEqual(@as(?i64, null), expression.floatToInt(9223372036854775808.0));
+    try std.testing.expectEqual(@as(?i64, null), expression.floatToInt(1e300));
+    try std.testing.expectEqual(@as(?i64, null), expression.floatToInt(-1e300));
+    try std.testing.expectEqual(@as(?i64, null), expression.floatToInt(std.math.nan(f64)));
+    try std.testing.expectEqual(@as(?i64, null), expression.floatToInt(std.math.inf(f64)));
+
+    const huge: expression.EvalResult = .{ .float_val = 1e300 };
+    try std.testing.expectEqual(@as(?i64, null), huge.toInt());
+}

@@ -428,3 +428,65 @@ test "cypher: a query that fails while an operator opens leaks nothing" {
     // The same database still answers.
     try std.testing.expectEqual(@as(i64, 3), try queryCount(db, "MATCH (n:Rare) RETURN count(n)"));
 }
+
+// ============================================================================
+// Float-to-integer conversion and range()
+// ============================================================================
+
+test "cypher: toInteger of an out-of-range float fails the query" {
+    const path = "/tmp/lattice_cs_to_integer_range.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    // These were undefined behaviour in a release build and a panic in a
+    // debug one.
+    try std.testing.expectError(QueryError.ExecutionError, db.query("RETURN toInteger(1e300)"));
+    try std.testing.expectError(QueryError.ExecutionError, db.query("RETURN toInteger(-1e300)"));
+    try std.testing.expectError(QueryError.ExecutionError, db.query("RETURN toInteger(9223372036854775808.0)"));
+    try std.testing.expectError(QueryError.ExecutionError, db.query("RETURN substring('abc', 1e300)"));
+    try std.testing.expectError(QueryError.ExecutionError, db.query("RETURN range(0, 1e300)"));
+
+    var result = try db.query("RETURN toInteger(2.9) AS a, toInteger(-2.9) AS b, toInteger(-9223372036854775807.0) AS c");
+    defer result.deinit();
+    try expectInt(result, 0, 0, 2);
+    try expectInt(result, 0, 1, -2);
+    try expectInt(result, 0, 2, -9223372036854775807 - 1);
+}
+
+test "cypher: range() is bounded and cannot overflow" {
+    const path = "/tmp/lattice_cs_range_bounds.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    // An unbounded allocation before; now an error, also through UNWIND,
+    // which used to swallow evaluation errors and return no rows.
+    try std.testing.expectError(QueryError.ExecutionError, db.query("RETURN size(range(0, 9223372036854775807))"));
+    try std.testing.expectError(QueryError.ExecutionError, db.query("UNWIND range(0, 99999999) AS x RETURN count(x)"));
+
+    {
+        // `i += step` overflowed past the top of the i64 range.
+        var result = try db.query("RETURN range(9223372036854775806, 9223372036854775807) AS r");
+        defer result.deinit();
+        const items = result.rows[0].values[0].list_val;
+        try std.testing.expectEqual(@as(usize, 2), items.len);
+        try std.testing.expectEqual(@as(i64, 9223372036854775807), items[1].int_val);
+    }
+    {
+        var result = try db.query("RETURN size(range(5, 1, -2)) AS a, size(range(1, 0)) AS b, size(range(0, 10, 4)) AS c");
+        defer result.deinit();
+        try expectInt(result, 0, 0, 3);
+        try expectInt(result, 0, 1, 0);
+        try expectInt(result, 0, 2, 3);
+    }
+    try std.testing.expectEqual(@as(i64, 3), try queryCount(db, "UNWIND range(1, 3) AS x RETURN count(x)"));
+}
+
+test "cypher: UNWIND of an expression that fails fails the query" {
+    const path = "/tmp/lattice_cs_unwind_error.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    // A missing parameter used to produce zero rows.
+    try std.testing.expectError(QueryError.ExecutionError, db.query("UNWIND $missing AS x RETURN x"));
+    try std.testing.expectError(QueryError.ExecutionError, db.query("UNWIND [1 / 0] AS x RETURN x"));
+}

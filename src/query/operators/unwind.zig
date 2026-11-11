@@ -121,9 +121,16 @@ pub const Unwind = struct {
             self.current_row = input_row.*;
 
             // Evaluate expression on this row
-            const result = self.evaluator.evaluate(self.expr, input_row, ctx) catch {
-                // Expression evaluation failed — skip this row
-                continue;
+            // An evaluation error fails the query. Skipping the row instead
+            // made `UNWIND $missing AS x` and an oversized range() quietly
+            // return nothing.
+            const result = self.evaluator.evaluate(self.expr, input_row, ctx) catch |err| {
+                return switch (err) {
+                    error.OutOfMemory => OperatorError.OutOfMemory,
+                    error.TypeError => OperatorError.TypeError,
+                    error.UnboundVariable => OperatorError.UnboundVariable,
+                    else => OperatorError.EvaluationError,
+                };
             };
 
             // Get the list from the result

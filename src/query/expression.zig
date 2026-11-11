@@ -62,7 +62,29 @@ pub const EvalError = error{
     InvalidOperation,
     /// Integer arithmetic produced a result outside the 64-bit range
     IntegerOverflow,
+    /// range() would produce more than `MAX_RANGE_LENGTH` elements
+    RangeTooLarge,
 };
+
+/// The most elements one range() call may produce.
+///
+/// The list is built in memory, so `range(0, 9223372036854775807)` would
+/// otherwise try to allocate until the process ran out. Ten million covers
+/// generating test data with UNWIND while bounding one call to a few hundred
+/// megabytes.
+pub const MAX_RANGE_LENGTH: i128 = 10_000_000;
+
+/// A float as an i64, truncated toward zero, or null when it is NaN, infinite
+/// or outside the i64 range. `@intFromFloat` is undefined behaviour for those
+/// in a release build.
+pub fn floatToInt(f: f64) ?i64 {
+    if (std.math.isNan(f)) return null;
+    // 2^63 is exactly representable; every float below it truncates into
+    // range, and -2^63 itself is minInt(i64).
+    const limit: f64 = 9223372036854775808.0;
+    if (f >= limit or f < -limit) return null;
+    return @intFromFloat(f);
+}
 
 // ============================================================================
 // Evaluation Result
@@ -135,11 +157,12 @@ pub const EvalResult = union(enum) {
         };
     }
 
-    /// Convert to integer
+    /// Convert to integer. Null for non-numbers, and for floats that are NaN,
+    /// infinite or outside the i64 range.
     pub fn toInt(self: Self) ?i64 {
         return switch (self) {
             .int_val => |i| i,
-            .float_val => |f| @intFromFloat(f),
+            .float_val => |f| floatToInt(f),
             else => null,
         };
     }
@@ -599,7 +622,7 @@ pub const ExpressionEvaluator = struct {
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             return switch (arg) {
                 .int_val => arg,
-                .float_val => |fv| .{ .int_val = @intFromFloat(fv) },
+                .float_val => |fv| .{ .int_val = floatToInt(fv) orelse return EvalError.IntegerOverflow },
                 .string_val => |s| blk: {
                     const i = std.fmt.parseInt(i64, s, 10) catch return .{ .null_val = {} };
                     break :blk .{ .int_val = i };
@@ -808,21 +831,21 @@ pub const ExpressionEvaluator = struct {
                 step = step_arg.toInt() orelse return EvalError.TypeError;
                 if (step == 0) return EvalError.InvalidOperation;
             }
-            var items: std.ArrayListUnmanaged(EvalResult) = .empty;
-            errdefer items.deinit(self.allocator);
-            // Cypher range() is inclusive on both ends
-            if (step > 0) {
-                var i = start;
-                while (i <= end) : (i += step) {
-                    items.append(self.allocator, .{ .int_val = i }) catch return EvalError.OutOfMemory;
-                }
-            } else {
-                var i = start;
-                while (i >= end) : (i += step) {
-                    items.append(self.allocator, .{ .int_val = i }) catch return EvalError.OutOfMemory;
-                }
+            // Cypher range() is inclusive on both ends. Count first, in i128 so
+            // neither the span nor the step can overflow, then refuse a list
+            // too large to build instead of allocating until memory runs out.
+            const span = @as(i128, end) - @as(i128, start);
+            const count: i128 = if ((step > 0 and span < 0) or (step < 0 and span > 0))
+                0
+            else
+                @divTrunc(span, step) + 1;
+            if (count > MAX_RANGE_LENGTH) return EvalError.RangeTooLarge;
+            const items = self.allocator.alloc(EvalResult, @intCast(count)) catch return EvalError.OutOfMemory;
+            for (items, 0..) |*item, k| {
+                // Every element lies between start and end, so it fits in i64.
+                item.* = .{ .int_val = @intCast(@as(i128, start) + @as(i128, @intCast(k)) * step) };
             }
-            return .{ .list_val = items.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory };
+            return .{ .list_val = items };
         }
 
         // Type/graph functions

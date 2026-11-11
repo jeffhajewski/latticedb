@@ -3407,3 +3407,117 @@ test "c_api: close wakes a stream reader blocked on the database" {
     try std.testing.expectEqual(lattice_error.err_invalid_arg, reader.rc);
     try std.testing.expect(reader.elapsed_ms < 4000);
 }
+
+// ============================================================================
+// Transaction handles after the transaction ends
+// ============================================================================
+
+fn openScratchDb(comptime path: [:0]const u8) !?*lattice_database {
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    return db;
+}
+
+fn removeScratchDb(comptime path: [:0]const u8) void {
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+}
+
+test "c_api: a finished transaction handle never reaches a later transaction" {
+    const path = "/tmp/lattice_capi_stale_txn_no_alias_test.db";
+    const db = try openScratchDb(path);
+    defer removeScratchDb(path);
+
+    var first: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &first));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(first));
+
+    // Begin and finish many more, keeping the last one open. However the
+    // allocator reuses memory, the first handle must stay dead.
+    var live: ?*lattice_txn = null;
+    for (0..500) |i| {
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &live));
+        if (i == 499) break;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_rollback(live));
+    }
+    try std.testing.expect(live != first);
+
+    var node: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.err_txn_aborted, c_api.lattice_node_create(first, "Stale", &node));
+    try std.testing.expectEqual(lattice_error.err_txn_aborted, c_api.lattice_commit(first));
+    try std.testing.expectEqual(lattice_error.err_txn_aborted, c_api.lattice_rollback(first));
+
+    var query: ?*lattice_query = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_prepare(db, "RETURN 1", &query));
+    var result: ?*lattice_result = null;
+    try std.testing.expectEqual(lattice_error.err_txn_aborted, c_api.lattice_query_execute(query, first, &result));
+    c_api.lattice_query_free(query);
+
+    // The live transaction is untouched by all of that.
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(live, "Live", &node));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(live));
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_close(db));
+    // Still recognised as an ended transaction after the database is gone,
+    // while an arbitrary pointer is not a transaction at all.
+    try std.testing.expectEqual(lattice_error.err_txn_aborted, c_api.lattice_commit(first));
+    var not_a_handle: u64 = 0;
+    try std.testing.expectEqual(lattice_error.err_invalid_arg, c_api.lattice_commit(@ptrCast(&not_a_handle)));
+}
+
+const TxnUser = struct {
+    txn: ?*lattice_txn,
+    stop: std.atomic.Value(bool) = .init(false),
+    ok_calls: std.atomic.Value(u32) = .init(0),
+    unexpected: std.atomic.Value(u32) = .init(0),
+
+    fn run(self: *TxnUser) void {
+        var saw_end = false;
+        while (!self.stop.load(.acquire)) {
+            var exists = false;
+            switch (c_api.lattice_node_exists(self.txn, 1, &exists)) {
+                .ok => {
+                    if (saw_end) _ = self.unexpected.fetchAdd(1, .monotonic);
+                    _ = self.ok_calls.fetchAdd(1, .monotonic);
+                },
+                .err_txn_aborted => saw_end = true,
+                else => _ = self.unexpected.fetchAdd(1, .monotonic),
+            }
+        }
+    }
+};
+
+test "c_api: ending a transaction while another thread uses it is safe" {
+    const path = "/tmp/lattice_capi_txn_end_while_used_test.db";
+    const db = try openScratchDb(path);
+    defer removeScratchDb(path);
+
+    for (0..20) |_| {
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &txn));
+
+        var users = [_]TxnUser{ .{ .txn = txn }, .{ .txn = txn } };
+        var threads: [users.len]std.Thread = undefined;
+        for (&users, &threads) |*user, *thread| thread.* = try std.Thread.spawn(.{}, TxnUser.run, .{user});
+        while (users[0].ok_calls.load(.monotonic) == 0 or users[1].ok_calls.load(.monotonic) == 0) {
+            std.atomic.spinLoopHint();
+        }
+
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_rollback(txn));
+        for (&users) |*user| user.stop.store(true, .release);
+        for (threads) |thread| thread.join();
+        for (users) |user| try std.testing.expectEqual(@as(u32, 0), user.unexpected.load(.monotonic));
+    }
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_close(db));
+}

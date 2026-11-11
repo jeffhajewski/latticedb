@@ -246,6 +246,8 @@ lattice_error lattice_close(lattice_database* db);
  */
 
 /* Begin a transaction.
+ * The lattice_txn* is an opaque token, not necessarily an address: pass it
+ * back to the API, but never dereference or reinterpret it.
  * At most one read-write transaction may be active per database handle.
  * Beginning a second writer returns LATTICE_ERROR_LOCK_TIMEOUT; read-only
  * transactions may remain active alongside the writer. */
@@ -257,12 +259,16 @@ lattice_error lattice_begin(
 
 /* Commit a transaction.
  * On success, the transaction handle is closed and must not be used for new
- * operations. Reusing it before database close returns LATTICE_ERROR_TXN_ABORTED. */
+ * operations. Reusing it returns LATTICE_ERROR_TXN_ABORTED, also after the
+ * database is closed; it never reaches a later transaction. The handle's
+ * memory is released here, not at database close. */
 lattice_error lattice_commit(lattice_txn* txn);
 
 /* Rollback a transaction.
  * On success, the transaction handle is closed and must not be used for new
- * operations. Reusing it before database close returns LATTICE_ERROR_TXN_ABORTED. */
+ * operations. Reusing it returns LATTICE_ERROR_TXN_ABORTED, also after the
+ * database is closed; it never reaches a later transaction. The handle's
+ * memory is released here, not at database close. */
 lattice_error lattice_rollback(lattice_txn* txn);
 
 /*

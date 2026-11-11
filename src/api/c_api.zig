@@ -82,7 +82,7 @@ const HandleHeader = struct {
     kind: HandleKind,
     state: HandleState,
     /// Calls currently inside the C API holding this handle. Only database
-    /// handles are pinned. Guarded by `handle_registry_mutex`.
+    /// and transaction handles are pinned. Guarded by `handle_registry_mutex`.
     pins: u32,
     /// The handle has left the registry; the last unpin frees its memory.
     /// Guarded by `handle_registry_mutex`.
@@ -108,7 +108,6 @@ const DatabaseHandle = struct {
     db: *Database,
     mutex: Mutex,
     active_children: usize,
-    retired_txns: ?*TxnHandle,
     /// Calls inside `lattice_stream_read`, which wait without holding `mutex`.
     /// Close wakes them and waits for them to leave. Guarded by `mutex`.
     stream_readers: usize,
@@ -122,7 +121,8 @@ const TxnHandle = struct {
     db_handle: *DatabaseHandle,
     txn: Transaction, // Actual Transaction struct from TxnManager
     counted_child: bool,
-    next_retired: ?*TxnHandle,
+    /// The value handed to the caller in place of this handle's address.
+    token: usize,
 };
 
 /// Internal query handle storing prepared query state
@@ -1041,6 +1041,130 @@ fn detachDb(handle: *DatabaseHandle) void {
     handle.header.detached = true;
 }
 
+// ============================================================================
+// Transaction handle tokens
+// ============================================================================
+//
+// A transaction handle reaches the caller as a token, not as the address of
+// its TxnHandle, so the TxnHandle can be freed as soon as the transaction ends.
+//
+// lattice.h promises that using a handle after commit or rollback returns
+// LATTICE_ERROR_TXN_ABORTED. That used to be kept by holding every finished
+// TxnHandle, and its registry entry, until the database closed: memory and
+// registry size grew with every transaction ever run. Just freeing them would
+// break the promise in a worse way than crashing: the allocator hands the same
+// address to the next transaction, and a stale pointer would then drive
+// somebody else's transaction. Tokens come from a range no allocation can
+// occupy and are not reissued until the counter wraps (2^59 transactions on
+// 64-bit targets), so a token that is not live is always a transaction that
+// has ended. Nothing dereferences a token; bindings only pass it back.
+
+const txn_token_stride: usize = 8;
+const txn_token_count: usize = if (@sizeOf(usize) >= 8) 1 << 59 else 1 << 16;
+
+/// 32-bit targets have no address range to spare, so tokens there are
+/// addresses inside this array, which is never read or written. They are
+/// reissued after 2^16 further transactions.
+var txn_token_space: [if (@sizeOf(usize) >= 8) 0 else txn_token_count * txn_token_stride]u8 align(txn_token_stride) = undefined;
+
+fn txnTokenBase() usize {
+    return if (@sizeOf(usize) >= 8) 1 << 62 else @intFromPtr(&txn_token_space);
+}
+
+fn isTxnToken(addr: usize) bool {
+    const base = txnTokenBase();
+    if (addr < base) return false;
+    const offset = addr - base;
+    return offset < txn_token_count * txn_token_stride and offset % txn_token_stride == 0;
+}
+
+/// Live transactions by token. Guarded by `handle_registry_mutex`.
+var txn_registry: std.AutoHashMapUnmanaged(usize, *TxnHandle) = .{};
+var next_txn_seq: usize = 0;
+
+/// Stands in for every ended transaction. A stale token resolves to it and
+/// takes the path a retained closed handle used to, so callers get the same
+/// errors in the same order as before. Its database is permanently closed;
+/// every path checks that before touching `db`, which is never set.
+var retired_db_handle: DatabaseHandle = .{
+    .header = .{ .magic = HandleMagic, .kind = .database, .state = .closed, .pins = 0, .detached = false },
+    .db = undefined,
+    .mutex = .{},
+    .active_children = 0,
+    .stream_readers = 0,
+    .closing = .init(true),
+};
+var retired_txn_handle: TxnHandle = .{
+    .header = .{ .magic = HandleMagic, .kind = .txn, .state = .closed, .pins = 0, .detached = false },
+    .db_handle = &retired_db_handle,
+    .txn = .{
+        .id = 0,
+        .state = .aborted,
+        .mode = .read_only,
+        .isolation = .snapshot,
+        .start_ts = 0,
+        .commit_ts = 0,
+    },
+    .counted_child = false,
+    .token = 0,
+};
+
+/// Give a new transaction handle its token and make it live.
+fn registerTxn(handle: *TxnHandle) lattice_error {
+    handle_registry_mutex.lock();
+    defer handle_registry_mutex.unlock();
+
+    // Skipping live tokens only matters once the counter has wrapped.
+    var token: usize = undefined;
+    while (true) {
+        token = txnTokenBase() + (next_txn_seq % txn_token_count) * txn_token_stride;
+        next_txn_seq +%= 1;
+        if (!txn_registry.contains(token)) break;
+    }
+    txn_registry.put(global_allocator, token, handle) catch return .err_out_of_memory;
+    handle.token = token;
+    return .ok;
+}
+
+/// Resolve a caller's transaction token and pin it, and its database, for the
+/// rest of the calling function, which must `releaseTxn` it. An ended
+/// transaction resolves to `retired_txn_handle`; anything else that is not a
+/// live token is rejected.
+///
+/// The pins are what make freeing safe: a commit on one thread can end a
+/// transaction another thread is still using, and the memory stays until that
+/// call is done with it.
+fn acquireTxn(ptr: ?*lattice_txn) ?*TxnHandle {
+    const addr = @intFromPtr(ptr);
+    if (addr == 0) return null;
+
+    handle_registry_mutex.lock();
+    defer handle_registry_mutex.unlock();
+    if (txn_registry.get(addr)) |handle| {
+        handle.header.pins += 1;
+        handle.db_handle.header.pins += 1;
+        return handle;
+    }
+    if (isTxnToken(addr)) return &retired_txn_handle;
+    return null;
+}
+
+fn releaseTxn(handle: *TxnHandle) void {
+    if (handle == &retired_txn_handle) return;
+
+    handle_registry_mutex.lock();
+    const db_handle = handle.db_handle;
+    std.debug.assert(handle.header.pins > 0 and db_handle.header.pins > 0);
+    handle.header.pins -= 1;
+    db_handle.header.pins -= 1;
+    const free_txn = handle.header.detached and handle.header.pins == 0;
+    const free_db = db_handle.header.detached and db_handle.header.pins == 0;
+    handle_registry_mutex.unlock();
+
+    if (free_txn) global_allocator.destroy(handle);
+    if (free_db) global_allocator.destroy(db_handle);
+}
+
 fn releaseDbChildLocked(db_handle: *DatabaseHandle, counted_child: *bool) void {
     if (!counted_child.*) return;
     std.debug.assert(db_handle.active_children > 0);
@@ -1048,22 +1172,18 @@ fn releaseDbChildLocked(db_handle: *DatabaseHandle, counted_child: *bool) void {
     counted_child.* = false;
 }
 
+/// End a transaction handle after commit or rollback. Called with the database
+/// mutex held by a call that has the handle pinned; the handle leaves the
+/// registry here and its memory goes when that call releases it.
 fn retireTxnHandleLocked(txn_handle: *TxnHandle) void {
     const db_handle = txn_handle.db_handle;
     releaseDbChildLocked(db_handle, &txn_handle.counted_child);
     txn_handle.header.state = .closed;
-    txn_handle.next_retired = db_handle.retired_txns;
-    db_handle.retired_txns = txn_handle;
-}
 
-fn destroyRetiredTxnsLocked(db_handle: *DatabaseHandle) void {
-    var next = db_handle.retired_txns;
-    db_handle.retired_txns = null;
-    while (next) |txn_handle| {
-        next = txn_handle.next_retired;
-        unregisterHandle(TxnHandle, txn_handle);
-        global_allocator.destroy(txn_handle);
-    }
+    handle_registry_mutex.lock();
+    defer handle_registry_mutex.unlock();
+    _ = txn_registry.remove(txn_handle.token);
+    txn_handle.header.detached = true;
 }
 
 fn ensureActiveDbLocked(db_handle: *DatabaseHandle) lattice_error {
@@ -1229,7 +1349,6 @@ fn adoptDatabase(db: *Database, db_out: *?*lattice_database) lattice_error {
         .db = db,
         .mutex = .{},
         .active_children = 0,
-        .retired_txns = null,
         .stream_readers = 0,
         .closing = .init(false),
     };
@@ -1317,7 +1436,6 @@ pub export fn lattice_close(db: ?*lattice_database) lattice_error {
     }
     handle.header.state = .closed;
     wakeStreamReadersForCloseLocked(handle);
-    destroyRetiredTxnsLocked(handle);
     handle.mutex.unlock();
 
     var close_error: ?lattice_error = null;
@@ -1398,15 +1516,15 @@ pub export fn lattice_begin(
                             .commit_ts = 0,
                         },
                         .counted_child = true,
-                        .next_retired = null,
+                        .token = 0,
                     };
-                    const register_result = registerHandle(TxnHandle, txn_handle);
+                    const register_result = registerTxn(txn_handle);
                     if (register_result != .ok) {
                         global_allocator.destroy(txn_handle);
                         return register_result;
                     }
                     db_handle.active_children += 1;
-                    out.* = @ptrCast(txn_handle);
+                    out.* = @ptrFromInt(txn_handle.token);
                     return .ok;
                 }
                 return .err_unsupported;
@@ -1428,9 +1546,9 @@ pub export fn lattice_begin(
         .db_handle = db_handle,
         .txn = txn,
         .counted_child = true,
-        .next_retired = null,
+        .token = 0,
     };
-    const register_result = registerHandle(TxnHandle, txn_handle);
+    const register_result = registerTxn(txn_handle);
     if (register_result != .ok) {
         var mutable_txn = txn;
         db_handle.db.abortTransaction(&mutable_txn) catch {};
@@ -1439,13 +1557,14 @@ pub export fn lattice_begin(
     }
     db_handle.active_children += 1;
 
-    out.* = @ptrCast(txn_handle);
+    out.* = @ptrFromInt(txn_handle.token);
     return .ok;
 }
 
 /// Commit a transaction
 pub export fn lattice_commit(txn: ?*lattice_txn) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
     const db_handle = txn_handle.db_handle;
     db_handle.mutex.lock();
     defer db_handle.mutex.unlock();
@@ -1473,7 +1592,8 @@ pub export fn lattice_commit(txn: ?*lattice_txn) lattice_error {
 
 /// Rollback a transaction
 pub export fn lattice_rollback(txn: ?*lattice_txn) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
     const db_handle = txn_handle.db_handle;
     db_handle.mutex.lock();
     defer db_handle.mutex.unlock();
@@ -1508,7 +1628,8 @@ pub export fn lattice_node_create(
     label: [*c]const u8,
     node_out: *lattice_node_id,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
 
     const maybe_label_slice = cStrToSlice(label);
     const labels: []const []const u8 = if (maybe_label_slice) |label_slice|
@@ -1538,7 +1659,8 @@ pub export fn lattice_node_add_label(
     node_id: lattice_node_id,
     label: [*c]const u8,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
 
     const label_slice = cStrToSlice(label) orelse return .err_invalid_arg;
     if (label_slice.len == 0) return .err_invalid_arg;
@@ -1563,7 +1685,8 @@ pub export fn lattice_node_remove_label(
     node_id: lattice_node_id,
     label: [*c]const u8,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
 
     const label_slice = cStrToSlice(label) orelse return .err_invalid_arg;
     if (label_slice.len == 0) return .err_invalid_arg;
@@ -1587,7 +1710,8 @@ pub export fn lattice_node_delete(
     txn: ?*lattice_txn,
     node_id: lattice_node_id,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
 
     const active_txn_result = lockActiveTxnDb(txn_handle);
     if (active_txn_result != .ok) return active_txn_result;
@@ -1611,7 +1735,8 @@ pub export fn lattice_node_set_property(
     key: [*c]const u8,
     value: ?*const lattice_value,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
 
     const key_slice = cStrToSlice(key) orelse return .err_invalid_arg;
     const c_val = value orelse return .err_invalid_arg;
@@ -1644,7 +1769,8 @@ pub export fn lattice_node_get_property(
     key: [*c]const u8,
     value_out: *lattice_value,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
 
     const key_slice = cStrToSlice(key) orelse return .err_invalid_arg;
 
@@ -1678,7 +1804,8 @@ pub export fn lattice_node_exists(
     node_id: lattice_node_id,
     exists_out: *bool,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
 
     const active_txn_result = lockActiveTxnDb(txn_handle);
     if (active_txn_result != .ok) return active_txn_result;
@@ -1749,7 +1876,8 @@ pub export fn lattice_get_nodes_by_label_txn(
     node_ids_out: *?[*]lattice_node_id,
     count_out: *usize,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
     if (label == null) return .err_invalid_arg;
 
     node_ids_out.* = null;
@@ -1788,7 +1916,8 @@ pub export fn lattice_get_all_nodes_txn(
     node_ids_out: *?[*]lattice_node_id,
     count_out: *usize,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
 
     node_ids_out.* = null;
     count_out.* = 0;
@@ -1974,7 +2103,8 @@ pub export fn lattice_nodes_find_by_label_property(
     node_ids_out: *?[*]lattice_node_id,
     count_out: *usize,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
     const label_slice = cStrToSlice(label) orelse return .err_invalid_arg;
     const property_slice = cStrToSlice(property) orelse return .err_invalid_arg;
     const c_value = value orelse return .err_invalid_arg;
@@ -2018,7 +2148,8 @@ pub export fn lattice_node_get_labels(
     node_id: lattice_node_id,
     labels_out: *[*c]u8,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
 
     const active_txn_result = lockActiveTxnDb(txn_handle);
     if (active_txn_result != .ok) return active_txn_result;
@@ -2169,7 +2300,8 @@ fn streamPublishGetSequenceImpl(
     payload: ?*const lattice_value,
     sequence_out: ?*u64,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
 
     const stream_slice = cArgBytes(stream, stream_len) orelse return .err_invalid_arg;
     const kind_slice: ?[]const u8 = if (kind_len == 0)
@@ -2456,7 +2588,8 @@ pub export fn lattice_stream_set_offset(
     consumer_len: usize,
     sequence: u64,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
     const stream_slice = cArgBytes(stream, stream_len) orelse return .err_invalid_arg;
     const consumer_slice = cArgBytes(consumer, consumer_len) orelse return .err_invalid_arg;
 
@@ -2482,7 +2615,8 @@ pub export fn lattice_stream_trim(
     stream_len: usize,
     through_sequence: u64,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
     const stream_slice = cArgBytes(stream, stream_len) orelse return .err_invalid_arg;
 
     const db_handle = txn_handle.db_handle;
@@ -2508,7 +2642,8 @@ pub export fn lattice_node_set_vector(
     vector: [*c]const f32,
     dimensions: u32,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
 
     // Key is currently ignored - vectors are stored by node_id
     // In future, we could support multiple vectors per node with different keys
@@ -2555,7 +2690,8 @@ pub export fn lattice_batch_insert(
 ) lattice_error {
     count_out.* = 0;
 
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
     if (nodes == null or count == 0 or node_ids_out == null) return .err_invalid_arg;
 
     const active_txn_result = lockActiveTxnDb(txn_handle);
@@ -2650,7 +2786,8 @@ pub export fn lattice_vector_search_txn(
     ef_search: u16,
     result_out: *?*lattice_vector_result,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
 
     if (k == 0) return .err_invalid_arg;
 
@@ -2781,7 +2918,8 @@ pub export fn lattice_fts_search_txn(
     limit: u32,
     result_out: *?*lattice_fts_result,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
     const label_slice = cStrToSlice(label) orelse return .err_invalid_arg;
     const property_slice = cStrToSlice(property) orelse return .err_invalid_arg;
     if (query_text == null or query_len == 0 or limit == 0) return .err_invalid_arg;
@@ -2860,7 +2998,8 @@ pub export fn lattice_fts_search_fuzzy_txn(
     min_term_length: u32,
     result_out: *?*lattice_fts_result,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
     const label_slice = cStrToSlice(label) orelse return .err_invalid_arg;
     const property_slice = cStrToSlice(property) orelse return .err_invalid_arg;
     if (query_text == null or query_len == 0 or limit == 0) return .err_invalid_arg;
@@ -2977,7 +3116,8 @@ pub export fn lattice_edge_create(
     edge_type: [*c]const u8,
     edge_out: *lattice_edge_id,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
 
     const type_slice = cStrToSlice(edge_type) orelse return .err_invalid_arg;
 
@@ -3004,7 +3144,8 @@ pub export fn lattice_edge_delete(
     target: lattice_node_id,
     edge_type: [*c]const u8,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
 
     const type_slice = cStrToSlice(edge_type) orelse return .err_invalid_arg;
 
@@ -3030,7 +3171,8 @@ pub export fn lattice_edge_set_property(
     key: [*c]const u8,
     value: ?*const lattice_value,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
 
     const key_slice = cStrToSlice(key) orelse return .err_invalid_arg;
     const c_val = value orelse return .err_invalid_arg;
@@ -3058,7 +3200,8 @@ pub export fn lattice_edge_get_property(
     key: [*c]const u8,
     value_out: *lattice_value,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
     const key_slice = cStrToSlice(key) orelse return .err_invalid_arg;
 
     const active_txn_result = lockActiveTxnDb(txn_handle);
@@ -3091,7 +3234,8 @@ pub export fn lattice_edge_remove_property(
     edge_id: lattice_edge_id,
     key: [*c]const u8,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
 
     const key_slice = cStrToSlice(key) orelse return .err_invalid_arg;
 
@@ -3154,7 +3298,8 @@ pub export fn lattice_edges_find_by_type_property(
     edge_ids_out: *?[*]lattice_edge_id,
     count_out: *usize,
 ) lattice_error {
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
     const type_slice = cStrToSlice(edge_type) orelse return .err_invalid_arg;
     const property_slice = cStrToSlice(property) orelse return .err_invalid_arg;
     const c_value = value orelse return .err_invalid_arg;
@@ -3228,7 +3373,8 @@ pub export fn lattice_edge_get_outgoing(
 ) lattice_error {
     result_out.* = null;
 
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
 
     const db_handle = txn_handle.db_handle;
     db_handle.mutex.lock();
@@ -3253,7 +3399,8 @@ pub export fn lattice_edge_get_incoming(
 ) lattice_error {
     result_out.* = null;
 
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
 
     const db_handle = txn_handle.db_handle;
     db_handle.mutex.lock();
@@ -3280,7 +3427,8 @@ pub export fn lattice_edge_get_outgoing_by_type(
 ) lattice_error {
     result_out.* = null;
 
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
     const type_slice = cStrToSlice(edge_type) orelse return .err_invalid_arg;
 
     const db_handle = txn_handle.db_handle;
@@ -3307,7 +3455,8 @@ pub export fn lattice_edge_get_incoming_by_type(
 ) lattice_error {
     result_out.* = null;
 
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
     const type_slice = cStrToSlice(edge_type) orelse return .err_invalid_arg;
 
     const db_handle = txn_handle.db_handle;
@@ -3333,7 +3482,8 @@ pub export fn lattice_edge_scan(
 ) lattice_error {
     result_out.* = null;
 
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
     const type_slice: ?[]const u8 = if (edge_type == null)
         null
     else
@@ -3494,8 +3644,13 @@ pub export fn lattice_query_execute(
     result_out.* = null;
 
     const query_handle = toHandle(QueryHandle, query) orelse return .err_invalid_arg;
-    const txn_handle = toHandle(TxnHandle, txn) orelse return .err_invalid_arg;
-    if (query_handle.db_handle != txn_handle.db_handle) return .err_invalid_arg;
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
+    // An ended transaction has no database of its own; the active check below
+    // reports it as aborted, as it did when finished handles were retained.
+    if (txn_handle != &retired_txn_handle and query_handle.db_handle != txn_handle.db_handle) {
+        return .err_invalid_arg;
+    }
 
     const db_handle = query_handle.db_handle;
     db_handle.mutex.lock();
@@ -3987,6 +4142,42 @@ test "error message returns valid strings" {
     const too_large = lattice_error_message(.err_value_too_large);
     try std.testing.expect(too_large != null);
     try std.testing.expectEqualStrings("Value too large for database page size", std.mem.sliceTo(too_large, 0));
+}
+
+test "finished transaction handles are freed, not kept until close" {
+    const path = "/tmp/lattice_capi_internal_txn_handles_freed.db";
+    compat.fs.cwd().deleteFile(path) catch {};
+    compat.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer {
+        compat.fs.cwd().deleteFile(path) catch {};
+        compat.fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{ .create = true, .cache_size_mb = 4, .vector_dimensions = 0 };
+    try std.testing.expectEqual(lattice_error.ok, lattice_open(path, &options, &db));
+    defer _ = lattice_close(db);
+
+    const liveHandles = struct {
+        fn count() usize {
+            handle_registry_mutex.lock();
+            defer handle_registry_mutex.unlock();
+            return handle_registry.count() + txn_registry.count();
+        }
+    }.count;
+
+    const before = liveHandles();
+    for (0..200) |i| {
+        var txn: ?*lattice_txn = null;
+        const mode: lattice_txn_mode = if (i % 2 == 0) .read_write else .read_only;
+        try std.testing.expectEqual(lattice_error.ok, lattice_begin(db, mode, &txn));
+        if (i % 4 == 0) {
+            try std.testing.expectEqual(lattice_error.ok, lattice_rollback(txn));
+        } else {
+            try std.testing.expectEqual(lattice_error.ok, lattice_commit(txn));
+        }
+    }
+    try std.testing.expectEqual(before, liveHandles());
 }
 
 test "null handle returns error" {

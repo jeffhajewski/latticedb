@@ -20,27 +20,37 @@ pub fn euclideanDistance(a: []const f32, b: []const f32) f32 {
     return @sqrt(euclideanDistanceSquared(a, b));
 }
 
+/// Floats one unrolled step of a single-vector kernel covers: four SIMD
+/// vectors, each summed into its own accumulator. One accumulator makes every
+/// step wait for the previous step's add; four independent chains let the
+/// adds overlap.
+const UNROLL = 4 * SIMD_WIDTH;
+
+inline fn load(x: []const f32, i: usize) SimdF32 {
+    return x[i..][0..SIMD_WIDTH].*;
+}
+
 /// Compute squared Euclidean distance (avoids sqrt for comparisons)
 /// Returns: sum((a[i] - b[i])^2)
 pub fn euclideanDistanceSquared(a: []const f32, b: []const f32) f32 {
     std.debug.assert(a.len == b.len);
 
     const len = a.len;
-    const simd_len = len - (len % SIMD_WIDTH);
+    var acc = [4]SimdF32{ @splat(0.0), @splat(0.0), @splat(0.0), @splat(0.0) };
 
-    var sum_vec: SimdF32 = @splat(0.0);
-
-    // SIMD loop - process 8 floats at a time
     var i: usize = 0;
-    while (i < simd_len) : (i += SIMD_WIDTH) {
-        const va: SimdF32 = a[i..][0..SIMD_WIDTH].*;
-        const vb: SimdF32 = b[i..][0..SIMD_WIDTH].*;
-        const diff = va - vb;
-        sum_vec += diff * diff;
+    while (i + UNROLL <= len) : (i += UNROLL) {
+        inline for (0..4) |j| {
+            const diff = load(a, i + j * SIMD_WIDTH) - load(b, i + j * SIMD_WIDTH);
+            acc[j] += diff * diff;
+        }
+    }
+    while (i + SIMD_WIDTH <= len) : (i += SIMD_WIDTH) {
+        const diff = load(a, i) - load(b, i);
+        acc[0] += diff * diff;
     }
 
-    // Horizontal sum of SIMD vector
-    var sum = @reduce(.Add, sum_vec);
+    var sum = @reduce(.Add, (acc[0] + acc[1]) + (acc[2] + acc[3]));
 
     // Scalar remainder
     while (i < len) : (i += 1) {
@@ -108,18 +118,19 @@ pub fn dotProduct(a: []const f32, b: []const f32) f32 {
     std.debug.assert(a.len == b.len);
 
     const len = a.len;
-    const simd_len = len - (len % SIMD_WIDTH);
-
-    var dot_vec: SimdF32 = @splat(0.0);
+    var acc = [4]SimdF32{ @splat(0.0), @splat(0.0), @splat(0.0), @splat(0.0) };
 
     var i: usize = 0;
-    while (i < simd_len) : (i += SIMD_WIDTH) {
-        const va: SimdF32 = a[i..][0..SIMD_WIDTH].*;
-        const vb: SimdF32 = b[i..][0..SIMD_WIDTH].*;
-        dot_vec += va * vb;
+    while (i + UNROLL <= len) : (i += UNROLL) {
+        inline for (0..4) |j| {
+            acc[j] += load(a, i + j * SIMD_WIDTH) * load(b, i + j * SIMD_WIDTH);
+        }
+    }
+    while (i + SIMD_WIDTH <= len) : (i += SIMD_WIDTH) {
+        acc[0] += load(a, i) * load(b, i);
     }
 
-    var dot = @reduce(.Add, dot_vec);
+    var dot = @reduce(.Add, (acc[0] + acc[1]) + (acc[2] + acc[3]));
 
     while (i < len) : (i += 1) {
         dot += a[i] * b[i];
@@ -551,4 +562,40 @@ test "innerProductDistanceBatch4 matches individual calls" {
     try testing.expectApproxEqAbs(innerProductDistance(&query, &v1), batch[1], 0.01);
     try testing.expectApproxEqAbs(innerProductDistance(&query, &v2), batch[2], 0.01);
     try testing.expectApproxEqAbs(innerProductDistance(&query, &v3), batch[3], 0.01);
+}
+
+test "kernels match a scalar reference at every unroll remainder" {
+    var prng = std.Random.DefaultPrng.init(5);
+    const r = prng.random();
+    var buf: [5][131]f32 = undefined;
+    for (&buf) |*v| for (v) |*x| {
+        x.* = r.float(f32) * 2.0 - 1.0;
+    };
+    for (0..131) |len| {
+        const q = buf[0][0..len];
+        var ref_dot = [4]f32{ 0, 0, 0, 0 };
+        var ref_l2 = [4]f32{ 0, 0, 0, 0 };
+        var ref_nq: f32 = 0;
+        var ref_nv: f32 = 0;
+        for (0..len) |i| {
+            ref_nq += q[i] * q[i];
+            ref_nv += buf[1][i] * buf[1][i];
+            for (0..4) |t| {
+                ref_dot[t] += q[i] * buf[t + 1][i];
+                const diff = q[i] - buf[t + 1][i];
+                ref_l2[t] += diff * diff;
+            }
+        }
+        const tol: f32 = 1e-4;
+        try testing.expectApproxEqAbs(ref_dot[0], dotProduct(q, buf[1][0..len]), tol);
+        try testing.expectApproxEqAbs(ref_l2[0], euclideanDistanceSquared(q, buf[1][0..len]), tol);
+        const ref_cos: f32 = if (ref_nq == 0 or ref_nv == 0) 0 else 1.0 - ref_dot[0] / (@sqrt(ref_nq) * @sqrt(ref_nv));
+        try testing.expectApproxEqAbs(ref_cos, cosineDistance(q, buf[1][0..len]), tol);
+        const dots = dotProductBatch4(q, buf[1][0..len], buf[2][0..len], buf[3][0..len], buf[4][0..len]);
+        const l2s = euclideanDistanceSquaredBatch4(q, buf[1][0..len], buf[2][0..len], buf[3][0..len], buf[4][0..len]);
+        for (0..4) |t| {
+            try testing.expectApproxEqAbs(ref_dot[t], dots[t], tol);
+            try testing.expectApproxEqAbs(ref_l2[t], l2s[t], tol);
+        }
+    }
 }

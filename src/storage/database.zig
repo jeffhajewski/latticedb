@@ -5502,7 +5502,6 @@ pub const Database = struct {
                 });
                 overlay.markDirty();
 
-                if (self.query_cache) |cache| cache.bumpSchemaVersion();
                 return node_id;
             }
         }
@@ -5553,9 +5552,6 @@ pub const Database = struct {
                 };
             }
         }
-
-        // Invalidate query cache (labels changed)
-        if (self.query_cache) |cache| cache.bumpSchemaVersion();
 
         return node_id;
     }
@@ -5612,7 +5608,6 @@ pub const Database = struct {
                 }
                 overlay.markDirty();
 
-                if (self.query_cache) |cache| cache.bumpSchemaVersion();
                 return;
             }
         }
@@ -5684,9 +5679,6 @@ pub const Database = struct {
         if (self.hnsw_index) |*hnsw| {
             hnsw.remove(node_id) catch |err| return mapHnswError(err);
         }
-
-        // Invalidate query cache (labels changed)
-        if (self.query_cache) |cache| cache.bumpSchemaVersion();
     }
 
     /// Check if a node exists
@@ -6047,7 +6039,6 @@ pub const Database = struct {
                 });
                 overlay.markDirty();
 
-                if (self.query_cache) |cache| cache.bumpSchemaVersion();
                 return;
             }
         }
@@ -6176,7 +6167,6 @@ pub const Database = struct {
                 }
                 overlay.markDirty();
 
-                if (self.query_cache) |cache| cache.bumpSchemaVersion();
                 return;
             }
         }
@@ -6623,7 +6613,6 @@ pub const Database = struct {
                 if (self.adjacency_cache) |*cache| {
                     cache.invalidate(source);
                 }
-                if (self.query_cache) |cache| cache.bumpSchemaVersion();
                 return edge_id;
             }
         }
@@ -6670,8 +6659,6 @@ pub const Database = struct {
             cache.invalidate(source);
         }
 
-        // Invalidate query cache (edge types changed)
-        if (self.query_cache) |cache| cache.bumpSchemaVersion();
         return edge_id;
     }
 
@@ -6721,7 +6708,6 @@ pub const Database = struct {
                     cache.invalidate(source);
                     cache.invalidate(target);
                 }
-                if (self.query_cache) |cache| cache.bumpSchemaVersion();
                 return;
             }
         }
@@ -6784,9 +6770,6 @@ pub const Database = struct {
             cache.invalidate(source);
             cache.invalidate(target);
         }
-
-        // Invalidate query cache (edge types changed)
-        if (self.query_cache) |cache| cache.bumpSchemaVersion();
     }
 
     /// Delete an edge by stable edge ID.
@@ -6821,7 +6804,6 @@ pub const Database = struct {
                         cache.invalidate(owned_state.source);
                         cache.invalidate(owned_state.target);
                     }
-                    if (self.query_cache) |cache| cache.bumpSchemaVersion();
                     return;
                 }
                 return DatabaseError.NotFound;
@@ -6872,7 +6854,6 @@ pub const Database = struct {
             cache.invalidate(source);
             cache.invalidate(target);
         }
-        if (self.query_cache) |cache| cache.bumpSchemaVersion();
     }
 
     /// Set a property on an edge by stable edge ID.

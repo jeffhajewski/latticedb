@@ -2114,3 +2114,76 @@ test "txn-aware reads: label scans see the transaction's own creates, deletes an
     defer limited.deinit();
     try std.testing.expectEqual(@as(usize, 2), limited.rows.len);
 }
+
+test "query cache: cached queries see labels, types and properties that writes create" {
+    if (!databaseSupportsTransactions()) {
+        return error.SkipZigTest;
+    }
+
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_query_cache_new_symbols_test.ltdb";
+
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{
+            .enable_wal = true,
+            .enable_fts = false,
+            .enable_vector = false,
+        },
+    });
+    defer db.close();
+
+    const by_label = "MATCH (n:Fresh) RETURN count(n)";
+    const by_property = "MATCH (n:Fresh) WHERE n.brand_new = 7 RETURN count(n)";
+    const by_type = "MATCH (:Fresh)-[r:NEVER_SEEN]->(:Fresh) RETURN count(r)";
+
+    // Cache all three while none of their labels, types or keys exist.
+    try expectLabelCount(db, null, by_label, 0);
+    try expectLabelCount(db, null, by_property, 0);
+    try expectLabelCount(db, null, by_type, 0);
+    const primed = db.queryCacheStats();
+    try std.testing.expectEqual(@as(u32, 3), primed.entries);
+
+    // Inside a transaction, the cached queries see what it writes.
+    var txn = try db.beginTransaction(.read_write);
+    const a = try db.createNode(&txn, &[_][]const u8{"Fresh"});
+    const b = try db.createNode(&txn, &[_][]const u8{"Fresh"});
+    try db.setNodeProperty(&txn, a, "brand_new", .{ .int_val = 7 });
+    const edge = try db.createEdgeAndGetId(&txn, a, b, "NEVER_SEEN");
+    try expectLabelCount(db, &txn, by_label, 2);
+    try expectLabelCount(db, &txn, by_property, 1);
+    try expectLabelCount(db, &txn, by_type, 1);
+    try db.commitTransaction(&txn);
+
+    // After commit, and without a transaction.
+    try expectLabelCount(db, null, by_label, 2);
+    try expectLabelCount(db, null, by_property, 1);
+    try expectLabelCount(db, null, by_type, 1);
+
+    // Deletes are seen too.
+    var del = try db.beginTransaction(.read_write);
+    try db.deleteEdgeById(&del, edge);
+    try db.removeNodeLabel(&del, b, "Fresh");
+    try db.commitTransaction(&del);
+    try expectLabelCount(db, null, by_label, 1);
+    try expectLabelCount(db, null, by_property, 1);
+    try expectLabelCount(db, null, by_type, 0);
+
+    // Writes without a transaction, too.
+    const c = try db.createNode(null, &[_][]const u8{"Fresh"});
+    try db.setNodeProperty(null, c, "brand_new", .{ .int_val = 7 });
+    try expectLabelCount(db, null, by_label, 2);
+    try expectLabelCount(db, null, by_property, 2);
+
+    // Every execution after the first three was served from the cache:
+    // writes no longer throw the parsed queries away.
+    const after = db.queryCacheStats();
+    try std.testing.expectEqual(primed.misses, after.misses);
+    try std.testing.expectEqual(@as(u32, 3), after.entries);
+    try std.testing.expectEqual(primed.hits + 11, after.hits);
+}

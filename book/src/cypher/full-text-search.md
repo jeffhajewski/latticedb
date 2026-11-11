@@ -94,6 +94,13 @@ a label — two relationship types can each declare an index on `note`:
 Write it in the pattern, as in -[x:TYPE]->.
 ```
 
+Labels and relationship types share one namespace, so a node index and a
+relationship index cannot both use the same name and property: with
+`(:Review).text` declared, declaring `[:Review].text` fails with "already exists",
+and the other way round. Their entries would land on the same storage keys. A
+database that declared both before this check existed keeps sharing them, and
+dropping either clears both; drop both and declare again the one you keep.
+
 A single `@@` predicate searches either nodes or relationships, not both at once.
 `WHERE d.title @@ "x" OR x.note @@ "x"` is not a union of two index scans, because
 one scan filters one variable; that query still works, through the row filter,
@@ -147,12 +154,18 @@ A query with no `LIMIT` returns every match. Writing `LIMIT` still limits.
 
 ## String queries
 
-The query is a space-separated list of terms, and all of them must match:
+The query is a list of terms, and all of them must match:
 
 ```cypher
 // Both "neural" and "networks" must appear
 MATCH (d:Document) WHERE d.text @@ "neural networks" RETURN d
 ```
+
+The query is split into terms the same way the indexed text is: words in any
+script, lowercased, accents folded, English stop words dropped, and punctuation,
+quotes and `-` treated as separators. A term that no document contains means no
+rows. The [full-text search guide](../guides/full-text-search.md#how-it-works)
+describes the tokenizer, and what changes for indexes built by 0.16.0.
 
 ## Using parameters
 
@@ -216,10 +229,15 @@ const results = await db.ftsSearch("Document", "content", "machine learning", { 
 const fuzzy = await db.ftsSearchFuzzy("Document", "content", "machin lerning", { limit: 10 });
 ```
 
-Inside a write transaction, these see that transaction's own uncommitted writes.
-Fuzzy matching is the one exception: pending text is matched by term presence
-rather than edit distance, so a typo will not find a document the transaction has
-only just written.
+Fuzzy search matches documents containing any of the query words, or a near
+spelling of one, rather than all of them.
+
+Inside a write transaction, `@@` and the transaction's search methods see that
+transaction's own uncommitted writes. Uncommitted text is matched by whole terms,
+split and normalised as the index would, and scored by how many distinct query
+terms it contains rather than by BM25, so its scores do not compare with the
+index's. Fuzzy matching does not reach it: a typo will not find a document the
+transaction has only just written.
 
 ## Dropping an index
 

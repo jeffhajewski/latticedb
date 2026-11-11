@@ -6,13 +6,46 @@ LatticeDB includes a BM25-scored inverted index for full-text search. This guide
 
 LatticeDB's full-text search uses:
 
-- **Tokenization** — text is lowercased and split into terms on anything that is
-  not an ASCII letter, digit, or `_`. Terms shorter than two characters and
-  English stop words ("the", "and", …) are dropped. There is no stemming: "fox" and
-  "foxes" are different terms. Non-ASCII letters split words, so text that is
-  not English (or not ASCII) is indexed poorly.
+- **Tokenization** — text is split into words: runs of letters, digits, combining
+  marks and `_`, in any script. Spaces, punctuation, symbols and emoji separate
+  words, and so do bytes that are not valid UTF-8. Chinese (Han) characters and
+  hiragana are a word each, because those scripts do not put spaces between
+  words. Each word is lowercased (Latin, Greek, Cyrillic and Armenian letters)
+  and its accents are folded, so "Café", "cafe" and "CAFÉ" are one term and
+  "Straße" is stored as "strasse". Single ASCII characters, words longer than 64
+  bytes and English stop words ("the", "and", …) are dropped. A query goes
+  through the same steps, so `"Müller"` and `"muller"` find the same documents.
+- **No stemming** — "run" does not find "running". The engine has an English
+  stemmer, but the C API, the bindings and Cypher cannot turn it on.
 - **Inverted index** — maps terms to the nodes containing them
 - **BM25 scoring** — ranks results by relevance considering term frequency, document frequency, and document length
+
+### Indexes built by 0.16.0 or earlier
+
+The tokenizer above applies to indexes that are new, or empty, in this release.
+An index that already held documents keeps the tokenizer it was built with,
+because its stored terms came from it: only ASCII letters, digits and `_` are
+word characters, so "Müller" was stored as "ller" (and matches "Zöller"), "café"
+as "caf", and Cyrillic or CJK text produced no terms at all. Accents are not
+folded in such an index. Searches against it keep working as they did.
+
+Each index records how it analyses text when its first document goes in, and an
+old index has no record. It switches to the new tokenizer only when every
+document has left it. There is no reindex command; to rebuild an old index with
+the new tokenizer, drop it and declare it again, which reads the property from
+every node afresh:
+
+```python
+db.drop_node_fts_index("Document", "text")
+db.create_node_fts_index("Document", "text")
+```
+
+Opening a database whose log has to be replayed after a crash also rebuilds
+every full-text index, and a rebuilt index takes the new tokenizer.
+
+Going back to 0.16.0 after this release has written to an index works, but
+0.16.0 splits non-ASCII words its old way, so it will not find words with
+non-ASCII letters that this release indexed. ASCII text is unaffected.
 
 ## Declaring an Index
 
@@ -81,9 +114,12 @@ RETURN d.title
 declared for the label and property you name, the query fails with "No full-text
 index is declared for Document.title" rather than returning nothing.
 
-A query with several terms matches documents containing every term. Quotes and a
-leading `-` have no special meaning in a `@@` query: punctuation only separates
-words, so `"fox -quick"` matches documents containing both "fox" and "quick".
+A query with several terms matches documents containing every term, so a term no
+document contains gives no results: `"apple zebra"` finds nothing if no document
+has "zebra". Every match is scored, and the best `limit` are returned. Quotes and a
+leading `-` have no special meaning in a `@@` query or in `fts_search`:
+punctuation only separates words, so `"fox -quick"` matches documents containing
+both "fox" and "quick". Only the first 32 distinct terms of a query are used.
 
 ## Fuzzy Search
 
@@ -116,7 +152,12 @@ const results = await db.ftsSearchFuzzy("Document", "text", "machne", {
 ```
 
 - **max_distance** — maximum Levenshtein edit distance. Higher values find more matches but may include irrelevant results.
-- **min_term_length** — minimum term length to apply fuzzy matching. Short terms (like "a", "the") are matched exactly.
+- **min_term_length** — minimum term length to apply fuzzy matching. Shorter terms are matched exactly.
+
+Unlike plain search, fuzzy search matches a document that contains **any** of the
+query words or a near spelling of one. Each query word scores a document by its
+best-matching spelling in that document, and the words' scores add up, so a
+document matching more of the query ranks higher.
 
 ## Combining with Vector Search
 

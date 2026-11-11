@@ -4473,6 +4473,11 @@ pub const Database = struct {
         if (!types.isValidVectorDimensions(vector.len)) return DatabaseError.InvalidArgument;
         const vs = self.vector_storage orelse return DatabaseError.IoError;
         if (vector.len != vs.dimensions) return DatabaseError.InvalidArgument;
+        // A NaN or infinite component makes every distance to it NaN or
+        // infinite, which breaks the ordering the index search relies on.
+        for (vector) |component| {
+            if (!std.math.isFinite(component)) return DatabaseError.InvalidArgument;
+        }
     }
 
     fn stageStreamAppend(

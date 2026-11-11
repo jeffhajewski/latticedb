@@ -684,8 +684,31 @@ pub const HnswIndex = struct {
     // Dirty flag for persistence
     dirty: bool,
 
+    /// Prior contents of every neighbour list a mutation in progress has
+    /// rewritten, so a mutation that fails part way can put them back.
+    journal: std.ArrayListUnmanaged(JournalEntry) = .empty,
+    journaling: bool = false,
+
     const Self = @This();
     const PAGE_SIZE: usize = 4096;
+
+    /// The most neighbours one list can hold; the stack buffers that read a
+    /// list are this size.
+    const MAX_NEIGHBORS: usize = 64;
+
+    const JournalEntry = struct {
+        loc: ConnectionLocation,
+        layer: u8,
+        count: u8,
+        ids: [MAX_NEIGHBORS]u64,
+    };
+
+    /// What a mutation has to restore besides neighbour lists.
+    const Snapshot = struct {
+        entry_point: ?u64,
+        max_layer: u8,
+        vector_count: u64,
+    };
 
     /// Initialize a new HNSW index
     pub fn init(
@@ -712,8 +735,59 @@ pub const HnswIndex = struct {
 
     /// Deinitialize the index
     pub fn deinit(self: *Self) void {
+        self.journal.deinit(self.allocator);
         self.connection_pool.deinit();
         self.nodes.deinit();
+    }
+
+    // ========================================================================
+    // Mutation journal
+    // ========================================================================
+
+    fn beginMutation(self: *Self) Snapshot {
+        self.journal.clearRetainingCapacity();
+        self.journaling = true;
+        return .{
+            .entry_point = self.entry_point,
+            .max_layer = self.max_layer,
+            .vector_count = self.vector_count,
+        };
+    }
+
+    fn endMutation(self: *Self) void {
+        self.journaling = false;
+        self.journal.clearRetainingCapacity();
+    }
+
+    /// Remember a list's contents before it is rewritten. Fails before
+    /// anything is written, so a failure here leaves nothing to undo.
+    fn journalList(self: *Self, loc: ConnectionLocation, layer: u8, old: []const u64) HnswError!void {
+        if (!self.journaling) return;
+        if (old.len > MAX_NEIGHBORS) return HnswError.StorageError;
+        var entry = JournalEntry{ .loc = loc, .layer = layer, .count = @intCast(old.len), .ids = undefined };
+        @memcpy(entry.ids[0..old.len], old);
+        self.journal.append(self.allocator, entry) catch return HnswError.OutOfMemory;
+    }
+
+    /// Put back every list the current mutation rewrote, newest first, and
+    /// the index-wide state captured when it began.
+    fn rollback(self: *Self, snapshot: Snapshot) void {
+        var i = self.journal.items.len;
+        while (i > 0) {
+            i -= 1;
+            const entry = &self.journal.items[i];
+            self.connection_pool.setConnections(entry.loc, 0, entry.layer, entry.ids[0..entry.count]) catch {};
+        }
+        self.journal.clearRetainingCapacity();
+        self.entry_point = snapshot.entry_point;
+        self.max_layer = snapshot.max_layer;
+        self.vector_count = snapshot.vector_count;
+    }
+
+    /// Rewrite a neighbour list, journaling what it held.
+    fn writeList(self: *Self, loc: ConnectionLocation, layer: u8, old: []const u64, new: []const u64) HnswError!void {
+        try self.journalList(loc, layer, old);
+        try self.connection_pool.setConnections(loc, 0, layer, new);
     }
 
     /// Get a node entry by ID
@@ -948,7 +1022,7 @@ pub const HnswIndex = struct {
             @memcpy(new_neighbors[0..neighbors.len], neighbors);
             new_neighbors[neighbors.len] = neighbor;
 
-            try self.setConnections(loc, node_id, layer, new_neighbors);
+            try self.writeList(loc, layer, neighbors, new_neighbors);
         } else {
             // At capacity — use heuristic pruning to select diverse neighbors
             const node_entry = self.getNode(node_id) orelse return;
@@ -986,7 +1060,7 @@ pub const HnswIndex = struct {
             const selected = try self.selectNeighborsHeuristic(node_id, candidates, max_connections);
             defer self.allocator.free(selected);
 
-            try self.setConnections(loc, node_id, layer, selected);
+            try self.writeList(loc, layer, neighbors, selected);
         }
     }
 
@@ -1257,7 +1331,6 @@ pub const HnswIndex = struct {
     // Insert Algorithm
     // ========================================================================
 
-    /// Insert a vector into the index
     /// Whether the index already holds exactly this vector for this node.
     ///
     /// Recovery replays every vector write since the last checkpoint, and
@@ -1281,6 +1354,12 @@ pub const HnswIndex = struct {
         return std.mem.eql(u8, std.mem.sliceAsBytes(borrowed.data), std.mem.sliceAsBytes(stored_form));
     }
 
+    /// Insert a vector into the index, or replace the vector of an id it
+    /// already holds.
+    ///
+    /// All or nothing: if it fails, the index is as it was before the call.
+    /// A new id is not left half-linked into the graph, and a replacement keeps
+    /// its old vector and neighbours.
     pub fn insert(self: *Self, vector_id: u64, vector: []const f32) HnswError!void {
         if (!types.isValidVectorDimensions(self.config.dimensions) or vector.len != self.config.dimensions) {
             return HnswError.DimensionMismatch;
@@ -1295,37 +1374,59 @@ pub const HnswIndex = struct {
             break :blk norm_buf[0..vector.len];
         } else vector;
 
-        var recycled_entry: ?HnswNodeEntry = null;
+        const snapshot = self.beginMutation();
+        defer self.endMutation();
+
         if (self.nodes.get(vector_id)) |existing| {
-            self.vector_storage.update(existing.vector_loc, vector_id, store_vector) catch return HnswError.StorageError;
-            recycled_entry = (try self.detach(vector_id)) orelse return HnswError.NotFound;
-            try self.connection_pool.resetSlot(existing.connections_loc);
+            return self.replace(existing, store_vector, snapshot);
         }
 
-        var owns_new_vector = false;
-        const vector_loc = if (recycled_entry) |entry|
-            entry.vector_loc
-        else blk: {
-            const loc = self.vector_storage.store(vector_id, store_vector) catch return HnswError.StorageError;
-            owns_new_vector = true;
-            break :blk loc;
-        };
-        errdefer if (owns_new_vector) self.vector_storage.delete(vector_loc, vector_id) catch {};
+        const vector_loc = self.vector_storage.store(vector_id, store_vector) catch return HnswError.StorageError;
+        errdefer self.vector_storage.delete(vector_loc, vector_id) catch {};
 
-        // Replacements retain their original level and connection slot. This avoids
-        // unbounded page growth while preserving the index's sampled level distribution.
-        const level = if (recycled_entry) |entry| entry.max_layer else self.randomLevel();
-        var owns_new_connections = false;
-        const connections_loc = if (recycled_entry) |entry|
-            entry.connections_loc
-        else blk: {
-            const loc = try self.connection_pool.allocateSlot(level);
-            owns_new_connections = true;
-            break :blk loc;
-        };
-        errdefer if (owns_new_connections) self.connection_pool.freeSlot(connections_loc) catch {};
+        const level = self.randomLevel();
+        const connections_loc = try self.connection_pool.allocateSlot(level);
+        errdefer self.connection_pool.freeSlot(connections_loc) catch {};
 
+        errdefer {
+            self.rollback(snapshot);
+            _ = self.nodes.remove(vector_id);
+        }
         try self.insertGraph(vector_id, vector_loc, connections_loc, level, store_vector);
+    }
+
+    /// Replace the vector of an indexed id in place. It keeps its level and
+    /// connection slot, which avoids unbounded page growth while preserving
+    /// the index's sampled level distribution.
+    fn replace(self: *Self, existing: HnswNodeEntry, store_vector: []const f32, snapshot: Snapshot) HnswError!void {
+        const vector_id = existing.vector_id;
+
+        // What a failure has to put back: the old vector and the node's own
+        // lists, which are journaled before the slot is cleared.
+        const old_vector = blk: {
+            const borrowed = self.vector_storage.borrowByLocation(existing.vector_loc) catch return HnswError.StorageError;
+            defer borrowed.release();
+            break :blk self.allocator.dupe(f32, borrowed.data) catch return HnswError.OutOfMemory;
+        };
+        defer self.allocator.free(old_vector);
+
+        var conn_buf: [MAX_NEIGHBORS]u64 = undefined;
+        var layer: u16 = 0;
+        while (layer <= existing.max_layer) : (layer += 1) {
+            const own = try self.connection_pool.getConnectionsInto(existing.connections_loc, @intCast(layer), &conn_buf);
+            try self.journalList(existing.connections_loc, @intCast(layer), own);
+        }
+
+        self.vector_storage.update(existing.vector_loc, vector_id, store_vector) catch return HnswError.StorageError;
+        errdefer self.vector_storage.update(existing.vector_loc, vector_id, old_vector) catch {};
+
+        errdefer {
+            self.rollback(snapshot);
+            self.nodes.put(vector_id, existing) catch {};
+        }
+        _ = (try self.detach(vector_id)) orelse return HnswError.NotFound;
+        try self.connection_pool.resetSlot(existing.connections_loc);
+        try self.insertGraph(vector_id, existing.vector_loc, existing.connections_loc, existing.max_layer, store_vector);
     }
 
     /// Add an already-persisted vector to a freshly rebuilt graph without
@@ -1350,9 +1451,16 @@ pub const HnswIndex = struct {
             break :blk norm_buf[0..vector.len];
         } else vector;
 
+        const snapshot = self.beginMutation();
+        defer self.endMutation();
+
         const level = self.randomLevel();
         const connections_loc = try self.connection_pool.allocateSlot(level);
         errdefer self.connection_pool.freeSlot(connections_loc) catch {};
+        errdefer {
+            self.rollback(snapshot);
+            _ = self.nodes.remove(vector_id);
+        }
         try self.insertGraph(vector_id, vector_loc, connections_loc, level, search_vector);
     }
 
@@ -1467,25 +1575,23 @@ pub const HnswIndex = struct {
                 const connections = try self.getConnections(entry.value_ptr.connections_loc, layer_u8);
                 defer self.allocator.free(connections);
 
+                if (std.mem.indexOfScalar(u64, connections, vector_id) == null) continue;
+                try self.journalList(entry.value_ptr.connections_loc, layer_u8, connections);
+
                 var write_index: usize = 0;
-                var found = false;
                 for (connections) |neighbor| {
-                    if (neighbor == vector_id) {
-                        found = true;
-                    } else {
+                    if (neighbor != vector_id) {
                         connections[write_index] = neighbor;
                         write_index += 1;
                     }
                 }
 
-                if (found) {
-                    try self.setConnections(
-                        entry.value_ptr.connections_loc,
-                        entry.key_ptr.*,
-                        layer_u8,
-                        connections[0..write_index],
-                    );
-                }
+                try self.setConnections(
+                    entry.value_ptr.connections_loc,
+                    entry.key_ptr.*,
+                    layer_u8,
+                    connections[0..write_index],
+                );
             }
         }
 
@@ -1506,10 +1612,21 @@ pub const HnswIndex = struct {
     }
 
     /// Remove a vector from the index and release its storage for reuse.
+    /// All or nothing, like `insert`.
     pub fn remove(self: *Self, vector_id: u64) HnswError!void {
-        const removed_entry = (try self.detach(vector_id)) orelse return;
+        const snapshot = self.beginMutation();
+        defer self.endMutation();
+
+        const removed_entry = self.nodes.get(vector_id) orelse return;
+        errdefer {
+            self.rollback(snapshot);
+            self.nodes.put(vector_id, removed_entry) catch {};
+        }
+        _ = try self.detach(vector_id);
         self.vector_storage.delete(removed_entry.vector_loc, vector_id) catch return HnswError.StorageError;
-        try self.connection_pool.freeSlot(removed_entry.connections_loc);
+        // Nothing refers to the slot any more; failing to mark it free only
+        // means it is not reused.
+        self.connection_pool.freeSlot(removed_entry.connections_loc) catch {};
     }
 
     /// Free search results allocated by search()

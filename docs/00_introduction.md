@@ -59,6 +59,11 @@ the engine itself.
 
 ## Chapters
 
+Chapters 1–12 now live in the book's architecture section, starting at
+[Overview](../book/src/architecture/overview.md); the files here point to them.
+Chapter 13 is [13_engine_conformance.md](13_engine_conformance.md) and chapter 14
+is [14_durable_streams.md](14_durable_streams.md).
+
 ### Storage Engine
 
 1. **Virtual File System** - Abstracting file I/O for portability and testing
@@ -71,7 +76,7 @@ the engine itself.
 5. **Write-Ahead Log** - Durability through logging before data changes
 6. **Transaction Manager** - ACID transactions with begin/commit/abort
 7. **Checkpointing** - Bounding recovery time by flushing dirty pages
-8. **Recovery** - ARIES-style crash recovery with redo/undo
+8. **Recovery** - ARIES-inspired crash recovery, redo only
 
 ### Data Model
 

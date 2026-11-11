@@ -1,96 +1,90 @@
-<svg width="449" height="760"
- viewBox="0.00 0.00 337.00 570.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 565.82)">
+<svg width="877" height="453"
+ viewBox="0.00 0.00 658.00 340.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 336.12)">
 <title>wal_write_flow</title>
-<!-- app -->
+<!-- caller -->
 <g id="node1" class="node">
-<title>app</title>
-<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M198.18,-561.82C198.18,-561.82 130.5,-561.82 130.5,-561.82 124.5,-561.82 118.5,-555.82 118.5,-549.82 118.5,-549.82 118.5,-537.82 118.5,-537.82 118.5,-531.82 124.5,-525.82 130.5,-525.82 130.5,-525.82 198.18,-525.82 198.18,-525.82 204.18,-525.82 210.18,-531.82 210.18,-537.82 210.18,-537.82 210.18,-549.82 210.18,-549.82 210.18,-555.82 204.18,-561.82 198.18,-561.82"/>
-<text xml:space="preserve" text-anchor="middle" x="164.34" y="-538.8" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Application</text>
+<title>caller</title>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M361.8,-332.12C361.8,-332.12 73.5,-332.12 73.5,-332.12 67.5,-332.12 61.5,-326.12 61.5,-320.12 61.5,-320.12 61.5,-299.84 61.5,-299.84 61.5,-293.84 67.5,-287.84 73.5,-287.84 73.5,-287.84 361.8,-287.84 361.8,-287.84 367.8,-287.84 373.8,-293.84 373.8,-299.84 373.8,-299.84 373.8,-320.12 373.8,-320.12 373.8,-326.12 367.8,-332.12 361.8,-332.12"/>
+<text xml:space="preserve" text-anchor="start" x="75.9" y="-313.03" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Commit logs its overlay</text>
+<text xml:space="preserve" text-anchor="start" x="75.9" y="-299.53" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">(TXN_BEGIN goes out with the first record)</text>
 </g>
-<!-- overlay -->
+<!-- append -->
 <g id="node2" class="node">
-<title>overlay</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M270.56,-484.57C270.56,-484.57 58.12,-484.57 58.12,-484.57 52.13,-484.57 46.12,-478.57 46.12,-472.57 46.12,-472.57 46.12,-439.6 46.12,-439.6 46.12,-433.6 52.12,-427.6 58.12,-427.6 58.12,-427.6 270.56,-427.6 270.56,-427.6 276.56,-427.6 282.56,-433.6 282.56,-439.6 282.56,-439.6 282.56,-472.57 282.56,-472.57 282.56,-478.57 276.56,-484.57 270.56,-484.57"/>
-<text xml:space="preserve" text-anchor="middle" x="164.34" y="-463.81" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Transaction overlay (RAM)</text>
-<text xml:space="preserve" text-anchor="middle" x="164.34" y="-451.06" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">CREATE / SET / DELETE staged here</text>
-<text xml:space="preserve" text-anchor="middle" x="164.34" y="-438.31" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">no log records yet</text>
+<title>append</title>
+<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M351.67,-256.84C351.67,-256.84 83.62,-256.84 83.62,-256.84 77.62,-256.84 71.62,-250.84 71.62,-244.84 71.62,-244.84 71.62,-211.06 71.62,-211.06 71.62,-205.06 77.62,-199.06 83.62,-199.06 83.62,-199.06 351.67,-199.06 351.67,-199.06 357.67,-199.06 363.67,-205.06 363.67,-211.06 363.67,-211.06 363.67,-244.84 363.67,-244.84 363.67,-250.84 357.67,-256.84 351.67,-256.84"/>
+<text xml:space="preserve" text-anchor="start" x="86.02" y="-237.75" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">appendRecord</text>
+<text xml:space="preserve" text-anchor="start" x="86.02" y="-224.25" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;assign the next LSN</text>
+<text xml:space="preserve" text-anchor="start" x="86.02" y="-210.75" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;copy the record into the frame buffer</text>
 </g>
-<!-- app&#45;&gt;overlay -->
+<!-- caller&#45;&gt;append -->
 <g id="edge1" class="edge">
-<title>app&#45;&gt;overlay</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M164.34,-525.47C164.34,-516.19 164.34,-504.4 164.34,-493.24"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="166.79,-493.54 164.34,-486.54 161.89,-493.54 166.79,-493.54"/>
-<text xml:space="preserve" text-anchor="middle" x="180.47" y="-501.32" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;writes</text>
+<title>caller&#45;&gt;append</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M217.65,-287.53C217.65,-280.88 217.65,-273.34 217.65,-265.94"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="220.1,-266.05 217.65,-259.05 215.2,-266.05 220.1,-266.05"/>
 </g>
-<!-- log -->
+<!-- full -->
 <g id="node3" class="node">
-<title>log</title>
-<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M316.68,-386.35C316.68,-386.35 12,-386.35 12,-386.35 6,-386.35 0,-380.35 0,-374.35 0,-374.35 0,-325.63 0,-325.63 0,-319.63 6,-313.63 12,-313.63 12,-313.63 316.68,-313.63 316.68,-313.63 322.68,-313.63 328.68,-319.63 328.68,-325.63 328.68,-325.63 328.68,-374.35 328.68,-374.35 328.68,-380.35 322.68,-386.35 316.68,-386.35"/>
-<text xml:space="preserve" text-anchor="start" x="15.84" y="-366.54" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">1. Log the overlay</text>
-<text xml:space="preserve" text-anchor="start" x="15.84" y="-353.04" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;WAL manager assigns LSNs, appends records</text>
-<text xml:space="preserve" text-anchor="start" x="15.84" y="-339.54" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;to the frame buffer; a full frame is</text>
-<text xml:space="preserve" text-anchor="start" x="15.84" y="-326.04" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;written to the &#45;wal file (no fsync)</text>
+<title>full</title>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M273.3,-146.56C273.3,-146.56 12,-146.56 12,-146.56 6,-146.56 0,-140.56 0,-134.56 0,-134.56 0,-100.78 0,-100.78 0,-94.78 6,-88.78 12,-88.78 12,-88.78 273.3,-88.78 273.3,-88.78 279.3,-88.78 285.3,-94.78 285.3,-100.78 285.3,-100.78 285.3,-134.56 285.3,-134.56 285.3,-140.56 279.3,-146.56 273.3,-146.56"/>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-127.47" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Frame full: write it to the &#45;wal file,</text>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-113.97" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">rewrite the header&#39;s frame count</text>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-100.47" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">(no fsync)</text>
 </g>
-<!-- overlay&#45;&gt;log -->
+<!-- append&#45;&gt;full -->
 <g id="edge2" class="edge">
-<title>overlay&#45;&gt;log</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M164.34,-427.19C164.34,-417.4 164.34,-406.15 164.34,-395.35"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="166.79,-395.48 164.34,-388.48 161.89,-395.48 166.79,-395.48"/>
-<text xml:space="preserve" text-anchor="middle" x="187.59" y="-403.1" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;COMMIT</text>
-</g>
-<!-- apply -->
-<g id="node4" class="node">
-<title>apply</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M283.68,-282.63C283.68,-282.63 45,-282.63 45,-282.63 39,-282.63 33,-276.63 33,-270.63 33,-270.63 33,-250.41 33,-250.41 33,-244.41 39,-238.41 45,-238.41 45,-238.41 283.68,-238.41 283.68,-238.41 289.68,-238.41 295.68,-244.41 295.68,-250.41 295.68,-250.41 295.68,-270.63 295.68,-270.63 295.68,-276.63 289.68,-282.63 283.68,-282.63"/>
-<text xml:space="preserve" text-anchor="middle" x="164.34" y="-261.87" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">2. Apply the overlay</text>
-<text xml:space="preserve" text-anchor="middle" x="164.34" y="-249.12" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">stores change; pages dirty in the buffer pool</text>
-</g>
-<!-- log&#45;&gt;apply -->
-<g id="edge3" class="edge">
-<title>log&#45;&gt;apply</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M164.34,-313.16C164.34,-305.99 164.34,-298.54 164.34,-291.59"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="166.79,-291.79 164.34,-284.79 161.89,-291.79 166.79,-291.79"/>
+<title>append&#45;&gt;full</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M153.22,-198.74C148.39,-194.46 144.14,-189.59 140.9,-184.06 135.92,-175.58 134.51,-165.35 134.83,-155.52"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="137.26,-155.88 135.37,-148.71 132.37,-155.49 137.26,-155.88"/>
+<text xml:space="preserve" text-anchor="start" x="140.9" y="-174.56" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;next record</text>
+<text xml:space="preserve" text-anchor="start" x="140.9" y="-163.31" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;does not fit</text>
 </g>
 <!-- commit -->
-<g id="node5" class="node">
+<g id="node4" class="node">
 <title>commit</title>
-<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.2" d="M227.43,-207.41C227.43,-207.41 101.25,-207.41 101.25,-207.41 95.25,-207.41 89.25,-201.41 89.25,-195.41 89.25,-195.41 89.25,-162.44 89.25,-162.44 89.25,-156.44 95.25,-150.44 101.25,-150.44 101.25,-150.44 227.43,-150.44 227.43,-150.44 233.43,-150.44 239.43,-156.44 239.43,-162.44 239.43,-162.44 239.43,-195.41 239.43,-195.41 239.43,-201.41 233.43,-207.41 227.43,-207.41"/>
-<text xml:space="preserve" text-anchor="middle" x="164.34" y="-186.65" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">3. TXN_COMMIT</text>
-<text xml:space="preserve" text-anchor="middle" x="164.34" y="-173.9" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">write the frame + fsync</text>
-<text xml:space="preserve" text-anchor="middle" x="164.34" y="-161.15" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">(durable from here)</text>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M459.17,-135.67C459.17,-135.67 326.12,-135.67 326.12,-135.67 320.12,-135.67 314.12,-129.67 314.12,-123.67 314.12,-123.67 314.12,-111.67 314.12,-111.67 314.12,-105.67 320.12,-99.67 326.12,-99.67 326.12,-99.67 459.17,-99.67 459.17,-99.67 465.17,-99.67 471.17,-105.67 471.17,-111.67 471.17,-111.67 471.17,-123.67 471.17,-123.67 471.17,-129.67 465.17,-135.67 459.17,-135.67"/>
+<text xml:space="preserve" text-anchor="middle" x="392.65" y="-113.97" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">TXN_COMMIT appended</text>
 </g>
-<!-- apply&#45;&gt;commit -->
+<!-- append&#45;&gt;commit -->
 <g id="edge4" class="edge">
-<title>apply&#45;&gt;commit</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M164.34,-238.19C164.34,-231.5 164.34,-223.93 164.34,-216.5"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="166.79,-216.57 164.34,-209.57 161.89,-216.57 166.79,-216.57"/>
+<title>append&#45;&gt;commit</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M263.63,-198.5C292.79,-180.46 329.95,-157.46 356.9,-140.79"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="358.13,-142.91 362.8,-137.14 355.56,-138.74 358.13,-142.91"/>
+<text xml:space="preserve" text-anchor="middle" x="346.7" y="-168.94" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;last record</text>
 </g>
-<!-- ckpt -->
-<g id="node7" class="node">
-<title>ckpt</title>
-<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M247.68,-119.44C247.68,-119.44 81,-119.44 81,-119.44 75,-119.44 69,-113.44 69,-107.44 69,-107.44 69,-87.22 69,-87.22 69,-81.22 75,-75.22 81,-75.22 81,-75.22 247.68,-75.22 247.68,-75.22 253.68,-75.22 259.68,-81.22 259.68,-87.22 259.68,-87.22 259.68,-107.44 259.68,-107.44 259.68,-113.44 253.68,-119.44 247.68,-119.44"/>
-<text xml:space="preserve" text-anchor="middle" x="164.34" y="-98.68" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">4. Auto&#45;checkpoint, best effort</text>
-<text xml:space="preserve" text-anchor="middle" x="164.34" y="-85.93" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">if the log reached its threshold</text>
+<!-- full&#45;&gt;append -->
+<g id="edge3" class="edge">
+<title>full&#45;&gt;append</title>
+<path fill="none" stroke="#c7d0da" stroke-width="1.1" stroke-dasharray="5,2" d="M185.81,-146.96C190.61,-151.41 195.05,-156.3 198.65,-161.56 204.49,-170.1 208.56,-180.44 211.38,-190.35"/>
+<polygon fill="#c7d0da" stroke="#c7d0da" stroke-width="1.1" points="208.95,-190.74 213.06,-196.92 213.7,-189.53 208.95,-190.74"/>
 </g>
-<!-- commit&#45;&gt;ckpt -->
+<!-- sync -->
+<g id="node5" class="node">
+<title>sync</title>
+<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.6" d="M364.67,-57.78C364.67,-57.78 150.62,-57.78 150.62,-57.78 144.62,-57.78 138.62,-51.78 138.62,-45.78 138.62,-45.78 138.62,-12 138.62,-12 138.62,-6 144.62,0 150.62,0 150.62,0 364.67,0 364.67,0 370.67,0 376.67,-6 376.67,-12 376.67,-12 376.67,-45.78 376.67,-45.78 376.67,-51.78 370.67,-57.78 364.67,-57.78"/>
+<text xml:space="preserve" text-anchor="start" x="153.02" y="-38.69" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">sync(): write the partial frame</text>
+<text xml:space="preserve" text-anchor="start" x="153.02" y="-25.19" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">and the header, then fsync</text>
+<text xml:space="preserve" text-anchor="start" x="153.02" y="-11.69" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">sync_mode = .full (default)</text>
+</g>
+<!-- commit&#45;&gt;sync -->
 <g id="edge5" class="edge">
-<title>commit&#45;&gt;ckpt</title>
-<path fill="none" stroke="#2f7d32" stroke-width="1.1" d="M164.34,-150.09C164.34,-143.15 164.34,-135.68 164.34,-128.64"/>
-<polygon fill="#2f7d32" stroke="#2f7d32" stroke-width="1.1" points="166.79,-128.67 164.34,-121.67 161.89,-128.67 166.79,-128.67"/>
+<title>commit&#45;&gt;sync</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M365.33,-99.11C349.28,-88.79 328.45,-75.4 309.4,-63.16"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="310.82,-61.15 303.6,-59.43 308.17,-65.27 310.82,-61.15"/>
 </g>
-<!-- done -->
+<!-- flush -->
 <g id="node6" class="node">
-<title>done</title>
-<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.5" d="M213.56,-44.22C213.56,-44.22 115.12,-44.22 115.12,-44.22 109.12,-44.22 103.12,-38.22 103.12,-32.22 103.12,-32.22 103.12,-12 103.12,-12 103.12,-6 109.12,0 115.12,0 115.12,0 213.56,0 213.56,0 219.56,0 225.56,-6 225.56,-12 225.56,-12 225.56,-32.22 225.56,-32.22 225.56,-38.22 219.56,-44.22 213.56,-44.22"/>
-<text xml:space="preserve" text-anchor="middle" x="164.34" y="-23.46" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Commit returns</text>
-<text xml:space="preserve" text-anchor="middle" x="164.34" y="-10.71" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">to the application</text>
+<title>flush</title>
+<path fill="#fdf0ea" stroke="#c2703f" stroke-width="1.2" d="M638.05,-57.78C638.05,-57.78 417.25,-57.78 417.25,-57.78 411.25,-57.78 405.25,-51.78 405.25,-45.78 405.25,-45.78 405.25,-12 405.25,-12 405.25,-6 411.25,0 417.25,0 417.25,0 638.05,0 638.05,0 644.05,0 650.05,-6 650.05,-12 650.05,-12 650.05,-45.78 650.05,-45.78 650.05,-51.78 644.05,-57.78 638.05,-57.78"/>
+<text xml:space="preserve" text-anchor="start" x="419.65" y="-38.69" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">flush(): write the partial frame</text>
+<text xml:space="preserve" text-anchor="start" x="419.65" y="-25.19" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">and the header, no fsync</text>
+<text xml:space="preserve" text-anchor="start" x="419.65" y="-11.69" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">sync_mode = .normal</text>
 </g>
-<!-- ckpt&#45;&gt;done -->
+<!-- commit&#45;&gt;flush -->
 <g id="edge6" class="edge">
-<title>ckpt&#45;&gt;done</title>
-<path fill="none" stroke="#2f7d32" stroke-width="1.1" d="M164.34,-74.76C164.34,-67.97 164.34,-60.34 164.34,-53.07"/>
-<polygon fill="#2f7d32" stroke="#2f7d32" stroke-width="1.1" points="166.79,-53.45 164.34,-46.45 161.89,-53.45 166.79,-53.45"/>
+<title>commit&#45;&gt;flush</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M419.97,-99.11C436.09,-88.74 457.02,-75.29 476.14,-63"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="477.4,-65.1 481.96,-59.26 474.75,-60.98 477.4,-65.1"/>
 </g>
 </g>
 </svg>

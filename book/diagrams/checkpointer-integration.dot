@@ -1,26 +1,32 @@
-// The checkpointer coordinates three subsystems; it owns none of them.
+// The database decides whether a checkpoint may run and puts the state that
+// lives outside the buffer pool into it; the checkpointer then coordinates the
+// log, the page manager and the buffer pool's journaled flush. It owns none of
+// them.
 digraph checkpointer_integration {
   bgcolor="transparent"
   rankdir=TB
   nodesep=0.4
-  ranksep=0.5
+  ranksep=0.45
   fontname="Helvetica,Arial,sans-serif"
   node [shape=box style="filled,rounded" fillcolor="#eef4fb" color="#4a90d9"
         penwidth=1.2 fontname="Helvetica,Arial,sans-serif" fontsize=12
         fontcolor="#1a1a1a" margin="0.22,0.13"]
   edge [color="#6b7280" penwidth=1.1 arrowsize=0.7]
 
+  db   [label="Database.runCheckpoint\lrefuse: failed handle, or a txn\l  with records in the log\lsave HNSW node map and tree roots\l"
+        fillcolor="#f6f8fa" color="#c7d0da" fontname="Menlo,Consolas,monospace" fontsize=11]
   ckpt [label="Checkpointer" fillcolor="#dbe9f8" width=2.4]
 
-  pool [label="BufferPool\lframes\ldirty tracking\llatches\l"
-        fontname="Menlo,Consolas,monospace" fontsize=11]
-  pgm  [label="PageManager\lwritePage\ladvanceCheckpointSeq\lsync\l"
-        fontname="Menlo,Consolas,monospace" fontsize=11]
   wal  [label="WalManager\lappendRecord\lsync\lsetCheckpointLsn\ltruncateToEmpty\l"
         fontname="Menlo,Consolas,monospace" fontsize=11]
+  pgm  [label="PageManager\ladvanceCheckpointSeq\l(header, in memory)\l"
+        fontname="Menlo,Consolas,monospace" fontsize=11]
+  pool [label="BufferPool\lflushAll: dirty pages,\lfreed pages and header\lthrough the journal,\lthen fsync the file\l"
+        fontname="Menlo,Consolas,monospace" fontsize=11]
 
-  ckpt -> pool
-  ckpt -> pgm
+  db -> ckpt
   ckpt -> wal
-  { rank=same; pool; pgm; wal }
+  ckpt -> pgm
+  ckpt -> pool
+  { rank=same; wal; pgm; pool }
 }

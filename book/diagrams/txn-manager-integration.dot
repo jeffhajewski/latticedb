@@ -1,5 +1,6 @@
 // Where the transaction manager sits: the Database owns overlays and applies
-// committed changes; the transaction manager only writes log records.
+// committed changes once the commit record is synced; the transaction manager
+// only writes log records, TXN_BEGIN lazily with a transaction's first record.
 digraph txn_manager_integration {
   bgcolor="transparent"
   rankdir=TB
@@ -13,11 +14,11 @@ digraph txn_manager_integration {
         fontname="Helvetica,Arial,sans-serif" fontsize=10 fontcolor="#6b7280"]
 
   app [label="Application" fillcolor="#f6f8fa" color="#c7d0da"]
-  db  [label="Database\l  per-transaction overlays\l  single read-write transaction\l  snapshot copies at commit\l"
+  db  [label="Database\l  per-transaction overlays\l  single read-write transaction\l  snapshot copies at commit\l  failed state if commit cannot finish\l"
        fillcolor="#dbe9f8" fontname="Menlo,Consolas,monospace" fontsize=11]
-  tm  [label="TxnManager\l  transaction ids\l  BEGIN / COMMIT / ABORT records\l  prev_lsn chains\l"
+  tm  [label="TxnManager\l  transaction ids\l  BEGIN with the first record\l  COMMIT / ABORT records\l  prev_lsn chains\l"
        fontname="Menlo,Consolas,monospace" fontsize=11]
-  wal [label="WalManager\l  frames, CRC32C\l  fsync on commit and abort\l"
+  wal [label="WalManager\l  frames, CRC32C\l  fsync on commit (sync_mode .full)\l"
        fontname="Menlo,Consolas,monospace" fontsize=11]
   storage [label="B+Trees + buffer pool\l  graph, index and stream data\l"
            fontname="Menlo,Consolas,monospace" fontsize=11]
@@ -25,7 +26,7 @@ digraph txn_manager_integration {
   app -> db
   db -> tm  [label="  begin, log overlay,\l  commit, abort\l"]
   tm -> wal
-  db -> storage [label="  apply overlay\l  at commit\l"]
+  db -> storage [label="  apply overlay after\l  the commit record\l  is synced\l"]
 
   { rank=same; tm; storage }
 }

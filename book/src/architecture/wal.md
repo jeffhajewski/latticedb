@@ -30,25 +30,43 @@ property name on edge 7" — not page images, and it logs them at commit rather 
 as each statement runs. Inside a transaction, writes go to an in-memory overlay
 and nothing reaches the log or the stores. At commit the database:
 
-1. appends the overlay's changes to the log as records (buffered, not yet synced),
-2. applies the overlay to the stores, which dirties pages in the buffer pool,
-3. appends `TXN_COMMIT` and fsyncs the log — the commit is durable from here,
-4. runs an automatic checkpoint if the log has grown past its threshold, and
-   returns.
+1. appends the overlay's changes to the log as records (buffered; full frames are
+   written but not synced),
+2. appends `TXN_COMMIT` and syncs the log — the commit is durable from here,
+3. applies the overlay to the stores, which dirties pages in the buffer pool,
+4. flushes early if half the buffer pool is dirty, runs an automatic checkpoint if
+   the log has grown past its threshold, and returns.
 
-The database file catches up later, when the buffer pool evicts a dirty page or a
-checkpoint or sync flushes it. Pages carry no LSN, and the buffer pool does not wait
-for the log before writing a page, so the ordering is not enforced page by page:
-the changes are applied in step 2, before the fsync in step 3, and a page evicted
-in that window reaches the database file before the commit record is on disk.
-Recovery is redo-only (see [Recovery](./recovery.md)), so it has no undo pass to
-take such a page back.
+The synced commit record is the commit point. Nothing has been applied before it,
+so a failure up to that point leaves nothing committed. A failure after it (the
+sync itself fails, or applying the overlay fails) cannot be taken back: the handle
+marks itself failed and the next open replays the log. The
+[Transaction Manager](./transaction-manager.md#3-commit) page walks through the
+sequence.
+
+A log of logical records can only be replayed onto a database file that is a
+whole, consistent image of the database as of some moment. A record that says
+"insert node 42" cannot repair a leaf that was half written, or a parent that was
+written without its new child. Three rules follow, and the rest of the storage
+engine keeps them:
+
+- **The file changes one whole image at a time.** The buffer pool never writes a
+  dirty page on its own. Every write to the database file is a flush of all the
+  dirty pages, the freed pages and the header together, copied first to a journal
+  file so that a crash part way through can be finished (see
+  [Checkpointing](./checkpointing.md#the-journaled-flush)).
+- **The log is synced before every flush.** A flush can capture half of a
+  transaction (commit applies changes one entity at a time), and only the log can
+  finish it after a crash.
+- **Replay is idempotent.** The file can already hold some of what the log holds.
+  Recovery replays every committed record anyway, and the records state outcomes
+  ("property `age` of node 42 is 31") so that replaying one twice changes nothing.
 
 If you crash:
 - **Before the commit record is on disk**: the transaction does not count;
-  recovery skips its records
+  recovery skips its records, and none of its changes reached the file
 - **After the commit record is on disk**: recovery re-executes its records against
-  the stores, so the change survives even if no page was written
+  the stores, so the change survives whether or not any page was written
 
 ## Why Append-Only Sequential Writes Are Special
 
@@ -74,9 +92,20 @@ write(fd, data, len);  // Data goes to OS buffer cache
 fsync(fd);             // Asks the OS to push the data to the storage device
 ```
 
-Without fsync, your "written" data might sit in RAM for seconds or minutes. A power failure loses it. fsync is a **durability barrier** - when it returns, the operating system has handed the data to the device. How far that goes depends on the platform: on macOS plain `fsync` does not force the drive's write cache (that needs `F_FULLFSYNC`, which LatticeDB does not use). See [Virtual File System](./vfs.md#sync-fsync).
+Without fsync, your "written" data might sit in RAM for seconds or minutes. A power failure loses it. fsync is a **durability barrier** - when it returns, the operating system has handed the data to the device. How far that goes depends on the platform: on macOS plain `fsync` does not force the drive's write cache, so a commit there survives a process or OS crash but not necessarily a power cut. The `full_fsync` option (or `LATTICE_FULL_FSYNC=1` in the environment) makes every sync use `F_FULLFSYNC`, which does ask the drive to flush; it is off by default because it makes each sync markedly slower. See [Virtual File System](./vfs.md#sync-fsync).
 
-This is expensive (milliseconds, not microseconds), so we batch multiple records into frames before syncing.
+This is expensive (milliseconds, not microseconds), and it is most of what a small
+write transaction costs. In the default sync mode every commit that changed
+something pays for exactly one. `sync_mode = .normal` (or `LATTICE_SYNC_MODE=normal`)
+skips it: the commit record is handed to the operating system and commit returns,
+so the transaction survives the process being killed and reaches the disk at the
+next checkpoint, flush or `sync()`. A power cut or OS crash can then lose the most
+recent commits, from the end only. See
+[Durability and the Log](../configuration/durability.md#sync-mode).
+
+There is no group commit. One writer runs at a time and the transaction manager
+holds its lock across the sync, so there is never a second commit to share an fsync
+with.
 
 ## WAL Structure
 
@@ -110,8 +139,10 @@ and an existing log keeps the frame size it was created with.
 Each record has its own 32-byte header — `record_type`, `flags`, `payload_size`,
 `txn_id`, `lsn`, `prev_lsn` — followed by its payload.
 
-The remainder of each frame holds records back to back, then unused space. A frame
-carrying a single-statement transaction might look like this:
+The remainder of each frame holds records back to back, then unused space. Each
+commit writes out the frame it is in, so a small transaction uses at least one
+whole frame, and the next commit starts a new one. A frame carrying a
+single-statement transaction might look like this:
 
 | LSN | Record | Transaction |
 |----:|--------|------------:|
@@ -123,22 +154,28 @@ carrying a single-statement transaction might look like this:
 
 Every record gets a **Log Sequence Number (LSN)** - a monotonically increasing integer.
 
+Because a transaction writes all of its records at commit and only one writer runs
+at a time, one transaction's records sit together in the log:
+
 ```
 LSN 1: TXN_BEGIN (txn 1)
-LSN 2: INSERT key="alice" (txn 1)
-LSN 3: INSERT key="bob" (txn 1)
-LSN 4: TXN_BEGIN (txn 2)
-LSN 5: DELETE key="charlie" (txn 2)
-LSN 6: TXN_COMMIT (txn 1)
-LSN 7: TXN_ABORT (txn 2)
+LSN 2: INSERT node 42 (txn 1)
+LSN 3: UPDATE node 42 name (txn 1)
+LSN 4: TXN_COMMIT (txn 1)
+LSN 5: TXN_BEGIN (txn 2)
+LSN 6: DELETE edge 7 (txn 2)
+LSN 7: TXN_COMMIT (txn 2)
 ```
 
 LSN serves two purposes:
 1. **Ordering**: Total order of all operations
 2. **Recovery point**: "Replay from LSN 42"
 
-Data pages do not record an LSN. Nothing compares a page's state with the log;
-recovery decides what to redo from transaction outcomes alone.
+LSNs are not a permanent clock. When a checkpoint empties the log, the running
+session keeps counting, but a later open of an empty log starts again at 1: the
+next LSN is always one past the largest the file holds. Data pages do not record an
+LSN, and nothing compares a page's state with the log; recovery decides what to
+redo from transaction outcomes alone.
 
 ## The prev_lsn Chain
 
@@ -148,36 +185,37 @@ Each record stores `prev_lsn` - the previous LSN **for the same transaction**:
 |----:|--------|------------:|-----------:|
 | 1 | `TXN_BEGIN` | 1 | 0 |
 | 2 | `INSERT` | 1 | 1 |
-| 3 | `INSERT` | 2 | 0 |
-| 4 | `UPDATE` | 1 | 2 |
-| 5 | `TXN_COMMIT` | 1 | 4 |
+| 3 | `UPDATE` | 1 | 2 |
+| 4 | `TXN_COMMIT` | 1 | 3 |
 
-Following `prev_lsn` from LSN 5 walks transaction 1 backwards — 5 → 4 → 2 → 1 —
-skipping LSN 3, which belongs to transaction 2.
-
-This creates a **backward chain** for each transaction:
-
-```
-Transaction 1: LSN 5 → LSN 4 → LSN 2 → LSN 1
-Transaction 2: LSN 3 (just one operation)
-```
+Following `prev_lsn` from LSN 4 walks transaction 1 backwards: 4 → 3 → 2 → 1.
 
 The chain is the classic tool for rolling a transaction back from the log. LatticeDB
-writes it but nothing reads it today: an abort discards the transaction's in-memory
-overlay, and recovery has no undo pass.
+writes it but nothing follows it for that: an abort has nothing in the log to undo,
+because a transaction's changes are only logged when it commits, and recovery has no
+undo pass. The one reader is the reassembly of fragmented records (below), which
+checks that the pieces of one record agree.
 
 ## Write Flow
 
 <img class="diagram" src="../assets/diagrams/wal-write-flow.svg"
-     alt="Writes inside a transaction go to its in-memory overlay and do not touch the log. At commit the database logs the overlay: the WAL manager assigns LSNs and appends records to the frame buffer, writing a frame to the file whenever it fills. The overlay is then applied to the stores in the buffer pool, TXN_COMMIT is appended and the last frame is written and fsynced, which makes the commit durable. An automatic checkpoint may then run before commit returns to the application">
+     alt="The log's write path. Commit logs its overlay, with TXN_BEGIN going out with the first record. appendRecord assigns the next LSN and copies the record into the frame buffer; when the next record does not fit, the frame is written to the -wal file and the header's frame count rewritten, without an fsync. After the last record TXN_COMMIT is appended, and then either sync() writes the partial frame and the header and fsyncs, in the default sync_mode .full, or flush() writes them without an fsync, in sync_mode .normal">
 
-The key insight: we buffer multiple records in memory, only hitting disk when:
-1. The frame buffer is full (a frame's worth of records accumulated) — the frame is
-   written, but not fsynced
-2. A transaction commits or aborts — the frame is written and the file is fsynced
+Records accumulate in an in-memory frame and reach the file a frame at a time:
 
-`TXN_BEGIN` is appended when a transaction starts, and sits in the frame buffer
-until something flushes it.
+1. When the next record will not fit, the frame is written to the file and the
+   header is rewritten with the new frame count. Neither write is synced.
+2. A commit ends with `sync()`, which writes the partial frame and the header and
+   fsyncs the file, or, in `sync_mode = .normal`, with `flush()`, which writes
+   them and returns. A small commit therefore costs two writes (the frame and the
+   4 KB header) and, by default, one fsync.
+
+Nothing is written when a transaction begins. `TXN_BEGIN` goes out with the
+transaction's first record, so a read-only transaction, or a read-write one that
+changed nothing, never touches the log: it costs no write and no fsync. An abort
+that does have records in the log (a commit that failed after logging some of
+them) appends `TXN_ABORT` without syncing it; recovery only redoes transactions
+whose commit record it finds, so a lost abort record changes nothing.
 
 Logical WAL records can be larger than a single frame. Large graph, stream, vector, and
 property payloads are fragmented into physical `large_fragment` records and
@@ -188,53 +226,67 @@ Vector replacements and removals are logical transaction records too. Recovery
 replays them into the vector index only for committed transactions; an index that
 cannot replay a vector record causes open to fail rather than return incomplete
 search results. Open with vector support and the same dimensions as the writer.
-The initial empty tree pages and out-of-transaction FTS declarations are persisted
-before writes rely on them. Recovered indexes and their roots are flushed before
-open returns, so recovery does not require a later clean close to survive.
+Deleting a node logs a vector removal only when the node has a committed vector,
+so a database that never stored a vector never needs vectors enabled to reopen.
+(Logs written by 0.16.0 hold a removal for every deleted node; recovery skips those
+when the file holds no vector data.)
 
 ## Commit Protocol
 
 When you call `COMMIT` on a transaction that changed something:
 
 ```
-1. Append the overlay's changes as logical records (frame buffer; full frames written)
-2. Apply the overlay to the stores (dirty pages in the buffer pool)
-3. Append TXN_COMMIT, write the current frame, and fsync() - WAIT for the device
-4. Checkpoint automatically if the log has reached its frame threshold (best effort:
-   a failed checkpoint does not fail the commit)
+1. Append the overlay's changes as logical records (TXN_BEGIN first; full frames
+   written, nothing synced)
+2. Append TXN_COMMIT, write the current frame, and fsync() - WAIT for the device
+   (sync_mode = .normal: write it and do not wait)
+3. Apply the overlay to the stores (dirty pages in the buffer pool)
+4. Flush early if half the pool is dirty; checkpoint automatically if the log has
+   reached its frame threshold (best effort: a failed checkpoint does not fail the
+   commit)
 5. Return "committed" to the application
 ```
 
-After step 3, even if power fails immediately, the commit record is on disk. Recovery will see the commit and redo the transaction's records.
+After step 2, even if power fails immediately, the commit record is on disk. Recovery will see the commit and redo the transaction's records.
 
-If we crash before step 3? The commit record might be lost. Recovery won't see a commit for that transaction, so it skips its records. The application was never told the commit succeeded. Because step 2 runs before step 3, though, a page that the buffer pool evicted in between can already hold some of those changes, and recovery does not undo it.
+If we crash before step 2 completes, the commit record might be lost. Recovery won't see a commit for that transaction, so it skips its records. The application was never told the commit succeeded, and nothing of the transaction reached the database file, because nothing was applied before step 2.
 
-A read-only transaction, or one that changed nothing, skips steps 1 and 2 but still
-appends `TXN_COMMIT` and fsyncs.
+If step 2 or step 3 fails, the outcome cannot be undone: the commit record may be
+on disk, or is on disk and the stores are missing part of the transaction. The
+database marks the handle failed and returns an error. A failed handle refuses new
+transactions, commits, `sync()` and checkpoints, and writes nothing more to the
+database file; closing and reopening replays the log.
+
+A read-only transaction, or one that changed nothing, writes nothing to the log at
+all.
 
 ## Recovery: Redo Only
 
 On startup, we need to:
 
-1. **Find the end of valid log** - Scan frames, verify checksums, find last valid record
+1. **Find the end of valid log** - Verify each frame's checksum; a torn tail is cut
+   off when the log is opened
 2. **Redo committed transactions** - Re-execute the logical records of every transaction with a commit record
 3. **Skip everything else** - Records of transactions without a commit record are ignored; there is no undo pass
+4. **Empty the log** - Checkpoint, so the next open has nothing to replay
 
 | LSN | Record | Transaction |
 |----:|--------|------------:|
 | 1 | `TXN_BEGIN` | 1 |
 | 2 | `INSERT x=1` | 1 |
-| 3 | `TXN_BEGIN` | 2 |
-| 4 | `INSERT y=2` | 2 |
-| 5 | `TXN_COMMIT` | 1 |
+| 3 | `TXN_COMMIT` | 1 |
+| 4 | `TXN_BEGIN` | 2 |
+| 5 | `INSERT y=2` | 2 |
 | 6 | `INSERT z=3` | 2 |
 
-The process crashes after LSN 6.
+The process crashes after LSN 6, while transaction 2 is still writing its records.
 
 | Transaction | Has `TXN_COMMIT`? | Recovery action |
 |------------:|-------------------|-----------------|
 | 1 | Yes | Redo — `x=1` is permanent |
 | 2 | No | Skip — `y=2` and `z=3` are never applied |
+
+See [Recovery](./recovery.md) for the whole sequence at open.
 
 ## Why Frames?
 
@@ -244,13 +296,16 @@ Why not just append individual records?
 
 A page-sized write at a page-aligned offset is more likely to be atomic than arbitrary-sized writes. Many storage systems guarantee 512-byte or 4KB atomic writes. Frames start after the 4 KB header at multiples of the frame size, which reduces torn write risk.
 
-**Reason 2: Batching**
+**Reason 2: Batching writes**
 
-Each fsync is expensive (~1-10ms). By batching records into frames, we amortize the sync cost across many operations.
+Records reach the file a frame at a time, so a large transaction costs one write per
+page of log rather than one per record. Frames do not batch fsyncs across
+transactions: each commit syncs its own frame.
 
 **Reason 3: Checksums**
 
-Each frame has a checksum. During recovery, we can detect partial/corrupted frames and stop replay at the right point.
+Each frame has a checksum, so the log can be verified a frame at a time and cut off
+at the point where it stops being trustworthy.
 
 **Reason 4: Large logical records**
 
@@ -275,7 +330,19 @@ On read the checksum is recomputed and compared:
 1. Read the frame.
 2. Compute `CRC32C(data)`.
 3. Compare against the stored checksum.
-4. On mismatch, corruption is detected and replay stops.
+
+Opening the log checks every frame the header counts. A frame that fails, with no
+valid frame after it, is a torn tail from a crash during an append: the log is cut
+back to the frames that verify, so the next frame written takes its place. A frame
+that fails with valid frames after it is damage in the middle of the log; it is left
+as found, and recovery refuses the open rather than skip what might be a commit
+record (see [Recovery](./recovery.md#corruption-detection)). A frame with no records
+in it counts as bad; one is never written.
+
+The header has a checksum too. A header whose checksum fails but whose magic,
+version, frame size and database id are intact was torn while being rewritten; it is
+rebuilt, taking the frame count from the file's length, and replay starts from the
+beginning of the log.
 
 This catches:
 - Torn writes (partial frame written)
@@ -340,8 +407,11 @@ reserved: nothing writes them.
 // Append a record, get back its LSN
 const lsn = try wal.appendRecord(.insert, txn_id, prev_lsn, payload);
 
-// Force all buffered records to disk
+// Write buffered records and fsync (commit in sync_mode .full, checkpoints)
 try wal.sync();
+
+// Write buffered records without an fsync (commit in sync_mode .normal)
+try wal.flush();
 
 // Iterate records for recovery
 var iter = wal.iterate(start_lsn);
@@ -360,12 +430,13 @@ try wal.truncateToEmpty();
 
 | Concept | Purpose |
 |---------|---------|
-| Write-ahead rule | Commit record durable before commit returns = crash safety |
+| Write-ahead rule | Commit record synced before anything is applied; log synced before every flush |
 | Sequential append | Simpler crash states than random writes |
 | fsync | Durability barrier to the storage device |
 | LSN | Universal ordering of all operations |
-| prev_lsn chain | Per-transaction back links (written, not yet used) |
-| Frames | Atomic-ish writes + batching |
+| Sync mode | `.full` fsyncs every commit; `.normal` leaves it to the next checkpoint or sync |
+| prev_lsn chain | Per-transaction back links (written; only fragment reassembly reads them) |
+| Frames | Page-sized, checksummed units of writing; a torn tail is cut off at open |
 | Checksums | Detect corruption and torn writes |
 | UUID | Match WAL to correct database file |
 

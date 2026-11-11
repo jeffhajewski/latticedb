@@ -10,13 +10,14 @@ full-text search, and the query layer over all of them.
 ## The Stack
 
 <img class="diagram" src="../assets/diagrams/engine-stack.svg"
-     alt="The engine stack from top to bottom: the application calls the Database, which holds the graph, vector, full-text, stream and query layers, the per-transaction overlays and the single-writer rule. The Database drives the B+Trees, the transaction manager and the checkpointer, and reads vector and posting pages from the buffer pool directly. The transaction manager writes through the write-ahead log, which writes its own file through the virtual file system. The B+Trees go through the buffer pool; the checkpointer uses the buffer pool, the page manager and the log. The buffer pool sits on the page manager, the virtual file system, and finally the operating system">
+     alt="The engine stack from top to bottom: the application calls the Database, which holds the graph, vector, full-text, stream and query layers, the per-transaction overlays and the single-writer rule. The Database drives the B+Trees, the transaction manager and the checkpointer, and reads vector and posting pages from the buffer pool directly. The transaction manager writes through the write-ahead log, which writes its own file through the virtual file system. The B+Trees go through the buffer pool; the checkpointer uses the buffer pool, the page manager and the log. The buffer pool sits on the page manager, and writes every flush through the journal, its own -journal file, before the pages go in place; both reach the virtual file system, and finally the operating system">
 
 The `Database` (`src/storage/database.zig`) is the orchestrator. It owns every
 component below it, stages each transaction's writes in an in-memory overlay, and at
-commit time logs that overlay, applies it to the stores, and asks the transaction
-manager to make the commit durable. The transaction manager only writes log records;
-it does not touch the B+Trees or the checkpointer.
+commit time logs that overlay, has the transaction manager write and sync the commit
+record, and only then applies the overlay to the stores. The transaction manager
+only writes log records; it does not touch the B+Trees or the checkpointer. Dirty
+pages reach the database file only in whole flushes that go through the journal.
 
 ## Chapters
 
@@ -51,10 +52,11 @@ it does not touch the B+Trees or the checkpointer.
 We don't deserialize B+Tree pages into node objects. Searches and in-place inserts read and write bytes directly in the page buffer at calculated offsets, with no intermediate representation of the node.
 
 <img class="diagram" src="../assets/diagrams/zero-copy-pages.svg"
-     alt="Traditional access deserialises page bytes into an in-memory object, modifies it, and serialises back. LatticeDB searches and modifies the page bytes in place through calculated offsets, with no node object; copies still happen for values handed back to callers and when splits, merges and deletes rebuild a page">
+     alt="Traditional access deserialises page bytes into an in-memory object, modifies it, and serialises back. LatticeDB searches, inserts and deletes leaf entries in the page bytes in place through calculated offsets, with no node object; copies still happen for values returned by get and when splits, merges and redistribution rebuild a page">
 
-It is not copy-free end to end. A lookup returns an owned copy of the value, and
-splits, merges and deletes rebuild a page from a temporary list of its entries.
+It is not copy-free end to end. `get` returns an owned copy of the value
+(`getBorrowed` lends it from the pinned leaf instead), and splits, merges and
+redistribution rebuild pages from a temporary list of their entries.
 
 ### Everything in the File is Pages
 
@@ -69,18 +71,21 @@ file header and cannot change afterwards.
 - Free pages form a linked list of pages
 
 This uniformity keeps the file simple: one page format and one caching layer for
-everything in it. The write-ahead log is the exception. It is a separate
+everything in it. Two files sit beside it. The write-ahead log is a separate
 `<database>-wal` file of page-sized frames, written directly through the VFS rather
-than through the buffer pool.
+than through the buffer pool. The flush journal, `<database>-journal`, holds a copy
+of the pages a flush is writing, so a crash part way through can be finished; it is
+empty between flushes and deleted at a clean close.
 
 ### Durability Through WAL
 
 A transaction's changes are held in memory until commit. At commit they are logged,
-applied, and then the commit record is forced to disk:
+the commit record is forced to disk, and only then are they applied:
 
 - Commit = commit record is on disk (fast, sequential write)
-- Actual data pages can be written lazily
-- Crash recovery re-executes committed log records
+- Data pages are written later, all dirty pages at once, through the journal, so
+  the file moves from one whole image to the next
+- Crash recovery re-executes committed log records onto that image
 
 ### Simple Concurrency Model
 

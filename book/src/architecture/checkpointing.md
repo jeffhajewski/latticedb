@@ -18,159 +18,185 @@ A checkpoint says: "Everything up to this point is safely on disk in the main da
 <img class="diagram" src="../assets/diagrams/checkpoint-before-after.svg"
      alt="Before a checkpoint, pages 5, 12 and 8 are dirty in the buffer pool, the database file holds old versions, and recovery needs every WAL record. After a checkpoint, all four pages are clean and the database file holds current versions; a truncate checkpoint, the default, resets the WAL to its header, while a full or passive checkpoint leaves the frames and recovery starts at checkpoint_lsn">
 
-The checkpoint itself is the `Checkpointer` in `src/storage/checkpoint.zig`. It
-works on pages: it flushes the buffer pool, not transactions. Who runs it, and when,
-is up to the `Database` (see [When to Checkpoint](#when-to-checkpoint)).
+Most of the work of a checkpoint is getting the pages into the file, and that is
+the part that has to be done carefully.
 
+## Why Pages Cannot Go One at a Time
 
-## How It Works Step by Step
+The obvious flush is a loop: for each dirty page, write it at its offset. A crash
+can stop that loop anywhere. For a log of page images that would not matter, but
+LatticeDB's log is logical (see [Write-Ahead Log](./wal.md#how-latticedb-applies-it)),
+and a logical record can only be replayed onto a file that is a whole, consistent
+image. Take a B+Tree split that changed three pages: the leaf that split, its new
+sibling, and the parent that points at both. If the loop writes the leaf and dies
+before the parent, the file holds a leaf that has lost half its keys and a parent
+that knows nothing of the sibling holding them. The log says "insert node 42"; it
+has no way to say "put the parent back".
 
-### Step 1: Write CHECKPOINT_BEGIN to WAL
+So the database file only ever moves from one whole image to the next. That takes
+three pieces.
 
-```
-WAL: [...existing records...][CHECKPOINT_BEGIN, lsn=1000]
-```
+### A buffer pool that never writes a page on its own
 
-This marks the start of the checkpoint in the log. It is informational: recovery
-reads past `CHECKPOINT_BEGIN` and `CHECKPOINT_END` without acting on them. What
-recovery uses is the `checkpoint_lsn` in the WAL header (step 6).
+The buffer pool never evicts a dirty page. When the clock sweep finds only dirty
+(or pinned) frames, the pool grows by an overflow frame beyond its configured size,
+and gives the extra frames back after the next flush has cleaned them. Freed pages
+are deferred the same way: freeing a page does not write a freelist link into the
+file; the page manager remembers it, and the next flush chains it onto the freelist
+together with everything else. The file header, with the tree roots and the
+freelist head, changes only in memory between flushes. See
+[Buffer Pool](./buffer-pool.md#writing-pages-back).
 
-### Step 2: Sync WAL
+### Flushing early
 
-```
-fsync(wal_file)
-```
+Holding every dirty page costs memory: between flushes, a large transaction, a long
+recovery or a run of direct writes can push the pool well past its configured
+size. So the database also flushes before a checkpoint is due. When at least half
+the pool's frames are dirty and **no page is pinned**, it writes the vector index's
+in-memory node map into its tree, copies the tree roots into the header, syncs the
+log, and flushes. It is called after every commit, between the entities a commit
+applies, before each write made outside a transaction, and between the operations
+recovery replays, and does nothing when it cannot act.
 
-Ensures CHECKPOINT_BEGIN is on disk before we start flushing pages.
+"Nothing pinned" is how it knows no B+Tree operation is half done: a page is pinned
+for the length of an operation that touches it. An early flush can still land in
+the middle of a commit and write half a transaction, but that transaction's commit
+record is already synced, so recovery finishes it. Early flushes are not
+checkpoints: they leave the log as it was.
 
-### Step 3: Flush Dirty Pages
+### The journaled flush
 
-Scan the buffer pool and write dirty pages to the database file:
+Every write of pages to the database file goes through one function,
+`BufferPool.flushAll`, and it writes everything at once: every dirty page, the
+pages freed since the last flush (formatted as freelist pages), and the header,
+sorted by page number. What makes that one step atomic is writing it twice.
 
-```
-for each frame in buffer_pool:
-    if frame.dirty:
-        write frame.data to database_file at page offset
-        frame.dirty = false
-```
+<img class="diagram" src="../assets/diagrams/journaled-flush.svg"
+     alt="A journaled flush. 0. The caller syncs the log. 1. Collect every dirty page, the header and the pages freed since the last flush. 2. Write them to the db-journal file and fsync; a crash here leaves an incomplete journal that fails its checks and is discarded, and the old image. 3. Write header and pages in place; a crash here means the next open writes the journal again, giving the new image. 4. fsync the database file. 5. Truncate the journal without a sync; a crash here means the journal may be applied again, writing the same bytes, giving the new image">
 
-**Passive mode**: Skip pages that are currently pinned (in use by transactions). This avoids blocking active work.
+Before any page is written in place, the whole set is written to a second file
+beside the database, `<database>-journal`, and synced. The journal is a 4 KB header
+(magic `"LTDJ"`, version, page size, page count, the database's file UUID, a
+checksum of the table and one of the header itself), a table of page ids and CRC32C
+checksums padded to 4 KB, and then the page images, header first. It is written
+images first, then the table, then the header, and synced once. Only then are the
+pages written in place, header first, and the database file synced. Finally the
+journal is truncated, without a sync.
 
-**Full mode**: Wait for latches if needed. Guarantees all dirty pages are flushed.
+The journal is read only when the database is opened, before anything else reads
+the file (see [Recovery](./recovery.md#finishing-an-interrupted-flush)). If its
+header and table verify, it names this database, and every image matches its
+checksum, all of it is written in place; otherwise it is discarded.
 
-### Step 4: Sync Database File
+| Crash during | State | Next open |
+|--------------|-------|-----------|
+| Writing the journal | Journal incomplete; database file untouched | Journal fails its checks and is discarded: the old image |
+| Writing pages in place | Journal complete and synced; file part old, part new | Journal applied: the new image |
+| Truncating the journal | File complete and synced; journal perhaps still there | Journal applied again, writing bytes the pages already hold: the new image |
 
-```
-if mode == truncate: checkpoint_seq += 1, rewrite the file header
-fsync(database_file)
-```
+The cost is plain: every page reaches the disk twice, and every flush syncs two
+files. Flushes are much rarer than commits, which is what makes that affordable.
+An in-memory database has no journal, since there is no crash for it to survive.
+While a database is open the journal file exists, empty between flushes; a clean
+close deletes it.
 
-Critical! This ensures all the page writes are actually on disk, not sitting in OS
-buffers. A truncate checkpoint first bumps `checkpoint_seq` in the database file
-header, so the counter is durable before the log is reset in step 7.
+### Log first, then pages
 
-### Step 5: Write CHECKPOINT_END to WAL
+Every caller of the flush syncs the log first: an early flush, a checkpoint,
+`sync()`, and close. An image may contain half of a transaction that the log can
+finish, but only if the log has it. In the default sync mode the log is already
+synced at every commit and this extra sync is cheap; in `sync_mode = .normal` it is
+what makes recent commit records durable before the pages that depend on them.
 
-```
-WAL: [...][CHECKPOINT_BEGIN][CHECKPOINT_END, lsn=1002]
-```
+## How a Checkpoint Runs
 
-This marks successful completion. The payload includes stats (pages flushed).
+Every checkpoint goes through one function in the database, `runCheckpoint`.
 
-### Step 6: Update checkpoint_lsn
+### Refusals
 
-```
-wal_header.checkpoint_lsn = 1002  // LSN of CHECKPOINT_END
-fsync(wal_file)
-```
+Two refusals come first:
 
-This is the key marker for recovery: the next recovery starts reading at LSN 1002.
-It says "everything before LSN 1002 is safely on disk" — which holds for a full or
-truncate checkpoint taken with no transaction open (see below).
+- **A failed handle** (see [Transaction Manager](./transaction-manager.md#when-commit-fails))
+  holds trees missing part of a committed transaction. Checkpointing them would
+  write that state to the file and then empty the log that could repair it, so the
+  checkpoint returns an error.
+- **An open transaction with records in the log.** Recovery only redoes a
+  transaction whose `TXN_BEGIN` it reads; a checkpoint that moved the replay point
+  past that record, or emptied the log under it, would make recovery drop the
+  transaction's commit. Such a checkpoint returns `TransactionConflict`. Because a
+  transaction writes nothing to the log until it commits, this is rare in practice:
+  readers, and writers still staging changes, do not hold a checkpoint back.
 
-### Step 7: Truncate (truncate mode only)
+### State outside the buffer pool
 
-```
-wal_header.frame_count = 0
-wal_header.checkpoint_lsn = 0
-truncate(wal_file, 4096)   // header only
-fsync(wal_file)
-```
+Then two pieces of state that live outside the buffer pool are put into it: the
+vector index's in-memory node map is written into its B+Tree, and the B+Tree root
+page numbers are copied into the file header. Without that, the flush would write
+pages whose roots the header does not name, and a process killed after a truncating
+checkpoint would reopen onto stale roots with nothing left in the log to replay.
 
-The log is now empty. If truncation fails, the pages are already durable, so the
-checkpoint still succeeds and reports `wal_truncated = false`.
+### The eight steps
+
+The `Checkpointer` in `src/storage/checkpoint.zig` then runs:
+
+1. Append `CHECKPOINT_BEGIN` to the log.
+2. Sync the log.
+3. In truncate mode, advance `checkpoint_seq` in the header, in memory. The flush in
+   the next step writes it, so it is durable before the log is reset in step 8;
+   anything following the log for replication reads the reset from it.
+4. Flush: the journaled flush above, which also syncs the database file.
+5. Append `CHECKPOINT_END`, with the number of pages flushed.
+6. Set the log header's `checkpoint_lsn` to the `CHECKPOINT_END` record.
+7. Sync the log.
+8. In truncate mode, cut the log back to its header and sync it. If that fails the
+   pages are already durable, so the checkpoint still succeeds and reports
+   `wal_truncated = false`.
+
+The begin and end records are informational: recovery reads past them. What
+recovery uses is `checkpoint_lsn` in the log header and, in the default mode, the
+truncation.
 
 ## The Checkpoint Modes
 
-### Passive Mode
-
-```
-"Checkpoint what you can without disrupting active work"
-
-for each frame:
-    if dirty AND not pinned AND can get latch immediately:
-        flush it
-    else:
-        skip it (maybe next time)
-```
-
-Good for: Background checkpointing during normal operation. Doesn't block transactions.
-
-Bad: May leave some dirty pages unflushed. It still advances `checkpoint_lsn` to its
-`CHECKPOINT_END` afterwards, so recovery after a crash will not replay the records
-behind a page it skipped.
-
-### Full Mode
-
-```
-"Checkpoint everything, wait if necessary"
-
-for each frame:
-    if dirty:
-        wait for latch (spin until available)
-        flush it
-```
-
-Good for: Complete checkpoint before shutdown, or when WAL is getting too large.
-
-Bad: May briefly block transactions waiting for latches.
+The mode decides what happens at steps 4 and 8.
 
 ### Truncate Mode
 
-```
-"Full checkpoint, then reset WAL to beginning"
+Flushes everything and then resets the log to its header. It is the only mode that
+bounds the log's size, the default for automatic checkpoints, and what open, close
+and `lattice checkpoint` use. The running session keeps counting LSNs; a later open
+of the empty log starts again from 1.
 
-1. Do full checkpoint (bumping checkpoint_seq first)
-2. Truncate WAL file to just the header
-3. Reset frame_count and checkpoint_lsn to 0
-```
+### Full Mode
 
-Good for: Bounding the WAL's size. It is the only mode that shrinks the log, and the
-default for automatic checkpoints.
+Flushes everything and leaves the log in place, with `checkpoint_lsn` marking where
+replay now starts. Backup and serialisation use it to make the file a complete
+database before copying it, without disturbing anything reading the log.
 
-### No Transaction May Be Open
+### Passive Mode
 
-Recovery only redoes a transaction whose `TXN_BEGIN` it reads, and it starts
-reading at `checkpoint_lsn`, or at the start of a freshly truncated log. A
-transaction that is open when a checkpoint runs has its `TXN_BEGIN` behind that
-point, so if it commits afterwards and the process then crashes before the next
-checkpoint, recovery skips it. In every mode, then, a checkpoint has to run with no
-transaction open. The automatic checkpoint checks for that and waits for the next
-commit; `Database.checkpoint` in the Zig API does not check, so its caller must.
+Does not wait. If any dirty page is pinned, it writes nothing at all and returns
+with `checkpoint_lsn` where it was. It cannot flush the pages it is able to and skip
+the rest, because a flush of some dirty pages and not others is exactly a torn image.
+
+A full or passive checkpoint keeps every frame, so the log keeps growing. It bounds
+recovery time, not disk space.
 
 ## What If We Crash Mid-Checkpoint?
 
-Recovery ignores the `CHECKPOINT_BEGIN` and `CHECKPOINT_END` records themselves. Only
-the `checkpoint_lsn` in the WAL header matters, and it moves only in step 6, after
-the pages have been flushed and fsynced.
+The file is always a whole image, and the log is never emptied before the image
+that replaces it is synced.
 
-| Crash point | `checkpoint_lsn` | State of the database file | What recovery does |
-|-------------|------------------|----------------------------|--------------------|
-| Before step 6 | Previous value | Some, all or none of the pages flushed | Replays from the previous `checkpoint_lsn`, re-executing the logical records on top of whatever pages made it |
-| After step 6, before truncation | New value | Fully flushed | Replays only what follows the new `checkpoint_lsn` |
-| After truncation | 0, empty log | Fully flushed | Nothing to replay |
+| Crash after | Database file | What recovery does |
+|-------------|---------------|--------------------|
+| Steps 1–3 | The previous image | Replays the log as before; `CHECKPOINT_BEGIN` is ignored |
+| During step 4 | The previous image or the new one, decided by the journal | Replays the whole log onto whichever it is |
+| Steps 4–7 | The new image | Replays from whichever `checkpoint_lsn` the header holds; the records it replays are already in the image, and replaying them changes nothing |
+| Step 8 | The new image | Finds an empty log, or one the truncation had not yet reached |
 
-A torn checkpoint costs replay time, not correctness.
+The last two rows depend on replay being idempotent: the log records state outcomes
+("property `age` of node 42 is 31"), so replaying one onto an image that already
+holds it changes nothing. A torn checkpoint costs replay time, not correctness.
 
 ## Statistics
 
@@ -185,14 +211,17 @@ CheckpointStats{
 }
 ```
 
-Useful for monitoring:
+They say what the checkpoint did, including when a passive checkpoint wrote nothing
+or a truncation failed after the flush succeeded. Useful for monitoring:
 - If `pages_flushed` is always high, consider checkpointing more often
 - If `duration_ns` is high, disk might be slow
 - Track `checkpoint_lsn` growth over time
 
 ## When to Checkpoint
 
-Usually you don't decide: checkpointing is automatic and size-based. The
+Usually you don't decide. Checkpoints run at four moments.
+
+**After a commit**, when the log holds at least `max_wal_frames` frames. The
 `auto_checkpoint` setting in `DatabaseConfig` is on by default:
 
 | Setting | Default | Meaning |
@@ -201,20 +230,25 @@ Usually you don't decide: checkpointing is automatic and size-based. The
 | `min_interval_ns` | 0 | Shortest gap between two automatic checkpoints |
 | `mode` | `.truncate` | The only mode that resets the log, so the only one that bounds its size |
 
-After every commit, the database checks: no transaction open, the WAL holds at least
-`max_wal_frames` frames, and the minimum interval has passed. If so it runs a
-checkpoint in `mode` before the commit returns. It is best effort: a failed
-checkpoint is not reported as a failed commit, and the next commit tries again.
-Setting `auto_checkpoint = null` turns it off.
+Each commit that changed something writes at least one frame, so the default is
+roughly a thousand small write transactions. The automatic checkpoint is best
+effort: it runs after the commit has succeeded, and if it fails, or is refused
+because a transaction has records in the log, the commit still reports success and
+the next commit tries again. Setting `auto_checkpoint = null` turns it off.
 
-The other places a checkpoint runs:
-- **C `lattice_close`**: syncs the database (vector index, tree roots, dirty pages,
-  log), then runs a truncate checkpoint, then closes. A cleanly closed database
-  leaves an empty log.
-- **Zig `Database.close()`**: does not checkpoint. It persists the vector index and
-  tree roots and flushes dirty pages on a best-effort basis, without an fsync of
-  the database file, and leaves the log in place to be replayed at the next open.
-  Call `checkpoint(.truncate)` first if you want a clean log.
+**At open**, after recovery, if the log still holds frames, so the next open has
+nothing to replay and a torn frame at the log's tail does not sit in front of new
+ones.
+
+**At close**, for the same reason: `Database.close()` runs a truncate checkpoint when
+the log holds frames, and the C API's `lattice_close` syncs the database first and
+then does the same. A cleanly closed database is its file alone: the log is empty
+and the journal is deleted. Both the open and the close checkpoint are skipped when
+`auto_checkpoint` is null, which leaves truncating the log to the caller, and both
+are skipped on a failed handle.
+
+**On request**:
+- **`Database.checkpoint(mode)`** in the Zig API.
 - **`lattice checkpoint <path>`**: opens the database and runs a truncate checkpoint.
 - **`backup` and `serialize`**: run a full checkpoint so the copied file stands on
   its own (see [Portable Databases](./portable-databases.md)).
@@ -229,15 +263,23 @@ if (checkpointer.shouldCheckpoint(1000)) {
 }
 ```
 
+A small threshold means a short replay after a crash and a flush, with its journal,
+every few commits; a large one means fewer flushes, a longer log, and more reliance
+on early flushes to keep the buffer pool in bounds.
+
 ## Integration
 
 <img class="diagram" src="../assets/diagrams/checkpointer-integration.svg"
-     alt="The checkpointer coordinates three subsystems: BufferPool for frames, dirty tracking and latches; PageManager for writePage, advanceCheckpointSeq and sync; and WalManager for appendRecord, sync, setCheckpointLsn and truncateToEmpty">
+     alt="The database's runCheckpoint refuses a failed handle and an open transaction with records in the log, writes the vector index's node map into its tree and the tree roots into the header, then runs the Checkpointer. The Checkpointer uses the WalManager for appendRecord, sync, setCheckpointLsn and truncateToEmpty; the PageManager for advanceCheckpointSeq; and the BufferPool for flushAll, which writes every dirty page, the freed pages and the header through the journal and syncs the database file">
 
 The Checkpointer coordinates between:
-- **BufferPool**: Knows which pages are dirty
-- **PageManager**: Writes pages to database file, bumps `checkpoint_seq`, fsyncs
+- **BufferPool**: `flushAll`, the journaled flush of every dirty page, freed page
+  and the header, which also syncs the database file
+- **PageManager**: bumps `checkpoint_seq` in the in-memory header
 - **WalManager**: Records checkpoint markers, updates checkpoint_lsn, truncates the log
+
+The database around it decides whether a checkpoint may run at all and puts the
+vector index map and tree roots in place first.
 
 ## API
 
@@ -250,12 +292,13 @@ if (try db.checkpoint(.truncate)) |stats| {
 }
 ```
 
-The `Checkpointer` underneath:
+The `Checkpointer` underneath. Called directly it skips the database's refusals and
+the vector index and tree-root step, which is why the database never does:
 
 ```zig
 var checkpointer = Checkpointer.init(allocator, &bp, &pm, &wal);
 
-// Passive checkpoint (background)
+// Passive checkpoint: writes nothing if a dirty page is pinned
 const passive_stats = try checkpointer.checkpoint(.passive);
 
 // Full checkpoint (pages durable, log left in place)
@@ -279,12 +322,14 @@ if (checkpointer.getLastStats()) |stats| {
 
 | Concept | Purpose |
 |---------|---------|
-| Dirty page flush | Write modified pages to database file |
+| Journaled flush | Every dirty page, freed page and the header reach the file together, or not at all |
+| No dirty eviction | The buffer pool grows instead of writing a page on its own |
+| Early flush | Half the pool dirty and nothing pinned: flush without checkpointing |
 | checkpoint_lsn | Recovery starting point |
 | CHECKPOINT_BEGIN/END | Markers in the log; informational |
-| Passive mode | Non-blocking background checkpoint |
-| Full mode | Complete checkpoint, may block briefly |
-| Truncate mode | Reclaim WAL disk space; the automatic default |
-| Auto-checkpoint | After a commit, at 1000 frames, with no transaction open |
+| Passive mode | Writes nothing if a dirty page is pinned |
+| Full mode | Flushes everything, keeps the log |
+| Truncate mode | Flushes everything and empties the log; the automatic default |
+| Auto-checkpoint | After a commit, at 1000 frames; refused while a transaction has records in the log |
 
 Checkpointing is the bridge between WAL-based durability (fast commits) and bounded recovery time (fast restart). Without it, durability requires replaying the entire history on every startup.

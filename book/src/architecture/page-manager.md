@@ -76,13 +76,16 @@ Key fields:
 - **Freelist head**: Points to the first free page (for allocation)
 - **Tree roots**: The root page of each of the engine's B+Trees (nodes, edges,
   labels, symbols, FTS, HNSW, streams, property indexes), indexed by `TreeIndex`.
-  The roots are written back here when the database syncs or closes.
+  The database copies the current roots into the in-memory header before every
+  flush, so the file's header always names the roots of the pages written with it.
 - **Checkpoint sequence**: Incremented by every checkpoint that truncates the WAL,
   so anything following the log can tell frame 40 of one run from frame 40 of the next
 - **File UUID**: Unique identifier, used to match WAL files
 
 The header page is written raw: unlike every other page it has no page header and
-no checksum.
+no checksum. Between flushes it changes only in memory; it reaches the file as the
+first page of each journaled flush (see
+[Buffer Pool](./buffer-pool.md#writing-pages-back)).
 
 ### Data Pages
 
@@ -133,26 +136,29 @@ the real code allocates (and frees) inline, and error mapping is left out.
 pub fn allocatePage(self: *Self) !PageId {
     if (self.read_only) return error.PermissionDenied;
 
-    // 1. Try freelist first
+    // 1. A page freed since the last flush: the file has not heard it was freed
+    if (self.deferred_frees.pop()) |page_id| return page_id;
+
+    // 2. The freelist
     if (self.header.freelist_page != NULL_PAGE) {
         return self.allocateFromFreelist();
     }
 
-    // 2. Allocate at end of file
+    // 3. Extend the file with a zeroed page (type free, checksum 0). This only
+    //    makes the file longer; nothing in the file refers to the page until
+    //    a flush writes the pages that use it.
     const page_id = self.pageCount();
-
-    // 3. Extend file with a zeroed page (type free, checksum 0)
     const zeros = try allocZeroedPage(self.page_size);
     const header: *PageHeader = @ptrCast(zeros.ptr);
     header.* = PageHeader.init(.free);
     try self.file.write(self.pageOffset(page_id), zeros);
 
-    // 4. Rewrite the file header (modified timestamp)
-    try self.writeHeader();
-
     return page_id;
 }
 ```
+
+The file header is not rewritten here. A file whose last page was cut short by a
+crash during such an extension is still opened; the partial page is not counted.
 
 ### Allocating from Freelist
 
@@ -160,47 +166,60 @@ pub fn allocatePage(self: *Self) !PageId {
 fn allocateFromFreelist(self: *Self) !PageId {
     const page_id = self.header.freelist_page;
 
-    // Read the free page to get next pointer
+    // The head must be inside the file, read back with a valid checksum, and be
+    // a free page. Otherwise the freelist is dropped and the page comes from the
+    // end of the file instead.
+    if (page_id >= self.pageCount()) return self.dropFreelistAndExtend();
     const buf = try allocPage(self.page_size);
-    try self.readPageRaw(page_id, buf);
+    self.readPage(page_id, buf) catch |err| switch (err) {
+        error.ChecksumMismatch => return self.dropFreelistAndExtend(),
+        else => return err,
+    };
+    if (pageType(buf) != .free) return self.dropFreelistAndExtend();
 
-    // Next pointer is stored after the 8-byte header
-    const next_free = std.mem.readInt(u32, buf[8..12], .little);
+    // Next pointer is stored after the 8-byte header; one that points at the
+    // page itself or past the end of the file ends the list
+    var next_free = std.mem.readInt(u32, buf[8..12], .little);
+    if (next_free == page_id or next_free >= self.pageCount()) next_free = NULL_PAGE;
 
-    // Update freelist head
+    // Update the freelist head, in memory; the next flush writes the header
     self.header.freelist_page = next_free;
-    try self.writeHeader();
+    self.header_dirty = true;
 
     return page_id;
 }
 ```
 
+Checking the head matters because a stale or damaged header could otherwise hand
+out a live page, giving it two owners. Dropping the list leaks the pages on it
+(`lattice compact` rebuilds the list from page types) rather than corrupt a tree.
+
 ### Freeing a Page
+
+Freeing writes nothing to the file. The page joins a list of deferred frees:
 
 ```zig
 pub fn freePage(self: *Self, page_id: PageId) !void {
-    // 1. Can't free the header page
-    if (page_id == 0) return error.InvalidPageId;
+    // Can't free the header page, a page past the end of the file, the current
+    // freelist head, or a page already freed since the last flush
+    if (page_id == 0 or page_id >= self.pageCount()) return error.InvalidPageId;
+    if (page_id == self.header.freelist_page) return error.InvalidPageId;
+    if (self.deferred_free_set.contains(page_id)) return error.InvalidPageId;
 
-    // 2. Set up page as free, pointing to current freelist head
-    const buf = try allocZeroedPage(self.page_size);
-    const header: *PageHeader = @ptrCast(buf.ptr);
-    header.* = PageHeader.init(.free);
-
-    // Store old freelist head as next pointer
-    std.mem.writeInt(u32, buf[8..12], self.header.freelist_page, .little);
-
-    // 3. Calculate checksum and write
-    header.checksum = calculateChecksum(buf[8..]);
-    try self.file.write(self.pageOffset(page_id), buf);
-
-    // 4. Update freelist head to this page
-    self.header.freelist_page = page_id;
-    try self.writeHeader();
+    try self.deferred_free_set.put(page_id, {});
+    try self.deferred_frees.append(page_id);
 }
 ```
 
-This is a LIFO (stack) freelist - last freed is first allocated. Simple and efficient.
+The buffer pool gives the freed page a blank free-page image in memory, so whoever
+is handed it next finds a free page, not what its last owner left. At the next
+flush the deferred pages are formatted as freelist pages, each linking to the next
+and the last to the current head, and written with the other dirty pages and the
+header. Writing a freelist link into a page the moment it was freed was the other
+way a page could reach the file on its own, over a page the file's image still
+used; that no longer happens.
+
+The freelist is LIFO (a stack): the most recently freed pages are handed out first.
 
 ### Physical Tail Reclamation
 
@@ -228,15 +247,26 @@ the page header — so the page type and flags in bytes 0–1 are not covered.
 
 The detection has two gaps worth knowing. A stored checksum of 0 means "not
 checked", and pages are allocated with a checksum of 0 until they are first written
-through `writePage`. And the header page has no checksum at all.
+in a flush. And the header page has no checksum at all (the journal checksums its
+copy of it during a flush).
 
 ### Checksum Calculation
 
 ```zig
 pub fn calculateChecksum(data: []const u8) u32 {
-    return std.hash.crc.Crc32Iscsi.hash(data); // CRC32C
+    return crc32c.hash(data); // CRC32C (Castagnoli)
 }
 ```
+
+`src/storage/crc32c.zig` uses the CPU's CRC-32C instruction where there is one
+(SSE4.2 on x86_64, the CRC extension on aarch64), chosen at run time because release
+binaries are built for baseline CPUs, and a slicing-by-8 table walk otherwise. The
+result is bit-identical to the byte-at-a-time `std.hash.crc.Crc32Iscsi` that earlier
+releases used, so files and logs verify in both directions.
+
+The buffer pool stamps the checksum when it seals a page for a flush, so the same
+bytes go to the journal and then in place. `writePage`, below, does the same for
+the page manager used on its own.
 
 ### Writing with Checksum
 
@@ -272,7 +302,7 @@ pub fn readPage(self: *Self, page_id: PageId, buf: []u8) !void {
 ```
 
 Note: A stored checksum of 0 skips verification. Newly allocated pages carry 0
-until they are first written through `writePage`.
+until they are first written.
 
 ## Read-Only Mode
 
@@ -292,6 +322,15 @@ Useful for:
 - Backup tools
 - Read replicas
 - Forensic analysis
+
+## Finishing an Interrupted Flush
+
+When it opens a file, before reading the header, the page manager looks for
+`<database>-journal`. If a flush was interrupted, the journal holds every page it
+was writing; a complete journal for this database is written in place and synced,
+and an incomplete one is discarded. A read-only open that finds a complete journal
+is refused, since it may not write the file to finish the flush. See
+[Recovery](./recovery.md#finishing-an-interrupted-flush).
 
 ## File Locking
 
@@ -367,10 +406,12 @@ try pm.writePage(page_id, &buf);
 var read_buf: [4096]u8 align(4096) = undefined;
 try pm.readPage(page_id, &read_buf);
 
-// Free the page
+// Free the page (deferred until the next flush)
 try pm.freePage(page_id);
 
-// Ensure durability
+// Without a buffer pool to flush through, write the deferred frees and the
+// header directly (not atomic), then make it durable
+try pm.persistDeferredFrees();
 try pm.sync();
 ```
 

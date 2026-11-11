@@ -49,7 +49,7 @@ The pin count is a reference count:
 | Pin count | Consequence |
 |-----------|-------------|
 | `> 0` | Page is in use and cannot be evicted |
-| `= 0` | Page may be evicted if a frame is needed |
+| `= 0` | Page may be evicted if a frame is needed and it is clean |
 
 ### Dirty Flag
 
@@ -57,9 +57,11 @@ The pin count is a reference count:
 |-------|-----------|---------|
 | Read page | `false` | Frame matches disk |
 | Modify page | `true` | Frame differs from disk |
-| Write to disk | `false` | Frame matches disk again |
+| Flush | `false` | Frame matches disk again |
 
-Dirty pages MUST be written to disk before eviction. Otherwise we lose data!
+A dirty page is never evicted, and never written to the file on its own. It stays
+in its frame until the next flush writes every dirty page together (see
+[Writing Pages Back](#writing-pages-back)).
 
 ### Reader-Writer Latch
 
@@ -88,7 +90,7 @@ pub fn fetchPage(self: *Self, page_id: PageId, mode: LatchMode) !*BufferFrame {
         return frame;
     }
 
-    // 2. Not in pool - take a free frame or evict one (flushing it if dirty)
+    // 2. Not in pool - take a free frame, evict a clean one, or grow the pool
     const frame_id = try self.getFreeFrame();
     const frame = &self.frames[frame_id];
 
@@ -124,7 +126,7 @@ When the buffer pool is full, we need to evict a page to make room. We use the C
 Imagine the frames arranged in a circle with a clock hand:
 
 <img class="diagram" src="../assets/diagrams/buffer-pool-clock.svg"
-     alt="Four frames arranged in a ring. The clock hand points at frame 1, which has a use count of zero and a pin count of zero and is therefore the eviction candidate; frames 3 and 4 have their use bit set and would only be skipped once">
+     alt="Four frames arranged in a ring. The clock hand points at frame 1, which is clean with a use count of zero and a pin count of zero and is therefore the eviction candidate; frame 2 is dirty and is passed over, frame 3 has its use bit set and would only be skipped once, and frame 4 is pinned and passed over">
 
 **To find a victim:**
 
@@ -137,12 +139,20 @@ fn getFreeFrame(self: *Self) !FrameId {
 
     // Clock sweep: at most two full rotations
     var iterations: usize = 0;
+    var passed_over_dirty = false;
     while (iterations < self.frame_count * 2) : (iterations += 1) {
         const frame = &self.frames[self.clock_hand];
         const frame_id: FrameId = @intCast(self.clock_hand);
 
         // Skip pinned pages
         if (frame.pin_count.load(.monotonic) > 0) {
+            self.advanceClock();
+            continue;
+        }
+
+        // Never evict a dirty page: it waits for the next flush
+        if (frame.dirty) {
+            passed_over_dirty = true;
             self.advanceClock();
             continue;
         }
@@ -154,24 +164,27 @@ fn getFreeFrame(self: *Self) !FrameId {
             continue;
         }
 
-        // Found victim: write it back if dirty, then drop it from the table
-        if (frame.dirty) try self.pm.writePage(frame.page_id, frame.data);
+        // Found a clean victim: drop it from the table, no write needed
         _ = self.page_table.remove(frame.page_id);
         frame.page_id = NULL_PAGE;
-        frame.dirty = false;
         self.advanceClock();
         return frame_id;
     }
 
-    return error.BufferPoolFull;  // Nothing evictable
+    // Every frame pinned: the caller is holding too much at once
+    if (!passed_over_dirty) return error.BufferPoolFull;
+    // Some frames were only dirty: grow by one overflow frame instead
+    return self.addOverflowFrame();
 }
 ```
 
 **The key insight:** The use bit gives pages a "second chance". A recently used page survives one pass of the hand. Only pages that haven't been used since the hand last passed get evicted.
 
-Eviction can happen at any time, so a dirty page may be written to the database
-file long before, or long after, the transaction that dirtied it commits. Nothing
-in the pool waits for the log.
+Eviction never writes anything: the victim is always a page the file already holds.
+When the sweep passes over frames that are only dirty, the pool allocates an
+overflow frame beyond its configured size instead. Overflow frames are given back
+after the next flush has cleaned them. `BufferPoolFull` now means every frame is
+pinned, which in practice is a pin that was never released.
 
 ## Unpinning Pages
 
@@ -197,40 +210,85 @@ Always unpin! Failure to unpin causes:
 - Buffer pool eventually fills with pinned pages
 - `BufferPoolFull` errors
 
-## Flushing Pages
+## Writing Pages Back
 
-Writing dirty pages to disk:
+Most buffer pools write a dirty page out when they want its frame, and this one
+used to. It no longer does, because of the write-ahead log.
 
-Simplified (both take a shared latch on the frame, spinning until it is free,
-before writing it):
+The log records what transactions did to the graph, not what happened to pages, so
+it can only be replayed onto a database file that is a complete, consistent image
+(see [Write-Ahead Log](./wal.md#how-latticedb-applies-it)). A page written on its
+own breaks that. A leaf split changes three pages; if the pool evicts and writes the
+old leaf, the file holds a leaf with half its keys missing while the new leaf and
+the parent that leads to them exist only in memory. After a checkpoint has emptied
+the log, that file is the only copy of everything committed before it, and a kill at
+that point lost committed data: 4000 small transactions against a 48-page pool lost
+nodes at the first kill.
+
+So a dirty page reaches the file in exactly one way: as part of a flush of every
+dirty page, the pages freed since the last flush and the header, together, through a
+journal.
+
+Simplified from `flushAll` and `writeAtomically`:
 
 ```zig
-// Flush one page
-pub fn flushPage(self: *Self, page_id: PageId) !void {
-    const frame = self.lookupFrame(page_id) orelse return; // under the mutex
-
-    if (frame.dirty) {
-        try self.pm.writePage(frame.page_id, frame.data);
-        frame.dirty = false;
-    }
-}
-
-// Flush all dirty pages, returning how many were written
+// Write every dirty page, the freed pages and the header as one atomic step.
 pub fn flushAll(self: *Self) !u32 {
-    var flushed: u32 = 0;
-    for (self.frames) |*frame| {
-        if (frame.page_id != NULL_PAGE and frame.dirty) {
-            try self.pm.writePage(frame.page_id, frame.data);
-            frame.dirty = false;
-            flushed += 1;
-        }
-    }
-    return flushed;
+    // Pages freed since the last flush join the freelist now
+    for (self.pm.deferredFrees()) |page_id| formatAsFreelistPage(page_id);
+
+    // Every dirty frame, in the pool and in overflow frames, sorted by page id
+    const dirty = self.collectDirtyFrames();
+
+    // 1. Copy the header image and every page to <db>-journal, and fsync it
+    try journal.write(file_uuid, page_size, header_image ++ dirty);
+    // 2. Write the header and the pages in place, then fsync the database file
+    try self.pm.writeSealed(0, header_image);
+    for (dirty) |frame| try self.pm.writeSealed(frame.page_id, frame.data);
+    try self.pm.sync();
+    // 3. Empty the journal (not synced: applying it again is harmless)
+    journal.clear() catch {};
+
+    for (dirty) |frame| frame.dirty = false;
+    self.releaseIdleOverflow();
+    return dirty.len;
 }
 ```
 
-Flushing writes pages; it does not fsync the database file. That is the page
-manager's `sync`, which a checkpoint issues after its flush.
+If the process dies during the in-place writes, the journal holds a complete copy of
+everything being written, and the next open writes the same pages again before it
+reads anything else. If it dies while the journal itself is being written, the
+journal fails its checksums and is discarded, and the database file has not been
+touched. Either way the file is a whole image, before the flush or after it.
+[Checkpointing](./checkpointing.md#the-journaled-flush) describes the journal's
+format and what each crash point leaves. An in-memory database has no journal.
+
+`flushPage(page_id)` still exists, but one page cannot go to the file on its own: if
+the page is dirty, it flushes everything.
+
+The pool cannot check the two rules that govern when a flush may run, so its
+callers keep them:
+
+1. **Every tree a dirty page belongs to must be whole in memory**, because the
+   image written is what recovery will start from. The database knows that holds
+   when no page is pinned: a page is pinned for the length of any tree operation
+   that touches it.
+2. **The log must be synced first**, because pages may carry the effects of
+   transactions whose commit records have only been handed to the operating system
+   (`sync_mode = .normal`). A page must never reach the file ahead of the log that
+   explains it.
+
+The database flushes at checkpoints, at close, on an explicit `sync()`, and early:
+after a commit, between the entities a commit applies, before each write made
+outside a transaction, and between the records recovery replays, it flushes if at
+least half the pool's frames are dirty and nothing is pinned. Before flushing it
+writes the vector index's in-memory node map into its tree and copies the tree roots
+into the header, so the image is whole in those respects too, and syncs the log.
+
+What this costs: every page a flush writes is written twice, once to the journal and
+once in place, and a flush syncs both files. Between flushes the pool holds every
+page changed since the last one, so a large transaction can take it well past its
+configured size.
 
 ## Thread Safety
 
@@ -293,6 +351,9 @@ from, in order of priority:
 3. Otherwise automatic sizing: 16 MB, plus 12 MB when full-text search is enabled
    (the Zig default) and 12 MB more when vectors are enabled
 
+All of these are the pool's resting size. Between flushes it may hold more, since
+dirty pages are kept until the next flush rather than evicted.
+
 Guidelines:
 - **More is better** (to a point)
 - **Working set**: Should fit frequently accessed pages
@@ -314,9 +375,10 @@ data. That keeps peak memory close to the size of the database itself, which
 matters when the point of the feature is holding many small databases at once.
 
 **The floor is a correctness requirement, not a tuning choice.** When the clock
-sweep finds no evictable frame the pool returns `BufferPoolFull`, and that surfaces
+sweep finds every frame pinned the pool returns `BufferPoolFull`, and that surfaces
 as a failed query rather than a slow one. The pool must always have room for the
-largest set of pages pinned simultaneously.
+largest set of pages pinned simultaneously. (Frames that are merely dirty make the
+pool grow instead, so the floor is about pins, not writes.)
 
 That number was measured rather than guessed, since guessing it trades memory
 against query failures. Pools from four frames upward were run through a deep
@@ -330,7 +392,7 @@ each pin pages of their own.
 
 ```zig
 var bp = try BufferPool.init(allocator, &pm, pool_size);
-defer bp.deinit();  // Flushes dirty pages
+defer bp.deinit();  // Flushes dirty pages, best effort; close() reports errors
 
 // Read a page
 const frame = try bp.fetchPage(page_id, .shared);
@@ -348,4 +410,7 @@ modifyPage(frame.data);
 1. **Pin before access**: Never access page data without pinning
 2. **Unpin when done**: Every fetchPage must have matching unpinPage
 3. **Mark dirty**: If you modified the page, set dirty=true when unpinning
-4. **Flush before close**: deinit() flushes, or call flushAll() explicitly
+4. **Flush only between operations, with the log synced first**: the database does
+   this at checkpoints, at close, in `sync()` and in its early flushes. `close()`
+   flushes and reports an error if the flush fails; `deinit()` flushes too but
+   swallows the error

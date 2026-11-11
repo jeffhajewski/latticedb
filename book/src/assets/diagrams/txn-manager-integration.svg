@@ -1,73 +1,76 @@
-<svg width="711" height="497"
- viewBox="0.00 0.00 533.00 373.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 369.48)">
+<svg width="720" height="549"
+ viewBox="0.00 0.00 540.00 412.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 407.73)">
 <title>txn_manager_integration</title>
 <!-- app -->
 <g id="node1" class="node">
 <title>app</title>
-<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M374.68,-365.48C374.68,-365.48 153.88,-365.48 153.88,-365.48 147.88,-365.48 141.88,-359.48 141.88,-353.48 141.88,-353.48 141.88,-341.48 141.88,-341.48 141.88,-335.48 147.88,-329.48 153.88,-329.48 153.88,-329.48 374.68,-329.48 374.68,-329.48 380.68,-329.48 386.68,-335.48 386.68,-341.48 386.68,-341.48 386.68,-353.48 386.68,-353.48 386.68,-359.48 380.68,-365.48 374.68,-365.48"/>
-<text xml:space="preserve" text-anchor="middle" x="264.28" y="-342.45" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Application</text>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M382.8,-403.73C382.8,-403.73 162,-403.73 162,-403.73 156,-403.73 150,-397.73 150,-391.73 150,-391.73 150,-379.73 150,-379.73 150,-373.73 156,-367.73 162,-367.73 162,-367.73 382.8,-367.73 382.8,-367.73 388.8,-367.73 394.8,-373.73 394.8,-379.73 394.8,-379.73 394.8,-391.73 394.8,-391.73 394.8,-397.73 388.8,-403.73 382.8,-403.73"/>
+<text xml:space="preserve" text-anchor="middle" x="272.4" y="-380.7" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">Application</text>
 </g>
 <!-- db -->
 <g id="node2" class="node">
 <title>db</title>
-<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M374.68,-296.48C374.68,-296.48 153.88,-296.48 153.88,-296.48 147.88,-296.48 141.88,-290.48 141.88,-284.48 141.88,-284.48 141.88,-234.32 141.88,-234.32 141.88,-228.32 147.88,-222.32 153.88,-222.32 153.88,-222.32 374.68,-222.32 374.68,-222.32 380.68,-222.32 386.68,-228.32 386.68,-234.32 386.68,-234.32 386.68,-284.48 386.68,-284.48 386.68,-290.48 380.68,-296.48 374.68,-296.48"/>
-<text xml:space="preserve" text-anchor="start" x="159.16" y="-275.95" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Database</text>
-<text xml:space="preserve" text-anchor="start" x="159.16" y="-262.45" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;per&#45;transaction overlays</text>
-<text xml:space="preserve" text-anchor="start" x="159.16" y="-248.95" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;single read&#45;write transaction</text>
-<text xml:space="preserve" text-anchor="start" x="159.16" y="-235.45" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;snapshot copies at commit</text>
+<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M405.93,-334.73C405.93,-334.73 138.88,-334.73 138.88,-334.73 132.88,-334.73 126.87,-328.73 126.87,-322.73 126.87,-322.73 126.87,-259.07 126.87,-259.07 126.87,-253.07 132.87,-247.07 138.87,-247.07 138.87,-247.07 405.93,-247.07 405.93,-247.07 411.93,-247.07 417.93,-253.07 417.93,-259.07 417.93,-259.07 417.93,-322.73 417.93,-322.73 417.93,-328.73 411.93,-334.73 405.93,-334.73"/>
+<text xml:space="preserve" text-anchor="start" x="144.15" y="-314.2" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Database</text>
+<text xml:space="preserve" text-anchor="start" x="144.15" y="-300.7" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;per&#45;transaction overlays</text>
+<text xml:space="preserve" text-anchor="start" x="144.15" y="-287.2" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;single read&#45;write transaction</text>
+<text xml:space="preserve" text-anchor="start" x="144.15" y="-273.7" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;snapshot copies at commit</text>
+<text xml:space="preserve" text-anchor="start" x="144.15" y="-260.2" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;failed state if commit cannot finish</text>
 </g>
 <!-- app&#45;&gt;db -->
 <g id="edge1" class="edge">
 <title>app&#45;&gt;db</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M264.28,-329.06C264.28,-322.13 264.28,-313.81 264.28,-305.4"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="266.73,-305.66 264.28,-298.66 261.83,-305.66 266.73,-305.66"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M272.4,-367.27C272.4,-360.42 272.4,-352.16 272.4,-343.66"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="274.86,-343.79 272.41,-336.79 269.96,-343.79 274.86,-343.79"/>
 </g>
 <!-- tm -->
 <g id="node3" class="node">
 <title>tm</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M238.56,-167.82C238.56,-167.82 12,-167.82 12,-167.82 6,-167.82 0,-161.82 0,-155.82 0,-155.82 0,-105.66 0,-105.66 0,-99.66 6,-93.66 12,-93.66 12,-93.66 238.56,-93.66 238.56,-93.66 244.56,-93.66 250.56,-99.66 250.56,-105.66 250.56,-105.66 250.56,-155.82 250.56,-155.82 250.56,-161.82 244.56,-167.82 238.56,-167.82"/>
-<text xml:space="preserve" text-anchor="start" x="17.28" y="-147.29" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">TxnManager</text>
-<text xml:space="preserve" text-anchor="start" x="17.28" y="-133.79" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;transaction ids</text>
-<text xml:space="preserve" text-anchor="start" x="17.28" y="-120.29" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;BEGIN / COMMIT / ABORT records</text>
-<text xml:space="preserve" text-anchor="start" x="17.28" y="-106.79" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;prev_lsn chains</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M245.8,-181.32C245.8,-181.32 25.01,-181.32 25.01,-181.32 19,-181.32 13,-175.32 13,-169.32 13,-169.32 13,-105.66 13,-105.66 13,-99.66 19,-93.66 25,-93.66 25,-93.66 245.8,-93.66 245.8,-93.66 251.8,-93.66 257.8,-99.66 257.8,-105.66 257.8,-105.66 257.8,-169.32 257.8,-169.32 257.8,-175.32 251.8,-181.32 245.8,-181.32"/>
+<text xml:space="preserve" text-anchor="start" x="30.28" y="-160.79" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">TxnManager</text>
+<text xml:space="preserve" text-anchor="start" x="30.28" y="-147.29" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;transaction ids</text>
+<text xml:space="preserve" text-anchor="start" x="30.28" y="-133.79" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;BEGIN with the first record</text>
+<text xml:space="preserve" text-anchor="start" x="30.28" y="-120.29" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;COMMIT / ABORT records</text>
+<text xml:space="preserve" text-anchor="start" x="30.28" y="-106.79" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;prev_lsn chains</text>
 </g>
 <!-- db&#45;&gt;tm -->
 <g id="edge2" class="edge">
 <title>db&#45;&gt;tm</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M224.08,-221.76C207.65,-206.8 188.56,-189.4 171.55,-173.91"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="173.45,-172.32 166.62,-169.41 170.15,-175.94 173.45,-172.32"/>
-<text xml:space="preserve" text-anchor="start" x="203.1" y="-196.82" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;begin, log overlay,</text>
-<text xml:space="preserve" text-anchor="start" x="203.1" y="-185.57" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;commit, abort</text>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M233.15,-246.51C216.67,-228.3 197.4,-207.01 180.36,-188.17"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="182.3,-186.67 175.79,-183.12 178.67,-189.95 182.3,-186.67"/>
+<text xml:space="preserve" text-anchor="start" x="216.18" y="-215.94" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;begin, log overlay,</text>
+<text xml:space="preserve" text-anchor="start" x="216.18" y="-204.69" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;commit, abort</text>
 </g>
 <!-- storage -->
 <g id="node5" class="node">
 <title>storage</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M512.68,-154.32C512.68,-154.32 291.88,-154.32 291.88,-154.32 285.88,-154.32 279.88,-148.32 279.88,-142.32 279.88,-142.32 279.88,-119.16 279.88,-119.16 279.88,-113.16 285.88,-107.16 291.88,-107.16 291.88,-107.16 512.68,-107.16 512.68,-107.16 518.68,-107.16 524.68,-113.16 524.68,-119.16 524.68,-119.16 524.68,-142.32 524.68,-142.32 524.68,-148.32 518.68,-154.32 512.68,-154.32"/>
-<text xml:space="preserve" text-anchor="start" x="297.16" y="-133.79" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">B+Trees + buffer pool</text>
-<text xml:space="preserve" text-anchor="start" x="297.16" y="-120.29" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;graph, index and stream data</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M519.8,-161.07C519.8,-161.07 299,-161.07 299,-161.07 293,-161.07 287,-155.07 287,-149.07 287,-149.07 287,-125.91 287,-125.91 287,-119.91 293,-113.91 299,-113.91 299,-113.91 519.8,-113.91 519.8,-113.91 525.8,-113.91 531.8,-119.91 531.8,-125.91 531.8,-125.91 531.8,-149.07 531.8,-149.07 531.8,-155.07 525.8,-161.07 519.8,-161.07"/>
+<text xml:space="preserve" text-anchor="start" x="304.28" y="-140.54" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">B+Trees + buffer pool</text>
+<text xml:space="preserve" text-anchor="start" x="304.28" y="-127.04" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;graph, index and stream data</text>
 </g>
 <!-- db&#45;&gt;storage -->
 <g id="edge4" class="edge">
 <title>db&#45;&gt;storage</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M304.2,-221.76C325.46,-202.25 351.23,-178.6 371.02,-160.43"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="372.49,-162.41 375.99,-155.87 369.18,-158.8 372.49,-162.41"/>
-<text xml:space="preserve" text-anchor="start" x="341.54" y="-196.82" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;apply overlay</text>
-<text xml:space="preserve" text-anchor="start" x="341.54" y="-185.57" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;at commit</text>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M311.66,-246.51C334.55,-221.22 362.79,-190 383.03,-167.64"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="384.77,-169.36 387.65,-162.53 381.14,-166.08 384.77,-169.36"/>
+<text xml:space="preserve" text-anchor="start" x="353.18" y="-221.57" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;apply overlay after</text>
+<text xml:space="preserve" text-anchor="start" x="353.18" y="-210.32" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;the commit record</text>
+<text xml:space="preserve" text-anchor="start" x="353.18" y="-199.07" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;is synced</text>
 </g>
 <!-- wal -->
 <g id="node4" class="node">
 <title>wal</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M235.68,-60.66C235.68,-60.66 14.88,-60.66 14.88,-60.66 8.88,-60.66 2.88,-54.66 2.88,-48.66 2.88,-48.66 2.88,-12 2.88,-12 2.88,-6 8.88,0 14.88,0 14.88,0 235.68,0 235.68,0 241.68,0 247.68,-6 247.68,-12 247.68,-12 247.68,-48.66 247.68,-48.66 247.68,-54.66 241.68,-60.66 235.68,-60.66"/>
-<text xml:space="preserve" text-anchor="start" x="20.16" y="-40.13" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">WalManager</text>
-<text xml:space="preserve" text-anchor="start" x="20.16" y="-26.63" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;frames, CRC32C</text>
-<text xml:space="preserve" text-anchor="start" x="20.16" y="-13.13" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;fsync on commit and abort</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M258.81,-60.66C258.81,-60.66 12,-60.66 12,-60.66 6,-60.66 0,-54.66 0,-48.66 0,-48.66 0,-12 0,-12 0,-6 6,0 12,0 12,0 258.81,0 258.81,0 264.81,0 270.81,-6 270.81,-12 270.81,-12 270.81,-48.66 270.81,-48.66 270.81,-54.66 264.81,-60.66 258.81,-60.66"/>
+<text xml:space="preserve" text-anchor="start" x="17.28" y="-40.13" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">WalManager</text>
+<text xml:space="preserve" text-anchor="start" x="17.28" y="-26.63" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;frames, CRC32C</text>
+<text xml:space="preserve" text-anchor="start" x="17.28" y="-13.13" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;fsync on commit (sync_mode .full)</text>
 </g>
 <!-- tm&#45;&gt;wal -->
 <g id="edge3" class="edge">
 <title>tm&#45;&gt;wal</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M125.28,-93.1C125.28,-85.39 125.28,-77.24 125.28,-69.49"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="127.73,-69.92 125.28,-62.92 122.83,-69.92 127.73,-69.92"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M135.4,-93.11C135.4,-85.38 135.4,-77.38 135.4,-69.81"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="137.86,-69.81 135.41,-62.81 132.96,-69.81 137.86,-69.81"/>
 </g>
 </g>
 </svg>

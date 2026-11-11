@@ -1,5 +1,6 @@
-// Writes inside a transaction stay in its overlay. At commit the overlay is
-// logged, applied, and then the commit record is forced to disk.
+// The log's own write path. Records are copied into an in-memory frame; a
+// full frame is written without a sync; a commit ends with sync() in the
+// default sync mode and with flush() in .normal.
 digraph wal_write_flow {
   bgcolor="transparent"
   rankdir=TB
@@ -7,26 +8,28 @@ digraph wal_write_flow {
   ranksep=0.4
   fontname="Helvetica,Arial,sans-serif"
   node [shape=box style="filled,rounded" fillcolor="#eef4fb" color="#4a90d9"
-        penwidth=1.2 fontname="Helvetica,Arial,sans-serif" fontsize=12
-        fontcolor="#1a1a1a" margin="0.22,0.13"]
+        penwidth=1.2 fontname="Menlo,Consolas,monospace" fontsize=11
+        fontcolor="#1a1a1a" margin="0.2,0.12"]
   edge [color="#6b7280" penwidth=1.1 arrowsize=0.7
         fontname="Helvetica,Arial,sans-serif" fontsize=10 fontcolor="#6b7280"]
 
-  app [label="Application" fillcolor="#f6f8fa" color="#c7d0da"]
-  overlay [label="Transaction overlay (RAM)\nCREATE / SET / DELETE staged here\nno log records yet"]
-  log [label="1. Log the overlay\l   WAL manager assigns LSNs, appends records\l   to the frame buffer; a full frame is\l   written to the -wal file (no fsync)\l"
-       fillcolor="#dbe9f8" fontname="Menlo,Consolas,monospace" fontsize=11]
-  apply [label="2. Apply the overlay\nstores change; pages dirty in the buffer pool"]
-  commit [label="3. TXN_COMMIT\nwrite the frame + fsync\n(durable from here)"
-          fillcolor="#eaf5ea" color="#2f7d32"]
-  done [label="Commit returns\nto the application"
-        fillcolor="#eaf5ea" color="#2f7d32" penwidth=1.5]
-  ckpt [label="4. Auto-checkpoint, best effort\nif the log reached its threshold"
-        fillcolor="#f6f8fa" color="#c7d0da"]
+  caller [label="Commit logs its overlay\l(TXN_BEGIN goes out with the first record)\l"
+          fillcolor="#f6f8fa" color="#c7d0da"]
+  append [label="appendRecord\l  assign the next LSN\l  copy the record into the frame buffer\l"
+          fillcolor="#dbe9f8"]
+  full   [label="Frame full: write it to the -wal file,\lrewrite the header's frame count\l(no fsync)\l"]
+  commit [label="TXN_COMMIT appended" fillcolor="#f6f8fa" color="#c7d0da"]
+  sync   [label="sync(): write the partial frame\land the header, then fsync\lsync_mode = .full (default)\l"
+          fillcolor="#eaf5ea" color="#2f7d32" penwidth=1.6]
+  flush  [label="flush(): write the partial frame\land the header, no fsync\lsync_mode = .normal\l"
+          fillcolor="#fdf0ea" color="#c2703f"]
 
-  app -> overlay [label="  writes"]
-  overlay -> log [label="  COMMIT"]
-  log -> apply -> commit
-  commit -> ckpt [color="#2f7d32"]
-  ckpt -> done [color="#2f7d32"]
+  caller -> append
+  append -> full [label="  next record\l  does not fit\l"]
+  full -> append [style=dashed color="#c7d0da"]
+  append -> commit [label="  last record"]
+  commit -> sync
+  commit -> flush
+
+  { rank=same; sync; flush }
 }

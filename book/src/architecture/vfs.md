@@ -37,9 +37,12 @@ raw system calls, so the per-platform differences live in Zig's standard library
 
 A backend that fails on purpose — say, after the Nth write — could be dropped in
 behind the same interface to test crash recovery. None exists today. The crash
-tests in `tests/crash/` simulate a crash differently: after a normal close they
-reset the database file to its header page, leave the log in place, and check that
-reopening replays the committed transactions.
+tests in `tests/crash/` simulate a crash differently: some copy the database file
+and its log while the handle is still open, which is what a killed process leaves,
+and open the copy; others reset the database file to its header page, leave the log
+in place, and check that reopening replays the committed transactions; others build
+the state a crash part way through a flush leaves. None of them injects faults or
+reorders writes, so they simulate a killed process, not a power cut.
 
 ## The Interface
 
@@ -141,8 +144,20 @@ failure.
 How far the flush goes depends on the platform. `sync` is Zig's standard
 `File.sync`, which is plain `fsync` on Linux and macOS and `NtFlushBuffersFile` on
 Windows. On macOS plain `fsync` hands the data to the drive but does not force the
-drive's own write cache out (that needs `F_FULLFSYNC`, which is not used), so a
-power loss there can still lose writes the drive had acknowledged.
+drive's own write cache out, so a power loss there can still lose writes the drive
+had acknowledged. Setting `full_fsync` in the database configuration, or
+`LATTICE_FULL_FSYNC=1` in the environment, makes every sync on macOS use
+`fcntl(F_FULLFSYNC)` instead, which does ask the drive to flush; a filesystem that
+does not support it falls back to `fsync`. It is off by default because each sync
+becomes markedly slower. The setting has no effect on other platforms.
+
+`fsync` on a file covers its contents, not the directory entry that names it. When a
+database is created, its parent directory is synced once after the new database
+file and log are, so a power cut right after creation cannot leave complete files
+that are missing from their directory (not on Windows, where this is skipped). The
+flush journal, `<database>-journal`, is created at every read-write open and removed
+at a clean close; only the open that creates the database syncs the directory after
+creating it.
 
 ## The File Implementation
 
@@ -201,6 +216,9 @@ pub fn writeAt(self: *PosixFile, offset: u64, data: []const u8) VfsError!void {
 
 ```zig
 pub fn syncFile(self: *PosixFile) VfsError!void {
+    if (builtin.os.tag.isDarwin() and self.full_fsync) {
+        if (std.c.fcntl(self.handle.handle(), std.c.F.FULLFSYNC, 0) != -1) return;
+    }
     self.handle.sync() catch |err| return switch (err) {
         error.InputOutput => VfsError.IoError,
         else => VfsError.Unexpected,
@@ -266,6 +284,9 @@ storage underneath it is already RAM.
 The overhead at small sizes is mostly the write-ahead log, which is a second file
 in the same backend. It shrinks as automatic checkpointing truncates it, which is
 why the ratio falls rather than rises as the database grows.
+
+An in-memory database has no flush journal: with no file behind it there is no
+crash for a journal to survive.
 
 The log stays enabled in memory, incidentally, and that is worth knowing. Turning
 it off looks free — a process holding the only copy of a database loses everything

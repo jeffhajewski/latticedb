@@ -1,4 +1,4 @@
-// The vector path: optional embedding client, HNSW index, and the three
+// The vector path: optional embedding helpers, HNSW index, and the three
 // page-backed structures the index persists into.
 digraph vector_search_stack {
   bgcolor="transparent"
@@ -12,18 +12,18 @@ digraph vector_search_stack {
   edge [color="#6b7280" penwidth=1.1 arrowsize=0.7
         fontname="Helvetica,Arial,sans-serif" fontsize=10 fontcolor="#6b7280"]
 
-  embed [label="EmbeddingClient (optional)\nHTTP to Ollama, OpenAI, …"
+  embed [label="EmbeddingClient or hash_embed\n(optional helpers)"
          fillcolor="#f6f8fa" color="#c7d0da" style="filled,rounded,dashed"]
-  hnsw  [label="HnswIndex\nmulti-layer graph, O(log n) search" fillcolor="#dbe9f8"]
+  hnsw  [label="HnswIndex\nmulti-layer graph" fillcolor="#dbe9f8"]
   store [label="VectorStorage\nvector_data pages\n(+ overflow pages > 1016 dims)"]
   pool  [label="Connection pool\nhnsw_layer pages\n(neighbour lists)"]
-  reg   [label="Node registry\nhnsw_node_tree B+Tree\n(vector id → layer, locations)"]
+  reg   [label="Node registry\nhnsw_node_tree B+Tree\n(vector id → layer, locations;\nentry point, pool heads)"]
   bp    [label="Buffer pool" fillcolor="#f6f8fa" color="#c7d0da"]
 
-  embed -> hnsw  [label="  []f32" style=dashed]
+  embed -> hnsw  [label="  []f32, via the caller" style=dashed]
   hnsw  -> store
   hnsw  -> pool
-  hnsw  -> reg   [label="  saved on sync,\n  loaded on open"]
+  hnsw  -> reg   [label="  saved at every flush and checkpoint,\n  loaded or rebuilt on open"]
   { rank=same; store; pool; reg }
   store -> bp
   pool  -> bp

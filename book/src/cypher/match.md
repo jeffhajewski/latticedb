@@ -128,3 +128,22 @@ MATCH (a:Person {name: "Alice"})
 MATCH (b:Person {name: "Bob"})
 RETURN a, b
 ```
+
+Each variable can be introduced only once in a query. A later `MATCH` — or a
+`MATCH` after `WITH` — cannot name a variable that an earlier clause bound; the
+query is rejected with "Variable 'a' is already defined". Write the whole path as
+one pattern instead:
+
+```cypher
+// Rejected: a is bound by the first MATCH
+MATCH (a:Person {name: "Alice"})
+MATCH (a)-[:KNOWS]->(b)
+RETURN b.name
+
+// Works
+MATCH (a:Person {name: "Alice"})-[:KNOWS]->(b)
+RETURN b.name
+```
+
+Relationship type alternation (`-[:KNOWS|LIKES]->`) is not supported either; run
+one query per type.

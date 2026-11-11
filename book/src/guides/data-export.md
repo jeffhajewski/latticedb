@@ -43,9 +43,25 @@ lattice export knowledge.db --file=people.json --labels=Person
 lattice export knowledge.db --file=content.dot --labels=Document,Chunk
 ```
 
+## What Is Not Exported
+
+Export writes labels, properties and edges. It does not write vector embeddings
+(and `lattice dump` does not either), full-text or property index definitions,
+or anything else about how the database was configured. Byte values come out as
+hex strings. Importing an export therefore gives you the graph but not its
+vectors, and every node gets a new ID.
+
+To copy a whole database, use `lattice backup` (see
+[Backup and Replication](./backup-and-replication.md)) or `serialize()` from a
+binding.
+
+The `--query` option is accepted but ignored in this release: the whole graph,
+or the labels chosen with `--labels`, is exported. To save the result of a
+query, run it with `lattice exec --format=json`.
+
 ## Choosing a Format
 
-- `.json`: single structured snapshot for backups and interchange.
+- `.json`: single structured snapshot of the graph, for interchange.
 - `.jsonl`: append/stream-friendly format for pipelines.
 - `.csv`: tabular extraction for spreadsheets and BI tooling.
 - `.dot`: graph visualization with Graphviz-compatible tooling.

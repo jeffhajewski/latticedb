@@ -8,7 +8,7 @@ TypeScript/Node.js bindings for LatticeDB, an embedded knowledge graph database 
 npm install @hajewski/latticedb
 ```
 
-The native shared library (`liblattice.dylib` / `liblattice.so`) must be available on the system. Install it via the [install script](../getting-started/installation.md) or build from source with `zig build shared`.
+The published package bundles the native shared library for Linux (x64, arm64), macOS (x64, arm64) and Windows (x64, arm64), so nothing else needs installing. From a source checkout, build it with `zig build shared`; the loader finds `zig-out/lib` (or set `LATTICE_LIB_PATH`).
 
 ## Quick Start
 
@@ -123,7 +123,7 @@ that nothing locks it, since no other process can reach it.
 
 A database can only be open in one process at a time. Opening takes a lock on the
 file, so a second process gets a `LatticeError` with
-`code === LatticeErrorCode.DatabaseLocked` rather than quietly corrupting your
+`code === -16` (`LATTICE_ERROR_DATABASE_LOCKED`) rather than quietly corrupting your
 data. A read-only handle shares the lock with other readers, but is still refused
 while a writer holds the database, because what it would read is a stale file that
 a checkpoint may be rewriting underneath it.
@@ -140,6 +140,7 @@ was not.
 - `await db.read(fn)` - Execute a read-only transaction
 - `await db.write(fn)` - Execute a read-write transaction
 - `await db.query(cypher, params?)` - Execute a Cypher query
+- `await db.getNodesByLabel(label)` - IDs of every node with a label
 - `await db.vectorSearch(vector, options?)` - k-NN vector search
 - `await db.ftsSearch(label, property, query, options?)` - Full-text search of one declared index
 - `await db.ftsSearchFuzzy(label, property, query, options?)` - Fuzzy full-text search
@@ -155,6 +156,11 @@ was not.
 - `db.isOpen()` - Check if database is open
 - `db.getPath()` - Get database file path
 
+`deserialize(bytes, options?, copy = true)`, exported from the package root, opens a
+database from bytes produced by `serialize()`.
+
+Node IDs, edge IDs and stream sequence numbers are `bigint`.
+
 ### Transaction
 
 #### Read Operations
@@ -164,6 +170,10 @@ was not.
 - `await txn.getProperty(nodeId, key)` - Get a property value
 - `await txn.getOutgoingEdges(nodeId)` - Get outgoing edges from a node
 - `await txn.getIncomingEdges(nodeId)` - Get incoming edges to a node
+- `await txn.getOutgoingEdgesByType(nodeId, edgeType, ...)` / `getIncomingEdgesByType(...)` - Edges of one type
+- `await txn.getNodesByLabel(label)` - IDs of every node with a label, as this transaction sees them
+- `await txn.query(cypher, params?)` - Run Cypher inside this transaction
+- `await txn.vectorSearch(...)` / `ftsSearch(...)` / `ftsSearchFuzzy(...)` - Searches inside this transaction
 - `await txn.findNodesByLabelProperty(label, property, value, limit?)` - Indexed node equality lookup
 - `await txn.findEdgesByTypeProperty(edgeType, property, value, limit?)` - Indexed edge equality lookup
 - `txn.isReadOnly()` / `txn.isActive()` - Transaction state
@@ -173,16 +183,16 @@ was not.
 - `await txn.createNode({ labels, properties })` - Create a node
 - `await txn.deleteNode(nodeId)` - Delete a node
 - `await txn.setProperty(nodeId, key, value)` - Set a property
-- `await txn.setVector(nodeId, key, vector)` - Set a vector embedding
+- `await txn.setVector(nodeId, key, vector)` - Set the node's vector embedding. A node has one vector; `key` is accepted but not used, and Cypher reads the vector as `n.embedding`.
 - `await txn.batchInsertVectors(label, vectors)` - Insert vector-bearing nodes in one call
 - `await txn.batchInsert(label, vectors)` - Deprecated compatibility alias for `batchInsertVectors`
-- `await db.createNodeFtsIndex(label, property)` - Declare a full-text index; writing that property keeps it current
 - `await txn.createEdge(sourceId, targetId, edgeType, options?)` - Create an edge and return its stable edge ID on the `Edge`
 - `await txn.deleteEdge(sourceId, targetId, edgeType)` - Delete an edge
 - `await txn.setEdgeProperty(edgeId, key, value)` - Set an edge property by stable edge ID
 - `await txn.getEdgeProperty(edgeId, key)` - Get an edge property by stable edge ID
 - `await txn.removeEdgeProperty(edgeId, key)` - Remove an edge property by stable edge ID
 - `txn.publishStream(stream, payload, kind?)` - Publish a durable stream record
+- `txn.publishStreamGetSequence(stream, payload, kind?)` - Publish and return the record's sequence (`bigint`)
 - `txn.setStreamOffset(stream, consumer, sequence)` - Commit a durable consumer offset
 - `txn.trimStream(stream, throughSequence)` - Delete stream records through a sequence
 - `txn.commit()` / `txn.rollback()` - Commit or rollback
@@ -365,8 +375,12 @@ await db.cacheClear();
 - `null` - Null value
 - `boolean` - Boolean
 - `number` - Integer or float
+- `bigint` - 64-bit integer
 - `string` - UTF-8 string
 - `Uint8Array` - Binary data
+- `Float32Array` - Vector
+- Arrays of any of these values, nested to any depth
+- Plain objects with string keys, whose values are any of these, nested to any depth
 
 ## Error Handling
 
@@ -409,4 +423,4 @@ npm test
 ## Requirements
 
 - Node.js 18+
-- The native LatticeDB library (`liblattice.dylib` / `liblattice.so`)
+- The native LatticeDB library (`liblattice.dylib` / `liblattice.so` / `lattice.dll`), bundled in the published package

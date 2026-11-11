@@ -11,7 +11,7 @@ RETURN n.name, n.age
 
 ## Returning Nodes
 
-Return a node reference:
+Return a node. The value returned is the node's integer ID:
 
 ```cypher
 MATCH (n:Person)

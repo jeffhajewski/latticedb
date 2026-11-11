@@ -33,7 +33,9 @@ process first.
 lattice backup social.lattice --file=/backups/social-2026-08-25.lattice
 ```
 
-From your own code, the same thing is a method on the database:
+From Zig code, the same thing is a method on the database. The C API and the
+language bindings do not expose backup or replication; from Python, TypeScript,
+Go or Java, use the `lattice` command while nothing else has the database open.
 
 ```zig
 const stats = try db.backup("/backups/social-2026-08-25.lattice");
@@ -114,8 +116,9 @@ Error: social.lattice is open in another process. Close it first, or pass
 ```
 
 That makes the command right for a database nothing else is using. For the case
-people most often want, which is replicating while an application runs, call
-`replicateTo` on the handle your application already has:
+people most often want, which is replicating while an application runs, a Zig
+application can call `replicateTo` on the handle it already has (the C API and
+the language bindings do not offer it):
 
 ```zig
 // Somewhere on a timer inside your application.
@@ -189,7 +192,7 @@ should have the same bug rather than a different one.
 |---------------|-------------|
 | A copy before an upgrade or a risky migration | `lattice backup` |
 | A nightly snapshot | `lattice backup` from cron |
-| To lose no more than a few seconds of work | `replicateTo` on a timer in your application |
+| To lose no more than a few seconds of work | `replicateTo` on a timer in your application (Zig only) |
 | To mirror a database nothing else has open | `lattice replicate --follow` |
 | To undo a bad migration or a bad delete | `lattice restore --at=...` |
 | Many small databases kept in a bucket | `serialize` and `deserialize` |
@@ -226,10 +229,10 @@ db.query("CREATE (n:Note {text: 'found something'})")
 s3.put_object(Bucket=bucket, Key=key, Body=db.serialize(), IfMatch=etag)
 ```
 
-The same pair exists in every binding: `Database.serialize()` returns bytes, and
-`deserialize` (a package-level function in Python and TypeScript,
-`latticedb.Deserialize` in Go, `lattice_serialize` and `lattice_deserialize` in
-C) opens a database from them.
+The same pair exists in every binding: `serialize()` on the database returns
+bytes, and `deserialize` (a package-level function in Python and TypeScript,
+`latticedb.Deserialize` in Go, `Database.deserialize` in Java,
+`lattice_serialize` and `lattice_deserialize` in C) opens a database from them.
 
 Pending writes are folded in before the bytes are handed over, so what you upload
 is a complete database that needs no log beside it. You can write those bytes to
@@ -273,11 +276,13 @@ it disappears when you close it and that nothing locks it, since there is no
 second process that could reach it.
 
 It is also cheaper than you might expect for small databases. The page cache is
-sized to the database rather than to a fixed budget, because a cache bigger than
-the data it holds has frames it can never fill. A hundred-kilobyte database costs
-around a quarter of a megabyte in memory, rather than the sixteen a file-backed
-one would reserve. If you are keeping many small databases open at once, that
-difference is most of what you pay.
+capped at 64 pages (256 KB at the default page size) whatever cache size you ask
+for, because a miss against memory is only a copy. A hundred-kilobyte database
+costs a few hundred kilobytes in memory, rather than the 100 MB cache a
+file-backed one opened through the C API or a binding reserves by default. If you
+are keeping many small databases open at once, that difference is most of what
+you pay. See [In-Memory Databases](../configuration/in-memory.md) for
+measurements.
 
 ### Loading without a second copy
 

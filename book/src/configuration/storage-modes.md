@@ -66,8 +66,8 @@ Three differences from a file-backed database, all deliberate:
   and a miss against memory is a copy from one part of RAM to another. Measured on
   a fourteen megabyte database, a 256 KB cache matched a 32 MB one for speed. So
   peak memory stays close to the size of the database: about 360 KB for a hundred
-  kilobyte database, against the sixteen megabytes a file-backed one would
-  reserve.
+  kilobyte database, against the 100 MB cache a file-backed one opened through a
+  binding reserves by default.
 
 The write-ahead log stays on, as a second file inside the same memory. Turning it
 off would save allocations and cost you transactions entirely, which is a bad

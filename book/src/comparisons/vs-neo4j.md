@@ -43,7 +43,7 @@ This is the important section, and [When to Use LatticeDB](../getting-started/wh
 | | LatticeDB | Neo4j |
 |---|---|---|
 | Deployment | Library, in-process | Server (JVM embedded available) |
-| Languages | C, Python, TypeScript | Drivers for everything; embedded is JVM-only |
+| Languages | C, Python, TypeScript, Go, Java | Drivers for everything; embedded is JVM-only |
 | Cypher | Subset | Complete, plus procedures |
 | Concurrency | Single writer, single process | Many clients |
 | Clustering | No | Yes |

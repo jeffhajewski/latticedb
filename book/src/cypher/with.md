@@ -37,6 +37,10 @@ In this example, `b` is not available after the `WITH` clause — only `a` and `
 
 ## Multi-Stage Queries
 
+A `MATCH` after `WITH` cannot name a variable that is already bound — `WITH a
+MATCH (a)-[:KNOWS]->(b)` is rejected with "Variable 'a' is already defined". Put
+the whole pattern in the first `MATCH`.
+
 Chain multiple `WITH` clauses for complex queries:
 
 ```cypher

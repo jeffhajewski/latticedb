@@ -69,12 +69,16 @@ SET n.city = NULL
 
 ### Delete a Node
 
-Delete a node (fails if the node has edges):
+Delete a node:
 
 ```cypher
 MATCH (n:Person {name: "Charlie"})
 DELETE n
 ```
+
+`DELETE` does not check for edges. If the node has any, it is removed and its
+edges are left behind, pointing at a node that no longer exists. Use
+`DETACH DELETE` for any node that might have edges.
 
 ### DETACH DELETE
 

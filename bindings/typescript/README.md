@@ -8,7 +8,7 @@ TypeScript/Node.js bindings for [LatticeDB](https://github.com/jeffhajewski/latt
 npm install @hajewski/latticedb
 ```
 
-Published package tarballs are expected to bundle the native shared library for supported platforms.
+Published package tarballs bundle the native shared library for Linux (x64, arm64), macOS (x64, arm64) and Windows (x64, arm64).
 
 If you are working from a source checkout, stage the native library into the package with:
 
@@ -29,6 +29,9 @@ Installed-prefix workflow:
 zig build install --prefix /tmp/lattice-install
 export LATTICE_PREFIX=/tmp/lattice-install
 ```
+
+`LATTICE_PREFIX` is searched under `<prefix>/lib`. On Windows, `zig build install`
+puts `lattice.dll` in `<prefix>/bin`, so point `LATTICE_LIB_PATH` at the DLL instead.
 
 Alternatively, discovery can use `pkg-config`:
 
@@ -146,6 +149,8 @@ interface DatabaseOptions {
 }
 ```
 
+Node IDs, edge IDs and stream sequence numbers are `bigint`.
+
 #### Methods
 
 - `await db.open()` - Open the database connection
@@ -153,9 +158,12 @@ interface DatabaseOptions {
 - `await db.read(fn)` - Execute a read-only transaction
 - `await db.write(fn)` - Execute a read-write transaction
 - `await db.query(cypher, params?)` - Execute a Cypher query
+- `await db.getNodesByLabel(label)` - IDs of every node with a label
 - `await db.vectorSearch(vector, options?)` - k-NN vector search
-- `await db.ftsSearch(query, options?)` - Full-text search
-- `await db.ftsSearchFuzzy(query, options?)` - Fuzzy full-text search
+- `await db.createNodeFtsIndex(label, property)` / `dropNodeFtsIndex(...)` / `hasNodeFtsIndex(...)` - Manage full-text indexes on node properties
+- `await db.createEdgeFtsIndex(edgeType, property)` / `dropEdgeFtsIndex(...)` / `hasEdgeFtsIndex(...)` - Manage full-text indexes on edge properties
+- `await db.ftsSearch(label, property, query, options?)` - Full-text search over one declared index
+- `await db.ftsSearchFuzzy(label, property, query, options?)` - Fuzzy full-text search
 - `await db.createNodePropertyIndex(label, property)` / `dropNodePropertyIndex(...)` - Manage explicit node equality indexes
 - `await db.createEdgePropertyIndex(edgeType, property)` / `dropEdgePropertyIndex(...)` - Manage explicit edge equality indexes
 - `await db.readStream(stream, options?)` - Read durable stream records by cursor
@@ -165,6 +173,9 @@ interface DatabaseOptions {
 - `await db.cacheStats()` - Get cache hit/miss statistics
 - `db.isOpen()` - Check if database is open
 - `db.getPath()` - Get database file path
+- `db.serialize()` - Return the whole database as a `Uint8Array`
+
+`deserialize(bytes, options?, copy = true)` opens a database from bytes produced by `serialize()`.
 
 ### Transaction
 
@@ -175,6 +186,10 @@ interface DatabaseOptions {
 - `await txn.getProperty(nodeId, key)` - Get a property value
 - `await txn.getOutgoingEdges(nodeId)` - Get outgoing edges from a node
 - `await txn.getIncomingEdges(nodeId)` - Get incoming edges to a node
+- `await txn.getOutgoingEdgesByType(nodeId, edgeType, ...)` / `getIncomingEdgesByType(...)` - Edges of one type
+- `await txn.getNodesByLabel(label)` - IDs of every node with a label, as this transaction sees them
+- `await txn.query(cypher, params?)` - Run Cypher inside this transaction
+- `await txn.vectorSearch(...)` / `ftsSearch(...)` / `ftsSearchFuzzy(...)` - Searches inside this transaction
 - `await txn.findNodesByLabelProperty(label, property, value, limit?)` - Indexed node equality lookup
 - `await txn.findEdgesByTypeProperty(edgeType, property, value, limit?)` - Indexed edge equality lookup
 - `txn.isReadOnly()` / `txn.isActive()` - Transaction state
@@ -183,17 +198,17 @@ interface DatabaseOptions {
 
 - `await txn.createNode({ labels, properties })` - Create a node
 - `await txn.deleteNode(nodeId)` - Delete a node
-- `await txn.setProperty(nodeId, key, value)` - Set a property
-- `await txn.setVector(nodeId, key, vector)` - Set a vector embedding
+- `await txn.setProperty(nodeId, key, value)` - Set a property. If a full-text index is declared for one of the node's labels and this property, the index is kept current.
+- `await txn.setVector(nodeId, key, vector)` - Set the node's vector embedding. A node has one vector; `key` is accepted but not used, and Cypher reads the vector as `n.embedding`.
 - `await txn.batchInsertVectors(label, vectors)` - Insert vector-bearing nodes in one call
 - `await txn.batchInsert(label, vectors)` - Deprecated compatibility alias for `batchInsertVectors`
-- `await db.createNodeFtsIndex(label, property)` - Declare a full-text index; writing that property keeps it current
 - `await txn.createEdge(sourceId, targetId, edgeType, options?)` - Create an edge
 - `await txn.deleteEdge(sourceId, targetId, edgeType)` - Delete an edge
 - `await txn.setEdgeProperty(edgeId, key, value)` - Set an edge property by stable edge ID
 - `await txn.getEdgeProperty(edgeId, key)` - Get an edge property by stable edge ID
 - `await txn.removeEdgeProperty(edgeId, key)` - Remove an edge property by stable edge ID
 - `txn.publishStream(stream, payload, kind?)` - Publish a durable stream record
+- `txn.publishStreamGetSequence(stream, payload, kind?)` - Publish and return the record's sequence (`bigint`)
 - `txn.setStreamOffset(stream, consumer, sequence)` - Commit a durable consumer offset
 - `txn.trimStream(stream, throughSequence)` - Delete stream records through a sequence
 - `txn.commit()` / `txn.rollback()` - Commit or rollback
@@ -402,11 +417,12 @@ graph events such as `node.insert`, `node.property_set`, `edge.delete`, and
 - `null` - Null value
 - `boolean` - Boolean
 - `number` - Integer or float
+- `bigint` - 64-bit integer
 - `string` - UTF-8 string
 - `Uint8Array` - Binary data
 - `Float32Array` - Vector embeddings
-
-Nested arrays/objects are not currently exposed by the public bindings/C API.
+- Arrays of any of these values, nested to any depth
+- Plain objects with string keys, whose values are any of these, nested to any depth
 
 ## Error Handling
 
@@ -486,8 +502,10 @@ let the loader find it under `process.resourcesPath`:
 }
 ```
 
-Pick the source directory for the platform you are building; Linux bundles carry
-a libc suffix (`linux-x64-gnu`, `linux-x64-musl`). The loader also accepts
+Pick the source directory for the platform you are building. The published package
+uses `lib/linux-x64` and `lib/linux-arm64` for Linux (glibc builds only); a package
+staged locally with `npm run bundle:native` may carry a libc suffix instead
+(`linux-x64-gnu`). The loader also accepts
 `resources/lib/<platform>-<arch>/`, `resources/<platform>-<arch>/`, and the
 library sitting next to the executable (electron-builder `extraFiles`).
 
@@ -509,8 +527,8 @@ and the `asarUnpack` glob to add.
 
 ### Windows
 
-Both Windows architectures are supported. Published package tarballs are
-expected to bundle `lib/win32-x64/lattice.dll` and `lib/win32-arm64/lattice.dll`,
+Windows x64 is built and tested in CI; Windows ARM64 is built but not run.
+Published package tarballs bundle `lib/win32-x64/lattice.dll` and `lib/win32-arm64/lattice.dll`,
 and koffi ships matching prebuilt `win32_x64` and `win32_arm64` binaries, so
 nothing has to be compiled at install time.
 

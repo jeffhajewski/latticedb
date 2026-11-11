@@ -65,8 +65,15 @@ $LATTICE check /tmp/lattice-quickstart.lattice
 
 ## Notes on Install Workflows
 
-- Published Python wheels are expected to bundle `liblattice` on supported platforms.
-- Published TypeScript package tarballs are expected to bundle `liblattice` on supported platforms.
+- The CLI installer (`dist/install.sh`) runs on Linux and macOS. On Windows, take the
+  `.zip` archive from the GitHub releases page, which holds `lattice.exe` and
+  `lattice.dll`.
+- Published Python wheels bundle `liblattice` for Linux (x86_64, aarch64), macOS
+  (x86_64, arm64) and Windows (x64, ARM64).
+- The published TypeScript package bundles `liblattice` for the same six platforms.
+  Electron apps must unpack it from `app.asar`; see the TypeScript README.
+- Python and TypeScript are tested on Linux, macOS and Windows x64. Windows ARM64
+  is built but not run, and Go and Java are tested on Linux and macOS only.
 - Go currently uses an installed-prefix or repo-local shared-library workflow rather than bundled native artifacts.
 - Java currently compiles its JNI bridge and stages `liblattice` from a source checkout during the Maven build.
 

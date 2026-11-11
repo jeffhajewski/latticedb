@@ -79,9 +79,11 @@ with db.read() as txn:
     edge_ids = txn.find_edges_by_type_property("REVIEWED", "year", 2024, limit=10)
 ```
 
-### The limit is required, and it is not optional
+### Every lookup is limited
 
-Every lookup takes a limit, and it has to be greater than zero:
+Every lookup takes a limit, and it has to be greater than zero. Go, Java and C
+require it; Python and TypeScript default it to 100, so leaving it out returns at
+most 100 IDs:
 
 ```python
 txn.find_nodes_by_label_property("Person", "email", "alice@example.com", limit=0)
@@ -89,8 +91,7 @@ txn.find_nodes_by_label_property("Person", "email", "alice@example.com", limit=0
 ```
 
 This is deliberate. An unbounded lookup on a common value could return a very
-large list, and having to name a number makes you think about how many results
-you can actually handle.
+large list. Pass a larger limit when a value can match more than 100 records.
 
 ### Asking for an index that does not exist
 

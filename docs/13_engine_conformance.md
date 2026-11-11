@@ -165,8 +165,9 @@ The current public contract does not freeze:
 Only one read-write transaction may be active per database handle. Beginning a
 second writer fails with the public lock-timeout/contention error instead of
 allowing overlapping overlays to overwrite each other's committed changes.
-Read-only transactions may remain active while the writer runs and retain their
-snapshot-oriented visibility guarantees.
+Read-only transactions may remain active while the writer runs. What a
+long-lived reader sees of commits made while it is open is not frozen (see
+above).
 
 The internal transaction manager uses snapshot-oriented MVCC machinery, but that should not be treated as the required public engine contract yet because the end-to-end database APIs are not fully wired to expose those stronger guarantees consistently. Implementations may provide stronger isolation than the guarantees listed above, but callers must not depend on that stronger behavior for cross-engine portability.
 
@@ -330,9 +331,10 @@ Current export behavior establishes several logical invariants worth preserving 
 
 Current CLI import compatibility is intentionally narrower than the logical value model.
 
-- The JSON import path currently accepts scalar property values only: `NULL`, `BOOL`, numeric, and `STRING`.
-- Nested `LIST`/`MAP`, `BYTES`, and `VECTOR` values are not yet part of the guaranteed JSON import contract.
-- Cross-engine compatibility should therefore target the direct property/query APIs and canonical dump/export behavior, not full-fidelity nested-value interchange through the current CLI JSON import format.
+- The JSON import path maps `null`, booleans, numbers and strings to `NULL`, `BOOL`, numeric and `STRING`.
+- It also maps arrays to `LIST`, objects to `MAP`, arrays of numbers to `VECTOR`, and any string of even length made only of hex digits to `BYTES`.
+- These rules are lossy. A string such as `"2024"` or `"cafe"` is imported as two bytes, not as a string, and a list of numbers cannot be imported as a `LIST`.
+- Only the scalar mappings are part of the guaranteed import contract. Cross-engine compatibility should therefore target the direct property/query APIs and canonical dump/export behavior, not full-fidelity nested-value interchange through the current CLI JSON import format.
 
 ## Deliberately Unspecified Areas
 
@@ -363,6 +365,10 @@ The current extracted suite already covers black-box cases drawn from these sour
   - own-write visibility
   - deleted-version invisibility
 - `conformance/go/suite_test.go`
+  - persistence across reopen and stable edge IDs
+  - missing versus `NULL` properties, and nested values
+  - mutation atomicity and parallel edges
+  - search operators and the query cache
   - read-only rejection
   - own-write visibility
   - newly started transactions observe committed state

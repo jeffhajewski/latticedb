@@ -206,18 +206,34 @@ JSON should have a `nodes` array and an `edges` array:
 }
 ```
 
-CSV needs two files, one for nodes and one for edges. Columns starting with an
-underscore have special meaning; everything else becomes a property:
+In JSON, `id` is a name local to the file: edges refer to nodes by it, and each
+node gets a fresh ID in the database.
+
+CSV takes one file per import, either nodes or edges, told apart by the header.
+In a node file `_labels` holds the labels separated by `;`, and every column not
+starting with an underscore becomes a property:
 
 ```text
 _id,_labels,name,age
 n1,"Person;Employee",Alice,30
 ```
 
+The CSV importer is simpler than the JSON one:
+
+- `_id` is ignored, so nothing can refer to it. In an edge file, `_source` and
+  `_target` must be the numeric IDs the nodes have in the database; a value like
+  `n1` makes the import fail.
+- Columns other than `_source`, `_target` and `_type` in an edge file are ignored,
+  so edges imported from CSV have no properties.
+- Quotes do not protect a comma inside a value; `"Smith, Jr"` is split in two.
+
 ```text
 _source,_target,_type
 1,2,KNOWS
 ```
+
+Use JSON when you need edge properties or references between records in the
+same file.
 
 Two options are worth knowing about for large imports:
 
@@ -240,6 +256,9 @@ lattice export social.lattice --file=people.csv --labels=Person
 lattice export social.lattice --file=graph.dot
 ```
 
+CSV export writes two files named after the one you give:
+`--file=people.csv` produces `people_nodes.csv` and `people_edges.csv`.
+
 DOT is the format Graphviz reads, so you can turn a small graph into a picture:
 
 ```text
@@ -250,8 +269,10 @@ digraph G {
 }
 ```
 
-You can narrow what gets exported with `--labels=Person,Company`, or export the result
-of a query instead of the whole graph with `--query="..."`.
+You can narrow what gets exported with `--labels=Person,Company`. The command
+also accepts `--query="..."`, but in this release it ignores it and exports the
+whole graph (or the labels you chose); run the query with `exec --format=json`
+to save its result instead.
 
 ### Dumping
 
@@ -377,11 +398,14 @@ the log over. When that happens, replication starts a **generation**: a fresh
 snapshot, followed by the changes that came after it. Older generations are left
 alone, because restoring to a moment inside one still needs them.
 
-There is one important limit. This command opens the database, and LatticeDB does
-not lock a database across processes, so you must not point it at a database
-another process has open. If you want to replicate a database while your
-application is using it, call `replicateTo` on the handle your application
-already has, and use this command for the case where nothing else is running.
+There is one important limit. This command opens the database itself, so it
+cannot run against a database another process has open; it stops with the
+error described under [One process at a time](#one-process-at-a-time). To
+replicate a database while your application is using it, the application has to
+do it: the Zig API's `replicateTo` runs on the handle the application already
+has. The C API and the language bindings do not expose replication, so from
+Python, TypeScript, Go or Java, run this command while nothing else has the
+database open.
 
 ### Getting a database back
 

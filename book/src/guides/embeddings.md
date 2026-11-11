@@ -34,6 +34,10 @@ const db = new Database("mydb.db", {
 await db.open();
 ```
 
+A node holds one vector. `set_vector` takes a key argument, but the key is not
+used: setting a second vector on a node replaces the first, and Cypher reads the
+vector as `n.embedding` whatever key you passed.
+
 ## Hash Embeddings (Built-in)
 
 `hash_embed` generates deterministic embeddings from text without an external service. It uses feature hashing to map text tokens to a fixed-dimension vector.
@@ -59,6 +63,10 @@ const vec = hashEmbed("hello world", 128);
 ## HTTP Embedding Client
 
 For production-quality semantic embeddings, use the HTTP client to connect to an embedding service.
+
+The endpoint is the full URL the client POSTs to; nothing is appended to it. Give
+Ollama's `/api/embeddings` path or OpenAI's `/v1/embeddings` path, not the
+server's base URL.
 
 ### Ollama
 
@@ -141,9 +149,18 @@ ORDER BY n.embedding <=> $query
 LIMIT 10
 ```
 
+In Cypher, `<=>` in `WHERE` first takes the 100 nearest vectors in the whole
+database, then keeps the rows of your pattern whose node is among them. The label
+in the pattern does not narrow the search, so a threshold query returns at most 100
+rows and can miss matches when nodes of other labels are nearer. For an exact top-k
+over the whole database, use `vector_search`. See
+[Vector Search in Cypher](../cypher/vector-search.md).
+
 ## Batch Insert
 
-For bulk loading, use `batch_insert` which is significantly faster than inserting one at a time:
+For bulk loading, `batch_insert_vectors` creates a node and stores its vector for
+every row in one call. It saves one binding call per node; each vector still goes
+into the HNSW index individually:
 
 ```python
 import numpy as np

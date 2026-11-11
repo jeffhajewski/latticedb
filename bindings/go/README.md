@@ -20,6 +20,8 @@ This is a cgo-backed client built on the stable C ABI. The current API supports:
 - built-in hash embeddings
 - HTTP embedding client
 
+CI builds and tests the Go binding on Linux and macOS; it has not been tested on Windows.
+
 The Go client now supports two native-library workflows:
 
 - installed development: default, resolves `lattice` through `pkg-config`
@@ -170,6 +172,7 @@ For a larger end-to-end example, see [examples/go](../../examples/go).
   - `[]any`
   - `map[string]any`
 - Query results are materialized into `[]map[string]Value`.
+- A node has one vector. `Tx.SetVector` accepts a key but does not use it, and Cypher reads the vector as `n.embedding`.
 - Create explicit equality indexes with `DB.CreateNodePropertyIndex` or
   `DB.CreateEdgePropertyIndex`, then query them from an active transaction with
   `Tx.FindNodesByLabelProperty` or `Tx.FindEdgesByTypeProperty`. Lookup limits

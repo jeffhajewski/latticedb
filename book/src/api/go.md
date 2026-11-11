@@ -10,11 +10,21 @@ properties are `any`, errors are ordinary errors you can compare with
 go get github.com/jeffhajewski/latticedb/bindings/go
 ```
 
-Because it uses cgo, building needs the LatticeDB shared library available to
-the linker. Installing a release package puts it somewhere pkg-config can find,
-which is what the default build expects. If you are working inside a checkout of
-the repository, build the library first and use the `repolocal` build tag, which
-points the linker at `zig-out/lib`:
+Because it uses cgo, building needs the LatticeDB shared library, the header,
+and the `lattice.pc` pkg-config file, which is what the default build looks up.
+The `install.sh` script installs only the CLI and the shared library, so it is not
+enough on its own. Either unpack a release archive (it carries `include/`, `lib/`
+and `lib/pkgconfig/lattice.pc`) or install from a checkout, then point pkg-config
+at it:
+
+```bash
+zig build install --prefix /tmp/lattice-install   # or unpack a release archive
+export PKG_CONFIG_PATH=/tmp/lattice-install/lib/pkgconfig
+```
+
+If you are working inside a checkout of the repository, build the library first
+and use the `repolocal` build tag instead, which points the compiler and linker at
+`include/` and `zig-out/lib`:
 
 ```bash
 zig build

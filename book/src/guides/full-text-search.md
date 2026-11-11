@@ -6,8 +6,11 @@ LatticeDB includes a BM25-scored inverted index for full-text search. This guide
 
 LatticeDB's full-text search uses:
 
-- **Tokenization** — text is split into terms
-- **Stemming** — terms are reduced to their root form
+- **Tokenization** — text is lowercased and split into terms on anything that is
+  not an ASCII letter, digit, or `_`. Terms shorter than two characters and
+  English stop words ("the", "and", …) are dropped. There is no stemming: "fox" and
+  "foxes" are different terms. Non-ASCII letters split words, so text that is
+  not English (or not ASCII) is indexed poorly.
 - **Inverted index** — maps terms to the nodes containing them
 - **BM25 scoring** — ranks results by relevance considering term frequency, document frequency, and document length
 
@@ -73,13 +76,14 @@ WHERE d.text @@ "quick fox"
 RETURN d.title
 ```
 
-The property name on the left of `@@` is not actually used. The index holds one
-document per node rather than one per property, so this reads as "does this
-node's indexed text match" no matter which property you name. `d.text`,
-`d.title`, and `d.spelled_wrong` all behave the same way.
+`@@` searches the index declared for that label and property — here
+`Document.text`. The variable needs a label in the pattern, and if no index is
+declared for the label and property you name, the query fails with "No full-text
+index is declared for Document.title" rather than returning nothing.
 
-Name the property that holds the text you indexed anyway, because it tells the
-next person what you meant. Just do not expect a mistake in it to be caught.
+A query with several terms matches documents containing every term. Quotes and a
+leading `-` have no special meaning in a `@@` query: punctuation only separates
+words, so `"fox -quick"` matches documents containing both "fox" and "quick".
 
 ## Fuzzy Search
 
@@ -164,7 +168,8 @@ MATCH (d:Document) WHERE d.title @@ "sourdough" OR d.body @@ "sourdough" RETURN 
 ```
 
 If an `OR` against a non-text condition is slow on a large label, the usual fix is
-two queries and a `UNION`, so each side can use the index that suits it.
+to run two queries and merge the results in your application, so each side can
+use the index that suits it. (LatticeDB's Cypher has no `UNION`.)
 
 ### Rare terms cost less than common ones
 

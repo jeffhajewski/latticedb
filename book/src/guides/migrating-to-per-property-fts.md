@@ -127,9 +127,8 @@ pattern was `MATCH (d)` with no label. Two labels can each declare an index on
 `title`, so the property alone does not say which you mean. Write `MATCH
 (d:Document)`.
 
-Note that a `WITH` starts a new scope: what comes through it is an alias rather
-than a node written with a label, so `@@` after a `WITH` needs the label written
-again in a later pattern.
+A node passed through `WITH` keeps its label, even under a new name, so
+`MATCH (d:Document) WITH d AS x WHERE x.title @@ 'graph' RETURN x.title` works.
 
 ## API changes by language
 

@@ -14,9 +14,9 @@ structured, see [Write-Ahead Log](../architecture/wal.md).
 2. The log is flushed to disk.
 3. Only then is the commit reported as successful.
 
-The database file itself is updated later. So a crash between a commit and that
-update loses nothing: the log is replayed on the next open and the change comes
-back.
+The database file itself is updated later, when the page cache writes changed
+pages back or a checkpoint runs. So a crash before that loses nothing: the log is
+replayed on the next open and the change comes back.
 
 This is why a commit is fast even though it is durable. Appending to a log is one
 sequential write; updating the database file properly would mean several scattered
@@ -45,7 +45,9 @@ nothing needs to be atomic. Even then, measure first.
 The log grows as you write. A checkpoint folds it back into the database file and
 resets it, which is what stops it growing forever.
 
-This happens on its own. `auto_checkpoint` decides when:
+This happens on its own, after a commit, once no transaction is open.
+`auto_checkpoint` decides when (it is set through the Zig API; the C API, the
+bindings and the CLI always use the defaults below):
 
 | Setting | Default | What it does |
 |---------|---------|--------------|
@@ -53,7 +55,7 @@ This happens on its own. `auto_checkpoint` decides when:
 | `min_interval_ns` | 0 | Shortest gap between two checkpoints. |
 | `mode` | `truncate` | Only `truncate` resets the log, so it is the only mode that bounds its size. |
 
-Set `auto_checkpoint` to null to manage this yourself, which is worth doing if you
+From Zig, set `auto_checkpoint` to null to manage this yourself, which is worth doing if you
 want to choose the moment rather than have it land mid-request.
 
 The minimum interval defaults to zero deliberately. Under `truncate` the frame
@@ -73,6 +75,9 @@ so the copy is complete on its own, and on a database that has been open a very
 long time under heavy writes if you would rather pick the moment.
 
 This is not `compact`. Checkpointing shrinks the log, not the database file.
+
+Closing a database through the C API or a binding also syncs it and runs a
+`truncate` checkpoint, so a cleanly closed database leaves no log to replay.
 
 ## What survives what
 

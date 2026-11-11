@@ -9,7 +9,7 @@ LatticeDB stores data as a **property graph**: a collection of nodes connected b
 A node represents an entity. Each node has:
 
 - A unique **ID** (assigned automatically)
-- One or more **labels** that categorize it (e.g., `Person`, `Document`, `Chunk`)
+- Zero or more **labels** that categorize it (e.g., `Person`, `Document`, `Chunk`)
 - Zero or more **properties** — key-value pairs (e.g., `name: "Alice"`, `age: 30`)
 
 ```python
@@ -26,6 +26,7 @@ An edge represents a relationship between two nodes. Each edge has:
 - A **source** node and a **target** node
 - An **edge type** (e.g., `KNOWS`, `AUTHORED_BY`, `PART_OF`)
 - A direction — edges always point from source to target
+- Zero or more **properties**, like a node
 
 ```python
 txn.create_edge(alice.id, bob.id, "KNOWS")
@@ -33,7 +34,7 @@ txn.create_edge(alice.id, bob.id, "KNOWS")
 
 ### Properties
 
-Properties are typed key-value pairs attached to nodes. Supported types:
+Properties are typed key-value pairs attached to nodes and edges. Supported types:
 
 | Type | Python | TypeScript | C |
 |------|--------|------------|---|
@@ -43,6 +44,11 @@ Properties are typed key-value pairs attached to nodes. Supported types:
 | Float | `float` | `number` | `LATTICE_VALUE_FLOAT` |
 | String | `str` | `string` | `LATTICE_VALUE_STRING` |
 | Binary | `bytes` | `Uint8Array` | `LATTICE_VALUE_BYTES` |
+| Vector | `numpy.ndarray` (`float32`) | `Float32Array` | `LATTICE_VALUE_VECTOR` |
+| List | `list` | array | `LATTICE_VALUE_LIST` |
+| Map | `dict` (string keys) | object (string keys) | `LATTICE_VALUE_MAP` |
+
+TypeScript also accepts `bigint` for integers. Lists and maps nest to any depth.
 
 ## Cypher Query Language
 
@@ -89,7 +95,7 @@ LatticeDB provides two ways to generate embeddings:
 
 ## Full-Text Search
 
-LatticeDB includes a BM25-scored inverted index for full-text search. Index text content on nodes, then search across all indexed text.
+LatticeDB includes a BM25-scored inverted index for full-text search. Declare an index on a label and property, and every write to that property keeps it current. A search reads one declared index.
 
 ```python
 # Declare an index over the property holding the text
@@ -113,7 +119,7 @@ db.query('MATCH (n:Chunk) WHERE n.text @@ "transformer attention" RETURN n')
 All operations in LatticeDB happen within transactions. LatticeDB uses **snapshot isolation**: each transaction sees a consistent snapshot of the database as of when it started.
 
 - **Read transactions** can run concurrently — readers never block other readers.
-- **Write transactions** are serialized — only one write transaction can commit at a time.
+- **Write transactions** are exclusive — only one can be open at a time. Beginning a second one while the first is open fails immediately with a lock-timeout error; it does not wait.
 
 ```python
 # Read transaction

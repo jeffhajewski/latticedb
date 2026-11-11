@@ -47,9 +47,12 @@ MATCH (a:Person {name: "Alice"})-[*]->(b)
 RETURN DISTINCT b
 ```
 
+A variable-length relationship cannot be given a variable or inline properties:
+`-[r:KNOWS*1..3]->` and `-[:KNOWS*1..3 {since: 2020}]->` are rejected.
+
 ## Performance
 
-Variable-length paths are implemented using BFS with bitset-based visited tracking. Performance characteristics:
+Variable-length paths are expanded depth-first, one path at a time; a node already on the current path is not revisited, so cycles do not loop. An unbounded `*` or `*n..` stops at 100 hops. Performance characteristics:
 
 - Short paths (1-3 hops): microseconds
 - Deep traversals scale linearly with the number of reachable nodes

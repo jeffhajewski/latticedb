@@ -16,7 +16,25 @@ This finds chunks whose embedding is within distance 0.5 of the query vector, so
 
 ## How It Works
 
-When the query planner encounters `<=>` in a `WHERE` clause, it converts the pattern into a specialized HNSW search operator rather than scanning all nodes. The distance threshold (e.g., `< 0.5`) filters results after the search.
+`n.embedding` is the node's vector — the one stored with `set_vector`, whatever key
+was passed there. A node has one vector, and `embedding` is the only property name
+that reads it.
+
+When the query planner encounters `<=>` in a `WHERE` clause, it runs one HNSW
+search for the **100 nearest vectors in the whole database**, then keeps the rows of
+the `MATCH` pattern whose node is among those 100 and within the threshold. Three
+consequences:
+
+- **The label does not narrow the search.** `MATCH (c:Chunk)` still searches every
+  vector; if nodes with other labels are nearer, they take places among the 100
+  and matching `Chunk` nodes can be missed.
+- **A threshold query returns at most 100 nodes**, however many are within the
+  distance.
+- **The threshold is inclusive**: `< 0.5` keeps a distance of exactly 0.5, the same
+  as `<= 0.5`.
+
+When you need an exact top-k, or more than 100 results, use the `vector_search`
+API (`db.vector_search(vector, k=...)`) instead.
 
 ## Distance Metric
 

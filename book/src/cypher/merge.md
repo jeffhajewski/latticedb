@@ -21,6 +21,17 @@ RETURN n
 
 The `SET` clause runs whether the node was matched or created.
 
+## ON CREATE and ON MATCH
+
+To set properties only when the node is created, or only when it already existed:
+
+```cypher
+MERGE (n:Person {name: "Alice"})
+ON CREATE SET n.created = "2024-01-15"
+ON MATCH SET n.last_seen = "2024-01-15"
+RETURN n
+```
+
 ## MERGE Edges
 
 ```cypher
@@ -29,6 +40,9 @@ MERGE (a)-[:KNOWS]->(b)
 ```
 
 This creates the `KNOWS` edge only if it doesn't already exist.
+
+`MERGE` accepts a single node pattern or a single relationship between two
+variables, as above; longer patterns are rejected.
 
 ## Use Cases
 

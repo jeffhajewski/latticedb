@@ -1,8 +1,9 @@
 # Client API Migration Notes
 
-This page records preferred client names after the recent binding-surface
-cleanup. Deprecated compatibility aliases remain available for now, but new code
-should use the names below.
+This page records preferred client names after the binding-surface cleanup in
+0.5. Deprecated compatibility aliases remain available, but new code should use
+the names below. No removal version has been set; the deprecation messages in the
+bindings still say "Earliest removal is v0.6.0", which has passed.
 
 ## Python
 
@@ -71,6 +72,28 @@ Preferred embedding import:
 ```go
 import latticeembedding "github.com/jeffhajewski/latticedb/bindings/go/embedding"
 ```
+
+Compatibility aliases still exported from `latticedb`:
+
+- `HashEmbed`
+- `EmbeddingClient`, `NewEmbeddingClient`, `EmbeddingConfig`
+- `EmbeddingAPIFormat`
+
+Preferred database option:
+
+- `OpenOptions.EnableVectors`
+
+Compatibility alias:
+
+- `OpenOptions.EnableVector`
+
+Preferred bulk vector method:
+
+- `tx.BatchInsertVectors(label, vectors)`
+
+Compatibility alias:
+
+- `tx.BatchInsert(label, vectors)`
 
 Preferred manual transaction entrypoints:
 

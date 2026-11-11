@@ -81,7 +81,8 @@ here.
 **The page cache is small and fixed.** A cache exists to keep pages off a disk, and
 a miss against memory is a copy from one part of RAM to another. Measured on a
 fourteen megabyte database, a 256 KB cache matched a 32 MB one for speed, so an
-in-memory database uses a small one and stays close to the size of the data:
+in-memory database caps its cache at 64 pages (256 KB at the default page size),
+whatever cache size you ask for, and stays close to the size of the data:
 
 | Database | Held in memory |
 |----------|---------------:|
@@ -89,8 +90,9 @@ in-memory database uses a small one and stays close to the size of the data:
 | 7 MB | about 7.7 MB |
 | 18 MB | about 18.7 MB |
 
-A file-backed database would reserve sixteen megabytes of cache regardless, which
-is why holding many small in-memory databases at once is practical.
+A file-backed database opened through the C API or a binding reserves its whole
+configured cache, 100 MB by default, which is why holding many small in-memory
+databases at once is practical.
 
 ## Two in-memory databases are two databases
 

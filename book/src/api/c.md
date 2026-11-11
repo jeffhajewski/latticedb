@@ -1,6 +1,6 @@
 # C API
 
-The C API is LatticeDB's primary interface. All language bindings (Python, TypeScript) wrap this API. The header file is `include/lattice.h`.
+The C API is LatticeDB's primary interface. All language bindings (Python, TypeScript, Go, and Java through a JNI bridge) wrap this API. The header file is `include/lattice.h`.
 
 ## Overview
 
@@ -146,15 +146,13 @@ struct yourself, because `struct_size` has to be set correctly. With `lock` this
 matters more than usual: a zeroed struct asks for no locking, which is the
 opposite of what you want.
 
-### The file lock
+### In-memory databases
 
 ```c
 lattice_open_options_v4 options = LATTICE_OPEN_OPTIONS_V4_DEFAULT;
 lattice_database* db;
 lattice_open_v4(":memory:", &options, &db);
 ```
-
-### In-memory databases
 
 Pass `:memory:` as the path and the database has no files behind it. Nothing is
 written to disk and nothing survives closing it, which suits a scratch database, a
@@ -166,6 +164,8 @@ that nothing locks it, since no other process can reach it.
 
 Opening `:memory:` implies creating it, so `create` does not need to be set: there
 is never a previous in-memory database to find.
+
+### The file lock
 
 A database can only be open in one process at a time. Opening takes a lock on the
 file: a read-write handle takes it exclusively and a read-only handle shares it,
@@ -672,9 +672,10 @@ work is discarded.
 
 ### Finding Out What Went Wrong
 
-When `lattice_query_prepare` or `lattice_query_execute` fails, the return code
-tells you that something failed but not what. These functions describe the
-failure, and they read from the query handle:
+`lattice_query_prepare` only stores the query text; parsing, analysis, planning
+and execution all happen in `lattice_query_execute`, so that is where a bad query
+fails. The return code tells you that something failed but not what. These
+functions describe the failure, and they read from the query handle:
 
 ```c
 if (lattice_query_execute(query, txn, &result) != LATTICE_OK) {
@@ -708,8 +709,8 @@ The distinction is useful when deciding whether to blame the query text or the
 data: a parse or semantic failure will fail again no matter what the database
 contains, while an execution failure might not.
 
-The returned strings belong to the query handle and stay valid until you prepare
-something else on it or free it.
+The returned strings belong to the query handle and stay valid until the next
+`lattice_query_execute` on it, or until you free it.
 
 ## Searching Inside a Transaction
 

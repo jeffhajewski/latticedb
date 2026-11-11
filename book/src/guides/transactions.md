@@ -115,7 +115,7 @@ run alongside the writer.
 |----------|--------------|
 | C | `LATTICE_ERROR_LOCK_TIMEOUT` (`-8`) returned from `lattice_begin` |
 | Python | `LatticeLockTimeoutError` raised |
-| TypeScript | `LatticeError` thrown, with `.code === LatticeErrorCode.LockTimeout` |
+| TypeScript | `LatticeError` thrown, with `.code === -8` |
 | Go | `ErrorLockTimeout` on the returned error's `Code` |
 
 The name says "lock timeout", which is a slightly misleading inheritance from the error
@@ -208,7 +208,7 @@ Error: social.lattice is open in another process. Close it first, or pass
 |----------|--------------|
 | C | `LATTICE_ERROR_DATABASE_LOCKED` (`-16`) returned from `lattice_open_v4` |
 | Python | `LatticeDatabaseLockedError` raised |
-| TypeScript | `LatticeError` thrown, with `.code === LatticeErrorCode.DatabaseLocked` |
+| TypeScript | `LatticeError` thrown, with `.code === -16` |
 | Go | `ErrorDatabaseLocked` on the returned error's `Code` |
 | Zig | `DatabaseError.DatabaseLocked` from `Database.open` |
 

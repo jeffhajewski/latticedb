@@ -14,15 +14,24 @@ db = latticedb.Database(
 db.open()  # or use it as a context manager: with latticedb.Database(...) as db:
 ```
 
-## Decided at creation, and permanent
+Not every option below is available everywhere. The bindings and the C API expose
+`create`, `read_only`, `cache_size_mb`, `enable_vectors`, `vector_dimensions`,
+`enable_wal`, `enable_adjacency_cache` and `lock`; the C API, Go and Java also
+take `page_size` (Python and TypeScript always use 4096). `enable_fts`, the query-cache settings and
+`auto_checkpoint` are options of the Zig API only — everywhere else they keep
+their defaults.
 
-Two options are baked into the file the first time it is created, and cannot be
-changed later without rebuilding the database.
+## Decided at creation, and permanent
 
 | Option | What it does |
 |--------|--------------|
-| `page_size` | Size of a page in bytes, 4096 to 65535. The default of 4096 matches almost every filesystem and is the right answer unless you have measured otherwise. |
+| `page_size` | Size of a page in bytes, 4096 to 65535. Fixed when the file is created and stored in it. The default of 4096 matches almost every filesystem and is the right answer unless you have measured otherwise. |
 | `vector_dimensions` | How many numbers are in each vector, 1 to 4096. This has to match whatever produces your embeddings. |
+
+The file does not record `vector_dimensions`: it is taken from the options each
+time you open with vectors enabled, so pass the same value every time. Opening a
+database that already holds vectors with a different value is rejected with an
+invalid-argument error.
 
 Getting `vector_dimensions` wrong is the one that bites, because it is only
 discovered when the first vector is rejected. OpenAI's `text-embedding-3-small`
@@ -35,34 +44,37 @@ produces 1536 numbers, so that is the number you would pass for it.
 | `create` | off | Create the database if it is not there. Ignored for `:memory:`, which always creates. |
 | `read_only` | off | Open without the ability to write. Takes a shared lock, so several readers can share a database nobody is writing. |
 | `enable_vectors` | off | Turn on vector storage and the HNSW index. |
-| `enable_fts` | on | Turn on full-text search. |
+| `enable_fts` | on | Turn on full-text search (Zig API only). |
 | `enable_wal` | on | Write-ahead logging. See below before turning this off. |
 | `enable_adjacency_cache` | off | Keep an in-memory map of which nodes connect to which, which speeds up traversal at the cost of memory. |
 
-Turning a feature off is not just a performance choice: it decides what is stored
-in the file. A database created without vector support has no vector index, and
-enabling it later means creating a new database and moving the data.
+A database created without vector support has no vector storage. Opening it later
+with vectors enabled creates the vector storage then, so you can start adding
+vectors to an existing database.
 
 ## Memory and caching
 
 | Option | Default | What it does |
 |--------|---------|--------------|
-| `cache_size_mb` | sized automatically | How much memory to hold pages in. |
-| `enable_query_cache` | on | Cache parsed queries so repeating one does not re-parse it. |
-| `query_cache_size` | 128 | How many parsed queries to keep. |
+| `cache_size_mb` | 100 MB (C API and bindings); 64 MB (CLI) | How much memory to hold pages in. |
+| `enable_query_cache` | on | Cache parsed queries so repeating one does not re-parse it (Zig API only). |
+| `query_cache_size` | 128 | How many parsed queries to keep (Zig API only). |
 
-Left alone, the page cache sizes itself from the features you turned on: 16 MB
-for the graph, plus 12 MB each for full-text and vector search. So a database
-with both enabled reserves about 40 MB.
+The C API and every binding default `cache_size_mb` to 100, and the CLI to 64
+(`--cache-size`). Set it when you know better — a machine with little memory, or a
+working set you have actually measured.
 
-Set `cache_size_mb` when you know better than that — a machine with little memory,
-or a working set you have actually measured. The environment variable
-`LATTICE_BUFFER_POOL_MB` overrides both, which is useful for trying a value
-without changing code.
+Only the Zig API can leave the size unset (`buffer_pool_size = 0`). The cache then
+sizes itself from the features you turned on: 16 MB for the graph, plus 12 MB each
+for full-text and vector search, so about 40 MB with both.
 
-In-memory databases ignore all of this and use a small fixed cache, because a
-cache miss against memory is a copy rather than a trip to a disk. See
-[Storage Modes](./storage-modes.md).
+The environment variable `LATTICE_BUFFER_POOL_MB` overrides all of these, including
+an explicit `cache_size_mb`, which is useful for trying a value without changing
+code.
+
+In-memory databases cap the cache at 64 pages (256 KB at the default page size)
+whatever you ask for, because a cache miss against memory is a copy rather than a
+trip to a disk. See [Storage Modes](./storage-modes.md).
 
 ## Safety
 
@@ -87,8 +99,9 @@ stay on when the caller says nothing.
 transactions are built on the log, so a database without one has no `BEGIN`, no
 rollback, and no multi-statement atomicity.
 
-`auto_checkpoint` controls how often the log is folded back into the database
-file. The default is sensible and the same page explains when it is not.
+`auto_checkpoint` (Zig API only) controls how often the log is folded back into
+the database file. Everywhere else it stays at its default; the same page
+explains what that is.
 
 ## The same options, per language
 

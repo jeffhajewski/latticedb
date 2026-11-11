@@ -19,6 +19,9 @@ The build compiles `native/lattice_jni.c` against `zig-out/lib/liblattice.dylib|
 stages both libraries into `target/native`, and tests load them from there
 (override with `-Dlattice.lib.dir=` or `-Dlatticedb.native.dir=`).
 
+The Java binding is not published to Maven Central; build it from source as above.
+CI builds and tests it on Linux and macOS only; it has not been tested on Windows.
+
 ## Usage
 
 ```java
@@ -71,12 +74,13 @@ mvn -q compile exec:java@run-example -Dexec.args=/tmp/knowledge.db
 ## API overview
 
 - `Database`: open/close, serialize/deserialize, `beginRead`/`beginWrite`, `read`/`write` (auto-managed
-  transactions), `query`, `vectorSearch`, `ftsSearch`/`ftsSearchFuzzy`,
+  transactions), `query`, `vectorSearch`, full-text index create/drop/exists for node and
+  edge properties, `ftsSearch`/`ftsSearchFuzzy`,
   `getNodesByLabel`, property-index create/drop, durable streams
   (`readStream`, `getLastSequence`, `getStreamOffset`, `changes`),
   query-cache stats/clear.
 - `Transaction`: node/edge CRUD with properties (nested `List`/`Map` values,
-  `byte[]`, `float[]` supported), labels, vectors, FTS indexing, equality-index
+  `byte[]`, `float[]` supported), labels, vectors, equality-index
   lookups, batch vector insert, stream publish/offsets/trim, Cypher queries,
   transaction-scoped search (`queryVector`, `ftsSearch`).
 - `Embedding`: deterministic `hashEmbed` plus native HTTP embedding `Client`

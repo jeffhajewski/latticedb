@@ -1,10 +1,13 @@
 # Functions
 
 LatticeDB supports the following built-in functions in Cypher expressions.
+Function names are case-sensitive (`toLower`, not `tolower`); aggregate names
+such as `count` are not. Aggregates are covered in
+[Aggregations](./aggregations.md).
 
 ## id()
 
-Returns the internal ID of a node:
+Returns the internal ID of a node or relationship:
 
 ```cypher
 MATCH (n:Person)
@@ -31,7 +34,7 @@ RETURN n.name, abs(n.score) AS abs_score
 
 ## size()
 
-Returns the length of a list:
+Returns the length of a list, or of a string:
 
 ```cypher
 MATCH (p:Person)-[:KNOWS]->(f:Person)
@@ -56,6 +59,26 @@ Converts a value to a float:
 MATCH (n:Person)
 RETURN n.name, toFloat(n.age) AS float_age
 ```
+
+## Other functions
+
+| Function | Returns |
+|----------|---------|
+| `toString(x)` | `x` as a string |
+| `toLower(s)` / `toUpper(s)` | `s` in lower or upper case |
+| `trim(s)` | `s` without leading and trailing whitespace |
+| `substring(s, start[, length])` | Part of `s`, from a zero-based `start` |
+| `replace(s, search, replacement)` | `s` with every `search` replaced |
+| `split(s, delimiter)` | A list of the parts of `s` |
+| `head(list)` / `last(list)` | The first or last element |
+| `tail(list)` | Every element but the first |
+| `range(start, end[, step])` | A list of integers from `start` to `end`, inclusive |
+| `type(r)` | A relationship's type |
+| `labels(n)` | A node's labels, as a list |
+| `properties(x)` | A node's or relationship's properties, as a map |
+
+`IN` tests list membership (`n.age IN [30, 40]`). There is no regular-expression
+operator (`=~`).
 
 ## Type Coercion
 

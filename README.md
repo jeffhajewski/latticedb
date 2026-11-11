@@ -30,13 +30,15 @@ LIMIT 10
 curl -fsSL https://raw.githubusercontent.com/jeffhajewski/latticedb/main/dist/install.sh | bash
 ```
 
+The installer runs on Linux and macOS. On Windows, download the `.zip` archive from the [releases page](https://github.com/jeffhajewski/latticedb/releases); it holds `lattice.exe` and `lattice.dll`.
+
 **Python**
 
 ```bash
 pip install latticedb
 ```
 
-Published wheels are expected to bundle `liblattice` on supported platforms. Source installs can also bundle a staged native library during wheel builds with `LATTICE_BUNDLE_LIB_DIR=/path/to/lib`.
+Published wheels bundle `liblattice` for Linux (x86_64, aarch64), macOS (x86_64, arm64) and Windows (x64, ARM64). Source installs can also bundle a staged native library during wheel builds with `LATTICE_BUNDLE_LIB_DIR=/path/to/lib`.
 
 **TypeScript / Node.js**
 
@@ -44,7 +46,7 @@ Published wheels are expected to bundle `liblattice` on supported platforms. Sou
 npm install @hajewski/latticedb
 ```
 
-Published package tarballs are expected to bundle `liblattice` on supported platforms. Source checkouts can stage the native library into the package with `LATTICE_BUNDLE_LIB_DIR=/path/to/lib npm run bundle:native`.
+The published package bundles `liblattice` for the same six platforms. Source checkouts can stage the native library into the package with `LATTICE_BUNDLE_LIB_DIR=/path/to/lib npm run bundle:native`.
 
 Electron apps run the bindings in the main process and must unpack the native library from `app.asar`; see [Electron](bindings/typescript/README.md#electron).
 
@@ -69,9 +71,10 @@ Version 0.5 moved embedding helpers into dedicated modules and subpackages. See 
 
 A complete example: create a small knowledge graph with documents and authors, store embeddings, index text, then query across all three search modes.
 
-The examples use the built-in `hash_embed` / `hashEmbed` / `HashEmbed` helper so they run with no
-external service. It is a deterministic placeholder, not a semantic embedding: similar text does not
-produce nearby vectors, so a distance threshold is arbitrary and a similarity query may match nothing.
+The examples use the built-in hash embedding helper (`hash_embed` / `hashEmbed` / `Hash` / `Embedding.hashEmbed`) so they run with no
+external service. It is a deterministic bag-of-words hash, not a semantic embedding: texts that share words get
+nearby vectors, but synonyms and paraphrases do not, so a distance threshold is arbitrary and a
+similarity query may match nothing.
 Use a real embedding model for anything where the results should mean something — see
 [Working with Embeddings](https://docs.latticedb.org/guides/embeddings).
 
@@ -444,7 +447,7 @@ If your data fits naturally into rows and columns — sales records, user accoun
 LatticeDB stores everything in one file on one machine. It can ship that file's changes elsewhere continuously, so a disk failure costs you seconds rather than everything, but that is backup rather than clustering. If you need sharding, multi-node replicas serving reads, or distributed queries across billions of nodes, look at Neo4j cluster, Dgraph, or a managed service like Neptune.
 
 **You need the full Cypher language.**
-LatticeDB supports most of Cypher but not all of it. Features like `OPTIONAL MATCH` and `CALL` procedures are not yet implemented. If your queries depend on these, Neo4j is the complete implementation.
+LatticeDB supports the core of Cypher but not all of it. `OPTIONAL MATCH`, `CALL` procedures, `UNION`, `CASE`, `EXISTS`, list indexing, regular expressions (`=~`), and relationship type alternation (`[:A|B]`) are not implemented, and a variable bound in one `MATCH` cannot be named again in a later `MATCH`. If your queries depend on these, Neo4j is the complete implementation.
 
 **You need mature tooling and ecosystem.**
 Neo4j has visualization tools, admin dashboards, monitoring, drivers in every language, and years of community resources. PostgreSQL has decades of tooling. LatticeDB is new and lean — which is a strength for embedding, but a weakness if you need a rich operational ecosystem around your database.

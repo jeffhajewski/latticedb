@@ -8,7 +8,7 @@ Python bindings for [LatticeDB](https://github.com/jeffhajewski/latticedb), an e
 pip install latticedb
 ```
 
-Published wheels are expected to bundle the native shared library on supported platforms.
+Published wheels bundle the native shared library for Linux (x86_64, aarch64), macOS (x86_64, arm64) and Windows (x64, ARM64).
 
 If you are installing from a source checkout, the package build can either:
 
@@ -33,6 +33,9 @@ Installed-prefix workflow:
 zig build install --prefix /tmp/lattice-install
 export LATTICE_PREFIX=/tmp/lattice-install
 ```
+
+`LATTICE_PREFIX` is searched under `<prefix>/lib`. On Windows, `zig build install`
+puts `lattice.dll` in `<prefix>/bin`, so point `LATTICE_LIB_PATH` at the DLL instead.
 
 Alternatively, discovery can use `pkg-config`:
 
@@ -110,22 +113,33 @@ Database(
 )
 ```
 
+Constructing a `Database` does not open it. Use it as a context manager
+(`with Database(...) as db:`) or call `db.open()` before using it.
+
 #### Methods
 
 - `open()` / `close()` - Open/close the database (also works as context manager)
 - `read()` - Start a read-only transaction (context manager)
 - `write()` - Start a read-write transaction (context manager)
 - `query(cypher, parameters=None)` - Execute a Cypher query
-- `vector_search(vector, k=10, ef_search=64)` - k-NN vector search
-- `fts_search(query, limit=10)` - Full-text search
-- `fts_search_fuzzy(query, limit=10, max_distance=0, min_term_length=0)` - Fuzzy full-text search
+- `get_nodes_by_label(label)` - IDs of every node with a label
+- `vector_search(vector, *, k=10, ef_search=64)` - k-NN vector search
+- `create_node_fts_index(label, prop)` / `drop_node_fts_index(label, prop)` / `has_node_fts_index(label, prop)` - Manage full-text indexes on node properties
+- `create_edge_fts_index(edge_type, prop)` / `drop_edge_fts_index(...)` / `has_edge_fts_index(...)` - Manage full-text indexes on edge properties
+- `fts_search(label, prop, query, *, limit=10)` - Full-text search over one declared index
+- `fts_search_fuzzy(label, prop, query, *, limit=10, max_distance=0, min_term_length=0)` - Fuzzy full-text search (0 selects the defaults, 2 and 4)
 - `create_node_property_index(label, property_key)` / `drop_node_property_index(...)` - Manage explicit node equality indexes
 - `create_edge_property_index(edge_type, property_key)` / `drop_edge_property_index(...)` - Manage explicit edge equality indexes
-- `read_stream(stream, after_sequence=0, limit=100, timeout_ms=0)` - Read durable stream records by cursor
+- `read_stream(stream, *, after_sequence=0, limit=100, timeout_ms=0)` - Read durable stream records by cursor
 - `get_stream_offset(stream, consumer)` - Read a committed consumer offset
-- `changes(after_sequence=0, limit=100, timeout_ms=0)` - Read the built-in graph changefeed
+- `changes(*, after_sequence=0, limit=100, timeout_ms=0)` - Read the built-in graph changefeed
+- `serialize()` - Return the whole database as bytes
 - `cache_clear()` - Clear the query cache
 - `cache_stats()` - Get cache hit/miss statistics
+
+The module-level `latticedb.deserialize(data, *, copy=True, ...)` opens a
+database from bytes produced by `serialize()`; it takes the same options as
+`Database` apart from `path`, `create` and `read_only`.
 
 ### Transaction
 
@@ -136,6 +150,11 @@ Database(
 - `get_property(node_id, key)` - Get a property value
 - `get_outgoing_edges(node_id)` - Get outgoing edges from a node
 - `get_incoming_edges(node_id)` - Get incoming edges to a node
+- `get_outgoing_edges_by_type(node_id, edge_type, *, limit=0)` / `get_incoming_edges_by_type(...)` - Edges of one type (0 means no limit)
+- `get_nodes_by_label(label)` - IDs of every node with a label, as this transaction sees them
+- `query(cypher, parameters=None)` - Run Cypher inside this transaction
+- `vector_search(vector, *, k=10, ef_search=64)` - k-NN search inside this transaction
+- `fts_search(label, prop, query, *, limit=10)` / `fts_search_fuzzy(...)` - Full-text search inside this transaction
 - `find_nodes_by_label_property(label, property_key, value, limit=100)` - Indexed node equality lookup
 - `find_edges_by_type_property(edge_type, property_key, value, limit=100)` - Indexed edge equality lookup
 - `is_read_only` / `is_active` - Transaction state
@@ -144,17 +163,17 @@ Database(
 
 - `create_node(labels=[], properties=None)` - Create a node
 - `delete_node(node_id)` - Delete a node
-- `set_property(node_id, key, value)` - Set a property on a node
-- `set_vector(node_id, key, vector)` - Set a vector embedding
+- `set_property(node_id, key, value)` - Set a property on a node. If a full-text index is declared for one of the node's labels and this property, the index is kept current.
+- `set_vector(node_id, key, vector)` - Set the node's vector embedding. A node has one vector; `key` is accepted but not used, and Cypher reads the vector as `n.embedding`.
 - `batch_insert_vectors(label, vectors)` - Insert vector-bearing nodes in one call
 - `batch_insert(label, vectors)` - Deprecated compatibility alias for `batch_insert_vectors`
-- `db.create_node_fts_index(label, property)` - Declare a full-text index; writing that property keeps it current
 - `create_edge(source_id, target_id, edge_type, properties=None)` - Create an edge
 - `delete_edge(source_id, target_id, edge_type)` - Delete an edge
 - `set_edge_property(edge_id, key, value)` - Set an edge property by stable edge ID
 - `get_edge_property(edge_id, key)` - Get an edge property by stable edge ID
 - `remove_edge_property(edge_id, key)` - Remove an edge property by stable edge ID
 - `publish_stream(stream, payload, kind="message")` - Publish a durable stream record
+- `publish_stream_get_sequence(stream, payload, kind="message")` - Publish and return the record's sequence number
 - `set_stream_offset(stream, consumer, sequence)` - Commit a durable consumer offset
 - `trim_stream(stream, through_sequence)` - Delete stream records through a sequence
 - `commit()` / `rollback()` - Commit or rollback the transaction
@@ -348,8 +367,8 @@ graph events such as `node.insert`, `node.property_set`, `edge.delete`, and
 - `str` - UTF-8 string
 - `bytes` - Binary data
 - NumPy `ndarray` (`float32`) - Vector embeddings
-
-Nested `list` and `dict` values are not currently exposed by the public bindings/C API.
+- `list` - List of any of these values, nested to any depth
+- `dict` with `str` keys - Map of any of these values, nested to any depth
 
 ## Error Handling
 
@@ -370,8 +389,8 @@ except LatticeError as e:
 ## Requirements
 
 - Python 3.9+
-- NumPy (for vector operations)
-- The native LatticeDB library (`liblattice.dylib` / `liblattice.so`)
+- NumPy (a required dependency)
+- The native LatticeDB library (`liblattice.dylib` / `liblattice.so` / `lattice.dll`), bundled in the published wheels
 
 ## License
 

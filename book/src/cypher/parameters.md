@@ -90,7 +90,7 @@ lattice_query_bind_vector(query, "embedding", vec, 128);
 
 ## Query Caching
 
-Parameterized queries are cached by their query text. The same query with different parameter values reuses the cached plan, improving performance for repeated queries.
+Queries are cached by their query text. The cache holds the parsed and analysed query, so the same query with different parameter values skips parsing and analysis.
 
 ```python
 # These share the same cache entry:

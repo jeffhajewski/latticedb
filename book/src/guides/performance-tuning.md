@@ -12,10 +12,12 @@ db.open()
 ```
 
 **Guidelines:**
-- Default is 100 MB, which handles most workloads well
+- Default is 100 MB in the C API and every binding (64 MB in the CLI), which handles most workloads well
 - For large databases (1M+ nodes), increase to 200-500 MB
 - For memory-constrained environments, reduce to 50 MB or less
-- The cache stores fixed-size pages (4 KB each), so 100 MB holds ~25,000 pages
+- The cache stores fixed-size pages (4 KB each at the default page size), so 100 MB holds ~25,000 pages
+- The `LATTICE_BUFFER_POOL_MB` environment variable overrides the size, including an explicit `cache_size_mb`
+- In-memory (`:memory:`) databases cap the cache at 64 pages whatever you ask for
 
 ## Vector Search: ef_search
 
@@ -42,7 +44,7 @@ results = db.vector_search(query_vec, k=10, ef_search=128)
 
 ## Batch Insert
 
-When loading large amounts of data, use `batch_insert` instead of individual creates:
+When loading large amounts of vector-bearing nodes, `batch_insert_vectors` creates a node and stores its vector for every row in one call:
 
 ```python
 import numpy as np
@@ -54,11 +56,12 @@ with db.write() as txn:
     txn.commit()
 ```
 
-Batch insert is significantly faster than individual node creation because it amortizes HNSW index updates.
+It saves one binding call per node. It does not amortize HNSW work: each vector is still inserted into the index individually, exactly as `set_vector` would.
 
-## Query Plan Caching
+## Query Caching
 
-Use parameterized queries to enable plan caching:
+Use parameterized queries so the cache can reuse the parsed query. The cache is
+keyed by query text and holds the parsed, analysed query (not an execution plan):
 
 ```python
 # Good: parsed once, reused
@@ -108,9 +111,13 @@ MATCH (c:Chunk) WHERE c.source = "web" RETURN c
 MATCH (n) WHERE n.source = "web" RETURN n
 ```
 
+A label does not narrow a `<=>` vector search: the search always takes the 100
+nearest vectors in the whole database first. See
+[Vector Search in Cypher](../cypher/vector-search.md).
+
 ## Transaction Scope
 
-Keep write transactions short. Long-running write transactions hold the write lock and block other writes:
+Keep write transactions short. Only one write transaction can be open at a time, and while one is open, beginning another fails immediately with a lock-timeout error rather than waiting:
 
 ```python
 # Good: small, focused transactions

@@ -659,7 +659,7 @@ pub const FtsIndex = struct {
             };
 
             const score = self.scorer.scoreTerm(
-                        self.doc_lengths.stats,
+                self.doc_lengths.stats,
                 entry.term_freq,
                 dict_entry.doc_freq,
                 doc_length,
@@ -1089,7 +1089,7 @@ pub const FtsIndex = struct {
 
                             // Score without penalty (exact prefix match)
                             const score = self.scorer.scoreTerm(
-                        self.doc_lengths.stats,
+                                self.doc_lengths.stats,
                                 posting.term_freq,
                                 match.entry.doc_freq,
                                 doc_length,
@@ -1136,7 +1136,7 @@ pub const FtsIndex = struct {
                         const doc_length = self.doc_lengths.getLength(posting.doc_id) catch continue;
 
                         const score = self.scorer.scoreTerm(
-                        self.doc_lengths.stats,
+                            self.doc_lengths.stats,
                             posting.term_freq,
                             dict_entry.doc_freq,
                             doc_length,
@@ -1615,7 +1615,7 @@ pub const FtsIndex = struct {
                 const doc_length = self.doc_lengths.getLength(entry.doc_id) catch continue;
 
                 const score = self.scorer.scoreTerm(
-                        self.doc_lengths.stats,
+                    self.doc_lengths.stats,
                     entry.term_freq,
                     dict_entry.doc_freq,
                     doc_length,
@@ -1850,7 +1850,7 @@ pub const FtsIndex = struct {
                         // Get score contribution
                         const doc_length = self.doc_lengths.getLength(entry.doc_id) catch 1;
                         const score = self.scorer.scoreTerm(
-                        self.doc_lengths.stats,
+                            self.doc_lengths.stats,
                             entry.term_freq,
                             dict_entry.doc_freq,
                             doc_length,

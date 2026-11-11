@@ -1058,7 +1058,12 @@ pub const Database = struct {
         self.symbol_table = SymbolTable.init(allocator, &self.symbol_forward_tree, &self.symbol_reverse_tree);
 
         // 7. Initialize Graph Stores
-        self.node_store = NodeStore.init(allocator, &self.node_tree);
+        // An existing database whose node tree cannot be read must not be
+        // opened for writing with its id counter reset to 1.
+        self.node_store = if (is_new or options.read_only)
+            NodeStore.init(allocator, &self.node_tree)
+        else
+            NodeStore.initChecked(allocator, &self.node_tree) catch return DatabaseError.IoError;
         self.edge_store = EdgeStore.init(allocator, &self.edge_tree, &self.edge_id_tree);
         self.label_index = LabelIndex.init(allocator, &self.label_tree);
         self.initializePropertyIndex();

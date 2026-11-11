@@ -87,6 +87,22 @@ pub const NodeStore = struct {
         return self;
     }
 
+    /// `init` for a tree that is known to hold a database's nodes.
+    ///
+    /// `init` starts the counter at 1 when the tree cannot be scanned, which
+    /// is right for a tree that does not exist yet and wrong for one that
+    /// does: the next node created would take the id of an existing node and
+    /// replace it. Here a failed scan is an error.
+    pub fn initChecked(allocator: Allocator, tree: *BTree) NodeError!Self {
+        var self = Self{
+            .allocator = allocator,
+            .tree = tree,
+            .next_id = 1,
+        };
+        self.next_id = try self.loadNextId();
+        return self;
+    }
+
     fn loadNextId(self: *Self) NodeError!NodeId {
         var max_id: NodeId = 0;
         var iter = self.tree.range(null, null) catch |err| {

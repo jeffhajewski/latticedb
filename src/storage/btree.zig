@@ -1412,10 +1412,18 @@ pub const BTree = struct {
         }
 
         // Remove the entry from the leaf
-        try self.deleteLeafEntry(frame.data, search.slot);
+        const orphaned_chain = try self.deleteLeafEntry(frame.data, search.slot);
 
         self.bp.unpinPage(frame, true);
         frame_pinned = false;
+
+        // Free the overflow chain only once no leaf points at it. If freeing
+        // fails part way, the rest of the chain is leaked: unreachable pages
+        // that waste space, rather than freed pages a live entry still
+        // points at and that a later allocation would hand to a second owner.
+        if (orphaned_chain) |chain| {
+            self.freeOverflowChain(chain.first_page, chain.page_count) catch {};
+        }
 
         // A failed merge is only a missed space-reclamation opportunity: the
         // key has already been removed and the tree remains valid. Keep delete
@@ -2114,9 +2122,22 @@ pub const BTree = struct {
     }
 
     /// Remove an entry from a leaf node and compact surviving entries.
-    fn deleteLeafEntry(self: *Self, buf: []u8, slot: u16) BTreeError!void {
+    /// Remove the entry at `slot` from a leaf. If its value lived in an
+    /// overflow chain, the chain is returned for the caller to free once the
+    /// leaf change is in place; it is not freed here.
+    fn deleteLeafEntry(self: *Self, buf: []u8, slot: u16) BTreeError!?OverflowChain {
         const num_entries = LeafNode.getNumEntries(buf);
         const stored = LeafNode.getStoredValue(buf, slot);
+
+        // Parse the descriptor while it is still on the page. A corrupt one
+        // fails the delete before anything changes.
+        var orphaned_chain: ?OverflowChain = null;
+        if (stored.overflow) {
+            const desc = try parseOverflowDescriptor(stored.value);
+            if (desc.page_count > 0) {
+                orphaned_chain = .{ .first_page = desc.first_page, .page_count = desc.page_count };
+            }
+        }
 
         const remaining_count = num_entries - 1;
         if (remaining_count > 0) {
@@ -2165,25 +2186,12 @@ pub const BTree = struct {
                 try self.insertLeafEntryStored(compacted, @intCast(i), entry.key, entry.value, entry.overflow);
             }
 
-            if (stored.overflow) {
-                const desc = try parseOverflowDescriptor(stored.value);
-                if (desc.page_count > 0) {
-                    try self.freeOverflowChain(desc.first_page, desc.page_count);
-                }
-            }
-
             @memcpy(buf[0..page_len], compacted[0..page_len]);
-            return;
-        }
-
-        if (stored.overflow) {
-            const desc = try parseOverflowDescriptor(stored.value);
-            if (desc.page_count > 0) {
-                try self.freeOverflowChain(desc.first_page, desc.page_count);
-            }
+            return orphaned_chain;
         }
 
         LeafNode.setNumEntries(buf, 0);
+        return orphaned_chain;
     }
 
     // ========================================================================

@@ -1113,3 +1113,55 @@ test "btree: an insert running out of buffer frames during a split leaves the tr
     }
     try std.testing.expect(saw_failure);
 }
+
+// ============================================================================
+// Contract: deleting an overflow value never leaves the entry pointing at freed pages
+// ============================================================================
+
+test "btree: delete removes an overflow entry even when freeing its chain fails" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "overflow_delete_chain_failure");
+    defer db.deinit();
+    var tree = try db.createBTree();
+
+    // A fresh tree's root is the only page, so a three-page overflow value
+    // lands on the next three pages.
+    const first_chain_page = db.pm.pageCount();
+    const big = try allocator.alloc(u8, 3 * 4000);
+    defer allocator.free(big);
+    @memset(big, 'o');
+    try tree.insert("big", big);
+    try tree.insert("small", "s");
+    try std.testing.expectEqual(first_chain_page + 3, db.pm.pageCount());
+
+    const PageHeader = lattice.storage.page.PageHeader;
+    for (0..3) |i| {
+        const frame = try db.bp.fetchPage(first_chain_page + @as(u32, @intCast(i)), .shared);
+        defer db.bp.unpinPage(frame, false);
+        const header: *const PageHeader = @ptrCast(@alignCast(frame.data.ptr));
+        try std.testing.expectEqual(lattice.storage.page.PageType.overflow, header.page_type);
+    }
+
+    // Damage the middle page so freeing the chain fails after the first page.
+    {
+        const frame = try db.bp.fetchPage(first_chain_page + 1, .exclusive);
+        const header: *PageHeader = @ptrCast(@alignCast(frame.data.ptr));
+        header.page_type = .btree_leaf;
+        db.bp.unpinPage(frame, true);
+    }
+
+    try tree.delete("big");
+    try std.testing.expect(!(try tree.contains("big")));
+    try std.testing.expect((try tree.get("big")) == null);
+    try std.testing.expectError(BTreeError.KeyNotFound, tree.delete("big"));
+
+    // The key can be written again, and the first chain page, which was
+    // freed, is reused without disturbing anything else.
+    try tree.insert("big", "again");
+    const got = (try tree.get("big")).?;
+    defer tree.freeValue(got);
+    try std.testing.expectEqualStrings("again", got);
+    try std.testing.expect(try tree.contains("small"));
+    try helpers.validateBTreeInvariants(&tree);
+    try std.testing.expectEqual(@as(usize, 0), db.bp.getStats().pinned_frames);
+}

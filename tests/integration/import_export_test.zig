@@ -885,3 +885,42 @@ test "import_export: export by query writes the nodes and edges the query return
         );
     }
 }
+
+test "import_export: CSV import reads quoted fields as RFC 4180 describes" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_import_csv_rfc4180.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    const nodes_csv = "_id,_labels,name,bio,quote\n" ++
+        "n1,\"Person;Employee\",\"Smith, Alice\",\"line one\nline two\",\"she said \"\"hi\"\"\"\n" ++
+        "n2, Person ,Bob,,plain\n";
+    const stats = try import_export.importCsvContent(allocator, db, nodes_csv, 1000, false);
+    try std.testing.expectEqual(@as(u64, 2), stats.nodes_imported);
+
+    try expectStringProperty(db, 1, "name", "Smith, Alice");
+    try expectStringProperty(db, 1, "bio", "line one\nline two");
+    try expectStringProperty(db, 1, "quote", "she said \"hi\"");
+    try expectStringProperty(db, 2, "name", "Bob");
+    try expectStringProperty(db, 2, "quote", "plain");
+    try std.testing.expect((try db.getNodeProperty(2, "bio")) == null);
+
+    const labels = try db.getNodeLabels(1);
+    defer {
+        for (labels) |label| allocator.free(label);
+        allocator.free(labels);
+    }
+    try std.testing.expectEqual(@as(usize, 2), labels.len);
+
+    const edges_csv = "_source,_target,_type\n1,2,\"KNOWS, WELL\"\n";
+    _ = try import_export.importCsvContent(allocator, db, edges_csv, 1000, false);
+    const edges = try db.getOutgoingEdges(1);
+    defer db.freeEdgeInfos(edges);
+    try std.testing.expectEqual(@as(usize, 1), edges.len);
+    try std.testing.expectEqualStrings("KNOWS, WELL", edges[0].edge_type);
+
+    try std.testing.expectError(
+        import_export.ImportExportError.ParseError,
+        import_export.importCsvContent(allocator, db, "_id,_labels,name\nn3,Person,\"unterminated\n", 1000, false),
+    );
+}

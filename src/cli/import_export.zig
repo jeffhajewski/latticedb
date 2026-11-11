@@ -40,7 +40,6 @@ const csv_nodes_header_line = csv_nodes_header ++ "\n";
 const csv_field_separator = ',';
 const csv_label_separator = ';';
 const csv_trim_chars = " \t\r";
-const csv_quoted_trim_chars = " \t\r\"";
 const label_filter_separator = ',';
 const label_trim_chars = " ";
 
@@ -1409,6 +1408,95 @@ fn collectGraphValues(
     }
 }
 
+/// One record of a CSV file: its fields, unquoted, and the line it starts on.
+const CsvRecord = struct {
+    fields: []const []const u8,
+    line: usize,
+};
+
+/// Reads CSV as RFC 4180 describes it.
+///
+/// A field in double quotes may hold commas, line breaks, and quotes written
+/// twice (`""`). Whitespace around a field outside quotes is trimmed, and a
+/// line with nothing on it is skipped, so hand-written files with a stray
+/// space or blank line still read.
+const CsvReader = struct {
+    content: []const u8,
+    pos: usize = 0,
+    line: usize = 1,
+
+    const Error = error{ InvalidFormat, OutOfMemory };
+
+    /// The next record, allocated in `arena`, or null at the end.
+    fn next(self: *CsvReader, arena: std.mem.Allocator) Error!?CsvRecord {
+        while (self.pos < self.content.len) {
+            const start_line = self.line;
+            var fields: std.ArrayList([]const u8) = .empty;
+            while (true) {
+                const field = try self.readField(arena);
+                try fields.append(arena, field);
+                if (self.pos >= self.content.len) break;
+                const c = self.content[self.pos];
+                self.pos += 1;
+                if (c == '\n') {
+                    self.line += 1;
+                    break;
+                }
+                // Otherwise it was a separator, and another field follows.
+            }
+            if (fields.items.len == 1 and fields.items[0].len == 0) continue;
+            return .{ .fields = fields.items, .line = start_line };
+        }
+        return null;
+    }
+
+    /// Read one field, leaving `pos` on the separator or line break after it.
+    fn readField(self: *CsvReader, arena: std.mem.Allocator) Error![]const u8 {
+        self.skipBlanks();
+        if (self.pos < self.content.len and self.content[self.pos] == '"') {
+            self.pos += 1;
+            var value: std.ArrayList(u8) = .empty;
+            while (true) {
+                if (self.pos >= self.content.len) return error.InvalidFormat; // unterminated quote
+                const c = self.content[self.pos];
+                self.pos += 1;
+                if (c == '"') {
+                    if (self.pos < self.content.len and self.content[self.pos] == '"') {
+                        try value.append(arena, '"');
+                        self.pos += 1;
+                        continue;
+                    }
+                    break;
+                }
+                if (c == '\n') self.line += 1;
+                try value.append(arena, c);
+            }
+            self.skipBlanks();
+            if (self.pos < self.content.len and self.content[self.pos] != csv_field_separator and
+                self.content[self.pos] != '\n')
+            {
+                return error.InvalidFormat; // text after a closing quote
+            }
+            return value.items;
+        }
+
+        const begin = self.pos;
+        while (self.pos < self.content.len and self.content[self.pos] != csv_field_separator and
+            self.content[self.pos] != '\n') : (self.pos += 1)
+        {}
+        return std.mem.trim(u8, self.content[begin..self.pos], csv_trim_chars);
+    }
+
+    fn skipBlanks(self: *CsvReader) void {
+        while (self.pos < self.content.len) : (self.pos += 1) {
+            switch (self.content[self.pos]) {
+                ' ', '\t', '\r' => {},
+                else => return,
+            }
+        }
+    }
+};
+
 /// Import data from a CSV file.
 /// CSV format for nodes: _id,_labels,prop1,prop2,...
 /// CSV format for edges: _source,_target,_type,prop1,prop2,...
@@ -1429,14 +1517,21 @@ pub fn importCsv(
     };
     defer allocator.free(content);
 
-    // Detect if this is a nodes or edges CSV by checking the header
-    var lines = std.mem.splitScalar(u8, content, '\n');
-    const header_line = lines.next() orelse return ImportExportError.ParseError;
+    return importCsvContent(allocator, db, content, batch_size, on_error_skip);
+}
 
-    if (std.mem.startsWith(u8, header_line, csv_nodes_header)) {
+/// Import CSV from a string, telling nodes from edges by the header.
+pub fn importCsvContent(
+    allocator: std.mem.Allocator,
+    db: *Database,
+    content: []const u8,
+    batch_size: u32,
+    on_error_skip: bool,
+) ImportExportError!ImportStats {
+    if (std.mem.startsWith(u8, content, csv_nodes_header)) {
         return importNodesCsv(allocator, db, content, batch_size, on_error_skip);
-    } else if (std.mem.startsWith(u8, header_line, csv_edges_header)) {
-        return importEdgesCsv(db, content, batch_size, on_error_skip);
+    } else if (std.mem.startsWith(u8, content, csv_edges_header)) {
+        return importEdgesCsv(allocator, db, content, batch_size, on_error_skip);
     } else {
         return ImportExportError.InvalidFormat;
     }
@@ -1453,27 +1548,21 @@ fn importNodesCsv(
     var batcher = ImportBatcher.init(db, batch_size, on_error_skip);
     errdefer if (batcher.hasPendingTransaction()) batcher.abort() catch {};
 
-    var lines = std.mem.splitScalar(u8, content, '\n');
+    var header_arena = std.heap.ArenaAllocator.init(allocator);
+    defer header_arena.deinit();
+    var record_arena = std.heap.ArenaAllocator.init(allocator);
+    defer record_arena.deinit();
 
-    // Parse header
-    const header_line = lines.next() orelse return ImportExportError.ParseError;
-    var headers = ManagedArrayList([]const u8).init(allocator);
-    defer headers.deinit();
+    var reader = CsvReader{ .content = content };
+    const header = (reader.next(header_arena.allocator()) catch |err| return mapCsvError(err)) orelse
+        return ImportExportError.ParseError;
 
-    var header_parts = std.mem.splitScalar(u8, header_line, csv_field_separator);
-    while (header_parts.next()) |part| {
-        headers.append(std.mem.trim(u8, part, csv_trim_chars)) catch {
-            return ImportExportError.OutOfMemory;
-        };
-    }
-
-    // Process data lines
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, csv_trim_chars);
-        if (trimmed.len == 0) continue;
+    while (true) {
+        _ = record_arena.reset(.retain_capacity);
+        const record = (reader.next(record_arena.allocator()) catch |err| return mapCsvError(err)) orelse break;
 
         const txn = try batcher.transaction();
-        if (importNodeCsvLine(allocator, db, txn, trimmed, headers.items)) |_| {
+        if (importNodeCsvRecord(record_arena.allocator(), db, txn, record.fields, header.fields)) |_| {
             try batcher.recordSuccess(&stats, .node);
         } else |_| {
             try batcher.recordFailure(&stats, .node);
@@ -1487,30 +1576,28 @@ fn importNodesCsv(
     return stats;
 }
 
-fn importNodeCsvLine(
+fn mapCsvError(err: CsvReader.Error) ImportExportError {
+    return switch (err) {
+        error.OutOfMemory => ImportExportError.OutOfMemory,
+        error.InvalidFormat => ImportExportError.ParseError,
+    };
+}
+
+fn importNodeCsvRecord(
     allocator: std.mem.Allocator,
     db: *Database,
     txn: ?*Transaction,
-    line: []const u8,
+    values: []const []const u8,
     headers: []const []const u8,
 ) !void {
-    var values = ManagedArrayList([]const u8).init(allocator);
-    defer values.deinit();
-
-    // Parse CSV values (simple, doesn't handle quoted values with commas)
-    var parts = std.mem.splitScalar(u8, line, csv_field_separator);
-    while (parts.next()) |part| {
-        try values.append(std.mem.trim(u8, part, csv_quoted_trim_chars));
-    }
-
-    if (values.items.len < 2) return error.InvalidFormat;
+    if (values.len < 2) return error.InvalidFormat;
 
     // Parse labels (semicolon-separated)
     var labels_list = ManagedArrayList([]const u8).init(allocator);
     defer labels_list.deinit();
 
-    if (values.items.len > 1 and values.items[1].len > 0) {
-        var label_parts = std.mem.splitScalar(u8, values.items[1], csv_label_separator);
+    if (values[1].len > 0) {
+        var label_parts = std.mem.splitScalar(u8, values[1], csv_label_separator);
         while (label_parts.next()) |label| {
             const trimmed = std.mem.trim(u8, label, label_trim_chars);
             if (trimmed.len > 0) {
@@ -1526,8 +1613,8 @@ fn importNodeCsvLine(
 
     // Set properties (columns after _id and _labels)
     for (headers[2..], 2..) |header, i| {
-        if (i < values.items.len and values.items[i].len > 0) {
-            const val = values.items[i];
+        if (i < values.len and values[i].len > 0) {
+            const val = values[i];
             // Try to parse as number, otherwise use as string
             const prop_val: PropertyValue = if (std.fmt.parseInt(i64, val, decimal_base)) |int_val|
                 .{ .int_val = int_val }
@@ -1542,6 +1629,7 @@ fn importNodeCsvLine(
 }
 
 fn importEdgesCsv(
+    allocator: std.mem.Allocator,
     db: *Database,
     content: []const u8,
     batch_size: u32,
@@ -1551,18 +1639,20 @@ fn importEdgesCsv(
     var batcher = ImportBatcher.init(db, batch_size, on_error_skip);
     errdefer if (batcher.hasPendingTransaction()) batcher.abort() catch {};
 
-    var lines = std.mem.splitScalar(u8, content, '\n');
+    var record_arena = std.heap.ArenaAllocator.init(allocator);
+    defer record_arena.deinit();
 
+    var reader = CsvReader{ .content = content };
     // Skip header
-    _ = lines.next();
+    _ = (reader.next(record_arena.allocator()) catch |err| return mapCsvError(err)) orelse
+        return ImportExportError.ParseError;
 
-    // Process data lines
-    while (lines.next()) |line| {
-        const trimmed = std.mem.trim(u8, line, csv_trim_chars);
-        if (trimmed.len == 0) continue;
+    while (true) {
+        _ = record_arena.reset(.retain_capacity);
+        const record = (reader.next(record_arena.allocator()) catch |err| return mapCsvError(err)) orelse break;
 
         const txn = try batcher.transaction();
-        if (importEdgeCsvLine(db, txn, trimmed)) |_| {
+        if (importEdgeCsvRecord(db, txn, record.fields)) |_| {
             try batcher.recordSuccess(&stats, .edge);
         } else |_| {
             try batcher.recordFailure(&stats, .edge);
@@ -1576,12 +1666,11 @@ fn importEdgesCsv(
     return stats;
 }
 
-fn importEdgeCsvLine(db: *Database, txn: ?*Transaction, line: []const u8) !void {
-    var parts = std.mem.splitScalar(u8, line, csv_field_separator);
-
-    const source_str = std.mem.trim(u8, parts.next() orelse return error.InvalidFormat, csv_quoted_trim_chars);
-    const target_str = std.mem.trim(u8, parts.next() orelse return error.InvalidFormat, csv_quoted_trim_chars);
-    const edge_type = std.mem.trim(u8, parts.next() orelse return error.InvalidFormat, csv_quoted_trim_chars);
+fn importEdgeCsvRecord(db: *Database, txn: ?*Transaction, values: []const []const u8) !void {
+    if (values.len < 3) return error.InvalidFormat;
+    const source_str = values[0];
+    const target_str = values[1];
+    const edge_type = values[2];
 
     // Parse node IDs
     const source_id = std.fmt.parseInt(NodeId, source_str, decimal_base) catch {

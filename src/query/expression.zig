@@ -103,7 +103,12 @@ pub const EvalResult = union(enum) {
         return self == .null_val;
     }
 
-    /// Check if result is truthy
+    /// Check if result is truthy.
+    ///
+    /// Two-valued: null counts as false here. That is the right reading for a
+    /// WHERE clause, which keeps a row only when its predicate is true, but not
+    /// inside an expression, where `NOT null` has to stay null. Logical
+    /// operators use `truthValue` instead.
     pub fn isTruthy(self: Self) bool {
         return switch (self) {
             .null_val => false,
@@ -223,6 +228,18 @@ pub const EvalResult = union(enum) {
         };
     }
 };
+
+/// A truth value in Cypher's three-valued logic.
+const TruthValue = enum { false_, true_, unknown };
+
+/// Read a value as a truth value for NOT, AND and OR.
+///
+/// Null is unknown. Anything else keeps the truthiness it has always had, so
+/// only the treatment of null changes here.
+fn truthValue(value: EvalResult) TruthValue {
+    if (value.isNull()) return .unknown;
+    return if (value.isTruthy()) .true_ else .false_;
+}
 
 // ============================================================================
 // Expression Evaluator
@@ -380,19 +397,27 @@ pub const ExpressionEvaluator = struct {
         row: *const Row,
         ctx: *const ExecutionContext,
     ) EvalError!EvalResult {
-        // Short-circuit evaluation for logical operators
+        // Logical operators use Kleene's three-valued logic, where null stands
+        // for "unknown". A false on either side decides AND and a true decides
+        // OR whatever the other side is, so the right side is skipped when the
+        // left one already settles it. Otherwise an unknown on either side
+        // leaves the answer unknown.
         if (b.operator == .and_) {
-            const left = try self.evaluate(b.left, row, ctx);
-            if (!left.isTruthy()) return .{ .bool_val = false };
-            const right = try self.evaluate(b.right, row, ctx);
-            return .{ .bool_val = right.isTruthy() };
+            const left = truthValue(try self.evaluate(b.left, row, ctx));
+            if (left == .false_) return .{ .bool_val = false };
+            const right = truthValue(try self.evaluate(b.right, row, ctx));
+            if (right == .false_) return .{ .bool_val = false };
+            if (left == .unknown or right == .unknown) return .{ .null_val = {} };
+            return .{ .bool_val = true };
         }
 
         if (b.operator == .or_) {
-            const left = try self.evaluate(b.left, row, ctx);
-            if (left.isTruthy()) return .{ .bool_val = true };
-            const right = try self.evaluate(b.right, row, ctx);
-            return .{ .bool_val = right.isTruthy() };
+            const left = truthValue(try self.evaluate(b.left, row, ctx));
+            if (left == .true_) return .{ .bool_val = true };
+            const right = truthValue(try self.evaluate(b.right, row, ctx));
+            if (right == .true_) return .{ .bool_val = true };
+            if (left == .unknown or right == .unknown) return .{ .null_val = {} };
+            return .{ .bool_val = false };
         }
 
         // Full-text match is answered by the index, not by looking at the text in
@@ -415,13 +440,18 @@ pub const ExpressionEvaluator = struct {
         const left = try self.evaluate(b.left, row, ctx);
         const right = try self.evaluate(b.right, row, ctx);
 
-        // Handle null comparisons
+        // A null operand makes every remaining operator null: comparisons
+        // (including `null = null`, since two unknowns are not known to be
+        // equal), XOR, arithmetic and the string operators alike. IN is the
+        // exception, because an empty list contains nothing, null included.
+        //
+        // This is `=` only. Grouping, DISTINCT and ORDER BY treat nulls as
+        // equivalent to each other through their own key encoding, and MERGE
+        // matches properties with its own comparison, so neither goes
+        // through here.
         if (left.isNull() or right.isNull()) {
-            return switch (b.operator) {
-                .eq => .{ .bool_val = left.isNull() and right.isNull() },
-                .neq => .{ .bool_val = !(left.isNull() and right.isNull()) },
-                else => .{ .null_val = {} },
-            };
+            if (b.operator == .in_) return self.listContains(left, right);
+            return .{ .null_val = {} };
         }
 
         return switch (b.operator) {
@@ -485,10 +515,15 @@ pub const ExpressionEvaluator = struct {
         const operand = try self.evaluate(u.operand, row, ctx);
 
         return switch (u.operator) {
-            .not => .{ .bool_val = !operand.isTruthy() },
+            .not => switch (truthValue(operand)) {
+                .true_ => .{ .bool_val = false },
+                .false_ => .{ .bool_val = true },
+                .unknown => .{ .null_val = {} },
+            },
             .neg => switch (operand) {
                 .int_val => |i| .{ .int_val = -i },
                 .float_val => |f| .{ .float_val = -f },
+                .null_val => .{ .null_val = {} },
                 else => EvalError.TypeError,
             },
             .is_null => .{ .bool_val = operand.isNull() },
@@ -1166,19 +1201,34 @@ pub const ExpressionEvaluator = struct {
     // List helpers
     // ========================================================================
 
+    /// `elem IN list`, with nulls handled the way `=` handles them.
+    ///
+    /// A match anywhere makes the answer true. Without one, a null element or
+    /// a null in the list means a match cannot be ruled out, so the answer is
+    /// null rather than false. An empty list contains nothing, so that answer
+    /// is false even for a null element.
     fn listContains(self: *Self, elem: EvalResult, list: EvalResult) EvalResult {
         const items = switch (list) {
             .list_val => |l| l,
             else => return .{ .null_val = {} },
         };
 
+        if (items.len == 0) return .{ .bool_val = false };
+        if (elem.isNull()) return .{ .null_val = {} };
+
+        var saw_null = false;
         for (items) |item| {
+            if (item.isNull()) {
+                saw_null = true;
+                continue;
+            }
             const eq = self.compareEqual(elem, item);
             if (eq.toBool()) |is_eq| {
                 if (is_eq) return .{ .bool_val = true };
             }
         }
 
+        if (saw_null) return .{ .null_val = {} };
         return .{ .bool_val = false };
     }
 

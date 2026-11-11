@@ -325,3 +325,33 @@ test "cli: export includes vectors when told the dimensions, and warns when it l
     defer allocator.free(full);
     try std.testing.expect(std.mem.indexOf(u8, full, "\"vector\":[1.0,0.0,0.0,0.0]") != null);
 }
+
+test "cli: export --query exports what the query returns, not the whole graph" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_cli_export_query.ltdb";
+    const out = "/tmp/lattice_cli_export_query.json";
+    deleteDatabaseFiles(path);
+    defer deleteDatabaseFiles(path);
+    defer compat.fs.cwd().deleteFile(out) catch {};
+
+    {
+        var db = try Database.open(allocator, path, .{ .create = true, .config = .{ .enable_fts = false } });
+        defer db.close();
+        const alice = try db.createNode(null, &.{"Person"});
+        const acme = try db.createNode(null, &.{"Company"});
+        _ = try db.createEdgeAndGetId(null, alice, acme, "WORKS_AT");
+    }
+
+    const run = try runCli(allocator, &.{ "export", path, "--file=" ++ out, "--query=MATCH (c:Company) RETURN c" });
+    defer run.deinit(allocator);
+    try std.testing.expect(run.succeeded());
+    const exported = try readFileAlloc(allocator, out);
+    defer allocator.free(exported);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "Company") != null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "Person") == null);
+    try std.testing.expect(std.mem.indexOf(u8, exported, "WORKS_AT") == null);
+
+    const scalars = try runCli(allocator, &.{ "export", path, "--file=" ++ out, "--query=MATCH (c:Company) RETURN count(c)" });
+    defer scalars.deinit(allocator);
+    try std.testing.expect(!scalars.succeeded());
+}

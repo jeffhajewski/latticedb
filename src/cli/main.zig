@@ -29,6 +29,7 @@ const Database = lattice.storage.database.Database;
 const DatabaseError = lattice.storage.database.DatabaseError;
 const DatabaseConfig = lattice.storage.database.DatabaseConfig;
 const OpenOptions = lattice.storage.database.OpenOptions;
+const QueryResult = lattice.storage.database.QueryResult;
 const PageHeader = lattice.storage.page.PageHeader;
 const PageManager = lattice.storage.page_manager.PageManager;
 const PageManagerError = lattice.storage.page_manager.PageManagerError;
@@ -1272,6 +1273,10 @@ fn cmdExport(
     const db = try openDatabase(allocator, stderr, parsed_args, .read_only);
     defer db.close();
 
+    var query_result: ?QueryResult = null;
+    defer if (query_result) |*result| result.deinit();
+    const scope = try exportScope(stderr, db, parsed_args, &query_result);
+
     output.printInfo(stdout, "Exporting {s} to {s}...", .{ path, file });
     warnIfVectorsLeftOut(stderr, db, path);
 
@@ -1293,9 +1298,9 @@ fn cmdExport(
 
         const writer = out_file.deprecatedWriter();
         const stats = switch (export_kind) {
-            .json => import_export.exportJson(allocator, db, writer, parsed_args.label_filter),
-            .jsonl => import_export.exportJsonl(allocator, db, writer, parsed_args.label_filter),
-            .dot => import_export.exportDot(allocator, db, writer, parsed_args.label_filter),
+            .json => import_export.exportJson(allocator, db, writer, scope),
+            .jsonl => import_export.exportJsonl(allocator, db, writer, scope),
+            .dot => import_export.exportDot(allocator, db, writer, scope),
             .csv => unreachable,
         };
 
@@ -1319,7 +1324,7 @@ fn cmdExport(
                 },
             }
         } else |err| {
-            return failCommand(stderr, "Export failed: {s}", .{@errorName(err)});
+            return failExport(stderr, err);
         }
     } else {
         // Export to CSV - creates two files: file_nodes.csv and file_edges.csv
@@ -1348,7 +1353,7 @@ fn cmdExport(
         const nodes_writer = nodes_file.deprecatedWriter();
         const edges_writer = edges_file.deprecatedWriter();
 
-        const stats = import_export.exportCsv(allocator, db, nodes_writer, edges_writer, parsed_args.label_filter);
+        const stats = import_export.exportCsv(allocator, db, nodes_writer, edges_writer, scope);
 
         if (stats) |s| {
             switch (parsed_args.format) {
@@ -1374,9 +1379,49 @@ fn cmdExport(
                 },
             }
         } else |err| {
-            return failCommand(stderr, "Export failed: {s}", .{@errorName(err)});
+            return failExport(stderr, err);
         }
     }
+}
+
+/// Work out what an export covers, running its query if it has one.
+///
+/// The query's result is kept in `result_slot`, which the caller frees once the
+/// export is written.
+fn exportScope(
+    stderr: anytype,
+    db: *Database,
+    parsed_args: *const Args,
+    result_slot: *?QueryResult,
+) !import_export.ExportScope {
+    const query = parsed_args.query_string orelse return .{ .label_filter = parsed_args.label_filter };
+    if (parsed_args.label_filter != null) {
+        return failCommand(stderr, "--labels and --query cannot be combined. Match the labels in the query instead.", .{});
+    }
+
+    var detailed = db.queryDetailed(query) catch |err| {
+        return failCommand(stderr, "Query failed: {s}", .{@errorName(err)});
+    };
+    switch (detailed) {
+        .failure => |*failure| {
+            output.printQueryFailure(stderr, query, failure.*);
+            failure.deinit();
+            return error.CommandFailed;
+        },
+        .success => |result| result_slot.* = result,
+    }
+    return .{ .query_result = &result_slot.*.? };
+}
+
+fn failExport(stderr: anytype, err: anyerror) anyerror {
+    if (err == error.QueryReturnedNoGraph) {
+        return failCommand(
+            stderr,
+            "Export failed: the query returned no nodes or relationships to export. Return them, for example MATCH (n:Person) RETURN n.",
+            .{},
+        );
+    }
+    return failCommand(stderr, "Export failed: {s}", .{@errorName(err)});
 }
 
 /// Say so when a database has vectors that an export or dump will not include.
@@ -1405,14 +1450,18 @@ fn cmdDump(
     defer db.close();
 
     // Dump to stdout as canonical JSON
+    var query_result: ?QueryResult = null;
+    defer if (query_result) |*result| result.deinit();
+    const scope = try exportScope(stderr, db, parsed_args, &query_result);
+
     warnIfVectorsLeftOut(stderr, db, parsed_args.path.?);
-    const stats = import_export.dumpCanonicalJson(allocator, db, stdout, parsed_args.label_filter);
+    const stats = import_export.dumpCanonicalJson(allocator, db, stdout, scope);
 
     if (stats) |s| {
         // Print stats to stderr so they don't mix with JSON output
         try stderr.print("Dumped {d} nodes, {d} edges\n", .{ s.nodes_exported, s.edges_exported });
     } else |err| {
-        return failCommand(stderr, "Dump failed: {s}", .{@errorName(err)});
+        return failExport(stderr, err);
     }
 }
 

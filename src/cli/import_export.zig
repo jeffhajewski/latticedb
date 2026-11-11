@@ -9,6 +9,8 @@ const Database = lattice.storage.database.Database;
 const PropertyValue = lattice.core.types.PropertyValue;
 const NodeId = lattice.core.types.NodeId;
 const EdgeId = lattice.core.types.EdgeId;
+const QueryResult = lattice.storage.database.QueryResult;
+const ResultValue = lattice.storage.database.ResultValue;
 const Transaction = lattice.Transaction;
 const TxnMode = lattice.TxnMode;
 
@@ -676,6 +678,8 @@ pub const ImportExportError = error{
     VectorsNotEnabled,
     /// The file's vectors have a different number of dimensions than the database's.
     VectorDimensionMismatch,
+    /// An export by query whose rows hold no nodes or edges to export.
+    QueryReturnedNoGraph,
 };
 
 /// Export database to JSON format
@@ -683,13 +687,12 @@ pub fn exportJson(
     allocator: std.mem.Allocator,
     db: *Database,
     writer: anytype,
-    label_filter: ?[]const u8,
+    scope: ExportScope,
 ) !ExportStats {
     var stats = ExportStats{};
-    const node_ids = try collectCanonicalNodeIds(allocator, db, label_filter);
-    defer allocator.free(node_ids);
-    var exported_nodes = try buildNodeIdSet(allocator, node_ids);
-    defer exported_nodes.deinit();
+    var selection = try Selection.init(allocator, db, scope);
+    defer selection.deinit();
+    const node_ids = selection.node_ids;
 
     try writeJsonHeader(db, writer);
 
@@ -712,7 +715,7 @@ pub fn exportJson(
         defer db.freeEdgeInfos(edges);
 
         for (edges) |edge| {
-            if (!exported_nodes.contains(edge.target)) continue;
+            if (!selection.includesEdge(edge)) continue;
             if (!first_edge) {
                 try writer.writeAll(",");
             }
@@ -742,14 +745,13 @@ pub fn dumpCanonicalJson(
     allocator: std.mem.Allocator,
     db: *Database,
     writer: anytype,
-    label_filter: ?[]const u8,
+    scope: ExportScope,
 ) !ExportStats {
     var stats = ExportStats{};
 
-    const node_ids = try collectCanonicalNodeIds(allocator, db, label_filter);
-    defer allocator.free(node_ids);
-    var exported_nodes = try buildNodeIdSet(allocator, node_ids);
-    defer exported_nodes.deinit();
+    var selection = try Selection.init(allocator, db, scope);
+    defer selection.deinit();
+    const node_ids = selection.node_ids;
 
     try writeJsonHeader(db, writer);
     for (node_ids, 0..) |node_id, i| {
@@ -775,7 +777,7 @@ pub fn dumpCanonicalJson(
         }.lessThan);
 
         for (edges) |edge| {
-            if (!exported_nodes.contains(edge.target)) continue;
+            if (!selection.includesEdge(edge)) continue;
             if (!first_edge) try writer.writeByte(',');
             first_edge = false;
             try writeEdgeJsonCanonical(allocator, db, writer, edge);
@@ -792,13 +794,12 @@ pub fn exportJsonl(
     allocator: std.mem.Allocator,
     db: *Database,
     writer: anytype,
-    label_filter: ?[]const u8,
+    scope: ExportScope,
 ) !ExportStats {
     var stats = ExportStats{};
-    const node_ids = try collectCanonicalNodeIds(allocator, db, label_filter);
-    defer allocator.free(node_ids);
-    var exported_nodes = try buildNodeIdSet(allocator, node_ids);
-    defer exported_nodes.deinit();
+    var selection = try Selection.init(allocator, db, scope);
+    defer selection.deinit();
+    const node_ids = selection.node_ids;
 
     for (node_ids) |node_id| {
         try writeNodeJsonlRecord(allocator, db, writer, node_id);
@@ -811,7 +812,7 @@ pub fn exportJsonl(
         defer db.freeEdgeInfos(edges);
 
         for (edges) |edge| {
-            if (!exported_nodes.contains(edge.target)) continue;
+            if (!selection.includesEdge(edge)) continue;
             try writeEdgeJsonlRecord(db, writer, edge);
             try writer.writeByte('\n');
             stats.edges_exported += 1;
@@ -826,13 +827,12 @@ pub fn exportDot(
     allocator: std.mem.Allocator,
     db: *Database,
     writer: anytype,
-    label_filter: ?[]const u8,
+    scope: ExportScope,
 ) !ExportStats {
     var stats = ExportStats{};
-    const node_ids = try collectCanonicalNodeIds(allocator, db, label_filter);
-    defer allocator.free(node_ids);
-    var exported_nodes = try buildNodeIdSet(allocator, node_ids);
-    defer exported_nodes.deinit();
+    var selection = try Selection.init(allocator, db, scope);
+    defer selection.deinit();
+    const node_ids = selection.node_ids;
     try writer.writeAll("digraph G {\n");
 
     for (node_ids) |node_id| {
@@ -845,7 +845,7 @@ pub fn exportDot(
         defer db.freeEdgeInfos(edges);
 
         for (edges) |edge| {
-            if (!exported_nodes.contains(edge.target)) continue;
+            if (!selection.includesEdge(edge)) continue;
             try writeEdgeDot(writer, edge);
             stats.edges_exported += 1;
         }
@@ -1319,18 +1319,94 @@ fn collectCanonicalNodeIds(
     return owned;
 }
 
-fn buildNodeIdSet(
-    allocator: std.mem.Allocator,
-    node_ids: []const NodeId,
-) !std.AutoHashMap(NodeId, void) {
-    var set = std.AutoHashMap(NodeId, void).init(allocator);
-    errdefer set.deinit();
+/// Which part of the graph an export covers. The default is all of it.
+pub const ExportScope = struct {
+    /// Only nodes with at least one of these labels, comma-separated, and the
+    /// edges between them.
+    label_filter: ?[]const u8 = null,
+    /// Only the nodes and edges this query returned, plus the endpoints of
+    /// those edges so that the export imports on its own.
+    query_result: ?*const QueryResult = null,
+};
 
-    for (node_ids) |node_id| {
-        try set.put(node_id, {});
+/// The nodes and edges one export writes.
+const Selection = struct {
+    allocator: std.mem.Allocator,
+    /// Ascending, so every format writes nodes in the same order.
+    node_ids: []NodeId,
+    nodes: std.AutoHashMap(NodeId, void),
+    /// Null means every edge whose endpoints are both selected.
+    edges: ?std.AutoHashMap(EdgeId, void),
+
+    fn init(allocator: std.mem.Allocator, db: *Database, scope: ExportScope) !Selection {
+        if (scope.query_result) |result| return fromQueryResult(allocator, db, result);
+
+        const node_ids = try collectCanonicalNodeIds(allocator, db, scope.label_filter);
+        errdefer allocator.free(node_ids);
+        var nodes = std.AutoHashMap(NodeId, void).init(allocator);
+        errdefer nodes.deinit();
+        for (node_ids) |node_id| try nodes.put(node_id, {});
+        return .{ .allocator = allocator, .node_ids = node_ids, .nodes = nodes, .edges = null };
     }
 
-    return set;
+    fn fromQueryResult(allocator: std.mem.Allocator, db: *Database, result: *const QueryResult) !Selection {
+        var nodes = std.AutoHashMap(NodeId, void).init(allocator);
+        errdefer nodes.deinit();
+        var edges = std.AutoHashMap(EdgeId, void).init(allocator);
+        errdefer edges.deinit();
+
+        for (result.rows) |row| {
+            for (row.values) |value| try collectGraphValues(value, &nodes, &edges);
+        }
+        if (result.rows.len > 0 and nodes.count() == 0 and edges.count() == 0) {
+            return ImportExportError.QueryReturnedNoGraph;
+        }
+
+        // An edge is only importable alongside its endpoints.
+        var edge_iter = edges.keyIterator();
+        while (edge_iter.next()) |edge_id| {
+            var edge = (db.getEdgeInTxn(null, edge_id.*) catch |err| return mapDatabaseError(err)) orelse continue;
+            defer edge.deinit(db.allocator);
+            try nodes.put(edge.source, {});
+            try nodes.put(edge.target, {});
+        }
+
+        const node_ids = try allocator.alloc(NodeId, nodes.count());
+        var node_iter = nodes.keyIterator();
+        var i: usize = 0;
+        while (node_iter.next()) |node_id| : (i += 1) node_ids[i] = node_id.*;
+        std.mem.sort(NodeId, node_ids, {}, std.sort.asc(NodeId));
+
+        return .{ .allocator = allocator, .node_ids = node_ids, .nodes = nodes, .edges = edges };
+    }
+
+    fn deinit(self: *Selection) void {
+        self.allocator.free(self.node_ids);
+        self.nodes.deinit();
+        if (self.edges) |*edges| edges.deinit();
+    }
+
+    fn includesEdge(self: *const Selection, edge: Database.EdgeInfo) bool {
+        if (!self.nodes.contains(edge.source) or !self.nodes.contains(edge.target)) return false;
+        const edges = self.edges orelse return true;
+        return edges.contains(edge.id);
+    }
+};
+
+/// Gather the node and edge ids a query result value refers to, looking
+/// inside lists and maps, which is where paths and collected values put them.
+fn collectGraphValues(
+    value: ResultValue,
+    nodes: *std.AutoHashMap(NodeId, void),
+    edges: *std.AutoHashMap(EdgeId, void),
+) error{OutOfMemory}!void {
+    switch (value) {
+        .node_id => |id| try nodes.put(id, {}),
+        .edge_id => |id| try edges.put(id, {}),
+        .list_val => |items| for (items) |item| try collectGraphValues(item, nodes, edges),
+        .map_val => |entries| for (entries) |entry| try collectGraphValues(entry.value, nodes, edges),
+        else => {},
+    }
 }
 
 /// Import data from a CSV file.
@@ -1526,13 +1602,12 @@ pub fn exportCsv(
     db: *Database,
     nodes_writer: anytype,
     edges_writer: anytype,
-    label_filter: ?[]const u8,
+    scope: ExportScope,
 ) !ExportStats {
     var stats = ExportStats{};
-    const node_ids = try collectCanonicalNodeIds(allocator, db, label_filter);
-    defer allocator.free(node_ids);
-    var exported_nodes = try buildNodeIdSet(allocator, node_ids);
-    defer exported_nodes.deinit();
+    var selection = try Selection.init(allocator, db, scope);
+    defer selection.deinit();
+    const node_ids = selection.node_ids;
 
     // Write nodes header
     try nodes_writer.writeAll(csv_nodes_header_line);
@@ -1563,7 +1638,7 @@ pub fn exportCsv(
         defer db.freeEdgeInfos(edges);
 
         for (edges) |edge| {
-            if (!exported_nodes.contains(edge.target)) continue;
+            if (!selection.includesEdge(edge)) continue;
             try edges_writer.print("{d},{d},{s}\n", .{
                 edge.source,
                 edge.target,
@@ -1795,13 +1870,13 @@ test "import_export: dumpCanonicalJson is deterministic and includes unlabeled n
 
     var buf_a: [8192]u8 = undefined;
     var stream_a = @import("compat").fixedBufferStream(&buf_a);
-    const stats_a = try dumpCanonicalJson(allocator, db_a, stream_a.writer(), null);
+    const stats_a = try dumpCanonicalJson(allocator, db_a, stream_a.writer(), .{});
     try std.testing.expectEqual(@as(u64, 2), stats_a.nodes_exported);
     try std.testing.expectEqual(@as(u64, 1), stats_a.edges_exported);
 
     var buf_b: [8192]u8 = undefined;
     var stream_b = @import("compat").fixedBufferStream(&buf_b);
-    const stats_b = try dumpCanonicalJson(allocator, db_b, stream_b.writer(), null);
+    const stats_b = try dumpCanonicalJson(allocator, db_b, stream_b.writer(), .{});
     try std.testing.expectEqual(@as(u64, 2), stats_b.nodes_exported);
     try std.testing.expectEqual(@as(u64, 1), stats_b.edges_exported);
 

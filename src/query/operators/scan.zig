@@ -122,6 +122,12 @@ pub const AllNodesScan = struct {
 
 /// Scans nodes with a specific label using the LabelIndex.
 /// Produces one row per node with the node ID in the output slot.
+///
+/// A query that only reads streams the ids: it reads the label index
+/// `CHUNK` ids at a time, so `MATCH (n:L) RETURN n LIMIT 1` reads one chunk
+/// rather than every :L node. A query that writes takes all the ids when it
+/// opens instead, so that nodes it creates, relabels or deletes while
+/// scanning cannot change which nodes the scan visits.
 pub const LabelScan = struct {
     /// The slot to output node IDs to
     output_slot: u8,
@@ -129,12 +135,33 @@ pub const LabelScan = struct {
     label_id: SymbolId,
     /// Database reference for txn-aware scans
     database: *Database,
-    /// Materialized node ids visible in the current txn
+    /// Materialized node ids visible in the current txn (writing queries)
     node_ids: ?[]NodeId,
-    /// Current result index
+    /// Current result index into `node_ids`
     current_index: usize,
     /// Current row being returned
     current_row: ?*Row,
+    /// Streaming state (read-only queries)
+    stream: ?Stream,
+
+    const CHUNK = 256;
+
+    /// Committed ids read from the label index a chunk at a time, merged
+    /// with the nodes the transaction's overlay gives the label.
+    const Stream = struct {
+        chunk: []NodeId,
+        chunk_len: usize = 0,
+        chunk_pos: usize = 0,
+        /// The last committed id read, where the next chunk starts.
+        last: ?NodeId = null,
+        /// The index has nothing after the current chunk.
+        exhausted: bool = false,
+        /// The next committed id the overlay does not rule out.
+        pending: ?NodeId = null,
+        /// Overlay nodes with the label, ascending.
+        overlay_ids: []NodeId,
+        overlay_pos: usize = 0,
+    };
 
     const Self = @This();
 
@@ -148,6 +175,7 @@ pub const LabelScan = struct {
             .node_ids = null,
             .current_index = 0,
             .current_row = null,
+            .stream = null,
         };
         return self;
     }
@@ -170,43 +198,114 @@ pub const LabelScan = struct {
     fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
+        // Opened again without a close (the inner side of a join): start over.
+        self.release();
+
         // Allocate row for reuse
         self.current_row = ctx.allocRow() catch return OperatorError.OutOfMemory;
-
-        self.node_ids = self.database.getNodesByLabelIdInTxn(ctx.txn, self.label_id) catch return OperatorError.StorageError;
         self.current_index = 0;
-    }
 
-    fn next(ptr: *anyopaque, _: *ExecutionContext) OperatorError!?*Row {
-        const self: *Self = @ptrCast(@alignCast(ptr));
-
-        const node_ids = self.node_ids orelse return OperatorError.NotInitialized;
-        const row = self.current_row orelse return OperatorError.NotInitialized;
-
-        if (self.current_index < node_ids.len) {
-            const node_id = node_ids[self.current_index];
-            self.current_index += 1;
-            // Set the node reference in the output slot
-            row.clear();
-            row.setSlot(self.output_slot, .{ .node_ref = node_id });
-
-            return row;
+        if (!ctx.stable_reads) {
+            self.node_ids = self.database.getNodesByLabelIdInTxn(ctx.txn, self.label_id) catch return OperatorError.StorageError;
+            return;
         }
 
-        return null;
+        const allocator = self.database.allocator;
+        const chunk = allocator.alloc(NodeId, CHUNK) catch return OperatorError.OutOfMemory;
+        errdefer allocator.free(chunk);
+        const overlay_ids = self.database.overlayNodesWithLabel(ctx.txn, self.label_id) catch |err| return switch (err) {
+            error.OutOfMemory => OperatorError.OutOfMemory,
+            else => OperatorError.StorageError,
+        };
+        self.stream = .{ .chunk = chunk, .overlay_ids = overlay_ids };
     }
 
-    fn close(ptr: *anyopaque, _: *ExecutionContext) void {
+    /// The next committed id with the label that the overlay does not
+    /// contradict, or null when the index has no more.
+    fn nextCommitted(self: *Self, stream: *Stream, ctx: *ExecutionContext) OperatorError!?NodeId {
+        while (true) {
+            if (stream.chunk_pos == stream.chunk_len) {
+                if (stream.exhausted) return null;
+                const n = self.database.label_index.readNodesByLabel(self.label_id, stream.last, stream.chunk) catch |err| return switch (err) {
+                    error.OutOfMemory => OperatorError.OutOfMemory,
+                    else => OperatorError.StorageError,
+                };
+                stream.chunk_len = n;
+                stream.chunk_pos = 0;
+                if (n < stream.chunk.len) stream.exhausted = true;
+                if (n == 0) return null;
+                stream.last = stream.chunk[n - 1];
+            }
+            const id = stream.chunk[stream.chunk_pos];
+            stream.chunk_pos += 1;
+            // An overlay that holds the node decides; a node it gives the
+            // label is in `overlay_ids` as well, and the merge emits it once.
+            if (self.database.overlayNodeHasLabel(ctx.txn, id, self.label_id)) |has| {
+                if (!has) continue;
+            }
+            return id;
+        }
+    }
+
+    fn nextStreamed(self: *Self, stream: *Stream, ctx: *ExecutionContext) OperatorError!?NodeId {
+        if (stream.pending == null) stream.pending = try self.nextCommitted(stream, ctx);
+        const committed = stream.pending;
+        const from_overlay: ?NodeId = if (stream.overlay_pos < stream.overlay_ids.len)
+            stream.overlay_ids[stream.overlay_pos]
+        else
+            null;
+
+        if (from_overlay) |o| {
+            if (committed == null or o <= committed.?) {
+                stream.overlay_pos += 1;
+                if (committed != null and committed.? == o) stream.pending = null;
+                return o;
+            }
+        }
+        stream.pending = null;
+        return committed;
+    }
+
+    fn next(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!?*Row {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
+        const row = self.current_row orelse return OperatorError.NotInitialized;
+
+        const node_id: NodeId = if (self.stream) |*stream|
+            (try self.nextStreamed(stream, ctx)) orelse return null
+        else blk: {
+            const node_ids = self.node_ids orelse return OperatorError.NotInitialized;
+            if (self.current_index >= node_ids.len) return null;
+            self.current_index += 1;
+            break :blk node_ids[self.current_index - 1];
+        };
+
+        // Set the node reference in the output slot
+        row.clear();
+        row.setSlot(self.output_slot, .{ .node_ref = node_id });
+        return row;
+    }
+
+    fn release(self: *Self) void {
         if (self.node_ids) |node_ids| {
             self.database.allocator.free(node_ids);
             self.node_ids = null;
         }
+        if (self.stream) |stream| {
+            self.database.allocator.free(stream.chunk);
+            self.database.allocator.free(stream.overlay_ids);
+            self.stream = null;
+        }
+    }
+
+    fn close(ptr: *anyopaque, _: *ExecutionContext) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.release();
     }
 
     fn deinit(ptr: *anyopaque, allocator: Allocator) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
+        self.release();
         allocator.destroy(self);
     }
 };

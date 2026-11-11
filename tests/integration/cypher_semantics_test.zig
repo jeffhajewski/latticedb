@@ -1234,3 +1234,54 @@ test "cypher: ORDER BY with SKIP and LIMIT returns the same rows as sorting ever
     try run(db, "UNWIND range(1, 5) AS i CREATE (t:T {i: i}) RETURN t.i ORDER BY t.i LIMIT 0");
     try std.testing.expectEqual(@as(i64, 5), try queryCount(db, "MATCH (t:T) RETURN count(t)"));
 }
+
+test "cypher: a streamed label scan sees what a materialised one does" {
+    const path = "/tmp/lattice_cs_label_stream.ltdb";
+    const compat_fs = @import("compat").fs;
+    compat_fs.cwd().deleteFile(path) catch {};
+    compat_fs.cwd().deleteFile(path ++ "-wal") catch {};
+    const db = try Database.open(std.testing.allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = true },
+    });
+    defer {
+        db.close();
+        compat_fs.cwd().deleteFile(path) catch {};
+        compat_fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    // Several index chunks of :C, with unlabelled :D nodes between them.
+    try run(db, "UNWIND range(0, 899) AS i CREATE (:C {i: i}), (:D {i: 1000 + i})");
+
+    var txn = try db.beginTransaction(.read_write);
+    defer db.abortTransaction(&txn) catch {};
+
+    // The overlay removes, relabels, deletes and adds nodes on both sides
+    // of chunk boundaries.
+    try runIn(db, &txn, "MATCH (n:C) WHERE n.i % 7 = 0 DELETE n");
+    try runIn(db, &txn, "MATCH (n:C) WHERE n.i % 11 = 0 REMOVE n:C");
+    try runIn(db, &txn, "MATCH (n:D) WHERE n.i % 13 = 0 SET n:C");
+    try runIn(db, &txn, "UNWIND range(0, 99) AS i CREATE (:C {i: 5000 + i})");
+
+    // A query that writes reads every id when it opens; one that only reads
+    // streams them. Both must visit the same nodes in the same order.
+    var materialised = try db.queryInTxn(&txn, "MATCH (n:C) SET n.seen = true RETURN n.i");
+    defer materialised.deinit();
+    var streamed = try db.queryInTxn(&txn, "MATCH (n:C) RETURN n.i");
+    defer streamed.deinit();
+    try std.testing.expect(materialised.rowCount() > 800);
+    try std.testing.expectEqual(materialised.rowCount(), streamed.rowCount());
+    for (0..streamed.rowCount()) |r| {
+        try std.testing.expectEqual(materialised.rows[r].values[0].int_val, streamed.rows[r].values[0].int_val);
+    }
+
+    var limited = try db.queryInTxn(&txn, "MATCH (n:C) RETURN n.i LIMIT 300");
+    defer limited.deinit();
+    try std.testing.expectEqual(@as(usize, 300), limited.rowCount());
+    for (0..300) |r| {
+        try std.testing.expectEqual(streamed.rows[r].values[0].int_val, limited.rows[r].values[0].int_val);
+    }
+
+    // Outside the transaction the committed 900 are all there.
+    try std.testing.expectEqual(@as(i64, 900), try queryCount(db, "MATCH (n:C) RETURN count(n)"));
+}

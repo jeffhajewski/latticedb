@@ -168,6 +168,31 @@ pub const LabelIndex = struct {
         return results.toOwnedSlice(self.allocator) catch return LabelIndexError.OutOfMemory;
     }
 
+    /// Fill `out` with the next node ids carrying `label_id`, ascending,
+    /// starting after `after` (from the first when null). Returns how many
+    /// were written; fewer than `out.len` means the label has no more.
+    ///
+    /// Each call opens and closes its own B-tree range, so nothing stays
+    /// pinned or latched between calls: a caller can read a large label a
+    /// chunk at a time and stop early.
+    pub fn readNodesByLabel(self: *Self, label_id: SymbolId, after: ?NodeId, out: []NodeId) LabelIndexError!usize {
+        const first: NodeId = if (after) |a| (std.math.add(NodeId, a, 1) catch return 0) else 0;
+        const start_bytes = (LabelKey{ .label_id = label_id, .node_id = first }).toBytes();
+
+        var iter = self.tree.range(&start_bytes, null) catch |err| return mapBTreeError(err);
+        defer iter.deinit();
+
+        var count: usize = 0;
+        while (count < out.len) {
+            const entry = (iter.next() catch |err| return mapBTreeError(err)) orelse break;
+            const key = LabelKey.fromBytes(entry.key);
+            if (key.label_id != label_id) break;
+            out[count] = key.node_id;
+            count += 1;
+        }
+        return count;
+    }
+
     /// Iterator for scanning nodes with a label (lazy evaluation)
     pub const NodeIterator = struct {
         tree_iter: btree.BTree.Iterator,

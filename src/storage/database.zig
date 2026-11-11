@@ -5393,6 +5393,37 @@ pub const Database = struct {
         return matches.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
     }
 
+    /// The nodes `txn`'s overlay holds with `label_id`, ascending; empty
+    /// without an overlay. Owned by `self.allocator`.
+    ///
+    /// With `overlayNodeHasLabel` and the label index's `readNodesByLabel`
+    /// this gives what getNodesByLabelIdInTxn does, a piece at a time.
+    pub fn overlayNodesWithLabel(self: *Self, txn: ?*Transaction, label_id: symbols_mod.SymbolId) DatabaseError![]NodeId {
+        var matches: std.ArrayListUnmanaged(NodeId) = .empty;
+        errdefer matches.deinit(self.allocator);
+        if (txn) |t| {
+            if (self.getTxnOverlay(t)) |overlay| {
+                var iter = overlay.node_states.iterator();
+                while (iter.next()) |entry| {
+                    const state = entry.value_ptr;
+                    if (!state.exists or !containsSymbolId(state.labels, label_id)) continue;
+                    matches.append(self.allocator, entry.key_ptr.*) catch return DatabaseError.OutOfMemory;
+                }
+            }
+        }
+        std.mem.sort(NodeId, matches.items, {}, std.sort.asc(NodeId));
+        return matches.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+    }
+
+    /// Whether `txn`'s overlay gives a node `label_id`, or null when the
+    /// overlay does not hold the node and the committed state decides.
+    pub fn overlayNodeHasLabel(self: *Self, txn: ?*Transaction, node_id: NodeId, label_id: symbols_mod.SymbolId) ?bool {
+        const t = txn orelse return null;
+        const overlay = self.getTxnOverlay(t) orelse return null;
+        const state = overlay.node_states.getPtr(node_id) orelse return null;
+        return state.exists and containsSymbolId(state.labels, label_id);
+    }
+
     fn orderNodeId(target: NodeId, item: NodeId) std.math.Order {
         return std.math.order(target, item);
     }

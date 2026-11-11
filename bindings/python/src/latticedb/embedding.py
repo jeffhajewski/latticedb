@@ -62,8 +62,12 @@ def hash_embed(text: str, dimensions: int = 128) -> np.ndarray:
 class EmbeddingClient:
     """HTTP embedding client for services like Ollama and OpenAI.
 
+    ``endpoint`` is the full URL each request is POSTed to; nothing is
+    appended to it. For Ollama that is ``http://localhost:11434/api/embeddings``,
+    for OpenAI ``https://api.openai.com/v1/embeddings``.
+
     Example:
-        with EmbeddingClient("http://localhost:11434") as client:
+        with EmbeddingClient("http://localhost:11434/api/embeddings") as client:
             vec = client.embed("hello world")
     """
 

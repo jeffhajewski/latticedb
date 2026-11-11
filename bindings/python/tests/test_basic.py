@@ -317,7 +317,7 @@ class TestHashEmbed:
         import latticedb
 
         with pytest.deprecated_call(
-            match=r"latticedb\.hash_embed is deprecated; use latticedb\.embedding\.hash_embed\. Earliest removal is v0\.6\.0\."
+            match=r"latticedb\.hash_embed is deprecated; use latticedb\.embedding\.hash_embed\."
         ):
             vec = latticedb.hash_embed("hello world", dimensions=32)
 
@@ -633,7 +633,7 @@ class TestEmbeddingClientUnit:
         fake_native = self._install_fake_embedding_native(monkeypatch)
 
         with pytest.deprecated_call(
-            match=r"latticedb\.EmbeddingClient is deprecated; use latticedb\.embedding\.EmbeddingClient\. Earliest removal is v0\.6\.0\."
+            match=r"latticedb\.EmbeddingClient is deprecated; use latticedb\.embedding\.EmbeddingClient\."
         ):
             client = latticedb.EmbeddingClient(endpoint="http://localhost:11434/api/embeddings")
 

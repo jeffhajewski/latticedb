@@ -821,7 +821,7 @@ typedef enum {
 } lattice_embedding_api_format;
 
 typedef struct {
-    const char* endpoint;
+    const char* endpoint;       /* full URL to POST to; nothing is appended */
     const char* model;
     lattice_embedding_api_format api_format;
     const char* api_key;        /* NULL for no auth */

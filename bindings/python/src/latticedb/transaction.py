@@ -692,7 +692,7 @@ class Transaction:
     ) -> List[int]:
         """Deprecated compatibility alias for :meth:`batch_insert_vectors`."""
         warnings.warn(
-            "Transaction.batch_insert(...) is deprecated; use batch_insert_vectors(...). Earliest removal is v0.6.0.",
+            "Transaction.batch_insert(...) is deprecated; use batch_insert_vectors(...).",
             DeprecationWarning,
             stacklevel=2,
         )

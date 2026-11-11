@@ -63,22 +63,22 @@ export {
 } from './ffi';
 
 /**
- * @deprecated Use `@hajewski/latticedb/embedding` instead. Earliest removal is v0.6.0.
+ * @deprecated Use `@hajewski/latticedb/embedding` instead.
  */
 export const hashEmbed: typeof embeddingHashEmbed = embeddingHashEmbed;
 
 /**
- * @deprecated Use `@hajewski/latticedb/embedding` instead. Earliest removal is v0.6.0.
+ * @deprecated Use `@hajewski/latticedb/embedding` instead.
  */
 export const EmbeddingClient: typeof EmbeddingClientClass = EmbeddingClientClass;
 
 /**
- * @deprecated Use `@hajewski/latticedb/embedding` instead. Earliest removal is v0.6.0.
+ * @deprecated Use `@hajewski/latticedb/embedding` instead.
  */
 export const EmbeddingApiFormat: typeof embeddingApiFormat = embeddingApiFormat;
 
 /**
- * @deprecated Use `@hajewski/latticedb/embedding` instead. Earliest removal is v0.6.0.
+ * @deprecated Use `@hajewski/latticedb/embedding` instead.
  */
 export type EmbeddingConfig = EmbeddingConfigType;
 

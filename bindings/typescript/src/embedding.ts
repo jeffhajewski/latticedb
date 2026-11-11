@@ -28,7 +28,7 @@ export function hashEmbed(text: string, dimensions: number = 128): Float32Array 
  *
  * @example
  * ```typescript
- * const client = new EmbeddingClient({ endpoint: "http://localhost:11434" });
+ * const client = new EmbeddingClient({ endpoint: "http://localhost:11434/api/embeddings" });
  * const vec = client.embed("hello world");
  * client.close();
  * ```

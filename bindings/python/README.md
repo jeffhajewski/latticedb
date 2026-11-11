@@ -240,12 +240,12 @@ Connect to Ollama, OpenAI, or compatible APIs:
 from latticedb.embedding import EmbeddingClient, EmbeddingApiFormat
 
 # Ollama (default)
-with EmbeddingClient("http://localhost:11434") as client:
+with EmbeddingClient("http://localhost:11434/api/embeddings") as client:
     vec = client.embed("hello world")
 
 # OpenAI-compatible API
 with EmbeddingClient(
-    "https://api.openai.com/v1",
+    "https://api.openai.com/v1/embeddings",
     model="text-embedding-3-small",
     api_format=EmbeddingApiFormat.OPENAI,
     api_key="sk-...",

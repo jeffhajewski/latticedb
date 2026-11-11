@@ -158,7 +158,11 @@ export enum EmbeddingApiFormat {
  * Configuration for an HTTP embedding client.
  */
 export interface EmbeddingConfig {
-  /** HTTP endpoint URL */
+  /**
+   * Full URL each request is POSTed to; nothing is appended to it. For
+   * Ollama, "http://localhost:11434/api/embeddings"; for OpenAI,
+   * "https://api.openai.com/v1/embeddings".
+   */
   endpoint: string;
   /** Model name (default: "nomic-embed-text") */
   model?: string;

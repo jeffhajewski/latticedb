@@ -289,14 +289,14 @@ import { EmbeddingClient, EmbeddingApiFormat } from "@hajewski/latticedb/embeddi
 
 // Ollama (default)
 const client = new EmbeddingClient({
-  endpoint: "http://localhost:11434",
+  endpoint: "http://localhost:11434/api/embeddings",
 });
 const vec = client.embed("hello world");
 client.close();
 
 // OpenAI-compatible API
 const openaiClient = new EmbeddingClient({
-  endpoint: "https://api.openai.com/v1",
+  endpoint: "https://api.openai.com/v1/embeddings",
   model: "text-embedding-3-small",
   apiFormat: EmbeddingApiFormat.OpenAI,
   apiKey: "sk-...",

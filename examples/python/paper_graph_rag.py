@@ -354,7 +354,7 @@ def main():
         from latticedb.embedding import EmbeddingClient
 
         print("Connecting to Ollama for embeddings...")
-        embed_client = EmbeddingClient("http://localhost:11434")
+        embed_client = EmbeddingClient("http://localhost:11434/api/embeddings")
         embed_fn = embed_client.embed
     else:
         embed_fn = lambda text: hash_embed(text, dimensions=128)

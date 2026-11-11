@@ -414,7 +414,7 @@ async function main(): Promise<void> {
 
   if (useOllama) {
     console.log("Connecting to Ollama for embeddings...");
-    embedClient = new EmbeddingClient({ endpoint: "http://localhost:11434" });
+    embedClient = new EmbeddingClient({ endpoint: "http://localhost:11434/api/embeddings" });
     embedFn = (text: string) => embedClient!.embed(text);
   } else {
     embedFn = (text: string) => hashEmbed(text, 128);

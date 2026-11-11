@@ -94,7 +94,7 @@ class Database:
         self._enable_adjacency_cache = enable_adjacency_cache
         if enable_vector is not None:
             warnings.warn(
-                "Database(..., enable_vector=...) is deprecated; use enable_vectors=.... Earliest removal is v0.6.0.",
+                "Database(..., enable_vector=...) is deprecated; use enable_vectors=....",
                 DeprecationWarning,
                 stacklevel=2,
             )

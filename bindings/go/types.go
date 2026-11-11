@@ -21,7 +21,7 @@ type OpenOptions struct {
 	EnableAdjacencyCache bool
 	// Preferred public option name.
 	EnableVectors bool
-	// Deprecated: use EnableVectors. Earliest removal is v0.6.0.
+	// Deprecated: use EnableVectors.
 	EnableVector     bool
 	VectorDimensions uint16
 	// DisableLock opens without taking a lock on the file. A locked database
@@ -96,7 +96,7 @@ type StreamRecord struct {
 	Payload  Value
 }
 
-// Deprecated: use package github.com/jeffhajewski/latticedb/bindings/go/embedding. Earliest removal is v0.6.0.
+// Deprecated: use package github.com/jeffhajewski/latticedb/bindings/go/embedding.
 type EmbeddingAPIFormat int
 
 const (
@@ -104,8 +104,11 @@ const (
 	EmbeddingAPIFormatOpenAI EmbeddingAPIFormat = EmbeddingAPIFormat(cgobridge.EmbeddingAPIFormatOpenAI)
 )
 
-// Deprecated: use package github.com/jeffhajewski/latticedb/bindings/go/embedding. Earliest removal is v0.6.0.
+// Deprecated: use package github.com/jeffhajewski/latticedb/bindings/go/embedding.
 type EmbeddingConfig struct {
+	// Endpoint is the full URL each request is POSTed to; nothing is
+	// appended to it. For Ollama, "http://localhost:11434/api/embeddings";
+	// for OpenAI, "https://api.openai.com/v1/embeddings".
 	Endpoint  string
 	Model     string
 	APIFormat EmbeddingAPIFormat

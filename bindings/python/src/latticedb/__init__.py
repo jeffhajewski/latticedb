@@ -72,7 +72,7 @@ EmbeddingApiFormat = _EmbeddingApiFormat
 def hash_embed(text: str, dimensions: int = 128) -> np.ndarray:
     """Deprecated compatibility wrapper for :func:`latticedb.embedding.hash_embed`."""
     warnings.warn(
-        "latticedb.hash_embed is deprecated; use latticedb.embedding.hash_embed. Earliest removal is v0.6.0.",
+        "latticedb.hash_embed is deprecated; use latticedb.embedding.hash_embed.",
         DeprecationWarning,
         stacklevel=2,
     )
@@ -84,7 +84,7 @@ class EmbeddingClient(_EmbeddingClient):
 
     def __init__(self, *args: Any, **kwargs: Any) -> None:
         warnings.warn(
-            "latticedb.EmbeddingClient is deprecated; use latticedb.embedding.EmbeddingClient. Earliest removal is v0.6.0.",
+            "latticedb.EmbeddingClient is deprecated; use latticedb.embedding.EmbeddingClient.",
             DeprecationWarning,
             stacklevel=2,
         )

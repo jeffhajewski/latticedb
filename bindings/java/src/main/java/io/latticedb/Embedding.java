@@ -22,7 +22,13 @@ public final class Embedding {
         }
     }
 
-    /** Configuration for {@link Client}. */
+    /**
+     * Configuration for {@link Client}.
+     *
+     * <p>{@code endpoint} is the full URL each request is POSTed to; nothing is
+     * appended to it. For Ollama, {@code http://localhost:11434/api/embeddings};
+     * for OpenAI, {@code https://api.openai.com/v1/embeddings}.
+     */
     public record Config(String endpoint, String model, APIFormat apiFormat,
                          String apiKey, int timeoutMs) {
         public Config {

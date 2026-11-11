@@ -2684,3 +2684,95 @@ test "fts searchWithMode treats a phrase as its words when positions are not sto
     try std.testing.expectEqual(@as(usize, 1), results.len);
     try std.testing.expectEqual(@as(DocId, 1), results[0].doc_id);
 }
+
+/// Text with `word` repeated `count` times, separated by spaces.
+fn repeatedWords(allocator: Allocator, word: []const u8, count: usize) ![]u8 {
+    var text: ArrayListUnmanaged(u8) = .empty;
+    errdefer text.deinit(allocator);
+    for (0..count) |i| {
+        if (i > 0) try text.append(allocator, ' ');
+        try text.appendSlice(allocator, word);
+    }
+    return text.toOwnedSlice(allocator);
+}
+
+test "fts posting entry with more positions than a page holds is stored" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_many_positions_test.db");
+    defer fx.destroy(allocator);
+    fx.index.config.store_positions = true;
+
+    // 3000 occurrences encode to about 6 KB of positions: past the 512-byte
+    // buffer the entry used to be encoded into, and past a whole page.
+    const text = try repeatedWords(allocator, "echo", 3000);
+    defer allocator.free(text);
+    _ = try fx.index.indexDocument(1, text);
+    _ = try fx.index.indexDocument(2, "echo chamber");
+    _ = try fx.index.indexDocument(3, "echo chamber");
+
+    const results = try fx.index.search("echo", 10);
+    defer fx.index.freeResults(results);
+    try std.testing.expectEqual(@as(usize, 3), results.len);
+
+    const phrase = try fx.index.searchPhrase("echo chamber", 10);
+    defer fx.index.freeResults(phrase);
+    try std.testing.expectEqual(@as(usize, 2), phrase.len);
+    try std.testing.expect(resultsContain(phrase, 2));
+    try std.testing.expect(resultsContain(phrase, 3));
+
+    // The first positions are kept, so a phrase near the start still matches.
+    const echoes = try fx.index.searchPhrase("echo echo", 10);
+    defer fx.index.freeResults(echoes);
+    try std.testing.expectEqual(@as(usize, 1), echoes.len);
+    try std.testing.expectEqual(@as(DocId, 1), echoes[0].doc_id);
+}
+
+test "fts removing from a page with skip pointers and a long entry" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_skip_rebuild_long_entry_test.db");
+    defer fx.destroy(allocator);
+    fx.index.config.store_positions = true;
+
+    // One entry of about 400 bytes among enough short ones that the page has
+    // skip pointers, so removing any entry rebuilds them and has to measure
+    // the long one.
+    const text = try repeatedWords(allocator, "delta", 200);
+    defer allocator.free(text);
+    _ = try fx.index.indexDocument(1, text);
+    for (2..200) |id| _ = try fx.index.indexDocument(@intCast(id), "delta");
+
+    try fx.index.removeDocument(150);
+    const results = try fx.index.search("delta", std.math.maxInt(u32));
+    defer fx.index.freeResults(results);
+    try std.testing.expectEqual(@as(usize, 198), results.len);
+    try std.testing.expect(!resultsContain(results, 150));
+}
+
+test "fts posting page keeps one encoding when store_positions changes" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_positions_flip_test.db");
+    defer fx.destroy(allocator);
+
+    // A database opened first without positions and later with them appends
+    // entries of both kinds to the same pages.
+    _ = try fx.index.indexDocument(1, "kilo lima");
+    _ = try fx.index.indexDocument(2, "kilo kilo lima");
+    fx.index.config.store_positions = true;
+    _ = try fx.index.indexDocument(3, "kilo kilo kilo lima");
+    fx.index.config.store_positions = false;
+    _ = try fx.index.indexDocument(4, "kilo lima");
+
+    var iter = try fx.index.posting_store.iterate((try fx.index.dictionary.get("kilo")).?.posting_page);
+    defer iter.deinit();
+    var seen: [4]struct { doc: DocId, tf: u32 } = undefined;
+    var n: usize = 0;
+    while (try iter.next()) |posting| : (n += 1) {
+        try std.testing.expect(n < seen.len);
+        seen[n] = .{ .doc = posting.doc_id, .tf = posting.term_freq };
+    }
+    try std.testing.expectEqual(@as(usize, 4), n);
+    for (seen, [_]u32{ 1, 2, 3, 1 }, 1..) |got, tf, doc| {
+        try std.testing.expectEqual(@as(DocId, @intCast(doc)), got.doc);
+        try std.testing.expectEqual(tf, got.tf);
+    }
+}

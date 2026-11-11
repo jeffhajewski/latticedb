@@ -477,108 +477,101 @@ pub const PostingStore = struct {
     }
 
     /// Append a posting entry with optional position storage
+    ///
+    /// Walks to the tail of the list and appends there, adding a page when the
+    /// tail is full. This is a loop rather than recursion: a long list is many
+    /// pages, and each level of recursion used to carry its own encode buffer.
+    ///
+    /// Whether a page's entries carry positions is a property of the page, set by
+    /// its first entry. An entry whose positions disagree with the page is written
+    /// the page's way — with an empty position list, or without its positions —
+    /// because one entry encoded differently would make every later entry on the
+    /// page decode as garbage. That can happen when `store_positions` changes
+    /// between opens of the same database.
+    ///
+    /// An entry always fits in an empty page: positions beyond what one page can
+    /// hold are not stored (see `encodeEntry`).
     pub fn appendWithPositions(self: *Self, page_id: PageId, entry: PostingEntry, store_positions: bool) PostingError!PageId {
-        const frame = self.bp.fetchPage(page_id, .exclusive) catch {
-            return PostingError.BufferPoolError;
-        };
-        var frame_pinned = true;
-        var frame_dirty = false;
-        errdefer if (frame_pinned) self.bp.unpinPage(frame, frame_dirty);
+        const wants_positions = store_positions and entry.positions != null;
+        var encode_buf: [PAGE_DATA_CAPACITY]u8 = undefined;
 
-        const data = frame.data;
-        var posting_header = self.readPageMeta(data, true);
-
-        if (posting_header.layout == .v1) {
-            try self.upgradePageToV2(data, &posting_header);
-            frame_dirty = true;
-        }
-
-        // Encode the entry - use larger buffer for positions
-        var encode_buf: [512]u8 = undefined;
-        var encode_len: usize = 0;
-
-        // Encode doc_id and term_freq
-        encode_len += encodeVarint(entry.doc_id, encode_buf[encode_len..]);
-        encode_len += encodeVarint(entry.term_freq, encode_buf[encode_len..]);
-
-        // Encode positions if requested and available
-        const has_positions = store_positions and entry.positions != null;
-        if (has_positions) {
-            const positions = entry.positions.?;
-            // Encode position count
-            encode_len += encodeVarint(positions.len, encode_buf[encode_len..]);
-            // Encode each position (absolute for now, could delta-encode later)
-            for (positions) |pos| {
-                encode_len += encodeVarint(pos, encode_buf[encode_len..]);
-            }
-            // Set has_positions flag
-            posting_header.flags |= POSTING_ENTRY_FLAG_HAS_POSITIONS;
-        }
-
-        // Check if there's space
-        const current_end: usize = posting_header.data_end;
-        if (current_end + encode_len > PAGE_SIZE) {
-            if (posting_header.next_page != 0) {
-                const next_page = posting_header.next_page;
-                self.bp.unpinPage(frame, frame_dirty);
-                frame_pinned = false;
-                return self.appendWithPositions(next_page, entry, store_positions);
-            }
-
-            // Need to allocate overflow page
-            const new_page_id = try self.create(posting_header.token_id);
-
-            // Link pages and preserve flags
-            const new_flags = posting_header.flags;
-            posting_header.next_page = new_page_id;
-            posting_header.write(data);
-            frame_dirty = true;
-            self.bp.unpinPage(frame, true);
-            frame_pinned = false;
-
-            // Create new page with same flags
-            const new_frame = self.bp.fetchPage(new_page_id, .exclusive) catch {
+        var current_page = page_id;
+        while (true) {
+            const frame = self.bp.fetchPage(current_page, .exclusive) catch {
                 return PostingError.BufferPoolError;
             };
-            var new_header = self.readPageMeta(new_frame.data, false);
-            new_header.flags = new_flags;
-            new_header.write(new_frame.data);
-            self.bp.unpinPage(new_frame, true);
+            var frame_dirty = false;
+            errdefer self.bp.unpinPage(frame, frame_dirty);
 
-            // Recursively append to new page
-            return self.appendWithPositions(new_page_id, entry, store_positions);
-        }
+            const data = frame.data;
+            var posting_header = self.readPageMeta(data, true);
 
-        // Write skip pointer if at SKIP_INTERVAL boundary
-        // Skip pointers point to entries at positions: SKIP_INTERVAL, 2*SKIP_INTERVAL, etc.
-        const entry_index = posting_header.num_entries;
-        if (entry_index > 0 and entry_index % SKIP_INTERVAL == 0) {
-            const skip_index = entry_index / SKIP_INTERVAL - 1;
-            if (skip_index < posting_header.maxSkipPointers()) {
-                const skip_ptr = SkipPointer{
-                    .doc_id = entry.doc_id,
-                    .byte_offset = @intCast(current_end - posting_header.data_start),
-                    .entry_count = entry_index,
-                };
-                const skip_offset = posting_header.skipPointerOffset(skip_index);
-                var skip_buf: [@sizeOf(SkipPointer)]u8 = undefined;
-                skip_ptr.serialize(&skip_buf);
-                @memcpy(data[skip_offset..][0..@sizeOf(SkipPointer)], &skip_buf);
-                posting_header.num_skip_pointers = @intCast(skip_index + 1);
+            if (posting_header.layout == .v1) {
+                try self.upgradePageToV2(data, &posting_header);
+                frame_dirty = true;
             }
+
+            const page_positions = if (posting_header.num_entries == 0)
+                wants_positions
+            else
+                posting_header.hasPositions();
+            const encode_len = encodeEntry(entry, page_positions, &encode_buf);
+
+            // Check if there's space
+            const current_end: usize = posting_header.data_end;
+            if (current_end + encode_len > PAGE_SIZE) {
+                if (posting_header.next_page != 0) {
+                    const next_page = posting_header.next_page;
+                    self.bp.unpinPage(frame, frame_dirty);
+                    current_page = next_page;
+                    continue;
+                }
+
+                // Need to allocate overflow page
+                const new_page_id = try self.create(posting_header.token_id);
+                posting_header.next_page = new_page_id;
+                posting_header.write(data);
+                self.bp.unpinPage(frame, true);
+                current_page = new_page_id;
+                continue;
+            }
+
+            if (page_positions) {
+                posting_header.flags |= POSTING_ENTRY_FLAG_HAS_POSITIONS;
+            } else {
+                posting_header.flags &= ~POSTING_ENTRY_FLAG_HAS_POSITIONS;
+            }
+
+            // Write skip pointer if at SKIP_INTERVAL boundary
+            // Skip pointers point to entries at positions: SKIP_INTERVAL, 2*SKIP_INTERVAL, etc.
+            const entry_index = posting_header.num_entries;
+            if (entry_index > 0 and entry_index % SKIP_INTERVAL == 0) {
+                const skip_index = entry_index / SKIP_INTERVAL - 1;
+                if (skip_index < posting_header.maxSkipPointers()) {
+                    const skip_ptr = SkipPointer{
+                        .doc_id = entry.doc_id,
+                        .byte_offset = @intCast(current_end - posting_header.data_start),
+                        .entry_count = entry_index,
+                    };
+                    const skip_offset = posting_header.skipPointerOffset(skip_index);
+                    var skip_buf: [@sizeOf(SkipPointer)]u8 = undefined;
+                    skip_ptr.serialize(&skip_buf);
+                    @memcpy(data[skip_offset..][0..@sizeOf(SkipPointer)], &skip_buf);
+                    posting_header.num_skip_pointers = @intCast(skip_index + 1);
+                }
+            }
+
+            // Write entry
+            @memcpy(data[current_end..][0..encode_len], encode_buf[0..encode_len]);
+
+            // Update header
+            posting_header.num_entries += 1;
+            posting_header.data_end = @intCast(current_end + encode_len);
+            posting_header.write(data);
+
+            self.bp.unpinPage(frame, true);
+            return current_page;
         }
-
-        // Write entry
-        @memcpy(data[current_end..][0..encode_len], encode_buf[0..encode_len]);
-
-        // Update header
-        posting_header.num_entries += 1;
-        posting_header.data_end = @intCast(current_end + encode_len);
-        posting_header.write(data);
-
-        self.bp.unpinPage(frame, true);
-        frame_pinned = false;
-        return page_id;
     }
 
     /// Get iterator for reading posting list
@@ -767,19 +760,16 @@ pub const PostingStore = struct {
                 skip_count += 1;
             }
 
-            // Calculate size of this entry to advance offset
-            var entry_buf: [256]u8 = undefined;
-            var entry_size: usize = 0;
-            entry_size += encodeVarint(entry.doc_id, entry_buf[entry_size..]);
-            entry_size += encodeVarint(entry.term_freq, entry_buf[entry_size..]);
+            // Advance past this entry. Measured rather than encoded into a
+            // scratch buffer: an entry with many positions is far longer than
+            // any small fixed buffer.
+            var entry_size: usize = varintLen(entry.doc_id) + varintLen(entry.term_freq);
             if (has_positions) {
                 if (entry.positions) |positions| {
-                    entry_size += encodeVarint(positions.len, entry_buf[entry_size..]);
-                    for (positions) |pos| {
-                        entry_size += encodeVarint(pos, entry_buf[entry_size..]);
-                    }
+                    entry_size += varintLen(positions.len);
+                    for (positions) |pos| entry_size += varintLen(pos);
                 } else {
-                    entry_size += encodeVarint(0, entry_buf[entry_size..]);
+                    entry_size += varintLen(0);
                 }
             }
             offset += entry_size;
@@ -1025,6 +1015,51 @@ pub const PostingIterator = struct {
 // ============================================================================
 // Variable-Length Integer Encoding (Varint)
 // ============================================================================
+
+/// Bytes of posting data one page can hold.
+const PAGE_DATA_CAPACITY: usize = PAGE_SIZE - DATA_OFFSET;
+
+/// Number of bytes `encodeVarint` writes for a value.
+pub fn varintLen(value: u64) usize {
+    var v = value;
+    var len: usize = 1;
+    while (v >= 0x80) : (v >>= 7) len += 1;
+    return len;
+}
+
+/// Encode one posting entry into `buf`, returning its length.
+///
+/// With `with_positions`, the position count and positions follow the doc id
+/// and term frequency; an entry that has none records a count of zero. A term
+/// can occur in one document more often than one page can record, and an entry
+/// is never split across pages, so positions that would not fit are dropped from
+/// the end. The term frequency still counts every occurrence, so scoring is
+/// unaffected; only phrase matching past that point is lost. The alternative
+/// was an entry no page could hold, which used to overrun a 512-byte stack
+/// buffer long before reaching that size.
+fn encodeEntry(entry: PostingEntry, with_positions: bool, buf: *[PAGE_DATA_CAPACITY]u8) usize {
+    var len: usize = 0;
+    len += encodeVarint(entry.doc_id, buf[len..]);
+    len += encodeVarint(entry.term_freq, buf[len..]);
+    if (!with_positions) return len;
+
+    const positions = entry.positions orelse &[_]u32{};
+    // The kept count is at most the full count, so its varint is no longer.
+    const budget = PAGE_DATA_CAPACITY - len - varintLen(positions.len);
+    var kept: usize = 0;
+    var kept_bytes: usize = 0;
+    while (kept < positions.len) : (kept += 1) {
+        const size = varintLen(positions[kept]);
+        if (kept_bytes + size > budget) break;
+        kept_bytes += size;
+    }
+
+    len += encodeVarint(kept, buf[len..]);
+    for (positions[0..kept]) |pos| {
+        len += encodeVarint(pos, buf[len..]);
+    }
+    return len;
+}
 
 /// Encode a u64 as a varint
 /// Returns the number of bytes written

@@ -1115,6 +1115,7 @@ pub const Database = struct {
         // Initialize these early since saveTreeRoots() checks them
         self.vector_storage = null;
         self.hnsw_index = null;
+        errdefer if (self.vector_storage) |*vs| vs.deinit();
         errdefer if (self.hnsw_index) |*hnsw| hnsw.deinit();
         self.hnsw_node_tree = null;
         self.stream_meta_tree = null;
@@ -1854,6 +1855,7 @@ pub const Database = struct {
             }
             hnsw.deinit();
         }
+        if (self.vector_storage) |*vs| vs.deinit();
 
         // 8. FTS index (no explicit deinit needed - components don't own resources)
 

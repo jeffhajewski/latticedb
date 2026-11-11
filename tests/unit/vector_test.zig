@@ -81,6 +81,7 @@ fn expectAllOrNothing(
     defer db.deinit();
 
     var vs = try VectorStorage.init(allocator, db.bp, DIMS);
+    defer vs.deinit();
     var failing = std.testing.FailingAllocator.init(allocator, .{});
     var index = HnswIndex.init(failing.allocator(), db.bp, &vs, .{
         .dimensions = DIMS,
@@ -289,6 +290,7 @@ test "incremental hnsw saves keep the tree equal to the node map" {
     defer db.deinit();
 
     var vs = try VectorStorage.init(allocator, db.bp, DIMS);
+    defer vs.deinit();
     var failing = std.testing.FailingAllocator.init(allocator, .{});
     var index = HnswIndex.init(failing.allocator(), db.bp, &vs, .{
         .dimensions = DIMS,

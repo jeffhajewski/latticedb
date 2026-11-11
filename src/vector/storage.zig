@@ -146,6 +146,12 @@ pub const VectorStorage = struct {
     last_page: PageId,
     layout: VectorLayout,
 
+    /// Deleted records that a store can reuse, so a store does not have to
+    /// walk the page chain looking for one. Filled by one walk the first time
+    /// a store needs it, then kept up to date by `delete`.
+    free_slots: std.ArrayListUnmanaged(VectorLocation) = .empty,
+    free_slots_known: bool = false,
+
     const Self = @This();
 
     fn validateDimensions(dimensions: u16) VectorStorageError!void {
@@ -267,6 +273,14 @@ pub const VectorStorage = struct {
         };
     }
 
+    /// Release the in-memory free-slot list. The storage stays usable; the
+    /// list is rebuilt from the pages if it is needed again.
+    pub fn deinit(self: *Self) void {
+        self.free_slots.deinit(self.allocator);
+        self.free_slots = .empty;
+        self.free_slots_known = false;
+    }
+
     /// Open existing vector storage from a known first page
     pub fn open(allocator: Allocator, bp: *BufferPool, first_page: PageId, dimensions: u16) !Self {
         try validateDimensions(dimensions);
@@ -316,9 +330,14 @@ pub const VectorStorage = struct {
             return VectorStorageError.DimensionMismatch;
         }
 
-        if (try self.findReusableLocation()) |loc| {
-            try self.writeAtLocation(loc, vector_id, vector);
-            return loc;
+        if (!self.free_slots_known) try self.collectFreeSlots();
+        while (self.free_slots.pop()) |loc| {
+            // Reuse a listed record only if it is still free.
+            const reused = self.writeAtLocation(loc, vector_id, vector, .only_if_free) catch |err| {
+                self.free_slots.appendAssumeCapacity(loc);
+                return err;
+            };
+            if (reused) return loc;
         }
 
         return switch (self.layout) {
@@ -327,29 +346,29 @@ pub const VectorStorage = struct {
         };
     }
 
-    fn findReusableLocation(self: *Self) VectorStorageError!?VectorLocation {
+    /// Walk the page chain once and list every deleted record, first in chain
+    /// order at the top so stores fill the chain from the front.
+    fn collectFreeSlots(self: *Self) VectorStorageError!void {
+        self.free_slots.clearRetainingCapacity();
         var current_page = self.first_page;
         while (current_page != NULL_PAGE) {
             const frame = self.bp.fetchPage(current_page, .shared) catch return VectorStorageError.BufferPoolError;
-            const vph = self.readVectorPageHeader(frame) catch |err| {
-                self.bp.unpinPage(frame, false);
-                return err;
-            };
+            defer self.bp.unpinPage(frame, false);
+            const vph = try self.readVectorPageHeader(frame);
 
             var slot: u16 = 0;
             while (slot < vph.vector_count) : (slot += 1) {
                 const offset = VECTOR_DATA_OFFSET + @as(usize, slot) * self.bytes_per_vector;
                 const vector_id = std.mem.readInt(u64, frame.data[offset..][0..8], .little);
                 if (vector_id == DELETED_VECTOR_ID) {
-                    self.bp.unpinPage(frame, false);
-                    return .{ .page_id = current_page, .slot_index = slot };
+                    self.free_slots.append(self.allocator, .{ .page_id = current_page, .slot_index = slot }) catch
+                        return VectorStorageError.OutOfMemory;
                 }
             }
-
             current_page = vph.next_page;
-            self.bp.unpinPage(frame, false);
         }
-        return null;
+        std.mem.reverse(VectorLocation, self.free_slots.items);
+        self.free_slots_known = true;
     }
 
     /// Replace an existing vector without allocating a new storage record.
@@ -364,7 +383,7 @@ pub const VectorStorage = struct {
         }
         const stored_id = try self.getVectorId(loc);
         if (stored_id != vector_id) return VectorStorageError.NotFound;
-        try self.writeAtLocation(loc, vector_id, vector);
+        _ = try self.writeAtLocation(loc, vector_id, vector, .any);
     }
 
     /// Mark a stored vector record reusable by a future insertion.
@@ -387,14 +406,28 @@ pub const VectorStorage = struct {
         }
         std.mem.writeInt(u64, frame.data[offset..][0..8], DELETED_VECTOR_ID, .little);
         self.bp.unpinPage(frame, true);
+
+        if (self.free_slots_known) {
+            self.free_slots.append(self.allocator, loc) catch {
+                // The record is deleted either way; the next store that
+                // needs a free record walks the chain to find it.
+                self.free_slots.clearRetainingCapacity();
+                self.free_slots_known = false;
+            };
+        }
     }
 
+    const WriteMode = enum { any, only_if_free };
+
+    /// Write a record in place. With `.only_if_free` the record must be
+    /// deleted, and false is returned without writing if it is not.
     fn writeAtLocation(
         self: *Self,
         loc: VectorLocation,
         vector_id: u64,
         vector: []const f32,
-    ) VectorStorageError!void {
+        mode: WriteMode,
+    ) VectorStorageError!bool {
         const frame = self.bp.fetchPage(loc.page_id, .exclusive) catch return VectorStorageError.BufferPoolError;
         const vph = self.readVectorPageHeader(frame) catch |err| {
             self.bp.unpinPage(frame, false);
@@ -406,6 +439,12 @@ pub const VectorStorage = struct {
         }
 
         const offset = VECTOR_DATA_OFFSET + @as(usize, loc.slot_index) * self.bytes_per_vector;
+        if (mode == .only_if_free and
+            std.mem.readInt(u64, frame.data[offset..][0..8], .little) != DELETED_VECTOR_ID)
+        {
+            self.bp.unpinPage(frame, false);
+            return false;
+        }
         switch (self.layout) {
             .inline_data => {
                 const float_offset = offset + INLINE_VECTOR_ID_SIZE;
@@ -424,6 +463,7 @@ pub const VectorStorage = struct {
         }
         std.mem.writeInt(u64, frame.data[offset..][0..8], vector_id, .little);
         self.bp.unpinPage(frame, true);
+        return true;
     }
 
     fn storeInline(self: *Self, vector_id: u64, vector: []const f32) VectorStorageError!VectorLocation {
@@ -1116,6 +1156,7 @@ test "vector storage updates and reuses deleted records" {
     defer bp.deinit();
 
     var storage = try VectorStorage.init(allocator, &bp, 4);
+    defer storage.deinit();
     const original = [_]f32{ 1.0, 0.0, 0.0, 0.0 };
     const replacement = [_]f32{ 0.0, 1.0, 0.0, 0.0 };
     const reused = [_]f32{ 0.0, 0.0, 1.0, 0.0 };
@@ -1271,6 +1312,7 @@ fn testLargeVectorRoundTrip(comptime dimensions: usize) !void {
         defer bp.deinit();
 
         var storage = try VectorStorage.init(allocator, &bp, @intCast(dimensions));
+        defer storage.deinit();
         first_page = storage.first_page;
 
         var vector: [dimensions]f32 = undefined;
@@ -1360,4 +1402,48 @@ test "vector storage rejects invalid dimensions and mismatched vectors" {
     var storage = try VectorStorage.init(allocator, &bp, 4);
     const wrong = [_]f32{ 1.0, 2.0, 3.0 };
     try std.testing.expectError(VectorStorageError.DimensionMismatch, storage.store(1, &wrong));
+}
+
+test "vector storage reuses records deleted before it was opened, then appends" {
+    const allocator = std.testing.allocator;
+    const vfs = @import("../storage/vfs.zig");
+    const page_manager = @import("../storage/page_manager.zig");
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+    const db_path = "/tmp/lattice_s2_vector_free_slots_test.db";
+    vfs_impl.delete(db_path) catch {};
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+    var bp = try buffer_pool.BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    // 384 dimensions fit two records to a page, so 9 records span 5 pages.
+    var first = try VectorStorage.init(allocator, &bp, 384);
+    defer first.deinit();
+    var vector: [384]f32 = undefined;
+    @memset(&vector, 0.5);
+    var locs: [9]VectorLocation = undefined;
+    for (&locs, 1..) |*loc, id| loc.* = try first.store(id, &vector);
+    try first.delete(locs[1], 2);
+    try first.delete(locs[6], 7);
+
+    var reopened = try VectorStorage.open(allocator, &bp, first.first_page, 384);
+    defer reopened.deinit();
+    const a = try reopened.store(100, &vector);
+    const b = try reopened.store(101, &vector);
+    try std.testing.expectEqual(locs[1], a);
+    try std.testing.expectEqual(locs[6], b);
+
+    // No free record is left, so the next store appends after the last one.
+    const c = try reopened.store(102, &vector);
+    try std.testing.expect(!std.meta.eql(c, a) and !std.meta.eql(c, b));
+    try std.testing.expectEqual(@as(u64, 10), try reopened.count());
+
+    // A record deleted now is reused next.
+    try reopened.delete(locs[3], 4);
+    try std.testing.expectEqual(locs[3], try reopened.store(103, &vector));
 }

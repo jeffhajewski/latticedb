@@ -261,12 +261,16 @@ function findLibrary(): { libPath: string | null; asarBlocked: string[] } {
     }
   }
 
-  // 4. Installed prefix override
+  // 4. Installed prefix override. An installed Windows DLL sits in bin/, with
+  // only the import library under lib/.
   const prefix = process.env.LATTICE_PREFIX;
   if (prefix) {
-    const resolved = accept(path.join(prefix, 'lib', libName));
-    if (resolved) {
-      return { libPath: resolved, asarBlocked };
+    const prefixDirs = process.platform === 'win32' ? ['bin', 'lib'] : ['lib'];
+    for (const prefixDir of prefixDirs) {
+      const resolved = accept(path.join(prefix, prefixDir, libName));
+      if (resolved) {
+        return { libPath: resolved, asarBlocked };
+      }
     }
   }
 

@@ -271,6 +271,55 @@ describe('Library availability', () => {
   });
 });
 
+describe('Library discovery on Windows', () => {
+  test('LATTICE_PREFIX finds an installed DLL in bin/', async () => {
+    const tempPrefix = fs.mkdtempSync(path.join(os.tmpdir(), 'lattice-prefix-win-'));
+    fs.mkdirSync(path.join(tempPrefix, 'lib'), { recursive: true });
+    fs.writeFileSync(path.join(tempPrefix, 'lib', 'lattice.lib'), '');
+    fs.mkdirSync(path.join(tempPrefix, 'bin'), { recursive: true });
+    const dll = path.join(tempPrefix, 'bin', 'lattice.dll');
+    fs.writeFileSync(dll, '');
+
+    const previousPrefix = process.env.LATTICE_PREFIX;
+    const previousLibPath = process.env.LATTICE_LIB_PATH;
+    const platform = Object.getOwnPropertyDescriptor(process, 'platform')!;
+
+    try {
+      delete process.env.LATTICE_LIB_PATH;
+      process.env.LATTICE_PREFIX = tempPrefix;
+      jest.resetModules();
+
+      // Loaded first: koffi picks its native module by the real platform.
+      // Discovery reads process.platform when it runs.
+      const library = await import('../src/ffi/library');
+      Object.defineProperty(process, 'platform', { ...platform, value: 'win32' });
+      const bundled = library.getBundledLibraryCandidates().find((candidate) =>
+        fs.existsSync(candidate)
+      );
+      if (bundled) {
+        // A bundled package library outranks LATTICE_PREFIX by design.
+        expect(library.resolveLibraryPath()).toBe(bundled);
+        return;
+      }
+      expect(library.resolveLibraryPath()).toBe(dll);
+    } finally {
+      Object.defineProperty(process, 'platform', platform);
+      if (previousPrefix === undefined) {
+        delete process.env.LATTICE_PREFIX;
+      } else {
+        process.env.LATTICE_PREFIX = previousPrefix;
+      }
+      if (previousLibPath === undefined) {
+        delete process.env.LATTICE_LIB_PATH;
+      } else {
+        process.env.LATTICE_LIB_PATH = previousLibPath;
+      }
+      jest.resetModules();
+      fs.rmSync(tempPrefix, { recursive: true, force: true });
+    }
+  });
+});
+
 describe('Top-level exports', () => {
   test('version returns a non-empty string', () => {
     const v = version();

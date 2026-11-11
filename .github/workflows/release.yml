@@ -141,6 +141,18 @@ jobs:
           cp zig-out/bin/lattice.dll dist/build/${{ matrix.target }}/lib/ || true
           cp zig-out/lib/pkgconfig/lattice.pc dist/build/${{ matrix.target }}/lib/pkgconfig/ || true
 
+          # The copies above tolerate the files other platforms produce being
+          # absent; the library for this one must be there.
+          case "${{ matrix.target }}" in
+            *windows*) lib=lattice.dll ;;
+            *macos*) lib=liblattice.dylib ;;
+            *) lib=liblattice.so ;;
+          esac
+          if [ ! -f "dist/build/${{ matrix.target }}/lib/$lib" ]; then
+            echo "::error::zig build shared produced no $lib for ${{ matrix.target }}"
+            exit 1
+          fi
+
       - name: Build CLI
         run: |
           zig build cli \
@@ -573,27 +585,27 @@ jobs:
 
           # linux-x64
           mkdir -p $PKG/lib/linux-x64
-          cp native-x86_64-linux-gnu/lib/liblattice.so $PKG/lib/linux-x64/ || true
+          cp native-x86_64-linux-gnu/lib/liblattice.so $PKG/lib/linux-x64/
 
           # linux-arm64
           mkdir -p $PKG/lib/linux-arm64
-          cp native-aarch64-linux-gnu/lib/liblattice.so $PKG/lib/linux-arm64/ || true
+          cp native-aarch64-linux-gnu/lib/liblattice.so $PKG/lib/linux-arm64/
 
           # darwin-x64
           mkdir -p $PKG/lib/darwin-x64
-          cp native-x86_64-macos/lib/liblattice.dylib $PKG/lib/darwin-x64/ || true
+          cp native-x86_64-macos/lib/liblattice.dylib $PKG/lib/darwin-x64/
 
           # darwin-arm64
           mkdir -p $PKG/lib/darwin-arm64
-          cp native-aarch64-macos/lib/liblattice.dylib $PKG/lib/darwin-arm64/ || true
+          cp native-aarch64-macos/lib/liblattice.dylib $PKG/lib/darwin-arm64/
 
           # win32-x64
           mkdir -p $PKG/lib/win32-x64
-          cp native-x86_64-windows-gnu/lib/lattice.dll $PKG/lib/win32-x64/ || true
+          cp native-x86_64-windows-gnu/lib/lattice.dll $PKG/lib/win32-x64/
 
           # win32-arm64
           mkdir -p $PKG/lib/win32-arm64
-          cp native-aarch64-windows-gnu/lib/lattice.dll $PKG/lib/win32-arm64/ || true
+          cp native-aarch64-windows-gnu/lib/lattice.dll $PKG/lib/win32-arm64/
 
           echo "Bundled libraries:"
           find $PKG/lib -type f | sort

@@ -56,6 +56,25 @@ class TestLibraryDiscovery:
 
         assert bindings._find_library() == lib_path
 
+    def test_find_library_uses_lattice_prefix_bin_on_windows(self, monkeypatch, tmp_path) -> None:
+        """An installed Windows DLL is in prefix/bin, not prefix/lib."""
+        monkeypatch.setattr(bindings.sys, "platform", "win32")
+        package_root = tmp_path / "site-packages" / "latticedb"
+        package_root.mkdir(parents=True)
+        monkeypatch.setattr(bindings, "__file__", str(package_root / "_bindings.py"))
+
+        prefix_root = tmp_path / "prefix"
+        (prefix_root / "lib").mkdir(parents=True)
+        (prefix_root / "lib" / "lattice.lib").write_bytes(b"")
+        (prefix_root / "bin").mkdir()
+        dll = prefix_root / "bin" / "lattice.dll"
+        dll.write_bytes(b"")
+
+        monkeypatch.delenv("LATTICE_LIB_PATH", raising=False)
+        monkeypatch.setenv("LATTICE_PREFIX", str(prefix_root))
+
+        assert bindings._find_library() == dll
+
     def test_find_library_uses_pkg_config_libdir(self, monkeypatch, tmp_path) -> None:
         """pkg-config libdir should be used when no repo-local build is present."""
         lib_dir = tmp_path / "pkg-lib"

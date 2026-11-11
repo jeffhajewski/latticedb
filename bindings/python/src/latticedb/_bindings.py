@@ -69,12 +69,15 @@ def _find_library() -> Optional[Path]:
     if package_lib.exists():
         return package_lib
 
-    # 3. Installed prefix override
+    # 3. Installed prefix override. An installed Windows DLL sits in bin/,
+    # with only the import library under lib/.
     prefix = os.environ.get("LATTICE_PREFIX")
     if prefix:
-        prefix_lib = Path(prefix) / "lib" / lib_name
-        if prefix_lib.exists():
-            return prefix_lib
+        prefix_dirs = ["bin", "lib"] if sys.platform == "win32" else ["lib"]
+        for prefix_dir in prefix_dirs:
+            prefix_lib = Path(prefix) / prefix_dir / lib_name
+            if prefix_lib.exists():
+                return prefix_lib
 
     # 4. Development: relative to bindings (zig-out/lib). Windows keeps the DLL
     # beside the executables and leaves only the import library under lib/.

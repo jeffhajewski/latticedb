@@ -647,6 +647,11 @@ const TxnOverlay = struct {
     stream_appends: std.ArrayListUnmanaged(TxnStreamAppend) = .empty,
     stream_offsets: std.ArrayListUnmanaged(TxnStreamOffset) = .empty,
     stream_trims: std.ArrayListUnmanaged(TxnStreamTrim) = .empty,
+    /// Highest sequence staged so far for each stream this transaction
+    /// appends to, so the next append costs one lookup instead of a scan of
+    /// every earlier append. Keys borrow the `stream` slice of the first
+    /// append to that stream, which lives as long as the overlay.
+    stream_last_sequences: std.StringHashMapUnmanaged(u64) = .empty,
     has_staged_writes: bool = false,
 
     fn hasChanges(self: *const TxnOverlay) bool {
@@ -676,6 +681,7 @@ const TxnOverlay = struct {
         }
         self.vector_states.deinit(allocator);
 
+        self.stream_last_sequences.deinit(allocator);
         for (self.stream_appends.items) |*append| {
             append.deinit(allocator);
         }
@@ -4400,7 +4406,7 @@ pub const Database = struct {
         }
         stream_store_mod.validateKind(kind) catch |err| return self.mapStreamError(err);
 
-        const sequence = try self.nextStreamSequence(overlay.stream_appends.items, stream);
+        const sequence = try self.nextStreamSequence(overlay, stream);
         const stream_copy = self.allocator.dupe(u8, stream) catch return DatabaseError.OutOfMemory;
         errdefer self.allocator.free(stream_copy);
         const kind_copy = self.allocator.dupe(u8, kind) catch return DatabaseError.OutOfMemory;
@@ -4411,42 +4417,58 @@ pub const Database = struct {
             owned.deinit(self.allocator);
         }
 
-        overlay.stream_appends.append(self.allocator, .{
+        // Reserve both slots first so the append and its sequence are
+        // recorded together or not at all.
+        overlay.stream_appends.ensureUnusedCapacity(self.allocator, 1) catch return DatabaseError.OutOfMemory;
+        overlay.stream_last_sequences.ensureUnusedCapacity(self.allocator, 1) catch return DatabaseError.OutOfMemory;
+        overlay.stream_appends.appendAssumeCapacity(.{
             .stream = stream_copy,
             .kind = kind_copy,
             .payload = payload_copy,
             .sequence = sequence,
-        }) catch return DatabaseError.OutOfMemory;
+        });
+        noteStreamSequence(overlay, stream_copy, sequence);
         overlay.markDirty();
         return sequence;
     }
 
-    fn nextStreamSequence(self: *Self, prior_appends: []const TxnStreamAppend, stream: []const u8) DatabaseError!u64 {
-        const trees = try self.streamTreesForWrite();
-
-        var last = stream_store_mod.getLastSequence(
-            trees,
-            self.allocator,
-            stream,
-        ) catch |err| return self.mapStreamError(err);
-
-        for (prior_appends) |previous| {
-            if (previous.sequence) |seq| {
-                if (std.mem.eql(u8, previous.stream, stream) and seq > last) {
-                    last = seq;
-                }
-            }
-        }
+    /// The sequence the next append to `stream` in this transaction gets.
+    ///
+    /// Only one write transaction runs at a time and only its commit moves a
+    /// stream's committed last sequence, so the committed value read for the
+    /// first append to a stream stays current for the rest of the
+    /// transaction; later appends continue from the overlay's own record.
+    fn nextStreamSequence(self: *Self, overlay: *const TxnOverlay, stream: []const u8) DatabaseError!u64 {
+        const last = overlay.stream_last_sequences.get(stream) orelse blk: {
+            const trees = try self.streamTreesForWrite();
+            break :blk stream_store_mod.getLastSequence(
+                trees,
+                self.allocator,
+                stream,
+            ) catch |err| return self.mapStreamError(err);
+        };
 
         if (last == std.math.maxInt(u64)) return DatabaseError.ValueTooLarge;
         return last + 1;
     }
 
+    /// Record `sequence` as staged for `owned_stream`, whose bytes must live
+    /// as long as the overlay. The caller reserves capacity first.
+    fn noteStreamSequence(overlay: *TxnOverlay, owned_stream: []const u8, sequence: u64) void {
+        const entry = overlay.stream_last_sequences.getOrPutAssumeCapacity(owned_stream);
+        if (!entry.found_existing or sequence > entry.value_ptr.*) {
+            entry.value_ptr.* = sequence;
+        }
+    }
+
     fn assignStreamSequences(self: *Self, overlay: *TxnOverlay) DatabaseError!void {
-        for (overlay.stream_appends.items, 0..) |*append, i| {
+        for (overlay.stream_appends.items) |*append| {
             if (append.sequence != null) continue;
 
-            append.sequence = try self.nextStreamSequence(overlay.stream_appends.items[0..i], append.stream);
+            const sequence = try self.nextStreamSequence(overlay, append.stream);
+            overlay.stream_last_sequences.ensureUnusedCapacity(self.allocator, 1) catch return DatabaseError.OutOfMemory;
+            append.sequence = sequence;
+            noteStreamSequence(overlay, append.stream, sequence);
         }
     }
 

@@ -392,3 +392,103 @@ test "streams: graph changefeed emits semantic events" {
     try std.testing.expect(saw_edge_delete);
     try std.testing.expect(saw_node_delete);
 }
+
+/// Reads every record of `stream` and checks that its sequences run
+/// 1, 2, ..., n with no gap or repeat. Returns n.
+fn expectContiguousSequences(db: *Database, stream: []const u8) !usize {
+    var batch = try db.readStream(stream, 0, 100_000, 0);
+    defer batch.deinit();
+    for (batch.records, 0..) |record, i| {
+        try std.testing.expectEqual(@as(u64, i + 1), record.sequence);
+    }
+    return batch.records.len;
+}
+
+test "streams: sequences stay contiguous across many appends in one transaction" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_stream_contiguous.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    const nodes_per_txn = 300;
+
+    {
+        var db = try openDb(allocator, path);
+        defer db.close();
+
+        // One transaction interleaves two user streams with graph writes, so
+        // the changefeed and both streams draw sequences side by side.
+        {
+            var txn = try db.beginTransaction(.read_write);
+            for (0..nodes_per_txn) |i| {
+                const value: i64 = @intCast(i);
+                try std.testing.expectEqual(
+                    @as(u64, i + 1),
+                    try db.publishStreamGetSequence(&txn, "alpha", null, .{ .int_val = value }),
+                );
+                if (i % 3 == 0) {
+                    try std.testing.expectEqual(
+                        @as(u64, i / 3 + 1),
+                        try db.publishStreamGetSequence(&txn, "beta", null, .{ .int_val = value }),
+                    );
+                }
+                const node = try db.createNode(&txn, &[_][]const u8{"Item"});
+                try db.setNodeProperty(&txn, node, "n", .{ .int_val = value });
+                try db.setNodeProperty(&txn, node, "name", .{ .string_val = "item" });
+            }
+            try db.commitTransaction(&txn);
+        }
+
+        try std.testing.expectEqual(@as(usize, nodes_per_txn), try expectContiguousSequences(db, "alpha"));
+        try std.testing.expectEqual(@as(usize, nodes_per_txn / 3), try expectContiguousSequences(db, "beta"));
+        // Each node yields an insert, one label and two properties.
+        const first_changes = try expectContiguousSequences(db, lattice.stream.store.changes_stream);
+        try std.testing.expectEqual(@as(usize, nodes_per_txn * 4), first_changes);
+
+        // An aborted transaction must not consume sequences.
+        {
+            var txn = try db.beginTransaction(.read_write);
+            _ = try db.publishStreamGetSequence(&txn, "alpha", null, .{ .null_val = {} });
+            _ = try db.createNode(&txn, &[_][]const u8{"Discarded"});
+            try db.abortTransaction(&txn);
+        }
+
+        // The next transaction continues each stream where the last commit
+        // left it.
+        {
+            var txn = try db.beginTransaction(.read_write);
+            try std.testing.expectEqual(
+                @as(u64, nodes_per_txn + 1),
+                try db.publishStreamGetSequence(&txn, "alpha", null, .{ .null_val = {} }),
+            );
+            try std.testing.expectEqual(
+                @as(u64, nodes_per_txn + 2),
+                try db.publishStreamGetSequence(&txn, "alpha", null, .{ .null_val = {} }),
+            );
+            try std.testing.expectEqual(
+                @as(u64, 1),
+                try db.publishStreamGetSequence(&txn, "gamma", null, .{ .null_val = {} }),
+            );
+            _ = try db.createNode(&txn, &[_][]const u8{"Item"});
+            try db.commitTransaction(&txn);
+        }
+
+        try std.testing.expectEqual(@as(usize, nodes_per_txn + 2), try expectContiguousSequences(db, "alpha"));
+        try std.testing.expectEqual(@as(usize, 1), try expectContiguousSequences(db, "gamma"));
+        try std.testing.expectEqual(first_changes + 2, try expectContiguousSequences(db, lattice.stream.store.changes_stream));
+    }
+
+    // Sequences resume after a reopen.
+    {
+        var db = try openDb(allocator, path);
+        defer db.close();
+
+        var txn = try db.beginTransaction(.read_write);
+        try std.testing.expectEqual(
+            @as(u64, nodes_per_txn + 3),
+            try db.publishStreamGetSequence(&txn, "alpha", null, .{ .null_val = {} }),
+        );
+        try db.commitTransaction(&txn);
+        try std.testing.expectEqual(@as(usize, nodes_per_txn + 3), try expectContiguousSequences(db, "alpha"));
+    }
+}

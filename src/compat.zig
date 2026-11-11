@@ -4,24 +4,31 @@ pub const io = std.Options.debug_io;
 
 const has_io_fs = @hasDecl(std.Io, "Dir");
 const has_thread_condition = @hasDecl(std.Thread, "Condition");
-const MutexState = if (@hasDecl(std.atomic, "Mutex")) std.atomic.Mutex else std.Thread.Mutex;
+const has_io_mutex = @hasDecl(std.Io, "Mutex");
+const MutexState = if (has_io_mutex) std.Io.Mutex else std.Thread.Mutex;
 const ConditionState = if (has_thread_condition) std.Thread.Condition else void;
 
+/// A blocking mutex. Uncontended, lock and unlock are one atomic operation
+/// each; a waiter sleeps on a futex instead of spinning, so a thread that
+/// calls into a database another thread is using does not burn a core for
+/// the length of the other thread's query.
 pub const Mutex = struct {
-    state: MutexState = if (@hasDecl(std.atomic, "Mutex")) .unlocked else .{},
+    state: MutexState = if (has_io_mutex) .init else .{},
 
     pub fn lock(self: *Mutex) void {
-        if (@hasDecl(std.atomic, "Mutex")) {
-            while (!self.state.tryLock()) {
-                std.atomic.spinLoopHint();
-            }
+        if (has_io_mutex) {
+            self.state.lockUncancelable(io);
         } else {
             self.state.lock();
         }
     }
 
     pub fn unlock(self: *Mutex) void {
-        self.state.unlock();
+        if (has_io_mutex) {
+            self.state.unlock(io);
+        } else {
+            self.state.unlock();
+        }
     }
 };
 

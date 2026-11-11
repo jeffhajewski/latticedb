@@ -7,7 +7,9 @@
 //! - Multi-threaded contention scenarios
 
 const std = @import("std");
+const builtin = @import("builtin");
 const lattice = @import("lattice");
+const compat = @import("compat");
 
 const locking = lattice.concurrency.locking;
 const RwLatch = locking.RwLatch;
@@ -496,4 +498,66 @@ test "rwlatch: stress test mixed readers and writers" {
     // Verify all operations completed
     try std.testing.expectEqual(@as(u64, num_readers * 200), read_count.load(.seq_cst));
     try std.testing.expectEqual(@as(u64, num_writers * 50), write_count.load(.seq_cst));
+}
+
+// ============================================================================
+// compat.Mutex
+// ============================================================================
+
+test "compat mutex: concurrent increments are not lost" {
+    const Shared = struct {
+        mutex: compat.Mutex = .{},
+        counter: usize = 0,
+
+        fn run(self: *@This()) void {
+            for (0..20_000) |_| {
+                self.mutex.lock();
+                self.counter += 1;
+                self.mutex.unlock();
+            }
+        }
+    };
+    var shared: Shared = .{};
+    var threads: [4]std.Thread = undefined;
+    for (&threads) |*t| t.* = try std.Thread.spawn(.{}, Shared.run, .{&shared});
+    for (threads) |t| t.join();
+    try std.testing.expectEqual(@as(usize, 80_000), shared.counter);
+}
+
+fn processCpuNs() u64 {
+    const usage = std.posix.getrusage(0); // RUSAGE_SELF
+    const user: u64 = @as(u64, @intCast(usage.utime.sec)) * std.time.ns_per_s + @as(u64, @intCast(usage.utime.usec)) * std.time.ns_per_us;
+    const sys: u64 = @as(u64, @intCast(usage.stime.sec)) * std.time.ns_per_s + @as(u64, @intCast(usage.stime.usec)) * std.time.ns_per_us;
+    return user + sys;
+}
+
+test "compat mutex: waiters sleep instead of spinning" {
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
+    const Waiter = struct {
+        fn run(mutex: *compat.Mutex, acquired: *std.atomic.Value(usize)) void {
+            mutex.lock();
+            _ = acquired.fetchAdd(1, .monotonic);
+            mutex.unlock();
+        }
+    };
+    var mutex: compat.Mutex = .{};
+    var acquired = std.atomic.Value(usize).init(0);
+
+    mutex.lock();
+    var threads: [2]std.Thread = undefined;
+    for (&threads) |*t| t.* = try std.Thread.spawn(.{}, Waiter.run, .{ &mutex, &acquired });
+
+    // Hold the lock for half a second. Two spinning waiters would use up to
+    // a second of CPU time between them; parked ones use next to none.
+    const hold_ns = 500 * std.time.ns_per_ms;
+    const cpu_before = processCpuNs();
+    compat.sleep(hold_ns);
+    const cpu_used = processCpuNs() - cpu_before;
+    try std.testing.expectEqual(@as(usize, 0), acquired.load(.monotonic));
+    mutex.unlock();
+    for (threads) |t| t.join();
+
+    try std.testing.expectEqual(@as(usize, 2), acquired.load(.monotonic));
+    try std.testing.expect(cpu_used < hold_ns / 5);
 }

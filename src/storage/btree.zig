@@ -81,6 +81,21 @@ const OVERFLOW_DESCRIPTOR_FIXED_SIZE: usize = 28;
 const OVERFLOW_PAGE_HEADER_SIZE: usize = @sizeOf(PageHeader) + 12;
 const REBALANCE_OCCUPANCY_DIVISOR = 3;
 
+/// Largest key a tree with this page size accepts.
+///
+/// A key can become a separator in an internal node, so internal nodes must
+/// always be able to split into two non-empty halves around a promoted key.
+/// Keeping every separator entry within a quarter of the internal payload
+/// guarantees that: an overfull node then holds at least four entries, and a
+/// byte-balanced split leaves each half at most five eighths full. It is 1012
+/// bytes for 4 KB pages.
+pub fn maxKeySize(page_size: u32) usize {
+    if (page_size <= INTERNAL_SLOTS_OFFSET) return 0;
+    const quarter = (@as(usize, page_size) - INTERNAL_SLOTS_OFFSET) / 4;
+    if (quarter <= INTERNAL_SLOT_SIZE + 2) return 0;
+    return quarter - INTERNAL_SLOT_SIZE - 2;
+}
+
 /// Key-value entry type returned by leaf operations
 pub const Entry = struct {
     key: []const u8,
@@ -831,6 +846,8 @@ pub const BTree = struct {
 
     /// Insert a key-value pair into the tree
     pub fn insert(self: *Self, key: []const u8, value: []const u8) BTreeError!void {
+        if (key.len > maxKeySize(self.page_size)) return BTreeError.PageFull;
+
         // Try simple insert first
         const result = try self.insertRecursive(self.root_page, key, value);
 
@@ -971,7 +988,7 @@ pub const BTree = struct {
     /// delete+insert sequence so they can bail out with a clean error
     /// instead of leaving the tree missing an entry.
     pub fn canFitLeafEntry(self: *const Self, key: []const u8, value_len: usize) bool {
-        if (key.len > std.math.maxInt(u16) or value_len > MAX_VALUE_SIZE) return false;
+        if (key.len > maxKeySize(self.page_size) or value_len > MAX_VALUE_SIZE) return false;
         if (value_len < OVERFLOW_VALUE_LEN_SENTINEL) {
             const entry_size = std.math.add(usize, 4, key.len) catch return false;
             const entry_size_with_value = std.math.add(usize, entry_size, value_len) catch return false;
@@ -1224,13 +1241,15 @@ pub const BTree = struct {
         }
 
         // Calculate space needed
-        const key_size: u16 = @intCast(2 + key.len); // key_len(2) + key
-        const space_needed: u16 = INTERNAL_SLOT_SIZE + key_size;
+        const space_needed: usize = INTERNAL_SLOT_SIZE + 2 + key.len; // slot + key_len(2) + key
         const free_space = InternalNode.getFreeSpace(buf, self.page_size);
 
         if (free_space >= space_needed) {
             // Fits in current page
-            self.insertInternalEntry(buf, insert_pos, key, new_child);
+            self.insertInternalEntry(buf, insert_pos, key, new_child) catch |err| {
+                self.bp.unpinPage(frame, false);
+                return err;
+            };
             self.bp.unpinPage(frame, true);
             return .{ .page_id = page_id, .split = null };
         }
@@ -1239,11 +1258,11 @@ pub const BTree = struct {
         return self.splitInternalAndInsert(frame, insert_pos, key, new_child);
     }
 
-    fn insertInternalEntry(self: *Self, buf: []u8, slot: u16, key: []const u8, child: PageId) void {
+    fn insertInternalEntry(self: *Self, buf: []u8, slot: u16, key: []const u8, child: PageId) BTreeError!void {
         const num_keys = InternalNode.getNumKeys(buf);
 
         // Find where to write key data
-        var min_offset: u16 = @intCast(self.page_size);
+        var min_offset: usize = self.page_size;
         for (0..num_keys) |i| {
             const offset = InternalNode.getKeyOffset(buf, @intCast(i));
             if (offset < min_offset) {
@@ -1251,9 +1270,13 @@ pub const BTree = struct {
             }
         }
 
+        // Refuse rather than write outside the page or over the slot array.
+        const key_size = 2 + key.len;
+        const grown_slots_end = INTERNAL_SLOTS_OFFSET + (@as(usize, num_keys) + 1) * INTERNAL_SLOT_SIZE;
+        if (key.len > std.math.maxInt(u16) or min_offset < grown_slots_end + key_size) return BTreeError.PageFull;
+
         // Write key
-        const key_size: u16 = @intCast(2 + key.len);
-        const new_offset = min_offset - key_size;
+        const new_offset: u16 = @intCast(min_offset - key_size);
         std.mem.writeInt(u16, buf[new_offset..][0..2], @intCast(key.len), .little);
         @memcpy(buf[new_offset + 2 ..][0..key.len], key);
 
@@ -1342,121 +1365,42 @@ pub const BTree = struct {
         var old_frame_dirty = false;
         errdefer if (old_frame_pinned) self.bp.unpinPage(frame, old_frame_dirty);
 
+        // Build the combined key/child image and choose the promotion point
+        // by bytes before touching any page. Splitting by key count can put
+        // more bytes on one side than a page holds once keys are long.
+        var image = try self.internalImageInserting(old_buf, slot, key, new_child);
+        defer image.deinit(self.allocator);
+        const promotion = self.chooseInternalPromotion(image.keys) orelse return BTreeError.PageFull;
+
+        const promoted_key_copy = self.allocator.dupe(u8, image.keys[promotion]) catch return BTreeError.OutOfMemory;
+        errdefer self.allocator.free(promoted_key_copy);
+
         // Allocate new internal page
         const new_page_id = self.bp.pm.allocatePage() catch return BTreeError.IoError;
         const new_frame = self.bp.fetchPage(new_page_id, .exclusive) catch {
             self.bp.pm.freePage(new_page_id) catch {};
             return BTreeError.BufferPoolFull;
         };
-        const new_buf = new_frame.data;
         var new_frame_pinned = true;
         var new_frame_dirty = false;
         errdefer if (new_frame_pinned) self.bp.unpinPage(new_frame, new_frame_dirty);
 
-        // Get current state
-        const num_keys = InternalNode.getNumKeys(old_buf);
-        const level = InternalNode.getLevel(old_buf);
-        const old_right_child = InternalNode.getRightChild(old_buf);
-
-        // Initialize new internal node
-        InternalNode.init(new_buf, level);
+        // Old page keeps keys[0..promotion] and children[0..promotion]; the
+        // promoted key moves up; the new page takes the rest.
         new_frame_dirty = true;
-
-        // Internal node structure: child[0] key[0] child[1] key[1] ... child[n] key[n] right_child
-        // We have n+1 children for n keys. The slot[i].child is child[i] (left of key[i]).
-        // right_child is the last child (right of key[n-1]).
-
-        // Collect all children (n+2 total after insertion: original n+1 plus new_child)
-        const total_children = num_keys + 2;
-        var children = self.allocator.alloc(PageId, total_children) catch return BTreeError.OutOfMemory;
-        defer self.allocator.free(children);
-
-        // Collect all keys (n+1 total after insertion)
-        const total_keys = num_keys + 1;
-        const split_point = total_keys / 2;
-
-        // Calculate total key data size for copying
-        var total_key_size: usize = 0;
-        for (0..num_keys) |i| {
-            total_key_size += InternalNode.getKey(old_buf, @intCast(i)).len;
-        }
-
-        var key_data = self.allocator.alloc(u8, total_key_size) catch return BTreeError.OutOfMemory;
-        defer self.allocator.free(key_data);
-
-        const KeySlice = struct { ptr: [*]const u8, len: usize };
-        var keys = self.allocator.alloc(KeySlice, total_keys) catch return BTreeError.OutOfMemory;
-        defer self.allocator.free(keys);
-
-        // Build the combined arrays with the new key/child inserted at the right position
-        var key_offset: usize = 0;
-        var key_idx: usize = 0;
-        var child_idx: usize = 0;
-
-        for (0..num_keys) |i| {
-            // Add child before key[i]
-            if (i == slot) {
-                // Insert new key and new_child here
-                children[child_idx] = InternalNode.getChild(old_buf, @intCast(i));
-                child_idx += 1;
-                keys[key_idx] = .{ .ptr = key.ptr, .len = key.len };
-                key_idx += 1;
-                children[child_idx] = new_child;
-                child_idx += 1;
-            } else {
-                children[child_idx] = InternalNode.getChild(old_buf, @intCast(i));
-                child_idx += 1;
-            }
-
-            // Copy existing key
-            const existing_key = InternalNode.getKey(old_buf, @intCast(i));
-            const key_copy = key_data[key_offset..][0..existing_key.len];
-            @memcpy(key_copy, existing_key);
-            keys[key_idx] = .{ .ptr = key_copy.ptr, .len = key_copy.len };
-            key_idx += 1;
-            key_offset += existing_key.len;
-        }
-
-        // Handle insertion at end (after all existing keys)
-        if (slot == num_keys) {
-            children[child_idx] = old_right_child;
-            child_idx += 1;
-            keys[key_idx] = .{ .ptr = key.ptr, .len = key.len };
-            key_idx += 1;
-            children[child_idx] = new_child;
-        } else {
-            children[child_idx] = old_right_child;
-        }
-
-        // Now redistribute: first half to old page, promoted key up, second half to new page
-        // Old page gets keys[0..split_point-1] and children[0..split_point]
-        // Promoted key is keys[split_point]
-        // New page gets keys[split_point+1..] and children[split_point+1..]
-
-        // Reinitialize old page
-        InternalNode.init(old_buf, level);
+        try self.writeInternalParts(
+            new_frame.data,
+            image.level,
+            image.keys[promotion + 1 ..],
+            image.children[promotion + 1 ..],
+        );
         old_frame_dirty = true;
-
-        // Write first half to old page
-        for (0..split_point) |i| {
-            const k = keys[i];
-            self.insertInternalEntryDirect(old_buf, @intCast(i), k.ptr[0..k.len], children[i]);
-        }
-        InternalNode.setRightChild(old_buf, children[split_point]);
-
-        // Get the promoted key before we lose access to it
-        const promoted = keys[split_point];
-        const promoted_key_copy = self.allocator.alloc(u8, promoted.len) catch return BTreeError.OutOfMemory;
-        @memcpy(promoted_key_copy, promoted.ptr[0..promoted.len]);
-
-        // Write second half to new page
-        var new_idx: u16 = 0;
-        for (split_point + 1..total_keys) |i| {
-            const k = keys[i];
-            self.insertInternalEntryDirect(new_buf, new_idx, k.ptr[0..k.len], children[i]);
-            new_idx += 1;
-        }
-        InternalNode.setRightChild(new_buf, children[total_children - 1]);
+        try self.writeInternalParts(
+            old_buf,
+            image.level,
+            image.keys[0..promotion],
+            image.children[0 .. promotion + 1],
+        );
 
         self.bp.unpinPage(new_frame, true);
         new_frame_pinned = false;
@@ -1472,12 +1416,13 @@ pub const BTree = struct {
         };
     }
 
-    /// Insert an internal entry directly without checks (for split redistribution)
-    fn insertInternalEntryDirect(self: *Self, buf: []u8, slot: u16, key: []const u8, child: PageId) void {
+    /// Write a key/child slot into an internal node being built in order.
+    /// Fails rather than writing outside the page if the key does not fit.
+    fn insertInternalEntryDirect(self: *Self, buf: []u8, slot: u16, key: []const u8, child: PageId) BTreeError!void {
         const num_keys = InternalNode.getNumKeys(buf);
 
         // Find where to write key data
-        var min_offset: u16 = @intCast(self.page_size);
+        var min_offset: usize = self.page_size;
         for (0..num_keys) |i| {
             const offset = InternalNode.getKeyOffset(buf, @intCast(i));
             if (offset < min_offset) {
@@ -1485,9 +1430,12 @@ pub const BTree = struct {
             }
         }
 
+        const key_size = 2 + key.len;
+        const grown_slots_end = INTERNAL_SLOTS_OFFSET + (@as(usize, num_keys) + 1) * INTERNAL_SLOT_SIZE;
+        if (key.len > std.math.maxInt(u16) or min_offset < grown_slots_end + key_size) return BTreeError.PageFull;
+
         // Write key
-        const key_size: u16 = @intCast(2 + key.len);
-        const new_offset = min_offset - key_size;
+        const new_offset: u16 = @intCast(min_offset - key_size);
         std.mem.writeInt(u16, buf[new_offset..][0..2], @intCast(key.len), .little);
         @memcpy(buf[new_offset + 2 ..][0..key.len], key);
 
@@ -1520,7 +1468,11 @@ pub const BTree = struct {
 
         // Insert split_key with right_child as the new child
         // This will: slot[0] = (split_key, left_child), right_child = right_child
-        self.insertInternalEntry(frame.data, 0, split_key, right_child);
+        self.insertInternalEntry(frame.data, 0, split_key, right_child) catch |err| {
+            self.bp.unpinPage(frame, false);
+            self.bp.pm.freePage(new_root) catch {};
+            return err;
+        };
 
         self.bp.unpinPage(frame, true);
         self.root_page = new_root;
@@ -1732,6 +1684,54 @@ pub const BTree = struct {
         };
     }
 
+    /// Image of an internal node with `key` inserted at `slot` and
+    /// `new_child` as the child to its right, as when the child at `slot`
+    /// has just split.
+    fn internalImageInserting(
+        self: *Self,
+        buf: []const u8,
+        slot: u16,
+        key: []const u8,
+        new_child: PageId,
+    ) BTreeError!InternalImage {
+        const num_keys = InternalNode.getNumKeys(buf);
+        if (slot > num_keys) return BTreeError.InvalidPage;
+
+        var key_bytes_len: usize = key.len;
+        for (0..num_keys) |i| key_bytes_len += InternalNode.getKey(buf, @intCast(i)).len;
+
+        const key_data = self.allocator.alloc(u8, key_bytes_len) catch return BTreeError.OutOfMemory;
+        errdefer self.allocator.free(key_data);
+        const keys = self.allocator.alloc([]const u8, @as(usize, num_keys) + 1) catch return BTreeError.OutOfMemory;
+        errdefer self.allocator.free(keys);
+        const children = self.allocator.alloc(PageId, @as(usize, num_keys) + 2) catch return BTreeError.OutOfMemory;
+        errdefer self.allocator.free(children);
+
+        var key_offset: usize = 0;
+        var key_out: usize = 0;
+        var child_out: usize = 0;
+        var i: u16 = 0;
+        while (i <= num_keys) : (i += 1) {
+            children[child_out] = internalChildAt(buf, i);
+            child_out += 1;
+            if (i == slot) {
+                copyKeyIntoImage(key, key_data, &key_offset, keys, &key_out);
+                children[child_out] = new_child;
+                child_out += 1;
+            }
+            if (i < num_keys) {
+                copyKeyIntoImage(InternalNode.getKey(buf, i), key_data, &key_offset, keys, &key_out);
+            }
+        }
+
+        return .{
+            .key_data = key_data,
+            .keys = keys,
+            .children = children,
+            .level = InternalNode.getLevel(buf),
+        };
+    }
+
     fn mergedInternalImage(
         self: *Self,
         left: []const u8,
@@ -1811,16 +1811,16 @@ pub const BTree = struct {
         level: u16,
         keys: []const []const u8,
         children: []const PageId,
-    ) void {
+    ) BTreeError!void {
         InternalNode.init(buf, level);
         for (keys, 0..) |key, i| {
-            self.insertInternalEntryDirect(buf, @intCast(i), key, children[i]);
+            try self.insertInternalEntryDirect(buf, @intCast(i), key, children[i]);
         }
         InternalNode.setRightChild(buf, children[keys.len]);
     }
 
-    fn writeInternalImage(self: *Self, buf: []u8, image: *const InternalImage) void {
-        self.writeInternalParts(buf, image.level, image.keys, image.children);
+    fn writeInternalImage(self: *Self, buf: []u8, image: *const InternalImage) BTreeError!void {
+        try self.writeInternalParts(buf, image.level, image.keys, image.children);
     }
 
     fn findInternalChildIndex(buf: []const u8, child_page: PageId) ?u16 {
@@ -1967,7 +1967,7 @@ pub const BTree = struct {
         LeafNode.setNextLeaf(left_frame.data, right_frame.page_id);
         LeafNode.setPrevLeaf(right_frame.data, left_frame.page_id);
         LeafNode.setNextLeaf(right_frame.data, right_next);
-        self.writeInternalImage(parent_frame.data, &parent_image);
+        try self.writeInternalImage(parent_frame.data, &parent_image);
         return true;
     }
 
@@ -2058,7 +2058,7 @@ pub const BTree = struct {
         }
         left_dirty = true;
 
-        self.writeInternalImage(parent_frame.data, &parent_image);
+        try self.writeInternalImage(parent_frame.data, &parent_image);
         parent_dirty = true;
 
         self.bp.unpinPage(right_frame, false);
@@ -2124,19 +2124,19 @@ pub const BTree = struct {
             defer grandparent_image.deinit(self.allocator);
             if (!self.internalImageFits(&grandparent_image)) return false;
 
-            self.writeInternalParts(
+            try self.writeInternalParts(
                 left_frame.data,
                 merged_image.level,
                 merged_image.keys[0..promotion_index],
                 merged_image.children[0 .. promotion_index + 1],
             );
-            self.writeInternalParts(
+            try self.writeInternalParts(
                 right_frame.data,
                 merged_image.level,
                 merged_image.keys[promotion_index + 1 ..],
                 merged_image.children[promotion_index + 1 ..],
             );
-            self.writeInternalImage(grandparent_frame.data, &grandparent_image);
+            try self.writeInternalImage(grandparent_frame.data, &grandparent_image);
 
             self.bp.unpinPage(right_frame, true);
             right_pinned = false;
@@ -2150,8 +2150,8 @@ pub const BTree = struct {
         var grandparent_image = try self.internalImageWithoutSeparator(grandparent_frame.data, separator_index);
         defer grandparent_image.deinit(self.allocator);
 
-        self.writeInternalImage(left_frame.data, &merged_image);
-        self.writeInternalImage(grandparent_frame.data, &grandparent_image);
+        try self.writeInternalImage(left_frame.data, &merged_image);
+        try self.writeInternalImage(grandparent_frame.data, &grandparent_image);
         grandparent_dirty = true;
 
         self.bp.unpinPage(right_frame, false);
@@ -2166,31 +2166,41 @@ pub const BTree = struct {
         return true;
     }
 
+    /// Choose the key to promote when an internal node splits so that both
+    /// halves fit on a page and their byte sizes are as even as possible.
+    /// Returns null when no such key exists. Both halves keep at least one
+    /// key.
     fn chooseInternalPromotion(self: *const Self, keys: []const []const u8) ?usize {
         if (keys.len < 3) return null;
 
+        const capacity = @as(usize, self.page_size) - INTERNAL_SLOTS_OFFSET;
+        var total: usize = 0;
+        for (keys) |key| total += internalEntrySpace(key);
+
         var best_index: ?usize = null;
         var best_imbalance: usize = std.math.maxInt(usize);
+        var left_space: usize = internalEntrySpace(keys[0]);
         var promotion_index: usize = 1;
         while (promotion_index + 1 < keys.len) : (promotion_index += 1) {
-            const left = keys[0..promotion_index];
-            const right = keys[promotion_index + 1 ..];
-            if (!self.internalKeysFit(left) or !self.internalKeysFit(right)) continue;
-
-            var left_space: usize = 0;
-            for (left) |key| left_space += INTERNAL_SLOT_SIZE + 2 + key.len;
-            var right_space: usize = 0;
-            for (right) |key| right_space += INTERNAL_SLOT_SIZE + 2 + key.len;
-            const imbalance = if (left_space >= right_space)
-                left_space - right_space
-            else
-                right_space - left_space;
-            if (imbalance < best_imbalance) {
-                best_imbalance = imbalance;
-                best_index = promotion_index;
+            const promoted_space = internalEntrySpace(keys[promotion_index]);
+            const right_space = total - left_space - promoted_space;
+            if (left_space <= capacity and right_space <= capacity) {
+                const imbalance = if (left_space >= right_space)
+                    left_space - right_space
+                else
+                    right_space - left_space;
+                if (imbalance < best_imbalance) {
+                    best_imbalance = imbalance;
+                    best_index = promotion_index;
+                }
             }
+            left_space += promoted_space;
         }
         return best_index;
+    }
+
+    fn internalEntrySpace(key: []const u8) usize {
+        return INTERNAL_SLOT_SIZE + 2 + key.len;
     }
 
     /// Remove an entry from a leaf node and compact surviving entries.

@@ -851,3 +851,169 @@ test "btree: delete after split maintains valid tree structure" {
     // Verify sorted iteration of remaining entries
     try helpers.assertBTreeSortedIteration(&tree, 250);
 }
+
+// ============================================================================
+// Contract: internal splits divide by bytes, so long keys cannot overflow a page
+// ============================================================================
+
+fn paddedKey(buf: []u8, prefix: u8, index: usize, len: usize) []const u8 {
+    @memset(buf[0..len], 'x');
+    buf[0] = prefix;
+    _ = std.fmt.bufPrint(buf[1..9], "{d:08}", .{index}) catch unreachable;
+    return buf[0..len];
+}
+
+fn rootKeyCount(tree: *BTree) !?u16 {
+    const frame = try tree.bp.fetchPage(tree.root_page, .shared);
+    defer tree.bp.unpinPage(frame, false);
+    const header: *const lattice.storage.page.PageHeader = @ptrCast(@alignCast(frame.data.ptr));
+    if (header.page_type != .btree_internal) return null;
+    return btree.InternalNode.getNumKeys(frame.data);
+}
+
+test "btree: internal split with long separators divides by bytes" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "internal_split_long_keys");
+    defer db.deinit();
+    var tree = try db.createBTree();
+
+    // A root internal node with twenty short separators.
+    var key_buf: [1100]u8 = undefined;
+    var value_buf: [300]u8 = undefined;
+    @memset(&value_buf, 'v');
+    var short_count: usize = 0;
+    while ((try rootKeyCount(&tree)) orelse 0 < 20) : (short_count += 1) {
+        try tree.insert(paddedKey(&key_buf, 'b', short_count, 9), &value_buf);
+    }
+    try std.testing.expectEqual(@as(u16, 2), (try helpers.getTreeStats(&tree)).height);
+
+    // Maximum-length keys sorting before all of them. Every second one splits
+    // the leftmost leaf and adds a long separator to the root. Three fit next
+    // to the short ones; the fourth splits the root, and a split by key count
+    // would put all four long keys plus a dozen short ones on one page.
+    const long_len = btree.maxKeySize(db.pm.getPageSize());
+    var long_count: usize = 0;
+    while (long_count < 12) : (long_count += 1) {
+        try tree.insert(paddedKey(&key_buf, 'a', long_count, long_len), "v");
+    }
+
+    try helpers.validateBTreeInvariants(&tree);
+    try std.testing.expectEqual(short_count + long_count, try helpers.countBTreeEntries(&tree));
+    for (0..short_count) |i| {
+        try std.testing.expect(try tree.contains(paddedKey(&key_buf, 'b', i, 9)));
+    }
+    for (0..long_count) |i| {
+        try std.testing.expect(try tree.contains(paddedKey(&key_buf, 'a', i, long_len)));
+    }
+}
+
+test "btree: keys longer than the maximum key size are rejected cleanly" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "max_key_size");
+    defer db.deinit();
+    var tree = try db.createBTree();
+
+    const max = btree.maxKeySize(db.pm.getPageSize());
+    try std.testing.expectEqual(@as(usize, 1012), max);
+
+    var key_buf: [4096]u8 = undefined;
+    @memset(&key_buf, 'k');
+    try std.testing.expect(tree.canFitLeafEntry(key_buf[0..max], 10));
+    try std.testing.expect(!tree.canFitLeafEntry(key_buf[0 .. max + 1], 10));
+    try tree.insert(key_buf[0..max], "ok");
+    try std.testing.expectError(BTreeError.PageFull, tree.insert(key_buf[0 .. max + 1], "no"));
+    try std.testing.expectError(BTreeError.PageFull, tree.insert(key_buf[0..3000], "no"));
+    try std.testing.expectEqual(@as(usize, 1), try helpers.countBTreeEntries(&tree));
+    try helpers.validateBTreeInvariants(&tree);
+}
+
+/// Model-checked random workload with keys and values of every size the tree
+/// accepts, over 4 KB pages. Every separator length, overflow value and
+/// split/merge shape is exercised; the tree must agree with a hash map and
+/// keep its structural invariants throughout.
+fn randomLongKeyWorkload(allocator: std.mem.Allocator, seed: u64, ops: usize) !void {
+    var db = try helpers.TempDb.initWithPoolSize(allocator, "random_long_keys", 2 * 1024 * 1024);
+    defer db.deinit();
+    var tree = try db.createBTree();
+
+    var model = std.StringHashMap([]u8).init(allocator);
+    defer {
+        var it = model.iterator();
+        while (it.next()) |e| {
+            allocator.free(e.key_ptr.*);
+            allocator.free(e.value_ptr.*);
+        }
+        model.deinit();
+    }
+
+    var prng = std.Random.DefaultPrng.init(seed);
+    const random = prng.random();
+    const max_key = btree.maxKeySize(db.pm.getPageSize());
+    var key_buf: [4096]u8 = undefined;
+    var value_buf: [9000]u8 = undefined;
+
+    for (0..ops) |op_index| {
+        // Mostly short keys, with a heavy tail up to the maximum.
+        const key_len = switch (random.uintLessThan(u8, 10)) {
+            0...4 => 1 + random.uintLessThan(usize, 24),
+            5...7 => 1 + random.uintLessThan(usize, 300),
+            else => 1 + random.uintLessThan(usize, max_key),
+        };
+        // A small alphabet makes repeats (duplicates, deletes of live keys) common.
+        for (key_buf[0..key_len]) |*b| b.* = 'a' + random.uintLessThan(u8, 3);
+        const key = key_buf[0..key_len];
+
+        const action = random.uintLessThan(u8, 10);
+        if (action < 6) {
+            const value_len = switch (random.uintLessThan(u8, 10)) {
+                0...6 => random.uintLessThan(usize, 40),
+                7, 8 => random.uintLessThan(usize, 2500),
+                else => random.uintLessThan(usize, value_buf.len),
+            };
+            random.bytes(value_buf[0..value_len]);
+            const value = value_buf[0..value_len];
+            if (tree.insert(key, value)) |_| {
+                try std.testing.expect(!model.contains(key));
+                try model.put(try allocator.dupe(u8, key), try allocator.dupe(u8, value));
+            } else |err| {
+                try std.testing.expectEqual(BTreeError.DuplicateKey, err);
+                try std.testing.expect(model.contains(key));
+            }
+        } else if (action < 9) {
+            if (tree.delete(key)) |_| {
+                const removed = model.fetchRemove(key) orelse return error.TestUnexpectedResult;
+                allocator.free(removed.key);
+                allocator.free(removed.value);
+            } else |err| {
+                try std.testing.expectEqual(BTreeError.KeyNotFound, err);
+                try std.testing.expect(!model.contains(key));
+            }
+        } else {
+            const got = try tree.get(key);
+            defer if (got) |v| tree.freeValue(v);
+            if (model.get(key)) |expected| {
+                try std.testing.expectEqualSlices(u8, expected, got.?);
+            } else {
+                try std.testing.expect(got == null);
+            }
+        }
+
+        if (op_index % 250 == 0) try helpers.validateBTreeInvariants(&tree);
+    }
+
+    try helpers.validateBTreeInvariants(&tree);
+    try std.testing.expectEqual(model.count(), try helpers.countBTreeEntries(&tree));
+    var it = model.iterator();
+    while (it.next()) |e| {
+        const got = (try tree.get(e.key_ptr.*)).?;
+        defer tree.freeValue(got);
+        try std.testing.expectEqualSlices(u8, e.value_ptr.*, got);
+    }
+    try std.testing.expectEqual(@as(usize, 0), db.bp.getStats().pinned_frames);
+}
+
+test "btree: random workload with keys up to the maximum size matches a model" {
+    for ([_]u64{ 1, 2, 3, 0xfeed }) |seed| {
+        try randomLongKeyWorkload(std.testing.allocator, seed, 3000);
+    }
+}

@@ -1165,3 +1165,36 @@ test "btree: delete removes an overflow entry even when freeing its chain fails"
     try helpers.validateBTreeInvariants(&tree);
     try std.testing.expectEqual(@as(usize, 0), db.bp.getStats().pinned_frames);
 }
+
+// ============================================================================
+// Contract: deletes next to a fresh split do not merge it back
+// ============================================================================
+
+test "btree: delete and reinsert beside a fresh split frees and allocates no pages" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.init(allocator, "no_merge_thrash");
+    defer db.deinit();
+    var tree = try db.createBTree();
+
+    var key_buf: [16]u8 = undefined;
+    var value: [100]u8 = undefined;
+    @memset(&value, 'v');
+    var count: usize = 0;
+    while ((try rootKeyCount(&tree)) == null) : (count += 1) {
+        try tree.insert(try std.fmt.bufPrint(&key_buf, "key{d:05}", .{count}), &value);
+    }
+    const pages = db.pm.pageCount();
+
+    // The last key sits in the new right leaf. Deleting it leaves the two
+    // leaves together just under a page; merging them would free a page
+    // that the reinsert immediately splits off again.
+    const last = try std.fmt.bufPrint(&key_buf, "key{d:05}", .{count - 1});
+    for (0..50) |_| {
+        try tree.delete(last);
+        try std.testing.expectEqual(lattice.core.types.NULL_PAGE, db.pm.getHeader().freelist_page);
+        try tree.insert(last, &value);
+    }
+    try std.testing.expectEqual(pages, db.pm.pageCount());
+    try std.testing.expectEqual(count, try helpers.countBTreeEntries(&tree));
+    try helpers.validateBTreeInvariants(&tree);
+}

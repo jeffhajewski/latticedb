@@ -1403,6 +1403,7 @@ pub const BTree = struct {
 
         // Remove the entry from the leaf
         const orphaned_chain = try self.deleteLeafEntry(frame.data, search.slot);
+        const underfull = storedLeafSpace(frame.data) < leafPagePayloadCapacity(self.page_size) / REBALANCE_OCCUPANCY_DIVISOR;
 
         self.bp.unpinPage(frame, true);
         frame_pinned = false;
@@ -1415,10 +1416,15 @@ pub const BTree = struct {
             self.freeOverflowChain(chain.first_page, chain.page_count) catch {};
         }
 
+        // Only a leaf that has fallen below a third full looks at its
+        // siblings. Probing after every delete cost three page fetches, and
+        // merging whenever two leaves fitted on one page undid every fresh
+        // split on the next delete, only for the next insert to split again.
+        //
         // A failed merge is only a missed space-reclamation opportunity: the
         // key has already been removed and the tree remains valid. Keep delete
         // semantics deterministic even under temporary memory or cache pressure.
-        self.rebalanceAfterDelete(leaf_page, &path) catch {};
+        if (underfull) self.rebalanceAfterDelete(leaf_page, &path) catch {};
     }
 
     const MAX_TREE_HEIGHT = 64;
@@ -1885,10 +1891,10 @@ pub const BTree = struct {
         return true;
     }
 
-    /// Merge a leaf with an adjacent sibling when both payloads fit on one
-    /// page. This is deliberately opportunistic rather than occupancy based:
-    /// every successful merge returns a page to the database freelist, while a
-    /// pair that cannot fit remains a valid (possibly uneven) pair of leaves.
+    /// Called for a leaf that has fallen below a third full. Merge it with an
+    /// adjacent sibling when both payloads fit on one page, returning a page
+    /// to the freelist; otherwise even out the pair. A pair that can do
+    /// neither remains a valid (possibly uneven) pair of leaves.
     fn tryMergeLeaf(self: *Self, leaf_page: PageId, parent_id: PageId) BTreeError!bool {
         const parent_frame = self.bp.fetchPage(parent_id, .exclusive) catch return BTreeError.BufferPoolFull;
         var parent_pinned = true;
@@ -2119,12 +2125,17 @@ pub const BTree = struct {
     }
 
     /// Remove an entry from a leaf node and compact surviving entries.
-    /// Remove the entry at `slot` from a leaf. If its value lived in an
-    /// overflow chain, the chain is returned for the caller to free once the
-    /// leaf change is in place; it is not freed here.
+    /// Remove the entry at `slot` from a leaf, in place. Whatever lies below
+    /// it in the entry heap moves up by its size, so the heap stays
+    /// contiguous (the layout every reader, 0.16.0 included, relies on), and
+    /// its slot is removed. No allocation, and one pass over the slots.
+    ///
+    /// If its value lived in an overflow chain, the chain is returned for
+    /// the caller to free once the leaf change is in place; it is not freed
+    /// here.
     fn deleteLeafEntry(self: *Self, buf: []u8, slot: u16) BTreeError!?OverflowChain {
         const num_entries = LeafNode.getNumEntries(buf);
-        const stored = LeafNode.getStoredValue(buf, slot);
+        const stored = LeafNode.getStoredEntry(buf, slot);
 
         // Parse the descriptor while it is still on the page. A corrupt one
         // fails the delete before anything changes.
@@ -2136,56 +2147,23 @@ pub const BTree = struct {
             }
         }
 
-        const remaining_count = num_entries - 1;
-        if (remaining_count > 0) {
-            var total_data_size: usize = 0;
-            for (0..num_entries) |i| {
-                if (i == slot) continue;
-                const entry = LeafNode.getStoredEntry(buf, @intCast(i));
-                total_data_size += entry.key.len + entry.value.len;
-            }
+        const offset: usize = LeafNode.getEntryOffset(buf, slot);
+        const size: usize = 4 + stored.key.len + stored.value.len;
+        const heap_top = leafHeapTop(buf, self.page_size);
+        if (offset < heap_top or offset + size > self.page_size) return BTreeError.InvalidPage;
 
-            var entries = self.allocator.alloc(StoredEntry, remaining_count) catch return BTreeError.OutOfMemory;
-            defer self.allocator.free(entries);
-
-            var data_buffer = self.allocator.alloc(u8, total_data_size) catch return BTreeError.OutOfMemory;
-            defer self.allocator.free(data_buffer);
-
-            var data_offset: usize = 0;
-            var entry_index: usize = 0;
-            for (0..num_entries) |i| {
-                if (i == slot) continue;
-
-                const entry = LeafNode.getStoredEntry(buf, @intCast(i));
-                const key_copy = data_buffer[data_offset..][0..entry.key.len];
-                @memcpy(key_copy, entry.key);
-                data_offset += entry.key.len;
-
-                const value_copy = data_buffer[data_offset..][0..entry.value.len];
-                @memcpy(value_copy, entry.value);
-                data_offset += entry.value.len;
-
-                entries[entry_index] = .{
-                    .key = key_copy,
-                    .value = value_copy,
-                    .overflow = entry.overflow,
-                };
-                entry_index += 1;
-            }
-
-            const page_len: usize = self.page_size;
-            const compacted = self.allocator.alloc(u8, page_len) catch return BTreeError.OutOfMemory;
-            defer self.allocator.free(compacted);
-            @memcpy(compacted[0..page_len], buf[0..page_len]);
-            LeafNode.setNumEntries(compacted, 0);
-
-            try self.appendLeafEntries(compacted, entries);
-
-            @memcpy(buf[0..page_len], compacted[0..page_len]);
-            return orphaned_chain;
+        if (offset > heap_top) {
+            std.mem.copyBackwards(u8, buf[heap_top + size .. offset + size], buf[heap_top..offset]);
+        }
+        for (0..num_entries) |i| {
+            const entry_offset = LeafNode.getEntryOffset(buf, @intCast(i));
+            if (entry_offset < offset) LeafNode.setEntryOffset(buf, @intCast(i), @intCast(entry_offset + size));
         }
 
-        LeafNode.setNumEntries(buf, 0);
+        const slots_start = LEAF_SLOTS_OFFSET + @as(usize, slot) * LEAF_SLOT_SIZE;
+        const slots_end = LEAF_SLOTS_OFFSET + @as(usize, num_entries) * LEAF_SLOT_SIZE;
+        std.mem.copyForwards(u8, buf[slots_start .. slots_end - LEAF_SLOT_SIZE], buf[slots_start + LEAF_SLOT_SIZE .. slots_end]);
+        LeafNode.setNumEntries(buf, num_entries - 1);
         return orphaned_chain;
     }
 
@@ -3188,4 +3166,56 @@ test "single-pass leaf and internal builders refuse to overrun the page" {
     try std.testing.expectEqual(@as(u16, 37), InternalNode.getNumKeys(&buf));
     try std.testing.expectEqualSlices(u8, &key_store[36], InternalNode.getKey(&buf, 36));
     try std.testing.expectError(BTreeError.PageFull, tree.writeInternalParts(&buf, 1, keys[0..38], children[0..39]));
+}
+
+test "in-place leaf delete keeps the entry heap contiguous" {
+    var tree = BTree{
+        .bp = undefined,
+        .root_page = NULL_PAGE,
+        .comparator = defaultComparator,
+        .page_size = 4096,
+        .allocator = std.testing.allocator,
+    };
+    var buf: [4096]u8 align(8) = undefined;
+    var prng = std.Random.DefaultPrng.init(7);
+    const random = prng.random();
+
+    for (0..50) |_| {
+        // Entries of varying sizes, keys "k" ++ index ++ padding.
+        var key_store: [30][24]u8 = undefined;
+        var value_store: [30][60]u8 = undefined;
+        var entries: [30]StoredEntry = undefined;
+        var live: [30]usize = undefined;
+        for (0..30) |i| {
+            const key_len = 3 + random.uintLessThan(usize, 22);
+            @memset(&key_store[i], 'p');
+            _ = std.fmt.bufPrint(&key_store[i], "k{d:02}", .{i}) catch unreachable;
+            const value_len = random.uintLessThan(usize, 61);
+            random.bytes(&value_store[i]);
+            entries[i] = .{ .key = key_store[i][0..key_len], .value = value_store[i][0..value_len], .overflow = false };
+            live[i] = i;
+        }
+        LeafNode.init(&buf);
+        try tree.appendLeafEntries(&buf, &entries);
+
+        var remaining: usize = 30;
+        while (remaining > 0) {
+            const slot = random.uintLessThan(usize, remaining);
+            const removed = try tree.deleteLeafEntry(&buf, @intCast(slot));
+            try std.testing.expect(removed == null);
+            std.mem.copyForwards(usize, live[slot .. remaining - 1], live[slot + 1 .. remaining]);
+            remaining -= 1;
+
+            try std.testing.expectEqual(@as(u16, @intCast(remaining)), LeafNode.getNumEntries(&buf));
+            var used: usize = 0;
+            for (live[0..remaining], 0..) |entry_index, s| {
+                const stored = LeafNode.getStoredEntry(&buf, @intCast(s));
+                try std.testing.expectEqualSlices(u8, entries[entry_index].key, stored.key);
+                try std.testing.expectEqualSlices(u8, entries[entry_index].value, stored.value);
+                used += 4 + stored.key.len + stored.value.len;
+            }
+            // Contiguous: the heap holds exactly the live entries.
+            try std.testing.expectEqual(@as(usize, 4096) - used, BTree.leafHeapTop(&buf, 4096));
+        }
+    }
 }

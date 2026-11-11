@@ -221,3 +221,51 @@ test "cypher: count(*) counts rows" {
     }
     try std.testing.expectEqual(@as(i64, 0), try queryCount(db, "MATCH (n:Nothing) RETURN count(*)"));
 }
+
+// ============================================================================
+// Projection width
+// ============================================================================
+
+test "cypher: RETURN and WITH accept up to 16 items" {
+    const path = "/tmp/lattice_cs_sixteen_items.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    var result = try db.query("UNWIND [7] AS x RETURN x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try std.testing.expectEqual(@as(usize, 16), result.columns.len);
+    try expectInt(result, 0, 15, 7);
+
+    var with_result = try db.query(
+        "UNWIND [7] AS x WITH x AS a, x AS b, x AS c, x AS d, x AS e, x AS f, x AS g, x AS h, " ++
+            "x AS i, x AS j, x AS k, x AS l, x AS m, x AS n, x AS o, x AS p RETURN p",
+    );
+    defer with_result.deinit();
+    try expectInt(with_result, 0, 0, 7);
+}
+
+test "cypher: more than 16 RETURN or WITH items is a plan error" {
+    const path = "/tmp/lattice_cs_seventeen_items.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    try std.testing.expectError(
+        QueryError.PlanError,
+        db.query("UNWIND [7] AS x RETURN x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x"),
+    );
+    try std.testing.expectError(
+        QueryError.PlanError,
+        db.query("UNWIND [7] AS x RETURN x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, count(x)"),
+    );
+    try std.testing.expectError(
+        QueryError.PlanError,
+        db.query("UNWIND [7] AS x WITH x AS a, x AS b, x AS c, x AS d, x AS e, x AS f, x AS g, x AS h, " ++
+            "x AS i, x AS j, x AS k, x AS l, x AS m, x AS n, x AS o, x AS p, x AS q RETURN q"),
+    );
+
+    var detailed = try db.queryDetailed("UNWIND [7] AS x RETURN x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x");
+    defer detailed.deinit();
+    try std.testing.expect(detailed == .failure);
+    try std.testing.expectEqualStrings("RETURN has 17 items, but at most 16 are supported.", detailed.failure.message);
+}

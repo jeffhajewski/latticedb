@@ -1255,6 +1255,7 @@ pub const QueryPlanner = struct {
     /// Plan a RETURN clause
     fn planReturn(self: *Self, ret: *const ast.ReturnClause, input: ?Operator) PlannerError!Operator {
         const input_op = input orelse return PlannerError.InvalidQuery;
+        try self.checkProjectionWidth("RETURN", ret.items.len);
 
         // Check if any RETURN items contain aggregate functions
         var has_aggregates = false;
@@ -1305,6 +1306,21 @@ pub const QueryPlanner = struct {
             result_op = distinct.operator();
         }
         return result_op;
+    }
+
+    /// Refuse a RETURN or WITH with more items than a row has slots.
+    ///
+    /// A projection writes item i to slot i of its output row, and a row has
+    /// `MAX_SLOTS` slots. Nothing checked the count, so a wider projection
+    /// wrote past the end of the row: a panic in a debug build and undefined
+    /// behaviour in a release one.
+    fn checkProjectionWidth(self: *Self, clause_name: []const u8, item_count: usize) PlannerError!void {
+        if (item_count <= MAX_SLOTS) return;
+        self.setPlanDetail(
+            "{s} has {d} items, but at most {d} are supported.",
+            .{ clause_name, item_count, MAX_SLOTS },
+        );
+        return PlannerError.TooManyVariables;
     }
 
     /// Name an unaliased RETURN item after the expression it projects.
@@ -1908,6 +1924,7 @@ pub const QueryPlanner = struct {
     /// Plan a WITH clause (projection that feeds into next query part)
     fn planWith(self: *Self, with_clause: *const ast.WithClause, input: ?Operator) PlannerError!Operator {
         const input_op = input orelse return PlannerError.InvalidQuery;
+        try self.checkProjectionWidth("WITH", with_clause.items.len);
 
         // Preserve upstream bindings referenced by WITH expressions so runtime
         // evaluation can resolve them even after WITH scope rebinding.

@@ -310,24 +310,35 @@ test "txn: nested savepoints work correctly" {
 // 8.1 WAL Integration Tests
 // ============================================================================
 
-test "txn: begin writes TXN_BEGIN to WAL" {
+test "txn: TXN_BEGIN is written with the first record, not at begin" {
     const allocator = std.testing.allocator;
     var ctx = try TestContext.init(allocator, "/tmp/lattice_txn_wal_begin.wal");
     defer ctx.deinit();
 
     var txn = try ctx.tm.begin(.read_write, .snapshot);
-
-    // Sync WAL to flush buffered records
-    try ctx.wal.sync();
-
-    // Verify WAL contains TXN_BEGIN
-    var iter = ctx.wal.iterate(1);
     var buf: [256]u8 = undefined;
 
-    const record = try iter.next(&buf);
-    try std.testing.expect(record != null);
-    try std.testing.expectEqual(WalRecordType.txn_begin, record.?.header.record_type);
-    try std.testing.expectEqual(txn.id, record.?.header.txn_id);
+    // Beginning a transaction puts nothing in the log.
+    try ctx.wal.sync();
+    {
+        var iter = ctx.wal.iterate(1);
+        try std.testing.expect(try iter.next(&buf) == null);
+    }
+
+    // The first record it logs brings TXN_BEGIN with it.
+    _ = try ctx.tm.logOperation(&txn, .insert, "op");
+    try ctx.wal.sync();
+    {
+        var iter = ctx.wal.iterate(1);
+        const begin_record = try iter.next(&buf);
+        try std.testing.expect(begin_record != null);
+        try std.testing.expectEqual(WalRecordType.txn_begin, begin_record.?.header.record_type);
+        try std.testing.expectEqual(txn.id, begin_record.?.header.txn_id);
+        const op_record = try iter.next(&buf);
+        try std.testing.expect(op_record != null);
+        try std.testing.expectEqual(WalRecordType.insert, op_record.?.header.record_type);
+        try std.testing.expectEqual(begin_record.?.header.lsn, op_record.?.header.prev_lsn);
+    }
 
     try ctx.tm.commit(&txn);
 }
@@ -338,41 +349,70 @@ test "txn: commit writes TXN_COMMIT and syncs" {
     defer ctx.deinit();
 
     var txn = try ctx.tm.begin(.read_write, .snapshot);
+    _ = try ctx.tm.logOperation(&txn, .insert, "op");
     try ctx.tm.commit(&txn); // Commit syncs the WAL
 
-    // Verify WAL contains TXN_BEGIN and TXN_COMMIT
     var iter = ctx.wal.iterate(1);
     var buf: [256]u8 = undefined;
 
-    // TXN_BEGIN
     const begin_record = try iter.next(&buf);
     try std.testing.expect(begin_record != null);
     try std.testing.expectEqual(WalRecordType.txn_begin, begin_record.?.header.record_type);
 
-    // TXN_COMMIT
+    const op_record = try iter.next(&buf);
+    try std.testing.expect(op_record != null);
+    try std.testing.expectEqual(WalRecordType.insert, op_record.?.header.record_type);
+
     const commit_record = try iter.next(&buf);
     try std.testing.expect(commit_record != null);
     try std.testing.expectEqual(WalRecordType.txn_commit, commit_record.?.header.record_type);
 }
 
-test "txn: abort writes TXN_ABORT and syncs" {
+test "txn: a transaction that logged nothing ends without touching the WAL" {
+    const allocator = std.testing.allocator;
+    var ctx = try TestContext.init(allocator, "/tmp/lattice_txn_wal_untouched.wal");
+    defer ctx.deinit();
+
+    const lsn_before = ctx.wal.getCurrentLsn();
+
+    var reader = try ctx.tm.begin(.read_only, .snapshot);
+    try ctx.tm.commit(&reader);
+    var idle_writer = try ctx.tm.begin(.read_write, .snapshot);
+    try ctx.tm.commit(&idle_writer);
+    var aborted = try ctx.tm.begin(.read_write, .snapshot);
+    try ctx.tm.abort(&aborted);
+
+    try std.testing.expectEqual(lsn_before, ctx.wal.getCurrentLsn());
+    try std.testing.expectEqual(@as(u64, 0), ctx.wal.header.frame_count);
+    try std.testing.expect(!ctx.tm.hasLoggedActiveTxn());
+}
+
+test "txn: abort writes TXN_ABORT" {
     const allocator = std.testing.allocator;
     var ctx = try TestContext.init(allocator, "/tmp/lattice_txn_wal_abort.wal");
     defer ctx.deinit();
 
     var txn = try ctx.tm.begin(.read_write, .snapshot);
-    try ctx.tm.abort(&txn); // Abort syncs the WAL
+    _ = try ctx.tm.logOperation(&txn, .insert, "op");
+    try std.testing.expect(ctx.tm.hasLoggedActiveTxn());
+    try ctx.tm.abort(&txn);
+    try std.testing.expect(!ctx.tm.hasLoggedActiveTxn());
 
-    // Verify WAL contains TXN_BEGIN and TXN_ABORT
+    // The abort record is not synced by the abort itself; it reaches the
+    // disk with whatever is flushed next.
+    try ctx.wal.sync();
+
     var iter = ctx.wal.iterate(1);
     var buf: [256]u8 = undefined;
 
-    // TXN_BEGIN
     const begin_record = try iter.next(&buf);
     try std.testing.expect(begin_record != null);
     try std.testing.expectEqual(WalRecordType.txn_begin, begin_record.?.header.record_type);
 
-    // TXN_ABORT
+    const op_record = try iter.next(&buf);
+    try std.testing.expect(op_record != null);
+    try std.testing.expectEqual(WalRecordType.insert, op_record.?.header.record_type);
+
     const abort_record = try iter.next(&buf);
     try std.testing.expect(abort_record != null);
     try std.testing.expectEqual(WalRecordType.txn_abort, abort_record.?.header.record_type);

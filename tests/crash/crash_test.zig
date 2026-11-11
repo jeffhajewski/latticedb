@@ -316,6 +316,42 @@ test "a vector removal is still refused when the file has vectors and the open d
     try std.testing.expectError(error.IoError, openCrashTestDb(allocator, killed, false));
 }
 
+test "a transaction that writes nothing leaves the log untouched" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_readonly_nolog.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var db = try openCrashTestDb(allocator, path, true);
+    defer db.close();
+
+    var txn = try db.beginTransaction(.read_write);
+    const node_id = try db.createNode(&txn, &.{"Person"});
+    try db.commitTransaction(&txn);
+
+    const wal = &db.wal.?;
+    const lsn_before = wal.getCurrentLsn();
+    const frames_before = wal.header.frame_count;
+
+    // Committed and aborted readers, and a writer that changed nothing.
+    var reader = try db.beginTransaction(.read_only);
+    try std.testing.expect(try db.nodeExistsInTxn(&reader, node_id));
+    try db.commitTransaction(&reader);
+    reader = try db.beginTransaction(.read_only);
+    try db.abortTransaction(&reader);
+    var idle_writer = try db.beginTransaction(.read_write);
+    try db.commitTransaction(&idle_writer);
+
+    try std.testing.expectEqual(lsn_before, wal.getCurrentLsn());
+    try std.testing.expectEqual(frames_before, wal.header.frame_count);
+
+    // A real write still gets its begin record, its data and its commit.
+    txn = try db.beginTransaction(.read_write);
+    _ = try db.createNode(&txn, &.{"Person"});
+    try db.commitTransaction(&txn);
+    try std.testing.expect(wal.getCurrentLsn() >= lsn_before + 3);
+}
+
 test "fragmented vector replacements and removals replay from WAL" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_crash_vectors.ltdb";

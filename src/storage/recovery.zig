@@ -166,9 +166,10 @@ pub const RecoveryManager = struct {
 
         const frame_count = wal.header.frame_count;
 
-        // Check up to 10 frames ahead (or until end of WAL)
-        // If any are valid, we have mid-log corruption
-        const max_scan = @min(corrupted_frame + 10, frame_count);
+        // Every remaining frame is checked. Opening the log already cut off
+        // a torn tail by the same test, and a shorter look here would call a
+        // long damaged run a tail and drop the commits behind it.
+        const max_scan = frame_count;
 
         var frame_buf: [wal_mod.MAX_FRAME_SIZE]u8 align(4096) = undefined;
 
@@ -1185,6 +1186,64 @@ test "recovery fails on mid-log corruption" {
         @memset(&garbage, 0xFF);
         // Write garbage to data area to corrupt checksum
         _ = wal.file.write(mid_frame_offset + @sizeOf(wal_mod.WalFrameHeader), &garbage) catch {};
+    }
+
+    // Close and reopen
+    wal.deinit();
+
+    var wal2 = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
+    defer {
+        wal2.deinit();
+        vfs_impl.delete(wal_path) catch {};
+    }
+
+    // Recovery should FAIL with MidLogCorruption because valid frames exist after corruption
+    const result = recoverDatabase(allocator, &wal2, &pm);
+    try std.testing.expectError(RecoveryError.MidLogCorruption, result);
+}
+
+test "a long damaged run with valid frames behind it is not a torn tail" {
+    const allocator = std.testing.allocator;
+
+    const vfs = @import("vfs.zig");
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/long_run_lattice_recovery_midlog_corrupt_test.db";
+    const wal_path = "/tmp/long_run_lattice_recovery_midlog_corrupt_test.wal";
+
+    vfs_impl.delete(db_path) catch {};
+    vfs_impl.delete(wal_path) catch {};
+
+    var pm = try PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var uuid: [16]u8 = undefined;
+    @import("compat").randomBytes(&uuid);
+
+    var wal = try WalManager.init(allocator, vfs_impl, wal_path, uuid);
+
+    // Fourteen transactions, one frame each.
+    var txn_id: u64 = 1;
+    while (txn_id <= 14) : (txn_id += 1) {
+        _ = try wal.appendRecord(.txn_begin, txn_id, 0, &[_]u8{});
+        _ = try wal.appendRecord(.insert, txn_id, 0, "data");
+        _ = try wal.appendRecord(.txn_commit, txn_id, 0, &[_]u8{});
+        try wal.sync();
+    }
+    try std.testing.expect(wal.header.frame_count >= 14);
+
+    // Damage frames 1 to 11. Frames 12 and 13 stay valid, further away than
+    // a ten-frame look ahead reaches.
+    var garbage: [64]u8 = undefined;
+    @memset(&garbage, 0xFF);
+    var frame: u64 = 1;
+    while (frame <= 11) : (frame += 1) {
+        const offset = wal_mod.FRAME_SIZE + frame * wal_mod.FRAME_SIZE;
+        _ = try wal.file.write(offset + @sizeOf(wal_mod.WalFrameHeader), &garbage);
     }
 
     // Close and reopen

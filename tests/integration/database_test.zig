@@ -5526,6 +5526,37 @@ test "database: a node and an edge full-text index cannot share a name and prope
     try std.testing.expectEqual(node, alpha[0].doc_id);
 }
 
+test "database: uncommitted text matches full-text queries by whole terms" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    try db.createNodeFtsIndex("Doc", "body");
+
+    var txn = try db.beginTransaction(.read_write);
+    const a = try db.createNode(&txn, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(&txn, a, "body", .{ .string_val = "concatenate the strings" });
+    const b = try db.createNode(&txn, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(&txn, b, "body", .{ .string_val = "a cat, asleep" });
+
+    // Pending text answers the same way the index will after commit.
+    for ([_][]const u8{ "cat", "cat," }) |query| {
+        const staged = try db.ftsSearchIndexInTxn(&txn, .node, "Doc", "body", query, 10);
+        defer db.freeFtsSearchResults(staged);
+        try std.testing.expectEqual(@as(usize, 1), staged.len);
+        try std.testing.expectEqual(b, staged[0].doc_id);
+    }
+
+    try db.commitTransaction(&txn);
+    const committed = try db.ftsSearchIndexInTxn(null, .node, "Doc", "body", "cat", 10);
+    defer db.freeFtsSearchResults(committed);
+    try std.testing.expectEqual(@as(usize, 1), committed.len);
+    try std.testing.expectEqual(b, committed[0].doc_id);
+}
+
 test "database: a full-text predicate becomes the access path, not a filter" {
     const allocator = std.testing.allocator;
     const db = try Database.open(allocator, ":memory:", .{

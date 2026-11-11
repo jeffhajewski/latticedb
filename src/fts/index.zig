@@ -866,6 +866,50 @@ pub const FtsIndex = struct {
         return result_slice;
     }
 
+    /// Score text that is not in the index yet against a query, by term presence.
+    ///
+    /// The query and the text go through the tokenizer and normalisation that
+    /// indexing and search use, so a pending document matches a query exactly
+    /// when the indexed one would: every query term must be one of its terms.
+    /// The score is the number of distinct query terms, or 0 when any is
+    /// missing or the query has no searchable terms. It is not BM25, so it only
+    /// decides which pending documents match, not how they rank against
+    /// indexed ones.
+    pub fn termPresenceScore(
+        allocator: Allocator,
+        config: FtsConfig,
+        query_text: []const u8,
+        text: []const u8,
+    ) FtsError!f32 {
+        var arena_state = std.heap.ArenaAllocator.init(allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+
+        var text_terms = StringHashMap(void).init(arena);
+        var text_tok = Tokenizer.init(arena, text, config.tokenizer);
+        while (text_tok.next()) |token| {
+            if (token.text.len > 64) continue;
+            const term = arena.alloc(u8, token.text.len) catch return FtsError.OutOfMemory;
+            for (token.text, 0..) |c, i| term[i] = std.ascii.toLower(c);
+            text_terms.put(term, {}) catch return FtsError.OutOfMemory;
+        }
+
+        var query_terms = StringHashMap(void).init(arena);
+        var query_tok = Tokenizer.init(arena, query_text, config.tokenizer);
+        while (query_tok.next()) |token| {
+            if (token.text.len > 64) continue;
+            var lower_buf: [64]u8 = undefined;
+            for (token.text, 0..) |c, i| lower_buf[i] = std.ascii.toLower(c);
+            const term = lower_buf[0..token.text.len];
+            if (!text_terms.contains(term)) return 0;
+            if (!query_terms.contains(term)) {
+                const owned = arena.dupe(u8, term) catch return FtsError.OutOfMemory;
+                query_terms.put(owned, {}) catch return FtsError.OutOfMemory;
+            }
+        }
+        return @floatFromInt(query_terms.count());
+    }
+
     /// Free search results
     pub fn freeResults(self: *Self, results: []ScoredDoc) void {
         // Empty slices from &[_]ScoredDoc{} are compile-time literals, not allocated
@@ -2856,4 +2900,17 @@ test "fts fuzzy search scores a query word by its best match" {
     try std.testing.expectEqual(@as(usize, 1), fuzzy.len);
     try std.testing.expectEqual(@as(DocId, 1), fuzzy[0].doc_id);
     try std.testing.expect(fuzzy[0].score <= exact[0].score);
+}
+
+test "fts term presence matches whole terms the way search does" {
+    const allocator = std.testing.allocator;
+    const config = FtsConfig{};
+
+    try std.testing.expectEqual(@as(f32, 0), try FtsIndex.termPresenceScore(allocator, config, "cat", "concatenate strings"));
+    try std.testing.expectEqual(@as(f32, 1), try FtsIndex.termPresenceScore(allocator, config, "Cat", "the cat sat"));
+    // Punctuation is not part of a term, and stop words ask for nothing.
+    try std.testing.expectEqual(@as(f32, 1), try FtsIndex.termPresenceScore(allocator, config, "bread,", "about bread"));
+    try std.testing.expectEqual(@as(f32, 1), try FtsIndex.termPresenceScore(allocator, config, "the bread", "about bread"));
+    try std.testing.expectEqual(@as(f32, 0), try FtsIndex.termPresenceScore(allocator, config, "bread butter", "about bread"));
+    try std.testing.expectEqual(@as(f32, 2), try FtsIndex.termPresenceScore(allocator, config, "bread butter bread", "butter on bread"));
 }

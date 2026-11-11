@@ -6684,23 +6684,11 @@ pub const Database = struct {
     // the rest of the index catalog. There is no unscoped search: a query names
     // the label and property whose index answers it.
 
+    /// Score uncommitted text by whole-term presence, with the tokenizer the
+    /// index uses. Matching substrings instead let "cat" find "concatenate",
+    /// and kept stop words and punctuation that indexing drops.
     fn overlayFtsScore(self: *Self, query_text: []const u8, text: []const u8) DatabaseError!f32 {
-        const lower_query = self.allocator.dupe(u8, query_text) catch return DatabaseError.OutOfMemory;
-        defer self.allocator.free(lower_query);
-        for (lower_query) |*ch| ch.* = std.ascii.toLower(ch.*);
-
-        const lower_text = self.allocator.dupe(u8, text) catch return DatabaseError.OutOfMemory;
-        defer self.allocator.free(lower_text);
-        for (lower_text) |*ch| ch.* = std.ascii.toLower(ch.*);
-
-        var score: f32 = 0;
-        var iter = std.mem.tokenizeAny(u8, lower_query, " \t\r\n");
-        while (iter.next()) |token| {
-            if (token.len == 0) continue;
-            if (std.mem.indexOf(u8, lower_text, token) == null) return 0;
-            score += 1;
-        }
-        return score;
+        return FtsIndex.termPresenceScore(self.allocator, self.config.fts_config, query_text, text) catch |err| return mapFtsError(err);
     }
 
     /// Free FTS search results.

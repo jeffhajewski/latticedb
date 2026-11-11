@@ -338,11 +338,7 @@ func decodeValue(value *C.lattice_value) (any, error) {
 		return cStringN((*C.char)(unsafe.Pointer(ptr)), length), nil
 	case ErrorCode(C.LATTICE_VALUE_BYTES):
 		ptr := C.lattice_go_value_bytes_ptr(value)
-		length := int(C.lattice_go_value_bytes_len(value))
-		if ptr == nil || length == 0 {
-			return []byte{}, nil
-		}
-		return C.GoBytes(unsafe.Pointer(ptr), C.int(length)), nil
+		return copyCBytes(unsafe.Pointer(ptr), uint64(C.lattice_go_value_bytes_len(value))), nil
 	case ErrorCode(C.LATTICE_VALUE_VECTOR):
 		ptr := C.lattice_go_value_vector_ptr(value)
 		length := int(C.lattice_go_value_vector_dimensions(value))

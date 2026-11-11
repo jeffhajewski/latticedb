@@ -201,7 +201,7 @@ func (db *DB) Serialize() ([]byte, error) {
 
 	// Copied into Go memory before the native buffer is released, so what the
 	// caller holds does not depend on memory this function is about to free.
-	out := C.GoBytes(unsafe.Pointer(cBytes), C.int(cLen))
+	out := copyCBytes(unsafe.Pointer(cBytes), uint64(cLen))
 	C.lattice_free_bytes(cBytes, cLen)
 	return out, nil
 }
@@ -1477,8 +1477,22 @@ func errorMessage(code ErrorCode) string {
 }
 
 func cStringN(ptr *C.char, length int) string {
-	if ptr == nil || length == 0 {
+	if ptr == nil || length <= 0 {
 		return ""
 	}
-	return C.GoStringN(ptr, C.int(length))
+	return string(unsafe.Slice((*byte)(unsafe.Pointer(ptr)), length))
+}
+
+// copyCBytes copies length bytes of C memory into a new Go slice.
+//
+// C.GoBytes takes its length as a C int, so a buffer of 2 GiB or more wrapped:
+// to a negative length, which panics, or past 4 GiB to a short one, which
+// silently truncated a serialized database. The length here is a full size_t.
+func copyCBytes(ptr unsafe.Pointer, length uint64) []byte {
+	if ptr == nil || length == 0 {
+		return []byte{}
+	}
+	out := make([]byte, length)
+	copy(out, unsafe.Slice((*byte)(ptr), length))
+	return out
 }

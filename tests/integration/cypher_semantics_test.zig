@@ -532,3 +532,72 @@ test "cypher: a relationship pattern can name alternative types" {
     try std.testing.expectError(QueryError.SemanticError, db.query("MATCH (a:P {name: 'a'}), (b:P {name: 'b'}) CREATE (a)-[:A|B]->(b)"));
     try std.testing.expectError(QueryError.SemanticError, db.query("MATCH (a:P {name: 'a'}), (b:P {name: 'b'}) MERGE (a)-[:A|B]->(b)"));
 }
+
+// ============================================================================
+// Variable-length patterns
+// ============================================================================
+
+/// a->b, b->c, a->c, c->d, all :R.
+fn seedDiamond(db: *Database) !void {
+    try run(db, "CREATE (a:N {name: 'a'}), (b:N {name: 'b'}), (c:N {name: 'c'}), (d:N {name: 'd'}), " ++
+        "(a)-[:R]->(b), (b)-[:R]->(c), (a)-[:R]->(c), (c)-[:R]->(d)");
+}
+
+test "cypher: a variable-length pattern returns every path within its bounds" {
+    const path = "/tmp/lattice_cs_varlength_paths.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try seedDiamond(db);
+
+    // One row per path: c is reached two ways, and d only through a->c->d.
+    // The old walk marked nodes visited at the last hop and never unmarked
+    // them, so it returned b and c and missed the rest.
+    try expectNames(db, "MATCH (s:N {name: 'a'})-[:R*1..2]->(x) RETURN x.name ORDER BY x.name", &.{ "b", "c", "c", "d" });
+    try expectNames(db, "MATCH (s:N {name: 'a'})-[:R*]->(x) RETURN x.name ORDER BY x.name", &.{ "b", "c", "c", "d", "d" });
+    try expectNames(db, "MATCH (s:N {name: 'a'})-[:R*0..1]->(x) RETURN x.name ORDER BY x.name", &.{ "a", "b", "c" });
+    try expectNames(db, "MATCH (s:N {name: 'd'})<-[:R*2..3]-(x) RETURN x.name ORDER BY x.name", &.{ "a", "a", "b" });
+    // Undirected: nodes repeat across paths, edges never repeat within one.
+    try expectNames(db, "MATCH (s:N {name: 'a'})-[:R*1..2]-(x) RETURN x.name ORDER BY x.name", &.{ "b", "b", "c", "c", "d" });
+}
+
+test "cypher: a variable-length path may revisit a node but not reuse an edge" {
+    const path = "/tmp/lattice_cs_varlength_cycle.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try run(db, "CREATE (a:N {name: 'a'}), (b:N {name: 'b'}), (a)-[:R]->(b), (b)-[:R]->(a)");
+
+    // a->b->a comes back to the source, which node uniqueness refused.
+    try expectNames(db, "MATCH (s:N {name: 'a'})-[:R*]->(x) RETURN x.name ORDER BY x.name", &.{ "a", "b" });
+    // Undirected, from a: a-b by either edge, then back to a by the other.
+    try expectNames(db, "MATCH (s:N {name: 'a'})-[:R*]-(x) RETURN x.name ORDER BY x.name", &.{ "a", "a", "b", "b" });
+}
+
+test "cypher: an unbounded variable-length pattern is not cut off at 100 hops" {
+    const path = "/tmp/lattice_cs_varlength_long.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    // A chain of 120 :NEXT edges, built eight nodes per CREATE and then
+    // stitched together, which keeps every statement small.
+    const per_batch = 8;
+    const batches = 15;
+    var buf: [512]u8 = undefined;
+    for (0..batches) |b| {
+        var stream = std.Io.Writer.fixed(&buf);
+        try stream.writeAll("CREATE ");
+        for (0..per_batch) |k| {
+            const i = b * per_batch + k + 1;
+            if (k > 0) try stream.writeAll("-[:NEXT]->");
+            try stream.print("(:C {{i: {d}}})", .{i});
+        }
+        try run(db, stream.buffered());
+    }
+    for (1..batches) |b| {
+        const last = b * per_batch;
+        const q = try std.fmt.bufPrint(&buf, "MATCH (a:C {{i: {d}}}), (b:C {{i: {d}}}) CREATE (a)-[:NEXT]->(b)", .{ last, last + 1 });
+        try run(db, q);
+    }
+
+    // The walk used to stop silently at 100 hops.
+    try std.testing.expectEqual(@as(i64, 119), try queryCount(db, "MATCH (s:C {i: 1})-[:NEXT*]->(x) RETURN count(x)"));
+    try std.testing.expectEqual(@as(i64, 120), try queryCount(db, "MATCH (s:C {i: 1})-[:NEXT*]->(x) RETURN max(x.i)"));
+}

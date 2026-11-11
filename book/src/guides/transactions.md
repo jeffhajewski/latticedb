@@ -81,10 +81,14 @@ LatticeDB uses a write-ahead log (WAL) for crash recovery:
 
 1. Changes are written to the WAL before being applied to data pages
 2. Commit means the WAL record is on disk (a fast sequential write)
-3. Data pages are written lazily during checkpointing
+3. Data pages are written later, all together: at checkpoints, at close, on `sync()`
 4. On crash, the WAL is replayed to recover committed transactions
 
-This means committed data survives process crashes and power failures.
+A commit that has returned survives the process crashing. Surviving a power cut as
+well depends on the settings: the default sync mode waits for the disk on every
+commit, `LATTICE_SYNC_MODE=normal` does not, and on macOS the disk's own cache is
+flushed only with `LATTICE_FULL_FSYNC=1`. See
+[Durability and the Log](../configuration/durability.md).
 
 ## Concurrency
 

@@ -19,7 +19,8 @@ Not every option below is available everywhere. The bindings and the C API expos
 `enable_wal`, `enable_adjacency_cache` and `lock`; the C API, Go and Java also
 take `page_size` (Python and TypeScript always use 4096). `enable_fts`, the query-cache settings and
 `auto_checkpoint` are options of the Zig API only — everywhere else they keep
-their defaults.
+their defaults. `sync_mode` and `full_fsync` are Zig options too, and elsewhere are
+set through the environment variables `LATTICE_SYNC_MODE` and `LATTICE_FULL_FSYNC`.
 
 ## Decided at creation, and permanent
 
@@ -76,6 +77,12 @@ In-memory databases cap the cache at 64 pages (256 KB at the default page size)
 whatever you ask for, because a cache miss against memory is a copy rather than a
 trip to a disk. See [Storage Modes](./storage-modes.md).
 
+The size is the cache's resting size, not a hard ceiling. Changed pages are never
+evicted to make room; they stay until the next flush writes them all together, and
+the cache grows past its size if it has to hold them. The database flushes early
+when half the cache holds changes, so this only shows during a single large
+transaction or a long recovery.
+
 ## Safety
 
 | Option | Default | What it does |
@@ -99,9 +106,15 @@ stay on when the caller says nothing.
 transactions are built on the log, so a database without one has no `BEGIN`, no
 rollback, and no multi-statement atomicity.
 
-`auto_checkpoint` (Zig API only) controls how often the log is folded back into
-the database file. Everywhere else it stays at its default; the same page
-explains what that is.
+| Option | Default | What it does |
+|--------|---------|--------------|
+| `enable_wal` | on | Write-ahead logging, and with it transactions. |
+| `sync_mode` | `.full` | Whether a commit waits for its log record to reach the disk. `.normal` survives a killed process but can lose the latest commits to a power cut. Zig API, or `LATTICE_SYNC_MODE`. |
+| `full_fsync` | off | On macOS, sync with `F_FULLFSYNC` so commits survive power loss, at several milliseconds per sync. Zig API, or `LATTICE_FULL_FSYNC=1`. |
+| `auto_checkpoint` | every 1000 log frames, truncating | How often the log is folded back into the database file. Zig API only. |
+
+[Durability and the Log](./durability.md) explains each of these and what survives
+what.
 
 ## The same options, per language
 

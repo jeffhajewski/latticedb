@@ -1313,6 +1313,10 @@ pub const Database = struct {
     /// Returns an error if flushing fails - data may not be persisted.
     pub fn sync(self: *Self) DatabaseError!void {
         if (self.read_only) return;
+        // A failed handle's trees are missing a committed transaction, or
+        // hold part of one. The log has all of it; the file must not get
+        // the trees.
+        if (self.failed) return DatabaseError.IoError;
         try self.flushPages();
     }
 

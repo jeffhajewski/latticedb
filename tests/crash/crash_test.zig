@@ -513,6 +513,7 @@ test "a commit is durable before it is applied, and a failed apply stops the han
         try std.testing.expectError(error.IoError, db.beginTransaction(.read_only));
         try std.testing.expectError(error.IoError, db.beginTransaction(.read_write));
         try std.testing.expectError(error.IoError, db.checkpoint(.truncate));
+        try std.testing.expectError(error.IoError, db.sync());
         try std.testing.expect(!try db.nodeExists(during));
 
         try copyAsIfKilled(allocator, path, killed);

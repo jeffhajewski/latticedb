@@ -123,6 +123,21 @@ export interface OpenOptions {
 }
 
 /**
+ * Copy `len` bytes of native memory into a new Uint8Array.
+ *
+ * koffi.view (koffi 2.11+) copies in one block; decoding to `number[]` first
+ * builds one JS number per byte, which for a serialized database is millions
+ * of them.
+ */
+function copyNativeBytes(ptr: unknown, len: number): Uint8Array {
+  const view = (koffi as unknown as { view?: (ref: unknown, len: number) => ArrayBuffer }).view;
+  if (typeof view === 'function') {
+    return new Uint8Array(view(ptr, len).slice(0));
+  }
+  return Uint8Array.from(koffi.decode(ptr as never, 'uint8_t', len) as number[]);
+}
+
+/**
  * High-level FFI wrapper class.
  */
 export class LatticeFFI {
@@ -299,8 +314,7 @@ export class LatticeFFI {
     try {
       // Copied out before the native buffer is released, so what the caller
       // holds does not depend on memory this function is about to free.
-      const decoded = koffi.decode(ptr, 'uint8_t', len) as number[];
-      return Uint8Array.from(decoded);
+      return copyNativeBytes(ptr, len);
     } finally {
       this.bindings.lattice_free_bytes(ptr, len);
     }
@@ -671,6 +685,9 @@ export class LatticeFFI {
     let ownsNativeValue = false;
     try {
       const err = this.bindings.lattice_node_get_property(txn, nodeId, key, valueOut);
+      if (err === LatticeErrorCode.NotFound) {
+        return null;
+      }
       this.checkError(err);
       ownsNativeValue = true;
       return this.nativeValueToJs(valueOut);
@@ -744,8 +761,50 @@ export class LatticeFFI {
       batchOut
     );
     this.checkError(err);
+    return this.takeStreamBatch(batchOut[0]);
+  }
 
-    const batch = batchOut[0];
+  /**
+   * Read a stream on a koffi worker thread, so a wait of `timeoutMs` does not
+   * block the event loop. Blocking it would also block the commit the reader
+   * is waiting for whenever that commit comes from this same thread.
+   */
+  readStreamAsync(
+    db: DatabaseHandle,
+    stream: string,
+    afterSequence = BigInt(0),
+    limit = 100,
+    timeoutMs = 0
+  ): Promise<StreamRecord[]> {
+    const streamBuf = Buffer.from(stream, 'utf8');
+    const batchOut: unknown[] = [null];
+    return new Promise((resolve, reject) => {
+      this.bindings.lattice_stream_read.async(
+        db,
+        streamBuf,
+        streamBuf.length,
+        afterSequence,
+        limit,
+        timeoutMs,
+        batchOut,
+        (callErr: unknown, err: number) => {
+          if (callErr) {
+            reject(callErr);
+            return;
+          }
+          try {
+            this.checkError(err);
+            resolve(this.takeStreamBatch(batchOut[0]));
+          } catch (decodeErr) {
+            reject(decodeErr);
+          }
+        }
+      );
+    });
+  }
+
+  /** Decode a stream batch into records and free it. */
+  private takeStreamBatch(batch: unknown): StreamRecord[] {
     if (!batch) {
       return [];
     }
@@ -1017,8 +1076,7 @@ export class LatticeFFI {
         const ptr = this.decodePointer(value, dataOffset);
         const len = this.decodeSize(value, dataOffset + 8);
         if (!ptr || len === 0) return new Uint8Array(0);
-        const bytes = koffi.decode(ptr as never, 'uint8_t', len) as number[];
-        return Uint8Array.from(bytes);
+        return copyNativeBytes(ptr, len);
       }
       case LatticeValueType.Vector: {
         const ptr = this.decodePointer(value, dataOffset);
@@ -1100,8 +1158,7 @@ export class LatticeFFI {
         const bv = data.bytes_val as { ptr: unknown; len: number | bigint };
         const len = Number(bv.len);
         if (!bv.ptr || len === 0) return new Uint8Array(0);
-        const bytes = koffi.decode(bv.ptr, 'uint8_t', len) as number[];
-        return Uint8Array.from(bytes);
+        return copyNativeBytes(bv.ptr, len);
       }
       case LatticeValueType.Vector: {
         const vv = data.vector_val as { ptr: unknown; dimensions: number | bigint };

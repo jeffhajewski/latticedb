@@ -267,6 +267,12 @@ describeIfNative('Database Integration', () => {
       });
     });
 
+    test('a missing property reads as null', async () => {
+      await db.read(async (txn) => {
+        expect(await txn.getProperty(nodeId, 'never_set')).toBeNull();
+      });
+    });
+
     test('set and get integer property', async () => {
       await db.write(async (txn) => {
         await txn.setProperty(nodeId, 'count', 42);
@@ -1353,6 +1359,20 @@ describeIfNative('Database Integration', () => {
       await expect(db.readStream('events')).resolves.toMatchObject([
         { sequence: BigInt(1), payload: 'visible' },
       ]);
+    });
+
+    test('a waiting stream read does not block a commit from the same thread', async () => {
+      const started = Date.now();
+      const reading = db.readStream('events', { timeoutMs: 5000 });
+      // Runs only if the read left the event loop free.
+      setTimeout(() => {
+        void db.write(async (txn) => {
+          txn.publishStream('events', 'wake');
+        });
+      }, 50);
+      const records = await reading;
+      expect(records.map((record) => record.payload)).toEqual(['wake']);
+      expect(Date.now() - started).toBeLessThan(4000);
     });
 
     test('enableWal false rejects stream writes', async () => {

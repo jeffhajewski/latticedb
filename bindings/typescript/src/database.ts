@@ -315,13 +315,14 @@ export class Database {
     options: { afterSequence?: bigint; limit?: number; timeoutMs?: number } = {}
   ): Promise<StreamRecord[]> {
     this.ensureOpen();
-    return this.ffi!.readStream(
-      this.dbHandle!,
-      stream,
-      options.afterSequence ?? BigInt(0),
-      options.limit ?? 100,
-      options.timeoutMs ?? 0
-    );
+    const afterSequence = options.afterSequence ?? BigInt(0);
+    const limit = options.limit ?? 100;
+    const timeoutMs = options.timeoutMs ?? 0;
+    if (timeoutMs > 0) {
+      // A wait runs off the event loop; a plain read is quicker done inline.
+      return this.ffi!.readStreamAsync(this.dbHandle!, stream, afterSequence, limit, timeoutMs);
+    }
+    return this.ffi!.readStream(this.dbHandle!, stream, afterSequence, limit, 0);
   }
 
   async getStreamOffset(stream: string, consumer: string): Promise<bigint | null> {

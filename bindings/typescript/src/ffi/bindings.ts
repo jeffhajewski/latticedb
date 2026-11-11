@@ -336,7 +336,7 @@ export interface LatticeBindings {
     payload: unknown,
     sequence_out: Buffer
   ) => number;
-  lattice_stream_read: (
+  lattice_stream_read: ((
     db: unknown,
     stream: Buffer,
     stream_len: number,
@@ -344,7 +344,18 @@ export interface LatticeBindings {
     limit: number,
     timeout_ms: number,
     batch_out: unknown[]
-  ) => number;
+  ) => number) & {
+    async: (
+      db: unknown,
+      stream: Buffer,
+      stream_len: number,
+      after_sequence: bigint,
+      limit: number,
+      timeout_ms: number,
+      batch_out: unknown[],
+      callback: (err: unknown, result: number) => void
+    ) => void;
+  };
   lattice_stream_batch_count: (batch: unknown) => number;
   lattice_stream_batch_get: (
     batch: unknown,

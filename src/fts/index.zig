@@ -284,7 +284,7 @@ pub const FtsIndex = struct {
         const recorded = self.doc_lengths.getAnalysis() catch return FtsError.ScorerError;
         const result = if (recorded) |r|
             decodeAnalysis(self.config.tokenizer, r)
-        else if (self.doc_lengths.stats.total_docs == 0)
+        else if (!(self.doc_lengths.hasDocuments() catch return FtsError.ScorerError))
             freshAnalysis(self.config.tokenizer)
         else
             legacyAnalysis(self.config.tokenizer);
@@ -296,7 +296,7 @@ pub const FtsIndex = struct {
     /// one every document has left) takes the config's settings and records
     /// them; otherwise the recorded or legacy settings stand.
     fn analysisForWrite(self: *Self) FtsError!TokenizerConfig {
-        if (self.doc_lengths.stats.total_docs != 0) return self.analysis();
+        if (self.doc_lengths.hasDocuments() catch return FtsError.ScorerError) return self.analysis();
         const fresh = freshAnalysis(self.config.tokenizer);
         const encoded = encodeAnalysis(fresh);
         const recorded = self.doc_lengths.getAnalysis() catch return FtsError.ScorerError;
@@ -1091,7 +1091,7 @@ pub const FtsIndex = struct {
     /// A matcher for `query_text` against text this index would take in now.
     pub fn presenceMatcher(self: *Self, query_text: []const u8) FtsError!PresenceMatcher {
         // Text that goes in now is analysed as indexing would analyse it.
-        const tokenizer_config = if (self.doc_lengths.stats.total_docs == 0)
+        const tokenizer_config = if (!(self.doc_lengths.hasDocuments() catch return FtsError.ScorerError))
             freshAnalysis(self.config.tokenizer)
         else
             try self.analysis();
@@ -3332,4 +3332,28 @@ test "fts query words split on punctuation and non-ASCII without stalling" {
     const accented = try fx.index.searchWithMode("bread café", .@"or", 10);
     defer fx.index.freeResults(accented);
     try std.testing.expectEqual(@as(usize, 2), accented.len);
+}
+
+test "fts an index with documents but no stored stats is not taken for empty" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_no_stats_analysis_test.db");
+    defer fx.destroy(allocator);
+
+    // Built as 0.14 built it: ASCII terms, and neither stats nor analysis.
+    const legacy = FtsIndex.legacyAnalysis(fx.index.config.tokenizer);
+    _ = try fx.index.indexDocumentAnalyzed(1, "Herr Müller", legacy);
+    _ = try fx.index.indexDocumentAnalyzed(2, "Frau Zöller", legacy);
+    try fx.lengths_tree.delete(&[_]u8{ 0x00, 's', 't', 'a', 't', 's' });
+
+    var reopened = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{});
+    try std.testing.expectEqual(@as(u64, 0), reopened.doc_lengths.stats.total_docs);
+    try std.testing.expect((try reopened.analysis()).ascii_only);
+    // A new document is written the way the stored ones were, not recorded
+    // as a fresh index over terms it cannot read.
+    _ = try reopened.indexDocument(3, "Herr Müller");
+    var again = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{});
+    try std.testing.expect((try again.analysis()).ascii_only);
+    const got = try again.search("ller", 10);
+    defer again.freeResults(got);
+    try std.testing.expectEqual(@as(usize, 3), got.len);
 }

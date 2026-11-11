@@ -133,15 +133,40 @@ pub const DocLengthStore = struct {
     /// Called on every change to a document. That is one extra tree write per
     /// indexed document, alongside the several that indexing already performs,
     /// and it buys scores that mean the same thing after a restart.
-    fn persistStats(self: *Self) void {
+    ///
+    /// A failure is returned rather than dropped: after the delete, a failed
+    /// insert leaves no stats at all, and every later open would score
+    /// against an empty corpus while the caller believed the write succeeded.
+    fn persistStats(self: *Self) ScorerError!void {
         const entry = StatsEntry{
             .total_docs = self.stats.total_docs,
             .total_tokens = self.stats.total_tokens,
         };
         const bytes = std.mem.asBytes(&entry);
 
-        self.tree.delete(&STATS_KEY) catch {};
-        self.tree.insert(&STATS_KEY, bytes) catch {};
+        self.tree.delete(&STATS_KEY) catch |err| {
+            if (err != BTreeError.KeyNotFound) return mapBTreeError(err);
+        };
+        self.tree.insert(&STATS_KEY, bytes) catch |err| return mapBTreeError(err);
+    }
+
+    /// Whether any document has a length stored here.
+    ///
+    /// The stats are the cheap answer but not a sure one: an index written
+    /// before they were stored (0.14 and earlier) has documents and no stats
+    /// until its next write. Scoped indexes reach their first document after
+    /// at most the stats and analysis keys; the unscoped view walks past every
+    /// scoped index's keys, so callers ask only when the stats say empty.
+    pub fn hasDocuments(self: *Self) ScorerError!bool {
+        if (self.stats.total_docs != 0) return true;
+        var iter: ScopedTree.Iterator = undefined;
+        self.tree.iterateAll(&iter) catch |err| return mapBTreeError(err);
+        defer iter.deinit();
+        while (iter.next() catch |err| return mapBTreeError(err)) |entry| {
+            const key = self.tree.callerKey(entry.key) orelse continue;
+            if (key.len == 8) return true;
+        }
+        return false;
     }
 
     /// Key the index's analyzer settings are stored under (see
@@ -211,7 +236,7 @@ pub const DocLengthStore = struct {
         }
 
         self.stats.recalculate();
-        self.persistStats();
+        try self.persistStats();
     }
 
     /// Get document length
@@ -288,7 +313,7 @@ pub const DocLengthStore = struct {
             self.stats.total_docs -= 1;
             self.stats.total_tokens -= entry.length;
             self.stats.recalculate();
-            self.persistStats();
+            try self.persistStats();
         }
     }
 

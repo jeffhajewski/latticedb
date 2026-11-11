@@ -101,6 +101,10 @@ pub const RecoveryStats = struct {
     stopped_at_corruption: bool,
     /// Frame number where corruption was detected (if any)
     corrupted_frame: ?u64,
+    /// Largest transaction id seen in the log. A new session has to number
+    /// its transactions above this, or a later recovery would read two
+    /// sessions' records as one transaction.
+    max_txn_id: u64 = 0,
 };
 
 /// Context for logical redo operations (optional)
@@ -294,6 +298,7 @@ pub const RecoveryManager = struct {
             stats.end_lsn = record.header.lsn;
 
             const txn_id = record.header.txn_id;
+            stats.max_txn_id = @max(stats.max_txn_id, txn_id);
 
             switch (record.header.record_type) {
                 .txn_begin => {

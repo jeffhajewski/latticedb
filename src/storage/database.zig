@@ -1139,6 +1139,7 @@ pub const Database = struct {
         }
 
         // Recover only after the vector index is available for logical redo.
+        var recovered_max_txn_id: u64 = 0;
         if (self.wal) |*wal| {
             var rm = recovery_mod.RecoveryManager.initWithLogicalContext(allocator, .{
                 .node_store = &self.node_store,
@@ -1154,6 +1155,7 @@ pub const Database = struct {
                 error.MidLogCorruption => return DatabaseError.InvalidDatabase,
                 else => return DatabaseError.IoError,
             };
+            recovered_max_txn_id = stats.max_txn_id;
             // Persist recovered state if any redo operations were applied
             if (stats.redo_operations > 0) {
                 try self.rebuildPropertyIndexes();
@@ -1167,6 +1169,8 @@ pub const Database = struct {
         self.txn_manager = null;
         if (self.wal) |*wal| {
             self.txn_manager = TxnManager.init(allocator, wal);
+            // The log can outlive this session, so ids must not start over.
+            self.txn_manager.?.next_txn_id = recovered_max_txn_id + 1;
         }
         self.txn_overlays = std.AutoHashMap(u64, TxnOverlay).init(allocator);
         self.last_auto_checkpoint_ns = @import("compat").nanoTimestamp();
@@ -1184,6 +1188,12 @@ pub const Database = struct {
             QueryCache.init(allocator, options.config.query_cache_size) catch null
         else
             null;
+
+        // Whatever the log held is in the trees now. Fold it into the file and
+        // empty the log, so the next open does not replay it all again and a
+        // torn frame at its tail does not sit in front of new ones. Best
+        // effort: if it fails the log simply stays.
+        self.checkpointLeftoverLog();
 
         return self;
     }
@@ -1245,6 +1255,18 @@ pub const Database = struct {
         return try self.runCheckpoint(wal, mode);
     }
 
+    /// Empty a log that still holds frames, at open and at close.
+    ///
+    /// Skipped when automatic checkpoints are switched off: that setting
+    /// means the caller decides when the log is truncated.
+    fn checkpointLeftoverLog(self: *Self) void {
+        if (self.read_only) return;
+        if (self.config.auto_checkpoint == null) return;
+        const wal = if (self.wal) |*w| w else return;
+        if (wal.header.frame_count == 0) return;
+        _ = self.runCheckpoint(wal, .truncate) catch {};
+    }
+
     /// The one place a checkpoint is run from, so that every checkpoint leaves
     /// a file that can be opened without the log.
     ///
@@ -1260,6 +1282,12 @@ pub const Database = struct {
         wal: *WalManager,
         mode: checkpoint_mod.CheckpointMode,
     ) DatabaseError!checkpoint_mod.CheckpointStats {
+        // A transaction with records already in the log would lose its
+        // beginning to a checkpoint, and recovery would then drop its commit.
+        if (self.txn_manager) |*tm| {
+            if (tm.hasLoggedActiveTxn()) return DatabaseError.TransactionConflict;
+        }
+
         if (mode != .passive) {
             // Into tree pages first, so the flush below carries them.
             try self.persistHnswIndex();
@@ -1299,12 +1327,14 @@ pub const Database = struct {
     ///
     /// Truncation discards the whole WAL, so it is only safe once every dirty
     /// page is durable in the main file and no other transaction is relying on
-    /// frames still being there. The checkpoint itself handles the first, and
-    /// the overlay count handles the second.
+    /// frames still being there. The checkpoint itself handles both: it
+    /// refuses to run while an open transaction has records in the log.
+    /// Open transactions that have logged nothing, readers above all, do not
+    /// hold it back, so a long-lived reader no longer lets the log grow
+    /// without limit.
     fn maybeAutoCheckpoint(self: *Self) void {
         const policy = self.config.auto_checkpoint orelse return;
         if (self.read_only) return;
-        if (self.txn_overlays.count() != 0) return;
 
         const wal = if (self.wal) |*w| w else return;
         if (wal.header.frame_count < policy.max_wal_frames) return;
@@ -1662,6 +1692,11 @@ pub const Database = struct {
     /// Close the database and release all resources.
     /// For guaranteed durability, call sync() first and handle errors.
     pub fn close(self: *Self) void {
+        // Leave a file that opens without replaying anything. The C API has
+        // always done this in lattice_close; the Zig API and the CLI left
+        // the whole log for the next open to replay.
+        self.checkpointLeftoverLog();
+
         // Reverse initialization order
 
         // 11. Query cache

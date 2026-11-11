@@ -106,6 +106,9 @@ fn openCrashTestDb(allocator: std.mem.Allocator, path: []const u8, create: bool)
             .enable_wal = true,
             .enable_fts = false,
             .enable_vector = false,
+            // These tests wipe the data file after a close and expect the
+            // log to rebuild it, so nothing may truncate the log for them.
+            .auto_checkpoint = null,
         },
     });
 }
@@ -350,6 +353,133 @@ test "a transaction that writes nothing leaves the log untouched" {
     _ = try db.createNode(&txn, &.{"Person"});
     try db.commitTransaction(&txn);
     try std.testing.expect(wal.getCurrentLsn() >= lsn_before + 3);
+}
+
+test "the log is empty after a clean close and after recovery" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_log_emptied.ltdb";
+    const killed = "/tmp/lattice_crash_log_emptied_killed.ltdb";
+    const killed_again = "/tmp/lattice_crash_log_emptied_killed2.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+    cleanup(killed);
+    defer cleanup(killed);
+    cleanup(killed_again);
+    defer cleanup(killed_again);
+
+    // Default checkpoint policy: the threshold is far away, so only open and
+    // close can be what empties the log here.
+    const config = DatabaseConfig{ .enable_fts = false, .enable_vector = false };
+    var node_id: NodeId = undefined;
+    {
+        var db = try Database.open(allocator, path, .{ .create = true, .config = config });
+        defer db.close();
+        var txn = try db.beginTransaction(.read_write);
+        node_id = try db.createNode(&txn, &.{"Person"});
+        try db.commitTransaction(&txn);
+        try std.testing.expect(db.wal.?.header.frame_count > 0);
+        try copyAsIfKilled(allocator, path, killed);
+    }
+
+    // Clean close: nothing left to replay.
+    {
+        var db = try Database.open(allocator, path, .{ .config = config });
+        defer db.close();
+        try std.testing.expectEqual(@as(u64, 0), db.wal.?.header.frame_count);
+        try std.testing.expect(try db.nodeExists(node_id));
+    }
+
+    // Kill: recovery replays the log, then folds it into the file. A second
+    // kill straight after that open must find the node in the file itself.
+    {
+        var db = try Database.open(allocator, killed, .{ .config = config });
+        defer db.close();
+        try std.testing.expectEqual(@as(u64, 0), db.wal.?.header.frame_count);
+        try std.testing.expect(try db.nodeExists(node_id));
+        try copyAsIfKilled(allocator, killed, killed_again);
+    }
+    {
+        var db = try Database.open(allocator, killed_again, .{ .config = config });
+        defer db.close();
+        try std.testing.expect(try db.nodeExists(node_id));
+    }
+}
+
+test "transaction ids continue above those already in the log" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_txn_ids.ltdb";
+    const killed = "/tmp/lattice_crash_txn_ids_killed.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+    cleanup(killed);
+    defer cleanup(killed);
+
+    var last_id: u64 = 0;
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+        defer db.close();
+        for (0..3) |_| {
+            var txn = try db.beginTransaction(.read_write);
+            _ = try db.createNode(&txn, &.{"Person"});
+            last_id = txn.id;
+            try db.commitTransaction(&txn);
+        }
+        try copyAsIfKilled(allocator, path, killed);
+    }
+
+    // The helper keeps the log in place, so this session appends to a log
+    // that still holds the first session's transactions.
+    var db = try openCrashTestDb(allocator, killed, false);
+    defer db.close();
+    var txn = try db.beginTransaction(.read_write);
+    defer db.abortTransaction(&txn) catch {};
+    try std.testing.expect(txn.id > last_id);
+}
+
+test "an open reader does not hold back automatic checkpoints" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_reader_ckpt.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var db = try Database.open(allocator, path, .{ .create = true, .config = .{
+        .enable_fts = false,
+        .enable_vector = false,
+        .auto_checkpoint = .{ .max_wal_frames = 16 },
+    } });
+    defer db.close();
+
+    var reader = try db.beginTransaction(.read_only);
+    for (0..200) |_| {
+        var txn = try db.beginTransaction(.read_write);
+        _ = try db.createNode(&txn, &.{"Person"});
+        try db.commitTransaction(&txn);
+    }
+    try std.testing.expect(db.wal.?.header.frame_count < 64);
+    try db.commitTransaction(&reader);
+}
+
+test "a checkpoint is refused while a transaction has records in the log" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_ckpt_refused.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var db = try openCrashTestDb(allocator, path, true);
+    defer db.close();
+
+    // Log through the transaction manager directly, the way the paths
+    // without an overlay do: the record is in the log before commit.
+    const tm = &db.txn_manager.?;
+    var txn = try tm.begin(.read_write, .snapshot);
+    const payload = try lattice.transaction.wal_payload.serializeVectorMutationAlloc(allocator, 1, null);
+    defer allocator.free(payload);
+    _ = try tm.logOperation(&txn, .update, payload);
+
+    try std.testing.expectError(error.TransactionConflict, db.checkpoint(.truncate));
+
+    try tm.abort(&txn);
+    _ = try db.checkpoint(.truncate);
 }
 
 test "fragmented vector replacements and removals replay from WAL" {

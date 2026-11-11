@@ -1416,72 +1416,42 @@ pub const FtsIndex = struct {
     }
 
     /// Search with explicit mode (AND or OR)
-    /// Supports quoted phrases: `database "quick brown" -mysql`
+    /// Supports quoted phrases and exclusions of words or phrases:
+    /// `database "quick brown" -mysql -"stored procedure"`
     pub fn searchWithMode(
         self: *Self,
         query_text: []const u8,
         mode: QueryMode,
         limit: u32,
     ) FtsError![]ScoredDoc {
-        // Parse query (handles -exclusions and "phrases")
-        var terms_buf: [32][]u8 = undefined;
-        var excluded_buf: [32][]u8 = undefined;
-        var phrases_buf: [MAX_PHRASES][MAX_PHRASE_TERMS][]u8 = undefined;
-        var phrase_lens: [MAX_PHRASES]usize = undefined;
-        var num_terms: usize = 0;
-        var num_excluded: usize = 0;
-        var num_phrases: usize = 0;
+        var query = try self.parseQuery(query_text);
+        defer query.deinit();
+        const arena = query.arena.allocator();
 
-        try self.parseQueryTerms(
-            query_text,
-            &terms_buf,
-            &num_terms,
-            &excluded_buf,
-            &num_excluded,
-            &phrases_buf,
-            &phrase_lens,
-            &num_phrases,
-        );
-
-        // Cleanup on exit
-        defer {
-            for (terms_buf[0..num_terms]) |t| self.allocator.free(t);
-            for (excluded_buf[0..num_excluded]) |t| self.allocator.free(t);
-            for (0..num_phrases) |p| {
-                for (phrases_buf[p][0..phrase_lens[p]]) |t| self.allocator.free(t);
-            }
-        }
-
-        if (num_terms == 0 and num_phrases == 0) {
+        const terms = query.terms.items;
+        const phrases = query.phrases.items;
+        if (terms.len == 0 and phrases.len == 0) {
             return &[_]ScoredDoc{};
         }
+        const positions = self.config.store_positions;
 
-        // Cast to const slices
-        var const_terms: [32][]const u8 = undefined;
-        for (terms_buf[0..num_terms], 0..) |t, i| {
-            const_terms[i] = t;
-        }
-        var num_const_terms: usize = num_terms;
         // Without stored positions a phrase cannot be checked for adjacency,
         // so in AND mode it asks for its words, as `searchPhrase` does. Dropping
         // it instead would answer a phrase-only query with nothing at all.
-        if (num_phrases > 0 and !self.config.store_positions and mode == .@"and") {
-            for (0..num_phrases) |p| {
-                for (phrases_buf[p][0..phrase_lens[p]]) |word| {
-                    if (num_const_terms >= const_terms.len) break;
-                    const duplicate = for (const_terms[0..num_const_terms]) |t| {
-                        if (std.mem.eql(u8, t, word)) break true;
-                    } else false;
-                    if (duplicate) continue;
-                    const_terms[num_const_terms] = word;
-                    num_const_terms += 1;
+        var plain_terms: ArrayListUnmanaged([]const u8) = .empty;
+        plain_terms.appendSlice(arena, terms) catch return FtsError.OutOfMemory;
+        if (phrases.len > 0 and !positions and mode == .@"and") {
+            for (phrases) |phrase| {
+                next_word: for (phrase) |word| {
+                    for (plain_terms.items) |t| {
+                        if (std.mem.eql(u8, t, word)) continue :next_word;
+                    }
+                    plain_terms.append(arena, word) catch return FtsError.OutOfMemory;
                 }
             }
         }
-        var const_excluded: [32][]const u8 = undefined;
-        for (excluded_buf[0..num_excluded], 0..) |t, i| {
-            const_excluded[i] = t;
-        }
+        const const_terms = plain_terms.items;
+        const has_exclusions = query.excluded.items.len > 0 or query.excluded_phrases.items.len > 0;
 
         // Each sub-search below is narrowed afterwards: by another phrase, by
         // the plain terms, or by the exclusions. Cutting one short beforehand
@@ -1490,29 +1460,19 @@ pub const FtsIndex = struct {
         // below others that do not. Only a lone term search with nothing to
         // filter it may stop at `limit`.
         const unbounded = std.math.maxInt(u32);
-        const narrowed = num_excluded > 0 or (num_phrases > 0 and self.config.store_positions);
+        const narrowed = has_exclusions or (phrases.len > 0 and positions);
         const term_limit: u32 = if (narrowed) unbounded else limit;
 
         // Get initial candidates based on terms and phrases
         var candidates: []ScoredDoc = undefined;
-        var candidates_owned = false;
 
-        if (num_phrases > 0 and self.config.store_positions) {
+        if (phrases.len > 0 and positions) {
             // Search phrases first (most restrictive)
-            var const_phrase: [MAX_PHRASE_TERMS][]const u8 = undefined;
-            for (phrases_buf[0][0..phrase_lens[0]], 0..) |t, i| {
-                const_phrase[i] = t;
-            }
-            candidates = try self.searchPhraseTerms(const_phrase[0..phrase_lens[0]], unbounded);
-            candidates_owned = true;
+            candidates = try self.searchPhraseTerms(phrases[0], unbounded);
 
             // Intersect with additional phrases
-            for (1..num_phrases) |p| {
-                var next_phrase: [MAX_PHRASE_TERMS][]const u8 = undefined;
-                for (phrases_buf[p][0..phrase_lens[p]], 0..) |t, i| {
-                    next_phrase[i] = t;
-                }
-                const phrase_results = try self.searchPhraseTerms(next_phrase[0..phrase_lens[p]], unbounded);
+            for (phrases[1..]) |phrase| {
+                const phrase_results = try self.searchPhraseTerms(phrase, unbounded);
                 defer self.allocator.free(phrase_results);
 
                 // Build set of phrase matches
@@ -1540,16 +1500,16 @@ pub const FtsIndex = struct {
             }
 
             // Intersect with regular terms if any
-            if (num_terms > 0) {
+            if (terms.len > 0) {
                 const term_results = switch (mode) {
-                    .@"and" => if (num_terms == 1)
-                        try self.searchSingleTerm(const_terms[0], unbounded)
+                    .@"and" => if (terms.len == 1)
+                        try self.searchSingleTerm(terms[0], unbounded)
                     else
-                        try self.searchMultiTerm(const_terms[0..num_terms], unbounded),
-                    .@"or" => if (num_terms == 1)
-                        try self.searchSingleTerm(const_terms[0], unbounded)
+                        try self.searchMultiTerm(terms, unbounded),
+                    .@"or" => if (terms.len == 1)
+                        try self.searchSingleTerm(terms[0], unbounded)
                     else
-                        try self.searchMultiTermOr(const_terms[0..num_terms], unbounded),
+                        try self.searchMultiTermOr(terms, unbounded),
                 };
                 defer self.allocator.free(term_results);
 
@@ -1595,27 +1555,26 @@ pub const FtsIndex = struct {
                     return FtsError.OutOfMemory;
                 };
             }
-        } else if (num_const_terms > 0) {
+        } else if (const_terms.len > 0) {
             // No phrases (or positions not stored), just use term search
             candidates = switch (mode) {
-                .@"and" => if (num_const_terms == 1)
+                .@"and" => if (const_terms.len == 1)
                     try self.searchSingleTerm(const_terms[0], term_limit)
                 else
-                    try self.searchMultiTerm(const_terms[0..num_const_terms], term_limit),
-                .@"or" => if (num_const_terms == 1)
+                    try self.searchMultiTerm(const_terms, term_limit),
+                .@"or" => if (const_terms.len == 1)
                     try self.searchSingleTerm(const_terms[0], term_limit)
                 else
-                    try self.searchMultiTermOr(const_terms[0..num_const_terms], term_limit),
+                    try self.searchMultiTermOr(const_terms, term_limit),
             };
-            candidates_owned = true;
         } else {
             return &[_]ScoredDoc{};
         }
 
-        defer if (candidates_owned) self.allocator.free(candidates);
+        defer self.allocator.free(candidates);
 
         // Apply exclusions if any
-        if (num_excluded == 0) {
+        if (!has_exclusions) {
             // No exclusions - sort and return top K
             std.mem.sort(ScoredDoc, candidates, {}, ScoredDoc.lessThan);
             if (candidates.len <= limit) {
@@ -1634,7 +1593,7 @@ pub const FtsIndex = struct {
         var excluded_docs = std.AutoHashMap(DocId, void).init(self.allocator);
         defer excluded_docs.deinit();
 
-        for (const_excluded[0..num_excluded]) |term| {
+        for (query.excluded.items) |term| {
             const dict_entry = self.dictionary.get(term) catch continue orelse continue;
             if (dict_entry.posting_page == 0) continue;
 
@@ -1643,6 +1602,20 @@ pub const FtsIndex = struct {
 
             while (iter.next() catch null) |entry| {
                 excluded_docs.put(entry.doc_id, {}) catch continue;
+            }
+        }
+
+        // An excluded phrase rules out the documents the same phrase would
+        // match if it were asked for: those holding it in order, or, without
+        // stored positions, those holding all of its words.
+        for (query.excluded_phrases.items) |phrase| {
+            const matches = if (positions)
+                try self.searchPhraseTerms(phrase, unbounded)
+            else
+                try self.searchMultiTermAnd(phrase, unbounded);
+            defer self.freeResults(matches);
+            for (matches) |doc| {
+                excluded_docs.put(doc.doc_id, {}) catch return FtsError.OutOfMemory;
             }
         }
 
@@ -1677,26 +1650,32 @@ pub const FtsIndex = struct {
         return result_slice;
     }
 
-    /// Phrase storage: array of term arrays (max 8 phrases, max 8 terms each)
-    const MAX_PHRASES: usize = 8;
-    const MAX_PHRASE_TERMS: usize = 8;
+    /// A query split into its parts, normalised as indexing normalises text.
+    /// Every part lives in `arena`.
+    const QueryParts = struct {
+        arena: std.heap.ArenaAllocator,
+        /// Words outside quotes, required (AND) or alternatives (OR).
+        terms: ArrayListUnmanaged([]const u8) = .empty,
+        /// Words a leading '-' excludes.
+        excluded: ArrayListUnmanaged([]const u8) = .empty,
+        /// Quoted runs of two or more words.
+        phrases: ArrayListUnmanaged([]const []const u8) = .empty,
+        /// Quoted runs of two or more words a leading '-' excludes.
+        excluded_phrases: ArrayListUnmanaged([]const []const u8) = .empty,
 
-    /// Parse query text into terms, phrases, and exclusions
-    /// Phrases are detected by quoted strings: "quick brown fox"
-    fn parseQueryTerms(
-        self: *Self,
-        query_text: []const u8,
-        terms_buf: *[32][]u8,
-        num_terms: *usize,
-        excluded_buf: *[32][]u8,
-        num_excluded: *usize,
-        phrases_buf: *[MAX_PHRASES][MAX_PHRASE_TERMS][]u8,
-        phrase_lens: *[MAX_PHRASES]usize,
-        num_phrases: *usize,
-    ) FtsError!void {
-        num_terms.* = 0;
-        num_excluded.* = 0;
-        num_phrases.* = 0;
+        fn deinit(self: *QueryParts) void {
+            self.arena.deinit();
+        }
+    };
+
+    /// Parse query text into terms, phrases, and exclusions of either.
+    /// Phrases are detected by quoted strings: "quick brown fox". There is no
+    /// cap on how many of any there are, or on a phrase's length: each one
+    /// narrows the answer, so leaving some out would widen it.
+    fn parseQuery(self: *Self, query_text: []const u8) FtsError!QueryParts {
+        var query: QueryParts = .{ .arena = std.heap.ArenaAllocator.init(self.allocator) };
+        errdefer query.deinit();
+        const arena = query.arena.allocator();
         const tokenizer_config = try self.analysis();
 
         var i: usize = 0;
@@ -1715,60 +1694,36 @@ pub const FtsIndex = struct {
             // Check for quoted phrase
             if (query_text[i] == '"') {
                 i += 1; // Skip opening quote
-                if (i >= query_text.len) break;
+                const body_start = i;
+                while (i < query_text.len and query_text[i] != '"') i += 1;
+                const body = query_text[body_start..i];
+                if (i < query_text.len) i += 1; // Skip closing quote
 
-                // Parse phrase terms until closing quote
-                if (num_phrases.* < MAX_PHRASES) {
-                    const phrase_idx = num_phrases.*;
-                    phrase_lens[phrase_idx] = 0;
+                // The words between the quotes go through the tokenizer the
+                // index was built with, so a phrase loses the stop words and
+                // short words indexing dropped. Those never took a position,
+                // so keeping them would ask for a gap the index never has
+                // and "Bank of America" would never match.
+                var words: ArrayListUnmanaged([]const u8) = .empty;
+                var tok = Tokenizer.init(arena, body, tokenizer_config);
+                while (tok.next()) |token| {
+                    var term_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
+                    const term = tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &term_buf) orelse continue;
+                    const normalized = arena.dupe(u8, term) catch return FtsError.OutOfMemory;
+                    words.append(arena, normalized) catch return FtsError.OutOfMemory;
+                }
 
-                    // The words between the quotes go through the tokenizer the
-                    // index was built with, so a phrase loses the stop words and
-                    // short words indexing dropped. Those never took a position,
-                    // so keeping them would ask for a gap the index never has
-                    // and "Bank of America" would never match.
-                    const body_start = i;
-                    while (i < query_text.len and query_text[i] != '"') i += 1;
-                    var tok = Tokenizer.init(self.allocator, query_text[body_start..i], tokenizer_config);
-                    while (tok.next()) |token| {
-                        if (phrase_lens[phrase_idx] >= MAX_PHRASE_TERMS) break;
-                        var term_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
-                        const term = tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &term_buf) orelse continue;
-                        const normalized = self.allocator.dupe(u8, term) catch {
-                            return FtsError.OutOfMemory;
-                        };
-                        phrases_buf[phrase_idx][phrase_lens[phrase_idx]] = normalized;
-                        phrase_lens[phrase_idx] += 1;
-                    }
-
-                    // Skip closing quote
-                    if (i < query_text.len and query_text[i] == '"') {
-                        i += 1;
-                    }
-
-                    // Only count phrase if it has at least 2 terms
-                    if (phrase_lens[phrase_idx] >= 2) {
-                        num_phrases.* += 1;
-                    } else {
-                        // Single word "phrase" - add as regular term
-                        if (phrase_lens[phrase_idx] == 1) {
-                            if (is_excluded) {
-                                if (num_excluded.* < 32) {
-                                    excluded_buf[num_excluded.*] = phrases_buf[phrase_idx][0];
-                                    num_excluded.* += 1;
-                                } else {
-                                    self.allocator.free(phrases_buf[phrase_idx][0]);
-                                }
-                            } else {
-                                if (num_terms.* < 32) {
-                                    terms_buf[num_terms.*] = phrases_buf[phrase_idx][0];
-                                    num_terms.* += 1;
-                                } else {
-                                    self.allocator.free(phrases_buf[phrase_idx][0]);
-                                }
-                            }
-                        }
-                    }
+                // A one-word "phrase" is that word.
+                switch (words.items.len) {
+                    0 => {},
+                    1 => {
+                        const list = if (is_excluded) &query.excluded else &query.terms;
+                        list.append(arena, words.items[0]) catch return FtsError.OutOfMemory;
+                    },
+                    else => {
+                        const list = if (is_excluded) &query.excluded_phrases else &query.phrases;
+                        list.append(arena, words.items) catch return FtsError.OutOfMemory;
+                    },
                 }
                 continue;
             }
@@ -1783,7 +1738,7 @@ pub const FtsIndex = struct {
                 i += 1;
             }
 
-            var words = Tokenizer.init(self.allocator, query_text[start..i], tokenizer_config);
+            var words = Tokenizer.init(arena, query_text[start..i], tokenizer_config);
             while (words.next()) |token| {
                 // Operators are not search terms.
                 if (std.ascii.eqlIgnoreCase(token.text, "OR") or
@@ -1795,28 +1750,12 @@ pub const FtsIndex = struct {
 
                 var term_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
                 const term = tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &term_buf) orelse continue;
-                const normalized = self.allocator.dupe(u8, term) catch {
-                    return FtsError.OutOfMemory;
-                };
-
-                // Add to appropriate list
-                if (is_excluded) {
-                    if (num_excluded.* < 32) {
-                        excluded_buf[num_excluded.*] = normalized;
-                        num_excluded.* += 1;
-                    } else {
-                        self.allocator.free(normalized);
-                    }
-                } else {
-                    if (num_terms.* < 32) {
-                        terms_buf[num_terms.*] = normalized;
-                        num_terms.* += 1;
-                    } else {
-                        self.allocator.free(normalized);
-                    }
-                }
+                const normalized = arena.dupe(u8, term) catch return FtsError.OutOfMemory;
+                const list = if (is_excluded) &query.excluded else &query.terms;
+                list.append(arena, normalized) catch return FtsError.OutOfMemory;
             }
         }
+        return query;
     }
 
     /// Search with OR semantics (documents matching any term)
@@ -2797,6 +2736,62 @@ test "fts AND search and phrase search require every term of a long query" {
     defer fx.index.freeResults(phrase_results);
     try std.testing.expectEqual(@as(usize, 1), phrase_results.len);
     try std.testing.expectEqual(@as(DocId, 1), phrase_results[0].doc_id);
+}
+
+test "fts searchWithMode requires every phrase and every phrase word, however many" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/s3_lattice_fts_many_phrases_test.db");
+    defer fx.destroy(allocator);
+    fx.index.config.store_positions = true;
+
+    const nine_phrases = "\"alpha able\" \"bravo baker\" \"charlie cable\" \"delta dandy\" " ++
+        "\"echo eager\" \"foxtrot fable\" \"golf gable\" \"hotel habit\" \"india ideal\"";
+    // Document 2 has the first eight phrases, and the ninth's words apart.
+    _ = try fx.index.indexDocument(1, "alpha able bravo baker charlie cable delta dandy " ++
+        "echo eager foxtrot fable golf gable hotel habit india ideal");
+    _ = try fx.index.indexDocument(2, "alpha able bravo baker charlie cable delta dandy " ++
+        "echo eager foxtrot fable golf gable hotel habit ideal india");
+
+    const phrases = try fx.index.searchWithMode(nine_phrases, .@"and", 10);
+    defer fx.index.freeResults(phrases);
+    try std.testing.expectEqual(@as(usize, 1), phrases.len);
+    try std.testing.expectEqual(@as(DocId, 1), phrases[0].doc_id);
+
+    // A nine-word phrase; document 4 has only its first eight in order.
+    _ = try fx.index.indexDocument(3, "kilo lima mike november oscar papa quebec romeo sierra");
+    _ = try fx.index.indexDocument(4, "kilo lima mike november oscar papa quebec romeo tango sierra");
+    const long = try fx.index.searchWithMode("\"kilo lima mike november oscar papa quebec romeo sierra\"", .@"and", 10);
+    defer fx.index.freeResults(long);
+    try std.testing.expectEqual(@as(usize, 1), long.len);
+    try std.testing.expectEqual(@as(DocId, 3), long[0].doc_id);
+}
+
+test "fts searchWithMode excludes a phrase rather than requiring it" {
+    const allocator = std.testing.allocator;
+    for ([_]bool{ true, false }) |store_positions| {
+        const fx = try AndSearchFixture.create(allocator, "/tmp/s3_lattice_fts_excluded_phrase_test.db");
+        defer fx.destroy(allocator);
+        fx.index.config.store_positions = store_positions;
+
+        _ = try fx.index.indexDocument(1, "quick brown fox");
+        _ = try fx.index.indexDocument(2, "brown quick fox");
+        _ = try fx.index.indexDocument(3, "quick fox");
+
+        for ([_]QueryMode{ .@"and", .@"or" }) |mode| {
+            const results = try fx.index.searchWithMode("fox -\"quick brown\"", mode, 10);
+            defer fx.index.freeResults(results);
+            if (store_positions) {
+                // Only document 1 holds the phrase.
+                try std.testing.expectEqual(@as(usize, 2), results.len);
+                try std.testing.expect(resultsContain(results, 2));
+                try std.testing.expect(resultsContain(results, 3));
+            } else {
+                // Without positions the phrase stands for its words.
+                try std.testing.expectEqual(@as(usize, 1), results.len);
+                try std.testing.expectEqual(@as(DocId, 3), results[0].doc_id);
+            }
+        }
+    }
 }
 
 test "fts AND search with a term no document contains matches nothing" {

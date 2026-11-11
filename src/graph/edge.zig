@@ -213,11 +213,7 @@ pub const EdgeStore = struct {
         var meta_value: [8]u8 = undefined;
         std.mem.writeInt(u64, &meta_value, next_edge_id, .little);
 
-        self.edge_id_index.delete(&meta_key) catch |err| switch (err) {
-            BTreeError.KeyNotFound => {},
-            else => return mapBTreeError(err),
-        };
-        self.edge_id_index.insert(&meta_key, &meta_value) catch |err| {
+        self.edge_id_index.put(&meta_key, &meta_value) catch |err| {
             return mapBTreeError(err);
         };
     }

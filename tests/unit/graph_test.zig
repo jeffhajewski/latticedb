@@ -1027,3 +1027,49 @@ test "label_index: iterator lazy evaluation" {
     const none = try iter.next();
     try std.testing.expectEqual(@as(?NodeId, null), none);
 }
+
+// ============================================================================
+// Contract: a failed node update leaves the old node in place
+// ============================================================================
+
+test "nodes: an update failing at any allocation keeps the old node" {
+    const allocator = std.testing.allocator;
+    const big = try allocator.alloc(u8, 1500);
+    defer allocator.free(big);
+    @memset(big, 'x');
+    const old_props = [_]Property{.{ .key_id = 7, .value = .{ .string_val = "old" } }};
+    const new_props = [_]Property{.{ .key_id = 7, .value = .{ .string_val = big } }};
+
+    var fail_offset: usize = 0;
+    while (true) : (fail_offset += 1) {
+        var db = try helpers.TempDb.initWithPoolSize(allocator, "node_update_atomic", 1024 * 1024);
+        defer db.deinit();
+        var failing_state = std.testing.FailingAllocator.init(allocator, .{});
+        const failing = failing_state.allocator();
+        var tree = try BTree.init(failing, db.bp);
+        var store = NodeStore.init(failing, &tree);
+
+        // Enough nodes to fill the root leaf, so the larger record splits it.
+        var ids: [120]NodeId = undefined;
+        for (&ids) |*id| id.* = try store.create(&[_]SymbolId{}, &old_props);
+        const target = ids[60];
+
+        failing_state.fail_index = failing_state.alloc_index + fail_offset;
+        const result = store.update(target, &[_]SymbolId{}, &new_props);
+        const induced = failing_state.has_induced_failure;
+        failing_state.fail_index = std.math.maxInt(usize);
+        try std.testing.expectEqual(@as(usize, 0), db.bp.getStats().pinned_frames);
+
+        var node = try store.get(target);
+        defer node.deinit(failing);
+        try std.testing.expectEqual(@as(usize, 1), node.properties.len);
+        if (!induced) {
+            try result;
+            try std.testing.expectEqualStrings(big, node.properties[0].value.string_val);
+            break;
+        }
+        try std.testing.expectError(NodeError.OutOfMemory, result);
+        try std.testing.expectEqualStrings("old", node.properties[0].value.string_val);
+    }
+    try std.testing.expect(fail_offset >= 2);
+}

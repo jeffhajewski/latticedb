@@ -209,31 +209,16 @@ pub const NodeStore = struct {
 
     /// Update a node's properties
     pub fn update(self: *Self, node_id: NodeId, labels: []const SymbolId, properties: []const Property) NodeError!void {
-        // First check if node exists
         var key_buf: [8]u8 = undefined;
         std.mem.writeInt(u64, &key_buf, node_id, .little);
 
-        const node_exists = self.tree.contains(&key_buf) catch |err| {
-            return mapBTreeError(err);
-        };
-
-        if (!node_exists) {
-            return NodeError.NotFound;
-        }
-
-        // Serialize new data AND bail out up-front if it exceeds the B-tree
-        // value limit. Doing the size check before the delete keeps the store
-        // consistent if an oversized update is rejected.
         const serialized = try self.serializeNodeAlloc(labels, properties);
         defer self.allocator.free(serialized);
-        if (!self.tree.canFitLeafEntry(&key_buf, serialized.len)) {
-            return NodeError.BufferTooSmall;
-        }
 
-        self.tree.delete(&key_buf) catch |err| {
-            return mapBTreeError(err);
-        };
-        self.tree.insert(&key_buf, serialized) catch |err| {
+        // One descent, and all or nothing: a missing node is NotFound, an
+        // oversized value is BufferTooSmall, and any failure leaves the old
+        // record in place.
+        self.tree.replace(&key_buf, serialized) catch |err| {
             return mapBTreeError(err);
         };
     }

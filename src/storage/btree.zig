@@ -949,9 +949,109 @@ pub const BTree = struct {
         try self.splitAndInsert(
             &path,
             search.slot,
+            false,
             .{ .key = key, .value = prepared.value, .overflow = prepared.overflow },
             &overflow_published,
         );
+    }
+
+    /// Replace the value stored under an existing key, or return
+    /// `KeyNotFound`.
+    ///
+    /// One descent instead of the three of contains + delete + insert, and
+    /// all or nothing like `insert`: on error the old value is still there.
+    /// The new value, including any overflow chain, is written before the
+    /// leaf changes; the old value's overflow chain is freed only after.
+    pub fn replace(self: *Self, key: []const u8, value: []const u8) BTreeError!void {
+        return self.store(key, value, .replace);
+    }
+
+    /// Insert the pair, or replace the value if the key is already present.
+    /// Same guarantees as `replace`.
+    pub fn put(self: *Self, key: []const u8, value: []const u8) BTreeError!void {
+        return self.store(key, value, .upsert);
+    }
+
+    const StoreMode = enum { replace, upsert };
+
+    fn store(self: *Self, key: []const u8, value: []const u8, mode: StoreMode) BTreeError!void {
+        if (key.len > maxKeySize(self.page_size)) return BTreeError.PageFull;
+
+        const old_chain = blk: {
+            var path = InsertPath{};
+            defer path.release(self.bp);
+            try self.descendForInsert(key, &path);
+
+            const leaf = path.frames[path.len - 1];
+            const search = LeafNode.searchSlot(leaf.data, key, self.comparator);
+            if (!search.found and mode == .replace) return BTreeError.KeyNotFound;
+
+            var prepared = try self.prepareStoredValue(key, value);
+            defer prepared.deinit(self);
+            var overflow_published = false;
+            errdefer if (!overflow_published) prepared.rollback(self);
+
+            const entry_size = storedLeafEntrySize(key, prepared.value) orelse return BTreeError.PageFull;
+            if (entry_size > maxLeafEntrySize(self.page_size)) return BTreeError.PageFull;
+            const new_entry: StoredEntry = .{ .key = key, .value = prepared.value, .overflow = prepared.overflow };
+
+            if (!search.found) {
+                if (self.insertLeafEntryStored(leaf.data, search.slot, key, prepared.value, prepared.overflow)) |_| {
+                    overflow_published = true;
+                    path.dirty[path.len - 1] = true;
+                    break :blk null;
+                } else |err| switch (err) {
+                    BTreeError.PageFull => {},
+                    else => return err,
+                }
+                try self.splitAndInsert(&path, search.slot, false, new_entry, &overflow_published);
+                break :blk null;
+            }
+
+            // Everything about the old entry is read and checked before the
+            // leaf changes.
+            const old = LeafNode.getStoredEntry(leaf.data, search.slot);
+            var chain: ?OverflowChain = null;
+            if (old.overflow) {
+                const desc = try parseOverflowDescriptor(old.value);
+                if (desc.page_count > 0) chain = .{ .first_page = desc.first_page, .page_count = desc.page_count };
+            }
+            const offset: usize = LeafNode.getEntryOffset(leaf.data, search.slot);
+            const old_size: usize = 4 + old.key.len + old.value.len;
+            const heap_top = leafHeapTop(leaf.data, self.page_size);
+            if (offset < heap_top or offset + old_size > self.page_size) return BTreeError.InvalidPage;
+
+            if (old.overflow == prepared.overflow and old.value.len == prepared.value.len) {
+                // Same footprint: overwrite the value bytes where they are.
+                @memcpy(leaf.data[offset + 4 + key.len ..][0..prepared.value.len], prepared.value);
+                overflow_published = true;
+                path.dirty[path.len - 1] = true;
+                break :blk chain;
+            }
+
+            // Removing the old entry raises the heap top by its size and
+            // frees its slot, which the new entry takes back.
+            const num_entries: usize = LeafNode.getNumEntries(leaf.data);
+            const slots_end = LEAF_SLOTS_OFFSET + num_entries * LEAF_SLOT_SIZE;
+            if (heap_top + old_size >= slots_end + entry_size) {
+                const removed = try self.deleteLeafEntry(leaf.data, search.slot);
+                std.debug.assert(removed == null or chain != null);
+                path.dirty[path.len - 1] = true;
+                self.insertLeafEntryStored(leaf.data, search.slot, key, prepared.value, prepared.overflow) catch unreachable;
+                overflow_published = true;
+                break :blk chain;
+            }
+
+            try self.splitAndInsert(&path, search.slot, true, new_entry, &overflow_published);
+            break :blk chain;
+        };
+
+        // As in `delete`: the old chain is freed once no leaf points at it,
+        // and a failure part way leaks the rest rather than freeing pages
+        // that are still in use.
+        if (old_chain) |chain| {
+            self.freeOverflowChain(chain.first_page, chain.page_count) catch {};
+        }
     }
 
     /// The pages from the root to a leaf, pinned exclusive for an insert.
@@ -993,13 +1093,15 @@ pub const BTree = struct {
         }
     }
 
-    /// Split the leaf at the end of `path` to insert `new_entry` at `slot`,
+    /// Split the leaf at the end of `path` to insert `new_entry` at `slot`
+    /// (or, when `replacing`, to put it in place of the entry at `slot`),
     /// splitting ancestors as far up as needed. See `insert` for the
     /// all-or-nothing contract.
     fn splitAndInsert(
         self: *Self,
         path: *InsertPath,
         slot: u16,
+        replacing: bool,
         new_entry: StoredEntry,
         overflow_published: *bool,
     ) BTreeError!void {
@@ -1008,7 +1110,7 @@ pub const BTree = struct {
 
         // ---- Plan. Nothing below modifies a page until "Apply". ----
 
-        var leaf_image = try self.leafImageInserting(leaf.data, slot, new_entry);
+        var leaf_image = try self.leafImageInserting(leaf.data, slot, replacing, new_entry);
         defer leaf_image.deinit(self.allocator);
         const leaf_split = try self.chooseLeafSplitPoint(leaf_image.entries);
 
@@ -1141,20 +1243,23 @@ pub const BTree = struct {
         self.root_page = root_frame.page_id;
     }
 
-    /// Copy of a leaf's entries with `new_entry` inserted at `slot`. Keys and
-    /// values of existing entries are copied out of the page so the page
-    /// can be rebuilt; `new_entry` is referenced, not copied.
-    fn leafImageInserting(self: *Self, buf: []const u8, slot: u16, new_entry: StoredEntry) BTreeError!LeafImage {
+    /// Copy of a leaf's entries with `new_entry` inserted at `slot`, or in
+    /// place of the entry at `slot` when `replacing`. Keys and values of
+    /// existing entries are copied out of the page so the page can be
+    /// rebuilt; `new_entry` is referenced, not copied.
+    fn leafImageInserting(self: *Self, buf: []const u8, slot: u16, replacing: bool, new_entry: StoredEntry) BTreeError!LeafImage {
         const num_entries = LeafNode.getNumEntries(buf);
         var data_len: usize = 0;
         for (0..num_entries) |i| {
+            if (replacing and i == slot) continue;
             const entry = LeafNode.getStoredEntry(buf, @intCast(i));
             data_len += entry.key.len + entry.value.len;
         }
 
         const data = self.allocator.alloc(u8, data_len) catch return BTreeError.OutOfMemory;
         errdefer self.allocator.free(data);
-        const entries = self.allocator.alloc(StoredEntry, @as(usize, num_entries) + 1) catch return BTreeError.OutOfMemory;
+        const entry_count = @as(usize, num_entries) + @intFromBool(!replacing);
+        const entries = self.allocator.alloc(StoredEntry, entry_count) catch return BTreeError.OutOfMemory;
         errdefer self.allocator.free(entries);
 
         var data_offset: usize = 0;
@@ -1163,6 +1268,7 @@ pub const BTree = struct {
             if (i == slot) {
                 entries[out] = new_entry;
                 out += 1;
+                if (replacing) continue;
             }
             const source = LeafNode.getStoredEntry(buf, @intCast(i));
             const key_copy = data[data_offset..][0..source.key.len];
@@ -1174,8 +1280,12 @@ pub const BTree = struct {
             entries[out] = .{ .key = key_copy, .value = value_copy, .overflow = source.overflow };
             out += 1;
         }
-        if (slot == num_entries) entries[out] = new_entry;
+        if (slot == num_entries) {
+            entries[out] = new_entry;
+            out += 1;
+        }
 
+        std.debug.assert(out == entry_count);
         return .{ .data = data, .entries = entries };
     }
 

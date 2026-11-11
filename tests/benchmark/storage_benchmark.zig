@@ -187,6 +187,18 @@ fn benchTree() !void {
     }
     report("btree update (delete + insert)", now() - start, updates.len);
 
+    if (@hasDecl(BTree, "replace")) {
+        start = now();
+        for (updates) |id| try tree.replace(leKey(&key_buf, id), VALUE);
+        report("btree replace, same size", now() - start, updates.len);
+
+        const longer = "w" ** 48;
+        start = now();
+        for (updates) |id| try tree.replace(leKey(&key_buf, id), longer);
+        report("btree replace, 32 -> 48 bytes", now() - start, updates.len);
+        for (updates) |id| try tree.replace(leKey(&key_buf, id), VALUE);
+    }
+
     start = now();
     for (lookups) |id| try tree.delete(leKey(&key_buf, id));
     report("btree delete, random (200k)", now() - start, lookups.len);
@@ -200,6 +212,25 @@ fn benchSequential() !void {
     const start = now();
     for (1..TREE_KEYS + 1) |id| try tree.insert(beKey(&key_buf, id), VALUE);
     report("btree insert, sequential BE keys (200k)", now() - start, TREE_KEYS);
+}
+
+fn benchOverflow() !void {
+    var store = try Store.open("/tmp/lattice_storage_bench_overflow.db", 64 * 1024 * 1024);
+    defer store.close();
+    var tree = try BTree.init(allocator, store.bp);
+    const value = try allocator.alloc(u8, 20 * 1024);
+    defer allocator.free(value);
+    @memset(value, 'o');
+    const n: usize = 2_000;
+    var key_buf: [8]u8 = undefined;
+
+    var start = now();
+    for (0..n) |i| try tree.insert(beKey(&key_buf, i), value);
+    report("btree insert, 20 KB overflow values", now() - start, n);
+
+    start = now();
+    for (0..n) |i| try tree.delete(beKey(&key_buf, i));
+    report("btree delete, 20 KB overflow values", now() - start, n);
 }
 
 fn benchStringKeys() !void {
@@ -256,5 +287,6 @@ pub fn main() !void {
     try benchTree();
     try benchSequential();
     try benchStringKeys();
+    try benchOverflow();
     try benchCold();
 }

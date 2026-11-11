@@ -5,6 +5,7 @@
 //! as the foundation for Python and TypeScript bindings.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 const Mutex = @import("compat").Mutex;
 
@@ -37,9 +38,20 @@ const TxnMode = txn_mod.TxnMode;
 // ============================================================================
 
 /// Global general-purpose allocator for C API.
-/// C callers cannot provide Zig allocators, so we use a global one.
-var gpa = std.heap.DebugAllocator(.{}){};
-const global_allocator = gpa.allocator();
+/// C callers cannot provide Zig allocators, so we use a global one, and it
+/// becomes the allocator for the whole engine behind every binding.
+///
+/// Debug builds use DebugAllocator: it never reuses an address, so a double
+/// free or a use after free in this layer or a binding traps instead of
+/// corrupting memory. That safety costs a global mutex and bookkeeping on
+/// every allocation, about 25x per property read, so every other build uses
+/// smp_allocator. Both are thread-safe, which the bindings need: they call in
+/// from several threads at once.
+var gpa: std.heap.DebugAllocator(.{ .thread_safe = true }) = .init;
+const global_allocator: Allocator = if (builtin.mode == .Debug)
+    gpa.allocator()
+else
+    std.heap.smp_allocator;
 
 // ============================================================================
 // Opaque Handle Types

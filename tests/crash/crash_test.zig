@@ -210,6 +210,112 @@ test "committed vectors survive a kill after an automatic checkpoint" {
     try std.testing.expectEqual(@as(usize, count), results.len);
 }
 
+test "deleting a node leaves a database without vectors openable" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_delete_novec.ltdb";
+    const killed = "/tmp/lattice_crash_delete_novec_killed.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+    cleanup(killed);
+    defer cleanup(killed);
+
+    var kept: NodeId = undefined;
+    var deleted: NodeId = undefined;
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+        defer db.close();
+        var txn = try db.beginTransaction(.read_write);
+        kept = try db.createNode(&txn, &.{"Person"});
+        deleted = try db.createNode(&txn, &.{"Person"});
+        try db.commitTransaction(&txn);
+        txn = try db.beginTransaction(.read_write);
+        try db.deleteNode(&txn, deleted);
+        try db.commitTransaction(&txn);
+        try copyAsIfKilled(allocator, path, killed);
+    }
+
+    // After a kill.
+    {
+        var db = try openCrashTestDb(allocator, killed, false);
+        defer db.close();
+        try std.testing.expect(try db.nodeExists(kept));
+        try std.testing.expect(!try db.nodeExists(deleted));
+    }
+    // After a clean close, which leaves the log in place for the next open.
+    {
+        var db = try openCrashTestDb(allocator, path, false);
+        defer db.close();
+        try std.testing.expect(try db.nodeExists(kept));
+        try std.testing.expect(!try db.nodeExists(deleted));
+    }
+}
+
+test "a vector removal logged by 0.16.0 is skipped when the file has no vectors" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_legacy_vector_remove.ltdb";
+    const killed = "/tmp/lattice_crash_legacy_vector_remove_killed.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+    cleanup(killed);
+    defer cleanup(killed);
+
+    var node_id: NodeId = undefined;
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+        defer db.close();
+        var txn = try db.beginTransaction(.read_write);
+        node_id = try db.createNode(&txn, &.{"Person"});
+        // What 0.16.0 wrote for every node delete, vectors or not.
+        const payload = try lattice.transaction.wal_payload.serializeVectorMutationAlloc(allocator, node_id, null);
+        defer allocator.free(payload);
+        _ = try db.txn_manager.?.logOperation(&txn, .update, payload);
+        try db.commitTransaction(&txn);
+        try copyAsIfKilled(allocator, path, killed);
+    }
+
+    var db = try openCrashTestDb(allocator, killed, false);
+    defer db.close();
+    try std.testing.expect(try db.nodeExists(node_id));
+}
+
+test "a vector removal is still refused when the file has vectors and the open does not" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_vector_remove_refused.ltdb";
+    const killed = "/tmp/lattice_crash_vector_remove_refused_killed.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+    cleanup(killed);
+    defer cleanup(killed);
+
+    const dims = 8;
+    const config = DatabaseConfig{
+        .enable_fts = false,
+        .enable_vector = true,
+        .vector_dimensions = dims,
+        .auto_checkpoint = null,
+    };
+    {
+        var db = try Database.open(allocator, path, .{ .create = true, .config = config });
+        defer db.close();
+        var vector = [_]f32{0} ** dims;
+        vector[0] = 1;
+        var txn = try db.beginTransaction(.read_write);
+        const node_id = try db.createNode(&txn, &.{"Chunk"});
+        try db.setNodeVectorInTxn(&txn, node_id, &vector);
+        try db.commitTransaction(&txn);
+        // Fold the vector into the file and empty the log, so the removal
+        // below is the only vector record left in it.
+        _ = try db.checkpoint(.truncate);
+        txn = try db.beginTransaction(.read_write);
+        try db.deleteNode(&txn, node_id);
+        try db.commitTransaction(&txn);
+        try copyAsIfKilled(allocator, path, killed);
+    }
+
+    // Skipping this removal would leave the vector in the index for good.
+    try std.testing.expectError(error.IoError, openCrashTestDb(allocator, killed, false));
+}
+
 test "fragmented vector replacements and removals replay from WAL" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_crash_vectors.ltdb";

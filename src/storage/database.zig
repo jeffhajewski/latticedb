@@ -1021,10 +1021,14 @@ pub const Database = struct {
                 return mapWalInitError(err);
             };
         }
+        // An open can still be refused from here on, by recovery among
+        // others, and must not leave the log's file handle behind.
+        errdefer if (self.wal) |*wal| wal.deinit();
 
         // Initialize these early since saveTreeRoots() checks them
         self.vector_storage = null;
         self.hnsw_index = null;
+        errdefer if (self.hnsw_index) |*hnsw| hnsw.deinit();
         self.hnsw_node_tree = null;
         self.stream_meta_tree = null;
         self.stream_events_tree = null;
@@ -1143,6 +1147,8 @@ pub const Database = struct {
                 .label_index = &self.label_index,
                 .stream_trees = self.streamTrees(),
                 .hnsw_index = if (self.hnsw_index) |*hnsw| hnsw else null,
+                .file_has_vectors = header.vector_segment_page != NULL_PAGE or
+                    header.getTreeRoot(.hnsw_node) != NULL_PAGE,
             });
             const stats = rm.recover(wal, &self.page_manager) catch |err| switch (err) {
                 error.MidLogCorruption => return DatabaseError.InvalidDatabase,
@@ -1918,7 +1924,11 @@ pub const Database = struct {
         var vector_iter = overlay.vector_states.iterator();
         while (vector_iter.next()) |entry| {
             const vector: ?[]const f32 = switch (entry.value_ptr.*) {
-                .absent => null,
+                // Nothing to take back out. Logging a removal anyway put a
+                // vector record into the log of databases that have never
+                // held a vector, and recovery refuses those without a
+                // vector index to apply them to.
+                .absent => if (self.baseHasVector(entry.key_ptr.*)) null else continue,
                 .value => |value| value,
             };
             const payload = wal_payload.serializeVectorMutationAlloc(
@@ -4965,6 +4975,12 @@ pub const Database = struct {
         };
     }
 
+    /// Whether the committed state holds a vector for this node.
+    fn baseHasVector(self: *Self, node_id: NodeId) bool {
+        var hnsw = self.hnsw_index orelse return false;
+        return hnsw.getNode(node_id) != null;
+    }
+
     fn readBaseVectorState(self: *Self, node_id: NodeId) DatabaseError!TxnVectorState {
         var hnsw = self.hnsw_index orelse return .{ .absent = {} };
         var vector_storage = self.vector_storage orelse return .{ .absent = {} };
@@ -5413,7 +5429,9 @@ pub const Database = struct {
                     .labels = self.allocator.alloc(symbols_mod.SymbolId, 0) catch return DatabaseError.OutOfMemory,
                     .properties = self.allocator.alloc(node_mod.Property, 0) catch return DatabaseError.OutOfMemory,
                 });
-                try self.storeVectorOverlayState(overlay, node_id, .{ .absent = {} });
+                if (self.hnsw_index != null) {
+                    try self.storeVectorOverlayState(overlay, node_id, .{ .absent = {} });
+                }
                 overlay.markDirty();
 
                 if (self.query_cache) |cache| cache.bumpSchemaVersion();
@@ -5975,7 +5993,7 @@ pub const Database = struct {
                     .labels = owned_labels,
                     .properties = owned_properties,
                 });
-                if (owned_labels.len == 0) {
+                if (owned_labels.len == 0 and self.hnsw_index != null) {
                     try self.storeVectorOverlayState(overlay, node_id, .{ .absent = {} });
                 }
                 overlay.markDirty();

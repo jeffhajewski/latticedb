@@ -112,6 +112,10 @@ pub const LogicalRecoveryContext = struct {
     label_index: *LabelIndex,
     stream_trees: ?stream_store.TreeSet = null,
     hnsw_index: ?*lattice.vector.hnsw.HnswIndex = null,
+    /// Whether the database file holds vector data. Decides what a vector
+    /// removal means when there is no index to apply it to. Defaults to the
+    /// answer that refuses.
+    file_has_vectors: bool = true,
 };
 
 // ============================================================================
@@ -484,9 +488,22 @@ pub const RecoveryManager = struct {
     }
 
     fn redoVector(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) !void {
-        // Silently skipping this record would acknowledge a recovered database
-        // with missing committed vectors. Refuse an incompatible open instead.
-        const hnsw = ctx.hnsw_index orelse return RecoveryError.InvalidRecord;
+        const hnsw = ctx.hnsw_index orelse {
+            // 0.16.0 logged a removal for every deleted node, whether or not
+            // it had a vector, so logs from databases that never stored one
+            // contain these. With no vectors in the file there is nothing the
+            // record could remove.
+            if (!ctx.file_has_vectors and
+                payload.len > 0 and
+                payload[0] == @intFromEnum(wal_payload.PayloadType.vector_remove))
+            {
+                return;
+            }
+            // Silently skipping any other vector record would acknowledge a
+            // recovered database with missing committed vectors. Refuse an
+            // incompatible open instead.
+            return RecoveryError.InvalidRecord;
+        };
         const mutation = try wal_payload.deserializeVectorMutation(self.allocator, payload);
         defer if (mutation.vector) |vector| self.allocator.free(vector);
         if (mutation.vector) |vector| {

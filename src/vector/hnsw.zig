@@ -728,16 +728,21 @@ pub const HnswIndex = struct {
         vector_storage: *VectorStorage,
         config: HnswConfig,
     ) Self {
+        // A neighbour list is read into fixed buffers of MAX_NEIGHBORS ids,
+        // so larger list sizes would make every read of a full list fail.
+        var bounded = config;
+        bounded.m = @min(config.m, MAX_NEIGHBORS);
+        bounded.m_max0 = @min(config.m_max0, MAX_NEIGHBORS);
         return Self{
             .allocator = allocator,
             .bp = bp,
-            .config = config,
+            .config = bounded,
             .entry_point = null,
             .max_layer = 0,
             .vector_count = 0,
             .vector_storage = vector_storage,
             .nodes = std.AutoHashMap(u64, HnswNodeEntry).init(allocator),
-            .connection_pool = ConnectionPool.init(allocator, bp, config.m, config.m_max0),
+            .connection_pool = ConnectionPool.init(allocator, bp, bounded.m, bounded.m_max0),
             .distance_fn = getDistanceFn(config.metric),
             .rng = std.Random.DefaultPrng.init(@intCast(@import("compat").timestamp())),
             .dirty = false,
@@ -875,14 +880,23 @@ pub const HnswIndex = struct {
         borrowed: VectorStorage.BorrowedVector,
     };
 
-    /// Borrow vectors for a batch of neighbor IDs, skipping failures.
-    /// Returns the number of entries actually filled into buf.
-    fn borrowNeighborVectors(self: *Self, neighbor_ids: []const u64, buf: []BatchEntry) usize {
+    /// Borrow vectors for a batch of neighbor IDs, skipping ids no longer in
+    /// the index. Returns the number of entries filled into buf.
+    ///
+    /// A vector that cannot be read is an error, not a neighbour to skip:
+    /// skipping it would turn an I/O or corruption error into silently
+    /// missing results.
+    fn borrowNeighborVectors(self: *Self, neighbor_ids: []const u64, buf: []BatchEntry) HnswError!usize {
         var count: usize = 0;
+        errdefer releaseBatch(buf[0..count]);
         for (neighbor_ids) |nid| {
             if (count >= buf.len) break;
             const node = self.getNode(nid) orelse continue;
-            const borrowed = self.vector_storage.borrowByLocation(node.vector_loc) catch continue;
+            const borrowed = self.vector_storage.borrowByLocation(node.vector_loc) catch |err| return switch (err) {
+                error.OutOfMemory => HnswError.OutOfMemory,
+                error.BufferPoolError => HnswError.BufferPoolError,
+                else => HnswError.StorageError,
+            };
             buf[count] = .{ .neighbor_id = nid, .borrowed = borrowed };
             count += 1;
         }
@@ -1049,7 +1063,7 @@ pub const HnswIndex = struct {
         neighbor: u64,
         max_connections: u16,
     ) HnswError!void {
-        var ac_conn_buf: [64]u64 = undefined;
+        var ac_conn_buf: [MAX_NEIGHBORS]u64 = undefined;
         const neighbors = try self.connection_pool.getConnectionsInto(loc, layer, &ac_conn_buf);
 
         // Check if already connected
@@ -1200,9 +1214,9 @@ pub const HnswIndex = struct {
         var current_node = entry_node;
         var current_dist = try self.distanceTo(query, current_node.vector_loc);
 
-        var conn_buf: [64]u64 = undefined;
-        var batch_buf: [64]BatchEntry = undefined;
-        var dist_buf: [64]f32 = undefined;
+        var conn_buf: [MAX_NEIGHBORS]u64 = undefined;
+        var batch_buf: [MAX_NEIGHBORS]BatchEntry = undefined;
+        var dist_buf: [MAX_NEIGHBORS]f32 = undefined;
 
         var improved = true;
         while (improved) {
@@ -1210,7 +1224,7 @@ pub const HnswIndex = struct {
             const neighbors = try self.connection_pool.getConnectionsInto(current_node.connections_loc, layer, &conn_buf);
 
             // Batch borrow all neighbor vectors
-            const count = self.borrowNeighborVectors(neighbors, &batch_buf);
+            const count = try self.borrowNeighborVectors(neighbors, &batch_buf);
 
             // Batch compute all distances
             self.batchComputeDistances(query, batch_buf[0..count], dist_buf[0..count]);
@@ -1294,10 +1308,10 @@ pub const HnswIndex = struct {
         visited.put(entry, {}) catch return HnswError.OutOfMemory;
 
         // Stack buffers for batch processing
-        var sl_conn_buf: [64]u64 = undefined;
-        var unvisited_buf: [64]u64 = undefined;
-        var batch_buf: [64]BatchEntry = undefined;
-        var dist_buf: [64]f32 = undefined;
+        var sl_conn_buf: [MAX_NEIGHBORS]u64 = undefined;
+        var unvisited_buf: [MAX_NEIGHBORS]u64 = undefined;
+        var batch_buf: [MAX_NEIGHBORS]BatchEntry = undefined;
+        var dist_buf: [MAX_NEIGHBORS]f32 = undefined;
 
         while (candidates.count() > 0) {
             const closest = if (@hasDecl(CandidateQueue, "pop"))
@@ -1328,7 +1342,7 @@ pub const HnswIndex = struct {
             if (unvisited_count == 0) continue;
 
             // Phase 2: Borrow — pin all pages at once
-            const batch_count = self.borrowNeighborVectors(unvisited_buf[0..unvisited_count], &batch_buf);
+            const batch_count = try self.borrowNeighborVectors(unvisited_buf[0..unvisited_count], &batch_buf);
 
             // Phase 3: Compute — batch SIMD distances
             self.batchComputeDistances(query, batch_buf[0..batch_count], dist_buf[0..batch_count]);

@@ -458,3 +458,29 @@ test "hnsw recall holds up under delete and re-insert churn" {
     }
     try std.testing.expect(missing <= n / 200);
 }
+
+test "hnsw with more neighbours per list than its read buffers still searches" {
+    const allocator = std.testing.allocator;
+    var db = try helpers.TempDb.initWithPoolSize(allocator, "hnsw_wide_lists", 16 * 1024 * 1024);
+    defer db.deinit();
+    var vs = try VectorStorage.init(allocator, db.bp, 4);
+    defer vs.deinit();
+    var index = HnswIndex.init(allocator, db.bp, &vs, .{
+        .dimensions = 4,
+        .m = 80,
+        .m_max0 = 160,
+        .ef_construction = 200,
+        .metric = .euclidean,
+    });
+    defer index.deinit();
+
+    var prng = std.Random.DefaultPrng.init(4);
+    for (1..201) |id| {
+        var v: [4]f32 = undefined;
+        for (&v) |*x| x.* = prng.random().float(f32);
+        try index.insert(id, &v);
+    }
+    const results = try index.search(&[_]f32{ 0.5, 0.5, 0.5, 0.5 }, 10, null);
+    defer index.freeResults(results);
+    try std.testing.expectEqual(@as(usize, 10), results.len);
+}

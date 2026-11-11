@@ -1,0 +1,42 @@
+// What Database.open does about a crash, in order. Only a read-write open
+// with the WAL enabled reads the log. A complete journal is applied first, and
+// a read-only open that finds one refuses rather than write the file.
+digraph recovery_open {
+  bgcolor="transparent"
+  rankdir=TB
+  nodesep=0.3
+  ranksep=0.3
+  fontname="Helvetica,Arial,sans-serif"
+  node [shape=box style="filled,rounded" fillcolor="#eef4fb" color="#4a90d9"
+        penwidth=1.2 fontname="Menlo,Consolas,monospace" fontsize=11
+        fontcolor="#1a1a1a" margin="0.2,0.12"]
+  edge [color="#6b7280" penwidth=1.1 arrowsize=0.7
+        fontname="Helvetica,Arial,sans-serif" fontsize=10 fontcolor="#6b7280"]
+
+  start   [label="Database.open" fillcolor="#f6f8fa" color="#c7d0da"]
+  journal [label="1. Finish an interrupted flush\l   complete journal: write it in place\l   (read-only: refuse to open)\l   incomplete journal: discard it\l"]
+  gate    [shape=diamond style="filled" fillcolor="#f6f8fa" color="#c7d0da"
+           label="read-write,\nWAL enabled?" fontname="Helvetica,Arial,sans-serif"
+           fontsize=11 margin="0.04,0.04"]
+  ro      [label="File only: no log,\lno recovery\l" fillcolor="#f6f8fa" color="#c7d0da"]
+  wal     [label="2. Open the log, check the database id\l   cut off a torn tail, rebuild a torn header\l"]
+  load    [label="3. Load trees, stores, FTS, vector index"]
+  analyse [label="4. Analysis: which transactions committed"
+           fillcolor="#dbe9f8"]
+  refuse  [label="Damage mid-log:\lrefuse to open\l" fillcolor="#fdf0ea" color="#c2703f"]
+  redo    [label="5. Redo committed records in log order\l   flushing early if the pool fills\l"
+           fillcolor="#dbe9f8"]
+  rebuild [label="6. If anything was redone: rebuild\l   property and FTS indexes, flush\l"]
+  ckpt    [label="7. Number transactions above the log,\l   then checkpoint: flush, empty the log\l"
+           fillcolor="#eaf5ea" color="#2f7d32" penwidth=1.6]
+  ready   [label="Ready" fillcolor="#eaf5ea" color="#2f7d32"]
+
+  start -> journal -> gate
+  gate -> ro [label="  no"]
+  gate -> wal [label="  yes"]
+  wal -> load -> analyse -> redo -> rebuild -> ckpt -> ready
+  analyse -> refuse [style=dashed color="#c7d0da"]
+  ro -> ready [style=dashed color="#c7d0da"]
+
+  { rank=same; analyse; refuse }
+}

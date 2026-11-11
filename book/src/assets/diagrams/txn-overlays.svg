@@ -1,0 +1,55 @@
+<svg width="585" height="187"
+ viewBox="0.00 0.00 439.00 140.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 135.81)">
+<title>txn_overlays</title>
+<!-- writer -->
+<g id="node1" class="node">
+<title>writer</title>
+<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.2" d="M145.05,-131.81C145.05,-131.81 18.75,-131.81 18.75,-131.81 12.75,-131.81 6.75,-125.81 6.75,-119.81 6.75,-119.81 6.75,-99.53 6.75,-99.53 6.75,-93.53 12.75,-87.53 18.75,-87.53 18.75,-87.53 145.05,-87.53 145.05,-87.53 151.05,-87.53 157.05,-93.53 157.05,-99.53 157.05,-99.53 157.05,-119.81 157.05,-119.81 157.05,-125.81 151.05,-131.81 145.05,-131.81"/>
+<text xml:space="preserve" text-anchor="start" x="21.15" y="-112.72" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Writer overlay</text>
+<text xml:space="preserve" text-anchor="start" x="21.15" y="-99.22" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">node 7: name = &quot;B&quot;</text>
+</g>
+<!-- trees -->
+<g id="node3" class="node">
+<title>trees</title>
+<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M407.8,-44.28C407.8,-44.28 214,-44.28 214,-44.28 208,-44.28 202,-38.28 202,-32.28 202,-32.28 202,-12 202,-12 202,-6 208,0 214,0 214,0 407.8,0 407.8,0 413.8,0 419.8,-6 419.8,-12 419.8,-12 419.8,-32.28 419.8,-32.28 419.8,-38.28 413.8,-44.28 407.8,-44.28"/>
+<text xml:space="preserve" text-anchor="start" x="216.4" y="-25.19" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Committed trees</text>
+<text xml:space="preserve" text-anchor="start" x="216.4" y="-11.69" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">node 7: name = &quot;A&quot;, then &quot;B&quot;</text>
+</g>
+<!-- writer&#45;&gt;trees -->
+<g id="edge3" class="edge">
+<title>writer&#45;&gt;trees</title>
+<path fill="none" stroke="#2f7d32" stroke-width="1.1" d="M139.98,-86.98C172,-75.02 211.86,-60.13 245.04,-47.74"/>
+<polygon fill="#2f7d32" stroke="#2f7d32" stroke-width="1.1" points="245.62,-50.14 251.32,-45.39 243.91,-45.55 245.62,-50.14"/>
+<text xml:space="preserve" text-anchor="middle" x="230.36" y="-62.03" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;3. apply</text>
+</g>
+<!-- log -->
+<g id="node4" class="node">
+<title>log</title>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M151.8,-44.28C151.8,-44.28 12,-44.28 12,-44.28 6,-44.28 0,-38.28 0,-32.28 0,-32.28 0,-12 0,-12 0,-6 6,0 12,0 12,0 151.8,0 151.8,0 157.8,0 163.8,-6 163.8,-12 163.8,-12 163.8,-32.28 163.8,-32.28 163.8,-38.28 157.8,-44.28 151.8,-44.28"/>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-25.19" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Log</text>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-11.69" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">records + TXN_COMMIT</text>
+</g>
+<!-- writer&#45;&gt;log -->
+<g id="edge2" class="edge">
+<title>writer&#45;&gt;log</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M81.9,-87.09C81.9,-76.86 81.9,-64.46 81.9,-53.32"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="84.35,-53.38 81.9,-46.38 79.45,-53.38 84.35,-53.38"/>
+<text xml:space="preserve" text-anchor="middle" x="110.4" y="-62.03" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;2. log, sync</text>
+</g>
+<!-- reader -->
+<g id="node2" class="node">
+<title>reader</title>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M418.92,-131.81C418.92,-131.81 204.87,-131.81 204.87,-131.81 198.87,-131.81 192.87,-125.81 192.87,-119.81 192.87,-119.81 192.87,-99.53 192.87,-99.53 192.87,-93.53 198.87,-87.53 204.87,-87.53 204.87,-87.53 418.92,-87.53 418.92,-87.53 424.92,-87.53 430.92,-93.53 430.92,-99.53 430.92,-99.53 430.92,-119.81 430.92,-119.81 430.92,-125.81 424.92,-131.81 418.92,-131.81"/>
+<text xml:space="preserve" text-anchor="start" x="207.27" y="-112.72" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Reader overlay</text>
+<text xml:space="preserve" text-anchor="start" x="207.27" y="-99.22" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">node 7: name = &quot;A&quot; &#160;(pre&#45;image)</text>
+</g>
+<!-- trees&#45;&gt;reader -->
+<g id="edge1" class="edge">
+<title>trees&#45;&gt;reader</title>
+<path fill="none" stroke="#4a90d9" stroke-width="1.1" d="M311.15,-44.72C311.27,-54.95 311.42,-67.34 311.55,-78.48"/>
+<polygon fill="#4a90d9" stroke="#4a90d9" stroke-width="1.1" points="309.1,-78.45 311.63,-85.42 314,-78.39 309.1,-78.45"/>
+<text xml:space="preserve" text-anchor="middle" x="353.46" y="-62.03" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;1. copy pre&#45;image</text>
+</g>
+</g>
+</svg>

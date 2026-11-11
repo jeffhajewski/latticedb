@@ -1,0 +1,41 @@
+// How dirty pages reach the database file: all of them at once, through the
+// journal, so the file goes from one whole image to the next. Notes on the
+// right say what a crash at that point leaves.
+digraph journaled_flush {
+  bgcolor="transparent"
+  rankdir=TB
+  nodesep=0.35
+  ranksep=0.3
+  fontname="Helvetica,Arial,sans-serif"
+  node [shape=box style="filled,rounded" fillcolor="#eef4fb" color="#4a90d9"
+        penwidth=1.2 fontname="Menlo,Consolas,monospace" fontsize=11
+        fontcolor="#1a1a1a" margin="0.2,0.12"]
+  edge [color="#6b7280" penwidth=1.1 arrowsize=0.7
+        fontname="Helvetica,Arial,sans-serif" fontsize=10 fontcolor="#6b7280"]
+
+  wal   [label="0. Caller syncs the log" fillcolor="#f6f8fa" color="#c7d0da"]
+  gather [label="1. Collect every dirty page, the header\l   and the pages freed since the last flush\l"]
+  jw    [label="2. Write them to <db>-journal, fsync"
+         fillcolor="#dbe9f8"]
+  inpl  [label="3. Write header and pages in place"]
+  dsync [label="4. fsync the database file"
+         fillcolor="#eaf5ea" color="#2f7d32" penwidth=1.6]
+  clear [label="5. Truncate the journal (not synced)"
+         fillcolor="#f6f8fa" color="#c7d0da"]
+
+  n2 [label="crash: an incomplete journal fails\lits checks, is discarded; old image\l"
+      fillcolor="#fdf0ea" color="#c2703f"]
+  n3 [label="crash: next open writes the\ljournal again; new image\l"
+      fillcolor="#fdf0ea" color="#c2703f"]
+  n5 [label="crash: journal may be applied\lagain; same bytes, new image\l"
+      fillcolor="#fdf0ea" color="#c2703f"]
+
+  wal -> gather -> jw -> inpl -> dsync -> clear
+  jw -> n2 [style=dashed color="#c7d0da"]
+  inpl -> n3 [style=dashed color="#c7d0da"]
+  clear -> n5 [style=dashed color="#c7d0da"]
+
+  { rank=same; jw; n2 }
+  { rank=same; inpl; n3 }
+  { rank=same; clear; n5 }
+}

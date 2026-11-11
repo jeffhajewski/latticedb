@@ -1,0 +1,40 @@
+// What Database.commitTransaction does, in order. The synced commit record is
+// the commit point: a failure before it leaves nothing committed, a failure
+// after it leaves the handle failed and the log in charge.
+digraph commit_sequence {
+  bgcolor="transparent"
+  rankdir=TB
+  nodesep=0.35
+  ranksep=0.32
+  fontname="Helvetica,Arial,sans-serif"
+  node [shape=box style="filled,rounded" fillcolor="#eef4fb" color="#4a90d9"
+        penwidth=1.2 fontname="Menlo,Consolas,monospace" fontsize=11
+        fontcolor="#1a1a1a" margin="0.2,0.12"]
+  edge [color="#6b7280" penwidth=1.1 arrowsize=0.7
+        fontname="Helvetica,Arial,sans-serif" fontsize=10 fontcolor="#6b7280"]
+
+  call [label="commitTransaction" fillcolor="#f6f8fa" color="#c7d0da"]
+  prep [label="1. Prepare, writing nothing\l   copy pre-images into readers' overlays\l   stage changefeed events\l"]
+  log  [label="2. Log the overlay\l   TXN_BEGIN, then one record per change\l   full frames written, not synced\l"]
+  cp   [label="3. TXN_COMMIT, write the frame, fsync\l   the commit point\l"
+        fillcolor="#eaf5ea" color="#2f7d32" penwidth=1.6]
+  app  [label="4. Apply the overlay to the trees\l   pages dirty in the buffer pool\l"]
+  tidy [label="5. Drop the overlay; flush early if\l   half the pool is dirty; checkpoint if\l   the log has passed its threshold\l"
+        fillcolor="#f6f8fa" color="#c7d0da"]
+  done [label="Return to the caller" fillcolor="#eaf5ea" color="#2f7d32"]
+
+  before [label="Fails here: error returned,\lnothing committed;\lthe caller aborts\l"
+          fillcolor="#fdf0ea" color="#c2703f"]
+  after  [label="Fails here: handle marked\lfailed; reopening replays\lthe log and redoes it\l"
+          fillcolor="#fdf0ea" color="#c2703f"]
+
+  call -> prep -> log -> cp
+  cp -> app [color="#2f7d32"]
+  app -> tidy -> done
+  log -> before [style=dashed color="#c7d0da"]
+  app -> after [style=dashed color="#c7d0da"]
+  cp -> after [style=dashed color="#c7d0da"]
+
+  { rank=same; log; before }
+  { rank=same; app; after }
+}

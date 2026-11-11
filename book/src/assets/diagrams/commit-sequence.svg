@@ -1,0 +1,126 @@
+<svg width="891" height="657"
+ viewBox="0.00 0.00 668.00 493.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 489.4)">
+<title>commit_sequence</title>
+<!-- call -->
+<g id="node1" class="node">
+<title>call</title>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M334.17,-485.4C334.17,-485.4 214.62,-485.4 214.62,-485.4 208.62,-485.4 202.62,-479.4 202.62,-473.4 202.62,-473.4 202.62,-461.4 202.62,-461.4 202.62,-455.4 208.62,-449.4 214.62,-449.4 214.62,-449.4 334.17,-449.4 334.17,-449.4 340.17,-449.4 346.17,-455.4 346.17,-461.4 346.17,-461.4 346.17,-473.4 346.17,-473.4 346.17,-479.4 340.17,-485.4 334.17,-485.4"/>
+<text xml:space="preserve" text-anchor="middle" x="274.4" y="-463.7" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">commitTransaction</text>
+</g>
+<!-- prep -->
+<g id="node2" class="node">
+<title>prep</title>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M415.17,-426.4C415.17,-426.4 133.62,-426.4 133.62,-426.4 127.63,-426.4 121.62,-420.4 121.62,-414.4 121.62,-414.4 121.62,-380.62 121.62,-380.62 121.62,-374.62 127.62,-368.62 133.62,-368.62 133.62,-368.62 415.17,-368.62 415.17,-368.62 421.17,-368.62 427.17,-374.62 427.17,-380.62 427.17,-380.62 427.17,-414.4 427.17,-414.4 427.17,-420.4 421.17,-426.4 415.17,-426.4"/>
+<text xml:space="preserve" text-anchor="start" x="136.02" y="-407.31" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">1. Prepare, writing nothing</text>
+<text xml:space="preserve" text-anchor="start" x="136.02" y="-393.81" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;copy pre&#45;images into readers&#39; overlays</text>
+<text xml:space="preserve" text-anchor="start" x="136.02" y="-380.31" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;stage changefeed events</text>
+</g>
+<!-- call&#45;&gt;prep -->
+<g id="edge1" class="edge">
+<title>call&#45;&gt;prep</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M274.4,-448.92C274.4,-444.74 274.4,-440.13 274.4,-435.44"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="276.85,-435.66 274.4,-428.66 271.95,-435.66 276.85,-435.66"/>
+</g>
+<!-- log -->
+<g id="node3" class="node">
+<title>log</title>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M411.8,-345.62C411.8,-345.62 137,-345.62 137,-345.62 131,-345.62 125,-339.62 125,-333.62 125,-333.62 125,-299.84 125,-299.84 125,-293.84 131,-287.84 137,-287.84 137,-287.84 411.8,-287.84 411.8,-287.84 417.8,-287.84 423.8,-293.84 423.8,-299.84 423.8,-299.84 423.8,-333.62 423.8,-333.62 423.8,-339.62 417.8,-345.62 411.8,-345.62"/>
+<text xml:space="preserve" text-anchor="start" x="139.4" y="-326.53" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">2. Log the overlay</text>
+<text xml:space="preserve" text-anchor="start" x="139.4" y="-313.03" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;TXN_BEGIN, then one record per change</text>
+<text xml:space="preserve" text-anchor="start" x="139.4" y="-299.53" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;full frames written, not synced</text>
+</g>
+<!-- prep&#45;&gt;log -->
+<g id="edge2" class="edge">
+<title>prep&#45;&gt;log</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M274.4,-368.07C274.4,-363.72 274.4,-359.17 274.4,-354.67"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="276.85,-354.79 274.4,-347.79 271.95,-354.79 276.85,-354.79"/>
+</g>
+<!-- cp -->
+<g id="node4" class="node">
+<title>cp</title>
+<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.6" d="M401.67,-264.84C401.67,-264.84 147.12,-264.84 147.12,-264.84 141.12,-264.84 135.12,-258.84 135.12,-252.84 135.12,-252.84 135.12,-232.56 135.12,-232.56 135.12,-226.56 141.12,-220.56 147.12,-220.56 147.12,-220.56 401.67,-220.56 401.67,-220.56 407.67,-220.56 413.67,-226.56 413.67,-232.56 413.67,-232.56 413.67,-252.84 413.67,-252.84 413.67,-258.84 407.67,-264.84 401.67,-264.84"/>
+<text xml:space="preserve" text-anchor="start" x="149.52" y="-245.75" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">3. TXN_COMMIT, write the frame, fsync</text>
+<text xml:space="preserve" text-anchor="start" x="149.52" y="-232.25" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;the commit point</text>
+</g>
+<!-- log&#45;&gt;cp -->
+<g id="edge3" class="edge">
+<title>log&#45;&gt;cp</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M274.4,-287.26C274.4,-282.97 274.4,-278.52 274.4,-274.18"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="276.85,-274.18 274.4,-267.18 271.95,-274.18 276.85,-274.18"/>
+</g>
+<!-- before -->
+<g id="node8" class="node">
+<title>before</title>
+<path fill="#fdf0ea" stroke="#c2703f" stroke-width="1.2" d="M647.92,-345.62C647.92,-345.62 460.88,-345.62 460.88,-345.62 454.88,-345.62 448.88,-339.62 448.88,-333.62 448.88,-333.62 448.88,-299.84 448.88,-299.84 448.88,-293.84 454.88,-287.84 460.88,-287.84 460.88,-287.84 647.92,-287.84 647.92,-287.84 653.92,-287.84 659.92,-293.84 659.92,-299.84 659.92,-299.84 659.92,-333.62 659.92,-333.62 659.92,-339.62 653.92,-345.62 647.92,-345.62"/>
+<text xml:space="preserve" text-anchor="start" x="463.27" y="-326.53" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Fails here: error returned,</text>
+<text xml:space="preserve" text-anchor="start" x="463.27" y="-313.03" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">nothing committed;</text>
+<text xml:space="preserve" text-anchor="start" x="463.27" y="-299.53" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">the caller aborts</text>
+</g>
+<!-- log&#45;&gt;before -->
+<g id="edge7" class="edge">
+<title>log&#45;&gt;before</title>
+<path fill="none" stroke="#c7d0da" stroke-width="1.1" stroke-dasharray="5,2" d="M424.24,-316.73C429.53,-316.73 434.81,-316.73 440.09,-316.73"/>
+<polygon fill="#c7d0da" stroke="#c7d0da" stroke-width="1.1" points="439.73,-319.18 446.73,-316.73 439.73,-314.28 439.73,-319.18"/>
+</g>
+<!-- app -->
+<g id="node5" class="node">
+<title>app</title>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M263.18,-190.81C263.18,-190.81 35.63,-190.81 35.63,-190.81 29.63,-190.81 23.63,-184.81 23.63,-178.81 23.63,-178.81 23.63,-158.53 23.63,-158.53 23.63,-152.53 29.63,-146.53 35.63,-146.53 35.63,-146.53 263.18,-146.53 263.18,-146.53 269.18,-146.53 275.18,-152.53 275.18,-158.53 275.18,-158.53 275.18,-178.81 275.18,-178.81 275.18,-184.81 269.18,-190.81 263.18,-190.81"/>
+<text xml:space="preserve" text-anchor="start" x="38.03" y="-171.72" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">4. Apply the overlay to the trees</text>
+<text xml:space="preserve" text-anchor="start" x="38.03" y="-158.22" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;pages dirty in the buffer pool</text>
+</g>
+<!-- cp&#45;&gt;app -->
+<g id="edge4" class="edge">
+<title>cp&#45;&gt;app</title>
+<path fill="none" stroke="#2f7d32" stroke-width="1.1" d="M236.56,-219.89C223.34,-212.28 208.37,-203.65 194.61,-195.72"/>
+<polygon fill="#2f7d32" stroke="#2f7d32" stroke-width="1.1" points="195.85,-193.61 188.56,-192.23 193.4,-197.85 195.85,-193.61"/>
+</g>
+<!-- after -->
+<g id="node9" class="node">
+<title>after</title>
+<path fill="#fdf0ea" stroke="#c2703f" stroke-width="1.2" d="M486.17,-197.56C486.17,-197.56 312.62,-197.56 312.62,-197.56 306.62,-197.56 300.62,-191.56 300.62,-185.56 300.62,-185.56 300.62,-151.78 300.62,-151.78 300.62,-145.78 306.62,-139.78 312.62,-139.78 312.62,-139.78 486.17,-139.78 486.17,-139.78 492.17,-139.78 498.17,-145.78 498.17,-151.78 498.17,-151.78 498.17,-185.56 498.17,-185.56 498.17,-191.56 492.17,-197.56 486.17,-197.56"/>
+<text xml:space="preserve" text-anchor="start" x="315.02" y="-178.47" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Fails here: handle marked</text>
+<text xml:space="preserve" text-anchor="start" x="315.02" y="-164.97" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">failed; reopening replays</text>
+<text xml:space="preserve" text-anchor="start" x="315.02" y="-151.47" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">the log and redoes it</text>
+</g>
+<!-- cp&#45;&gt;after -->
+<g id="edge9" class="edge">
+<title>cp&#45;&gt;after</title>
+<path fill="none" stroke="#c7d0da" stroke-width="1.1" stroke-dasharray="5,2" d="M312.24,-219.89C321.84,-214.36 332.36,-208.3 342.68,-202.36"/>
+<polygon fill="#c7d0da" stroke="#c7d0da" stroke-width="1.1" points="343.85,-204.51 348.69,-198.89 341.4,-200.26 343.85,-204.51"/>
+</g>
+<!-- tidy -->
+<g id="node6" class="node">
+<title>tidy</title>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M286.8,-116.78C286.8,-116.78 12,-116.78 12,-116.78 6,-116.78 0,-110.78 0,-104.78 0,-104.78 0,-71 0,-71 0,-65 6,-59 12,-59 12,-59 286.8,-59 286.8,-59 292.8,-59 298.8,-65 298.8,-71 298.8,-71 298.8,-104.78 298.8,-104.78 298.8,-110.78 292.8,-116.78 286.8,-116.78"/>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-97.69" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">5. Drop the overlay; flush early if</text>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-84.19" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;half the pool is dirty; checkpoint if</text>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-70.69" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;the log has passed its threshold</text>
+</g>
+<!-- app&#45;&gt;tidy -->
+<g id="edge5" class="edge">
+<title>app&#45;&gt;tidy</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M149.4,-146.14C149.4,-139.73 149.4,-132.5 149.4,-125.41"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="151.85,-125.86 149.4,-118.86 146.95,-125.86 151.85,-125.86"/>
+</g>
+<!-- app&#45;&gt;after -->
+<g id="edge8" class="edge">
+<title>app&#45;&gt;after</title>
+<path fill="none" stroke="#c7d0da" stroke-width="1.1" stroke-dasharray="5,2" d="M275.38,-168.67C280.78,-168.67 286.19,-168.67 291.59,-168.67"/>
+<polygon fill="#c7d0da" stroke="#c7d0da" stroke-width="1.1" points="291.42,-171.12 298.42,-168.67 291.42,-166.22 291.42,-171.12"/>
+</g>
+<!-- done -->
+<g id="node7" class="node">
+<title>done</title>
+<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.2" d="M219.3,-36C219.3,-36 79.5,-36 79.5,-36 73.5,-36 67.5,-30 67.5,-24 67.5,-24 67.5,-12 67.5,-12 67.5,-6 73.5,0 79.5,0 79.5,0 219.3,0 219.3,0 225.3,0 231.3,-6 231.3,-12 231.3,-12 231.3,-24 231.3,-24 231.3,-30 225.3,-36 219.3,-36"/>
+<text xml:space="preserve" text-anchor="middle" x="149.4" y="-14.3" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Return to the caller</text>
+</g>
+<!-- tidy&#45;&gt;done -->
+<g id="edge6" class="edge">
+<title>tidy&#45;&gt;done</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M149.4,-58.49C149.4,-53.89 149.4,-49.14 149.4,-44.61"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="151.85,-44.91 149.4,-37.91 146.95,-44.91 151.85,-44.91"/>
+</g>
+</g>
+</svg>

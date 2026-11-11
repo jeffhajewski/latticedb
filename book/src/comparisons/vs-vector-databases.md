@@ -33,7 +33,7 @@ Vector similarity, lexical matching, graph traversal, and a metadata filter, res
 |---|---|---|---|---|---|
 | Deployment | Embedded | Embedded / server | Embedded | Postgres extension | SQLite extension |
 | Vector index | HNSW | HNSW | IVF / HNSW | HNSW / IVFFlat | Brute force |
-| Full-text search | Native BM25 | Limited | Native | `tsvector` | FTS5, separate |
+| Full-text search | Native BM25 | BM25 and sparse vectors | Native | `tsvector` | FTS5, separate |
 | Graph traversal | Native Cypher | No | No | Recursive CTE | Recursive CTE |
 | Metadata filtering | Cypher `WHERE` | Dict filters | SQL-like | Full SQL | Full SQL |
 | Durable streams | Native | No | No | Logical decoding | No |
@@ -69,7 +69,7 @@ Sources for each row are in [Competitive Analysis](../performance/competitive-an
 
 **You need the ecosystem.** LangChain and LlamaIndex integrations, managed hosting, hybrid-search tuning knobs, and reranking pipelines are mature in the dedicated vector stores and thin here.
 
-**Billions of vectors.** LatticeDB is benchmarked to 1M vectors using roughly 1 GB of memory. Beyond that scale you want a purpose-built distributed system.
+**Billions of vectors.** LatticeDB is benchmarked to 1M vectors; its index estimates about 1 GB of pages for them, and the benchmark ran with a 4 GB buffer pool. Beyond that scale you want a purpose-built distributed system.
 
 ## When LatticeDB fits
 

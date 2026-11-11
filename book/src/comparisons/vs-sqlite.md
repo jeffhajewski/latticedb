@@ -17,9 +17,9 @@ If relationships in your data are an occasional join rather than the point of th
 
 ## Where the graph model pulls ahead
 
-Traversal in SQLite means a recursive common table expression. It works, and for one or two hops it works fine. The cost is that every level of recursion re-enters the query engine, re-plans, and deduplicates through a `UNION`, so the overhead compounds with depth.
+Traversal in SQLite means a recursive common table expression. It works, and for one or two hops it works fine. A depth-limited search written with `UNION` deduplicates on (node, depth), so a node reached at several depths is expanded again at each one.
 
-LatticeDB traverses with BFS over an adjacency cache and a bitset for visited tracking. Both engines below compute the same reachable node sets over the same social-network graph with a power-law degree distribution.
+LatticeDB traverses with BFS over an adjacency cache and a bitset for visited tracking, which expands each node once. Both engines below run over the same social-network graph with a power-law degree distribution, LatticeDB with the WAL off. In the hop tables the two sides do not do identical work: LatticeDB counts paths with raw edge iterators, with no edge-type filter and no deduplication, while SQLite runs `SELECT DISTINCT` with a type filter and a join.
 
 ### 100K nodes, 500K edges
 
@@ -32,7 +32,7 @@ LatticeDB traverses with BFS over an adjacency cache and a bitset for visited tr
 
 ### Depth-limited traversal, 10K nodes
 
-The gap widens with depth, which is the shape you would expect from CTE overhead accumulating per recursion level.
+Here both engines compute the same reachable node sets (`zig build graph-benchmark`). The gap widens with depth because SQLite's `UNION` expands a node again at every depth it is reached, while LatticeDB's visited bitset expands it once: it measures that difference in algorithm.
 
 | Depth | LatticeDB | SQLite | Speedup |
 |------:|----------:|-------:|--------:|
@@ -65,7 +65,7 @@ For reference, published figures put SQLite FTS5 under 6 ms for full-text search
 
 ## Durability and transactions
 
-Both engines are ACID with write-ahead logging, and both survive a hard kill without corruption. LatticeDB's WAL, checkpointing, and recovery design is documented in [Architecture](../architecture/wal.md).
+Both engines are ACID with write-ahead logging and recover committed transactions after a crash. LatticeDB's crash tests simulate a crash by resetting the file header after a clean close; they do not kill a running process or tear data pages. LatticeDB's WAL, checkpointing, and recovery design is documented in [Architecture](../architecture/wal.md).
 
 LatticeDB adds one thing SQLite has no equivalent for: [durable streams and changefeeds](../guides/durable-streams.md). Graph mutations can be consumed as an ordered, replayable log from inside the same file, which is useful when something downstream — an index, a cache, an embedding pipeline — needs to react to writes.
 

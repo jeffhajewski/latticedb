@@ -548,7 +548,7 @@ npm test
 
 ## Requirements
 
-- Node.js 18+, or Electron 23+ (main process, Node 18 — see [Electron](#electron))
+- Node.js 18+, or Electron's main process (see [Electron](#electron); the loader's asar handling is tested without running Electron, and no Electron version is tested)
 - The native LatticeDB library (`liblattice.dylib` / `liblattice.so` /
   `lattice.dll`)
 

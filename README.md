@@ -289,7 +289,7 @@ For the repeated-term FTS indexing workload that previously exposed quadratic ap
 | 100,000 | 438 μs | 1.2 ms | 99% | 101 MB |
 | 1,000,000 | 832 μs | 1.8 ms | 100% | 1,040 MB |
 
-Search latency scales sub-linearly (O(log N)) with 99–100% recall@10. Uses heuristic neighbor selection (HNSW paper Algorithm 4) for diverse graph connectivity, connection page packing for ~4.5x memory reduction, and pre-normalized dot product for fast cosine distance.
+Search latency scales sub-linearly (O(log N)) with 99–100% recall@10. Uses heuristic neighbor selection (HNSW paper Algorithm 4) for diverse graph connectivity, connection page packing to reduce memory, and pre-normalized dot product for fast cosine distance.
 
 **ef_search Sensitivity (1M vectors)**
 
@@ -313,8 +313,6 @@ Search latency scales sub-linearly (O(log N)) with 99–100% recall@10. Uses heu
 | SQLite (WAL, disk) | 3 μs (p90) | Embedded | [marending.dev](https://marending.dev/notes/sqlite-benchmarks/) |
 | Neo4j | 28 ms (p99) | Server | [Memgraph comparison](https://memgraph.com/blog/memgraph-vs-neo4j-performance-benchmark-comparison) |
 
-LatticeDB's B+Tree achieves sub-microsecond cached lookups, matching RocksDB in-memory and outperforming SQLite on disk by 23x.
-
 #### Vector Search
 
 | System | Latency (10-NN) | Scale | Type | Source |
@@ -329,8 +327,6 @@ LatticeDB's B+Tree achieves sub-microsecond cached lookups, matching RocksDB in-
 | Chroma | 4–5 ms mean | 1M | Embedded | [Chroma docs](https://docs.trychroma.com/production/administration/performance) |
 | Pinecone P2 | ~15 ms (incl. network) | 1M | Cloud | [Pinecone blog](https://www.pinecone.io/blog/dedicated-read-nodes/) |
 | sqlite-vec (brute force) | 17 ms | 1M | Extension | [Alex Garcia](https://alexgarcia.xyz/blog/2024/sqlite-vec-stable-release/index.html) |
-
-LatticeDB at 1M achieves 0.83 ms mean with 100% recall@10 — faster than FAISS single-threaded HNSW and competitive with Weaviate and Qdrant server-based systems (which add network overhead in practice).
 
 #### Graph Traversal
 
@@ -372,7 +368,9 @@ Only the SQLite rows are measured head to head on the same machine in the same h
 | 25    | 318 μs    | 587 ms | **1,848x** |
 | 50    | 500 μs    | 1.4 s  | **2,819x** |
 
-LatticeDB uses BFS with adjacency cache and bitset visited tracking. SQLite uses a recursive CTE with `UNION` deduplication. Both compute identical reachable node sets (~8K nodes). The gap widens at deeper depths as SQLite's CTE overhead grows with each recursion level. Run `zig build graph-benchmark -- --quick` to reproduce.
+LatticeDB uses BFS with adjacency cache and bitset visited tracking. SQLite uses a recursive CTE with `UNION` deduplication. In this depth-limited test both compute identical reachable node sets (~8K nodes). `UNION` deduplicates on (node, depth), so SQLite expands a node again at every depth it is reached, while the visited bitset expands each node once; the gap measures that difference in algorithm and widens with depth. Run `zig build graph-benchmark -- --quick` to reproduce.
+
+In the 1-hop to variable-path tables above (`zig build sqlite-benchmark`), the two sides do not run the same work: LatticeDB counts paths with raw edge iterators, with no edge-type filter and no deduplication, while SQLite runs `SELECT DISTINCT` with a type filter and a join. LatticeDB runs with the WAL off in all of these benchmarks.
 
 #### Full-Text Search (BM25)
 
@@ -383,7 +381,7 @@ LatticeDB uses BFS with adjacency cache and bitset visited tracking. SQLite uses
 | Elasticsearch | 1–10 ms | Server | Various |
 | Tantivy | 10–100 μs | Library | Various |
 
-LatticeDB's inverted index with BM25 scoring is ~300x faster than SQLite FTS5 and competitive with Tantivy (a dedicated Rust search library).
+The LatticeDB figure searches a 100-document corpus; the other rows come from other sources and workloads and are not comparable to it.
 
 ## Features
 
@@ -395,12 +393,12 @@ LatticeDB's inverted index with BM25 scoring is ~300x faster than SQLite FTS5 an
 - MERGE, WITH, UNWIND, aggregations (`count`, `sum`, `avg`, `min`, `max`, `collect`)
 
 **Vector Search**
-- HNSW approximate nearest neighbor with configurable M, ef
+- HNSW approximate nearest neighbor, with `ef_search` tunable per query
 - Built-in hash embeddings or HTTP client for Ollama/OpenAI
 - Bulk vector node insertion for fast ingestion
 
 **Full-Text Search**
-- BM25-ranked inverted index with tokenization and stemming
+- BM25-ranked inverted index with tokenization and English stop words
 - Fuzzy search with configurable Levenshtein distance
 
 **Cypher Query Language**
@@ -452,7 +450,7 @@ Neo4j has visualization tools, admin dashboards, monitoring, drivers in every la
 
 ## Building from Source
 
-Written in Zig. No dependencies.
+Written in Zig. Building needs only Zig (the engine links the C library).
 
 ```bash
 git clone https://github.com/jeffhajewski/latticedb.git

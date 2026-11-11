@@ -141,4 +141,4 @@ npm install @hajewski/latticedb@0.15.0
 go get github.com/jeffhajewski/latticedb/bindings/go@v0.15.0
 ```
 
-Java artifacts are published at `io.latticedb:latticedb:0.15.0`.
+The Java binding (`io.latticedb:latticedb`) is not published to a Maven repository; build it from `bindings/java` (see its README).

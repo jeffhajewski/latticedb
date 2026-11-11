@@ -28,12 +28,12 @@ LIMIT 10
 - MERGE, WITH, UNWIND, aggregations (`count`, `sum`, `avg`, `min`, `max`, `collect`)
 
 **Vector Search**
-- HNSW approximate nearest neighbor with configurable M, ef
+- HNSW approximate nearest neighbor, with `ef_search` tunable per query
 - Built-in hash embeddings or HTTP client for Ollama/OpenAI
 - Batch insert for bulk loading
 
 **Full-Text Search**
-- BM25-ranked inverted index with tokenization and stemming
+- BM25-ranked inverted index with tokenization and English stop words
 - Fuzzy search with configurable Levenshtein distance
 
 **Cypher Query Language**

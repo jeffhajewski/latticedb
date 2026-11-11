@@ -8,7 +8,7 @@ If you are looking for a Neo4j alternative, the first question is not performanc
 
 Neo4j runs as a service. Your application opens a Bolt connection, sends a query, and receives a result set over the network. That indirection buys you multi-client access, independent scaling, clustering, and an operational surface you can monitor and back up with standard tools.
 
-LatticeDB runs inside your process. There is no connection, no serialisation, no network hop, and no second thing to deploy. A query is a function call against memory-mapped pages. The database is one file you can copy, ship, or delete.
+LatticeDB runs inside your process. There is no connection, no serialisation, no network hop, and no second thing to deploy. A query is a function call against pages cached in your own process. The database is one file you can copy, ship, or delete.
 
 Neo4j does offer an embedded mode, but it is JVM-only — you embed it in a Java or Kotlin application. If your application is Python, TypeScript, Rust, Go, or C, embedded Neo4j is not available to you and the server is the only option.
 

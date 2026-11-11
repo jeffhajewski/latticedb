@@ -588,12 +588,12 @@ footer .footer-links {
         <div class="stat-label">10-NN vector search @ 1M</div>
       </div>
       <div class="stat-card">
-        <div class="stat-number">14&ndash;2819<span class="stat-unit">x</span></div>
-        <div class="stat-label">Faster graph traversal vs SQLite</div>
+        <div class="stat-number">39<span class="stat-unit"> &micro;s</span></div>
+        <div class="stat-label">2-hop traversal @ 100K nodes</div>
       </div>
       <div class="stat-card">
         <div class="stat-number">19<span class="stat-unit"> &micro;s</span></div>
-        <div class="stat-label">Full-text search (300x faster than FTS5)</div>
+        <div class="stat-label">Full-text search (100 docs)</div>
       </div>
     </div>
   </div>
@@ -669,7 +669,7 @@ footer .footer-links {
         <h3>Vector Search</h3>
         <ul>
           <li>HNSW approximate nearest neighbor</li>
-          <li>Configurable M, ef parameters</li>
+          <li>ef_search tunable per query</li>
           <li>100% recall at 1M vectors</li>
           <li>Built-in hash embeddings or Ollama/OpenAI</li>
         </ul>
@@ -678,9 +678,8 @@ footer .footer-links {
         <h3>Full-Text Search</h3>
         <ul>
           <li>BM25-ranked inverted index</li>
-          <li>Tokenization and stemming</li>
+          <li>Tokenization and English stop words</li>
           <li>Fuzzy search with Levenshtein distance</li>
-          <li>300x faster than SQLite FTS5</li>
         </ul>
       </div>
       <div class="feature-card">

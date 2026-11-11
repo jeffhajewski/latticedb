@@ -10,7 +10,8 @@
 | SQLite (WAL, disk) | 3 us (p90) | Embedded | marending.dev |
 | Neo4j | 28 ms (p99) | Server | Memgraph comparison |
 
-LatticeDB's B+Tree achieves sub-microsecond cached lookups, matching RocksDB in-memory and outperforming SQLite on disk by 23x.
+The LatticeDB figure is a cached lookup with the WAL off; the SQLite rows are
+in-memory and on-disk figures from other people's runs.
 
 ## Vector Search
 
@@ -27,7 +28,9 @@ LatticeDB's B+Tree achieves sub-microsecond cached lookups, matching RocksDB in-
 | Pinecone P2 | ~15 ms (incl. network) | 1M | Cloud | Pinecone blog |
 | sqlite-vec (brute force) | 17 ms | 1M | Extension | Alex Garcia |
 
-LatticeDB at 1M achieves 0.83 ms mean with 100% recall@10 — faster than FAISS single-threaded HNSW and competitive with Weaviate and Qdrant server-based systems (which add network overhead in practice).
+The LatticeDB figure calls the HNSW index directly on synthetic clustered
+vectors; the other rows were measured by others on their own datasets (often
+SIFT or GloVe) and hardware.
 
 ## Graph Traversal
 
@@ -40,13 +43,18 @@ LatticeDB at 1M achieves 0.83 ms mean with 100% recall@10 — faster than FAISS 
 
 > Numbers marked with a third-party source were measured on hardware and with
 > methodology we do not control, and are not directly comparable to the LatticeDB
-> figures. Only the SQLite comparison below is head to head. Kùzu was archived in
+> figures. Only the SQLite comparison below runs on the same machine in the same
+> harness. Kùzu was archived in
 > October 2025 following its creators' acquisition; see
 > [vs Kùzu and LadybugDB](../comparisons/vs-kuzu.md).
 
 ### LatticeDB vs SQLite
 
 Social network graph with power-law degree distribution, adjacency cache pre-warmed.
+LatticeDB runs with the WAL off. In the 1-hop to variable-path tables
+(`zig build sqlite-benchmark`), the two sides do not do the same work: LatticeDB
+counts paths with raw edge iterators, with no edge-type filter and no
+deduplication, while SQLite runs `SELECT DISTINCT` with a type filter and a join.
 
 **Small Scale (10K nodes, 50K edges)**
 
@@ -75,7 +83,7 @@ Social network graph with power-law degree distribution, adjacency cache pre-war
 | 25    | 318 us    | 587 ms | **1,848x** |
 | 50    | 500 us    | 1.4 s  | **2,819x** |
 
-LatticeDB uses BFS with adjacency cache and bitset visited tracking. SQLite uses a recursive CTE with `UNION` deduplication. Both compute identical reachable node sets (~8K nodes). The gap widens at deeper depths as SQLite's CTE overhead grows with each recursion level.
+Measured with `zig build graph-benchmark`. LatticeDB uses BFS with adjacency cache and bitset visited tracking. SQLite uses a recursive CTE with `UNION` deduplication. In this test both compute identical reachable node sets (~8K nodes). `UNION` deduplicates on (node, depth), so SQLite expands a node again at every depth it is reached, while the visited bitset expands each node once; the gap measures that difference in algorithm and widens with depth.
 
 ## Full-Text Search (BM25)
 
@@ -86,4 +94,6 @@ LatticeDB uses BFS with adjacency cache and bitset visited tracking. SQLite uses
 | Elasticsearch | 1-10 ms | Server | Various |
 | Tantivy | 10-100 us | Library | Various |
 
-LatticeDB's inverted index with BM25 scoring is ~300x faster than SQLite FTS5 and competitive with Tantivy (a dedicated Rust search library).
+The LatticeDB figure searches a 100-document corpus. The other rows come from
+other workloads, and the Elasticsearch and Tantivy rows have no specific source,
+so they are not comparable to it.

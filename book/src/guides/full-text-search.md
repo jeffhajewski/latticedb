@@ -131,7 +131,7 @@ Full-text search in LatticeDB is fast:
 |-----------|---------|
 | FTS search (100 docs) | 19 us |
 
-This is ~300x faster than SQLite FTS5 and competitive with Tantivy, a dedicated Rust search library. See [Benchmarks](../performance/benchmarks.md) for details.
+See [Benchmarks](../performance/benchmarks.md) for details.
 
 ### Write the query so it can use the index
 

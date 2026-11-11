@@ -884,11 +884,13 @@ pub const BTree = struct {
         const entry_size = storedLeafEntrySize(key, prepared.value) orelse return BTreeError.PageFull;
         if (entry_size > maxLeafEntrySize(self.page_size)) return BTreeError.PageFull;
 
-        if (LeafNode.getFreeSpace(leaf.data, self.page_size) >= LEAF_SLOT_SIZE + entry_size) {
-            try self.insertLeafEntryStored(leaf.data, search.slot, key, prepared.value, prepared.overflow);
+        if (self.insertLeafEntryStored(leaf.data, search.slot, key, prepared.value, prepared.overflow)) |_| {
             overflow_published = true;
             path.dirty[path.len - 1] = true;
             return;
+        } else |err| switch (err) {
+            BTreeError.PageFull => {}, // does not fit: split
+            else => return err,
         }
 
         try self.splitAndInsert(
@@ -1029,12 +1031,8 @@ pub const BTree = struct {
         LeafNode.init(new_leaf.data);
         LeafNode.init(leaf.data);
         path.dirty[leaf_depth] = true;
-        for (leaf_image.entries[0..leaf_split], 0..) |entry, i| {
-            try self.insertLeafEntryStored(leaf.data, @intCast(i), entry.key, entry.value, entry.overflow);
-        }
-        for (leaf_image.entries[leaf_split..], 0..) |entry, i| {
-            try self.insertLeafEntryStored(new_leaf.data, @intCast(i), entry.key, entry.value, entry.overflow);
-        }
+        try self.appendLeafEntries(leaf.data, leaf_image.entries[0..leaf_split]);
+        try self.appendLeafEntries(new_leaf.data, leaf_image.entries[leaf_split..]);
         overflow_published.* = true;
 
         LeafNode.setPrevLeaf(leaf.data, old_prev);
@@ -1169,6 +1167,18 @@ pub const BTree = struct {
         return self.chooseOverflowLocalPrefixLen(key, value_len) != null;
     }
 
+    /// Lowest entry offset in a leaf, i.e. the top of its entry heap, which
+    /// grows down from the end of the page. One pass over the slots.
+    fn leafHeapTop(buf: []const u8, page_size: u32) usize {
+        const num_entries = LeafNode.getNumEntries(buf);
+        var min_offset: usize = page_size;
+        for (0..num_entries) |i| {
+            const offset = LeafNode.getEntryOffset(buf, @intCast(i));
+            if (offset < min_offset) min_offset = offset;
+        }
+        return min_offset;
+    }
+
     fn insertLeafEntryStored(
         self: *Self,
         buf: []u8,
@@ -1177,32 +1187,29 @@ pub const BTree = struct {
         value: []const u8,
         overflow: bool,
     ) BTreeError!void {
+        _ = try writeLeafEntryBelow(buf, leafHeapTop(buf, self.page_size), slot, key, value, overflow);
+    }
+
+    /// Write an entry just below `heap_top` and give it slot `slot`,
+    /// shifting later slots up. Returns the new heap top, or PageFull if the
+    /// entry and its slot do not fit between the slot array and `heap_top`.
+    fn writeLeafEntryBelow(
+        buf: []u8,
+        heap_top: usize,
+        slot: u16,
+        key: []const u8,
+        value: []const u8,
+        overflow: bool,
+    ) BTreeError!usize {
         const num_entries = LeafNode.getNumEntries(buf);
-        const entry_size_usize = storedLeafEntrySize(key, value) orelse return BTreeError.PageFull;
-        const space_needed_usize = std.math.add(usize, LEAF_SLOT_SIZE, entry_size_usize) catch return BTreeError.PageFull;
-
-        if (entry_size_usize > std.math.maxInt(u16) or space_needed_usize > std.math.maxInt(u16)) {
+        const entry_size = storedLeafEntrySize(key, value) orelse return BTreeError.PageFull;
+        const grown_slots_end = LEAF_SLOTS_OFFSET + (@as(usize, num_entries) + 1) * LEAF_SLOT_SIZE;
+        if (heap_top < grown_slots_end or heap_top - grown_slots_end < entry_size) {
             return BTreeError.PageFull;
-        }
-
-        const space_needed: u16 = @intCast(space_needed_usize);
-        if (LeafNode.getFreeSpace(buf, self.page_size) < space_needed) {
-            return BTreeError.PageFull;
-        }
-
-        // Find where to write entry data (at end of page, growing backward)
-        var min_offset: u16 = @intCast(self.page_size);
-        for (0..num_entries) |i| {
-            const offset = LeafNode.getEntryOffset(buf, @intCast(i));
-            if (offset < min_offset) {
-                min_offset = offset;
-            }
         }
 
         // Write entry at new position
-        const entry_size: u16 = @intCast(entry_size_usize);
-        const new_offset = min_offset - entry_size;
-
+        const new_offset: u16 = @intCast(heap_top - entry_size);
         std.mem.writeInt(u16, buf[new_offset..][0..2], @intCast(key.len), .little);
         std.mem.writeInt(
             u16,
@@ -1223,6 +1230,17 @@ pub const BTree = struct {
         // Set the new slot
         LeafNode.setEntryOffset(buf, slot, new_offset);
         LeafNode.setNumEntries(buf, num_entries + 1);
+        return new_offset;
+    }
+
+    /// Append `entries`, in order, after the existing entries of a leaf. One
+    /// scan for the heap top, then one write per entry, instead of a scan per
+    /// entry.
+    fn appendLeafEntries(self: *Self, buf: []u8, entries: []const StoredEntry) BTreeError!void {
+        var heap_top = leafHeapTop(buf, self.page_size);
+        for (entries) |entry| {
+            heap_top = try writeLeafEntryBelow(buf, heap_top, LeafNode.getNumEntries(buf), entry.key, entry.value, entry.overflow);
+        }
     }
 
     fn chooseLeafSplitPoint(self: *Self, entries: []const StoredEntry) BTreeError!u16 {
@@ -1357,34 +1375,6 @@ pub const BTree = struct {
             InternalNode.setSlot(buf, slot + 1, next_key_offset, child);
         }
 
-        InternalNode.setNumKeys(buf, num_keys + 1);
-    }
-
-    /// Write a key/child slot into an internal node being built in order.
-    /// Fails rather than writing outside the page if the key does not fit.
-    fn insertInternalEntryDirect(self: *Self, buf: []u8, slot: u16, key: []const u8, child: PageId) BTreeError!void {
-        const num_keys = InternalNode.getNumKeys(buf);
-
-        // Find where to write key data
-        var min_offset: usize = self.page_size;
-        for (0..num_keys) |i| {
-            const offset = InternalNode.getKeyOffset(buf, @intCast(i));
-            if (offset < min_offset) {
-                min_offset = offset;
-            }
-        }
-
-        const key_size = 2 + key.len;
-        const grown_slots_end = INTERNAL_SLOTS_OFFSET + (@as(usize, num_keys) + 1) * INTERNAL_SLOT_SIZE;
-        if (key.len > std.math.maxInt(u16) or min_offset < grown_slots_end + key_size) return BTreeError.PageFull;
-
-        // Write key
-        const new_offset: u16 = @intCast(min_offset - key_size);
-        std.mem.writeInt(u16, buf[new_offset..][0..2], @intCast(key.len), .little);
-        @memcpy(buf[new_offset + 2 ..][0..key.len], key);
-
-        // Set the slot (no shifting needed when building sequentially)
-        InternalNode.setSlot(buf, slot, new_offset, child);
         InternalNode.setNumKeys(buf, num_keys + 1);
     }
 
@@ -1731,8 +1721,18 @@ pub const BTree = struct {
         children: []const PageId,
     ) BTreeError!void {
         InternalNode.init(buf, level);
+        // Keys are written in order below a running heap top, so building a
+        // node is one pass rather than a scan for the heap top per key.
+        var heap_top: usize = self.page_size;
+        const slots_end = INTERNAL_SLOTS_OFFSET + keys.len * INTERNAL_SLOT_SIZE;
         for (keys, 0..) |key, i| {
-            try self.insertInternalEntryDirect(buf, @intCast(i), key, children[i]);
+            const key_size = 2 + key.len;
+            if (key.len > std.math.maxInt(u16) or heap_top < slots_end + key_size) return BTreeError.PageFull;
+            heap_top -= key_size;
+            std.mem.writeInt(u16, buf[heap_top..][0..2], @intCast(key.len), .little);
+            @memcpy(buf[heap_top + 2 ..][0..key.len], key);
+            InternalNode.setSlot(buf, @intCast(i), @intCast(heap_top), children[i]);
+            InternalNode.setNumKeys(buf, @intCast(i + 1));
         }
         InternalNode.setRightChild(buf, children[keys.len]);
     }
@@ -1874,12 +1874,8 @@ pub const BTree = struct {
         LeafNode.init(left_frame.data);
         LeafNode.init(right_frame.data);
 
-        for (image.entries[0..split_point], 0..) |entry, i| {
-            try self.insertLeafEntryStored(left_frame.data, @intCast(i), entry.key, entry.value, entry.overflow);
-        }
-        for (image.entries[split_point..], 0..) |entry, i| {
-            try self.insertLeafEntryStored(right_frame.data, @intCast(i), entry.key, entry.value, entry.overflow);
-        }
+        try self.appendLeafEntries(left_frame.data, image.entries[0..split_point]);
+        try self.appendLeafEntries(right_frame.data, image.entries[split_point..]);
 
         LeafNode.setPrevLeaf(left_frame.data, left_prev);
         LeafNode.setNextLeaf(left_frame.data, right_frame.page_id);
@@ -1956,13 +1952,14 @@ pub const BTree = struct {
         }
         defer if (next_frame) |frame| self.bp.unpinPage(frame, false);
 
-        const left_count = LeafNode.getNumEntries(left_frame.data);
         const right_count = LeafNode.getNumEntries(right_frame.data);
+        var heap_top = leafHeapTop(left_frame.data, self.page_size);
         for (0..right_count) |right_index| {
             const entry = LeafNode.getStoredEntry(right_frame.data, @intCast(right_index));
-            try self.insertLeafEntryStored(
+            heap_top = try writeLeafEntryBelow(
                 left_frame.data,
-                left_count + @as(u16, @intCast(right_index)),
+                heap_top,
+                LeafNode.getNumEntries(left_frame.data),
                 entry.key,
                 entry.value,
                 entry.overflow,
@@ -2182,9 +2179,7 @@ pub const BTree = struct {
             @memcpy(compacted[0..page_len], buf[0..page_len]);
             LeafNode.setNumEntries(compacted, 0);
 
-            for (entries, 0..) |entry, i| {
-                try self.insertLeafEntryStored(compacted, @intCast(i), entry.key, entry.value, entry.overflow);
-            }
+            try self.appendLeafEntries(compacted, entries);
 
             @memcpy(buf[0..page_len], compacted[0..page_len]);
             return orphaned_chain;
@@ -3121,18 +3116,20 @@ test "findChildIndex binary search matches a linear scan" {
     const random = prng.random();
 
     for (0..200) |round| {
-        // Sorted distinct keys of 1..3 bytes, from 0 up to ~200 of them.
-        InternalNode.init(&buf, 1);
+        // Sorted distinct 3-byte keys, from 0 up to ~200 of them.
         const count = random.uintLessThan(u16, 200);
+        var key_bytes: [200][3]u8 = undefined;
+        var keys: [200][]const u8 = undefined;
+        var children: [201]PageId = undefined;
         var value: u32 = 0;
-        var written: u16 = 0;
-        while (written < count) : (written += 1) {
+        for (0..count) |i| {
             value += 1 + random.uintLessThan(u32, 300);
-            var key_bytes: [3]u8 = undefined;
-            std.mem.writeInt(u24, &key_bytes, @intCast(value), .big);
-            try tree.insertInternalEntryDirect(&buf, written, &key_bytes, written + 10);
+            std.mem.writeInt(u24, &key_bytes[i], @intCast(value), .big);
+            keys[i] = &key_bytes[i];
+            children[i] = @intCast(i + 10);
         }
-        InternalNode.setRightChild(&buf, 9999);
+        children[count] = 9999;
+        try tree.writeInternalParts(&buf, 1, keys[0..count], children[0 .. count + 1]);
 
         for (0..300) |_| {
             var probe: [3]u8 = undefined;
@@ -3153,4 +3150,42 @@ test "findChildIndex binary search matches a linear scan" {
             try std.testing.expectEqual(@as(u16, @intCast(i + 1)), tree.findChildIndex(&buf, key));
         }
     }
+}
+
+test "single-pass leaf and internal builders refuse to overrun the page" {
+    var tree = BTree{
+        .bp = undefined,
+        .root_page = NULL_PAGE,
+        .comparator = defaultComparator,
+        .page_size = 4096,
+        .allocator = std.testing.allocator,
+    };
+    var buf: [4096]u8 align(8) = undefined;
+
+    // 100-byte keys with 50-byte values: 154 bytes of entry + 2 of slot, so
+    // 26 fit in the 4076-byte leaf payload and the 27th does not.
+    var key_store: [40][100]u8 = undefined;
+    var entries: [40]StoredEntry = undefined;
+    for (&key_store, &entries, 0..) |*key, *entry, i| {
+        @memset(key, @intCast('A' + i));
+        entry.* = .{ .key = key, .value = "v" ** 50, .overflow = false };
+    }
+    LeafNode.init(&buf);
+    try tree.appendLeafEntries(&buf, entries[0..26]);
+    try std.testing.expectError(BTreeError.PageFull, tree.appendLeafEntries(&buf, entries[26..27]));
+    try std.testing.expectEqual(@as(u16, 26), LeafNode.getNumEntries(&buf));
+    for (0..26) |i| {
+        try std.testing.expectEqualSlices(u8, &key_store[i], LeafNode.getKey(&buf, @intCast(i)));
+    }
+    try std.testing.expectEqual(@as(usize, 4096 - 26 * 154), BTree.leafHeapTop(&buf, 4096));
+
+    // Same for internal nodes: 108 bytes per entry, 37 fit in 4080.
+    var keys: [40][]const u8 = undefined;
+    var children: [41]PageId = undefined;
+    for (&keys, 0..) |*key, i| key.* = &key_store[i];
+    for (&children, 0..) |*child, i| child.* = @intCast(i + 1);
+    try tree.writeInternalParts(&buf, 1, keys[0..37], children[0..38]);
+    try std.testing.expectEqual(@as(u16, 37), InternalNode.getNumKeys(&buf));
+    try std.testing.expectEqualSlices(u8, &key_store[36], InternalNode.getKey(&buf, 36));
+    try std.testing.expectError(BTreeError.PageFull, tree.writeInternalParts(&buf, 1, keys[0..38], children[0..39]));
 }

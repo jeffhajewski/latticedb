@@ -21,9 +21,9 @@ digraph graph_storage_btrees {
     symbols  [label="SYMBOLS\nstring → id"]
     symrev   [label="SYMBOLS_REVERSE\nid → string"]
     nodes    [label="NODES\nnode_id → NodeData"]
-    edges_t  [label="EDGES\ntraversal key → ∅"]
+    edges_t  [label="EDGES\ntraversal key → empty"]
     edge_ids [label="EDGE_ID\nedge_id → payload\n(key 0: next_edge_id)"]
-    labels   [label="LABEL_INDEX\n(label, node) → ∅"]
+    labels   [label="LABEL_INDEX\n(label, node) → empty"]
 
     { rank=same; symbols -> symrev -> nodes }
     { rank=same; edges_t -> edge_ids -> labels }

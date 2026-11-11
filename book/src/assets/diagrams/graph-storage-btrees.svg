@@ -25,9 +25,9 @@
 <!-- edges_t -->
 <g id="node4" class="node">
 <title>edges_t</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M159,-74.66C159,-74.66 39,-74.66 39,-74.66 33,-74.66 27,-68.66 27,-62.66 27,-62.66 27,-42.38 27,-42.38 27,-36.38 33,-30.38 39,-30.38 39,-30.38 159,-30.38 159,-30.38 165,-30.38 171,-36.38 171,-42.38 171,-42.38 171,-62.66 171,-62.66 171,-68.66 165,-74.66 159,-74.66"/>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M160.28,-74.66C160.28,-74.66 37.72,-74.66 37.72,-74.66 31.72,-74.66 25.72,-68.66 25.72,-62.66 25.72,-62.66 25.72,-42.38 25.72,-42.38 25.72,-36.38 31.72,-30.38 37.72,-30.38 37.72,-30.38 160.28,-30.38 160.28,-30.38 166.28,-30.38 172.28,-36.38 172.28,-42.38 172.28,-42.38 172.28,-62.66 172.28,-62.66 172.28,-68.66 166.28,-74.66 160.28,-74.66"/>
 <text xml:space="preserve" text-anchor="middle" x="99" y="-54.62" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">EDGES</text>
-<text xml:space="preserve" text-anchor="middle" x="99" y="-41.87" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">traversal key → ∅</text>
+<text xml:space="preserve" text-anchor="middle" x="99" y="-41.87" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">traversal key → empty</text>
 </g>
 <!-- symbols&#45;&gt;edges_t -->
 <!-- nodes -->
@@ -50,9 +50,9 @@
 <!-- labels -->
 <g id="node6" class="node">
 <title>labels</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M495,-74.66C495,-74.66 375,-74.66 375,-74.66 369,-74.66 363,-68.66 363,-62.66 363,-62.66 363,-42.38 363,-42.38 363,-36.38 369,-30.38 375,-30.38 375,-30.38 495,-30.38 495,-30.38 501,-30.38 507,-36.38 507,-42.38 507,-42.38 507,-62.66 507,-62.66 507,-68.66 501,-74.66 495,-74.66"/>
-<text xml:space="preserve" text-anchor="middle" x="435" y="-54.62" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">LABEL_INDEX</text>
-<text xml:space="preserve" text-anchor="middle" x="435" y="-41.87" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">(label, node) → ∅</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M496.9,-74.66C496.9,-74.66 375.1,-74.66 375.1,-74.66 369.1,-74.66 363.1,-68.66 363.1,-62.66 363.1,-62.66 363.1,-42.38 363.1,-42.38 363.1,-36.38 369.1,-30.38 375.1,-30.38 375.1,-30.38 496.9,-30.38 496.9,-30.38 502.9,-30.38 508.9,-36.38 508.9,-42.38 508.9,-42.38 508.9,-62.66 508.9,-62.66 508.9,-68.66 502.9,-74.66 496.9,-74.66"/>
+<text xml:space="preserve" text-anchor="middle" x="436" y="-54.62" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">LABEL_INDEX</text>
+<text xml:space="preserve" text-anchor="middle" x="436" y="-41.87" font-family="Helvetica,Arial,sans-serif" font-size="12.00" fill="#1a1a1a">(label, node) → empty</text>
 </g>
 <!-- nodes&#45;&gt;labels -->
 <!-- edges_t&#45;&gt;edge_ids -->

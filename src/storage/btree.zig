@@ -171,7 +171,7 @@ pub const InternalNode = struct {
         std.mem.writeInt(u16, buf[@sizeOf(PageHeader)..][0..2], n, .little);
     }
 
-    /// Get level (0 = just above leaves)
+    /// Get level (1 = just above leaves)
     pub fn getLevel(buf: []const u8) u16 {
         return std.mem.readInt(u16, buf[@sizeOf(PageHeader) + 2 ..][0..2], .little);
     }

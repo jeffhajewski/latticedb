@@ -360,7 +360,7 @@ pub const QueryResult = struct {
 
 /// Database configuration
 pub const DatabaseConfig = struct {
-    /// Buffer pool size in bytes (default 4MB, auto-scales for vector/FTS)
+    /// Buffer pool size in bytes (default 16MB, plus 12MB each for FTS and vectors)
     /// Set to 0 to use automatic sizing based on enabled features
     buffer_pool_size: usize = 0,
     /// Enable write-ahead logging
@@ -815,11 +815,10 @@ fn ftsTextOf(definition: FtsDefinition, properties: []const node_mod.Property) ?
 /// concurrent readers each pin pages of their own. Sixteen times the observed
 /// requirement is cheap insurance at 256 KB.
 ///
-/// Note also where this floor actually applies. The pool is the smaller of the
-/// configured budget and the database plus this floor, so for anything but a very
-/// small database the database term dominates and the floor is irrelevant. A
-/// database small enough for the floor to matter has too few pages to pin many of
-/// them, which is the opposite of the dangerous case.
+/// Note also where this number applies. An in-memory database gets the smaller
+/// of the configured budget and this many frames, so in practice it is the size
+/// of that pool rather than a floor under it. Dirty pages are held in overflow
+/// frames beyond it until the next flush.
 const MIN_MEMORY_POOL_FRAMES: usize = 64;
 
 /// The path that asks for a database with no files behind it.

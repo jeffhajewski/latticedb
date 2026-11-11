@@ -39,13 +39,18 @@ npm run paper-graph-rag
 
 ### Go
 
-Build the shared library from the repo root first:
+Build the shared library from the repo root first, then run with the `repolocal`
+build tag so the binding links against `zig-out/lib` in this checkout:
 
 ```bash
 zig build shared
 cd examples/go
-go run .
+go run -tags repolocal .
 ```
+
+Without the tag, the binding finds the library through pkg-config. That works
+after installing it with `zig build install --prefix <prefix>` and pointing
+`PKG_CONFIG_PATH` at `<prefix>/lib/pkgconfig`.
 
 ### With LLM Answers (Optional)
 
@@ -62,7 +67,7 @@ ANTHROPIC_API_KEY=sk-... npm run paper-graph-rag
 
 ### With Real Embeddings (Optional)
 
-By default the examples use hash-based embeddings (no external services needed). For real embeddings via Ollama:
+By default the examples use hash-based embeddings (no external services needed). These are bag-of-words vectors: texts that share words get nearby vectors, but synonyms and paraphrases do not. For real embeddings via Ollama, in the Python demo:
 
 ```bash
 ollama serve
@@ -70,8 +75,10 @@ ollama pull nomic-embed-text
 python paper_graph_rag.py --ollama
 ```
 
+The demo posts to `http://localhost:11434/api/embeddings`; the embedding client takes the full URL of the endpoint, not the server's base URL.
+
 ## The Key Insight
 
-Vector search finds 5 papers directly relevant to "How can retrieval improve large language model accuracy?" — but by traversing the citation graph, author connections, and full-text keyword matches, the graph-expanded workflow discovers 9 additional papers (14 total) including foundational works like "Attention Is All You Need" and the latest Graph RAG research. These are papers that vector similarity misses because their abstracts use different vocabulary, but the citation graph reveals they are deeply connected to the query topic.
+With the default hash embeddings, vector search returns 5 papers for "How can retrieval improve large language model accuracy?" — but by traversing the citation graph, author connections, and full-text keyword matches, the graph-expanded workflow discovers 9 additional papers (14 total) including foundational works like "Attention Is All You Need" and the latest Graph RAG research. These are papers that word-overlap similarity misses because their abstracts use different vocabulary, but the citation graph reveals they are deeply connected to the query topic. With real embeddings the vector results change, and so do the counts.
 
-When both sets of context are sent to an LLM, the graph-expanded answer is noticeably more comprehensive — it can trace the evolution from transformers through RAG to Graph RAG, cite foundational papers, and identify the current research frontier. The broader point is that LatticeDB lets one local application combine relationship, semantic, and text retrieval over the same data without splitting the workload across separate systems.
+When both sets of context are sent to an LLM, the graph-expanded answer has more to draw on — it can trace the evolution from transformers through RAG to Graph RAG, cite foundational papers, and identify the current research frontier. The broader point is that LatticeDB lets one local application combine relationship, semantic, and text retrieval over the same data without splitting the workload across separate systems.

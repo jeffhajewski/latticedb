@@ -8,7 +8,7 @@
  *
  * Usage:
  *     npm run paper-graph-rag
- *     npm run paper-graph-rag -- --ollama
+ *     npm run paper-graph-rag -- --ollama   # needs: ollama pull nomic-embed-text
  *     ANTHROPIC_API_KEY=sk-... npm run paper-graph-rag
  */
 
@@ -126,6 +126,8 @@ async function createGraph(
 
     // Create paper nodes with vectors and FTS
     for (const paper of PAPERS) {
+      // The "text" property is what the Paper.text full-text index reads.
+      const text = `${paper.title}. ${paper.abstract}`;
       const node = await txn.createNode({
         labels: ["Paper"],
         properties: {
@@ -133,15 +135,14 @@ async function createGraph(
           year: paper.year,
           venue: paper.venue,
           key: paper.key,
+          text,
         },
       });
       paperIds.set(paper.key, node.id);
 
-      // Embed and index
-      const text = `${paper.title}. ${paper.abstract}`;
+      // Embed
       const vec = embedFn(text);
       await txn.setVector(node.id, "embedding", vec);
-      await txn.ftsIndex(node.id, text);
 
       // Author edge
       await txn.createEdge(
@@ -161,6 +162,11 @@ async function createGraph(
       await txn.createEdge(paperIds.get(citingKey)!, paperIds.get(citedKey)!, "CITES");
     }
   });
+
+  // Full-text indexes are declared per label and property. Declaring one after
+  // the bulk load indexes the text already stored on every Paper; later writes
+  // to Paper.text keep it up to date.
+  await db.createNodeFtsIndex("Paper", "text");
 
   return {
     papers: PAPERS.length,
@@ -296,7 +302,7 @@ async function ftsSearchDemo(
   queryText: string,
   limit = 5
 ): Promise<PaperResult[]> {
-  const results = await db.ftsSearch(queryText, { limit });
+  const results = await db.ftsSearch("Paper", "text", queryText, { limit });
   const papers: PaperResult[] = [];
 
   await db.read(async (txn) => {
@@ -414,11 +420,20 @@ async function main(): Promise<void> {
 
   if (useOllama) {
     console.log("Connecting to Ollama for embeddings...");
-    embedClient = new EmbeddingClient({ endpoint: "http://localhost:11434/api/embeddings" });
+    // The client POSTs to this URL as given, so it is the full embeddings
+    // endpoint, not the server's base URL.
+    embedClient = new EmbeddingClient({
+      endpoint: "http://localhost:11434/api/embeddings",
+    });
     embedFn = (text: string) => embedClient!.embed(text);
   } else {
     embedFn = (text: string) => hashEmbed(text, 128);
   }
+
+  // The vector index needs the embedding width up front: 128 for the hash
+  // embeddings, whatever the model returns for Ollama (768 for
+  // nomic-embed-text).
+  const dimensions = embedFn("dimension probe").length;
 
   const dbPath = "_paper_graph_rag_demo.db";
 
@@ -432,7 +447,7 @@ async function main(): Promise<void> {
     const db = new Database(dbPath, {
       create: true,
       enableVectors: true,
-      vectorDimensions: 128,
+      vectorDimensions: dimensions,
     });
     await db.open();
 
@@ -485,9 +500,7 @@ async function main(): Promise<void> {
             "miss when abstracts use different vocabulary.\n"
         );
       } else {
-        console.log(
-          "  No exact FTS matches (try --ollama for better results).\n"
-        );
+        console.log("  No FTS matches for this query.\n");
       }
 
       // ---- Act 4: Full pipeline ----

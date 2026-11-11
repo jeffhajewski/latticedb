@@ -8,8 +8,11 @@ vector search, graph traversal, and full-text search.
 Usage:
     python paper_graph_rag.py                        # hash embeddings (no deps)
     python paper_graph_rag.py --ollama               # real embeddings via Ollama
+                                                     # (ollama pull nomic-embed-text)
     ANTHROPIC_API_KEY=sk-... python paper_graph_rag.py   # full LLM demo
 """
+
+from __future__ import annotations
 
 import argparse
 import json
@@ -94,6 +97,8 @@ def create_graph(db: Database, embed_fn) -> dict:
 
         # Create paper nodes with vectors and FTS
         for paper in PAPERS:
+            # The "text" property is what the Paper.text full-text index reads.
+            text = f"{paper['title']}. {paper['abstract']}"
             node = txn.create_node(
                 labels=["Paper"],
                 properties={
@@ -101,15 +106,14 @@ def create_graph(db: Database, embed_fn) -> dict:
                     "year": paper["year"],
                     "venue": paper["venue"],
                     "key": paper["key"],
+                    "text": text,
                 },
             )
             paper_ids[paper["key"]] = node.id
 
-            # Embed and index
-            text = f"{paper['title']}. {paper['abstract']}"
+            # Embed
             vec = embed_fn(text)
             txn.set_vector(node.id, "embedding", vec)
-            txn.fts_index(node.id, text)
 
             # Author edge
             txn.create_edge(node.id, author_ids[paper["author"]], "AUTHORED_BY")
@@ -123,6 +127,11 @@ def create_graph(db: Database, embed_fn) -> dict:
             txn.create_edge(paper_ids[citing_key], paper_ids[cited_key], "CITES")
 
         txn.commit()
+
+    # Full-text indexes are declared per label and property. Declaring one after
+    # the bulk load indexes the text already stored on every Paper; later writes
+    # to Paper.text keep it up to date.
+    db.create_node_fts_index("Paper", "text")
 
     return {
         "papers": len(PAPERS),
@@ -148,8 +157,8 @@ def vector_search_only(db: Database, query: str, embed_fn, k: int = 5) -> list[d
             title = txn.get_property(r.node_id, "title")
             year = txn.get_property(r.node_id, "year")
             venue = txn.get_property(r.node_id, "venue")
-            abstract = txn.get_property(r.node_id, "key")
-            paper = next((p for p in PAPERS if p["key"] == abstract), None)
+            key = txn.get_property(r.node_id, "key")
+            paper = next((p for p in PAPERS if p["key"] == key), None)
             papers.append(
                 {
                     "node_id": r.node_id,
@@ -237,7 +246,7 @@ def graph_expand(db: Database, seed_papers: list[dict]) -> list[dict]:
 
 
 def fts_search_demo(db: Database, query_text: str, limit: int = 5) -> list[dict]:
-    results = db.fts_search(query_text, limit=limit)
+    results = db.fts_search("Paper", "text", query_text, limit=limit)
     papers = []
     with db.read() as txn:
         for r in results:
@@ -354,10 +363,17 @@ def main():
         from latticedb.embedding import EmbeddingClient
 
         print("Connecting to Ollama for embeddings...")
+        # The client POSTs to this URL as given, so it is the full embeddings
+        # endpoint, not the server's base URL.
         embed_client = EmbeddingClient("http://localhost:11434/api/embeddings")
         embed_fn = embed_client.embed
     else:
         embed_fn = lambda text: hash_embed(text, dimensions=128)
+
+    # The vector index needs the embedding width up front: 128 for the hash
+    # embeddings, whatever the model returns for Ollama (768 for
+    # nomic-embed-text).
+    dimensions = len(embed_fn("dimension probe"))
 
     db_path = Path("_paper_graph_rag_demo.db")
 
@@ -372,7 +388,7 @@ def main():
             db_path,
             create=True,
             enable_vectors=True,
-            vector_dimensions=128,
+            vector_dimensions=dimensions,
         ) as db:
 
             # ---- Act 0: Build the graph ----
@@ -419,7 +435,7 @@ def main():
                     "miss when abstracts use different vocabulary.\n"
                 )
             else:
-                print("  No exact FTS matches (try --ollama for better results).\n")
+                print("  No FTS matches for this query.\n")
 
             # ---- Act 4: Full pipeline ----
             print_section("Act 4: Complete Graph RAG Pipeline")

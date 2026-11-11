@@ -56,6 +56,7 @@ func main() {
 
 	dbPath := filepath.Join(os.TempDir(), "latticedb-go-paper-graph-rag.db")
 	_ = os.Remove(dbPath)
+	_ = os.Remove(dbPath + "-wal")
 
 	db, err := latticedb.Open(dbPath, latticedb.OpenOptions{
 		Create:           true,
@@ -174,6 +175,8 @@ func createGraph(
 		}
 
 		for _, item := range data.Papers {
+			// The "text" property is what the Paper.text full-text index reads.
+			text := item.Title + ". " + item.Abstract
 			node, err := tx.CreateNode(latticedb.CreateNodeOptions{
 				Labels: []string{"Paper"},
 				Properties: map[string]latticedb.Value{
@@ -181,6 +184,7 @@ func createGraph(
 					"year":  item.Year,
 					"venue": item.Venue,
 					"key":   item.Key,
+					"text":  text,
 				},
 			})
 			if err != nil {
@@ -188,15 +192,11 @@ func createGraph(
 			}
 			paperIDs[item.Key] = node.ID
 
-			text := item.Title + ". " + item.Abstract
 			vec, err := embed(text)
 			if err != nil {
 				return err
 			}
 			if err := tx.SetVector(node.ID, "embedding", vec); err != nil {
-				return err
-			}
-			if err := tx.FTSIndex(node.ID, text); err != nil {
 				return err
 			}
 			if _, err := tx.CreateEdge(node.ID, authorIDs[item.Author], "AUTHORED_BY", latticedb.CreateEdgeOptions{}); err != nil {
@@ -226,6 +226,13 @@ func createGraph(
 		return nil
 	})
 	if err != nil {
+		return graphStats{}, err
+	}
+
+	// Full-text indexes are declared per label and property. Declaring one after
+	// the bulk load indexes the text already stored on every Paper; later writes
+	// to Paper.text keep it up to date.
+	if err := db.CreateNodeFTSIndex("Paper", "text"); err != nil {
 		return graphStats{}, err
 	}
 
@@ -372,7 +379,7 @@ func graphExpand(db *latticedb.DB, data *dataset, seeds []paperResult) ([]paperR
 }
 
 func ftsSearchDemo(db *latticedb.DB, data *dataset, query string, limit uint32) ([]paperResult, error) {
-	results, err := db.FTSSearch(query, latticedb.FTSSearchOptions{Limit: limit})
+	results, err := db.FTSSearch("Paper", "text", query, latticedb.FTSSearchOptions{Limit: limit})
 	if err != nil {
 		return nil, err
 	}

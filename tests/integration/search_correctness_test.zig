@@ -91,3 +91,40 @@ test "search: full-text AND with a word no document has matches nothing" {
     defer freeFtsResults(allocator, results);
     try std.testing.expectEqual(@as(usize, 0), results.len);
 }
+
+test "search: vector search returns k results when k exceeds ef_search" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_vector_k_exceeds_ef_test.ltdb";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+
+    const dims = 16;
+    const db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false, .enable_vector = true, .vector_dimensions = dims },
+    });
+    defer db.close();
+
+    var prng = std.Random.DefaultPrng.init(0x5eed);
+    const random = prng.random();
+    var vec: [dims]f32 = undefined;
+    for (0..300) |_| {
+        for (&vec) |*x| x.* = random.float(f32) * 2.0 - 1.0;
+        const node = try db.createNode(null, &[_][]const u8{"Embedding"});
+        try db.setNodeVector(node, &vec);
+    }
+
+    for (&vec) |*x| x.* = random.float(f32) * 2.0 - 1.0;
+
+    // The default ef_search is 64, and a search used to stop at ef results
+    // however many were asked for.
+    const ef_cases = [_]?u16{ null, 16, 64, 200 };
+    for (ef_cases) |ef| {
+        const results = try db.vectorSearch(&vec, 100, ef);
+        defer db.freeVectorSearchResults(results);
+        try std.testing.expectEqual(@as(usize, 100), results.len);
+        for (results[1..], results[0 .. results.len - 1]) |later, earlier| {
+            try std.testing.expect(earlier.distance <= later.distance);
+        }
+    }
+}

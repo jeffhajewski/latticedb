@@ -1039,7 +1039,12 @@ pub const HnswIndex = struct {
             return self.allocator.alloc(SearchResult, 0) catch return HnswError.OutOfMemory;
         }
 
-        const ef = ef_override orelse self.config.ef_search;
+        // The results are the best k of the layer-0 beam, so a beam narrower
+        // than k can never return k of them. Widen it to k, as far as a u16
+        // beam allows.
+        const requested_ef = ef_override orelse self.config.ef_search;
+        const k_ef: u16 = @intCast(@min(k, std.math.maxInt(u16)));
+        const ef = @max(requested_ef, k_ef);
 
         // For cosine metric, normalize query to match stored normalized vectors
         var norm_buf: [4096]f32 = undefined;
@@ -2025,4 +2030,56 @@ test "hnsw rejects wrong vector dimensions" {
     try std.testing.expectError(HnswError.DimensionMismatch, index.insert(1, &[_]f32{ 1.0, 0.0, 0.0 }));
     try index.insert(1, &[_]f32{ 1.0, 0.0, 0.0, 0.0 });
     try std.testing.expectError(HnswError.DimensionMismatch, index.search(&[_]f32{ 1.0, 0.0, 0.0 }, 1, null));
+}
+
+test "hnsw search returns k results when k exceeds ef_search" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+    const db_path = "/tmp/lattice_hnsw_k_exceeds_ef_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+    var bp = try buffer_pool.BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+
+    var vs = try VectorStorage.init(allocator, &bp, 4);
+    var index = HnswIndex.init(allocator, &bp, &vs, .{
+        .dimensions = 4,
+        .m = 4,
+        .m_max0 = 8,
+        .ef_construction = 16,
+        .ef_search = 8,
+        .metric = .euclidean,
+    });
+    defer index.deinit();
+
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+    for (1..65) |id| {
+        var vec: [4]f32 = undefined;
+        for (&vec) |*x| x.* = random.float(f32);
+        try index.insert(id, &vec);
+    }
+
+    const query = [_]f32{ 0.5, 0.5, 0.5, 0.5 };
+
+    // k = 30 is past the configured ef_search of 8 and past an override of 4.
+    // The beam has to widen to k, or the search can only ever return ef.
+    for ([_]?u16{ null, 4 }) |ef| {
+        const results = try index.search(&query, 30, ef);
+        defer index.freeResults(results);
+        try std.testing.expectEqual(@as(usize, 30), results.len);
+        for (results[1..], results[0 .. results.len - 1]) |later, earlier| {
+            try std.testing.expect(earlier.distance <= later.distance);
+        }
+    }
 }

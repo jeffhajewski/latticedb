@@ -6513,7 +6513,11 @@ pub const Database = struct {
         try self.validateVectorValue(query_vector);
         const hnsw = &(self.hnsw_index orelse return DatabaseError.IoError);
 
-        const search_limit: u32 = @intCast(@min(hnsw.vector_count, @as(u64, std.math.maxInt(u32))));
+        // The index widens its beam to the number of results asked for, so
+        // asking for every vector would make each query exhaustive. A full beam
+        // still leaves slack for skipping nodes that no longer exist.
+        const beam: u64 = @max(k, ef_search orelse hnsw.config.ef_search);
+        const search_limit: u32 = @intCast(@min(hnsw.vector_count, beam));
         const raw_results = hnsw.search(query_vector, search_limit, ef_search) catch |err| {
             return switch (err) {
                 HnswError.EmptyIndex => self.allocator.alloc(VectorSearchResult, 0) catch return DatabaseError.OutOfMemory,

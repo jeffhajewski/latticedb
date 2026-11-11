@@ -6505,6 +6505,14 @@ pub const Database = struct {
         try self.setNodeVector(node_id, vector);
     }
 
+    /// The vector visible to `txn` for a node, or null if it has none.
+    ///
+    /// Under the cosine metric, which is the one the database uses, the index
+    /// stores each vector scaled to unit length and the file keeps no other
+    /// copy, so a committed vector reads back normalised: storing (3, 4) reads
+    /// back as (0.6, 0.8). The direction, and so every cosine distance, is
+    /// unchanged. A vector written earlier in the same transaction and not yet
+    /// committed reads back as written.
     pub fn getNodeVectorInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError!?[]f32 {
         var state = try self.readVisibleVectorState(txn, node_id);
         return switch (state) {
@@ -6516,10 +6524,12 @@ pub const Database = struct {
         };
     }
 
+    /// Score a transaction's pending vector exactly as the committed index
+    /// would score it once stored, so pending and committed results rank on
+    /// one scale.
     fn vectorDistanceForSearch(self: *Self, query_vector: []const f32, candidate: []const f32) f32 {
         if (self.hnsw_index) |*hnsw| {
-            const distance_fn = hnsw_mod.getDistanceFn(hnsw.config.metric);
-            return distance_fn(query_vector, candidate);
+            return hnsw.distanceForSearch(query_vector, candidate);
         }
         return vector_distance.euclideanDistance(query_vector, candidate);
     }
@@ -6540,7 +6550,7 @@ pub const Database = struct {
                 }
 
                 const extra: u32 = @intCast(overlay.vector_states.count());
-                const base_results = try self.vectorSearch(query_vector, k + extra, ef_search);
+                const base_results = try self.vectorSearch(query_vector, k +| extra, ef_search);
                 defer self.freeVectorSearchResults(base_results);
 
                 var merged: std.ArrayListUnmanaged(VectorSearchResult) = .empty;

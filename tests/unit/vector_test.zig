@@ -195,3 +195,61 @@ test "database rejects NaN and infinite vectors" {
     try std.testing.expectEqual(@as(usize, 1), results.len);
     try std.testing.expectEqual(node, results[0].node_id);
 }
+
+test "pending vectors score on the committed scale under cosine" {
+    const path = "/tmp/lattice_s2_vector_pending_cosine.ltdb";
+    const db = try openVectorDb(path);
+    defer {
+        db.close();
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    const labels = [_][]const u8{"Doc"};
+    const a = try db.createNode(null, &labels);
+    const b = try db.createNode(null, &labels);
+    try db.setNodeVector(a, &[_]f32{ 1, 0.2, 0, 0 });
+
+    // b points exactly along the query; a does not.
+    const query = [_]f32{ 0.1, 0, 0, 0 };
+    var txn = try db.beginTransaction(.read_write);
+    try db.setNodeVectorInTxn(&txn, b, &[_]f32{ 1, 0, 0, 0 });
+
+    const pending = try db.vectorSearchInTxn(&txn, &query, 2, null);
+    defer db.freeVectorSearchResults(pending);
+    try std.testing.expectEqual(@as(usize, 2), pending.len);
+    try std.testing.expectEqual(b, pending[0].node_id);
+    try std.testing.expectEqual(a, pending[1].node_id);
+
+    try db.commitTransaction(&txn);
+    const committed = try db.vectorSearch(&query, 2, null);
+    defer db.freeVectorSearchResults(committed);
+    try std.testing.expectEqual(b, committed[0].node_id);
+    for (pending, committed) |p, c| {
+        try std.testing.expectEqual(p.node_id, c.node_id);
+        try std.testing.expectApproxEqAbs(c.distance, p.distance, 1e-5);
+    }
+}
+
+test "transactional vector search with the largest k does not overflow" {
+    const path = "/tmp/lattice_s2_vector_txn_max_k.ltdb";
+    const db = try openVectorDb(path);
+    defer {
+        db.close();
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    const labels = [_][]const u8{"Doc"};
+    const a = try db.createNode(null, &labels);
+    const b = try db.createNode(null, &labels);
+    try db.setNodeVector(a, &[_]f32{ 1, 0, 0, 0 });
+
+    var txn = try db.beginTransaction(.read_write);
+    defer db.abortTransaction(&txn) catch {};
+    try db.setNodeVectorInTxn(&txn, b, &[_]f32{ 0, 1, 0, 0 });
+
+    const all = try db.vectorSearchInTxn(&txn, &[_]f32{ 1, 1, 0, 0 }, std.math.maxInt(u32), null);
+    defer db.freeVectorSearchResults(all);
+    try std.testing.expectEqual(@as(usize, 2), all.len);
+}

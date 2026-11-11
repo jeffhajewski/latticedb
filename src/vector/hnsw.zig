@@ -806,6 +806,25 @@ pub const HnswIndex = struct {
         return level;
     }
 
+    /// The distance `search` would report between `query` and a vector stored
+    /// as `candidate`, for vectors that are not in the index (such as a
+    /// transaction's pending writes). Under cosine the index compares unit
+    /// vectors, so both sides are normalised first, exactly as `insert` and
+    /// `search` normalise them.
+    pub fn distanceForSearch(self: *const Self, query: []const f32, candidate: []const f32) f32 {
+        std.debug.assert(query.len == candidate.len and query.len <= types.MAX_VECTOR_DIMENSIONS);
+        if (self.config.metric != .cosine) return self.distance_fn(query, candidate);
+        var query_buf: [types.MAX_VECTOR_DIMENSIONS]f32 = undefined;
+        var candidate_buf: [types.MAX_VECTOR_DIMENSIONS]f32 = undefined;
+        const q = query_buf[0..query.len];
+        const c = candidate_buf[0..candidate.len];
+        @memcpy(q, query);
+        @memcpy(c, candidate);
+        simd_distance.normalize(q);
+        simd_distance.normalize(c);
+        return normalizedCosineDistance(q, c);
+    }
+
     /// Calculate distance between query and a stored vector
     fn distanceTo(self: *Self, query: []const f32, loc: VectorLocation) HnswError!f32 {
         const borrowed = self.vector_storage.borrowByLocation(loc) catch return HnswError.StorageError;

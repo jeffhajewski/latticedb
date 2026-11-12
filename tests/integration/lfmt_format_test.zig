@@ -607,7 +607,7 @@ fn checkMetric(comptime metric: VectorMetric, path: []const u8) !void {
     for (vectors, 0..) |*v, i| {
         if (db.vectorDistance(&q0, v) < db.vectorDistance(&q0, &vectors[best])) best = i;
     }
-    if (metric != .inner_product) try std.testing.expectEqual(@as(usize, 7), best);
+    if (metric != .dot_product) try std.testing.expectEqual(@as(usize, 7), best);
     try std.testing.expectEqual(@as(usize, 1), result.rows.len);
     try std.testing.expectEqual(@as(i64, @intCast(ids[best])), result.rows[0].values[0].int_val);
 
@@ -616,7 +616,7 @@ fn checkMetric(comptime metric: VectorMetric, path: []const u8) !void {
     const expected: f64 = switch (metric) {
         .cosine => 1.0,
         .euclidean => @sqrt(5.0),
-        .inner_product => 0.0,
+        .dot_product => 0.0,
         else => unreachable,
     };
     try std.testing.expectApproxEqAbs(expected, lit.rows[0].values[0].float_val, 1e-5);
@@ -642,7 +642,7 @@ test "lfmt: euclidean search ranks by L2 distance and stores vectors as given" {
 }
 
 test "lfmt: dot-product search ranks by largest dot product" {
-    try checkMetric(.inner_product, "/tmp/lfmt_metric_dot.ltdb");
+    try checkMetric(.dot_product, "/tmp/lfmt_metric_dot.ltdb");
 }
 
 test "lfmt: a euclidean index reads vectors back as written" {

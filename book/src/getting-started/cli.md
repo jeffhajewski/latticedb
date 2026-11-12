@@ -77,7 +77,7 @@ Created database: embeddings.lattice
 |--------|--------------|
 | `--enable-vector` | Turn on the vector index for similarity search |
 | `--vector-dims=<n>` | How many numbers are in each vector, 1 to 4096 (default 128) |
-| `--vector-metric=<m>` | How distance is measured: `cosine` (default), `euclidean`, or `dot` (the negative dot product) |
+| `--vector-metric=<m>` | How distance is measured: `cosine` (default), `euclidean`, or `dot_product` (the negated dot product) |
 | `--vector-m=<n>` | HNSW connections per node, 2 to 32 (default 16) |
 | `--vector-ef-construction=<n>` | HNSW candidate list size while building, 1 to 4096 (default 200). These four options need `--enable-vector`: without it the command is refused rather than creating a database with no index |
 | `--enable-fts` | Turn on full-text search — already the default |

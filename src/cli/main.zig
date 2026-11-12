@@ -95,7 +95,7 @@ pub fn main(init: std.process.Init) !u8 {
             error.UnknownOption => output.printError(stderr, "Unknown option. Use 'lattice help' for available options.", .{}),
             error.InvalidFormat => output.printError(stderr, "Invalid format. Use: table, json, or csv", .{}),
             error.InvalidVectorDims => output.printError(stderr, "Invalid vector dimensions. Must be in the range 1..4096.", .{}),
-            error.InvalidVectorMetric => output.printError(stderr, "Invalid vector metric. Use: cosine, euclidean, or dot", .{}),
+            error.InvalidVectorMetric => output.printError(stderr, "Invalid vector metric. Use: cosine, euclidean or dot_product", .{}),
             error.InvalidVectorM => output.printError(stderr, "Invalid --vector-m. Must be in the range 2..32.", .{}),
             error.InvalidVectorEfConstruction => output.printError(stderr, "Invalid --vector-ef-construction. Must be in the range 1..4096.", .{}),
             error.InvalidChangefeedRetention => output.printError(stderr, "Invalid --changefeed. Use: all, off, last:<events> or age:<duration> (such as age:7d, age:12h, age:30m).", .{}),
@@ -303,11 +303,7 @@ fn cmdCreate(
     output.printSuccess(stdout, "Created database: {s}", .{path});
 
     if (parsed_args.enable_vector) {
-        const metric_name = if (parsed_args.vector_metric) |metric| switch (metric) {
-            .euclidean => "euclidean",
-            .inner_product => "dot",
-            else => "cosine",
-        } else "cosine";
+        const metric_name = if (parsed_args.vector_metric) |metric| metric.name() else "cosine";
         try stdout.print("  Vector index enabled (dimensions: {d}, metric: {s})\n", .{ parsed_args.vector_dims, metric_name });
     }
     if (parsed_args.enable_fts) {
@@ -339,6 +335,9 @@ fn cmdInfo(
         return failCommand(stderr, "Cannot stat file", .{});
     };
     const size_kb = stat.size / 1024;
+    // A database with a vector index opens with it, so its configuration is
+    // the file's.
+    const vector_config = db.vectorConfig();
 
     const feed = db.changefeedStatus() catch |err| {
         return failCommand(stderr, "Failed to read the changefeed: {s}", .{@errorName(err)});
@@ -359,6 +358,12 @@ fn cmdInfo(
             try stdout.print("Edges:        {d}\n", .{edge_count});
             try stdout.print("Format:       v{d}\n", .{lattice.core.types.FORMAT_VERSION});
             try stdout.print("Vector:       {s}\n", .{if (db.hasPersistedVectorIndex()) "enabled" else "disabled"});
+            if (vector_config) |config| {
+                try stdout.print("  Dimensions: {d}\n", .{config.dimensions});
+                try stdout.print("  Metric:     {s}\n", .{config.metric.name()});
+                try stdout.print("  M:          {d}\n", .{config.m});
+                try stdout.print("  ef_construction: {d}\n", .{config.ef_construction});
+            }
             try stdout.print("FTS:          {s}\n", .{if (db.hasPersistedFtsIndex()) "enabled" else "disabled"});
             if (feed.retention == .off) {
                 try stdout.writeAll("Changefeed:   off, ");
@@ -376,13 +381,23 @@ fn cmdInfo(
             }
         },
         .json => {
-            try stdout.print("{{\"path\":\"{s}\",\"size_kb\":{d},\"nodes\":{d},\"edges\":{d},\"format_version\":{d},\"vector_enabled\":{},\"fts_enabled\":{},\"changefeed_retention\":\"{s}\",\"changefeed_oldest_sequence\":{d},\"changefeed_last_sequence\":{d},\"property_indexes\":[", .{
+            try stdout.print("{{\"path\":\"{s}\",\"size_kb\":{d},\"nodes\":{d},\"edges\":{d},\"format_version\":{d},\"vector_enabled\":{},", .{
                 path,
                 size_kb,
                 node_count,
                 edge_count,
                 lattice.core.types.FORMAT_VERSION,
                 db.hasPersistedVectorIndex(),
+            });
+            if (vector_config) |config| {
+                try stdout.print("\"vector_dimensions\":{d},\"vector_metric\":\"{s}\",\"vector_m\":{d},\"vector_ef_construction\":{d},", .{
+                    config.dimensions,
+                    config.metric.name(),
+                    config.m,
+                    config.ef_construction,
+                });
+            }
+            try stdout.print("\"fts_enabled\":{},\"changefeed_retention\":\"{s}\",\"changefeed_oldest_sequence\":{d},\"changefeed_last_sequence\":{d},\"property_indexes\":[", .{
                 db.hasPersistedFtsIndex(),
                 policy,
                 feed.oldest_sequence orelse 0,
@@ -407,6 +422,12 @@ fn cmdInfo(
             try stdout.print("edges,{d}\n", .{edge_count});
             try stdout.print("format_version,{d}\n", .{lattice.core.types.FORMAT_VERSION});
             try stdout.print("vector_enabled,{}\n", .{db.hasPersistedVectorIndex()});
+            if (vector_config) |config| {
+                try stdout.print("vector_dimensions,{d}\n", .{config.dimensions});
+                try stdout.print("vector_metric,{s}\n", .{config.metric.name()});
+                try stdout.print("vector_m,{d}\n", .{config.m});
+                try stdout.print("vector_ef_construction,{d}\n", .{config.ef_construction});
+            }
             try stdout.print("fts_enabled,{}\n", .{db.hasPersistedFtsIndex()});
             try stdout.print("changefeed_retention,{s}\n", .{policy});
             try stdout.print("changefeed_oldest_sequence,{d}\n", .{feed.oldest_sequence orelse 0});
@@ -1972,7 +1993,8 @@ fn printUsage(writer: anytype) void {
         \\                        opens with it without this flag. The
         \\                        --vector-* options need it.
         \\  --vector-dims=<n>     Vector dimensions, 1..4096 (default for create: 128)
-        \\  --vector-metric=<m>   With create: cosine, euclidean or dot (default: cosine)
+        \\  --vector-metric=<m>   With create: cosine, euclidean or dot_product
+        \\                        (default: cosine)
         \\  --enable-fts          Enable full-text search (default: on)
         \\  --no-fts              Disable full-text search
         \\  --cache-size=<mb>     Buffer pool size in MB (default: LATTICE_BUFFER_POOL_MB, else 64)
@@ -2009,8 +2031,8 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\  --enable-vector       Enable HNSW vector index (the --vector-*
             \\                        options below need it)
             \\  --vector-dims=<n>     Vector dimensions (default: 128, max: 4096)
-            \\  --vector-metric=<m>   Distance: cosine, euclidean, or dot (negative
-            \\                        dot product) (default: cosine)
+            \\  --vector-metric=<m>   Distance: cosine, euclidean or dot_product
+            \\                        (negative dot product) (default: cosine)
             \\  --vector-m=<n>        HNSW connections per node, 2..32 (default: 16)
             \\  --vector-ef-construction=<n>
             \\                        HNSW build candidate list, 1..4096 (default: 200)

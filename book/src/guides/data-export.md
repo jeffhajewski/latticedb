@@ -107,7 +107,7 @@ lattice export embeddings.db --file=docs.json
 
 Under the cosine metric a vector is stored normalised, so the exported vector is
 the unit-length one: a node given `[3, 4, 0]` exports as `[0.6,0.8,0.0]`. Under
-the `euclidean` and `dot` metrics vectors are stored as given and export as
+the `euclidean` and `dot_product` metrics vectors are stored as given and export as
 `[3.0,4.0,0.0]`. An export records the dimensions but not the metric or the HNSW
 settings: create the database you import into with the ones you want.
 

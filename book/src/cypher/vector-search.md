@@ -107,7 +107,7 @@ aggregation.
 ## Distance Metric
 
 Each database's vector index has one metric, chosen when the index is created and
-fixed afterwards (`lattice create --vector-metric=cosine|euclidean|dot`, or the
+fixed afterwards (`lattice create --vector-metric=cosine|euclidean|dot_product`, or the
 `vector_metric` open option in the bindings). Search, `<=>` and the scoring of
 vectors not yet committed all use it. Smaller is always nearer.
 
@@ -115,7 +115,7 @@ vectors not yet committed all use it. Smaller is always nearer.
 |--------|---------------|-------|---------------------|
 | `cosine` (default) | 1 - cosine similarity | 0 (same direction) to 2 (opposite) | 1.0 |
 | `euclidean` | the L2 distance, square root included | 0 and up | 2.236 (√5) |
-| `dot` | the negated dot product | any number | -0.0 |
+| `dot_product` | the negated dot product | any number | -0.0 |
 
 Under cosine, vectors are normalised when stored, so their length does not matter.
 Under Euclidean and dot product they are stored as given, and their length counts.

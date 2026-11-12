@@ -355,7 +355,7 @@ test "vectors added to an existing file survive a kill before any checkpoint" {
             .enable_fts = false,
             .enable_vector = true,
             .vector_dimensions = dims,
-            .vector_metric = .inner_product,
+            .vector_metric = .dot_product,
             .auto_checkpoint = null,
         } });
         defer db.close();
@@ -370,7 +370,7 @@ test "vectors added to an existing file survive a kill before any checkpoint" {
     // log's vector records to go into.
     var db = try openCrashTestDb(allocator, killed, false);
     defer db.close();
-    try std.testing.expectEqual(lattice.storage.database.VectorMetric.inner_product, db.vectorConfig().?.metric);
+    try std.testing.expectEqual(lattice.storage.database.VectorMetric.dot_product, db.vectorConfig().?.metric);
     const results = try db.vectorSearch(&[_]f32{ 1, 1, 1, 1 }, 1, null);
     defer db.freeVectorSearchResults(results);
     try std.testing.expectEqual(node_id, results[0].node_id);

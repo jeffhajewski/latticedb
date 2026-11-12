@@ -459,6 +459,30 @@ test "cli: check finishes an interrupted flush from the journal, in memory" {
     try std.testing.expectEqualSlices(u8, journal_before, journal_after);
 }
 
+test "cli: the dot product metric has one name, from create to info" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lfmt_cli_dot_product.ltdb";
+    deleteDatabaseFiles(path);
+    defer deleteDatabaseFiles(path);
+
+    const refused = try runCli(allocator, &.{ "create", path, "--enable-vector", "--vector-dims=2", "--vector-metric=dot" });
+    defer refused.deinit(allocator);
+    try std.testing.expect(!refused.succeeded());
+    try std.testing.expect(std.mem.indexOf(u8, refused.stderr, "dot_product") != null);
+
+    const created = try runCli(allocator, &.{ "create", path, "--enable-vector", "--vector-dims=2", "--vector-metric=dot_product", "--vector-m=8" });
+    defer created.deinit(allocator);
+    try std.testing.expect(created.succeeded());
+    try std.testing.expect(std.mem.indexOf(u8, created.stdout, "metric: dot_product") != null);
+
+    const info = try runCli(allocator, &.{ "info", path, "--format=json" });
+    defer info.deinit(allocator);
+    if (!info.succeeded() or std.mem.indexOf(u8, info.stdout, "\"vector_dimensions\":2,\"vector_metric\":\"dot_product\",\"vector_m\":8,") == null) {
+        std.debug.print("exit {?d}\nstdout: {s}\nstderr: {s}\n", .{ info.exit_code, info.stdout, info.stderr });
+        return error.TestUnexpectedResult;
+    }
+}
+
 test "cli: help for every command that opens a database lists the vector options" {
     const allocator = std.testing.allocator;
     const commands = [_][]const u8{

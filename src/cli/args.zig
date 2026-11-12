@@ -322,14 +322,7 @@ pub const Args = struct {
                     args.vector_dims_set = true;
                 } else if (std.mem.startsWith(u8, arg, "--vector-metric=")) {
                     const value = arg["--vector-metric=".len..];
-                    args.vector_metric = if (std.mem.eql(u8, value, "cosine"))
-                        .cosine
-                    else if (std.mem.eql(u8, value, "euclidean"))
-                        .euclidean
-                    else if (std.mem.eql(u8, value, "dot"))
-                        .inner_product
-                    else
-                        return error.InvalidVectorMetric;
+                    args.vector_metric = VectorMetric.fromName(value) orelse return error.InvalidVectorMetric;
                 } else if (std.mem.startsWith(u8, arg, "--vector-m=")) {
                     const value = arg["--vector-m=".len..];
                     const m = std.fmt.parseInt(u16, value, 10) catch return error.InvalidVectorM;
@@ -533,10 +526,10 @@ test "parse vector dimensions range" {
 
 test "parse vector index options for create" {
     const allocator = std.testing.allocator;
-    var args = try Args.parse(allocator, &.{ "lattice", "create", "test.db", "--enable-vector", "--vector-dims=8", "--vector-metric=dot", "--vector-m=24", "--vector-ef-construction=64" });
+    var args = try Args.parse(allocator, &.{ "lattice", "create", "test.db", "--enable-vector", "--vector-dims=8", "--vector-metric=dot_product", "--vector-m=24", "--vector-ef-construction=64" });
     defer args.deinit(allocator);
     try std.testing.expect(args.vector_dims_set);
-    try std.testing.expectEqual(@as(?VectorMetric, .inner_product), args.vector_metric);
+    try std.testing.expectEqual(@as(?VectorMetric, .dot_product), args.vector_metric);
     try std.testing.expectEqual(@as(?u16, 24), args.vector_m);
     try std.testing.expectEqual(@as(?u16, 64), args.vector_ef_construction);
 
@@ -552,6 +545,9 @@ test "parse vector index options for create" {
     try std.testing.expectEqual(@as(?Command, .changefeed), feed.command);
     try std.testing.expectEqual(@as(u64, 1000), feed.changefeed_retention.?.keep_last);
     try std.testing.expect(feed.trim);
+    // One spelling: the one the bindings and `lattice info` use.
+    try std.testing.expectError(error.InvalidVectorMetric, Args.parse(allocator, &.{ "lattice", "create", "t.db", "--enable-vector", "--vector-metric=dot" }));
+    try std.testing.expectError(error.InvalidVectorMetric, Args.parse(allocator, &.{ "lattice", "create", "t.db", "--enable-vector", "--vector-metric=inner_product" }));
     try std.testing.expectError(error.InvalidVectorM, Args.parse(allocator, &.{ "lattice", "create", "t.db", "--vector-m=1" }));
     try std.testing.expectError(error.InvalidVectorM, Args.parse(allocator, &.{ "lattice", "create", "t.db", "--vector-m=33" }));
     try std.testing.expectError(error.InvalidVectorEfConstruction, Args.parse(allocator, &.{ "lattice", "create", "t.db", "--vector-ef-construction=0" }));

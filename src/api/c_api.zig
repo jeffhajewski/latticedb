@@ -1541,7 +1541,7 @@ fn buildOpenOptionsV5(options: ?*const lattice_open_options_v5) DatabaseError!Op
             .default => null,
             .cosine => .cosine,
             .euclidean => .euclidean,
-            .dot_product => .inner_product,
+            .dot_product => .dot_product,
             _ => return DatabaseError.InvalidArgument,
         };
         zig_options.config.vector_m = if (opts.vector_m == 0) null else opts.vector_m;

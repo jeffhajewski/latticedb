@@ -335,7 +335,7 @@ test "vector filter: euclidean measures the set by euclidean distance" {
 }
 
 test "vector filter: dot product measures the set by negative dot product" {
-    try checkMetric(.inner_product, "/tmp/lse_vector_filter_dot.ltdb");
+    try checkMetric(.dot_product, "/tmp/lse_vector_filter_dot.ltdb");
 }
 
 test "vector filter: a large label is searched through the graph with the label index as the filter" {

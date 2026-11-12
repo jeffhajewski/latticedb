@@ -232,10 +232,13 @@ layer and the vector count back as they were.
 | `.cosine` | 1 - (a·b)/(‖a‖‖b‖) | Text embeddings (normalized) |
 | `.inner_product` | -Σ(aᵢ × bᵢ) | When vectors are pre-normalized |
 
-The CLI calls the last one `dot` and the bindings `dot_product`. Smaller is nearer
-under all three, so the inner product is negated, and its distances can be
-negative. For text embeddings from most models (OpenAI, Cohere, etc.), use
-`.cosine`.
+Everywhere outside the index itself the third metric is called `dot_product`:
+`DatabaseConfig.vector_metric = .dot_product`, `--vector-metric=dot_product`,
+`lattice info`, `LATTICE_VECTOR_METRIC_DOT_PRODUCT`, and the bindings' `"dot_product"`,
+`VectorMetricDotProduct` and `DOT_PRODUCT`. The HNSW index's own `DistanceMetric` keeps
+the name `.inner_product` it had in 0.16.0. Smaller is nearer under all three, so
+the inner product is negated, and its distances can be negative. For text
+embeddings from most models (OpenAI, Cohere, etc.), use `.cosine`.
 
 A database's search, Cypher's `<=>` (including `<=>` between two literal lists),
 and the scoring of vectors a transaction has set but not yet committed all use the

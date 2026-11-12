@@ -584,7 +584,7 @@ fn validateVectorOptions(config: DatabaseConfig) DatabaseError!void {
         return DatabaseError.InvalidArgument;
     }
     if (config.vector_metric) |metric| switch (metric) {
-        .cosine, .euclidean, .inner_product => {},
+        .cosine, .euclidean, .dot_product => {},
         _ => return DatabaseError.InvalidArgument,
     };
     if (config.vector_m) |m| if (m < 2 or m > 32) return DatabaseError.InvalidArgument;
@@ -658,7 +658,7 @@ fn hnswConfigFor(config: VectorConfig) HnswConfig {
         .ef_construction = config.ef_construction,
         .metric = switch (config.metric) {
             .euclidean => .euclidean,
-            .inner_product => .inner_product,
+            .dot_product => .inner_product,
             else => .cosine,
         },
     };
@@ -7893,12 +7893,12 @@ pub const Database = struct {
         std.debug.assert(a.len == b.len);
         const metric: VectorMetric = if (self.hnsw_index) |*hnsw| switch (hnsw.config.metric) {
             .euclidean => .euclidean,
-            .inner_product => .inner_product,
+            .inner_product => .dot_product,
             .cosine => .cosine,
         } else .cosine;
         return switch (metric) {
             .euclidean => vector_distance.euclideanDistance(a, b),
-            .inner_product => vector_distance.innerProductDistance(a, b),
+            .dot_product => vector_distance.innerProductDistance(a, b),
             else => vector_distance.cosineDistance(a, b),
         };
     }
@@ -7910,7 +7910,7 @@ pub const Database = struct {
             .dimensions = hnsw.config.dimensions,
             .metric = switch (hnsw.config.metric) {
                 .euclidean => .euclidean,
-                .inner_product => .inner_product,
+                .inner_product => .dot_product,
                 .cosine => .cosine,
             },
             .m = hnsw.config.m,

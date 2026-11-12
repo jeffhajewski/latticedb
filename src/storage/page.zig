@@ -134,12 +134,32 @@ pub const FileHeader = extern struct {
     /// Where 0.16.0's header ends and the format-4 fields begin.
     pub const LEGACY_SIZE: usize = 200;
 
-    /// How the vector index measures distance.
+    /// How the vector index measures distance. The names are the ones every
+    /// interface uses: the CLI's --vector-metric, `lattice info`, the
+    /// bindings' strings and constants (`dot_product` is the negative dot
+    /// product).
     pub const VectorMetric = enum(u8) {
         cosine = 1,
         euclidean = 2,
-        inner_product = 3,
+        dot_product = 3,
         _,
+
+        /// The metric's name, as `fromName` reads it.
+        pub fn name(self: VectorMetric) []const u8 {
+            return switch (self) {
+                .cosine => "cosine",
+                .euclidean => "euclidean",
+                .dot_product => "dot_product",
+                _ => "unknown",
+            };
+        }
+
+        pub fn fromName(text: []const u8) ?VectorMetric {
+            inline for (.{ VectorMetric.cosine, VectorMetric.euclidean, VectorMetric.dot_product }) |metric| {
+                if (std.mem.eql(u8, text, comptime metric.name())) return metric;
+            }
+            return null;
+        }
     };
 
     /// The vector index's configuration as the file records it.
@@ -205,7 +225,7 @@ pub const FileHeader = extern struct {
         if (!self.hasExtension() or self.vector_dimensions == 0) return null;
         const metric: VectorMetric = @enumFromInt(self.vector_metric);
         switch (metric) {
-            .cosine, .euclidean, .inner_product => {},
+            .cosine, .euclidean, .dot_product => {},
             _ => return null,
         }
         return .{
@@ -368,7 +388,7 @@ test "format-4 header fields read as absent once an older release zeroes them" {
 
 test "a vector configuration 0.16.0 would misread raises min_reader_version" {
     var header = FileHeader.init();
-    header.setVectorConfig(.{ .dimensions = 4, .metric = .inner_product, .m = 16, .m_max0 = 32, .ef_construction = 200 });
+    header.setVectorConfig(.{ .dimensions = 4, .metric = .dot_product, .m = 16, .m_max0 = 32, .ef_construction = 200 });
     try std.testing.expectEqual(types.FORMAT_VERSION, header.min_reader_version);
 
     var other = FileHeader.init();

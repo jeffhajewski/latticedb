@@ -540,7 +540,7 @@ the GQL-only clauses. `book/src/cypher/overview.md` lists them.
   Euclidean (L2) distance or the negated dot product as well as cosine, and other
   `m` and `ef_construction`: `vector_metric`, `vector_m` and
   `vector_ef_construction` in every binding and in `lattice_open_options_v5`, and
-  `lattice create --vector-metric=cosine|euclidean|dot --vector-m=<n>
+  `lattice create --vector-metric=cosine|euclidean|dot_product --vector-m=<n>
   --vector-ef-construction=<n>`. They are fixed once the index exists; export and
   import to change them. Under Euclidean and dot product vectors are stored as
   given; cosine still normalises them.

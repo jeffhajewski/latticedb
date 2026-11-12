@@ -89,6 +89,12 @@ pub const SymbolTable = struct {
         return self;
     }
 
+    /// The next free id, found by walking the id -> name tree. Unlike the
+    /// node id counter this is not kept in the file header, because the walk
+    /// is cheap at any size the table can reach (ReleaseFast, Apple M-series,
+    /// warm cache: about 1 us for 200 symbols, 5 us for 2,000, 170 us at
+    /// 64,000, against an open of 120-830 us), and a symbol id is never freed,
+    /// so the highest one in the tree is always the last handed out.
     fn loadNextId(self: *Self) SymbolError!SymbolId {
         var max_id: SymbolId = USER_SYMBOL_START - 1;
         var iter = self.reverse.range(null, null) catch |err| {

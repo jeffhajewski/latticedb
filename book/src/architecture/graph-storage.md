@@ -162,6 +162,33 @@ try store.update(node_id, &new_labels, &new_properties);
 try store.delete(node_id);
 ```
 
+### Node ids
+
+Node ids come from a counter that never goes down. The database keeps it in the
+file header and writes it with every flush, in the same header image as the node
+tree pages it describes, so opening a database reads it rather than scanning the
+node tree, and the id of a committed node is never handed out again, even after the
+node is deleted. Ids handed out by a transaction that rolled back, or that had not
+committed when the process died, can be handed out again. A file last written by
+0.16.0 has no stored counter; the first read-write open finds the highest id with
+one scan and stores the counter from then on. If that scan fails, the open fails
+rather than start the ids again at 1.
+
+### Deleting a node that has relationships
+
+`NodeStore.delete` removes the node record only. The rule that a node with
+relationships cannot be deleted lives one level up, in the database:
+`Database.deleteNode` (C `lattice_node_delete`) refuses a node that has any
+relationship the transaction can see, its own uncommitted ones included, with
+`NodeHasRelationships` (`LATTICE_ERROR_HAS_RELATIONSHIPS`), and
+`detachDeleteNode` (`lattice_node_detach_delete`) deletes the relationships with
+the node. Cypher's `DELETE` and `DETACH DELETE` go through the same two calls. The
+check is one range probe over the node's edge keys, plus a look at the node's own
+pending edges in the transaction. Creating an edge likewise checks that both its
+ends exist as the transaction sees them, a key probe each, and fails with
+`NotFound` (`LATTICE_ERROR_NOT_FOUND`) otherwise. So no committed edge points at a
+node that does not exist.
+
 ## Edge Storage
 
 Edges are more complex because we need efficient traversal in **both directions**

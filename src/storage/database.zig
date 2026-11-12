@@ -6612,6 +6612,15 @@ pub const Database = struct {
         var refs: std.ArrayListUnmanaged(EdgeRef) = .empty;
         errdefer refs.deinit(self.allocator);
 
+        // Without staged edges, the committed ones are the answer: no
+        // overlay lookup per edge, and no set of the ids seen.
+        const overlay: ?*TxnOverlay = if (txn) |t| self.getTxnOverlay(t) else null;
+        const staged = if (overlay) |o| o.edge_states.count() > 0 else false;
+        // Only this node's pending edges, not the transaction's.
+        const pending: []const EdgeId = if (!staged) &.{} else if (overlay.?.edges_by_node.get(node_id)) |list| list.items else &.{};
+
+        // The committed edges seen, so that a pending edge already given is
+        // not given again; needed only when this node has pending ones.
         var seen: std.AutoHashMapUnmanaged(EdgeId, void) = .{};
         defer seen.deinit(self.allocator);
 
@@ -6630,17 +6639,15 @@ pub const Database = struct {
         defer base_iter.deinit();
 
         while (base_iter.next() catch return DatabaseError.IoError) |base_ref| {
-            try seen.put(self.allocator, base_ref.id, {});
+            if (pending.len > 0) try seen.put(self.allocator, base_ref.id, {});
 
-            if (txn) |t| {
-                if (self.getTxnOverlay(t)) |overlay| {
-                    if (overlay.edge_states.get(base_ref.id)) |state| {
-                        if (edgeStateMatches(state, node_id, direction, edge_type)) {
-                            refs.append(self.allocator, edgeStateToRef(base_ref.id, state)) catch return DatabaseError.OutOfMemory;
-                            if (edgeLimitReached(refs.items.len, limit)) break;
-                        }
-                        continue;
+            if (staged) {
+                if (overlay.?.edge_states.get(base_ref.id)) |state| {
+                    if (edgeStateMatches(state, node_id, direction, edge_type)) {
+                        refs.append(self.allocator, edgeStateToRef(base_ref.id, state)) catch return DatabaseError.OutOfMemory;
+                        if (edgeLimitReached(refs.items.len, limit)) break;
                     }
+                    continue;
                 }
             }
 
@@ -6649,19 +6656,13 @@ pub const Database = struct {
         }
 
         if (!edgeLimitReached(refs.items.len, limit)) {
-            if (txn) |t| {
-                if (self.getTxnOverlay(t)) |overlay| {
-                    // Only this node's pending edges, not the transaction's.
-                    const pending: []const EdgeId = if (overlay.edges_by_node.get(node_id)) |list| list.items else &.{};
-                    for (pending) |edge_id| {
-                        // Also skips an edge filed twice by a retried write.
-                        if ((try seen.getOrPut(self.allocator, edge_id)).found_existing) continue;
-                        const state = overlay.edge_states.get(edge_id) orelse continue;
-                        if (!edgeStateMatches(state, node_id, direction, edge_type)) continue;
-                        refs.append(self.allocator, edgeStateToRef(edge_id, state)) catch return DatabaseError.OutOfMemory;
-                        if (edgeLimitReached(refs.items.len, limit)) break;
-                    }
-                }
+            for (pending) |edge_id| {
+                // Also skips an edge filed twice by a retried write.
+                if ((try seen.getOrPut(self.allocator, edge_id)).found_existing) continue;
+                const state = overlay.?.edge_states.get(edge_id) orelse continue;
+                if (!edgeStateMatches(state, node_id, direction, edge_type)) continue;
+                refs.append(self.allocator, edgeStateToRef(edge_id, state)) catch return DatabaseError.OutOfMemory;
+                if (edgeLimitReached(refs.items.len, limit)) break;
             }
         }
 
@@ -6677,6 +6678,10 @@ pub const Database = struct {
         var refs: std.ArrayListUnmanaged(EdgeRef) = .empty;
         errdefer refs.deinit(self.allocator);
 
+        // The committed edges seen, to tell the staged edges that are new
+        // from those that change a committed one; only with staged edges.
+        const overlay: ?*TxnOverlay = if (txn) |t| self.getTxnOverlay(t) else null;
+        const staged = if (overlay) |o| o.edge_states.count() > 0 else false;
         var seen: std.AutoHashMapUnmanaged(EdgeId, void) = .{};
         defer seen.deinit(self.allocator);
 
@@ -6684,17 +6689,14 @@ pub const Database = struct {
         defer base_iter.deinit();
 
         while (base_iter.next() catch return DatabaseError.IoError) |base_ref| {
-            try seen.put(self.allocator, base_ref.id, {});
-
-            if (txn) |t| {
-                if (self.getTxnOverlay(t)) |overlay| {
-                    if (overlay.edge_states.get(base_ref.id)) |state| {
-                        if (edgeStateMatchesType(state, edge_type)) {
-                            refs.append(self.allocator, edgeStateToRef(base_ref.id, state)) catch return DatabaseError.OutOfMemory;
-                            if (edgeLimitReached(refs.items.len, limit)) break;
-                        }
-                        continue;
+            if (staged) {
+                try seen.put(self.allocator, base_ref.id, {});
+                if (overlay.?.edge_states.get(base_ref.id)) |state| {
+                    if (edgeStateMatchesType(state, edge_type)) {
+                        refs.append(self.allocator, edgeStateToRef(base_ref.id, state)) catch return DatabaseError.OutOfMemory;
+                        if (edgeLimitReached(refs.items.len, limit)) break;
                     }
+                    continue;
                 }
             }
 
@@ -6705,17 +6707,13 @@ pub const Database = struct {
             if (edgeLimitReached(refs.items.len, limit)) break;
         }
 
-        if (!edgeLimitReached(refs.items.len, limit)) {
-            if (txn) |t| {
-                if (self.getTxnOverlay(t)) |overlay| {
-                    var overlay_iter = overlay.edge_states.iterator();
-                    while (overlay_iter.next()) |entry| {
-                        if (seen.contains(entry.key_ptr.*)) continue;
-                        if (!edgeStateMatchesType(entry.value_ptr.*, edge_type)) continue;
-                        refs.append(self.allocator, edgeStateToRef(entry.key_ptr.*, entry.value_ptr.*)) catch return DatabaseError.OutOfMemory;
-                        if (edgeLimitReached(refs.items.len, limit)) break;
-                    }
-                }
+        if (staged and !edgeLimitReached(refs.items.len, limit)) {
+            var overlay_iter = overlay.?.edge_states.iterator();
+            while (overlay_iter.next()) |entry| {
+                if (seen.contains(entry.key_ptr.*)) continue;
+                if (!edgeStateMatchesType(entry.value_ptr.*, edge_type)) continue;
+                refs.append(self.allocator, edgeStateToRef(entry.key_ptr.*, entry.value_ptr.*)) catch return DatabaseError.OutOfMemory;
+                if (edgeLimitReached(refs.items.len, limit)) break;
             }
         }
 

@@ -345,7 +345,10 @@ Inside a write transaction, the expand merges the stored edges with the
 transaction's own. The transaction's overlay files each edge it creates under both
 endpoints (`edges_by_node`), so expanding a node reads only that node's pending
 edges, not every edge the transaction has touched; the check that refuses deleting
-a node with relationships reads the same list.
+a node with relationships reads the same list. A transaction that holds no edge
+changes, which is every read-only one unless a writer has committed since it
+began, takes the stored edges as they come: no lookup in the overlay per edge and
+no set of the ids already returned.
 
 When the far end of the relationship is a node that is already bound, the expand
 keeps only edges that lead to it, and a bound node at the start of a pattern is

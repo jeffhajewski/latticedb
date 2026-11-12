@@ -1509,3 +1509,104 @@ test "lgr: index paths beside @@ and <=> answer as without the indexes" {
         }
     }
 }
+
+/// The ids of `refs`, sorted, as text.
+fn edgeIdsText(refs: []const lattice.graph.edge.EdgeRef) ![]u8 {
+    var ids: std.ArrayList(u64) = .empty;
+    defer ids.deinit(std.testing.allocator);
+    for (refs) |ref| try ids.append(std.testing.allocator, ref.id);
+    std.mem.sort(u64, ids.items, {}, std.sort.asc(u64));
+    var out: std.ArrayList(u8) = .empty;
+    for (ids.items) |id| try out.print(std.testing.allocator, "{d} ", .{id});
+    return out.toOwnedSlice(std.testing.allocator);
+}
+
+const StagedEdges = struct {
+    /// A node's outgoing or incoming edges as `t` sees them must be `want`.
+    fn check(d: *Database, t: ?*lattice.transaction.manager.Transaction, node: u64, incoming: bool, want: []const u64) !void {
+        const refs = if (incoming) try d.getIncomingEdgeRefsInTxn(t, node) else try d.getOutgoingEdgeRefsInTxn(t, node);
+        defer d.allocator.free(refs);
+        const got = try edgeIdsText(refs);
+        defer std.testing.allocator.free(got);
+        var sorted: [16]u64 = undefined;
+        @memcpy(sorted[0..want.len], want);
+        std.mem.sort(u64, sorted[0..want.len], {}, std.sort.asc(u64));
+        var expected: std.ArrayList(u8) = .empty;
+        defer expected.deinit(std.testing.allocator);
+        for (sorted[0..want.len]) |id| try expected.print(std.testing.allocator, "{d} ", .{id});
+        try std.testing.expectEqualStrings(expected.items, got);
+    }
+
+    /// Every edge `t` sees must number `want`.
+    fn checkAll(d: *Database, t: ?*lattice.transaction.manager.Transaction, want: usize) !void {
+        const all = try d.scanEdgesInTxn(t, null, 0);
+        defer d.freeEdgeInfos(all);
+        try std.testing.expectEqual(want, all.len);
+    }
+};
+
+test "lgr: a node's edges in a transaction, with staged edges elsewhere, here, or none" {
+    const path = "/tmp/lgr_staged_edges.ltdb";
+    defer removeFiles(path);
+    var db = try openDb(path, true);
+    defer db.close();
+
+    var nodes: [6]u64 = undefined;
+    var committed: [8]u64 = undefined;
+    {
+        var txn = try db.beginTransaction(.read_write);
+        for (&nodes) |*n| n.* = try db.createNode(&txn, &.{"P"});
+        for (&committed, 0..) |*e, i| e.* = try db.createEdgeAndGetId(&txn, nodes[i % 3], nodes[3 + i % 3], "KNOWS");
+        try db.commitTransaction(&txn);
+    }
+    const check = StagedEdges.check;
+
+    // No transaction, and a transaction that staged nothing on edges.
+    try check(db, null, nodes[0], false, &.{ committed[0], committed[3], committed[6] });
+    var txn = try db.beginTransaction(.read_write);
+    _ = try db.createNode(&txn, &.{"Q"});
+    try check(db, &txn, nodes[0], false, &.{ committed[0], committed[3], committed[6] });
+    try check(db, &txn, nodes[3], true, &.{ committed[0], committed[3], committed[6] });
+
+    // Staged edges on other nodes only: node 1's edges are the committed ones.
+    const elsewhere = try db.createEdgeAndGetId(&txn, nodes[2], nodes[5], "KNOWS");
+    try check(db, &txn, nodes[1], false, &.{ committed[1], committed[4], committed[7] });
+    // A committed edge deleted, one added, here.
+    try db.deleteEdgeById(&txn, committed[3]);
+    const here = try db.createEdgeAndGetId(&txn, nodes[0], nodes[4], "LIKES");
+    try check(db, &txn, nodes[0], false, &.{ committed[0], committed[6], here });
+    try check(db, &txn, nodes[3], true, &.{ committed[0], committed[6] });
+    try check(db, &txn, nodes[4], true, &.{ committed[1], committed[4], committed[7], here });
+    try check(db, &txn, nodes[5], true, &.{ committed[2], committed[5], elsewhere });
+
+    // Every edge, with and without a type, and with a limit.
+    try StagedEdges.checkAll(db, &txn, 9);
+    {
+        const likes = try db.scanEdgesInTxn(&txn, "LIKES", 0);
+        defer db.freeEdgeInfos(likes);
+        try std.testing.expectEqual(@as(usize, 1), likes.len);
+        try std.testing.expectEqual(here, likes[0].id);
+        const some = try db.scanEdgesInTxn(&txn, null, 4);
+        defer db.freeEdgeInfos(some);
+        try std.testing.expectEqual(@as(usize, 4), some.len);
+    }
+    try db.abortTransaction(&txn);
+    try StagedEdges.checkAll(db, null, 8);
+
+    // A reader that staged nothing keeps seeing the edges of its snapshot
+    // after a writer deletes one and adds one, and so does a reader that
+    // began before anything was staged at all.
+    var reader = try db.beginTransaction(.read_only);
+    try check(db, &reader, nodes[0], false, &.{ committed[0], committed[3], committed[6] });
+    var writer = try db.beginTransaction(.read_write);
+    try db.deleteEdgeById(&writer, committed[0]);
+    const later = try db.createEdgeAndGetId(&writer, nodes[0], nodes[5], "KNOWS");
+    try db.commitTransaction(&writer);
+    try check(db, &reader, nodes[0], false, &.{ committed[0], committed[3], committed[6] });
+    try check(db, &reader, nodes[3], true, &.{ committed[0], committed[3], committed[6] });
+    try check(db, &reader, nodes[5], true, &.{ committed[2], committed[5] });
+    try StagedEdges.checkAll(db, &reader, 8);
+    try db.abortTransaction(&reader);
+    try check(db, null, nodes[0], false, &.{ committed[3], committed[6], later });
+    try StagedEdges.checkAll(db, null, 8);
+}

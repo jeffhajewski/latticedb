@@ -761,6 +761,11 @@ Other changes, measured by their commits on a busy machine:
   about 21 s.
 - Expanding a node inside a write transaction that holds 20,000 new
   relationships looks only at that node's pending ones: 265 µs to 4.9 µs a hop.
+- Expanding a node in a transaction that holds no relationship changes, as a
+  read usually is, no longer looks each relationship up among the
+  transaction's changes or builds a set of the ids returned: a one-hop
+  `count` over 1,000,000 relationships from 100,000 nodes, 100–137 ms to
+  72–87 ms; `lattice_edge_scan` of all of them, 126–134 ms to 71–72 ms.
 - `r.prop`, `type(r)` and `labels(n)` decode only what they need: `RETURN r.w,
   r.note` over 20,000 relationships, 15.3 ms to 10.2 ms.
 - A `WHERE` that is the same `@@` search the `MATCH` already ran no longer runs

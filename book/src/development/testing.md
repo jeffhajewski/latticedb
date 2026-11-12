@@ -32,7 +32,7 @@ tests/
 ├── unit/           # Unit tests for individual modules
 ├── integration/    # End-to-end integration tests
 ├── fuzz/           # Fuzzing targets for parser and serialization
-├── crash/          # Crash recovery tests (simulated crashes, see below)
+├── crash/          # Crash recovery and power-loss tests (see below)
 ├── container/      # Linux package/shared-library smoke tests
 └── benchmark/      # Performance benchmarks
 ```
@@ -40,13 +40,72 @@ tests/
 ## Testing Standards
 
 - Fuzzing is mandatory for the parser and serialization code
-- Crash recovery tests simulate a crash in-process: they close the database
-  cleanly, then reset the file to an earlier state (for example truncating it to
-  its header page) so that reopening has to recover from the write-ahead log.
-  No test kills a process, and none injects torn page writes.
+- Crash recovery tests simulate a crash in-process. Some copy the database and
+  its log while a handle is still open, which is what a killed process leaves;
+  some reset the file to an earlier state (for example truncating it to its header
+  page) so that reopening has to recover from the write-ahead log; some build the
+  state a crash part way through a flush leaves. No test kills a real process.
+- Power loss is tested by simulation, described below.
 - CI enforces coverage only for the Python binding (`--cov-fail-under=85`); the
   TypeScript binding runs `npm run test:coverage`. There is no Zig coverage
   tooling.
+
+## Power-Loss Tests
+
+A process kill leaves every write the process made, synced or not. A power cut does
+more: it loses what was not synced, can keep later writes while losing earlier ones,
+can tear a write at a sector boundary, and can lose the name of a file whose
+directory was not synced. The crash suite tests that with a simulated disk:
+
+- `FaultVfs` (`src/storage/fault_vfs.zig`) is an in-memory filesystem that records
+  every create, delete, write, truncate, file sync and directory sync.
+- `DiskModel` replays a prefix of that record and cuts the power. Synced data and
+  synced names survive. Each unsynced change survives in one of four styles: all of
+  it, as a process kill leaves it; a prefix in order with the last write torn; any
+  subset in any order; or any subset of 512-byte sectors, with truncations possibly
+  lost and file lengths possibly grown with zeroes. A name created or removed since
+  its directory was last synced comes back old or new at random.
+- `Database.openWithVfs` (Zig API only) opens a database on any `Vfs`, treated as a
+  disk, journal included, so the harness runs the same engine as a file on disk.
+- `tests/crash/ldur_power.zig` runs a seeded random workload through the Zig API
+  against a model of what the database should hold: labelled nodes, properties
+  including values in overflow pages, edges and their deletion, node deletes, a
+  property index, a full-text index, vectors, rolled-back transactions, explicit
+  syncs and checkpoints, reopens, and optionally a log removed while the database
+  is closed. It notes where each commit returned, then cuts the power before and
+  after every sync and at random points, opens each result and checks it:
+  - the contents are exactly the state after some whole number of transactions, no
+    fewer than had been acknowledged at the cut (in `normal` sync mode, no fewer
+    than had been acknowledged when the log was last synced), and at most one more;
+  - node and edge counts agree with scans, every edge's ends exist, adjacency
+    agrees with the edges, the label, property and full-text indexes agree exactly
+    with the graph, and every vector is reachable by search;
+  - every fifth cut is followed by a second cut during that recovery, which must
+    reach the same state.
+
+`zig build crash-test` runs five configurations: the default sync mode over the
+graph and a property index; overflow values with transactions over several log
+frames; `normal` sync mode; vectors with a full-text index; and a log removed while
+the database was closed. Together they take about a minute and a half of CPU in a
+debug build. For a longer search, environment variables control the harness:
+
+| Variable | Effect |
+|----------|--------|
+| `LDUR_SEEDS=<n>` | Run each configuration at three times the size, over `n` more seeds |
+| `LDUR_SEED_BASE=<n>` | First of those seeds (default 100) |
+| `LDUR_SEED=<n>` | Rerun the configurations at one seed |
+| `LDUR_ONLY_CUT=<n>` | Run only one cut |
+| `LDUR_VERBOSE=1` | Print each cut |
+| `LDUR_KEEP_GOING=1` | Count failures instead of stopping at the first |
+
+```bash
+LDUR_SEEDS=4 zig build crash-test
+```
+
+The harness does not reach everything. `lattice check`, backup, restore and
+replication use the filesystem directly rather than the `Vfs`, `deserialize` writes
+a temporary file directly, and the workload drives the Zig API, not the C API,
+Cypher or streams.
 
 ## TypeScript Binding Tests
 

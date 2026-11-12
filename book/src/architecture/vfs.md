@@ -35,14 +35,28 @@ raw system calls, so the per-platform differences live in Zig's standard library
 
 ### 3. A Seam for Failure Injection
 
-A backend that fails on purpose — say, after the Nth write — could be dropped in
-behind the same interface to test crash recovery. None exists today. The crash
-tests in `tests/crash/` simulate a crash differently: some copy the database file
-and its log while the handle is still open, which is what a killed process leaves,
-and open the copy; others reset the database file to its header page, leave the log
-in place, and check that reopening replays the committed transactions; others build
-the state a crash part way through a flush leaves. None of them injects faults or
-reorders writes, so they simulate a killed process, not a power cut.
+A backend that records every write and sync can be dropped in behind the same
+interface to test what a power cut does. `FaultVfs` (`src/storage/fault_vfs.zig`)
+is that backend: an in-memory filesystem that keeps a trace of every create,
+delete, write, truncate, file sync and directory sync, and a disk model that
+replays part of the trace and cuts the power, losing, reordering or tearing what
+was not synced. `Database.openWithVfs` opens a database on any `Vfs` and treats it
+as a disk, journal and configured buffer pool included, which `:memory:` does not.
+The power-loss tests drive the engine through it; see
+[Running Tests](../development/testing.md#power-loss-tests).
+
+The same seam carries read-only recovery. `OverlayVfs`
+(`src/storage/overlay_vfs.zig`) opens the files beneath it for reading only and
+keeps every write in memory, in 4 KB blocks over them, up to a budget. A read-only
+open of a crashed database runs recovery on it, so the handle sees every committed
+transaction and the files are not touched (see
+[Recovery](./recovery.md#the-order-of-work-at-open)).
+
+The older crash tests in `tests/crash/` simulate a crash differently: some copy the
+database file and its log while the handle is still open, which is what a killed
+process leaves, and open the copy; others reset the database file to its header
+page, leave the log in place, and check that reopening replays the committed
+transactions; others build the state a crash part way through a flush leaves.
 
 ## The Interface
 
@@ -84,9 +98,15 @@ pub const Vfs = struct {
         open:   fn(ptr, path: []const u8, flags: OpenFlags) VfsError!File,
         delete: fn(ptr, path: []const u8) VfsError!void,
         exists: fn(ptr, path: []const u8) bool,
+        // Optional: make a file's directory entry durable. PosixVfs syncs the
+        // parent directory; a backend without directories leaves it null.
+        syncParentDir: ?fn(ptr, path: []const u8) void = null,
     };
 };
 ```
+
+The journal, a newly created database and a newly created log reach the directory
+sync through the `Vfs` in use, so a power-loss test can see it.
 
 ### Open Flags
 
@@ -158,7 +178,11 @@ that are missing from their directory (not on Windows, where this is skipped). T
 flush journal, `<database>-journal`, is created at every read-write open and removed
 at a clean close, so each session's journal is a new name in the directory: the
 first journal write of a session syncs the directory before it returns, which is
-before any page is written in place. A session that never flushes pays nothing.
+before any page is written in place. A session that never flushes pays nothing. The
+log is a new name too when an existing database is opened without one, as after a
+backup is put back without its log: creating it syncs the new file and its
+directory, once per file, so a power cut cannot take the log's name, and the
+commits in it, with it. These directory syncs go through the `Vfs` in use.
 
 ## The File Implementation
 

@@ -103,6 +103,40 @@ test "lfmt gate: the first changefeed event raises the reader version on disk be
     }
 }
 
+test "lfmt gate: a commit that fails after staging its events raises nothing, and its retry raises once" {
+    inline for (.{ true, false }) |wal| {
+        const path = if (wal) "/tmp/lfmt_gate_retry.db" else "/tmp/lfmt_gate_retry_nolog.db";
+        cleanup(path);
+        defer cleanup(path);
+
+        const db = try openRw(path, config(wal), true);
+        defer db.close();
+        var txn = try db.beginTransaction(.read_write);
+        _ = try db.createNode(&txn, &.{"Person"});
+        db.fail_after_changefeed_staging_for_testing = true;
+        try std.testing.expectError(lattice.storage.database.DatabaseError.IoError, db.commitTransaction(&txn));
+
+        // Nothing was logged or written, so nothing asks 0.16.0 to stay out.
+        try std.testing.expectEqual(OnDisk{ .version = types.MIN_READER_VERSION, .reasons = 0 }, try onDisk(path));
+        try std.testing.expectEqual(types.MIN_READER_VERSION, db.page_manager.getHeader().min_reader_version);
+
+        // The retry restages and commits; the raise happens with it.
+        _ = try db.createNode(&txn, &.{"Person"});
+        try db.commitTransaction(&txn);
+        try std.testing.expectEqual(OnDisk{ .version = types.FORMAT_VERSION, .reasons = Reason.changefeed_events }, try onDisk(path));
+        const after_retry = try countChanges(db);
+        try std.testing.expect(after_retry > 0);
+
+        // Later commits find it raised and write nothing more to the header
+        // in place: the bytes stay as the raise left them until a flush.
+        try commitNode(db);
+        try std.testing.expectEqual(OnDisk{ .version = types.FORMAT_VERSION, .reasons = Reason.changefeed_events }, try onDisk(path));
+        // One more node's events, half as many as the two the retry
+        // committed: the failed attempt left none behind.
+        try std.testing.expectEqual(after_retry + after_retry / 2, try countChanges(db));
+    }
+}
+
 test "lfmt gate: with retention off no event is stored and the version stays" {
     inline for (.{ true, false }) |wal| {
         const path = if (wal) "/tmp/lfmt_gate_off.db" else "/tmp/lfmt_gate_off_nolog.db";

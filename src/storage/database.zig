@@ -1147,7 +1147,13 @@ pub const Database = struct {
         }
 
         // 6. Initialize Symbol Table
-        self.symbol_table = SymbolTable.init(allocator, &self.symbol_forward_tree, &self.symbol_reverse_tree);
+        // An existing database whose symbol tree cannot be read must not be
+        // opened for writing with the symbol id counter restarted: new names
+        // would take ids that existing labels and property names already have.
+        self.symbol_table = if (is_new or options.read_only)
+            SymbolTable.init(allocator, &self.symbol_forward_tree, &self.symbol_reverse_tree)
+        else
+            SymbolTable.initChecked(allocator, &self.symbol_forward_tree, &self.symbol_reverse_tree) catch return DatabaseError.IoError;
 
         // 7. Initialize Graph Stores
         // An existing database whose node tree cannot be read must not be

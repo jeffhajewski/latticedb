@@ -5641,6 +5641,39 @@ test "database: retrying a full-text declaration that failed part way indexes ea
     try std.testing.expect(failures > 0);
 }
 
+test "database: an unreadable symbol table is not opened for writing" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/s3_lattice_unreadable_symbols_test.ltdb";
+    const cwd = @import("compat").fs.cwd();
+    cwd.deleteFile(path) catch {};
+    cwd.deleteFile(path ++ "-wal") catch {};
+    defer cwd.deleteFile(path) catch {};
+    defer cwd.deleteFile(path ++ "-wal") catch {};
+
+    var root: u32 = 0;
+    var page_size: u32 = 0;
+    {
+        const db = try Database.open(allocator, path, .{ .create = true, .config = .{ .enable_wal = false, .enable_fts = false } });
+        defer db.close();
+        _ = try db.createNode(null, &[_][]const u8{"Person"});
+        try db.sync();
+        root = db.page_manager.getHeader().getTreeRoot(.symbol_reverse);
+        page_size = db.page_manager.getPageSize();
+    }
+
+    // Damage the page the id -> name tree starts at, so its checksum fails.
+    {
+        const file = try cwd.openFile(path, .{ .mode = .read_write });
+        defer file.close();
+        try file.pwriteAll(&([_]u8{0xA5} ** 64), @as(u64, root) * page_size + 128);
+    }
+
+    // The next symbol id is found by scanning that tree. Without it the
+    // counter would restart at the first id and a new label would take an id
+    // "Person" already has.
+    try std.testing.expectError(error.IoError, Database.open(allocator, path, .{ .config = .{ .enable_wal = false, .enable_fts = false } }));
+}
+
 test "database: a node and an edge full-text index cannot share a name and property" {
     const allocator = std.testing.allocator;
     const db = try Database.open(allocator, ":memory:", .{

@@ -71,6 +71,24 @@ pub const SymbolTable = struct {
         return self;
     }
 
+    /// `init` for trees that are known to hold a database's symbols.
+    ///
+    /// `init` starts the counter at the first user id when the id -> name
+    /// tree cannot be scanned, which is right for trees that do not exist yet
+    /// and wrong for ones that do: the next string interned would take an id
+    /// already in use, and a new label or property name would silently become
+    /// another name for an existing one. Here a failed scan is an error.
+    pub fn initChecked(allocator: Allocator, forward: *BTree, reverse: *BTree) SymbolError!Self {
+        var self = Self{
+            .allocator = allocator,
+            .forward = forward,
+            .reverse = reverse,
+            .next_id = USER_SYMBOL_START,
+        };
+        self.next_id = try self.loadNextId();
+        return self;
+    }
+
     fn loadNextId(self: *Self) SymbolError!SymbolId {
         var max_id: SymbolId = USER_SYMBOL_START - 1;
         var iter = self.reverse.range(null, null) catch |err| {

@@ -1642,12 +1642,12 @@ fn mergeValuesEqual(a: PropertyValue, b: PropertyValue) bool {
     switch (a) {
         .int_val => |av| switch (b) {
             .int_val => |bv| return av == bv,
-            .float_val => |bv| return @as(f64, @floatFromInt(av)) == bv,
+            .float_val => |bv| return expression_mod.compareIntFloat(av, bv) == .eq,
             else => return false,
         },
         .float_val => |av| switch (b) {
             .float_val => |bv| return av == bv,
-            .int_val => |bv| return av == @as(f64, @floatFromInt(bv)),
+            .int_val => |bv| return expression_mod.compareIntFloat(bv, av) == .eq,
             else => return false,
         },
         .list_val => |list| {
@@ -1857,7 +1857,7 @@ pub const MergeEdge = struct {
             var found = false;
             for (edge.properties) |actual_prop| {
                 if (actual_prop.key_id != key_id) continue;
-                if (!propertyValuesEqual(expected_pv, actual_prop.value)) {
+                if (!mergeValuesEqual(expected_pv, actual_prop.value)) {
                     return false;
                 }
                 found = true;

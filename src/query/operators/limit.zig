@@ -609,15 +609,8 @@ fn orderFloats(a: anytype, b: @TypeOf(a)) std.math.Order {
 /// Order an integer against a float by exact value. Converting the integer
 /// to a float would round above 2^53 and call unequal values equal.
 fn orderIntFloat(i: i64, f: f64) std.math.Order {
-    if (std.math.isNan(f)) return .lt;
-    const limit: f64 = 9223372036854775808.0; // 2^63
-    if (f >= limit) return .lt;
-    if (f < -limit) return .gt;
-    const whole = @trunc(f);
-    const t: i64 = @intFromFloat(whole);
-    if (i != t) return std.math.order(i, t);
-    const fraction = f - whole;
-    return if (fraction > 0) .lt else if (fraction < 0) .gt else .eq;
+    // NaN sorts after every number.
+    return expression.compareIntFloat(i, f) orelse .lt;
 }
 
 pub fn evaluateCountExpression(

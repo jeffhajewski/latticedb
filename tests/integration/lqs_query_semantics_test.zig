@@ -227,3 +227,99 @@ test "lqs: an allocation failure fails the query instead of reading null" {
     try sweepAllocationFailures(&failing, db, "MATCH (a:P {name: 'bo'}) RETURN properties(a)", &.{"{name:bo}"});
     try sweepAllocationFailures(&failing, db, "MATCH (:P)-[r]->() RETURN properties(r)", &.{"{since:long ago}"});
 }
+
+// ============================================================================
+// Integers and floats compare exactly
+// ============================================================================
+
+fn expectBools(db: *Database, cypher: []const u8, expected: []const ?bool) !void {
+    var result = try db.query(cypher);
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try std.testing.expectEqual(expected.len, result.rows[0].values.len);
+    for (expected, result.rows[0].values, 0..) |want, got, col| {
+        if (want) |b| {
+            if (got != .bool_val or got.bool_val != b) {
+                std.debug.print("{s}: column {d} want {}, got {any}\n", .{ cypher, col, b, got });
+                return error.TestUnexpectedResult;
+            }
+        } else try std.testing.expect(got == .null_val);
+    }
+}
+
+fn queryInt(db: *Database, cypher: []const u8) !i64 {
+    var result = try db.query(cypher);
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    return result.rows[0].values[0].int_val;
+}
+
+test "lqs: an integer and a float compare by their exact values" {
+    const path = "/tmp/lattice_lqs_int_float.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    // 2^53 + 1 has no float of its own: converting it to compare made it
+    // equal to 2^53.0, and i64 max equal to 2^63.0.
+    try expectBools(db, "RETURN 9007199254740993 = 9007199254740992.0, 9007199254740993 > 9007199254740992.0, " ++
+        "9007199254740993 <> 9007199254740992.0, 9007199254740992.0 < 9007199254740993", &.{ false, true, true, true });
+    try expectBools(db, "RETURN 9223372036854775807 < 9223372036854775808.0, 9223372036854775807 = 9223372036854775808.0, " ++
+        "-9223372036854775808 = -9223372036854775808.0, -9223372036854775807 > -9223372036854775808.0", &.{ true, false, true, true });
+    try expectBools(db, "RETURN 9007199254740993 IN [9007199254740992.0], 9007199254740992 IN [9007199254740992.0], " ++
+        "1 = 1.0, 1 < 1.5, 2 >= 1.5, 0 = -0.0, 3 <= 2.9999999999999996", &.{ false, true, true, true, true, true, false });
+
+    // ORDER BY already compared exactly; WHERE now agrees with it.
+    var ordered = try db.query("UNWIND [9007199254740992.0, 9007199254740993, 9007199254740991] AS x " ++
+        "WITH x ORDER BY x WHERE x > 9007199254740992.0 RETURN x");
+    defer ordered.deinit();
+    try std.testing.expectEqual(@as(usize, 1), ordered.rowCount());
+    try std.testing.expectEqual(@as(i64, 9007199254740993), ordered.rows[0].values[0].int_val);
+}
+
+test "lqs: DISTINCT and grouping treat equal integers and floats as one value" {
+    const path = "/tmp/lattice_lqs_int_float_groups.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    // 1 = 1.0 is true, so they are one value; they used to be two.
+    try std.testing.expectEqual(@as(i64, 2), try queryInt(db, "UNWIND [1, 1.0, 2] AS x RETURN count(DISTINCT x)"));
+    try std.testing.expectEqual(@as(i64, 1), try queryInt(db, "UNWIND [0, -0.0, 0.0] AS x RETURN count(DISTINCT x)"));
+    try std.testing.expectEqual(@as(i64, 2), try queryInt(db, "UNWIND [[1, 2], [1.0, 2.0], [1, 2.5]] AS x RETURN count(DISTINCT x)"));
+    // Exactly: 2^53 + 1 is not 2^53.0.
+    try std.testing.expectEqual(@as(i64, 2), try queryInt(
+        db,
+        "UNWIND [9007199254740993, 9007199254740992.0] AS x RETURN count(DISTINCT x)",
+    ));
+
+    var distinct = try db.query("UNWIND [1, 1.0, 2.5] AS x RETURN DISTINCT x");
+    defer distinct.deinit();
+    try std.testing.expectEqual(@as(usize, 2), distinct.rowCount());
+
+    var groups = try db.query("UNWIND [1.0, 1, 2.5, 9007199254740993, 9007199254740992.0] AS x " ++
+        "RETURN x, count(*) AS c ORDER BY x");
+    defer groups.deinit();
+    try std.testing.expectEqual(@as(usize, 4), groups.rowCount());
+    try std.testing.expectEqual(@as(i64, 2), groups.rows[0].values[1].int_val);
+}
+
+test "lqs: MERGE matches an integer and a float exactly" {
+    const path = "/tmp/lattice_lqs_int_float_merge.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    try run(db, "CREATE (n:M {v: 9007199254740992.0})");
+    // Used to match the 2^53.0 node and create nothing.
+    try run(db, "MERGE (n:M {v: 9007199254740993})");
+    try std.testing.expectEqual(@as(i64, 2), try queryInt(db, "MATCH (n:M) RETURN count(n)"));
+    // A number equal to the float still matches it.
+    try run(db, "MERGE (n:M {v: 9007199254740992})");
+    try std.testing.expectEqual(@as(i64, 2), try queryInt(db, "MATCH (n:M) RETURN count(n)"));
+
+    // A relationship's properties used to need the same type as well as the
+    // same value, so 1 did not find 1.0 and a second relationship was made.
+    try run(db, "CREATE (a:E {k: 1})-[:R {w: 1.0}]->(b:E {k: 2})");
+    try run(db, "MATCH (a:E {k: 1}), (b:E {k: 2}) MERGE (a)-[:R {w: 1}]->(b)");
+    try std.testing.expectEqual(@as(i64, 1), try queryInt(db, "MATCH (:E)-[r:R]->(:E) RETURN count(r)"));
+    try run(db, "MATCH (a:E {k: 1}), (b:E {k: 2}) MERGE (a)-[:R {w: 1.5}]->(b)");
+    try std.testing.expectEqual(@as(i64, 2), try queryInt(db, "MATCH (:E)-[r:R]->(:E) RETURN count(r)"));
+}

@@ -427,6 +427,23 @@ fn checkedInt(result: anytype) EvalError!i64 {
     };
 }
 
+/// How an integer compares with a float, exactly: by the numbers they are,
+/// not by the integer rounded to a float, so 2^53 + 1 is greater than
+/// 2^53.0 although converting it to a float makes them equal. Null when the
+/// float is NaN, which is not less than, equal to or greater than anything.
+pub fn compareIntFloat(i: i64, f: f64) ?std.math.Order {
+    if (std.math.isNan(f)) return null;
+    const limit: f64 = 9223372036854775808.0; // 2^63
+    if (f >= limit) return .lt;
+    if (f < -limit) return .gt;
+    // In range, the whole part of the float is an i64 exactly.
+    const whole = @trunc(f);
+    const t: i64 = @intFromFloat(whole);
+    if (i != t) return std.math.order(i, t);
+    const fraction = f - whole;
+    return if (fraction > 0) .lt else if (fraction < 0) .gt else .eq;
+}
+
 /// A truth value in Cypher's three-valued logic.
 const TruthValue = enum { false_, true_, unknown };
 
@@ -1313,12 +1330,12 @@ pub const ExpressionEvaluator = struct {
             },
             .int_val => |l| switch (right) {
                 .int_val => |r| l == r,
-                .float_val => |r| @as(f64, @floatFromInt(l)) == r,
+                .float_val => |r| compareIntFloat(l, r) == .eq,
                 else => false,
             },
             .float_val => |l| switch (right) {
                 .float_val => |r| l == r,
-                .int_val => |r| l == @as(f64, @floatFromInt(r)),
+                .int_val => |r| compareIntFloat(r, l) == .eq,
                 else => false,
             },
             .string_val => |l| switch (right) {
@@ -1408,12 +1425,12 @@ pub const ExpressionEvaluator = struct {
             },
             .int_val => |l| switch (right) {
                 .int_val => |r| l < r,
-                .float_val => |r| @as(f64, @floatFromInt(l)) < r,
+                .float_val => |r| compareIntFloat(l, r) == .lt,
                 else => null,
             },
             .float_val => |l| switch (right) {
                 .float_val => |r| l < r,
-                .int_val => |r| l < @as(f64, @floatFromInt(r)),
+                .int_val => |r| compareIntFloat(r, l) == .gt,
                 else => null,
             },
             .string_val => |l| switch (right) {

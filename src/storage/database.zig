@@ -173,6 +173,9 @@ pub const DatabaseError = error{
     /// Another process holds this database. A writer takes it exclusively and a
     /// reader shares it, so a reader is refused while a writer has it open.
     DatabaseLocked,
+    /// `deleteNode` was asked to delete a node that still has relationships.
+    /// `detachDeleteNode` deletes them with it.
+    NodeHasRelationships,
     /// The open options contradict the vector index configuration the file
     /// records: a different dimension count, metric, or HNSW parameter.
     VectorConfigMismatch,
@@ -5952,7 +5955,68 @@ pub const Database = struct {
         return null;
     }
 
-    /// Delete a node
+    /// Whether `txn` sees any relationship of `node_id`, in either direction.
+    ///
+    /// One probe of the edge tree answers for the committed edges, since
+    /// every edge is filed under both of its endpoints; only when the
+    /// transaction has changed edges is more needed. The first committed edge
+    /// the transaction has not deleted ends the search, so a node with many
+    /// edges costs no more than one with a single edge. What the transaction
+    /// created is then found in its overlay, which this walks in full.
+    pub fn nodeHasRelationshipsInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError!bool {
+        const overlay: ?*TxnOverlay = if (txn) |t| self.getTxnOverlay(t) else null;
+        const changed_edges: ?*const std.AutoHashMapUnmanaged(EdgeId, TxnEdgeState) = if (overlay) |o|
+            (if (o.edge_states.count() > 0) &o.edge_states else null)
+        else
+            null;
+
+        var iter = self.edge_store.getAllRefs(node_id) catch return DatabaseError.IoError;
+        defer iter.deinit();
+        while (iter.next() catch return DatabaseError.IoError) |edge_ref| {
+            const states = changed_edges orelse return true;
+            const state = states.getPtr(edge_ref.id) orelse return true;
+            if (state.exists) return true;
+        }
+
+        const states = changed_edges orelse return false;
+        var it = states.iterator();
+        while (it.next()) |entry| {
+            const state = entry.value_ptr;
+            if (state.exists and (state.source == node_id or state.target == node_id)) return true;
+        }
+        return false;
+    }
+
+    /// Delete a node and every relationship it has, as Cypher's DETACH DELETE
+    /// does. In a transaction it is all or nothing with the rest of it.
+    pub fn detachDeleteNode(self: *Self, txn: ?*Transaction, node_id: NodeId) !void {
+        if (self.read_only) return DatabaseError.PermissionDenied;
+        if (txn) |t| {
+            if (!t.isActive()) return DatabaseError.TransactionNotActive;
+            if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+        }
+        // Deleted by id, so parallel edges of one type between the same two
+        // nodes each go once.
+        inline for (.{ edge_mod.Direction.outgoing, edge_mod.Direction.incoming }) |direction| {
+            const refs = try self.collectVisibleEdgeRefs(txn, node_id, direction, null, 0);
+            defer self.allocator.free(refs);
+            for (refs) |edge_ref| {
+                self.deleteEdgeById(txn, edge_ref.id) catch |err| switch (err) {
+                    // A self-loop is listed both ways; the first pass took it.
+                    error.NotFound => {},
+                    else => return err,
+                };
+            }
+        }
+        try self.deleteNode(txn, node_id);
+    }
+
+    /// Delete a node.
+    ///
+    /// Refuses with `NodeHasRelationships` while the node has relationships
+    /// that `txn` can see, as Cypher's DELETE does: removing the node alone
+    /// would leave edges that point at nothing. `detachDeleteNode` removes
+    /// them with it. Deleting a node that does not exist does nothing.
     /// If txn is null, the operation is auto-committed
     pub fn deleteNode(self: *Self, txn: ?*Transaction, node_id: NodeId) !void {
         if (self.read_only) return DatabaseError.PermissionDenied;
@@ -5962,6 +6026,9 @@ pub const Database = struct {
         if (txn) |t| {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;
             if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+        }
+        if (try self.nodeHasRelationshipsInTxn(txn, node_id)) return DatabaseError.NodeHasRelationships;
+        if (txn) |t| {
             if (self.getTxnOverlay(t)) |overlay| {
                 const existing = try self.readVisibleNodeState(txn, node_id);
                 if (existing) |state| {
@@ -6053,6 +6120,18 @@ pub const Database = struct {
         if (self.hnsw_index) |*hnsw| {
             hnsw.remove(node_id) catch |err| return mapHnswError(err);
         }
+    }
+
+    /// Whether `txn` sees `node_id`, checked as cheaply as possible: the
+    /// transaction's own state for the node if it has one, else a probe for
+    /// the key in the node tree, without reading the record.
+    fn nodeVisibleForEdge(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError!bool {
+        if (txn) |t| {
+            if (self.getTxnOverlay(t)) |overlay| {
+                if (overlay.node_states.getPtr(node_id)) |state| return state.exists;
+            }
+        }
+        return self.nodeExists(node_id);
     }
 
     /// Check if a node exists
@@ -7074,6 +7153,14 @@ pub const Database = struct {
         if (txn) |t| {
             if (!t.isActive()) return DatabaseError.TransactionNotActive;
             if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+        }
+
+        // Both ends must exist as this transaction sees them, or the edge
+        // would point at nothing.
+        if (!try self.nodeVisibleForEdge(txn, source)) return DatabaseError.NotFound;
+        if (target != source and !try self.nodeVisibleForEdge(txn, target)) return DatabaseError.NotFound;
+
+        if (txn) |t| {
             if (self.getTxnOverlay(t)) |overlay| {
                 const type_id = self.symbol_table.intern(edge_type) catch return DatabaseError.IoError;
                 const edge_id = self.edge_store.reserveNextEdgeId();

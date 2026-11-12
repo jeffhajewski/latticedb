@@ -364,6 +364,9 @@ pub const lattice_error = enum(c_int) {
     /// Another process holds the database. Distinct from err_lock_timeout,
     /// which is about a second writer inside this process.
     err_database_locked = -16,
+    /// lattice_node_delete was asked to delete a node that still has
+    /// relationships; lattice_node_detach_delete removes them with it.
+    err_has_relationships = -17,
     /// The open options contradict the vector index configuration the file
     /// records (dimensions, metric or HNSW parameters).
     err_config_mismatch = -18,
@@ -399,6 +402,7 @@ fn mapDatabaseError(err: DatabaseError) lattice_error {
         DatabaseError.ValueTooLarge => .err_value_too_large,
         DatabaseError.MissingIndex => .err_unsupported,
         DatabaseError.DatabaseLocked => .err_database_locked,
+        DatabaseError.NodeHasRelationships => .err_has_relationships,
         DatabaseError.VectorConfigMismatch => .err_config_mismatch,
     };
 }
@@ -1752,11 +1756,34 @@ pub export fn lattice_node_remove_label(
     return .ok;
 }
 
-/// Delete a node
+/// Map an error from deleting a node or creating an edge. The two errors
+/// these have of their own get their own codes; the rest map as before.
+fn mapGraphWriteError(err: anyerror) lattice_error {
+    return switch (err) {
+        error.NotFound => .err_not_found,
+        error.NodeHasRelationships => .err_has_relationships,
+        else => mapAnyError(err),
+    };
+}
+
+/// Delete a node. Refuses with err_has_relationships while the node still
+/// has relationships the transaction can see.
 pub export fn lattice_node_delete(
     txn: ?*lattice_txn,
     node_id: lattice_node_id,
 ) lattice_error {
+    return deleteNodeFromC(txn, node_id, false);
+}
+
+/// Delete a node together with every relationship it has.
+pub export fn lattice_node_detach_delete(
+    txn: ?*lattice_txn,
+    node_id: lattice_node_id,
+) lattice_error {
+    return deleteNodeFromC(txn, node_id, true);
+}
+
+fn deleteNodeFromC(txn: ?*lattice_txn, node_id: lattice_node_id, detach: bool) lattice_error {
     const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
     defer releaseTxn(txn_handle);
 
@@ -1768,8 +1795,12 @@ pub export fn lattice_node_delete(
 
     // Pass transaction if it's a real one (id != 0)
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
-    txn_handle.db_handle.db.deleteNode(txn_ptr, node_id) catch |err| {
-        return mapAnyError(err);
+    const db = txn_handle.db_handle.db;
+    const result = if (detach) db.detachDeleteNode(txn_ptr, node_id) else db.deleteNode(txn_ptr, node_id);
+    result catch |err| switch (err) {
+        // Deleting a node that is not there is not an error, here as before.
+        error.NotFound => {},
+        else => return mapGraphWriteError(err),
     };
 
     return .ok;
@@ -3181,7 +3212,8 @@ pub export fn lattice_edge_create(
     // Pass transaction if it's a real one (id != 0)
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
     const edge_id = txn_handle.db_handle.db.createEdgeAndGetId(txn_ptr, source, target, type_slice) catch |err| {
-        return mapAnyError(err);
+        // err_not_found when either end does not exist.
+        return mapGraphWriteError(err);
     };
 
     edge_out.* = edge_id;
@@ -4039,6 +4071,7 @@ pub export fn lattice_error_message(code: lattice_error) [*c]const u8 {
         .err_unsupported => "Unsupported operation or value type",
         .err_value_too_large => "Value too large for database page size",
         .err_database_locked => "Database is open in another process",
+        .err_has_relationships => "Node still has relationships; delete them first or detach-delete the node",
         .err_config_mismatch => "Open options contradict the vector index configuration stored in the database",
     };
 }

@@ -452,50 +452,28 @@ pub const DeleteNode = struct {
             targets.append(self.allocator, node_id) catch return OperatorError.OutOfMemory;
         }
 
+        // The rule is the database's: deleteNode refuses a node that still
+        // has relationships and detachDeleteNode removes them with it.
         if (self.detach) {
             for (targets.items) |node_id| {
-                try self.deleteAllEdges(ctx, node_id);
+                self.database.detachDeleteNode(ctx.txn, node_id) catch return OperatorError.StorageError;
             }
-        } else {
-            // Check every node before deleting any, so a refusal leaves the
-            // nodes in place.
-            for (targets.items) |node_id| {
-                if (try self.hasRelationships(ctx, node_id)) return OperatorError.NodeHasRelationships;
-            }
+            return;
+        }
+
+        // Check every node before deleting any, so a refusal leaves the
+        // nodes in place.
+        for (targets.items) |node_id| {
+            const has_relationships = self.database.nodeHasRelationshipsInTxn(ctx.txn, node_id) catch
+                return OperatorError.StorageError;
+            if (has_relationships) return OperatorError.NodeHasRelationships;
         }
 
         for (targets.items) |node_id| {
-            self.database.deleteNode(ctx.txn, node_id) catch {
-                return OperatorError.StorageError;
+            self.database.deleteNode(ctx.txn, node_id) catch |err| return switch (err) {
+                error.NodeHasRelationships => OperatorError.NodeHasRelationships,
+                else => OperatorError.StorageError,
             };
-        }
-    }
-
-    fn hasRelationships(self: *Self, ctx: *ExecutionContext, node_id: NodeId) OperatorError!bool {
-        const outgoing = self.database.getOutgoingEdgeRefsInTxn(ctx.txn, node_id) catch return OperatorError.StorageError;
-        defer self.database.allocator.free(outgoing);
-        if (outgoing.len > 0) return true;
-        const incoming = self.database.getIncomingEdgeRefsInTxn(ctx.txn, node_id) catch return OperatorError.StorageError;
-        defer self.database.allocator.free(incoming);
-        return incoming.len > 0;
-    }
-
-    /// Delete every relationship of `node_id`, by id, so parallel edges of
-    /// one type between the same nodes are each removed once.
-    fn deleteAllEdges(self: *Self, ctx: *ExecutionContext, node_id: NodeId) OperatorError!void {
-        inline for (.{ false, true }) |incoming| {
-            const refs = (if (incoming)
-                self.database.getIncomingEdgeRefsInTxn(ctx.txn, node_id)
-            else
-                self.database.getOutgoingEdgeRefsInTxn(ctx.txn, node_id)) catch return OperatorError.StorageError;
-            defer self.database.allocator.free(refs);
-            for (refs) |ref| {
-                self.database.deleteEdgeById(ctx.txn, ref.id) catch |err| switch (err) {
-                    // A self-loop is listed both ways; the first pass took it.
-                    error.NotFound => {},
-                    else => return OperatorError.StorageError,
-                };
-            }
         }
     }
 

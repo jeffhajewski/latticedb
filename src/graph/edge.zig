@@ -845,6 +845,39 @@ pub const EdgeStore = struct {
         };
     }
 
+    /// Lightweight iterator over every edge of a node, outgoing then incoming.
+    /// Each edge is filed under both of its endpoints, so one range under the
+    /// node's key prefix covers both directions; a self-loop appears twice.
+    pub fn getAllRefs(self: *Self, node_id: NodeId) EdgeError!EdgeRefIterator {
+        const start_key = EdgeKey{
+            .source = node_id,
+            .direction = .outgoing,
+            .edge_type = 0,
+            .target = 0,
+            .edge_id = 0,
+        };
+        const end_key = EdgeKey{
+            .source = node_id +| 1,
+            .direction = .outgoing,
+            .edge_type = 0,
+            .target = 0,
+            .edge_id = 0,
+        };
+
+        const start_bytes = start_key.toBytes();
+        const end_bytes = end_key.toBytes();
+
+        const tree_iter = self.tree.range(&start_bytes, null) catch |err| {
+            return mapBTreeError(err);
+        };
+
+        return EdgeRefIterator{
+            .tree_iter = tree_iter,
+            .done = false,
+            .end_key_storage = end_bytes,
+        };
+    }
+
     /// Get lightweight iterator for incoming edges (no property deserialization).
     /// Returns EdgeRef containing only (source, target, edge_type_id).
     pub fn getIncomingRefs(self: *Self, node_id: NodeId) EdgeError!EdgeRefIterator {

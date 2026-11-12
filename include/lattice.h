@@ -59,6 +59,9 @@ typedef enum {
     /* Another process holds the database. Distinct from LATTICE_ERROR_LOCK_TIMEOUT,
      * which reports a second writer inside this process. */
     LATTICE_ERROR_DATABASE_LOCKED = -16,
+    /* lattice_node_delete was asked to delete a node that still has
+     * relationships. lattice_node_detach_delete removes them with it. */
+    LATTICE_ERROR_HAS_RELATIONSHIPS = -17,
     /* The open options contradict the vector index configuration the database
      * file records: a different vector_dimensions, vector_metric, vector_m or
      * vector_ef_construction. Nothing was read with the wrong configuration. */
@@ -307,8 +310,19 @@ lattice_error lattice_node_remove_label(
     const char* label
 );
 
-/* Delete a node */
+/* Delete a node.
+ * Returns LATTICE_ERROR_HAS_RELATIONSHIPS, and deletes nothing, while the node
+ * has relationships the transaction can see, as Cypher's DELETE does: deleting
+ * the node alone would leave edges pointing at nothing. Deleting a node that
+ * does not exist succeeds and does nothing. */
 lattice_error lattice_node_delete(
+    lattice_txn* txn,
+    lattice_node_id node_id
+);
+
+/* Delete a node and every relationship it has, as Cypher's DETACH DELETE does.
+ * All of it is part of the transaction. */
+lattice_error lattice_node_detach_delete(
     lattice_txn* txn,
     lattice_node_id node_id
 );
@@ -871,7 +885,9 @@ void lattice_embedding_client_free(lattice_embedding_client* client);
  * Edge operations
  */
 
-/* Create an edge between two nodes */
+/* Create an edge between two nodes.
+ * Returns LATTICE_ERROR_NOT_FOUND if either node does not exist as the
+ * transaction sees it. */
 lattice_error lattice_edge_create(
     lattice_txn* txn,
     lattice_node_id source,

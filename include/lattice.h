@@ -918,7 +918,19 @@ void lattice_vector_result_free(lattice_vector_result* result);
  * name does not look like a query that found nothing.
  */
 
-/* Search one declared index for documents matching a text query */
+/* Search one declared index for documents matching a text query.
+ *
+ * Query syntax (the same for Cypher's @@):
+ *   quick fox          every word is required
+ *   quick OR fox       either side; AND binds tighter, so "a b OR c" is (a b) OR c
+ *   fox -dog           excludes documents with "dog"; -"a phrase" excludes a phrase
+ *   "quick brown"      the words next to each other, in order
+ *   data*              any word starting with "data"
+ *   databse~ / ~1      words within two / one edit(s)
+ *   \- \* \~ \" \OR   a backslash makes an operator character literal
+ * A query of only exclusions returns LATTICE_ERROR_INVALID_ARG, as does a phrase
+ * on an index created before 0.17.0, which stores no word positions (drop and
+ * re-create the index to get them). */
 lattice_error lattice_fts_search(
     lattice_database* db,
     const char* label,
@@ -943,9 +955,9 @@ lattice_error lattice_fts_search_txn(
  * max_distance: max Levenshtein edit distance (0 = default 2)
  * min_term_length: min term length for fuzzy expansion (0 = default 4)
  *
- * Text written in the current transaction and not yet committed is matched by
- * term presence rather than edit distance, so a typo will not find a document
- * this transaction has only just written. */
+ * A document matching any one word is returned, as before; the query syntax
+ * of lattice_fts_search applies otherwise. Text written in the current
+ * transaction and not yet committed is matched with the same edit distances. */
 lattice_error lattice_fts_search_fuzzy(
     lattice_database* db,
     const char* label,

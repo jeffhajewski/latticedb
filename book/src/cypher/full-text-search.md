@@ -259,11 +259,14 @@ Fuzzy search matches documents containing any of the query words, or a near
 spelling of one, rather than all of them.
 
 Inside a write transaction, `@@` and the transaction's search methods see that
-transaction's own uncommitted writes. Uncommitted text is matched by whole terms,
-split and normalised as the index would, and scored by how many distinct query
-terms it contains rather than by BM25, so its scores do not compare with the
-index's. Fuzzy matching does not reach it: a typo will not find a document the
-transaction has only just written.
+transaction's own uncommitted writes. Uncommitted text is matched by the same
+query, split and normalised as the index would, fuzzy words included, and scored
+with the same BM25 and the index's statistics, so it ranks where it will once
+committed, give or take the statistics its own commit changes.
+
+The query syntax (`OR`, `-word`, `"phrase"`, `word*`, `word~`) is described in the
+[full-text search guide](../guides/full-text-search.md#query-syntax). It applies
+to `"some text" @@ "query"` on a plain string as well.
 
 ## Dropping an index
 

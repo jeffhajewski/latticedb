@@ -110,10 +110,11 @@ pub fn expandPrefixTerms(
 
     var count: u32 = 0;
     while (try iter.next()) |item| {
-        // Verify term actually starts with prefix (range might include edge cases)
-        if (!std.mem.startsWith(u8, item.term, prefix)) {
-            continue;
-        }
+        // Terms are in order from the prefix up, so the first that does not
+        // start with it is past them all. Without a bound (a prefix too long
+        // for `prefixUpperBound`), carrying on would walk the rest of the
+        // dictionary.
+        if (!std.mem.startsWith(u8, item.term, prefix)) break;
 
         // The iterator's term lives in a leaf page that is unpinned once the
         // walk moves past it, so the match keeps its own copy.

@@ -161,9 +161,8 @@ inside an `OR` returned all of them, so the answer depended on where you wrote i
 
 **Fuzzy search inside a transaction is now actually fuzzy.** It accepted
 `max_distance` and `min_term_length`, discarded both, and ran an exact search.
-One caveat remains and is deliberate: text your transaction has written but not
-committed is matched by term presence rather than edit distance, so a typo will
-not find a document you have only just written.
+Since 0.17.0 that includes text your transaction has written but not committed:
+it is matched with the same edit distances.
 
 ## Only string properties are indexed
 

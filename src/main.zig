@@ -62,6 +62,7 @@ pub const fts = struct {
     pub const stopwords = @import("fts/stopwords.zig");
     pub const highlight = @import("fts/highlight.zig");
     pub const legacy = @import("fts/legacy.zig");
+    pub const query = @import("fts/query.zig");
 };
 
 // Query system

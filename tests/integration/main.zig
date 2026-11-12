@@ -28,6 +28,7 @@ const lcf_changefeed_retention_test = @import("lcf_changefeed_retention_test.zig
 const lcy_cypher_features_test = @import("lcy_cypher_features_test.zig");
 const lnl_nolog_test = @import("lnl_nolog_test.zig");
 const lse_fts_space_test = @import("lse_fts_space_test.zig");
+const lse_fts_query_test = @import("lse_fts_query_test.zig");
 
 // Re-export tests from all modules
 test {
@@ -71,6 +72,8 @@ test {
     _ = lnl_nolog_test;
     // Full-text search giving back the space of what leaves it
     _ = lse_fts_space_test;
+    // The full-text query language, the same on every path
+    _ = lse_fts_query_test;
 }
 
 test "integration test runner initialized" {

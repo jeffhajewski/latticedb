@@ -703,6 +703,7 @@ fn mapFtsError(err: FtsError) DatabaseError {
         FtsError.NotFound => DatabaseError.NotFound,
         FtsError.OutOfMemory => DatabaseError.OutOfMemory,
         FtsError.InvalidQuery => DatabaseError.InvalidArgument,
+        FtsError.PhraseNeedsPositions => DatabaseError.InvalidArgument,
         else => DatabaseError.IoError,
     };
 }
@@ -4361,10 +4362,9 @@ pub const Database = struct {
     /// the state before its own writes, which is the one place a reader is
     /// entitled to see them.
     ///
-    /// The pending text is scored by term presence rather than BM25, matching what
-    /// the unscoped search already does for uncommitted documents. Those scores
-    /// are not comparable with the index's, so this is about which rows come back
-    /// rather than exactly how they rank among themselves.
+    /// The pending text is scored with the same BM25 and the index's corpus
+    /// statistics, so it ranks among committed documents as it will once
+    /// committed, give or take what its own commit changes in the statistics.
     pub fn ftsSearchIndexInTxn(
         self: *Self,
         txn: ?*Transaction,
@@ -4390,11 +4390,9 @@ pub const Database = struct {
     /// arguments that were supposed to control that sitting unused. Both forms go
     /// through the same fuzzy matcher now.
     ///
-    /// Uncommitted text is matched by term presence rather than edit distance, so
-    /// a typo will not find a document this transaction has only just written.
-    /// That is worth saying out loud rather than hiding: fuzzy matching against
-    /// pending text needs the tokenizer to run over it, which is what committing
-    /// does.
+    /// Uncommitted text is matched with the same edit distances, so a typo finds
+    /// a document this transaction has only just written as it would a
+    /// committed one.
     pub fn ftsSearchIndexFuzzy(
         self: *Self,
         txn: ?*Transaction,
@@ -4441,7 +4439,7 @@ pub const Database = struct {
         const base = index.searchFuzzy(query_text, config, limit +| extra) catch |err| return mapFtsError(err);
         defer self.freeFtsSearchResults(base);
 
-        return self.mergePendingFts(definition, pending, base, query_text, limit);
+        return self.mergePendingFts(definition, pending, base, query_text, config, limit);
     }
 
     /// Roughly how many entities a query would match in one declared index.
@@ -4507,7 +4505,7 @@ pub const Database = struct {
         const base_results = index.search(query_text, limit +| extra) catch |err| return mapFtsError(err);
         defer self.freeFtsSearchResults(base_results);
 
-        return self.mergePendingFts(definition, pending, base_results, query_text, limit);
+        return self.mergePendingFts(definition, pending, base_results, query_text, null, limit);
     }
 
     /// Reconcile indexed results with what an open transaction has pending.
@@ -4522,6 +4520,7 @@ pub const Database = struct {
         pending: *TxnOverlay,
         base: []const FtsSearchResult,
         query_text: []const u8,
+        fuzzy: ?fuzzy_mod.FuzzyConfig,
         limit: u32,
     ) DatabaseError![]FtsSearchResult {
         var merged: std.ArrayListUnmanaged(FtsSearchResult) = .empty;
@@ -4532,7 +4531,7 @@ pub const Database = struct {
 
         // The query is analysed once for every pending document.
         var index = self.ftsIndexFor(definition);
-        var matcher = index.presenceMatcher(query_text) catch |err| return mapFtsError(err);
+        var matcher = index.queryMatcher(query_text, fuzzy) catch |err| return mapFtsError(err);
         defer matcher.deinit();
 
         for (base) |result| {
@@ -4589,7 +4588,7 @@ pub const Database = struct {
         definition: FtsDefinition,
         pending: *TxnOverlay,
         doc_id: NodeId,
-        matcher: *FtsIndex.PresenceMatcher,
+        matcher: *FtsIndex.QueryMatcher,
     ) DatabaseError!?struct { score: ?f32 } {
         switch (definition.kind) {
             .node => {
@@ -4609,14 +4608,13 @@ pub const Database = struct {
         self: *Self,
         definition: FtsDefinition,
         state: TxnEdgeState,
-        matcher: *FtsIndex.PresenceMatcher,
+        matcher: *FtsIndex.QueryMatcher,
     ) DatabaseError!?f32 {
         _ = self;
         if (!state.exists) return null;
         if (state.edge_type != definition.scope_id) return null;
         const text = ftsTextOf(definition, state.properties) orelse return null;
-        const score = try overlayFtsScore(matcher, text);
-        return if (score > 0) score else null;
+        return overlayFtsScore(matcher, text);
     }
 
     /// What an uncommitted node state would score for a declared index, or null
@@ -4625,14 +4623,13 @@ pub const Database = struct {
         self: *Self,
         definition: FtsDefinition,
         state: TxnNodeState,
-        matcher: *FtsIndex.PresenceMatcher,
+        matcher: *FtsIndex.QueryMatcher,
     ) DatabaseError!?f32 {
         _ = self;
         if (!state.exists) return null;
         if (!containsSymbolId(state.labels, definition.scope_id)) return null;
         const text = ftsTextOf(definition, state.properties) orelse return null;
-        const score = try overlayFtsScore(matcher, text);
-        return if (score > 0) score else null;
+        return overlayFtsScore(matcher, text);
     }
 
     /// Whether one node matches a query through the index declared for a property.
@@ -7730,10 +7727,10 @@ pub const Database = struct {
     // the rest of the index catalog. There is no unscoped search: a query names
     // the label and property whose index answers it.
 
-    /// Score uncommitted text by whole-term presence, with the tokenizer the
-    /// index uses. Matching substrings instead let "cat" find "concatenate",
-    /// and kept stop words and punctuation that indexing drops.
-    fn overlayFtsScore(matcher: *FtsIndex.PresenceMatcher, text: []const u8) DatabaseError!f32 {
+    /// Score uncommitted text as the index would score it, or null when it
+    /// does not match. Matching substrings instead let "cat" find
+    /// "concatenate", and kept stop words and punctuation that indexing drops.
+    fn overlayFtsScore(matcher: *FtsIndex.QueryMatcher, text: []const u8) DatabaseError!?f32 {
         return matcher.score(text) catch |err| return mapFtsError(err);
     }
 

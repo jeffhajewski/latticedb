@@ -69,7 +69,8 @@ lowercased, accent-folded word before stemming.
 ### Analysis is recorded per index
 
 An index records how it analyses text (a version, whether accents are folded,
-whether words are stemmed, and the language) under a six-byte key in its own
+whether words are stemmed, whether postings carry word positions, and the
+language) under a six-byte key in its own
 document-lengths scope when its first document goes in. From then on the record
 wins over the configuration, so a word is always looked up as the term it was
 stored as, even if the configuration changes between opens.
@@ -172,10 +173,13 @@ The dictionary maps tokens to integer IDs and tracks statistics.
 ### What the TokenId is for
 
 The dictionary entry's `posting_page` is what leads from a token to its
-postings. The `token_id` is only a label: it is written into the header of the
-token's posting pages and never used to find anything. Each `FtsIndex` instance
-starts numbering from the same first value (the database builds one per
-search), so the same id can label different tokens.
+postings. Since 0.17.0 the `token_id` is the list's head page id, and every page
+of the list carries it in its header. That stamp is what lets an append trust
+the entry's `tail_page`: a tail is used only if it is a posting page carrying
+the list's stamp, so a stale tail can never send an append into another list.
+Lists written by 0.16.0 carry a counter value instead (it restarted at every
+open, so it never identified anything) and take the stamp at their first
+append.
 
 ### Storage Format
 
@@ -189,27 +193,28 @@ The dictionary uses a B+Tree with:
 | `token_id` | 4 B | 8 |
 | `doc_freq` | 4 B | 12 |
 | `posting_page` | 4 B | 16 |
-| `_padding` | 4 B | 20 |
+| `tail_page` | 4 B | 20 |
 
 Fields are ordered largest-first to minimize internal padding (u64 requires 8-byte alignment).
 
 | Field | Type | Description |
 |-------|------|-------------|
-| `total_freq` | u64 | Total occurrences across all documents |
-| `token_id` | u32 | Unique identifier (1 to ~4 billion) |
+| `total_freq` | u64 | Total occurrences across all documents (always 0 before 0.17.0) |
+| `token_id` | u32 | The list's head page, stamped on its pages (see above) |
 | `doc_freq` | u32 | Number of documents containing this token |
 | `posting_page` | PageId | First page of the posting list |
-| `_padding` | u32 | Explicit padding for 8-byte struct alignment |
+| `tail_page` | PageId | Last page of the list, where the next append goes; 0 when unknown |
+
+`tail_page` was padding before 0.17.0, and 0.16.0 writes it as 0 whenever it
+updates an entry; the next append here then walks the list from its head once
+and records the tail again.
 
 ### Operations
 
-**getOrCreate(token)** - Get existing TokenId or create new one:
-1. Look up `"hello"` in the B+Tree.
-2. If found, return the existing `token_id`.
-3. If not found:
-   1. Assign the next `token_id` — say 5.
-   2. Insert the token into the B+Tree.
-   3. Return 5.
+Indexing a document reads each of its terms' entries once and writes it back
+once, with the counts and the tail brought up to date. A term no document holds
+any more is removed from the dictionary, so the term count (`unique_tokens`,
+which counts the dictionary) and prefix and fuzzy expansion see only live terms.
 
 ---
 
@@ -237,7 +242,7 @@ Each posting list page is 4096 bytes. This is the current (V2) layout:
 |--------|-------|----------|
 | `PageHeader` | 0–7 | `page_type = fts_posting`; page-header flag `0x01` marks the V2 layout |
 | `PostingPageHeader` | 8–31 (24 B) | see below |
-| Skip-pointer area | 32–283 (252 B) | fixed reserve: up to 15 pointers of 16 B `[doc_id, byte_offset, entry_count]` |
+| Skip-pointer area | 32–283 (252 B) | reserved; zero on pages written since 0.17.0 (see below) |
 | Posting data | 284 → | varint encoded entries, see below |
 
 Each entry is `[doc_id: varint][term_freq: varint]`. When the index stores
@@ -249,10 +254,10 @@ deltas.
 
 | Field | Type | Meaning |
 |-------|------|---------|
-| `token_id` | u32 | Label of the token this list belongs to |
+| `token_id` | u32 | The list's head page id (a counter value on lists 0.16.0 wrote) |
 | `num_entries` | u32 | Postings held in this page |
 | `next_page` | u32 | Overflow page, 0 for none |
-| `num_skip_pointers` | u16 | Number of skip pointers in use |
+| `num_skip_pointers` | u16 | 0 since 0.17.0 |
 | `flags` | u16 | `0x01` = entries carry positions (for phrase queries) |
 | `data_start` | u32 | Byte offset where posting data begins (284) |
 | `data_end` | u32 | Byte offset where posting data currently ends |
@@ -303,51 +308,32 @@ When a posting list exceeds one page, it chains to overflow pages:
 <img class="diagram" src="../assets/diagrams/fts-posting-overflow.svg"
      alt="Page 42 holds the first 200 posting entries and its next_page field points to page 87, which holds entries 201 to 250 and has next_page 0 marking the end of the chain">
 
+### Appending and Removing
+
+An append goes to the list's last page, found from the dictionary entry's
+`tail_page`, so it costs a page or two however long the list is. Until 0.17.0
+an append walked the list from its head: indexing 100,000 documents that share
+one word took 20 µs per document, against 10 µs now, and a single append to a
+100,000-entry list 650 ns against 17 ns.
+
+Removing a document's entry rewrites the page it was on. If that page and the
+next together fit in one page and encode positions alike, the next page's
+entries move up and the next page is freed; a last page left empty is unlinked
+and freed, and the tail moves back. A list left with no entries is freed with its
+dictionary entry. Dropping or rebuilding an index frees every list its
+dictionary names, and `compact` frees the lists of the single index releases
+before 0.15.0 kept (keys no declared index can reach). Freed pages go to the
+file's freelist; only free pages at the end of the file shrink it.
+
 ### Skip Pointers
 
-Skip pointers let a seek within a posting page binary-search to roughly the
-right place instead of scanning from the start, which speeds up multi-term AND
-queries. They are per page: each page has its own fixed reserve of at most 15,
-so entries beyond the 15th interval on a page are reached by scanning.
-
-**Structure:**
-| Field | Size | Offset |
-|-------|-----:|-------:|
-| `doc_id` | 8 B | 0 |
-| `byte_offset` | 4 B | 8 |
-| `entry_count` | 4 B | 12 |
-
-**How they work:**
-
-Skip pointers are created every 128 entries (SKIP_INTERVAL). They record:
-- `doc_id`: The document ID at that entry
-- `byte_offset`: Where to jump in the posting data
-- `entry_count`: Number of entries before this pointer
-
-```
-Posting list with 500 entries:
-
-Skip Pointers:
-  [0] doc_id=1280, offset=512, count=128   ← entry 128
-  [1] doc_id=2560, offset=1024, count=256  ← entry 256
-  [2] doc_id=3840, offset=1536, count=384  ← entry 384
-
-Seeking to doc_id 3000:
-  1. Binary search skip pointers: find [1] (doc_id=2560 < 3000)
-  2. Jump to offset 1024
-  3. Linear scan from entry 256 to find doc_id 3000
-
-Result: Skipped 256 entries instead of scanning all 300
-```
-
-**Search does not use them.** `skipTo()` assumes a list in doc_id order, and
-posting lists are not kept in that order: updating an indexed property removes
-the document's postings and appends the new ones at the tail of each list, and a
-transaction that writes several documents commits them in hash order. A merge
-that advanced the other lists with `skipTo()` silently dropped any match stored
-behind its cursor, which is how 0.16.0's AND search lost documents. The AND
-search (section 6) now reads each list through once instead. Skip pointers are
-still written and maintained, and the iterator still offers `skipTo()`.
+0.16.0 wrote skip pointers into the reserved area, and nothing read them
+usefully: they assumed a list in doc-id order, and posting lists are not kept in
+that order (an update removes a document's postings and appends the new ones at
+the tail, and a transaction commits its documents in hash order). Since 0.17.0
+they are not written, a page rewritten by a removal or upgrade has its area
+cleared, and pages that still hold them read as before, since the posting data
+starts after the area either way.
 
 Reading is batched: `PostingIterator.next()` decodes up to 128 entries per page
 pin, rather than pinning the page once per entry.
@@ -496,20 +482,30 @@ Reading every list in full means an AND query costs about the sum of its terms'
 document frequencies, so a common term costs as much beside a rare one as on its
 own.
 
-### Which operations are reachable
+### The query language
 
-`FtsIndex` implements more query forms than the database exposes:
+Since 0.17.0 every entry point takes the same query language, parsed once by
+`src/fts/query.zig`: words side by side are required, `OR` (capitals) separates
+alternatives and binds looser than the AND, `-word` and `-"phrase"` exclude,
+`"phrase"` needs its words adjacent and in order, `word*` is a prefix, and
+`word~` / `word~1` allow two / one edits. The guide's
+[query syntax](../guides/full-text-search.md#query-syntax) has the table.
 
 | Entry point | Query form |
 |-------------|------------|
-| Cypher `x.prop @@ text`, `lattice_fts_search` | plain AND of the terms (`search()`) |
-| `lattice_fts_search_fuzzy` | fuzzy match (`searchFuzzy()`) |
-| `FtsIndex` only | OR, `-term` exclusion, phrases and quoted phrases, prefix (`term*`) |
+| Cypher `x.prop @@ text`, `lattice_fts_search`, `search()` | the language as written |
+| `lattice_fts_search_fuzzy`, `searchFuzzy()` | each plain word made fuzzy, and any one word enough |
+| `searchWithMode(.@"or")`, `searchOr()` | each required unit an alternative of its own |
+| `"text" @@ "query"` on a plain string | the language, matched against that text with the default analysis |
 
-Through `@@` and `lattice_fts_search`, quotes and a leading `-` are treated as
-separators like any other punctuation: `"database -mysql"` searches for
-documents containing both `database` and `mysql`. The sections below on OR,
-exclusion, phrase and prefix search describe the component, for use from Zig.
+A parsed query is a list of branches; a branch is a list of required units
+(term, phrase, prefix, fuzzy word) and exclusion groups. A query of plain words
+goes straight to the AND search above. Otherwise each branch starts from its
+plain terms through the AND search, intersects the other units' matches, removes
+each exclusion group's, and the branches' scores add up; ranking and the limit
+come last. Text a transaction has not committed is matched by the same parsed
+query (`QueryMatcher`) and scored with the same BM25 and corpus statistics. The
+sections below describe the individual forms.
 
 ### OR Search
 
@@ -552,8 +548,8 @@ survive it. Only a lone term search, with no exclusions and no phrases, stops at
 tokenizer, so `foo-bar` asks for both `foo` and `bar` (a `-` inside a word is a
 separator, not an exclusion), and punctuation such as `bread, butter` is
 separated rather than kept. An exclusion written as a phrase, `-"a b"`,
-removes the documents the phrase would match: those holding it in order, or,
-without stored positions, those holding all of its words.
+removes the documents holding it in order, and needs stored positions as any
+phrase does.
 
 ### Phrase Search
 
@@ -603,11 +599,12 @@ and narrows them term by term. A phrase's own words go through the index's
 tokenizer, so stop words in it are dropped the way indexing dropped them, and
 `"Bank of America"` matches the text "Bank of America".
 
-**Note:** Phrase queries require `store_positions = true` in FtsConfig, which is
-off by default and is not exposed by the C API or the bindings. Without
-positions, `searchPhrase()` falls back to AND semantics, and so does a quoted
-phrase given to `searchWithMode()` in AND mode: it asks for its words. In OR mode
-without positions a phrase is left out of the query. One posting entry holds at
+**Note:** Phrase queries need positions. `store_positions` is on by default
+since 0.17.0 and is recorded in the index with its analysis when the first
+document goes in, so it holds for the index's life. An index with no positions
+(any index 0.16.0 built) answers a phrase with `PhraseNeedsPositions`
+(`LATTICE_ERROR_INVALID_ARG` through the C API) rather than with its words in
+any order; dropping and declaring it again stores them. One posting entry holds at
 most a page's worth of positions; occurrences of a term beyond that still count
 towards its frequency, but a phrase starting past that point in a document is
 not found.
@@ -908,28 +905,28 @@ different kind discriminators.
 1. **Stemming only from Zig** - `use_stemming` stems new indexes, but only a Zig caller can set it; through the C API, the bindings and Cypher there is no stemming
 2. **English stop words only** - The `language` setting does not change the stop-word list, and the stemmer is English only
 3. **Old indexes keep ASCII tokenization** - An index that held documents before this release keeps splitting on non-ASCII bytes until it is emptied, or dropped and declared again; there is no reindex command
-4. **Plain AND through the database** - `@@` and `lattice_fts_search` support neither OR within one query, `-term`, phrases nor prefixes; those exist only on `FtsIndex`
+4. **No grouping in queries** - the query language has no parentheses, and a query of only exclusions is refused
 5. **Unspaced scripts** - Han and hiragana are indexed a character at a time; Thai, Lao and Khmer runs become one long term, and a term over 64 bytes is dropped
 6. **A node and an edge index cannot share a name and property** - see section 14
 7. **One property per index** - Searching several fields as one document means storing the combined text in a property and indexing that. The reasoning is in the design note: an index spanning `title` and `body` would make `d.title @@ "x"` match on body text, which is the confusion per-property indexes exist to remove.
 8. **Selectivity is per term, not per phrase** - the estimate that chooses between two indexes is the rarest term's document frequency, which bounds an AND query correctly but says nothing about how often the terms occur *together*. Two predicates whose terms are individually common but jointly rare estimate as common.
-9. **Fuzzy matching does not reach uncommitted text** - Text written in the current transaction is matched by whole terms, through the index's tokenizer, rather than by edit distance, because fuzzy expansion walks the committed dictionary. It is scored by the number of distinct query terms it contains, not BM25.
+9. **Prefix and fuzzy words walk the dictionary** - a prefix expands to every term starting with it, and a fuzzy word compares against every term, so a short prefix or any fuzzy word costs in proportion to what it reaches
 
 ### Implemented Features
 
 Items marked *(FtsIndex)* are implemented in the component but not reachable
 through the database, the C API or Cypher.
 
-1. **Phrase queries** *(FtsIndex)* - `searchPhrase("quick brown fox")` with position verification
-2. **Boolean queries** - AND (default, everywhere); OR (`searchOr`) and NOT (`-term` syntax) *(FtsIndex)*
+1. **Phrase queries** - `"quick brown fox"` in any query, with position verification
+2. **Boolean queries** - AND (default), `OR`, and `-term` / `-"phrase"` exclusion, everywhere
 3. **Porter stemmer (English)** - applied by indexing, search and highlighting when `use_stemming` is set (Zig only); also available as `normalizeAndStem()`
-4. **Position indexing** *(FtsIndex)* - `store_positions=true` for phrase queries
-5. **Skip pointers** - written per posting page and usable through `PostingIterator.skipTo()`; search does not use them (section 3)
-6. **Quoted phrase syntax** *(FtsIndex)* - Parse `"exact phrase"` in `searchWithMode()` calls
+4. **Position indexing** - on by default for new indexes, recorded per index
+5. **Tail appends and page reclamation** - appends go to the list's last page, and removals free and merge pages (section 3)
+6. **Quoted phrase syntax** - `"exact phrase"` in every query
 7. **Fuzzy search** - Levenshtein distance for typo tolerance via `searchFuzzy()` and `lattice_fts_search_fuzzy`
 8. **Stop words** - one English list
-9. **Prefix/wildcard search** *(FtsIndex)* - `searchWithPrefix("optim*")` expands to matching terms
-10. **Search highlighting** *(Zig module only)* - `highlight()` returns snippets with matched terms marked
+9. **Prefix/wildcard search** - `optim*` in any query expands to every matching term
+10. **Search highlighting** *(Zig module only)* - `highlight()` marks given terms; `highlightQuery()` marks what a parsed query matched, phrases only where they occur
 11. **Document deletion** - `removeDocument()` with reverse index properly cleans posting lists and stats
 12. **Per-property indexes** - one index per label and property, declared and then maintained by writes (sections 13 to 15)
 13. **Relationship indexes** - the same over a relationship type and property

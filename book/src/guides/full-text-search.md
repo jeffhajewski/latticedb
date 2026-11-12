@@ -128,13 +128,36 @@ LIMIT 10
 It is null for a node no `@@` search scored. See
 [Reading the score](../cypher/full-text-search.md#reading-the-score).
 
-A query with several terms matches documents containing every term, so a term no
+A query with several words matches documents containing every word, so a word no
 document contains gives no results: `"apple zebra"` finds nothing if no document
-has "zebra". Every match is scored, and the best `limit` are returned. Quotes and a
-leading `-` have no special meaning in a `@@` query or in `fts_search`:
-punctuation only separates words, so `"fox -quick"` matches documents containing
-both "fox" and "quick". Every term of the query is required, however many
-there are.
+has "zebra". Every match is scored, and the best `limit` are returned.
+
+### Query syntax
+
+The same syntax works in `@@`, `fts_search` and `fts_search_fuzzy`:
+
+| Query | Matches |
+|---|---|
+| `quick fox` | both words |
+| `quick OR fox` | either; `OR` must be in capitals. `a b OR c` is `(a b) OR c` |
+| `fox -dog` | "fox" and not "dog"; `-"lazy dog"` excludes a phrase |
+| `"quick brown"` | the words next to each other, in that order |
+| `data*` | any word starting with "data" (at least two characters before the `*`) |
+| `databse~`, `databse~1` | words within two edits, or one; words under four characters match exactly |
+| `\-fox`, `fox\*`, `\OR`, `\"` | a backslash makes the next character literal; so do quotes: `"OR"` |
+
+Words go through the same tokenizer as the indexed text, so punctuation separates
+words (`well-known` asks for "well" and "known"), and stop words ask for nothing. A query
+made only of exclusions (`-dog`) is an error rather than "everything except dog":
+in Cypher write `NOT d.text @@ "dog"`. There are no parentheses.
+
+Phrases need word positions, which indexes created in 0.17.0 or later store. An
+index created earlier has none, and a phrase query against it is an error rather
+than a search for the words in any order; drop and re-create the index to store
+them.
+
+Releases before 0.17.0 treated quotes, `-`, `*` and `~` as punctuation and `OR` as
+a stop word, so `fox -quick` asked for both words and `cats OR dogs` for both.
 
 ## Fuzzy Search
 

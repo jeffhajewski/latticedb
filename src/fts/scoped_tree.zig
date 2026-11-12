@@ -165,12 +165,12 @@ pub const ScopedTree = struct {
             break :blk out.start_buf[0..PREFIX_SIZE];
         };
 
-        const upper = if (end) |k|
+        const upper: ?[]const u8 = if (end) |k|
             try self.storedKey(k, &out.end_buf)
-        else blk: {
-            @memcpy(out.end_buf[0..PREFIX_SIZE], &nextPrefix(prefix));
+        else if (nextPrefix(prefix)) |next| blk: {
+            @memcpy(out.end_buf[0..PREFIX_SIZE], &next);
             break :blk out.end_buf[0..PREFIX_SIZE];
-        };
+        } else null;
 
         out.inner = try self.tree.range(lower, upper);
     }
@@ -290,7 +290,11 @@ pub const ScopedTree = struct {
 /// A prefix ending in 0xFF has to carry into the byte before it. Incrementing the
 /// last byte alone would wrap to zero and produce a bound below the prefix, so a
 /// range would return nothing and the index would look empty.
-fn nextPrefix(prefix: [PREFIX_SIZE]u8) [PREFIX_SIZE]u8 {
+///
+/// Null for the last prefix there is (every byte 0xFF): its keys run to the
+/// end of the tree. Returning the prefix itself made the range end where it
+/// started, so that index looked empty.
+fn nextPrefix(prefix: [PREFIX_SIZE]u8) ?[PREFIX_SIZE]u8 {
     var end = prefix;
     var i: usize = PREFIX_SIZE;
     while (i > 0) {
@@ -301,9 +305,7 @@ fn nextPrefix(prefix: [PREFIX_SIZE]u8) [PREFIX_SIZE]u8 {
         }
         end[i] = 0;
     }
-    // Every byte was 0xFF, so this is the last index there is and the range runs
-    // to the end of the tree.
-    return [_]u8{0xFF} ** PREFIX_SIZE;
+    return null;
 }
 
 test "an unscoped view leaves keys alone" {
@@ -354,7 +356,8 @@ test "the range end covers every key of one index and no more" {
     // Incrementing the last byte alone would wrap to zero and give a bound below
     // the prefix, so the range would return nothing and the index would look
     // empty.
-    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 3, 1, 0 }, &nextPrefix([_]u8{ 0, 3, 0, 0xFF }));
-    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 3, 0, 8 }, &nextPrefix([_]u8{ 0, 3, 0, 7 }));
-    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 4, 0, 0 }, &nextPrefix([_]u8{ 0, 3, 0xFF, 0xFF }));
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 3, 1, 0 }, &nextPrefix([_]u8{ 0, 3, 0, 0xFF }).?);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 3, 0, 8 }, &nextPrefix([_]u8{ 0, 3, 0, 7 }).?);
+    try std.testing.expectEqualSlices(u8, &[_]u8{ 0, 4, 0, 0 }, &nextPrefix([_]u8{ 0, 3, 0xFF, 0xFF }).?);
+    try std.testing.expectEqual(@as(?[PREFIX_SIZE]u8, null), nextPrefix([_]u8{ 0xFF, 0xFF, 0xFF, 0xFF }));
 }

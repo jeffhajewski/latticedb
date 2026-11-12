@@ -12,6 +12,8 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const tokenizer_mod = @import("tokenizer.zig");
+const query_mod = @import("query.zig");
+const fuzzy_mod = @import("fuzzy.zig");
 const Tokenizer = tokenizer_mod.Tokenizer;
 const TokenizerConfig = tokenizer_mod.TokenizerConfig;
 const Language = tokenizer_mod.Language;
@@ -150,7 +152,17 @@ pub fn highlight(
     // Find all matches
     const matches = try findMatches(allocator, text, query_terms, tokenizer_config);
     defer allocator.free(matches);
+    return snippetsFor(allocator, text, matches, config);
+}
 
+/// Snippets of `text` around `matches` (sorted by start, not overlapping),
+/// with markers inserted.
+fn snippetsFor(
+    allocator: Allocator,
+    text: []const u8,
+    matches: []const Match,
+    config: HighlightConfig,
+) HighlightError!HighlightResult {
     if (matches.len == 0) {
         const snippets = allocator.alloc(Snippet, 0) catch return HighlightError.OutOfMemory;
         return HighlightResult{
@@ -374,6 +386,88 @@ fn insertMarkers(
 // ============================================================================
 // Cleanup
 // ============================================================================
+
+/// The words of `text` a parsed query matched, sorted by position.
+///
+/// `query` comes from `query.parse` with the analysis the index reads with
+/// (`FtsIndex.parseQuery`), and `tokenizer_config` is that analysis, so a
+/// word is marked exactly when search would have matched it: a term, a word
+/// starting with a prefix, a word within a fuzzy word's distance, or every
+/// word of each place a phrase occurs (not the phrase's words elsewhere).
+/// Excluded words are not marked. Every branch's words are marked, also
+/// those of a branch the text does not satisfy as a whole.
+pub fn findQueryMatches(
+    allocator: Allocator,
+    text: []const u8,
+    query: query_mod.Query,
+    tokenizer_config: TokenizerConfig,
+) HighlightError![]Match {
+    const Word = struct { term: []const u8, position: u32, start: u32, end: u32 };
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const arena = arena_state.allocator();
+
+    var words: std.ArrayListUnmanaged(Word) = .empty;
+    var tokenizer = Tokenizer.init(arena, text, tokenizer_config);
+    while (tokenizer.next()) |token| {
+        var buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
+        const term = tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &buf) orelse continue;
+        words.append(arena, .{
+            .term = arena.dupe(u8, term) catch return HighlightError.OutOfMemory,
+            .position = token.position,
+            .start = token.byte_offset,
+            .end = token.byte_offset + @as(u32, @intCast(token.text.len)),
+        }) catch return HighlightError.OutOfMemory;
+    }
+    const marked = arena.alloc(bool, words.items.len) catch return HighlightError.OutOfMemory;
+    @memset(marked, false);
+
+    for (query.branches) |branch| {
+        for (branch.required) |unit| {
+            switch (unit) {
+                .term => |t| for (words.items, marked) |w, *m| {
+                    if (std.mem.eql(u8, w.term, t)) m.* = true;
+                },
+                .prefix => |p| for (words.items, marked) |w, *m| {
+                    if (std.mem.startsWith(u8, w.term, p)) m.* = true;
+                },
+                .fuzzy => |f| for (words.items, marked) |w, *m| {
+                    if (fuzzy_mod.levenshteinDistanceBounded(f.term, w.term, f.distance) != null) m.* = true;
+                },
+                .phrase => |terms| for (words.items, 0..) |w, start| {
+                    if (!std.mem.eql(u8, w.term, terms[0])) continue;
+                    if (start + terms.len > words.items.len) break;
+                    const whole = for (terms[1..], 1..) |t, k| {
+                        const next = words.items[start + k];
+                        if (next.position != w.position + k or !std.mem.eql(u8, next.term, t)) break false;
+                    } else true;
+                    if (whole) @memset(marked[start..][0..terms.len], true);
+                },
+            }
+        }
+    }
+
+    var matches: std.ArrayListUnmanaged(Match) = .empty;
+    errdefer matches.deinit(allocator);
+    for (words.items, marked) |w, m| {
+        if (m) matches.append(allocator, .{ .start = w.start, .end = w.end }) catch return HighlightError.OutOfMemory;
+    }
+    return matches.toOwnedSlice(allocator) catch return HighlightError.OutOfMemory;
+}
+
+/// Snippets of `text` with the words a parsed query matched marked; see
+/// `findQueryMatches`. Free with `freeResult`.
+pub fn highlightQuery(
+    allocator: Allocator,
+    text: []const u8,
+    query: query_mod.Query,
+    tokenizer_config: TokenizerConfig,
+    config: HighlightConfig,
+) HighlightError!HighlightResult {
+    const matches = try findQueryMatches(allocator, text, query, tokenizer_config);
+    defer allocator.free(matches);
+    return snippetsFor(allocator, text, matches, config);
+}
 
 /// Free a highlight result and all associated memory
 pub fn freeResult(allocator: Allocator, result: HighlightResult) void {
@@ -639,4 +733,21 @@ test "highlight - running out of memory frees what was built" {
         freeResult(failing.allocator(), result);
         break;
     }
+}
+
+test "highlightQuery marks what each query form matched, and a phrase only where it occurs" {
+    const allocator = std.testing.allocator;
+    var arena_state = std.heap.ArenaAllocator.init(allocator);
+    defer arena_state.deinit();
+    const config: TokenizerConfig = .{};
+    const query = try query_mod.parse(arena_state.allocator(), "\"quick brown\" data* OR jumpz~ -lazy", .{ .analysis = config });
+
+    const text = "The quick brown fox saw a brown quick database jump over the lazy dog";
+    const result = try highlightQuery(allocator, text, query, config, .{ .context_chars = 200, .max_snippets = 1 });
+    defer freeResult(allocator, result);
+    try std.testing.expectEqual(@as(usize, 1), result.snippets.len);
+    try std.testing.expectEqualStrings(
+        "The <em>quick</em> <em>brown</em> fox saw a brown quick <em>database</em> <em>jump</em> over the lazy dog",
+        result.snippets[0].text,
+    );
 }

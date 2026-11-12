@@ -26,6 +26,7 @@ const fuzzy_mod = @import("fuzzy.zig");
 const prefix_mod = @import("prefix.zig");
 const stopwords_mod = @import("stopwords.zig");
 const reverse_index_mod = @import("reverse_index.zig");
+const query_mod = @import("query.zig");
 
 const Tokenizer = tokenizer_mod.Tokenizer;
 const TokenizerConfig = tokenizer_mod.TokenizerConfig;
@@ -47,8 +48,12 @@ pub const FtsConfig = struct {
     tokenizer: TokenizerConfig = .{},
     /// BM25 scoring configuration
     bm25: Bm25Config = .{},
-    /// Store term positions for phrase queries
-    store_positions: bool = false,
+    /// Store term positions, which phrase queries need. Like the tokenizer
+    /// settings, this is recorded in an index when its first document goes in
+    /// and the record wins from then on (see `FtsIndex.positionsStored`).
+    /// Positions cost about 1% more space and 4% more indexing time on short
+    /// documents.
+    store_positions: bool = true,
 };
 
 /// Query mode for boolean search
@@ -96,6 +101,9 @@ pub const FtsError = error{
     ScorerError,
     /// B+Tree error
     BTreeError,
+    /// The query has a quoted phrase and the index stores no positions to
+    /// check it with. Re-declaring the index stores them.
+    PhraseNeedsPositions,
 };
 
 /// FTS Index statistics
@@ -215,6 +223,8 @@ pub const FtsIndex = struct {
     /// The tokenizer settings the stored terms were written with, once read;
     /// see `analysis`.
     analysis_cache: ?TokenizerConfig = null,
+    /// Whether postings carry positions, once read; see `positionsStored`.
+    positions_cache: ?bool = null,
 
     const Self = @This();
 
@@ -298,18 +308,43 @@ pub const FtsIndex = struct {
     fn analysisForWrite(self: *Self) FtsError!TokenizerConfig {
         if (self.doc_lengths.hasDocuments() catch return FtsError.ScorerError) return self.analysis();
         const fresh = freshAnalysis(self.config.tokenizer);
-        const encoded = encodeAnalysis(fresh);
+        const encoded = encodeAnalysis(fresh, self.config.store_positions);
         const recorded = self.doc_lengths.getAnalysis() catch return FtsError.ScorerError;
         if (recorded == null or !std.mem.eql(u8, &recorded.?, &encoded)) {
             self.doc_lengths.putAnalysis(encoded) catch return FtsError.ScorerError;
         }
         self.analysis_cache = fresh;
+        self.positions_cache = self.config.store_positions;
         return fresh;
+    }
+
+    /// Whether this index's postings carry positions, so phrases can be
+    /// checked.
+    ///
+    /// Recorded with the analysis when the first document goes in, from
+    /// `config.store_positions`, and fixed from then on: a page's entries
+    /// are all encoded one way, and a phrase is only answerable if every
+    /// document has positions. An index with no record (0.16.0 built it,
+    /// through a database that never stored positions) has none. An empty
+    /// index follows the config.
+    pub fn positionsStored(self: *Self) FtsError!bool {
+        if (self.positions_cache) |cached| return cached;
+        const recorded = self.doc_lengths.getAnalysis() catch return FtsError.ScorerError;
+        const result = if (recorded) |r|
+            r[1] & ANALYSIS_POSITIONS != 0
+        else if (!(self.doc_lengths.hasDocuments() catch return FtsError.ScorerError))
+            self.config.store_positions
+        else
+            false;
+        self.positions_cache = result;
+        return result;
     }
 
     const ANALYSIS_VERSION: u8 = 1;
     const ANALYSIS_ACCENTS: u8 = 1;
     const ANALYSIS_STEMMING: u8 = 2;
+    /// Postings carry positions. Releases before this one ignore the bit.
+    const ANALYSIS_POSITIONS: u8 = 4;
 
     fn freshAnalysis(config: TokenizerConfig) TokenizerConfig {
         var result = config;
@@ -326,8 +361,9 @@ pub const FtsIndex = struct {
     }
 
     /// Version, flags, language, reserved.
-    fn encodeAnalysis(config: TokenizerConfig) [scorer_mod.DocLengthStore.ANALYSIS_LEN]u8 {
+    fn encodeAnalysis(config: TokenizerConfig, positions: bool) [scorer_mod.DocLengthStore.ANALYSIS_LEN]u8 {
         var flags: u8 = 0;
+        if (positions) flags |= ANALYSIS_POSITIONS;
         if (config.remove_accents) flags |= ANALYSIS_ACCENTS;
         if (config.use_stemming) flags |= ANALYSIS_STEMMING;
         return .{ ANALYSIS_VERSION, flags, @intFromEnum(config.language), 0 };
@@ -359,7 +395,8 @@ pub const FtsIndex = struct {
         doc_id: DocId,
         text: []const u8,
     ) FtsError!u32 {
-        return self.indexDocumentAnalyzed(doc_id, text, try self.analysisForWrite());
+        const tokenizer_config = try self.analysisForWrite();
+        return self.indexDocumentAnalyzed(doc_id, text, tokenizer_config, try self.positionsStored());
     }
 
     /// `indexDocument` with the tokenizer settings given rather than the
@@ -369,6 +406,7 @@ pub const FtsIndex = struct {
         doc_id: DocId,
         text: []const u8,
         tokenizer_config: TokenizerConfig,
+        store_positions: bool,
     ) FtsError!u32 {
         // 1. Tokenize text
         var tok = Tokenizer.init(self.allocator, text, tokenizer_config);
@@ -410,7 +448,7 @@ pub const FtsIndex = struct {
             };
             if (result.found_existing) {
                 result.value_ptr.freq += 1;
-                if (self.config.store_positions) {
+                if (store_positions) {
                     result.value_ptr.positions.append(self.allocator, token.position) catch {
                         return FtsError.OutOfMemory;
                     };
@@ -428,7 +466,7 @@ pub const FtsIndex = struct {
                     .freq = 1,
                     .positions = .empty,
                 };
-                if (self.config.store_positions) {
+                if (store_positions) {
                     result.value_ptr.positions.append(self.allocator, token.position) catch {
                         return FtsError.OutOfMemory;
                     };
@@ -451,7 +489,7 @@ pub const FtsIndex = struct {
             const posting_entry = PostingEntry{
                 .doc_id = doc_id,
                 .term_freq = info.freq,
-                .positions = if (self.config.store_positions and info.positions.items.len > 0)
+                .positions = if (store_positions and info.positions.items.len > 0)
                     info.positions.items
                 else
                     null,
@@ -487,7 +525,7 @@ pub const FtsIndex = struct {
                 dict_entry.token_id,
                 dict_entry.tail_page,
                 posting_entry,
-                self.config.store_positions,
+                store_positions,
             ) catch {
                 return FtsError.PostingError;
             };
@@ -576,6 +614,7 @@ pub const FtsIndex = struct {
         self.doc_lengths.tree.clear(self.allocator) catch return FtsError.BTreeError;
         self.doc_lengths.stats = .{ .total_docs = 0, .total_tokens = 0, .avg_doc_length = 0 };
         self.analysis_cache = null;
+        self.positions_cache = null;
         if (self.reverse_index) |*ri| {
             ri.tree.clear(self.allocator) catch return FtsError.BTreeError;
         }
@@ -735,76 +774,55 @@ pub const FtsIndex = struct {
     /// This is a B-tree lookup per term against data the index already keeps, so
     /// it costs microseconds and needs no counting pass.
     pub fn estimateMatches(self: *Self, query_text: []const u8) FtsError!?u32 {
-        const tokenizer_config = try self.analysis();
-        var tok = Tokenizer.init(self.allocator, query_text, tokenizer_config);
-        const tokens = tok.tokenizeAll() catch return FtsError.TokenizerError;
-        defer self.allocator.free(tokens);
+        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena_state.deinit();
+        const query = try self.parseQuery(arena_state.allocator(), query_text);
 
-        var estimate: ?u32 = null;
-        for (tokens) |token| {
-            // The same normalisation search does, so the terms looked up here are
-            // the terms that would actually be searched.
-            var lower_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
-            const normalized = tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &lower_buf) orelse continue;
-
-            const entry = self.dictionary.get(normalized) catch {
-                return FtsError.DictionaryError;
-            };
-            const freq: u32 = if (entry) |e| e.doc_freq else 0;
-            estimate = if (estimate) |current| @min(current, freq) else freq;
-            if (estimate == 0) return 0;
+        // A branch can match no more documents than its rarest required term
+        // or phrase word; alternatives add up. A branch of only prefixes or
+        // fuzzy words gives nothing to go on.
+        var total: u32 = 0;
+        var any = false;
+        for (query.branches) |branch| {
+            var estimate: ?u32 = null;
+            for (branch.required) |unit| {
+                const terms: []const []const u8 = switch (unit) {
+                    .term => |t| &.{t},
+                    .phrase => |p| p,
+                    .prefix, .fuzzy => continue,
+                };
+                for (terms) |term| {
+                    const entry = self.dictionary.get(term) catch return FtsError.DictionaryError;
+                    const freq: u32 = if (entry) |e| e.doc_freq else 0;
+                    estimate = if (estimate) |current| @min(current, freq) else freq;
+                }
+            }
+            total +|= estimate orelse return null;
+            any = true;
         }
-        return estimate;
+        return if (any) total else 0;
     }
 
+    /// Parse a query in this index's analysis (see `query.zig` for the
+    /// language).
+    pub fn parseQuery(self: *Self, arena: Allocator, query_text: []const u8) FtsError!query_mod.Query {
+        return query_mod.parse(arena, query_text, .{ .analysis = try self.analysis() }) catch |err| switch (err) {
+            error.OutOfMemory => FtsError.OutOfMemory,
+            error.InvalidQuery => FtsError.InvalidQuery,
+        };
+    }
+
+    /// Search with a query in the language `query.zig` describes. Results are
+    /// the best `limit` by BM25, highest first.
     pub fn search(
         self: *Self,
         query_text: []const u8,
         limit: u32,
     ) FtsError![]ScoredDoc {
-        // Tokenize query
-        const tokenizer_config = try self.analysis();
-        var tok = Tokenizer.init(self.allocator, query_text, tokenizer_config);
-        const tokens = tok.tokenizeAll() catch {
-            return FtsError.TokenizerError;
-        };
-        defer self.allocator.free(tokens);
-
-        if (tokens.len == 0) {
-            return &[_]ScoredDoc{};
-        }
-
-        // Collect the distinct query terms. Every one of them is required, so
-        // there is no cap on how many: ignoring the ones past some count would
-        // answer a broader query than the one asked.
-        var query_terms: ArrayListUnmanaged([]const u8) = .empty;
-        defer {
-            for (query_terms.items) |t| self.allocator.free(t);
-            query_terms.deinit(self.allocator);
-        }
-
-        next_token: for (tokens) |token| {
-            var lower_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
-            const normalized = tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &lower_buf) orelse continue;
-            for (query_terms.items) |t| {
-                if (std.mem.eql(u8, t, normalized)) continue :next_token;
-            }
-            query_terms.ensureUnusedCapacity(self.allocator, 1) catch return FtsError.OutOfMemory;
-            const copy = self.allocator.dupe(u8, normalized) catch return FtsError.OutOfMemory;
-            query_terms.appendAssumeCapacity(copy);
-        }
-
-        if (query_terms.items.len == 0) {
-            return &[_]ScoredDoc{};
-        }
-
-        // For single term query, do simple posting list scan
-        if (query_terms.items.len == 1) {
-            return self.searchSingleTerm(query_terms.items[0], limit);
-        }
-
-        // For multi-term query, combine results
-        return self.searchMultiTerm(query_terms.items, limit);
+        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena_state.deinit();
+        const query = try self.parseQuery(arena_state.allocator(), query_text);
+        return self.searchQuery(query, limit);
     }
 
     /// Search for a single term
@@ -1050,88 +1068,113 @@ pub const FtsIndex = struct {
         return top.finish(self.allocator);
     }
 
-    /// Matches text that is not in the index yet against one query, by term
-    /// presence.
+    /// Matches text that is not in the index yet against one query.
     ///
-    /// The query and the text go through the tokenizer and normalisation that
-    /// indexing and search use, so a pending document matches a query exactly
-    /// when the indexed one would: every query term must be one of its terms.
-    /// The score is the number of distinct query terms, or 0 when any is
-    /// missing or the query has no searchable terms. It is not BM25, so it only
-    /// decides which pending documents match, not how they rank against
-    /// indexed ones. The query is analysed once, so scoring many pending
-    /// documents costs only their own tokenizing.
-    pub const PresenceMatcher = struct {
+    /// The query and the text go through the analysis indexing would apply,
+    /// and the query means what it means against the index (`query.zig`
+    /// evaluates both). A match is scored with the same BM25 and the index's
+    /// corpus statistics as committed documents, so committing a document
+    /// changes its score only as far as the statistics change. A term the
+    /// index does not hold yet counts as held by one document, the pending
+    /// one, rather than scoring nothing. The query is analysed once, so
+    /// scoring many pending documents costs only their own tokenizing.
+    pub const QueryMatcher = struct {
+        index: *FtsIndex,
         query_arena: std.heap.ArenaAllocator,
         scratch: std.heap.ArenaAllocator,
         config: TokenizerConfig,
-        /// Distinct query terms.
-        terms: []const []const u8,
+        query: query_mod.Query,
+        /// Document frequencies already looked up, by term.
+        doc_freqs: std.StringHashMapUnmanaged(u32) = .empty,
 
-        pub fn deinit(self: *PresenceMatcher) void {
+        pub fn deinit(self: *QueryMatcher) void {
             self.scratch.deinit();
             self.query_arena.deinit();
         }
 
-        pub fn score(self: *PresenceMatcher, text: []const u8) FtsError!f32 {
-            if (self.terms.len == 0) return 0;
+        /// The text's score, or null when it does not match.
+        pub fn score(self: *QueryMatcher, text: []const u8) FtsError!?f32 {
+            if (self.query.branches.len == 0) return null;
             _ = self.scratch.reset(.retain_capacity);
-            const arena = self.scratch.allocator();
-
-            var text_terms = StringHashMap(void).init(arena);
-            var tok = Tokenizer.init(arena, text, self.config);
-            while (tok.next()) |token| {
-                var term_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
-                const term = tokenizer_mod.normalizeTerm(self.config, token.text, &term_buf) orelse continue;
-                if (text_terms.contains(term)) continue;
-                const owned = arena.dupe(u8, term) catch return FtsError.OutOfMemory;
-                text_terms.put(owned, {}) catch return FtsError.OutOfMemory;
-            }
-            for (self.terms) |term| {
-                if (!text_terms.contains(term)) return 0;
-            }
-            return @floatFromInt(self.terms.len);
+            const terms = query_mod.TextTerms.init(self.scratch.allocator(), text, self.config) catch return FtsError.OutOfMemory;
+            return query_mod.evaluate(self.query, &terms, Bm25{ .matcher = self }) catch |err| switch (err) {
+                error.OutOfMemory => FtsError.OutOfMemory,
+                else => |e| e,
+            };
         }
+
+        fn docFreq(self: *QueryMatcher, term: []const u8) FtsError!u32 {
+            if (self.doc_freqs.get(term)) |freq| return freq;
+            const entry = self.index.dictionary.get(term) catch return FtsError.DictionaryError;
+            const freq: u32 = if (entry) |e| e.doc_freq else 0;
+            const arena = self.query_arena.allocator();
+            const key = arena.dupe(u8, term) catch return FtsError.OutOfMemory;
+            self.doc_freqs.put(arena, key, freq) catch return FtsError.OutOfMemory;
+            return freq;
+        }
+
+        /// The index's statistics, as they would be with this document in
+        /// them if there are none yet.
+        fn stats(self: *QueryMatcher, doc_length: u32) scorer_mod.DocStats {
+            var result = self.index.doc_lengths.stats;
+            if (result.total_docs == 0) {
+                result.total_docs = 1;
+                result.total_tokens = doc_length;
+                result.avg_doc_length = @floatFromInt(@max(doc_length, 1));
+            }
+            return result;
+        }
+
+        const Bm25 = struct {
+            matcher: *QueryMatcher,
+
+            pub fn term(self: Bm25, t: []const u8, tf: u32, doc_length: u32) FtsError!f32 {
+                const df = @max(try self.matcher.docFreq(t), 1);
+                return self.matcher.index.scorer.scoreTerm(self.matcher.stats(doc_length), tf, df, doc_length);
+            }
+
+            pub fn fuzzy(self: Bm25, t: []const u8, tf: u32, doc_length: u32, distance: u32, max_distance: u32) FtsError!f32 {
+                const df = @max(try self.matcher.docFreq(t), 1);
+                return self.matcher.index.scorer.scoreTermFuzzy(self.matcher.stats(doc_length), tf, df, doc_length, distance, max_distance);
+            }
+        };
     };
 
     /// A matcher for `query_text` against text this index would take in now.
-    pub fn presenceMatcher(self: *Self, query_text: []const u8) FtsError!PresenceMatcher {
+    /// With `fuzzy`, its plain words are matched as `searchFuzzy` matches
+    /// them.
+    pub fn queryMatcher(self: *Self, query_text: []const u8, fuzzy: ?fuzzy_mod.FuzzyConfig) FtsError!QueryMatcher {
         // Text that goes in now is analysed as indexing would analyse it.
-        const tokenizer_config = if (!(self.doc_lengths.hasDocuments() catch return FtsError.ScorerError))
-            freshAnalysis(self.config.tokenizer)
-        else
-            try self.analysis();
+        const empty = !(self.doc_lengths.hasDocuments() catch return FtsError.ScorerError);
+        const tokenizer_config = if (empty) freshAnalysis(self.config.tokenizer) else try self.analysis();
 
         var query_arena = std.heap.ArenaAllocator.init(self.allocator);
         errdefer query_arena.deinit();
         const arena = query_arena.allocator();
-
-        var terms: ArrayListUnmanaged([]const u8) = .empty;
-        var tok = Tokenizer.init(arena, query_text, tokenizer_config);
-        next_token: while (tok.next()) |token| {
-            var term_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
-            const term = tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &term_buf) orelse continue;
-            for (terms.items) |seen| {
-                if (std.mem.eql(u8, seen, term)) continue :next_token;
-            }
-            const owned = arena.dupe(u8, term) catch return FtsError.OutOfMemory;
-            terms.append(arena, owned) catch return FtsError.OutOfMemory;
-        }
+        var query = query_mod.parse(arena, query_text, .{ .analysis = tokenizer_config }) catch |err| return switch (err) {
+            error.OutOfMemory => FtsError.OutOfMemory,
+            error.InvalidQuery => FtsError.InvalidQuery,
+        };
+        if (fuzzy) |config| query = try fuzzyQuery(arena, query, config);
+        // The index search refuses this too; a pending document must not
+        // answer what committed ones cannot.
+        if (query.hasPhrase() and !(try self.positionsStored())) return FtsError.PhraseNeedsPositions;
         return .{
+            .index = self,
             .query_arena = query_arena,
             .scratch = std.heap.ArenaAllocator.init(self.allocator),
             .config = tokenizer_config,
-            .terms = terms.items,
+            .query = query,
         };
     }
 
-    /// `presenceMatcher(query_text).score(text)`, for a single document.
-    pub fn termPresenceScore(
+    /// `queryMatcher(query_text, null).score(text)`, for a single document.
+    pub fn matchScore(
         self: *Self,
         query_text: []const u8,
         text: []const u8,
-    ) FtsError!f32 {
-        var matcher = try self.presenceMatcher(query_text);
+    ) FtsError!?f32 {
+        var matcher = try self.queryMatcher(query_text, null);
         defer matcher.deinit();
         return matcher.score(text);
     }
@@ -1156,285 +1199,51 @@ pub const FtsIndex = struct {
         return self.searchWithMode(query_text, .@"or", limit);
     }
 
-    /// Search with fuzzy matching (typo tolerance)
-    /// Terms with edit distance <= max_distance will match
+    /// Search with typo tolerance: each plain word of the query matches terms
+    /// within `max_distance` edits (words shorter than `min_term_length`
+    /// exactly), and a document needs to match any one word, as it always
+    /// has. Phrases, prefixes and exclusions mean what they do in `search`.
     pub fn searchFuzzy(
         self: *Self,
         query_text: []const u8,
         fuzzy_config: fuzzy_mod.FuzzyConfig,
         limit: u32,
     ) FtsError![]ScoredDoc {
-        // Tokenize query
-        const tokenizer_config = try self.analysis();
-        var tok = Tokenizer.init(self.allocator, query_text, tokenizer_config);
-        const tokens = tok.tokenizeAll() catch {
-            return FtsError.TokenizerError;
-        };
-        defer self.allocator.free(tokens);
-
-        if (tokens.len == 0) {
-            return &[_]ScoredDoc{};
-        }
-
-        // A document's score is the sum over query words of its best match for
-        // each word. Taking the best rather than the sum over a word's
-        // expansions keeps a document that happens to contain several spellings
-        // near one query word ("databse" -> "database", "databases") from
-        // outranking one that matches more of the query.
-        var doc_scores = std.AutoHashMap(DocId, f32).init(self.allocator);
-        defer doc_scores.deinit();
-        var word_best = std.AutoHashMap(DocId, f32).init(self.allocator);
-        defer word_best.deinit();
-
-        // Process each query term
-        for (tokens) |token| {
-            // Normalize token
-            var lower_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
-            const normalized = tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &lower_buf) orelse continue;
-
-            word_best.clearRetainingCapacity();
-
-            // Skip short terms for fuzzy matching
-            if (normalized.len < fuzzy_config.min_term_length) {
-                // Try exact match for short terms
-                const results = try self.searchSingleTerm(normalized, std.math.maxInt(u32));
-                defer self.freeResults(results);
-                for (results) |doc| {
-                    word_best.put(doc.doc_id, doc.score) catch return FtsError.OutOfMemory;
-                }
-            } else {
-                // Find fuzzy matches for this term
-                const fuzzy_matches = fuzzy_mod.expandFuzzyTerms(
-                    self.allocator,
-                    normalized,
-                    &self.dictionary,
-                    fuzzy_config.max_distance,
-                ) catch {
-                    return FtsError.DictionaryError;
-                };
-                defer fuzzy_mod.freeMatches(self.allocator, fuzzy_matches);
-
-                // Score documents from each fuzzy match
-                for (fuzzy_matches) |match| {
-                    if (match.entry.posting_page == 0) continue;
-
-                    var list = try self.readPostingsWithLengths(match.entry.posting_page);
-                    defer list.deinit(self.allocator);
-
-                    for (list.postings.items(.doc_id), list.postings.items(.term_freq), list.lengths) |doc_id, term_freq, length| {
-                        const doc_length = length orelse continue;
-
-                        // Score with fuzzy penalty
-                        const score = self.scorer.scoreTermFuzzy(
-                            self.doc_lengths.stats,
-                            term_freq,
-                            match.entry.doc_freq,
-                            doc_length,
-                            match.distance,
-                            fuzzy_config.max_distance,
-                        );
-
-                        const best = word_best.getOrPut(doc_id) catch return FtsError.OutOfMemory;
-                        best.value_ptr.* = if (best.found_existing) @max(best.value_ptr.*, score) else score;
-                    }
-                }
-            }
-
-            var best_iter = word_best.iterator();
-            while (best_iter.next()) |hit| {
-                const total = doc_scores.getOrPut(hit.key_ptr.*) catch return FtsError.OutOfMemory;
-                total.value_ptr.* = if (total.found_existing) total.value_ptr.* + hit.value_ptr.* else hit.value_ptr.*;
-            }
-        }
-
-        // Convert to result array
-        var results: ArrayListUnmanaged(ScoredDoc) = .empty;
-        errdefer results.deinit(self.allocator);
-
-        var iter = doc_scores.iterator();
-        while (iter.next()) |entry| {
-            results.append(self.allocator, .{
-                .doc_id = entry.key_ptr.*,
-                .score = entry.value_ptr.*,
-            }) catch {
-                return FtsError.OutOfMemory;
-            };
-        }
-
-        // Sort by score descending
-        std.mem.sort(ScoredDoc, results.items, {}, ScoredDoc.lessThan);
-
-        // Return top K
-        const result_slice = results.toOwnedSlice(self.allocator) catch {
-            return FtsError.OutOfMemory;
-        };
-
-        if (result_slice.len > limit) {
-            const trimmed = self.allocator.alloc(ScoredDoc, limit) catch {
-                self.allocator.free(result_slice);
-                return FtsError.OutOfMemory;
-            };
-            @memcpy(trimmed, result_slice[0..limit]);
-            self.allocator.free(result_slice);
-            return trimmed;
-        }
-        return result_slice;
+        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        const query = try fuzzyQuery(arena, try self.parseQuery(arena, query_text), fuzzy_config);
+        return self.searchQuery(query, limit);
     }
 
-    /// Search with prefix/wildcard matching
-    /// Terms ending with * are expanded to all matching dictionary terms
-    /// Example: "optim*" matches "optimize", "optimization", "optimizer"
-    ///
-    /// Every query word is required. Words are split the way the tokenizer
-    /// splits them, so "bar," asks for "bar"; words the tokenizer would drop
-    /// (too short, stop words) are dropped here too. A prefix shorter than
-    /// `min_prefix_length` is a requirement nothing can meet. A document counts
-    /// once per query word however many of a prefix's expansions it contains.
-    /// Words starting with '-' are ignored.
+    fn fuzzyQuery(arena: Allocator, query: query_mod.Query, config: fuzzy_mod.FuzzyConfig) FtsError!query_mod.Query {
+        const alone = query.eachUnitAlone(arena) catch return FtsError.OutOfMemory;
+        return alone.fuzzyTerms(arena, config.max_distance, config.min_term_length) catch return FtsError.OutOfMemory;
+    }
+
+    /// `search`, with prefixes shorter than `min_prefix_length` matching
+    /// nothing and each prefix expanding to at most `max_expansions` terms
+    /// in term order. `search` itself expands a prefix to every term.
     pub fn searchWithPrefix(
         self: *Self,
         query_text: []const u8,
         prefix_config: prefix_mod.PrefixConfig,
         limit: u32,
     ) FtsError![]ScoredDoc {
-        // Collect all document scores
-        var doc_scores = std.AutoHashMap(DocId, f32).init(self.allocator);
-        defer doc_scores.deinit();
-
-        // Track term counts for AND semantics
-        var doc_term_counts = std.AutoHashMap(DocId, u32).init(self.allocator);
-        defer doc_term_counts.deinit();
-
-        // Documents matched by the query word being processed, with its score.
-        var word_docs = std.AutoHashMap(DocId, f32).init(self.allocator);
-        defer word_docs.deinit();
-
-        var total_terms: u32 = 0;
-
-        const tokenizer_config = try self.analysis();
-        // Every word, so the checks below can tell which is the prefix.
-        var split_config = tokenizer_config;
-        split_config.min_token_length = 1;
-        split_config.max_token_length = std.math.maxInt(u8);
-        split_config.remove_stop_words = false;
-
-        var chunks = std.mem.tokenizeAny(u8, query_text, " \t\r\n");
-        while (chunks.next()) |chunk| {
-            // Exclusions are not supported by this search.
-            if (chunk[0] == '-') continue;
-
-            const wildcard = prefix_mod.hasWildcard(chunk);
-            const body = prefix_mod.extractPrefix(chunk);
-
-            var words = Tokenizer.init(self.allocator, body, split_config);
-            while (words.next()) |token| {
-                const word = token.text;
-                // Only the word the '*' is attached to is a prefix.
-                const is_prefix = wildcard and token.byte_offset + word.len == body.len;
-
-                // A prefix is folded but not stemmed: a stem is not a prefix
-                // of the stems of longer words.
-                var lower_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
-                var fold_config = tokenizer_config;
-                fold_config.use_stemming = false;
-                const folded = tokenizer_mod.normalizeTerm(fold_config, word, &lower_buf) orelse {
-                    if (is_prefix) return &[_]ScoredDoc{};
-                    continue;
-                };
-
-                word_docs.clearRetainingCapacity();
-                if (is_prefix) {
-                    const normalized = folded;
-                    total_terms += 1;
-                    if (normalized.len < prefix_config.min_prefix_length) return &[_]ScoredDoc{};
-
-                    const prefix_matches = prefix_mod.expandPrefixTerms(
-                        self.allocator,
-                        normalized,
-                        &self.dictionary,
-                        prefix_config,
-                    ) catch {
-                        return FtsError.DictionaryError;
-                    };
-                    defer prefix_mod.freeMatches(self.allocator, prefix_matches);
-
-                    for (prefix_matches) |match| {
-                        try self.addTermScores(match.entry, &word_docs);
-                    }
-                } else {
-                    if (word.len < tokenizer_config.min_token_length or
-                        word.len > tokenizer_config.max_token_length) continue;
-                    if (tokenizer_config.remove_stop_words and
-                        stopwords_mod.isStopWord(folded, tokenizer_config.language))
-                    {
-                        continue;
-                    }
-                    total_terms += 1;
-
-                    var term_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
-                    const normalized = tokenizer_mod.normalizeTerm(tokenizer_config, word, &term_buf) orelse continue;
-
-                    const dict_entry = (self.dictionary.get(normalized) catch {
-                        return FtsError.DictionaryError;
-                    }) orelse return &[_]ScoredDoc{};
-                    try self.addTermScores(dict_entry, &word_docs);
-                }
-
-                // A required word nothing matched rules out every document.
-                if (word_docs.count() == 0) return &[_]ScoredDoc{};
-
-                var it = word_docs.iterator();
-                while (it.next()) |hit| {
-                    const score = doc_scores.getOrPut(hit.key_ptr.*) catch return FtsError.OutOfMemory;
-                    score.value_ptr.* = if (score.found_existing) score.value_ptr.* + hit.value_ptr.* else hit.value_ptr.*;
-                    const count = doc_term_counts.getOrPut(hit.key_ptr.*) catch return FtsError.OutOfMemory;
-                    count.value_ptr.* = if (count.found_existing) count.value_ptr.* + 1 else 1;
-                }
-            }
-        }
-
-        // Convert to result array (AND semantics: require all terms)
-        var results: ArrayListUnmanaged(ScoredDoc) = .empty;
-        errdefer results.deinit(self.allocator);
-
-        var score_iter = doc_scores.iterator();
-        while (score_iter.next()) |entry| {
-            const doc_id = entry.key_ptr.*;
-            const term_count = doc_term_counts.get(doc_id) orelse 0;
-
-            // Only include if document has all terms (AND semantics)
-            if (total_terms == 0 or term_count >= total_terms) {
-                results.append(self.allocator, .{
-                    .doc_id = doc_id,
-                    .score = entry.value_ptr.*,
-                }) catch {
-                    return FtsError.OutOfMemory;
-                };
-            }
-        }
-
-        // Sort by score descending
-        std.mem.sort(ScoredDoc, results.items, {}, ScoredDoc.lessThan);
-
-        // Return top K
-        const result_slice = results.toOwnedSlice(self.allocator) catch {
-            return FtsError.OutOfMemory;
+        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena_state.deinit();
+        const query = query_mod.parse(arena_state.allocator(), query_text, .{
+            .analysis = try self.analysis(),
+            .min_prefix_length = prefix_config.min_prefix_length,
+        }) catch |err| return switch (err) {
+            error.OutOfMemory => FtsError.OutOfMemory,
+            error.InvalidQuery => FtsError.InvalidQuery,
         };
-
-        if (result_slice.len > limit) {
-            const trimmed = self.allocator.alloc(ScoredDoc, limit) catch {
-                self.allocator.free(result_slice);
-                return FtsError.OutOfMemory;
-            };
-            @memcpy(trimmed, result_slice[0..limit]);
-            self.allocator.free(result_slice);
-            return trimmed;
-        }
-        return result_slice;
+        return self.searchQueryWith(query, limit, prefix_config.max_expansions);
     }
 
     /// Add one dictionary term's BM25 score to every document in its postings.
-    fn addTermScores(self: *Self, entry: DictionaryEntry, scores: *std.AutoHashMap(DocId, f32)) FtsError!void {
+    fn addTermScores(self: *Self, entry: DictionaryEntry, scores: *DocScores) FtsError!void {
         if (entry.posting_page == 0) return;
         var list = try self.readPostingsWithLengths(entry.posting_page);
         defer list.deinit(self.allocator);
@@ -1451,458 +1260,220 @@ pub const FtsIndex = struct {
         }
     }
 
-    /// Search with explicit mode (AND or OR)
-    /// Supports quoted phrases and exclusions of words or phrases:
-    /// `database "quick brown" -mysql -"stored procedure"`
+    /// `search`, with side-by-side words read as alternatives in OR mode.
     pub fn searchWithMode(
         self: *Self,
         query_text: []const u8,
         mode: QueryMode,
         limit: u32,
     ) FtsError![]ScoredDoc {
-        var query = try self.parseQuery(query_text);
-        defer query.deinit();
-        const arena = query.arena.allocator();
-
-        const terms = query.terms.items;
-        const phrases = query.phrases.items;
-        if (terms.len == 0 and phrases.len == 0) {
-            return &[_]ScoredDoc{};
-        }
-        const positions = self.config.store_positions;
-
-        // Without stored positions a phrase cannot be checked for adjacency,
-        // so in AND mode it asks for its words, as `searchPhrase` does. Dropping
-        // it instead would answer a phrase-only query with nothing at all.
-        var plain_terms: ArrayListUnmanaged([]const u8) = .empty;
-        plain_terms.appendSlice(arena, terms) catch return FtsError.OutOfMemory;
-        if (phrases.len > 0 and !positions and mode == .@"and") {
-            for (phrases) |phrase| {
-                next_word: for (phrase) |word| {
-                    for (plain_terms.items) |t| {
-                        if (std.mem.eql(u8, t, word)) continue :next_word;
-                    }
-                    plain_terms.append(arena, word) catch return FtsError.OutOfMemory;
-                }
-            }
-        }
-        const const_terms = plain_terms.items;
-        const has_exclusions = query.excluded.items.len > 0 or query.excluded_phrases.items.len > 0;
-
-        // Each sub-search below is narrowed afterwards: by another phrase, by
-        // the plain terms, or by the exclusions. Cutting one short beforehand
-        // ranks and truncates a set that is not yet the answer, so a document
-        // that would have survived the narrowing can be dropped for scoring
-        // below others that do not. Only a lone term search with nothing to
-        // filter it may stop at `limit`.
-        const unbounded = std.math.maxInt(u32);
-        const narrowed = has_exclusions or (phrases.len > 0 and positions);
-        const term_limit: u32 = if (narrowed) unbounded else limit;
-
-        // Get initial candidates based on terms and phrases
-        var candidates: []ScoredDoc = undefined;
-
-        if (phrases.len > 0 and positions) {
-            // Search phrases first (most restrictive)
-            candidates = try self.searchPhraseTerms(phrases[0], unbounded);
-
-            // Intersect with additional phrases
-            for (phrases[1..]) |phrase| {
-                const phrase_results = try self.searchPhraseTerms(phrase, unbounded);
-                defer self.allocator.free(phrase_results);
-
-                // Build set of phrase matches
-                var phrase_docs = std.AutoHashMap(DocId, f32).init(self.allocator);
-                defer phrase_docs.deinit();
-                for (phrase_results) |doc| {
-                    phrase_docs.put(doc.doc_id, doc.score) catch continue;
-                }
-
-                // Filter candidates to those matching this phrase
-                var filtered: ArrayListUnmanaged(ScoredDoc) = .empty;
-                for (candidates) |doc| {
-                    if (phrase_docs.get(doc.doc_id)) |score| {
-                        filtered.append(self.allocator, .{
-                            .doc_id = doc.doc_id,
-                            .score = doc.score + score,
-                        }) catch continue;
-                    }
-                }
-
-                self.allocator.free(candidates);
-                candidates = filtered.toOwnedSlice(self.allocator) catch {
-                    return FtsError.OutOfMemory;
-                };
-            }
-
-            // Intersect with regular terms if any
-            if (terms.len > 0) {
-                const term_results = switch (mode) {
-                    .@"and" => if (terms.len == 1)
-                        try self.searchSingleTerm(terms[0], unbounded)
-                    else
-                        try self.searchMultiTerm(terms, unbounded),
-                    .@"or" => if (terms.len == 1)
-                        try self.searchSingleTerm(terms[0], unbounded)
-                    else
-                        try self.searchMultiTermOr(terms, unbounded),
-                };
-                defer self.allocator.free(term_results);
-
-                // Build set of term matches
-                var term_docs = std.AutoHashMap(DocId, f32).init(self.allocator);
-                defer term_docs.deinit();
-                for (term_results) |doc| {
-                    term_docs.put(doc.doc_id, doc.score) catch continue;
-                }
-
-                // Filter phrase candidates by term matches (AND mode) or merge (OR mode)
-                var filtered: ArrayListUnmanaged(ScoredDoc) = .empty;
-                if (mode == .@"and") {
-                    for (candidates) |doc| {
-                        if (term_docs.get(doc.doc_id)) |score| {
-                            filtered.append(self.allocator, .{
-                                .doc_id = doc.doc_id,
-                                .score = doc.score + score,
-                            }) catch continue;
-                        }
-                    }
-                } else {
-                    // OR mode: include all from both
-                    var seen = std.AutoHashMap(DocId, void).init(self.allocator);
-                    defer seen.deinit();
-                    for (candidates) |doc| {
-                        const extra = term_docs.get(doc.doc_id) orelse 0;
-                        filtered.append(self.allocator, .{
-                            .doc_id = doc.doc_id,
-                            .score = doc.score + extra,
-                        }) catch continue;
-                        seen.put(doc.doc_id, {}) catch continue;
-                    }
-                    for (term_results) |doc| {
-                        if (!seen.contains(doc.doc_id)) {
-                            filtered.append(self.allocator, doc) catch continue;
-                        }
-                    }
-                }
-
-                self.allocator.free(candidates);
-                candidates = filtered.toOwnedSlice(self.allocator) catch {
-                    return FtsError.OutOfMemory;
-                };
-            }
-        } else if (const_terms.len > 0) {
-            // No phrases (or positions not stored), just use term search
-            candidates = switch (mode) {
-                .@"and" => if (const_terms.len == 1)
-                    try self.searchSingleTerm(const_terms[0], term_limit)
-                else
-                    try self.searchMultiTerm(const_terms, term_limit),
-                .@"or" => if (const_terms.len == 1)
-                    try self.searchSingleTerm(const_terms[0], term_limit)
-                else
-                    try self.searchMultiTermOr(const_terms, term_limit),
-            };
-        } else {
-            return &[_]ScoredDoc{};
-        }
-
-        defer self.allocator.free(candidates);
-
-        // Apply exclusions if any
-        if (!has_exclusions) {
-            // No exclusions - sort and return top K
-            std.mem.sort(ScoredDoc, candidates, {}, ScoredDoc.lessThan);
-            if (candidates.len <= limit) {
-                const result = self.allocator.dupe(ScoredDoc, candidates) catch {
-                    return FtsError.OutOfMemory;
-                };
-                return result;
-            }
-            const result = self.allocator.dupe(ScoredDoc, candidates[0..limit]) catch {
-                return FtsError.OutOfMemory;
-            };
-            return result;
-        }
-
-        // Build exclusion set
-        var excluded_docs = std.AutoHashMap(DocId, void).init(self.allocator);
-        defer excluded_docs.deinit();
-
-        for (query.excluded.items) |term| {
-            const dict_entry = self.dictionary.get(term) catch continue orelse continue;
-            if (dict_entry.posting_page == 0) continue;
-
-            var iter = self.posting_store.iterate(dict_entry.posting_page) catch continue;
-            defer iter.deinit();
-
-            while (iter.next() catch null) |entry| {
-                excluded_docs.put(entry.doc_id, {}) catch continue;
-            }
-        }
-
-        // An excluded phrase rules out the documents the same phrase would
-        // match if it were asked for: those holding it in order, or, without
-        // stored positions, those holding all of its words.
-        for (query.excluded_phrases.items) |phrase| {
-            const matches = if (positions)
-                try self.searchPhraseTerms(phrase, unbounded)
-            else
-                try self.searchMultiTermAnd(phrase, unbounded);
-            defer self.freeResults(matches);
-            for (matches) |doc| {
-                excluded_docs.put(doc.doc_id, {}) catch return FtsError.OutOfMemory;
-            }
-        }
-
-        // Filter results
-        var results: ArrayListUnmanaged(ScoredDoc) = .empty;
-        errdefer results.deinit(self.allocator);
-
-        for (candidates) |doc| {
-            if (!excluded_docs.contains(doc.doc_id)) {
-                results.append(self.allocator, doc) catch {
-                    return FtsError.OutOfMemory;
-                };
-            }
-        }
-
-        // Sort and return top K
-        std.mem.sort(ScoredDoc, results.items, {}, ScoredDoc.lessThan);
-
-        const result_slice = results.toOwnedSlice(self.allocator) catch {
-            return FtsError.OutOfMemory;
-        };
-
-        if (result_slice.len > limit) {
-            const trimmed = self.allocator.alloc(ScoredDoc, limit) catch {
-                self.allocator.free(result_slice);
-                return FtsError.OutOfMemory;
-            };
-            @memcpy(trimmed, result_slice[0..limit]);
-            self.allocator.free(result_slice);
-            return trimmed;
-        }
-        return result_slice;
+        var arena_state = std.heap.ArenaAllocator.init(self.allocator);
+        defer arena_state.deinit();
+        const arena = arena_state.allocator();
+        var query = try self.parseQuery(arena, query_text);
+        if (mode == .@"or") query = query.eachUnitAlone(arena) catch return FtsError.OutOfMemory;
+        return self.searchQuery(query, limit);
     }
 
-    /// A query split into its parts, normalised as indexing normalises text.
-    /// Every part lives in `arena`.
-    const QueryParts = struct {
-        arena: std.heap.ArenaAllocator,
-        /// Words outside quotes, required (AND) or alternatives (OR).
-        terms: ArrayListUnmanaged([]const u8) = .empty,
-        /// Words a leading '-' excludes.
-        excluded: ArrayListUnmanaged([]const u8) = .empty,
-        /// Quoted runs of two or more words.
-        phrases: ArrayListUnmanaged([]const []const u8) = .empty,
-        /// Quoted runs of two or more words a leading '-' excludes.
-        excluded_phrases: ArrayListUnmanaged([]const []const u8) = .empty,
+    const DocScores = std.AutoHashMap(DocId, f32);
 
-        fn deinit(self: *QueryParts) void {
-            self.arena.deinit();
+    /// Answer a parsed query: every branch's matches, scored, the best
+    /// `limit` of them highest first.
+    pub fn searchQuery(self: *Self, query: query_mod.Query, limit: u32) FtsError![]ScoredDoc {
+        return self.searchQueryWith(query, limit, std.math.maxInt(u32));
+    }
+
+    fn searchQueryWith(self: *Self, query: query_mod.Query, limit: u32, max_prefix_expansions: u32) FtsError![]ScoredDoc {
+        if (query.branches.len == 0) return &[_]ScoredDoc{};
+        if (query.hasPhrase() and !(try self.positionsStored())) return FtsError.PhraseNeedsPositions;
+
+        // Plain words, the commonest query, take the AND search as they
+        // always have.
+        if (query.branches.len == 1 and query.branches[0].excluded.len == 0) {
+            const required = query.branches[0].required;
+            const terms = self.allocator.alloc([]const u8, required.len) catch return FtsError.OutOfMemory;
+            defer self.allocator.free(terms);
+            const plain = for (required, terms) |unit, *t| {
+                if (unit != .term) break false;
+                t.* = unit.term;
+            } else true;
+            if (plain) return self.searchMultiTermAnd(terms, limit);
         }
-    };
 
-    /// Parse query text into terms, phrases, and exclusions of either.
-    /// Phrases are detected by quoted strings: "quick brown fox". There is no
-    /// cap on how many of any there are, or on a phrase's length: each one
-    /// narrows the answer, so leaving some out would widen it.
-    fn parseQuery(self: *Self, query_text: []const u8) FtsError!QueryParts {
-        var query: QueryParts = .{ .arena = std.heap.ArenaAllocator.init(self.allocator) };
-        errdefer query.deinit();
-        const arena = query.arena.allocator();
-        const tokenizer_config = try self.analysis();
-
-        var i: usize = 0;
-        while (i < query_text.len) {
-            // Skip whitespace
-            while (i < query_text.len and std.ascii.isWhitespace(query_text[i])) {
-                i += 1;
+        var total = DocScores.init(self.allocator);
+        defer total.deinit();
+        for (query.branches) |branch| {
+            var scores = try self.branchScores(branch, max_prefix_expansions);
+            defer scores.deinit();
+            var it = scores.iterator();
+            while (it.next()) |hit| {
+                const slot = total.getOrPut(hit.key_ptr.*) catch return FtsError.OutOfMemory;
+                slot.value_ptr.* = if (slot.found_existing) slot.value_ptr.* + hit.value_ptr.* else hit.value_ptr.*;
             }
-            if (i >= query_text.len) break;
+        }
 
-            // Check for exclusion prefix
-            const is_excluded = query_text[i] == '-';
-            if (is_excluded) i += 1;
-            if (i >= query_text.len) break;
+        var top = try TopK.init(self.allocator, limit, total.count());
+        defer top.deinit(self.allocator);
+        var it = total.iterator();
+        while (it.next()) |hit| top.add(.{ .doc_id = hit.key_ptr.*, .score = hit.value_ptr.* });
+        return top.finish(self.allocator);
+    }
 
-            // Check for quoted phrase
-            if (query_text[i] == '"') {
-                i += 1; // Skip opening quote
-                const body_start = i;
-                while (i < query_text.len and query_text[i] != '"') i += 1;
-                const body = query_text[body_start..i];
-                if (i < query_text.len) i += 1; // Skip closing quote
+    /// The documents one branch matches, with their scores. Every match is
+    /// found before the limit applies: cutting a unit's matches short would
+    /// rank and truncate a set that is not yet the answer.
+    fn branchScores(self: *Self, branch: query_mod.Branch, max_prefix_expansions: u32) FtsError!DocScores {
+        var candidates = DocScores.init(self.allocator);
+        errdefer candidates.deinit();
+        var seeded = false;
 
-                // The words between the quotes go through the tokenizer the
-                // index was built with, so a phrase loses the stop words and
-                // short words indexing dropped. Those never took a position,
-                // so keeping them would ask for a gap the index never has
-                // and "Bank of America" would never match.
-                var words: ArrayListUnmanaged([]const u8) = .empty;
-                var tok = Tokenizer.init(arena, body, tokenizer_config);
-                while (tok.next()) |token| {
-                    var term_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
-                    const term = tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &term_buf) orelse continue;
-                    const normalized = arena.dupe(u8, term) catch return FtsError.OutOfMemory;
-                    words.append(arena, normalized) catch return FtsError.OutOfMemory;
-                }
+        // The plain terms together, through the AND search, which starts
+        // from the rarest.
+        var terms: ArrayListUnmanaged([]const u8) = .empty;
+        defer terms.deinit(self.allocator);
+        for (branch.required) |unit| {
+            if (unit == .term) terms.append(self.allocator, unit.term) catch return FtsError.OutOfMemory;
+        }
+        if (terms.items.len > 0) {
+            const found = try self.searchMultiTermAnd(terms.items, std.math.maxInt(u32));
+            defer self.freeResults(found);
+            for (found) |doc| candidates.put(doc.doc_id, doc.score) catch return FtsError.OutOfMemory;
+            seeded = true;
+        }
 
-                // A one-word "phrase" is that word.
-                switch (words.items.len) {
-                    0 => {},
-                    1 => {
-                        const list = if (is_excluded) &query.excluded else &query.terms;
-                        list.append(arena, words.items[0]) catch return FtsError.OutOfMemory;
-                    },
-                    else => {
-                        const list = if (is_excluded) &query.excluded_phrases else &query.phrases;
-                        list.append(arena, words.items) catch return FtsError.OutOfMemory;
-                    },
-                }
+        for (branch.required) |unit| {
+            if (unit == .term) continue;
+            if (seeded and candidates.count() == 0) break;
+            var scores = try self.unitScores(unit, max_prefix_expansions);
+            if (!seeded) {
+                candidates.deinit();
+                candidates = scores;
+                seeded = true;
                 continue;
             }
-
-            // A run up to whitespace or a quote is split into words by the
-            // tokenizer, as indexing splits text, so "bread," asks for
-            // "bread" and "e-mail" for "e" and "mail" (both required: '-'
-            // excludes only at the start of the run). A leading '-' applies
-            // to every word of the run.
-            const start = i;
-            while (i < query_text.len and !std.ascii.isWhitespace(query_text[i]) and query_text[i] != '"') {
-                i += 1;
-            }
-
-            var words = Tokenizer.init(arena, query_text[start..i], tokenizer_config);
-            while (words.next()) |token| {
-                // Operators are not search terms.
-                if (std.ascii.eqlIgnoreCase(token.text, "OR") or
-                    std.ascii.eqlIgnoreCase(token.text, "AND") or
-                    std.ascii.eqlIgnoreCase(token.text, "NOT"))
-                {
-                    continue;
-                }
-
-                var term_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
-                const term = tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &term_buf) orelse continue;
-                const normalized = arena.dupe(u8, term) catch return FtsError.OutOfMemory;
-                const list = if (is_excluded) &query.excluded else &query.terms;
-                list.append(arena, normalized) catch return FtsError.OutOfMemory;
-            }
+            defer scores.deinit();
+            try intersectInto(&candidates, &scores);
         }
-        return query;
+
+        for (branch.excluded) |group| {
+            if (candidates.count() == 0) break;
+            var docs = try self.groupScores(group, max_prefix_expansions);
+            defer docs.deinit();
+            var it = docs.keyIterator();
+            while (it.next()) |doc_id| _ = candidates.remove(doc_id.*);
+        }
+        return candidates;
     }
 
-    /// Search with OR semantics (documents matching any term)
-    fn searchMultiTermOr(self: *Self, terms: []const []const u8, limit: u32) FtsError![]ScoredDoc {
-        if (terms.len == 0) {
-            return &[_]ScoredDoc{};
+    /// Keep in `into` only the documents `other` has, adding their scores.
+    fn intersectInto(into: *DocScores, other: *const DocScores) FtsError!void {
+        var drop: ArrayListUnmanaged(DocId) = .empty;
+        defer drop.deinit(into.allocator);
+        var it = into.iterator();
+        while (it.next()) |hit| {
+            if (other.get(hit.key_ptr.*)) |score| {
+                hit.value_ptr.* += score;
+            } else {
+                drop.append(into.allocator, hit.key_ptr.*) catch return FtsError.OutOfMemory;
+            }
         }
+        for (drop.items) |doc_id| _ = into.remove(doc_id);
+    }
 
-        // Collect scores for all documents matching any term
-        var doc_scores = std.AutoHashMap(DocId, f32).init(self.allocator);
-        defer doc_scores.deinit();
-
-        for (terms) |term| {
-            const dict_entry = self.dictionary.get(term) catch continue orelse continue;
-            // OR = sum of matching term scores
-            try self.addTermScores(dict_entry, &doc_scores);
+    /// The documents matching every unit of an exclusion group.
+    fn groupScores(self: *Self, group: []const query_mod.Unit, max_prefix_expansions: u32) FtsError!DocScores {
+        var docs = try self.unitScores(group[0], max_prefix_expansions);
+        errdefer docs.deinit();
+        for (group[1..]) |unit| {
+            if (docs.count() == 0) break;
+            var more = try self.unitScores(unit, max_prefix_expansions);
+            defer more.deinit();
+            try intersectInto(&docs, &more);
         }
+        return docs;
+    }
 
-        // Collect all results (no term count filter for OR)
-        var results: ArrayListUnmanaged(ScoredDoc) = .empty;
-        errdefer results.deinit(self.allocator);
-
-        var score_iter = doc_scores.iterator();
-        while (score_iter.next()) |entry| {
-            results.append(self.allocator, .{
-                .doc_id = entry.key_ptr.*,
-                .score = entry.value_ptr.*,
-            }) catch {
-                return FtsError.OutOfMemory;
-            };
+    /// The documents one unit matches, with what each scores for it.
+    fn unitScores(self: *Self, unit: query_mod.Unit, max_prefix_expansions: u32) FtsError!DocScores {
+        var scores = DocScores.init(self.allocator);
+        errdefer scores.deinit();
+        switch (unit) {
+            .term => |term| {
+                const entry = (self.dictionary.get(term) catch return FtsError.DictionaryError) orelse return scores;
+                try self.addTermScores(entry, &scores);
+            },
+            .phrase => |terms| {
+                const found = try self.searchPhraseTerms(terms, std.math.maxInt(u32));
+                defer self.freeResults(found);
+                for (found) |doc| scores.put(doc.doc_id, doc.score) catch return FtsError.OutOfMemory;
+            },
+            // A document's score for a prefix is the sum over the terms it
+            // holds that start with it.
+            .prefix => |prefix| {
+                const matches = prefix_mod.expandPrefixTerms(self.allocator, prefix, &self.dictionary, .{
+                    .min_prefix_length = 0,
+                    .max_expansions = max_prefix_expansions,
+                }) catch |err| return switch (err) {
+                    error.OutOfMemory => FtsError.OutOfMemory,
+                    else => FtsError.DictionaryError,
+                };
+                defer prefix_mod.freeMatches(self.allocator, matches);
+                for (matches) |match| try self.addTermScores(match.entry, &scores);
+            },
+            // A document's score for a fuzzy word is its best match. Taking
+            // the best rather than the sum keeps a document holding several
+            // spellings near one word ("databse" -> "database", "databases")
+            // from outranking one that matches more of the query.
+            .fuzzy => |fuzzy| {
+                const matches = fuzzy_mod.expandFuzzyTerms(self.allocator, fuzzy.term, &self.dictionary, fuzzy.distance) catch |err| return switch (err) {
+                    error.OutOfMemory => FtsError.OutOfMemory,
+                    else => FtsError.DictionaryError,
+                };
+                defer fuzzy_mod.freeMatches(self.allocator, matches);
+                for (matches) |match| {
+                    if (match.entry.posting_page == 0) continue;
+                    var list = try self.readPostingsWithLengths(match.entry.posting_page);
+                    defer list.deinit(self.allocator);
+                    for (list.postings.items(.doc_id), list.postings.items(.term_freq), list.lengths) |doc_id, term_freq, length| {
+                        const doc_length = length orelse continue;
+                        const score = self.scorer.scoreTermFuzzy(
+                            self.doc_lengths.stats,
+                            term_freq,
+                            match.entry.doc_freq,
+                            doc_length,
+                            match.distance,
+                            fuzzy.distance,
+                        );
+                        const slot = scores.getOrPut(doc_id) catch return FtsError.OutOfMemory;
+                        slot.value_ptr.* = if (slot.found_existing) @max(slot.value_ptr.*, score) else score;
+                    }
+                }
+            },
         }
-
-        // Sort by score descending
-        std.mem.sort(ScoredDoc, results.items, {}, ScoredDoc.lessThan);
-
-        // Return top K
-        const result_slice = results.toOwnedSlice(self.allocator) catch {
-            return FtsError.OutOfMemory;
-        };
-
-        if (result_slice.len > limit) {
-            const trimmed = self.allocator.alloc(ScoredDoc, limit) catch {
-                self.allocator.free(result_slice);
-                return FtsError.OutOfMemory;
-            };
-            @memcpy(trimmed, result_slice[0..limit]);
-            self.allocator.free(result_slice);
-            return trimmed;
-        }
-        return result_slice;
+        return scores;
     }
 
     // ========================================================================
     // Phrase Search
     // ========================================================================
 
-    /// Search for an exact phrase (terms must appear adjacent in order)
-    /// Requires store_positions=true in config
+    /// Search for an exact phrase: `search` of the text in quotes. Needs an
+    /// index that stores positions (`PhraseNeedsPositions` otherwise).
     pub fn searchPhrase(
         self: *Self,
         phrase_text: []const u8,
         limit: u32,
     ) FtsError![]ScoredDoc {
-        if (!self.config.store_positions) {
-            // Fall back to AND search if positions not stored
-            return self.search(phrase_text, limit);
+        var quoted: ArrayListUnmanaged(u8) = .empty;
+        defer quoted.deinit(self.allocator);
+        quoted.ensureTotalCapacity(self.allocator, phrase_text.len * 2 + 2) catch return FtsError.OutOfMemory;
+        quoted.appendAssumeCapacity('"');
+        for (phrase_text) |c| {
+            if (c == '"' or c == '\\') quoted.appendAssumeCapacity('\\');
+            quoted.appendAssumeCapacity(c);
         }
-
-        // Tokenize phrase
-        const tokenizer_config = try self.analysis();
-        var tok = Tokenizer.init(self.allocator, phrase_text, tokenizer_config);
-        const tokens = tok.tokenizeAll() catch {
-            return FtsError.TokenizerError;
-        };
-        defer self.allocator.free(tokens);
-
-        if (tokens.len == 0) {
-            return &[_]ScoredDoc{};
-        }
-
-        // Single word "phrase" is just a regular search
-        if (tokens.len == 1) {
-            var lower_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
-            const term = tokenizer_mod.normalizeTerm(tokenizer_config, tokens[0].text, &lower_buf) orelse return &[_]ScoredDoc{};
-            return self.searchSingleTerm(term, limit);
-        }
-
-        // Collect normalized terms, all of them: a phrase cut short matches
-        // documents the whole phrase does not.
-        var phrase_terms: ArrayListUnmanaged([]const u8) = .empty;
-        defer {
-            for (phrase_terms.items) |t| self.allocator.free(t);
-            phrase_terms.deinit(self.allocator);
-        }
-
-        for (tokens) |token| {
-            var term_buf: [tokenizer_mod.MAX_TERM_LEN]u8 = undefined;
-            const term = tokenizer_mod.normalizeTerm(tokenizer_config, token.text, &term_buf) orelse continue;
-
-            phrase_terms.ensureUnusedCapacity(self.allocator, 1) catch return FtsError.OutOfMemory;
-            const normalized = self.allocator.dupe(u8, term) catch {
-                return FtsError.OutOfMemory;
-            };
-            phrase_terms.appendAssumeCapacity(normalized);
-        }
-
-        if (phrase_terms.items.len < 2) {
-            return &[_]ScoredDoc{};
-        }
-
-        return self.searchPhraseTerms(phrase_terms.items, limit);
+        quoted.appendAssumeCapacity('"');
+        return self.search(quoted.items, limit);
     }
 
     /// Search for phrase with pre-tokenized terms
@@ -2816,18 +2387,18 @@ test "fts searchWithMode excludes a phrase rather than requiring it" {
         _ = try fx.index.indexDocument(3, "quick fox");
 
         for ([_]QueryMode{ .@"and", .@"or" }) |mode| {
+            if (!store_positions) {
+                // Without positions the phrase cannot be checked, and an
+                // excluded one is refused like a required one.
+                try std.testing.expectError(FtsError.PhraseNeedsPositions, fx.index.searchWithMode("fox -\"quick brown\"", mode, 10));
+                continue;
+            }
             const results = try fx.index.searchWithMode("fox -\"quick brown\"", mode, 10);
             defer fx.index.freeResults(results);
-            if (store_positions) {
-                // Only document 1 holds the phrase.
-                try std.testing.expectEqual(@as(usize, 2), results.len);
-                try std.testing.expect(resultsContain(results, 2));
-                try std.testing.expect(resultsContain(results, 3));
-            } else {
-                // Without positions the phrase stands for its words.
-                try std.testing.expectEqual(@as(usize, 1), results.len);
-                try std.testing.expectEqual(@as(DocId, 3), results[0].doc_id);
-            }
+            // Only document 1 holds the phrase.
+            try std.testing.expectEqual(@as(usize, 2), results.len);
+            try std.testing.expect(resultsContain(results, 2));
+            try std.testing.expect(resultsContain(results, 3));
         }
     }
 }
@@ -2971,18 +2542,44 @@ test "fts searchWithMode intersects a phrase with terms before the limit" {
     try std.testing.expectEqual(@as(DocId, 6), results[0].doc_id);
 }
 
-test "fts searchWithMode treats a phrase as its words when positions are not stored" {
+test "fts a phrase on an index without positions is refused, not answered as its words" {
     const allocator = std.testing.allocator;
-    const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_mode_phrase_no_positions_test.db");
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lse_fts_phrase_no_positions_test.db");
     defer fx.destroy(allocator);
 
+    fx.index.config.store_positions = false;
     _ = try fx.index.indexDocument(1, "quick brown fox");
-    _ = try fx.index.indexDocument(2, "quick red fox");
+    _ = try fx.index.indexDocument(2, "brown quick fox");
 
-    const results = try fx.index.searchWithMode("\"quick brown\"", .@"and", 10);
-    defer fx.index.freeResults(results);
-    try std.testing.expectEqual(@as(usize, 1), results.len);
-    try std.testing.expectEqual(@as(DocId, 1), results[0].doc_id);
+    // The record wins over a later config.
+    var reopened = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{});
+    try std.testing.expect(!try reopened.positionsStored());
+    try std.testing.expectError(FtsError.PhraseNeedsPositions, reopened.search("\"quick brown\"", 10));
+    try std.testing.expectError(FtsError.PhraseNeedsPositions, reopened.searchWithMode("fox -\"quick brown\"", .@"and", 10));
+    try std.testing.expectError(FtsError.PhraseNeedsPositions, reopened.matchScore("\"quick brown\"", "quick brown"));
+    // Words, and a quoted single word, still work.
+    const words = try reopened.search("quick \"brown\"", 10);
+    defer reopened.freeResults(words);
+    try std.testing.expectEqual(@as(usize, 2), words.len);
+
+    // An index 0.16.0 built has no record and no positions.
+    const legacy_fx = try AndSearchFixture.create(allocator, "/tmp/lse_fts_phrase_legacy_test.db");
+    defer legacy_fx.destroy(allocator);
+    _ = try legacy_fx.index.indexDocumentAnalyzed(1, "quick brown", FtsIndex.legacyAnalysis(.{}), false);
+    var legacy = FtsIndex.init(allocator, &legacy_fx.bp, &legacy_fx.dict_tree, &legacy_fx.lengths_tree, &legacy_fx.reverse_tree, .{});
+    try std.testing.expect(!try legacy.positionsStored());
+
+    // A new index stores positions by default, and phrases work.
+    const new_fx = try AndSearchFixture.create(allocator, "/tmp/lse_fts_phrase_default_test.db");
+    defer new_fx.destroy(allocator);
+    _ = try new_fx.index.indexDocument(1, "quick brown fox");
+    _ = try new_fx.index.indexDocument(2, "brown quick fox");
+    var again = FtsIndex.init(allocator, &new_fx.bp, &new_fx.dict_tree, &new_fx.lengths_tree, &new_fx.reverse_tree, .{ .store_positions = false });
+    try std.testing.expect(try again.positionsStored());
+    const phrase = try again.search("\"quick brown\"", 10);
+    defer again.freeResults(phrase);
+    try std.testing.expectEqual(@as(usize, 1), phrase.len);
+    try std.testing.expectEqual(@as(DocId, 1), phrase[0].doc_id);
 }
 
 /// Text with `word` repeated `count` times, separated by spaces.
@@ -3207,13 +2804,14 @@ test "fts term presence matches whole terms the way search does" {
     defer fx.destroy(allocator);
     const index = &fx.index;
 
-    try std.testing.expectEqual(@as(f32, 0), try index.termPresenceScore("cat", "concatenate strings"));
-    try std.testing.expectEqual(@as(f32, 1), try index.termPresenceScore("Cat", "the cat sat"));
+    try std.testing.expectEqual(@as(?f32, null), try index.matchScore("cat", "concatenate strings"));
+    try std.testing.expect(try index.matchScore("Cat", "the cat sat") != null);
     // Punctuation is not part of a term, and stop words ask for nothing.
-    try std.testing.expectEqual(@as(f32, 1), try index.termPresenceScore("bread,", "about bread"));
-    try std.testing.expectEqual(@as(f32, 1), try index.termPresenceScore("the bread", "about bread"));
-    try std.testing.expectEqual(@as(f32, 0), try index.termPresenceScore("bread butter", "about bread"));
-    try std.testing.expectEqual(@as(f32, 2), try index.termPresenceScore("bread butter bread", "butter on bread"));
+    try std.testing.expect(try index.matchScore("bread,", "about bread") != null);
+    try std.testing.expectEqual(try index.matchScore("bread", "about bread"), try index.matchScore("the bread", "about bread"));
+    try std.testing.expectEqual(@as(?f32, null), try index.matchScore("bread butter", "about bread"));
+    // A repeated word counts once.
+    try std.testing.expectEqual(try index.matchScore("bread butter", "butter on bread"), try index.matchScore("bread butter bread", "butter on bread"));
 }
 
 /// What a single-term search should return: every posting scored with its
@@ -3359,7 +2957,7 @@ test "fts a new index finds non-ASCII words whole, however they are cased or acc
     defer fx.index.freeResults(mode);
     try std.testing.expectEqual(@as(usize, 1), mode.len);
     try std.testing.expectEqual(@as(DocId, 2), mode[0].doc_id);
-    try std.testing.expectEqual(@as(f32, 1), try fx.index.termPresenceScore("MÜLLER", "müller"));
+    try std.testing.expect(try fx.index.matchScore("MÜLLER", "müller") != null);
 }
 
 test "fts an index 0.16.0 built keeps its ASCII tokenizer until it is emptied" {
@@ -3369,8 +2967,8 @@ test "fts an index 0.16.0 built keeps its ASCII tokenizer until it is emptied" {
 
     // Written as 0.16.0 wrote it: ASCII-only terms and no recorded analysis.
     const legacy = FtsIndex.legacyAnalysis(fx.index.config.tokenizer);
-    _ = try fx.index.indexDocumentAnalyzed(1, "Herr Müller", legacy);
-    _ = try fx.index.indexDocumentAnalyzed(2, "Frau Zöller", legacy);
+    _ = try fx.index.indexDocumentAnalyzed(1, "Herr Müller", legacy, false);
+    _ = try fx.index.indexDocumentAnalyzed(2, "Frau Zöller", legacy, false);
 
     // Reopened by this version.
     var reopened = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{});
@@ -3457,8 +3055,8 @@ test "fts an index with documents but no stored stats is not taken for empty" {
 
     // Built as 0.14 built it: ASCII terms, and neither stats nor analysis.
     const legacy = FtsIndex.legacyAnalysis(fx.index.config.tokenizer);
-    _ = try fx.index.indexDocumentAnalyzed(1, "Herr Müller", legacy);
-    _ = try fx.index.indexDocumentAnalyzed(2, "Frau Zöller", legacy);
+    _ = try fx.index.indexDocumentAnalyzed(1, "Herr Müller", legacy, false);
+    _ = try fx.index.indexDocumentAnalyzed(2, "Frau Zöller", legacy, false);
     try fx.lengths_tree.delete(&[_]u8{ 0x00, 's', 't', 'a', 't', 's' });
 
     var reopened = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{});
@@ -3513,4 +3111,55 @@ test "fts dictionary entries keep their counts, their tail and the term count ac
     const removed = (try reopened.dictionary.get("alpha")).?;
     try std.testing.expectEqual(@as(u32, 1499), removed.doc_freq);
     try std.testing.expectEqual(@as(u64, 2248), removed.total_freq);
+}
+
+test "fts the index and the pending-text matcher agree on every query form, and on scores" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lse_fts_query_agreement_test.db");
+    defer fx.destroy(allocator);
+
+    const docs = [_][]const u8{
+        "the quick brown fox jumps over the lazy dog",
+        "a quick red fox and a slow brown bear",
+        "databases store graphs and documents",
+        "a graph database stores nodes and edges",
+        "brown bread with butter",
+        "the fox, the dog and the database",
+        "quick quick quick",
+        "network latency and packet loss",
+    };
+    for (docs, 1..) |text, id| _ = try fx.index.indexDocument(@intCast(id), text);
+
+    const queries = [_][]const u8{
+        "quick",                  "quick fox",          "quick OR database",
+        "fox -dog",               "\"quick brown\"",    "brown -\"brown bear\"",
+        "data*",                  "databse~",           "databse~1 OR graph",
+        "fox dog OR bread",       "\"lazy dog\" quick", "-",
+        "the",                    "quick \\-fox",       "graph* -edges",
+        "packet~ network OR qu*", "\"fox the\"",        "co-op",
+    };
+    for (queries) |q| {
+        const got = try fx.index.search(q, 100);
+        defer fx.index.freeResults(got);
+        var matched: usize = 0;
+        for (docs, 1..) |text, id| {
+            const pending = try fx.index.matchScore(q, text);
+            const found = for (got) |r| {
+                if (r.doc_id == id) break r.score;
+            } else null;
+            if ((pending == null) != (found == null)) {
+                std.debug.print("query \"{s}\" doc {d}: index {?d}, pending {?d}\n", .{ q, id, found, pending });
+                return error.TestUnexpectedResult;
+            }
+            if (pending) |p| {
+                matched += 1;
+                try std.testing.expectApproxEqRel(found.?, p, 1e-4);
+            }
+        }
+        try std.testing.expectEqual(got.len, matched);
+    }
+
+    // Only exclusions is refused by both.
+    try std.testing.expectError(FtsError.InvalidQuery, fx.index.search("-fox", 10));
+    try std.testing.expectError(FtsError.InvalidQuery, fx.index.matchScore("-fox", "fox"));
 }

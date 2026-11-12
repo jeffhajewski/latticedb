@@ -21,6 +21,7 @@ const NodeRecordCache = @import("../graph/node.zig").RecordCache;
 const vector_distance = @import("../vector/distance.zig");
 const fts_ops = @import("operators/fts.zig");
 const tokenizer = @import("../fts/tokenizer.zig");
+const fts_query = @import("../fts/query.zig");
 
 const Row = executor.Row;
 
@@ -2407,7 +2408,10 @@ pub const ExpressionEvaluator = struct {
         return self.ftsMatch(left, right);
     }
 
-    fn ftsMatch(_: *Self, left: EvalResult, right: EvalResult) EvalResult {
+    /// Whether text matches a query in the full-text query language, with
+    /// the default analysis, as an index declared with defaults would. A
+    /// query the language refuses (only exclusions) is unknown, not false.
+    fn ftsMatch(self: *Self, left: EvalResult, right: EvalResult) EvalResult {
         const text = switch (left) {
             .string_val => |s| s,
             else => return .{ .null_val = {} },
@@ -2417,34 +2421,10 @@ pub const ExpressionEvaluator = struct {
             else => return .{ .null_val = {} },
         };
 
-        return .{ .bool_val = ftsQueryMatches(text, query) };
+        const matched = fts_query.textMatches(self.allocator, query, text, .{}) catch return .{ .null_val = {} };
+        return .{ .bool_val = matched };
     }
 };
-
-fn ftsQueryMatches(text: []const u8, query: []const u8) bool {
-    var saw_token = false;
-    var token_iter = std.mem.tokenizeAny(u8, query, " \t\r\n");
-    while (token_iter.next()) |token| {
-        saw_token = true;
-        if (!containsAsciiInsensitive(text, token)) return false;
-    }
-    return saw_token;
-}
-
-fn containsAsciiInsensitive(haystack: []const u8, needle: []const u8) bool {
-    if (needle.len == 0) return true;
-    if (needle.len > haystack.len) return false;
-
-    var i: usize = 0;
-    while (i + needle.len <= haystack.len) : (i += 1) {
-        var j: usize = 0;
-        while (j < needle.len) : (j += 1) {
-            if (std.ascii.toLower(haystack[i + j]) != std.ascii.toLower(needle[j])) break;
-        }
-        if (j == needle.len) return true;
-    }
-    return false;
-}
 
 // ============================================================================
 // Tests

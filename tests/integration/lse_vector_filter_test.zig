@@ -142,8 +142,10 @@ test "vector filter: a large set goes through the graph and still holds only its
     for (0..20) |_| {
         var query: [DIMS]f32 = undefined;
         for (&query) |*x| x.* = rnd.float(f32) * 2 - 1;
-        const want = try exactNearest(db, allocator, null, &query, half, 10);
-        defer allocator.free(want);
+        // The exact answer, by measuring every member (the scan the small
+        // set takes; checked against brute force in the hnsw tests).
+        const want = try hnsw.searchExact(&query, 10, half);
+        defer hnsw.freeResults(want);
         const got = try db.vectorSearchAmongInTxn(null, &query, 10, null, half, null);
         defer db.freeVectorSearchResults(got);
         try std.testing.expectEqual(@as(usize, 10), got.len);

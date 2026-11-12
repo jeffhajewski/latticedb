@@ -26,8 +26,16 @@ pub const WAL_MAGIC: u32 = types.WAL_MAGIC_NUMBER;
 /// larger property values transactionally.
 pub const FRAME_SIZE: u32 = 4096;
 pub const MAX_FRAME_SIZE: u32 = std.math.maxInt(u16);
-pub const WAL_FORMAT_VERSION: u16 = 2;
+/// Version 3 frames say how much of the log was synced when they were
+/// written, and their checksum covers their header as well as their data.
+/// See `WalFrameHeader.synced_frames`.
+pub const WAL_FORMAT_VERSION: u16 = 3;
 pub const MIN_READABLE_WAL_VERSION: u16 = 1;
+/// The version written in the header of a log that holds no frames. An empty
+/// log is the same in every version, and 0.16.0, which reads version 2 and
+/// below, can then open a database this release closed cleanly. The header
+/// says 3 once a frame is in the log.
+pub const EMPTY_LOG_VERSION: u16 = 2;
 pub const MAX_LOGICAL_RECORD_PAYLOAD_SIZE: usize = 64 * 1024 * 1024;
 
 const LARGE_FRAGMENT_MAGIC: u32 = 0x31464c57; // "WLF1"
@@ -103,15 +111,64 @@ pub const WalFrameHeader = extern struct {
     data_size: u16,
     /// LSN of last record in previous frame (for backward traversal)
     prev_frame_lsn: u64,
-    /// CRC32C of frame data
+    /// CRC32C. Version 3: of the other header fields and the data. Up to
+    /// version 2: of the data alone.
     checksum: u32,
-    /// Reserved
-    _reserved: u32 = 0,
+    /// How many frames, from the start of the log, had been synced when
+    /// this frame was written. Version 3; zero before.
+    ///
+    /// A power cut can leave the frames written since the last sync in any
+    /// state: some whole, some torn, in any order. A frame that fails its
+    /// checksum with whole frames after it is then not evidence of damage,
+    /// only of a sync that never completed. But a whole frame that says
+    /// frame N was synced before it was written makes damage to frame N real
+    /// damage, to data that was promised durable. At open, the largest
+    /// statement among the frames that verify divides the log: damage below
+    /// it is corruption and refuses the open; damage at or above it is an
+    /// unsynced tail and is cut off at the first bad frame.
+    ///
+    /// Saturates at the largest u32, which keeps it a true lower bound.
+    synced_frames: u32 = 0,
 
     comptime {
         std.debug.assert(@sizeOf(WalFrameHeader) == 32);
+        std.debug.assert(@offsetOf(WalFrameHeader, "checksum") == 24);
     }
 };
+
+/// The kinds of frame a log can hold, told apart by which checksum matches.
+pub const FrameKind = enum {
+    /// Fails both checksums: torn, never written, or damaged.
+    invalid,
+    /// Version 1 or 2: checksum of the data only, no sync statement.
+    legacy,
+    /// Version 3: checksum of the header and data, with a sync statement.
+    current,
+};
+
+/// The version 3 checksum: every header field but the checksum, then the
+/// data.
+pub fn frameChecksum(header_bytes: []const u8, data: []const u8) u32 {
+    const crc32c = page.crc32c;
+    var crc = crc32c.update(0xFFFF_FFFF, header_bytes[0..24]);
+    crc = crc32c.update(crc, header_bytes[28..32]);
+    crc = crc32c.update(crc, data);
+    return ~crc;
+}
+
+/// Which kind of frame these bytes are. `frame` is one whole frame.
+pub fn classifyFrame(frame: []const u8) FrameKind {
+    if (frame.len < @sizeOf(WalFrameHeader)) return .invalid;
+    const header = std.mem.bytesAsValue(WalFrameHeader, frame[0..@sizeOf(WalFrameHeader)]);
+    // A frame is only ever written with records in it. One without is
+    // file space counted before the data arrived.
+    if (header.record_count == 0 or header.data_size == 0) return .invalid;
+    if (header.data_size > frame.len - @sizeOf(WalFrameHeader)) return .invalid;
+    const data = frame[@sizeOf(WalFrameHeader)..][0..header.data_size];
+    if (header.checksum == frameChecksum(frame[0..@sizeOf(WalFrameHeader)], data)) return .current;
+    if (header.checksum == calculateChecksum(data)) return .legacy;
+    return .invalid;
+}
 
 /// Size of frame data area
 pub const FRAME_DATA_SIZE: usize = FRAME_SIZE - @sizeOf(WalFrameHeader);
@@ -308,6 +365,13 @@ pub const WalManager = struct {
     mutex: @import("compat").Mutex,
     /// Where a torn tail was cut off when this log was opened, if one was.
     trimmed_tail_frame: ?u64 = null,
+    /// A frame found damaged at open where the damage cannot be a torn
+    /// tail: the log was synced past it, or, in a log of legacy frames,
+    /// whole frames follow it. Recovery refuses the log.
+    damaged_frame: ?u64 = null,
+    /// Frames known to be on the disk: the frame count at the last sync.
+    /// Every frame written states it. See `WalFrameHeader.synced_frames`.
+    durable_frames: u64 = 0,
 
     const Self = @This();
 
@@ -429,44 +493,81 @@ pub const WalManager = struct {
         // Find the end of valid frames and set next_lsn
         try self.findLogEnd();
 
-        if (header_torn) {
-            self.writeHeader() catch return WalError.IoError;
+        // Anything past the last frame is from writes the header never
+        // counted: frames that a power cut kept while losing the header
+        // update, or a tail cut off before. Left in place, such a frame
+        // could later be read as part of the log.
+        const file_size = self.file.size() catch return WalError.IoError;
+        const log_end = WAL_HEADER_SIZE + self.header.frame_count * self.frame_size;
+        const stale_bytes = self.damaged_frame == null and file_size > log_end;
+        if (stale_bytes) self.file.truncate(log_end) catch return WalError.IoError;
+
+        if (header_torn) self.writeHeader() catch return WalError.IoError;
+
+        // The frames found here may be in the operating system's cache and
+        // not on the disk, if the process before this one was killed
+        // without syncing. They are synced before any new frame states
+        // that they are durable.
+        if (header_torn or stale_bytes or self.header.frame_count > 0) {
             self.file.sync() catch return WalError.IoError;
         }
+        self.durable_frames = self.header.frame_count;
     }
 
     /// Find the end of valid log entries
     ///
     /// The header's frame count says how many frames were written, not how
-    /// many survived. After a power failure the last frame can be half
-    /// written, or missing altogether while the header that counts it made
-    /// it to disk. Such a tail is cut off here: left in place, new frames
-    /// were appended after the bad one, and the next recovery saw a damaged
-    /// frame with good ones behind it and refused the database.
+    /// many survived. After a power failure the frames written since the
+    /// last sync can be in any state: missing, torn, or whole with an
+    /// earlier one torn, because the disk need not write them in order.
+    /// Such frames were never promised durable, and the log is cut at the
+    /// first bad one: left in place, new frames were appended after it, and
+    /// the next recovery saw a damaged frame with good ones behind it and
+    /// refused the database.
     ///
-    /// A bad frame with valid frames after it is different. That is damage
-    /// in the middle of the log, it is left exactly as found, and recovery
-    /// reports it.
+    /// Damage to a frame that had been synced is different. That is
+    /// corruption, it is left exactly as found, and recovery reports it.
+    /// Version 3 frames carry the evidence (`WalFrameHeader.synced_frames`):
+    /// a bad frame below the largest statement among the frames that verify
+    /// is corruption. A log of legacy frames carries none, and keeps the
+    /// rule it was written under: a bad frame with any frame that verifies
+    /// after it is corruption.
     fn findLogEnd(self: *Self) WalError!void {
         var max_lsn: u64 = 0;
-        var frame_num: u64 = 0;
+        var first_bad: ?u64 = null;
+        var synced: u64 = 0;
+        var any_current = false;
+        var valid_after_bad = false;
 
-        while (frame_num < self.header.frame_count) {
-            if (!self.frameVerifies(frame_num, &max_lsn)) break;
-            frame_num += 1;
+        var frame_num: u64 = 0;
+        while (frame_num < self.header.frame_count) : (frame_num += 1) {
+            var frame_buf: [MAX_FRAME_SIZE]u8 = undefined;
+            const frame = frame_buf[0..self.frame_size];
+            const kind = self.readFrameKind(frame_num, frame);
+            if (kind == .invalid) {
+                if (first_bad == null) first_bad = frame_num;
+                continue;
+            }
+            const header = std.mem.bytesAsValue(WalFrameHeader, frame[0..@sizeOf(WalFrameHeader)]);
+            if (kind == .current) {
+                any_current = true;
+                synced = @max(synced, header.synced_frames);
+            }
+            if (first_bad != null) {
+                valid_after_bad = true;
+                continue;
+            }
+            maxLsnOf(frame, &max_lsn);
         }
 
-        if (frame_num < self.header.frame_count) {
-            var later = frame_num + 1;
-            var ignored_lsn: u64 = 0;
-            const damage_mid_log = while (later < self.header.frame_count) : (later += 1) {
-                if (self.frameVerifies(later, &ignored_lsn)) break true;
-            } else false;
-
-            if (!damage_mid_log) {
-                self.trimmed_tail_frame = frame_num;
-                self.header.frame_count = frame_num;
-                self.file.truncate(WAL_HEADER_SIZE + frame_num * self.frame_size) catch return WalError.IoError;
+        if (first_bad) |bad| {
+            const corrupt = if (any_current) bad < synced else valid_after_bad;
+            if (corrupt) {
+                self.damaged_frame = bad;
+            } else {
+                self.trimmed_tail_frame = bad;
+                self.header.frame_count = bad;
+                self.file.truncate(WAL_HEADER_SIZE + bad * self.frame_size) catch return WalError.IoError;
                 self.writeHeader() catch return WalError.IoError;
                 self.file.sync() catch return WalError.IoError;
             }
@@ -476,25 +577,17 @@ pub const WalManager = struct {
         self.startNewFrame();
     }
 
-    /// Whether the frame at this position is one this log wrote in full.
-    /// Raises `max_lsn` to the largest LSN in it.
-    fn frameVerifies(self: *Self, frame_num: u64, max_lsn: *u64) bool {
+    fn readFrameKind(self: *Self, frame_num: u64, frame: []u8) FrameKind {
         const offset = WAL_HEADER_SIZE + frame_num * self.frame_size;
+        const n = self.file.read(offset, frame) catch return .invalid;
+        if (n != self.frame_size) return .invalid;
+        return classifyFrame(frame);
+    }
 
-        var frame_buf: [MAX_FRAME_SIZE]u8 = undefined;
-        const frame = frame_buf[0..self.frame_size];
-        const n = self.file.read(offset, frame) catch return false;
-        if (n != self.frame_size) return false;
-
+    /// Raise `max_lsn` to the largest LSN in a frame that verified.
+    fn maxLsnOf(frame: []const u8, max_lsn: *u64) void {
         const header = std.mem.bytesAsValue(WalFrameHeader, frame[0..@sizeOf(WalFrameHeader)]);
-        // A frame is only ever written with records in it. One without is
-        // file space the header counted before the data arrived.
-        if (header.record_count == 0 or header.data_size == 0) return false;
-        if (header.data_size > self.frameDataSize()) return false;
-
         const data = frame[@sizeOf(WalFrameHeader)..][0..header.data_size];
-        if (header.checksum != calculateChecksum(data)) return false;
-
         var record_offset: usize = 0;
         while (record_offset < header.data_size) {
             if (record_offset + @sizeOf(WalRecordHeader) > header.data_size) break;
@@ -509,11 +602,13 @@ pub const WalManager = struct {
             }
             record_offset += record_size;
         }
-        return true;
     }
 
     /// Write the WAL header to disk
     fn writeHeader(self: *Self) !void {
+        // Frames in the log are version 3, and a release that cannot read
+        // them must refuse the log. An empty log is readable by all.
+        self.header.version = if (self.header.frame_count == 0) EMPTY_LOG_VERSION else WAL_FORMAT_VERSION;
         self.header.checksum = self.header.calculateHeaderChecksum();
         const header_bytes = std.mem.asBytes(&self.header);
         self.file.write(0, header_bytes) catch return WalError.IoError;
@@ -645,8 +740,11 @@ pub const WalManager = struct {
             return; // Nothing to flush
         }
 
-        // Calculate checksum of data
-        self.current_frame_header.checksum = calculateChecksum(
+        // What this frame can promise about the ones before it.
+        self.current_frame_header.synced_frames = std.math.cast(u32, self.durable_frames) orelse std.math.maxInt(u32);
+        self.current_frame_header.checksum = 0;
+        self.current_frame_header.checksum = frameChecksum(
+            std.mem.asBytes(&self.current_frame_header),
             self.current_frame_data[0..self.current_frame_header.data_size],
         );
 
@@ -678,6 +776,7 @@ pub const WalManager = struct {
         }
 
         self.file.sync() catch return WalError.IoError;
+        self.durable_frames = self.header.frame_count;
     }
 
     /// Hand buffered records to the operating system without waiting for
@@ -730,6 +829,7 @@ pub const WalManager = struct {
         self.writeHeader() catch return WalError.IoError;
         self.startNewFrame();
         self.file.sync() catch return WalError.IoError;
+        self.durable_frames = 0;
     }
 
     /// Create an iterator for reading WAL records
@@ -958,9 +1058,7 @@ pub const WalIterator = struct {
 
         // Validate checksum
         if (self.frame_header.data_size > self.wal.frameDataSize()) return WalError.CorruptedFrame;
-        const data = self.frame_data[@sizeOf(WalFrameHeader)..][0..self.frame_header.data_size];
-        const expected = calculateChecksum(data);
-        if (self.frame_header.checksum != expected) {
+        if (classifyFrame(frame) == .invalid) {
             return WalError.ChecksumMismatch;
         }
 

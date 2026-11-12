@@ -631,10 +631,322 @@ test "wal: damage in the middle of the log is left for recovery to report" {
     var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
     defer wal.deinit();
     try std.testing.expectEqual(@as(?u64, null), wal.trimmed_tail_frame);
+    try std.testing.expectEqual(@as(?u64, 1), wal.damaged_frame);
     try std.testing.expectEqual(@as(u64, 3), wal.header.frame_count);
 
     var iter = wal.iterate(1);
     var payload_buf: [4096]u8 = undefined;
     _ = try iter.next(&payload_buf);
     try std.testing.expectError(WalError.ChecksumMismatch, iter.next(&payload_buf));
+}
+
+/// Write one frame of one record, flushed but not synced.
+fn writeUnsyncedFrame(wal: *WalManager, payload: []const u8) !void {
+    _ = try wal.appendRecord(.insert, 1, 0, payload);
+    try wal.flush();
+}
+
+/// Close a log without the sync that `deinit` does, as a crash would.
+fn crashClose(wal: *WalManager) void {
+    wal.file.close();
+}
+
+fn damageFrame(wal: *WalManager, frame: u64) !void {
+    const garbage = [_]u8{0xFF} ** 64;
+    try wal.file.write(frameOffset(wal, frame) + @sizeOf(wal_mod.WalFrameHeader), &garbage);
+}
+
+fn readFrameHeader(wal: *WalManager, frame: u64) !wal_mod.WalFrameHeader {
+    var buf: [@sizeOf(wal_mod.WalFrameHeader)]u8 = undefined;
+    _ = try wal.file.read(frameOffset(wal, frame), &buf);
+    return std.mem.bytesToValue(wal_mod.WalFrameHeader, &buf);
+}
+
+/// Rewrite every frame of a log, and its header, as 0.16.0 wrote them:
+/// checksums of the data alone, no sync statement, version 2.
+fn rewriteAsVersion2(wal: *WalManager) !void {
+    var frame_buf: [wal_mod.MAX_FRAME_SIZE]u8 = undefined;
+    const frame = frame_buf[0..wal.frame_size];
+    var n: u64 = 0;
+    while (n < wal.header.frame_count) : (n += 1) {
+        _ = try wal.file.read(frameOffset(wal, n), frame);
+        const header = std.mem.bytesAsValue(wal_mod.WalFrameHeader, frame[0..@sizeOf(wal_mod.WalFrameHeader)]);
+        header.synced_frames = 0;
+        header.checksum = page.calculateChecksum(frame[@sizeOf(wal_mod.WalFrameHeader)..][0..header.data_size]);
+        try std.testing.expectEqual(wal_mod.FrameKind.legacy, wal_mod.classifyFrame(frame));
+        try wal.file.write(frameOffset(wal, n), frame);
+    }
+    var header = wal.header;
+    header.version = 2;
+    header.checksum = header.calculateHeaderChecksum();
+    try wal.file.write(0, std.mem.asBytes(&header));
+}
+
+test "wal: frames say how much of the log was synced before them" {
+    const allocator = std.testing.allocator;
+    var posix_vfs = PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+    const path = try createTempPath(allocator, "ldur_synced_claims");
+    defer allocator.free(path);
+    defer vfs_impl.delete(path) catch {};
+    const uuid = generateUuid();
+
+    var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+    defer wal.deinit();
+    try std.testing.expectEqual(@as(u16, 2), wal.header.version);
+
+    _ = try writeThreeFrames(&wal);
+    try writeUnsyncedFrame(&wal, "fourth");
+    try writeUnsyncedFrame(&wal, "fifth");
+
+    try std.testing.expectEqual(@as(u32, 0), (try readFrameHeader(&wal, 0)).synced_frames);
+    try std.testing.expectEqual(@as(u32, 1), (try readFrameHeader(&wal, 1)).synced_frames);
+    try std.testing.expectEqual(@as(u32, 2), (try readFrameHeader(&wal, 2)).synced_frames);
+    try std.testing.expectEqual(@as(u32, 3), (try readFrameHeader(&wal, 3)).synced_frames);
+    try std.testing.expectEqual(@as(u32, 3), (try readFrameHeader(&wal, 4)).synced_frames);
+    // Frames are in the log, which an older release must refuse.
+    try std.testing.expectEqual(wal_mod.WAL_FORMAT_VERSION, wal.header.version);
+
+    // An emptied log is one every release can read.
+    try wal.truncateToEmpty();
+    try std.testing.expectEqual(wal_mod.EMPTY_LOG_VERSION, wal.header.version);
+    _ = try wal.appendRecord(.insert, 1, 0, "after");
+    try wal.sync();
+    try std.testing.expectEqual(@as(u32, 0), (try readFrameHeader(&wal, 0)).synced_frames);
+}
+
+test "wal: a frame the disk lost behind whole unsynced frames is a torn tail" {
+    const allocator = std.testing.allocator;
+    var posix_vfs = PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+    const path = try createTempPath(allocator, "ldur_reordered_tail");
+    defer allocator.free(path);
+    defer vfs_impl.delete(path) catch {};
+    const uuid = generateUuid();
+
+    {
+        var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+        _ = try writeThreeFrames(&wal);
+        try writeUnsyncedFrame(&wal, "fourth");
+        try writeUnsyncedFrame(&wal, "fifth");
+        try writeUnsyncedFrame(&wal, "sixth");
+        // Power cut: the disk wrote the fifth and sixth frames and lost
+        // the fourth. None of the three was synced.
+        try damageFrame(&wal, 3);
+        crashClose(&wal);
+    }
+
+    {
+        var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+        defer wal.deinit();
+        try std.testing.expectEqual(@as(?u64, null), wal.damaged_frame);
+        try std.testing.expectEqual(@as(?u64, 3), wal.trimmed_tail_frame);
+        try std.testing.expectEqual(@as(u64, 3), wal.header.frame_count);
+        try expectPayloads(&wal, &.{ "first", "second", "third" });
+        _ = try wal.appendRecord(.insert, 1, 0, "seventh");
+        try wal.sync();
+    }
+
+    // The frames behind the lost one went with it, and nothing older
+    // than the new frame can turn up after it.
+    var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+    defer wal.deinit();
+    try std.testing.expectEqual(@as(?u64, null), wal.trimmed_tail_frame);
+    try expectPayloads(&wal, &.{ "first", "second", "third", "seventh" });
+}
+
+test "wal: damage to a frame a later frame says was synced is corruption" {
+    const allocator = std.testing.allocator;
+    var posix_vfs = PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+    const path = try createTempPath(allocator, "ldur_synced_damage");
+    defer allocator.free(path);
+    defer vfs_impl.delete(path) catch {};
+    const uuid = generateUuid();
+
+    {
+        var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+        _ = try writeThreeFrames(&wal);
+        try writeUnsyncedFrame(&wal, "fourth");
+        // The third frame was synced, and the unsynced fourth says so.
+        // Only the fourth vouches for it.
+        try damageFrame(&wal, 2);
+        crashClose(&wal);
+    }
+
+    var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+    defer wal.deinit();
+    try std.testing.expectEqual(@as(?u64, 2), wal.damaged_frame);
+    try std.testing.expectEqual(@as(?u64, null), wal.trimmed_tail_frame);
+    // Left exactly as found.
+    try std.testing.expectEqual(@as(u64, 4), wal.header.frame_count);
+}
+
+test "wal: frames found at open are synced before new frames vouch for them" {
+    const allocator = std.testing.allocator;
+    var posix_vfs = PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+    const path = try createTempPath(allocator, "ldur_open_sync");
+    defer allocator.free(path);
+    defer vfs_impl.delete(path) catch {};
+    const uuid = generateUuid();
+
+    {
+        var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+        try writeUnsyncedFrame(&wal, "first");
+        try writeUnsyncedFrame(&wal, "second");
+        crashClose(&wal);
+    }
+
+    var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+    defer wal.deinit();
+    try std.testing.expectEqual(@as(u64, 2), wal.durable_frames);
+    try writeUnsyncedFrame(&wal, "third");
+    try std.testing.expectEqual(@as(u32, 2), (try readFrameHeader(&wal, 2)).synced_frames);
+}
+
+test "wal: bytes past the counted frames are removed at open" {
+    const allocator = std.testing.allocator;
+    var posix_vfs = PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+    const path = try createTempPath(allocator, "ldur_stale_frames");
+    defer allocator.free(path);
+    defer vfs_impl.delete(path) catch {};
+    const uuid = generateUuid();
+
+    {
+        var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+        _ = try writeThreeFrames(&wal);
+        // The frame reached the disk and the header that counts it did
+        // not.
+        const counted = wal.header;
+        try writeUnsyncedFrame(&wal, "fourth");
+        try wal.file.write(0, std.mem.asBytes(&counted));
+        crashClose(&wal);
+    }
+
+    {
+        var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+        defer wal.deinit();
+        try std.testing.expectEqual(@as(u64, 3), wal.header.frame_count);
+        try std.testing.expectEqual(frameOffset(&wal, 3), try wal.file.size());
+        try expectPayloads(&wal, &.{ "first", "second", "third" });
+    }
+}
+
+test "wal: a version 2 log still opens, and keeps the rule it was written under" {
+    const allocator = std.testing.allocator;
+    var posix_vfs = PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+    const path = try createTempPath(allocator, "ldur_v2_log");
+    defer allocator.free(path);
+    defer vfs_impl.delete(path) catch {};
+    const uuid = generateUuid();
+
+    {
+        var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+        _ = try writeThreeFrames(&wal);
+        try rewriteAsVersion2(&wal);
+        crashClose(&wal);
+    }
+
+    // Read as written, then appended to: the new frames are version 3
+    // and vouch for the old ones.
+    {
+        var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+        defer wal.deinit();
+        try expectPayloads(&wal, &.{ "first", "second", "third" });
+        _ = try wal.appendRecord(.insert, 1, 0, "fourth");
+        try wal.sync();
+        try std.testing.expectEqual(@as(u32, 3), (try readFrameHeader(&wal, 3)).synced_frames);
+        try std.testing.expectEqual(wal_mod.WAL_FORMAT_VERSION, wal.header.version);
+    }
+    {
+        var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+        defer wal.deinit();
+        try expectPayloads(&wal, &.{ "first", "second", "third", "fourth" });
+    }
+
+    // Damage in a log of legacy frames: whole frames after it make it
+    // corruption, as in 0.16.0.
+    {
+        var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+        try wal.truncateToEmpty();
+        _ = try writeThreeFrames(&wal);
+        try rewriteAsVersion2(&wal);
+        try damageFrame(&wal, 1);
+        crashClose(&wal);
+    }
+    {
+        var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+        defer wal.deinit();
+        try std.testing.expectEqual(@as(?u64, 1), wal.damaged_frame);
+    }
+
+    // And with nothing whole after it, a torn tail.
+    {
+        var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+        try wal.truncateToEmpty();
+        _ = try writeThreeFrames(&wal);
+        try rewriteAsVersion2(&wal);
+        try damageFrame(&wal, 2);
+        crashClose(&wal);
+    }
+    var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+    defer wal.deinit();
+    try std.testing.expectEqual(@as(?u64, 2), wal.trimmed_tail_frame);
+    try expectPayloads(&wal, &.{ "first", "second" });
+}
+
+test "wal: a version 3 frame with a damaged header fails its checksum" {
+    const allocator = std.testing.allocator;
+    var posix_vfs = PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+    const path = try createTempPath(allocator, "ldur_header_damage");
+    defer allocator.free(path);
+    defer vfs_impl.delete(path) catch {};
+    const uuid = generateUuid();
+
+    var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+    defer wal.deinit();
+    _ = try writeThreeFrames(&wal);
+
+    var frame_buf: [wal_mod.MAX_FRAME_SIZE]u8 = undefined;
+    const frame = frame_buf[0..wal.frame_size];
+    _ = try wal.file.read(frameOffset(&wal, 2), frame);
+    try std.testing.expectEqual(wal_mod.FrameKind.current, wal_mod.classifyFrame(frame));
+    // A larger sync statement would turn damage before it into corruption.
+    frame[28] +%= 1;
+    try std.testing.expectEqual(wal_mod.FrameKind.invalid, wal_mod.classifyFrame(frame));
+}
+
+test "wal: a frame that never reached the disk is not read as an empty one" {
+    const allocator = std.testing.allocator;
+    var posix_vfs = PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+    const path = try createTempPath(allocator, "ldur_zero_frame");
+    defer allocator.free(path);
+    defer vfs_impl.delete(path) catch {};
+    const uuid = generateUuid();
+
+    {
+        var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+        _ = try writeThreeFrames(&wal);
+        // One transaction over two frames, the second holding its commit.
+        try writeUnsyncedFrame(&wal, "fourth");
+        try writeUnsyncedFrame(&wal, "fifth");
+        // Power cut: the disk wrote the fifth frame and not the fourth,
+        // whose space reads back as zeroes. A frame of zeroes has a zero
+        // checksum over no data, which is the checksum of no data.
+        var zeroes: [wal_mod.MAX_FRAME_SIZE]u8 = @splat(0);
+        try wal.file.write(frameOffset(&wal, 3), zeroes[0..wal.frame_size]);
+        crashClose(&wal);
+    }
+
+    var wal = try WalManager.init(allocator, vfs_impl, path, uuid);
+    defer wal.deinit();
+    // Read as an empty frame, it let the fifth frame be replayed without
+    // the fourth: a transaction applied in part.
+    try std.testing.expectEqual(@as(?u64, 3), wal.trimmed_tail_frame);
+    try expectPayloads(&wal, &.{ "first", "second", "third" });
 }

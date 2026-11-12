@@ -189,7 +189,7 @@ pub const WalReader = struct {
         }
 
         const data = self.buffer[@sizeOf(WalFrameHeader)..][0..frame_header.data_size];
-        if (page.calculateChecksum(data) != frame_header.checksum) {
+        if (wal_mod.classifyFrame(self.buffer) == .invalid) {
             return WalReaderError.FrameChecksumMismatch;
         }
 

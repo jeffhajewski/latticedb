@@ -161,52 +161,23 @@ pub const RecoveryManager = struct {
     }
 
     /// Check if there are valid frames after the given frame number.
-    /// Used to distinguish tail corruption (torn write) from mid-log corruption.
+    /// Opening the log has already sorted damage into a torn tail, which it
+    /// cut off, and corruption, which it recorded in `damaged_frame`. A
+    /// frame that fails here went bad after the open, and is judged by the
+    /// legacy rule: any frame that verifies after it makes it corruption.
     fn hasValidFramesAfter(self: *Self, wal: *WalManager, corrupted_frame: u64) RecoveryError!bool {
         _ = self;
-
-        const frame_count = wal.header.frame_count;
-
-        // Every remaining frame is checked. Opening the log already cut off
-        // a torn tail by the same test, and a shorter look here would call a
-        // long damaged run a tail and drop the commits behind it.
-        const max_scan = frame_count;
 
         var frame_buf: [wal_mod.MAX_FRAME_SIZE]u8 align(4096) = undefined;
 
         var frame_num = corrupted_frame + 1;
-        while (frame_num < max_scan) : (frame_num += 1) {
-            // Read frame directly
+        while (frame_num < wal.header.frame_count) : (frame_num += 1) {
             const offset = @as(u64, @sizeOf(wal_mod.WalHeader)) + frame_num * wal.frame_size;
             const frame = frame_buf[0..wal.frame_size];
-            const n = wal.file.read(offset, frame) catch {
-                continue; // IO error, try next frame
-            };
-
-            if (n != wal.frame_size) {
-                continue; // Incomplete read, try next frame
-            }
-
-            // Parse frame header and verify checksum
-            const frame_header = std.mem.bytesAsValue(
-                wal_mod.WalFrameHeader,
-                frame_buf[0..@sizeOf(wal_mod.WalFrameHeader)],
-            ).*;
-
-            // Validate checksum
-            const frame_data_size = @as(usize, wal.frame_size) - @sizeOf(wal_mod.WalFrameHeader);
-            if (frame_header.data_size > 0 and frame_header.data_size <= frame_data_size) {
-                const data = frame_buf[@sizeOf(wal_mod.WalFrameHeader)..][0..frame_header.data_size];
-                const expected = page.calculateChecksum(data);
-
-                if (frame_header.checksum == expected) {
-                    // Found a valid frame after corruption - this is mid-log corruption
-                    return true;
-                }
-            }
+            const n = wal.file.read(offset, frame) catch continue;
+            if (n != wal.frame_size) continue;
+            if (wal_mod.classifyFrame(frame) != .invalid) return true;
         }
-
-        // No valid frames found after corruption - this is tail corruption
         return false;
     }
 
@@ -237,6 +208,12 @@ pub const RecoveryManager = struct {
         defer {
             for (redo_list.items) |entry| self.allocator.free(entry.payload);
             redo_list.deinit(self.allocator);
+        }
+
+        // Damage the open found in frames the log had promised were synced.
+        if (wal.damaged_frame) |frame| {
+            stats.corrupted_frame = frame;
+            return RecoveryError.MidLogCorruption;
         }
 
         try self.analysisPass(wal, &txn_states, &redo_list, &stats);

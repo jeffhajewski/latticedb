@@ -308,6 +308,90 @@ test "lnl: indexes, full-text, vectors and the changefeed follow commit and roll
 }
 
 // ============================================================================
+// Changefeed retention
+// ============================================================================
+
+const Retention = lattice.stream.changefeed.Retention;
+
+/// Commit `n` transactions of one node each: two changefeed events apiece.
+fn commitNodes(db: *Database, n: usize) !void {
+    for (0..n) |_| {
+        var txn = try db.beginTransaction(.read_write);
+        _ = try db.createNode(&txn, &.{"N"});
+        try db.commitTransaction(&txn);
+    }
+}
+
+fn retentionConfig(mode: Mode, retention: Retention) DatabaseConfig {
+    var config = configFor(mode);
+    config.changefeed_retention = retention;
+    // With a log, retention acts at checkpoints; these come often here.
+    config.auto_checkpoint = .{ .max_wal_frames = 20, .min_interval_ns = 0 };
+    return config;
+}
+
+test "lnl: retention keeps the changefeed to its policy with or without a log" {
+    for (modes) |mode| {
+        var buf: [128]u8 = undefined;
+        const path = pathFor(&buf, "retention", mode);
+        const config = retentionConfig(mode, .{ .keep_last = 100 });
+        defer removeFiles(path);
+        {
+            var db = try openFresh(path, config);
+            defer db.close();
+            try commitNodes(db, 500);
+            // With a log, a checkpoint trims; without one, a flush does,
+            // and sync is one. At most the policy plus what came since.
+            try db.sync();
+            const size = try db.changefeedSize();
+            try std.testing.expect(size.events >= 100 and size.events < 200);
+            try std.testing.expectEqual(@as(u64, 1000), (try db.changefeedStatus()).last_sequence);
+        }
+        // Closing applies the policy too, and the file keeps the result.
+        var db = try reopen(path, config);
+        defer db.close();
+        const size = try db.changefeedSize();
+        try std.testing.expectEqual(@as(u64, 100), size.events);
+        try std.testing.expectEqual(@as(?u64, 901), (try db.changefeedStatus()).oldest_sequence);
+    }
+}
+
+test "lnl: without a log, the flushes a commit brings on apply retention" {
+    var buf: [128]u8 = undefined;
+    const path = pathFor(&buf, "retention_flush", .no_log);
+    var config = retentionConfig(.no_log, .{ .keep_last = 100 });
+    // A small cache, so that commits fill half of it and flush.
+    config.enable_fts = false;
+    config.buffer_pool_size = 64 * 4096;
+    var db = try openFresh(path, config);
+    defer {
+        db.close();
+        removeFiles(path);
+    }
+    try commitNodes(db, 3000);
+    // No sync: only the flushes after commits have trimmed.
+    const size = try db.changefeedSize();
+    try std.testing.expect(size.events >= 100 and size.events < 1000);
+    try std.testing.expectEqual(@as(u64, 6000), (try db.changefeedStatus()).last_sequence);
+}
+
+test "lnl: retention off records no events with or without a log" {
+    for (modes) |mode| {
+        var buf: [128]u8 = undefined;
+        const path = pathFor(&buf, "retention_off", mode);
+        var db = try openFresh(path, retentionConfig(mode, .off));
+        defer {
+            db.close();
+            removeFiles(path);
+        }
+        try commitNodes(db, 50);
+        try run(db, "CREATE (:M {i: 1})");
+        try std.testing.expectEqual(@as(u64, 0), (try db.changefeedSize()).events);
+        try std.testing.expectEqual(@as(i64, 51), try count(db, "MATCH (n) RETURN count(n)"));
+    }
+}
+
+// ============================================================================
 // Failure and crashes
 // ============================================================================
 

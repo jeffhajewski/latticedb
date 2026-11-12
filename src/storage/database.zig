@@ -469,8 +469,8 @@ pub const DatabaseConfig = struct {
     /// database with no value here takes `LATTICE_CHANGEFEED_RETENTION` from
     /// the environment if it is set (`all`, `off`, `last:<n>`, `age:<d>`).
     ///
-    /// Retention acts at checkpoints and on `trimChangefeed`, oldest events
-    /// first. `off` writes no events at all.
+    /// Retention acts at checkpoints (without a log, at flushes) and on
+    /// `trimChangefeed`, oldest events first. `off` writes no events at all.
     changefeed_retention: ?changefeed_mod.Retention = null,
 
     pub const SyncMode = enum { full, normal };
@@ -1764,6 +1764,7 @@ pub const Database = struct {
         // hold part of one. The log has all of it; the file must not get
         // the trees.
         if (self.failed) return DatabaseError.IoError;
+        try self.applyChangefeedRetentionWithoutLog();
         try self.flushPages();
     }
 
@@ -1808,6 +1809,7 @@ pub const Database = struct {
         if (self.read_only or self.failed) return;
         if (self.buffer_pool.dirtyCount() * 2 < self.buffer_pool.frame_count) return;
         if (self.buffer_pool.hasPinnedFrames()) return;
+        self.applyChangefeedRetentionWithoutLog() catch return;
 
         // The vector index's node map lives in memory, and the pages it
         // describes are among those about to be written. An image with the
@@ -2279,6 +2281,7 @@ pub const Database = struct {
         // always done this in lattice_close; the Zig API and the CLI left
         // the whole log for the next open to replay.
         self.checkpointLeftoverLog();
+        self.applyChangefeedRetentionWithoutLog() catch {};
 
         // Reverse initialization order
 
@@ -5466,6 +5469,20 @@ pub const Database = struct {
         const result = changefeed_mod.trimBelow(trees, self.allocator, target, max_events) catch |err| return mapChangefeedError(err);
         if (result.done) self.changefeed_appended_since_trim = 0;
         return result;
+    }
+
+    /// Without a log there are no checkpoints, and retention acts at the
+    /// flushes instead, which is where a checkpoint would have written the
+    /// same pages: `sync`, close, and the flush after a commit once the
+    /// cache is half dirty. The events dropped go to the file in the same
+    /// flush as the floor, so a crash keeps both or neither.
+    fn applyChangefeedRetentionWithoutLog(self: *Self) DatabaseError!void {
+        if (self.wal != null) return;
+        if (self.changefeed_retention == .keep_all) return;
+        // A writer between its statements: its staged events are not in
+        // the trees yet, and trimming may wait for its commit.
+        if (self.active_writer_txn_id != null) return;
+        _ = try self.applyChangefeedRetention(changefeed_trim_slack + self.changefeed_appended_since_trim);
     }
 
     /// Apply the retention policy in full now, rather than a bounded part

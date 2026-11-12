@@ -370,7 +370,9 @@ were dropped. It is refused while a write transaction is open on the handle
 
 Otherwise, events are dropped at checkpoints: automatically once the log
 passes its threshold (1,000 log frames by default), on `lattice checkpoint`,
-and when the database is closed.
+and when the database is closed. A database opened without the log has no
+checkpoints; its events are dropped when its pages are flushed instead: on
+`sync()`, at close, and after a commit once half the page cache holds changes.
 
 You can also drop events through a sequence yourself, in a write transaction,
 with the stream trim every stream has (`txn.trim_stream("__lattice_changes", s)`,

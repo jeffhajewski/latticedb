@@ -3,6 +3,8 @@ package latticedb
 import (
 	"errors"
 	"fmt"
+	"math"
+	"time"
 
 	cgobridge "github.com/jeffhajewski/latticedb/bindings/go/internal/cgo"
 )
@@ -253,6 +255,88 @@ func (db *DB) Query(cypher string, params map[string]Value) (QueryResult, error)
 		return result, db.View(run)
 	}
 	return result, db.Update(run)
+}
+
+// Checkpoint folds the log (the -wal file) into the database file now.
+//
+// A commit is durable once it is in the log; a checkpoint writes the pages the
+// log's commits changed into the database file and, with CheckpointTruncate,
+// empties the log. See CheckpointMode for what each mode does.
+//
+// It returns ErrorInvalidArg for a mode other than the three constants, without
+// calling the library; ErrorReadOnly on a read-only database; ErrorLockTimeout
+// if a transaction already has records in the log, because a checkpoint would
+// cut its commit off from them; and ErrorIO if writing failed, in which case the
+// log still holds every commit.
+func (db *DB) Checkpoint(mode CheckpointMode) (CheckpointStats, error) {
+	switch mode {
+	case CheckpointPassive, CheckpointFull, CheckpointTruncate:
+	default:
+		return CheckpointStats{}, &Error{
+			Code:    ErrorInvalidArg,
+			Message: fmt.Sprintf("latticedb: unknown checkpoint mode %d", int(mode)),
+		}
+	}
+	if db == nil || db.raw == nil {
+		return CheckpointStats{}, ErrDatabaseClosed
+	}
+
+	stats, err := db.raw.Checkpoint(int(mode))
+	if err != nil {
+		return CheckpointStats{}, wrapError(err)
+	}
+	duration := time.Duration(math.MaxInt64)
+	if stats.DurationNS <= math.MaxInt64 {
+		duration = time.Duration(stats.DurationNS)
+	}
+	return CheckpointStats{
+		PagesFlushed:  stats.PagesFlushed,
+		Duration:      duration,
+		CheckpointLSN: stats.CheckpointLSN,
+		WALTruncated:  stats.WALTruncated,
+	}, nil
+}
+
+// SetAutoCheckpoint sets when commits checkpoint from now on.
+//
+// A commit runs a CheckpointTruncate checkpoint once the log holds
+// maxWALFrames frames (one frame is one page, usually 4096 bytes), and no
+// sooner than minInterval after the last automatic one. minInterval is passed
+// in whole milliseconds, rounded up so it is never shorter than asked (a
+// nonzero interval under a millisecond becomes 1ms); 0 means no minimum. maxWALFrames 0 switches automatic checkpoints off: the log
+// grows until Checkpoint runs, though Close still folds it into the file.
+//
+// Without this call the default is 1000 frames, or the
+// LATTICE_AUTO_CHECKPOINT_FRAMES environment variable (0 for none); this call
+// wins over the variable. It has no effect on a read-only database.
+//
+// A larger interval means fewer checkpoints, each a longer pause for the
+// commit that runs it, a longer log on disk and more to replay after a crash. A
+// smaller one means shorter pauses, more often.
+//
+// A negative minInterval returns ErrorInvalidArg without calling the library.
+func (db *DB) SetAutoCheckpoint(maxWALFrames uint64, minInterval time.Duration) error {
+	if minInterval < 0 {
+		return &Error{
+			Code:    ErrorInvalidArg,
+			Message: fmt.Sprintf("latticedb: negative checkpoint interval %v", minInterval),
+		}
+	}
+	if db == nil || db.raw == nil {
+		return ErrDatabaseClosed
+	}
+
+	return wrapError(db.raw.SetAutoCheckpoint(maxWALFrames, checkpointIntervalMS(minInterval)))
+}
+
+// checkpointIntervalMS converts a non-negative interval to whole milliseconds,
+// rounding up so the interval is never shorter than asked.
+func checkpointIntervalMS(d time.Duration) uint64 {
+	ms := uint64(d / time.Millisecond)
+	if d%time.Millisecond != 0 {
+		ms++
+	}
+	return ms
 }
 
 func (db *DB) CacheClear() error {

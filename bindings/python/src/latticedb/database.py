@@ -34,6 +34,10 @@ from latticedb._bindings import (
     LATTICE_VECTOR_METRIC_COSINE,
     LATTICE_VECTOR_METRIC_DOT_PRODUCT,
     LATTICE_VECTOR_METRIC_EUCLIDEAN,
+    LATTICE_CHECKPOINT_FULL,
+    LATTICE_CHECKPOINT_PASSIVE,
+    LATTICE_CHECKPOINT_TRUNCATE,
+    LatticeCheckpointStats,
     LATTICE_OK,
     LATTICE_ERROR_IO,
     LATTICE_ERROR_UNSUPPORTED,
@@ -49,6 +53,7 @@ from latticedb._bindings import (
 from latticedb.transaction import Transaction
 from latticedb.types import (
     ChangefeedStatus,
+    CheckpointStats,
     QueryResult,
     VectorSearchResult,
     FtsSearchResult,
@@ -62,6 +67,12 @@ _VECTOR_METRICS = {
     "euclidean": LATTICE_VECTOR_METRIC_EUCLIDEAN,
     "dot_product": LATTICE_VECTOR_METRIC_DOT_PRODUCT,
 }
+_CHECKPOINT_MODES = {
+    "passive": LATTICE_CHECKPOINT_PASSIVE,
+    "full": LATTICE_CHECKPOINT_FULL,
+    "truncate": LATTICE_CHECKPOINT_TRUNCATE,
+}
+_MAX_U64 = 2**64 - 1
 
 
 def _sync_mode_code(sync_mode: Optional[str]) -> int:
@@ -1140,6 +1151,99 @@ class Database:
             # Free the result handle
             if result_ptr.value:
                 lib._lib.lattice_fts_result_free(result_ptr)
+
+    def checkpoint(self, mode: str = "truncate") -> CheckpointStats:
+        """Fold the log (the ``-wal`` file) into the database file now.
+
+        A commit is durable once it is in the log; a checkpoint writes the
+        pages the log's commits changed into the database file and can then
+        empty the log.
+
+        Args:
+            mode: ``"passive"`` writes the changed pages unless one is in use,
+                in which case it writes nothing and reports 0 pages; the log is
+                left in place. ``"full"`` writes every changed page and leaves
+                the log in place. ``"truncate"`` (the default, and what automatic
+                checkpoints do) is ``"full"`` and then empties the log; it is the
+                only mode that bounds the log's size.
+
+        Returns:
+            A :class:`CheckpointStats` saying what the checkpoint did.
+
+        Raises:
+            ValueError: ``mode`` is not one of the three above.
+            LatticeReadOnlyError: The database was opened read-only.
+            LatticeLockTimeoutError: A transaction already has records in the
+                log, so a checkpoint would cut its commit off from them.
+            LatticeIOError: Writing failed; the log still holds every commit.
+            LatticeUnsupportedError: The native library has no
+                ``lattice_checkpoint``.
+        """
+        try:
+            mode_code = _CHECKPOINT_MODES[mode]
+        except (KeyError, TypeError):
+            raise ValueError(
+                f"mode must be 'passive', 'full' or 'truncate', not {mode!r}"
+            ) from None
+        if self._handle is None:
+            raise RuntimeError("Database is not open")
+
+        lib = get_lib()
+        if not getattr(lib, "_has_checkpoint", False):
+            raise LatticeUnsupportedError(
+                "the native library is too old to support checkpoint"
+            )
+
+        stats = LatticeCheckpointStats()
+        code = lib._lib.lattice_checkpoint(self._handle, mode_code, byref(stats))
+        check_error(code)
+        return CheckpointStats(
+            pages_flushed=int(stats.pages_flushed),
+            duration_ns=int(stats.duration_ns),
+            checkpoint_lsn=int(stats.checkpoint_lsn),
+            wal_truncated=bool(stats.wal_truncated),
+        )
+
+    def set_auto_checkpoint(self, max_wal_frames: int, min_interval_ms: int = 0) -> None:
+        """Set when commits checkpoint from now on.
+
+        A commit runs a ``"truncate"`` checkpoint once the log holds
+        ``max_wal_frames`` frames (one frame is one page, usually 4096 bytes),
+        and no sooner than ``min_interval_ms`` after the last automatic one.
+        ``max_wal_frames=0`` switches automatic checkpoints off: the log grows
+        until :meth:`checkpoint` runs, though closing still folds it into the
+        file. Without this call the default is 1000 frames, or the
+        ``LATTICE_AUTO_CHECKPOINT_FRAMES`` environment variable (0 for none);
+        this call wins over the variable. It has no effect on a read-only
+        database.
+
+        A larger interval means fewer checkpoints, each a longer pause for the
+        commit that runs it, a longer log on disk and more to replay after a
+        crash. A smaller one means shorter pauses, more often.
+
+        Raises:
+            TypeError: An argument is not an ``int``.
+            ValueError: An argument is negative or does not fit in 64 bits.
+            LatticeUnsupportedError: The native library has no
+                ``lattice_set_auto_checkpoint``.
+        """
+        args = (("max_wal_frames", max_wal_frames), ("min_interval_ms", min_interval_ms))
+        for name, value in args:
+            if isinstance(value, bool) or not isinstance(value, int):
+                raise TypeError(f"{name} must be an int, not {type(value).__name__}")
+            if value < 0 or value > _MAX_U64:
+                raise ValueError(f"{name} must be between 0 and 2**64 - 1, not {value}")
+        if self._handle is None:
+            raise RuntimeError("Database is not open")
+
+        lib = get_lib()
+        if not getattr(lib, "_has_set_auto_checkpoint", False):
+            raise LatticeUnsupportedError(
+                "the native library is too old to support set_auto_checkpoint"
+            )
+
+        code = lib._lib.lattice_set_auto_checkpoint(self._handle, max_wal_frames, min_interval_ms)
+        check_error(code)
 
     def cache_clear(self) -> None:
         """

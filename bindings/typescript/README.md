@@ -203,6 +203,8 @@ Node IDs, edge IDs and stream sequence numbers are `bigint`.
 - `await db.readStream(stream, options?)` - Read durable stream records by cursor. With `timeoutMs > 0` the wait runs on a worker thread, so the event loop keeps running and a commit from the same process can end the wait
 - `await db.getStreamOffset(stream, consumer)` - Read a committed consumer offset
 - `await db.changes(options?)` - Read the built-in graph changefeed
+- `await db.checkpoint(mode = 'truncate')` - Fold the log into the database file now; resolves to `CheckpointStats` (see [Checkpoints](#checkpoints))
+- `await db.setAutoCheckpoint(maxWalFrames, minIntervalMs = 0)` - Set when commits checkpoint from now on; `0` frames switches automatic checkpoints off
 - `await db.cacheClear()` - Clear the query cache
 - `await db.cacheStats()` - Get cache hit/miss statistics
 - `db.isOpen()` - Check if database is open
@@ -419,6 +421,43 @@ console.log(
 // Clear the cache
 await db.cacheClear();
 ```
+
+### Checkpoints
+
+A commit is durable once it is in the log (the `-wal` file beside the database).
+A checkpoint writes the pages the log's commits changed into the database file
+and can then empty the log. By default a commit runs one once the log holds 1000
+frames (one frame per page, 4096 bytes); the `LATTICE_AUTO_CHECKPOINT_FRAMES`
+environment variable sets another default (`0` for none), and
+`setAutoCheckpoint` wins over it. Closing a database always folds the log into
+the file.
+
+```typescript
+import type { CheckpointStats } from '@hajewski/latticedb';
+
+await db.setAutoCheckpoint(0);   // commits never checkpoint; the log grows
+// ... a burst of commits ...
+const stats: CheckpointStats = await db.checkpoint('truncate');
+console.log(stats.pagesFlushed, stats.durationNs, stats.checkpointLsn, stats.walTruncated);
+
+await db.setAutoCheckpoint(4000, 1000); // every 4000 frames, at most once a second
+```
+
+Modes (`CheckpointMode`): `'passive'` writes the changed pages unless one is in
+use (then it writes nothing and reports 0 pages) and leaves the log in place;
+`'full'` writes every changed page and leaves the log in place; `'truncate'` (the
+default) does what `'full'` does and then empties the log, the only mode that
+bounds its size. Any other mode throws a `TypeError`, and a negative or
+fractional argument to `setAutoCheckpoint` a `RangeError`. `durationNs` and
+`checkpointLsn` are `bigint`. `checkpoint` rejects with code -9 (`ReadOnly`) on a
+read-only database and -8 (`LockTimeout`) if a transaction already has records
+in the log; `setAutoCheckpoint` has no effect on a read-only database. Against a
+native library without `lattice_checkpoint`, both reject with code -14
+(`Unsupported`).
+
+The interval is a trade-off. A larger one means fewer checkpoints, each a longer
+pause for the commit that runs it, a longer `-wal` file and more to replay after
+a crash. A smaller one means shorter pauses, more often.
 
 ### Durable Streams and Changefeeds
 

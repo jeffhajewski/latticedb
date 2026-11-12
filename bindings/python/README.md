@@ -166,6 +166,8 @@ recover it on disk.
 - `get_stream_offset(stream, consumer)` - Read a committed consumer offset
 - `changes(*, after_sequence=0, limit=100, timeout_ms=0)` - Read the built-in graph changefeed
 - `serialize()` - Return the whole database as bytes
+- `checkpoint(mode="truncate")` - Fold the log into the database file now; returns `CheckpointStats` (see [Checkpoints](#checkpoints))
+- `set_auto_checkpoint(max_wal_frames, min_interval_ms=0)` - Set when commits checkpoint from now on; `0` frames switches automatic checkpoints off
 - `cache_clear()` - Clear the query cache
 - `cache_stats()` - Get cache hit/miss statistics
 
@@ -369,6 +371,41 @@ print(f"Entries: {stats['entries']}, Hits: {stats['hits']}, Misses: {stats['miss
 # Clear the cache
 db.cache_clear()
 ```
+
+### Checkpoints
+
+A commit is durable once it is in the log (the `-wal` file beside the database).
+A checkpoint writes the pages the log's commits changed into the database file
+and can then empty the log. By default a commit runs one once the log holds 1000
+frames (one frame per page, 4096 bytes); the `LATTICE_AUTO_CHECKPOINT_FRAMES`
+environment variable sets another default (`0` for none), and
+`set_auto_checkpoint` wins over it. Closing a database always folds the log into
+the file.
+
+```python
+db.set_auto_checkpoint(0)          # commits never checkpoint; the log grows
+# ... a burst of commits ...
+stats = db.checkpoint("truncate")  # write the changed pages, then empty the log
+print(stats.pages_flushed, stats.duration_ns, stats.checkpoint_lsn, stats.wal_truncated)
+
+db.set_auto_checkpoint(4000, min_interval_ms=1000)  # every 4000 frames, at most once a second
+```
+
+Modes: `"passive"` writes the changed pages unless one is in use (then it writes
+nothing and reports 0 pages) and leaves the log in place; `"full"` writes every
+changed page and leaves the log in place; `"truncate"` (the default) does what
+`"full"` does and then empties the log, the only mode that bounds its size. Any
+other mode raises `ValueError`. `checkpoint` raises `LatticeReadOnlyError` on a
+read-only database and `LatticeLockTimeoutError` if a transaction already has
+records in the log; `set_auto_checkpoint` has no effect on a read-only database
+and raises `ValueError` for a negative argument.
+
+The interval is a trade-off. A larger one means fewer checkpoints, each a longer
+pause for the commit that runs it, a longer `-wal` file and more to replay after
+a crash. A smaller one means shorter pauses, more often.
+
+Both need a native library with `lattice_checkpoint`; against an older one they
+raise `LatticeUnsupportedError`.
 
 ### Durable Streams and Changefeeds
 

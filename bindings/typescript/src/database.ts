@@ -10,6 +10,7 @@ import {
   VectorSearchOptions,
   FtsSearchOptions,
   StreamRecord,
+  CheckpointStats,
 } from './types';
 import {
   getFFI,
@@ -22,6 +23,7 @@ import {
   ChangefeedRetention,
   ChangefeedStatus,
   LatticeChangesTrimmedError,
+  CheckpointMode,
 } from './ffi';
 
 /**
@@ -582,6 +584,56 @@ export class Database {
     } finally {
       ffi.ftsResultFree(resultHandle);
     }
+  }
+
+  /**
+   * Fold the log (the -wal file) into the database file now.
+   *
+   * A commit is durable once it is in the log; a checkpoint writes the pages
+   * the log's commits changed into the database file and can then empty the
+   * log. `'passive'` writes the changed pages unless one is in use, in which
+   * case it writes nothing and reports 0 pages, and leaves the log in place.
+   * `'full'` writes every changed page and leaves the log in place.
+   * `'truncate'` (the default, and what automatic checkpoints do) does what
+   * `'full'` does and then empties the log; it is the only mode that bounds the
+   * log's size.
+   *
+   * @param mode - `'passive'`, `'full'` or `'truncate'`; anything else throws a
+   *   TypeError before the library is called
+   * @returns What the checkpoint did
+   * @throws LatticeError with code -9 (`ReadOnly`) on a read-only database,
+   *   -8 (`LockTimeout`) if a transaction already has records in the log, -2
+   *   (`IoError`) if writing failed (the log still holds every commit), and -14
+   *   (`Unsupported`) if the native library has no `lattice_checkpoint`
+   */
+  async checkpoint(mode: CheckpointMode = 'truncate'): Promise<CheckpointStats> {
+    this.ensureOpen();
+    return this.ffi!.checkpoint(this.dbHandle!, mode);
+  }
+
+  /**
+   * Set when commits checkpoint from now on.
+   *
+   * A commit runs a `'truncate'` checkpoint once the log holds `maxWalFrames`
+   * frames (one frame is one page, usually 4096 bytes), and no sooner than
+   * `minIntervalMs` after the last automatic one. `maxWalFrames = 0` switches
+   * automatic checkpoints off: the log grows until {@link Database.checkpoint}
+   * runs, though closing still folds it into the file. Without this call the
+   * default is 1000 frames, or the LATTICE_AUTO_CHECKPOINT_FRAMES environment
+   * variable (0 for none); this call wins over the variable. It has no effect on
+   * a read-only database.
+   *
+   * A larger interval means fewer checkpoints, each a longer pause for the
+   * commit that runs it, a longer log on disk and more to replay after a crash.
+   * A smaller one means shorter pauses, more often.
+   *
+   * @throws RangeError if either argument is not a non-negative safe integer;
+   *   LatticeError with code -14 (`Unsupported`) if the native library has no
+   *   `lattice_set_auto_checkpoint`
+   */
+  async setAutoCheckpoint(maxWalFrames: number, minIntervalMs = 0): Promise<void> {
+    this.ensureOpen();
+    this.ffi!.setAutoCheckpoint(this.dbHandle!, maxWalFrames, minIntervalMs);
   }
 
   /**

@@ -434,6 +434,68 @@ public final class Database implements AutoCloseable {
         return new QueryCacheStats((Integer) out[0], (Long) out[1], (Long) out[2]);
     }
 
+    /* ------------------------------------------------------------------ */
+    /* Checkpoints                                                         */
+    /* ------------------------------------------------------------------ */
+
+    /** Runs a {@link CheckpointMode#TRUNCATE} checkpoint now. */
+    public CheckpointStats checkpoint() {
+        return checkpoint(CheckpointMode.TRUNCATE);
+    }
+
+    /**
+     * Folds the log (the {@code -wal} file) into the database file now.
+     *
+     * <p>A commit is durable once it is in the log; a checkpoint writes the
+     * pages the log's commits changed into the database file and, with
+     * {@link CheckpointMode#TRUNCATE}, empties the log.</p>
+     *
+     * <p>Throws {@link ErrorCode#READ_ONLY} on a read-only database,
+     * {@link ErrorCode#LOCK_TIMEOUT} if a transaction already has records in
+     * the log (a checkpoint would cut its commit off from them), and
+     * {@link ErrorCode#IO} if writing failed, in which case the log still holds
+     * every commit.</p>
+     *
+     * @throws NullPointerException if {@code mode} is null
+     */
+    public CheckpointStats checkpoint(CheckpointMode mode) {
+        Objects.requireNonNull(mode, "mode");
+        long[] out = Native.checkpoint(handle(), mode.code());
+        return new CheckpointStats((int) out[0], out[1], out[2], out[3] != 0);
+    }
+
+    /**
+     * Sets when commits checkpoint from now on.
+     *
+     * <p>A commit runs a {@link CheckpointMode#TRUNCATE} checkpoint once the
+     * log holds {@code maxWalFrames} frames (one frame is one page, usually
+     * 4096 bytes), and no sooner than {@code minIntervalMs} after the last
+     * automatic one (0 for no minimum). {@code maxWalFrames} 0 switches
+     * automatic checkpoints off: the log grows until {@link #checkpoint}
+     * runs, though {@link #close()} still folds it into the file. Without this
+     * call the default is 1000 frames, or the
+     * {@code LATTICE_AUTO_CHECKPOINT_FRAMES} environment variable (0 for
+     * none); this call wins over the variable. It has no effect on a
+     * read-only database.</p>
+     *
+     * <p>A larger interval means fewer checkpoints, each a longer pause for
+     * the commit that runs it, a longer log on disk and more to replay after a
+     * crash. A smaller one means shorter pauses, more often.</p>
+     *
+     * @throws IllegalArgumentException if either argument is negative
+     */
+    public void setAutoCheckpoint(long maxWalFrames, long minIntervalMs) {
+        if (maxWalFrames < 0) {
+            throw new IllegalArgumentException(
+                    "maxWalFrames must not be negative: " + maxWalFrames);
+        }
+        if (minIntervalMs < 0) {
+            throw new IllegalArgumentException(
+                    "minIntervalMs must not be negative: " + minIntervalMs);
+        }
+        Native.setAutoCheckpoint(handle(), maxWalFrames, minIntervalMs);
+    }
+
     @Override
     public String toString() {
         return "Database[path=" + path + ", open=" + isOpen() + "]";

@@ -23,6 +23,7 @@ from latticedb.types import (
     FtsSearchResult,
     StreamRecord,
     ChangefeedStatus,
+    CheckpointStats,
 )
 from latticedb.embedding import (
     hash_embed as _hash_embed,
@@ -108,6 +109,7 @@ __all__ = [
     "FtsSearchResult",
     "StreamRecord",
     "ChangefeedStatus",
+    "CheckpointStats",
     # Exceptions
     "LatticeError",
     "LatticeIOError",

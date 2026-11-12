@@ -78,7 +78,7 @@ mvn -q compile exec:java@run-example -Dexec.args=/tmp/knowledge.db
   edge properties, `ftsSearch`/`ftsSearchFuzzy`,
   `getNodesByLabel`, property-index create/drop, durable streams
   (`readStream`, `getLastSequence`, `getStreamOffset`, `changes`),
-  query-cache stats/clear.
+  query-cache stats/clear, `checkpoint`/`setAutoCheckpoint`.
 - `Transaction`: node/edge CRUD with properties (nested `List`/`Map` values,
   `byte[]`, `float[]` supported), labels, vectors, equality-index
   lookups, batch vector insert, stream publish/offsets/trim, Cypher queries,
@@ -114,6 +114,26 @@ mvn -q compile exec:java@run-example -Dexec.args=/tmp/knowledge.db
   or not. Cosine stores vectors at unit length and returns
   cosine distance; Euclidean returns the L2 distance and dot product the negative
   dot product, both over vectors stored as given; results come smallest first.
+- A commit is durable once it is in the log (the `-wal` file beside the
+  database); a checkpoint writes the pages the log's commits changed into the
+  database file. `Database.checkpoint(CheckpointMode)` does it now and returns
+  `CheckpointStats` (`pagesFlushed`, `durationNs`, `checkpointLsn`,
+  `walTruncated`); `checkpoint()` means `TRUNCATE`. `PASSIVE` writes the changed
+  pages unless one is in use (then nothing, 0 pages) and leaves the log in place;
+  `FULL` writes every changed page and leaves the log in place; `TRUNCATE` does
+  what `FULL` does and then empties the log, the only mode that bounds its size.
+  A read-only database throws `ErrorCode.READ_ONLY`, and a transaction that
+  already has records in the log `ErrorCode.LOCK_TIMEOUT`. By default a commit
+  checkpoints once the log holds 1000 frames (one frame per page, 4096 bytes);
+  the `LATTICE_AUTO_CHECKPOINT_FRAMES` environment variable sets another default
+  (`0` for none), and `setAutoCheckpoint(maxWalFrames, minIntervalMs)` wins over
+  it from then on: a commit checkpoints once the log holds `maxWalFrames` frames
+  and no sooner than `minIntervalMs` after the last automatic one; 0 frames
+  switches automatic checkpoints off, and `close` still folds the log into the
+  file. It has no effect on a read-only database, and a negative argument throws
+  `IllegalArgumentException`. A larger interval means fewer checkpoints, each a
+  longer pause for the commit that runs it, a longer `-wal` file and more to
+  replay after a crash; a smaller one means shorter pauses, more often.
 - `Transaction.deleteNode` refuses a node that still has relationships with
   `ErrorCode.HAS_RELATIONSHIPS` and deletes nothing, as Cypher's `DELETE` does;
   `detachDeleteNode` deletes the node with all its relationships, as

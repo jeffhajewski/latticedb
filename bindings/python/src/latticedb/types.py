@@ -182,3 +182,17 @@ class ChangefeedStatus:
     oldest_sequence: Optional[int]
     #: The last sequence handed to an event, 0 if none ever was.
     last_sequence: int
+
+
+@dataclass(frozen=True)
+class CheckpointStats:
+    """What a checkpoint did (see :meth:`Database.checkpoint`)."""
+
+    pages_flushed: int
+    """Pages written into the database file."""
+    duration_ns: int
+    """How long the checkpoint took, in nanoseconds."""
+    checkpoint_lsn: int
+    """The log position the database file now holds."""
+    wal_truncated: bool
+    """Whether the log (the ``-wal`` file) was emptied."""

@@ -107,6 +107,13 @@ type QueryCacheStats struct {
 	Misses  uint64
 }
 
+type CheckpointStats struct {
+	PagesFlushed  uint32
+	DurationNS    uint64
+	CheckpointLSN uint64
+	WALTruncated  bool
+}
+
 type VectorSearchResult struct {
 	NodeID   uint64
 	Distance float32
@@ -290,6 +297,41 @@ func (db *DB) Begin(readOnly bool) (*Tx, error) {
 	}
 
 	return &Tx{ptr: txn, db: db}, nil
+}
+
+// Checkpoint runs lattice_checkpoint with mode, which the caller has checked.
+func (db *DB) Checkpoint(mode int) (CheckpointStats, error) {
+	if db == nil || db.ptr == nil {
+		return CheckpointStats{}, &Error{Code: ErrorInvalidArg, Message: "database is not open"}
+	}
+
+	var stats C.lattice_checkpoint_stats
+	if err := errorFromCode(ErrorCode(C.lattice_checkpoint(
+		db.ptr,
+		C.lattice_checkpoint_mode(mode),
+		&stats,
+	))); err != nil {
+		return CheckpointStats{}, err
+	}
+
+	return CheckpointStats{
+		PagesFlushed:  uint32(stats.pages_flushed),
+		DurationNS:    uint64(stats.duration_ns),
+		CheckpointLSN: uint64(stats.checkpoint_lsn),
+		WALTruncated:  bool(stats.wal_truncated),
+	}, nil
+}
+
+// SetAutoCheckpoint runs lattice_set_auto_checkpoint.
+func (db *DB) SetAutoCheckpoint(maxWALFrames, minIntervalMS uint64) error {
+	if db == nil || db.ptr == nil {
+		return &Error{Code: ErrorInvalidArg, Message: "database is not open"}
+	}
+	return errorFromCode(ErrorCode(C.lattice_set_auto_checkpoint(
+		db.ptr,
+		C.uint64_t(maxWALFrames),
+		C.uint64_t(minIntervalMS),
+	)))
 }
 
 func (db *DB) CacheClear() error {

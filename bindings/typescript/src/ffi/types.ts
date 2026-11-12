@@ -73,6 +73,15 @@ export const enum LatticeChangefeedRetention {
 }
 
 /**
+ * lattice_checkpoint_mode values.
+ */
+export const enum LatticeCheckpointMode {
+  Passive = 0,
+  Full = 1,
+  Truncate = 2,
+}
+
+/**
  * Transaction modes
  */
 export const enum LatticeTxnMode {

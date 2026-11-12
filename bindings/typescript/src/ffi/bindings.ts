@@ -132,6 +132,13 @@ const LatticeOpenOptionsV5 = defineNamedType('lattice_open_options_v5', () => ko
   changefeed_retention_value: 'uint64',
 }));
 
+const LatticeCheckpointStats = defineNamedType('lattice_checkpoint_stats', () => koffi.struct('lattice_checkpoint_stats', {
+  pages_flushed: 'uint32',
+  duration_ns: 'uint64',
+  checkpoint_lsn: 'uint64',
+  wal_truncated: 'bool',
+}));
+
 // Define struct for string in value union
 const LatticeStringValue = defineNamedType('lattice_string_value', () => koffi.struct('lattice_string_value', {
   ptr: 'void*',
@@ -259,6 +266,12 @@ export interface LatticeBindings {
   ) => number;
   lattice_free_bytes?: (bytes: unknown, len: number) => void;
   lattice_close: (db: unknown) => number;
+  lattice_checkpoint?: (db: unknown, mode: number, stats_out: Buffer | null) => number;
+  lattice_set_auto_checkpoint?: (
+    db: unknown,
+    max_wal_frames: bigint,
+    min_interval_ms: bigint
+  ) => number;
 
   // Transaction operations
   lattice_begin: (
@@ -758,6 +771,7 @@ function createBindings(): LatticeBindings {
   const OpenOptionsV3Ptr = koffi.pointer(LatticeOpenOptionsV3);
   const OpenOptionsV4Ptr = koffi.pointer(LatticeOpenOptionsV4);
   const OpenOptionsV5Ptr = koffi.pointer(LatticeOpenOptionsV5);
+  const CheckpointStatsPtr = koffi.pointer(LatticeCheckpointStats);
   const ValuePtr = koffi.pointer(LatticeValue);
   const ValueConstPtr = koffi.pointer(LatticeValue);
   const ValueConstPtrPtr = koffi.pointer(ValueConstPtr);
@@ -838,6 +852,16 @@ function createBindings(): LatticeBindings {
       'size_t',
     ]),
     lattice_close: lib.func('lattice_close', 'int', [DatabasePtr]),
+    lattice_checkpoint: tryOptionalFunc(lib, 'lattice_checkpoint', 'int', [
+      DatabasePtr,
+      'int', // mode
+      CheckpointStatsPtr, // stats_out (may be NULL)
+    ]),
+    lattice_set_auto_checkpoint: tryOptionalFunc(lib, 'lattice_set_auto_checkpoint', 'int', [
+      DatabasePtr,
+      'uint64', // max_wal_frames
+      'uint64', // min_interval_ms
+    ]),
 
     // Transaction operations
     lattice_begin: lib.func('lattice_begin', 'int', [

@@ -193,6 +193,12 @@ final class Native {
     /** Returns Object[3]: Integer entries, Long hits, Long misses. */
     static native Object[] cacheStats(long db);
 
+    /* Checkpoints */
+    /** Returns long[4]: pagesFlushed, durationNs, checkpointLsn, walTruncated (0 or 1). */
+    static native long[] checkpoint(long db, int mode);
+
+    static native void setAutoCheckpoint(long db, long maxWalFrames, long minIntervalMs);
+
     /* Embedding helpers */
     static native float[] hashEmbed(String text, int dimensions);
 

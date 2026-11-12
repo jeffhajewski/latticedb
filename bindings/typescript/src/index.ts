@@ -37,6 +37,7 @@ export {
   Value,
   QueryResult,
   StreamRecord,
+  CheckpointStats,
   VectorSearchResult,
   PropertyValue,
   CreateNodeOptions,
@@ -67,6 +68,7 @@ export {
   VectorMetric,
   ChangefeedRetention,
   ChangefeedStatus,
+  CheckpointMode,
 } from './ffi';
 
 /**

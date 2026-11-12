@@ -2054,6 +2054,44 @@ Java_io_latticedb_Native_cacheStats(JNIEnv *env, jclass cls, jlong db_handle) {
 }
 
 /* ------------------------------------------------------------------ */
+/* Checkpoints                                                         */
+/* ------------------------------------------------------------------ */
+
+/* Returns long[4] = { pages_flushed, duration_ns, checkpoint_lsn,
+ * wal_truncated (0 or 1) }. */
+JNIEXPORT jlongArray JNICALL
+Java_io_latticedb_Native_checkpoint(JNIEnv *env, jclass cls, jlong db_handle,
+                                    jint mode) {
+    init_cache(env); (void)cls;
+    lattice_checkpoint_stats stats;
+    memset(&stats, 0, sizeof(stats));
+    lattice_error rc = lattice_checkpoint(
+        (lattice_database *)(uintptr_t)db_handle,
+        (lattice_checkpoint_mode)mode, &stats);
+    if (!check(env, rc)) return NULL;
+    jlong values[4];
+    values[0] = (jlong)stats.pages_flushed;
+    values[1] = (jlong)stats.duration_ns;
+    values[2] = (jlong)stats.checkpoint_lsn;
+    values[3] = stats.wal_truncated ? 1 : 0;
+    jlongArray out = (*env)->NewLongArray(env, 4);
+    if (out == NULL) return NULL;
+    (*env)->SetLongArrayRegion(env, out, 0, 4, values);
+    return out;
+}
+
+/* The Java side refuses negative arguments, so both convert as they are. */
+JNIEXPORT void JNICALL
+Java_io_latticedb_Native_setAutoCheckpoint(JNIEnv *env, jclass cls,
+                                           jlong db_handle, jlong max_wal_frames,
+                                           jlong min_interval_ms) {
+    init_cache(env); (void)cls;
+    check(env, lattice_set_auto_checkpoint(
+        (lattice_database *)(uintptr_t)db_handle,
+        (uint64_t)max_wal_frames, (uint64_t)min_interval_ms));
+}
+
+/* ------------------------------------------------------------------ */
 /* Embedding helpers                                                   */
 /* ------------------------------------------------------------------ */
 

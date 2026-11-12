@@ -99,6 +99,20 @@ export interface StreamRecord {
 }
 
 /**
+ * What a checkpoint did (see `Database.checkpoint`).
+ */
+export interface CheckpointStats {
+  /** Pages written into the database file */
+  pagesFlushed: number;
+  /** How long the checkpoint took, in nanoseconds */
+  durationNs: bigint;
+  /** The log position the database file now holds */
+  checkpointLsn: bigint;
+  /** Whether the log (the -wal file) was emptied */
+  walTruncated: boolean;
+}
+
+/**
  * Result of a vector similarity search.
  */
 export interface VectorSearchResult {

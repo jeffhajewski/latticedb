@@ -15,8 +15,9 @@ import {
   LatticeFullFsync,
   LatticeVectorMetric,
   LatticeChangefeedRetention,
+  LatticeCheckpointMode,
 } from './types';
-import type { PropertyValue, StreamRecord } from '../types';
+import type { CheckpointStats, PropertyValue, StreamRecord } from '../types';
 
 export {
   isLibraryAvailable,
@@ -34,6 +35,7 @@ export {
   LatticeFullFsync,
   LatticeVectorMetric,
   LatticeChangefeedRetention,
+  LatticeCheckpointMode,
 } from './types';
 
 /**
@@ -232,6 +234,14 @@ function changefeedRetentionText(mode: number, value: bigint): ChangefeedRetenti
   }
 }
 
+/**
+ * How a checkpoint folds the log into the database file. `'passive'` writes
+ * the changed pages unless one is in use, and leaves the log in place;
+ * `'full'` writes every changed page and leaves the log in place;
+ * `'truncate'` does what `'full'` does and then empties the log.
+ */
+export type CheckpointMode = 'passive' | 'full' | 'truncate';
+
 function syncModeCode(mode: SyncMode | undefined): number {
   switch (mode) {
     case undefined:
@@ -267,6 +277,29 @@ function vectorMetricCode(metric: VectorMetric | undefined): number {
         `vectorMetric must be 'cosine', 'euclidean' or 'dot_product', not ${String(metric)}`
       );
   }
+}
+
+function checkpointModeCode(mode: CheckpointMode): number {
+  switch (mode) {
+    case 'passive':
+      return LatticeCheckpointMode.Passive;
+    case 'full':
+      return LatticeCheckpointMode.Full;
+    case 'truncate':
+      return LatticeCheckpointMode.Truncate;
+    default:
+      throw new TypeError(
+        `checkpoint mode must be 'passive', 'full' or 'truncate', not ${String(mode)}`
+      );
+  }
+}
+
+/** A count of frames or milliseconds: a non-negative safe integer. */
+function checkpointSetting(name: string, value: number): bigint {
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < 0) {
+    throw new RangeError(`${name} must be a non-negative integer, not ${String(value)}`);
+  }
+  return BigInt(value);
 }
 
 /**
@@ -315,6 +348,11 @@ export class LatticeFFI {
   private static readonly VALUE_SIZE = koffi.sizeof('lattice_value');
   private static readonly MAP_ENTRY_SIZE = koffi.sizeof('lattice_map_entry');
   private static readonly MAP_ENTRY_VALUE_OFFSET = koffi.offsetof('lattice_map_entry', 'value');
+  private static readonly CHECKPOINT_STATS_SIZE = koffi.sizeof('lattice_checkpoint_stats');
+  private static readonly CHECKPOINT_PAGES_OFFSET = koffi.offsetof('lattice_checkpoint_stats', 'pages_flushed');
+  private static readonly CHECKPOINT_DURATION_OFFSET = koffi.offsetof('lattice_checkpoint_stats', 'duration_ns');
+  private static readonly CHECKPOINT_LSN_OFFSET = koffi.offsetof('lattice_checkpoint_stats', 'checkpoint_lsn');
+  private static readonly CHECKPOINT_TRUNCATED_OFFSET = koffi.offsetof('lattice_checkpoint_stats', 'wal_truncated');
 
   constructor() {
     this.bindings = getBindings();
@@ -600,6 +638,43 @@ export class LatticeFFI {
   close(db: DatabaseHandle): void {
     const err = this.bindings.lattice_close(db);
     this.checkError(err);
+  }
+
+  /**
+   * Checkpoint now. The mode is checked before the library is called.
+   */
+  checkpoint(db: DatabaseHandle, mode: CheckpointMode): CheckpointStats {
+    const modeCode = checkpointModeCode(mode);
+    if (!this.bindings.lattice_checkpoint) {
+      throw new LatticeError(
+        'the native library is too old to support checkpoint',
+        LatticeErrorCode.Unsupported
+      );
+    }
+
+    const statsOut = Buffer.alloc(LatticeFFI.CHECKPOINT_STATS_SIZE);
+    this.checkError(this.bindings.lattice_checkpoint(db, modeCode, statsOut));
+    return {
+      pagesFlushed: statsOut.readUInt32LE(LatticeFFI.CHECKPOINT_PAGES_OFFSET),
+      durationNs: statsOut.readBigUInt64LE(LatticeFFI.CHECKPOINT_DURATION_OFFSET),
+      checkpointLsn: statsOut.readBigUInt64LE(LatticeFFI.CHECKPOINT_LSN_OFFSET),
+      walTruncated: statsOut.readUInt8(LatticeFFI.CHECKPOINT_TRUNCATED_OFFSET) !== 0,
+    };
+  }
+
+  /**
+   * Set when commits checkpoint from now on; 0 frames switches them off.
+   */
+  setAutoCheckpoint(db: DatabaseHandle, maxWalFrames: number, minIntervalMs: number): void {
+    const frames = checkpointSetting('maxWalFrames', maxWalFrames);
+    const interval = checkpointSetting('minIntervalMs', minIntervalMs);
+    if (!this.bindings.lattice_set_auto_checkpoint) {
+      throw new LatticeError(
+        'the native library is too old to support setAutoCheckpoint',
+        LatticeErrorCode.Unsupported
+      );
+    }
+    this.checkError(this.bindings.lattice_set_auto_checkpoint(db, frames, interval));
   }
 
   // ============================================================

@@ -1,6 +1,11 @@
 package latticedb
 
-import cgobridge "github.com/jeffhajewski/latticedb/bindings/go/internal/cgo"
+import (
+	"fmt"
+	"time"
+
+	cgobridge "github.com/jeffhajewski/latticedb/bindings/go/internal/cgo"
+)
 
 type Value = any
 
@@ -113,6 +118,48 @@ const (
 	// VectorMetricDotProduct is the negative dot product. Vectors are stored as given.
 	VectorMetricDotProduct VectorMetric = 3
 )
+
+// CheckpointMode is how DB.Checkpoint folds the log (the -wal file) into the
+// database file.
+type CheckpointMode int
+
+const (
+	// CheckpointPassive writes the changed pages unless one is in use, in which
+	// case it writes nothing and reports 0 pages. It leaves the log in place.
+	CheckpointPassive CheckpointMode = 0
+	// CheckpointFull writes every changed page and leaves the log in place, so
+	// anything reading it keeps its position.
+	CheckpointFull CheckpointMode = 1
+	// CheckpointTruncate does what CheckpointFull does and then empties the log.
+	// It is the only mode that bounds the log's size, and what automatic
+	// checkpoints use.
+	CheckpointTruncate CheckpointMode = 2
+)
+
+func (m CheckpointMode) String() string {
+	switch m {
+	case CheckpointPassive:
+		return "passive"
+	case CheckpointFull:
+		return "full"
+	case CheckpointTruncate:
+		return "truncate"
+	default:
+		return fmt.Sprintf("CheckpointMode(%d)", int(m))
+	}
+}
+
+// CheckpointStats reports what a checkpoint did.
+type CheckpointStats struct {
+	// PagesFlushed is the number of pages written into the database file.
+	PagesFlushed uint32
+	// Duration is how long the checkpoint took.
+	Duration time.Duration
+	// CheckpointLSN is the log position the database file now holds.
+	CheckpointLSN uint64
+	// WALTruncated reports whether the log was emptied.
+	WALTruncated bool
+}
 
 type CreateNodeOptions struct {
 	Labels     []string

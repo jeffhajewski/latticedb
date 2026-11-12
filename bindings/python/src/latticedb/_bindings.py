@@ -538,6 +538,21 @@ class OpenOptionsV5(Structure):
     ]
 
 
+# lattice_checkpoint_mode values.
+LATTICE_CHECKPOINT_PASSIVE = 0
+LATTICE_CHECKPOINT_FULL = 1
+LATTICE_CHECKPOINT_TRUNCATE = 2
+
+
+class LatticeCheckpointStats(Structure):
+    _fields_ = [
+        ("pages_flushed", c_uint32),
+        ("duration_ns", c_uint64),
+        ("checkpoint_lsn", c_uint64),
+        ("wal_truncated", c_bool),
+    ]
+
+
 # Type aliases
 LatticeDatabase = c_void_p
 LatticeTxn = c_void_p
@@ -586,6 +601,8 @@ class LatticeLib:
         self._has_deserialize_borrowed = hasattr(self._lib, "lattice_deserialize_borrowed")
         self._has_deserialize_v5 = hasattr(self._lib, "lattice_deserialize_v5")
         self._has_deserialize_borrowed_v5 = hasattr(self._lib, "lattice_deserialize_borrowed_v5")
+        self._has_checkpoint = hasattr(self._lib, "lattice_checkpoint")
+        self._has_set_auto_checkpoint = hasattr(self._lib, "lattice_set_auto_checkpoint")
         self._setup_functions()
 
     def _setup_functions(self) -> None:
@@ -689,6 +706,22 @@ class LatticeLib:
         # lattice_close
         self._lib.lattice_close.argtypes = [LatticeDatabase]
         self._lib.lattice_close.restype = c_int
+
+        if self._has_checkpoint:
+            self._lib.lattice_checkpoint.argtypes = [
+                LatticeDatabase,
+                c_int,
+                POINTER(LatticeCheckpointStats),
+            ]
+            self._lib.lattice_checkpoint.restype = c_int
+
+        if self._has_set_auto_checkpoint:
+            self._lib.lattice_set_auto_checkpoint.argtypes = [
+                LatticeDatabase,
+                c_uint64,
+                c_uint64,
+            ]
+            self._lib.lattice_set_auto_checkpoint.restype = c_int
 
         # lattice_begin
         self._lib.lattice_begin.argtypes = [

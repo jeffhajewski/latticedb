@@ -469,6 +469,17 @@ test "lcy: OPTIONAL stays usable as a name and needs MATCH" {
     try expectFailure(db, "OPTIONAL (n) RETURN n", .parse, "Expected MATCH after OPTIONAL");
 }
 
+test "lcy: exists() on a property is IS NOT NULL" {
+    const path = "/tmp/lcy_exists_prop.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedItems(db);
+
+    try expectResult(db, "MATCH (i:Item) WHERE exists(i.n) RETURN i.name ORDER BY i.name", "i.name\n\"a\"\n\"b\"\n\"c\"");
+    try expectResult(db, "MATCH (i:Item) WHERE NOT exists(i.n) RETURN i.name", "i.name\n\"d\"");
+    try expectResult(db, "MATCH (i:Item {name: 'd'}) RETURN exists(i.n) AS e, exists(i.name) AS f, EXISTS({k: 1}.k) AS g", "e | f | g\nfalse | true | true");
+}
+
 test "lcy: named paths" {
     const path = "/tmp/lcy_paths.ltdb";
     const db = try openTestDb(path);

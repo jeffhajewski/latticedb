@@ -124,6 +124,7 @@ pub const builtin_functions = [_]FunctionSpec{
     .{ .name = "length", .min_args = 1, .max_args = 1, .signature = "(path)" },
     .{ .name = "nodes", .min_args = 1, .max_args = 1, .signature = "(path)" },
     .{ .name = "relationships", .min_args = 1, .max_args = 1, .signature = "(path)" },
+    .{ .name = "exists", .min_args = 1, .max_args = 1, .signature = "(any)" },
 };
 
 /// The built-in scalar function called `name`, ignoring case.
@@ -1514,6 +1515,14 @@ pub const ExpressionEvaluator = struct {
             std.ascii.eqlIgnoreCase(f.name, "relationships"))
         {
             return self.evaluatePathFunction(f, row, ctx);
+        }
+
+        // exists(n.prop): whether the property is there, which is whether
+        // it is not null.
+        if (std.ascii.eqlIgnoreCase(f.name, "exists")) {
+            if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
+            const arg = try self.evaluate(f.arguments[0], row, ctx);
+            return .{ .bool_val = !arg.isNull() };
         }
 
         return EvalError.UnknownFunction;

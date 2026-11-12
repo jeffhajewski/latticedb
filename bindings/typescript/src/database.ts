@@ -19,6 +19,9 @@ import {
   DatabaseHandle,
   SyncMode,
   VectorMetric,
+  ChangefeedRetention,
+  ChangefeedStatus,
+  LatticeChangesTrimmedError,
 } from './ffi';
 
 /**
@@ -81,6 +84,17 @@ export interface DatabaseOptions {
   vectorM?: number;
   /** HNSW build candidate list size for a new index, 1..4096. Unset: the file's, or 200. */
   vectorEfConstruction?: number;
+  /**
+   * How much of the changefeed (see {@link Database.changes}) to keep:
+   * `'all'`, `'off'`, `'last:<events>'` or `'age:<duration>'` such as
+   * `'age:7d'`. The file records its policy. Unset keeps the file's, which is
+   * `'all'` unless something set another (for a new database, the
+   * LATTICE_CHANGEFEED_RETENTION environment variable). A value set here
+   * replaces the file's policy when the database is opened for writing; a
+   * read-only open never changes it. Retention drops the oldest events at
+   * checkpoints; {@link Database.trimChangefeed} applies it at once.
+   */
+  changefeedRetention?: ChangefeedRetention;
 }
 
 /**
@@ -172,6 +186,7 @@ export class Database {
       vectorMetric: this.options.vectorMetric,
       vectorM: this.options.vectorM,
       vectorEfConstruction: this.options.vectorEfConstruction,
+      changefeedRetention: this.options.changefeedRetention,
     });
   }
 
@@ -369,10 +384,49 @@ export class Database {
     return this.ffi!.getStreamOffset(this.dbHandle!, stream, consumer);
   }
 
+  /**
+   * Read graph changefeed records from `__lattice_changes`: up to `limit`
+   * records with a sequence greater than `afterSequence`, oldest first.
+   * `afterSequence: 0n` reads from the oldest event held.
+   *
+   * Throws {@link LatticeChangesTrimmedError} when retention or a trim has
+   * dropped the events after `afterSequence` (the reader has missed changes),
+   * and a `LatticeError` with code `Unsupported` when the policy is `'off'`.
+   */
   async changes(
     options: { afterSequence?: bigint; limit?: number; timeoutMs?: number } = {}
   ): Promise<StreamRecord[]> {
-    return this.readStream('__lattice_changes', options);
+    try {
+      return await this.readStream('__lattice_changes', options);
+    } catch (err) {
+      if (err instanceof LatticeError && err.code === LatticeErrorCode.NotFound) {
+        throw new LatticeChangesTrimmedError(
+          `the changefeed no longer holds the events after sequence ${options.afterSequence ?? 0}: ` +
+            'its retention policy or a trim dropped them'
+        );
+      }
+      if (err instanceof LatticeError && err.code === LatticeErrorCode.Unsupported) {
+        throw new LatticeError("the changefeed is off (changefeedRetention: 'off')", err.code);
+      }
+      throw err;
+    }
+  }
+
+  /** The changefeed's retention policy and the events it holds. */
+  async changefeedStatus(): Promise<ChangefeedStatus> {
+    this.ensureOpen();
+    return this.ffi!.changefeedStatus(this.dbHandle!);
+  }
+
+  /**
+   * Apply the changefeed's retention policy in full now (checkpoints apply it
+   * a bounded number of events at a time) and make that durable. Returns the
+   * number of events dropped. Throws a `LatticeError` with code `LockTimeout`
+   * while a write transaction is open.
+   */
+  async trimChangefeed(): Promise<bigint> {
+    this.ensureOpen();
+    return this.ffi!.trimChangefeed(this.dbHandle!);
   }
 
   /**

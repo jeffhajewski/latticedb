@@ -14,6 +14,7 @@ import {
   LatticeSyncMode,
   LatticeFullFsync,
   LatticeVectorMetric,
+  LatticeChangefeedRetention,
 } from './types';
 import type { PropertyValue, StreamRecord } from '../types';
 
@@ -32,6 +33,7 @@ export {
   LatticeSyncMode,
   LatticeFullFsync,
   LatticeVectorMetric,
+  LatticeChangefeedRetention,
 } from './types';
 
 /**
@@ -44,6 +46,19 @@ export class LatticeError extends Error {
   ) {
     super(message);
     this.name = 'LatticeError';
+  }
+}
+
+/**
+ * The changefeed no longer holds the events after the position read from:
+ * its retention policy, or a trim, dropped them, so the reader has missed
+ * changes. Reading from `afterSequence: 0n` starts at the oldest event held.
+ * Its code is `LatticeErrorCode.NotFound`.
+ */
+export class LatticeChangesTrimmedError extends LatticeError {
+  constructor(message: string) {
+    super(message, LatticeErrorCode.NotFound);
+    this.name = 'LatticeChangesTrimmedError';
   }
 }
 
@@ -128,6 +143,95 @@ export type SyncMode = 'full' | 'normal';
  */
 export type VectorMetric = 'cosine' | 'euclidean' | 'dot_product';
 
+/**
+ * How much of the changefeed to keep: `'all'`, `'off'`, `'last:<events>'`, or
+ * `'age:<duration>'` with a duration such as `'500ms'`, `'90s'`, `'30m'`,
+ * `'12h'` or `'7d'`.
+ */
+export type ChangefeedRetention = 'all' | 'off' | `last:${number}` | `age:${string}`;
+
+/**
+ * The changefeed's retention policy and the events it holds.
+ */
+export interface ChangefeedStatus {
+  /** The policy in force, in the form `ChangefeedRetention` takes. */
+  retention: ChangefeedRetention;
+  /** The oldest event held, or null when the changefeed holds none. */
+  oldestSequence: bigint | null;
+  /** The last sequence handed to an event, 0n if none ever was. */
+  lastSequence: bigint;
+}
+
+const U64_MAX = (BigInt(1) << BigInt(64)) - BigInt(1);
+// Longest suffix first, so "ms" is not read as "s".
+const DURATION_UNITS: Array<[string, bigint]> = [
+  ['ms', BigInt(1)],
+  ['s', BigInt(1000)],
+  ['m', BigInt(60_000)],
+  ['h', BigInt(3_600_000)],
+  ['d', BigInt(86_400_000)],
+];
+
+/** Turn a policy such as `'last:1000'` into the C API's mode and value. */
+export function changefeedRetentionCode(policy: ChangefeedRetention | undefined): [number, bigint] {
+  if (policy === undefined) {
+    return [LatticeChangefeedRetention.Default, BigInt(0)];
+  }
+  if (typeof policy === 'string') {
+    const lowered = policy.toLowerCase();
+    if (lowered === 'all') {
+      return [LatticeChangefeedRetention.All, BigInt(0)];
+    }
+    if (lowered === 'off') {
+      return [LatticeChangefeedRetention.Off, BigInt(0)];
+    }
+    if (policy.startsWith('last:')) {
+      const digits = policy.slice(5);
+      if (/^[0-9]+$/.test(digits)) {
+        const n = BigInt(digits);
+        if (n > BigInt(0) && n <= U64_MAX) {
+          return [LatticeChangefeedRetention.Last, n];
+        }
+      }
+    } else if (policy.startsWith('age:')) {
+      const text = policy.slice(4);
+      for (const [suffix, ms] of DURATION_UNITS) {
+        const number = text.slice(0, text.length - suffix.length);
+        if (text.endsWith(suffix) && /^[0-9]+$/.test(number)) {
+          const value = BigInt(number) * ms;
+          if (value > BigInt(0) && value <= U64_MAX) {
+            return [LatticeChangefeedRetention.Age, value];
+          }
+          break;
+        }
+      }
+    }
+  }
+  throw new TypeError(
+    "changefeedRetention must be 'all', 'off', 'last:<events>' or 'age:<duration>' " +
+      `(such as 'age:7d', 'age:12h', 'age:500ms'), not ${String(policy)}`
+  );
+}
+
+function changefeedRetentionText(mode: number, value: bigint): ChangefeedRetention {
+  switch (mode) {
+    case LatticeChangefeedRetention.Off:
+      return 'off';
+    case LatticeChangefeedRetention.Last:
+      return `last:${value}` as ChangefeedRetention;
+    case LatticeChangefeedRetention.Age: {
+      for (const [suffix, ms] of DURATION_UNITS.slice(1).reverse()) {
+        if (value % ms === BigInt(0)) {
+          return `age:${value / ms}${suffix}` as ChangefeedRetention;
+        }
+      }
+      return `age:${value}ms` as ChangefeedRetention;
+    }
+    default:
+      return 'all';
+  }
+}
+
 function syncModeCode(mode: SyncMode | undefined): number {
   switch (mode) {
     case undefined:
@@ -184,6 +288,7 @@ export interface OpenOptions {
   vectorMetric?: VectorMetric;
   vectorM?: number;
   vectorEfConstruction?: number;
+  changefeedRetention?: ChangefeedRetention;
 }
 
 /**
@@ -300,6 +405,15 @@ export class LatticeFFI {
     const vectorMetric = vectorMetricCode(options.vectorMetric);
     const vectorM = options.vectorM ?? 0;
     const vectorEfConstruction = options.vectorEfConstruction ?? 0;
+    const [changefeedRetention, changefeedRetentionValue] = changefeedRetentionCode(
+      options.changefeedRetention
+    );
+    if (changefeedRetention && !this.bindings.lattice_changefeed_status) {
+      throw new LatticeError(
+        'the native library is too old to support changefeedRetention',
+        LatticeErrorCode.Unsupported
+      );
+    }
     if (
       !this.bindings.lattice_open_v5 &&
       (syncMode || fullFsync || vectorMetric || vectorM || vectorEfConstruction)
@@ -365,6 +479,8 @@ export class LatticeFFI {
       vector_metric: vectorMetric,
       vector_m: vectorM,
       vector_ef_construction: vectorEfConstruction,
+      changefeed_retention: changefeedRetention,
+      changefeed_retention_value: changefeedRetentionValue,
     };
 
     const dbOut: unknown[] = [null];
@@ -845,6 +961,46 @@ export class LatticeFFI {
     );
     this.checkError(err);
     return sequenceOut.readBigUInt64LE();
+  }
+
+  /**
+   * The changefeed's retention policy, the oldest event it holds and the
+   * last sequence it handed out.
+   */
+  changefeedStatus(db: DatabaseHandle): ChangefeedStatus {
+    if (!this.bindings.lattice_changefeed_status) {
+      throw new LatticeError(
+        "the native library is too old to report the changefeed's status",
+        LatticeErrorCode.Unsupported
+      );
+    }
+    const mode = Buffer.alloc(1);
+    const value = Buffer.alloc(8);
+    const oldest = Buffer.alloc(8);
+    const last = Buffer.alloc(8);
+    this.checkError(this.bindings.lattice_changefeed_status(db, mode, value, oldest, last));
+    const oldestSequence = oldest.readBigUInt64LE();
+    return {
+      retention: changefeedRetentionText(mode.readUInt8(0), value.readBigUInt64LE()),
+      oldestSequence: oldestSequence === BigInt(0) ? null : oldestSequence,
+      lastSequence: last.readBigUInt64LE(),
+    };
+  }
+
+  /**
+   * Apply the changefeed's retention policy in full now. Returns the number
+   * of events dropped.
+   */
+  trimChangefeed(db: DatabaseHandle): bigint {
+    if (!this.bindings.lattice_changefeed_trim) {
+      throw new LatticeError(
+        'the native library is too old to trim the changefeed',
+        LatticeErrorCode.Unsupported
+      );
+    }
+    const removed = Buffer.alloc(8);
+    this.checkError(this.bindings.lattice_changefeed_trim(db, removed));
+    return removed.readBigUInt64LE();
   }
 
   readStream(

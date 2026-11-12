@@ -128,6 +128,8 @@ const LatticeOpenOptionsV5 = defineNamedType('lattice_open_options_v5', () => ko
   vector_metric: 'uint8',
   vector_m: 'uint16',
   vector_ef_construction: 'uint16',
+  changefeed_retention: 'uint8',
+  changefeed_retention_value: 'uint64',
 }));
 
 // Define struct for string in value union
@@ -223,6 +225,14 @@ export interface LatticeBindings {
     bytes_out: unknown[],
     len_out: number[]
   ) => number;
+  lattice_changefeed_status?: (
+    db: unknown,
+    retention_out: Buffer,
+    retention_value_out: Buffer,
+    oldest_sequence_out: Buffer,
+    last_sequence_out: Buffer
+  ) => number;
+  lattice_changefeed_trim?: (db: unknown, removed_out: Buffer) => number;
   lattice_deserialize?: (
     bytes: Uint8Array,
     len: number,
@@ -770,6 +780,17 @@ function createBindings(): LatticeBindings {
       'str', // path
       OpenOptionsV5Ptr, // options
       koffi.out(DatabasePtrPtr), // db_out
+    ]),
+    lattice_changefeed_status: tryOptionalFunc(lib, 'lattice_changefeed_status', 'int', [
+      DatabasePtr,
+      koffi.out(koffi.pointer('uint8')), // retention_out
+      koffi.out(koffi.pointer('uint64')), // retention_value_out
+      koffi.out(koffi.pointer('uint64')), // oldest_sequence_out
+      koffi.out(koffi.pointer('uint64')), // last_sequence_out
+    ]),
+    lattice_changefeed_trim: tryOptionalFunc(lib, 'lattice_changefeed_trim', 'int', [
+      DatabasePtr,
+      koffi.out(koffi.pointer('uint64')), // removed_out
     ]),
     lattice_serialize: tryOptionalFunc(lib, 'lattice_serialize', 'int', [
       DatabasePtr,

@@ -58,11 +58,14 @@ export {
   isElectronRuntime,
   ELECTRON_ASAR_UNPACK_GLOB,
   LatticeError,
+  LatticeChangesTrimmedError,
   LatticeQueryError,
   QueryErrorStage,
   QueryErrorLocation,
   SyncMode,
   VectorMetric,
+  ChangefeedRetention,
+  ChangefeedStatus,
 } from './ffi';
 
 /**

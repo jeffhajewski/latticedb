@@ -60,6 +60,17 @@ export const enum LatticeVectorMetric {
 }
 
 /**
+ * lattice_open_options_v5.changefeed_retention values. 0 keeps the file's policy.
+ */
+export const enum LatticeChangefeedRetention {
+  Default = 0,
+  All = 1,
+  Last = 2,
+  Age = 3,
+  Off = 4,
+}
+
+/**
  * Transaction modes
  */
 export const enum LatticeTxnMode {

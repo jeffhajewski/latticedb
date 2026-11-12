@@ -1164,7 +1164,11 @@ pub const Database = struct {
             NodeStore.init(allocator, &self.node_tree)
         else
             NodeStore.initChecked(allocator, &self.node_tree) catch return DatabaseError.IoError;
-        self.edge_store = EdgeStore.init(allocator, &self.edge_tree, &self.edge_id_tree);
+        // The same goes for the edge id counter.
+        self.edge_store = if (is_new or options.read_only)
+            EdgeStore.init(allocator, &self.edge_tree, &self.edge_id_tree)
+        else
+            EdgeStore.initChecked(allocator, &self.edge_tree, &self.edge_id_tree) catch return DatabaseError.IoError;
         self.label_index = LabelIndex.init(allocator, &self.label_tree);
         self.initializePropertyIndex();
 

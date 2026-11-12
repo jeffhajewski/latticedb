@@ -172,6 +172,23 @@ pub const EdgeStore = struct {
         return self;
     }
 
+    /// Initialize over trees that already hold a database's edges.
+    ///
+    /// `init` starts the counter at 1 when it cannot be read, which is right
+    /// for trees that do not exist yet and wrong for ones that do: the next
+    /// edge would take the id of an existing one and replace its entry in
+    /// the edge-id index. Here a counter that cannot be read is an error.
+    pub fn initChecked(allocator: Allocator, tree: *BTree, edge_id_index: *BTree) EdgeError!Self {
+        var self = Self{
+            .allocator = allocator,
+            .tree = tree,
+            .edge_id_index = edge_id_index,
+            .next_edge_id = 1,
+        };
+        self.next_edge_id = try self.loadNextEdgeId();
+        return self;
+    }
+
     fn edgeIdToKey(edge_id: EdgeId) [8]u8 {
         var key: [8]u8 = undefined;
         std.mem.writeInt(u64, &key, edge_id, .little);
@@ -198,7 +215,7 @@ pub const EdgeStore = struct {
         };
         defer iter.deinit();
 
-        while (iter.next() catch null) |entry| {
+        while (iter.next() catch |err| return mapBTreeError(err)) |entry| {
             if (entry.key.len != 8) continue;
             const edge_id = std.mem.readInt(u64, entry.key[0..8], .little);
             if (edge_id == EDGE_ID_META_KEY) continue;

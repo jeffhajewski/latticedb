@@ -5674,6 +5674,40 @@ test "database: an unreadable symbol table is not opened for writing" {
     try std.testing.expectError(error.IoError, Database.open(allocator, path, .{ .config = .{ .enable_wal = false, .enable_fts = false } }));
 }
 
+test "database: an unreadable edge id index is not opened for writing" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_unreadable_edge_ids_test.ltdb";
+    const cwd = @import("compat").fs.cwd();
+    cwd.deleteFile(path) catch {};
+    cwd.deleteFile(path ++ "-wal") catch {};
+    defer cwd.deleteFile(path) catch {};
+    defer cwd.deleteFile(path ++ "-wal") catch {};
+
+    var root: u32 = 0;
+    var page_size: u32 = 0;
+    {
+        const db = try Database.open(allocator, path, .{ .create = true, .config = .{ .enable_wal = false, .enable_fts = false } });
+        defer db.close();
+        const a = try db.createNode(null, &[_][]const u8{"Person"});
+        const b = try db.createNode(null, &[_][]const u8{"Person"});
+        try db.createEdge(null, a, b, "KNOWS");
+        try db.sync();
+        root = db.page_manager.getHeader().getTreeRoot(.edge_id_index);
+        page_size = db.page_manager.getPageSize();
+    }
+
+    // Damage the page the edge-id index starts at, so its checksum fails.
+    {
+        const file = try cwd.openFile(path, .{ .mode = .read_write });
+        defer file.close();
+        try file.pwriteAll(&([_]u8{0xA5} ** 64), @as(u64, root) * page_size + 128);
+    }
+
+    // The next edge id is kept in that tree. Without it the counter would
+    // restart at 1 and a new edge would replace the entry of the first.
+    try std.testing.expectError(error.IoError, Database.open(allocator, path, .{ .config = .{ .enable_wal = false, .enable_fts = false } }));
+}
+
 test "database: vectors and full-text search work on pages larger than 4096 bytes" {
     // Vector, HNSW and posting pages use the first 4096 bytes of a page
     // whatever the page size: that layout is part of the file format, so a

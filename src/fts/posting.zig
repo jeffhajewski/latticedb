@@ -582,77 +582,52 @@ pub const PostingStore = struct {
             };
 
             const data = frame.data;
-            var header = self.readPageMeta(data, false);
+            var header = self.readPageMeta(data, true);
             const has_positions = header.hasPositions();
 
-            // Collect all entries except the target
-            var kept_entries: std.ArrayList(StoredEntry) = .empty;
-            defer {
-                for (kept_entries.items) |entry| {
-                    if (entry.positions) |pos| {
-                        self.allocator.free(pos);
-                    }
-                }
-                kept_entries.deinit(self.allocator);
-            }
-
-            var found_entry: ?StoredEntry = null;
+            // Find the entry's bytes; the page's other entries stay as they
+            // are encoded, so nothing is decoded into memory or re-encoded.
+            var found: ?struct { start: usize, end: usize, term_freq: u32 } = null;
             var offset: usize = header.data_start;
-
             for (0..header.num_entries) |_| {
+                const entry_start = offset;
                 const doc_result = decodeVarint(data[offset..]);
                 offset += doc_result.bytes;
-
                 const freq_result = decodeVarint(data[offset..]);
                 offset += freq_result.bytes;
-
-                var positions: ?[]u32 = null;
                 if (has_positions) {
                     const pos_count_result = decodeVarint(data[offset..]);
                     offset += pos_count_result.bytes;
-                    const pos_count: usize = @intCast(pos_count_result.value);
-
-                    if (pos_count > 0) {
-                        positions = self.allocator.alloc(u32, pos_count) catch {
-                            self.bp.unpinPage(frame, false);
-                            return PostingError.OutOfMemory;
-                        };
-                        for (0..pos_count) |i| {
-                            const pos_result = decodeVarint(data[offset..]);
-                            offset += pos_result.bytes;
-                            positions.?[i] = @intCast(pos_result.value);
-                        }
+                    for (0..@intCast(pos_count_result.value)) |_| {
+                        offset += decodeVarint(data[offset..]).bytes;
                     }
                 }
-
-                const entry = StoredEntry{
-                    .doc_id = doc_result.value,
-                    .term_freq = @intCast(freq_result.value),
-                    .positions = positions,
-                };
-
                 if (doc_result.value == target_doc_id) {
-                    found_entry = entry;
-                } else {
-                    kept_entries.append(self.allocator, entry) catch {
-                        if (positions) |pos| self.allocator.free(pos);
-                        self.bp.unpinPage(frame, false);
-                        return PostingError.OutOfMemory;
-                    };
+                    found = .{ .start = entry_start, .end = offset, .term_freq = @intCast(freq_result.value) };
+                    break;
                 }
             }
 
-            if (found_entry) |removed| {
+            if (found) |removed| {
                 if (header.layout == .v1) {
-                    try self.ensureFormatV2();
+                    self.ensureFormatV2() catch |err| {
+                        self.bp.unpinPage(frame, false);
+                        return err;
+                    };
                     header.layout = .v2;
                 }
 
-                // Rebuild page with remaining entries
-                header.data_end = self.rebuildPage(data, &header, kept_entries.items, has_positions);
-
-                // Update header
-                header.num_entries = @intCast(kept_entries.items.len);
+                // Close the gap the entry leaves.
+                const old_end: usize = header.data_end;
+                if (removed.end > old_end or old_end > PAGE_SIZE) {
+                    self.bp.unpinPage(frame, false);
+                    return PostingError.InvalidData;
+                }
+                const width = removed.end - removed.start;
+                std.mem.copyForwards(u8, data[removed.start .. old_end - width], data[removed.end..old_end]);
+                @memset(data[old_end - width .. old_end], 0);
+                header.data_end = @intCast(old_end - width);
+                header.num_entries -= 1;
 
                 // Skip pointers, on a page an earlier release filled them
                 // on, name byte offsets the rewrite has moved.
@@ -660,11 +635,6 @@ pub const PostingStore = struct {
                 header.num_skip_pointers = 0;
 
                 header.write(data);
-
-                // Free removed entry's positions
-                if (removed.positions) |pos| {
-                    self.allocator.free(pos);
-                }
 
                 var result: RemovalResult = .{ .found = true, .term_freq = removed.term_freq };
                 self.mergeNextPage(current_page, data, &header, &result) catch |err| {
@@ -765,46 +735,6 @@ pub const PostingStore = struct {
             self.bp.freePage(current) catch return PostingError.BufferPoolError;
             current = next;
         }
-    }
-
-    /// Temporary storage for entry during rebuild
-    const StoredEntry = struct {
-        doc_id: DocId,
-        term_freq: u32,
-        positions: ?[]u32,
-    };
-
-    /// Rebuild page data from entries
-    fn rebuildPage(self: *Self, data: []u8, header: *PostingPageMeta, entries: []const StoredEntry, has_positions: bool) u32 {
-        _ = self;
-        var offset: usize = header.data_start;
-
-        for (entries) |entry| {
-            // Encode doc_id
-            offset += encodeVarint(entry.doc_id, data[offset..]);
-
-            // Encode term_freq
-            offset += encodeVarint(entry.term_freq, data[offset..]);
-
-            // Encode positions if present
-            if (has_positions) {
-                if (entry.positions) |positions| {
-                    offset += encodeVarint(positions.len, data[offset..]);
-                    for (positions) |pos| {
-                        offset += encodeVarint(pos, data[offset..]);
-                    }
-                } else {
-                    offset += encodeVarint(0, data[offset..]);
-                }
-            }
-        }
-
-        // Zero out remaining data area (optional, for cleanliness)
-        if (offset < PAGE_SIZE) {
-            @memset(data[offset..PAGE_SIZE], 0);
-        }
-
-        return @intCast(offset);
     }
 };
 
@@ -1368,6 +1298,81 @@ test "posting store lazily upgrades legacy v1 pages on append" {
     try std.testing.expect(e3 != null);
     try std.testing.expectEqual(@as(DocId, 30), e3.?.doc_id);
     try std.testing.expectEqual(@as(u32, 3), e3.?.term_freq);
+}
+
+test "posting removal closes the entry's gap, on a legacy v1 page too" {
+    const allocator = std.testing.allocator;
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+    const db_path = "/tmp/lattice_posting_v1_removal_test.db";
+    vfs_impl.delete(db_path) catch {};
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+    var bp = try BufferPool.init(allocator, &pm, 64 * 4096);
+    defer bp.deinit();
+    var store = PostingStore.init(allocator, &bp);
+
+    var file_header = pm.getHeader().*;
+    file_header.format_version = 1;
+    file_header.min_reader_version = 1;
+    try pm.updateHeader(&file_header);
+
+    // A v1 page has no data_end; removal has to find where its entries end.
+    // Entries carry positions, so each is more than two bytes.
+    const page_id = try pm.allocatePage();
+    const frame = try bp.fetchPage(page_id, .exclusive);
+    {
+        const data = frame.data;
+        const header = PageHeader.init(.fts_posting);
+        @memcpy(data[0..@sizeOf(PageHeader)], std.mem.asBytes(&header));
+        var offset: usize = DATA_OFFSET;
+        for ([_]DocId{ 10, 20, 300 }) |doc| {
+            offset += encodeVarint(doc, data[offset..]);
+            offset += encodeVarint(2, data[offset..]);
+            offset += encodeVarint(2, data[offset..]);
+            offset += encodeVarint(doc, data[offset..]);
+            offset += encodeVarint(doc + 1, data[offset..]);
+        }
+        var legacy_header = PostingPageHeaderV1{
+            .token_id = 1,
+            .num_entries = 3,
+            .next_page = 0,
+            .num_skip_pointers = 0,
+            .flags = POSTING_ENTRY_FLAG_HAS_POSITIONS,
+            .data_start = @intCast(DATA_OFFSET),
+        };
+        legacy_header.write(data);
+    }
+    bp.unpinPage(frame, true);
+
+    const removed = try store.removeEntry(page_id, 20);
+    try std.testing.expect(removed.found);
+    try std.testing.expectEqual(@as(u32, 2), removed.term_freq);
+    try std.testing.expect(!(try store.removeEntry(page_id, 20)).found);
+
+    var iter = try store.iterate(page_id);
+    defer iter.deinit();
+    for ([_]DocId{ 10, 300 }) |doc| {
+        const entry = (try iter.nextWithPositions(allocator)).?;
+        defer if (entry.positions) |p| allocator.free(p);
+        try std.testing.expectEqual(doc, entry.doc_id);
+        try std.testing.expectEqualSlices(u32, &[_]u32{ @intCast(doc), @intCast(doc + 1) }, entry.positions.?);
+    }
+    try std.testing.expect((try iter.next()) == null);
+
+    // An append lands after the remaining entries, not over them.
+    _ = try store.appendWithPositions(page_id, .{ .doc_id = 40, .term_freq = 1, .positions = &[_]u32{7} }, true);
+    var again = try store.iterate(page_id);
+    defer again.deinit();
+    var seen: [3]DocId = undefined;
+    for (&seen) |*d| d.* = (try again.next()).?.doc_id;
+    try std.testing.expectEqualSlices(DocId, &[_]DocId{ 10, 300, 40 }, &seen);
 }
 
 test "posting store appends thousands of entries without stalling" {

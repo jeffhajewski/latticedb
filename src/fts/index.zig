@@ -416,8 +416,11 @@ pub const FtsIndex = struct {
                     };
                 }
             } else {
-                // Need to copy the key since normalized is stack-allocated
+                // Need to copy the key since normalized is stack-allocated.
+                // Until it is, the new entry holds that stack key and no
+                // value, so it must not be left for the cleanup above.
                 const key_copy = self.allocator.dupe(u8, normalized) catch {
+                    term_infos.removeByPtr(result.key_ptr);
                     return FtsError.OutOfMemory;
                 };
                 result.key_ptr.* = key_copy;
@@ -2832,6 +2835,26 @@ test "fts a document with no terms is removed without walking the dictionary" {
     const results = try fx.index.search("apple", 10);
     defer fx.index.freeResults(results);
     try std.testing.expectEqual(@as(usize, 1), results.len);
+}
+
+test "fts indexing that runs out of memory returns the error and frees what it took" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/s3_lattice_fts_index_oom_test.db");
+    defer fx.destroy(allocator);
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(allocator, .{ .fail_index = fail_index });
+        var index = FtsIndex.init(failing.allocator(), &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{});
+        if (index.indexDocument(@intCast(fail_index + 1), "alpha beta gamma alpha")) |_| {
+            break;
+        } else |err| switch (err) {
+            // A tree or page operation reports the allocation it could not make
+            // as its own kind of failure.
+            FtsError.OutOfMemory, FtsError.TokenizerError, FtsError.DictionaryError, FtsError.PostingError, FtsError.IoError, FtsError.ScorerError => {},
+            else => return err,
+        }
+    }
 }
 
 test "fts AND search with a term no document contains matches nothing" {

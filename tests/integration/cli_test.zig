@@ -302,6 +302,78 @@ test "cli: a database that needs a newer writer is read by read-only commands an
     defer write.deinit(allocator);
     try std.testing.expect(!write.succeeded());
     try std.testing.expect(std.mem.indexOf(u8, write.stderr, "newer LatticeDB") != null);
+
+    // A statement that only reads, and a backup, open it read-only.
+    const read = try runCli(allocator, &.{ "exec", path, "--query=MATCH (n:A) RETURN count(n) AS c" });
+    defer read.deinit(allocator);
+    if (!read.succeeded()) {
+        std.debug.print("exec read: exit {?d}\nstderr: {s}\n", .{ read.exit_code, read.stderr });
+        return error.TestUnexpectedResult;
+    }
+    const backup_path = "/tmp/lattice_cli_min_writer_backup.ltdb";
+    deleteDatabaseFiles(backup_path);
+    defer deleteDatabaseFiles(backup_path);
+    const backup = try runCli(allocator, &.{ "backup", path, "--file=" ++ backup_path });
+    defer backup.deinit(allocator);
+    if (!backup.succeeded()) {
+        std.debug.print("backup: exit {?d}\nstderr: {s}\n", .{ backup.exit_code, backup.stderr });
+        return error.TestUnexpectedResult;
+    }
+}
+
+test "cli: exec of a read and backup leave the file alone, and a backup of a killed database has its log's commits" {
+    const allocator = std.testing.allocator;
+    const source = "/tmp/lfmt_cli_ro_source.ltdb";
+    const killed = "/tmp/lfmt_cli_ro_killed.ltdb";
+    const backup_path = "/tmp/lfmt_cli_ro_backup.ltdb";
+    deleteDatabaseFiles(source);
+    deleteDatabaseFiles(killed);
+    deleteDatabaseFiles(backup_path);
+    defer deleteDatabaseFiles(source);
+    defer deleteDatabaseFiles(killed);
+    defer deleteDatabaseFiles(backup_path);
+    {
+        var db = try Database.open(allocator, source, .{ .create = true, .config = .{ .enable_fts = false, .auto_checkpoint = null } });
+        defer db.close();
+        try db.sync();
+        var txn = try db.beginTransaction(.read_write);
+        for (0..3) |_| _ = try db.createNode(&txn, &.{"A"});
+        try db.commitTransaction(&txn);
+        // Committed and in the log only, as a killed writer leaves them.
+        try copyAsIfKilled(allocator, source, killed);
+    }
+    const before = try readWholeFile(allocator, killed);
+    defer allocator.free(before);
+    const wal_before = try readWholeFile(allocator, killed ++ "-wal");
+    defer allocator.free(wal_before);
+
+    const read = try runCli(allocator, &.{ "exec", killed, "--format=csv", "--query=MATCH (n:A) RETURN count(n) AS c" });
+    defer read.deinit(allocator);
+    try std.testing.expect(read.succeeded());
+    try std.testing.expect(std.mem.indexOf(u8, read.stdout, "3") != null);
+
+    const backup = try runCli(allocator, &.{ "backup", killed, "--file=" ++ backup_path });
+    defer backup.deinit(allocator);
+    try std.testing.expect(backup.succeeded());
+
+    // Neither changed the database or its log: both opened it read-only.
+    const after = try readWholeFile(allocator, killed);
+    defer allocator.free(after);
+    const wal_after = try readWholeFile(allocator, killed ++ "-wal");
+    defer allocator.free(wal_after);
+    try std.testing.expectEqualSlices(u8, before, after);
+    try std.testing.expectEqualSlices(u8, wal_before, wal_after);
+
+    // The backup is complete on its own, without the log.
+    var copy = try Database.open(allocator, backup_path, .{ .read_only = true, .config = .{ .enable_fts = false } });
+    defer copy.close();
+    try std.testing.expectEqual(@as(u64, 3), copy.nodeCount());
+}
+
+fn readWholeFile(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
+    const file = try compat.fs.cwd().openFile(path, .{});
+    defer file.close();
+    return file.readToEndAlloc(allocator, 64 * 1024 * 1024);
 }
 
 test "cli: a database in a format too new to read says so, from open and from check" {

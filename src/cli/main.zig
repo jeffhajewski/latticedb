@@ -471,8 +471,15 @@ fn cmdQuery(
     parsed_args: *const Args,
 ) !void {
 
-    // Open database
-    const db = try openDatabase(allocator, stderr, parsed_args, .read_write);
+    // A database this version may read but not write still opens, for
+    // reading, with a word about why writes will be refused.
+    const path = parsed_args.path.?;
+    const db = Database.open(allocator, path, openOptions(parsed_args, .read_write)) catch |err| blk: {
+        if (err != DatabaseError.NeedsNewerWriter) return failOpen(stderr, path, err, parsed_args.enable_vector);
+        const reader = try openDatabase(allocator, stderr, parsed_args, .read_only);
+        output.printInfo(stderr, "{s} was written by a newer LatticeDB that does not let this version write to it; opened read-only.", .{path});
+        break :blk reader;
+    };
     defer db.close();
 
     // Start REPL
@@ -509,8 +516,14 @@ fn cmdExec(
     }
     defer if (query_owned) allocator.free(query_string);
 
-    // Open database
-    const db = try openDatabase(allocator, stderr, parsed_args, .read_write);
+    // A statement that only reads opens the database read-only: it takes the
+    // shared lock, changes nothing on disk, and works on a file this version
+    // may read but not write.
+    // An in-memory database exists only once opened for writing.
+    const reads_only = !statementWrites(allocator, query_string) and
+        !lattice.storage.database.isMemoryPath(parsed_args.path.?);
+    const mode: OpenMode = if (reads_only) .read_only else .read_write;
+    const db = try openDatabase(allocator, stderr, parsed_args, mode);
     defer db.close();
 
     var detailed = db.queryDetailed(query_string) catch |err| {
@@ -538,6 +551,16 @@ fn cmdExec(
     repl.displayResult(&detailed.success, stdout, 0) catch |err| {
         return failCommand(stderr, "Failed to display results: {s}", .{@errorName(err)});
     };
+}
+
+/// Whether a statement can change the database, as the engine decides it
+/// for choosing a transaction. One that does not parse counts as reading:
+/// running it reports the parse error either way.
+fn statementWrites(allocator: std.mem.Allocator, statement: []const u8) bool {
+    var parser = lattice.query.parser.Parser.init(allocator, statement);
+    defer parser.deinit();
+    const parsed = parser.parse().query orelse return false;
+    return parsed.writesData();
 }
 
 fn cmdLabels(
@@ -830,7 +853,9 @@ fn cmdBackup(
         return failCommand(stderr, "No destination provided. Use --file=<path>", .{});
     };
 
-    const db = try openDatabase(allocator, stderr, parsed_args, .read_write);
+    // A backup only reads. A read-only handle has already recovered whatever
+    // the log held, in memory, so the copy has every committed transaction.
+    const db = try openDatabase(allocator, stderr, parsed_args, .read_only);
     defer db.close();
 
     const stats = db.backup(dest) catch |err| {
@@ -1058,7 +1083,8 @@ fn failOpen(stderr: anytype, path: []const u8, err: anyerror, vectors_enabled: b
         return failCommand(
             stderr,
             "{s} was written by a newer LatticeDB that does not let this version write to it. " ++
-                "info, count, labels, types, schema, export and dump still read it; use that newer version for anything else.",
+                "info, count, labels, types, schema, export, dump, backup, query and exec (for statements that only read) " ++
+                "still read it; use that newer version for anything else.",
             .{path},
         );
     }

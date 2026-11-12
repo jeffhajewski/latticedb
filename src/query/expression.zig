@@ -1302,7 +1302,7 @@ pub const ExpressionEvaluator = struct {
 
             // Special operators (handled by dedicated operators)
             .vector_distance => try self.vectorDistance(left, right, ctx),
-            .fts_match => self.ftsMatch(left, right),
+            .fts_match => try self.ftsMatch(b, left, right, ctx),
         };
     }
 
@@ -2405,13 +2405,14 @@ pub const ExpressionEvaluator = struct {
     ) EvalError!EvalResult {
         const left = try self.evaluate(b.left, row, ctx);
         const right = try self.evaluate(b.right, row, ctx);
-        return self.ftsMatch(left, right);
+        return self.ftsMatch(b, left, right, ctx);
     }
 
     /// Whether text matches a query in the full-text query language, with
     /// the default analysis, as an index declared with defaults would. A
-    /// query the language refuses (only exclusions) is unknown, not false.
-    fn ftsMatch(self: *Self, left: EvalResult, right: EvalResult) EvalResult {
+    /// query the language refuses (only exclusions) is an error, as it is
+    /// against an index.
+    fn ftsMatch(self: *Self, b: *const ast.BinaryExpr, left: EvalResult, right: EvalResult, ctx: *const ExecutionContext) EvalError!EvalResult {
         const text = switch (left) {
             .string_val => |s| s,
             else => return .{ .null_val = {} },
@@ -2421,7 +2422,10 @@ pub const ExpressionEvaluator = struct {
             else => return .{ .null_val = {} },
         };
 
-        const matched = fts_query.textMatches(self.allocator, query, text, .{}) catch return .{ .null_val = {} };
+        const matched = fts_query.textMatches(self.allocator, query, text, .{}) catch |err| return switch (err) {
+            error.OutOfMemory => EvalError.OutOfMemory,
+            error.InvalidQuery => ctx.fail(EvalError.InvalidOperation, b.right.getLocation(), "Full-text query {f} only excludes; it needs a word to match (write NOT x @@ 'word' to exclude)", .{Brief{ .value = right }}),
+        };
         return .{ .bool_val = matched };
     }
 };

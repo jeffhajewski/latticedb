@@ -292,3 +292,19 @@ test "fts query: ORDER BY score() DESC with a LIMIT keeps only the best matches"
     try std.testing.expectEqual(@as(usize, 3), m);
     for (top[0..3], in_txn[0..3]) |g, want| try std.testing.expectApproxEqAbs(want, g, 1e-6);
 }
+
+test "fts query: text @@ a query of only exclusions fails, as it does against an index" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lse_fts_query_literal.ltdb";
+    const db = try openDb(allocator, path);
+    defer {
+        db.close();
+        removeFiles(path);
+    }
+    var yes = try db.query("RETURN 'the quick fox' @@ 'fox -dog'");
+    defer yes.deinit();
+    try std.testing.expect(yes.rows[0].values[0].bool_val);
+    // Before, a refused query read as null, so a WHERE dropped every row
+    // and the query succeeded.
+    try std.testing.expectError(error.ExecutionError, db.query("RETURN 'the quick fox' @@ '-dog'"));
+}

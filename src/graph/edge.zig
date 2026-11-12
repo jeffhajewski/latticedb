@@ -1321,8 +1321,10 @@ fn deserializeEdge(
     // Read properties
     const num_props = try reader.readInt(u16, .little);
     const properties = try allocator.alloc(Property, num_props);
+    // Only the properties decoded so far hold anything to free.
+    var decoded: usize = 0;
     errdefer {
-        for (properties) |*prop| {
+        for (properties[0..decoded]) |*prop| {
             var val = prop.value;
             val.deinit(allocator);
         }
@@ -1332,6 +1334,7 @@ fn deserializeEdge(
     for (properties) |*prop| {
         prop.key_id = try reader.readInt(u16, .little);
         prop.value = try deserializeValue(allocator, reader);
+        decoded += 1;
     }
 
     return Edge{
@@ -1367,10 +1370,7 @@ fn deserializeValue(allocator: Allocator, reader: anytype) !PropertyValue {
             const str = try allocator.alloc(u8, len);
             errdefer allocator.free(str);
             const bytes_read = try reader.readAll(str);
-            if (bytes_read != len) {
-                allocator.free(str);
-                return error.EndOfStream;
-            }
+            if (bytes_read != len) return error.EndOfStream;
             break :blk PropertyValue{ .string_val = str };
         },
         5 => blk: {
@@ -1378,10 +1378,7 @@ fn deserializeValue(allocator: Allocator, reader: anytype) !PropertyValue {
             const bytes = try allocator.alloc(u8, len);
             errdefer allocator.free(bytes);
             const bytes_read = try reader.readAll(bytes);
-            if (bytes_read != len) {
-                allocator.free(bytes);
-                return error.EndOfStream;
-            }
+            if (bytes_read != len) return error.EndOfStream;
             break :blk PropertyValue{ .bytes_val = bytes };
         },
         6 => blk: {
@@ -1401,15 +1398,17 @@ fn deserializeValue(allocator: Allocator, reader: anytype) !PropertyValue {
                 break :blk PropertyValue{ .list_val = &[_]PropertyValue{} };
             }
             const list = try allocator.alloc(PropertyValue, count);
+            var decoded: usize = 0;
             errdefer {
-                for (list) |*item| {
+                for (list[0..decoded]) |*item| {
                     var mutable = item.*;
                     mutable.deinit(allocator);
                 }
                 allocator.free(list);
             }
-            for (0..count) |i| {
-                list[i] = try deserializeValue(allocator, reader);
+            for (list) |*item| {
+                item.* = try deserializeValue(allocator, reader);
+                decoded += 1;
             }
             break :blk PropertyValue{ .list_val = list };
         },
@@ -1420,8 +1419,9 @@ fn deserializeValue(allocator: Allocator, reader: anytype) !PropertyValue {
                 break :blk PropertyValue{ .map_val = &[_]PropertyValue.MapEntry{} };
             }
             const map = try allocator.alloc(PropertyValue.MapEntry, count);
+            var decoded: usize = 0;
             errdefer {
-                for (map) |*entry| {
+                for (map[0..decoded]) |*entry| {
                     allocator.free(entry.key);
                     var mutable = entry.value;
                     mutable.deinit(allocator);
@@ -1433,12 +1433,10 @@ fn deserializeValue(allocator: Allocator, reader: anytype) !PropertyValue {
                 const key = try allocator.alloc(u8, key_len);
                 errdefer allocator.free(key);
                 const key_bytes_read = try reader.readAll(key);
-                if (key_bytes_read != key_len) {
-                    allocator.free(key);
-                    return error.EndOfStream;
-                }
+                if (key_bytes_read != key_len) return error.EndOfStream;
                 const value = try deserializeValue(allocator, reader);
                 map[i] = .{ .key = key, .value = value };
+                decoded += 1;
             }
             break :blk PropertyValue{ .map_val = map };
         },
@@ -2102,4 +2100,41 @@ test "createWithId rejects duplicate edge_id" {
         EdgeError.AlreadyExists,
         store.createWithId(7, 1, 3, 1000, &[_]Property{}),
     );
+}
+
+test "deserializeEdge frees exactly what it decoded when it fails part way" {
+    var list_items = [_]PropertyValue{ .{ .string_val = "first" }, .{ .bytes_val = "second" } };
+    var map_entries = [_]PropertyValue.MapEntry{
+        .{ .key = "inner", .value = .{ .list_val = &list_items } },
+        .{ .key = "text", .value = .{ .string_val = "value" } },
+    };
+    const properties = [_]Property{
+        .{ .key_id = 1, .value = .{ .string_val = "a string" } },
+        .{ .key_id = 2, .value = .{ .list_val = &list_items } },
+        .{ .key_id = 3, .value = .{ .map_val = &map_entries } },
+        .{ .key_id = 4, .value = .{ .string_val = "last" } },
+    };
+    var buf: [512]u8 = undefined;
+    const data = try serializeEdge(1, 2, 3, &properties, &buf);
+
+    // Truncated anywhere: an error, and nothing leaked or freed twice.
+    for (0..data.len) |len| {
+        if (deserializeEdge(std.testing.allocator, 1, data[0..len])) |edge| {
+            var e = edge;
+            e.deinit(std.testing.allocator);
+            return error.TestExpectedError;
+        } else |_| {}
+    }
+
+    // Out of memory at every allocation in turn: the same.
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        var edge = deserializeEdge(failing.allocator(), 1, data) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        edge.deinit(failing.allocator());
+        break;
+    }
 }

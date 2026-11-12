@@ -1011,3 +1011,46 @@ test "a truncated or corrupt node record fails cleanly" {
     var reader_stream = @import("compat").fixedBufferStream(corrupt[0..stream.pos]);
     try std.testing.expectError(error.EndOfStream, deserializeValue(std.testing.failing_allocator, reader_stream.reader()));
 }
+
+/// Properties holding every allocated kind of value, nested.
+fn allocatedKindsTestProperties(list_items: []PropertyValue, map_entries: []PropertyValue.MapEntry) [4]Property {
+    list_items[0] = .{ .string_val = "first" };
+    list_items[1] = .{ .bytes_val = "second" };
+    map_entries[0] = .{ .key = "inner", .value = .{ .list_val = list_items } };
+    map_entries[1] = .{ .key = "text", .value = .{ .string_val = "value" } };
+    return .{
+        .{ .key_id = 1, .value = .{ .string_val = "a string" } },
+        .{ .key_id = 2, .value = .{ .list_val = list_items } },
+        .{ .key_id = 3, .value = .{ .map_val = map_entries } },
+        .{ .key_id = 4, .value = .{ .string_val = "last" } },
+    };
+}
+
+test "deserializeNode frees exactly what it decoded when it fails part way" {
+    var list_items: [2]PropertyValue = undefined;
+    var map_entries: [2]PropertyValue.MapEntry = undefined;
+    const properties = allocatedKindsTestProperties(&list_items, &map_entries);
+    var buf: [512]u8 = undefined;
+    const data = try serializeNode(&[_]SymbolId{ 7, 8 }, &properties, &buf);
+
+    // Truncated anywhere: an error, and nothing leaked or freed twice.
+    for (0..data.len) |len| {
+        if (deserializeNode(std.testing.allocator, 1, data[0..len])) |node| {
+            var n = node;
+            n.deinit(std.testing.allocator);
+            return error.TestExpectedError;
+        } else |_| {}
+    }
+
+    // Out of memory at every allocation in turn: the same.
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        var node = deserializeNode(failing.allocator(), 1, data) catch |err| {
+            try std.testing.expectEqual(error.OutOfMemory, err);
+            continue;
+        };
+        node.deinit(failing.allocator());
+        break;
+    }
+}

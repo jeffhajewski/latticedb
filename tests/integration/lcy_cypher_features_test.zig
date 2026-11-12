@@ -1020,12 +1020,13 @@ test "lcy: the new constructs give the same rows over ordered index scans" {
         try run(db, "UNWIND range(0, 79) AS i CREATE (:P {id: i, v: (i * 37) % 80, w: i % 7, s: 'k' + toString(i % 13) + 'x'})");
         try run(db, "MATCH (n:P) WHERE n.id % 9 = 0 REMOVE n.v");
         try run(db, "UNWIND range(0, 9) AS j CREATE (:Q {id: 100 + j, w: j % 7, v: j * 9})");
-        try run(db, "MATCH (a:P), (b:P) WHERE b.id = (a.id * 7 + 3) % 80 CREATE (a)-[:R]->(b)");
+        try run(db, "MATCH (a:P), (b:P) WHERE b.id = (a.id * 7 + 3) % 80 CREATE (a)-[:R {k: a.id % 11}]->(b)");
         try run(db, "MATCH (a:P), (q:Q) WHERE q.w = a.w AND a.id % 5 = 0 CREATE (a)-[:S]->(q)");
     }
     try indexed.createNodePropertyIndex("P", "v");
     try indexed.createNodePropertyIndex("P", "w");
     try indexed.createNodePropertyIndex("P", "s");
+    try indexed.createEdgePropertyIndex("R", "k");
 
     const Kind = lattice.query.planner.QueryPlanner.ScanKind;
 
@@ -1099,4 +1100,29 @@ test "lcy: the new constructs give the same rows over ordered index scans" {
         try std.testing.expect(try planScanKind(indexed, q) != Kind.property_order_scan);
         try expectSameWithIndex(indexed, plain, q);
     }
+    try expectSameWithIndex(indexed, plain, "MATCH (n:Q) RETURN n.id AS a ORDER BY n.v DESC LIMIT 2 UNION ALL MATCH (n:P) RETURN n.id AS a ORDER BY n.w DESC, n.id LIMIT 3");
+    try expectSameWithIndex(indexed, plain, "MATCH (n:P) RETURN n.id AS a ORDER BY n.v DESC LIMIT 2 UNION ALL MATCH (n:P) RETURN n.id AS a ORDER BY n.v LIMIT 2");
+    try expectSameWithIndex(indexed, plain, "MATCH (n:P) RETURN n.id AS a, [(n)-[:R]->(m) | m.id] AS ms ORDER BY n.v DESC LIMIT 4");
+    try expectSameWithIndex(indexed, plain, "MATCH (n:P) WHERE EXISTS { (n)-[:S]->(:Q) } RETURN n.id AS a ORDER BY n.v DESC LIMIT 3");
+    try expectSameWithIndex(indexed, plain, "MATCH (n:P) WHERE n.v < 50 AND COUNT { (n)--() } > 1 RETURN n.id AS a ORDER BY n.v DESC LIMIT 3");
+    try expectSameWithIndex(indexed, plain, "MATCH p = (n:P)-[:R]->(m) RETURN n.id AS a, length(p) AS l, m.id AS b ORDER BY n.v DESC LIMIT 4");
+    try expectSameWithIndex(indexed, plain, "MATCH (n:P) WITH n ORDER BY n.v DESC LIMIT 3 RETURN n.id AS a, [x IN [n.v, n.w] WHERE x IS NOT NULL] AS b");
+
+    // A pattern that starts from a relationship type reads its index for
+    // ranges and equality, under each construct.
+    const edge_query = "MATCH (a)-[r:R]->(b) WHERE r.k > 7 RETURN a.id AS a, b.id AS b ORDER BY a, b";
+    try std.testing.expectEqual(Kind.edge_range_scan, try planScanKind(indexed, edge_query));
+    for ([_][]const u8{
+        edge_query,
+        "MATCH (a)<-[r:R]-(b) WHERE r.k <= 1 RETURN a.id AS a, b.id AS b ORDER BY a, b",
+        "MATCH (a)-[r:R {k: 3}]->(b) RETURN a.id AS a, b.id AS b ORDER BY a",
+        "MATCH p = (a)-[r:R]->(b) WHERE r.k = 4 RETURN a.id AS a, length(p) AS l, [x IN nodes(p) | x.id] AS ids ORDER BY a",
+        "MATCH (a)-[r:R]->(b) WHERE r.k >= 5 AND r.k < 7 AND EXISTS { (b)-[:S]->() } RETURN a.id AS a ORDER BY a",
+        "MATCH (a)-[r:R]->(b) WHERE r.k = 2 RETURN a.id AS a, [(b)-[:R]->(c) | c.id] AS cs, CASE WHEN b.v > 40 THEN 1 ELSE 0 END AS h ORDER BY a",
+        "OPTIONAL MATCH (a)-[r:R]->(b) WHERE r.k > 100 RETURN a.id AS a",
+        "MATCH (m:Q) OPTIONAL MATCH (a)-[r:R]->(b) WHERE r.k = 6 AND a.w = m.w RETURN m.id AS a, count(r) AS c ORDER BY a",
+        "MATCH (a)-[r:R]->(b) WHERE r.k < 2 RETURN a.id AS a ORDER BY a UNION MATCH (a)-[r:R]->(b) WHERE r.k > 9 RETURN a.id AS a ORDER BY a",
+        "MATCH (m:Q) RETURN m.id AS a, COUNT { MATCH (x)-[r:R]->(y) WHERE r.k = m.w } AS c ORDER BY a",
+        "MATCH (a)-[r:R]->(b) WHERE r.k > 8 RETURN count(*) AS c, sum(r.k) AS s",
+    }) |q| try expectSameWithIndex(indexed, plain, q);
 }

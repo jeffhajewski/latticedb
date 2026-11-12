@@ -14,7 +14,7 @@ const ResultValue = lattice.storage.database.ResultValue;
 const Transaction = lattice.Transaction;
 const TxnMode = lattice.TxnMode;
 
-const max_import_file_bytes: usize = 100 * 1024 * 1024;
+pub const max_import_file_bytes: usize = 100 * 1024 * 1024;
 const node_key_size = @sizeOf(NodeId);
 const wal_path_buffer_size = 512;
 const decimal_base = 10;
@@ -32,6 +32,9 @@ const json_record_kind_edge = "edge";
 const json_record_kind_node = "node";
 const json_field_vector = "vector";
 const json_field_vector_dimensions = "vector_dimensions";
+const json_field_vector_metric = "vector_metric";
+const json_field_vector_m = "vector_m";
+const json_field_vector_ef_construction = "vector_ef_construction";
 
 const csv_field_separator = ',';
 const csv_label_separator = ';';
@@ -1092,14 +1095,108 @@ pub fn exportDot(
     return stats;
 }
 
-/// Open a JSON export: the format version, the vector dimensions when the
-/// handle has vectors, and the start of the nodes array.
+/// Open a JSON export: the format version, the vector index's dimensions,
+/// metric and HNSW settings when the handle has vectors, and the start of
+/// the nodes array. An import that creates a vector index creates it with
+/// these (`declaredVectorConfig`).
 fn writeJsonHeader(db: *const Database, writer: anytype) !void {
     try writer.print("{{\"" ++ json_field_version ++ "\":{d},", .{@intFromEnum(current_format_version)});
     if (vectorDimensions(db)) |dims| {
         try writer.print("\"" ++ json_field_vector_dimensions ++ "\":{d},", .{dims});
+        if (db.vectorConfig()) |config| {
+            try writer.print(
+                "\"" ++ json_field_vector_metric ++ "\":\"{s}\",\"" ++ json_field_vector_m ++ "\":{d},\"" ++
+                    json_field_vector_ef_construction ++ "\":{d},",
+                .{ config.metric.name(), config.m, config.ef_construction },
+            );
+        }
     }
     try writer.writeAll("\"" ++ json_field_nodes ++ "\":[");
+}
+
+/// The vector index a JSON export says its vectors came from. Any field can
+/// be missing: files from 0.16.0 have the dimensions at most, and JSONL and
+/// CSV have no header to say it in.
+pub const DeclaredVectorConfig = struct {
+    dimensions: ?u16 = null,
+    metric: ?lattice.storage.database.VectorMetric = null,
+    m: ?u16 = null,
+    ef_construction: ?u16 = null,
+};
+
+/// Read the vector fields of a JSON export's top-level object, skipping
+/// everything else without building it. A value that is out of range or of
+/// the wrong type is refused as `InvalidFormat`, as the import would.
+pub fn declaredVectorConfig(allocator: std.mem.Allocator, content: []const u8) ImportExportError!DeclaredVectorConfig {
+    var scanner = std.json.Scanner.initCompleteInput(allocator, content);
+    defer scanner.deinit();
+    var declared: DeclaredVectorConfig = .{};
+
+    const invalid = ImportExportError.InvalidFormat;
+    if ((scanner.next() catch return invalid) != .object_begin) return invalid;
+    while (true) {
+        const key_token = scanner.nextAlloc(allocator, .alloc_if_needed) catch return invalid;
+        const key = switch (key_token) {
+            .object_end => break,
+            .string => |text| text,
+            .allocated_string => |text| text,
+            else => return invalid,
+        };
+        defer if (key_token == .allocated_string) allocator.free(key);
+
+        const Field = enum { dimensions, metric, m, ef_construction, other };
+        const field: Field = if (std.mem.eql(u8, key, json_field_vector_dimensions))
+            .dimensions
+        else if (std.mem.eql(u8, key, json_field_vector_metric))
+            .metric
+        else if (std.mem.eql(u8, key, json_field_vector_m))
+            .m
+        else if (std.mem.eql(u8, key, json_field_vector_ef_construction))
+            .ef_construction
+        else
+            .other;
+        if (field == .other) {
+            scanner.skipValue() catch return invalid;
+            continue;
+        }
+
+        const value_token = scanner.nextAlloc(allocator, .alloc_if_needed) catch return invalid;
+        defer switch (value_token) {
+            .allocated_string, .allocated_number => |text| allocator.free(text),
+            else => {},
+        };
+        const text = switch (value_token) {
+            .string, .number, .allocated_string, .allocated_number => |t| t,
+            else => return invalid,
+        };
+        const is_string = value_token == .string or value_token == .allocated_string;
+        switch (field) {
+            .metric => {
+                if (!is_string) return invalid;
+                declared.metric = lattice.storage.database.VectorMetric.fromName(text) orelse return invalid;
+            },
+            else => {
+                if (is_string) return invalid;
+                const number = std.fmt.parseInt(u16, text, decimal_base) catch return invalid;
+                switch (field) {
+                    .dimensions => {
+                        lattice.core.types.validateVectorDimensions(number) catch return invalid;
+                        declared.dimensions = number;
+                    },
+                    .m => {
+                        if (number < 2 or number > 32) return invalid;
+                        declared.m = number;
+                    },
+                    .ef_construction => {
+                        if (number < 1 or number > 4096) return invalid;
+                        declared.ef_construction = number;
+                    },
+                    else => unreachable,
+                }
+            },
+        }
+    }
+    return declared;
 }
 
 /// Write a node's vector as a "vector" field, when the handle has vectors and
@@ -2694,4 +2791,32 @@ test "import_export: dumpCanonicalJson is deterministic and includes unlabeled n
     try std.testing.expect(std.mem.indexOf(u8, out_a, "\"labels\":[]") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_a, "\"id\":\"1\"") != null);
     try std.testing.expect(std.mem.indexOf(u8, out_a, "\"id\":\"1\",\"source\":\"1\",\"target\":\"2\"") != null);
+}
+
+test "lfmt the vector fields of a JSON export are read without the rest" {
+    const allocator = std.testing.allocator;
+    const full = try declaredVectorConfig(allocator,
+        \\{"version":2,"nodes":[{"id":"1","vector":[1.0]}],"vector_dimensions":1,"vector_metric":"dot_product","vector_m":8,"vector_ef_construction":64,"edges":[]}
+    );
+    try std.testing.expectEqual(@as(?u16, 1), full.dimensions);
+    try std.testing.expectEqual(@as(?lattice.storage.database.VectorMetric, .dot_product), full.metric);
+    try std.testing.expectEqual(@as(?u16, 8), full.m);
+    try std.testing.expectEqual(@as(?u16, 64), full.ef_construction);
+
+    // What 0.16.0 wrote: the dimensions at most.
+    const old = try declaredVectorConfig(allocator, "{\"version\":2,\"vector_dimensions\":4,\"nodes\":[],\"edges\":[]}");
+    try std.testing.expectEqual(@as(?u16, 4), old.dimensions);
+    try std.testing.expect(old.metric == null and old.m == null and old.ef_construction == null);
+
+    for ([_][]const u8{
+        "{\"vector_metric\":\"dot\"}",
+        "{\"vector_metric\":3}",
+        "{\"vector_dimensions\":0}",
+        "{\"vector_dimensions\":\"3\"}",
+        "{\"vector_m\":1}",
+        "{\"vector_ef_construction\":5000}",
+        "[1,2]",
+    }) |bad| {
+        try std.testing.expectError(ImportExportError.InvalidFormat, declaredVectorConfig(allocator, bad));
+    }
 }

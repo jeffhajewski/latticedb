@@ -483,6 +483,69 @@ test "cli: the dot product metric has one name, from create to info" {
     }
 }
 
+test "cli: a JSON export carries the vector index's metric and settings to the database an import indexes" {
+    const allocator = std.testing.allocator;
+    const source = "/tmp/lfmt_cli_vexport_source.ltdb";
+    const target = "/tmp/lfmt_cli_vexport_target.ltdb";
+    const indexed = "/tmp/lfmt_cli_vexport_indexed.ltdb";
+    const input = "/tmp/lfmt_cli_vexport_input.json";
+    const exported = "/tmp/lfmt_cli_vexport.json";
+    for ([_][]const u8{ source, target, indexed }) |path| deleteDatabaseFiles(path);
+    defer for ([_][]const u8{ source, target, indexed }) |path| deleteDatabaseFiles(path);
+    defer compat.fs.cwd().deleteFile(input) catch {};
+    defer compat.fs.cwd().deleteFile(exported) catch {};
+
+    try writeFile(input,
+        \\{"version":2,"vector_dimensions":3,"nodes":[{"id":"1","labels":["Doc"],"properties":{},"vector":[3.0,4.0,0.0]}],"edges":[]}
+    );
+    const steps = [_][]const []const u8{
+        &.{ "create", source, "--enable-vector", "--vector-dims=3", "--vector-metric=euclidean", "--vector-m=8", "--vector-ef-construction=50" },
+        &.{ "import", source, "--file=" ++ input },
+        &.{ "export", source, "--file=" ++ exported },
+        &.{ "create", target },
+        &.{ "import", target, "--file=" ++ exported, "--enable-vector" },
+        // A database that has an index keeps its own settings.
+        &.{ "create", indexed, "--enable-vector", "--vector-dims=3" },
+        &.{ "import", indexed, "--file=" ++ exported, "--enable-vector" },
+    };
+    for (steps) |argv| {
+        const run = try runCli(allocator, argv);
+        defer run.deinit(allocator);
+        if (!run.succeeded()) {
+            std.debug.print("{s}: exit {?d}\nstderr: {s}\n", .{ argv[0], run.exit_code, run.stderr });
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    const content = try readWholeFile(allocator, exported);
+    defer allocator.free(content);
+    const settings = "\"vector_dimensions\":3,\"vector_metric\":\"euclidean\",\"vector_m\":8,\"vector_ef_construction\":50,";
+    try std.testing.expect(std.mem.indexOf(u8, content, settings) != null);
+
+    for ([_]struct { path: []const u8, expected: []const u8 }{
+        .{ .path = target, .expected = settings },
+        .{ .path = indexed, .expected = "\"vector_dimensions\":3,\"vector_metric\":\"cosine\",\"vector_m\":16,\"vector_ef_construction\":200," },
+    }) |case| {
+        const info = try runCli(allocator, &.{ "info", case.path, "--format=json" });
+        defer info.deinit(allocator);
+        if (!info.succeeded() or std.mem.indexOf(u8, info.stdout, case.expected) == null) {
+            std.debug.print("{s}: {s}\n{s}\n", .{ case.path, info.stdout, info.stderr });
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    // The vector came through, and under the euclidean metric it is stored
+    // as written, not normalised.
+    const exported_again = "/tmp/lfmt_cli_vexport_again.json";
+    defer compat.fs.cwd().deleteFile(exported_again) catch {};
+    const again = try runCli(allocator, &.{ "export", target, "--file=" ++ exported_again });
+    defer again.deinit(allocator);
+    try std.testing.expect(again.succeeded());
+    const round_trip = try readWholeFile(allocator, exported_again);
+    defer allocator.free(round_trip);
+    try std.testing.expect(std.mem.indexOf(u8, round_trip, "\"vector\":[3.0,4.0,0.0]") != null);
+}
+
 test "cli: help for every command that opens a database lists the vector options" {
     const allocator = std.testing.allocator;
     const commands = [_][]const u8{

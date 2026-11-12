@@ -1556,7 +1556,7 @@ fn cmdImport(
         csv_pair = &csv_pair_storage;
     }
 
-    const db = try openDatabase(allocator, stderr, parsed_args, .read_write);
+    const db = try openImportTarget(allocator, stderr, parsed_args, if (is_json) file else null);
     defer db.close();
 
     if (csv_pair) |pair| {
@@ -1647,10 +1647,16 @@ fn cmdImport(
             return error.CommandFailed;
         }
         return switch (err) {
-            error.VectorsNotEnabled => failCommand(
+            error.VectorsNotEnabled => if (is_json) failCommand(
                 stderr,
-                "Import failed: {s} contains vectors, and {s} was opened without them. Retry with --enable-vector " ++
-                    "--vector-dims=<n>, where <n> is the vector_dimensions the file declares.",
+                "Import failed: {s} contains vectors, and {s} has no vector index. Retry with --enable-vector: " ++
+                    "the index is created with the dimensions, metric and HNSW settings the file declares " ++
+                    "(--vector-dims=<n> where it declares none).",
+                .{ file, path },
+            ) else failCommand(
+                stderr,
+                "Import failed: {s} contains vectors, and {s} has no vector index. Retry with --enable-vector " ++
+                    "--vector-dims=<n>, where <n> is the number of numbers in each vector.",
                 .{ file, path },
             ),
             error.VectorDimensionMismatch => failCommand(
@@ -1666,6 +1672,60 @@ fn cmdImport(
             else => failCommand(stderr, "Import failed: {s}", .{@errorName(err)}),
         };
     }
+}
+
+/// Open the database an import writes to.
+///
+/// With --enable-vector, a database that has no vector index gets one. A
+/// JSON export says which index its vectors came from: dimensions, metric
+/// and HNSW settings. The new index takes them from there, --vector-dims
+/// winning over the file's dimensions. A database that already has an index
+/// keeps it as it is: the file's settings are not imposed on it, and an
+/// import whose vectors have other dimensions fails as before.
+fn openImportTarget(
+    allocator: std.mem.Allocator,
+    stderr: anytype,
+    parsed_args: *const Args,
+    json_file: ?[]const u8,
+) !*Database {
+    const path = parsed_args.path.?;
+    const plain = openOptions(parsed_args, .read_write);
+    const json_path = json_file orelse return openDatabase(allocator, stderr, parsed_args, .read_write);
+    if (!parsed_args.enable_vector) return openDatabase(allocator, stderr, parsed_args, .read_write);
+
+    const declared = blk: {
+        const json = compat.fs.cwd().openFile(json_path, .{}) catch {
+            return failCommand(stderr, "Import failed: cannot read {s}", .{json_path});
+        };
+        defer json.close();
+        const content = json.readToEndAlloc(allocator, import_export.max_import_file_bytes) catch {
+            return failCommand(stderr, "Import failed: cannot read {s}", .{json_path});
+        };
+        defer allocator.free(content);
+        break :blk import_export.declaredVectorConfig(allocator, content) catch {
+            return failCommand(stderr, "Import failed: {s} is not a JSON export (its vector fields could not be read)", .{json_path});
+        };
+    };
+
+    var options = plain;
+    if (!parsed_args.vector_dims_set) {
+        if (declared.dimensions) |dims| options.config.vector_dimensions = dims;
+    }
+    options.config.vector_metric = declared.metric;
+    options.config.vector_m = declared.m;
+    options.config.vector_ef_construction = declared.ef_construction;
+
+    return Database.open(allocator, path, options) catch |err| {
+        // A database with an index that the file's settings contradict:
+        // open it with its own, which the import then checks the vectors
+        // against.
+        if (err == DatabaseError.VectorConfigMismatch) {
+            return Database.open(allocator, path, plain) catch |retry_err| {
+                return failOpen(stderr, path, retry_err, parsed_args.enable_vector);
+            };
+        }
+        return failOpen(stderr, path, err, parsed_args.enable_vector);
+    };
 }
 
 const CsvPair = struct {
@@ -2306,6 +2366,14 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\  --vector-dims=<n>     Dimensions for a new index, or for a 0.16.0
             \\                        database whose dimensions cannot be read
             \\
+            \\A JSON export records the vector index its vectors came from:
+            \\dimensions, metric, M and ef_construction. With --enable-vector, a
+            \\database that has no vector index gets one with those settings
+            \\(--vector-dims wins over the file's dimensions); one that has an
+            \\index keeps it. JSONL and CSV exports cannot record them: pass
+            \\--vector-dims, and create the database with `lattice create` first
+            \\if the metric or HNSW settings are not the defaults.
+            \\
             \\Without --on-error=skip, the import stops at the first invalid record
             \\and says which it was; batches committed before it are kept. With it,
             \\each record is committed on its own, an invalid one is left out whole,
@@ -2355,6 +2423,11 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\
             \\Export data to JSON, JSONL, CSV, or DOT files, or RDF in Turtle or
             \\N-Triples.
+            \\
+            \\Vectors are exported with their nodes. A JSON export (and dump) also
+            \\records the vector index's dimensions, metric, M and ef_construction,
+            \\which an import that creates an index uses; JSONL, CSV and DOT
+            \\exports cannot record them.
             \\
             \\Options:
             \\  --file=<path>         Output file path (.json, .jsonl, .csv, .dot,

@@ -617,6 +617,9 @@ test "buffer_pool: ldur a load larger than the pool leaves the page table its us
     }
     try std.testing.expect(bp.page_table.capacity() <= 4 * frame_count);
     try std.testing.expect(bp.pageTableFreeSlots() * 5 >= bp.page_table.capacity());
+    // Clean pages are evicted again rather than the pool growing: the flush
+    // ended the stretch in which every frame was dirty.
+    try std.testing.expectEqual(@as(usize, frame_count), bp.getStats().total_frames);
 }
 
 test "buffer_pool: ldur long eviction churn keeps free slots in the page table" {

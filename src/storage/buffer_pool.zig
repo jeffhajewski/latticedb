@@ -109,6 +109,14 @@ pub const BufferPool = struct {
     /// rather than write one of them out. These go back to the allocator at
     /// the next flush. A slot is null once its frame has been released.
     overflow: std.ArrayListUnmanaged(?*BufferFrame) = .empty,
+    /// How many slots of `overflow` are null, so that growing the pool
+    /// only searches for one when there is one to find.
+    overflow_holes: usize = 0,
+    /// The last clock sweep found every frame of the pool proper dirty.
+    /// Nothing but a flush or `abandonDirty` makes one clean, so until then
+    /// a sweep would find the same, and the pool grows without one: each
+    /// sweep walks every frame twice. Guarded by `mutex`.
+    all_frames_dirty: bool = false,
     /// Where a flush records its pages before writing them in place. Null
     /// for a database with no file behind it, which has nothing to tear.
     journal: ?*journal_mod.Journal = null,
@@ -390,6 +398,9 @@ pub const BufferPool = struct {
 
         if (dirty.items.len == 0 and !self.pm.hasPendingChanges()) {
             self.dirty_count = 0;
+            self.mutex.lock();
+            self.all_frames_dirty = false;
+            self.mutex.unlock();
             return 0;
         }
 
@@ -477,6 +488,9 @@ pub const BufferPool = struct {
             if (slot) |frame| frame.dirty = false;
         }
         self.dirty_count = 0;
+        self.mutex.lock();
+        self.all_frames_dirty = false;
+        self.mutex.unlock();
     }
 
     /// Whether anything holds a page. Nothing pinned means no B+Tree
@@ -539,6 +553,7 @@ pub const BufferPool = struct {
             slot.* = null;
         }
         self.overflow.clearRetainingCapacity();
+        self.overflow_holes = 0;
         // Every page is gone, so the table starts over, without tombstones
         // and at its usual size.
         self.page_table.clearRetainingCapacity();
@@ -615,6 +630,8 @@ pub const BufferPool = struct {
     fn returnFrame(self: *Self, frame_id: FrameId) void {
         if (frame_id < self.frame_count) {
             self.free_list.append(self.allocator, frame_id) catch {};
+            // Whatever it is given to next starts clean.
+            self.all_frames_dirty = false;
             return;
         }
         const slot = &self.overflow.items[frame_id - self.frame_count];
@@ -622,6 +639,7 @@ pub const BufferPool = struct {
             self.allocator.free(frame.data);
             self.allocator.destroy(frame);
             slot.* = null;
+            self.overflow_holes += 1;
         }
     }
 
@@ -652,6 +670,9 @@ pub const BufferPool = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
+        // The flush cleaned every frame it could latch.
+        self.all_frames_dirty = false;
+
         var released: usize = 0;
         for (self.overflow.items) |*slot| {
             const frame = slot.* orelse continue;
@@ -668,6 +689,10 @@ pub const BufferPool = struct {
             _ = self.overflow.pop();
         }
         if (self.overflow.items.len == 0) self.overflow.clearAndFree(self.allocator);
+        self.overflow_holes = 0;
+        for (self.overflow.items) |slot| {
+            if (slot == null) self.overflow_holes += 1;
+        }
         if (released > 0) self.resizePageTable();
     }
 
@@ -744,10 +769,13 @@ pub const BufferPool = struct {
             .latch = RwLatch{},
         };
 
-        for (self.overflow.items, 0..) |*slot, i| {
-            if (slot.* == null) {
-                slot.* = frame;
-                return @intCast(self.frame_count + i);
+        if (self.overflow_holes > 0) {
+            for (self.overflow.items, 0..) |*slot, i| {
+                if (slot.* == null) {
+                    slot.* = frame;
+                    self.overflow_holes -= 1;
+                    return @intCast(self.frame_count + i);
+                }
             }
         }
         self.overflow.append(self.allocator, frame) catch return BufferPoolError.BufferPoolFull;
@@ -767,10 +795,13 @@ pub const BufferPool = struct {
             return frame_id;
         }
 
+        if (self.all_frames_dirty) return self.addOverflowFrame();
+
         // Clock eviction algorithm
         var iterations: usize = 0;
         const max_iterations = self.frame_count * 2; // Allow two full rotations
         var passed_over_dirty = false;
+        var saw_clean = false;
 
         while (iterations < max_iterations) {
             const frame = &self.frames[self.clock_hand];
@@ -778,6 +809,7 @@ pub const BufferPool = struct {
 
             // Skip if pinned
             if (frame.pin_count.load(.monotonic) > 0) {
+                if (!frame.dirty) saw_clean = true;
                 self.advanceClock();
                 iterations += 1;
                 continue;
@@ -809,6 +841,7 @@ pub const BufferPool = struct {
         // Every frame pinned is the caller holding too much at once, as it
         // always was. Frames that are merely dirty are a different matter.
         if (!passed_over_dirty) return BufferPoolError.BufferPoolFull;
+        if (!saw_clean) self.all_frames_dirty = true;
         return self.addOverflowFrame();
     }
 

@@ -672,9 +672,16 @@ pub const RecoveryManager = struct {
             self.allocator.free(properties);
         };
         var existing = try getEdge(ctx, p.edge_id);
-        const exists = existing != null;
-        if (existing) |*edge| edge.deinit(self.allocator);
-        try putEdge(ctx, p.edge_id, exists, p.source, p.target, p.type_id, @ptrCast(properties));
+        defer if (existing) |*edge| edge.deinit(self.allocator);
+        if (existing) |edge| {
+            // Same endpoints and type: only the record differs, and the
+            // traversal keys stay as they are.
+            if (edge.source == p.source and edge.target == p.target and edge.edge_type == p.type_id) {
+                ctx.edge_store.replaceProperties(p.edge_id, p.source, p.target, p.type_id, @ptrCast(properties)) catch return RecoveryError.IoError;
+                return;
+            }
+        }
+        try putEdge(ctx, p.edge_id, existing != null, p.source, p.target, p.type_id, @ptrCast(properties));
     }
 
     fn redoEdgeProperty(self: *Self, ctx: LogicalRecoveryContext, deletes: *const Deletes, lsn: u64, payload: []const u8) RecoveryError!void {
@@ -691,7 +698,10 @@ pub const RecoveryManager = struct {
 
         const props = try self.withProperty(edge.properties, key_id, new_value);
         defer self.allocator.free(props);
-        try putEdge(ctx, p.edge_id, true, edge.source, edge.target, edge.edge_type, props);
+        // The record is the only place the properties live; the traversal
+        // keys stay as they are. Logs from any version carry the same
+        // record, and redoing it either way leaves the same edge.
+        ctx.edge_store.replaceProperties(p.edge_id, edge.source, edge.target, edge.edge_type, props) catch return RecoveryError.IoError;
     }
 
     fn streamTrees(ctx: LogicalRecoveryContext) RecoveryError!stream_store.TreeSet {

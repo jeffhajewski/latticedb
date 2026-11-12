@@ -3091,16 +3091,29 @@ pub const Database = struct {
             return DatabaseError.ValueTooLarge;
         }
 
-        if (current != null) {
-            self.edge_store.deleteById(edge_id) catch |err| switch (err) {
-                edge_mod.EdgeError.NotFound => {},
-                else => return DatabaseError.IoError,
+        // An edge that keeps its endpoints and type changed only properties,
+        // and those live in its record alone: rewrite that, not the
+        // traversal keys.
+        const same_edge = if (current) |existing|
+            existing.source == state.source and existing.target == state.target and existing.edge_type == state.edge_type
+        else
+            false;
+        if (same_edge) {
+            self.edge_store.replaceProperties(edge_id, state.source, state.target, state.edge_type, state.properties) catch |err| {
+                return mapEdgeStoreError(err);
+            };
+        } else {
+            if (current != null) {
+                self.edge_store.deleteById(edge_id) catch |err| switch (err) {
+                    edge_mod.EdgeError.NotFound => {},
+                    else => return DatabaseError.IoError,
+                };
+            }
+
+            self.edge_store.createWithId(edge_id, state.source, state.target, state.edge_type, state.properties) catch |err| {
+                return mapEdgeStoreError(err);
             };
         }
-
-        self.edge_store.createWithId(edge_id, state.source, state.target, state.edge_type, state.properties) catch |err| {
-            return mapEdgeStoreError(err);
-        };
         if (self.property_index) |*index| {
             if (current) |existing| {
                 index.removeEdge(edge_id, existing.edge_type, existing.properties) catch |err| return mapPropertyIndexError(err);
@@ -3261,15 +3274,25 @@ pub const Database = struct {
                         self.allocator.free(properties);
                     };
 
-                    // Replace edge state with the previous snapshot.
-                    self.edge_store.deleteById(entry.entity_id) catch {};
-                    self.edge_store.createWithId(
+                    // Put back the previous properties. An update never
+                    // changes an edge's endpoints or type, so only its
+                    // record needs writing.
+                    self.edge_store.replaceProperties(
                         payload.edge_id,
                         payload.source,
                         payload.target,
                         payload.type_id,
                         properties,
-                    ) catch {};
+                    ) catch |err| switch (err) {
+                        edge_mod.EdgeError.NotFound => self.edge_store.createWithId(
+                            payload.edge_id,
+                            payload.source,
+                            payload.target,
+                            payload.type_id,
+                            properties,
+                        ) catch {},
+                        else => {},
+                    };
                 },
             },
             .property => switch (entry.op_type) {
@@ -7768,10 +7791,8 @@ pub const Database = struct {
             }
         }
 
-        self.edge_store.deleteById(edge_id) catch return DatabaseError.IoError;
-        self.edge_store.createWithId(edge_id, edge.source, edge.target, edge.edge_type, new_props.items) catch |err| {
-            // Best-effort restore of previous state.
-            self.edge_store.createWithId(edge_id, edge.source, edge.target, edge.edge_type, edge.properties) catch {};
+        // All or nothing: a failure leaves the old record in place.
+        self.edge_store.replaceProperties(edge_id, edge.source, edge.target, edge.edge_type, new_props.items) catch |err| {
             return mapEdgeStoreError(err);
         };
         try self.replaceEdgePropertyIndex(
@@ -7909,9 +7930,8 @@ pub const Database = struct {
             }
         }
 
-        self.edge_store.deleteById(edge_id) catch return DatabaseError.IoError;
-        self.edge_store.createWithId(edge_id, edge.source, edge.target, edge.edge_type, new_props.items) catch |err| {
-            self.edge_store.createWithId(edge_id, edge.source, edge.target, edge.edge_type, edge.properties) catch {};
+        // All or nothing: a failure leaves the old record in place.
+        self.edge_store.replaceProperties(edge_id, edge.source, edge.target, edge.edge_type, new_props.items) catch |err| {
             return mapEdgeStoreError(err);
         };
         try self.replaceEdgePropertyIndex(

@@ -22,6 +22,7 @@ const lfmt_sync_test = @import("lfmt_sync_test.zig");
 const lqs_query_semantics_test = @import("lqs_query_semantics_test.zig");
 const llv_label_vector_test = @import("llv_label_vector_test.zig");
 const lrdf_rdf_test = @import("lrdf_rdf_test.zig");
+const lgr_graph_storage_test = @import("lgr_graph_storage_test.zig");
 
 // Re-export tests from all modules
 test {
@@ -55,6 +56,8 @@ test {
     _ = llv_label_vector_test;
     // RDF import and export through the command-line tool
     _ = lrdf_rdf_test;
+    // Graph storage: edge updates, ordered property indexes, type scans
+    _ = lgr_graph_storage_test;
 }
 
 test "integration test runner initialized" {

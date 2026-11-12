@@ -427,6 +427,39 @@ pub const EdgeStore = struct {
         }
     }
 
+    /// Replace the properties of an existing edge.
+    ///
+    /// The properties live only in the edge's record in the edge id index;
+    /// the two traversal entries are keys with empty values and hold nothing
+    /// a property change affects. So this rewrites that one record, in one
+    /// descent, and leaves the traversal tree alone. `source`, `target` and
+    /// `edge_type` must be the edge's own: they are written into the record
+    /// but not checked against it, and changing them here would leave the
+    /// traversal keys describing a different edge.
+    ///
+    /// NotFound when the edge does not exist; BufferTooSmall when the new
+    /// record cannot be stored. Either way the old record is left in place.
+    pub fn replaceProperties(
+        self: *Self,
+        edge_id: EdgeId,
+        source: NodeId,
+        target: NodeId,
+        edge_type: SymbolId,
+        properties: []const Property,
+    ) EdgeError!void {
+        if (edge_id == EDGE_ID_META_KEY) return EdgeError.InvalidData;
+        const serialized = try self.serializeEdgeAlloc(source, target, edge_type, properties);
+        defer self.allocator.free(serialized);
+
+        const id_key = edgeIdToKey(edge_id);
+        if (!self.edge_id_index.canFitLeafEntry(&id_key, serialized.len)) {
+            return EdgeError.BufferTooSmall;
+        }
+        self.edge_id_index.replace(&id_key, serialized) catch |err| {
+            return mapBTreeError(err);
+        };
+    }
+
     /// Get an edge by source, target, and type
     pub fn get(
         self: *Self,

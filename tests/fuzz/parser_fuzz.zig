@@ -257,6 +257,15 @@ test "parser: handles the syntax added after 0.16" {
         "FOREACH (x IN [1] | CREATE (n)",
         "FOREACH (x IN [1] | MATCH (n) RETURN n)",
         "FOREACH (x IN [1] | FOREACH (y IN [x] | ))",
+        "MATCH (`a b`:`L 1`)-[r:`T:x`]->() RETURN `a b`.`p q` AS `c d`, {`k``k`: 1}",
+        "RETURN `toUpper`('a')",
+        "RETURN ``",
+        "RETURN `",
+        "RETURN `a",
+        "RETURN `a``",
+        "RETURN ```",
+        "MATCH (n:`a\n`) RETURN n",
+        "WITH 1 AS `match` RETURN `match`",
     };
     for (corpus) |input| try fuzzParser(allocator, input);
 }

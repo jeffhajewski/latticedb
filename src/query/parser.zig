@@ -202,6 +202,8 @@ pub const TokenType = enum {
     string,
     // Identifiers
     identifier,
+    /// A backtick-quoted name: never a keyword. Its text keeps the backticks.
+    quoted_identifier,
     parameter,
     // Operators
     eq,
@@ -504,7 +506,7 @@ pub const Parser = struct {
             self.errorAtCurrent("Expected a variable in FOREACH");
             return null;
         }
-        const variable = self.current.text;
+        const variable = self.currentName();
         self.advance();
         if (!self.consume(.kw_in, "Expected IN after the variable")) return null;
         const list = self.parseExpression() orelse return null;
@@ -550,7 +552,7 @@ pub const Parser = struct {
             return null;
         }
         var name: std.ArrayList(u8) = .empty;
-        name.appendSlice(a, self.current.text) catch return null;
+        name.appendSlice(a, self.currentName()) catch return null;
         self.advance();
         while (self.match(.dot)) {
             if (!self.checkName()) {
@@ -558,7 +560,7 @@ pub const Parser = struct {
                 return null;
             }
             name.append(a, '.') catch return null;
-            name.appendSlice(a, self.current.text) catch return null;
+            name.appendSlice(a, self.currentName()) catch return null;
             self.advance();
         }
         if (!self.consume(.lparen, "Expected '(' after the procedure name")) return null;
@@ -586,7 +588,7 @@ pub const Parser = struct {
                         return null;
                     }
                     const item_loc = self.currentLocation();
-                    const column = self.current.text;
+                    const column = self.currentName();
                     self.advance();
                     var alias: ?[]const u8 = null;
                     if (self.match(.kw_as)) {
@@ -594,7 +596,7 @@ pub const Parser = struct {
                             self.errorAtCurrent("Expected a name after AS");
                             return null;
                         }
-                        alias = self.current.text;
+                        alias = self.currentName();
                         self.advance();
                     }
                     items.append(a, .{ .column = column, .alias = alias, .location = item_loc }) catch return null;
@@ -680,7 +682,7 @@ pub const Parser = struct {
                 self.errorAtCurrent("Expected identifier after AS");
                 return null;
             }
-            alias = self.current.text;
+            alias = self.currentName();
             self.advance();
         }
 
@@ -874,7 +876,7 @@ pub const Parser = struct {
             self.errorAtCurrent("Expected variable name in SET");
             return null;
         }
-        const var_name = self.current.text;
+        const var_name = self.currentName();
         const var_loc = self.currentLocation();
         self.advance();
 
@@ -898,7 +900,7 @@ pub const Parser = struct {
                 self.errorAtCurrent("Expected property name after '.'");
                 return null;
             }
-            const prop_name = self.current.text;
+            const prop_name = self.currentName();
             self.advance();
 
             if (!self.consume(.eq, "Expected '=' after property name in SET")) {
@@ -926,7 +928,7 @@ pub const Parser = struct {
             self.errorAtCurrent("Expected label name after ':'");
             return null;
         }
-        labels.append(self.arena.allocator(), self.current.text) catch return null;
+        labels.append(self.arena.allocator(), self.currentName()) catch return null;
         self.advance();
 
         // Additional labels (SET n:Label1:Label2)
@@ -935,7 +937,7 @@ pub const Parser = struct {
                 self.errorAtCurrent("Expected label name after ':'");
                 return null;
             }
-            labels.append(self.arena.allocator(), self.current.text) catch return null;
+            labels.append(self.arena.allocator(), self.currentName()) catch return null;
             self.advance();
         }
 
@@ -998,7 +1000,7 @@ pub const Parser = struct {
             self.errorAtCurrent("Expected variable name in REMOVE");
             return null;
         }
-        const var_name = self.current.text;
+        const var_name = self.currentName();
         const var_loc = self.currentLocation();
         self.advance();
 
@@ -1016,7 +1018,7 @@ pub const Parser = struct {
                 self.errorAtCurrent("Expected property name after '.'");
                 return null;
             }
-            const prop_name = self.current.text;
+            const prop_name = self.currentName();
             self.advance();
 
             return .{ .property = .{
@@ -1038,7 +1040,7 @@ pub const Parser = struct {
             self.errorAtCurrent("Expected label name after ':'");
             return null;
         }
-        labels.append(self.arena.allocator(), self.current.text) catch return null;
+        labels.append(self.arena.allocator(), self.currentName()) catch return null;
         self.advance();
 
         // Additional labels (REMOVE n:Label1:Label2)
@@ -1047,7 +1049,7 @@ pub const Parser = struct {
                 self.errorAtCurrent("Expected label name after ':'");
                 return null;
             }
-            labels.append(self.arena.allocator(), self.current.text) catch return null;
+            labels.append(self.arena.allocator(), self.currentName()) catch return null;
             self.advance();
         }
 
@@ -1172,7 +1174,7 @@ pub const Parser = struct {
             self.errorAtCurrent("Expected variable name after AS");
             return null;
         }
-        const variable = self.current.text;
+        const variable = self.currentName();
         self.advance();
 
         const clause = self.arena.allocator().create(ast.UnwindClause) catch return null;
@@ -1197,7 +1199,7 @@ pub const Parser = struct {
         var path_variable: ?[]const u8 = null;
         const path_location = self.currentLocation();
         if (self.checkVariable()) {
-            path_variable = self.current.text;
+            path_variable = self.currentName();
             self.advance();
             if (!self.consume(.eq, "Expected '=' after a path variable")) return null;
         }
@@ -1262,7 +1264,7 @@ pub const Parser = struct {
 
         // Optional variable
         if (self.checkVariable()) {
-            variable = self.current.text;
+            variable = self.currentName();
             self.advance();
         }
 
@@ -1272,7 +1274,7 @@ pub const Parser = struct {
                 self.errorAtCurrent("Expected label after ':'");
                 return null;
             }
-            labels.append(self.arena.allocator(), self.current.text) catch return null;
+            labels.append(self.arena.allocator(), self.currentName()) catch return null;
             self.advance();
         }
 
@@ -1316,7 +1318,7 @@ pub const Parser = struct {
         if (self.match(.lbracket)) {
             // Optional variable
             if (self.checkVariable()) {
-                variable = self.current.text;
+                variable = self.currentName();
                 self.advance();
             }
 
@@ -1332,7 +1334,7 @@ pub const Parser = struct {
                     self.errorAtCurrent("Expected relationship type after ':'");
                     return null;
                 }
-                types_list.append(self.arena.allocator(), self.current.text) catch return null;
+                types_list.append(self.arena.allocator(), self.currentName()) catch return null;
                 self.advance();
 
                 // Handle multiple types with |
@@ -1342,7 +1344,7 @@ pub const Parser = struct {
                         self.errorAtCurrent("Expected relationship type after '|'");
                         return null;
                     }
-                    types_list.append(self.arena.allocator(), self.current.text) catch return null;
+                    types_list.append(self.arena.allocator(), self.currentName()) catch return null;
                     self.advance();
                 }
             }
@@ -1469,7 +1471,7 @@ pub const Parser = struct {
             self.errorAtCurrent("Expected property name");
             return null;
         }
-        const key = self.current.text;
+        const key = self.currentName();
         self.advance();
 
         if (!self.consume(.colon, "Expected ':' after property name")) {
@@ -1620,7 +1622,14 @@ pub const Parser = struct {
         // Identifier (variable or function call)
         if (self.checkVariable()) {
             self.advance();
-            const name = self.previous.text;
+            const name = self.tokenName(self.previous);
+
+            // A quoted name is never one of the forms below, only a variable
+            // or a function's name.
+            if (self.previous.token_type == .quoted_identifier) {
+                if (self.match(.lparen)) return self.parseFunctionCall(name, loc);
+                return self.makeVariable(name, loc);
+            }
 
             // EXISTS { ... } and COUNT { ... }
             if (self.check(.lbrace)) {
@@ -1850,7 +1859,7 @@ pub const Parser = struct {
     /// comprehension, or of a quantifier, whose WHERE is required and which
     /// takes no `| value`.
     fn parseIteration(self: *Self, kind: ast.ListComprehension.Kind, loc: ast.SourceLocation, close: TokenType) ?*ast.Expression {
-        const variable = self.current.text;
+        const variable = self.currentName();
         self.advance();
         if (!self.consume(.kw_in, "Expected IN after the variable")) return null;
         const list = self.parseExpression() orelse return null;
@@ -1876,7 +1885,7 @@ pub const Parser = struct {
 
     /// `acc = initial, x IN list | expression)`, after `reduce(`.
     fn parseReduce(self: *Self, loc: ast.SourceLocation) ?*ast.Expression {
-        const accumulator = self.current.text;
+        const accumulator = self.currentName();
         self.advance();
         if (!self.consume(.eq, "Expected '=' after the accumulator in reduce()")) return null;
         const initial = self.parseExpression() orelse return null;
@@ -1885,7 +1894,7 @@ pub const Parser = struct {
             self.errorAtCurrent("Expected a variable in reduce()");
             return null;
         }
-        const variable = self.current.text;
+        const variable = self.currentName();
         self.advance();
         if (!self.consume(.kw_in, "Expected IN after the variable")) return null;
         const list = self.parseExpression() orelse return null;
@@ -2000,7 +2009,7 @@ pub const Parser = struct {
                 self.errorAtCurrent("Expected property name after '.'");
                 return null;
             }
-            const prop_name = self.current.text;
+            const prop_name = self.currentName();
             self.advance();
             return self.makePropertyAccess(left, prop_name, loc);
         }
@@ -2315,7 +2324,15 @@ pub const Parser = struct {
         self.current = self.lexer.nextToken();
 
         if (self.current.token_type == .invalid) {
-            self.errorAtCurrent("Invalid token");
+            const text = self.current.text;
+            if (text.len > 0 and text[0] == '`') {
+                self.errorAtCurrent(if (std.mem.eql(u8, text, "``"))
+                    "A backtick-quoted name cannot be empty"
+                else
+                    "Expected '`' to close the name before the end of the line");
+            } else {
+                self.errorAtCurrent("Invalid token");
+            }
         }
     }
 
@@ -2323,7 +2340,7 @@ pub const Parser = struct {
     /// name. Keywords can: `n.order`, `(:Set)` and `{limit: 1}` name things
     /// that happen to be spelled like a clause.
     fn checkName(self: *const Self) bool {
-        if (self.current.token_type == .identifier) return true;
+        if (self.current.token_type == .identifier or self.current.token_type == .quoted_identifier) return true;
         return std.mem.startsWith(u8, @tagName(self.current.token_type), "kw_");
     }
 
@@ -2336,9 +2353,35 @@ pub const Parser = struct {
     /// CASE itself starts an expression and cannot.
     fn checkVariable(self: *const Self) bool {
         return switch (self.current.token_type) {
-            .identifier, .kw_when, .kw_then, .kw_else, .kw_end, .kw_union => true,
+            .identifier, .quoted_identifier, .kw_when, .kw_then, .kw_else, .kw_end, .kw_union => true,
             else => false,
         };
+    }
+
+    /// The name the current token spells (see `tokenName`).
+    fn currentName(self: *Self) []const u8 {
+        return self.tokenName(self.current);
+    }
+
+    /// The name a token spells: its text, or for a backtick-quoted name the
+    /// text between the backticks, with each doubled backtick made one.
+    fn tokenName(self: *Self, token: Token) []const u8 {
+        if (token.token_type != .quoted_identifier) return token.text;
+        const inner = token.text[1 .. token.text.len - 1];
+        if (std.mem.indexOfScalar(u8, inner, '`') == null) return inner;
+        const name = self.arena.allocator().alloc(u8, inner.len) catch {
+            self.errorAtCurrent("Out of memory");
+            return inner;
+        };
+        var len: usize = 0;
+        var i: usize = 0;
+        while (i < inner.len) : (i += 1) {
+            name[len] = inner[i];
+            len += 1;
+            // The lexer only lets backticks through in pairs.
+            if (inner[i] == '`') i += 1;
+        }
+        return name[0..len];
     }
 
     fn check(self: *Self, token_type: TokenType) bool {

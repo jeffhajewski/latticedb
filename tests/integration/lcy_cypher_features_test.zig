@@ -763,3 +763,57 @@ test "lcy: FOREACH scope and what it refuses" {
     try run(db, "FOREACH (x IN 5 | CREATE (:Q {v: x}))");
     try expectResult(db, "MATCH (q:Q) RETURN q.v", "q.v\n5");
 }
+
+// ============================================================================
+// Backtick-quoted names
+// ============================================================================
+
+test "lcy: backtick-quoted names" {
+    const path = "/tmp/lcy_backticks.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+
+    // Labels, relationship types and property keys that are not plain
+    // identifiers, as an RDF import makes them.
+    try run(db,
+        \\CREATE (a:`http://xmlns.com/foaf/0.1/Person` {`http://xmlns.com/foaf/0.1/name`: 'ann', `full name`: 'Ann A'})
+        \\      -[:`http://xmlns.com/foaf/0.1/knows` {`since year`: 2001}]->
+        \\      (b:`http://xmlns.com/foaf/0.1/Person` {`http://xmlns.com/foaf/0.1/name`: 'bob'})
+    );
+    try expectResult(db,
+        \\MATCH (p:`http://xmlns.com/foaf/0.1/Person`)-[k:`http://xmlns.com/foaf/0.1/knows`]->(q)
+        \\RETURN p.`http://xmlns.com/foaf/0.1/name` AS from, type(k) AS t, k.`since year`, q.`http://xmlns.com/foaf/0.1/name` AS to
+    , "from | t | k.`since year` | to\n\"ann\" | \"http://xmlns.com/foaf/0.1/knows\" | 2001 | \"bob\"");
+    try expectResult(db, "CALL db.labels()", "label\n\"http://xmlns.com/foaf/0.1/Person\"");
+    try expectResult(db, "CALL db.propertyKeys()", "propertyKey\n\"full name\"\n\"http://xmlns.com/foaf/0.1/name\"\n\"since year\"");
+
+    // Variables and aliases; an unaliased column keeps the text as written.
+    try expectResult(db,
+        \\MATCH (`the person` {`full name`: 'Ann A'}) RETURN `the person`.`full name` AS `the name`, `the person`.`full name`
+    , "the name | `the person`.`full name`\n\"Ann A\" | \"Ann A\"");
+    try expectResult(db, "WITH 1 AS `x y` RETURN `x y`, `x y` + 1 AS `x y 2`", "`x y` | x y 2\n1 | 2");
+    // Map keys, in literals and in property access.
+    try expectResult(db, "WITH {`a b`: 1, `c:d`: 2} AS m RETURN m.`a b` AS ab, m['c:d'] AS cd, m", "ab | cd | m\n1 | 2 | {a b: 1, c:d: 2}");
+
+    // A quoted name is the same name unquoted, and a doubled backtick is one.
+    try run(db, "CREATE (:Plain {v: 1}), (:`odd``label` {`a``b`: 2})");
+    try expectResult(db, "MATCH (n:`Plain`) RETURN n.`v` AS v", "v\n1");
+    try expectResult(db, "MATCH (n:`odd``label`) RETURN n.`a``b` AS v, labels(n) AS l", "v | l\n2 | [\"odd`label\"]");
+    try expectResult(db, "RETURN {`````x`: 3} AS m", "m\n{``x: 3}");
+    // Keywords and other characters quoted are only names.
+    try expectResult(db, "WITH 1 AS `match`, 2 AS `return`, 3 AS `名前` RETURN `match` + `return` + `名前` AS s", "s\n6");
+    try expectResult(db, "WITH 1 AS `optional` OPTIONAL MATCH (n:Nope) RETURN `optional`, n", "`optional` | n\n1 | null");
+
+    // In writes.
+    try run(db, "MATCH (n:`odd``label`) SET n.`new key` = 'x', n:`Second Label` REMOVE n.`a``b`");
+    try expectResult(db, "MATCH (n:`Second Label`) RETURN n.`new key` AS k, n.`a``b` AS gone", "k | gone\n\"x\" | null");
+    try run(db, "MERGE (:`Merged Label` {`the key`: 1})");
+    try run(db, "MERGE (:`Merged Label` {`the key`: 1})");
+    try expectResult(db, "MATCH (n:`Merged Label`) RETURN count(n) AS c", "c\n1");
+    // A function by a quoted name.
+    try expectResult(db, "RETURN `toUpper`('a') AS u", "u\n\"A\"");
+
+    try expectFailure(db, "MATCH (n:``) RETURN n", .parse, "A backtick-quoted name cannot be empty");
+    try expectFailure(db, "MATCH (n:`Person) RETURN n", .parse, "Expected '`' to close the name before the end of the line");
+    try expectFailure(db, "MATCH (n:`Per\nson`) RETURN n", .parse, "Expected '`' to close the name before the end of the line");
+}

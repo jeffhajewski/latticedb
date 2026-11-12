@@ -2433,6 +2433,9 @@ pub const QueryPlanner = struct {
     /// whichever variable happens to share its slot.
     fn columnName(self: *Self, item: ast.ReturnItem) ?[]const u8 {
         if (item.alias) |alias| return alias;
+        // A quoted name keeps its backticks in the column, as written:
+        // `n.my prop` would read as something else.
+        if (std.mem.indexOfScalar(u8, item.text, '`') != null) return item.text;
         if (self.columnNameForExpression(item.expression)) |name| return name;
         if (item.text.len > 0) return item.text;
         return null;

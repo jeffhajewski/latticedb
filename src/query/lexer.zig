@@ -6,6 +6,7 @@
 //! - Graph pattern syntax: ->, <-, -[]->, etc.
 //! - Parameters: $name
 //! - Literals: integers, floats, strings
+//! - Backtick-quoted names: `my label`, with a doubled backtick for one
 
 const std = @import("std");
 const parser = @import("parser.zig");
@@ -85,6 +86,7 @@ pub const Lexer = struct {
             '@' => return self.scanAt(start),
             '$' => return self.scanParameter(start),
             '"', '\'' => return self.scanString(c, start),
+            '`' => return self.scanQuotedName(start),
             '!' => return self.scanBang(start),
             else => {
                 if (isDigit(c)) return self.scanNumber(start);
@@ -252,6 +254,26 @@ pub const Lexer = struct {
             }
         }
         // Unterminated string at EOF
+        return self.makeTokenAt(.invalid, start);
+    }
+
+    /// Scan a backtick-quoted name, after the opening backtick. A doubled
+    /// backtick stands for one and does not end the name. The token's text
+    /// keeps the backticks; the parser takes the name out of it. An empty
+    /// name, or one with no closing backtick on its line, is invalid.
+    fn scanQuotedName(self: *Self, start: usize) Token {
+        while (!self.isAtEnd()) {
+            const c = self.peek().?;
+            if (c == '\n') break;
+            _ = self.advance();
+            if (c != '`') continue;
+            if (self.peek() == '`') {
+                _ = self.advance();
+                continue;
+            }
+            if (self.position - start == 2) return self.makeTokenAt(.invalid, start);
+            return self.makeTokenAt(.quoted_identifier, start);
+        }
         return self.makeTokenAt(.invalid, start);
     }
 
@@ -558,4 +580,25 @@ test "tokenize CASE keywords in any case" {
     try std.testing.expectEqual(TokenType.kw_then, lexer.nextToken().token_type);
     try std.testing.expectEqual(TokenType.kw_else, lexer.nextToken().token_type);
     try std.testing.expectEqual(TokenType.kw_end, lexer.nextToken().token_type);
+}
+
+test "tokenize backtick-quoted names" {
+    var lexer = Lexer.init("`my label` `match` `a``b` `````` `` `open\n`x");
+    var t = lexer.nextToken();
+    try std.testing.expectEqual(TokenType.quoted_identifier, t.token_type);
+    try std.testing.expectEqualStrings("`my label`", t.text);
+    try std.testing.expectEqual(TokenType.quoted_identifier, lexer.nextToken().token_type);
+    t = lexer.nextToken();
+    try std.testing.expectEqual(TokenType.quoted_identifier, t.token_type);
+    try std.testing.expectEqualStrings("`a``b`", t.text);
+    // A name of two backticks.
+    t = lexer.nextToken();
+    try std.testing.expectEqual(TokenType.quoted_identifier, t.token_type);
+    try std.testing.expectEqualStrings("``````", t.text);
+    // Empty, then unterminated at the end of the line.
+    try std.testing.expectEqual(TokenType.invalid, lexer.nextToken().token_type);
+    t = lexer.nextToken();
+    try std.testing.expectEqual(TokenType.invalid, t.token_type);
+    try std.testing.expectEqualStrings("`open", t.text);
+    try std.testing.expectEqual(TokenType.invalid, lexer.nextToken().token_type);
 }

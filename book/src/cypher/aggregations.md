@@ -61,6 +61,10 @@ MATCH (n:Person)
 RETURN min(n.age) AS youngest, max(n.age) AS oldest
 ```
 
+Values of different types are compared the way `ORDER BY` orders them, so
+`min` over `1`, `'a'` and `true` is `'a'` and `max` is `1`, and an integer and
+a float compare exactly.
+
 ### collect
 
 Collect values into a list:

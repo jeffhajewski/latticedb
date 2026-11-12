@@ -49,7 +49,9 @@ When the executor calls `root.next()`:
 Without aggregation, `ORDER BY`, `SKIP` and `LIMIT` are planned *under* the
 projection, so they can still see variables the projection drops (`RETURN n.name
 ORDER BY n.age`). With aggregation they go on top, because they may refer to
-aggregated values that only exist after grouping.
+aggregated values that only exist after grouping. `RETURN DISTINCT` splits them:
+`ORDER BY` stays under the projection and its sort keeps every row, while `SKIP`
+and `LIMIT` go above `Distinct`, so they count rows after duplicates are removed.
 
 ### Lazy Evaluation
 
@@ -559,7 +561,8 @@ true
 **Aggregates** (planned as an `Aggregate` operator): `count()`, `count(*)`,
 `sum()`, `avg()`, `min()`, `max()`, `collect()`. Every aggregate but `count(*)`
 skips nulls. `sum` of integers is computed exactly in an `i128` and must fit in
-an `i64`; any float makes it a float.
+an `i64`; any float makes it a float. `min` and `max` compare values with the
+same total order as `ORDER BY`, so they are defined over mixed types.
 
 **Regular expressions**: `=~` compiles its pattern with `src/query/regex.zig` into
 a small program and runs it as a Pike VM, which follows every alternative at once,
@@ -632,6 +635,7 @@ pub fn plan(query: *Query) !Operator {
             .where => try planWhere(clause.where, current),
             // Also plans the ORDER BY / SKIP / LIMIT that follow it:
             // underneath the projection, or on top if it aggregates
+            // (with DISTINCT, SKIP and LIMIT on top)
             .return_ => try planReturnAndTrailing(clause.return_, current),
             .order_by => try planOrderBy(clause.order_by, current),
             .limit => try planLimit(clause.limit, current),

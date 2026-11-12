@@ -11,6 +11,8 @@ const Allocator = std.mem.Allocator;
 
 const ast = @import("ast.zig");
 const parser_types = @import("parser.zig");
+const expression = @import("expression.zig");
+const aggregate_ops = @import("operators/aggregate.zig");
 const BinaryOp = parser_types.BinaryOp;
 const UnaryOp = parser_types.UnaryOp;
 
@@ -44,6 +46,10 @@ pub const ErrorCode = enum {
     invalid_set_target,
     invalid_remove_target,
     unsupported_pattern,
+    /// A call to a function that does not exist.
+    unknown_function,
+    /// A call with more or fewer arguments than the function takes.
+    wrong_argument_count,
     internal_error,
 };
 
@@ -811,7 +817,23 @@ pub const SemanticAnalyzer = struct {
         for (func.arguments) |arg| {
             self.analyzeExpression(arg);
         }
-        // Could add function signature validation here
+        // A misspelt function used to be found only when a row first reached
+        // it, so a query over no rows succeeded and the same query over data
+        // failed. The name and the argument count are known now.
+        if (expression.findFunction(func.name)) |spec| {
+            const n = func.arguments.len;
+            if (func.star or n < spec.min_args or (spec.max_args != expression.FunctionSpec.ANY_COUNT and n > spec.max_args)) {
+                self.addErrorFmt(
+                    .wrong_argument_count,
+                    func.location,
+                    "{s} takes {s}, but was given {d} argument{s}",
+                    .{ spec.name, spec.signature, n, if (n == 1) "" else "s" },
+                );
+            }
+            return;
+        }
+        if (aggregate_ops.isAggregateFunction(func.name)) return;
+        self.addErrorFmt(.unknown_function, func.location, "Unknown function '{s}'", .{func.name});
     }
 
     fn analyzeListExpr(self: *Self, list: *const ast.ListExpr) void {

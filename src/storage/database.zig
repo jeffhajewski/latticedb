@@ -221,6 +221,12 @@ pub const QueryFailure = struct {
     message: []const u8,
     code: ?[]const u8 = null,
     location: ?QueryFailureLocation = null,
+    /// What failed, beyond the stage: a fault in the query or its data, or
+    /// the database underneath it. An execution failure can be either, and
+    /// the caller has to be able to tell them apart.
+    cause: Cause = .query,
+
+    pub const Cause = enum { query, storage, out_of_memory };
 
     pub fn deinit(self: *QueryFailure) void {
         self.allocator.free(self.message);
@@ -697,17 +703,21 @@ const TxnNodeState = struct {
     properties: []node_mod.Property,
 
     fn clone(self: TxnNodeState, allocator: Allocator) Allocator.Error!TxnNodeState {
+        const labels = try cloneSymbolIds(allocator, self.labels);
+        errdefer allocator.free(labels);
         return .{
             .exists = self.exists,
-            .labels = try cloneSymbolIds(allocator, self.labels),
+            .labels = labels,
             .properties = try cloneProperties(allocator, self.properties),
         };
     }
 
     fn toNode(self: TxnNodeState, allocator: Allocator, node_id: NodeId) Allocator.Error!node_mod.Node {
+        const labels = try cloneSymbolIds(allocator, self.labels);
+        errdefer allocator.free(labels);
         return .{
             .id = node_id,
-            .labels = try cloneSymbolIds(allocator, self.labels),
+            .labels = labels,
             .properties = try cloneProperties(allocator, self.properties),
         };
     }
@@ -4384,7 +4394,11 @@ pub const Database = struct {
         query_text: []const u8,
         limit: u32,
     ) DatabaseError!?bool {
-        const property_id = self.symbol_table.lookup(property) catch return null;
+        const property_id = self.symbol_table.lookup(property) catch |err| return switch (err) {
+            symbols_mod.SymbolError.NotFound => null,
+            symbols_mod.SymbolError.OutOfMemory => DatabaseError.OutOfMemory,
+            else => DatabaseError.IoError,
+        };
 
         var node = (try self.getNodeInTxn(txn, node_id)) orelse return null;
         defer node.deinit(self.allocator);
@@ -4403,7 +4417,11 @@ pub const Database = struct {
         query_text: []const u8,
         limit: u32,
     ) DatabaseError!?bool {
-        const property_id = self.symbol_table.lookup(property) catch return null;
+        const property_id = self.symbol_table.lookup(property) catch |err| return switch (err) {
+            symbols_mod.SymbolError.NotFound => null,
+            symbols_mod.SymbolError.OutOfMemory => DatabaseError.OutOfMemory,
+            else => DatabaseError.IoError,
+        };
 
         var edge = (try self.getEdgeInTxn(txn, edge_id)) orelse return null;
         defer edge.deinit(self.allocator);
@@ -5499,14 +5517,17 @@ pub const Database = struct {
         var node = self.node_store.get(node_id) catch |err| {
             return switch (err) {
                 node_mod.NodeError.NotFound => null,
+                node_mod.NodeError.OutOfMemory => DatabaseError.OutOfMemory,
                 else => DatabaseError.IoError,
             };
         };
         defer node.deinit(self.allocator);
 
+        const labels = cloneSymbolIds(self.allocator, node.labels) catch return DatabaseError.OutOfMemory;
+        errdefer self.allocator.free(labels);
         return .{
             .exists = true,
-            .labels = cloneSymbolIds(self.allocator, node.labels) catch return DatabaseError.OutOfMemory,
+            .labels = labels,
             .properties = cloneProperties(self.allocator, node.properties) catch return DatabaseError.OutOfMemory,
         };
     }
@@ -5550,6 +5571,7 @@ pub const Database = struct {
         var edge = self.edge_store.getById(edge_id) catch |err| {
             return switch (err) {
                 edge_mod.EdgeError.NotFound => null,
+                edge_mod.EdgeError.OutOfMemory => DatabaseError.OutOfMemory,
                 else => DatabaseError.IoError,
             };
         };
@@ -8983,6 +9005,8 @@ pub const Database = struct {
         exec_ctx.database = self;
         exec_ctx.txn = if (auto_txn) |*t| t else txn;
         exec_ctx.stable_reads = !ast_query.writesData();
+        var diagnostic: executor_mod.Diagnostic = .{};
+        exec_ctx.diagnostic = &diagnostic;
         defer exec_ctx.deinit();
 
         var binding_iter = planner.bindings.iterator();
@@ -9003,7 +9027,7 @@ pub const Database = struct {
         }
 
         var exec_result = execute(query_alloc, root_op, &exec_ctx) catch |err| {
-            return self.makeExecutionFailure(err);
+            return self.makeExecutionFailure(err, &diagnostic);
         };
 
         // Built before the commit, because the rows are read back through the
@@ -9011,7 +9035,14 @@ pub const Database = struct {
         const converted = try self.convertResult(&exec_result, &planner);
 
         if (auto_txn) |*t| {
-            self.commitTransaction(t) catch return QueryError.ExecutionError;
+            self.commitTransaction(t) catch |err| {
+                // The rows were built for a commit that did not happen.
+                var rows = converted;
+                rows.deinit();
+                var failed = try self.makeFailure(.execution, "Storage error: the query's changes could not be committed", @errorName(err), null);
+                failed.failure.cause = if (err == DatabaseError.OutOfMemory) .out_of_memory else .storage;
+                return failed;
+            };
             auto_txn_committed = true;
         }
 
@@ -9087,8 +9118,28 @@ pub const Database = struct {
         );
     }
 
-    fn makeExecutionFailure(self: *Self, err: anyerror) QueryError!QueryDetailedResult {
-        return self.makeFailure(.execution, "Execution error: query failed", @errorName(err), null);
+    /// An execution failure, described by what the code that found it
+    /// recorded, or by its error when nothing was recorded.
+    fn makeExecutionFailure(self: *Self, err: anyerror, diagnostic: *const executor_mod.Diagnostic) QueryError!QueryDetailedResult {
+        const kind = if (diagnostic.recorded) diagnostic.kind else executor_mod.diagnosticKind(err);
+        const message = diagnostic.message() orelse switch (kind) {
+            .storage => "Storage error: reading the database failed during the query",
+            .out_of_memory => "Out of memory while running the query",
+            .query => "Execution error: query failed",
+        };
+        const code = if (diagnostic.recorded and diagnostic.code.len > 0) diagnostic.code else @errorName(err);
+        const location: ?QueryFailureLocation = if (diagnostic.location) |loc| .{
+            .line = loc.line,
+            .column = loc.column,
+            .length = loc.length,
+        } else null;
+        var result = try self.makeFailure(.execution, message, code, location);
+        result.failure.cause = switch (kind) {
+            .query => .query,
+            .storage => .storage,
+            .out_of_memory => .out_of_memory,
+        };
+        return result;
     }
 
     fn makeFailure(
@@ -9129,13 +9180,20 @@ pub const Database = struct {
         var columns = self.allocator.alloc([]const u8, num_cols) catch {
             return QueryError.OutOfMemory;
         };
-        errdefer self.allocator.free(columns);
+        // On failure, free only the names and rows built so far: the rest
+        // are undefined, and freeing them crashed when memory ran out.
+        var columns_named: usize = 0;
+        errdefer {
+            for (columns[0..columns_named]) |name| self.allocator.free(name);
+            self.allocator.free(columns);
+        }
 
         // Initialize columns with slot numbers as names (default)
         for (0..num_cols) |i| {
             columns[i] = std.fmt.allocPrint(self.allocator, "col{}", .{i}) catch {
                 return QueryError.OutOfMemory;
             };
+            columns_named += 1;
         }
 
         // Try to get actual variable names
@@ -9144,20 +9202,22 @@ pub const Database = struct {
             const slot = entry.value_ptr.slot;
             if (slot < num_cols and planner.output_column_names[slot] == null) {
                 // Free default name and use actual variable name
-                self.allocator.free(columns[slot]);
-                columns[slot] = self.allocator.dupe(u8, entry.key_ptr.*) catch {
+                const name = self.allocator.dupe(u8, entry.key_ptr.*) catch {
                     return QueryError.OutOfMemory;
                 };
+                self.allocator.free(columns[slot]);
+                columns[slot] = name;
             }
         }
 
         // Explicit aliases from RETURN take precedence over inferred binding names.
         for (0..num_cols) |i| {
             if (planner.output_column_names[i]) |name| {
-                self.allocator.free(columns[i]);
-                columns[i] = self.allocator.dupe(u8, name) catch {
+                const owned = self.allocator.dupe(u8, name) catch {
                     return QueryError.OutOfMemory;
                 };
+                self.allocator.free(columns[i]);
+                columns[i] = owned;
             }
         }
 
@@ -9165,8 +9225,9 @@ pub const Database = struct {
         var rows = self.allocator.alloc(ResultRow, exec_result.rows.items.len) catch {
             return QueryError.OutOfMemory;
         };
+        var rows_built: usize = 0;
         errdefer {
-            for (rows) |*row| {
+            for (rows[0..rows_built]) |*row| {
                 row.deinit(self.allocator);
             }
             self.allocator.free(rows);
@@ -9176,6 +9237,11 @@ pub const Database = struct {
             var values = self.allocator.alloc(ResultValue, num_cols) catch {
                 return QueryError.OutOfMemory;
             };
+            var values_built: usize = 0;
+            errdefer {
+                for (values[0..values_built]) |*value| value.deinit(self.allocator);
+                self.allocator.free(values);
+            }
 
             for (0..num_cols) |col_idx| {
                 const slot: u8 = @intCast(col_idx);
@@ -9184,9 +9250,11 @@ pub const Database = struct {
                 } else {
                     values[col_idx] = .{ .null_val = {} };
                 }
+                values_built += 1;
             }
 
             rows[row_idx] = ResultRow{ .values = values };
+            rows_built += 1;
         }
 
         return QueryResult{
@@ -9221,8 +9289,15 @@ pub const Database = struct {
                 const result_list = self.allocator.alloc(ResultValue, list.len) catch {
                     return QueryError.OutOfMemory;
                 };
+                // Out of memory part way: free the items already converted.
+                var built: usize = 0;
+                errdefer {
+                    for (result_list[0..built]) |*item| item.deinit(self.allocator);
+                    self.allocator.free(result_list);
+                }
                 for (list, 0..) |item, i| {
                     result_list[i] = try self.propertyToResultValue(item);
+                    built += 1;
                 }
                 break :blk .{ .list_val = result_list };
             },
@@ -9230,11 +9305,19 @@ pub const Database = struct {
                 const result_map = self.allocator.alloc(ResultValue.MapEntry, map.len) catch {
                     return QueryError.OutOfMemory;
                 };
+                var built: usize = 0;
+                errdefer {
+                    for (result_map[0..built]) |*entry| {
+                        self.allocator.free(entry.key);
+                        entry.value.deinit(self.allocator);
+                    }
+                    self.allocator.free(result_map);
+                }
                 for (map, 0..) |entry, i| {
-                    result_map[i] = .{
-                        .key = self.allocator.dupe(u8, entry.key) catch return QueryError.OutOfMemory,
-                        .value = try self.propertyToResultValue(entry.value),
-                    };
+                    const key = self.allocator.dupe(u8, entry.key) catch return QueryError.OutOfMemory;
+                    errdefer self.allocator.free(key);
+                    result_map[i] = .{ .key = key, .value = try self.propertyToResultValue(entry.value) };
+                    built += 1;
                 }
                 break :blk .{ .map_val = result_map };
             },

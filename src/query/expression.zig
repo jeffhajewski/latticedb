@@ -67,6 +67,8 @@ pub const EvalError = error{
     IntegerOverflow,
     /// range() would produce more than `MAX_RANGE_LENGTH` elements
     RangeTooLarge,
+    /// `=~` was given a pattern its engine does not accept
+    InvalidRegex,
     /// Reading the database failed
     StorageError,
 };
@@ -78,6 +80,167 @@ pub const EvalError = error{
 /// generating test data with UNWIND while bounding one call to a few hundred
 /// megabytes.
 pub const MAX_RANGE_LENGTH: i128 = 10_000_000;
+
+/// A built-in scalar function: its name, how many arguments it takes and,
+/// for error messages, what they are.
+pub const FunctionSpec = struct {
+    name: []const u8,
+    min_args: u8,
+    /// `ANY_COUNT` when there is no upper bound.
+    max_args: u8,
+    /// The arguments it takes, as written in an error message.
+    signature: []const u8,
+
+    pub const ANY_COUNT: u8 = 255;
+};
+
+/// Every scalar function `evaluateFunction` knows. The analyser reports a
+/// call to anything else, or with the wrong number of arguments, before the
+/// query runs; a test keeps this list and `evaluateFunction` in step.
+/// Aggregates (count, sum, ...) are listed in operators/aggregate.zig.
+pub const builtin_functions = [_]FunctionSpec{
+    .{ .name = "id", .min_args = 1, .max_args = 1, .signature = "(node or relationship)" },
+    .{ .name = "coalesce", .min_args = 1, .max_args = FunctionSpec.ANY_COUNT, .signature = "(any, ...)" },
+    .{ .name = "abs", .min_args = 1, .max_args = 1, .signature = "(number)" },
+    .{ .name = "size", .min_args = 1, .max_args = 1, .signature = "(string or list)" },
+    .{ .name = "toInteger", .min_args = 1, .max_args = 1, .signature = "(any)" },
+    .{ .name = "toFloat", .min_args = 1, .max_args = 1, .signature = "(any)" },
+    .{ .name = "toString", .min_args = 1, .max_args = 1, .signature = "(any)" },
+    .{ .name = "toLower", .min_args = 1, .max_args = 1, .signature = "(string)" },
+    .{ .name = "toUpper", .min_args = 1, .max_args = 1, .signature = "(string)" },
+    .{ .name = "trim", .min_args = 1, .max_args = 1, .signature = "(string)" },
+    .{ .name = "substring", .min_args = 2, .max_args = 3, .signature = "(string, integer[, integer])" },
+    .{ .name = "replace", .min_args = 3, .max_args = 3, .signature = "(string, string, string)" },
+    .{ .name = "split", .min_args = 2, .max_args = 2, .signature = "(string, string)" },
+    .{ .name = "head", .min_args = 1, .max_args = 1, .signature = "(list)" },
+    .{ .name = "tail", .min_args = 1, .max_args = 1, .signature = "(list)" },
+    .{ .name = "last", .min_args = 1, .max_args = 1, .signature = "(list)" },
+    .{ .name = "range", .min_args = 2, .max_args = 3, .signature = "(integer, integer[, integer])" },
+    .{ .name = "type", .min_args = 1, .max_args = 1, .signature = "(relationship)" },
+    .{ .name = "labels", .min_args = 1, .max_args = 1, .signature = "(node)" },
+    .{ .name = "properties", .min_args = 1, .max_args = 1, .signature = "(node, relationship or map)" },
+};
+
+/// The built-in scalar function called `name`, ignoring case.
+pub fn findFunction(name: []const u8) ?*const FunctionSpec {
+    for (&builtin_functions) |*spec| {
+        if (std.ascii.eqlIgnoreCase(spec.name, name)) return spec;
+    }
+    return null;
+}
+
+/// An operator as it is written, for error messages.
+fn operatorSymbol(op: ast.BinaryOp) []const u8 {
+    return switch (op) {
+        .eq => "=",
+        .neq => "<>",
+        .lt => "<",
+        .lte => "<=",
+        .gt => ">",
+        .gte => ">=",
+        .and_ => "AND",
+        .or_ => "OR",
+        .xor => "XOR",
+        .add => "+",
+        .sub => "-",
+        .mul => "*",
+        .div => "/",
+        .mod => "%",
+        .pow => "^",
+        .contains => "CONTAINS",
+        .starts_with => "STARTS WITH",
+        .ends_with => "ENDS WITH",
+        .regex_match => "=~",
+        .in_ => "IN",
+        .vector_distance => "<=>",
+        .fts_match => "@@",
+    };
+}
+
+/// The name Cypher gives a value's type, for error messages.
+pub fn typeName(value: EvalResult) []const u8 {
+    return switch (value) {
+        .null_val => "null",
+        .bool_val => "boolean",
+        .int_val => "integer",
+        .float_val => "float",
+        .string_val => "string",
+        .bytes_val => "bytes",
+        .node_ref => "node",
+        .edge_ref => "relationship",
+        .list_val => "list",
+        .vector_val => "vector",
+        .map_val => "map",
+    };
+}
+
+/// A value as an error message shows it: numbers and booleans in full, a
+/// string quoted and cut short, anything else by its type.
+const Brief = struct {
+    value: EvalResult,
+
+    pub fn format(self: Brief, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        switch (self.value) {
+            .int_val => |i| try writer.print("{d}", .{i}),
+            .float_val => |f| try writeFloat(writer, f),
+            .bool_val => |b| try writer.writeAll(if (b) "true" else "false"),
+            .null_val => try writer.writeAll("null"),
+            .string_val => |s| {
+                const max = 40;
+                if (s.len <= max) {
+                    try writer.print("'{s}'", .{s});
+                } else {
+                    // Cut on a character boundary.
+                    var end: usize = max;
+                    while (end > 0 and (s[end] & 0xC0) == 0x80) end -= 1;
+                    try writer.print("'{s}...'", .{s[0..end]});
+                }
+            },
+            else => |v| try writer.print("a {s}", .{typeName(v)}),
+        }
+    }
+};
+
+/// A float in a message: plain decimal at ordinary magnitudes, scientific
+/// notation where decimal would run to hundreds of digits.
+pub fn writeFloat(writer: *std.Io.Writer, f: f64) std.Io.Writer.Error!void {
+    const magnitude = @abs(f);
+    if (std.math.isFinite(f) and f != 0 and (magnitude >= 1e16 or magnitude < 1e-6)) {
+        try writer.print("{e}", .{f});
+    } else {
+        try writer.print("{d}", .{f});
+        // A whole number keeps a ".0", so 2.0 reads as a float, not as 2.
+        if (std.math.isFinite(f) and @trunc(f) == f) try writer.writeAll(".0");
+    }
+}
+
+/// The types of a list of values, as "(string, integer)".
+const TypeList = struct {
+    values: []const EvalResult,
+
+    pub fn format(self: TypeList, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.writeByte('(');
+        for (self.values, 0..) |value, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try writer.writeAll(typeName(value));
+        }
+        try writer.writeByte(')');
+    }
+};
+
+/// A list of values, as "(1, 'a')".
+const ValueList = struct {
+    values: []const EvalResult,
+
+    pub fn format(self: ValueList, writer: *std.Io.Writer) std.Io.Writer.Error!void {
+        try writer.writeByte('(');
+        for (self.values, 0..) |value, i| {
+            if (i > 0) try writer.writeAll(", ");
+            try (Brief{ .value = value }).format(writer);
+        }
+        try writer.writeByte(')');
+    }
+};
 
 /// A float as an i64, truncated toward zero, or null when it is NaN, infinite
 /// or outside the i64 range. `@intFromFloat` is undefined behaviour for those
@@ -184,39 +347,31 @@ pub const EvalResult = union(enum) {
     /// Convert from PropertyValue, cloning all borrowed data.
     /// All slice data (strings, vectors, map keys) is duplicated onto the
     /// provided allocator so the result is independent of the source lifetime.
-    pub fn fromPropertyValue(pv: PropertyValue, allocator: Allocator) Self {
+    ///
+    /// Running out of memory is an error. It used to produce a null, so a
+    /// query that ran short of memory returned a plausible wrong answer.
+    pub fn fromPropertyValue(pv: PropertyValue, allocator: Allocator) Allocator.Error!Self {
         return switch (pv) {
             .null_val => .{ .null_val = {} },
             .bool_val => |b| .{ .bool_val = b },
             .int_val => |i| .{ .int_val = i },
             .float_val => |f| .{ .float_val = f },
-            .string_val => |s| blk: {
-                const cloned = allocator.dupe(u8, s) catch break :blk .{ .null_val = {} };
-                break :blk .{ .string_val = cloned };
-            },
-            .bytes_val => |b| blk: {
-                const cloned = allocator.dupe(u8, b) catch break :blk .{ .null_val = {} };
-                break :blk .{ .bytes_val = cloned };
-            },
-            .vector_val => |v| blk: {
-                const cloned = allocator.dupe(f32, v) catch break :blk .{ .null_val = {} };
-                break :blk .{ .vector_val = cloned };
-            },
+            .string_val => |s| .{ .string_val = try allocator.dupe(u8, s) },
+            .bytes_val => |b| .{ .bytes_val = try allocator.dupe(u8, b) },
+            .vector_val => |v| .{ .vector_val = try allocator.dupe(f32, v) },
             .list_val => |list| blk: {
-                const results = allocator.alloc(EvalResult, list.len) catch
-                    break :blk .{ .null_val = {} };
+                const results = try allocator.alloc(EvalResult, list.len);
                 for (list, 0..) |item, i| {
-                    results[i] = fromPropertyValue(item, allocator);
+                    results[i] = try fromPropertyValue(item, allocator);
                 }
                 break :blk .{ .list_val = results };
             },
             .map_val => |map| blk: {
-                const entries = allocator.alloc(MapEntry, map.len) catch
-                    break :blk .{ .null_val = {} };
+                const entries = try allocator.alloc(MapEntry, map.len);
                 for (map, 0..) |entry, i| {
                     entries[i] = .{
-                        .key = allocator.dupe(u8, entry.key) catch break :blk .{ .null_val = {} },
-                        .value = fromPropertyValue(entry.value, allocator),
+                        .key = try allocator.dupe(u8, entry.key),
+                        .value = try fromPropertyValue(entry.value, allocator),
                     };
                 }
                 break :blk .{ .map_val = entries };
@@ -224,8 +379,9 @@ pub const EvalResult = union(enum) {
         };
     }
 
-    /// Convert to PropertyValue (allocator needed for list/map conversion)
-    pub fn toPropertyValue(self: Self, allocator: Allocator) PropertyValue {
+    /// Convert to PropertyValue (allocator needed for list/map conversion).
+    /// Running out of memory is an error, not a null.
+    pub fn toPropertyValue(self: Self, allocator: Allocator) Allocator.Error!PropertyValue {
         return switch (self) {
             .null_val => .{ .null_val = {} },
             .bool_val => |b| .{ .bool_val = b },
@@ -237,20 +393,18 @@ pub const EvalResult = union(enum) {
             .edge_ref => |id| .{ .int_val = @intCast(id) },
             .vector_val => |v| .{ .vector_val = v },
             .list_val => |list| blk: {
-                const props = allocator.alloc(PropertyValue, list.len) catch
-                    break :blk .{ .null_val = {} };
+                const props = try allocator.alloc(PropertyValue, list.len);
                 for (list, 0..) |item, i| {
-                    props[i] = item.toPropertyValue(allocator);
+                    props[i] = try item.toPropertyValue(allocator);
                 }
                 break :blk .{ .list_val = props };
             },
             .map_val => |map| blk: {
-                const entries = allocator.alloc(PropertyValue.MapEntry, map.len) catch
-                    break :blk .{ .null_val = {} };
+                const entries = try allocator.alloc(PropertyValue.MapEntry, map.len);
                 for (map, 0..) |entry, i| {
                     entries[i] = .{
                         .key = entry.key,
-                        .value = entry.value.toPropertyValue(allocator),
+                        .value = try entry.value.toPropertyValue(allocator),
                     };
                 }
                 break :blk .{ .map_val = entries };
@@ -291,10 +445,31 @@ fn storageError(err: anyerror) EvalError {
     return if (err == error.OutOfMemory) EvalError.OutOfMemory else EvalError.StorageError;
 }
 
+/// `storageError`, recorded with what was being read, so the caller can
+/// tell a damaged database from a fault in the query.
+fn readFailure(
+    ctx: *const ExecutionContext,
+    err: anyerror,
+    location: ?ast.SourceLocation,
+    comptime what: []const u8,
+    args: anytype,
+) EvalError {
+    @branchHint(.cold);
+    const mapped = storageError(err);
+    if (ctx.diagnostic) |d| {
+        if (mapped == EvalError.OutOfMemory) {
+            d.record(.out_of_memory, "OutOfMemory", location, "Out of memory while " ++ what, args);
+        } else {
+            d.record(.storage, "StorageError", location, "Storage error while " ++ what ++ ": {s}", args ++ .{@errorName(err)});
+        }
+    }
+    return mapped;
+}
+
 /// An EvalResult taking over a value decoded into `allocator`. Scalars and
 /// strings are used in place; lists and maps are converted, which copies
 /// them, and the decoded original is freed.
-fn evalResultFromOwned(value: PropertyValue, allocator: Allocator) EvalResult {
+fn evalResultFromOwned(value: PropertyValue, allocator: Allocator) Allocator.Error!EvalResult {
     switch (value) {
         .string_val => |v| return .{ .string_val = v },
         .bytes_val => |v| return .{ .bytes_val = v },
@@ -359,9 +534,69 @@ pub const ExpressionEvaluator = struct {
             .property_access => |pa| self.evaluatePropertyAccess(pa, row, ctx),
             .binary => |b| self.evaluateBinary(b, row, ctx),
             .unary => |u| self.evaluateUnary(u, row, ctx),
-            .function_call => |f| self.evaluateFunction(f, row, ctx),
+            .function_call => |f| self.evaluateFunction(f, row, ctx) catch |err| self.functionFailure(f, err, row, ctx),
             .list => |l| self.evaluateList(l, row, ctx),
             .map => |m| self.evaluateMap(m, row, ctx),
+        };
+    }
+
+    /// Describe a failed function call, unless the failure was already
+    /// described where it happened (in an argument, say).
+    ///
+    /// Only reached on failure. The arguments are evaluated again to say
+    /// what the call was given; the first evaluation's values are gone.
+    fn functionFailure(
+        self: *Self,
+        f: *const ast.FunctionCall,
+        err: EvalError,
+        row: *const Row,
+        ctx: *const ExecutionContext,
+    ) EvalError {
+        @branchHint(.cold);
+        if (ctx.failureRecorded()) return err;
+        const loc = f.location;
+        const spec = findFunction(f.name) orelse
+            return ctx.fail(err, loc, "Unknown function '{s}'", .{f.name});
+
+        var values: [8]EvalResult = undefined;
+        var count: usize = 0;
+        for (f.arguments[0..@min(f.arguments.len, values.len)]) |arg| {
+            values[count] = self.evaluate(arg, row, ctx) catch break;
+            count += 1;
+        }
+        // Evaluating them again may itself have failed and said why.
+        if (ctx.failureRecorded()) return err;
+        const args = values[0..count];
+
+        return switch (err) {
+            EvalError.InvalidArgumentCount => ctx.fail(err, loc, "{s} takes {s}, but was given {d} argument{s}", .{ spec.name, spec.signature, f.arguments.len, if (f.arguments.len == 1) "" else "s" }),
+            EvalError.TypeError => ctx.fail(err, loc, "Type error: {s}{f} is not defined; {s} takes {s}", .{ spec.name, TypeList{ .values = args }, spec.name, spec.signature }),
+            EvalError.IntegerOverflow => ctx.fail(err, loc, "Integer overflow: {s}{f} does not fit in a 64-bit integer", .{ spec.name, ValueList{ .values = args } }),
+            EvalError.RangeTooLarge => ctx.fail(err, loc, "{s}{f} would produce more than {d} elements", .{ spec.name, ValueList{ .values = args }, MAX_RANGE_LENGTH }),
+            EvalError.InvalidOperation => ctx.fail(err, loc, "{s}{f} is not defined: the step must not be 0", .{ spec.name, ValueList{ .values = args } }),
+            else => ctx.fail(err, loc, "{s}{f} failed: {s}", .{ spec.name, ValueList{ .values = args }, @errorName(err) }),
+        };
+    }
+
+    /// Describe a failed operator, with the values it was applied to.
+    fn binaryFailure(
+        _: *Self,
+        b: *const ast.BinaryExpr,
+        err: EvalError,
+        left: EvalResult,
+        right: EvalResult,
+        ctx: *const ExecutionContext,
+    ) EvalError {
+        @branchHint(.cold);
+        if (ctx.failureRecorded()) return err;
+        const symbol = operatorSymbol(b.operator);
+        const l = Brief{ .value = left };
+        const r = Brief{ .value = right };
+        return switch (err) {
+            EvalError.DivisionByZero => ctx.fail(err, b.location, "Division by zero: {f} {s} {f}", .{ l, symbol, r }),
+            EvalError.IntegerOverflow => ctx.fail(err, b.location, "Integer overflow: {f} {s} {f} does not fit in a 64-bit integer", .{ l, symbol, r }),
+            EvalError.TypeError => ctx.fail(err, b.location, "Type error: {s} {s} {s} is not defined", .{ typeName(left), symbol, typeName(right) }),
+            else => ctx.fail(err, b.location, "{f} {s} {f} failed: {s}", .{ l, symbol, r, @errorName(err) }),
         };
     }
 
@@ -384,16 +619,18 @@ pub const ExpressionEvaluator = struct {
         ctx: *const ExecutionContext,
     ) EvalError!EvalResult {
         // Look up the slot for this variable
-        const slot = ctx.getVariableSlot(v.name) orelse return EvalError.UnboundVariable;
+        const slot = ctx.getVariableSlot(v.name) orelse
+            return ctx.fail(EvalError.UnboundVariable, v.location, "Variable `{s}` is not defined here", .{v.name});
 
         // Get the value from the row
-        const slot_val = row.getSlot(slot) orelse return EvalError.EmptySlot;
+        const slot_val = row.getSlot(slot) orelse
+            return ctx.fail(EvalError.EmptySlot, v.location, "Variable `{s}` has no value here", .{v.name});
 
         return switch (slot_val) {
-            .empty => EvalError.EmptySlot,
+            .empty => ctx.fail(EvalError.EmptySlot, v.location, "Variable `{s}` has no value here", .{v.name}),
             .node_ref => |id| .{ .node_ref = id },
             .edge_ref => |id| .{ .edge_ref = id },
-            .property => |pv| EvalResult.fromPropertyValue(pv, self.allocator),
+            .property => |pv| try EvalResult.fromPropertyValue(pv, self.allocator),
         };
     }
 
@@ -403,7 +640,8 @@ pub const ExpressionEvaluator = struct {
         p: ast.ParameterRef,
         ctx: *const ExecutionContext,
     ) EvalError!EvalResult {
-        const pv = ctx.getParameter(p.name) orelse return EvalError.ParameterNotFound;
+        const pv = ctx.getParameter(p.name) orelse
+            return ctx.fail(EvalError.ParameterNotFound, p.location, "Parameter ${s} was not given a value", .{p.name});
         return EvalResult.fromPropertyValue(pv, self.allocator);
     }
 
@@ -424,7 +662,8 @@ pub const ExpressionEvaluator = struct {
             // Special pseudo-property for vector embeddings stored outside node properties.
             if (std.mem.eql(u8, pa.property, "embedding")) {
                 if (ctx.database) |database| {
-                    const found = database.getNodeVectorInTxn(ctx.txn, node_id) catch |err| return storageError(err);
+                    const found = database.getNodeVectorInTxn(ctx.txn, node_id) catch |err|
+                        return readFailure(ctx, err, pa.location, "reading the vector of node {d}", .{node_id});
                     if (found) |vector| {
                         // The database's copy was never freed, leaking one
                         // vector per row; evaluation temporaries live in
@@ -440,13 +679,14 @@ pub const ExpressionEvaluator = struct {
             const symbol_table = ctx.symbol_table orelse return .{ .null_val = {} };
 
             // A key no node has ever used cannot be set on this one.
-            const key_id = (try self.propertyKeyId(symbol_table, pa.property)) orelse return .{ .null_val = {} };
+            const key_id = (self.propertyKeyId(symbol_table, pa.property) catch |err|
+                return readFailure(ctx, err, pa.location, "looking up property key '{s}'", .{pa.property})) orelse return .{ .null_val = {} };
 
             // Decode just this property, straight into the evaluator's
             // allocator. A node that no longer exists has no properties.
             const record_cache = if (ctx.stable_reads) &self.node_record else null;
             const found = database.getNodePropertyByKeyInTxn(ctx.txn, node_id, key_id, self.allocator, record_cache) catch |err|
-                return storageError(err);
+                return readFailure(ctx, err, pa.location, "reading property '{s}' of node {d}", .{ pa.property, node_id });
             const value = found orelse return .{ .null_val = {} };
             return evalResultFromOwned(value, self.allocator);
         }
@@ -459,7 +699,7 @@ pub const ExpressionEvaluator = struct {
             const database = ctx.database orelse return .{ .null_val = {} };
 
             var prop = (database.getEdgePropertyByIdInTxn(ctx.txn, edge_id, pa.property) catch |err|
-                return storageError(err)) orelse return .{ .null_val = {} };
+                return readFailure(ctx, err, pa.location, "reading property '{s}' of relationship {d}", .{ pa.property, edge_id })) orelse return .{ .null_val = {} };
             defer prop.deinit(ctx.allocator);
 
             return EvalResult.fromPropertyValue(prop, self.allocator);
@@ -593,24 +833,24 @@ pub const ExpressionEvaluator = struct {
             .xor => .{ .bool_val = left.isTruthy() != right.isTruthy() },
 
             // Arithmetic operators
-            .add => try self.arithmeticAdd(left, right),
-            .sub => try self.arithmeticSub(left, right),
-            .mul => try self.arithmeticMul(left, right),
-            .div => self.arithmeticDiv(left, right),
-            .mod => self.arithmeticMod(left, right),
+            .add => self.arithmeticAdd(left, right) catch |err| return self.binaryFailure(b, err, left, right, ctx),
+            .sub => self.arithmeticSub(left, right) catch |err| return self.binaryFailure(b, err, left, right, ctx),
+            .mul => self.arithmeticMul(left, right) catch |err| return self.binaryFailure(b, err, left, right, ctx),
+            .div => self.arithmeticDiv(left, right) catch |err| return self.binaryFailure(b, err, left, right, ctx),
+            .mod => self.arithmeticMod(left, right) catch |err| return self.binaryFailure(b, err, left, right, ctx),
             .pow => self.arithmeticPow(left, right),
 
             // String operators
             .contains => self.stringContains(left, right),
             .starts_with => self.stringStartsWith(left, right),
             .ends_with => self.stringEndsWith(left, right),
-            .regex_match => try self.regexMatch(left, right, ctx),
+            .regex_match => try self.regexMatch(b, left, right, ctx),
 
             // List operator
             .in_ => self.listContains(left, right),
 
             // Special operators (handled by dedicated operators)
-            .vector_distance => self.vectorDistance(left, right, ctx),
+            .vector_distance => try self.vectorDistance(left, right, ctx),
             .fts_match => self.ftsMatch(left, right),
         };
     }
@@ -631,10 +871,11 @@ pub const ExpressionEvaluator = struct {
                 .unknown => .{ .null_val = {} },
             },
             .neg => switch (operand) {
-                .int_val => |i| .{ .int_val = try checkedInt(std.math.sub(i64, 0, i)) },
+                .int_val => |i| .{ .int_val = checkedInt(std.math.sub(i64, 0, i)) catch |err|
+                    return ctx.fail(err, u.location, "Integer overflow: -({d}) does not fit in a 64-bit integer", .{i}) },
                 .float_val => |f| .{ .float_val = -f },
                 .null_val => .{ .null_val = {} },
-                else => EvalError.TypeError,
+                else => ctx.fail(EvalError.TypeError, u.location, "Type error: -{s} is not defined", .{typeName(operand)}),
             },
             .is_null => .{ .bool_val = operand.isNull() },
             .is_not_null => .{ .bool_val = !operand.isNull() },
@@ -934,9 +1175,11 @@ pub const ExpressionEvaluator = struct {
                 .edge_ref => |edge_id| blk: {
                     const symbol_table = ctx.symbol_table orelse break :blk .{ .null_val = {} };
                     const database = ctx.database orelse break :blk .{ .null_val = {} };
-                    var edge = (database.getEdgeInTxn(ctx.txn, edge_id) catch break :blk .{ .null_val = {} }) orelse break :blk .{ .null_val = {} };
+                    var edge = (database.getEdgeInTxn(ctx.txn, edge_id) catch |err|
+                        return readFailure(ctx, err, f.location, "reading relationship {d}", .{edge_id})) orelse break :blk .{ .null_val = {} };
                     defer edge.deinit(ctx.allocator);
-                    const resolved = symbol_table.resolve(edge.edge_type) catch break :blk .{ .null_val = {} };
+                    const resolved = symbol_table.resolve(edge.edge_type) catch |err|
+                        return readFailure(ctx, err, f.location, "resolving the type of relationship {d}", .{edge_id});
                     defer symbol_table.freeString(resolved);
                     const owned = self.allocator.dupe(u8, resolved) catch return EvalError.OutOfMemory;
                     break :blk .{ .string_val = owned };
@@ -953,11 +1196,13 @@ pub const ExpressionEvaluator = struct {
                 .node_ref => |node_id| blk: {
                     const database = ctx.database orelse break :blk .{ .null_val = {} };
                     const symbol_table = ctx.symbol_table orelse break :blk .{ .null_val = {} };
-                    var node = (database.getNodeInTxn(ctx.txn, node_id) catch break :blk .{ .null_val = {} }) orelse break :blk .{ .null_val = {} };
+                    var node = (database.getNodeInTxn(ctx.txn, node_id) catch |err|
+                        return readFailure(ctx, err, f.location, "reading node {d}", .{node_id})) orelse break :blk .{ .null_val = {} };
                     defer node.deinit(ctx.allocator);
                     var label_list: std.ArrayListUnmanaged(EvalResult) = .empty;
                     for (node.labels) |label_id| {
-                        const resolved = symbol_table.resolve(label_id) catch continue;
+                        const resolved = symbol_table.resolve(label_id) catch |err|
+                            return readFailure(ctx, err, f.location, "resolving label {d} of node {d}", .{ label_id, node_id });
                         defer symbol_table.freeString(resolved);
                         const owned = self.allocator.dupe(u8, resolved) catch return EvalError.OutOfMemory;
                         label_list.append(self.allocator, .{ .string_val = owned }) catch return EvalError.OutOfMemory;
@@ -976,16 +1221,18 @@ pub const ExpressionEvaluator = struct {
                 const node_id = arg.node_ref;
                 const database = ctx.database orelse return .{ .null_val = {} };
                 const symbol_table = ctx.symbol_table orelse return .{ .null_val = {} };
-                var node = (database.getNodeInTxn(ctx.txn, node_id) catch return .{ .null_val = {} }) orelse return .{ .null_val = {} };
+                var node = (database.getNodeInTxn(ctx.txn, node_id) catch |err|
+                    return readFailure(ctx, err, f.location, "reading node {d}", .{node_id})) orelse return .{ .null_val = {} };
                 defer node.deinit(ctx.allocator);
                 var entries: std.ArrayListUnmanaged(EvalResult.MapEntry) = .empty;
                 for (node.properties) |prop| {
-                    const key = symbol_table.resolve(prop.key_id) catch continue;
+                    const key = symbol_table.resolve(prop.key_id) catch |err|
+                        return readFailure(ctx, err, f.location, "resolving property key {d} of node {d}", .{ prop.key_id, node_id });
                     defer symbol_table.freeString(key);
                     const owned_key = self.allocator.dupe(u8, key) catch return EvalError.OutOfMemory;
                     entries.append(self.allocator, .{
                         .key = owned_key,
-                        .value = EvalResult.fromPropertyValue(prop.value, self.allocator),
+                        .value = try EvalResult.fromPropertyValue(prop.value, self.allocator),
                     }) catch return EvalError.OutOfMemory;
                 }
                 return .{ .map_val = entries.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory };
@@ -993,16 +1240,18 @@ pub const ExpressionEvaluator = struct {
                 const edge_id = arg.edge_ref;
                 const database = ctx.database orelse return .{ .null_val = {} };
                 const symbol_table = ctx.symbol_table orelse return .{ .null_val = {} };
-                var edge = (database.getEdgeInTxn(ctx.txn, edge_id) catch return .{ .null_val = {} }) orelse return .{ .null_val = {} };
+                var edge = (database.getEdgeInTxn(ctx.txn, edge_id) catch |err|
+                    return readFailure(ctx, err, f.location, "reading relationship {d}", .{edge_id})) orelse return .{ .null_val = {} };
                 defer edge.deinit(ctx.allocator);
                 var entries: std.ArrayListUnmanaged(EvalResult.MapEntry) = .empty;
                 for (edge.properties) |prop| {
-                    const key = symbol_table.resolve(prop.key_id) catch continue;
+                    const key = symbol_table.resolve(prop.key_id) catch |err|
+                        return readFailure(ctx, err, f.location, "resolving property key {d} of relationship {d}", .{ prop.key_id, edge_id });
                     defer symbol_table.freeString(key);
                     const owned_key = self.allocator.dupe(u8, key) catch return EvalError.OutOfMemory;
                     entries.append(self.allocator, .{
                         .key = owned_key,
-                        .value = EvalResult.fromPropertyValue(prop.value, self.allocator),
+                        .value = try EvalResult.fromPropertyValue(prop.value, self.allocator),
                     }) catch return EvalError.OutOfMemory;
                 }
                 return .{ .map_val = entries.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory };
@@ -1377,7 +1626,7 @@ pub const ExpressionEvaluator = struct {
     /// `text =~ pattern`: whether the pattern matches the whole text. A
     /// pattern the engine does not accept fails the query rather than
     /// matching nothing. See regex.zig for the syntax.
-    fn regexMatch(self: *Self, left: EvalResult, right: EvalResult, ctx: *const ExecutionContext) EvalError!EvalResult {
+    fn regexMatch(self: *Self, b: *const ast.BinaryExpr, left: EvalResult, right: EvalResult, ctx: *const ExecutionContext) EvalError!EvalResult {
         const text = switch (left) {
             .string_val => |s| s,
             else => return .{ .null_val = {} },
@@ -1393,7 +1642,8 @@ pub const ExpressionEvaluator = struct {
         else
             regex.fullMatch(self.allocator, pattern, text)) catch |err| return switch (err) {
             error.OutOfMemory => EvalError.OutOfMemory,
-            error.InvalidPattern, error.PatternTooComplex => EvalError.InvalidOperation,
+            error.InvalidPattern => ctx.fail(EvalError.InvalidRegex, b.right.getLocation(), "Invalid regular expression {f}: =~ accepts a subset of Java's syntax, without backreferences or lookaround", .{Brief{ .value = right }}),
+            error.PatternTooComplex => ctx.fail(EvalError.InvalidRegex, b.right.getLocation(), "Regular expression {f} is too complex: it compiles to more than {d} instructions, or repeats more than {d} times", .{ Brief{ .value = right }, regex.MAX_PROGRAM, regex.MAX_REPEAT }),
         };
         return .{ .bool_val = matched };
     }
@@ -1436,9 +1686,9 @@ pub const ExpressionEvaluator = struct {
     /// `a <=> b`: the distance under the database's vector metric, the same
     /// number a vector search reports, or cosine distance where there is no
     /// vector index to say otherwise.
-    fn vectorDistance(self: *Self, left: EvalResult, right: EvalResult, ctx: *const ExecutionContext) EvalResult {
-        const left_vec = self.asVector(left) orelse return .{ .null_val = {} };
-        const right_vec = self.asVector(right) orelse return .{ .null_val = {} };
+    fn vectorDistance(self: *Self, left: EvalResult, right: EvalResult, ctx: *const ExecutionContext) EvalError!EvalResult {
+        const left_vec = (try self.asVector(left)) orelse return .{ .null_val = {} };
+        const right_vec = (try self.asVector(right)) orelse return .{ .null_val = {} };
 
         if (left_vec.len == 0 or right_vec.len == 0) return .{ .null_val = {} };
         if (left_vec.len != right_vec.len) return .{ .null_val = {} };
@@ -1449,11 +1699,11 @@ pub const ExpressionEvaluator = struct {
         return .{ .float_val = vector_distance.cosineDistance(left_vec, right_vec) };
     }
 
-    fn asVector(self: *Self, value: EvalResult) ?[]const f32 {
+    fn asVector(self: *Self, value: EvalResult) EvalError!?[]const f32 {
         return switch (value) {
             .vector_val => |v| v,
             .list_val => |items| blk: {
-                const vec = self.allocator.alloc(f32, items.len) catch break :blk null;
+                const vec = try self.allocator.alloc(f32, items.len);
                 for (items, 0..) |item, i| {
                     vec[i] = switch (item) {
                         .float_val => |f| @floatCast(f),
@@ -1525,9 +1775,10 @@ pub const ExpressionEvaluator = struct {
         const matched = (if (is_edge)
             database.ftsEdgeMatches(ctx.fts_cache, ctx.txn, doc_id, property_access.property, query, FTS_FILTER_LIMIT)
         else
-            database.ftsNodeMatches(ctx.fts_cache, ctx.txn, doc_id, property_access.property, query, FTS_FILTER_LIMIT)) catch {
-            return .{ .null_val = {} };
-        };
+            database.ftsNodeMatches(ctx.fts_cache, ctx.txn, doc_id, property_access.property, query, FTS_FILTER_LIMIT)) catch |err|
+            // A failed search is an error. Reading it as null made a damaged
+            // index look like a document that does not match.
+            return readFailure(ctx, err, b.location, "searching the full-text index for {s}.{s}", .{ variable.name, property_access.property });
 
         // No index declared for this property on any label the node carries, or
         // on the edge's type. The
@@ -1601,6 +1852,27 @@ fn containsAsciiInsensitive(haystack: []const u8, needle: []const u8) bool {
 
 test {
     _ = regex;
+}
+
+test "every function evaluateFunction answers is in builtin_functions" {
+    // The analyser refuses a name missing from the list, so a function added
+    // to the evaluator alone would be unreachable. Read the names out of
+    // this file's own source.
+    const source = @embedFile("expression.zig");
+    const marker = "eqlIgnoreCase(f.name, \"";
+    var checked: usize = 0;
+    var rest: []const u8 = source;
+    while (std.mem.indexOf(u8, rest, marker)) |at| {
+        rest = rest[at + marker.len ..];
+        const end = std.mem.indexOfScalar(u8, rest, '"') orelse break;
+        const name = rest[0..end];
+        if (findFunction(name) == null) {
+            std.debug.print("function '{s}' is evaluated but missing from builtin_functions\n", .{name});
+            return error.TestUnexpectedResult;
+        }
+        checked += 1;
+    }
+    try std.testing.expect(checked >= builtin_functions.len);
 }
 
 test "evaluate integer literal" {
@@ -1838,7 +2110,7 @@ test "fromPropertyValue converts list" {
     };
     const pv = PropertyValue{ .list_val = &items };
 
-    const result = EvalResult.fromPropertyValue(pv, allocator);
+    const result = try EvalResult.fromPropertyValue(pv, allocator);
     defer {
         allocator.free(result.list_val[2].string_val);
         allocator.free(result.list_val);
@@ -1856,7 +2128,7 @@ test "fromPropertyValue converts vector" {
     const vec = [_]f32{ 1.0, 2.5, 3.0 };
     const pv = PropertyValue{ .vector_val = &vec };
 
-    const result = EvalResult.fromPropertyValue(pv, allocator);
+    const result = try EvalResult.fromPropertyValue(pv, allocator);
     defer allocator.free(result.vector_val);
 
     try std.testing.expectEqual(@as(usize, 3), result.vector_val.len);
@@ -1874,7 +2146,7 @@ test "fromPropertyValue converts map" {
     };
     const pv = PropertyValue{ .map_val = &entries };
 
-    const result = EvalResult.fromPropertyValue(pv, allocator);
+    const result = try EvalResult.fromPropertyValue(pv, allocator);
     defer {
         allocator.free(result.map_val[0].key);
         allocator.free(result.map_val[0].value.string_val);
@@ -1899,7 +2171,7 @@ test "fromPropertyValue converts nested list" {
     };
     const pv = PropertyValue{ .list_val = &items };
 
-    const result = EvalResult.fromPropertyValue(pv, allocator);
+    const result = try EvalResult.fromPropertyValue(pv, allocator);
     defer {
         // Free inner list allocation
         allocator.free(result.list_val[1].list_val);
@@ -1924,7 +2196,7 @@ test "toPropertyValue converts list" {
     };
     const eval = EvalResult{ .list_val = &items };
 
-    const pv = eval.toPropertyValue(allocator);
+    const pv = try eval.toPropertyValue(allocator);
     defer allocator.free(pv.list_val);
 
     try std.testing.expectEqual(@as(usize, 3), pv.list_val.len);
@@ -1939,7 +2211,7 @@ test "toPropertyValue converts vector" {
     const vec = [_]f32{ 0.5, 1.5, 2.5 };
     const eval = EvalResult{ .vector_val = &vec };
 
-    const pv = eval.toPropertyValue(allocator);
+    const pv = try eval.toPropertyValue(allocator);
 
     try std.testing.expectEqual(@as(usize, 3), pv.vector_val.len);
     try std.testing.expectApproxEqAbs(@as(f32, 0.5), pv.vector_val[0], 0.001);
@@ -1956,7 +2228,7 @@ test "toPropertyValue converts map" {
     };
     const eval = EvalResult{ .map_val = &entries };
 
-    const pv = eval.toPropertyValue(allocator);
+    const pv = try eval.toPropertyValue(allocator);
     defer allocator.free(pv.map_val);
 
     try std.testing.expectEqual(@as(usize, 2), pv.map_val.len);
@@ -1977,10 +2249,10 @@ test "fromPropertyValue/toPropertyValue round-trip for list" {
     const original = PropertyValue{ .list_val = &items };
 
     // PropertyValue -> EvalResult -> PropertyValue
-    const eval = EvalResult.fromPropertyValue(original, allocator);
+    const eval = try EvalResult.fromPropertyValue(original, allocator);
     defer allocator.free(eval.list_val);
 
-    const roundtrip = eval.toPropertyValue(allocator);
+    const roundtrip = try eval.toPropertyValue(allocator);
     defer allocator.free(roundtrip.list_val);
 
     try std.testing.expectEqual(@as(usize, 3), roundtrip.list_val.len);
@@ -1995,10 +2267,10 @@ test "fromPropertyValue/toPropertyValue round-trip for vector" {
     const vec = [_]f32{ 1.0, 2.0, 3.0 };
     const original = PropertyValue{ .vector_val = &vec };
 
-    const eval = EvalResult.fromPropertyValue(original, allocator);
+    const eval = try EvalResult.fromPropertyValue(original, allocator);
     defer allocator.free(eval.vector_val);
 
-    const roundtrip = eval.toPropertyValue(allocator);
+    const roundtrip = try eval.toPropertyValue(allocator);
     // vector_val in PropertyValue just copies the slice from EvalResult (no new alloc)
     // so no need to free roundtrip.vector_val separately
 
@@ -2017,7 +2289,7 @@ test "fromPropertyValue/toPropertyValue round-trip for map" {
     };
     const original = PropertyValue{ .map_val = &entries };
 
-    const eval = EvalResult.fromPropertyValue(original, allocator);
+    const eval = try EvalResult.fromPropertyValue(original, allocator);
     defer {
         allocator.free(eval.map_val[0].key);
         allocator.free(eval.map_val[0].value.string_val);
@@ -2025,7 +2297,7 @@ test "fromPropertyValue/toPropertyValue round-trip for map" {
         allocator.free(eval.map_val);
     }
 
-    const roundtrip = eval.toPropertyValue(allocator);
+    const roundtrip = try eval.toPropertyValue(allocator);
     defer allocator.free(roundtrip.map_val);
 
     try std.testing.expectEqual(@as(usize, 2), roundtrip.map_val.len);

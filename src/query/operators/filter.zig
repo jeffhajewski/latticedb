@@ -212,10 +212,8 @@ pub const LabelFilter = struct {
             // The label index answers this without reading the node; a node
             // that no longer exists has no labels. A storage error is an
             // error: skipping the row hid it as a missing match.
-            const has_label = database.nodeHasLabelInTxn(ctx.txn, node_id, self.label_id) catch |err| return switch (err) {
-                error.OutOfMemory => OperatorError.OutOfMemory,
-                else => OperatorError.StorageError,
-            };
+            const has_label = database.nodeHasLabelInTxn(ctx.txn, node_id, self.label_id) catch |err|
+                return ctx.storageFailure(err, "reading the labels of node {d}", .{node_id});
             if (has_label) return row;
             // Label doesn't match, continue to next row
         }

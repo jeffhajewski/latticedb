@@ -105,7 +105,7 @@ pub const Project = struct {
             };
 
             // Convert result to slot value
-            const slot_value = resultToSlotValue(result, self.evaluator.allocator);
+            const slot_value = resultToSlotValue(result, self.evaluator.allocator) catch return OperatorError.OutOfMemory;
             output_row.setSlot(item.output_slot, slot_value);
 
             // Copy distances and scores from input if this is a passthrough
@@ -141,7 +141,7 @@ pub const Project = struct {
 };
 
 /// Convert an EvalResult to a SlotValue
-fn resultToSlotValue(result: EvalResult, allocator: Allocator) SlotValue {
+fn resultToSlotValue(result: EvalResult, allocator: Allocator) Allocator.Error!SlotValue {
     return switch (result) {
         .null_val => .{ .property = .{ .null_val = {} } },
         .node_ref => |id| .{ .node_ref = id },
@@ -152,8 +152,8 @@ fn resultToSlotValue(result: EvalResult, allocator: Allocator) SlotValue {
         .string_val => |s| .{ .property = .{ .string_val = s } },
         .bytes_val => |b| .{ .property = .{ .bytes_val = b } },
         .vector_val => |v| .{ .property = .{ .vector_val = v } },
-        .list_val => .{ .property = result.toPropertyValue(allocator) },
-        .map_val => .{ .property = result.toPropertyValue(allocator) },
+        .list_val => .{ .property = try result.toPropertyValue(allocator) },
+        .map_val => .{ .property = try result.toPropertyValue(allocator) },
     };
 }
 
@@ -183,13 +183,13 @@ test "Project basic structure" {
 }
 
 test "resultToSlotValue conversions" {
-    const node_slot = resultToSlotValue(.{ .node_ref = 123 }, std.testing.allocator);
+    const node_slot = try resultToSlotValue(.{ .node_ref = 123 }, std.testing.allocator);
     try std.testing.expectEqual(@as(u64, 123), node_slot.asNodeId().?);
 
-    const bool_slot = resultToSlotValue(.{ .bool_val = true }, std.testing.allocator);
+    const bool_slot = try resultToSlotValue(.{ .bool_val = true }, std.testing.allocator);
     try std.testing.expectEqual(true, bool_slot.asProperty().?.bool_val);
 
-    const int_slot = resultToSlotValue(.{ .int_val = 42 }, std.testing.allocator);
+    const int_slot = try resultToSlotValue(.{ .int_val = 42 }, std.testing.allocator);
     try std.testing.expectEqual(@as(i64, 42), int_slot.asProperty().?.int_val);
 }
 
@@ -203,7 +203,7 @@ test "resultToSlotValue converts list to property" {
     };
     const list_result = EvalResult{ .list_val = &items };
 
-    const slot = resultToSlotValue(list_result, allocator);
+    const slot = try resultToSlotValue(list_result, allocator);
     defer allocator.free(slot.asProperty().?.list_val);
 
     const prop = slot.asProperty().?;
@@ -217,7 +217,7 @@ test "resultToSlotValue converts vector to property" {
     const vec = [_]f32{ 1.0, 2.0, 3.0 };
     const vec_result = EvalResult{ .vector_val = &vec };
 
-    const slot = resultToSlotValue(vec_result, std.testing.allocator);
+    const slot = try resultToSlotValue(vec_result, std.testing.allocator);
 
     const prop = slot.asProperty().?;
     try std.testing.expectEqual(@as(usize, 3), prop.vector_val.len);
@@ -235,7 +235,7 @@ test "resultToSlotValue converts map to property" {
     };
     const map_result = EvalResult{ .map_val = &entries };
 
-    const slot = resultToSlotValue(map_result, allocator);
+    const slot = try resultToSlotValue(map_result, allocator);
     defer allocator.free(slot.asProperty().?.map_val);
 
     const prop = slot.asProperty().?;
@@ -249,7 +249,7 @@ test "resultToSlotValue converts map to property" {
 test "resultToSlotValue stores null as a bound null, not an empty slot" {
     // An empty slot means "never bound", which reading it reports as an error.
     // A projected null is bound, so it has to read back as null.
-    const slot = resultToSlotValue(.{ .null_val = {} }, std.testing.allocator);
+    const slot = try resultToSlotValue(.{ .null_val = {} }, std.testing.allocator);
     try std.testing.expect(!slot.isEmpty());
     try std.testing.expect(slot.asProperty().? == .null_val);
 }

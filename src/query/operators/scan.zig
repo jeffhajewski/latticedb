@@ -80,7 +80,8 @@ pub const AllNodesScan = struct {
         // Allocate row for reuse
         self.current_row = ctx.allocRow() catch return OperatorError.OutOfMemory;
 
-        self.node_ids = self.database.getAllNodeIdsInTxn(ctx.txn) catch return OperatorError.StorageError;
+        self.node_ids = self.database.getAllNodeIdsInTxn(ctx.txn) catch |err|
+            return ctx.storageFailure(err, "reading every node", .{});
         self.current_index = 0;
     }
 
@@ -206,17 +207,16 @@ pub const LabelScan = struct {
         self.current_index = 0;
 
         if (!ctx.stable_reads) {
-            self.node_ids = self.database.getNodesByLabelIdInTxn(ctx.txn, self.label_id) catch return OperatorError.StorageError;
+            self.node_ids = self.database.getNodesByLabelIdInTxn(ctx.txn, self.label_id) catch |err|
+                return ctx.storageFailure(err, "reading the label index", .{});
             return;
         }
 
         const allocator = self.database.allocator;
         const chunk = allocator.alloc(NodeId, CHUNK) catch return OperatorError.OutOfMemory;
         errdefer allocator.free(chunk);
-        const overlay_ids = self.database.overlayNodesWithLabel(ctx.txn, self.label_id) catch |err| return switch (err) {
-            error.OutOfMemory => OperatorError.OutOfMemory,
-            else => OperatorError.StorageError,
-        };
+        const overlay_ids = self.database.overlayNodesWithLabel(ctx.txn, self.label_id) catch |err|
+            return ctx.storageFailure(err, "reading the transaction's labelled nodes", .{});
         self.stream = .{ .chunk = chunk, .overlay_ids = overlay_ids };
     }
 
@@ -226,10 +226,8 @@ pub const LabelScan = struct {
         while (true) {
             if (stream.chunk_pos == stream.chunk_len) {
                 if (stream.exhausted) return null;
-                const n = self.database.label_index.readNodesByLabel(self.label_id, stream.last, stream.chunk) catch |err| return switch (err) {
-                    error.OutOfMemory => OperatorError.OutOfMemory,
-                    else => OperatorError.StorageError,
-                };
+                const n = self.database.label_index.readNodesByLabel(self.label_id, stream.last, stream.chunk) catch |err|
+                    return ctx.storageFailure(err, "reading the label index", .{});
                 stream.chunk_len = n;
                 stream.chunk_pos = 0;
                 if (n < stream.chunk.len) stream.exhausted = true;
@@ -330,7 +328,8 @@ pub fn findNodesByIndexedValue(
     property: []const u8,
     value: types.PropertyValue,
 ) OperatorError![]NodeId {
-    const first = database.findNodesByLabelProperty(ctx.txn, label, property, value, std.math.maxInt(usize)) catch return OperatorError.StorageError;
+    const first = database.findNodesByLabelProperty(ctx.txn, label, property, value, std.math.maxInt(usize)) catch |err|
+        return ctx.storageFailure(err, "reading the property index on {s}.{s}", .{ label, property });
     const other: types.PropertyValue = switch (value) {
         .int_val => |i| blk: {
             const f: f64 = @floatFromInt(i);
@@ -345,7 +344,8 @@ pub fn findNodesByIndexedValue(
         else => return first,
     };
     defer database.allocator.free(first);
-    const second = database.findNodesByLabelProperty(ctx.txn, label, property, other, std.math.maxInt(usize)) catch return OperatorError.StorageError;
+    const second = database.findNodesByLabelProperty(ctx.txn, label, property, other, std.math.maxInt(usize)) catch |err|
+        return ctx.storageFailure(err, "reading the property index on {s}.{s}", .{ label, property });
     defer database.allocator.free(second);
 
     const merged = database.allocator.alloc(NodeId, first.len + second.len) catch return OperatorError.OutOfMemory;
@@ -416,8 +416,12 @@ pub const PropertyIndexScan = struct {
         const temporary_allocator = ctx.row_arena.allocator();
         var evaluator = expression.ExpressionEvaluator.init(temporary_allocator);
         const empty_row = Row.init();
-        const evaluated = evaluator.evaluate(self.value_expression, &empty_row, ctx) catch return OperatorError.EvaluationError;
-        const value = evaluated.toPropertyValue(temporary_allocator);
+        const evaluated = evaluator.evaluate(self.value_expression, &empty_row, ctx) catch |err| return switch (err) {
+            error.OutOfMemory => OperatorError.OutOfMemory,
+            error.StorageError => OperatorError.StorageError,
+            else => OperatorError.EvaluationError,
+        };
+        const value = evaluated.toPropertyValue(temporary_allocator) catch return OperatorError.OutOfMemory;
         self.node_ids = try findNodesByIndexedValue(self.database, ctx, self.label, self.property, value);
         self.current_index = 0;
     }

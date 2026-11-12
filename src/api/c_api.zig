@@ -432,6 +432,14 @@ fn mapQueryFailureStage(stage: QueryFailureStage) lattice_query_error_stage {
 }
 
 fn mapQueryFailureToError(failure: QueryFailure) lattice_error {
+    // A failure of the database underneath a query is not the query's
+    // fault, and a caller deciding whether to retry or fix the query has
+    // to be able to tell the two apart.
+    switch (failure.cause) {
+        .query => {},
+        .storage => return .err_io,
+        .out_of_memory => return .err_out_of_memory,
+    }
     return switch (failure.stage) {
         .parse, .semantic => .err_invalid_arg,
         .plan, .execution => .err,

@@ -174,11 +174,10 @@ pub const CreateNode = struct {
         );
 
         // Create node with labels
-        const node_id = self.database.createNode(ctx.txn, self.labels) catch {
-            return OperatorError.StorageError;
-        };
+        const node_id = self.database.createNode(ctx.txn, self.labels) catch |err|
+            return ctx.storageFailure(err, "creating a node", .{});
 
-        try applyEvaluatedNodeProperties(self.database, ctx.txn, node_id, evaluated.items);
+        try applyEvaluatedNodeProperties(self.database, ctx, node_id, evaluated.items);
         return node_id;
     }
 
@@ -307,15 +306,15 @@ pub const CreateEdge = struct {
             &evaluated,
         );
 
-        const edge_id = self.database.createEdgeAndGetId(ctx.txn, source_id, target_id, self.edge_type) catch {
-            return OperatorError.StorageError;
-        };
+        const edge_id = self.database.createEdgeAndGetId(ctx.txn, source_id, target_id, self.edge_type) catch |err|
+            return ctx.storageFailure(err, "creating a relationship", .{});
 
         for (evaluated.items) |item| {
-            self.database.setEdgePropertyById(ctx.txn, edge_id, item.key, item.value) catch {
-                // Best-effort rollback to avoid exposing partially initialized edges.
+            self.database.setEdgePropertyById(ctx.txn, edge_id, item.key, item.value) catch |err| {
+                // Best-effort rollback to avoid exposing partially initialized
+                // edges. The query fails either way, with the first error.
                 self.database.deleteEdgeById(ctx.txn, edge_id) catch {};
-                return OperatorError.StorageError;
+                return ctx.storageFailure(err, "setting property '{s}' of relationship {d}", .{ item.key, edge_id });
             };
         }
 
@@ -456,7 +455,8 @@ pub const DeleteNode = struct {
         // has relationships and detachDeleteNode removes them with it.
         if (self.detach) {
             for (targets.items) |node_id| {
-                self.database.detachDeleteNode(ctx.txn, node_id) catch return OperatorError.StorageError;
+                self.database.detachDeleteNode(ctx.txn, node_id) catch |err|
+                    return ctx.storageFailure(err, "deleting node {d} and its relationships", .{node_id});
             }
             return;
         }
@@ -464,17 +464,26 @@ pub const DeleteNode = struct {
         // Check every node before deleting any, so a refusal leaves the
         // nodes in place.
         for (targets.items) |node_id| {
-            const has_relationships = self.database.nodeHasRelationshipsInTxn(ctx.txn, node_id) catch
-                return OperatorError.StorageError;
-            if (has_relationships) return OperatorError.NodeHasRelationships;
+            const has_relationships = self.database.nodeHasRelationshipsInTxn(ctx.txn, node_id) catch |err|
+                return ctx.storageFailure(err, "reading the relationships of node {d}", .{node_id});
+            if (has_relationships) return hasRelationshipsFailure(ctx, node_id);
         }
 
         for (targets.items) |node_id| {
             self.database.deleteNode(ctx.txn, node_id) catch |err| return switch (err) {
-                error.NodeHasRelationships => OperatorError.NodeHasRelationships,
-                else => OperatorError.StorageError,
+                error.NodeHasRelationships => hasRelationshipsFailure(ctx, node_id),
+                else => ctx.storageFailure(err, "deleting node {d}", .{node_id}),
             };
         }
+    }
+
+    fn hasRelationshipsFailure(ctx: *ExecutionContext, node_id: NodeId) OperatorError {
+        return ctx.fail(
+            OperatorError.NodeHasRelationships,
+            null,
+            "Cannot delete node {d} because it still has relationships; delete them first, or use DETACH DELETE",
+            .{node_id},
+        );
     }
 
     fn close(ptr: *anyopaque, ctx: *ExecutionContext) void {
@@ -565,7 +574,7 @@ pub const DeleteEdge = struct {
             // statement deleted it. An undirected pattern lists every edge
             // twice, and deleting it twice is not an error in Cypher.
             error.NotFound => {},
-            else => return OperatorError.StorageError,
+            else => return ctx.storageFailure(err, "deleting relationship {d}", .{edge_id}),
         };
 
         return row;
@@ -672,26 +681,22 @@ pub const SetProperty = struct {
             .node_ref => |node_id| {
                 if (value == .null_val) {
                     // NULL removes property
-                    self.database.removeNodeProperty(ctx.txn, node_id, self.property_name) catch {
-                        return OperatorError.StorageError;
-                    };
+                    self.database.removeNodeProperty(ctx.txn, node_id, self.property_name) catch |err|
+                        return ctx.storageFailure(err, "removing property '{s}' of node {d}", .{ self.property_name, node_id });
                 } else {
-                    const prop_value = evalResultToPropertyValue(value, self.evaluator.allocator) orelse return OperatorError.TypeError;
-                    self.database.setNodeProperty(ctx.txn, node_id, self.property_name, prop_value) catch {
-                        return OperatorError.StorageError;
-                    };
+                    const prop_value = (evalResultToPropertyValue(value, self.evaluator.allocator) catch return OperatorError.OutOfMemory) orelse return OperatorError.TypeError;
+                    self.database.setNodeProperty(ctx.txn, node_id, self.property_name, prop_value) catch |err|
+                        return ctx.storageFailure(err, "setting property '{s}' of node {d}", .{ self.property_name, node_id });
                 }
             },
             .edge_ref => |edge_id| {
                 if (value == .null_val) {
-                    self.database.removeEdgePropertyById(ctx.txn, edge_id, self.property_name) catch {
-                        return OperatorError.StorageError;
-                    };
+                    self.database.removeEdgePropertyById(ctx.txn, edge_id, self.property_name) catch |err|
+                        return ctx.storageFailure(err, "removing property '{s}' of relationship {d}", .{ self.property_name, edge_id });
                 } else {
-                    const prop_value = evalResultToPropertyValue(value, self.evaluator.allocator) orelse return OperatorError.TypeError;
-                    self.database.setEdgePropertyById(ctx.txn, edge_id, self.property_name, prop_value) catch {
-                        return OperatorError.StorageError;
-                    };
+                    const prop_value = (evalResultToPropertyValue(value, self.evaluator.allocator) catch return OperatorError.OutOfMemory) orelse return OperatorError.TypeError;
+                    self.database.setEdgePropertyById(ctx.txn, edge_id, self.property_name, prop_value) catch |err|
+                        return ctx.storageFailure(err, "setting property '{s}' of relationship {d}", .{ self.property_name, edge_id });
                 }
             },
             else => return OperatorError.TypeError,
@@ -787,9 +792,8 @@ pub const SetLabels = struct {
 
         // Add each label
         for (self.label_names) |label| {
-            self.database.addNodeLabel(ctx.txn, node_id, label) catch {
-                return OperatorError.StorageError;
-            };
+            self.database.addNodeLabel(ctx.txn, node_id, label) catch |err|
+                return ctx.storageFailure(err, "adding label '{s}' to node {d}", .{ label, node_id });
         }
 
         return row;
@@ -898,14 +902,13 @@ pub const SetPropertiesReplace = struct {
         switch (target_val) {
             .node_ref => |node_id| {
                 // Clear existing properties and apply new values.
-                self.database.clearNodeProperties(ctx.txn, node_id) catch {
-                    return OperatorError.StorageError;
-                };
-                try applyEvaluatedNodeProperties(self.database, ctx.txn, node_id, evaluated.items);
+                self.database.clearNodeProperties(ctx.txn, node_id) catch |err|
+                    return ctx.storageFailure(err, "clearing the properties of node {d}", .{node_id});
+                try applyEvaluatedNodeProperties(self.database, ctx, node_id, evaluated.items);
             },
             .edge_ref => |edge_id| {
-                try clearEdgeProperties(self.database, ctx.txn, edge_id);
-                try applyEvaluatedEdgeProperties(self.database, ctx.txn, edge_id, evaluated.items);
+                try clearEdgeProperties(self.database, ctx, edge_id);
+                try applyEvaluatedEdgeProperties(self.database, ctx, edge_id, evaluated.items);
             },
             else => return OperatorError.TypeError,
         }
@@ -1013,8 +1016,8 @@ pub const SetPropertiesMerge = struct {
             &evaluated,
         );
         switch (target_val) {
-            .node_ref => |node_id| try applyEvaluatedNodeProperties(self.database, ctx.txn, node_id, evaluated.items),
-            .edge_ref => |edge_id| try applyEvaluatedEdgeProperties(self.database, ctx.txn, edge_id, evaluated.items),
+            .node_ref => |node_id| try applyEvaluatedNodeProperties(self.database, ctx, node_id, evaluated.items),
+            .edge_ref => |edge_id| try applyEvaluatedEdgeProperties(self.database, ctx, edge_id, evaluated.items),
             else => return OperatorError.TypeError,
         }
 
@@ -1108,14 +1111,12 @@ pub const RemoveProperty = struct {
         // Remove property based on target type
         switch (target_val) {
             .node_ref => |node_id| {
-                self.database.removeNodeProperty(ctx.txn, node_id, self.property_name) catch {
-                    return OperatorError.StorageError;
-                };
+                self.database.removeNodeProperty(ctx.txn, node_id, self.property_name) catch |err|
+                    return ctx.storageFailure(err, "removing property '{s}' of node {d}", .{ self.property_name, node_id });
             },
             .edge_ref => |edge_id| {
-                self.database.removeEdgePropertyById(ctx.txn, edge_id, self.property_name) catch {
-                    return OperatorError.StorageError;
-                };
+                self.database.removeEdgePropertyById(ctx.txn, edge_id, self.property_name) catch |err|
+                    return ctx.storageFailure(err, "removing property '{s}' of relationship {d}", .{ self.property_name, edge_id });
             },
             else => return OperatorError.TypeError,
         }
@@ -1210,9 +1211,8 @@ pub const RemoveLabels = struct {
 
         // Remove each label
         for (self.label_names) |label| {
-            self.database.removeNodeLabel(ctx.txn, node_id, label) catch {
-                return OperatorError.StorageError;
-            };
+            self.database.removeNodeLabel(ctx.txn, node_id, label) catch |err|
+                return ctx.storageFailure(err, "removing label '{s}' from node {d}", .{ label, node_id });
         }
 
         return row;
@@ -1238,7 +1238,7 @@ pub const RemoveLabels = struct {
 // ============================================================================
 
 /// Convert EvalResult to PropertyValue
-fn evalResultToPropertyValue(result: EvalResult, allocator: Allocator) ?PropertyValue {
+fn evalResultToPropertyValue(result: EvalResult, allocator: Allocator) Allocator.Error!?PropertyValue {
     return switch (result) {
         .null_val => .{ .null_val = {} },
         .bool_val => |b| .{ .bool_val = b },
@@ -1248,7 +1248,7 @@ fn evalResultToPropertyValue(result: EvalResult, allocator: Allocator) ?Property
         .bytes_val => |b| .{ .bytes_val = b },
         .vector_val => |v| .{ .vector_val = v },
         .node_ref, .edge_ref => null, // Can't convert refs to property
-        .list_val, .map_val => result.toPropertyValue(allocator),
+        .list_val, .map_val => try result.toPropertyValue(allocator),
     };
 }
 
@@ -1282,7 +1282,7 @@ fn evaluatePropertyExprList(
         const value = evaluator.evaluate(item.value_expr, row, ctx) catch |err| {
             return mapEvalError(err);
         };
-        const prop_value = evalResultToPropertyValue(value, allocator) orelse return OperatorError.TypeError;
+        const prop_value = (evalResultToPropertyValue(value, allocator) catch return OperatorError.OutOfMemory) orelse return OperatorError.TypeError;
         out.append(allocator, .{
             .key = item.key,
             .value = prop_value,
@@ -1309,7 +1309,7 @@ fn evaluateMapExpression(
     };
 
     for (entries) |entry| {
-        const prop_value = evalResultToPropertyValue(entry.value, allocator) orelse return OperatorError.TypeError;
+        const prop_value = (evalResultToPropertyValue(entry.value, allocator) catch return OperatorError.OutOfMemory) orelse return OperatorError.TypeError;
         out.append(allocator, .{
             .key = entry.key,
             .value = prop_value,
@@ -1319,38 +1319,36 @@ fn evaluateMapExpression(
 
 fn applyEvaluatedNodeProperties(
     database: *Database,
-    txn: ?*Transaction,
+    ctx: *const ExecutionContext,
     node_id: NodeId,
     items: []const EvaluatedProperty,
 ) OperatorError!void {
     for (items) |item| {
-        database.setNodeProperty(txn, node_id, item.key, item.value) catch {
-            return OperatorError.StorageError;
-        };
+        database.setNodeProperty(ctx.txn, node_id, item.key, item.value) catch |err|
+            return ctx.storageFailure(err, "setting property '{s}' of node {d}", .{ item.key, node_id });
     }
 }
 
 fn applyEvaluatedEdgeProperties(
     database: *Database,
-    txn: ?*Transaction,
+    ctx: *const ExecutionContext,
     edge_id: EdgeId,
     items: []const EvaluatedProperty,
 ) OperatorError!void {
     for (items) |item| {
-        database.setEdgePropertyById(txn, edge_id, item.key, item.value) catch {
-            return OperatorError.StorageError;
-        };
+        database.setEdgePropertyById(ctx.txn, edge_id, item.key, item.value) catch |err|
+            return ctx.storageFailure(err, "setting property '{s}' of relationship {d}", .{ item.key, edge_id });
     }
 }
 
-fn clearEdgeProperties(database: *Database, txn: ?*Transaction, edge_id: EdgeId) OperatorError!void {
-    const props = database.getEdgePropertiesInTxn(txn, edge_id) catch return OperatorError.StorageError;
+fn clearEdgeProperties(database: *Database, ctx: *const ExecutionContext, edge_id: EdgeId) OperatorError!void {
+    const props = database.getEdgePropertiesInTxn(ctx.txn, edge_id) catch |err|
+        return ctx.storageFailure(err, "reading the properties of relationship {d}", .{edge_id});
     defer database.freePropertyEntries(props);
 
     for (props) |prop| {
-        database.removeEdgePropertyById(txn, edge_id, prop.key) catch {
-            return OperatorError.StorageError;
-        };
+        database.removeEdgePropertyById(ctx.txn, edge_id, prop.key) catch |err|
+            return ctx.storageFailure(err, "removing property '{s}' of relationship {d}", .{ prop.key, edge_id });
     }
 }
 
@@ -1507,7 +1505,12 @@ pub const MergeNode = struct {
             &evaluated_pattern,
         );
         for (evaluated_pattern.items) |prop| {
-            if (prop.value == .null_val) return OperatorError.EvaluationError;
+            if (prop.value == .null_val) return ctx.fail(
+                OperatorError.EvaluationError,
+                null,
+                "MERGE cannot match a null property value: '{s}' is null; use MATCH, or give it a value",
+                .{prop.key},
+            );
         }
 
         try self.findMatches(ctx, evaluated_pattern.items);
@@ -1520,10 +1523,9 @@ pub const MergeNode = struct {
         }
 
         // Not found — create the node
-        const node_id = self.database.createNode(ctx.txn, self.labels) catch {
-            return OperatorError.StorageError;
-        };
-        try applyEvaluatedNodeProperties(self.database, ctx.txn, node_id, evaluated_pattern.items);
+        const node_id = self.database.createNode(ctx.txn, self.labels) catch |err|
+            return ctx.storageFailure(err, "creating a node", .{});
+        try applyEvaluatedNodeProperties(self.database, ctx, node_id, evaluated_pattern.items);
         try self.applySetItems(node_id, self.on_create_props, ctx, row);
         self.pending.append(self.allocator, node_id) catch return OperatorError.OutOfMemory;
     }
@@ -1539,7 +1541,7 @@ pub const MergeNode = struct {
         for (self.labels, label_ids) |label, *id| {
             id.* = symbol_table.lookup(label) catch |err| switch (err) {
                 SymbolError.NotFound => return,
-                else => return OperatorError.StorageError,
+                else => return ctx.storageFailure(err, "looking up a label or property key of the MERGE pattern", .{}),
             };
         }
         const key_ids = self.allocator.alloc(SymbolId, props.len) catch return OperatorError.OutOfMemory;
@@ -1547,7 +1549,7 @@ pub const MergeNode = struct {
         for (props, key_ids) |prop, *id| {
             id.* = symbol_table.lookup(prop.key) catch |err| switch (err) {
                 SymbolError.NotFound => return,
-                else => return OperatorError.StorageError,
+                else => return ctx.storageFailure(err, "looking up a label or property key of the MERGE pattern", .{}),
             };
         }
 
@@ -1555,9 +1557,8 @@ pub const MergeNode = struct {
         defer self.database.allocator.free(candidates);
 
         for (candidates) |candidate_id| {
-            var node = (self.database.getNodeInTxn(ctx.txn, candidate_id) catch {
-                return OperatorError.StorageError;
-            }) orelse continue;
+            var node = (self.database.getNodeInTxn(ctx.txn, candidate_id) catch |err|
+                return ctx.storageFailure(err, "reading node {d}", .{candidate_id})) orelse continue;
             defer node.deinit(self.database.allocator);
             if (!nodeMatches(node, label_ids, props, key_ids)) continue;
             self.pending.append(self.allocator, candidate_id) catch return OperatorError.OutOfMemory;
@@ -1575,9 +1576,11 @@ pub const MergeNode = struct {
             }
         }
         if (self.labels.len > 0) {
-            return self.database.getNodesByLabelInTxn(ctx.txn, self.labels[0]) catch return OperatorError.StorageError;
+            return self.database.getNodesByLabelInTxn(ctx.txn, self.labels[0]) catch |err|
+                return ctx.storageFailure(err, "reading the nodes labelled '{s}'", .{self.labels[0]});
         }
-        return self.database.getAllNodeIdsInTxn(ctx.txn) catch return OperatorError.StorageError;
+        return self.database.getAllNodeIdsInTxn(ctx.txn) catch |err|
+            return ctx.storageFailure(err, "reading every node", .{});
     }
 
     fn nodeMatches(
@@ -1613,7 +1616,7 @@ pub const MergeNode = struct {
             ctx,
             &evaluated,
         );
-        try applyEvaluatedNodeProperties(self.database, ctx.txn, node_id, evaluated.items);
+        try applyEvaluatedNodeProperties(self.database, ctx, node_id, evaluated.items);
     }
 
     fn close(ptr: *anyopaque, ctx: *ExecutionContext) void {
@@ -1787,9 +1790,8 @@ pub const MergeEdge = struct {
             return edge_id;
         }
 
-        const edge_id = self.database.createEdgeAndGetId(ctx.txn, source_id, target_id, self.edge_type) catch {
-            return OperatorError.StorageError;
-        };
+        const edge_id = self.database.createEdgeAndGetId(ctx.txn, source_id, target_id, self.edge_type) catch |err|
+            return ctx.storageFailure(err, "creating a relationship", .{});
 
         // MERGE pattern properties initialize newly created relationships.
         try self.applyEdgeSetItems(edge_id, self.properties, ctx, row);
@@ -1808,13 +1810,12 @@ pub const MergeEdge = struct {
         const type_id = self.database.symbol_table.lookup(self.edge_type) catch |err| {
             return switch (err) {
                 SymbolError.NotFound => null,
-                else => OperatorError.StorageError,
+                else => ctx.storageFailure(err, "looking up relationship type '{s}'", .{self.edge_type}),
             };
         };
 
-        const refs = self.database.getOutgoingEdgeRefsByTypeInTxn(ctx.txn, source_id, type_id) catch {
-            return OperatorError.StorageError;
-        };
+        const refs = self.database.getOutgoingEdgeRefsByTypeInTxn(ctx.txn, source_id, type_id) catch |err|
+            return ctx.storageFailure(err, "reading the relationships of node {d}", .{source_id});
         defer self.database.allocator.free(refs);
 
         for (refs) |edge_ref| {
@@ -1835,19 +1836,21 @@ pub const MergeEdge = struct {
     ) OperatorError!bool {
         if (self.properties.len == 0) return true;
 
-        var edge = (self.database.getEdgeInTxn(ctx.txn, edge_id) catch return OperatorError.StorageError) orelse return OperatorError.StorageError;
+        var edge = (self.database.getEdgeInTxn(ctx.txn, edge_id) catch |err|
+            return ctx.storageFailure(err, "reading relationship {d}", .{edge_id})) orelse
+            return ctx.storageFailure(error.NotFound, "reading relationship {d}", .{edge_id});
         defer edge.deinit(self.database.allocator);
 
         for (self.properties) |prop| {
             const expected = self.evaluator.evaluate(prop.value_expr, row, ctx) catch |err| {
                 return mapEvalError(err);
             };
-            const expected_pv = evalResultToPropertyValue(expected, self.allocator) orelse return OperatorError.TypeError;
+            const expected_pv = (evalResultToPropertyValue(expected, self.allocator) catch return OperatorError.OutOfMemory) orelse return OperatorError.TypeError;
 
             const key_id = self.database.symbol_table.lookup(prop.key) catch |err| {
                 return switch (err) {
                     SymbolError.NotFound => false,
-                    else => OperatorError.StorageError,
+                    else => ctx.storageFailure(err, "looking up property key '{s}'", .{prop.key}),
                 };
             };
 
@@ -1886,9 +1889,8 @@ pub const MergeEdge = struct {
         );
 
         for (evaluated.items) |item| {
-            self.database.setEdgePropertyById(ctx.txn, edge_id, item.key, item.value) catch {
-                return OperatorError.StorageError;
-            };
+            self.database.setEdgePropertyById(ctx.txn, edge_id, item.key, item.value) catch |err|
+                return ctx.storageFailure(err, "setting property '{s}' of relationship {d}", .{ item.key, edge_id });
         }
     }
 
@@ -1954,30 +1956,30 @@ test "DeleteNode basic structure" {
 test "evalResultToPropertyValue scalar types" {
     const allocator = std.testing.allocator;
 
-    const null_pv = evalResultToPropertyValue(.{ .null_val = {} }, allocator);
+    const null_pv = try evalResultToPropertyValue(.{ .null_val = {} }, allocator);
     try std.testing.expect(null_pv != null);
     try std.testing.expect(null_pv.? == .null_val);
 
-    const bool_pv = evalResultToPropertyValue(.{ .bool_val = true }, allocator);
+    const bool_pv = try evalResultToPropertyValue(.{ .bool_val = true }, allocator);
     try std.testing.expectEqual(true, bool_pv.?.bool_val);
 
-    const int_pv = evalResultToPropertyValue(.{ .int_val = 99 }, allocator);
+    const int_pv = try evalResultToPropertyValue(.{ .int_val = 99 }, allocator);
     try std.testing.expectEqual(@as(i64, 99), int_pv.?.int_val);
 
-    const float_pv = evalResultToPropertyValue(.{ .float_val = 1.5 }, allocator);
+    const float_pv = try evalResultToPropertyValue(.{ .float_val = 1.5 }, allocator);
     try std.testing.expectApproxEqAbs(@as(f64, 1.5), float_pv.?.float_val, 0.001);
 
-    const str_pv = evalResultToPropertyValue(.{ .string_val = "test" }, allocator);
+    const str_pv = try evalResultToPropertyValue(.{ .string_val = "test" }, allocator);
     try std.testing.expectEqualStrings("test", str_pv.?.string_val);
 }
 
 test "evalResultToPropertyValue returns null for node/edge refs" {
     const allocator = std.testing.allocator;
 
-    const node_pv = evalResultToPropertyValue(.{ .node_ref = 42 }, allocator);
+    const node_pv = try evalResultToPropertyValue(.{ .node_ref = 42 }, allocator);
     try std.testing.expect(node_pv == null);
 
-    const edge_pv = evalResultToPropertyValue(.{ .edge_ref = 7 }, allocator);
+    const edge_pv = try evalResultToPropertyValue(.{ .edge_ref = 7 }, allocator);
     try std.testing.expect(edge_pv == null);
 }
 
@@ -1985,7 +1987,7 @@ test "evalResultToPropertyValue converts vector" {
     const allocator = std.testing.allocator;
 
     const vec = [_]f32{ 1.0, 2.0, 3.0 };
-    const pv = evalResultToPropertyValue(.{ .vector_val = &vec }, allocator);
+    const pv = try evalResultToPropertyValue(.{ .vector_val = &vec }, allocator);
 
     try std.testing.expect(pv != null);
     try std.testing.expectEqual(@as(usize, 3), pv.?.vector_val.len);
@@ -2002,7 +2004,7 @@ test "evalResultToPropertyValue converts list" {
         .{ .int_val = 2 },
         .{ .string_val = "three" },
     };
-    const pv = evalResultToPropertyValue(.{ .list_val = &items }, allocator);
+    const pv = try evalResultToPropertyValue(.{ .list_val = &items }, allocator);
     defer allocator.free(pv.?.list_val);
 
     try std.testing.expect(pv != null);
@@ -2019,7 +2021,7 @@ test "evalResultToPropertyValue converts map" {
         .{ .key = "name", .value = .{ .string_val = "Alice" } },
         .{ .key = "score", .value = .{ .int_val = 95 } },
     };
-    const pv = evalResultToPropertyValue(.{ .map_val = &entries }, allocator);
+    const pv = try evalResultToPropertyValue(.{ .map_val = &entries }, allocator);
     defer allocator.free(pv.?.map_val);
 
     try std.testing.expect(pv != null);

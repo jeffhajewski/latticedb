@@ -107,7 +107,7 @@ pub const Unwind = struct {
                     self.output_row = self.current_row.?;
 
                     // Bind the list element to the output slot
-                    self.output_row.setSlot(self.output_slot, evalResultToSlot(list[self.list_index], self.allocator));
+                    self.output_row.setSlot(self.output_slot, evalResultToSlot(list[self.list_index], self.allocator) catch return OperatorError.OutOfMemory);
                     self.list_index += 1;
                     return &self.output_row;
                 }
@@ -147,7 +147,7 @@ pub const Unwind = struct {
                     // Not a list — treat as single-element (Cypher behavior)
                     // Produce one row with the value itself
                     self.output_row = self.current_row.?;
-                    self.output_row.setSlot(self.output_slot, evalResultToSlot(result, self.allocator));
+                    self.output_row.setSlot(self.output_slot, evalResultToSlot(result, self.allocator) catch return OperatorError.OutOfMemory);
                     return &self.output_row;
                 },
             }
@@ -170,7 +170,7 @@ pub const Unwind = struct {
 };
 
 /// Convert an EvalResult to a SlotValue
-fn evalResultToSlot(result: EvalResult, allocator: Allocator) SlotValue {
+fn evalResultToSlot(result: EvalResult, allocator: Allocator) Allocator.Error!SlotValue {
     return switch (result) {
         .node_ref => |id| .{ .node_ref = id },
         .edge_ref => |id| .{ .edge_ref = id },
@@ -180,6 +180,6 @@ fn evalResultToSlot(result: EvalResult, allocator: Allocator) SlotValue {
         .bytes_val => |v| .{ .property = .{ .bytes_val = v } },
         .bool_val => |v| .{ .property = .{ .bool_val = v } },
         .null_val => .{ .property = .{ .null_val = {} } },
-        .list_val, .vector_val, .map_val => .{ .property = result.toPropertyValue(allocator) },
+        .list_val, .vector_val, .map_val => .{ .property = try result.toPropertyValue(allocator) },
     };
 }

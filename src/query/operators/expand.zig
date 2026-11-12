@@ -105,12 +105,14 @@ pub fn fetchEdgeRefs(
         return (if (incoming)
             database.getIncomingEdgeRefsByTypeInTxn(ctx.txn, node_id, edge_type)
         else
-            database.getOutgoingEdgeRefsByTypeInTxn(ctx.txn, node_id, edge_type)) catch return OperatorError.StorageError;
+            database.getOutgoingEdgeRefsByTypeInTxn(ctx.txn, node_id, edge_type)) catch |err|
+            return ctx.storageFailure(err, "reading the relationships of node {d}", .{node_id});
     }
     return (if (incoming)
         database.getIncomingEdgeRefsInTxn(ctx.txn, node_id)
     else
-        database.getOutgoingEdgeRefsInTxn(ctx.txn, node_id)) catch return OperatorError.StorageError;
+        database.getOutgoingEdgeRefsInTxn(ctx.txn, node_id)) catch |err|
+        return ctx.storageFailure(err, "reading the relationships of node {d}", .{node_id});
 }
 
 // ============================================================================

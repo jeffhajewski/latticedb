@@ -100,7 +100,8 @@ pub const VectorSearch = struct {
         self.output_row = ctx.allocRow() catch return OperatorError.OutOfMemory;
 
         // Perform the search
-        self.results = self.database.vectorSearchInTxn(ctx.txn, self.query_vector, self.k, null) catch return OperatorError.StorageError;
+        self.results = self.database.vectorSearchInTxn(ctx.txn, self.query_vector, self.k, null) catch |err|
+            return ctx.storageFailure(err, "searching the vector index", .{});
         self.current_index = 0;
     }
 
@@ -344,13 +345,11 @@ pub const VectorSearchWithInput = struct {
         const query_vector = if (self.literal_query) |literal|
             literal
         else if (self.param_name) |param_name| blk: {
-            const param_value = ctx.getParameter(param_name) orelse {
-                return OperatorError.UnboundVariable;
-            };
+            const param_value = ctx.getParameter(param_name) orelse
+                return ctx.fail(OperatorError.UnboundVariable, null, "Parameter ${s} was not given a value", .{param_name});
 
-            break :blk extractVectorFromParam(param_value) orelse {
-                return OperatorError.TypeError;
-            };
+            break :blk extractVectorFromParam(param_value) orelse
+                return ctx.fail(OperatorError.TypeError, null, "Parameter ${s} must be a vector for <=>, but it is a {s}", .{ param_name, @tagName(param_value) });
         } else {
             return OperatorError.UnboundVariable;
         };
@@ -362,12 +361,13 @@ pub const VectorSearchWithInput = struct {
             switch (threshold.value) {
                 .literal => |t| self.threshold = t,
                 .parameter => |name| {
-                    const value = ctx.getParameter(name) orelse return OperatorError.UnboundVariable;
+                    const value = ctx.getParameter(name) orelse
+                        return ctx.fail(OperatorError.UnboundVariable, null, "Parameter ${s} was not given a value", .{name});
                     switch (value) {
                         .int_val => |i| self.threshold = @floatFromInt(i),
                         .float_val => |f| self.threshold = @floatCast(f),
                         .null_val => empty = true,
-                        else => return OperatorError.TypeError,
+                        else => return ctx.fail(OperatorError.TypeError, null, "Parameter ${s} must be a number to bound a vector distance, but it is a {s}", .{ name, @tagName(value) }),
                     }
                 },
             }
@@ -485,7 +485,8 @@ pub const VectorSearchWithInput = struct {
         found: *std.AutoHashMapUnmanaged(NodeId, void),
     ) OperatorError!void {
         self.freeResults();
-        const results = self.database.vectorSearchInTxn(ctx.txn, query_vector, k, null) catch return OperatorError.StorageError;
+        const results = self.database.vectorSearchInTxn(ctx.txn, query_vector, k, null) catch |err|
+            return ctx.storageFailure(err, "searching the vector index", .{});
         self.results = results;
         found.clearRetainingCapacity();
         found.ensureTotalCapacity(self.allocator, @intCast(results.len)) catch return OperatorError.OutOfMemory;
@@ -563,7 +564,8 @@ pub const VectorSearchWithInput = struct {
         keys = self.rows_by_node.keyIterator();
         while (keys.next()) |node_id| {
             if (found.contains(node_id.*)) continue;
-            const vector = (self.database.getNodeVectorInTxn(ctx.txn, node_id.*) catch return OperatorError.StorageError) orelse continue;
+            const vector = (self.database.getNodeVectorInTxn(ctx.txn, node_id.*) catch |err|
+                return ctx.storageFailure(err, "reading the vector of node {d}", .{node_id.*})) orelse continue;
             defer self.database.allocator.free(vector);
             if (vector.len != query_vector.len) continue;
             matches.append(self.allocator, .{

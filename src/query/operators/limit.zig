@@ -415,7 +415,7 @@ pub const Sort = struct {
     fn evaluateKeys(self: *Self, row: *const Row, ctx: *ExecutionContext, keys: []EvalResult) OperatorError!void {
         for (self.sort_items, keys) |item, *key| {
             key.* = if (item.slot) |slot|
-                keyFromSlot(row, slot, self.allocator)
+                keyFromSlot(row, slot, self.allocator) catch return OperatorError.OutOfMemory
             else
                 self.evaluator.evaluate(item.expr, row, ctx) catch |err| return mapEvalError(err);
         }
@@ -502,7 +502,7 @@ pub const Sort = struct {
 
 /// A row's column as a sort key. Nodes and relationships order by id, and an
 /// empty slot by null.
-fn keyFromSlot(row: *const Row, slot: u8, allocator: Allocator) EvalResult {
+fn keyFromSlot(row: *const Row, slot: u8, allocator: Allocator) Allocator.Error!EvalResult {
     if (slot >= row.slots.len) return .{ .null_val = {} };
     return switch (row.slots[slot]) {
         .empty => .{ .null_val = {} },
@@ -513,7 +513,7 @@ fn keyFromSlot(row: *const Row, slot: u8, allocator: Allocator) EvalResult {
             .string_val => |v| .{ .string_val = v },
             .bytes_val => |v| .{ .bytes_val = v },
             .vector_val => |v| .{ .vector_val = v },
-            else => EvalResult.fromPropertyValue(pv, allocator),
+            else => try EvalResult.fromPropertyValue(pv, allocator),
         },
     };
 }
@@ -630,10 +630,10 @@ pub fn evaluateCountExpression(
 
     return switch (result) {
         .int_val => |i| {
-            if (i < 0) return OperatorError.TypeError;
+            if (i < 0) return ctx.fail(OperatorError.TypeError, expr.getLocation(), "SKIP and LIMIT take a non-negative integer, but this is {d}", .{i});
             return @intCast(i);
         },
-        else => OperatorError.TypeError,
+        else => ctx.fail(OperatorError.TypeError, expr.getLocation(), "SKIP and LIMIT take a non-negative integer, but this is a {s}", .{expression.typeName(result)}),
     };
 }
 

@@ -255,8 +255,10 @@ fn runSearches(
         const query_text = if (search.literal_query) |lit|
             lit
         else if (search.param_name) |pname| blk: {
-            const param_value = ctx.getParameter(pname) orelse return OperatorError.UnboundVariable;
-            break :blk extractTextFromParam(param_value) orelse return OperatorError.TypeError;
+            const param_value = ctx.getParameter(pname) orelse
+                return ctx.fail(OperatorError.UnboundVariable, null, "Parameter ${s} was not given a value", .{pname});
+            break :blk extractTextFromParam(param_value) orelse
+                return ctx.fail(OperatorError.TypeError, null, "Parameter ${s} must be a string for @@, but it is a {s}", .{ pname, @tagName(param_value) });
         } else {
             return OperatorError.UnboundVariable;
         };
@@ -268,7 +270,7 @@ fn runSearches(
             search.property,
             query_text,
             limit,
-        ) catch return OperatorError.StorageError;
+        ) catch |err| return ctx.storageFailure(err, "searching the full-text index on {s}.{s}", .{ search.scope, search.property });
         defer database.freeFtsSearchResults(hits);
 
         for (hits) |hit| {

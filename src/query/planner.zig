@@ -1451,7 +1451,10 @@ pub const QueryPlanner = struct {
         // either. Mixing them would need two scans joined, which is a different
         // shape than this.
         for (searches[1..]) |search| {
-            if (search.kind != searches[0].kind) return PlannerError.InvalidQuery;
+            if (search.kind != searches[0].kind) {
+                self.setPlanDetail("An OR of @@ predicates must search only nodes or only relationships", .{});
+                return PlannerError.InvalidQuery;
+            }
         }
 
         const fts_search = fts_ops.FtsSearchWithInput.init(
@@ -1795,6 +1798,7 @@ pub const QueryPlanner = struct {
             // rows in an unhelpful order is how this went unnoticed before.
             const slot = outputSlotFor(item.expression, ret) orelse {
                 self.allocator.free(sort_items);
+                self.setPlanDetail("After an aggregating RETURN, ORDER BY can only name a returned column or its alias; ORDER BY item {d} is neither", .{i + 1});
                 return PlannerError.InvalidQuery;
             };
             sort_items[i] = .{
@@ -1949,7 +1953,8 @@ pub const QueryPlanner = struct {
                         // If there's a pending edge, now we have the target - create it
                         if (pending_edge) |pe| {
                             if (pe.edge_pattern.types.len == 0) {
-                                return PlannerError.InvalidQuery; // Edge type required
+                                self.setPlanDetail("CREATE needs a relationship type, as in -[:TYPE]->", .{});
+                                return PlannerError.InvalidQuery;
                             }
 
                             // Bind edge variable if present
@@ -2011,6 +2016,7 @@ pub const QueryPlanner = struct {
 
             // Check for dangling edge (edge without target node)
             if (pending_edge != null) {
+                self.setPlanDetail("CREATE needs a node at each end of a relationship", .{});
                 return PlannerError.InvalidQuery;
             }
         }
@@ -2028,6 +2034,7 @@ pub const QueryPlanner = struct {
         for (delete.expressions) |expr| {
             // Expression should be a variable reference
             if (expr.* != .variable) {
+                self.setPlanDetail("DELETE takes variables bound to nodes or relationships", .{});
                 return PlannerError.InvalidQuery;
             }
 
@@ -2092,7 +2099,10 @@ pub const QueryPlanner = struct {
                     const var_name = getVariableName(l.target) orelse return PlannerError.InvalidQuery;
                     const binding = self.bindings.get(var_name) orelse return PlannerError.InvalidQuery;
 
-                    if (binding.kind != .node) return PlannerError.InvalidQuery;
+                    if (binding.kind != .node) {
+                        self.setPlanDetail("SET can add labels only to a node; '{s}' is not one", .{var_name});
+                        return PlannerError.InvalidQuery;
+                    }
 
                     const set_labels = mutation_ops.SetLabels.init(
                         self.allocator,
@@ -2397,8 +2407,14 @@ pub const QueryPlanner = struct {
                 else => return PlannerError.InvalidQuery,
             };
 
-            if (edge.types.len == 0) return PlannerError.InvalidQuery;
-            if (edge.direction == .both) return PlannerError.InvalidQuery;
+            if (edge.types.len == 0) {
+                self.setPlanDetail("MERGE needs a relationship type, as in -[:TYPE]->", .{});
+                return PlannerError.InvalidQuery;
+            }
+            if (edge.direction == .both) {
+                self.setPlanDetail("MERGE needs a relationship direction, -> or <-", .{});
+                return PlannerError.InvalidQuery;
+            }
 
             var op: ?Operator = if (input) |inp| try self.materializeInput(inp) else null;
             const left_slot = try self.resolveMergeNodeSlot(&op, left, database);
@@ -2632,7 +2648,10 @@ pub const QueryPlanner = struct {
     fn allocateSlot(self: *Self) PlannerError!u8 {
         var free = all_slots & ~self.ever_used_slots;
         if (free == 0) free = all_slots & ~self.used_slots;
-        if (free == 0) return PlannerError.TooManyVariables;
+        if (free == 0) {
+            self.setPlanDetail("The query uses more than {d} variables, including ones the planner adds for patterns", .{MAX_SLOTS});
+            return PlannerError.TooManyVariables;
+        }
         const slot: u8 = @ctz(free);
         self.markSlot(slot);
         return slot;

@@ -28,6 +28,7 @@ const database_mod = lattice.storage.database;
 const Database = database_mod.Database;
 
 const regex = @import("regex.zig");
+const ast = @import("ast.zig");
 
 // ============================================================================
 // Constants
@@ -65,6 +66,79 @@ pub const OperatorError = error{
     /// DELETE of a node that still has relationships (use DETACH DELETE)
     NodeHasRelationships,
 };
+
+/// What went wrong in a failed execution, in words, written where the
+/// failure is found.
+///
+/// An error value says only which kind of thing failed: every evaluation
+/// failure used to reach the user as "EvaluationError: query failed", the
+/// same for a division by zero as for an unknown function. The code that
+/// finds a failure knows the operator, the function and the values, so it
+/// records them here, and the database reports this text through the same
+/// path that carries parse errors.
+///
+/// Nothing is formatted until something fails. The first failure recorded
+/// wins: errors propagate outwards, and the innermost one is the cause.
+pub const Diagnostic = struct {
+    pub const Kind = enum {
+        /// Something about the query or its data: a type error, an overflow.
+        query,
+        /// Reading or writing the database failed.
+        storage,
+        out_of_memory,
+    };
+
+    buf: [MESSAGE_CAPACITY]u8 = undefined,
+    len: usize = 0,
+    recorded: bool = false,
+    kind: Kind = .query,
+    /// A short name for the failure, such as "DivisionByZero".
+    code: []const u8 = "",
+    /// Where in the query text, when the failing expression is known.
+    location: ?ast.SourceLocation = null,
+
+    pub const MESSAGE_CAPACITY = 384;
+
+    pub fn record(
+        self: *Diagnostic,
+        kind: Kind,
+        code: []const u8,
+        location: ?ast.SourceLocation,
+        comptime fmt: []const u8,
+        args: anytype,
+    ) void {
+        @branchHint(.cold);
+        if (self.recorded) return;
+        self.recorded = true;
+        self.kind = kind;
+        self.code = code;
+        self.location = location;
+        var writer: std.Io.Writer = .fixed(&self.buf);
+        writer.print(fmt, args) catch {
+            // Keep what fitted and say it was cut.
+            const ellipsis = "...";
+            self.len = self.buf.len;
+            @memcpy(self.buf[self.buf.len - ellipsis.len ..], ellipsis);
+            return;
+        };
+        self.len = writer.end;
+    }
+
+    pub fn message(self: *const Diagnostic) ?[]const u8 {
+        if (!self.recorded or self.len == 0) return null;
+        return self.buf[0..self.len];
+    }
+};
+
+/// The kind of failure an error value stands for, for errors recorded
+/// without a more specific kind.
+pub fn diagnosticKind(err: anyerror) Diagnostic.Kind {
+    return switch (err) {
+        error.StorageError => .storage,
+        error.OutOfMemory => .out_of_memory,
+        else => .query,
+    };
+}
 
 // ============================================================================
 // Slot Value
@@ -360,7 +434,88 @@ pub const ExecutionContext = struct {
     /// the caller knows the query only reads.
     stable_reads: bool = false,
 
+    /// Where a failure is described for the caller, or null when nobody
+    /// will read it. A pointer, so code holding a `*const ExecutionContext`
+    /// can still write to it.
+    diagnostic: ?*Diagnostic = null,
+
     const Self = @This();
+
+    /// Record why the query failed and return `err`, for
+    /// `return ctx.fail(error.X, location, "...", .{...})`. The message is
+    /// formatted only here, on the way out.
+    pub fn fail(
+        self: *const Self,
+        err: anytype,
+        location: ?ast.SourceLocation,
+        comptime fmt: []const u8,
+        args: anytype,
+    ) @TypeOf(err) {
+        @branchHint(.cold);
+        if (self.diagnostic) |d| d.record(diagnosticKind(err), @errorName(err), location, fmt, args);
+        return err;
+    }
+
+    /// Whether a failure has already been described, so an outer layer
+    /// does not replace the cause with its own, vaguer, account.
+    pub fn failureRecorded(self: *const Self) bool {
+        const d = self.diagnostic orelse return true;
+        return d.recorded;
+    }
+
+    /// A failed database call as an operator error, recorded with what was
+    /// being done, so that a failure of the storage underneath cannot be
+    /// mistaken for a fault in the query, or the other way round.
+    ///
+    /// Some database errors are the caller's doing: a value too large to
+    /// store, a write in a read-only transaction. Those are reported as
+    /// query errors under their own names; the rest are storage errors.
+    pub fn storageFailure(
+        self: *const Self,
+        err: anyerror,
+        comptime what: []const u8,
+        args: anytype,
+    ) OperatorError {
+        @branchHint(.cold);
+        if (err == error.OutOfMemory) {
+            if (self.diagnostic) |d| d.record(.out_of_memory, "OutOfMemory", null, "Out of memory while " ++ what, args);
+            return OperatorError.OutOfMemory;
+        }
+        if (isCallerError(err)) {
+            if (self.diagnostic) |d| d.record(.query, @errorName(err), null, "Cannot complete " ++ what ++ ": {s}", args ++ .{callerErrorText(err)});
+            return OperatorError.InvalidState;
+        }
+        if (self.diagnostic) |d| d.record(.storage, "StorageError", null, "Storage error while " ++ what ++ ": {s}", args ++ .{@errorName(err)});
+        return OperatorError.StorageError;
+    }
+
+    fn isCallerError(err: anyerror) bool {
+        return switch (err) {
+            error.ValueTooLarge,
+            error.TransactionReadOnly,
+            error.ReadOnly,
+            error.PermissionDenied,
+            error.TransactionNotActive,
+            error.TransactionConflict,
+            error.InvalidArgument,
+            error.MissingIndex,
+            => true,
+            else => false,
+        };
+    }
+
+    fn callerErrorText(err: anyerror) []const u8 {
+        return switch (err) {
+            error.ValueTooLarge => "the value is too large to store",
+            error.TransactionReadOnly => "the transaction is read-only",
+            error.ReadOnly, error.PermissionDenied => "the database is open read-only",
+            error.TransactionNotActive => "the transaction is no longer active",
+            error.TransactionConflict => "another transaction conflicts with this one",
+            error.InvalidArgument => "an argument is not valid",
+            error.MissingIndex => "the index does not exist",
+            else => @errorName(err),
+        };
+    }
 
     /// Create a new execution context
     /// Somewhere to remember full-text searches for the length of a query.
@@ -391,6 +546,7 @@ pub const ExecutionContext = struct {
             .txn = null,
             .fts_cache = newFtsCache(allocator),
             .regex_cache = newRegexCache(allocator),
+            .diagnostic = null,
         };
     }
 

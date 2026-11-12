@@ -343,7 +343,7 @@ pub const Aggregate = struct {
                 else
                     EvalResult{ .null_val = {} }; // COUNT(*)
 
-                self.global_group.?.accumulators[i].accumulate(value) catch |err| return mapAccumulateError(err);
+                self.global_group.?.accumulators[i].accumulate(value) catch |err| return accumulateFailure(ctx, item, err, value);
             }
         } else {
             // Grouped aggregation - compute group key
@@ -389,7 +389,7 @@ pub const Aggregate = struct {
                 else
                     EvalResult{ .null_val = {} };
 
-                gop.value_ptr.accumulators[i].accumulate(value) catch |err| return mapAccumulateError(err);
+                gop.value_ptr.accumulators[i].accumulate(value) catch |err| return accumulateFailure(ctx, item, err, value);
             }
         }
     }
@@ -407,8 +407,9 @@ pub const Aggregate = struct {
 
                 // Output aggregate results
                 for (self.agg_items, 0..) |item, i| {
-                    const result = group.accumulators[i].result() catch return OperatorError.EvaluationError;
-                    output_row.setSlot(item.output_slot, resultToSlotValue(result, self.allocator));
+                    const result = group.accumulators[i].result() catch
+                        return ctx.fail(OperatorError.EvaluationError, if (item.expr) |e| e.getLocation() else null, "Integer overflow: {s}() of these integers does not fit in a 64-bit integer", .{@tagName(item.func)});
+                    output_row.setSlot(item.output_slot, resultToSlotValue(result, self.allocator) catch return OperatorError.OutOfMemory);
                 }
 
                 // Clear global group so we don't return it again
@@ -430,13 +431,14 @@ pub const Aggregate = struct {
 
                 // Output group key values
                 for (self.group_keys, 0..) |gk, i| {
-                    output_row.setSlot(gk.output_slot, resultToSlotValue(entry.value_ptr.key_values[i], self.allocator));
+                    output_row.setSlot(gk.output_slot, resultToSlotValue(entry.value_ptr.key_values[i], self.allocator) catch return OperatorError.OutOfMemory);
                 }
 
                 // Output aggregate results
                 for (self.agg_items, 0..) |item, i| {
-                    const result = entry.value_ptr.accumulators[i].result() catch return OperatorError.EvaluationError;
-                    output_row.setSlot(item.output_slot, resultToSlotValue(result, self.allocator));
+                    const result = entry.value_ptr.accumulators[i].result() catch
+                        return ctx.fail(OperatorError.EvaluationError, if (item.expr) |e| e.getLocation() else null, "Integer overflow: {s}() of these integers does not fit in a 64-bit integer", .{@tagName(item.func)});
+                    output_row.setSlot(item.output_slot, resultToSlotValue(result, self.allocator) catch return OperatorError.OutOfMemory);
                 }
 
                 return output_row;
@@ -478,7 +480,7 @@ pub const Aggregate = struct {
 };
 
 /// Convert an EvalResult to a SlotValue
-fn resultToSlotValue(result: EvalResult, allocator: Allocator) SlotValue {
+fn resultToSlotValue(result: EvalResult, allocator: Allocator) Allocator.Error!SlotValue {
     return switch (result) {
         .null_val => .{ .property = .{ .null_val = {} } },
         .node_ref => |id| .{ .node_ref = id },
@@ -489,9 +491,18 @@ fn resultToSlotValue(result: EvalResult, allocator: Allocator) SlotValue {
         .string_val => |s| .{ .property = .{ .string_val = s } },
         .bytes_val => |b| .{ .property = .{ .bytes_val = b } },
         .vector_val => |v| .{ .property = .{ .vector_val = v } },
-        .list_val => .{ .property = result.toPropertyValue(allocator) },
-        .map_val => .{ .property = result.toPropertyValue(allocator) },
+        .list_val => .{ .property = try result.toPropertyValue(allocator) },
+        .map_val => .{ .property = try result.toPropertyValue(allocator) },
     };
+}
+
+/// An aggregate that could not take a value, described.
+fn accumulateFailure(ctx: *const ExecutionContext, item: AggregateItem, err: Accumulator.Error, value: EvalResult) OperatorError {
+    @branchHint(.cold);
+    if (err == error.TypeError) {
+        return ctx.fail(OperatorError.TypeError, if (item.expr) |e| e.getLocation() else null, "Type error: {s}() takes numbers, but was given a {s}", .{ @tagName(item.func), expression.typeName(value) });
+    }
+    return mapAccumulateError(err);
 }
 
 fn mapAccumulateError(err: Accumulator.Error) OperatorError {
@@ -747,7 +758,7 @@ test "resultToSlotValue converts list" {
     };
     const list_result = EvalResult{ .list_val = &items };
 
-    const slot = resultToSlotValue(list_result, allocator);
+    const slot = try resultToSlotValue(list_result, allocator);
     defer allocator.free(slot.asProperty().?.list_val);
 
     const prop = slot.asProperty().?;
@@ -760,7 +771,7 @@ test "resultToSlotValue converts vector" {
     const vec = [_]f32{ 0.1, 0.2, 0.3, 0.4 };
     const vec_result = EvalResult{ .vector_val = &vec };
 
-    const slot = resultToSlotValue(vec_result, std.testing.allocator);
+    const slot = try resultToSlotValue(vec_result, std.testing.allocator);
 
     const prop = slot.asProperty().?;
     try std.testing.expectEqual(@as(usize, 4), prop.vector_val.len);
@@ -776,7 +787,7 @@ test "resultToSlotValue converts map" {
     };
     const map_result = EvalResult{ .map_val = &entries };
 
-    const slot = resultToSlotValue(map_result, allocator);
+    const slot = try resultToSlotValue(map_result, allocator);
     defer allocator.free(slot.asProperty().?.map_val);
 
     const prop = slot.asProperty().?;

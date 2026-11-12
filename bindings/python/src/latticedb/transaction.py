@@ -1145,7 +1145,7 @@ class Transaction:
                     byref(edge_type_len),
                 )
                 check_error(code)
-                # Read exactly the reported length. Libraries before 0.16.1
+                # Read exactly the reported length. Libraries before 0.17.0
                 # did not NUL-terminate the type, so reading it as a C string
                 # ran past the end of the allocation.
                 edge_type = (

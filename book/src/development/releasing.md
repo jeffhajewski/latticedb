@@ -8,12 +8,12 @@ commits, tags and pushes; do not use it.)
 ## Patch Release Flow
 
 ```bash
-scripts/prepare_release.sh 0.16.1
+scripts/prepare_release.sh 0.17.0
 ```
 
 Then, before committing:
 
-1. Promote `docs/release_notes_next.md` to `docs/release_notes_0.16.1.md`, covering
+1. Promote `docs/release_notes_next.md` to `docs/release_notes_0.17.0.md`, covering
    every change since the last tag (`git log v0.16.0..origin/main`), and reset
    `release_notes_next.md` to the empty template.
 2. Rewrite the "What's new" caption and cards in `website/index.html` by hand. The
@@ -26,10 +26,10 @@ git diff
 git status --short --branch
 git add build.zig build.zig.zon src/main.zig src/api/c_api.zig include/lattice.h \
   bindings/ examples/ conformance/ book/src/api/c.md website/index.html docs/
-git commit -m "Release v0.16.1"
-git tag -a v0.16.1 -m "LatticeDB 0.16.1"
+git commit -m "Release v0.17.0"
+git tag -a v0.17.0 -m "LatticeDB 0.17.0"
 git push origin main
-git push origin v0.16.1
+git push origin v0.17.0
 ```
 
 Pushing the tag runs `.github/workflows/release.yml`, which builds the release
@@ -60,7 +60,7 @@ and validates:
 Before pushing a release tag, run:
 
 ```bash
-python3 scripts/bump_version.py --check 0.16.1 --strict-lockfile
+python3 scripts/bump_version.py --check 0.17.0 --strict-lockfile
 ```
 
 The GitHub release workflow runs the same strict check before building or

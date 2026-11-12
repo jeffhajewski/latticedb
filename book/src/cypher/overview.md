@@ -47,8 +47,6 @@ parse error pointing at the first token it could not read:
 - list comprehensions
 - named paths (`p = (a)-->(b)`)
 - `NULLS FIRST` / `NULLS LAST`
-- a variable on a variable-length relationship (`-[r*1..3]->`), which is a
-  semantic error
 
 `exists()` is not a function either, and fails before the query runs as an
 unknown function. The parse error names the clauses it expected rather than the

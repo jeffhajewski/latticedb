@@ -58,10 +58,25 @@ MATCH (a:Person {name: "Alice"})-[*]->(b)
 RETURN DISTINCT b
 ```
 
-A variable-length relationship cannot be given a variable or inline properties:
-`-[r:KNOWS*1..3]->` fails with the semantic error "Variable-length relationships
-do not support edge variables", and `-[:KNOWS*1..3 {since: 2020}]->` is rejected
-too.
+### The relationships of the path
+
+A variable on a variable-length relationship is the list of the relationships
+the path went through, in the order it walked them; zero hops give an empty
+list:
+
+```cypher
+MATCH (a:Person {name: "Alice"})-[r:KNOWS*1..3]->(b:Person)
+WHERE all(k IN r WHERE k.since >= 2020)
+RETURN b.name, size(r) AS hops, [k IN r | k.since] AS years
+```
+
+The variable is a list, not a relationship: `DELETE r` and `SET r.x = 1` are
+errors, while `r[0]`, `size(r)`, comprehensions and quantifiers work on it.
+
+An inline property map holds for every relationship of the path:
+`-[:KNOWS*1..3 {since: 2020}]->` matches paths whose relationships all have
+`since = 2020`. Paths are walked first and filtered after, so a selective map
+on an unbounded pattern still costs as much as the walk without it.
 
 If the far end is a node that is already bound, only paths that end at it are
 returned.

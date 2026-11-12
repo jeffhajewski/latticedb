@@ -723,22 +723,6 @@ pub const SemanticAnalyzer = struct {
                 return;
             }
         }
-
-        if (edge.variable != null) {
-            self.addError(
-                .unsupported_pattern,
-                edge.location,
-                "Variable-length relationships do not support edge variables",
-            );
-        }
-
-        if (edge.properties != null) {
-            self.addError(
-                .unsupported_pattern,
-                edge.location,
-                "Variable-length relationships do not support inline property maps",
-            );
-        }
     }
 
     // ========================================================================
@@ -760,7 +744,10 @@ pub const SemanticAnalyzer = struct {
 
     fn registerEdgeVariable(self: *Self, edge: *const ast.EdgePattern) void {
         if (edge.variable) |name| {
-            self.registerVariable(name, .edge, edge.location);
+            // A variable-length relationship's variable is the list of the
+            // relationships on the path, a value.
+            const kind: VariableKind = if (edge.quantifier != null) .alias else .edge;
+            self.registerVariable(name, kind, edge.location);
         }
 
         // Analyze property expressions
@@ -1306,7 +1293,7 @@ test "fts match query" {
     }
 }
 
-test "MATCH variable-length relationship rejects edge variable" {
+test "MATCH variable-length relationship binds its variable to a list" {
     const allocator = std.testing.allocator;
     const source = "MATCH (a)-[r:REL*1..2]->(b) RETURN r";
 
@@ -1319,9 +1306,7 @@ test "MATCH variable-length relationship rejects edge variable" {
         defer analyzer.deinit();
         const result = analyzer.analyze(query);
 
-        try std.testing.expect(!result.success);
-        try std.testing.expect(result.errors.len > 0);
-        try std.testing.expectEqual(ErrorCode.unsupported_pattern, result.errors[0].code);
+        try std.testing.expect(result.success);
     } else {
         try std.testing.expect(false);
     }

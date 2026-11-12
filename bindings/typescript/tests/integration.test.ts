@@ -707,7 +707,7 @@ describeIfNative('Database Integration', () => {
 
     test('query semantic errors include stage and diagnostic code', async () => {
       try {
-        await db.query('MATCH (a)-[r:REL*1..2]->(b) RETURN r');
+        await db.query('MATCH (a)-[:REL*3..1]->(b) RETURN b');
         throw new Error('expected query to fail');
       } catch (err) {
         expect(err).toBeInstanceOf(LatticeQueryError);

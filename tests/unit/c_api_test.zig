@@ -2677,7 +2677,7 @@ test "c_api: semantic query error diagnostics include code and location" {
     var query: ?*lattice_query = null;
     try std.testing.expectEqual(
         lattice_error.ok,
-        c_api.lattice_query_prepare(db, "MATCH (a)-[r:REL*1..2]->(b) RETURN r", &query),
+        c_api.lattice_query_prepare(db, "MATCH (a)-[:REL*3..1]->(b) RETURN b", &query),
     );
 
     var result: ?*lattice_result = null;

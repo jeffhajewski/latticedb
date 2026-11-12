@@ -32,6 +32,7 @@ const lse_fts_space_test = @import("lse_fts_space_test.zig");
 const lse_fts_query_test = @import("lse_fts_query_test.zig");
 const lse_fts_ddl_test = @import("lse_fts_ddl_test.zig");
 const lse_vector_filter_test = @import("lse_vector_filter_test.zig");
+const lcy_cypher_phase2_test = @import("lcy_cypher_phase2_test.zig");
 
 // Re-export tests from all modules
 test {
@@ -81,6 +82,7 @@ test {
     // Declaring a full-text index happens whole or not at all
     _ = lse_fts_ddl_test;
     _ = lse_vector_filter_test;
+    _ = lcy_cypher_phase2_test;
 }
 
 test "integration test runner initialized" {

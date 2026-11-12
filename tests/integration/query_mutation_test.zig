@@ -261,26 +261,18 @@ test "query: MATCH on unknown relationship type returns empty result" {
     try expectInt(result, 0, 0, 0);
 }
 
-test "query: MATCH variable-length relationship rejects edge variable" {
+test "query: MATCH variable-length relationship accepts an edge variable and a property map" {
     const path = "/tmp/lattice_qm_match_varlen_rejects_edge_var.ltdb";
     var db = try openTestDb(path, .{});
     defer cleanupTestDb(db, path);
 
-    try std.testing.expectError(
-        QueryError.SemanticError,
-        db.query("MATCH (a)-[r:REL*1..2]->(b) RETURN r"),
-    );
-}
-
-test "query: MATCH variable-length relationship rejects inline property map" {
-    const path = "/tmp/lattice_qm_match_varlen_rejects_props.ltdb";
-    var db = try openTestDb(path, .{});
-    defer cleanupTestDb(db, path);
-
-    try std.testing.expectError(
-        QueryError.SemanticError,
-        db.query("MATCH (a)-[:REL*1..2 {w: 1}]->(b) RETURN b"),
-    );
+    // The variable is the list of the path's relationships, and the map
+    // holds for each of them (tests/integration/lcy_cypher_phase2_test.zig
+    // checks the answers).
+    var with_variable = try db.query("MATCH (a)-[r:REL*1..2]->(b) RETURN r");
+    with_variable.deinit();
+    var with_map = try db.query("MATCH (a)-[:REL*1..2 {w: 1}]->(b) RETURN b");
+    with_map.deinit();
 }
 
 test "query: MATCH variable-length relationship rejects invalid hop range" {
@@ -326,7 +318,7 @@ test "query: queryDetailed surfaces semantic diagnostics with code" {
     var db = try openTestDb(path, .{});
     defer cleanupTestDb(db, path);
 
-    var detailed = try db.queryDetailed("MATCH (a)-[r:REL*1..2]->(b) RETURN r");
+    var detailed = try db.queryDetailed("MATCH (a)-[:REL*3..1]->(b) RETURN b");
     defer detailed.deinit();
 
     try std.testing.expect(detailed == .failure);

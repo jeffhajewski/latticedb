@@ -18,6 +18,7 @@ const NodeId = core_types.NodeId;
 const EdgeId = core_types.EdgeId;
 
 const edge_mod = @import("../../graph/edge.zig");
+const EvalResult = @import("../expression.zig").EvalResult;
 
 const symbols = @import("../../graph/symbols.zig");
 const SymbolId = symbols.SymbolId;
@@ -118,6 +119,9 @@ pub const VariableLengthExpand = struct {
     /// Where to put the walk that reached each result, as a path from the
     /// source to the target, for a named path. Null when nothing needs it.
     walk_slot: ?u8 = null,
+    /// Where to put the relationships of the path, as a list, for the
+    /// relationship's variable (`-[r*1..3]->`). Null when it has none.
+    rels_slot: ?u8 = null,
 
     const Self = @This();
 
@@ -315,6 +319,20 @@ pub const VariableLengthExpand = struct {
                 id.* = .{ .int_val = @bitCast(frame.via_edge.?) };
             }
             output_row.setSlot(slot, .{ .property = .{ .list_val = ids } });
+        }
+
+        if (self.rels_slot) |slot| {
+            // Kept with the row, like the path's edge ids above.
+            const frames = self.path_stack.items;
+            const hops = if (frames.len > 0) frames.len - 1 else 0;
+            const arena = ctx.row_arena.allocator();
+            const rels = arena.alloc(EvalResult, hops) catch return OperatorError.OutOfMemory;
+            for (frames[frames.len - hops ..], rels) |frame, *rel| {
+                rel.* = .{ .edge_ref = frame.via_edge.? };
+            }
+            const list = arena.create(EvalResult) catch return OperatorError.OutOfMemory;
+            list.* = .{ .list_val = rels };
+            output_row.setSlot(slot, .{ .value = list });
         }
 
         if (self.walk_slot) |slot| {

@@ -278,6 +278,7 @@ test "parser: handles the syntax added after 0.16" {
         "MATCH (n:A|B) RETURN n",
         "MATCH (n:!A&B) RETURN n",
         "MATCH (n WHERE n.v > 1)-[r WHERE r.x]->(m) RETURN n",
+        "MATCH (a)-[r:R*1..3 {w: 1}]->(b) RETURN r, size(r), [e IN r | e.w], r[0]",
         "MATCH (n) RETURN *",
         "MATCH (n) RETURN n {.a}",
         "RETURN 1 IS :: INTEGER, 'a' || 'b'",

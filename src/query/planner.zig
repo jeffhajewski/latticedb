@@ -1260,7 +1260,19 @@ pub const QueryPlanner = struct {
                     // Optional edge variable
                     var edge_slot: ?u8 = null;
                     var edge_var_name: ?[]const u8 = null;
-                    if (edge_pattern.variable) |name| {
+                    // A variable-length relationship's variable is the list
+                    // of the relationships its path went through.
+                    var rels_slot: ?u8 = null;
+                    var rels_name: ?[]const u8 = null;
+                    if (edge_pattern.quantifier != null and (edge_pattern.variable != null or edge_pattern.properties != null)) {
+                        rels_slot = try self.allocateNamedSlot(edge_pattern.variable);
+                        if (edge_pattern.variable) |name| {
+                            try self.bindVariable(name, rels_slot.?, .alias);
+                            rels_name = name;
+                        } else {
+                            rels_name = try self.bindInternalVariable(rels_slot.?, .alias);
+                        }
+                    } else if (edge_pattern.variable) |name| {
                         edge_slot = try self.allocateNamedSlot(name);
                         try self.bindVariable(name, edge_slot.?, .edge);
                         edge_var_name = name;
@@ -1367,6 +1379,7 @@ pub const QueryPlanner = struct {
                             return PlannerError.OutOfMemory;
                         };
                         var_expand.path_slot = path_slot;
+                        var_expand.rels_slot = rels_slot;
                         if (pattern.path_variable != null) {
                             const walk_slot = try self.allocateSlot();
                             _ = try self.bindInternalVariable(walk_slot, .alias);
@@ -1395,9 +1408,15 @@ pub const QueryPlanner = struct {
                         op = expand.operator();
                     }
 
-                    // Add relationship property filters for inline maps:
-                    // [:TYPE {k: v}] -> Filter(edge.k = v)
-                    if (edge_pattern.properties) |props| {
+                    // A variable-length relationship's map holds for every
+                    // relationship of the path: all(x IN r WHERE x.k = v).
+                    if (edge_pattern.quantifier != null) {
+                        if (edge_pattern.properties) |props| {
+                            if (props.len > 0) op = try self.filterEachRelationship(op.?, rels_name.?, props, edge_pattern.location);
+                        }
+                    } else if (edge_pattern.properties) |props| {
+                        // Add relationship property filters for inline maps:
+                        // [:TYPE {k: v}] -> Filter(edge.k = v)
                         const var_name = edge_var_name orelse return PlannerError.InvalidQuery;
                         const loc = edge_pattern.location;
                         for (props) |prop| {
@@ -1437,6 +1456,51 @@ pub const QueryPlanner = struct {
         }
 
         return op orelse PlannerError.InvalidQuery;
+    }
+
+    /// Keep the rows whose relationship list `rels` has every property of
+    /// `props` on every relationship, as `-[*1..3 {k: v}]->` asks:
+    /// `all(x IN rels WHERE x.k = v AND ...)`. An empty path passes.
+    fn filterEachRelationship(
+        self: *Self,
+        input: Operator,
+        rels: []const u8,
+        props: []const ast.PropertyEntry,
+        loc: ast.SourceLocation,
+    ) PlannerError!Operator {
+        const element = "  relationship";
+        var condition: ?*ast.Expression = null;
+        for (props) |prop| {
+            const var_expr = try self.newExpression(.{ .variable = .{ .name = element, .location = loc } });
+            const access = self.allocator.create(ast.PropertyAccess) catch return PlannerError.OutOfMemory;
+            access.* = .{ .object = var_expr, .property = prop.key, .location = loc };
+            const eq = self.allocator.create(ast.BinaryExpr) catch return PlannerError.OutOfMemory;
+            eq.* = .{ .left = try self.newExpression(.{ .property_access = access }), .operator = .eq, .right = prop.value, .location = loc };
+            const eq_expr = try self.newExpression(.{ .binary = eq });
+            if (condition) |left| {
+                const both = self.allocator.create(ast.BinaryExpr) catch return PlannerError.OutOfMemory;
+                both.* = .{ .left = left, .operator = .and_, .right = eq_expr, .location = loc };
+                condition = try self.newExpression(.{ .binary = both });
+            } else condition = eq_expr;
+        }
+        const all = self.allocator.create(ast.ListComprehension) catch return PlannerError.OutOfMemory;
+        all.* = .{
+            .kind = .all,
+            .variable = element,
+            .list = try self.newExpression(.{ .variable = .{ .name = rels, .location = loc } }),
+            .where = condition,
+            .map = null,
+            .location = loc,
+        };
+        const predicate = try self.newExpression(.{ .comprehension = all });
+        const filter = filter_ops.Filter.init(self.allocator, input, predicate) catch return PlannerError.OutOfMemory;
+        return filter.operator();
+    }
+
+    fn newExpression(self: *Self, value: ast.Expression) PlannerError!*ast.Expression {
+        const expr = self.allocator.create(ast.Expression) catch return PlannerError.OutOfMemory;
+        expr.* = value;
+        return expr;
     }
 
     /// Resolve a relationship pattern's type names to symbol ids.

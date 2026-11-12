@@ -777,7 +777,7 @@ class TestQueries:
 
         with Database(db_path, create=True) as db:
             with pytest.raises(LatticeQueryError) as exc_info:
-                db.query("MATCH (a)-[r:REL*1..2]->(b) RETURN r")
+                db.query("MATCH (a)-[:REL*3..1]->(b) RETURN b")
 
             err = exc_info.value
             assert err.stage == "semantic"

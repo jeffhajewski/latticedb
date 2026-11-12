@@ -637,7 +637,8 @@ Java_io_latticedb_Native_open(JNIEnv *env, jclass cls, jstring path,
         jboolean enable_vector, jint vector_dimensions, jboolean enable_wal,
         jboolean enable_adjacency_cache, jboolean lock, jint sync_mode,
         jint full_fsync, jint vector_metric, jint vector_m,
-        jint vector_ef_construction) {
+        jint vector_ef_construction, jint changefeed_retention,
+        jlong changefeed_retention_value) {
     init_cache(env);
     (void)cls;
     /* The v5 fields are 0 for "not set". A value that does not fit its C
@@ -646,7 +647,8 @@ Java_io_latticedb_Native_open(JNIEnv *env, jclass cls, jstring path,
     if (sync_mode < 0 || sync_mode > 255 || full_fsync < 0 || full_fsync > 255 ||
         vector_metric < 0 || vector_metric > 255 || vector_m < 0 ||
         vector_m > 65535 || vector_ef_construction < 0 ||
-        vector_ef_construction > 65535) {
+        vector_ef_construction > 65535 || changefeed_retention < 0 ||
+        changefeed_retention > 255) {
         throw_lattice(env, LATTICE_ERROR_INVALID_ARG);
         return 0;
     }
@@ -667,6 +669,9 @@ Java_io_latticedb_Native_open(JNIEnv *env, jclass cls, jstring path,
     opts.vector_metric = (uint8_t)vector_metric;
     opts.vector_m = (uint16_t)vector_m;
     opts.vector_ef_construction = (uint16_t)vector_ef_construction;
+    opts.changefeed_retention = (uint8_t)changefeed_retention;
+    /* An unsigned 64-bit count or duration carried in a jlong. */
+    opts.changefeed_retention_value = (uint64_t)changefeed_retention_value;
 
     size_t path_len = 0;
     char *path_buf = jstring_to_utf8(env, path, &path_len);
@@ -1809,6 +1814,31 @@ Java_io_latticedb_Native_streamGetLastSequence(JNIEnv *env, jclass cls,
     free(s);
     if (!check(env, rc)) return 0;
     return (jlong)seq;
+}
+
+JNIEXPORT jlongArray JNICALL
+Java_io_latticedb_Native_changefeedStatus(JNIEnv *env, jclass cls, jlong db_handle) {
+    init_cache(env); (void)cls;
+    uint8_t mode = 0;
+    uint64_t value = 0, oldest = 0, last = 0;
+    lattice_error rc = lattice_changefeed_status(
+        (lattice_database *)(uintptr_t)db_handle, &mode, &value, &oldest, &last);
+    if (!check(env, rc)) return NULL;
+    jlong out[4] = {(jlong)mode, (jlong)value, (jlong)oldest, (jlong)last};
+    jlongArray arr = (*env)->NewLongArray(env, 4);
+    if (arr == NULL) return NULL;
+    (*env)->SetLongArrayRegion(env, arr, 0, 4, out);
+    return arr;
+}
+
+JNIEXPORT jlong JNICALL
+Java_io_latticedb_Native_changefeedTrim(JNIEnv *env, jclass cls, jlong db_handle) {
+    init_cache(env); (void)cls;
+    uint64_t removed = 0;
+    lattice_error rc = lattice_changefeed_trim(
+        (lattice_database *)(uintptr_t)db_handle, &removed);
+    if (!check(env, rc)) return 0;
+    return (jlong)removed;
 }
 
 JNIEXPORT void JNICALL

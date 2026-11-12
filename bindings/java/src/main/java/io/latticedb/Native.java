@@ -21,7 +21,8 @@ final class Native {
                             int vectorDimensions, boolean enableWal,
                             boolean enableAdjacencyCache, boolean lock,
                             int syncMode, int fullFsync, int vectorMetric,
-                            int vectorM, int vectorEfConstruction);
+                            int vectorM, int vectorEfConstruction,
+                            int changefeedRetention, long changefeedRetentionValue);
 
     static native byte[] serialize(long db);
 
@@ -155,6 +156,11 @@ final class Native {
     static native void streamSetOffset(long txn, String stream, String consumer, long sequence);
 
     static native void streamTrim(long txn, String stream, long throughSequence);
+
+    /** {retention mode, its value, oldest sequence held (0 for none), last sequence}. */
+    static native long[] changefeedStatus(long db);
+
+    static native long changefeedTrim(long db);
 
     /* Query engine */
     static native long queryPrepare(long db, String cypher);

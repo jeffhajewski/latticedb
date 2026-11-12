@@ -48,7 +48,8 @@ public final class Database implements AutoCloseable {
                 options.enableAdjacencyCache(), options.lock(),
                 options.syncModeCode(), options.fullFsyncCode(),
                 options.vectorMetricCode(), options.vectorM(),
-                options.vectorEfConstruction());
+                options.vectorEfConstruction(), options.changefeedRetentionMode(),
+                options.changefeedRetentionValue());
         return new Database(path, options, handle);
     }
 
@@ -365,9 +366,49 @@ public final class Database implements AutoCloseable {
         return Native.streamGetLastSequence(handle(), stream);
     }
 
-    /** Reads the built-in graph changefeed. */
+    /**
+     * Reads the built-in graph changefeed: up to {@code limit} records with a
+     * sequence greater than {@code afterSequence}, oldest first.
+     * {@code afterSequence} 0 reads from the oldest event held.
+     *
+     * @throws ChangesTrimmedException (a {@link ErrorCode#NOT_FOUND}) when
+     *     retention or a trim has dropped the events after
+     *     {@code afterSequence}: the reader has missed changes
+     * @throws LatticeException with {@link ErrorCode#UNSUPPORTED} when the
+     *     retention policy is {@code "off"}
+     */
     public List<StreamRecord> changes(long afterSequence, int limit, int timeoutMs) {
-        return readStream("__lattice_changes", afterSequence, limit, timeoutMs);
+        try {
+            return readStream("__lattice_changes", afterSequence, limit, timeoutMs);
+        } catch (LatticeException e) {
+            if (e.getErrorCode() == ErrorCode.NOT_FOUND) {
+                throw new ChangesTrimmedException(afterSequence);
+            }
+            if (e.getErrorCode() == ErrorCode.UNSUPPORTED) {
+                throw new LatticeException(ErrorCode.UNSUPPORTED,
+                        "the changefeed is off (changefeedRetention \"off\")");
+            }
+            throw e;
+        }
+    }
+
+    /** The changefeed's retention policy and the events it holds. */
+    public ChangefeedStatus changefeedStatus() {
+        long[] out = Native.changefeedStatus(handle());
+        return new ChangefeedStatus(
+                OpenOptions.changefeedRetentionText((int) out[0], out[1]), out[2], out[3]);
+    }
+
+    /**
+     * Applies the changefeed's retention policy in full now (checkpoints apply
+     * it a bounded number of events at a time) and makes that durable.
+     *
+     * @return the number of events dropped
+     * @throws LatticeException with {@link ErrorCode#LOCK_TIMEOUT} while a
+     *     write transaction is open
+     */
+    public long trimChangefeed() {
+        return Native.changefeedTrim(handle());
     }
 
     /* ------------------------------------------------------------------ */

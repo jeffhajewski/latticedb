@@ -117,6 +117,8 @@ const HnswIndex = hnsw_mod.HnswIndex;
 const HnswConfig = hnsw_mod.HnswConfig;
 const HnswError = hnsw_mod.HnswError;
 pub const VectorSearchResult = hnsw_mod.SearchResult;
+pub const VectorMetric = page_mod.FileHeader.VectorMetric;
+pub const VectorConfig = page_mod.FileHeader.VectorConfig;
 
 // Transactions
 const txn_mod = lattice.transaction.manager;
@@ -171,6 +173,9 @@ pub const DatabaseError = error{
     /// Another process holds this database. A writer takes it exclusively and a
     /// reader shares it, so a reader is refused while a writer has it open.
     DatabaseLocked,
+    /// The open options contradict the vector index configuration the file
+    /// records: a different dimension count, metric, or HNSW parameter.
+    VectorConfigMismatch,
 };
 
 /// Query execution errors
@@ -369,10 +374,28 @@ pub const DatabaseConfig = struct {
     enable_fts: bool = true,
     /// FTS configuration
     fts_config: FtsConfig = .{},
-    /// Enable vector storage
+    /// Create the vector index if the database does not have one.
+    ///
+    /// A database whose file records a vector index opens with it whatever
+    /// this says, configured as the file records it. Setting this as well
+    /// asserts the configuration below: `vector_dimensions` and every vector
+    /// field that is not null must match the file, or the open fails with
+    /// `VectorConfigMismatch` rather than reading the index wrongly.
     enable_vector: bool = false,
-    /// Vector dimensions (required if enable_vector is true)
+    /// Vector dimensions, 1..4096, for a new index. With `enable_vector`,
+    /// 0 means "the file's": it opens a database that has an index, and
+    /// fails with `InvalidArgument` where one would have to be created.
     vector_dimensions: u16 = 128,
+    /// How the vector index measures distance, for a new index. Null means
+    /// the file's, or cosine for a new index. Fixed once the index exists.
+    vector_metric: ?VectorMetric = null,
+    /// HNSW connections per node, 2..32, for a new index (layer 0 keeps
+    /// twice as many). Null means the file's, or 16. Fixed once the index
+    /// exists: it decides the layout of the index's pages.
+    vector_m: ?u16 = null,
+    /// HNSW candidate list size while building, 1..4096, for a new index.
+    /// Null means the file's, or 200. Fixed once the index exists.
+    vector_ef_construction: ?u16 = null,
     /// Keep an in-memory adjacency cache. Only `getOutgoingEdgesCached` reads
     /// it; the query engine and the C API do not, so for them it speeds up
     /// nothing and costs an invalidation on each edge write.
@@ -479,6 +502,110 @@ pub const OpenOptions = struct {
     /// turning it off buys is the old behaviour of finding that out the hard way.
     lock: bool = true,
 };
+
+/// The vector configuration the open options ask for, for a new index.
+fn requestedVectorConfig(config: DatabaseConfig) DatabaseError!VectorConfig {
+    if (!types.isValidVectorDimensions(config.vector_dimensions)) return DatabaseError.InvalidArgument;
+    const m = config.vector_m orelse 16;
+    const ef_construction = config.vector_ef_construction orelse 200;
+    return .{
+        .dimensions = config.vector_dimensions,
+        .metric = config.vector_metric orelse .cosine,
+        .m = m,
+        .m_max0 = 2 * m,
+        .ef_construction = ef_construction,
+    };
+}
+
+/// Refuse vector options this release cannot honour, whatever the file holds.
+fn validateVectorOptions(config: DatabaseConfig) DatabaseError!void {
+    // Zero dimensions with vectors on means "whatever the file has", which
+    // only a database that has an index can answer.
+    if (config.enable_vector and config.vector_dimensions != 0 and
+        !types.isValidVectorDimensions(config.vector_dimensions))
+    {
+        return DatabaseError.InvalidArgument;
+    }
+    if (config.vector_metric) |metric| switch (metric) {
+        .cosine, .euclidean, .inner_product => {},
+        _ => return DatabaseError.InvalidArgument,
+    };
+    if (config.vector_m) |m| if (m < 2 or m > 32) return DatabaseError.InvalidArgument;
+    if (config.vector_ef_construction) |ef| if (ef < 1 or ef > 4096) return DatabaseError.InvalidArgument;
+}
+
+/// Whether the open options contradict the configuration the file holds.
+///
+/// Everything the caller states must match: the dimensions when vectors are
+/// asked for, and each of metric, m and ef_construction that is not left
+/// null. Dimensions, metric and m decide how the stored pages are read and
+/// what a distance means. ef_construction does neither, but a caller who
+/// names one expects the index to be built with it, and silently building
+/// with another would be the same surprise in a smaller form.
+fn checkVectorOptions(config: DatabaseConfig, file: VectorConfig) DatabaseError!void {
+    if (config.enable_vector and config.vector_dimensions != 0 and config.vector_dimensions != file.dimensions) {
+        return DatabaseError.VectorConfigMismatch;
+    }
+    if (config.vector_metric) |metric| if (metric != file.metric) return DatabaseError.VectorConfigMismatch;
+    if (config.vector_m) |m| if (m != file.m) return DatabaseError.VectorConfigMismatch;
+    if (config.vector_ef_construction) |ef| if (ef != file.ef_construction) return DatabaseError.VectorConfigMismatch;
+}
+
+/// The dimensions a file written before format 4 gave its vector index.
+///
+/// Such a file records no configuration, but everything else about it is
+/// known: 0.16.0 could set only the dimensions, and it wrote them into the
+/// header of every vector page. Null when the page cannot be read as one.
+fn legacyVectorDimensions(allocator: Allocator, pm: *PageManager, first_page: PageId) ?u16 {
+    if (first_page == NULL_PAGE or !pm.isValidPage(first_page)) return null;
+    const page_alignment = comptime std.mem.Alignment.fromByteUnits(4096);
+    const buf = allocator.alignedAlloc(u8, page_alignment, pm.getPageSize()) catch return null;
+    defer allocator.free(buf);
+    pm.readPage(first_page, buf) catch return null;
+    if (buf[0] != @intFromEnum(page_mod.PageType.vector_data)) return null;
+    const dimensions = vector_storage_mod.VectorPageHeader.read(buf).dimensions;
+    if (!types.isValidVectorDimensions(dimensions)) return null;
+    return dimensions;
+}
+
+/// The vector index a database opens with, or null for none.
+///
+/// The file decides when it has an index: its recorded configuration, or for
+/// a file from before format 4, the one inferred from its vector pages. Only
+/// when it has none do the options decide, by asking for one.
+fn resolveVectorConfig(allocator: Allocator, pm: *PageManager, config: DatabaseConfig) DatabaseError!?VectorConfig {
+    try validateVectorOptions(config);
+    const header = pm.getHeader();
+    if (header.storedVectorConfig()) |stored| {
+        try checkVectorOptions(config, stored);
+        return stored;
+    }
+    const file_has_vectors = header.vector_segment_page != NULL_PAGE or
+        header.getTreeRoot(.hnsw_node) != NULL_PAGE;
+    if (file_has_vectors) {
+        if (legacyVectorDimensions(allocator, pm, header.vector_segment_page)) |dimensions| {
+            const legacy = VectorConfig.legacy(dimensions);
+            try checkVectorOptions(config, legacy);
+            return legacy;
+        }
+    }
+    if (!config.enable_vector) return null;
+    return try requestedVectorConfig(config);
+}
+
+fn hnswConfigFor(config: VectorConfig) HnswConfig {
+    return .{
+        .dimensions = config.dimensions,
+        .m = config.m,
+        .m_max0 = config.m_max0,
+        .ef_construction = config.ef_construction,
+        .metric = switch (config.metric) {
+            .euclidean => .euclidean,
+            .inner_product => .inner_product,
+            else => .cosine,
+        },
+    };
+}
 
 fn mapWalInitError(err: WalError) DatabaseError {
     return switch (err) {
@@ -967,9 +1094,7 @@ pub const Database = struct {
         if (!page_manager.isValidPageSize(options.page_size)) {
             return DatabaseError.InvalidArgument;
         }
-        if (options.config.enable_vector and !types.isValidVectorDimensions(options.config.vector_dimensions)) {
-            return DatabaseError.InvalidArgument;
-        }
+        try validateVectorOptions(options.config);
 
         var self = allocator.create(Self) catch return DatabaseError.OutOfMemory;
         errdefer allocator.destroy(self);
@@ -1026,6 +1151,14 @@ pub const Database = struct {
         };
         errdefer self.page_manager.deinit();
 
+        // 2b. The vector index, configured as the file records it. A file
+        // with a vector index opens with it whatever the options say, and
+        // options that contradict it are refused here, before any of its
+        // pages could be read the wrong way.
+        const vector_config = try resolveVectorConfig(allocator, &self.page_manager, options.config);
+        self.config.enable_vector = vector_config != null;
+        if (vector_config) |vc| self.config.vector_dimensions = vc.dimensions;
+
         // 3. Initialize BufferPool (auto-scales based on enabled features)
         // An in-memory database gets a small fixed pool, and the reason is that
         // pool size stops mattering once the storage underneath is memory.
@@ -1046,7 +1179,7 @@ pub const Database = struct {
         // evictable the pool returns BufferPoolFull, which surfaces as a failed
         // query rather than a slow one, so there must be room for the largest set
         // of pages pinned at once.
-        const configured_pool_size = options.config.effectiveBufferPoolSize();
+        const configured_pool_size = self.config.effectiveBufferPoolSize();
         const memory_pool_size = MIN_MEMORY_POOL_FRAMES * @as(usize, self.page_manager.getPageSize());
         const effective_pool_size = switch (self.vfs) {
             .posix => configured_pool_size,
@@ -1137,6 +1270,11 @@ pub const Database = struct {
         const header = self.page_manager.getHeader();
         const is_new = !header.hasInitializedTrees();
 
+        // Setting up the trees saves their roots, and saving the roots
+        // stores the node id counter. Until the node store is set up below,
+        // the counter stored is the one the header already holds.
+        self.node_store = .{ .allocator = allocator, .tree = &self.node_tree, .next_id = header.next_node_id };
+
         if (is_new) {
             try self.initNewTrees();
         } else {
@@ -1158,10 +1296,18 @@ pub const Database = struct {
             SymbolTable.initChecked(allocator, &self.symbol_forward_tree, &self.symbol_reverse_tree) catch return DatabaseError.IoError;
 
         // 7. Initialize Graph Stores
-        // An existing database whose node tree cannot be read must not be
+        // The node id counter comes from the header, so opening does not
+        // walk every node to find the highest id, and a deleted node's id is
+        // never handed out again. A file without one (written by 0.16.0, or
+        // rewritten by it since) gets it by one scan, and the next flush
+        // stores it. A read-only handle creates no nodes and needs no counter.
+        // An existing database whose node tree cannot be scanned must not be
         // opened for writing with its id counter reset to 1.
-        self.node_store = if (is_new or options.read_only)
-            NodeStore.init(allocator, &self.node_tree)
+        const stored_next_node_id = header.storedNextNodeId();
+        self.node_store = if (stored_next_node_id) |next_id|
+            NodeStore.initAt(allocator, &self.node_tree, next_id)
+        else if (is_new or options.read_only)
+            NodeStore.initAt(allocator, &self.node_tree, 1)
         else
             NodeStore.initChecked(allocator, &self.node_tree) catch return DatabaseError.IoError;
         // The same goes for the edge id counter.
@@ -1189,8 +1335,9 @@ pub const Database = struct {
 
         // 8b. Initialize Vector Storage (optional)
         // (vector_storage and hnsw_index already initialized to null above)
-        const is_existing_vectors = options.config.enable_vector and header.vector_segment_page != NULL_PAGE;
-        if (options.config.enable_vector) {
+        const is_existing_vectors = vector_config != null and header.vector_segment_page != NULL_PAGE;
+        var vector_config_recorded = false;
+        if (vector_config) |vc| {
             // Check if vector storage already exists (from a previous session)
             if (header.vector_segment_page != NULL_PAGE) {
                 // Open existing vector storage
@@ -1198,15 +1345,21 @@ pub const Database = struct {
                     allocator,
                     &self.buffer_pool,
                     header.vector_segment_page,
-                    options.config.vector_dimensions,
+                    vc.dimensions,
                 ) catch |err| return mapVectorStorageError(err);
             } else {
                 // Create new vector storage
                 self.vector_storage = VectorStorage.init(
                     allocator,
                     &self.buffer_pool,
-                    options.config.vector_dimensions,
+                    vc.dimensions,
                 ) catch |err| return mapVectorStorageError(err);
+            }
+
+            // The file records the configuration from the moment the index
+            // exists, including a 0.16.0 file's, which had none.
+            if (!options.read_only) {
+                vector_config_recorded = self.page_manager.recordVectorConfig(vc) catch return DatabaseError.IoError;
             }
 
             // 8c. Initialize HNSW index if vector storage is available
@@ -1215,9 +1368,7 @@ pub const Database = struct {
                     allocator,
                     &self.buffer_pool,
                     vs,
-                    HnswConfig{
-                        .dimensions = options.config.vector_dimensions,
-                    },
+                    hnswConfigFor(vc),
                 );
 
                 // 8d. Load HNSW index from B+Tree, or rebuild from vectors
@@ -1274,7 +1425,18 @@ pub const Database = struct {
                 try self.rebuildFtsIndexes();
                 try self.sync();
                 self.page_manager.sync() catch return DatabaseError.IoError;
+                vector_config_recorded = false;
             }
+        }
+
+        // An index this open added to an existing file goes into the file
+        // now, before anything is logged against it. Left for the first
+        // checkpoint, a kill before then would leave a log of vector records
+        // and a header that does not say there is an index to replay them
+        // into, and an open without vector options would have to refuse.
+        if (vector_config_recorded and !is_new) {
+            try self.sync();
+            self.page_manager.sync() catch return DatabaseError.IoError;
         }
 
         // 9. Initialize Transaction Manager
@@ -3392,6 +3554,12 @@ pub const Database = struct {
         // Save vector storage first page for persistence
         if (self.vector_storage) |vs| {
             header.vector_segment_page = vs.first_page;
+        }
+
+        // The node id counter travels with the pages it describes: every
+        // flush writes this header together with the node tree.
+        if (header.hasExtension()) {
+            header.next_node_id = self.node_store.next_id;
         }
 
         return header;
@@ -6682,12 +6850,13 @@ pub const Database = struct {
 
     /// The vector visible to `txn` for a node, or null if it has none.
     ///
-    /// Under the cosine metric, which is the one the database uses, the index
-    /// stores each vector scaled to unit length and the file keeps no other
-    /// copy, so a committed vector reads back normalised: storing (3, 4) reads
-    /// back as (0.6, 0.8). The direction, and so every cosine distance, is
-    /// unchanged. A vector written earlier in the same transaction and not yet
-    /// committed reads back as written.
+    /// Under the cosine metric, the default, the index stores each vector
+    /// scaled to unit length and the file keeps no other copy, so a committed
+    /// vector reads back normalised: storing (3, 4) reads back as (0.6, 0.8).
+    /// The direction, and so every cosine distance, is unchanged. Under the
+    /// euclidean and inner-product metrics vectors are stored as given. A
+    /// vector written earlier in the same transaction and not yet committed
+    /// reads back as written.
     pub fn getNodeVectorInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError!?[]f32 {
         var state = try self.readVisibleVectorState(txn, node_id);
         return switch (state) {
@@ -6707,6 +6876,39 @@ pub const Database = struct {
             return hnsw.distanceForSearch(query_vector, candidate);
         }
         return vector_distance.euclideanDistance(query_vector, candidate);
+    }
+
+    /// The distance between two vectors under this database's vector metric,
+    /// as a vector search would report it: what Cypher's `<=>` returns.
+    /// Cosine when the database has no vector index.
+    pub fn vectorDistance(self: *Self, a: []const f32, b: []const f32) f32 {
+        std.debug.assert(a.len == b.len);
+        const metric: VectorMetric = if (self.hnsw_index) |*hnsw| switch (hnsw.config.metric) {
+            .euclidean => .euclidean,
+            .inner_product => .inner_product,
+            .cosine => .cosine,
+        } else .cosine;
+        return switch (metric) {
+            .euclidean => vector_distance.euclideanDistance(a, b),
+            .inner_product => vector_distance.innerProductDistance(a, b),
+            else => vector_distance.cosineDistance(a, b),
+        };
+    }
+
+    /// The vector index's configuration, or null when the database has none.
+    pub fn vectorConfig(self: *const Self) ?VectorConfig {
+        const hnsw = if (self.hnsw_index) |*h| h else return null;
+        return .{
+            .dimensions = hnsw.config.dimensions,
+            .metric = switch (hnsw.config.metric) {
+                .euclidean => .euclidean,
+                .inner_product => .inner_product,
+                .cosine => .cosine,
+            },
+            .m = hnsw.config.m,
+            .m_max0 = hnsw.config.m_max0,
+            .ef_construction = hnsw.config.ef_construction,
+        };
     }
 
     pub fn vectorSearchInTxn(

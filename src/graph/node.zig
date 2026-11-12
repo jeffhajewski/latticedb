@@ -103,6 +103,20 @@ pub const NodeStore = struct {
         return self;
     }
 
+    /// `init` with the counter already known, from where the database keeps
+    /// it, so nothing is scanned. `next_id` must be above every id the tree
+    /// holds or has held.
+    pub fn initAt(allocator: Allocator, tree: *BTree, next_id: NodeId) Self {
+        return .{
+            .allocator = allocator,
+            .tree = tree,
+            .next_id = @max(next_id, 1),
+        };
+    }
+
+    /// Walks every node to find the highest id. Its cost grows with the
+    /// database, which is why the database keeps the counter instead and
+    /// only falls back to this for a file that does not have one.
     fn loadNextId(self: *Self) NodeError!NodeId {
         var max_id: NodeId = 0;
         var iter = self.tree.range(null, null) catch |err| {

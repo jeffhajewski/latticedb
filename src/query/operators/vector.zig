@@ -557,10 +557,9 @@ pub const VectorSearchWithInput = struct {
                 matches.append(self.allocator, result) catch return OperatorError.OutOfMemory;
             }
         }
-        const distance_fn = if (self.database.hnsw_index) |*index|
-            hnsw.getDistanceFn(index.config.metric)
-        else
-            hnsw.getDistanceFn(.euclidean);
+        // The database's own measure, the one the index's results are on.
+        // The index's distance function would not do: under cosine it expects
+        // both vectors already at unit length, and neither need be here.
         keys = self.rows_by_node.keyIterator();
         while (keys.next()) |node_id| {
             if (found.contains(node_id.*)) continue;
@@ -569,7 +568,7 @@ pub const VectorSearchWithInput = struct {
             if (vector.len != query_vector.len) continue;
             matches.append(self.allocator, .{
                 .node_id = node_id.*,
-                .distance = distance_fn(query_vector, vector),
+                .distance = self.database.vectorDistance(query_vector, vector),
             }) catch return OperatorError.OutOfMemory;
         }
         std.mem.sort(SearchResult, matches.items, {}, struct {

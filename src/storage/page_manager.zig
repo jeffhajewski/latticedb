@@ -249,9 +249,21 @@ pub const PageManager = struct {
         };
         self.page_count.store(page_count, .release);
 
+        // A header without the format-4 fields was written by 0.16.0 or
+        // earlier, or rewritten by it since this release last wrote it; the
+        // bytes past its end are zero or stale. Start them afresh. The
+        // database fills them in from the file's contents as it opens.
+        if (!self.read_only and !self.header.hasExtension()) {
+            self.header.resetExtension();
+            self.header_dirty = true;
+        }
+
+        // Upgrading the version does not lock 0.16.0 out: what format 4 adds
+        // it can ignore, so the minimum reader stays where it was unless the
+        // file holds something it would misread (see FileHeader).
         if (!self.read_only and self.header.format_version < FORMAT_VERSION) {
             self.header.format_version = FORMAT_VERSION;
-            self.header.min_reader_version = FORMAT_VERSION;
+            self.header.min_reader_version = @max(self.header.min_reader_version, types.MIN_READER_VERSION);
             try self.writeHeader();
         }
     }
@@ -605,6 +617,18 @@ pub const PageManager = struct {
         if (self.read_only) return PageManagerError.PermissionDenied;
         self.header = new_header.*;
         self.header_dirty = true;
+    }
+
+    /// Record the vector index's configuration in the header, which reaches
+    /// the file with the next flush. A no-op when it is already recorded.
+    pub fn recordVectorConfig(self: *Self, config: FileHeader.VectorConfig) PageManagerError!bool {
+        if (self.read_only) return PageManagerError.PermissionDenied;
+        if (self.header.storedVectorConfig()) |stored| {
+            if (std.meta.eql(stored, config)) return false;
+        }
+        self.header.setVectorConfig(config);
+        self.header_dirty = true;
+        return true;
     }
 
     /// Record that the write-ahead log is about to be reset.

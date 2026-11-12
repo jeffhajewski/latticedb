@@ -38,8 +38,19 @@ pub const WAL_MAGIC_NUMBER: u32 = 0x574C4F47;
 /// Default page size in bytes
 pub const DEFAULT_PAGE_SIZE: u32 = 4096;
 
-/// File format version
-pub const FORMAT_VERSION: u16 = 3;
+/// File format version.
+///
+/// 4 added the node id counter and the vector index configuration to the
+/// file header, past the end of the header 3 knows (see `FileHeader`).
+pub const FORMAT_VERSION: u16 = 4;
+
+/// The `min_reader_version` this release writes for a file that uses nothing
+/// a format-3 reader (0.16.0) would misread. Such a reader ignores the
+/// format-4 header fields and drops them when it writes the header, which
+/// this release notices and recovers from, so it is not locked out. A file
+/// whose vector index uses a metric or connection count format 3 cannot
+/// express gets FORMAT_VERSION instead.
+pub const MIN_READER_VERSION: u16 = 3;
 
 /// Property value - a tagged union supporting multiple types
 pub const PropertyValue = union(enum) {

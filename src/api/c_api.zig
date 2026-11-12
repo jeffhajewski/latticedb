@@ -364,6 +364,9 @@ pub const lattice_error = enum(c_int) {
     /// Another process holds the database. Distinct from err_lock_timeout,
     /// which is about a second writer inside this process.
     err_database_locked = -16,
+    /// The open options contradict the vector index configuration the file
+    /// records (dimensions, metric or HNSW parameters).
+    err_config_mismatch = -18,
 };
 
 /// Query diagnostic stage for prepared query execution failures.
@@ -396,6 +399,7 @@ fn mapDatabaseError(err: DatabaseError) lattice_error {
         DatabaseError.ValueTooLarge => .err_value_too_large,
         DatabaseError.MissingIndex => .err_unsupported,
         DatabaseError.DatabaseLocked => .err_database_locked,
+        DatabaseError.VectorConfigMismatch => .err_config_mismatch,
     };
 }
 
@@ -4035,6 +4039,7 @@ pub export fn lattice_error_message(code: lattice_error) [*c]const u8 {
         .err_unsupported => "Unsupported operation or value type",
         .err_value_too_large => "Value too large for database page size",
         .err_database_locked => "Database is open in another process",
+        .err_config_mismatch => "Open options contradict the vector index configuration stored in the database",
     };
 }
 

@@ -16,6 +16,7 @@ const stream_test = @import("stream_test.zig");
 const cli_test = @import("cli_test.zig");
 const search_correctness_test = @import("search_correctness_test.zig");
 const cypher_semantics_test = @import("cypher_semantics_test.zig");
+const lfmt_format_test = @import("lfmt_format_test.zig");
 
 // Re-export tests from all modules
 test {
@@ -37,6 +38,8 @@ test {
     _ = search_correctness_test;
     // Cypher expression semantics, end to end
     _ = cypher_semantics_test;
+    // Node ids and the vector configuration kept in the file header
+    _ = lfmt_format_test;
 }
 
 test "integration test runner initialized" {

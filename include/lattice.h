@@ -58,7 +58,11 @@ typedef enum {
     LATTICE_ERROR_VALUE_TOO_LARGE = -15,
     /* Another process holds the database. Distinct from LATTICE_ERROR_LOCK_TIMEOUT,
      * which reports a second writer inside this process. */
-    LATTICE_ERROR_DATABASE_LOCKED = -16
+    LATTICE_ERROR_DATABASE_LOCKED = -16,
+    /* The open options contradict the vector index configuration the database
+     * file records: a different vector_dimensions, vector_metric, vector_m or
+     * vector_ef_construction. Nothing was read with the wrong configuration. */
+    LATTICE_ERROR_CONFIG_MISMATCH = -18
 } lattice_error;
 
 /* Transaction modes */
@@ -135,7 +139,7 @@ typedef struct {
     bool read_only;         /* Open in read-only mode */
     uint32_t cache_size_mb; /* Cache size in MB (default: 100) */
     uint32_t page_size;     /* Page size in bytes (default: 4096) */
-    bool enable_vector;     /* Enable vector storage for embeddings */
+    bool enable_vector;     /* Create a vector index if none (see v5) */
     uint16_t vector_dimensions; /* Vector dimensions, 1..4096 (default: 128) */
 } lattice_open_options;
 
@@ -149,7 +153,7 @@ typedef struct {
     bool read_only;         /* Open in read-only mode */
     uint32_t cache_size_mb; /* Cache size in MB (default: 100) */
     uint32_t page_size;     /* Page size in bytes (default: 4096) */
-    bool enable_vector;     /* Enable vector storage for embeddings */
+    bool enable_vector;     /* Create a vector index if none (see v5) */
     uint16_t vector_dimensions; /* Vector dimensions, 1..4096 (default: 128) */
     bool enable_wal;        /* Enable WAL-backed transactions (default: true) */
 } lattice_open_options_v2;
@@ -164,7 +168,7 @@ typedef struct {
     bool read_only;         /* Open in read-only mode */
     uint32_t cache_size_mb; /* Cache size in MB (default: 100) */
     uint32_t page_size;     /* Page size in bytes (default: 4096) */
-    bool enable_vector;     /* Enable vector storage for embeddings */
+    bool enable_vector;     /* Create a vector index if none (see v5) */
     uint16_t vector_dimensions; /* Vector dimensions, 1..4096 (default: 128) */
     bool enable_wal;        /* Enable WAL-backed transactions (default: true) */
     /* Keep an in-memory adjacency cache. Nothing in this API reads it yet:
@@ -183,7 +187,7 @@ typedef struct {
     bool read_only;         /* Open in read-only mode */
     uint32_t cache_size_mb; /* Cache size in MB (default: 100) */
     uint32_t page_size;     /* Page size in bytes (default: 4096) */
-    bool enable_vector;     /* Enable vector storage for embeddings */
+    bool enable_vector;     /* Create a vector index if none (see v5) */
     uint16_t vector_dimensions; /* Vector dimensions, 1..4096 (default: 128) */
     bool enable_wal;        /* Enable WAL-backed transactions (default: true) */
     /* Keep an in-memory adjacency cache. Nothing in this API reads it yet:

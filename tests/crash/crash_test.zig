@@ -281,10 +281,10 @@ test "a vector removal logged by 0.16.0 is skipped when the file has no vectors"
     try std.testing.expect(try db.nodeExists(node_id));
 }
 
-test "a vector removal is still refused when the file has vectors and the open does not" {
+test "a vector removal is replayed when the file has vectors and the open does not ask for them" {
     const allocator = std.testing.allocator;
-    const path = "/tmp/lattice_crash_vector_remove_refused.ltdb";
-    const killed = "/tmp/lattice_crash_vector_remove_refused_killed.ltdb";
+    const path = "/tmp/lattice_crash_vector_remove_replayed.ltdb";
+    const killed = "/tmp/lattice_crash_vector_remove_replayed_killed.ltdb";
     cleanup(path);
     defer cleanup(path);
     cleanup(killed);
@@ -295,28 +295,85 @@ test "a vector removal is still refused when the file has vectors and the open d
         .enable_fts = false,
         .enable_vector = true,
         .vector_dimensions = dims,
+        .vector_metric = .euclidean,
         .auto_checkpoint = null,
     };
+    var removed: NodeId = undefined;
+    var kept: NodeId = undefined;
     {
         var db = try Database.open(allocator, path, .{ .create = true, .config = config });
         defer db.close();
         var vector = [_]f32{0} ** dims;
         vector[0] = 1;
         var txn = try db.beginTransaction(.read_write);
-        const node_id = try db.createNode(&txn, &.{"Chunk"});
-        try db.setNodeVectorInTxn(&txn, node_id, &vector);
+        removed = try db.createNode(&txn, &.{"Chunk"});
+        try db.setNodeVectorInTxn(&txn, removed, &vector);
+        kept = try db.createNode(&txn, &.{"Chunk"});
+        vector[0] = 4;
+        try db.setNodeVectorInTxn(&txn, kept, &vector);
         try db.commitTransaction(&txn);
-        // Fold the vector into the file and empty the log, so the removal
+        // Fold the vectors into the file and empty the log, so the removal
         // below is the only vector record left in it.
         _ = try db.checkpoint(.truncate);
         txn = try db.beginTransaction(.read_write);
-        try db.deleteNode(&txn, node_id);
+        try db.deleteNode(&txn, removed);
         try db.commitTransaction(&txn);
         try copyAsIfKilled(allocator, path, killed);
     }
 
-    // Skipping this removal would leave the vector in the index for good.
-    try std.testing.expectError(error.IoError, openCrashTestDb(allocator, killed, false));
+    // 0.16.0 refused this open: without vector options it had no index to
+    // replay the removal into. The file now says what its index is.
+    var db = try openCrashTestDb(allocator, killed, false);
+    defer db.close();
+    try std.testing.expect(!try db.nodeExists(removed));
+    try std.testing.expectEqual(lattice.storage.database.VectorMetric.euclidean, db.vectorConfig().?.metric);
+    const probe = [_]f32{0} ** dims;
+    const results = try db.vectorSearch(&probe, 10, null);
+    defer db.freeVectorSearchResults(results);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqual(kept, results[0].node_id);
+    try std.testing.expectApproxEqAbs(@as(f32, 4), results[0].distance, 1e-4);
+}
+
+test "vectors added to an existing file survive a kill before any checkpoint" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_crash_vector_added.ltdb";
+    const killed = "/tmp/lattice_crash_vector_added_killed.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+    cleanup(killed);
+    defer cleanup(killed);
+
+    {
+        var db = try openCrashTestDb(allocator, path, true);
+        db.close();
+    }
+    const dims = 4;
+    var node_id: NodeId = undefined;
+    {
+        var db = try Database.open(allocator, path, .{ .config = .{
+            .enable_fts = false,
+            .enable_vector = true,
+            .vector_dimensions = dims,
+            .vector_metric = .inner_product,
+            .auto_checkpoint = null,
+        } });
+        defer db.close();
+        var txn = try db.beginTransaction(.read_write);
+        node_id = try db.createNode(&txn, &.{"Chunk"});
+        try db.setNodeVectorInTxn(&txn, node_id, &[_]f32{ 1, 2, 3, 4 });
+        try db.commitTransaction(&txn);
+        try copyAsIfKilled(allocator, path, killed);
+    }
+
+    // Opened with no vector options, the file says there is an index for the
+    // log's vector records to go into.
+    var db = try openCrashTestDb(allocator, killed, false);
+    defer db.close();
+    try std.testing.expectEqual(lattice.storage.database.VectorMetric.inner_product, db.vectorConfig().?.metric);
+    const results = try db.vectorSearch(&[_]f32{ 1, 1, 1, 1 }, 1, null);
+    defer db.freeVectorSearchResults(results);
+    try std.testing.expectEqual(node_id, results[0].node_id);
 }
 
 test "a transaction that writes nothing leaves the log untouched" {

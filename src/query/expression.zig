@@ -610,7 +610,7 @@ pub const ExpressionEvaluator = struct {
             .in_ => self.listContains(left, right),
 
             // Special operators (handled by dedicated operators)
-            .vector_distance => self.vectorDistance(left, right),
+            .vector_distance => self.vectorDistance(left, right, ctx),
             .fts_match => self.ftsMatch(left, right),
         };
     }
@@ -1433,13 +1433,19 @@ pub const ExpressionEvaluator = struct {
         return .{ .bool_val = false };
     }
 
-    fn vectorDistance(self: *Self, left: EvalResult, right: EvalResult) EvalResult {
+    /// `a <=> b`: the distance under the database's vector metric, the same
+    /// number a vector search reports, or cosine distance where there is no
+    /// vector index to say otherwise.
+    fn vectorDistance(self: *Self, left: EvalResult, right: EvalResult, ctx: *const ExecutionContext) EvalResult {
         const left_vec = self.asVector(left) orelse return .{ .null_val = {} };
         const right_vec = self.asVector(right) orelse return .{ .null_val = {} };
 
         if (left_vec.len == 0 or right_vec.len == 0) return .{ .null_val = {} };
         if (left_vec.len != right_vec.len) return .{ .null_val = {} };
 
+        if (ctx.database) |database| {
+            return .{ .float_val = database.vectorDistance(left_vec, right_vec) };
+        }
         return .{ .float_val = vector_distance.cosineDistance(left_vec, right_vec) };
     }
 

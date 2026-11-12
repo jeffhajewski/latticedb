@@ -95,11 +95,18 @@ const Model = struct {
     allocator: Allocator,
     nodes: std.AutoArrayHashMapUnmanaged(NodeId, MNode) = .empty,
     edges: std.AutoArrayHashMapUnmanaged(EdgeId, MEdge) = .empty,
+    /// What a transaction that will be rolled back has deleted so far. Its
+    /// changes stay out of the model, so without these a later change in it
+    /// could pick a node or edge it already deleted.
+    gone_nodes: std.AutoHashMapUnmanaged(NodeId, void) = .empty,
+    gone_edges: std.AutoHashMapUnmanaged(EdgeId, void) = .empty,
 
     fn deinit(self: *Model) void {
         for (self.nodes.values()) |node| freeNode(self.allocator, node);
         self.nodes.deinit(self.allocator);
         self.edges.deinit(self.allocator);
+        self.gone_nodes.deinit(self.allocator);
+        self.gone_edges.deinit(self.allocator);
     }
 
     fn freeNode(allocator: Allocator, node: MNode) void {
@@ -324,6 +331,7 @@ fn randomOp(
         return;
     }
     const id = target.?;
+    if (!apply_to_model and model.gone_nodes.contains(id)) return;
     const node = model.nodes.getPtr(id).?;
     if (choice < 40) {
         const n = @as(i64, random.uintLessThan(u32, 10));
@@ -371,6 +379,7 @@ fn randomOp(
         if (apply_to_model) node.vector = v;
     } else if (choice < 84) {
         const other = pickNode(model, random).?;
+        if (!apply_to_model and model.gone_nodes.contains(other)) return;
         const kind: u1 = @intCast(random.uintLessThan(u8, 2));
         const edge_id = try db.createEdgeAndGetId(txn, id, other, if (kind == 0) "T" else "U");
         var edge = MEdge{ .source = id, .target = other, .kind = kind };
@@ -383,9 +392,10 @@ fn randomOp(
     } else if (choice < 90 and model.edges.count() > 0) {
         const keys = model.edges.keys();
         const edge_id = keys[random.uintLessThan(usize, keys.len)];
+        if (!apply_to_model and model.gone_edges.contains(edge_id)) return;
         if (random.boolean()) {
             try db.deleteEdgeById(txn, edge_id);
-            if (apply_to_model) _ = model.edges.orderedRemove(edge_id);
+            if (apply_to_model) _ = model.edges.orderedRemove(edge_id) else try model.gone_edges.put(allocator, edge_id, {});
         } else {
             const w = @as(i64, random.uintLessThan(u32, 1000));
             try db.setEdgePropertyById(txn, edge_id, "w", .{ .int_val = w });
@@ -397,8 +407,9 @@ fn randomOp(
         while (i < model.edges.count()) {
             const e = model.edges.values()[i];
             const edge_id = model.edges.keys()[i];
-            if (e.source == id or e.target == id) {
+            if ((e.source == id or e.target == id) and (apply_to_model or !model.gone_edges.contains(edge_id))) {
                 try db.deleteEdgeById(txn, edge_id);
+                if (!apply_to_model) try model.gone_edges.put(allocator, edge_id, {});
                 if (apply_to_model) {
                     _ = model.edges.orderedRemove(edge_id);
                     continue;
@@ -410,7 +421,7 @@ fn randomOp(
         if (apply_to_model) {
             const removed = model.nodes.fetchOrderedRemove(id).?;
             Model.freeNode(allocator, removed.value);
-        }
+        } else try model.gone_nodes.put(allocator, id, {});
     }
 }
 
@@ -445,6 +456,8 @@ fn runWorkload(allocator: Allocator, options: Options) !Run {
         } else if (roll < 9) {
             // A transaction that is rolled back leaves no trace.
             var txn = try db.beginTransaction(.read_write);
+            model.gone_nodes.clearRetainingCapacity();
+            model.gone_edges.clearRetainingCapacity();
             for (0..1 + random.uintLessThan(usize, 3)) |_| {
                 try randomOp(allocator, db, &txn, &model, random, options, false);
             }

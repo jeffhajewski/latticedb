@@ -466,14 +466,15 @@ fn mapQueryFailureToError(failure: QueryFailure) lattice_error {
     };
 }
 
-/// Map any error to C error code
+/// Map an error from a function whose error set is inferred. An error the
+/// database's own set names gets the code `mapDatabaseError` gives it, so an
+/// I/O failure is err_io and a missing node err_not_found whichever function
+/// reported it; only an error outside that set is the generic err.
 fn mapAnyError(err: anyerror) lattice_error {
-    return switch (err) {
-        error.OutOfMemory => .err_out_of_memory,
-        error.FileNotFound => .err_not_found,
-        error.PermissionDenied => .err_read_only,
-        else => .err,
-    };
+    inline for (@typeInfo(DatabaseError).error_set.?) |e| {
+        if (err == @field(anyerror, e.name)) return mapDatabaseError(@field(DatabaseError, e.name));
+    }
+    return .err;
 }
 
 // ============================================================================
@@ -1769,9 +1770,7 @@ pub export fn lattice_begin(
                 }
                 return .err_unsupported;
             },
-            DatabaseError.OutOfMemory => .err_out_of_memory,
-            DatabaseError.TransactionConflict => .err_lock_timeout,
-            else => .err,
+            else => mapDatabaseError(err),
         };
     };
 
@@ -1847,7 +1846,7 @@ pub export fn lattice_rollback(txn: ?*lattice_txn) lattice_error {
             retireTxnHandleLocked(txn_handle);
             return switch (err) {
                 DatabaseError.TransactionNotActive => .err_txn_aborted,
-                else => .err,
+                else => mapDatabaseError(err),
             };
         };
     }
@@ -3724,7 +3723,7 @@ pub export fn lattice_edge_get_outgoing(
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 
     const edges = txn_handle.db_handle.db.getOutgoingEdgesInTxn(txn_ptr, node_id, 0) catch |err| {
-        return mapAnyError(err);
+        return mapDatabaseError(err);
     };
 
     return finishEdgeResultHandleLocked(txn_handle, edges, result_out);
@@ -3750,7 +3749,7 @@ pub export fn lattice_edge_get_incoming(
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 
     const edges = txn_handle.db_handle.db.getIncomingEdgesInTxn(txn_ptr, node_id, 0) catch |err| {
-        return mapAnyError(err);
+        return mapDatabaseError(err);
     };
 
     return finishEdgeResultHandleLocked(txn_handle, edges, result_out);
@@ -3778,7 +3777,7 @@ pub export fn lattice_edge_get_outgoing_by_type(
 
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
     const edges = txn_handle.db_handle.db.getOutgoingEdgesByTypeInTxn(txn_ptr, node_id, type_slice, limit) catch |err| {
-        return mapAnyError(err);
+        return mapDatabaseError(err);
     };
 
     return finishEdgeResultHandleLocked(txn_handle, edges, result_out);
@@ -3806,7 +3805,7 @@ pub export fn lattice_edge_get_incoming_by_type(
 
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
     const edges = txn_handle.db_handle.db.getIncomingEdgesByTypeInTxn(txn_ptr, node_id, type_slice, limit) catch |err| {
-        return mapAnyError(err);
+        return mapDatabaseError(err);
     };
 
     return finishEdgeResultHandleLocked(txn_handle, edges, result_out);
@@ -3836,7 +3835,7 @@ pub export fn lattice_edge_scan(
 
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
     const edges = txn_handle.db_handle.db.scanEdgesInTxn(txn_ptr, type_slice, limit) catch |err| {
-        return mapAnyError(err);
+        return mapDatabaseError(err);
     };
 
     return finishEdgeResultHandleLocked(txn_handle, edges, result_out);
@@ -4671,4 +4670,40 @@ test "vector parameter binding validation" {
     // Test that zero dimensions returns error (when query handle is null)
     const dummy_vec = [_]f32{1.0};
     try std.testing.expectEqual(lattice_error.err_invalid_arg, lattice_query_bind_vector(null, "query", &dummy_vec, 0));
+}
+
+test "an error the database names gets its own code, whichever function reports it" {
+    try std.testing.expectEqual(lattice_error.err_io, mapAnyError(error.IoError));
+    try std.testing.expectEqual(lattice_error.err_not_found, mapAnyError(error.NotFound));
+    try std.testing.expectEqual(lattice_error.err_read_only, mapAnyError(error.TransactionReadOnly));
+    try std.testing.expectEqual(lattice_error.err_invalid_arg, mapAnyError(error.TransactionNotActive));
+    try std.testing.expectEqual(lattice_error.err_value_too_large, mapAnyError(error.ValueTooLarge));
+    try std.testing.expectEqual(lattice_error.err_has_relationships, mapAnyError(error.NodeHasRelationships));
+    try std.testing.expectEqual(lattice_error.err_out_of_memory, mapAnyError(error.OutOfMemory));
+    try std.testing.expectEqual(lattice_error.err, mapAnyError(error.SomethingNoCodeDescribes));
+}
+
+test "begin and rollback on a handle that failed report an I/O error" {
+    var db: ?*lattice_database = null;
+    try std.testing.expectEqual(lattice_error.ok, lattice_open(":memory:", null, &db));
+    defer _ = lattice_close(db);
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, lattice_begin(db, .read_write, &txn));
+    {
+        const handle = acquireDb(db).?;
+        defer releaseDb(handle);
+        handle.db.failed = true;
+    }
+    // A rollback on a failed handle ends the transaction without logging
+    // anything, and succeeds; a new transaction cannot begin.
+    try std.testing.expectEqual(lattice_error.ok, lattice_rollback(txn));
+    var second: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.err_io, lattice_begin(db, .read_write, &second));
+    try std.testing.expect(second == null);
+    {
+        const handle = acquireDb(db).?;
+        defer releaseDb(handle);
+        handle.db.failed = false;
+    }
 }

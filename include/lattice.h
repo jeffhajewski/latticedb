@@ -41,6 +41,8 @@ typedef uint64_t lattice_edge_id;
 /* Error codes */
 typedef enum {
     LATTICE_OK = 0,
+    /* A failure that none of the codes below describes. Every function
+     * returns the specific code when there is one. */
     LATTICE_ERROR = -1,
     LATTICE_ERROR_IO = -2,
     LATTICE_ERROR_CORRUPTION = -3,

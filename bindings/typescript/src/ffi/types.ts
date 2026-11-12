@@ -6,9 +6,11 @@
  */
 
 /**
- * Error codes from lattice.h
+ * Error codes from lattice.h. A plain enum, not a const one, so that the
+ * package exports it as a value: JavaScript callers, and TypeScript compiled
+ * with isolatedModules, cannot read a const enum.
  */
-export const enum LatticeErrorCode {
+export enum LatticeErrorCode {
   Ok = 0,
   Error = -1,
   IoError = -2,
@@ -96,7 +98,7 @@ export const enum LatticeValueType {
 /**
  * Query diagnostic stages from the C API.
  */
-export const enum QueryErrorStage {
+export enum QueryErrorStage {
   None = 0,
   Parse = 1,
   Semantic = 2,

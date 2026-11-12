@@ -489,7 +489,8 @@ try {
 ```
 
 Errors from the native library are `LatticeError`s whose `code` is the C error
-code, for example -4 (not found, also from `createEdge` when either end does not
+code; `LatticeErrorCode` (exported from the package, with `QueryErrorStage` for
+`LatticeQueryError.stage`) names them. For example -4 (not found, also from `createEdge` when either end does not
 exist), -16 (another process holds the file), -17 (a plain `deleteNode` of a node
 with relationships), -18 (open options that contradict the file's vector
 index), -19 (`NeedsNewerWriter`: a writable open of a file that a newer

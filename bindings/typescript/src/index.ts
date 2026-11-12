@@ -59,6 +59,7 @@ export {
   ELECTRON_ASAR_UNPACK_GLOB,
   LatticeError,
   LatticeChangesTrimmedError,
+  LatticeErrorCode,
   LatticeQueryError,
   QueryErrorStage,
   QueryErrorLocation,

@@ -631,6 +631,51 @@ Java_io_latticedb_Native_version(JNIEnv *env, jclass cls) {
     return (*env)->NewStringUTF(env, lattice_version());
 }
 
+/* Fill a lattice_open_options_v5 from the Java arguments, shared by open and
+ * deserialize so the same values mean the same thing to both. The v5 fields
+ * are 0 for "not set". A value that does not fit its C field is refused here
+ * (INVALID_ARG thrown, false returned) rather than truncated into a valid one;
+ * one that fits but is out of range is refused by the C API. */
+static bool fill_open_options_v5(JNIEnv *env, lattice_open_options_v5 *opts,
+        jboolean create, jboolean read_only, jint cache_size_mb, jint page_size,
+        jboolean enable_vector, jint vector_dimensions, jboolean enable_wal,
+        jboolean enable_adjacency_cache, jboolean lock, jint sync_mode,
+        jint full_fsync, jint vector_metric, jint vector_m,
+        jint vector_ef_construction, jint changefeed_retention,
+        jlong changefeed_retention_value) {
+    /* The v5 fields are 0 for "not set". A value that does not fit its C
+     * field is refused here rather than truncated into a valid one; one that
+     * fits but is out of range is refused by lattice_open_v5. */
+    if (sync_mode < 0 || sync_mode > 255 || full_fsync < 0 || full_fsync > 255 ||
+        vector_metric < 0 || vector_metric > 255 || vector_m < 0 ||
+        vector_m > 65535 || vector_ef_construction < 0 ||
+        vector_ef_construction > 65535 || changefeed_retention < 0 ||
+        changefeed_retention > 255) {
+        throw_lattice(env, LATTICE_ERROR_INVALID_ARG);
+        return false;
+    }
+    memset(opts, 0, sizeof(*opts));
+    opts->struct_size = sizeof(*opts);
+    opts->create = create == JNI_TRUE;
+    opts->read_only = read_only == JNI_TRUE;
+    opts->cache_size_mb = cache_size_mb <= 0 ? 0 : (uint32_t)cache_size_mb;
+    opts->page_size = page_size <= 0 ? 4096 : (uint32_t)page_size;
+    opts->enable_vector = enable_vector == JNI_TRUE;
+    opts->vector_dimensions = vector_dimensions <= 0 ? 128 : (uint16_t)vector_dimensions;
+    opts->enable_wal = enable_wal == JNI_TRUE;
+    opts->enable_adjacency_cache = enable_adjacency_cache == JNI_TRUE;
+    opts->lock = lock == JNI_TRUE;
+    opts->sync_mode = (uint8_t)sync_mode;
+    opts->full_fsync = (uint8_t)full_fsync;
+    opts->vector_metric = (uint8_t)vector_metric;
+    opts->vector_m = (uint16_t)vector_m;
+    opts->vector_ef_construction = (uint16_t)vector_ef_construction;
+    opts->changefeed_retention = (uint8_t)changefeed_retention;
+    /* An unsigned 64-bit count or duration carried in a jlong. */
+    opts->changefeed_retention_value = (uint64_t)changefeed_retention_value;
+    return true;
+}
+
 JNIEXPORT jlong JNICALL
 Java_io_latticedb_Native_open(JNIEnv *env, jclass cls, jstring path,
         jboolean create, jboolean read_only, jint cache_size_mb, jint page_size,
@@ -641,37 +686,14 @@ Java_io_latticedb_Native_open(JNIEnv *env, jclass cls, jstring path,
         jlong changefeed_retention_value) {
     init_cache(env);
     (void)cls;
-    /* The v5 fields are 0 for "not set". A value that does not fit its C
-     * field is refused here rather than truncated into a valid one; one that
-     * fits but is out of range is refused by lattice_open_v5. */
-    if (sync_mode < 0 || sync_mode > 255 || full_fsync < 0 || full_fsync > 255 ||
-        vector_metric < 0 || vector_metric > 255 || vector_m < 0 ||
-        vector_m > 65535 || vector_ef_construction < 0 ||
-        vector_ef_construction > 65535 || changefeed_retention < 0 ||
-        changefeed_retention > 255) {
-        throw_lattice(env, LATTICE_ERROR_INVALID_ARG);
+    lattice_open_options_v5 opts;
+    if (!fill_open_options_v5(env, &opts, create, read_only, cache_size_mb,
+            page_size, enable_vector, vector_dimensions, enable_wal,
+            enable_adjacency_cache, lock, sync_mode, full_fsync, vector_metric,
+            vector_m, vector_ef_construction, changefeed_retention,
+            changefeed_retention_value)) {
         return 0;
     }
-    lattice_open_options_v5 opts;
-    memset(&opts, 0, sizeof(opts));
-    opts.struct_size = sizeof(opts);
-    opts.create = create == JNI_TRUE;
-    opts.read_only = read_only == JNI_TRUE;
-    opts.cache_size_mb = cache_size_mb <= 0 ? 0 : (uint32_t)cache_size_mb;
-    opts.page_size = page_size <= 0 ? 4096 : (uint32_t)page_size;
-    opts.enable_vector = enable_vector == JNI_TRUE;
-    opts.vector_dimensions = vector_dimensions <= 0 ? 128 : (uint16_t)vector_dimensions;
-    opts.enable_wal = enable_wal == JNI_TRUE;
-    opts.enable_adjacency_cache = enable_adjacency_cache == JNI_TRUE;
-    opts.lock = lock == JNI_TRUE;
-    opts.sync_mode = (uint8_t)sync_mode;
-    opts.full_fsync = (uint8_t)full_fsync;
-    opts.vector_metric = (uint8_t)vector_metric;
-    opts.vector_m = (uint16_t)vector_m;
-    opts.vector_ef_construction = (uint16_t)vector_ef_construction;
-    opts.changefeed_retention = (uint8_t)changefeed_retention;
-    /* An unsigned 64-bit count or duration carried in a jlong. */
-    opts.changefeed_retention_value = (uint64_t)changefeed_retention_value;
 
     size_t path_len = 0;
     char *path_buf = jstring_to_utf8(env, path, &path_len);
@@ -715,7 +737,9 @@ JNIEXPORT jlong JNICALL
 Java_io_latticedb_Native_deserialize(JNIEnv *env, jclass cls, jbyteArray bytes,
         jint cache_size_mb, jint page_size, jboolean enable_vector,
         jint vector_dimensions, jboolean enable_wal,
-        jboolean enable_adjacency_cache, jboolean lock) {
+        jboolean enable_adjacency_cache, jboolean lock, jint sync_mode,
+        jint full_fsync, jint vector_metric, jint vector_m,
+        jint vector_ef_construction) {
     init_cache(env);
     (void)cls;
     if (bytes == NULL) {
@@ -723,25 +747,21 @@ Java_io_latticedb_Native_deserialize(JNIEnv *env, jclass cls, jbyteArray bytes,
         return 0;
     }
 
-    lattice_open_options_v4 opts;
-    memset(&opts, 0, sizeof(opts));
-    opts.struct_size = sizeof(opts);
-    opts.create = false;
-    opts.read_only = false;
-    opts.cache_size_mb = cache_size_mb <= 0 ? 0 : (uint32_t)cache_size_mb;
-    opts.page_size = page_size <= 0 ? 4096 : (uint32_t)page_size;
-    opts.enable_vector = enable_vector == JNI_TRUE;
-    opts.vector_dimensions = vector_dimensions <= 0 ? 128 : (uint16_t)vector_dimensions;
-    opts.enable_wal = enable_wal == JNI_TRUE;
-    opts.enable_adjacency_cache = enable_adjacency_cache == JNI_TRUE;
-    opts.lock = lock == JNI_TRUE;
+    /* create and read_only are ignored by lattice_deserialize_v5. */
+    lattice_open_options_v5 opts;
+    if (!fill_open_options_v5(env, &opts, JNI_FALSE, JNI_FALSE, cache_size_mb,
+            page_size, enable_vector, vector_dimensions, enable_wal,
+            enable_adjacency_cache, lock, sync_mode, full_fsync, vector_metric,
+            vector_m, vector_ef_construction, 0, 0)) {
+        return 0;
+    }
 
     jsize len = (*env)->GetArrayLength(env, bytes);
     jbyte *data = len > 0 ? (*env)->GetByteArrayElements(env, bytes, NULL) : NULL;
     if (len > 0 && data == NULL) return 0;
 
     lattice_database *db = NULL;
-    lattice_error rc = lattice_deserialize(
+    lattice_error rc = lattice_deserialize_v5(
         (const uint8_t *)data, (size_t)len, &opts, &db);
     if (data != NULL) {
         (*env)->ReleaseByteArrayElements(env, bytes, data, JNI_ABORT);

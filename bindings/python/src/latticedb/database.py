@@ -1201,6 +1201,11 @@ def deserialize(
     enable_vectors: bool = False,
     vector_dimensions: int = 128,
     lock: bool = True,
+    sync_mode: Optional[str] = None,
+    full_fsync: Optional[bool] = None,
+    vector_metric: Optional[str] = None,
+    vector_m: Optional[int] = None,
+    vector_ef_construction: Optional[int] = None,
     copy: bool = True,
 ) -> Database:
     """Open a database from bytes produced by :meth:`Database.serialize`.
@@ -1214,6 +1219,16 @@ def deserialize(
         db = latticedb.deserialize(blob)
         db.query("CREATE (n:Note {text: 'hello'})")
         s3.put_object(Bucket=b, Key=k, Body=db.serialize(), IfMatch=etag)
+
+    The options mean what they mean to :class:`Database`. The vector settings
+    are fixed once the index exists, so bytes with an index open with the one
+    they record: any vector option that is set must match it, or this raises
+    :class:`LatticeConfigMismatchError`. ``enable_vectors`` creates an index in
+    bytes that have none, configured by the vector options. ``sync_mode``,
+    ``full_fsync``, ``vector_metric``, ``vector_m`` and
+    ``vector_ef_construction`` need a native library with
+    ``lattice_deserialize_v5``; setting one against an older library raises
+    :class:`LatticeUnsupportedError`.
 
     The bytes are copied, so you may discard ``data`` as soon as this returns.
     Changes made afterwards do not travel back to it; call
@@ -1235,36 +1250,81 @@ def deserialize(
         raise LatticeUnsupportedError(
             "the native library is too old to support deserialize"
         )
+    if not copy and not getattr(lib, "_has_deserialize_borrowed", False):
+        raise LatticeUnsupportedError(
+            "the native library is too old to deserialize without copying"
+        )
 
-    opts = OpenOptionsV4(
-        struct_size=ctypes.sizeof(OpenOptionsV4),
-        create=False,
-        read_only=False,
-        cache_size_mb=0 if cache_size_mb is None else cache_size_mb,
-        page_size=4096,
-        enable_vector=enable_vectors,
-        vector_dimensions=vector_dimensions,
-        enable_wal=enable_wal,
-        enable_adjacency_cache=enable_adjacency_cache,
-        lock=lock,
-    )
-
-    db_ptr = c_void_p()
-    if copy:
-        owned = (c_ubyte * len(data)).from_buffer_copy(data)
-        code = lib._lib.lattice_deserialize(owned, len(data), byref(opts), byref(db_ptr))
+    sync_mode_code = _sync_mode_code(sync_mode)
+    if full_fsync is None:
+        full_fsync_code = 0
     else:
-        if not getattr(lib, "_has_deserialize_borrowed", False):
-            raise LatticeUnsupportedError(
-                "the native library is too old to deserialize without copying"
-            )
+        full_fsync_code = LATTICE_FULL_FSYNC_ON if full_fsync else LATTICE_FULL_FSYNC_OFF
+    vector_metric_code = _vector_metric_code(vector_metric)
+    vector_m_value = vector_m or 0
+    vector_ef_construction_value = vector_ef_construction or 0
+    cache_size = 0 if cache_size_mb is None else cache_size_mb
+
+    if copy:
+        # One copy, owned here for the length of the call.
+        buffer: Any = (c_ubyte * len(data)).from_buffer_copy(data)
+    else:
         # Going through c_char_p points at the caller's buffer rather than
         # duplicating it, which is the whole point of this branch. from_buffer
         # refuses immutable bytes, and from_buffer_copy would copy.
-        borrowed = ctypes.cast(ctypes.c_char_p(data), POINTER(c_ubyte))
-        code = lib._lib.lattice_deserialize_borrowed(
-            borrowed, len(data), byref(opts), byref(db_ptr)
+        buffer = ctypes.cast(ctypes.c_char_p(data), POINTER(c_ubyte))
+
+    db_ptr = c_void_p()
+    has_v5 = getattr(
+        lib, "_has_deserialize_v5" if copy else "_has_deserialize_borrowed_v5", False
+    )
+    if has_v5:
+        opts_v5 = OpenOptionsV5(
+            struct_size=ctypes.sizeof(OpenOptionsV5),
+            create=False,
+            read_only=False,
+            cache_size_mb=cache_size,
+            page_size=4096,
+            enable_vector=enable_vectors,
+            vector_dimensions=vector_dimensions,
+            enable_wal=enable_wal,
+            enable_adjacency_cache=enable_adjacency_cache,
+            lock=lock,
+            sync_mode=sync_mode_code,
+            full_fsync=full_fsync_code,
+            vector_metric=vector_metric_code,
+            vector_m=vector_m_value,
+            vector_ef_construction=vector_ef_construction_value,
         )
+        fn = lib._lib.lattice_deserialize_v5 if copy else lib._lib.lattice_deserialize_borrowed_v5
+        code = fn(buffer, len(data), byref(opts_v5), byref(db_ptr))
+    else:
+        if (
+            sync_mode_code
+            or full_fsync_code
+            or vector_metric_code
+            or vector_m_value
+            or vector_ef_construction_value
+        ):
+            raise LatticeUnsupportedError(
+                "lattice_deserialize_v5 is required for sync_mode, full_fsync, "
+                "vector_metric, vector_m and vector_ef_construction",
+                LATTICE_ERROR_UNSUPPORTED,
+            )
+        opts = OpenOptionsV4(
+            struct_size=ctypes.sizeof(OpenOptionsV4),
+            create=False,
+            read_only=False,
+            cache_size_mb=cache_size,
+            page_size=4096,
+            enable_vector=enable_vectors,
+            vector_dimensions=vector_dimensions,
+            enable_wal=enable_wal,
+            enable_adjacency_cache=enable_adjacency_cache,
+            lock=lock,
+        )
+        fn = lib._lib.lattice_deserialize if copy else lib._lib.lattice_deserialize_borrowed
+        code = fn(buffer, len(data), byref(opts), byref(db_ptr))
     check_error(code)
 
     # The handle is already open, so the wrapper is built around it rather than
@@ -1273,17 +1333,17 @@ def deserialize(
     db._path = Path("<deserialized>")
     db._create = False
     db._read_only = False
-    db._cache_size_mb = 0 if cache_size_mb is None else cache_size_mb
+    db._cache_size_mb = cache_size
     db._enable_wal = enable_wal
     db._enable_adjacency_cache = enable_adjacency_cache
     db._enable_vectors = enable_vectors
     db._vector_dimensions = vector_dimensions
     db._lock = lock
-    db._sync_mode = 0
-    db._full_fsync = 0
-    db._vector_metric = 0
-    db._vector_m = 0
-    db._vector_ef_construction = 0
+    db._sync_mode = sync_mode_code
+    db._full_fsync = full_fsync_code
+    db._vector_metric = vector_metric_code
+    db._vector_m = vector_m_value
+    db._vector_ef_construction = vector_ef_construction_value
     db._handle = db_ptr
     db._closed = False
     # Borrowed bytes have to outlive the database. Holding the reference here is

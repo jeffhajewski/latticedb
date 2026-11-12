@@ -17,6 +17,7 @@ from latticedb import (
     LatticeTxnAbortedError,
     LatticeUnsupportedError,
     LatticeVersionMismatchError,
+    deserialize,
     library_available,
 )
 from latticedb._bindings import get_lib
@@ -114,6 +115,98 @@ class TestOpenOptionsV5:
         # Without any v5-only option, the v4 path still opens.
         with Database(tmp_path / "v4.db", create=True):
             pass
+
+
+def _require_deserialize_v5() -> None:
+    lib = get_lib()
+    if not (
+        getattr(lib, "_has_deserialize_v5", False)
+        and getattr(lib, "_has_deserialize_borrowed_v5", False)
+    ):
+        pytest.skip("native library has no lattice_deserialize_v5")
+
+
+class TestDeserializeV5:
+    @staticmethod
+    def _euclidean_bytes(tmp_path):
+        np = pytest.importorskip("numpy")
+        with Database(
+            tmp_path / "deser_euclid.db",
+            create=True,
+            enable_vectors=True,
+            vector_dimensions=2,
+            vector_metric="euclidean",
+        ) as db:
+            with db.write() as txn:
+                a = txn.create_node(labels=["P"])
+                b = txn.create_node(labels=["P"])
+                txn.set_vector(a.id, "embedding", np.array([0.0, 0.0], dtype=np.float32))
+                txn.set_vector(b.id, "embedding", np.array([3.0, 4.0], dtype=np.float32))
+                txn.commit()
+            return db.serialize()
+
+    @pytest.mark.parametrize("copy", [True, False])
+    def test_index_in_the_bytes_brings_its_metric(self, tmp_path, copy):
+        _require_deserialize_v5()
+        np = pytest.importorskip("numpy")
+        data = self._euclidean_bytes(tmp_path)
+
+        db = deserialize(data, copy=copy)
+        try:
+            results = db.vector_search(np.array([0.0, 0.0], dtype=np.float32), k=2)
+            assert len(results) == 2
+            # L2 distance from the origin to (3, 4); cosine could not give 5.
+            assert math.isclose(results[1].distance, 5.0, rel_tol=1e-5)
+        finally:
+            db.close()
+
+    @pytest.mark.parametrize("copy", [True, False])
+    def test_contradicting_metric_is_config_mismatch(self, tmp_path, copy):
+        _require_deserialize_v5()
+        data = self._euclidean_bytes(tmp_path)
+
+        with pytest.raises(LatticeConfigMismatchError) as info:
+            deserialize(data, vector_metric="cosine", copy=copy)
+        assert info.value.code == -18
+
+    @pytest.mark.parametrize("copy", [True, False])
+    def test_enable_vectors_configures_a_new_index(self, tmp_path, copy):
+        _require_deserialize_v5()
+        np = pytest.importorskip("numpy")
+        with Database(tmp_path / "deser_plain.db", create=True) as db:
+            data = db.serialize()
+
+        db = deserialize(
+            data,
+            enable_vectors=True,
+            vector_dimensions=2,
+            vector_metric="euclidean",
+            copy=copy,
+        )
+        try:
+            with db.write() as txn:
+                a = txn.create_node(labels=["P"])
+                b = txn.create_node(labels=["P"])
+                txn.set_vector(a.id, "embedding", np.array([0.0, 0.0], dtype=np.float32))
+                txn.set_vector(b.id, "embedding", np.array([3.0, 4.0], dtype=np.float32))
+                txn.commit()
+            results = db.vector_search(np.array([0.0, 0.0], dtype=np.float32), k=2)
+            assert len(results) == 2
+            assert math.isclose(results[1].distance, 5.0, rel_tol=1e-5)
+        finally:
+            db.close()
+
+    def test_v5_only_option_without_v5_is_unsupported(self, tmp_path, monkeypatch):
+        with Database(tmp_path / "deser_v4.db", create=True) as db:
+            data = db.serialize()
+        lib = get_lib()
+        monkeypatch.setattr(lib, "_has_deserialize_v5", False)
+        monkeypatch.setattr(lib, "_has_deserialize_borrowed_v5", False)
+        for copy in (True, False):
+            with pytest.raises(LatticeUnsupportedError):
+                deserialize(data, sync_mode="normal", copy=copy)
+            # Without any v5-only option, the v4 path still opens.
+            deserialize(data, copy=copy).close()
 
 
 class TestNeedsNewerWriter:

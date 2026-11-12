@@ -86,6 +86,12 @@ func (db *DB) Serialize() ([]byte, error) {
 //	next, _ := db.Serialize()
 //	s3c.PutObject(ctx, &s3.PutObjectInput{Bucket: b, Key: k, Body: bytes.NewReader(next), IfMatch: obj.ETag})
 //
+// The options mean what they mean to Open, apart from Create and ReadOnly,
+// which are ignored. Bytes that hold a vector index open with the configuration
+// they record, and any vector option that is set must match it, or Deserialize
+// returns ErrorConfigMismatch; EnableVectors creates an index, configured by the
+// vector options, in bytes that have none.
+//
 // The bytes are copied, so the caller may reuse the slice as soon as this
 // returns. Changes made afterwards do not travel back to it.
 //
@@ -103,6 +109,11 @@ func Deserialize(data []byte, opts OpenOptions) (*DB, error) {
 		EnableVector:         opts.vectorsEnabled(),
 		VectorDimensions:     opts.VectorDimensions,
 		Lock:                 !opts.DisableLock,
+		SyncMode:             uint8(opts.SyncMode),
+		FullFsync:            uint8(opts.FullFsync),
+		VectorMetric:         uint8(opts.VectorMetric),
+		VectorM:              opts.VectorM,
+		VectorEfConstruction: opts.VectorEfConstruction,
 	})
 	if err != nil {
 		return nil, wrapError(err)

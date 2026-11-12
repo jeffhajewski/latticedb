@@ -245,6 +245,18 @@ export interface LatticeBindings {
     options: unknown,
     db_out: unknown[]
   ) => number;
+  lattice_deserialize_v5?: (
+    bytes: Uint8Array,
+    len: number,
+    options: unknown,
+    db_out: unknown[]
+  ) => number;
+  lattice_deserialize_borrowed_v5?: (
+    bytes: Uint8Array,
+    len: number,
+    options: unknown,
+    db_out: unknown[]
+  ) => number;
   lattice_free_bytes?: (bytes: unknown, len: number) => void;
   lattice_close: (db: unknown) => number;
 
@@ -807,6 +819,18 @@ function createBindings(): LatticeBindings {
       'uint8_t*', // bytes
       'size_t', // len
       OpenOptionsV4Ptr, // options
+      koffi.out(DatabasePtrPtr), // db_out
+    ]),
+    lattice_deserialize_v5: tryOptionalFunc(lib, 'lattice_deserialize_v5', 'int', [
+      'uint8_t*', // bytes
+      'size_t', // len
+      OpenOptionsV5Ptr, // options
+      koffi.out(DatabasePtrPtr), // db_out
+    ]),
+    lattice_deserialize_borrowed_v5: tryOptionalFunc(lib, 'lattice_deserialize_borrowed_v5', 'int', [
+      'uint8_t*', // bytes
+      'size_t', // len
+      OpenOptionsV5Ptr, // options
       koffi.out(DatabasePtrPtr), // db_out
     ]),
     lattice_free_bytes: tryOptionalFunc(lib, 'lattice_free_bytes', 'void', [

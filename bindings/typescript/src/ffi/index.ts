@@ -529,19 +529,32 @@ export class LatticeFFI {
 
   /**
    * Open a database from bytes produced by `serialize`.
+   *
+   * Uses the v5 entry point when the library has it, so the sync and vector
+   * index options reach the database as they do for `open`; otherwise the v4
+   * one, which cannot carry them.
    */
   deserialize(bytes: Uint8Array, options: OpenOptions = {}, copy = true): DatabaseHandle {
     const entry = copy
       ? this.bindings.lattice_deserialize
       : this.bindings.lattice_deserialize_borrowed;
-    if (!entry) {
+    const entryV5 = copy
+      ? this.bindings.lattice_deserialize_v5
+      : this.bindings.lattice_deserialize_borrowed_v5;
+    if (!entry && !entryV5) {
       throw new LatticeError(
         'the native library is too old to support deserialize',
         LatticeErrorCode.Unsupported
       );
     }
 
-    const opts = {
+    const syncMode = syncModeCode(options.syncMode);
+    const fullFsync = fullFsyncCode(options.fullFsync);
+    const vectorMetric = vectorMetricCode(options.vectorMetric);
+    const vectorM = options.vectorM ?? 0;
+    const vectorEfConstruction = options.vectorEfConstruction ?? 0;
+
+    const v4Opts = {
       struct_size: koffi.sizeof('lattice_open_options_v4'),
       create: false,
       read_only: false,
@@ -555,7 +568,29 @@ export class LatticeFFI {
     };
 
     const dbOut: unknown[] = [null];
-    this.checkError(entry(bytes, bytes.length, opts, dbOut));
+    if (entryV5) {
+      const v5Opts = {
+        ...v4Opts,
+        struct_size: koffi.sizeof('lattice_open_options_v5'),
+        sync_mode: syncMode,
+        full_fsync: fullFsync,
+        vector_metric: vectorMetric,
+        vector_m: vectorM,
+        vector_ef_construction: vectorEfConstruction,
+      };
+      this.checkError(entryV5(bytes, bytes.length, v5Opts, dbOut));
+      return dbOut[0];
+    }
+
+    if (syncMode || fullFsync || vectorMetric || vectorM || vectorEfConstruction) {
+      throw new LatticeError(
+        'lattice_deserialize_v5 is required for syncMode, fullFsync, vectorMetric, ' +
+          'vectorM and vectorEfConstruction',
+        LatticeErrorCode.Unsupported
+      );
+    }
+    // entryV5 is absent here, so the check above guarantees entry.
+    this.checkError(entry!(bytes, bytes.length, v4Opts, dbOut));
     return dbOut[0];
   }
 

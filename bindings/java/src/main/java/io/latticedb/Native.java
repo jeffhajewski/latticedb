@@ -29,7 +29,9 @@ final class Native {
     static native long deserialize(byte[] bytes, int cacheSizeMB, int pageSize,
                                    boolean enableVector, int vectorDimensions,
                                    boolean enableWal, boolean enableAdjacencyCache,
-                                   boolean lock);
+                                   boolean lock, int syncMode, int fullFsync,
+                                   int vectorMetric, int vectorM,
+                                   int vectorEfConstruction);
 
     static native void close(long db);
 

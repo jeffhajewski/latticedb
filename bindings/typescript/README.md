@@ -174,8 +174,8 @@ left unset.
 
 `syncMode`, `fullFsync` and the three vector index options need a native library
 with `lattice_open_v5`; against an older one, setting any of them throws with
-code -14 (`Unsupported`). `deserialize()` opens through the v4 options and
-ignores them.
+code -14 (`Unsupported`). `deserialize()` takes the same options and passes
+them through `lattice_deserialize_v5`, which needs the same newer library.
 
 `readOnly: true` on a database that was not closed cleanly recovers it in
 memory: the handle sees every committed transaction and nothing is written to
@@ -210,6 +210,11 @@ Node IDs, edge IDs and stream sequence numbers are `bigint`.
 - `db.serialize()` - Return the whole database as a `Uint8Array`
 
 `deserialize(bytes, options?, copy = true)` opens a database from bytes produced by `serialize()`.
+Its options mean what they mean to `new Database()`, apart from `create` and
+`readOnly`, which it ignores. Bytes that hold a vector index open with the
+configuration they record, and any vector option you pass must match it (code
+-18, `ConfigMismatch`); `enableVectors` with the vector options creates and
+configures an index in bytes that have none.
 
 ### Transaction
 

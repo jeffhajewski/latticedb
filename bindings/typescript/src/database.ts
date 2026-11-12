@@ -641,6 +641,15 @@ export class Database {
  * await s3.send(new PutObjectCommand({ Bucket, Key, Body: db.serialize(), IfMatch: etag }));
  * ```
  *
+ * The options mean what they mean to {@link Database}, apart from `create` and
+ * `readOnly`, which are ignored. Bytes that hold a vector index open with the
+ * configuration they record, and any vector option that is set must match it
+ * (code -18, `ConfigMismatch`, otherwise); `enableVectors` creates an index,
+ * configured by the vector options, in bytes that have none. `syncMode`,
+ * `fullFsync`, `vectorMetric`, `vectorM` and `vectorEfConstruction` need a
+ * native library with `lattice_deserialize_v5`; against an older one, setting
+ * any of them throws with code -14 (`Unsupported`).
+ *
  * The bytes are copied, so the caller may discard them as soon as this returns.
  * Changes made afterwards do not travel back to them.
  *
@@ -671,6 +680,11 @@ export function deserialize(
     enableVector: options.enableVector,
     vectorDimensions: options.vectorDimensions,
     lock: options.lock,
+    syncMode: options.syncMode,
+    fullFsync: options.fullFsync,
+    vectorMetric: options.vectorMetric,
+    vectorM: options.vectorM,
+    vectorEfConstruction: options.vectorEfConstruction,
   }, copy);
 
   // The handle is already open, so the wrapper is attached to it rather than

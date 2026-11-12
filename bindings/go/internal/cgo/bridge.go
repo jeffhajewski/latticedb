@@ -85,8 +85,7 @@ type OpenOptions struct {
 	// filesystems where locking does not work; it does not make concurrent
 	// access safe.
 	Lock bool
-	// The lattice_open_options_v5 fields. 0 means "not set" for each; Deserialize
-	// ignores them.
+	// The lattice_open_options_v5 fields. 0 means "not set" for each.
 	SyncMode             uint8
 	FullFsync            uint8
 	VectorMetric         uint8
@@ -228,8 +227,8 @@ func (db *DB) Serialize() ([]byte, error) {
 
 // Deserialize opens a database from bytes produced by Serialize.
 func Deserialize(data []byte, opts OpenOptions) (*DB, error) {
-	cOpts := C.lattice_open_options_v4{
-		struct_size:            C.size_t(unsafe.Sizeof(C.lattice_open_options_v4{})),
+	cOpts := C.lattice_open_options_v5{
+		struct_size:            C.size_t(unsafe.Sizeof(C.lattice_open_options_v5{})),
 		create:                 C.bool(false),
 		read_only:              C.bool(false),
 		cache_size_mb:          C.uint32_t(opts.CacheSizeMB),
@@ -239,6 +238,11 @@ func Deserialize(data []byte, opts OpenOptions) (*DB, error) {
 		enable_wal:             C.bool(opts.EnableWAL),
 		enable_adjacency_cache: C.bool(opts.EnableAdjacencyCache),
 		lock:                   C.bool(opts.Lock),
+		sync_mode:              C.uint8_t(opts.SyncMode),
+		full_fsync:             C.uint8_t(opts.FullFsync),
+		vector_metric:          C.uint8_t(opts.VectorMetric),
+		vector_m:               C.uint16_t(opts.VectorM),
+		vector_ef_construction: C.uint16_t(opts.VectorEfConstruction),
 	}
 
 	var ptr *C.uint8_t
@@ -247,7 +251,7 @@ func Deserialize(data []byte, opts OpenOptions) (*DB, error) {
 	}
 
 	var db *C.lattice_database
-	if err := errorFromCode(ErrorCode(C.lattice_deserialize(ptr, C.size_t(len(data)), &cOpts, &db))); err != nil {
+	if err := errorFromCode(ErrorCode(C.lattice_deserialize_v5(ptr, C.size_t(len(data)), &cOpts, &db))); err != nil {
 		return nil, err
 	}
 

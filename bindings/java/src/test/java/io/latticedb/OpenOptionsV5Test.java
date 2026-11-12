@@ -65,6 +65,63 @@ class OpenOptionsV5Test {
         assertThrows(IllegalArgumentException.class, () -> OpenOptions.defaults().vectorM(64));
     }
 
+    private static void addOriginAndThreeFour(Database db) {
+        db.write(tx -> {
+            Node a = tx.createNode(List.of("P"));
+            Node b = tx.createNode(List.of("P"));
+            tx.setVector(a.id(), "embedding", new float[]{0, 0});
+            tx.setVector(b.id(), "embedding", new float[]{3, 4});
+            return null;
+        });
+    }
+
+    private static void assertSecondDistanceFive(Database db) {
+        List<VectorSearchResult> results = db.vectorSearch(
+                new float[]{0, 0}, VectorSearchOptions.defaults().k(2));
+        assertEquals(2, results.size());
+        // L2 distance from the origin to (3, 4); cosine could not give 5.
+        assertEquals(5.0, results.get(1).distance(), 1e-4);
+    }
+
+    private byte[] serializedEuclideanDatabase() {
+        try (Database db = Database.open(dir.resolve("deser-euclid.db").toString(),
+                OpenOptions.defaults().create(true).enableVectors(true)
+                        .vectorDimensions(2).vectorMetric(VectorMetric.EUCLIDEAN))) {
+            addOriginAndThreeFour(db);
+            return db.serialize();
+        }
+    }
+
+    @Test
+    void deserializeTakesTheIndexTheBytesRecord() {
+        try (Database db = Database.deserialize(serializedEuclideanDatabase(),
+                OpenOptions.defaults())) {
+            assertSecondDistanceFive(db);
+        }
+    }
+
+    @Test
+    void deserializeWithContradictingMetricIsConfigMismatch() {
+        byte[] bytes = serializedEuclideanDatabase();
+        assertCode(ErrorCode.CONFIG_MISMATCH, () -> Database.deserialize(bytes,
+                OpenOptions.defaults().vectorMetric(VectorMetric.COSINE)).close());
+    }
+
+    @Test
+    void deserializeEnableVectorsConfiguresANewIndex() {
+        byte[] bytes;
+        try (Database db = Database.open(dir.resolve("deser-plain.db").toString(),
+                OpenOptions.defaults().create(true))) {
+            bytes = db.serialize();
+        }
+        try (Database db = Database.deserialize(bytes, OpenOptions.defaults()
+                .enableVectors(true).vectorDimensions(2)
+                .vectorMetric(VectorMetric.EUCLIDEAN))) {
+            addOriginAndThreeFour(db);
+            assertSecondDistanceFive(db);
+        }
+    }
+
     @Test
     void fileMarkedForNewerWritersOpensOnlyReadOnly() throws IOException {
         String path = dir.resolve("newer-writer.db").toString();

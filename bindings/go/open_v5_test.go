@@ -300,3 +300,100 @@ func TestFileInANewerFormatIsAVersionMismatch(t *testing.T) {
 		wantCode(t, "open", err, ErrorVersionMismatch)
 	}
 }
+
+func addOriginAndThreeFour(t *testing.T, db *DB) {
+	t.Helper()
+	err := db.Update(func(tx *Tx) error {
+		a, err := tx.CreateNode(CreateNodeOptions{Labels: []string{"P"}})
+		if err != nil {
+			return err
+		}
+		b, err := tx.CreateNode(CreateNodeOptions{Labels: []string{"P"}})
+		if err != nil {
+			return err
+		}
+		if err := tx.SetVector(a.ID, "embedding", []float32{0, 0}); err != nil {
+			return err
+		}
+		return tx.SetVector(b.ID, "embedding", []float32{3, 4})
+	})
+	if err != nil {
+		t.Fatalf("write vectors: %v", err)
+	}
+}
+
+func wantSecondDistanceFive(t *testing.T, db *DB) {
+	t.Helper()
+	results, err := db.VectorSearch([]float32{0, 0}, VectorSearchOptions{K: 2})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("results = %+v, want 2", results)
+	}
+	// L2 distance from the origin to (3, 4); cosine could not give 5.
+	if math.Abs(float64(results[1].Distance)-5) > 1e-4 {
+		t.Fatalf("second distance = %v, want 5", results[1].Distance)
+	}
+}
+
+func serializedEuclideanDB(t *testing.T) []byte {
+	t.Helper()
+	db, err := Open(filepath.Join(t.TempDir(), "deser-euclid.db"), OpenOptions{
+		Create:           true,
+		EnableVectors:    true,
+		VectorDimensions: 2,
+		VectorMetric:     VectorMetricEuclidean,
+	})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+	addOriginAndThreeFour(t, db)
+	data, err := db.Serialize()
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+	return data
+}
+
+func TestDeserializeTakesTheIndexTheBytesRecord(t *testing.T) {
+	db, err := Deserialize(serializedEuclideanDB(t), OpenOptions{})
+	if err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+	defer db.Close()
+	wantSecondDistanceFive(t, db)
+}
+
+func TestDeserializeWithContradictingMetricIsConfigMismatch(t *testing.T) {
+	db, err := Deserialize(serializedEuclideanDB(t), OpenOptions{VectorMetric: VectorMetricCosine})
+	if err == nil {
+		db.Close()
+	}
+	wantCode(t, "deserialize with cosine", err, ErrorConfigMismatch)
+}
+
+func TestDeserializeEnableVectorsConfiguresANewIndex(t *testing.T) {
+	plain, err := Open(filepath.Join(t.TempDir(), "deser-plain.db"), OpenOptions{Create: true})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	data, err := plain.Serialize()
+	plain.Close()
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+
+	db, err := Deserialize(data, OpenOptions{
+		EnableVectors:    true,
+		VectorDimensions: 2,
+		VectorMetric:     VectorMetricEuclidean,
+	})
+	if err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+	defer db.Close()
+	addOriginAndThreeFour(t, db)
+	wantSecondDistanceFive(t, db)
+}

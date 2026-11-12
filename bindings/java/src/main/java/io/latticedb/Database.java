@@ -62,13 +62,23 @@ public final class Database implements AutoCloseable {
      * Opens an in-memory database from bytes produced by {@link #serialize()}.
      * The bytes are copied, so the caller may reuse or discard them after this
      * method returns. Changes do not affect the input array.
+     *
+     * <p>The options mean what they mean to {@link #open(String, OpenOptions)},
+     * apart from {@code create} and {@code readOnly}, which are ignored. Bytes
+     * that hold a vector index open with the configuration they record, and
+     * any vector option that is set must match it, or this throws
+     * {@link ErrorCode#CONFIG_MISMATCH}; {@code enableVectors(true)} creates
+     * an index, configured by the vector options, in bytes that have none.</p>
      */
     public static Database deserialize(byte[] bytes, OpenOptions options) {
         Objects.requireNonNull(bytes, "bytes");
         Objects.requireNonNull(options, "options");
         long handle = Native.deserialize(bytes, options.cacheSizeMB(), options.pageSize(),
                 options.enableVectors(), options.vectorDimensions(), options.enableWal(),
-                options.enableAdjacencyCache(), options.lock());
+                options.enableAdjacencyCache(), options.lock(),
+                options.syncModeCode(), options.fullFsyncCode(),
+                options.vectorMetricCode(), options.vectorM(),
+                options.vectorEfConstruction());
         return new Database("<deserialized>", options, handle);
     }
 

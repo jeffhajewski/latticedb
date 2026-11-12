@@ -6,7 +6,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { Database } from '../src/database';
+import { Database, deserialize } from '../src/database';
 import { Transaction } from '../src/transaction';
 import { getFFI, isLibraryAvailable, LatticeErrorCode, LatticeError } from '../src/ffi';
 
@@ -297,6 +297,146 @@ describeIfNative('open options v5, detach delete and edge endpoints', () => {
       });
     } finally {
       await db.close();
+    }
+  });
+});
+
+function hasDeserializeV5(): boolean {
+  const bindings = (
+    getFFI() as unknown as {
+      bindings: { lattice_deserialize_v5?: unknown; lattice_deserialize_borrowed_v5?: unknown };
+    }
+  ).bindings;
+  return Boolean(bindings.lattice_deserialize_v5 && bindings.lattice_deserialize_borrowed_v5);
+}
+
+function codeOfSync(fn: () => unknown): number | undefined {
+  try {
+    fn();
+  } catch (err) {
+    expect(err).toBeInstanceOf(LatticeError);
+    return (err as LatticeError).code;
+  }
+  return undefined;
+}
+
+describeIfNative('deserialize with v5 options', () => {
+  let dir: string;
+
+  beforeEach(() => {
+    dir = fs.mkdtempSync(path.join(os.tmpdir(), 'lattice_deser_v5_'));
+  });
+
+  afterEach(() => {
+    fs.rmSync(dir, { recursive: true, force: true });
+  });
+
+  async function addPoints(db: Database): Promise<void> {
+    await db.write(async (txn) => {
+      const a = (await txn.createNode({ labels: ['P'] })).id;
+      const b = (await txn.createNode({ labels: ['P'] })).id;
+      await txn.setVector(a, 'embedding', new Float32Array([0, 0]));
+      await txn.setVector(b, 'embedding', new Float32Array([3, 4]));
+    });
+  }
+
+  async function euclideanBytes(): Promise<Uint8Array> {
+    const db = new Database(path.join(dir, 'euclid.db'), {
+      create: true,
+      enableVectors: true,
+      vectorDimensions: 2,
+      vectorMetric: 'euclidean',
+    });
+    await db.open();
+    try {
+      await addPoints(db);
+      return db.serialize();
+    } finally {
+      await db.close();
+    }
+  }
+
+  async function secondDistance(db: Database): Promise<number> {
+    const results = await db.vectorSearch(new Float32Array([0, 0]), { k: 2 });
+    expect(results).toHaveLength(2);
+    return results[1]!.distance;
+  }
+
+  for (const copy of [true, false]) {
+    describe(copy ? 'copying' : 'borrowed', () => {
+      test('the index in the bytes brings its metric', async () => {
+        if (!hasDeserializeV5()) return;
+        const db = deserialize(await euclideanBytes(), {}, copy);
+        try {
+          // L2 distance from the origin to (3, 4); cosine could not give 5.
+          expect(await secondDistance(db)).toBeCloseTo(5, 4);
+        } finally {
+          await db.close();
+        }
+      });
+
+      test('a contradicting metric is ConfigMismatch', async () => {
+        if (!hasDeserializeV5()) return;
+        const bytes = await euclideanBytes();
+        expect(codeOfSync(() => deserialize(bytes, { vectorMetric: 'cosine' }, copy))).toBe(
+          LatticeErrorCode.ConfigMismatch
+        );
+      });
+
+      test('enableVectors creates an index configured by the vector options', async () => {
+        if (!hasDeserializeV5()) return;
+        const plain = new Database(path.join(dir, 'plain.db'), { create: true });
+        await plain.open();
+        let bytes: Uint8Array;
+        try {
+          bytes = plain.serialize();
+        } finally {
+          await plain.close();
+        }
+
+        const db = deserialize(
+          bytes,
+          { enableVectors: true, vectorDimensions: 2, vectorMetric: 'euclidean' },
+          copy
+        );
+        try {
+          await addPoints(db);
+          expect(await secondDistance(db)).toBeCloseTo(5, 4);
+        } finally {
+          await db.close();
+        }
+      });
+    });
+  }
+
+  test('a v5-only option against a library without deserialize v5 is Unsupported', async () => {
+    const plain = new Database(path.join(dir, 'v4.db'), { create: true });
+    await plain.open();
+    let bytes: Uint8Array;
+    try {
+      bytes = plain.serialize();
+    } finally {
+      await plain.close();
+    }
+
+    const bindings = (
+      getFFI() as unknown as {
+        bindings: { lattice_deserialize_v5?: unknown; lattice_deserialize_borrowed_v5?: unknown };
+      }
+    ).bindings;
+    const saved = [bindings.lattice_deserialize_v5, bindings.lattice_deserialize_borrowed_v5];
+    bindings.lattice_deserialize_v5 = undefined;
+    bindings.lattice_deserialize_borrowed_v5 = undefined;
+    try {
+      for (const copy of [true, false]) {
+        expect(codeOfSync(() => deserialize(bytes, { syncMode: 'normal' }, copy))).toBe(
+          LatticeErrorCode.Unsupported
+        );
+        // Without any v5-only option, the v4 entry point still opens.
+        await deserialize(bytes, {}, copy).close();
+      }
+    } finally {
+      [bindings.lattice_deserialize_v5, bindings.lattice_deserialize_borrowed_v5] = saved;
     }
   });
 });

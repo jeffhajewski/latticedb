@@ -94,8 +94,12 @@ mvn -q compile exec:java@run-example -Dexec.args=/tmp/knowledge.db
   system has it: it survives the process being killed, but a power cut or OS crash
   can lose the most recent commits. Unset sync settings defer to the
   `LATTICE_SYNC_MODE` and `LATTICE_FULL_FSYNC` environment variables, else a full
-  sync without `F_FULLFSYNC`. `deserialize` still opens through the v4 options and
-  ignores these.
+  sync without `F_FULLFSYNC`. `Database.deserialize(bytes, options)` takes the
+  same options through `lattice_deserialize_v5`, with the same meaning, apart from
+  `create` and `readOnly`, which it ignores: bytes that hold a vector index open
+  with the configuration they record, any vector option that is set must match it
+  (`ErrorCode.CONFIG_MISMATCH`), and `enableVectors(true)` with the vector options
+  creates and configures an index in bytes that have none.
 - A database file records its vector index (dimensions, metric, M,
   ef_construction), and a database that has one opens with it whether or not
   `enableVectors` is set, so reopening needs no vector options. Any vector option

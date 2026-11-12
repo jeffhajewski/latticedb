@@ -94,22 +94,24 @@ options too.
 ## Vectors
 
 When the database has a vector index, exports include each node's vector, and
-JSON exports and dumps record the dimensions. No vector options are needed, because
-the database file records its index:
+JSON exports and dumps record the index: its dimensions, metric, `m` and
+`ef_construction`. No vector options are needed, because the database file records
+its index:
 
 ```bash
 lattice export embeddings.db --file=docs.json
 ```
 
 ```json
-{"version":2,"vector_dimensions":3,"nodes":[{"id":"1","labels":["Doc"],"properties":{"title":"cafe"},"vector":[0.6,0.8,0.0]}],"edges":[]}
+{"version":2,"vector_dimensions":3,"vector_metric":"cosine","vector_m":16,"vector_ef_construction":200,"nodes":[{"id":"1","labels":["Doc"],"properties":{"title":"cafe"},"vector":[0.6,0.8,0.0]}],"edges":[]}
 ```
 
 Under the cosine metric a vector is stored normalised, so the exported vector is
 the unit-length one: a node given `[3, 4, 0]` exports as `[0.6,0.8,0.0]`. Under
 the `euclidean` and `dot_product` metrics vectors are stored as given and export as
-`[3.0,4.0,0.0]`. An export records the dimensions but not the metric or the HNSW
-settings: create the database you import into with the ones you want.
+`[3.0,4.0,0.0]`. Readers that do not know the metric and HNSW fields, 0.16.0 among
+them, skip them, so the format version stays 2. JSONL, CSV and DOT exports have no
+header and carry none of these settings.
 
 A database last written by 0.16.0 whose dimensions cannot be read from its vector
 pages is the one case where an export leaves vectors out, with a warning, unless
@@ -117,7 +119,12 @@ it is given `--enable-vector --vector-dims=<n>`.
 
 Importing a file that holds vectors needs a target database with a vector index of
 the same dimensions; a database without one can be given one by the import itself,
-with `--enable-vector --vector-dims=<n>`. A JSON import checks this before writing
+with `--enable-vector`. A JSON import then builds the index from the file's
+header, with its dimensions, metric, `m` and `ef_construction`, so a database
+rebuilt from an export searches as the original did; `--vector-dims=<n>` overrides
+the dimensions, and a JSONL or CSV import, or a JSON file without a header, needs
+it. A target that already has an index keeps its own settings: the file's are not
+imposed on it. A JSON import checks the dimensions before writing
 anything (here `copy.db` was created with four dimensions); JSONL and CSV
 imports fail at the first node whose vector does not fit:
 

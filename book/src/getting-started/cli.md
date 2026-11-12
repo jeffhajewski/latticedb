@@ -88,7 +88,9 @@ Created database: embeddings.lattice
 Pick `--vector-dims` to match whatever produces your embeddings. OpenAI's
 `text-embedding-3-small` gives you 1536 numbers per vector, so that is the number you
 would use. The metric and the two HNSW settings cannot be changed later either; to
-change them, export the data and import it into a new database.
+change them, create a new database with the ones you want and import an export of
+the old one into it. (A JSON import into a database with no vector index, given
+`--enable-vector`, copies the original's settings instead.)
 
 ### Opening a database that stores vectors
 
@@ -284,8 +286,10 @@ JSON should have a `nodes` array and an `edges` array:
 In JSON, `id` is a name local to the file: edges refer to nodes by it, and each
 node gets a fresh ID in the database. A node can also carry a `"vector"` array,
 which is stored as its embedding; that needs a database with a vector index. Into a
-database without one, the import stops and asks for `--enable-vector
---vector-dims=<n>`, which creates the index. Files that `export` writes
+database without one, the import stops and asks for `--enable-vector`, which
+creates the index with the dimensions, metric and HNSW settings an exported JSON
+file records in its header; a file without them also needs `--vector-dims=<n>`.
+Files that `export` writes
 also have a `"version"` field and write some values in a tagged form; see
 [Data Export](../guides/data-export.md) for the format.
 

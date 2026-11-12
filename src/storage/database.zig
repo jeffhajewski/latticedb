@@ -104,6 +104,7 @@ const scorer_mod = lattice.fts.scorer;
 const fts_catalog_mod = lattice.fts.catalog;
 const FtsCatalog = fts_catalog_mod.FtsCatalog;
 const FtsCatalogError = fts_catalog_mod.FtsCatalogError;
+const fts_legacy = lattice.fts.legacy;
 const FtsDefinition = fts_catalog_mod.FtsDefinition;
 const FtsEntityKind = fts_catalog_mod.FtsEntityKind;
 pub const FtsSearchResult = scorer_mod.ScoredDoc;
@@ -2264,6 +2265,7 @@ pub const Database = struct {
         if (self.read_only) return DatabaseError.ReadOnly;
         if (self.txn_overlays.count() != 0) return DatabaseError.TransactionConflict;
 
+        try self.reclaimUnreachableFts();
         try self.persistHnswIndex();
         self.saveTreeRoots() catch return DatabaseError.IoError;
         try self.checkpointWal(.truncate);
@@ -4111,10 +4113,7 @@ pub const Database = struct {
     ///
     /// Built per call rather than kept, because it holds nothing worth keeping:
     /// the trees belong to the database and the scope is four bytes derived from
-    /// the definition. The one piece of state it does carry, the dictionary's next
-    /// token id, restarts at its first value — which is already what happens on
-    /// every reopen, and is harmless because that id is a label written into the
-    /// posting page header and never used to find anything.
+    /// the definition, and everything it reads, counts included, is in the trees.
     fn ftsIndexFor(self: *Self, definition: FtsDefinition) FtsIndex {
         return FtsIndex.initScoped(
             self.allocator,
@@ -4255,6 +4254,41 @@ pub const Database = struct {
     fn clearFtsDefinition(self: *Self, definition: FtsDefinition) DatabaseError!void {
         var index = self.ftsIndexFor(definition);
         index.clearScope() catch |err| return mapFtsError(err);
+    }
+
+    /// Remove the full-text entries no declared index can reach: those of the
+    /// single index releases before 0.15.0 kept, and any a drop cut short left
+    /// (see `fts/legacy.zig` for how each is told apart). Their posting pages
+    /// go to the freelist. `compact` does this rather than opening, because
+    /// the old index may be the only place some text was searchable, and only
+    /// the user knows they have moved on from it.
+    fn reclaimUnreachableFts(self: *Self) DatabaseError!void {
+        if (self.fts_index == null) return;
+        var prefixes: std.ArrayListUnmanaged([fts_catalog_mod.SCOPE_PREFIX_SIZE]u8) = .empty;
+        defer prefixes.deinit(self.allocator);
+        if (self.ftsCatalog()) |catalog_value| {
+            var catalog = catalog_value;
+            inline for (.{ FtsEntityKind.node, FtsEntityKind.edge }) |kind| {
+                var iter: FtsCatalog.DefinitionIterator = undefined;
+                catalog.iterate(kind, &iter) catch |err| return mapFtsCatalogError(err);
+                defer iter.deinit();
+                while (iter.next() catch |err| return mapFtsCatalogError(err)) |definition| {
+                    prefixes.append(self.allocator, fts_catalog_mod.scopePrefix(definition)) catch return DatabaseError.OutOfMemory;
+                }
+            }
+        }
+        const stats = fts_legacy.reclaimUnreachable(
+            self.allocator,
+            &self.buffer_pool,
+            &self.fts_dict_tree,
+            &self.fts_lengths_tree,
+            if (self.fts_reverse_tree) |*t| t else null,
+            prefixes.items,
+        ) catch |err| return switch (err) {
+            error.OutOfMemory => DatabaseError.OutOfMemory,
+            error.StorageError => DatabaseError.IoError,
+        };
+        if (stats.terms + stats.length_keys + stats.reverse_keys != 0) try self.sync();
     }
 
     /// Rebuild every declared index from the entities as they now stand.

@@ -554,11 +554,24 @@ pub const FtsIndex = struct {
     /// any whose entity no longer exists — exactly the state a crash in the middle
     /// of a write leaves behind.
     ///
-    /// The posting pages themselves stay allocated. Nothing points at them once
-    /// the dictionary entries naming them are gone, so they are wasted space
-    /// rather than wrong data, and freeing them needs page reclamation the store
-    /// does not have yet.
+    /// The posting lists the dictionary names are freed first. A page that is
+    /// not a posting page stops its list's walk instead of being freed, so a
+    /// damaged link costs the pages after it, never another structure's page.
     pub fn clearScope(self: *Self) FtsError!void {
+        var heads: ArrayListUnmanaged(lattice.core.types.PageId) = .empty;
+        defer heads.deinit(self.allocator);
+        {
+            var iter: Dictionary.DictionaryIterator = undefined;
+            self.dictionary.iterate(&iter) catch return FtsError.DictionaryError;
+            defer iter.deinit();
+            while (iter.next() catch return FtsError.DictionaryError) |item| {
+                if (item.entry.posting_page == 0) continue;
+                heads.append(self.allocator, item.entry.posting_page) catch return FtsError.OutOfMemory;
+            }
+        }
+        for (heads.items) |head| {
+            self.posting_store.freeList(head) catch return FtsError.PostingError;
+        }
         self.dictionary.tree.clear(self.allocator) catch return FtsError.BTreeError;
         self.doc_lengths.tree.clear(self.allocator) catch return FtsError.BTreeError;
         self.doc_lengths.stats = .{ .total_docs = 0, .total_tokens = 0, .avg_doc_length = 0 };
@@ -571,9 +584,6 @@ pub const FtsIndex = struct {
     /// Remove a document from the index
     /// If reverse_index is available, properly cleans up posting lists and stats
     pub fn removeDocument(self: *Self, doc_id: DocId) FtsError!void {
-        // Track if any dictionary stat updates failed (non-fatal but should be reported)
-        var stats_update_failed = false;
-
         // If we have a reverse index, do proper cleanup
         if (self.reverse_index) |*ri| {
             // 1. Get terms from reverse index
@@ -583,17 +593,13 @@ pub const FtsIndex = struct {
                 defer ri.freeTerms(terms);
 
                 // 2. For each term, remove from posting list and update dictionary
+                // A storage error stops the removal and is returned: carrying
+                // on would leave the document's entries behind unreported.
                 for (terms) |term| {
-                    const entry = self.dictionary.get(term) catch continue orelse continue;
-
-                    if (entry.posting_page != 0) {
-                        const result = self.posting_store.removeEntry(entry.posting_page, doc_id) catch continue;
-                        if (result.found) {
-                            self.dictionary.put(term, entryAfterRemoval(entry, result.term_freq)) catch {
-                                stats_update_failed = true;
-                            };
-                        }
-                    }
+                    const entry = (self.dictionary.get(term) catch {
+                        return FtsError.DictionaryError;
+                    }) orelse continue;
+                    try self.removeFromList(term, entry, doc_id);
                 }
 
                 // 3. Remove reverse index entry
@@ -612,9 +618,7 @@ pub const FtsIndex = struct {
                 // full dictionary scan so stale posting entries for doc_id do
                 // not survive removal (and resurrect on re-index under the
                 // same id).
-                self.removeDocumentByDictionaryScan(doc_id, &stats_update_failed) catch |err| {
-                    return err;
-                };
+                try self.removeDocumentByDictionaryScan(doc_id);
             }
         }
 
@@ -625,12 +629,6 @@ pub const FtsIndex = struct {
                 else => FtsError.IoError,
             };
         };
-
-        // If dictionary stats updates failed, report it
-        // The document is removed but stats may be inconsistent
-        if (stats_update_failed) {
-            return FtsError.DictionaryError;
-        }
     }
 
     /// Fallback cleanup path used when the reverse index has no terms for
@@ -646,7 +644,6 @@ pub const FtsIndex = struct {
     fn removeDocumentByDictionaryScan(
         self: *Self,
         doc_id: DocId,
-        stats_update_failed: *bool,
     ) FtsError!void {
         const PostingRef = struct {
             term: []u8,
@@ -686,25 +683,34 @@ pub const FtsIndex = struct {
         }
 
         for (refs.items) |ref| {
-            const result = self.posting_store.removeEntry(ref.posting_page, doc_id) catch continue;
-            if (!result.found) continue;
-
             const entry = (self.dictionary.get(ref.term) catch {
-                stats_update_failed.* = true;
-                continue;
+                return FtsError.DictionaryError;
             }) orelse continue;
-            self.dictionary.put(ref.term, entryAfterRemoval(entry, result.term_freq)) catch {
-                stats_update_failed.* = true;
-            };
+            try self.removeFromList(ref.term, entry, doc_id);
         }
     }
 
-    /// A term's entry once one document holding it `term_freq` times is gone.
-    fn entryAfterRemoval(entry: DictionaryEntry, term_freq: u32) DictionaryEntry {
+    /// Remove `doc_id` from `term`'s posting list and bring the term's entry
+    /// up to date. A list left with no entries is freed and its term leaves
+    /// the dictionary, so terms no document holds any more take no space
+    /// and are not counted.
+    fn removeFromList(self: *Self, term: []const u8, entry: DictionaryEntry, doc_id: DocId) FtsError!void {
+        if (entry.posting_page == 0) return;
+        const result = self.posting_store.removeEntry(entry.posting_page, doc_id) catch {
+            return FtsError.PostingError;
+        };
+        if (!result.found) return;
+
+        if (result.list_empty) {
+            self.posting_store.freeList(entry.posting_page) catch return FtsError.PostingError;
+            self.dictionary.remove(term) catch return FtsError.DictionaryError;
+            return;
+        }
         var updated = entry;
         updated.doc_freq -|= 1;
-        updated.total_freq -|= term_freq;
-        return updated;
+        updated.total_freq -|= result.term_freq;
+        if (result.tail != 0) updated.tail_page = result.tail;
+        self.dictionary.put(term, updated) catch return FtsError.DictionaryError;
     }
 
     // ========================================================================

@@ -557,12 +557,24 @@ pub const PostingStore = struct {
     pub const RemovalResult = struct {
         found: bool,
         term_freq: u32,
+        /// The list's last page, when the removal changed which page that
+        /// is; 0 when it did not.
+        tail: PageId = 0,
+        /// The list holds no entries now and is down to its head page,
+        /// which the caller should free along with the list's entry.
+        list_empty: bool = false,
     };
 
     /// Remove an entry from a posting list by doc_id
     /// Returns the term frequency of the removed entry if found
+    ///
+    /// The page the entry leaves takes in the next page's entries when they
+    /// fit, and the next page is freed; a last page left empty is unlinked
+    /// and freed. So pages that removals empty go back to the file, and two
+    /// neighbouring pages never stay together less than a page's worth.
     pub fn removeEntry(self: *Self, posting_page: PageId, target_doc_id: DocId) PostingError!RemovalResult {
         var current_page = posting_page;
+        var prev_page: PageId = 0;
 
         while (current_page != 0) {
             const frame = self.bp.fetchPage(current_page, .exclusive) catch {
@@ -648,23 +660,111 @@ pub const PostingStore = struct {
                 header.num_skip_pointers = 0;
 
                 header.write(data);
-                self.bp.unpinPage(frame, true);
 
                 // Free removed entry's positions
                 if (removed.positions) |pos| {
                     self.allocator.free(pos);
                 }
 
-                return .{ .found = true, .term_freq = removed.term_freq };
+                var result: RemovalResult = .{ .found = true, .term_freq = removed.term_freq };
+                self.mergeNextPage(current_page, data, &header, &result) catch |err| {
+                    self.bp.unpinPage(frame, true);
+                    return err;
+                };
+                self.bp.unpinPage(frame, true);
+
+                if (header.num_entries == 0 and header.next_page == 0) {
+                    if (prev_page == 0) {
+                        result.list_empty = true;
+                    } else {
+                        try self.unlinkLastPage(prev_page, current_page);
+                        result.tail = prev_page;
+                    }
+                }
+                return result;
             }
 
             // Entry not found in this page, try next
             const next_page = header.next_page;
             self.bp.unpinPage(frame, false);
+            prev_page = current_page;
             current_page = next_page;
         }
 
         return .{ .found = false, .term_freq = 0 };
+    }
+
+    /// Move the entries of the page after `page_id` onto it, when they fit
+    /// and are encoded the same way, and free that page. `data` and `header`
+    /// are `page_id`'s, pinned exclusively by the caller.
+    fn mergeNextPage(self: *Self, page_id: PageId, data: []u8, header: *PostingPageMeta, result: *RemovalResult) PostingError!void {
+        const next_id = header.next_page;
+        if (next_id == 0) return;
+        const next = self.bp.fetchPage(next_id, .shared) catch return PostingError.BufferPoolError;
+        const next_data = next.data;
+        if (pageHeaderConst(next_data).page_type != .fts_posting) {
+            self.bp.unpinPage(next, false);
+            return;
+        }
+        const next_meta = self.readPageMeta(next_data, true);
+        const used: usize = next_meta.data_end - next_meta.data_start;
+        const same_encoding = header.num_entries == 0 or next_meta.num_entries == 0 or
+            header.hasPositions() == next_meta.hasPositions();
+        if (!same_encoding or @as(usize, header.data_end) + used > PAGE_SIZE) {
+            self.bp.unpinPage(next, false);
+            return;
+        }
+
+        @memcpy(data[header.data_end..][0..used], next_data[next_meta.data_start..][0..used]);
+        if (header.num_entries == 0) {
+            header.flags = (header.flags & ~POSTING_ENTRY_FLAG_HAS_POSITIONS) |
+                (next_meta.flags & POSTING_ENTRY_FLAG_HAS_POSITIONS);
+        }
+        header.num_entries += next_meta.num_entries;
+        header.data_end += @intCast(used);
+        header.next_page = next_meta.next_page;
+        header.write(data);
+        self.bp.unpinPage(next, false);
+
+        self.bp.freePage(next_id) catch return PostingError.BufferPoolError;
+        if (header.next_page == 0) result.tail = page_id;
+    }
+
+    /// Unlink `page_id`, the empty last page of a list, from `prev_id`
+    /// before it, and free it.
+    fn unlinkLastPage(self: *Self, prev_id: PageId, page_id: PageId) PostingError!void {
+        const frame = self.bp.fetchPage(prev_id, .exclusive) catch return PostingError.BufferPoolError;
+        var meta = self.readPageMeta(frame.data, false);
+        if (meta.next_page != page_id) {
+            self.bp.unpinPage(frame, false);
+            return;
+        }
+        meta.next_page = 0;
+        meta.write(frame.data);
+        self.bp.unpinPage(frame, true);
+        self.bp.freePage(page_id) catch return PostingError.BufferPoolError;
+    }
+
+    /// Free every page of the list that starts at `head`.
+    ///
+    /// Stops at a page that is not a posting page, rather than freeing what
+    /// a damaged link points at, and after as many pages as the file holds,
+    /// so a chain that loops ends.
+    pub fn freeList(self: *Self, head: PageId) PostingError!void {
+        var current = head;
+        var budget = self.bp.pm.pageCount();
+        while (current != 0 and budget > 0) : (budget -= 1) {
+            if (!self.bp.pm.isValidPage(current)) return;
+            const frame = self.bp.fetchPage(current, .shared) catch return PostingError.BufferPoolError;
+            if (pageHeaderConst(frame.data).page_type != .fts_posting) {
+                self.bp.unpinPage(frame, false);
+                return;
+            }
+            const next = self.readPageMeta(frame.data, false).next_page;
+            self.bp.unpinPage(frame, false);
+            self.bp.freePage(current) catch return PostingError.BufferPoolError;
+            current = next;
+        }
     }
 
     /// Temporary storage for entry during rebuild
@@ -1490,4 +1590,100 @@ test "posting append trusts a tail hint only on a page of its own list" {
         try std.testing.expectEqual(list.want, count);
         try std.testing.expectEqual(list.last, last);
     }
+}
+
+test "posting removals free emptied pages and merge pages that fit together" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lse_posting_free_pages_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 128 * 4096);
+    defer bp.deinit();
+
+    var store = PostingStore.init(allocator, &bp);
+    const head = try store.createList();
+    var tail = head;
+    const n: DocId = 4000;
+    for (1..n + 1) |i| {
+        tail = try store.appendAt(head, head, tail, .{ .doc_id = @intCast(i), .term_freq = 1, .positions = null }, false);
+    }
+
+    const Walk = struct {
+        fn pages(s: *PostingStore, first: PageId, list: *[64]PageId) !usize {
+            var count: usize = 0;
+            var at = first;
+            while (at != 0) : (count += 1) {
+                list[count] = at;
+                const frame = try s.bp.fetchPage(at, .shared);
+                at = s.readPageMeta(frame.data, false).next_page;
+                s.bp.unpinPage(frame, false);
+            }
+            return count;
+        }
+    };
+    var pages: [64]PageId = undefined;
+    const before = try Walk.pages(&store, head, &pages);
+    try std.testing.expect(before >= 4);
+    try std.testing.expectEqual(tail, pages[before - 1]);
+
+    // Removing every other entry leaves each page half full, so each removal
+    // that brings a page and its successor within one page merges them.
+    var doc: DocId = 2;
+    while (doc <= n) : (doc += 2) {
+        const result = try store.removeEntry(head, doc);
+        try std.testing.expect(result.found);
+        try std.testing.expect(!result.list_empty);
+        if (result.tail != 0) tail = result.tail;
+    }
+    const halved = try Walk.pages(&store, head, &pages);
+    try std.testing.expect(halved <= before / 2 + 1);
+    try std.testing.expect(pm.deferredFrees().len >= before - halved);
+    try std.testing.expectEqual(tail, pages[halved - 1]);
+
+    // What is left still reads in order, and a hinted append lands at the end.
+    tail = try store.appendAt(head, head, tail, .{ .doc_id = n + 1, .term_freq = 1, .positions = null }, false);
+    {
+        var iter = try store.iterate(head);
+        defer iter.deinit();
+        var expect: DocId = 1;
+        while (try iter.next()) |entry| : (expect += 2) {
+            try std.testing.expectEqual(expect, entry.doc_id);
+        }
+        try std.testing.expectEqual(n + 3, expect);
+    }
+
+    // Emptying the list from the back frees each last page as it empties
+    // and reports the page before it as the new last page.
+    var remaining = n + 1;
+    while (remaining >= 1) : (remaining -= 2) {
+        const result = try store.removeEntry(head, remaining);
+        try std.testing.expect(result.found);
+        if (result.tail != 0) tail = result.tail;
+        if (remaining == 1) {
+            try std.testing.expect(result.list_empty);
+            break;
+        }
+        try std.testing.expect(!result.list_empty);
+        const count = try Walk.pages(&store, head, &pages);
+        try std.testing.expectEqual(tail, pages[count - 1]);
+    }
+    try std.testing.expectEqual(@as(usize, 1), try Walk.pages(&store, head, &pages));
+
+    try store.freeList(head);
+    try std.testing.expect(pm.isDeferredFree(head));
+    // A list already freed is not freed twice.
+    try store.freeList(head);
 }

@@ -161,7 +161,10 @@ pub fn highlight(
 
     // Group matches into snippet regions
     var regions: std.ArrayListUnmanaged(SnippetRegion) = .empty;
-    defer regions.deinit(allocator);
+    defer {
+        for (regions.items) |region| allocator.free(region.matches);
+        regions.deinit(allocator);
+    }
 
     var region_matches: std.ArrayListUnmanaged(Match) = .empty;
     defer region_matches.deinit(allocator);
@@ -224,16 +227,16 @@ pub fn highlight(
     // Build snippets from regions
     var snippets = allocator.alloc(Snippet, regions.items.len) catch
         return HighlightError.OutOfMemory;
+    // Only the snippets built so far have text to free.
+    var built: usize = 0;
     errdefer {
-        for (snippets) |s| {
+        for (snippets[0..built]) |s| {
             allocator.free(s.text);
         }
         allocator.free(snippets);
     }
 
     for (regions.items, 0..) |region, idx| {
-        defer allocator.free(region.matches);
-
         const snippet_text = try insertMarkers(
             allocator,
             text,
@@ -248,6 +251,7 @@ pub fn highlight(
             .doc_offset = region.start,
             .match_count = @intCast(region.matches.len),
         };
+        built += 1;
     }
 
     return HighlightResult{
@@ -614,5 +618,25 @@ test "highlight - context never splits a UTF-8 character" {
         try std.testing.expect(std.unicode.utf8ValidateSlice(snippet.text));
         try std.testing.expect(std.unicode.utf8ValidateSlice(text[snippet.doc_offset..]));
         try std.testing.expect(std.mem.indexOf(u8, snippet.text, "<em>database</em>") != null);
+    }
+}
+
+test "highlight - running out of memory frees what was built" {
+    const text = "data at start. " ++ "x" ** 100 ++ " data in middle. " ++ "x" ** 100 ++ " data at end.";
+    const terms = [_][]const u8{"data"};
+
+    var fail_index: usize = 0;
+    while (true) : (fail_index += 1) {
+        var failing = std.testing.FailingAllocator.init(std.testing.allocator, .{ .fail_index = fail_index });
+        const result = highlight(failing.allocator(), text, &terms, .{
+            .use_stemming = false,
+            .remove_stop_words = false,
+        }, .{ .context_chars = 10, .merge_distance = 20 }) catch |err| {
+            try std.testing.expectEqual(HighlightError.OutOfMemory, err);
+            continue;
+        };
+        try std.testing.expectEqual(@as(usize, 3), result.snippets.len);
+        freeResult(failing.allocator(), result);
+        break;
     }
 }

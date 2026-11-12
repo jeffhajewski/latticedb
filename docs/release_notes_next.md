@@ -709,9 +709,17 @@ with relationships is one range probe, under 1 µs.
   valid.
 - A full-text index whose declaration failed to reach the disk is no longer
   reported as existing.
+- `score(d)` survives a join: with two patterns in one `MATCH`
+  (`MATCH (p:Person), (d:Doc) WHERE d.text @@ 'x'`) it was null.
+- A `LIMIT` under `ORDER BY score(d) DESC` bounds the search under a named path
+  (`MATCH p = (d:Doc) WHERE ...`) too.
 
 **Vector search**
 
+- A `WHERE` of only `n.embedding <=> $q` after `WITH` (and in the new
+  `OPTIONAL MATCH`, subqueries and pattern comprehensions, where a `WHERE` is a
+  row filter) is refused with a message asking for a bound. It read the
+  distance as a condition: every row passed except an exact match, in no order.
 - `vector_search` with `k` above `ef_search` returns `k` results; it returned
   `ef_search` of them.
 - HNSW inserts and removes are all or nothing. `m` and `m_max0` are capped at 64.

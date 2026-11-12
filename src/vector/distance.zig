@@ -108,8 +108,11 @@ pub fn cosineDistance(a: []const f32, b: []const f32) f32 {
 /// Compute inner product distance (negative dot product)
 /// Returns: -sum(a[i] * b[i])
 /// Note: For normalized vectors, this is equivalent to cosine distance
+///
+/// Subtracted from zero rather than negated: orthogonal vectors have a dot
+/// product of +0, which negation turns into -0, printed as "-0.0".
 pub fn innerProductDistance(a: []const f32, b: []const f32) f32 {
-    return -dotProduct(a, b);
+    return 0.0 - dotProduct(a, b);
 }
 
 /// Compute dot product using SIMD
@@ -304,7 +307,8 @@ pub fn innerProductDistanceBatch4(
     v3: []const f32,
 ) [4]f32 {
     const dots = dotProductBatch4(query, v0, v1, v2, v3);
-    return .{ -dots[0], -dots[1], -dots[2], -dots[3] };
+    // As in innerProductDistance: zero minus, so that orthogonal is +0.
+    return .{ 0.0 - dots[0], 0.0 - dots[1], 0.0 - dots[2], 0.0 - dots[3] };
 }
 
 // ============================================================================
@@ -418,6 +422,19 @@ test "inner product distance - large vector (SIMD path)" {
     // dot = 512 * (1 * 2) = 1024
     const dist = innerProductDistance(&a, &b);
     try testing.expectApproxEqAbs(@as(f32, -1024.0), dist, 0.0001);
+}
+
+test "lfmt inner product distance of orthogonal vectors is +0, not -0" {
+    const a = [_]f32{ 1.0, 0.0 };
+    const b = [_]f32{ 0.0, 2.0 };
+    const dist = innerProductDistance(&a, &b);
+    try testing.expectEqual(@as(f32, 0.0), dist);
+    try testing.expect(!std.math.signbit(dist));
+    const batch = innerProductDistanceBatch4(&a, &b, &b, &a, &b);
+    for (batch, 0..) |d, i| {
+        if (i == 2) continue;
+        try testing.expect(!std.math.signbit(d));
+    }
 }
 
 test "dot product" {

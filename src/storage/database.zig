@@ -3647,8 +3647,16 @@ pub const Database = struct {
         if (catalog.has(other_kind) catch |err| return mapFtsCatalogError(err)) {
             return DatabaseError.AlreadyExists;
         }
-        try self.populateFtsDefinition(definition);
-        catalog.create(definition) catch |err| return mapFtsCatalogError(err);
+        // Indexing appends, so whatever an earlier attempt that failed part way
+        // left under this scope would be indexed a second time. Start from an
+        // empty scope, as `createPropertyIndex` does, and leave one behind if
+        // this attempt fails before the declaration is recorded.
+        try self.clearFtsDefinition(definition);
+        {
+            errdefer self.clearFtsDefinition(definition) catch {};
+            try self.populateFtsDefinition(definition);
+            catalog.create(definition) catch |err| return mapFtsCatalogError(err);
+        }
         self.fts_declared = true;
         try self.sync();
         self.page_manager.sync() catch return DatabaseError.IoError;

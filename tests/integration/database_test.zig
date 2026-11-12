@@ -5595,6 +5595,52 @@ test "database: fuzzy search inside a transaction sees pending edges and fills i
     try std.testing.expectEqual(long, nodes[0].doc_id);
 }
 
+test "database: retrying a full-text declaration that failed part way indexes each document once" {
+    // Fail the declaration at every allocation in turn, then retry it. Whatever
+    // the failed attempt wrote must not be added to by the retry.
+    var fail_at: usize = 0;
+    var failures: usize = 0;
+    while (true) : (fail_at += 1) {
+        var failing = std.testing.FailingAllocator.init(std.heap.smp_allocator, .{});
+        const db = try Database.open(failing.allocator(), ":memory:", .{
+            .create = true,
+            .config = .{ .enable_fts = true, .enable_vector = false },
+        });
+        defer db.close();
+
+        var ids: [12]u64 = undefined;
+        for (&ids, 0..) |*id, i| {
+            id.* = try db.createNode(null, &[_][]const u8{"Doc"});
+            var text_buf: [64]u8 = undefined;
+            const text = try std.fmt.bufPrint(&text_buf, "shared word{c}", .{@as(u8, @intCast('a' + i))});
+            try db.setNodeProperty(null, id.*, "body", .{ .string_val = text });
+        }
+
+        failing.fail_index = failing.alloc_index + fail_at;
+        const first = db.createNodeFtsIndex("Doc", "body");
+        failing.fail_index = std.math.maxInt(usize);
+        if (first) |_| break else |_| failures += 1;
+
+        // A failure after the declaration was recorded (while syncing it)
+        // leaves the index declared, so the retry finds it there.
+        db.createNodeFtsIndex("Doc", "body") catch |err| switch (err) {
+            error.AlreadyExists => {},
+            else => return err,
+        };
+        const results = try db.ftsSearchIndex(.node, "Doc", "body", "shared", 100);
+        defer db.freeFtsSearchResults(results);
+        try std.testing.expectEqual(ids.len, results.len);
+        for (ids) |id| {
+            var count: usize = 0;
+            for (results) |r| {
+                if (r.doc_id == id) count += 1;
+            }
+            try std.testing.expectEqual(@as(usize, 1), count);
+        }
+    }
+    try std.testing.expect(failures > 0);
+}
+
 test "database: a node and an edge full-text index cannot share a name and property" {
     const allocator = std.testing.allocator;
     const db = try Database.open(allocator, ":memory:", .{

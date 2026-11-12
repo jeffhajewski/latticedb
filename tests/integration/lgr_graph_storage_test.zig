@@ -545,6 +545,51 @@ test "lgr: an ordered index answers ranges and ORDER BY ... LIMIT exactly as a s
     try compareAll(indexed, plain, null, null);
 }
 
+test "lgr: rows a sort finds equal keep their order when a range on another property finds them" {
+    const path_i = "/tmp/lgr_ties_indexed.ltdb";
+    const path_p = "/tmp/lgr_ties_plain.ltdb";
+    defer removeFiles(path_i);
+    defer removeFiles(path_p);
+    var indexed = try openDb(path_i, true);
+    defer indexed.close();
+    var plain = try openDb(path_p, true);
+    defer plain.close();
+
+    for ([_]*Database{ indexed, plain }) |db| {
+        var txn = try db.beginTransaction(.read_write);
+        try fillMixed(db, &txn, 700);
+        try db.commitTransaction(&txn);
+    }
+    // A range on w answers `WHERE n.w > 3`, and finds the nodes in w's
+    // order; the sort on v must then see them as a label scan offers them.
+    try indexed.createNodePropertyIndex("P", "v");
+    try indexed.createNodePropertyIndex("P", "w");
+    const Kind = lattice.query.planner.QueryPlanner.ScanKind;
+    try std.testing.expectEqual(Kind.property_range_scan, try planScanKind(indexed, "MATCH (n:P) WHERE n.w > 3 RETURN n.id ORDER BY n.v LIMIT 12"));
+
+    const queries = [_][]const u8{
+        "MATCH (n:P) WHERE n.w > 3 RETURN n.id, n.v ORDER BY n.v LIMIT 12",
+        "MATCH (n:P) WHERE n.w > 3 RETURN n.id, n.v ORDER BY n.v DESC LIMIT 12",
+        "MATCH (n:P) WHERE n.w >= 2 AND n.w < 9 RETURN n.id, n.v ORDER BY n.v SKIP 5 LIMIT 20",
+        "MATCH (n:P) WHERE n.w > 3 WITH n ORDER BY n.v LIMIT 9 RETURN n.id",
+        // The range is the inner scan: its order decides ties within each
+        // outer row.
+        "MATCH (a:P), (b:P) WHERE a.id < 3 AND b.w > 8 RETURN a.id, b.id ORDER BY a.id LIMIT 10",
+    };
+    for (queries) |cypher| try expectSameAnswer(indexed, plain, null, null, cypher);
+
+    var ti = try indexed.beginTransaction(.read_write);
+    var tp = try plain.beginTransaction(.read_write);
+    for ([_]*Database{ indexed, plain }, [_]*lattice.transaction.manager.Transaction{ &ti, &tp }) |db, txn| {
+        try fillMixed(db, txn, 60);
+        var id: u64 = 3;
+        while (id < 700) : (id += 29) try db.setNodeProperty(txn, id, "w", .{ .int_val = @intCast(id % 10) });
+    }
+    for (queries) |cypher| try expectSameAnswer(indexed, plain, &ti, &tp, cypher);
+    try indexed.commitTransaction(&ti);
+    try plain.commitTransaction(&tp);
+}
+
 test "lgr: ORDER BY ... LIMIT is not read in index order under a vector search" {
     const path = "/tmp/lgr_order_vector.ltdb";
     removeFiles(path);

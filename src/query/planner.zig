@@ -221,6 +221,11 @@ pub const QueryPlanner = struct {
     order_hint: ?OrderHint = null,
     /// Set once a scan reads in that order: the sort key to cut off on.
     order_cutoff_key: ?*const ast.Expression = null,
+    /// The query sorts somewhere (an ORDER BY after RETURN or WITH), so a
+    /// range scan that does not read in the sort's order returns its nodes
+    /// in id order, as a label scan does: rows the sort finds equal then
+    /// keep the order they have without the index.
+    query_sorts: bool = false,
 
     const OrderHint = struct {
         variable: []const u8,
@@ -308,6 +313,7 @@ pub const QueryPlanner = struct {
         self.consumed_conjuncts.clearRetainingCapacity();
         self.order_hint = orderHintFor(query.clauses);
         self.order_cutoff_key = null;
+        self.query_sorts = hasOrderBy(query.clauses);
         self.subquery_plans = .empty;
         self.has_subqueries = query.subqueries.len > 0;
 
@@ -542,6 +548,7 @@ pub const QueryPlanner = struct {
         // index in its own order; no query's order may reach another's scan.
         self.order_hint = orderHintFor(clauses);
         self.order_cutoff_key = null;
+        self.query_sorts = hasOrderBy(clauses);
         return (try self.planClauses(clauses)) orelse PlannerError.InvalidQuery;
     }
 
@@ -1411,6 +1418,7 @@ pub const QueryPlanner = struct {
                                 choice.descending,
                                 database,
                             ) catch return PlannerError.OutOfMemory;
+                            range_scan.id_order = choice.id_order;
                             self.last_scan_kind = if (choice.conditions.len == 0) .property_order_scan else .property_range_scan;
                             break :blk range_scan.operator();
                         } else blk: {
@@ -2029,6 +2037,8 @@ pub const QueryPlanner = struct {
         conditions: []const range_ops.Condition,
         /// Read from the last value down.
         descending: bool,
+        /// Return the range's nodes in id order (see `query_sorts`).
+        id_order: bool,
     };
 
     const RangeConjunct = struct {
@@ -2122,6 +2132,7 @@ pub const QueryPlanner = struct {
             .property = property,
             .conditions = conditions.toOwnedSlice(self.allocator) catch return PlannerError.OutOfMemory,
             .descending = ordered and hint.?.descending,
+            .id_order = !ordered and self.query_sorts,
         };
     }
 
@@ -2267,6 +2278,13 @@ pub const QueryPlanner = struct {
         const result = self.allocator.create(ast.Expression) catch return PlannerError.OutOfMemory;
         result.* = .{ .binary = narrowed };
         return result;
+    }
+
+    fn hasOrderBy(clauses: []const ast.Clause) bool {
+        for (clauses) |clause| {
+            if (clause == .order_by) return true;
+        }
+        return false;
     }
 
     /// The ORDER BY a query's first scan could serve in order: a single

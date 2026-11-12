@@ -192,7 +192,11 @@ which holds the nodes that lack the property too, after every value. It reads
 forward for an ascending sort and backward, from the last leaf down, for a
 descending one; backward, the index gives equal values highest id first, so
 the scan collects each run of equal keys and returns it lowest id first, the
-order a stable sort leaves a label scan's rows in.
+order a stable sort leaves a label scan's rows in. When the query sorts on
+something the range does not read in order (`WHERE n.w > 3 ... ORDER BY n.v`),
+the scan collects the range's ids and returns them in id order, so rows the
+sort finds equal come as they would from a label scan and a `LIMIT` that cuts
+through them keeps the same ones.
 
 **OrderedCutoff** (same file): Placed under the Sort of `ORDER BY n.p [SKIP s]
 LIMIT k` when the scan below reads `p`'s index in order. It passes rows through

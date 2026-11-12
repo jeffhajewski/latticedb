@@ -96,6 +96,11 @@ pub const IndexRangeScan = struct {
     database: *Database,
     evaluator: ExpressionEvaluator,
     edges: ?EdgeOutput = null,
+    /// Return the nodes in id order rather than the index's, for a sort
+    /// above that the index does not serve: it reads them all anyway, and
+    /// keeps rows it finds equal in the order they come, which is then the
+    /// label scan's. Takes every id when it opens.
+    id_order: bool = false,
 
     current_row: ?*Row = null,
     state: ?State = null,
@@ -257,10 +262,11 @@ pub const IndexRangeScan = struct {
             while (try self.nextEdge(ctx)) |ref| refs.append(self.allocator, ref) catch return OperatorError.OutOfMemory;
             self.refs = refs.toOwnedSlice(self.allocator) catch return OperatorError.OutOfMemory;
             self.ids_pos = 0;
-        } else if (!ctx.stable_reads) {
+        } else if (!ctx.stable_reads or self.id_order) {
             var ids: std.ArrayList(NodeId) = .empty;
             errdefer ids.deinit(self.allocator);
             while (try self.nextId(ctx)) |id| ids.append(self.allocator, id) catch return OperatorError.OutOfMemory;
+            if (self.id_order) std.mem.sort(NodeId, ids.items, {}, std.sort.asc(NodeId));
             self.ids = ids.toOwnedSlice(self.allocator) catch return OperatorError.OutOfMemory;
             self.ids_pos = 0;
         }

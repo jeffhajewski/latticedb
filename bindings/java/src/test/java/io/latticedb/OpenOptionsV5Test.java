@@ -142,6 +142,24 @@ class OpenOptionsV5Test {
     }
 
     @Test
+    void commitThatReportsTxnAbortedEndsTheTransaction() {
+        try (Database db = Database.open(dir.resolve("aborted-commit.db").toString(),
+                OpenOptions.defaults().create(true))) {
+            Transaction tx = db.beginWrite();
+            tx.createNode(List.of("N"));
+            // Retire the native handle behind the wrapper's back, so the
+            // wrapper's own commit gets TXN_ABORTED from the C side.
+            Native.commit(tx.handle());
+
+            assertCode(ErrorCode.TXN_ABORTED, tx::commit);
+            assertFalse(tx.isActive());
+            // Nothing is left to roll back; this must not reach the retired
+            // handle and throw again.
+            assertDoesNotThrow(tx::close);
+        }
+    }
+
+    @Test
     void edgeToMissingNodeIsNotFound() {
         try (Database db = Database.open(dir.resolve("edge.db").toString(),
                 OpenOptions.defaults().create(true))) {

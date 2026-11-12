@@ -38,10 +38,27 @@ public final class Transaction implements AutoCloseable {
         return active;
     }
 
-    /** Commits the transaction. A committed handle must not be reused. */
+    /**
+     * Commits the transaction. A committed handle must not be reused.
+     *
+     * <p>If the commit fails with {@link ErrorCode#TXN_ABORTED}, the native
+     * transaction is already gone and this one is over: {@link #rollback()}
+     * and {@link #close()} then do nothing. After any other failure it stays
+     * open, and closing it rolls it back.</p>
+     */
     public synchronized void commit() {
         ensureActive();
-        Native.commit(handle);
+        try {
+            Native.commit(handle);
+        } catch (LatticeException e) {
+            if (e.getErrorCode() == ErrorCode.TXN_ABORTED) {
+                // The native side has retired the handle; it cannot be
+                // committed or rolled back again.
+                handle = 0;
+                active = false;
+            }
+            throw e;
+        }
         handle = 0;
         active = false;
     }

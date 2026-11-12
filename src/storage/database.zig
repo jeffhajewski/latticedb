@@ -412,7 +412,7 @@ pub const DatabaseConfig = struct {
     vector_ef_construction: ?u16 = null,
     /// Keep an in-memory adjacency cache. Only `getOutgoingEdgesCached` reads
     /// it; the query engine and the C API do not, so for them it speeds up
-    /// nothing and costs an invalidation on each edge write.
+    /// nothing and costs a hash lookup for each committed edge change.
     enable_adjacency_cache: bool = false,
     /// Enable query cache for parsed ASTs
     enable_query_cache: bool = true,
@@ -3124,6 +3124,7 @@ pub const Database = struct {
                     edge_mod.EdgeError.NotFound => {},
                     else => return DatabaseError.IoError,
                 };
+                self.forgetCachedAdjacency(current.?.source);
                 if (self.property_index) |*index| {
                     const existing = current.?;
                     index.removeEdge(edge_id, existing.edge_type, existing.properties) catch |err| return mapPropertyIndexError(err);
@@ -3150,16 +3151,18 @@ pub const Database = struct {
                 return mapEdgeStoreError(err);
             };
         } else {
-            if (current != null) {
+            if (current) |existing| {
                 self.edge_store.deleteById(edge_id) catch |err| switch (err) {
                     edge_mod.EdgeError.NotFound => {},
                     else => return DatabaseError.IoError,
                 };
+                self.forgetCachedAdjacency(existing.source);
             }
 
             self.edge_store.createWithId(edge_id, state.source, state.target, state.edge_type, state.properties) catch |err| {
                 return mapEdgeStoreError(err);
             };
+            self.forgetCachedAdjacency(state.source);
         }
         if (self.property_index) |*index| {
             const old_type: ?symbols_mod.SymbolId = if (current) |existing| existing.edge_type else null;
@@ -3173,8 +3176,18 @@ pub const Database = struct {
         }
     }
 
+    /// The adjacency cache holds committed edges, so it changes when a
+    /// commit applies an edge, not when a transaction stages one.
+    fn forgetCachedAdjacency(self: *Self, source: NodeId) void {
+        if (self.adjacency_cache) |*cache| cache.invalidate(source);
+    }
+
     /// Execute a single undo operation
     fn executeUndo(self: *Self, entry: UndoEntry) !void {
+        // An undo entry does not always say which node an edge left from.
+        if (entry.entity_type == .edge) {
+            if (self.adjacency_cache) |*cache| cache.clear();
+        }
         switch (entry.entity_type) {
             .node => switch (entry.op_type) {
                 // Undo of insert is delete
@@ -7508,10 +7521,6 @@ pub const Database = struct {
                     .properties = emptyProperties(self.allocator) catch return DatabaseError.OutOfMemory,
                 });
                 overlay.markDirty();
-
-                if (self.adjacency_cache) |*cache| {
-                    cache.invalidate(source);
-                }
                 return edge_id;
             }
         }
@@ -7603,11 +7612,6 @@ pub const Database = struct {
                     .properties = cloneProperties(self.allocator, existing.properties) catch return DatabaseError.OutOfMemory,
                 });
                 overlay.markDirty();
-
-                if (self.adjacency_cache) |*cache| {
-                    cache.invalidate(source);
-                    cache.invalidate(target);
-                }
                 return;
             }
         }
@@ -7700,11 +7704,6 @@ pub const Database = struct {
                         .properties = cloneProperties(self.allocator, owned_state.properties) catch return DatabaseError.OutOfMemory,
                     });
                     overlay.markDirty();
-
-                    if (self.adjacency_cache) |*cache| {
-                        cache.invalidate(owned_state.source);
-                        cache.invalidate(owned_state.target);
-                    }
                     return;
                 }
                 return DatabaseError.NotFound;
@@ -8414,7 +8413,9 @@ pub const Database = struct {
     /// Get cached outgoing edges for a node. If the adjacency cache is enabled
     /// and the node is cached, returns the cached slice directly (no B+Tree access).
     /// On cache miss, populates the cache from the B+Tree and returns the result.
-    /// Falls back to the uncached iterator path if the cache is disabled.
+    /// Returns null if the cache is disabled; the caller then iterates the edges.
+    /// The edges are the committed ones: a transaction's staged edges are not
+    /// in it until it commits. The slice is valid until the next edge change.
     pub fn getOutgoingEdgesCached(self: *Self, node_id: NodeId) !?[]const CachedEdge {
         if (self.adjacency_cache) |*cache| {
             if (cache.get(node_id)) |edges| {

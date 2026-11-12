@@ -849,3 +849,69 @@ test "lgr: a pattern from a relationship type walks the edges once, with the sam
     try db.commitTransaction(&txn);
     try compareTypePatterns(db, null);
 }
+
+fn cachedTargets(db: *Database, node: u64) ![]u64 {
+    const edges = (try db.getOutgoingEdgesCached(node)) orelse return error.TestUnexpectedResult;
+    const targets = try std.testing.allocator.alloc(u64, edges.len);
+    for (edges, targets) |edge, *target| target.* = edge.target;
+    std.mem.sort(u64, targets, {}, std.sort.asc(u64));
+    return targets;
+}
+
+test "lgr: the adjacency cache follows commits, not staged writes" {
+    const path = "/tmp/lgr_adjacency_cache.ltdb";
+    defer removeFiles(path);
+    removeFiles(path);
+    var db = try Database.open(std.testing.allocator, path, .{
+        .create = true,
+        .config = .{ .enable_fts = false, .enable_vector = false, .enable_adjacency_cache = true },
+    });
+    defer db.close();
+
+    var txn = try db.beginTransaction(.read_write);
+    const a = try db.createNode(&txn, &.{"P"});
+    const b = try db.createNode(&txn, &.{"P"});
+    const c = try db.createNode(&txn, &.{"P"});
+    _ = try db.createEdgeAndGetId(&txn, a, b, "KNOWS");
+    try db.commitTransaction(&txn);
+
+    // An edge staged and then committed, with the cache read in between.
+    txn = try db.beginTransaction(.read_write);
+    const ac = try db.createEdgeAndGetId(&txn, a, c, "KNOWS");
+    {
+        const targets = try cachedTargets(db, a);
+        defer std.testing.allocator.free(targets);
+        try std.testing.expectEqualSlices(u64, &.{b}, targets);
+    }
+    try db.commitTransaction(&txn);
+    {
+        const targets = try cachedTargets(db, a);
+        defer std.testing.allocator.free(targets);
+        try std.testing.expectEqualSlices(u64, &.{ b, c }, targets);
+    }
+
+    // The same for a delete.
+    txn = try db.beginTransaction(.read_write);
+    try db.deleteEdgeById(&txn, ac);
+    {
+        const targets = try cachedTargets(db, a);
+        defer std.testing.allocator.free(targets);
+        try std.testing.expectEqualSlices(u64, &.{ b, c }, targets);
+    }
+    try db.commitTransaction(&txn);
+    {
+        const targets = try cachedTargets(db, a);
+        defer std.testing.allocator.free(targets);
+        try std.testing.expectEqualSlices(u64, &.{b}, targets);
+    }
+
+    // A transaction that is rolled back leaves the cache as it was.
+    txn = try db.beginTransaction(.read_write);
+    _ = try db.createEdgeAndGetId(&txn, a, c, "KNOWS");
+    try db.abortTransaction(&txn);
+    {
+        const targets = try cachedTargets(db, a);
+        defer std.testing.allocator.free(targets);
+        try std.testing.expectEqualSlices(u64, &.{b}, targets);
+    }
+}

@@ -1,11 +1,17 @@
 //! In-memory adjacency cache for accelerating graph traversals.
 //!
 //! Maps NodeId → []CachedEdge to bypass B+Tree lookups for repeated
-//! traversals. Populated lazily on first access, invalidated on edge mutations.
-//! Opt-in via DatabaseConfig.enable_adjacency_cache.
+//! traversals. Populated lazily on first access. Opt-in via
+//! DatabaseConfig.enable_adjacency_cache.
+//!
+//! It holds committed edges only: an entry is dropped when a commit (or a
+//! write without a transaction) changes an edge leaving that node, not when
+//! a transaction stages one, so a read in the middle of a transaction does
+//! not leave it stale after the commit.
 //!
 //! Only `Database.getOutgoingEdgesCached` reads it, and only the graph
 //! benchmarks call that; the query engine and the C API traverse the B+Tree.
+//! An entry has no edge id and no incoming side, which an expand needs.
 
 const std = @import("std");
 const lattice = @import("lattice");
@@ -22,8 +28,9 @@ pub const CachedEdge = struct {
 };
 
 /// In-memory adjacency cache that maps NodeId → outgoing edges.
-/// Bypasses the B+Tree entirely for cached nodes, providing ~50ns lookups
-/// vs ~32μs for uncached B+Tree traversals.
+/// Bypasses the B+Tree entirely for cached nodes: a warm breadth-first walk
+/// of 8,000 nodes and 40,000 edges took 0.27 ms with it and 3.0 ms with an
+/// edge iterator per node (`zig build graph-benchmark -- --quick`).
 pub const AdjacencyCache = struct {
     map: std.AutoHashMap(NodeId, []CachedEdge),
     allocator: Allocator,

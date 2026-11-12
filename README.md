@@ -374,6 +374,8 @@ Only the SQLite rows are measured head to head on the same machine in the same h
 
 LatticeDB uses BFS with adjacency cache and bitset visited tracking. SQLite uses a recursive CTE with `UNION` deduplication. In this depth-limited test both compute identical reachable node sets (~8K nodes). `UNION` deduplicates on (node, depth), so SQLite expands a node again at every depth it is reached, while the visited bitset expands each node once; the gap measures that difference in algorithm and widens with depth. Run `zig build graph-benchmark -- --quick` to reproduce.
 
+The LatticeDB side of these traversal tables is Zig code calling the storage layer in process, and the adjacency cache it reads is not used by Cypher queries or the C API, which read edges from the B+Tree (`enable_adjacency_cache` is accepted there and changes nothing). Without the cache the same BFS took 3.0 ms at depths 10 and 15, 3.3 ms at 25 and 4.5 ms at 50, against 0.21 to 0.28 ms with it in a run on the same machine. A query has no reachability operator: `MATCH (a)-[*1..k]->(b) RETURN count(DISTINCT b)` enumerates paths, so on a similar 10K-node graph from a hub it took 3.7 ms at `k = 2` and 37 ms at `k = 3` (130K paths to 9.8K nodes) and grows with the number of paths, not nodes.
+
 In the 1-hop to variable-path tables above (`zig build sqlite-benchmark`), the two sides do not run the same work: LatticeDB counts paths with raw edge iterators, with no edge-type filter and no deduplication, while SQLite runs `SELECT DISTINCT` with a type filter and a join. LatticeDB runs with the WAL off in all of these benchmarks.
 
 #### Full-Text Search (BM25)

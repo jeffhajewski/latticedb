@@ -294,3 +294,19 @@ test "lcy: RETURN * with nothing in scope is an error" {
     // With other items, an empty * is fine.
     try expectResult(db, "RETURN *, 1 AS one", "one\n1");
 }
+
+// ============================================================================
+// Small fixes
+// ============================================================================
+
+test "lcy: properties() of a map is the map" {
+    const path = "/tmp/lcy_properties_map.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+
+    try expectResult(db, "RETURN properties({a: 1, b: 'x'}) AS p", "p\n{a: 1, b: \"x\"}");
+    try expectResult(db, "RETURN properties({}) AS p", "p\n{}");
+    try expectResult(db, "WITH {a: {b: 2}} AS m RETURN properties(m.a) AS p", "p\n{b: 2}");
+    try expectResult(db, "RETURN properties(null) AS p", "p\nnull");
+    try expectFailure(db, "RETURN properties([1])", .execution, "properties(list) is not defined");
+}

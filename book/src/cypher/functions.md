@@ -100,7 +100,7 @@ RETURN n.name, toFloat(n.age) AS float_age
 | `range(start, end[, step])` | A list of integers from `start` to `end`, inclusive; a step of 0, or more than ten million elements, fails the query |
 | `type(r)` | A relationship's type |
 | `labels(n)` | A node's labels, as a list |
-| `properties(x)` | A node's or relationship's properties, as a map |
+| `properties(x)` | A node's or relationship's properties, as a map; a map is returned as it is |
 | `score(d)` | The BM25 score of the full-text search that matched `d`; see [Full-Text Search](./full-text-search.md#reading-the-score) |
 
 `IN` tests list membership (`n.age IN [30, 40]`). `=~` matches a regular

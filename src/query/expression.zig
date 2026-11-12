@@ -1726,6 +1726,9 @@ pub const ExpressionEvaluator = struct {
                 return .{ .map_val = entries.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory };
             } else if (arg == .null_val) {
                 return .{ .null_val = {} };
+            } else if (arg == .map_val) {
+                // A map's properties are its entries.
+                return arg;
             }
             return EvalError.TypeError;
         }

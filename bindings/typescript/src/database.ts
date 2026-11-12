@@ -698,7 +698,8 @@ export class Database {
  * configuration they record, and any vector option that is set must match it
  * (code -18, `ConfigMismatch`, otherwise); `enableVectors` creates an index,
  * configured by the vector options, in bytes that have none. `syncMode`,
- * `fullFsync`, `vectorMetric`, `vectorM` and `vectorEfConstruction` need a
+ * `fullFsync`, `vectorMetric`, `vectorM`, `vectorEfConstruction` and
+ * `changefeedRetention` (which sets the policy as an open does) need a
  * native library with `lattice_deserialize_v5`; against an older one, setting
  * any of them throws with code -14 (`Unsupported`).
  *
@@ -737,6 +738,7 @@ export function deserialize(
     vectorMetric: options.vectorMetric,
     vectorM: options.vectorM,
     vectorEfConstruction: options.vectorEfConstruction,
+    changefeedRetention: options.changefeedRetention,
   }, copy);
 
   // The handle is already open, so the wrapper is attached to it rather than

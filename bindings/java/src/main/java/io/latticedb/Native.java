@@ -31,7 +31,8 @@ final class Native {
                                    boolean enableWal, boolean enableAdjacencyCache,
                                    boolean lock, int syncMode, int fullFsync,
                                    int vectorMetric, int vectorM,
-                                   int vectorEfConstruction);
+                                   int vectorEfConstruction, int changefeedRetention,
+                                   long changefeedRetentionValue);
 
     static native void close(long db);
 

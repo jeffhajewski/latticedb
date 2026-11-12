@@ -196,6 +196,18 @@ class TestDeserializeV5:
         finally:
             db.close()
 
+    @pytest.mark.parametrize("copy", [True, False])
+    def test_changefeed_retention_sets_the_policy(self, tmp_path, copy):
+        _require_deserialize_v5()
+        with Database(tmp_path / "deser_feed.db", create=True) as db:
+            data = db.serialize()
+
+        db = deserialize(data, changefeed_retention="last:5", copy=copy)
+        try:
+            assert db.changefeed_status().retention == "last:5"
+        finally:
+            db.close()
+
     def test_v5_only_option_without_v5_is_unsupported(self, tmp_path, monkeypatch):
         with Database(tmp_path / "deser_v4.db", create=True) as db:
             data = db.serialize()
@@ -205,6 +217,8 @@ class TestDeserializeV5:
         for copy in (True, False):
             with pytest.raises(LatticeUnsupportedError):
                 deserialize(data, sync_mode="normal", copy=copy)
+            with pytest.raises(LatticeUnsupportedError):
+                deserialize(data, changefeed_retention="off", copy=copy)
             # Without any v5-only option, the v4 path still opens.
             deserialize(data, copy=copy).close()
 

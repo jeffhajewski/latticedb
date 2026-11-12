@@ -406,6 +406,25 @@ describeIfNative('deserialize with v5 options', () => {
           await db.close();
         }
       });
+
+      test('changefeedRetention sets the policy, as an open does', async () => {
+        if (!hasDeserializeV5()) return;
+        const plain = new Database(path.join(dir, 'feed.db'), { create: true });
+        await plain.open();
+        let bytes: Uint8Array;
+        try {
+          bytes = plain.serialize();
+        } finally {
+          await plain.close();
+        }
+
+        const db = deserialize(bytes, { changefeedRetention: 'last:5' }, copy);
+        try {
+          expect((await db.changefeedStatus()).retention).toBe('last:5');
+        } finally {
+          await db.close();
+        }
+      });
     });
   }
 
@@ -430,6 +449,9 @@ describeIfNative('deserialize with v5 options', () => {
     try {
       for (const copy of [true, false]) {
         expect(codeOfSync(() => deserialize(bytes, { syncMode: 'normal' }, copy))).toBe(
+          LatticeErrorCode.Unsupported
+        );
+        expect(codeOfSync(() => deserialize(bytes, { changefeedRetention: 'off' }, copy))).toBe(
           LatticeErrorCode.Unsupported
         );
         // Without any v5-only option, the v4 entry point still opens.

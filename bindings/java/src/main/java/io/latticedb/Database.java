@@ -78,7 +78,8 @@ public final class Database implements AutoCloseable {
                 options.enableAdjacencyCache(), options.lock(),
                 options.syncModeCode(), options.fullFsyncCode(),
                 options.vectorMetricCode(), options.vectorM(),
-                options.vectorEfConstruction());
+                options.vectorEfConstruction(), options.changefeedRetentionMode(),
+                options.changefeedRetentionValue());
         return new Database("<deserialized>", options, handle);
     }
 

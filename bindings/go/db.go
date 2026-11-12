@@ -102,20 +102,26 @@ func (db *DB) Serialize() ([]byte, error) {
 // other, and nothing reports an error when they do.
 func Deserialize(data []byte, opts OpenOptions) (*DB, error) {
 	opts = opts.withDefaults()
+	retention, retentionValue, err := changefeedRetentionCode(opts.ChangefeedRetention)
+	if err != nil {
+		return nil, err
+	}
 
 	raw, err := cgobridge.Deserialize(data, cgobridge.OpenOptions{
-		CacheSizeMB:          opts.CacheSizeMB,
-		PageSize:             opts.PageSize,
-		EnableWAL:            opts.EnableWAL,
-		EnableAdjacencyCache: opts.EnableAdjacencyCache,
-		EnableVector:         opts.vectorsEnabled(),
-		VectorDimensions:     opts.VectorDimensions,
-		Lock:                 !opts.DisableLock,
-		SyncMode:             uint8(opts.SyncMode),
-		FullFsync:            uint8(opts.FullFsync),
-		VectorMetric:         uint8(opts.VectorMetric),
-		VectorM:              opts.VectorM,
-		VectorEfConstruction: opts.VectorEfConstruction,
+		CacheSizeMB:              opts.CacheSizeMB,
+		PageSize:                 opts.PageSize,
+		EnableWAL:                opts.EnableWAL,
+		EnableAdjacencyCache:     opts.EnableAdjacencyCache,
+		EnableVector:             opts.vectorsEnabled(),
+		VectorDimensions:         opts.VectorDimensions,
+		Lock:                     !opts.DisableLock,
+		SyncMode:                 uint8(opts.SyncMode),
+		FullFsync:                uint8(opts.FullFsync),
+		VectorMetric:             uint8(opts.VectorMetric),
+		VectorM:                  opts.VectorM,
+		VectorEfConstruction:     opts.VectorEfConstruction,
+		ChangefeedRetention:      retention,
+		ChangefeedRetentionValue: retentionValue,
 	})
 	if err != nil {
 		return nil, wrapError(err)

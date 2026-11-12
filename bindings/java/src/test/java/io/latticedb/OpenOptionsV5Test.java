@@ -123,6 +123,19 @@ class OpenOptionsV5Test {
     }
 
     @Test
+    void deserializeChangefeedRetentionSetsThePolicy() {
+        byte[] bytes;
+        try (Database db = Database.open(dir.resolve("deser-feed.db").toString(),
+                OpenOptions.defaults().create(true))) {
+            bytes = db.serialize();
+        }
+        try (Database db = Database.deserialize(bytes,
+                OpenOptions.defaults().changefeedRetention("last:5"))) {
+            assertEquals("last:5", db.changefeedStatus().retention());
+        }
+    }
+
+    @Test
     void vectorDimensionsZeroMeansTheFiles() {
         String path = dir.resolve("zero-dims.db").toString();
         long id;

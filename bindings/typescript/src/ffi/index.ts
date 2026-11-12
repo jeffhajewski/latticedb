@@ -591,6 +591,9 @@ export class LatticeFFI {
     const vectorMetric = vectorMetricCode(options.vectorMetric);
     const vectorM = options.vectorM ?? 0;
     const vectorEfConstruction = options.vectorEfConstruction ?? 0;
+    const [changefeedRetention, changefeedRetentionValue] = changefeedRetentionCode(
+      options.changefeedRetention
+    );
 
     const v4Opts = {
       struct_size: koffi.sizeof('lattice_open_options_v4'),
@@ -615,15 +618,24 @@ export class LatticeFFI {
         vector_metric: vectorMetric,
         vector_m: vectorM,
         vector_ef_construction: vectorEfConstruction,
+        changefeed_retention: changefeedRetention,
+        changefeed_retention_value: changefeedRetentionValue,
       };
       this.checkError(entryV5(bytes, bytes.length, v5Opts, dbOut));
       return dbOut[0];
     }
 
-    if (syncMode || fullFsync || vectorMetric || vectorM || vectorEfConstruction) {
+    if (
+      syncMode ||
+      fullFsync ||
+      vectorMetric ||
+      vectorM ||
+      vectorEfConstruction ||
+      changefeedRetention
+    ) {
       throw new LatticeError(
         'lattice_deserialize_v5 is required for syncMode, fullFsync, vectorMetric, ' +
-          'vectorM and vectorEfConstruction',
+          'vectorM, vectorEfConstruction and changefeedRetention',
         LatticeErrorCode.Unsupported
       );
     }

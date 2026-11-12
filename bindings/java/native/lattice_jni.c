@@ -742,7 +742,8 @@ Java_io_latticedb_Native_deserialize(JNIEnv *env, jclass cls, jbyteArray bytes,
         jint vector_dimensions, jboolean enable_wal,
         jboolean enable_adjacency_cache, jboolean lock, jint sync_mode,
         jint full_fsync, jint vector_metric, jint vector_m,
-        jint vector_ef_construction) {
+        jint vector_ef_construction, jint changefeed_retention,
+        jlong changefeed_retention_value) {
     init_cache(env);
     (void)cls;
     if (bytes == NULL) {
@@ -755,7 +756,8 @@ Java_io_latticedb_Native_deserialize(JNIEnv *env, jclass cls, jbyteArray bytes,
     if (!fill_open_options_v5(env, &opts, JNI_FALSE, JNI_FALSE, cache_size_mb,
             page_size, enable_vector, vector_dimensions, enable_wal,
             enable_adjacency_cache, lock, sync_mode, full_fsync, vector_metric,
-            vector_m, vector_ef_construction, 0, 0)) {
+            vector_m, vector_ef_construction, changefeed_retention,
+            changefeed_retention_value)) {
         return 0;
     }
 

@@ -398,6 +398,31 @@ func TestDeserializeEnableVectorsConfiguresANewIndex(t *testing.T) {
 	wantSecondDistanceFive(t, db)
 }
 
+func TestDeserializeChangefeedRetentionSetsThePolicy(t *testing.T) {
+	plain, err := Open(filepath.Join(t.TempDir(), "deser-feed.db"), OpenOptions{Create: true})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	data, err := plain.Serialize()
+	plain.Close()
+	if err != nil {
+		t.Fatalf("serialize: %v", err)
+	}
+
+	db, err := Deserialize(data, OpenOptions{ChangefeedRetention: "last:5"})
+	if err != nil {
+		t.Fatalf("deserialize: %v", err)
+	}
+	defer db.Close()
+	status, err := db.ChangefeedStatus()
+	if err != nil {
+		t.Fatalf("changefeed status: %v", err)
+	}
+	if status.Retention != "last:5" {
+		t.Fatalf("retention = %q, want last:5", status.Retention)
+	}
+}
+
 func TestVectorDimensionsZeroMeansTheFiles(t *testing.T) {
 	dbPath := filepath.Join(t.TempDir(), "zero-dims.db")
 	db, err := Open(dbPath, OpenOptions{Create: true, EnableVectors: true, VectorDimensions: 3})

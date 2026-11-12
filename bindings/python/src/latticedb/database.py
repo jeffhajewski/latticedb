@@ -1310,6 +1310,7 @@ def deserialize(
     vector_metric: Optional[str] = None,
     vector_m: Optional[int] = None,
     vector_ef_construction: Optional[int] = None,
+    changefeed_retention: Optional[str] = None,
     copy: bool = True,
 ) -> Database:
     """Open a database from bytes produced by :meth:`Database.serialize`.
@@ -1328,11 +1329,12 @@ def deserialize(
     are fixed once the index exists, so bytes with an index open with the one
     they record: any vector option that is set must match it, or this raises
     :class:`LatticeConfigMismatchError`. ``enable_vectors`` creates an index in
-    bytes that have none, configured by the vector options. ``sync_mode``,
-    ``full_fsync``, ``vector_metric``, ``vector_m`` and
-    ``vector_ef_construction`` need a native library with
-    ``lattice_deserialize_v5``; setting one against an older library raises
-    :class:`LatticeUnsupportedError`.
+    bytes that have none, configured by the vector options.
+    ``changefeed_retention`` sets the changefeed's policy, as it does for
+    :class:`Database`. ``sync_mode``, ``full_fsync``, ``vector_metric``,
+    ``vector_m``, ``vector_ef_construction`` and ``changefeed_retention`` need a
+    native library with ``lattice_deserialize_v5``; setting one against an older
+    library raises :class:`LatticeUnsupportedError`.
 
     The bytes are copied, so you may discard ``data`` as soon as this returns.
     Changes made afterwards do not travel back to it; call
@@ -1367,6 +1369,7 @@ def deserialize(
     vector_metric_code = _vector_metric_code(vector_metric)
     vector_m_value = vector_m or 0
     vector_ef_construction_value = vector_ef_construction or 0
+    retention_mode, retention_value = _changefeed_retention_code(changefeed_retention)
     cache_size = 0 if cache_size_mb is None else cache_size_mb
 
     if copy:
@@ -1399,6 +1402,8 @@ def deserialize(
             vector_metric=vector_metric_code,
             vector_m=vector_m_value,
             vector_ef_construction=vector_ef_construction_value,
+            changefeed_retention=retention_mode,
+            changefeed_retention_value=retention_value,
         )
         fn = lib._lib.lattice_deserialize_v5 if copy else lib._lib.lattice_deserialize_borrowed_v5
         code = fn(buffer, len(data), byref(opts_v5), byref(db_ptr))
@@ -1409,10 +1414,12 @@ def deserialize(
             or vector_metric_code
             or vector_m_value
             or vector_ef_construction_value
+            or retention_mode
         ):
             raise LatticeUnsupportedError(
                 "lattice_deserialize_v5 is required for sync_mode, full_fsync, "
-                "vector_metric, vector_m and vector_ef_construction",
+                "vector_metric, vector_m, vector_ef_construction and "
+                "changefeed_retention",
                 LATTICE_ERROR_UNSUPPORTED,
             )
         opts = OpenOptionsV4(
@@ -1448,6 +1455,7 @@ def deserialize(
     db._vector_metric = vector_metric_code
     db._vector_m = vector_m_value
     db._vector_ef_construction = vector_ef_construction_value
+    db._changefeed_retention = (retention_mode, retention_value)
     db._handle = db_ptr
     db._closed = False
     # Borrowed bytes have to outlive the database. Holding the reference here is

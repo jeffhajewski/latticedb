@@ -235,21 +235,23 @@ func (db *DB) Serialize() ([]byte, error) {
 // Deserialize opens a database from bytes produced by Serialize.
 func Deserialize(data []byte, opts OpenOptions) (*DB, error) {
 	cOpts := C.lattice_open_options_v5{
-		struct_size:            C.size_t(unsafe.Sizeof(C.lattice_open_options_v5{})),
-		create:                 C.bool(false),
-		read_only:              C.bool(false),
-		cache_size_mb:          C.uint32_t(opts.CacheSizeMB),
-		page_size:              C.uint32_t(opts.PageSize),
-		enable_vector:          C.bool(opts.EnableVector),
-		vector_dimensions:      C.uint16_t(opts.VectorDimensions),
-		enable_wal:             C.bool(opts.EnableWAL),
-		enable_adjacency_cache: C.bool(opts.EnableAdjacencyCache),
-		lock:                   C.bool(opts.Lock),
-		sync_mode:              C.uint8_t(opts.SyncMode),
-		full_fsync:             C.uint8_t(opts.FullFsync),
-		vector_metric:          C.uint8_t(opts.VectorMetric),
-		vector_m:               C.uint16_t(opts.VectorM),
-		vector_ef_construction: C.uint16_t(opts.VectorEfConstruction),
+		struct_size:                C.size_t(unsafe.Sizeof(C.lattice_open_options_v5{})),
+		create:                     C.bool(false),
+		read_only:                  C.bool(false),
+		cache_size_mb:              C.uint32_t(opts.CacheSizeMB),
+		page_size:                  C.uint32_t(opts.PageSize),
+		enable_vector:              C.bool(opts.EnableVector),
+		vector_dimensions:          C.uint16_t(opts.VectorDimensions),
+		enable_wal:                 C.bool(opts.EnableWAL),
+		enable_adjacency_cache:     C.bool(opts.EnableAdjacencyCache),
+		lock:                       C.bool(opts.Lock),
+		sync_mode:                  C.uint8_t(opts.SyncMode),
+		full_fsync:                 C.uint8_t(opts.FullFsync),
+		vector_metric:              C.uint8_t(opts.VectorMetric),
+		vector_m:                   C.uint16_t(opts.VectorM),
+		vector_ef_construction:     C.uint16_t(opts.VectorEfConstruction),
+		changefeed_retention:       C.uint8_t(opts.ChangefeedRetention),
+		changefeed_retention_value: C.uint64_t(opts.ChangefeedRetentionValue),
 	}
 
 	var ptr *C.uint8_t

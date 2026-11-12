@@ -178,8 +178,8 @@ Bytes that hold a vector index open with the configuration they record, and any
 vector option you set must match it (`LatticeConfigMismatchError` otherwise);
 `enable_vectors` with `vector_dimensions`, `vector_metric`, `vector_m` and
 `vector_ef_construction` creates and configures an index in bytes that have
-none. `sync_mode`, `full_fsync` and the vector metric, m and ef_construction
-need a native library with `lattice_deserialize_v5`; against an older one,
+none. `sync_mode`, `full_fsync`, the vector metric, m and ef_construction, and
+`changefeed_retention` need a native library with `lattice_deserialize_v5`; against an older one,
 setting any of them raises `LatticeUnsupportedError`.
 
 ### Transaction

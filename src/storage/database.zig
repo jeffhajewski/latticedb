@@ -821,6 +821,13 @@ const TxnStreamTrim = struct {
 const TxnOverlay = struct {
     node_states: std.AutoHashMapUnmanaged(NodeId, TxnNodeState) = .{},
     edge_states: std.AutoHashMapUnmanaged(EdgeId, TxnEdgeState) = .{},
+    /// The edges in `edge_states` that exist, under each of their two
+    /// endpoints, so reading one node's relationships looks at that node's
+    /// pending edges instead of every pending edge of the transaction.
+    /// Endpoints never change, so an edge is added once, when it first
+    /// exists here, and never removed; a later state that deletes it fails
+    /// the `exists` check where it is read.
+    edges_by_node: std.AutoHashMapUnmanaged(NodeId, std.ArrayListUnmanaged(EdgeId)) = .{},
     vector_states: std.AutoHashMapUnmanaged(NodeId, TxnVectorState) = .{},
     stream_appends: std.ArrayListUnmanaged(TxnStreamAppend) = .empty,
     stream_offsets: std.ArrayListUnmanaged(TxnStreamOffset) = .empty,
@@ -852,6 +859,10 @@ const TxnOverlay = struct {
             entry.value_ptr.deinit(allocator);
         }
         self.edge_states.deinit(allocator);
+
+        var by_node_iter = self.edges_by_node.valueIterator();
+        while (by_node_iter.next()) |list| list.deinit(allocator);
+        self.edges_by_node.deinit(allocator);
 
         var vector_iter = self.vector_states.iterator();
         while (vector_iter.next()) |entry| {
@@ -5610,15 +5621,47 @@ pub const Database = struct {
         }
 
         if (overlay.edge_states.getPtr(edge_id)) |existing| {
+            if (state.exists and !existing.exists) {
+                indexOverlayEdge(self.allocator, overlay, edge_id, state) catch {
+                    var owned_state = state;
+                    owned_state.deinit(self.allocator);
+                    return DatabaseError.OutOfMemory;
+                };
+            }
             existing.deinit(self.allocator);
             existing.* = state;
             return;
+        }
+        if (state.exists) {
+            indexOverlayEdge(self.allocator, overlay, edge_id, state) catch {
+                var owned_state = state;
+                owned_state.deinit(self.allocator);
+                return DatabaseError.OutOfMemory;
+            };
         }
         overlay.edge_states.put(self.allocator, edge_id, state) catch {
             var owned_state = state;
             owned_state.deinit(self.allocator);
             return DatabaseError.OutOfMemory;
         };
+    }
+
+    /// File a pending edge under its endpoints in `edges_by_node`. A
+    /// self-loop is filed once. An entry with no state behind it, left by a
+    /// failed put, is harmless: readers look the state up and skip it.
+    fn indexOverlayEdge(
+        allocator: Allocator,
+        overlay: *TxnOverlay,
+        edge_id: EdgeId,
+        state: TxnEdgeState,
+    ) Allocator.Error!void {
+        const source = try overlay.edges_by_node.getOrPut(allocator, state.source);
+        if (!source.found_existing) source.value_ptr.* = .empty;
+        try source.value_ptr.append(allocator, edge_id);
+        if (state.target == state.source) return;
+        const target = try overlay.edges_by_node.getOrPut(allocator, state.target);
+        if (!target.found_existing) target.value_ptr.* = .empty;
+        try target.value_ptr.append(allocator, edge_id);
     }
 
     /// Whether the committed state holds a vector for this node.
@@ -5915,11 +5958,14 @@ pub const Database = struct {
         if (!edgeLimitReached(refs.items.len, limit)) {
             if (txn) |t| {
                 if (self.getTxnOverlay(t)) |overlay| {
-                    var overlay_iter = overlay.edge_states.iterator();
-                    while (overlay_iter.next()) |entry| {
-                        if (seen.contains(entry.key_ptr.*)) continue;
-                        if (!edgeStateMatches(entry.value_ptr.*, node_id, direction, edge_type)) continue;
-                        refs.append(self.allocator, edgeStateToRef(entry.key_ptr.*, entry.value_ptr.*)) catch return DatabaseError.OutOfMemory;
+                    // Only this node's pending edges, not the transaction's.
+                    const pending: []const EdgeId = if (overlay.edges_by_node.get(node_id)) |list| list.items else &.{};
+                    for (pending) |edge_id| {
+                        // Also skips an edge filed twice by a retried write.
+                        if ((try seen.getOrPut(self.allocator, edge_id)).found_existing) continue;
+                        const state = overlay.edge_states.get(edge_id) orelse continue;
+                        if (!edgeStateMatches(state, node_id, direction, edge_type)) continue;
+                        refs.append(self.allocator, edgeStateToRef(edge_id, state)) catch return DatabaseError.OutOfMemory;
                         if (edgeLimitReached(refs.items.len, limit)) break;
                     }
                 }

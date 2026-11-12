@@ -467,6 +467,44 @@ test "lqs: relationship properties, types and labels read as the transaction see
     try std.testing.expect(deleted.rows[0].values[1] == .null_val);
 }
 
+test "lqs: expanding in a transaction sees exactly the node's pending edges" {
+    const path = "/tmp/lattice_lqs_pending_edges.ltdb";
+    const db = try openTxnTestDb(path);
+    defer cleanupTxnTestDb(db, path);
+    try run(db, "UNWIND range(0, 9) AS i CREATE (:N {i: i})");
+    try run(db, "MATCH (a:N {i: 0}), (b:N {i: 1}) CREATE (a)-[:R]->(b)");
+
+    var txn = try db.beginTransaction(.read_write);
+    defer db.abortTransaction(&txn) catch {};
+    // Many pending edges elsewhere, a few on node 0, a self-loop, and one
+    // created and deleted again.
+    try runIn(db, &txn, "MATCH (a:N), (b:N) WHERE a.i > 0 AND b.i > 0 CREATE (a)-[:R]->(b)");
+    try runIn(db, &txn, "MATCH (a:N {i: 0}), (b:N {i: 2}) CREATE (a)-[:R]->(b), (b)-[:R]->(a), (a)-[:R]->(a)");
+    try runIn(db, &txn, "MATCH (a:N {i: 0}), (b:N {i: 3}) CREATE (a)-[:GONE]->(b)");
+    try runIn(db, &txn, "MATCH (:N {i: 0})-[g:GONE]->() DELETE g");
+
+    try std.testing.expectEqual(@as(i64, 3), try queryIntIn(db, &txn, "MATCH (:N {i: 0})-[:R]->(b) RETURN count(b)"));
+    try std.testing.expectEqual(@as(i64, 2), try queryIntIn(db, &txn, "MATCH (:N {i: 0})<-[:R]-(b) RETURN count(b)"));
+    try std.testing.expectEqual(@as(i64, 4), try queryIntIn(db, &txn, "MATCH (:N {i: 0})-[:R]-(b) RETURN count(b)"));
+    try std.testing.expectEqual(@as(i64, 0), try queryIntIn(db, &txn, "MATCH (:N {i: 0})-[:GONE]-(b) RETURN count(b)"));
+    try std.testing.expectEqual(@as(i64, 9), try queryIntIn(db, &txn, "MATCH (:N {i: 5})-[:R]->(b) RETURN count(b)"));
+    // Deleting a committed edge in the transaction hides it.
+    try runIn(db, &txn, "MATCH (:N {i: 0})-[r:R]->(:N {i: 1}) DELETE r");
+    try std.testing.expectEqual(@as(i64, 2), try queryIntIn(db, &txn, "MATCH (:N {i: 0})-[:R]->(b) RETURN count(b)"));
+}
+
+fn runIn(db: *Database, txn: *lattice.transaction.manager.Transaction, cypher: []const u8) !void {
+    var result = try db.queryInTxn(txn, cypher);
+    result.deinit();
+}
+
+fn queryIntIn(db: *Database, txn: *lattice.transaction.manager.Transaction, cypher: []const u8) !i64 {
+    var result = try db.queryInTxn(txn, cypher);
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    return result.rows[0].values[0].int_val;
+}
+
 // ============================================================================
 // Relationship uniqueness across variable-length relationships
 // ============================================================================

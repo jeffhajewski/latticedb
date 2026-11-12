@@ -657,7 +657,7 @@ pub const Repl = struct {
         for (result.columns, 0..) |col, i| {
             try stdout.writeByte(' ');
             try stdout.writeAll(col);
-            const padding = col_widths[i] - col.len;
+            const padding = col_widths[i] -| col.len;
             for (0..padding) |_| try stdout.writeByte(' ');
             try stdout.writeAll(" │");
         }
@@ -672,7 +672,7 @@ pub const Repl = struct {
                 if (i < col_widths.len) {
                     try stdout.writeByte(' ');
                     const written = try self.writeValue(stdout, val);
-                    const padding = col_widths[i] - written;
+                    const padding = col_widths[i] -| written;
                     for (0..padding) |_| try stdout.writeByte(' ');
                     try stdout.writeAll(" │");
                 }
@@ -729,10 +729,16 @@ pub const Repl = struct {
                 while (n > 0) : (n /= 10) len += 1;
                 break :blk len;
             },
-            .float_val => 10, // Approximate
+            // Measured the way it is written. A guess narrower than the
+            // text made the padding that follows it underflow.
+            .float_val => |f| blk: {
+                var buf: [FLOAT_DISPLAY_MAX]u8 = undefined;
+                const slice = std.fmt.bufPrint(&buf, "{d:.6}", .{f}) catch break :blk 0;
+                break :blk slice.len;
+            },
             .string_val => |s| s.len + 2, // Include quotes
-            .node_id => 12, // "Node(xxxxx)"
-            .edge_id => 12, // "Edge(xxxxx)"
+            .node_id => |id| 6 + countDigits(id), // "Node(N)"
+            .edge_id => |id| 6 + countDigits(id), // "Edge(N)"
             .bytes_val => |b| 10 + countDigits(b.len), // "<bytes:N>"
             .vector_val => |v| 10 + countDigits(v.len), // "<vector:N>"
             .list_val => |list| blk: {
@@ -779,7 +785,7 @@ pub const Repl = struct {
                 return slice.len;
             },
             .float_val => |f| {
-                var buf: [32]u8 = undefined;
+                var buf: [FLOAT_DISPLAY_MAX]u8 = undefined;
                 const slice = std.fmt.bufPrint(&buf, "{d:.6}", .{f}) catch return 0;
                 try writer.writeAll(slice);
                 return slice.len;
@@ -1048,7 +1054,11 @@ pub const Repl = struct {
 };
 
 /// Count decimal digits in a number
-fn countDigits(n: usize) usize {
+/// Room for any f64 printed with six decimals: the largest has 309 digits
+/// before the point.
+const FLOAT_DISPLAY_MAX = 336;
+
+fn countDigits(n: u64) usize {
     if (n == 0) return 1;
     var count: usize = 0;
     var val = n;

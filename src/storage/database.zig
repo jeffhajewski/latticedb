@@ -86,6 +86,7 @@ const PropertyIndex = property_index_mod.PropertyIndex;
 const PropertyIndexError = property_index_mod.PropertyIndexError;
 const PropertyIndexDefinition = property_index_mod.Definition;
 const PropertyIndexEntityKind = property_index_mod.EntityKind;
+const OverlayLookup = lattice.storage.overlay_lookup.OverlayLookup;
 
 const adjacency_cache_mod = lattice.graph.adjacency_cache;
 const AdjacencyCache = adjacency_cache_mod.AdjacencyCache;
@@ -838,6 +839,10 @@ const TxnOverlay = struct {
     /// append to that stream, which lives as long as the overlay.
     stream_last_sequences: std.StringHashMapUnmanaged(u64) = .empty,
     has_staged_writes: bool = false,
+    /// Staged nodes by indexed value, for index lookups in the transaction.
+    node_lookup: OverlayLookup = .{},
+    /// Staged edges by indexed value.
+    edge_lookup: OverlayLookup = .{},
 
     fn hasChanges(self: *const TxnOverlay) bool {
         return self.has_staged_writes;
@@ -885,6 +890,9 @@ const TxnOverlay = struct {
             trim.deinit(allocator);
         }
         self.stream_trims.deinit(allocator);
+
+        self.node_lookup.deinit(allocator);
+        self.edge_lookup.deinit(allocator);
 
         self.* = .{};
     }
@@ -4751,11 +4759,11 @@ pub const Database = struct {
         }
         if (txn) |active_txn| {
             if (self.getTxnOverlay(active_txn)) |overlay| {
-                var iter = overlay.node_states.iterator();
-                while (iter.next()) |entry| {
-                    if (seen.contains(entry.key_ptr.*) or !nodeStateMatchesPropertyIndex(entry.value_ptr.*, definition, value)) continue;
-                    try seen.put(self.allocator, entry.key_ptr.*, {});
-                    ids.append(self.allocator, entry.key_ptr.*) catch return DatabaseError.OutOfMemory;
+                for (try self.overlayNodeCandidates(overlay, definition, value)) |node_id| {
+                    const state = overlay.node_states.getPtr(node_id) orelse continue;
+                    if (seen.contains(node_id) or !nodeStateMatchesPropertyIndex(state.*, definition, value)) continue;
+                    try seen.put(self.allocator, node_id, {});
+                    ids.append(self.allocator, node_id) catch return DatabaseError.OutOfMemory;
                 }
             }
         }
@@ -4792,11 +4800,11 @@ pub const Database = struct {
         }
         if (txn) |active_txn| {
             if (self.getTxnOverlay(active_txn)) |overlay| {
-                var iter = overlay.edge_states.iterator();
-                while (iter.next()) |entry| {
-                    if (seen.contains(entry.key_ptr.*) or !edgeStateMatchesPropertyIndex(entry.value_ptr.*, definition, value)) continue;
-                    try seen.put(self.allocator, entry.key_ptr.*, {});
-                    ids.append(self.allocator, entry.key_ptr.*) catch return DatabaseError.OutOfMemory;
+                for (try self.overlayEdgeCandidates(overlay, definition, value)) |edge_id| {
+                    const state = overlay.edge_states.getPtr(edge_id) orelse continue;
+                    if (seen.contains(edge_id) or !edgeStateMatchesPropertyIndex(state.*, definition, value)) continue;
+                    try seen.put(self.allocator, edge_id, {});
+                    ids.append(self.allocator, edge_id) catch return DatabaseError.OutOfMemory;
                 }
             }
         }
@@ -5651,13 +5659,65 @@ pub const Database = struct {
         if (overlay.node_states.getPtr(node_id)) |existing| {
             existing.deinit(self.allocator);
             existing.* = state;
-            return;
+        } else {
+            overlay.node_states.put(self.allocator, node_id, state) catch {
+                var owned_state = state;
+                owned_state.deinit(self.allocator);
+                return DatabaseError.OutOfMemory;
+            };
         }
-        overlay.node_states.put(self.allocator, node_id, state) catch {
-            var owned_state = state;
-            owned_state.deinit(self.allocator);
-            return DatabaseError.OutOfMemory;
-        };
+        try noteOverlayNode(overlay, self.allocator, node_id, state);
+    }
+
+    /// Note a staged node under its values for the declarations that index
+    /// lookups in this transaction have asked about. None until the first.
+    fn noteOverlayNode(overlay: *TxnOverlay, allocator: Allocator, node_id: NodeId, state: TxnNodeState) DatabaseError!void {
+        if (!state.exists) return;
+        for (overlay.node_lookup.covered.items) |definition| {
+            if (!containsSymbolId(state.labels, definition.scope_id)) continue;
+            const property = findPropertyById(state.properties, definition.property_id) orelse continue;
+            overlay.node_lookup.note(allocator, definition, node_id, property.value) catch return DatabaseError.OutOfMemory;
+        }
+    }
+
+    fn noteOverlayEdge(overlay: *TxnOverlay, allocator: Allocator, edge_id: EdgeId, state: TxnEdgeState) DatabaseError!void {
+        if (!state.exists) return;
+        for (overlay.edge_lookup.covered.items) |definition| {
+            if (state.edge_type != definition.scope_id) continue;
+            const property = findPropertyById(state.properties, definition.property_id) orelse continue;
+            overlay.edge_lookup.note(allocator, definition, edge_id, property.value) catch return DatabaseError.OutOfMemory;
+        }
+    }
+
+    /// The staged nodes that may hold `value` under `definition`, to be
+    /// checked against their staged state. The first call for a declaration
+    /// notes every node staged so far.
+    fn overlayNodeCandidates(self: *Self, overlay: *TxnOverlay, definition: PropertyIndexDefinition, value: PropertyValue) DatabaseError![]const u64 {
+        if (!overlay.node_lookup.covers(definition)) {
+            overlay.node_lookup.cover(self.allocator, definition) catch return DatabaseError.OutOfMemory;
+            var iter = overlay.node_states.iterator();
+            while (iter.next()) |entry| {
+                const state = entry.value_ptr;
+                if (!state.exists or !containsSymbolId(state.labels, definition.scope_id)) continue;
+                const property = findPropertyById(state.properties, definition.property_id) orelse continue;
+                overlay.node_lookup.note(self.allocator, definition, entry.key_ptr.*, property.value) catch return DatabaseError.OutOfMemory;
+            }
+        }
+        return overlay.node_lookup.candidates(definition, value);
+    }
+
+    fn overlayEdgeCandidates(self: *Self, overlay: *TxnOverlay, definition: PropertyIndexDefinition, value: PropertyValue) DatabaseError![]const u64 {
+        if (!overlay.edge_lookup.covers(definition)) {
+            overlay.edge_lookup.cover(self.allocator, definition) catch return DatabaseError.OutOfMemory;
+            var iter = overlay.edge_states.iterator();
+            while (iter.next()) |entry| {
+                const state = entry.value_ptr;
+                if (!state.exists or state.edge_type != definition.scope_id) continue;
+                const property = findPropertyById(state.properties, definition.property_id) orelse continue;
+                overlay.edge_lookup.note(self.allocator, definition, entry.key_ptr.*, property.value) catch return DatabaseError.OutOfMemory;
+            }
+        }
+        return overlay.edge_lookup.candidates(definition, value);
     }
 
     fn readBaseEdgeState(self: *Self, edge_id: EdgeId) DatabaseError!?TxnEdgeState {
@@ -5711,20 +5771,21 @@ pub const Database = struct {
             }
             existing.deinit(self.allocator);
             existing.* = state;
-            return;
-        }
-        if (state.exists) {
-            indexOverlayEdge(self.allocator, overlay, edge_id, state) catch {
+        } else {
+            if (state.exists) {
+                indexOverlayEdge(self.allocator, overlay, edge_id, state) catch {
+                    var owned_state = state;
+                    owned_state.deinit(self.allocator);
+                    return DatabaseError.OutOfMemory;
+                };
+            }
+            overlay.edge_states.put(self.allocator, edge_id, state) catch {
                 var owned_state = state;
                 owned_state.deinit(self.allocator);
                 return DatabaseError.OutOfMemory;
             };
         }
-        overlay.edge_states.put(self.allocator, edge_id, state) catch {
-            var owned_state = state;
-            owned_state.deinit(self.allocator);
-            return DatabaseError.OutOfMemory;
-        };
+        try noteOverlayEdge(overlay, self.allocator, edge_id, state);
     }
 
     /// File a pending edge under its endpoints in `edges_by_node`. A

@@ -28,6 +28,7 @@ pub const storage = struct {
     pub const checkpoint = @import("storage/checkpoint.zig");
     pub const recovery = @import("storage/recovery.zig");
     pub const database = @import("storage/database.zig");
+    pub const overlay_lookup = @import("storage/overlay_lookup.zig");
 };
 
 // Durable streams

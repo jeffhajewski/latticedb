@@ -635,6 +635,67 @@ fn expectFoundNodes(db: *Database, txn: anytype, value: PropertyValue, expected:
     try std.testing.expectEqualSlices(u64, expected, found);
 }
 
+fn expectFoundEdges(db: *Database, txn: anytype, value: PropertyValue, expected: []const u64) !void {
+    const found = try db.findEdgesByTypeProperty(txn, "R", "k", value, 100);
+    defer std.testing.allocator.free(found);
+    try std.testing.expectEqualSlices(u64, expected, found);
+}
+
+test "lgr: index lookups in a transaction follow its later writes" {
+    const path = "/tmp/lgr_overlay_lookup.ltdb";
+    defer removeFiles(path);
+    var db = try openDb(path, true);
+    defer db.close();
+    try db.createNodePropertyIndex("P", "k");
+    try db.createEdgePropertyIndex("R", "k");
+
+    var txn = try db.beginTransaction(.read_write);
+    const committed = try db.createNode(&txn, &.{"P"});
+    try db.setNodeProperty(&txn, committed, "k", .{ .int_val = 5 });
+    try db.commitTransaction(&txn);
+
+    txn = try db.beginTransaction(.read_write);
+    var ids: [6]u64 = undefined;
+    for (&ids, 0..) |*id, i| {
+        id.* = try db.createNode(&txn, &.{"P"});
+        try db.setNodeProperty(&txn, id.*, "k", .{ .int_val = @intCast(i) });
+    }
+    // The first lookup notes what is staged; the writes after it are noted
+    // as they happen.
+    try expectFoundNodes(db, &txn, .{ .int_val = 5 }, &.{ committed, ids[5] });
+    try db.setNodeProperty(&txn, ids[5], "k", .{ .int_val = 9 });
+    try db.setNodeProperty(&txn, ids[1], "k", .{ .int_val = 5 });
+    try db.setNodeProperty(&txn, committed, "k", .{ .int_val = 9 });
+    try expectFoundNodes(db, &txn, .{ .int_val = 5 }, &.{ids[1]});
+    try expectFoundNodes(db, &txn, .{ .int_val = 9 }, &.{ committed, ids[5] });
+    try db.deleteNode(&txn, ids[5]);
+    try db.removeNodeLabel(&txn, committed, "P");
+    try expectFoundNodes(db, &txn, .{ .int_val = 9 }, &.{});
+    try db.addNodeLabel(&txn, committed, "P");
+    try db.removeNodeProperty(&txn, ids[1], "k");
+    try expectFoundNodes(db, &txn, .{ .int_val = 9 }, &.{committed});
+    try expectFoundNodes(db, &txn, .{ .int_val = 5 }, &.{});
+    const late = try db.createNode(&txn, &.{"P"});
+    try db.setNodeProperty(&txn, late, "k", .{ .int_val = 5 });
+    try expectFoundNodes(db, &txn, .{ .int_val = 5 }, &.{late});
+
+    // Edges, the same way.
+    const e1 = try db.createEdgeAndGetId(&txn, ids[0], ids[2], "R");
+    const e2 = try db.createEdgeAndGetId(&txn, ids[2], ids[3], "R");
+    try db.setEdgePropertyById(&txn, e1, "k", .{ .string_val = "a" });
+    try db.setEdgePropertyById(&txn, e2, "k", .{ .string_val = "b" });
+    try expectFoundEdges(db, &txn, .{ .string_val = "a" }, &.{e1});
+    try db.setEdgePropertyById(&txn, e2, "k", .{ .string_val = "a" });
+    try expectFoundEdges(db, &txn, .{ .string_val = "a" }, &.{ e1, e2 });
+    try db.deleteEdgeById(&txn, e1);
+    try expectFoundEdges(db, &txn, .{ .string_val = "a" }, &.{e2});
+    try db.commitTransaction(&txn);
+
+    try expectFoundNodes(db, null, .{ .int_val = 5 }, &.{late});
+    try expectFoundNodes(db, null, .{ .int_val = 9 }, &.{committed});
+    try expectFoundEdges(db, null, .{ .string_val = "a" }, &.{e2});
+}
+
 test "lgr: declaring and dropping indexes keeps the others maintained" {
     const path = "/tmp/lgr_index_declarations.ltdb";
     defer removeFiles(path);

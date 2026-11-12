@@ -8,6 +8,7 @@ const ldur_redo_test = @import("ldur_redo_test.zig");
 const ldur_files_test = @import("ldur_files_test.zig");
 const ldur_power_test = @import("ldur_power_test.zig");
 const ldur_readonly_test = @import("ldur_readonly_test.zig");
+const lcf_wal_creation_test = @import("lcf_wal_creation_test.zig");
 
 test {
     _ = crash_test;
@@ -15,4 +16,5 @@ test {
     _ = ldur_files_test;
     _ = ldur_power_test;
     _ = ldur_readonly_test;
+    _ = lcf_wal_creation_test;
 }

@@ -410,7 +410,9 @@ pub const WalManager = struct {
             .mutex = .{},
         };
 
-        if (file_size == 0) {
+        const unfinished = file_size > 0 and try creationCutShort(file, file_size);
+        if (file_size == 0 or unfinished) {
+            if (unfinished) file.truncate(0) catch return WalError.IoError;
             try self.initNewWal(db_uuid);
             // A commit syncs the log's contents, which keeps nothing if the
             // log's name is lost: a power cut before the directory reached
@@ -424,6 +426,24 @@ pub const WalManager = struct {
         }
 
         return self;
+    }
+
+    /// Whether a log that holds no frames is one whose creation a power cut
+    /// interrupted. A log is created by writing its header and syncing it,
+    /// and nothing is logged until then, so such a log has no frames and
+    /// lost nothing; but the header may be partly on the disk, in any
+    /// subset of its sectors. A file shorter than a header, or a header's
+    /// length with the magic number missing from its first sector, is that.
+    /// Refusing it made a database unopenable after a power cut in the
+    /// moment its log was being created (as an open does when the log has
+    /// been removed). Such a log is started again.
+    fn creationCutShort(file: File, file_size: u64) WalError!bool {
+        if (file_size < WAL_HEADER_SIZE) return true;
+        if (file_size > WAL_HEADER_SIZE) return false;
+        var magic: [4]u8 = undefined;
+        const n = file.read(0, &magic) catch return WalError.IoError;
+        if (n != magic.len) return true;
+        return std.mem.readInt(u32, &magic, .little) == 0;
     }
 
     fn frameDataSize(self: *const Self) usize {

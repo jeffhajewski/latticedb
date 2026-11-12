@@ -22,6 +22,14 @@ from latticedb._bindings import (
     OpenOptionsV2,
     OpenOptionsV3,
     OpenOptionsV4,
+    OpenOptionsV5,
+    LATTICE_FULL_FSYNC_OFF,
+    LATTICE_FULL_FSYNC_ON,
+    LATTICE_SYNC_MODE_FULL,
+    LATTICE_SYNC_MODE_NORMAL,
+    LATTICE_VECTOR_METRIC_COSINE,
+    LATTICE_VECTOR_METRIC_DOT_PRODUCT,
+    LATTICE_VECTOR_METRIC_EUCLIDEAN,
     LATTICE_OK,
     LATTICE_ERROR_IO,
     LATTICE_ERROR_UNSUPPORTED,
@@ -34,6 +42,37 @@ from latticedb._bindings import (
 )
 from latticedb.transaction import Transaction
 from latticedb.types import QueryResult, VectorSearchResult, FtsSearchResult, StreamRecord
+
+
+_SYNC_MODES = {"full": LATTICE_SYNC_MODE_FULL, "normal": LATTICE_SYNC_MODE_NORMAL}
+_VECTOR_METRICS = {
+    "cosine": LATTICE_VECTOR_METRIC_COSINE,
+    "euclidean": LATTICE_VECTOR_METRIC_EUCLIDEAN,
+    "dot_product": LATTICE_VECTOR_METRIC_DOT_PRODUCT,
+}
+
+
+def _sync_mode_code(sync_mode: Optional[str]) -> int:
+    if sync_mode is None:
+        return 0
+    try:
+        return _SYNC_MODES[sync_mode]
+    except KeyError:
+        raise ValueError(
+            f"sync_mode must be 'full' or 'normal', not {sync_mode!r}"
+        ) from None
+
+
+def _vector_metric_code(vector_metric: Optional[str]) -> int:
+    if vector_metric is None:
+        return 0
+    try:
+        return _VECTOR_METRICS[vector_metric]
+    except KeyError:
+        raise ValueError(
+            "vector_metric must be 'cosine', 'euclidean' or 'dot_product', "
+            f"not {vector_metric!r}"
+        ) from None
 
 
 def _is_numpy_array(value: Any) -> bool:
@@ -65,6 +104,11 @@ class Database:
         enable_vector: Optional[bool] = None,
         vector_dimensions: int = 128,
         lock: bool = True,
+        sync_mode: Optional[str] = None,
+        full_fsync: Optional[bool] = None,
+        vector_metric: Optional[str] = None,
+        vector_m: Optional[int] = None,
+        vector_ef_construction: Optional[int] = None,
     ) -> None:
         """
         Open a Lattice database.
@@ -76,15 +120,44 @@ class Database:
             cache_size_mb: Size of the page cache in megabytes.
             enable_wal: Enable WAL-backed transactions.
             enable_adjacency_cache: Enable the in-memory graph adjacency cache.
-            enable_vectors: Enable vector storage and indexing.
+            enable_vectors: Create a vector index if the database has none. A
+                database that already has one opens with it whatever this says.
             enable_vector: Compatibility alias for ``enable_vectors``.
-            vector_dimensions: Dimension of vectors when vector support is enabled.
+            vector_dimensions: Dimension of vectors when ``enable_vectors`` is set.
+                It must match the index the file records, if it has one, or
+                opening raises :class:`LatticeConfigMismatchError`; pass ``0``
+                to take the file's dimensions.
             lock: Take a lock on the file so two processes cannot tread on each
                 other. A read-write handle takes it exclusively and a read-only
                 handle shares it, so opening raises
                 :class:`LatticeDatabaseLockedError` rather than waiting. Turn this
                 off only where locking does not work, such as some network
                 filesystems; it does not make concurrent access safe.
+            sync_mode: When a commit waits for the disk. ``"full"`` syncs the
+                log on every commit, so a commit that has returned survives a
+                power cut. ``"normal"`` hands the commit to the operating
+                system and returns: it survives the process being killed, but a
+                power cut or OS crash can lose the most recent commits. Unset
+                uses the ``LATTICE_SYNC_MODE`` environment variable, else full.
+            full_fsync: On macOS, whether syncs ask the drive to flush its cache
+                (``F_FULLFSYNC``). No effect elsewhere. Unset uses the
+                ``LATTICE_FULL_FSYNC`` environment variable, else off.
+            vector_metric: How a new vector index measures distance:
+                ``"cosine"`` (``1 - cos``, vectors stored at unit length),
+                ``"euclidean"`` (L2 distance) or ``"dot_product"`` (negative
+                dot product). Unset means the file's metric, or cosine for a new
+                index.
+            vector_m: HNSW connections per node for a new index, 2..32. Unset
+                means the file's, or 16.
+            vector_ef_construction: HNSW candidate list size while building a
+                new index, 1..4096. Unset means the file's, or 200.
+
+        The vector settings are fixed once the index exists: any that is set
+        must match the file, or opening raises
+        :class:`LatticeConfigMismatchError`. ``sync_mode``, ``full_fsync``,
+        ``vector_metric``, ``vector_m`` and ``vector_ef_construction`` need a
+        native library with ``lattice_open_v5``; setting one against an older
+        library raises :class:`LatticeUnsupportedError`.
         """
         self._path = Path(path)
         self._create = create
@@ -103,6 +176,14 @@ class Database:
         )
         self._vector_dimensions = vector_dimensions
         self._lock = lock
+        self._sync_mode = _sync_mode_code(sync_mode)
+        if full_fsync is None:
+            self._full_fsync = 0
+        else:
+            self._full_fsync = LATTICE_FULL_FSYNC_ON if full_fsync else LATTICE_FULL_FSYNC_OFF
+        self._vector_metric = _vector_metric_code(vector_metric)
+        self._vector_m = vector_m or 0
+        self._vector_ef_construction = vector_ef_construction or 0
         self._handle: Optional[Any] = None
         self._closed = False
         # Set by deserialize when it points the database at a caller's buffer
@@ -157,6 +238,45 @@ class Database:
 
         lib = get_lib()
         db_ptr = c_void_p()
+        if getattr(lib, "_has_lattice_open_v5", False):
+            opts_v5 = OpenOptionsV5(
+                struct_size=ctypes.sizeof(OpenOptionsV5),
+                create=self._create,
+                read_only=self._read_only,
+                cache_size_mb=self._cache_size_mb,
+                page_size=4096,
+                enable_vector=self._enable_vectors,
+                vector_dimensions=self._vector_dimensions,
+                enable_wal=self._enable_wal,
+                enable_adjacency_cache=self._enable_adjacency_cache,
+                lock=self._lock,
+                sync_mode=self._sync_mode,
+                full_fsync=self._full_fsync,
+                vector_metric=self._vector_metric,
+                vector_m=self._vector_m,
+                vector_ef_construction=self._vector_ef_construction,
+            )
+            code = lib._lib.lattice_open_v5(
+                str(self._path).encode("utf-8"),
+                byref(opts_v5),
+                byref(db_ptr),
+            )
+            check_error(code)
+            self._handle = db_ptr
+            return
+
+        if (
+            self._sync_mode
+            or self._full_fsync
+            or self._vector_metric
+            or self._vector_m
+            or self._vector_ef_construction
+        ):
+            raise LatticeUnsupportedError(
+                "lattice_open_v5 is required for sync_mode, full_fsync, vector_metric, "
+                "vector_m and vector_ef_construction",
+                LATTICE_ERROR_UNSUPPORTED,
+            )
         if getattr(lib, "_has_lattice_open_v4", False):
             opts_v4 = OpenOptionsV4(
                 struct_size=ctypes.sizeof(OpenOptionsV4),
@@ -1004,6 +1124,11 @@ def deserialize(
     db._enable_vectors = enable_vectors
     db._vector_dimensions = vector_dimensions
     db._lock = lock
+    db._sync_mode = 0
+    db._full_fsync = 0
+    db._vector_metric = 0
+    db._vector_m = 0
+    db._vector_ef_construction = 0
     db._handle = db_ptr
     db._closed = False
     # Borrowed bytes have to outlive the database. Holding the reference here is

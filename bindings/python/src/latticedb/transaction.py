@@ -9,10 +9,12 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 
 from latticedb._bindings import (
     LATTICE_ERROR_NOT_FOUND,
+    LATTICE_ERROR_UNSUPPORTED,
     LATTICE_TXN_READ_ONLY,
     LATTICE_TXN_READ_WRITE,
     LATTICE_VALUE_NULL,
     LatticeNodeId,
+    LatticeUnsupportedError,
     LatticeValue,
     NodeWithVector,
     check_error,
@@ -265,12 +267,25 @@ class Transaction:
 
         return node
 
-    def delete_node(self, node_id: int) -> None:
+    def delete_node(self, node_id: int, *, detach: bool = False) -> None:
         """
         Delete a node.
 
+        A node that still has relationships is not deleted unless ``detach`` is
+        set, since deleting it alone would leave edges pointing at nothing; this
+        matches Cypher's ``DELETE`` and ``DETACH DELETE``. Deleting a node that
+        does not exist does nothing.
+
         Args:
             node_id: ID of the node to delete.
+            detach: Also delete every relationship the node has, as part of
+                this transaction.
+
+        Raises:
+            LatticeHasRelationshipsError: ``detach`` is false and the node has
+                relationships this transaction can see. Nothing was deleted.
+            LatticeUnsupportedError: ``detach`` is set and the native library
+                has no ``lattice_node_detach_delete``.
         """
         if self._read_only:
             raise RuntimeError("Cannot delete node in read-only transaction")
@@ -278,7 +293,16 @@ class Transaction:
             raise RuntimeError("Transaction not started")
 
         lib = get_lib()
-        code = lib._lib.lattice_node_delete(self._handle, node_id)
+        if detach:
+            if not getattr(lib, "_has_node_detach_delete", False):
+                raise LatticeUnsupportedError(
+                    "lattice_node_detach_delete is required to delete a node with "
+                    "its relationships",
+                    LATTICE_ERROR_UNSUPPORTED,
+                )
+            code = lib._lib.lattice_node_detach_delete(self._handle, node_id)
+        else:
+            code = lib._lib.lattice_node_delete(self._handle, node_id)
         check_error(code)
 
     def get_node(self, node_id: int) -> Optional[Node]:
@@ -866,6 +890,10 @@ class Transaction:
 
         Returns:
             The created edge.
+
+        Raises:
+            LatticeNotFoundError: Either node does not exist as this transaction
+                sees it.
         """
         if self._read_only:
             raise RuntimeError("Cannot create edge in read-only transaction")

@@ -107,15 +107,36 @@ Database(
     cache_size_mb: int = 100,    # Page cache size
     enable_wal: bool = True,     # WAL-backed transactions and crash recovery
     enable_adjacency_cache: bool = False, # In-memory graph adjacency cache
-    enable_vectors: bool | None = None, # Preferred vector config flag
+    enable_vectors: bool | None = None, # Create a vector index if the file has none
     enable_vector: bool | None = None,  # Deprecated compatibility alias
-    vector_dimensions: int = 128, # Vector dimensions
+    vector_dimensions: int = 128, # Vector dimensions (0 = the file's)
     lock: bool = True,           # Take a file lock (exclusive for read-write, shared for read-only)
+    sync_mode: str | None = None,       # "full" or "normal"; None = LATTICE_SYNC_MODE or full
+    full_fsync: bool | None = None,     # macOS F_FULLFSYNC; None = LATTICE_FULL_FSYNC or off
+    vector_metric: str | None = None,   # "cosine", "euclidean" or "dot_product"
+    vector_m: int | None = None,        # HNSW connections per node, 2..32 (default 16)
+    vector_ef_construction: int | None = None, # HNSW build candidate list, 1..4096 (default 200)
 )
 ```
 
 Constructing a `Database` does not open it. Use it as a context manager
 (`with Database(...) as db:`) or call `db.open()` before using it.
+
+A database file records its vector index: dimensions, metric, `vector_m` and
+`vector_ef_construction`. A database that has an index opens with it whether or
+not `enable_vectors` is set, so reopening needs no vector options at all. Any
+vector option you do pass (and `vector_dimensions` when `enable_vectors` is set)
+must match the file, or opening raises `LatticeConfigMismatchError`. The metric
+decides search distances, smallest first: cosine distance (vectors stored at unit
+length), L2 distance, or the negative dot product (vectors stored as given).
+
+`sync_mode="normal"` returns from a commit once the operating system has it: the
+commit survives the process being killed, but a power cut or OS crash can lose
+the most recent commits. The default, `"full"`, syncs the log on every commit.
+
+`sync_mode`, `full_fsync` and the three vector index options need a native
+library with `lattice_open_v5`; against an older one, setting any of them raises
+`LatticeUnsupportedError`.
 
 #### Methods
 
@@ -163,7 +184,7 @@ database from bytes produced by `serialize()`; it takes the same options as
 #### Write Operations
 
 - `create_node(labels=[], properties=None)` - Create a node
-- `delete_node(node_id)` - Delete a node
+- `delete_node(node_id, *, detach=False)` - Delete a node. A node that still has relationships raises `LatticeHasRelationshipsError` and nothing is deleted, as Cypher's `DELETE` does; `detach=True` deletes its relationships with it, as `DETACH DELETE` does. Deleting a node that does not exist does nothing.
 - `set_property(node_id, key, value)` - Set a property on a node. If a full-text index is declared for one of the node's labels and this property, the index is kept current.
 - `set_vector(node_id, key, vector)` - Set the node's vector embedding. A node has one vector, which Cypher reads as `n.embedding`; `key` must be `"embedding"` (or `""`), and any other key raises `LatticeUnsupportedError`. A vector with NaN or infinite components raises `LatticeInvalidArgError`.
 - `batch_insert_vectors(label, vectors)` - Insert vector-bearing nodes in one call
@@ -386,6 +407,12 @@ except LatticeIOError:
 except LatticeError as e:
     print(f"Error: {e}")
 ```
+
+Every exception carries the C error code as `.code`. Among the more specific ones:
+`LatticeHasRelationshipsError` (a plain `delete_node` of a node with
+relationships), `LatticeConfigMismatchError` (open options that contradict the
+file's vector index), `LatticeNotFoundError` (also `create_edge` when either end
+does not exist) and `LatticeDatabaseLockedError` (another process holds the file).
 
 ## Requirements
 

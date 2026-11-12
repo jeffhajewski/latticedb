@@ -141,6 +141,8 @@ LATTICE_ERROR_OUT_OF_MEMORY = -13
 LATTICE_ERROR_UNSUPPORTED = -14
 LATTICE_ERROR_VALUE_TOO_LARGE = -15
 LATTICE_ERROR_DATABASE_LOCKED = -16
+LATTICE_ERROR_HAS_RELATIONSHIPS = -17
+LATTICE_ERROR_CONFIG_MISMATCH = -18
 
 
 # Exception classes
@@ -199,6 +201,28 @@ class LatticeDatabaseLockedError(LatticeError):
 
     Distinct from :class:`LatticeLockTimeoutError`, which means something inside
     this process is already writing.
+    """
+
+    pass
+
+
+class LatticeHasRelationshipsError(LatticeError):
+    """A plain delete was refused because the node still has relationships.
+
+    Deleting the node alone would leave edges pointing at nothing. Use
+    ``delete_node(node_id, detach=True)`` to delete the node with its
+    relationships.
+    """
+
+    pass
+
+
+class LatticeConfigMismatchError(LatticeError):
+    """The open options contradict the vector index the database file records.
+
+    Raised when ``vector_dimensions`` (with vectors enabled), ``vector_metric``,
+    ``vector_m`` or ``vector_ef_construction`` differ from the file's index.
+    Nothing was read with the wrong configuration.
     """
 
     pass
@@ -282,6 +306,8 @@ _ERROR_MAP = {
     LATTICE_ERROR_UNSUPPORTED: LatticeUnsupportedError,
     LATTICE_ERROR_VALUE_TOO_LARGE: LatticeValueTooLargeError,
     LATTICE_ERROR_DATABASE_LOCKED: LatticeDatabaseLockedError,
+    LATTICE_ERROR_HAS_RELATIONSHIPS: LatticeHasRelationshipsError,
+    LATTICE_ERROR_CONFIG_MISMATCH: LatticeConfigMismatchError,
 }
 
 
@@ -453,6 +479,36 @@ class OpenOptionsV4(Structure):
     ]
 
 
+# lattice_open_options_v5 enum values. 0 means "not set" for each.
+LATTICE_SYNC_MODE_FULL = 1
+LATTICE_SYNC_MODE_NORMAL = 2
+LATTICE_FULL_FSYNC_OFF = 1
+LATTICE_FULL_FSYNC_ON = 2
+LATTICE_VECTOR_METRIC_COSINE = 1
+LATTICE_VECTOR_METRIC_EUCLIDEAN = 2
+LATTICE_VECTOR_METRIC_DOT_PRODUCT = 3
+
+
+class OpenOptionsV5(Structure):
+    _fields_ = [
+        ("struct_size", c_size_t),
+        ("create", c_bool),
+        ("read_only", c_bool),
+        ("cache_size_mb", c_uint32),
+        ("page_size", c_uint32),
+        ("enable_vector", c_bool),
+        ("vector_dimensions", c_uint16),
+        ("enable_wal", c_bool),
+        ("enable_adjacency_cache", c_bool),
+        ("lock", c_bool),
+        ("sync_mode", ctypes.c_uint8),
+        ("full_fsync", ctypes.c_uint8),
+        ("vector_metric", ctypes.c_uint8),
+        ("vector_m", c_uint16),
+        ("vector_ef_construction", c_uint16),
+    ]
+
+
 # Type aliases
 LatticeDatabase = c_void_p
 LatticeTxn = c_void_p
@@ -494,6 +550,8 @@ class LatticeLib:
         self._has_lattice_open_v2 = hasattr(self._lib, "lattice_open_v2")
         self._has_lattice_open_v3 = hasattr(self._lib, "lattice_open_v3")
         self._has_lattice_open_v4 = hasattr(self._lib, "lattice_open_v4")
+        self._has_lattice_open_v5 = hasattr(self._lib, "lattice_open_v5")
+        self._has_node_detach_delete = hasattr(self._lib, "lattice_node_detach_delete")
         self._has_serialize = hasattr(self._lib, "lattice_serialize")
         self._has_deserialize_borrowed = hasattr(self._lib, "lattice_deserialize_borrowed")
         self._setup_functions()
@@ -531,6 +589,14 @@ class LatticeLib:
                 POINTER(LatticeDatabase),
             ]
             self._lib.lattice_open_v4.restype = c_int
+
+        if self._has_lattice_open_v5:
+            self._lib.lattice_open_v5.argtypes = [
+                c_char_p,
+                POINTER(OpenOptionsV5),
+                POINTER(LatticeDatabase),
+            ]
+            self._lib.lattice_open_v5.restype = c_int
 
         if self._has_serialize:
             self._lib.lattice_serialize.argtypes = [
@@ -605,6 +671,10 @@ class LatticeLib:
         # lattice_node_delete
         self._lib.lattice_node_delete.argtypes = [LatticeTxn, LatticeNodeId]
         self._lib.lattice_node_delete.restype = c_int
+
+        if self._has_node_detach_delete:
+            self._lib.lattice_node_detach_delete.argtypes = [LatticeTxn, LatticeNodeId]
+            self._lib.lattice_node_detach_delete.restype = c_int
 
         # lattice_node_set_property
         self._lib.lattice_node_set_property.argtypes = [

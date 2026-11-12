@@ -7,18 +7,31 @@ Draft for the next release after `0.16.0`.
 A database that was killed, or lost power, could reopen missing committed data,
 or not reopen at all. Most of this release closes those holes: pages reach the
 database file only in whole flushes through a new journal, checkpoints save
-everything they depend on, a commit is durable before it becomes visible, and
-the log survives a torn write at its end.
+everything they depend on, a commit is durable before it becomes visible, the
+log tells writes a power cut left unfinished from damage to synced data, and
+replay applies exactly what was committed or refuses to open. A simulated disk
+that cuts the power at every sync point now tests this, and a read-only open
+recovers a crashed database in memory instead of showing a stale one.
+
+The file now records its vector index and its node id counter, so a database
+with vectors opens without being told its dimensions, after a crash included,
+and a deleted node's id is never handed out again. The vector metric can be
+cosine, Euclidean or dot product, chosen at creation. Every API refuses to
+delete a node that still has relationships and to create an edge to a missing
+node, and `lattice_open_v5` sets the sync mode and vector options per open.
 
 Cypher queries now give the answers Cypher specifies in many places where they
 did not: null follows three-valued logic, `DELETE` refuses a node that still has
 relationships, `MERGE` matches every label and property, a `MATCH` never uses one
 relationship twice, variable-length patterns return every path, `sum` of integers
 is an integer, and aggregates skip nulls. `=~`, relationship type alternation and
-`count(*)` work. These and the other behaviour changes are listed under *Breaking
-changes*, among them integer overflow as an error, a 1012-byte key cap, opaque C
-API handles, JSON export format version 2, Unicode full-text tokenization and
-stricter `set_vector` keys. The page layout of the database file is unchanged.
+`count(*)` work. A failed query says what failed and where, strings are counted
+in characters, and integers and floats compare exactly. These and the other
+behaviour changes are listed under *Breaking changes*, among them integer
+overflow as an error, a 1012-byte key cap, opaque C API handles, JSON export
+format version 2, Unicode full-text tokenization and stricter `set_vector` keys.
+The file format is version 4 and the log format version 3; *Upgrade notes* says
+exactly what 0.16.0 can still open.
 
 ## Durability
 
@@ -46,8 +59,7 @@ in place, it copies them to `<database>-journal` and syncs that. If the process
 or machine dies part way through, the next open finishes the flush from the
 journal, so the file always holds one whole image. The journal exists while the
 database is open read-write and is deleted at a clean close. Leave it in place
-after a crash: it is what the next open needs. A read-only open refuses a
-database with a complete journal waiting; open it read-write once.
+after a crash: it is what the next open needs.
 
 **A commit is durable before anyone sees it.** Commit applied a transaction's
 changes and then wrote and synced the commit record, so a failure in between
@@ -58,14 +70,67 @@ itself failed. It refuses further transactions, `sync()` and checkpoints, and
 writes nothing more to the database file. Close it and reopen; recovery gives
 exactly the state the log describes.
 
-**A torn log opens.** A power cut could leave the log's header counting a frame
-the file did not fully hold, a torn last frame that later frames were appended
-behind, or a half-written header. Each of these made the database unopenable or
-reported corruption. Opening now cuts a torn tail back to the last good frame,
-and rebuilds a header whose checksum fails but whose identity fields match.
-Damage with good frames after it is still reported as corruption: recovery now
-checks every later frame to decide, where it looked only ten frames ahead and
-could take a longer damaged run for a tail, dropping the commits behind it.
+**What a power cut leaves, the log can tell apart from damage.** After a power
+cut the frames written since the last sync can be in any state, some whole and
+some torn or never written, in any order. 0.16.0 called a bad frame with a good
+one after it corruption, so an ordinary power failure during a commit could
+leave a database that would not open; it looked only ten frames ahead, so a
+longer damaged run could instead be taken for a torn tail, dropping the commits
+behind it. A frame that never reached the disk reads back as zeroes, which
+recovery accepted as an empty frame, so a transaction spread over several
+frames could be replayed without the records of the lost one: a commit applied
+in part. The log is now format version 3. Each frame records how many frames had
+been synced when it was written, and its checksum covers that claim. At open, a
+bad frame that a later frame vouches for as synced is damage, left as found and
+refused (`InvalidDatabase`); any other bad frame starts an unsynced tail, which
+is cut off. A frame verifies only if it holds records, in every reader of the
+log. A header whose checksum fails but whose identity fields match is rebuilt.
+No write or sync is added to a commit.
+
+**The guarantee, stated and tested.** In the default sync mode, a transaction
+whose commit returned survives a power cut, and one whose commit had not
+returned is wholly present or wholly absent; after recovery the database holds
+exactly the transactions up to some point at or after the last acknowledged
+one, with every index consistent. In `normal` mode it holds a whole number of
+transactions up to some point no earlier than the last log sync. A crash during
+recovery changes nothing. This assumes a device that honours `fsync` (and
+`F_FULLFSYNC` on macOS with `full_fsync`). A new power-loss simulation tests it:
+an in-memory disk records every write and sync and cuts the power before and
+after every sync and at random points, losing, reordering and tearing unsynced
+writes and file names, and the crash suite runs a random workload through it and
+checks every result, including a second cut during recovery. It found five of
+the defects listed here.
+
+**Replay is exact.** Replay re-applied logged changes loosely: replaying a node
+insert added its labels to the label index again, and replaying a label removal
+did nothing if the node already lacked the label, index entry included, so a
+node could come back listed under a label it did not have. Every logged change
+is now applied as an assignment of the state it records. A committed record
+that cannot be replayed, one whose payload does not decode, of a type no release
+writes, a page image, or a change to a node that is missing and not deleted
+later, fails the open with `InvalidDatabase`; it used to be skipped, and the
+database opened without an acknowledged change.
+
+**A read-only open recovers in memory.** A read-only open never read the log, so
+after a crash it showed the file as of its last flush, missing any number of
+committed transactions, and with a flush the crash had interrupted it failed
+with an I/O error. It now runs the same recovery as a read-write open on an
+in-memory overlay of the files: every committed transaction is visible, and
+nothing is written to disk. The memory it may use is 64 MB plus four times the
+size of the log and journal; a recovery that needs more fails with
+`BufferPoolFull` (`LATTICE_ERROR_FULL`), and a read-write open recovers it.
+
+**A large value cut short no longer breaks the log.** A process killed while a
+value too large for one log frame was being logged left the first fragments
+behind. With automatic checkpoints off, or the open's own checkpoint
+interrupted, later commits were logged after them, and every later open called
+the log corrupt and refused the database. The unfinished fragments are now
+skipped when another transaction's records follow them.
+
+**A zeroed page header is caught.** A page whose stored checksum was zero passed
+verification whatever it held, so damage that zeroed a page's first sector,
+checksum included, was read as a valid page. A zero checksum now passes only for
+a page exactly as allocation writes it.
 
 **Open and close empty the log.** Recovery replayed the log and left it in
 place, and closing through the Zig API or the CLI never checkpointed, so every
@@ -80,22 +145,32 @@ file, and with the log off nothing synced the file at all; it now does. A newly
 created database's directory is synced, so a power cut right after creation
 cannot leave the files missing from it, and so is the directory entry of each
 session's flush journal, before the first page is written in place (neither on
-Windows).
+Windows). A log created for an existing database, as when a backup is put back
+without its log, is synced with its directory entry when it is created; before,
+a power cut could lose the new log's name and up to every commit in it.
 
 **Full fsync on macOS.** On macOS `fsync` does not ask the drive to flush its own
 cache, so a commit there survives a crash but not necessarily a power cut. The
-new `full_fsync` option, or `LATTICE_FULL_FSYNC=1` from the C API, the bindings
-and the CLI, uses `F_FULLFSYNC`. It is off by default: it makes each commit
-several milliseconds slower.
+new `full_fsync` option uses `F_FULLFSYNC`. It is off by default: it makes each
+commit several milliseconds slower.
 
-**A sync mode for throughput.** `sync_mode = .normal`, or
-`LATTICE_SYNC_MODE=normal`, returns from a commit without waiting for the disk. A
-returned commit survives the process being killed; a power cut or OS crash can
-lose the latest commits, from the end only, and the database stays consistent.
-The default stays `.full`.
+**A sync mode for throughput.** `sync_mode = normal` returns from a commit
+without waiting for the disk. A returned commit survives the process being
+killed; a power cut or OS crash can lose the commits since the last log sync,
+from the end only, and the database stays consistent. The default stays `full`.
+
+Both are open options in every API: `sync_mode` and `full_fsync` in Zig and
+Python, `syncMode` and `fullFsync` in TypeScript and Java, `SyncMode` and
+`FullFsync` in Go, and fields of `lattice_open_options_v5` in C. The
+`LATTICE_SYNC_MODE` and `LATTICE_FULL_FSYNC` environment variables apply when a
+program does not set them, and are how the CLI sets them.
 
 **Other recovery fixes.**
 
+- A database whose log held vector changes could only be reopened with vectors
+  enabled at the dimensions it was written with; any other open failed with an
+  I/O error. The file now records its vector index, so it opens with it, after a
+  crash included, whatever the open's options say.
 - Deleting a node logged a vector removal whether or not the node had a vector.
   On a database that had never stored a vector, one delete followed by a kill, or
   a close through the Zig API or the CLI, made every later open fail with an I/O
@@ -104,9 +179,10 @@ The default stays `.full`.
   node map, and replay re-linked every vector it saw, which could leave most of
   the graph unreachable by search (186 of 298 vectors in one test). Both are
   fixed.
-- Opening an existing database for writing fails if the node tree, the symbol
-  table or the edge id index cannot be read. The id counters used to restart,
-  so new nodes, names or edges would have taken ids already in use.
+- Opening an existing database for writing fails if the symbol table or the
+  edge id index cannot be read, or, for a file that does not yet record its node
+  id counter, the node tree. The id counters used to restart, so new nodes,
+  names or edges would have taken ids already in use.
 - Declaring or dropping a property index, and dropping a full-text index, reach
   the file before the call returns. A kill straight afterwards lost the
   declaration or brought the dropped index back.
@@ -120,6 +196,13 @@ The default stays `.full`.
 
 ### Cypher
 
+- **Query errors say what failed and where.** A failed query reports its stage
+  (parse, semantic, plan or execution), a diagnostic code, a message naming the
+  value or operation, and the line and column: `RETURN 1/0` fails with "Division
+  by zero: 1 / 0" at 1:9, where it said "query failed". The CLI prints the query
+  with a caret under the place. Unknown functions and wrong argument counts are
+  semantic errors found before the query runs, so `lenght(n)` fails over an empty
+  graph too; it used to succeed until a row reached it.
 - **Null follows three-valued logic.** A comparison, arithmetic or string
   operation with a null operand is null, and `NOT`, `AND` and `OR` are Kleene:
   `null = null` is null, `NOT null` is null, `false AND null` is false, `true OR
@@ -144,7 +227,8 @@ The default stays `.full`.
 - **`RETURN` and `WITH` take at most 16 items.** More fails to plan with
   `TooManyVariables`; it used to read past the end of the row.
 - **`DELETE` refuses a node that still has relationships.** The query fails with
-  `NodeHasRelationships` and deletes nothing; it used to delete the node and
+  `NodeHasRelationships` (`LATTICE_ERROR_HAS_RELATIONSHIPS`, -17, through the C
+  API, the same code as `lattice_node_delete`) and deletes nothing; it used to delete the node and
   leave its relationships pointing at nothing. Use `DETACH DELETE`, or delete the
   relationships in the same statement (`DELETE r, n`). `DETACH DELETE` now
   removes relationships by id, so parallel relationships and self-loops go too,
@@ -199,15 +283,98 @@ The default stays `.full`.
   parameter is honoured (it was ignored), any other threshold expression is
   evaluated exactly, and `<` no longer includes a distance equal to the
   threshold.
-- **Storage errors fail the query.** A read error in a property access or a
-  label check read as null, or as "no such label"; it now fails the query with
-  `StorageError`.
+- **Storage errors fail the query.** A failure to read or write while a query
+  runs fails it with a message naming what was being read or written. Before, a
+  property read, `labels()`, `type()`, `properties()`, a relationship property,
+  a vector for `<=>` or a `@@` filter read as null or false, and a `WHERE`
+  quietly dropped the row. Null now means only a missing property, a deleted
+  entity or a property name never used. Through the C API, a storage failure
+  under a query returns `LATTICE_ERROR_IO` and running out of memory
+  `LATTICE_ERROR_OUT_OF_MEMORY`, where both were `LATTICE_ERROR`; the bindings'
+  query errors carry the code.
+- **A relationship `CREATE` to a missing node fails with `LATTICE_ERROR_NOT_FOUND`**
+  (-4), the code `lattice_edge_create` returns, and names both nodes: "Cannot
+  complete creating a relationship from node 2 to node 3: a node or relationship
+  it needs does not exist, or was deleted earlier in the query". It was
+  `LATTICE_ERROR` with "Storage error while creating a relationship: NotFound".
+- **Strings are counted in characters.** `size('Müller')` is 6, not 7.
+  `substring` takes offsets in characters and no longer cuts one in half, which
+  produced invalid UTF-8 that a binding then failed to decode. `toLower` and
+  `toUpper` map Latin, Greek, Cyrillic, Armenian and fullwidth letters, not ASCII
+  only. `split(s, '')` splits into characters; it crashed the process. A null
+  argument to `substring`, `replace` or `split` gives null, where a wrong type in
+  another argument made it a type error.
+- **Integers and floats compare exactly everywhere.**
+  `9007199254740993 = 9007199254740992.0` is false and `>` is true, as `ORDER BY`
+  already had it. `DISTINCT` and grouping treat `1` and `1.0` as one value, and
+  `0` and `-0.0` as one. `MERGE (a)-[:R {w: 1}]->(b)` finds a relationship whose
+  `w` is `1.0` instead of creating a second.
+- **A `MATCH` never reuses a variable-length path's relationships.**
+  `MATCH (a)-[:R*1..2]->(b)-[:R]->(c)` over a two-relationship cycle returned 4
+  rows that walked one relationship twice, and now returns 2.
 - **Function names are not case-sensitive** (`TOLOWER` works), and
   `toString(null)` is null, where it was the string `'null'`.
 - **`CREATE` cannot add labels or properties to a bound variable.**
   `MATCH (n) CREATE (n:Extra {p: 1})` silently dropped them; it is now rejected.
 
 ### Storage, API and formats
+
+- **Deleting a node that has relationships is refused in every API.**
+  `lattice_node_delete`, and so `delete_node` in Python, `deleteNode` in
+  TypeScript and Java and `DeleteNode` in Go, removed the node and left its
+  relationships in place, pointing at nothing and still returned from their other
+  end. It now returns `LATTICE_ERROR_HAS_RELATIONSHIPS` (-17) and deletes nothing.
+  `lattice_node_detach_delete` deletes the node with its relationships:
+  `delete_node(id, detach=True)` in Python, `deleteNode(id, { detach: true })` in
+  TypeScript, `Tx.DetachDeleteNode` in Go, `Transaction.detachDeleteNode` in Java.
+  Deleting a node that does not exist is still not an error.
+- **An edge needs both of its ends.** `lattice_edge_create` returns
+  `LATTICE_ERROR_NOT_FOUND` (-4) unless both nodes exist as the transaction sees
+  them; it created edges to nodes that did not exist.
+- **A database opens with the vector index it has.** The file records the index's
+  dimensions, metric and build settings, and a database that has an index opens
+  with it whatever the options say; `enable_vector` now means "create an index if
+  there is none". Options that contradict the file are refused with the new
+  `LATTICE_ERROR_CONFIG_MISMATCH` (-18), where wrong dimensions were refused as
+  an invalid argument, or misread the pages. Python and TypeScript accept
+  `vector_dimensions=0` (`vectorDimensions: 0`) for "the file's"; Go and Java
+  cannot express that, so leave vectors off when reopening there.
+- **`<=>` and vector search use the database's metric.** New indexes can use
+  Euclidean (L2) distance or the negated dot product as well as cosine, and other
+  `m` and `ef_construction`: `vector_metric`, `vector_m` and
+  `vector_ef_construction` in every binding and in `lattice_open_options_v5`, and
+  `lattice create --vector-metric=cosine|euclidean|dot --vector-m=<n>
+  --vector-ef-construction=<n>`. They are fixed once the index exists; export and
+  import to change them. Under Euclidean and dot product vectors are stored as
+  given; cosine still normalises them.
+- **A node's id is never handed out again.** Every open found the next node id
+  by scanning for the highest one, so deleting the newest node and reopening gave
+  its id to the next node created. The counter is now stored in the file. Ids
+  handed out by work that rolled back, or that had not committed before a crash,
+  can still be reused.
+- **An explicit sync setting wins over the environment.** `LATTICE_SYNC_MODE` and
+  `LATTICE_FULL_FSYNC` overrode whatever a program set; they now apply only when
+  the program leaves the option unset.
+- **A log that cannot be replayed refuses to open** (see *Replay is exact*).
+  Store failures during replay are `IoError` and running out of memory
+  `OutOfMemory`; every recovery failure used to be `IoError`.
+- **New error codes.** `LATTICE_ERROR_HAS_RELATIONSHIPS` (-17),
+  `LATTICE_ERROR_CONFIG_MISMATCH` (-18) and `LATTICE_ERROR_NEEDS_NEWER_WRITER`
+  (-19, a writable open of a file whose header asks for a newer writer; a
+  read-only open works). Python raises `LatticeHasRelationshipsError`,
+  `LatticeConfigMismatchError` and `LatticeNeedsNewerWriterError`; TypeScript
+  uses `LatticeErrorCode.HasRelationships`, `ConfigMismatch` and
+  `NeedsNewerWriter`; Go `ErrorHasRelationships`, `ErrorConfigMismatch` and
+  `ErrorNeedsNewerWriter`; Java `HAS_RELATIONSHIPS`, `CONFIG_MISMATCH` and
+  `NEEDS_NEWER_WRITER`.
+- **A commit that fails with `LATTICE_ERROR_TXN_ABORTED` ends the transaction**
+  in Python, TypeScript, Go and Java, and rolling it back afterwards does
+  nothing. Leaving a `with` block, `Database.write` or try-with-resources raised
+  the error a second time, and Go's `IsActive` stayed true.
+- **The Go binding needs a library with `lattice_open_v5`**, since it links the
+  library rather than looking for the function. Python and TypeScript fall back
+  to the older open functions, and raise their Unsupported error if one of the
+  new options is set against an older library.
 
 - **Keys are capped at 1012 bytes** (for 4 KB pages). Labels, relationship types
   and property names are stored as keys, so a name of more than about a thousand
@@ -307,6 +474,27 @@ Other changes, measured by their commits on a busy machine:
   reads avoid copies.
 - A second thread waiting on a database lock sleeps instead of spinning on a
   core.
+- Opening a database reads the node id counter from the file instead of
+  scanning every node: 200,000 nodes, 2.5–2.8 ms to 0.5 ms.
+- A process that had just built a large database read it back many times more
+  slowly than after reopening it, because the buffer pool's page table filled
+  with tombstones. In the process that built a million-node database: a full
+  scan 28.9 µs to about 1 µs a node, a random node read 51.1 µs to about 1.7 µs,
+  declaring a property index 16.7 s to 2.2–3.1 s, and the build itself 52.7 s to
+  about 21 s.
+- Expanding a node inside a write transaction that holds 20,000 new
+  relationships looks only at that node's pending ones: 265 µs to 4.9 µs a hop.
+- `r.prop`, `type(r)` and `labels(n)` decode only what they need: `RETURN r.w,
+  r.note` over 20,000 relationships, 15.3 ms to 10.2 ms.
+- A `WHERE` that is the same `@@` search the `MATCH` already ran no longer runs
+  it again: 366 µs to 235 µs at 663 hits of 2,000 documents.
+- `ORDER BY d.embedding <=> $q LIMIT 10` keeps the vector search bounded, as
+  `LIMIT` alone did: 598 µs to 227 µs at 2,000 vectors.
+
+Two checks cost a little. Creating an edge checks that both ends exist, two key
+probes: 100,000 edge creates in one transaction take 21–26 ms instead of 6–7 ms,
+which is within the noise once the commit is counted. Refusing to delete a node
+with relationships is one range probe, under 1 µs.
 
 ## Fixes
 
@@ -341,6 +529,16 @@ Other changes, measured by their commits on a busy machine:
   apart beyond 2^53 when a float was among them.
 - `size`, `abs`, `id` and `range` return null for a null argument; they failed
   the query. `{a: 1}.a` is 1; property access on a map was always null.
+- `score(d)` returns the BM25 score of the `@@` search that matched `d`, the best
+  term's for an `OR`. It is null when no single search scored `d`.
+- Writing a search's distance in the `RETURN` (`d.embedding <=> $q AS dist`)
+  returns the distance the search measured instead of computing it again, and a
+  distance no longer outlives its node when a later clause reuses its slot or
+  `WITH` renames it.
+- `ORDER BY` on the search's own `<=>`, or on the alias of a returned one, keeps
+  `LIMIT` and `SKIP` bounding the vector search, as `LIMIT` alone did. The
+  answer is HNSW's approximate top k; before, every match under the threshold was
+  sorted.
 
 **Full-text search**
 
@@ -381,12 +579,28 @@ Other changes, measured by their commits on a busy machine:
   the pages the old graph used instead of leaking them.
 - A neighbour whose vector cannot be read fails the insert instead of being
   linked unchecked.
+- The search operator measured vectors not yet in the index with cosine on
+  unnormalised vectors; it uses the database's metric.
 
 **CLI**
 
-- Every command that opens a database takes `--enable-vector` and
-  `--vector-dims`, and an open that fails because the log holds vector changes
-  says which options to retry with.
+- Every command opens a database's vector index as it was created, without
+  vector options, after a crash included. `--enable-vector --vector-dims` add an
+  index to a database that has none; a `--vector-dims` that contradicts the file
+  is refused with a message saying to leave it out. `create` takes
+  `--vector-metric`, `--vector-m` and `--vector-ef-construction`.
+- A failed query prints its stage, code, message, line and column, and the query
+  with a caret under the place.
+- The read-only commands (`info`, `count`, `labels`, `types`, `schema`, `export`,
+  `dump`) recover a crashed database in memory and show every committed
+  transaction. `check` still reads pages as the crash left them.
+- A file that needs a newer writer is refused by the commands that write, with a
+  message naming the commands that still read it.
+- A CSV file that cannot be read as CSV, such as one with an unclosed quote,
+  names the line and the reason; it said "Import failed: ParseError".
+- The result table prints floats of 1e16 and above, or below 1e-6, in size in
+  the shortest scientific form (`1e300`, `1e-300`), where `1e300` took 301
+  digits and `1e-300` printed as `0.000000`.
 - Export, JSONL export and dump include node vectors, and import restores them.
 - `export --query` exports what the query returns.
 - CSV import follows RFC 4180, finds columns by header, resolves edges through
@@ -424,6 +638,14 @@ Other changes, measured by their commits on a busy machine:
   carries the real error code, `BigDecimal` is stored as a float, and characters
   outside the BMP survive error text and column names.
 - `LATTICE_PREFIX` on Windows looks for the DLL under `bin/`, then `lib/`.
+- `lattice_open_v5` and `lattice_open_options_v5` add `sync_mode`, `full_fsync`,
+  `vector_metric`, `vector_m` and `vector_ef_construction`; 0 means "not set",
+  and an out-of-range value is `LATTICE_ERROR_INVALID_ARG`. The older open
+  functions behave as v5 with those fields at 0. `lattice_deserialize` still
+  takes the v4 options.
+- A second fetch of a page another thread was still reading from disk could see
+  the frame's previous contents, another page's or zeroes; it now waits for the
+  read.
 - The embedding client applies its timeout (`timeout_ms`, 30 s by default) to the
   wait for the response to begin; it was stored and never used, so a stalled
   server kept a request waiting indefinitely. Connecting and reading the rest of
@@ -431,13 +653,26 @@ Other changes, measured by their commits on a busy machine:
 
 ## Known limits
 
-- **Reopen a crashed vector database with vectors enabled.** If the log holds
-  committed vector writes, the next open must enable vectors with the dimensions
-  the writer used. Every CLI command now accepts the options, and the error says
-  so.
-- **A read-only open does not read the log.** After a crash it shows the
-  database file as of its last flush, which can be behind the commits the log
-  holds. Open the database read-write once to recover them.
+- **The automatic checkpoint runs inside the commit that triggers it.** About
+  every thousandth small commit takes 5 to 12 ms, up to 27 ms, against about
+  50 µs for the others (C API, macOS, a busy machine). There is no background
+  checkpointer; from Zig, turn the automatic checkpoint off and run checkpoints
+  at moments you choose.
+- **Damage in the newest sync batch reads as a torn tail.** Only a frame written
+  after a later sync can vouch that a frame was synced, so damage to the last
+  frames before the most recent sync, with nothing written after them, is cut
+  off, and the commits in them are lost without an error.
+- **A page that is entirely zero still passes its checksum**, since nothing
+  tells it apart from a page allocated and never written; a pointer to such a
+  page reads it as an empty free page.
+- **A read-only recovery is bounded by memory**, 64 MB plus four times the size
+  of the log and journal; beyond that the read-only open fails with
+  `LATTICE_ERROR_FULL`. `lattice check` does not recover first.
+- **The vector metric, `m` and `ef_construction` cannot be changed** once the
+  index exists; export and import into a new database to change them.
+- **Removing a node's last label removes its vector**, which takes the node out
+  of vector search. A node created without labels can be given a vector and
+  keeps it.
 - **`lattice replicate` takes a snapshot after any process that wrote has
   closed the database.** Closing now folds the log into the file and resets it,
   which begins a new replication generation. That was already so for the
@@ -445,24 +680,55 @@ Other changes, measured by their commits on a busy machine:
   0.16.0 left in the log to be shipped as frames. A pass with nothing changed
   still ships nothing, and a process that stays open and calls `replicateTo`
   on its own handle ships frames as before.
-- **`sync_mode` and `full_fsync` are set through the environment** outside Zig;
-  the C API's open options do not include them.
+- **Files that need a newer writer.** `exec`, `query`, `import`, `backup`,
+  `compact` and `checkpoint` open the database for writing, so the CLI cannot run
+  them, not even a read-only query through `exec`, on a file whose header asks
+  for a newer writer. 0.16.0 does not know that gate and writes such a file
+  anyway.
 - **Some Cypher is not implemented.** `OPTIONAL MATCH`, `CASE`, `UNION`, `CALL`,
   list indexing, list comprehensions and named paths fail with a parse error.
   The message names the clauses the parser expected, not the missing feature.
-- **One relationship-uniqueness gap.** A single-hop relationship written after a
-  variable-length one in the same `MATCH` can reuse a relationship of that path.
-- **Strings are measured in bytes.** `size()` and `substring()` count bytes, and
-  `toLower()` and `toUpper()` change ASCII letters only. An unknown function name
-  is reported when it is first evaluated, not when the query is parsed.
+- **Case mapping is one to one.** `toUpper` and `toLower` use the simple
+  Unicode mappings: `ß` stays `ß`, a final `Σ` lowercases to `σ`, and there is
+  no language-specific casing such as Turkish. `trim` removes ASCII whitespace
+  only.
+- **`ORDER BY score(d) LIMIT k` sorts every match**; it does not bound the
+  full-text search. Search distances and scores do not survive an aggregation.
 
 ## Upgrade notes
 
-- The page layout and the log format are unchanged. Full-text indexes record how
-  they analyse text when their first document goes in, under a new key.
-- Close a database cleanly with this release before opening it with 0.16.0.
-  0.16.0 does not know about the journal, so after a crash it would ignore an
-  unfinished flush.
+- **The file format is version 4.** The header gains fields past the 200 bytes
+  0.16.0 uses, behind a magic number: the node id counter, the vector index's
+  dimensions, metric and HNSW settings, and a minimum writer version. Data pages
+  are laid out as before. Full-text indexes record how they analyse text when
+  their first document goes in, under a new key.
+- **Opening a 0.16.0 file with this release.** The first read-write open
+  upgrades the header to format 4: it finds the node id counter with one scan,
+  reads the vector dimensions from the vector pages (0.16.0 could only build
+  cosine indexes with `m` 16 and `ef_construction` 200) and records both. A
+  read-only open changes nothing. If 0.16.0 had itself deleted the highest node,
+  that id is handed out once more, as 0.16.0 would have done; from then on no
+  deleted id is reused. A 0.16.0 vector database opens with no vector options;
+  opened with different dimensions it is refused with -18.
+- **Opening a file this release wrote with 0.16.0.** 0.16.0 opens and writes a
+  file whose vector index, if any, is cosine with `m` 16, whatever its
+  `ef_construction`. It writes zeros over the format-4 fields, and this release
+  derives them again at its next open, as for a 0.16.0 file. 0.16.0 refuses a
+  file whose index is Euclidean or dot product or has another `m`, reporting an
+  I/O error, and leaves the file untouched. It does not know the minimum writer
+  version: it writes a file that asks for a newer writer, and zeros the field.
+- **The log.** A log that holds frames is format version 3, which 0.16.0 refuses
+  to open. A clean close or a truncating checkpoint leaves an empty log, written
+  as version 2, which 0.16.0 opens. So close a database cleanly with this
+  release before opening it with 0.16.0; after a crash, open it once with this
+  release first. 0.16.0 does not know about the journal either, so after a crash
+  it would ignore an unfinished flush. This release opens and replays logs
+  0.16.0 wrote.
+- Code that deletes nodes through `lattice_node_delete` or a binding's delete
+  now gets -17 for a node with relationships, and must delete them first or use
+  the detach variant.
+- A program that relied on `LATTICE_SYNC_MODE` or `LATTICE_FULL_FSYNC` to
+  override what it set in code now gets what it set.
 - Check application code against the Cypher changes above, in particular plain
   `DELETE` of nodes that may have relationships, code that reads results by
   the name of an unaliased column, code that expects `sum` of integers to be a

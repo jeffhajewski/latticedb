@@ -1,6 +1,7 @@
 // A Cypher string becomes result rows. A query-cache hit skips lexing, parsing
-// and analysis; a write query with no caller transaction runs inside an
-// automatic read-write transaction.
+// and analysis, and a prepared query skips the cache lookup as well; a write
+// query with no caller transaction runs inside an automatic read-write
+// transaction. Plans are not cached: every execution plans again.
 digraph query_pipeline {
   bgcolor="transparent"
   rankdir=TB
@@ -18,6 +19,8 @@ digraph query_pipeline {
      fontname="Menlo,Consolas,monospace" fontsize=11]
 
   cache    [label="Query cache\n(normalized text → AST + bindings)" fillcolor="#f6f8fa" color="#c7d0da"]
+  prepared [label="Prepared query\n(holds its cache entry)" fillcolor="#f6f8fa" color="#c7d0da"
+            style="filled,rounded,dashed"]
   lexer    [label="Lexer"]
   parser   [label="Parser"]
   semantic [label="Semantic Analyzer"]
@@ -30,8 +33,9 @@ digraph query_pipeline {
   cache    -> lexer    [label="  miss"]
   lexer    -> parser   [label="  tokens"]
   parser   -> semantic [label="  AST"]
-  semantic -> planner  [label="  validated AST + variable bindings\n  (stored in the cache)"]
+  semantic -> planner  [label="  validated AST\n  (stored in the cache)"]
   cache    -> planner  [label="  hit" style=dashed]
+  prepared -> planner  [label="  no lookup" style=dashed]
   planner  -> txn      [label="  operator tree"]
   txn      -> executor [label="  begin read-write"]
 

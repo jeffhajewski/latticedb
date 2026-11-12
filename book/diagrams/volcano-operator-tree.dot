@@ -27,7 +27,7 @@ digraph volcano_operator_tree {
           label="executor calls next()"]
   storage [shape=plaintext style="" fillcolor="transparent"
            fontname="Helvetica,Arial,sans-serif" fontsize=10 fontcolor="#6b7280"
-           label="reads from storage"]
+           label="reads the label index,\n256 ids at a time"]
 
   { rank=same; caller -> proj [color="#4a90d9" style=dashed] }
   { rank=same; scan -> storage [color="#4a90d9" style=dashed] }

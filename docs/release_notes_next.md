@@ -249,23 +249,50 @@ The default stays `.full`.
 
 ## Performance
 
-<!-- numbers to be re-measured on a quiet machine before release -->
+<!-- Measured on 11 November 2026 on an Apple M5 in ordinary use, not a quiet
+     machine: v0.16.0 and this release built ReleaseFast and run alternately,
+     medians of three runs for the first table and single runs for the second.
+     Re-measure on a quiet machine before quoting these elsewhere. -->
 
 The C API used Zig's debug allocator in every build, with one global lock per
 allocation. Release builds now use `smp_allocator`. Label scans read the label
 index instead of decoding every node, and changefeed records no longer make a
-large commit quadratic. Through the C API, release build, 20,000 nodes:
+large commit quadratic. A read-only transaction no longer writes to the log at
+all; it used to write two records and an fsync. Through the C API, release
+build, 20,000 nodes:
 
-| | before | after |
+| | 0.16.0 | this release |
 |---|---:|---:|
-| read one property | 9.4 µs | 0.37 µs |
-| `MATCH (n:Rare) … LIMIT 1` | 190 ms | 3.7 µs |
-| `MATCH (n:Person) WHERE n.age > 60` | 478 ms | about 9 ms |
-| read-only transaction, no work | 44 µs | 0.08 µs |
-| commit 20,000 nodes in one transaction | 9.5 s | about 0.3–0.6 s |
+| read one property | 10.2 µs | 0.26 µs |
+| read-only transaction, no work | 43.7 µs | 0.08 µs |
+| write transaction: one node, one property, commit | 96 µs | 54 µs |
+| commit 20,000 nodes in one transaction | 10.7 s | 0.23 s |
+| `UNWIND [1] AS x RETURN x` | 72 µs | 0.70 µs |
+| `MATCH (n:Rare) RETURN n.name LIMIT 1`, 10 of 22,000 nodes | 208 ms | 0.9 µs |
+| `MATCH (n:Person) WHERE n.age > 60 RETURN n.name`, 3,600 rows | 560 ms | 5.5 ms |
 
-A read-only transaction no longer writes to the log at all; it used to write two
-records and an fsync.
+The `LIMIT 1` figure is the steady state; the first call after a burst of
+writes took between 40 µs and 2 ms.
+
+Cypher queries read one property at a time instead of copying the whole node,
+evaluate `ORDER BY` keys once per row and keep only the top `k` under a
+`LIMIT`, stream label scans in read-only queries so a `LIMIT` stops them early,
+and parse a prepared query once instead of once for `lattice_query_writes` and
+again to run it. Same setup:
+
+| query | 0.16.0 | this release |
+|---|---:|---:|
+| return one property of all 20,000 nodes | 654 ms | 6.4 ms |
+| return four properties of all 20,000 nodes | 1.88 s | 11.5 ms |
+| `WHERE n.age = 33`, 400 rows | 613 ms | 4.3 ms |
+| `ORDER BY n.age DESC, n.id LIMIT 10` | 19.7 s | 4.3 ms |
+| `ORDER BY n.name`, all 20,000 rows | 10.5 s | 15.6 ms |
+| `count` and `avg` over 20,000 nodes | 1.18 s | 4.5 ms |
+| one-hop expand, 2,000 rows | 1.19 s | 10.7 ms |
+| `*1..3` from one node | 646 ms | 4.0 ms |
+
+One lookup is slower than it would otherwise be: an indexed integer equality
+also probes the equal float, about 0.3 µs more.
 
 Other changes, measured by their commits on a busy machine:
 
@@ -280,32 +307,6 @@ Other changes, measured by their commits on a busy machine:
   reads avoid copies.
 - A second thread waiting on a database lock sleeps instead of spinning on a
   core.
-
-The second table compares the query engine before and after its own fixes in
-this release, so its "before" already includes the gains above. Cypher queries
-read one property at a time instead of copying the whole node, evaluate
-`ORDER BY` keys once per row and keep only the top `k` under a `LIMIT`, stream
-label scans in read-only queries so a `LIMIT` stops them early, and parse a
-prepared query once instead of once for `lattice_query_writes` and again to run
-it. Through the C API, release build, 20,000 nodes, median of three runs on a
-busy machine (±15%):
-
-| query | before | after |
-|---|---:|---:|
-| `MATCH (n:Person) RETURN n.id LIMIT 1`, 20,000 `Person` nodes | 99.7 µs | 1.39 µs |
-| `RETURN` 4 properties | 31.2 ms | 12.4 ms |
-| `WHERE age = 33` | 6.9 ms | 4.3 ms |
-| `ORDER BY age DESC, id LIMIT 10` | 288 ms | 4.9 ms |
-| `ORDER BY name`, all rows | 82 ms | 16.1 ms |
-| `count` + `avg` + `sum` | 12.5 ms | 4.7 ms |
-| 1-hop expand | 21.9 ms | 12.3 ms |
-| `*1..3` from one node | 7.0 ms | 4.4 ms |
-| `<=>` with `LIMIT 10` | 131 µs | 96 µs |
-| `UNWIND` of a tiny list | 0.57 µs | 0.60 µs |
-
-Preparing, running and freeing a tiny read query went from 0.79 µs to 0.60 µs.
-One lookup is slower: an indexed integer equality also probes the equal float,
-about 0.3 µs more.
 
 ## Fixes
 

@@ -313,6 +313,12 @@ pub const FtsIndex = struct {
         if (recorded == null or !std.mem.eql(u8, &recorded.?, &encoded)) {
             self.doc_lengths.putAnalysis(encoded) catch return FtsError.ScorerError;
         }
+        // 0.16.0 appends to a page whose entries carry positions without
+        // writing a position count, which garbles the page. It ignores the
+        // record's positions bit, so the file has to keep it out.
+        if (self.config.store_positions) {
+            self.posting_store.bp.pm.requireReaderVersion(lattice.core.types.FORMAT_VERSION) catch return FtsError.IoError;
+        }
         self.analysis_cache = fresh;
         self.positions_cache = self.config.store_positions;
         return fresh;

@@ -43,9 +43,14 @@ db.create_node_fts_index("Document", "text")
 Opening a database whose log has to be replayed after a crash also rebuilds
 every full-text index, and a rebuilt index takes the new tokenizer.
 
-Going back to 0.16.0 after this release has written to an index works, but
-0.16.0 splits non-ASCII words its old way, so it will not find words with
-non-ASCII letters that this release indexed. ASCII text is unaffected.
+Going back to 0.16.0 works for a database whose full-text indexes do not store
+word positions (indexes 0.16.0 built, and indexes this release has only declared),
+but 0.16.0 splits non-ASCII words its old way, so it will not find words with
+non-ASCII letters that this release indexed. ASCII text is unaffected. Once an
+index that stores positions (every index this release fills) holds a document,
+the file asks for this release or later and 0.16.0 refuses to open it: 0.16.0
+would append entries without their positions to pages whose entries carry them,
+and damage the index.
 
 ## Declaring an Index
 

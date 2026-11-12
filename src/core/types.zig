@@ -51,8 +51,9 @@ pub const FORMAT_VERSION: u16 = 4;
 /// format-4 header fields and drops them when it writes the header, which
 /// this release notices and recovers from, so it is not locked out. A file
 /// whose vector index uses a metric or connection count format 3 cannot
-/// express, or that holds an ordered property index, gets FORMAT_VERSION
-/// instead.
+/// express, that holds an ordered property index, or with a full-text index
+/// that stores positions (which 0.16.0 would damage by appending to it),
+/// gets FORMAT_VERSION instead.
 pub const MIN_READER_VERSION: u16 = 3;
 
 /// Property value - a tagged union supporting multiple types

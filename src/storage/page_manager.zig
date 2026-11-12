@@ -665,6 +665,16 @@ pub const PageManager = struct {
         return true;
     }
 
+    /// Keep releases older than `version` from opening the file: it now
+    /// holds something they would misread or damage. Reaches the file with
+    /// the next flush; never lowered.
+    pub fn requireReaderVersion(self: *Self, version: u16) PageManagerError!void {
+        if (self.read_only) return PageManagerError.PermissionDenied;
+        if (self.header.min_reader_version >= version) return;
+        self.header.min_reader_version = version;
+        self.header_dirty = true;
+    }
+
     /// Record that the write-ahead log is about to be reset.
     ///
     /// This has to reach disk before the log is actually truncated, which the

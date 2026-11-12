@@ -414,3 +414,40 @@ test "lqs: a null argument makes a function null" {
     // A wrong type that is not null is still an error.
     try expectFailure(db, "RETURN substring('abc', 'x')", .execution, "TypeError", "Type error: substring(string, string) is not defined; substring takes (string, integer[, integer])");
 }
+
+// ============================================================================
+// Relationship uniqueness across variable-length relationships
+// ============================================================================
+
+test "lqs: a MATCH never binds one relationship twice, variable-length or not" {
+    const path = "/tmp/lattice_lqs_var_unique.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try run(db, "CREATE (:U {n: 1})-[:R]->(:U {n: 2})-[:R]->(:U {n: 3})");
+
+    // A single hop after a variable-length one could walk back along the
+    // path's own edge; so could a second variable-length one.
+    try std.testing.expectEqual(@as(i64, 0), try queryInt(db, "MATCH (:U {n: 1})-[:R*1..1]->(b)<-[:R]-(c) RETURN count(*)"));
+    try std.testing.expectEqual(@as(i64, 0), try queryInt(db, "MATCH (:U {n: 1})-[:R*1..2]->(b)<-[:R*1..2]-(c) RETURN count(*)"));
+    // The other way round already held.
+    try std.testing.expectEqual(@as(i64, 0), try queryInt(db, "MATCH (:U {n: 1})-[:R]->(b)<-[:R*1..1]-(c) RETURN count(*)"));
+    // Undirected: from 1 the path takes 1-2, and the next hop may take only 2-3.
+    var undirected = try db.query("MATCH (:U {n: 1})-[:R*1..1]-(y)-[:R]-(z) RETURN z.n");
+    defer undirected.deinit();
+    try std.testing.expectEqual(@as(usize, 1), undirected.rowCount());
+    try std.testing.expectEqual(@as(i64, 3), undirected.rows[0].values[0].int_val);
+    // Across comma-separated patterns of one MATCH: the path [1-2] leaves
+    // 2->3 for the second pattern, the path [1-2, 2-3] leaves nothing.
+    try std.testing.expectEqual(@as(i64, 1), try queryInt(db, "MATCH (:U {n: 1})-[:R*1..2]-(y), (p)-[:R]->(q) RETURN count(*)"));
+    // A zero-length path uses no edge.
+    var zero = try db.query("MATCH (:U {n: 1})-[:R*0..2]->(y)-[:R]->(z) RETURN y.n, z.n ORDER BY y.n");
+    defer zero.deinit();
+    try std.testing.expectEqual(@as(usize, 2), zero.rowCount());
+    try std.testing.expectEqual(@as(i64, 1), zero.rows[0].values[0].int_val);
+    try std.testing.expectEqual(@as(i64, 2), zero.rows[1].values[0].int_val);
+    // Separate MATCH clauses may bind the same relationship.
+    try std.testing.expectEqual(@as(i64, 1), try queryInt(db, "MATCH (:U {n: 1})-[:R*1..1]->(b) MATCH (b)<-[:R]-(c) RETURN count(*)"));
+    // Relationships whose types cannot overlap need no check, and still match.
+    try run(db, "MATCH (a:U {n: 3}) CREATE (a)-[:S]->(:U {n: 4})");
+    try std.testing.expectEqual(@as(i64, 1), try queryInt(db, "MATCH (:U {n: 1})-[:R*2..2]->(b)-[:S]->(c) RETURN count(*)"));
+}

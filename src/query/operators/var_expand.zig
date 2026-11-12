@@ -13,6 +13,7 @@ const Row = executor.Row;
 const ExecutionContext = executor.ExecutionContext;
 
 const core_types = @import("../../core/types.zig");
+const types = core_types;
 const NodeId = core_types.NodeId;
 const EdgeId = core_types.EdgeId;
 
@@ -93,6 +94,10 @@ pub const VariableLengthExpand = struct {
     min_hops: u32,
     /// Maximum hops (inclusive), null means unbounded
     max_hops: ?u32,
+    /// Where to put the ids of the path's edges, as a list, when a later
+    /// relationship of the same MATCH must not reuse them. Null otherwise,
+    /// which keeps the list's allocation off every other pattern.
+    path_slot: ?u8 = null,
 
     /// Current input row being processed
     current_input: ?*Row,
@@ -181,7 +186,7 @@ pub const VariableLengthExpand = struct {
         while (true) {
             if (self.pending_result) |target_id| {
                 self.pending_result = null;
-                return self.emitResult(target_id);
+                return self.emitResult(ctx, target_id);
             }
 
             if (self.path_stack.items.len == 0) {
@@ -193,7 +198,7 @@ pub const VariableLengthExpand = struct {
             }
 
             if (try self.step(ctx)) |target_id| {
-                return self.emitResult(target_id);
+                return self.emitResult(ctx, target_id);
             }
         }
     }
@@ -285,7 +290,7 @@ pub const VariableLengthExpand = struct {
         }
     }
 
-    fn emitResult(self: *Self, target_id: NodeId) ?*Row {
+    fn emitResult(self: *Self, ctx: *ExecutionContext, target_id: NodeId) OperatorError!?*Row {
         const output_row = self.output_row orelse return null;
         const input_row = self.current_input orelse return null;
 
@@ -295,6 +300,19 @@ pub const VariableLengthExpand = struct {
 
         // Set target node
         output_row.setSlot(self.target_slot, .{ .node_ref = target_id });
+
+        if (self.path_slot) |slot| {
+            // The row may be kept (sorted, collected), so the list lives in
+            // the row arena, for the rest of the query. The source frame has
+            // no edge; every frame after it arrived by one.
+            const frames = self.path_stack.items;
+            const hops = if (frames.len > 0) frames.len - 1 else 0;
+            const ids = ctx.row_arena.allocator().alloc(types.PropertyValue, hops) catch return OperatorError.OutOfMemory;
+            for (frames[frames.len - hops ..], ids) |frame, *id| {
+                id.* = .{ .int_val = @bitCast(frame.via_edge.?) };
+            }
+            output_row.setSlot(slot, .{ .property = .{ .list_val = ids } });
+        }
 
         return output_row;
     }

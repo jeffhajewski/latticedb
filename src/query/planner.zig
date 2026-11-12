@@ -410,14 +410,15 @@ pub const QueryPlanner = struct {
     /// slot to hold their edge, which keeps the extra slots off ordinary
     /// multi-type paths.
     ///
-    /// A variable-length relationship's edges are not kept in the row, so a
-    /// later relationship cannot check against them. A variable-length
-    /// relationship does check against earlier single-hop ones, and its own
-    /// path never reuses an edge.
+    /// A variable-length relationship that a later one could collide with
+    /// keeps its path's edge ids in a slot of their own, as a list, and
+    /// later relationships, single-hop or variable-length, skip those too.
+    /// Its own path never reuses an edge.
     const MatchEdges = struct {
         /// Every relationship pattern of the clause, in order.
         edges: []const *const ast.EdgePattern,
-        /// The slot each planned single-hop relationship's edge went to.
+        /// The slot each planned relationship's edge, or variable-length
+        /// path, went to.
         slots: []?u8,
         /// How many relationships have been planned.
         planned: usize = 0,
@@ -436,7 +437,6 @@ pub const QueryPlanner = struct {
         /// later relationship of the clause could match the same edge.
         fn needsSlot(self: *const MatchEdges, k: usize) bool {
             const edge = self.edges[k];
-            if (edge.quantifier != null) return false;
             for (self.edges[k + 1 ..]) |later| {
                 if (typesOverlap(edge.types, later.types)) return true;
             }
@@ -790,12 +790,23 @@ pub const QueryPlanner = struct {
                     // Relationship uniqueness within the MATCH clause.
                     const edge_index = match_edges.planned;
                     match_edges.planned += 1;
-                    if (edge_slot == null and match_edges.needsSlot(edge_index)) {
-                        edge_slot = try self.allocateSlot();
-                        _ = try self.bindInternalVariable(edge_slot.?, .edge);
+                    var path_slot: ?u8 = null;
+                    if (edge_pattern.quantifier != null) {
+                        // A path's edges go in a slot of their own, never in
+                        // the relationship's variable.
+                        if (match_edges.needsSlot(edge_index)) {
+                            path_slot = try self.allocateSlot();
+                            _ = try self.bindInternalVariable(path_slot.?, .alias);
+                        }
+                        match_edges.slots[edge_index] = path_slot;
+                    } else {
+                        if (edge_slot == null and match_edges.needsSlot(edge_index)) {
+                            edge_slot = try self.allocateSlot();
+                            _ = try self.bindInternalVariable(edge_slot.?, .edge);
+                        }
+                        match_edges.slots[edge_index] = edge_slot;
                     }
                     const distinct_from = try match_edges.distinctFrom(self.allocator, edge_index);
-                    if (edge_pattern.quantifier == null) match_edges.slots[edge_index] = edge_slot;
 
                     // Every type the pattern accepts, as in `-[:A|B]->`.
                     const edge_types = try self.resolveEdgeTypes(edge_pattern.types);
@@ -826,6 +837,7 @@ pub const QueryPlanner = struct {
                         ) catch {
                             return PlannerError.OutOfMemory;
                         };
+                        var_expand.path_slot = path_slot;
                         op = var_expand.operator();
                     } else {
                         // Regular single-hop expand

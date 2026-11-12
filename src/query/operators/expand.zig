@@ -51,7 +51,8 @@ pub const EdgeConstraints = struct {
     types: []const SymbolId = &.{},
     /// Slots holding edges matched earlier in the same MATCH. Cypher never
     /// binds one relationship twice in a pattern, so an edge already in any of
-    /// these slots is skipped.
+    /// these slots is skipped. A slot holds one edge, or, for a
+    /// variable-length relationship, the list of its path's edge ids.
     distinct_from: []const u8 = &.{},
     /// The far end is already bound in the target slot, as in
     /// `MATCH (a)-->(b)-->(a)` or a variable bound by an earlier clause. Only
@@ -72,8 +73,14 @@ pub const EdgeConstraints = struct {
     pub fn usedEarlier(self: EdgeConstraints, row: *const Row, edge_id: EdgeId) bool {
         for (self.distinct_from) |slot| {
             const value = row.getSlot(slot) orelse continue;
-            if (value.asEdgeId()) |id| {
-                if (id == edge_id) return true;
+            switch (value) {
+                .edge_ref => |id| if (id == edge_id) return true,
+                .property => |path| if (path == .list_val) {
+                    for (path.list_val) |item| {
+                        if (item == .int_val and item.int_val == @as(i64, @bitCast(edge_id))) return true;
+                    }
+                },
+                else => {},
             }
         }
         return false;

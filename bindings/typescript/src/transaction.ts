@@ -16,6 +16,8 @@ import {
 } from './types';
 import {
   LatticeFFI,
+  LatticeError,
+  LatticeErrorCode,
   DatabaseHandle,
   TransactionHandle,
 } from './ffi';
@@ -52,6 +54,10 @@ export class Transaction {
 
   /**
    * Commit the transaction.
+   *
+   * If the commit fails with code -7 (TxnAborted), the native transaction is
+   * already gone and this one is over: rolling it back afterwards does
+   * nothing. After any other failure it stays open for `rollback()`.
    */
   commit(): void {
     if (this.committed) {
@@ -63,7 +69,17 @@ export class Transaction {
     if (this.txnHandle === null) {
       throw new Error('Transaction closed');
     }
-    this.ffi.commit(this.txnHandle);
+    try {
+      this.ffi.commit(this.txnHandle);
+    } catch (error) {
+      if (error instanceof LatticeError && error.code === LatticeErrorCode.TxnAborted) {
+        // The native side has retired the handle; it cannot be committed or
+        // rolled back again, so the transaction ended without committing.
+        this.txnHandle = null;
+        this.rolledBack = true;
+      }
+      throw error;
+    }
     this.txnHandle = null;
     this.committed = true;
   }

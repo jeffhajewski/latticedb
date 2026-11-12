@@ -7,6 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { Database } from '../src/database';
+import { Transaction } from '../src/transaction';
 import { getFFI, isLibraryAvailable, LatticeErrorCode, LatticeError } from '../src/ffi';
 
 const describeIfNative = isLibraryAvailable() ? describe : describe.skip;
@@ -229,6 +230,34 @@ describeIfNative('open options v5, detach delete and edge endpoints', () => {
         await txn.deleteNode(BigInt(987654));
         await txn.deleteNode(BigInt(987654), { detach: true });
       });
+    } finally {
+      await db.close();
+    }
+  });
+
+  test('a commit that reports TxnAborted ends the transaction', async () => {
+    const db = new Database(path.join(dir, 'aborted-commit.db'), { create: true });
+    await db.open();
+    try {
+      const ffi = getFFI();
+      const dbHandle = (db as unknown as { dbHandle: unknown }).dbHandle;
+      const handle = ffi.begin(dbHandle, false);
+      const txn = new Transaction(ffi, handle, false, dbHandle);
+      await txn.createNode({ labels: ['N'] });
+      // Retire the native handle behind the wrapper's back, so the wrapper's
+      // own commit gets TXN_ABORTED from the C side.
+      ffi.commit(handle);
+
+      let code: number | undefined;
+      try {
+        txn.commit();
+      } catch (err) {
+        code = (err as LatticeError).code;
+      }
+      expect(code).toBe(LatticeErrorCode.TxnAborted);
+      // Nothing is left to roll back; this must not reach the retired handle.
+      expect(() => txn.rollback()).not.toThrow();
+      expect(() => txn.commit()).toThrow('Transaction already rolled back');
     } finally {
       await db.close();
     }

@@ -1407,7 +1407,8 @@ pub const Database = struct {
         return try self.runCheckpoint(wal, mode);
     }
 
-    /// Empty a log that still holds frames, at open and at close.
+    /// Fold a log that holds work into the file and empty it, at open and at
+    /// close. A log that ends at its own last checkpoint is left as it is.
     ///
     /// Skipped when automatic checkpoints are switched off: that setting
     /// means the caller decides when the log is truncated.

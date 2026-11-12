@@ -126,8 +126,24 @@ pub const SemanticAnalyzer = struct {
 
     /// Analyze a parsed query
     pub fn analyze(self: *Self, query: *const ast.Query) AnalysisResult {
+        self.analyzeClauses(query.clauses);
+        // Each single query of a UNION sees only its own variables.
+        for (query.unions) |branch| {
+            self.variables.clearRetainingCapacity();
+            self.analyzeClauses(branch.clauses);
+        }
+
+        return .{
+            .success = self.errors.items.len == 0 and !self.errors_dropped,
+            .errors = self.errors.items,
+            .variables = self.variable_list.items,
+            .errors_dropped = self.errors_dropped,
+        };
+    }
+
+    fn analyzeClauses(self: *Self, clauses: []const ast.Clause) void {
         // Process clauses in order
-        for (query.clauses) |clause| {
+        for (clauses) |clause| {
             switch (clause) {
                 .match => |m| self.analyzeMatchClause(m),
                 .where => |w| self.analyzeWhereClause(w),
@@ -144,13 +160,6 @@ pub const SemanticAnalyzer = struct {
                 .unwind => |u| self.analyzeUnwindClause(u),
             }
         }
-
-        return .{
-            .success = self.errors.items.len == 0 and !self.errors_dropped,
-            .errors = self.errors.items,
-            .variables = self.variable_list.items,
-            .errors_dropped = self.errors_dropped,
-        };
     }
 
     // ========================================================================

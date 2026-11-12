@@ -31,6 +31,11 @@ pub fn fuzzParser(allocator: std.mem.Allocator, input: []const u8) !void {
         for (query.clauses) |clause| {
             _ = validateClause(clause);
         }
+        for (query.unions) |branch| {
+            for (branch.clauses) |clause| {
+                _ = validateClause(clause);
+            }
+        }
     }
 
     // Errors are expected for malformed input - just ensure they exist
@@ -177,6 +182,31 @@ test "parser: handles numeric edge cases" {
     try fuzzParser(allocator, "MATCH (n) WHERE n.x = .5"); // Was panicking, now returns error
     try fuzzParser(allocator, "MATCH (n) WHERE n.x = 0.5");
     try fuzzParser(allocator, "MATCH (n) WHERE n.x = 1e999");
+}
+
+test "parser: handles the syntax added after 0.16" {
+    const allocator = std.testing.allocator;
+    const corpus = [_][]const u8{
+        "RETURN [1, 2, 3][0], [1, 2, 3][-1], [1, 2, 3][1..], [1, 2, 3][..-1], {a: 1}['a']",
+        "RETURN [[1, 2], [3]][0][1], [1][",
+        "RETURN [1][..",
+        "RETURN [1][1..2..3]",
+        "RETURN CASE WHEN true THEN 1 ELSE 2 END, CASE 1 WHEN 1 THEN 'a' END",
+        "RETURN CASE WHEN CASE 1 WHEN 1 THEN true END THEN CASE WHEN false THEN 0 END END",
+        "RETURN CASE",
+        "RETURN CASE WHEN",
+        "RETURN CASE WHEN 1 THEN",
+        "RETURN CASE END",
+        "MATCH (n) RETURN count(n) + 1, sum(n.x) / count(*)",
+        "RETURN 1 AS x UNION RETURN 2 AS x",
+        "RETURN 1 AS x UNION ALL RETURN 2 AS x UNION ALL RETURN 3 AS x",
+        "UNION",
+        "UNION ALL",
+        "RETURN 1 UNION",
+        "RETURN 1 UNION UNION RETURN 1",
+        "RETURN 1 UNION RETURN 1 UNION ALL RETURN 1",
+    };
+    for (corpus) |input| try fuzzParser(allocator, input);
 }
 
 test "lexer: handles binary data" {

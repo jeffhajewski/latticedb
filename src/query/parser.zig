@@ -195,6 +195,7 @@ pub const TokenType = enum {
     kw_then,
     kw_else,
     kw_end,
+    kw_union,
     // Literals
     integer,
     float,
@@ -310,8 +311,13 @@ pub const Parser = struct {
         self.advance();
 
         var clauses: std.ArrayList(ast.Clause) = .empty;
+        var unions = UnionParts{};
 
         while (!self.check(.eof)) {
+            if (self.check(.kw_union)) {
+                self.parseUnion(&unions, &clauses);
+                continue;
+            }
             if (self.parseClause()) |clause| {
                 clauses.append(self.arena.allocator(), clause) catch {
                     self.errorAtCurrent("Out of memory");
@@ -320,6 +326,12 @@ pub const Parser = struct {
             } else {
                 self.synchronize();
             }
+        }
+
+        if (unions.branches.items.len > 0) {
+            if (clauses.items.len == 0 and !self.had_error) self.errorAtCurrent("Expected a query after UNION");
+            unions.branches.items[unions.branches.items.len - 1].clauses = clauses.toOwnedSlice(self.arena.allocator()) catch &.{};
+            clauses = .fromOwnedSlice(unions.first);
         }
 
         // Fail if we had errors or if errors were dropped due to OOM
@@ -341,12 +353,54 @@ pub const Parser = struct {
         query.* = .{
             .clauses = clauses.toOwnedSlice(self.arena.allocator()) catch &[_]ast.Clause{},
             .allocator = self.arena.allocator(),
+            .unions = unions.branches.items,
         };
 
         return .{
             .query = query,
             .errors = self.errors.items,
             .errors_dropped = self.errors_dropped,
+        };
+    }
+
+    /// The single queries of a UNION seen so far.
+    const UnionParts = struct {
+        /// The clauses before the first UNION.
+        first: []ast.Clause = &.{},
+        /// Each UNION and the clauses after it; the last one's clauses are
+        /// still being parsed.
+        branches: std.ArrayList(ast.UnionBranch) = .empty,
+    };
+
+    /// A UNION or UNION ALL between two single queries. The clauses parsed
+    /// so far end the query before it.
+    fn parseUnion(self: *Self, unions: *UnionParts, clauses: *std.ArrayList(ast.Clause)) void {
+        const loc = self.currentLocation();
+        self.advance();
+        // ALL is not reserved, so it is read here by its spelling.
+        const all = self.check(.identifier) and std.ascii.eqlIgnoreCase(self.current.text, "all");
+        if (all) self.advance();
+
+        if (clauses.items.len == 0) {
+            self.errorAt(loc, "UNION needs a query before it");
+            return;
+        }
+        const finished = clauses.toOwnedSlice(self.arena.allocator()) catch {
+            self.errorAt(loc, "Out of memory");
+            return;
+        };
+        if (unions.branches.items.len == 0) {
+            unions.first = finished;
+        } else {
+            const previous = &unions.branches.items[unions.branches.items.len - 1];
+            previous.clauses = finished;
+            if (previous.all != all) {
+                self.errorAt(loc, "UNION and UNION ALL cannot be mixed in one query");
+                return;
+            }
+        }
+        unions.branches.append(self.arena.allocator(), .{ .all = all, .clauses = &.{}, .location = loc }) catch {
+            self.errorAt(loc, "Out of memory");
         };
     }
 
@@ -1893,10 +1947,11 @@ pub const Parser = struct {
     /// Keywords added after 0.16 (WHEN, THEN, ELSE, END) only mean
     /// something inside a CASE, where a variable cannot stand in their
     /// place, so they stay usable as variable names: `MATCH (a)-->(end)`
-    /// kept working. CASE itself starts an expression and cannot.
+    /// kept working. UNION only means something where a clause starts.
+    /// CASE itself starts an expression and cannot.
     fn checkVariable(self: *const Self) bool {
         return switch (self.current.token_type) {
-            .identifier, .kw_when, .kw_then, .kw_else, .kw_end => true,
+            .identifier, .kw_when, .kw_then, .kw_else, .kw_end, .kw_union => true,
             else => false,
         };
     }
@@ -1965,7 +2020,7 @@ pub const Parser = struct {
         while (!self.check(.eof)) {
             // Synchronize at clause boundaries
             switch (self.current.token_type) {
-                .kw_match, .kw_where, .kw_return, .kw_order, .kw_limit, .kw_skip, .kw_create, .kw_delete, .kw_detach, .kw_set, .kw_remove => return,
+                .kw_match, .kw_where, .kw_return, .kw_order, .kw_limit, .kw_skip, .kw_create, .kw_delete, .kw_detach, .kw_set, .kw_remove, .kw_union => return,
                 else => self.advance(),
             }
         }

@@ -379,6 +379,7 @@ fn lookupKeyword(text: []const u8) ?TokenType {
     if (std.mem.eql(u8, lower, "then")) return .kw_then;
     if (std.mem.eql(u8, lower, "else")) return .kw_else;
     if (std.mem.eql(u8, lower, "end")) return .kw_end;
+    if (std.mem.eql(u8, lower, "union")) return .kw_union;
 
     return null;
 }

@@ -32,8 +32,12 @@ pub const SourceLocation = struct {
 
 /// Root of the AST - a complete query
 pub const Query = struct {
+    /// The clauses of the query, or of its first single query when it has
+    /// UNIONs.
     clauses: []Clause,
     allocator: Allocator,
+    /// Each UNION and the single query after it, in order.
+    unions: []UnionBranch = &.{},
 
     pub fn deinit(self: *Query) void {
         _ = self;
@@ -48,7 +52,15 @@ pub const Query = struct {
     /// run together, and running every query as a reader would make writes
     /// impossible. Clauses do not nest, so a scan of the top level is enough.
     pub fn writesData(self: *const Query) bool {
-        for (self.clauses) |clause| {
+        if (clausesWriteData(self.clauses)) return true;
+        for (self.unions) |branch| {
+            if (clausesWriteData(branch.clauses)) return true;
+        }
+        return false;
+    }
+
+    fn clausesWriteData(clauses: []const Clause) bool {
+        for (clauses) |clause| {
             switch (clause) {
                 .create, .delete, .set, .remove, .merge => return true,
                 .match, .where, .return_, .order_by, .limit, .skip, .with, .unwind => {},
@@ -56,6 +68,14 @@ pub const Query = struct {
         }
         return false;
     }
+};
+
+/// `UNION [ALL]` and the single query that follows it.
+pub const UnionBranch = struct {
+    /// UNION ALL keeps duplicate rows; UNION removes them.
+    all: bool,
+    clauses: []Clause,
+    location: SourceLocation,
 };
 
 /// A single clause in a query

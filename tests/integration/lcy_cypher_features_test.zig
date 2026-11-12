@@ -293,3 +293,67 @@ test "lcy: aggregates in expressions that cannot be planned say why" {
         \\MATCH (i:Item) RETURN i.n AS a, i.name AS b, count(*) + sum(i.n) + min(i.n) + max(i.n) + avg(i.n) + count(i.n) + sum(i.n + 1) + sum(i.n + 2) + sum(i.n + 3) + sum(i.n + 4) + sum(i.n + 5) + sum(i.n + 6) + sum(i.n + 7) + sum(i.n + 8) + sum(i.n + 9) AS big
     , .plan, "RETURN needs more than 16 values for its grouping keys and aggregates");
 }
+
+test "lcy: UNION ALL keeps every row, UNION removes duplicates" {
+    const path = "/tmp/lcy_union.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedItems(db);
+    try run(db, "CREATE (:Tag {name: 'b'}), (:Tag {name: 'x'})");
+
+    try expectResult(db, "RETURN 1 AS x UNION ALL RETURN 1 AS x UNION ALL RETURN 2 AS x", "x\n1\n1\n2");
+    try expectResult(db, "RETURN 1 AS x UNION RETURN 1 AS x UNION RETURN 2 AS x", "x\n1\n2");
+    // Rows come from the queries in the order they are written.
+    try expectResult(db,
+        \\MATCH (i:Item) WHERE i.n >= 2 RETURN i.name AS name ORDER BY name
+        \\UNION ALL MATCH (t:Tag) RETURN t.name AS name ORDER BY name DESC
+    , "name\n\"b\"\n\"c\"\n\"x\"\n\"b\"");
+    try expectResult(db,
+        \\MATCH (i:Item) WHERE i.n >= 2 RETURN i.name AS name
+        \\UNION MATCH (t:Tag) RETURN t.name AS name
+    , "name\n\"b\"\n\"c\"\n\"x\"");
+    // Duplicates within one query go too, and null equals null here.
+    try expectResult(db, "UNWIND [1, 1, null, null] AS v RETURN v UNION UNWIND [null] AS v RETURN v", "v\n1\nnull");
+    // ORDER BY, SKIP and LIMIT belong to the query they follow.
+    try expectResult(db, "MATCH (i:Item) RETURN i.name AS n ORDER BY n LIMIT 1 UNION ALL MATCH (i:Item) RETURN i.name AS n ORDER BY n DESC LIMIT 1", "n\n\"a\"\n\"d\"");
+    // The same variable name may mean different things in each query, and an
+    // unaliased column is named after its text in each.
+    try expectResult(db, "MATCH (n:Tag) RETURN n.name AS v UNION ALL UNWIND ['z'] AS n RETURN n AS v", "v\n\"b\"\n\"x\"\n\"z\"");
+    try expectResult(db, "MATCH (n:Tag) RETURN n.name UNION ALL MATCH (n:Item {name: 'a'}) RETURN n.name", "n.name\n\"b\"\n\"x\"\n\"a\"");
+    try expectResult(db, "MATCH (a:Item {name: 'a'}) RETURN a AS v, 1 AS k UNION ALL MATCH (b:Tag {name: 'x'}) RETURN b AS v, 2 AS k", "v | k\nN | 1\nN | 2");
+    // Aggregates and WITH inside the queries.
+    try expectResult(db, "MATCH (i:Item) RETURN count(*) AS c UNION ALL MATCH (t:Tag) WITH t.name AS name RETURN count(name) AS c", "c\n4\n2");
+    // A query that matches nothing adds nothing.
+    try expectResult(db, "MATCH (i:Nope) RETURN i.name AS n UNION ALL RETURN 'only' AS n", "n\n\"only\"");
+    // Keywords spelled in any case, UNION as a name stays usable.
+    try expectResult(db, "RETURN 1 AS union union all RETURN 2 AS union", "union\n1\n2");
+    try run(db, "CREATE (:Union {union: 'u'})");
+    try expectResult(db, "MATCH (u:Union) RETURN u.union, u['union'] AS k, {union: 1}.union AS m", "u.union | k | m\n\"u\" | \"u\" | 1");
+}
+
+test "lcy: UNION writes run in order and one query cannot see another's variables" {
+    const path = "/tmp/lcy_union_writes.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+
+    try expectResult(db, "CREATE (a:U {v: 1}) RETURN a.v AS v UNION ALL CREATE (b:U {v: 2}) RETURN b.v AS v", "v\n1\n2");
+    // The second query runs after the first, so it sees what the first created.
+    try expectResult(db, "CREATE (:U {v: 3}) RETURN 0 AS c UNION ALL MATCH (u:U) RETURN count(u) AS c", "c\n0\n3");
+    try expectFailure(db, "MATCH (a:U) RETURN a.v AS v UNION RETURN a.v AS v", .semantic, "Variable 'a' is not defined");
+}
+
+test "lcy: UNION that cannot be planned says why" {
+    const path = "/tmp/lcy_union_errors.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+
+    try expectFailure(db, "RETURN 1 AS x UNION RETURN 1 AS x UNION ALL RETURN 1 AS x", .parse, "UNION and UNION ALL cannot be mixed in one query");
+    try expectFailure(db, "RETURN 1 AS x UNION ALL RETURN 1 AS x UNION RETURN 1 AS x", .parse, "UNION and UNION ALL cannot be mixed in one query");
+    try expectFailure(db, "UNION RETURN 1 AS x", .parse, "UNION needs a query before it");
+    try expectFailure(db, "RETURN 1 AS x UNION", .parse, "Expected a query after UNION");
+    try expectFailure(db, "RETURN 1 AS x UNION UNION RETURN 1 AS x", .parse, "UNION needs a query before it");
+    try expectFailure(db, "RETURN 1 AS x UNION RETURN 1 AS x, 2 AS y", .plan, "All queries in a UNION must return the same number of columns; query 1 returns 1, query 2 returns 2");
+    try expectFailure(db, "RETURN 1 AS x UNION RETURN 1 AS y", .plan, "column 1 is `x` in query 1 and `y` in query 2");
+    try expectFailure(db, "RETURN 1 AS x UNION CREATE (:U)", .plan, "Every query in a UNION must end with RETURN; query 2 does not");
+    try expectFailure(db, "CREATE (:U) UNION RETURN 1 AS x", .plan, "Every query in a UNION must end with RETURN; query 1 does not");
+}

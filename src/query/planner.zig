@@ -38,6 +38,7 @@ const unwind_ops = @import("operators/unwind.zig");
 const source_ops = @import("operators/source.zig");
 const materialize_ops = @import("operators/materialize.zig");
 const cross_product_ops = @import("operators/cross_product.zig");
+const union_ops = @import("operators/union.zig");
 
 const btree = @import("../storage/btree.zig");
 const BTree = btree.BTree;
@@ -287,18 +288,39 @@ pub const QueryPlanner = struct {
         self.order_hint = orderHintFor(query.clauses);
         self.order_cutoff_key = null;
 
+        const current_op: ?Operator = if (query.unions.len == 0)
+            try self.planClauses(query.clauses)
+        else
+            try self.planUnion(query);
+
+        if (self.slot_conflict) |name| {
+            self.setPlanDetail("Variable '{s}' is bound again where its earlier slot is taken; use a different name", .{name});
+            return PlannerError.InvalidQuery;
+        }
+        // Expressions a WITH evaluated still read the bindings it dropped.
+        var outer = self.outer_bindings.iterator();
+        while (outer.next()) |entry| {
+            if (self.bindings.contains(entry.key_ptr.*)) continue;
+            self.bindings.put(entry.key_ptr.*, entry.value_ptr.*) catch return PlannerError.OutOfMemory;
+        }
+
+        return current_op orelse PlannerError.InvalidQuery;
+    }
+
+    /// Plan the clauses of one single query, in order.
+    fn planClauses(self: *Self, clauses: []const ast.Clause) PlannerError!?Operator {
         var current_op: ?Operator = null;
 
         // Process each clause. RETURN + trailing ORDER BY/SKIP/LIMIT is
         // planned as sort/window first, then projection, so ORDER BY can
         // reference non-returned variables (e.g. RETURN n.name ORDER BY n.age).
         var clause_idx: usize = 0;
-        while (clause_idx < query.clauses.len) : (clause_idx += 1) {
-            const clause = query.clauses[clause_idx];
+        while (clause_idx < clauses.len) : (clause_idx += 1) {
+            const clause = clauses[clause_idx];
             switch (clause) {
                 .match => |m| {
-                    const where_hint: ?*const ast.Expression = if (clause_idx + 1 < query.clauses.len)
-                        switch (query.clauses[clause_idx + 1]) {
+                    const where_hint: ?*const ast.Expression = if (clause_idx + 1 < clauses.len)
+                        switch (clauses[clause_idx + 1]) {
                             .where => |w| w.condition,
                             else => null,
                         }
@@ -306,7 +328,7 @@ pub const QueryPlanner = struct {
                         null;
                     current_op = try self.planMatch(m, current_op, where_hint);
                 },
-                .where => |w| current_op = try self.planWhere(w, current_op, vectorLimitHint(query.clauses[clause_idx + 1 ..])),
+                .where => |w| current_op = try self.planWhere(w, current_op, vectorLimitHint(clauses[clause_idx + 1 ..])),
                 .return_ => |r| {
                     // Where ORDER BY, SKIP, and LIMIT belong depends on whether
                     // the projection aggregates.
@@ -326,8 +348,8 @@ pub const QueryPlanner = struct {
                     var input_for_return: ?Operator = current_op orelse try self.singleRow();
                     var lookahead = clause_idx + 1;
                     const first_trailing = lookahead;
-                    while (lookahead < query.clauses.len) : (lookahead += 1) {
-                        switch (query.clauses[lookahead]) {
+                    while (lookahead < clauses.len) : (lookahead += 1) {
+                        switch (clauses[lookahead]) {
                             .order_by, .skip, .limit => {},
                             else => break,
                         }
@@ -340,12 +362,12 @@ pub const QueryPlanner = struct {
                         // still see what the projection discards, but it
                         // keeps every row: a bound would be the same cut.
                         // Distinct passes rows on in the order they arrive.
-                        switch (query.clauses[lookahead]) {
+                        switch (clauses[lookahead]) {
                             .order_by => |o| input_for_return = try self.planOrderBy(
                                 o,
-                                try self.orderedCutoff(input_for_return, query.clauses[lookahead + 1 ..]),
+                                try self.orderedCutoff(input_for_return, clauses[lookahead + 1 ..]),
                                 r,
-                                if (r.distinct) &.{} else query.clauses[lookahead + 1 ..],
+                                if (r.distinct) &.{} else clauses[lookahead + 1 ..],
                             ),
                             .skip => |s| if (!r.distinct) {
                                 input_for_return = try self.planSkip(s, input_for_return);
@@ -362,7 +384,7 @@ pub const QueryPlanner = struct {
                     if (r.distinct and !aggregates) {
                         var i = first_trailing;
                         while (i < lookahead) : (i += 1) {
-                            switch (query.clauses[i]) {
+                            switch (clauses[i]) {
                                 .order_by => {},
                                 .skip => |sk| current_op = try self.planSkip(sk, current_op),
                                 .limit => |l| current_op = try self.planLimit(l, current_op),
@@ -374,8 +396,8 @@ pub const QueryPlanner = struct {
                     if (aggregates) {
                         var i = first_trailing;
                         while (i < lookahead) : (i += 1) {
-                            switch (query.clauses[i]) {
-                                .order_by => |o| current_op = try self.planOrderByOnOutput(o, current_op, r, query.clauses[i + 1 .. lookahead]),
+                            switch (clauses[i]) {
+                                .order_by => |o| current_op = try self.planOrderByOnOutput(o, current_op, r, clauses[i + 1 .. lookahead]),
                                 .skip => |sk| current_op = try self.planSkip(sk, current_op),
                                 .limit => |l| current_op = try self.planLimit(l, current_op),
                                 else => unreachable,
@@ -385,7 +407,7 @@ pub const QueryPlanner = struct {
 
                     clause_idx = lookahead - 1;
                 },
-                .order_by => |o| current_op = try self.planOrderBy(o, current_op, null, query.clauses[clause_idx + 1 ..]),
+                .order_by => |o| current_op = try self.planOrderBy(o, current_op, null, clauses[clause_idx + 1 ..]),
                 .limit => |l| current_op = try self.planLimit(l, current_op),
                 .skip => |s| current_op = try self.planSkip(s, current_op),
                 .create => |c| current_op = try self.planCreate(c, current_op),
@@ -397,19 +419,93 @@ pub const QueryPlanner = struct {
                 .unwind => |u| current_op = try self.planUnwind(u, current_op),
             }
         }
+        return current_op;
+    }
 
-        if (self.slot_conflict) |name| {
-            self.setPlanDetail("Variable '{s}' is bound again where its earlier slot is taken; use a different name", .{name});
+    /// Plan `q1 UNION [ALL] q2 ...`: each single query on its own, then
+    /// their rows one query after another, without duplicates for UNION.
+    ///
+    /// Each single query starts with no variables in scope. Variables are
+    /// found by name when the query runs, through one map for the whole
+    /// query, so a name keeps its slot across the single queries the way it
+    /// does across WITH scopes (`name_slots`); the bindings of the queries
+    /// already planned are kept as outer bindings so that they are
+    /// registered too.
+    fn planUnion(self: *Self, query: *const ast.Query) PlannerError!Operator {
+        const inputs = self.allocator.alloc(Operator, query.unions.len + 1) catch return PlannerError.OutOfMemory;
+        var planned: usize = 0;
+        errdefer for (inputs[0..planned]) |input| input.deinit(self.allocator);
+
+        inputs[0] = try self.planUnionPart(query.clauses, 1);
+        planned = 1;
+        const columns = self.output_columns;
+        var names: [MAX_SLOTS]?[]const u8 = self.output_column_names;
+
+        for (query.unions, 1..) |branch, i| {
+            try self.startUnionPart();
+            inputs[i] = try self.planUnionPart(branch.clauses, i + 1);
+            planned += 1;
+            if (self.output_columns != columns) {
+                self.setPlanDetail("All queries in a UNION must return the same number of columns; query 1 returns {d}, query {d} returns {d}", .{ columns, i + 1, self.output_columns });
+                return PlannerError.InvalidQuery;
+            }
+            for (0..columns) |c| {
+                const first = names[c] orelse "";
+                const this = self.output_column_names[c] orelse "";
+                if (!std.mem.eql(u8, first, this)) {
+                    self.setPlanDetail("All queries in a UNION must return the same column names; column {d} is `{s}` in query 1 and `{s}` in query {d}", .{ c + 1, first, this, i + 1 });
+                    return PlannerError.InvalidQuery;
+                }
+            }
+            names = self.output_column_names;
+        }
+
+        const union_op = union_ops.Union.init(self.allocator, inputs) catch return PlannerError.OutOfMemory;
+        // From here the union owns the inputs.
+        planned = 0;
+        if (query.unions[0].all) return union_op.operator();
+
+        const distinct = distinct_ops.Distinct.init(self.allocator, union_op.operator()) catch {
+            union_op.operator().deinit(self.allocator);
+            return PlannerError.OutOfMemory;
+        };
+        return distinct.operator();
+    }
+
+    /// Plan one single query of a UNION, which has to end in RETURN.
+    fn planUnionPart(self: *Self, clauses: []const ast.Clause, number: usize) PlannerError!Operator {
+        var last = clauses.len;
+        while (last > 0) : (last -= 1) {
+            switch (clauses[last - 1]) {
+                .order_by, .skip, .limit => {},
+                else => break,
+            }
+        }
+        if (last == 0 or clauses[last - 1] != .return_) {
+            self.setPlanDetail("Every query in a UNION must end with RETURN; query {d} does not", .{number});
             return PlannerError.InvalidQuery;
         }
-        // Expressions a WITH evaluated still read the bindings it dropped.
-        var outer = self.outer_bindings.iterator();
-        while (outer.next()) |entry| {
-            if (self.bindings.contains(entry.key_ptr.*)) continue;
-            self.bindings.put(entry.key_ptr.*, entry.value_ptr.*) catch return PlannerError.OutOfMemory;
-        }
+        // Each query has its own ORDER BY and LIMIT, so each may read an
+        // index in its own order; no query's order may reach another's scan.
+        self.order_hint = orderHintFor(clauses);
+        self.order_cutoff_key = null;
+        return (try self.planClauses(clauses)) orelse PlannerError.InvalidQuery;
+    }
 
-        return current_op orelse PlannerError.InvalidQuery;
+    /// Clear the scope for the next single query of a UNION.
+    fn startUnionPart(self: *Self) PlannerError!void {
+        var it = self.bindings.iterator();
+        while (it.next()) |entry| {
+            if (self.outer_bindings.contains(entry.key_ptr.*)) continue;
+            self.outer_bindings.put(entry.key_ptr.*, entry.value_ptr.*) catch return PlannerError.OutOfMemory;
+        }
+        self.bindings.clearRetainingCapacity();
+        self.pattern_labels.clearRetainingCapacity();
+        self.pattern_edge_types.clearRetainingCapacity();
+        self.edge_bindings.clearRetainingCapacity();
+        self.used_slots = 0;
+        self.output_columns = 0;
+        self.output_column_names = [_]?[]const u8{null} ** MAX_SLOTS;
     }
 
     /// Plan a MATCH clause

@@ -22,6 +22,7 @@ const NULL_PAGE = types.NULL_PAGE;
 const vfs_mod = lattice.storage.vfs;
 const PosixVfs = vfs_mod.PosixVfs;
 const memory_vfs_mod = lattice.storage.memory_vfs;
+const overlay_vfs_mod = lattice.storage.overlay_vfs;
 const Vfs = vfs_mod.Vfs;
 
 const page_mod = lattice.storage.page;
@@ -988,12 +989,16 @@ pub const Backend = union(enum) {
     /// it. For tests that need to see every write, such as the power-loss
     /// simulation.
     external: vfs_mod.Vfs,
+    /// A read-only open that had work to recover: the files underneath are
+    /// read, and recovery's writes stay in memory. See `openReadOnly`.
+    overlay: *ReplayFs,
 
     pub fn vfs(self: *Backend) vfs_mod.Vfs {
         return switch (self.*) {
             .posix => |*p| p.vfs(),
             .memory => |*m| m.vfs(),
             .external => |v| v,
+            .overlay => |r| r.overlay.vfs(),
         };
     }
 
@@ -1004,9 +1009,27 @@ pub const Backend = union(enum) {
             .posix => {},
             .memory => |*m| m.deinit(),
             .external => {},
+            .overlay => |r| {
+                r.overlay.deinit();
+                r.allocator.destroy(r);
+            },
         }
     }
 };
+
+/// What a read-only open with recovery to do runs on.
+pub const ReplayFs = struct {
+    allocator: Allocator,
+    posix: PosixVfs,
+    overlay: overlay_vfs_mod.OverlayVfs,
+};
+
+/// What a read-only open may hold in memory to recover a database: this much,
+/// plus four times the size of the log and the journal it has to apply.
+pub const READ_ONLY_RECOVERY_BASE_BUDGET: usize = 64 * 1024 * 1024;
+
+/// Replaces `READ_ONLY_RECOVERY_BASE_BUDGET` when set, for tests.
+pub var read_only_recovery_budget_for_testing: ?usize = null;
 
 /// Central database coordinator
 pub const Database = struct {
@@ -1097,13 +1120,97 @@ pub const Database = struct {
     ///
     /// Pass `:memory:` as the path for a database with no files behind it.
     pub fn open(allocator: Allocator, path: []const u8, options: OpenOptions) DatabaseError!*Self {
+        if (options.read_only and !isMemoryPath(path)) return openReadOnly(allocator, path, options, null);
         return openWithBackend(allocator, path, options, null);
     }
 
     /// Open a database on a filesystem the caller supplies, which has to
     /// outlive the database. It is used like a disk, journal included.
     pub fn openWithVfs(allocator: Allocator, path: []const u8, options: OpenOptions, vfs: vfs_mod.Vfs) DatabaseError!*Self {
+        if (options.read_only) return openReadOnly(allocator, path, options, vfs);
         return openWithBackend(allocator, path, options, Backend{ .external = vfs });
+    }
+
+    /// Open a database for reading, recovering it in memory if it needs it.
+    ///
+    /// A crash can leave committed transactions in the log that the file does
+    /// not have yet, and a flush half done that the journal has to finish. A
+    /// read-only open used to read the file as it was and so served a state
+    /// from before those commits, or refused when the journal held a flush.
+    /// Now, when the log holds frames or the journal holds anything, the
+    /// database is opened on an overlay: the files are read and never
+    /// written, and recovery runs as it would in a writable open, with every
+    /// write it makes kept in memory. What that memory may hold is bounded
+    /// (`READ_ONLY_RECOVERY_BASE_BUDGET`); a recovery that needs more fails
+    /// the open with `BufferPoolFull`, and a writable open recovers it.
+    ///
+    /// The shared lock a reader takes keeps a writer out while the files are
+    /// read, as before. Without locking, a log that a live writer is still
+    /// appending to is recovered as far as it was written.
+    fn openReadOnly(allocator: Allocator, path: []const u8, options: OpenOptions, external: ?vfs_mod.Vfs) DatabaseError!*Self {
+        var posix = PosixVfs.init(allocator);
+        const base = external orelse posix.vfs();
+
+        const work = recoveryWorkSize(allocator, base, path, options.config.enable_wal) catch |err| return err;
+        const pending = work orelse {
+            const backend: ?Backend = if (external) |v| Backend{ .external = v } else null;
+            return openWithBackend(allocator, path, options, backend);
+        };
+
+        const replay = allocator.create(ReplayFs) catch return DatabaseError.OutOfMemory;
+        replay.* = .{ .allocator = allocator, .posix = PosixVfs.init(allocator), .overlay = undefined };
+        const overlay_base = external orelse replay.posix.vfs();
+        const budget = read_only_recovery_budget_for_testing orelse READ_ONLY_RECOVERY_BASE_BUDGET +| (pending *| 4);
+        replay.overlay = overlay_vfs_mod.OverlayVfs.init(allocator, overlay_base, budget);
+        var exceeded = false;
+        replay.overlay.exceeded_out = &exceeded;
+
+        var writable = options;
+        writable.read_only = false;
+        writable.create = false;
+        const db = openWithBackend(allocator, path, writable, Backend{ .overlay = replay }) catch |err| {
+            if (exceeded) return DatabaseError.BufferPoolFull;
+            return err;
+        };
+        replay.overlay.exceeded_out = null;
+        db.read_only = true;
+        return db;
+    }
+
+    /// How many bytes of log and journal a read-only open has to apply, or
+    /// null when there is nothing to recover and the file can be read as it
+    /// is. A file too short to be a database is left to the ordinary open
+    /// to refuse.
+    fn recoveryWorkSize(allocator: Allocator, base: vfs_mod.Vfs, path: []const u8, wal_enabled: bool) DatabaseError!?u64 {
+        if (fileSize(base, path) < types.DEFAULT_PAGE_SIZE) return null;
+        var work: u64 = 0;
+        var needed = false;
+
+        const journal_path = std.fmt.allocPrint(allocator, "{s}-journal", .{path}) catch return DatabaseError.OutOfMemory;
+        defer allocator.free(journal_path);
+        const journal_size = fileSize(base, journal_path);
+        if (journal_size > 0) {
+            needed = true;
+            work += journal_size;
+        }
+
+        if (wal_enabled) {
+            const wal_path = std.fmt.allocPrint(allocator, "{s}-wal", .{path}) catch return DatabaseError.OutOfMemory;
+            defer allocator.free(wal_path);
+            const wal_size = fileSize(base, wal_path);
+            if (wal_size > wal_mod.WAL_HEADER_SIZE) {
+                needed = true;
+                work += wal_size;
+            }
+        }
+        return if (needed) work else null;
+    }
+
+    fn fileSize(base: vfs_mod.Vfs, path: []const u8) u64 {
+        if (!base.exists(path)) return 0;
+        const file = base.open(path, .{ .read = true }) catch return 0;
+        defer file.close();
+        return file.size() catch 0;
     }
 
     /// Open a database, optionally against a backend that already holds it.
@@ -1146,7 +1253,7 @@ pub const Database = struct {
         errdefer self.vfs.deinit();
         switch (self.vfs) {
             .posix => |*posix| posix.full_fsync = options.config.effectiveFullFsync(),
-            .memory, .external => {},
+            .memory, .external, .overlay => {},
         }
 
         // 2. Open/create PageManager
@@ -1209,7 +1316,7 @@ pub const Database = struct {
         const configured_pool_size = self.config.effectiveBufferPoolSize();
         const memory_pool_size = MIN_MEMORY_POOL_FRAMES * @as(usize, self.page_manager.getPageSize());
         const effective_pool_size = switch (self.vfs) {
-            .posix, .external => configured_pool_size,
+            .posix, .external, .overlay => configured_pool_size,
             .memory => @min(configured_pool_size, memory_pool_size),
         };
         self.buffer_pool = BufferPool.init(allocator, &self.page_manager, effective_pool_size) catch {
@@ -1446,6 +1553,8 @@ pub const Database = struct {
                 // be applied. Opening without it would lose a commit.
                 error.MidLogCorruption, error.InvalidRecord, error.CorruptedWal => return DatabaseError.InvalidDatabase,
                 error.OutOfMemory => return DatabaseError.OutOfMemory,
+                // Includes a log of vector changes opened without vectors,
+                // which callers tell users how to fix.
                 else => return DatabaseError.IoError,
             };
             recovered_max_txn_id = stats.max_txn_id;

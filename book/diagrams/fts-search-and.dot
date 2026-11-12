@@ -12,7 +12,7 @@ digraph fts_search_and {
   edge [color="#6b7280" penwidth=1.1 arrowsize=0.7]
 
   q [label="query: \"database optimization\"" fillcolor="#f6f8fa" color="#c7d0da"]
-  s1 [label="1. Tokenize, normalise, dedupe (≤ 32 terms)\l   → [\"database\", \"optimization\"]\l"]
+  s1 [label="1. Tokenize, normalise, dedupe\l   → [\"database\", \"optimization\"]\l"]
   s2 [label="2. Look up each term in the dictionary\l   any term missing → no results\l   order terms by doc_freq, rarest first\l"]
   s3 [label="3. Rarest list → candidate map by doc_id\l   read each other list once, count matches\l   keep candidates found in every list\l" fillcolor="#dbe9f8"]
   s4 [label="4. Look up lengths, score every match\l   keep the best K in a bounded heap\l" fillcolor="#eaf5ea" color="#2f7d32"]

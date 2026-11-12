@@ -475,12 +475,12 @@ Total Score for Document 42 = 4.96 + 5.10 = 10.06
 ### Multi-Term Search (AND Semantics)
 
 <img class="diagram" src="../assets/diagrams/fts-search-and.svg"
-     alt="Multi-term AND search for database optimization: tokenize, normalise and dedupe into at most 32 terms; look each term up in the dictionary, returning no results if any term is missing, and order the terms rarest first; build a candidate map from the rarest term's posting list, read every other list once counting matches, and keep the candidates found in every list; then look up their lengths, score every match and keep the best K in a bounded heap">
+     alt="Multi-term AND search for database optimization: tokenize, normalise and dedupe the terms; look each term up in the dictionary, returning no results if any term is missing, and order the terms rarest first; build a candidate map from the rarest term's posting list, read every other list once counting matches, and keep the candidates found in every list; then look up their lengths, score every match and keep the best K in a bounded heap">
 
-A query is split into at most 32 distinct normalised terms. A document matches
-only if it contains every term, so a term that is not in the dictionary at all
-means nothing matches, and a failed dictionary lookup or posting read is an
-error rather than a term quietly left out. The rarest term's posting list
+A query is split into distinct normalised terms, however many there are. A
+document matches only if it contains every term, so a term that is not in the
+dictionary at all means nothing matches, and a failed dictionary lookup or
+posting read is an error rather than a term quietly left out. The rarest term's posting list
 (lowest `doc_freq`) supplies the candidates, held in a hash map by doc_id. Every
 other list is then read through once, rarest next, and each entry is matched
 against the candidates by doc_id, so the result does not depend on the order the
@@ -551,8 +551,9 @@ survive it. Only a lone term search, with no exclusions and no phrases, stops at
 `searchWithMode` splits each whitespace-separated run of the query with the
 tokenizer, so `foo-bar` asks for both `foo` and `bar` (a `-` inside a word is a
 separator, not an exclusion), and punctuation such as `bread, butter` is
-separated rather than kept. An exclusion written as a phrase, `-"a b"`, is
-treated as a required phrase, not excluded.
+separated rather than kept. An exclusion written as a phrase, `-"a b"`,
+removes the documents the phrase would match: those holding it in order, or,
+without stored positions, those holding all of its words.
 
 ### Phrase Search
 
@@ -913,7 +914,6 @@ different kind discriminators.
 7. **One property per index** - Searching several fields as one document means storing the combined text in a property and indexing that. The reasoning is in the design note: an index spanning `title` and `body` would make `d.title @@ "x"` match on body text, which is the confusion per-property indexes exist to remove.
 8. **Selectivity is per term, not per phrase** - the estimate that chooses between two indexes is the rarest term's document frequency, which bounds an AND query correctly but says nothing about how often the terms occur *together*. Two predicates whose terms are individually common but jointly rare estimate as common.
 9. **Fuzzy matching does not reach uncommitted text** - Text written in the current transaction is matched by whole terms, through the index's tokenizer, rather than by edit distance, because fuzzy expansion walks the committed dictionary. It is scored by the number of distinct query terms it contains, not BM25.
-10. **Excluded phrases** *(FtsIndex)* - `-"a b"` in `searchWithMode()` is treated as a required phrase
 
 ### Implemented Features
 

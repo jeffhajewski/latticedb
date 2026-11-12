@@ -11,9 +11,9 @@
 <!-- s1 -->
 <g id="node2" class="node">
 <title>s1</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M309.93,-287.88C309.93,-287.88 12,-287.88 12,-287.88 6,-287.88 0,-281.88 0,-275.88 0,-275.88 0,-254.16 0,-254.16 0,-248.16 6,-242.16 12,-242.16 12,-242.16 309.93,-242.16 309.93,-242.16 315.93,-242.16 321.93,-248.16 321.93,-254.16 321.93,-254.16 321.93,-275.88 321.93,-275.88 321.93,-281.88 315.93,-287.88 309.93,-287.88"/>
-<text xml:space="preserve" text-anchor="start" x="15.84" y="-268.07" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">1. Tokenize, normalise, dedupe (≤ 32 terms)</text>
-<text xml:space="preserve" text-anchor="start" x="15.84" y="-254.57" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;→ [&quot;database&quot;, &quot;optimization&quot;]</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M276.18,-287.88C276.18,-287.88 45.75,-287.88 45.75,-287.88 39.75,-287.88 33.75,-281.88 33.75,-275.88 33.75,-275.88 33.75,-254.16 33.75,-254.16 33.75,-248.16 39.75,-242.16 45.75,-242.16 45.75,-242.16 276.18,-242.16 276.18,-242.16 282.18,-242.16 288.18,-248.16 288.18,-254.16 288.18,-254.16 288.18,-275.88 288.18,-275.88 288.18,-281.88 282.18,-287.88 276.18,-287.88"/>
+<text xml:space="preserve" text-anchor="start" x="49.59" y="-268.07" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">1. Tokenize, normalise, dedupe</text>
+<text xml:space="preserve" text-anchor="start" x="49.59" y="-254.57" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;→ [&quot;database&quot;, &quot;optimization&quot;]</text>
 </g>
 <!-- q&#45;&gt;s1 -->
 <g id="edge1" class="edge">

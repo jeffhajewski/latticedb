@@ -119,7 +119,8 @@ document contains gives no results: `"apple zebra"` finds nothing if no document
 has "zebra". Every match is scored, and the best `limit` are returned. Quotes and a
 leading `-` have no special meaning in a `@@` query or in `fts_search`:
 punctuation only separates words, so `"fox -quick"` matches documents containing
-both "fox" and "quick". Only the first 32 distinct terms of a query are used.
+both "fox" and "quick". Every term of the query is required, however many
+there are.
 
 ## Fuzzy Search
 

@@ -114,6 +114,20 @@ RETURN d.title
 declared for the label and property you name, the query fails with "No full-text
 index is declared for Document.title" rather than returning nothing.
 
+`score(d)` returns the BM25 score the search gave `d`, the same number
+`fts_search` reports, so a query can rank by it or return it:
+
+```cypher
+MATCH (d:Document)
+WHERE d.text @@ "quick fox"
+RETURN d.title, score(d) AS score
+ORDER BY score DESC
+LIMIT 10
+```
+
+It is null for a node no `@@` search scored. See
+[Reading the score](../cypher/full-text-search.md#reading-the-score).
+
 A query with several terms matches documents containing every term, so a term no
 document contains gives no results: `"apple zebra"` finds nothing if no document
 has "zebra". Every match is scored, and the best `limit` are returned. Quotes and a

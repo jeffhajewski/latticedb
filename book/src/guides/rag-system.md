@@ -211,6 +211,7 @@ with db.write() as txn:
 
 - Use `batch_insert_vectors()` for bulk loading — it saves one binding call per node; each vector is still inserted into the HNSW index individually
 - Set `ef_search` based on your recall requirements (64 gives 100% recall at 1M vectors)
+- End a retrieval query as above, with `ORDER BY` the same `<=>` distance as the `WHERE` and a `LIMIT`: the search then stops once it has enough rows, rather than finding every chunk under the threshold and sorting them. To return the distance, write it in the `RETURN` the same way (`chunk.embedding <=> $query AS dist`) and the measured value is reused
 - Use `cache_size_mb` to control memory usage
 - Declare a full-text index only over properties you actually search; each one costs write time
 - Use parameters (`$name`) so the query text stays the same and its parsed form is reused from the query cache

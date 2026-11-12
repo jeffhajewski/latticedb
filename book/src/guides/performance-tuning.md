@@ -42,6 +42,14 @@ The `ef_search` parameter controls the accuracy/speed tradeoff for HNSW vector s
 results = db.vector_search(query_vec, k=10, ef_search=128)
 ```
 
+`ef_search` is the only search setting that can change after the index exists. The
+index's `m` (connections per node, 2 to 32, default 16) and `ef_construction` (the
+candidate list while inserting, 1 to 4096, default 200) are chosen when the database
+is created (`vector_m` and `vector_ef_construction` in the bindings, `--vector-m`
+and `--vector-ef-construction` in `lattice create`) and are fixed afterwards. A
+larger `m` or `ef_construction` builds a better-connected graph, at the cost of
+slower inserts and, for `m`, more memory.
+
 ## Batch Insert
 
 When loading large amounts of vector-bearing nodes, `batch_insert_vectors` creates a node and stores its vector for every row in one call:
@@ -114,7 +122,11 @@ MATCH (n) WHERE n.source = "web" RETURN n
 A label narrows a `<=>` vector search as well: the rows the pattern produces are
 the candidates, and the search widens until it has the candidates the predicate
 asks for. A label that is rare among the vectors therefore costs more searching
-than a common one. See [Vector Search in Cypher](../cypher/vector-search.md).
+than a common one. To get the nearest `k`, write the distance in the `WHERE` and
+end with `ORDER BY` that same distance and `LIMIT k`: the search then stops once it
+has `k` rows, instead of finding every candidate under the threshold and sorting
+them. Write the distance in the `RETURN` the same way as in the `WHERE` to reuse
+the value the search measured. See [Vector Search in Cypher](../cypher/vector-search.md).
 
 ## Transaction Scope
 

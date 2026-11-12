@@ -6,7 +6,7 @@ LatticeDB supports storing and searching vector embeddings on nodes. This guide 
 
 To use embeddings:
 
-1. Enable vector storage when opening the database
+1. Enable vector storage when creating the database
 2. Generate embeddings (built-in hash or external service)
 3. Attach embeddings to nodes
 4. Search by similarity
@@ -20,7 +20,8 @@ db = Database(
     "mydb.db",
     create=True,
     enable_vectors=True,
-    vector_dimensions=128,  # Must match your embedding dimensions
+    vector_dimensions=128,   # Must match your embedding dimensions
+    vector_metric="cosine",  # or "euclidean" or "dot_product"; fixed once created
 )
 db.open()
 ```
@@ -34,6 +35,22 @@ const db = new Database("mydb.db", {
 await db.open();
 ```
 
+The vector index is created with the database, and its configuration (dimensions,
+metric, `vector_m`, `vector_ef_construction`) is stored in the file. Later opens
+need no vector options: `Database("mydb.db")` opens the index as it was created,
+also after a crash. An option you do pass must match the file, or the open fails
+with a configuration-mismatch error (`LatticeConfigMismatchError` in Python). The
+TypeScript options are `vectorMetric`, `vectorM` and `vectorEfConstruction`; the
+CLI's are `lattice create --vector-metric=cosine|euclidean|dot --vector-m=<n>
+--vector-ef-construction=<n>`.
+
+The metric decides what a distance means, and smaller is always nearer: cosine
+distance (1 minus cosine similarity, the default and the usual choice for text
+embeddings), Euclidean (L2) distance, or the negated dot product. It cannot be
+changed once the index exists; to change it, export the database and import it into
+one created with the new metric. See
+[Distance Metric](../cypher/vector-search.md#distance-metric).
+
 A node holds one vector, and Cypher reads it as `n.embedding`. `set_vector` takes
 a key argument, which must be `"embedding"` (an empty key also works); any other
 key is rejected with an unsupported-operation error rather than stored under that
@@ -42,7 +59,8 @@ name. Setting a vector on a node that already has one replaces it.
 Every component must be a finite number: a vector containing NaN or infinity is
 rejected with an invalid-argument error, both when stored and when used as a
 search query. Under the cosine metric the database keeps only the normalised
-(unit-length) copy of a vector, so a committed vector reads back normalised.
+(unit-length) copy of a vector, so a committed vector reads back normalised. Under
+the Euclidean and dot-product metrics vectors are kept as given.
 
 ## Hash Embeddings (Built-in)
 
@@ -166,7 +184,8 @@ LIMIT 10
 In Cypher, `<=>` in `WHERE` searches among the nodes your pattern matches: a
 threshold query returns every `Chunk` within the distance, however many there are
 and whatever other nodes are nearer, and a `LIMIT` stops the search once it has
-enough. For the nearest `k` over the whole database, use `vector_search`. See
+enough, also when an `ORDER BY` on the same distance comes between them. For the
+nearest `k` over the whole database, use `vector_search`. See
 [Vector Search in Cypher](../cypher/vector-search.md).
 
 ## Batch Insert
@@ -186,7 +205,7 @@ with db.write() as txn:
 
 ## Choosing Dimensions
 
-The `vector_dimensions` parameter must be set when opening the database and must match the embedding model output:
+The `vector_dimensions` parameter is set when the database is created, is stored in the file, and must match the embedding model output:
 
 | Model | Dimensions |
 |-------|-----------|

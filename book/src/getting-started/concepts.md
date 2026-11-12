@@ -71,7 +71,9 @@ LatticeDB includes an HNSW (Hierarchical Navigable Small World) index for approx
 
 To use vector search:
 
-1. Enable vector storage when opening the database
+1. Enable vector storage when creating the database, with the number of
+   dimensions and, if not cosine, the distance metric; the file records them, so
+   later opens need no vector options
 2. Attach vector embeddings to nodes
 3. Search by similarity using `vector_search()` or the `<=>` operator in Cypher
 

@@ -18,6 +18,7 @@ test {
     _ = repl_mod;
     _ = import_export;
     _ = @import("history.zig");
+    _ = @import("rdf/syntax.zig");
 }
 
 const Args = args_mod.Args;

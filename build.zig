@@ -258,6 +258,30 @@ pub fn build(b: *std.Build) void {
     const integration_test_step = b.step("integration-test", "Run integration tests");
     integration_test_step.dependOn(&run_integration_tests.step);
 
+    // The W3C Turtle and N-Triples suites, run against a checkout of
+    // github.com/w3c/rdf-tests named on the command line. Not part of `test`:
+    // the suite is not in this repository.
+    const rdf_syntax_module = b.createModule(.{
+        .root_source_file = b.path("src/cli/rdf/syntax.zig"),
+        .target = target,
+        .optimize = optimize,
+    });
+    const rdf_w3c_module = b.createModule(.{
+        .root_source_file = b.path("tests/rdf/w3c_runner.zig"),
+        .target = target,
+        .optimize = optimize,
+        .imports = &.{
+            .{ .name = "rdf_syntax", .module = rdf_syntax_module },
+            .{ .name = "compat", .module = compat_module },
+        },
+    });
+    rdf_w3c_module.link_libc = true;
+    const rdf_w3c = b.addExecutable(.{ .name = "rdf-w3c", .root_module = rdf_w3c_module });
+    const run_rdf_w3c = b.addRunArtifact(rdf_w3c);
+    if (b.args) |args| run_rdf_w3c.addArgs(args);
+    const rdf_w3c_step = b.step("rdf-w3c", "Run the W3C Turtle and N-Triples suites: zig build rdf-w3c -- <rdf-tests checkout>");
+    rdf_w3c_step.dependOn(&run_rdf_w3c.step);
+
     // Crash test module - imports the library module
     const crash_test_module = b.createModule(.{
         .root_source_file = b.path("tests/crash/main.zig"),

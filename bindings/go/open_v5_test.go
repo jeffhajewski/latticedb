@@ -84,7 +84,7 @@ func TestOpenOptionsThatContradictTheFileAreConfigMismatch(t *testing.T) {
 		wantCode(t, "open with different "+name, err, ErrorConfigMismatch)
 	}
 
-	db, err = Open(filepath.Join(t.TempDir(), "v5-bad-m.db"), OpenOptions{Create: true, EnableVectors: true, VectorM: 64})
+	db, err = Open(filepath.Join(t.TempDir(), "v5-bad-m.db"), OpenOptions{Create: true, EnableVectors: true, VectorDimensions: 3, VectorM: 64})
 	if err == nil {
 		db.Close()
 	}
@@ -396,4 +396,49 @@ func TestDeserializeEnableVectorsConfiguresANewIndex(t *testing.T) {
 	defer db.Close()
 	addOriginAndThreeFour(t, db)
 	wantSecondDistanceFive(t, db)
+}
+
+func TestVectorDimensionsZeroMeansTheFiles(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "zero-dims.db")
+	db, err := Open(dbPath, OpenOptions{Create: true, EnableVectors: true, VectorDimensions: 3})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	var id NodeID
+	err = db.Update(func(tx *Tx) error {
+		n, err := tx.CreateNode(CreateNodeOptions{Labels: []string{"P"}})
+		if err != nil {
+			return err
+		}
+		id = n.ID
+		return tx.SetVector(id, "embedding", []float32{1, 0, 0})
+	})
+	if err != nil {
+		t.Fatalf("write vector: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Vectors enabled with no dimensions: the file's 3, not a default 128.
+	db, err = Open(dbPath, OpenOptions{EnableVectors: true})
+	if err != nil {
+		t.Fatalf("reopen with dimensions 0: %v", err)
+	}
+	defer db.Close()
+	results, err := db.VectorSearch([]float32{1, 0, 0}, VectorSearchOptions{K: 1})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	if len(results) != 1 || results[0].NodeID != id {
+		t.Fatalf("results = %+v, want node %d", results, id)
+	}
+}
+
+func TestVectorDimensionsZeroCannotCreateAnIndex(t *testing.T) {
+	db, err := Open(filepath.Join(t.TempDir(), "zero-dims-new.db"), OpenOptions{Create: true, EnableVectors: true})
+	if err == nil {
+		db.Close()
+	}
+	wantCode(t, "create an index with dimensions 0", err, ErrorInvalidArg)
 }

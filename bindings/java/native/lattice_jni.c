@@ -646,7 +646,8 @@ static bool fill_open_options_v5(JNIEnv *env, lattice_open_options_v5 *opts,
     /* The v5 fields are 0 for "not set". A value that does not fit its C
      * field is refused here rather than truncated into a valid one; one that
      * fits but is out of range is refused by lattice_open_v5. */
-    if (sync_mode < 0 || sync_mode > 255 || full_fsync < 0 || full_fsync > 255 ||
+    if (vector_dimensions < 0 || vector_dimensions > 65535 ||
+        sync_mode < 0 || sync_mode > 255 || full_fsync < 0 || full_fsync > 255 ||
         vector_metric < 0 || vector_metric > 255 || vector_m < 0 ||
         vector_m > 65535 || vector_ef_construction < 0 ||
         vector_ef_construction > 65535 || changefeed_retention < 0 ||
@@ -661,7 +662,9 @@ static bool fill_open_options_v5(JNIEnv *env, lattice_open_options_v5 *opts,
     opts->cache_size_mb = cache_size_mb <= 0 ? 0 : (uint32_t)cache_size_mb;
     opts->page_size = page_size <= 0 ? 4096 : (uint32_t)page_size;
     opts->enable_vector = enable_vector == JNI_TRUE;
-    opts->vector_dimensions = vector_dimensions <= 0 ? 128 : (uint16_t)vector_dimensions;
+    /* 0 means the file's dimensions, as in the C API; the Java default of
+     * 128 is OpenOptions' to apply, not this layer's. */
+    opts->vector_dimensions = (uint16_t)vector_dimensions;
     opts->enable_wal = enable_wal == JNI_TRUE;
     opts->enable_adjacency_cache = enable_adjacency_cache == JNI_TRUE;
     opts->lock = lock == JNI_TRUE;

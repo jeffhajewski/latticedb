@@ -105,7 +105,9 @@ mvn -q compile exec:java@run-example -Dexec.args=/tmp/knowledge.db
   `enableVectors` is set, so reopening needs no vector options. Any vector option
   that is set, and `vectorDimensions` when `enableVectors(true)` is set (it
   defaults to 128), must match the file or opening throws
-  `ErrorCode.CONFIG_MISMATCH`. A file that a newer release has marked as not
+  `ErrorCode.CONFIG_MISMATCH`. `vectorDimensions(0)` with `enableVectors(true)`
+  means the file's: it opens a database that has an index whatever its size, and
+  throws `ErrorCode.INVALID_ARG` where an index would have to be created. A file that a newer release has marked as not
   writable by this one opens with `readOnly(true)`; a writable open throws
   `ErrorCode.NEEDS_NEWER_WRITER` and writes nothing. A file in a format too new
   for this release to read at all throws `ErrorCode.VERSION_MISMATCH`, read-only

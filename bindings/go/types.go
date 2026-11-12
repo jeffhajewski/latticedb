@@ -30,9 +30,11 @@ type OpenOptions struct {
 	EnableVectors bool
 	// Deprecated: use EnableVectors.
 	EnableVector bool
-	// VectorDimensions applies when EnableVectors is set (0 means 128). It must
-	// match the index the file records, if it has one, or Open returns
-	// ErrorConfigMismatch.
+	// VectorDimensions applies when EnableVectors is set. It must match the
+	// index the file records, if it has one, or Open returns
+	// ErrorConfigMismatch. 0 means the file's: it opens a database that has an
+	// index, whatever its size, and returns ErrorInvalidArg where an index
+	// would have to be created, so creating one needs VectorDimensions set.
 	VectorDimensions uint16
 	// DisableLock opens without taking a lock on the file. A locked database
 	// normally refuses a second process, which is what stops two of them
@@ -196,9 +198,6 @@ type EmbeddingConfig struct {
 func (o OpenOptions) withDefaults() OpenOptions {
 	if o.PageSize == 0 {
 		o.PageSize = 4096
-	}
-	if o.VectorDimensions == 0 {
-		o.VectorDimensions = 128
 	}
 	if o.DisableWAL {
 		o.EnableWAL = false

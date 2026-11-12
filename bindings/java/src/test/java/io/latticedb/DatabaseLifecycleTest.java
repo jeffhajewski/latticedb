@@ -136,7 +136,8 @@ class DatabaseLifecycleTest {
         assertTrue(opts.lock());
         assertNotEquals(opts, OpenOptions.defaults().lock(false));
         assertThrows(IllegalArgumentException.class,
-                () -> opts.vectorDimensions(0));
+                () -> opts.vectorDimensions(-1));
+        assertDoesNotThrow(() -> OpenOptions.defaults().vectorDimensions(0));
         assertThrows(IllegalArgumentException.class,
                 () -> opts.vectorDimensions(5000));
     }

@@ -123,6 +123,36 @@ class OpenOptionsV5Test {
     }
 
     @Test
+    void vectorDimensionsZeroMeansTheFiles() {
+        String path = dir.resolve("zero-dims.db").toString();
+        long id;
+        try (Database db = Database.open(path, OpenOptions.defaults().create(true)
+                .enableVectors(true).vectorDimensions(3))) {
+            id = db.write(tx -> {
+                Node n = tx.createNode(List.of("P"));
+                tx.setVector(n.id(), "embedding", new float[]{1, 0, 0});
+                return n.id();
+            });
+        }
+
+        // Vectors enabled with dimensions 0: the file's 3, not the default 128.
+        try (Database db = Database.open(path, OpenOptions.defaults()
+                .enableVectors(true).vectorDimensions(0))) {
+            List<VectorSearchResult> results = db.vectorSearch(
+                    new float[]{1, 0, 0}, VectorSearchOptions.defaults().k(1));
+            assertEquals(1, results.size());
+            assertEquals(id, results.get(0).nodeId());
+        }
+    }
+
+    @Test
+    void vectorDimensionsZeroCannotCreateAnIndex() {
+        String path = dir.resolve("zero-dims-new.db").toString();
+        assertCode(ErrorCode.INVALID_ARG, () -> Database.open(path, OpenOptions.defaults()
+                .create(true).enableVectors(true).vectorDimensions(0)).close());
+    }
+
+    @Test
     void fileMarkedForNewerWritersOpensOnlyReadOnly() throws IOException {
         String path = dir.resolve("newer-writer.db").toString();
         try (Database db = Database.open(path, OpenOptions.defaults().create(true))) {

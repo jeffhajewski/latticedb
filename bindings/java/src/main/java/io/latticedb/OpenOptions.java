@@ -11,8 +11,8 @@ import java.util.Objects;
  * ef_construction. A database that has one opens with it whether or not
  * {@link #enableVectors(boolean)} is set. Any of {@link #vectorMetric},
  * {@link #vectorM} and {@link #vectorEfConstruction} that is set, and
- * {@link #vectorDimensions} when vectors are enabled, must match the file, or
- * opening throws {@link ErrorCode#CONFIG_MISMATCH}.</p>
+ * {@link #vectorDimensions} when vectors are enabled and it is not 0, must
+ * match the file, or opening throws {@link ErrorCode#CONFIG_MISMATCH}.</p>
  */
 public final class OpenOptions {
     private boolean create = false;
@@ -81,11 +81,16 @@ public final class OpenOptions {
         return this;
     }
 
-    /** Vector dimensions when vectors are enabled, 1..4096. Default 128. It
-     * must match the index the file records, if it has one. */
+    /**
+     * Vector dimensions when vectors are enabled, 1..4096, or 0 for the
+     * file's. Default 128. It must match the index the file records, if it
+     * has one. 0 opens a database that has an index, whatever its size, and
+     * throws {@link ErrorCode#INVALID_ARG} where an index would have to be
+     * created, so creating one needs dimensions set.
+     */
     public OpenOptions vectorDimensions(int vectorDimensions) {
-        if (vectorDimensions < 1 || vectorDimensions > 4096) {
-            throw new IllegalArgumentException("vectorDimensions must be in 1..4096");
+        if (vectorDimensions < 0 || vectorDimensions > 4096) {
+            throw new IllegalArgumentException("vectorDimensions must be 0 or in 1..4096");
         }
         this.vectorDimensions = vectorDimensions;
         return this;

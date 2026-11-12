@@ -1750,11 +1750,16 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\left in place, because restoring to a point inside one still needs
             \\its frames.
             \\
-            \\This command opens the database, and LatticeDB does not lock a
-            \\database across processes. Do not run it against a database another
-            \\process currently has open. To replicate a database while your
-            \\application is using it, call replicateTo on your own handle instead
-            \\and let this command cover the case where nothing else is running.
+            \\A process that writes and then closes the database folds the log
+            \\into the file and resets it, so the pass after it starts a new
+            \\generation. A pass with nothing changed ships nothing.
+            \\
+            \\This command opens the database for writing, which takes the file
+            \\lock: it fails if another process has the database open, and nothing
+            \\else can open it while --follow is running. To replicate a database
+            \\while your application is using it, call replicateTo on your own
+            \\handle instead and let this command cover the case where nothing
+            \\else is running.
             \\
             \\Options:
             \\  --to=<directory>      Where to ship to, created if missing

@@ -1493,11 +1493,10 @@ pub const Database = struct {
     /// With a log, committed pages are folded in by a checkpoint, which is `.full`
     /// rather than `.truncate` so frame numbering is left alone for anything
     /// following the log. Without one there is nothing to checkpoint: committed
-    /// pages sit dirty in the buffer pool until they are evicted, so they are
-    /// written back directly, or the copy is missing whatever has not been
-    /// evicted yet. Derived state that lives in memory until asked, notably the
-    /// vector index, has to be persisted first or the copy comes out missing an
-    /// index it claims to have.
+    /// pages sit dirty in the buffer pool until the next flush, so they are
+    /// flushed here, or the copy is missing all of them. Derived state that
+    /// lives in memory until asked, notably the vector index, has to be
+    /// persisted first or the copy comes out missing an index it claims to have.
     ///
     /// Returns the number of pages flushed.
     fn quiesceForCopy(self: *Self) DatabaseError!u32 {

@@ -1741,3 +1741,83 @@ test "lgr: a commit reads each changed record once and applies, logs and snapsho
     defer std.testing.allocator.free(replayed_kinds);
     try std.testing.expectEqualStrings(applied_kinds, replayed_kinds);
 }
+
+// ============================================================================
+// A node's labels, as the exports read them
+// ============================================================================
+
+/// `node`'s labels as the label index holds them: every (label, node)
+/// key, in key order, so by label id.
+fn labelsFromIndex(db: *Database, node: u64) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(std.testing.allocator);
+    var iter = try db.label_tree.range(null, null);
+    defer iter.deinit();
+    while (try iter.next()) |entry| {
+        if (std.mem.readInt(u64, entry.key[2..10], .big) != node) continue;
+        const name = try db.symbol_table.resolve(std.mem.readInt(u16, entry.key[0..2], .big));
+        defer std.testing.allocator.free(name);
+        try out.print(std.testing.allocator, "{s},", .{name});
+    }
+    return out.toOwnedSlice(std.testing.allocator);
+}
+
+fn expectLabelsAsIndexed(db: *Database, node: u64, expected: []const u8) !void {
+    const labels = try db.getNodeLabels(node);
+    defer {
+        for (labels) |label| std.testing.allocator.free(label);
+        std.testing.allocator.free(labels);
+    }
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(std.testing.allocator);
+    for (labels) |label| try got.print(std.testing.allocator, "{s},", .{label});
+    const indexed = try labelsFromIndex(db, node);
+    defer std.testing.allocator.free(indexed);
+    try std.testing.expectEqualStrings(expected, got.items);
+    try std.testing.expectEqualStrings(indexed, got.items);
+}
+
+test "lgr: a node's labels come from its record, in the label index's order" {
+    const path = "/tmp/lgr_node_labels.ltdb";
+    defer removeFiles(path);
+    var db = try openDb(path, true);
+    defer db.close();
+
+    // Label ids are given in first-use order: Z 1, M 2, A 3, Q 4.
+    var txn = try db.beginTransaction(.read_write);
+    const first = try db.createNode(&txn, &.{"Z"});
+    const second = try db.createNode(&txn, &.{ "M", "A", "Z" });
+    const third = try db.createNode(&txn, &.{});
+    const gone = try db.createNode(&txn, &.{ "A", "Q" });
+    try db.commitTransaction(&txn);
+    try expectLabelsAsIndexed(db, first, "Z,");
+    try expectLabelsAsIndexed(db, second, "Z,M,A,");
+    try expectLabelsAsIndexed(db, third, "");
+    try expectLabelsAsIndexed(db, gone, "A,Q,");
+    try expectLabelsAsIndexed(db, 999_999, "");
+
+    // Labels added out of id order, removed, a node deleted; and a
+    // transaction's changes are not seen until it commits, nor after an
+    // abort.
+    txn = try db.beginTransaction(.read_write);
+    try db.addNodeLabel(&txn, first, "Q");
+    try db.addNodeLabel(&txn, first, "A");
+    try db.removeNodeLabel(&txn, second, "Z");
+    try db.deleteNode(&txn, gone);
+    try expectLabelsAsIndexed(db, first, "Z,");
+    try db.commitTransaction(&txn);
+    try expectLabelsAsIndexed(db, first, "Z,A,Q,");
+    try expectLabelsAsIndexed(db, second, "M,A,");
+    try expectLabelsAsIndexed(db, gone, "");
+
+    txn = try db.beginTransaction(.read_write);
+    try db.addNodeLabel(&txn, third, "M");
+    try db.abortTransaction(&txn);
+    try expectLabelsAsIndexed(db, third, "");
+
+    // And after reopening.
+    db.close();
+    db = try reopenDb(path);
+    try expectLabelsAsIndexed(db, first, "Z,A,Q,");
+    try expectLabelsAsIndexed(db, second, "M,A,");
+}

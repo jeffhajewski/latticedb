@@ -770,6 +770,11 @@ Other changes, measured by their commits on a busy machine:
   instead of once each for the open readers' snapshots, the changefeed, the log
   and the apply: committing 100,000 property changes in transactions of 10,000,
   189–228 ms to 148–191 ms; 100,000 new nodes, 484–556 ms to 444–535 ms.
+- `lattice export` (JSON, JSONL, CSV, DOT) and `lattice dump` read each node's
+  labels from its record instead of walking the whole label index for every
+  node, which made them quadratic in the number of nodes: 100,000 nodes, JSON
+  export 27.3 s to 0.20 s and `dump` 28.5 s to 0.21 s (20,000 nodes: 1.3 s to
+  0.04–0.06 s). The output is byte for byte the same.
 - `r.prop`, `type(r)` and `labels(n)` decode only what they need: `RETURN r.w,
   r.note` over 20,000 relationships, 15.3 ms to 10.2 ms.
 - A `WHERE` that is the same `@@` search the `MATCH` already ran no longer runs

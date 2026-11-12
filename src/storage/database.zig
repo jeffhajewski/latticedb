@@ -9263,7 +9263,16 @@ pub const Database = struct {
 
     /// Get all labels for a specific node.
     /// Returns an allocated slice that the caller must free.
+    /// The labels of a committed node, by name, in label id order (the
+    /// order the label index keeps them in); none for a node that does not
+    /// exist. Read from the node's record, one lookup, rather than by
+    /// walking the label index, which made every export quadratic.
     pub fn getNodeLabels(self: *Self, node_id: NodeId) DatabaseError![][]const u8 {
+        var state = (try self.readBaseNodeState(node_id)) orelse
+            return self.allocator.alloc([]const u8, 0) catch return DatabaseError.OutOfMemory;
+        defer state.deinit(self.allocator);
+        std.mem.sortUnstable(symbols_mod.SymbolId, state.labels, {}, std.sort.asc(symbols_mod.SymbolId));
+
         var labels_list: std.ArrayListUnmanaged([]const u8) = .empty;
         errdefer {
             for (labels_list.items) |label| {
@@ -9271,31 +9280,12 @@ pub const Database = struct {
             }
             labels_list.deinit(self.allocator);
         }
-
-        // Iterate the label tree looking for entries with this node_id
-        var iter = self.label_tree.range(null, null) catch {
-            return DatabaseError.IoError;
-        };
-        defer iter.deinit();
-
-        while (true) {
-            const entry = iter.next() catch break;
-            if (entry) |e| {
-                // Parse label key: (label_id: u16, node_id: u64)
-                if (e.key.len >= 10) {
-                    const entry_node_id = std.mem.readInt(u64, e.key[2..10], .big);
-                    if (entry_node_id == node_id) {
-                        const label_id = std.mem.readInt(u16, e.key[0..2], .big);
-                        const label_name = self.symbol_table.resolve(label_id) catch continue;
-                        labels_list.append(self.allocator, label_name) catch {
-                            self.allocator.free(label_name);
-                            return DatabaseError.OutOfMemory;
-                        };
-                    }
-                }
-            } else {
-                break;
-            }
+        for (state.labels) |label_id| {
+            const label_name = self.symbol_table.resolve(label_id) catch continue;
+            labels_list.append(self.allocator, label_name) catch {
+                self.allocator.free(label_name);
+                return DatabaseError.OutOfMemory;
+            };
         }
 
         return labels_list.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;

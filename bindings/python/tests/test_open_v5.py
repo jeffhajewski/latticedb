@@ -12,6 +12,7 @@ from latticedb import (
     LatticeConfigMismatchError,
     LatticeHasRelationshipsError,
     LatticeInvalidArgError,
+    LatticeNeedsNewerWriterError,
     LatticeNotFoundError,
     LatticeUnsupportedError,
     library_available,
@@ -111,6 +112,28 @@ class TestOpenOptionsV5:
         # Without any v5-only option, the v4 path still opens.
         with Database(tmp_path / "v4.db", create=True):
             pass
+
+
+class TestNeedsNewerWriter:
+    def test_file_marked_for_newer_writers_opens_only_read_only(self, tmp_path):
+        db_path = tmp_path / "v5_newer_writer.db"
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                txn.create_node(labels=["Old"])
+                txn.commit()
+
+        # min_writer_version is a little-endian u16 at byte 222 of the header.
+        with open(db_path, "r+b") as f:
+            f.seek(222)
+            f.write((5).to_bytes(2, "little"))
+
+        with pytest.raises(LatticeNeedsNewerWriterError) as info:
+            Database(db_path).open()
+        assert info.value.code == -19
+
+        with Database(db_path, read_only=True) as db:
+            rows = db.query("MATCH (n:Old) RETURN count(n) AS c").fetchall()
+            assert rows[0]["c"] == 1
 
 
 class TestNodeDelete:

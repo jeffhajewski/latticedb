@@ -411,7 +411,9 @@ except LatticeError as e:
 Every exception carries the C error code as `.code`. Among the more specific ones:
 `LatticeHasRelationshipsError` (a plain `delete_node` of a node with
 relationships), `LatticeConfigMismatchError` (open options that contradict the
-file's vector index), `LatticeNotFoundError` (also `create_edge` when either end
+file's vector index), `LatticeNeedsNewerWriterError` (a writable open of a file
+that a newer release has marked as not writable by this one; it still opens with
+`read_only=True`), `LatticeNotFoundError` (also `create_edge` when either end
 does not exist) and `LatticeDatabaseLockedError` (another process holds the file).
 
 ## Requirements

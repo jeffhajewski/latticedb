@@ -143,6 +143,7 @@ LATTICE_ERROR_VALUE_TOO_LARGE = -15
 LATTICE_ERROR_DATABASE_LOCKED = -16
 LATTICE_ERROR_HAS_RELATIONSHIPS = -17
 LATTICE_ERROR_CONFIG_MISMATCH = -18
+LATTICE_ERROR_NEEDS_NEWER_WRITER = -19
 
 
 # Exception classes
@@ -228,6 +229,17 @@ class LatticeConfigMismatchError(LatticeError):
     pass
 
 
+class LatticeNeedsNewerWriterError(LatticeError):
+    """The database file was written by a newer release that does not let this
+    one write it.
+
+    The file opens with ``read_only=True``. A writable open fails with this
+    error and writes nothing.
+    """
+
+    pass
+
+
 class LatticeReadOnlyError(LatticeError):
     """Cannot write to read-only database/transaction."""
 
@@ -308,6 +320,7 @@ _ERROR_MAP = {
     LATTICE_ERROR_DATABASE_LOCKED: LatticeDatabaseLockedError,
     LATTICE_ERROR_HAS_RELATIONSHIPS: LatticeHasRelationshipsError,
     LATTICE_ERROR_CONFIG_MISMATCH: LatticeConfigMismatchError,
+    LATTICE_ERROR_NEEDS_NEWER_WRITER: LatticeNeedsNewerWriterError,
 }
 
 

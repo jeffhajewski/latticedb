@@ -2154,3 +2154,47 @@ test "committed vectors and indexed text survive a kill while the buffer pool is
         try std.testing.expectEqual(ids[i], one[0].doc_id);
     }
 }
+
+test "index declarations and drops that returned survive a kill" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/s3_lattice_crash_index_decl.ltdb";
+    const killed = "/tmp/s3_lattice_crash_index_decl_killed.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+    cleanup(killed);
+    defer cleanup(killed);
+
+    const config = DatabaseConfig{ .enable_fts = true, .enable_vector = false };
+    var db = try Database.open(allocator, path, .{ .create = true, .config = config });
+    defer db.close();
+
+    var txn = try db.beginTransaction(.read_write);
+    const node = try db.createNode(&txn, &.{"Person"});
+    try db.setNodeProperty(&txn, node, "email", .{ .string_val = "a@example.com" });
+    try db.setNodeProperty(&txn, node, "bio", .{ .string_val = "graph databases" });
+    try db.commitTransaction(&txn);
+    try db.createNodeFtsIndex("Person", "bio");
+    try db.sync();
+
+    // Nothing is written after each call returns: no commit, no flush, no
+    // close. What it did has to be in the file already.
+    try db.createNodePropertyIndex("Person", "email");
+    try copyAsIfKilled(allocator, path, killed);
+    {
+        var reopened = try Database.open(allocator, killed, .{ .config = config });
+        defer reopened.close();
+        try std.testing.expect(try reopened.hasNodePropertyIndex("Person", "email"));
+        try std.testing.expect(try reopened.nodeExists(node));
+    }
+    cleanup(killed);
+
+    try db.dropNodePropertyIndex("Person", "email");
+    try db.dropNodeFtsIndex("Person", "bio");
+    try copyAsIfKilled(allocator, path, killed);
+    {
+        var reopened = try Database.open(allocator, killed, .{ .config = config });
+        defer reopened.close();
+        try std.testing.expect(!try reopened.hasNodePropertyIndex("Person", "email"));
+        try std.testing.expect(!try reopened.hasNodeFtsIndex("Person", "bio"));
+    }
+}

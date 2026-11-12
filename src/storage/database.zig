@@ -3476,7 +3476,11 @@ pub const Database = struct {
         index.clearEntries(definition) catch |err| return mapPropertyIndexError(err);
         try self.populatePropertyIndexDefinition(definition);
         index.createDefinition(definition) catch |err| return mapPropertyIndexError(err);
-        try self.saveTreeRoots();
+        // A declaration runs outside any transaction, so the log never sees
+        // it. Until the pages and header reach the file, a crash would lose
+        // a declaration this call said it made.
+        try self.sync();
+        self.page_manager.sync() catch return DatabaseError.IoError;
         if (self.query_cache) |cache| cache.bumpSchemaVersion();
     }
 
@@ -3492,6 +3496,10 @@ pub const Database = struct {
         const definition = try self.propertyIndexDefinition(kind, scope, property, false);
         var index = &(self.property_index orelse return DatabaseError.MissingIndex);
         index.dropDefinition(definition) catch |err| return mapPropertyIndexError(err);
+        // Durable for the same reason as a declaration: a drop the file never
+        // saw would bring the index back after a crash.
+        try self.sync();
+        self.page_manager.sync() catch return DatabaseError.IoError;
         if (self.query_cache) |cache| cache.bumpSchemaVersion();
     }
 
@@ -3683,7 +3691,10 @@ pub const Database = struct {
         catalog.drop(definition) catch |err| return mapFtsCatalogError(err);
         try self.clearFtsDefinition(definition);
         self.fts_declared = self.ftsDeclarationsExist();
-        try self.saveTreeRoots();
+        // Durable as the declaration is: a drop the file never saw would
+        // bring back a declaration whose terms are already partly gone.
+        try self.sync();
+        self.page_manager.sync() catch return DatabaseError.IoError;
         if (self.query_cache) |cache| cache.bumpSchemaVersion();
     }
 

@@ -179,3 +179,57 @@ test "lfmt c_api: a file that needs a newer writer opens read-only, and a writab
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open_v5(path, &read_only, &db));
     _ = c_api.lattice_close(db);
 }
+
+/// Overwrite two bytes of the file at `offset` with a little-endian u16.
+fn patchU16(path: []const u8, offset: u64, value: u16) !void {
+    const file = try @import("compat").fs.cwd().openFile(path, .{ .mode = .read_write });
+    defer file.close();
+    var bytes: [2]u8 = undefined;
+    std.mem.writeInt(u16, &bytes, value, .little);
+    try file.pwriteAll(&bytes, offset);
+}
+
+test "lfmt c_api: a file in a format too new to read is a version mismatch, not an I/O error" {
+    const path = "/tmp/lfmt_capi_min_reader.db";
+    cleanup(path);
+    defer cleanup(path);
+    {
+        var db: ?*lattice_database = null;
+        const options = Options{ .create = true };
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open_v5(path, &options, &db));
+        _ = c_api.lattice_close(db);
+    }
+    const FileHeader = lattice.storage.page.FileHeader;
+    try patchU16(path, @offsetOf(FileHeader, "min_reader_version"), lattice.core.types.FORMAT_VERSION + 1);
+
+    var db: ?*lattice_database = null;
+    const writable = Options{};
+    try std.testing.expectEqual(lattice_error.err_version_mismatch, c_api.lattice_open_v5(path, &writable, &db));
+    try std.testing.expect(db == null);
+    const read_only = Options{ .read_only = true };
+    try std.testing.expectEqual(lattice_error.err_version_mismatch, c_api.lattice_open_v5(path, &read_only, &db));
+    try std.testing.expect(db == null);
+    // The older entry points report it the same way.
+    try std.testing.expectEqual(lattice_error.err_version_mismatch, c_api.lattice_open(path, null, &db));
+    const message = std.mem.span(c_api.lattice_error_message(.err_version_mismatch));
+    try std.testing.expect(std.mem.indexOf(u8, message, "newer") != null);
+}
+
+test "lfmt c_api: a log written in a newer format is a version mismatch" {
+    const path = "/tmp/lfmt_capi_wal_version.db";
+    cleanup(path);
+    defer cleanup(path);
+    {
+        var db: ?*lattice_database = null;
+        const options = Options{ .create = true };
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open_v5(path, &options, &db));
+        _ = c_api.lattice_close(db);
+    }
+    const WalHeader = lattice.storage.wal.WalHeader;
+    try patchU16(path ++ "-wal", @offsetOf(WalHeader, "version"), lattice.storage.wal.WAL_FORMAT_VERSION + 1);
+
+    var db: ?*lattice_database = null;
+    const writable = Options{};
+    try std.testing.expectEqual(lattice_error.err_version_mismatch, c_api.lattice_open_v5(path, &writable, &db));
+    try std.testing.expect(db == null);
+}

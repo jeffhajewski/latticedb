@@ -357,6 +357,8 @@ pub const lattice_error = enum(c_int) {
     err_lock_timeout = -8,
     err_read_only = -9,
     err_full = -10,
+    /// The database file, or its log, was written by a newer release in a
+    /// format this one cannot read, read-only or not.
     err_version_mismatch = -11,
     err_checksum = -12,
     err_out_of_memory = -13,
@@ -413,6 +415,7 @@ fn mapDatabaseError(err: DatabaseError) lattice_error {
         DatabaseError.ChangesTrimmed => .err_not_found,
         // The changefeed's retention policy is off.
         DatabaseError.ChangefeedOff => .err_unsupported,
+        DatabaseError.VersionTooNew => .err_version_mismatch,
     };
 }
 
@@ -4296,7 +4299,7 @@ pub export fn lattice_error_message(code: lattice_error) [*c]const u8 {
         .err_lock_timeout => "Lock timeout",
         .err_read_only => "Database is read-only",
         .err_full => "Database or buffer pool full",
-        .err_version_mismatch => "Version mismatch",
+        .err_version_mismatch => "Database was written by a newer LatticeDB in a format this version cannot read",
         .err_checksum => "Checksum error",
         .err_out_of_memory => "Out of memory",
         .err_unsupported => "Unsupported operation or value type",

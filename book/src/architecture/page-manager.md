@@ -390,8 +390,10 @@ not work; it does not make cross-process sharing safe.
 The header has two gates for older releases:
 
 - **Minimum reader version.** A release whose format version is lower may not open
-  the file at all; the page manager refuses it with `VersionTooNew` (reported as an
-  I/O error through the C API).
+  the file at all; the page manager refuses it with `VersionTooNew`
+  (`LATTICE_ERROR_VERSION_MISMATCH`, -11, through the C API; the CLI says the file
+  was written by a newer LatticeDB). A log whose version is newer than this release
+  knows is refused the same way.
 - **Minimum writer version.** A release whose format version is lower may open the
   file read-only but not for writing. A writable open is refused with
   `NeedsNewerWriter` (`LATTICE_ERROR_NEEDS_NEWER_WRITER`) before anything is

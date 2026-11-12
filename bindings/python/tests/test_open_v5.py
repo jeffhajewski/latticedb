@@ -16,6 +16,7 @@ from latticedb import (
     LatticeNotFoundError,
     LatticeTxnAbortedError,
     LatticeUnsupportedError,
+    LatticeVersionMismatchError,
     library_available,
 )
 from latticedb._bindings import get_lib
@@ -135,6 +136,25 @@ class TestNeedsNewerWriter:
         with Database(db_path, read_only=True) as db:
             rows = db.query("MATCH (n:Old) RETURN count(n) AS c").fetchall()
             assert rows[0]["c"] == 1
+
+
+class TestVersionTooNew:
+    def test_file_in_a_newer_format_is_a_version_mismatch(self, tmp_path):
+        db_path = tmp_path / "v5_newer_reader.db"
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                txn.create_node(labels=["Old"])
+                txn.commit()
+
+        # min_reader_version is a little-endian u16 at byte 6 of the header.
+        with open(db_path, "r+b") as f:
+            f.seek(6)
+            f.write((5).to_bytes(2, "little"))
+
+        for read_only in (False, True):
+            with pytest.raises(LatticeVersionMismatchError) as info:
+                Database(db_path, read_only=read_only).open()
+            assert info.value.code == -11
 
 
 class TestNodeDelete:

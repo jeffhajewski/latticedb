@@ -432,7 +432,8 @@ Every exception carries the C error code as `.code`. Among the more specific one
 relationships), `LatticeConfigMismatchError` (open options that contradict the
 file's vector index), `LatticeNeedsNewerWriterError` (a writable open of a file
 that a newer release has marked as not writable by this one; it still opens with
-`read_only=True`), `LatticeNotFoundError` (also `create_edge` when either end
+`read_only=True`), `LatticeVersionMismatchError` (a file in a format too new for
+this release to read at all, read-only or not), `LatticeNotFoundError` (also `create_edge` when either end
 does not exist) and `LatticeDatabaseLockedError` (another process holds the file).
 
 A failed Cypher query raises `LatticeQueryError`, which says what failed and

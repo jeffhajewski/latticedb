@@ -54,6 +54,7 @@ const CheckError = error{
     IoError,
     OutOfMemory,
     DatabaseLocked,
+    VersionTooNew,
 };
 
 const CheckStats = struct {
@@ -1026,6 +1027,9 @@ fn openDatabase(
     };
 }
 
+/// What a file in a format this build cannot read gets, from every command.
+const newer_format_message = "{s} was written by a newer LatticeDB, in a format this version cannot read. Use that newer version.";
+
 /// Report a database that would not open.
 ///
 /// The engine's error names say what happened and not what to do about it, so
@@ -1040,6 +1044,9 @@ fn failOpen(stderr: anytype, path: []const u8, err: anyerror, vectors_enabled: b
     }
     if (err == DatabaseError.NotFound or err == error.FileNotFound) {
         return failCommand(stderr, "Database not found: {s}. Create it first with 'lattice create'.", .{path});
+    }
+    if (err == DatabaseError.VersionTooNew) {
+        return failCommand(stderr, newer_format_message, .{path});
     }
     if (err == DatabaseError.NeedsNewerWriter) {
         return failCommand(
@@ -1291,6 +1298,7 @@ fn cmdCheck(
         error.FileNotFound => return failCommand(stderr, "Database file not found: {s}", .{path}),
         error.PermissionDenied => return failCommand(stderr, "Permission denied while checking: {s}", .{path}),
         error.InvalidDatabase => return failCommand(stderr, "Invalid database file: {s}", .{path}),
+        error.VersionTooNew => return failCommand(stderr, newer_format_message, .{path}),
         error.ChecksumMismatch => return failCommand(stderr, "Checksum mismatch detected in database file: {s}", .{path}),
         error.DatabaseLocked => return failCommand(
             stderr,
@@ -1365,7 +1373,8 @@ fn mapPageManagerCheckError(err: PageManagerError) CheckError {
         error.PermissionDenied => CheckError.PermissionDenied,
         error.ChecksumMismatch => CheckError.ChecksumMismatch,
         error.DatabaseLocked => CheckError.DatabaseLocked,
-        error.InvalidHeader, error.InvalidMagic, error.VersionTooNew, error.InvalidPageId, error.PageNotAllocated => CheckError.InvalidDatabase,
+        error.VersionTooNew => CheckError.VersionTooNew,
+        error.InvalidHeader, error.InvalidMagic, error.InvalidPageId, error.PageNotAllocated => CheckError.InvalidDatabase,
         else => CheckError.IoError,
     };
 }

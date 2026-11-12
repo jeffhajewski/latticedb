@@ -46,6 +46,8 @@ pub const WalError = error{
     InvalidMagic,
     UuidMismatch,
     VersionMismatch,
+    /// The log was written by a newer release, in a format this one cannot read.
+    VersionTooNew,
     ChecksumMismatch,
     CorruptedFrame,
     RecordTooLarge,
@@ -489,9 +491,8 @@ pub const WalManager = struct {
             return WalError.InvalidMagic;
         }
 
-        if (self.header.version < MIN_READABLE_WAL_VERSION or self.header.version > WAL_FORMAT_VERSION) {
-            return WalError.VersionMismatch;
-        }
+        if (self.header.version > WAL_FORMAT_VERSION) return WalError.VersionTooNew;
+        if (self.header.version < MIN_READABLE_WAL_VERSION) return WalError.VersionMismatch;
 
         // Validate UUID
         if (!std.mem.eql(u8, &self.header.database_uuid, &db_uuid)) {

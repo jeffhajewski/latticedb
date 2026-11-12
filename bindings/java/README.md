@@ -103,7 +103,9 @@ mvn -q compile exec:java@run-example -Dexec.args=/tmp/knowledge.db
   defaults to 128), must match the file or opening throws
   `ErrorCode.CONFIG_MISMATCH`. A file that a newer release has marked as not
   writable by this one opens with `readOnly(true)`; a writable open throws
-  `ErrorCode.NEEDS_NEWER_WRITER` and writes nothing. Cosine stores vectors at unit length and returns
+  `ErrorCode.NEEDS_NEWER_WRITER` and writes nothing. A file in a format too new
+  for this release to read at all throws `ErrorCode.VERSION_MISMATCH`, read-only
+  or not. Cosine stores vectors at unit length and returns
   cosine distance; Euclidean returns the L2 distance and dot product the negative
   dot product, both over vectors stored as given; results come smallest first.
 - `Transaction.deleteNode` refuses a node that still has relationships with

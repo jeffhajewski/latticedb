@@ -87,6 +87,25 @@ class OpenOptionsV5Test {
     }
 
     @Test
+    void fileInANewerFormatIsAVersionMismatch() throws Exception {
+        String path = dir.resolve("newer-reader.db").toString();
+        try (Database db = Database.open(path, OpenOptions.defaults().create(true))) {
+            db.write(tx -> tx.createNode(List.of("Old")));
+        }
+
+        // min_reader_version is a little-endian u16 at byte 6 of the header.
+        try (RandomAccessFile file = new RandomAccessFile(path, "rw")) {
+            file.seek(6);
+            file.write(new byte[]{5, 0});
+        }
+
+        assertCode(ErrorCode.VERSION_MISMATCH,
+                () -> Database.open(path, OpenOptions.defaults()).close());
+        assertCode(ErrorCode.VERSION_MISMATCH,
+                () -> Database.open(path, OpenOptions.defaults().readOnly(true)).close());
+    }
+
+    @Test
     void syncOptionsAreAccepted() {
         String path = dir.resolve("sync.db").toString();
         List<OpenOptions> settings = List.of(

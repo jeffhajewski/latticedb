@@ -269,3 +269,34 @@ func TestFileMarkedForNewerWritersOpensOnlyReadOnly(t *testing.T) {
 		t.Fatalf("count = %v, want 1", got)
 	}
 }
+
+func TestFileInANewerFormatIsAVersionMismatch(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "v5-newer-reader.db")
+	db, err := Open(dbPath, OpenOptions{Create: true})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// min_reader_version is a little-endian u16 at byte 6 of the header.
+	f, err := os.OpenFile(dbPath, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open file: %v", err)
+	}
+	if _, err := f.WriteAt([]byte{5, 0}, 6); err != nil {
+		t.Fatalf("patch header: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close file: %v", err)
+	}
+
+	for _, readOnly := range []bool{false, true} {
+		opened, err := Open(dbPath, OpenOptions{ReadOnly: readOnly})
+		if err == nil {
+			opened.Close()
+		}
+		wantCode(t, "open", err, ErrorVersionMismatch)
+	}
+}

@@ -195,6 +195,10 @@ pub const DatabaseError = error{
     ChangesTrimmed,
     /// The changefeed's retention policy is `off`: there are no events to read.
     ChangefeedOff,
+    /// The file, or its log, was written by a newer release in a format this
+    /// one cannot read at all (its `min_reader_version`, or the log's version,
+    /// is above what this build knows). Open it with that release.
+    VersionTooNew,
 };
 
 /// Query execution errors
@@ -655,6 +659,7 @@ fn hnswConfigFor(config: VectorConfig) HnswConfig {
 fn mapWalInitError(err: WalError) DatabaseError {
     return switch (err) {
         WalError.IoError => DatabaseError.IoError,
+        WalError.VersionTooNew => DatabaseError.VersionTooNew,
         WalError.InvalidMagic,
         WalError.UuidMismatch,
         WalError.VersionMismatch,
@@ -716,6 +721,7 @@ fn shouldResetWalForNewDatabase(err: WalError) bool {
         WalError.InvalidMagic,
         WalError.UuidMismatch,
         WalError.VersionMismatch,
+        WalError.VersionTooNew,
         WalError.ChecksumMismatch,
         WalError.CorruptedFrame,
         => true,
@@ -1463,6 +1469,7 @@ pub const Database = struct {
                 PageManagerError.OutOfMemory => DatabaseError.OutOfMemory,
                 PageManagerError.InvalidMagic, PageManagerError.InvalidHeader => DatabaseError.InvalidDatabase,
                 PageManagerError.WriterVersionTooNew => DatabaseError.NeedsNewerWriter,
+                PageManagerError.VersionTooNew => DatabaseError.VersionTooNew,
                 else => DatabaseError.IoError,
             };
         };

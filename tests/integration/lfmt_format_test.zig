@@ -269,6 +269,36 @@ test "lfmt: no min_writer_version means no restriction, and a write records this
     try std.testing.expectEqual(types.FORMAT_VERSION, (try readHeader(path)).min_writer_version);
 }
 
+test "lfmt: a file or log in a format too new to read is VersionTooNew, read-only or not" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lfmt_min_reader.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    {
+        var db = try Database.open(allocator, path, .{ .create = true, .config = plain_config });
+        defer db.close();
+        _ = try db.createNode(null, &.{"A"});
+    }
+    try patchHeader(path, "min_reader_version", types.FORMAT_VERSION + 1);
+    const before = try readHeaderPage(path);
+    try std.testing.expectError(DatabaseError.VersionTooNew, Database.open(allocator, path, .{ .config = plain_config }));
+    try std.testing.expectError(DatabaseError.VersionTooNew, Database.open(allocator, path, .{ .read_only = true, .config = plain_config }));
+    const after = try readHeaderPage(path);
+    try std.testing.expectEqualSlices(u8, &before, &after);
+
+    // The log has a version of its own.
+    try patchHeader(path, "min_reader_version", types.MIN_READER_VERSION);
+    {
+        const file = try @import("compat").fs.cwd().openFile(path ++ "-wal", .{ .mode = .read_write });
+        defer file.close();
+        var bytes: [2]u8 = undefined;
+        std.mem.writeInt(u16, &bytes, lattice.storage.wal.WAL_FORMAT_VERSION + 1, .little);
+        try file.pwriteAll(&bytes, @offsetOf(lattice.storage.wal.WalHeader, "version"));
+    }
+    try std.testing.expectError(DatabaseError.VersionTooNew, Database.open(allocator, path, .{ .config = plain_config }));
+}
+
 // ============================================================================
 // Vector configuration
 // ============================================================================

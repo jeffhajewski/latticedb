@@ -51,6 +51,10 @@ typedef enum {
     LATTICE_ERROR_LOCK_TIMEOUT = -8,
     LATTICE_ERROR_READ_ONLY = -9,
     LATTICE_ERROR_FULL = -10,
+    /* The database file, or its write-ahead log, was written by a newer
+     * release in a format this one cannot read (the header's
+     * min_reader_version, or the log's version, is above what this release
+     * knows). Read-only opens are refused too. Nothing was written. */
     LATTICE_ERROR_VERSION_MISMATCH = -11,
     LATTICE_ERROR_CHECKSUM = -12,
     LATTICE_ERROR_OUT_OF_MEMORY = -13,

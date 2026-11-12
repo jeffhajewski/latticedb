@@ -182,6 +182,29 @@ describeIfNative('open options v5, detach delete and edge endpoints', () => {
     }
   });
 
+  test('a file in a newer format is a version mismatch, read-only or not', async () => {
+    const dbPath = path.join(dir, 'newer-reader.db');
+    const db = new Database(dbPath, { create: true });
+    await db.open();
+    await db.write(async (txn) => {
+      await txn.createNode({ labels: ['Old'] });
+    });
+    await db.close();
+
+    // min_reader_version is a little-endian u16 at byte 6 of the header.
+    const fd = fs.openSync(dbPath, 'r+');
+    try {
+      fs.writeSync(fd, Buffer.from([5, 0]), 0, 2, 6);
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    expect(await codeOf(new Database(dbPath).open())).toBe(LatticeErrorCode.VersionMismatch);
+    expect(await codeOf(new Database(dbPath, { readOnly: true }).open())).toBe(
+      LatticeErrorCode.VersionMismatch
+    );
+  });
+
   test('a plain delete of a node with relationships is refused', async () => {
     const db = new Database(path.join(dir, 'del.db'), { create: true });
     await db.open();

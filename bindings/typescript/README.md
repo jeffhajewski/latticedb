@@ -492,9 +492,10 @@ Errors from the native library are `LatticeError`s whose `code` is the C error
 code, for example -4 (not found, also from `createEdge` when either end does not
 exist), -16 (another process holds the file), -17 (a plain `deleteNode` of a node
 with relationships), -18 (open options that contradict the file's vector
-index) and -19 (`NeedsNewerWriter`: a writable open of a file that a newer
+index), -19 (`NeedsNewerWriter`: a writable open of a file that a newer
 release has marked as not writable by this one; it still opens with
-`readOnly: true`).
+`readOnly: true`) and -11 (`VersionMismatch`: a file in a format too new for
+this release to read at all, read-only or not).
 
 A failed Cypher query throws a `LatticeQueryError`, a `LatticeError` that also
 says where the query failed:

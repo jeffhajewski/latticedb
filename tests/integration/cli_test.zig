@@ -304,6 +304,36 @@ test "cli: a database that needs a newer writer is read by read-only commands an
     try std.testing.expect(std.mem.indexOf(u8, write.stderr, "newer LatticeDB") != null);
 }
 
+test "cli: a database in a format too new to read says so, from open and from check" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lfmt_cli_min_reader.ltdb";
+    deleteDatabaseFiles(path);
+    defer deleteDatabaseFiles(path);
+    {
+        var db = try Database.open(allocator, path, .{ .create = true, .config = .{ .enable_fts = false } });
+        defer db.close();
+        _ = try db.createNode(null, &.{"A"});
+    }
+    {
+        const file = try compat.fs.cwd().openFile(path, .{ .mode = .read_write });
+        defer file.close();
+        var bytes: [2]u8 = undefined;
+        std.mem.writeInt(u16, &bytes, lattice.core.types.FORMAT_VERSION + 1, .little);
+        try file.pwriteAll(&bytes, @offsetOf(lattice.storage.page.FileHeader, "min_reader_version"));
+    }
+    for ([_][]const u8{ "count", "exec", "check" }) |command| {
+        const run = if (std.mem.eql(u8, command, "exec"))
+            try runCli(allocator, &.{ command, path, "--query=MATCH (n) RETURN n" })
+        else
+            try runCli(allocator, &.{ command, path });
+        defer run.deinit(allocator);
+        if (run.succeeded() or std.mem.indexOf(u8, run.stderr, "format this version cannot read") == null) {
+            std.debug.print("{s}: exit {?d}\nstderr: {s}\n", .{ command, run.exit_code, run.stderr });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
 test "cli: help for every command that opens a database lists the vector options" {
     const allocator = std.testing.allocator;
     const commands = [_][]const u8{

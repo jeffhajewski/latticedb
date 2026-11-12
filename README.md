@@ -394,10 +394,14 @@ The LatticeDB figure searches a 100-document corpus; the other rows come from ot
 - Durable explicit equality indexes for scoped node and edge properties
 - Multi-hop traversal, variable-length paths (`*1..3`)
 - ACID transactions with commit/rollback and crash recovery
+- Deleting a node that still has relationships is refused unless asked to detach
+  them, and a relationship needs both of its ends
 - MERGE, WITH, UNWIND, aggregations (`count`, `sum`, `avg`, `min`, `max`, `collect`)
 
 **Vector Search**
 - HNSW approximate nearest neighbor, with `ef_search` tunable per query
+- Cosine, Euclidean or dot-product distance, chosen when the index is created; the
+  file records the index, so reopening needs no vector options
 - Built-in hash embeddings or HTTP client for Ollama/OpenAI
 - Bulk vector node insertion for fast ingestion
 
@@ -412,9 +416,15 @@ The LatticeDB figure searches a 100-document corpus; the other rows come from ot
 - Full-text search operator: `@@`
 - Regular expressions: `=~`
 - Parameters: `$name`
+- Errors that give the stage, a message and the line and column
 
 **Operations**
-- Single-file storage with write-ahead log for crash recovery
+- Single-file storage with write-ahead log for crash recovery, tested by cutting
+  the power at every sync point of a simulated disk
+- Choose per database whether a commit waits for the disk (`sync_mode`), and on
+  macOS whether syncs flush the drive's cache (`full_fsync`)
+- Read-only opens of a crashed database see every committed transaction, without
+  writing to it
 - Continuous backup: ship changes to a directory and restore to a point in time
 - Hot backup with `lattice backup`, taken without closing the database
 - Serialize a database to bytes and open one from bytes, for keeping many small

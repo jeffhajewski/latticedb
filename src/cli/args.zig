@@ -268,6 +268,8 @@ pub const Args = struct {
     to: ?[]const u8 = null,
     follow: bool = false,
     interval_secs: u32 = 10,
+    /// Whether --interval was given; it means something only with --follow.
+    interval_set: bool = false,
 
     /// Skip the file lock. For filesystems where locking does not work, not
     /// for arranging concurrent access.
@@ -379,6 +381,7 @@ pub const Args = struct {
                         return error.InvalidInterval;
                     };
                     if (args.interval_secs == 0) return error.InvalidInterval;
+                    args.interval_set = true;
                 } else if (std.mem.eql(u8, arg, "--no-lock")) {
                     args.no_lock = true;
                 } else if (std.mem.startsWith(u8, arg, "--output=")) {
@@ -431,6 +434,16 @@ pub const Args = struct {
             }
         }
 
+        // An option that only means something with another one would
+        // otherwise be ignored without a word: a database created with
+        // --vector-dims and no --enable-vector has no vector index.
+        if (!args.enable_vector and (args.vector_dims_set or args.vector_metric != null or
+            args.vector_m != null or args.vector_ef_construction != null))
+        {
+            return error.VectorOptionWithoutEnableVector;
+        }
+        if (args.interval_set and !args.follow) return error.IntervalWithoutFollow;
+
         args.positional = try positional.toOwnedSlice();
         return args;
     }
@@ -449,6 +462,8 @@ pub const Error = error{
     InvalidVectorM,
     InvalidVectorEfConstruction,
     InvalidChangefeedRetention,
+    VectorOptionWithoutEnableVector,
+    IntervalWithoutFollow,
     InvalidCacheSize,
     InvalidPageSize,
     InvalidBatchSize,
@@ -540,6 +555,24 @@ test "parse vector index options for create" {
     try std.testing.expectError(error.InvalidVectorM, Args.parse(allocator, &.{ "lattice", "create", "t.db", "--vector-m=1" }));
     try std.testing.expectError(error.InvalidVectorM, Args.parse(allocator, &.{ "lattice", "create", "t.db", "--vector-m=33" }));
     try std.testing.expectError(error.InvalidVectorEfConstruction, Args.parse(allocator, &.{ "lattice", "create", "t.db", "--vector-ef-construction=0" }));
+}
+
+test "lfmt vector options without --enable-vector are refused, not ignored" {
+    const allocator = std.testing.allocator;
+    for ([_][]const u8{ "--vector-dims=8", "--vector-metric=cosine", "--vector-m=16", "--vector-ef-construction=64" }) |option| {
+        try std.testing.expectError(error.VectorOptionWithoutEnableVector, Args.parse(allocator, &.{ "lattice", "create", "t.db", option }));
+        try std.testing.expectError(error.VectorOptionWithoutEnableVector, Args.parse(allocator, &.{ "lattice", "info", "t.db", option }));
+        var with = try Args.parse(allocator, &.{ "lattice", "create", "t.db", option, "--enable-vector" });
+        with.deinit(allocator);
+    }
+}
+
+test "lfmt --interval without --follow is refused, not ignored" {
+    const allocator = std.testing.allocator;
+    try std.testing.expectError(error.IntervalWithoutFollow, Args.parse(allocator, &.{ "lattice", "replicate", "t.db", "--to=r", "--interval=5" }));
+    var with = try Args.parse(allocator, &.{ "lattice", "replicate", "t.db", "--to=r", "--follow", "--interval=5" });
+    defer with.deinit(allocator);
+    try std.testing.expectEqual(@as(u32, 5), with.interval_secs);
 }
 
 test "parse page size option" {

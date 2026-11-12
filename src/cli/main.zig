@@ -99,6 +99,8 @@ pub fn main(init: std.process.Init) !u8 {
             error.InvalidVectorM => output.printError(stderr, "Invalid --vector-m. Must be in the range 2..32.", .{}),
             error.InvalidVectorEfConstruction => output.printError(stderr, "Invalid --vector-ef-construction. Must be in the range 1..4096.", .{}),
             error.InvalidChangefeedRetention => output.printError(stderr, "Invalid --changefeed. Use: all, off, last:<events> or age:<duration> (such as age:7d, age:12h, age:30m).", .{}),
+            error.VectorOptionWithoutEnableVector => output.printError(stderr, "--vector-dims, --vector-metric, --vector-m and --vector-ef-construction need --enable-vector.", .{}),
+            error.IntervalWithoutFollow => output.printError(stderr, "--interval needs --follow.", .{}),
             error.InvalidCacheSize => output.printError(stderr, "Invalid cache size. Must be a positive integer.", .{}),
             error.InvalidPageSize => output.printError(stderr, "Invalid page size. Must be in the range 4096..65535 bytes.", .{}),
             error.InvalidBatchSize => output.printError(stderr, "Invalid batch size. Must be a positive integer.", .{}),
@@ -1967,7 +1969,8 @@ fn printUsage(writer: anytype) void {
         \\Options:
         \\  --format=<fmt>        Output format: table, json, csv (default: table)
         \\  --enable-vector       Create a vector index. A database that has one
-        \\                        opens with it without this flag.
+        \\                        opens with it without this flag. The
+        \\                        --vector-* options need it.
         \\  --vector-dims=<n>     Vector dimensions, 1..4096 (default for create: 128)
         \\  --vector-metric=<m>   With create: cosine, euclidean or dot (default: cosine)
         \\  --enable-fts          Enable full-text search (default: on)
@@ -2003,7 +2006,8 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\Create a new LatticeDB database file.
             \\
             \\Options:
-            \\  --enable-vector       Enable HNSW vector index
+            \\  --enable-vector       Enable HNSW vector index (the --vector-*
+            \\                        options below need it)
             \\  --vector-dims=<n>     Vector dimensions (default: 128, max: 4096)
             \\  --vector-metric=<m>   Distance: cosine, euclidean, or dot (negative
             \\                        dot product) (default: cosine)
@@ -2114,7 +2118,8 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\Options:
             \\  --to=<directory>      Where to ship to, created if missing
             \\  --follow              Keep running, shipping on an interval
-            \\  --interval=<seconds>  How long to wait between passes (default 10)
+            \\  --interval=<seconds>  With --follow, how long to wait between passes
+            \\                        (default 10)
             \\  --format=<fmt>        Output format: table, json, csv
             \\  --enable-vector       Create a vector index if the database has
             \\                        none (needs --vector-dims). A database with

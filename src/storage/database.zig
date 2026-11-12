@@ -6831,9 +6831,6 @@ pub const Database = struct {
                     .labels = owned_labels,
                     .properties = owned_properties,
                 });
-                if (owned_labels.len == 0 and self.hnsw_index != null) {
-                    try self.storeVectorOverlayState(overlay, node_id, .{ .absent = {} });
-                }
                 overlay.markDirty();
 
                 return;
@@ -6885,12 +6882,6 @@ pub const Database = struct {
             new_labels.items,
             existing_node.properties,
         );
-
-        if (new_labels.items.len == 0) {
-            if (self.hnsw_index) |*hnsw| {
-                hnsw.remove(node_id) catch |err| return mapHnswError(err);
-            }
-        }
 
         // Log undo entry for transaction rollback
         if (txn) |t| {

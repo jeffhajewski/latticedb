@@ -20,6 +20,7 @@ const lfmt_format_test = @import("lfmt_format_test.zig");
 const lfmt_delete_test = @import("lfmt_delete_test.zig");
 const lfmt_sync_test = @import("lfmt_sync_test.zig");
 const lqs_query_semantics_test = @import("lqs_query_semantics_test.zig");
+const llv_label_vector_test = @import("llv_label_vector_test.zig");
 
 // Re-export tests from all modules
 test {
@@ -49,6 +50,8 @@ test {
     _ = lfmt_sync_test;
     // Query errors that name their cause, and query semantics fixes
     _ = lqs_query_semantics_test;
+    // A node's vector stays when its last label goes
+    _ = llv_label_vector_test;
 }
 
 test "integration test runner initialized" {

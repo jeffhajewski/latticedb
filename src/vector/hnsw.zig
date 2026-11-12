@@ -349,6 +349,35 @@ const ConnectionPool = struct {
         if (frame.data[slot_offset] == FREE_CONNECTION_SLOT) return HnswError.StorageError;
     }
 
+    /// Free every page of every pool and forget the pools.
+    ///
+    /// Each chain is followed only as far as its pages check out as this
+    /// pool's pages. This runs when a saved graph is being thrown away,
+    /// usually because it failed to load, and a page that does not look like
+    /// one of ours is not ours to free; the rest of that chain is left
+    /// allocated rather than risk freeing another structure's page.
+    fn releaseAllPages(self: *Self) void {
+        var heads = self.pool_heads.iterator();
+        while (heads.next()) |head| {
+            var page_id = head.value_ptr.*;
+            var visited: u32 = 0;
+            while (page_id != NULL_PAGE) : (visited += 1) {
+                if (visited >= self.bp.pm.pageCount() or !self.bp.pm.isValidPage(page_id)) break;
+                const frame = self.bp.fetchPage(page_id, .shared) catch break;
+                const hdr = self.readPageHeader(frame, head.key_ptr.*) catch {
+                    self.bp.unpinPage(frame, false);
+                    break;
+                };
+                self.bp.unpinPage(frame, false);
+                // Refused for a page already freed, which ends a looping chain.
+                self.bp.freePage(page_id) catch break;
+                page_id = hdr.next_page;
+            }
+        }
+        self.pool_heads.clearRetainingCapacity();
+        self.total_pages = 0;
+    }
+
     /// Allocate a slot for a node with the given max_layer.
     fn allocateSlot(self: *Self, max_layer: u8) HnswError!ConnectionLocation {
         const slot_size = try slotSizeForLevel(max_layer, self.m, self.m_max0);
@@ -1913,12 +1942,22 @@ pub const HnswIndex = struct {
         }
     }
 
+    /// Forget the graph so it can be built again from the stored vectors.
+    ///
+    /// The connection pages the old graph used are freed, so the new graph
+    /// reuses them instead of growing the file by the size of the graph on
+    /// every rebuild. A read-only handle frees nothing; its rebuilt graph
+    /// lives in memory only.
     pub fn resetForRebuild(self: *Self) void {
         self.dangling.clearRetainingCapacity();
         self.unsaved.clearRetainingCapacity();
         self.needs_full_save = true;
         self.nodes.clearRetainingCapacity();
-        self.connection_pool.pool_heads.clearRetainingCapacity();
+        if (self.bp.pm.read_only) {
+            self.connection_pool.pool_heads.clearRetainingCapacity();
+        } else {
+            self.connection_pool.releaseAllPages();
+        }
         self.entry_point = null;
         self.max_layer = 0;
         self.vector_count = 0;
@@ -2540,4 +2579,52 @@ test "hnsw replacing a vector leaves the node linked on every layer" {
             }
         }
     }
+}
+
+test "hnsw rebuild reuses the connection pages the old graph used" {
+    const allocator = std.testing.allocator;
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+    const db_path = "/tmp/s3_lattice_hnsw_rebuild_pages_test.db";
+    vfs_impl.delete(db_path) catch {};
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+    var bp = try buffer_pool.BufferPool.init(allocator, &pm, 256 * 4096);
+    defer bp.deinit();
+
+    const dims = 8;
+    var vs = try VectorStorage.init(allocator, &bp, dims);
+    var index = HnswIndex.init(allocator, &bp, &vs, .{ .dimensions = dims, .m = 4, .m_max0 = 8, .ef_construction = 16 });
+    defer index.deinit();
+
+    var prng = std.Random.DefaultPrng.init(3);
+    const random = prng.random();
+    const count = 400;
+    var vectors: [count][dims]f32 = undefined;
+    for (&vectors, 1..) |*v, id| {
+        for (v) |*x| x.* = random.float(f32);
+        try index.insert(id, v);
+    }
+    var locations: [count]VectorLocation = undefined;
+    for (&locations, 1..) |*loc, id| loc.* = index.getNode(id).?.vector_loc;
+    try std.testing.expect(index.connection_pool.total_pages > 1);
+    const pages_before = pm.pageCount();
+
+    // What opening does when the saved graph cannot be loaded: forget it and
+    // place every stored vector again.
+    for (0..3) |_| {
+        index.resetForRebuild();
+        for (&vectors, locations, 1..) |*v, loc, id| try index.insertStored(id, loc, v);
+        try std.testing.expectEqual(pages_before, pm.pageCount());
+    }
+
+    const results = try index.search(&vectors[10], 1, null);
+    defer index.freeResults(results);
+    try std.testing.expectEqual(@as(u64, 11), results[0].node_id);
 }

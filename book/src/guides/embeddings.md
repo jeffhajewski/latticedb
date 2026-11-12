@@ -76,8 +76,11 @@ server's base URL: given `http://localhost:11434` alone, the client POSTs to `/`
 on that server, which does not serve embeddings, and `embed` fails. The client
 copies the endpoint, model and API key when it is created.
 
-The client accepts a timeout setting (`timeout_ms` in Python, `timeoutMs` in
-TypeScript), but it is not applied: a request waits as long as the server takes.
+The timeout setting (`timeout_ms` in Python, `timeoutMs` in TypeScript, 30
+seconds by default) is how long the client waits for the server to start
+answering. A request that gets no response in that time fails with an I/O
+error. Connecting, and reading the rest of a response that has begun, are not
+bounded by it, and it is not applied on Windows.
 
 ### Ollama
 

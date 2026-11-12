@@ -540,7 +540,7 @@ lattice_embedding_config config = {
     .model = "nomic-embed-text",  // required; NULL is rejected with LATTICE_ERROR_INVALID_ARG
     .api_format = LATTICE_EMBEDDING_OLLAMA,
     .api_key = NULL,
-    .timeout_ms = 0  // accepted, but not currently applied
+    .timeout_ms = 0  // wait for the response to begin; 0 means 30 seconds
 };
 
 lattice_embedding_client* client;
@@ -557,8 +557,10 @@ lattice_embedding_client_free(client);
 
 The client POSTs to `endpoint` exactly as given, with nothing appended, and
 copies the endpoint, model and API key when it is created, so the caller's
-strings can be freed afterwards. `timeout_ms` is stored but no timeout is
-applied to the request.
+strings can be freed afterwards. `timeout_ms` bounds the wait for the server to
+start answering. It does not bound connecting or reading the rest of a response
+that has begun, and it is not applied on Windows. A request that times out
+returns `LATTICE_ERROR_IO`.
 
 ## Durable Streams
 

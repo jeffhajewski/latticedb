@@ -289,7 +289,7 @@ openaiClient.close();
 
 The endpoint is POSTed to exactly as given; nothing is appended, so a server's
 base URL alone (`http://localhost:11434`) sends the request to `/` and `embed`
-throws. `timeoutMs` is accepted but not applied.
+throws. `timeoutMs` is how long `embed` waits for the response to begin: it bounds the wait for the server to start answering (default 30 seconds), not connecting or reading the rest of a response that has begun, and is not applied on Windows.
 
 ### Edge Traversal
 

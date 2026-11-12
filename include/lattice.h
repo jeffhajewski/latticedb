@@ -825,7 +825,7 @@ typedef struct {
     const char* model;
     lattice_embedding_api_format api_format;
     const char* api_key;        /* NULL for no auth */
-    uint32_t timeout_ms;        /* 0 = default 30s */
+    uint32_t timeout_ms;        /* wait for the response to begin; 0 = 30s */
 } lattice_embedding_config;
 
 /* Generate a hash embedding (built-in, no external service).

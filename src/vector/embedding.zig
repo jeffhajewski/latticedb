@@ -6,6 +6,7 @@
 //! Disabled by default - must be explicitly configured and instantiated.
 
 const std = @import("std");
+const builtin = @import("builtin");
 const Allocator = std.mem.Allocator;
 
 /// Supported embedding API formats
@@ -30,7 +31,11 @@ pub const Config = struct {
     /// Optional API key for authenticated endpoints
     api_key: ?[]const u8 = null,
 
-    /// Request timeout in milliseconds
+    /// How long to wait for the server to start answering, in milliseconds.
+    /// It bounds the wait for the first byte of the response, which is where
+    /// a busy or stalled model server spends its time. Connecting, and
+    /// reading the rest of a response that has begun, are not bounded by it.
+    /// Not applied on Windows.
     timeout_ms: u32 = 30_000,
 };
 
@@ -76,6 +81,16 @@ pub const EmbeddingClient = struct {
         self.http_client.deinit();
     }
 
+    /// Wait until the socket has something to read. False if nothing arrived
+    /// in time. A failed or interrupted wait counts as ready, and the read
+    /// that follows reports whatever is wrong.
+    fn responseStartsWithin(handle: std.posix.socket_t, timeout_ms: u32) bool {
+        if (builtin.os.tag == .windows) return true;
+        var fds = [_]std.posix.pollfd{.{ .fd = handle, .events = std.posix.POLL.IN, .revents = 0 }};
+        const wait: c_int = @intCast(@min(timeout_ms, std.math.maxInt(c_int)));
+        return std.c.poll(&fds, 1, wait) != 0;
+    }
+
     /// Generate an embedding vector for the given text
     /// Caller owns the returned slice and must free it with the same allocator
     pub fn embed(self: *Self, text: []const u8) EmbeddingError![]f32 {
@@ -116,7 +131,14 @@ pub const EmbeddingClient = struct {
         var body_writer = req.sendBodyUnflushed(&.{}) catch return EmbeddingError.RequestFailed;
         body_writer.writer.writeAll(body) catch return EmbeddingError.RequestFailed;
         body_writer.end() catch return EmbeddingError.RequestFailed;
-        (req.connection orelse return EmbeddingError.RequestFailed).flush() catch return EmbeddingError.RequestFailed;
+        const connection = req.connection orelse return EmbeddingError.RequestFailed;
+        connection.flush() catch return EmbeddingError.RequestFailed;
+
+        // Without this the read below waits for as long as the server
+        // keeps the connection open and says nothing.
+        if (!responseStartsWithin(connection.stream_reader.stream.socket.handle, self.config.timeout_ms)) {
+            return EmbeddingError.RequestFailed;
+        }
 
         // Receive response head
         var redirect_buf: [8192]u8 = undefined;

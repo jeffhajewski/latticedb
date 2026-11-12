@@ -410,6 +410,22 @@ const range_queries = [_][]const u8{
     "MATCH (n:P) WHERE n.w > 3 RETURN n.id, n.v ORDER BY n.v LIMIT 12",
     "MATCH (n:P) WHERE n.v STARTS WITH 'J' RETURN n.id, n.v ORDER BY n.v LIMIT 3",
     "MATCH (n:P) RETURN n.id, n.v ORDER BY n.v LIMIT 0",
+    // Descending: nulls first, then NaN, then values down; equal values,
+    // nulls among them, in id order, as the sort leaves a label scan's.
+    "MATCH (n:P) RETURN n.id, n.v ORDER BY n.v DESC LIMIT 15",
+    "MATCH (n:P) RETURN n.id, n.v ORDER BY n.v DESC LIMIT 120",
+    "MATCH (n:P) RETURN n.id, n.v ORDER BY n.v DESC, n.id SKIP 60 LIMIT 30",
+    "MATCH (n:P) RETURN n.id, n.v ORDER BY n.v DESC, n.id DESC LIMIT 90",
+    "MATCH (n:P) RETURN n.id, n.v ORDER BY n.v DESC LIMIT 100000",
+    "MATCH (n:P) RETURN n.v AS v, n.id ORDER BY v DESC LIMIT 70",
+    "MATCH (n:P) WHERE n.v > 0 RETURN n.id, n.v ORDER BY n.v DESC LIMIT 12",
+    "MATCH (n:P) WHERE n.v < 3 RETURN n.id, n.v ORDER BY n.v DESC LIMIT 40",
+    "MATCH (n:P) WHERE n.w > 3 RETURN n.id, n.v ORDER BY n.v DESC LIMIT 12",
+    "MATCH (n:P) WHERE n.v STARTS WITH 'J' RETURN n.id, n.v ORDER BY n.v DESC LIMIT 3",
+    "MATCH (n:P) WHERE n.v STARTS WITH 'mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm' RETURN n.id ORDER BY n.v DESC LIMIT 7",
+    "MATCH (n:P) WHERE n.v < 'mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm' RETURN n.id, n.v ORDER BY n.v DESC LIMIT 9",
+    "MATCH (n:P) RETURN n.id, n.v ORDER BY n.v DESC LIMIT 0",
+    "MATCH (n:P) RETURN n.id ORDER BY n.v DESC SKIP 50 LIMIT 10",
     "MATCH (n:P) RETURN count(n)",
     "MATCH (n:P) WHERE n.v >= 0 RETURN count(n)",
     // Integers against floats, where rounding the integer would answer
@@ -489,10 +505,11 @@ test "lgr: an ordered index answers ranges and ORDER BY ... LIMIT exactly as a s
     try std.testing.expectEqual(Kind.property_range_scan, try planScanKind(indexed, "MATCH (n:P) WHERE n.v > 3 RETURN n"));
     try std.testing.expectEqual(Kind.property_range_scan, try planScanKind(indexed, "MATCH (n:P) WHERE n.v STARTS WITH 'Jo' RETURN n"));
     try std.testing.expectEqual(Kind.property_order_scan, try planScanKind(indexed, "MATCH (n:P) RETURN n ORDER BY n.v LIMIT 10"));
+    try std.testing.expectEqual(Kind.property_order_scan, try planScanKind(indexed, "MATCH (n:P) RETURN n ORDER BY n.v DESC LIMIT 3"));
     try std.testing.expectEqual(Kind.property_index_scan, try planScanKind(indexed, "MATCH (n:P) WHERE n.v = 3 AND n.v > 1 RETURN n"));
-    // Not without a LIMIT, not descending, not through an OR.
+    // Not without a LIMIT, not through an OR.
     try std.testing.expectEqual(Kind.label_scan, try planScanKind(indexed, "MATCH (n:P) RETURN n ORDER BY n.v"));
-    try std.testing.expectEqual(Kind.label_scan, try planScanKind(indexed, "MATCH (n:P) RETURN n ORDER BY n.v DESC LIMIT 3"));
+    try std.testing.expectEqual(Kind.label_scan, try planScanKind(indexed, "MATCH (n:P) RETURN n ORDER BY n.v DESC"));
     try std.testing.expectEqual(Kind.label_scan, try planScanKind(indexed, "MATCH (n:P) WHERE n.v > 3 OR n.w = 1 RETURN n"));
     try std.testing.expectEqual(Kind.label_scan, try planScanKind(plain, "MATCH (n:P) WHERE n.v > 3 RETURN n"));
 
@@ -512,6 +529,15 @@ test "lgr: an ordered index answers ranges and ORDER BY ... LIMIT exactly as a s
         while (id < 700) : (id += 41) try db.removeNodeProperty(txn, id, "v");
         id = 7;
         while (id < 700) : (id += 53) try db.deleteNode(txn, id);
+        // Nodes entering and leaving the label, with and without the
+        // property: the nodes without it are in a label's index too.
+        id = 11;
+        while (id < 700) : (id += 47) try db.removeNodeLabel(txn, id, "P");
+        for (0..12) |i| {
+            const q = try db.createNode(txn, &.{"Q"});
+            if (i % 2 == 0) try db.setNodeProperty(txn, q, "v", .{ .int_val = @intCast(i) });
+            try db.addNodeLabel(txn, q, "P");
+        }
     }
     try compareAll(indexed, plain, &ti, &tp);
     try indexed.commitTransaction(&ti);

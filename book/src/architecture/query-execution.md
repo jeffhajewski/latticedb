@@ -185,11 +185,14 @@ filter (`consumed_conjuncts`, `residualCondition`). At open the scan evaluates
 the bounds, turns them into a key range, and merges the index's entries with the
 transaction's own nodes of the label that fall in it. It re-checks the consumed
 conjuncts only where the key cannot decide: a string bound longer than the 128
-bytes a key keeps, and NaN, whose entries it reads as a separate segment. Like
-the label scan it streams 256 keys at a time in read-only queries and collects
-its ids up front in queries that write. With no range it can also read a whole
-index in order (`property_order_scan`), followed by the label's nodes that lack
-the property.
+bytes a key keeps. Like the label scan it streams 256 keys at a time in
+read-only queries and collects its ids up front in queries that write. With no
+range it can also read a whole label's index in order (`property_order_scan`),
+which holds the nodes that lack the property too, after every value. It reads
+forward for an ascending sort and backward, from the last leaf down, for a
+descending one; backward, the index gives equal values highest id first, so
+the scan collects each run of equal keys and returns it lowest id first, the
+order a stable sort leaves a label scan's rows in.
 
 **OrderedCutoff** (same file): Placed under the Sort of `ORDER BY n.p [SKIP s]
 LIMIT k` when the scan below reads `p`'s index in order. It passes rows through
@@ -197,7 +200,7 @@ and stops once it has passed `s + k` rows and the sort key moves past the last
 of them, so the Sort sees only the rows that can be returned. The planner uses
 it for a single `MATCH` pattern, an optional `WHERE` without a vector or
 full-text search, and a `RETURN` that neither aggregates nor uses `DISTINCT`,
-sorted ascending first by a property of the scanned node.
+sorted first by a property of the scanned node, ascending or descending.
 
 **EdgeTypeScan** (`edge_type_scan.zig`): Used for `(a)-[r:T]->(b)` (or
 incoming) when `a` has no label, properties or earlier binding: one walk of the
@@ -904,7 +907,7 @@ After:  Expand → Filter(a.x > 10) → LabelScan
 
 The planner already selects explicit property indexes for eligible inline and
 immediately following `WHERE` equalities, ranges and prefixes, and for an
-ascending `ORDER BY ... LIMIT`. Its rule has no statistics: an equality first,
+`ORDER BY ... LIMIT` in either direction. Its rule has no statistics: an equality first,
 then a range on the property the query sorts by (read in order), then the first
 indexed property with a range, then an ordered read for the sort; a range is
 always preferred to the label scan. A future cost model could choose between

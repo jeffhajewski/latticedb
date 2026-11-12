@@ -132,10 +132,11 @@ the query fails.
 
 With a following `LIMIT`, the sort keeps only the rows it can return, so
 `ORDER BY ... LIMIT 10` does not hold every row in memory. When the sort is
-ascending by a property that has a property index, over a single `MATCH`
-pattern whose `RETURN` neither aggregates nor uses `DISTINCT`, the scan reads
-the index in that order and stops once no later row could be among the first
-`SKIP + LIMIT`, so it does not read every node either.
+first by a property that has a property index, ascending or descending, over a
+single `MATCH` pattern whose `RETURN` neither aggregates nor uses `DISTINCT`,
+the scan reads the index in that order and stops once no later row could be
+among the first `SKIP + LIMIT`, so it does not read every node either. The
+rows, ties and nulls included, are the ones the full sort would return.
 
 `ORDER BY` sees both the variables of the query and the columns the `RETURN`
 names, so an alias can be used inside an expression:

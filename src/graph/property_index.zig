@@ -7,9 +7,14 @@
 //! - `digest`, the only one before 0.17.0, keys a value by a SHA-256 digest
 //!   of its type and bits. Keys are fixed-size, which suits any value, but
 //!   they are in no useful order, so such an index answers equality only.
-//! - `ordered`, what `CREATE` makes from 0.17.0 on, keys a value so that byte
-//!   order is value order (`encodeOrderedValue`). It answers equality, ranges
-//!   and prefixes, and can be read in order.
+//! - `ordered` keys a value so that byte order is value order
+//!   (`encodeOrderedValue`). It answers equality, ranges and prefixes. What
+//!   `CREATE` makes for a relationship type from 0.17.0 on.
+//! - `ordered_dense`, what `CREATE` makes for a label from 0.17.0 on, is
+//!   `ordered` plus an entry under `OrderedTag.absent` for every node with
+//!   the label but not the property. Every node with the label is in it, in
+//!   the order ORDER BY puts them, so it can also be read in order, either
+//!   way, nulls included.
 //!
 //! Callers verify an entity found by equality against its record, which
 //! makes digest collisions and truncated string keys harmless.
@@ -49,6 +54,12 @@ const VALUE_DIGEST_SIZE = 32;
 pub const Encoding = enum(u8) {
     digest = 0,
     ordered = 1,
+    ordered_dense = 2,
+
+    /// Keys in value order: the index answers ranges and prefixes.
+    pub fn isOrdered(self: Encoding) bool {
+        return self != .digest;
+    }
 };
 
 pub const Definition = struct {
@@ -71,7 +82,8 @@ pub const ORDERED_KEY_MAX = SCOPE_PREFIX_SIZE + ORDERED_VALUE_MAX + 8;
 
 /// The first byte of an ordered value, which orders values of different
 /// types the way ORDER BY does: maps, lists and vectors, then byte arrays,
-/// strings, booleans, numbers, NaN. Null is never indexed.
+/// strings, booleans, numbers, NaN, and last, where nulls sort, the entities
+/// a dense index holds without the property.
 pub const OrderedTag = struct {
     /// Lists, maps and vectors: a digest, so equality only.
     pub const other: u8 = 0x10;
@@ -80,6 +92,9 @@ pub const OrderedTag = struct {
     pub const boolean: u8 = 0x40;
     pub const number: u8 = 0x50;
     pub const nan: u8 = 0x51;
+    /// No value: the property is missing (`ordered_dense` only). The tag
+    /// alone, which no range a comparison makes reaches.
+    pub const absent: u8 = 0xF0;
 };
 
 /// A value encoded for an ordered index.
@@ -372,7 +387,7 @@ pub const PropertyIndex = struct {
         }
         const value: []const u8 = switch (definition.encoding) {
             .digest => &.{},
-            .ordered => &.{@intFromEnum(Encoding.ordered)},
+            .ordered, .ordered_dense => &.{@intFromEnum(definition.encoding)},
         };
         self.cache.loaded = false;
         self.catalog.insert(&key, value) catch |err| return mapBTreeError(err);
@@ -511,11 +526,11 @@ pub const PropertyIndex = struct {
 
             fn visit(change: *const @This(), definition: Definition) PropertyIndexError!void {
                 const was: ?PropertyValue = if (containsSymbol(change.old_labels, definition.scope_id))
-                    if (findProperty(change.old_properties, definition.property_id)) |p| p.value else null
+                    scopedValue(definition, change.old_properties)
                 else
                     null;
                 const now: ?PropertyValue = if (containsSymbol(change.new_labels, definition.scope_id))
-                    if (findProperty(change.new_properties, definition.property_id)) |p| p.value else null
+                    scopedValue(definition, change.new_properties)
                 else
                     null;
                 try change.index.replaceEntry(definition, change.id, was, now);
@@ -560,11 +575,11 @@ pub const PropertyIndex = struct {
 
             fn visit(change: *const @This(), definition: Definition) PropertyIndexError!void {
                 const was: ?PropertyValue = if (change.old_type == definition.scope_id)
-                    if (findProperty(change.old_properties, definition.property_id)) |p| p.value else null
+                    scopedValue(definition, change.old_properties)
                 else
                     null;
                 const now: ?PropertyValue = if (change.new_type == definition.scope_id)
-                    if (findProperty(change.new_properties, definition.property_id)) |p| p.value else null
+                    scopedValue(definition, change.new_properties)
                 else
                     null;
                 try change.index.replaceEntry(definition, change.id, was, now);
@@ -616,8 +631,9 @@ pub const PropertyIndex = struct {
                 @memcpy(prefix_buf[0..ENTRY_PREFIX_SIZE], &digest_prefix);
                 break :blk prefix_buf[0..ENTRY_PREFIX_SIZE];
             },
-            .ordered => blk: {
-                // Null is not indexed, so nothing equals it here.
+            .ordered, .ordered_dense => blk: {
+                // Nothing equals null, though a dense index holds nodes
+                // without the property.
                 const encoded = encodeOrderedValue(value) orelse
                     return self.allocator.alloc(u64, 0) catch return PropertyIndexError.OutOfMemory;
                 break :blk orderedPrefix(stored, encoded.bytes(), &prefix_buf);
@@ -646,15 +662,20 @@ pub const PropertyIndex = struct {
         return results.toOwnedSlice(self.allocator) catch return PropertyIndexError.OutOfMemory;
     }
 
+    pub const Direction = enum { forward, backward };
+
     /// Read up to `max` entries of an ordered index whose keys lie in
-    /// [start, end), appending each key to `keys` and its end offset to
-    /// `ends`. Returns whether the range has nothing after what was read.
+    /// [start, end), first to last or last to first, appending each key to
+    /// `keys` and its end offset to `ends`. Returns whether the range has
+    /// nothing beyond what was read.
     ///
     /// A chunk at a time rather than an iterator, so that no page stays
-    /// pinned between calls: the next call starts after the last key read.
+    /// pinned between calls: the next call starts after the last key read,
+    /// or, backward, ends at it.
     pub fn readRange(
         self: *Self,
         kind: EntityKind,
+        direction: Direction,
         start: []const u8,
         end: []const u8,
         max: usize,
@@ -662,8 +683,27 @@ pub const PropertyIndex = struct {
         keys: *std.ArrayList(u8),
         ends: *std.ArrayList(u32),
     ) PropertyIndexError!bool {
-        var iter = self.entryTree(kind).range(start, end) catch |err| return mapBTreeError(err);
-        defer iter.deinit();
+        switch (direction) {
+            .forward => {
+                var iter = self.entryTree(kind).range(start, end) catch |err| return mapBTreeError(err);
+                defer iter.deinit();
+                return readEntries(&iter, max, allocator, keys, ends);
+            },
+            .backward => {
+                var iter = self.entryTree(kind).rangeBackward(start, end) catch |err| return mapBTreeError(err);
+                defer iter.deinit();
+                return readEntries(&iter, max, allocator, keys, ends);
+            },
+        }
+    }
+
+    fn readEntries(
+        iter: anytype,
+        max: usize,
+        allocator: Allocator,
+        keys: *std.ArrayList(u8),
+        ends: *std.ArrayList(u32),
+    ) PropertyIndexError!bool {
         var read: usize = 0;
         while (read < max) : (read += 1) {
             const entry = (iter.next() catch |err| return mapBTreeError(err)) orelse return true;
@@ -782,7 +822,10 @@ fn definitionKey(definition: Definition) [DEFINITION_KEY_SIZE]u8 {
 
 fn decodeEncoding(value: []const u8) PropertyIndexError!Encoding {
     if (value.len == 0) return .digest;
-    if (value.len == 1 and value[0] == @intFromEnum(Encoding.ordered)) return .ordered;
+    if (value.len == 1) {
+        if (value[0] == @intFromEnum(Encoding.ordered)) return .ordered;
+        if (value[0] == @intFromEnum(Encoding.ordered_dense)) return .ordered_dense;
+    }
     return PropertyIndexError.InvalidData;
 }
 
@@ -816,7 +859,8 @@ pub fn orderedValueOf(key: []const u8) []const u8 {
 }
 
 /// The key an entity's value has in an index, or null when the encoding
-/// leaves the value out.
+/// leaves the value out. Null is the missing property: a dense index keys it
+/// as absent, an `ordered` one leaves it out.
 pub fn entryKeyFor(definition: Definition, value: PropertyValue, entity_id: u64, buf: *EntryKeyBuffer) ?[]const u8 {
     switch (definition.encoding) {
         .digest => {
@@ -824,9 +868,15 @@ pub fn entryKeyFor(definition: Definition, value: PropertyValue, entity_id: u64,
             @memcpy(buf[0..ENTRY_KEY_SIZE], &key);
             return buf[0..ENTRY_KEY_SIZE];
         },
-        .ordered => {
-            const encoded = encodeOrderedValue(value) orelse return null;
-            const prefix = orderedPrefix(definition, encoded.bytes(), buf);
+        .ordered, .ordered_dense => {
+            const absent = [_]u8{OrderedTag.absent};
+            const value_bytes: []const u8 = if (encodeOrderedValue(value)) |encoded|
+                encoded.bytes()
+            else if (definition.encoding == .ordered_dense)
+                &absent
+            else
+                return null;
+            const prefix = orderedPrefix(definition, value_bytes, buf);
             std.mem.writeInt(u64, buf[prefix.len..][0..8], entity_id, .big);
             return buf[0 .. prefix.len + 8];
         },
@@ -902,6 +952,13 @@ fn containsSymbol(values: []const SymbolId, needle: SymbolId) bool {
 fn findProperty(properties: []const Property, property_id: SymbolId) ?Property {
     for (properties) |property| if (property.key_id == property_id) return property;
     return null;
+}
+
+/// What an entity in an index's scope is indexed under: its value, null
+/// for a dense index's absent entry, or nothing.
+fn scopedValue(definition: Definition, properties: []const Property) ?PropertyValue {
+    if (findProperty(properties, definition.property_id)) |p| return p.value;
+    return if (definition.encoding == .ordered_dense) .{ .null_val = {} } else null;
 }
 
 fn incrementBytes(bytes: []u8) bool {

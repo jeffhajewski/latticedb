@@ -4000,6 +4000,8 @@ pub const Database = struct {
                     defer state.deinit(self.allocator);
                     if (findPropertyById(state.properties, definition.property_id)) |property| {
                         index.add(definition, node_id, property.value) catch |err| return mapPropertyIndexError(err);
+                    } else if (definition.encoding == .ordered_dense) {
+                        index.add(definition, node_id, .{ .null_val = {} }) catch |err| return mapPropertyIndexError(err);
                     }
                 }
             },
@@ -4044,7 +4046,10 @@ pub const Database = struct {
         self.initializePropertyIndex();
 
         var definition = try self.propertyIndexDefinition(kind, scope, property, true);
-        definition.encoding = .ordered;
+        // A label's index holds every node with the label, so that it can
+        // be read in ORDER BY's order with the nulls; a relationship type's
+        // only the edges with the property.
+        definition.encoding = if (kind == .node) .ordered_dense else .ordered;
         var index = &(self.property_index orelse return DatabaseError.IoError);
         if (index.hasDefinition(definition) catch |err| return mapPropertyIndexError(err)) {
             return DatabaseError.AlreadyExists;

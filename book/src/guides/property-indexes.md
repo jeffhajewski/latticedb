@@ -193,7 +193,7 @@ MATCH (p:Person) WHERE p.name STARTS WITH 'Al' RETURN p.name
 `<`, `<=`, `>` and `>=`, written either way round, and `STARTS WITH` qualify.
 Several comparisons on one property joined by `AND` become one range. The
 comparisons the index answers are not checked again row by row, except where
-the index cannot decide on its own: a string bound longer than 128 bytes, and NaN.
+the index cannot decide on its own: a string bound longer than 128 bytes.
 An equality on an indexed property is preferred to a range; without statistics,
 a range on an indexed property is always read through the index, which measured
 no slower than a scan even when the range holds every node.
@@ -215,10 +215,28 @@ MATCH (p:Person) RETURN p.name, p.age ORDER BY p.age LIMIT 3
 └─────────┴───────┘
 ```
 
+Descending works the same way, and the index puts nodes without the property
+where `ORDER BY` puts nulls, last ascending and first descending:
+
+```cypher
+MATCH (p:Person) RETURN p.name, p.age ORDER BY p.age DESC LIMIT 3
+```
+
+```
+┌─────────┬───────┐
+│ p.name  │ p.age │
+├─────────┼───────┤
+│ "Dan"   │ null  │
+│ "Alan"  │ 41    │
+│ "Carol" │ 38    │
+└─────────┴───────┘
+```
+
 That applies to a single `MATCH` pattern, with or without a `WHERE`, whose
-`RETURN` does not aggregate or use `DISTINCT`, sorted ascending by the property,
-with a `LIMIT`. A `WHERE` with a vector or full-text search keeps the ordinary
-sort, since the search returns its rows nearest or best first.
+`RETURN` does not aggregate or use `DISTINCT`, sorted first by the property,
+either way, with a `LIMIT`. Rows with equal values come in the same order as
+without the index. A `WHERE` with a vector or full-text search keeps the
+ordinary sort, since the search returns its rows nearest or best first.
 
 On 200,000 `:Person` nodes (a release build, median of seven runs):
 
@@ -228,6 +246,7 @@ On 200,000 `:Person` nodes (a release build, median of seven runs):
 | `WHERE p.score >= 500 AND p.score < 505` (978 rows) | 76 ms | 0.6 ms |
 | `WHERE p.name STARTS WITH 'Jo'` (293 rows) | 66 ms | 0.11 ms |
 | `ORDER BY p.score LIMIT 10` | 64 ms | 0.01 ms |
+| `ORDER BY p.score DESC LIMIT 10` | 58 ms | 0.02 ms |
 | `WHERE p.age >= 50 RETURN count(p)` (half the nodes) | 64 ms | 3.7 ms |
 | `WHERE p.age >= 0` (every node) | 146 ms | 120 ms |
 
@@ -276,7 +295,9 @@ one-writer rule that applies to transactions; see
 
 An index costs you something. It uses space in the file, it makes creation
 slower the first time because of the initial scan, and it adds a little work to
-every write that touches the indexed property. That is a good trade for a lookup
+every write that touches the indexed property, and to every node created with
+the label but without the property, which the index holds too so that it can
+sort them. That is a good trade for a lookup
 your application does constantly, and a bad one for a property you query once a
 month.
 

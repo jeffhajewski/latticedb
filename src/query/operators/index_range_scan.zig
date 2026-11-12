@@ -3,7 +3,7 @@
 //! - IndexRangeScan: the nodes with a label whose indexed property lies in a
 //!   range (`<`, `<=`, `>`, `>=`, `STARTS WITH`, any conjunction of them on
 //!   the property), or, with no range, every node with the label in the order
-//!   of the property: the indexed ones by value, then the ones without it.
+//!   of the property, ascending or descending, nulls where ORDER BY puts them.
 //! - OrderedCutoff: under a sort by that property with a LIMIT, stops
 //!   reading once no further row can be among the first k.
 
@@ -35,7 +35,6 @@ const expression = @import("../expression.zig");
 const ExpressionEvaluator = expression.ExpressionEvaluator;
 const EvalError = expression.EvalError;
 
-const scan_ops = @import("scan.zig");
 const limit_ops = @import("limit.zig");
 
 /// One conjunct of the WHERE that the scan answers: `property <op> value`.
@@ -49,17 +48,22 @@ pub const Condition = struct {
 };
 
 /// The nodes with `label` whose `property` satisfies every condition, read
-/// from the label's ordered index on the property, in index order: by value,
-/// and by id among equal values.
+/// from the label's ordered index on the property in the order of the
+/// value, ascending or descending, and by id among equal values either way.
+/// That is the order a sort on the property leaves rows in, since the sort
+/// keeps ties in input order and a scan by label reads by id.
 ///
 /// The conditions leave the WHERE: the scan answers them. Where the index
 /// cannot tell (a string bound longer than the part of a value a key holds)
 /// it evaluates the conditions on the row itself. NaN passes no comparison,
 /// so its keys, after every number, are outside every range.
 ///
-/// With no conditions it returns every node with the label, the ones with
-/// the property first, in order, then the ones without it in id order, which
-/// is where ascending ORDER BY puts nulls.
+/// With no conditions it returns every node with the label. That takes a
+/// dense index, which holds the nodes without the property after every
+/// value: last ascending and first descending, where ORDER BY puts nulls.
+///
+/// Read descending, the index gives equal values with the highest id first,
+/// so the scan collects each run of equal keys and returns it from the end.
 ///
 /// A query that only reads streams the index `CHUNK` keys at a time. One
 /// that writes takes every id when it opens, as LabelScan does, so that its
@@ -70,6 +74,7 @@ pub const IndexRangeScan = struct {
     label: []const u8,
     property: []const u8,
     conditions: []const Condition,
+    descending: bool,
     database: *Database,
     evaluator: ExpressionEvaluator,
 
@@ -95,30 +100,27 @@ pub const IndexRangeScan = struct {
         chunk_pos: usize = 0,
         exhausted: bool = false,
         /// Nodes the transaction's overlay holds that fall in the range,
-        /// sorted by key. The keys are slices of `overlay_bytes`.
+        /// in the order the scan reads. The keys are slices of `overlay_bytes`.
         overlay: std.ArrayList(OverlayEntry) = .empty,
         overlay_bytes: std.ArrayList(u8) = .empty,
         overlay_pos: usize = 0,
         /// The next committed entry, read but not yet emitted.
         pending: ?Entry = null,
-        /// After the index, the nodes without the property (no conditions).
-        missing: ?*scan_ops.LabelScan = null,
-        missing_open: bool = false,
-        done_index: bool = false,
+        /// Descending: the ids of a run of equal values, highest first, and
+        /// how many are left to return from its end.
+        run: std.ArrayList(NodeId) = .empty,
+        run_left: usize = 0,
+        /// Descending: the entry that ended the last run, which begins the
+        /// next.
+        lookahead: ?Entry = null,
+        done: bool = false,
 
-        fn deinit(self: *State, allocator: Allocator, ctx: ?*ExecutionContext) void {
+        fn deinit(self: *State, allocator: Allocator) void {
             self.keys.deinit(allocator);
             self.ends.deinit(allocator);
             self.overlay.deinit(allocator);
             self.overlay_bytes.deinit(allocator);
-            if (self.missing) |scan| {
-                const op = scan.operator();
-                if (self.missing_open) {
-                    if (ctx) |c| op.close(c);
-                }
-                op.deinit(allocator);
-                self.missing = null;
-            }
+            self.run.deinit(allocator);
         }
     };
 
@@ -137,6 +139,7 @@ pub const IndexRangeScan = struct {
         label: []const u8,
         property: []const u8,
         conditions: []const Condition,
+        descending: bool,
         database: *Database,
     ) !*Self {
         const self = try allocator.create(Self);
@@ -146,6 +149,7 @@ pub const IndexRangeScan = struct {
             .label = label,
             .property = property,
             .conditions = conditions,
+            .descending = descending,
             .database = database,
             .evaluator = ExpressionEvaluator.init(allocator),
         };
@@ -165,7 +169,7 @@ pub const IndexRangeScan = struct {
 
     fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        self.release(ctx);
+        self.release();
         self.current_row = ctx.allocRow() catch return OperatorError.OutOfMemory;
 
         const definition = (self.database.nodePropertyIndex(self.label, self.property) catch |err|
@@ -173,8 +177,11 @@ pub const IndexRangeScan = struct {
             // Dropped since the plan was made.
             return ctx.fail(OperatorError.StorageError, null, "The property index on {s}.{s} is gone", .{ self.label, self.property });
         };
-        if (definition.encoding != .ordered) {
+        if (!definition.encoding.isOrdered()) {
             return ctx.fail(OperatorError.StorageError, null, "The property index on {s}.{s} cannot answer ranges", .{ self.label, self.property });
+        }
+        if (self.conditions.len == 0 and definition.encoding != .ordered_dense) {
+            return ctx.fail(OperatorError.StorageError, null, "The property index on {s}.{s} does not hold the nodes without the property", .{ self.label, self.property });
         }
 
         var range = ValueRange.all();
@@ -187,15 +194,10 @@ pub const IndexRangeScan = struct {
         const state = &self.state.?;
         if (range.empty) {
             state.exhausted = true;
-            state.done_index = true;
+            state.done = true;
         } else {
             setBounds(state, range.startBytes(), range.endBytes());
-        }
-        if (!state.done_index) try self.collectOverlay(state, ctx);
-
-        if (self.conditions.len == 0) {
-            state.missing = scan_ops.LabelScan.init(self.allocator, self.output_slot, state.label_id, self.database) catch
-                return OperatorError.OutOfMemory;
+            try self.collectOverlay(state, ctx);
         }
 
         if (!ctx.stable_reads) {
@@ -238,8 +240,9 @@ pub const IndexRangeScan = struct {
         if (ids.len == 0) return;
 
         for (ids) |id| {
+            // Null is the property missing, which a dense index keys too.
             var value = (self.database.getNodePropertyByKeyInTxn(ctx.txn, id, state.definition.property_id, self.allocator, null) catch |err|
-                return ctx.storageFailure(err, "reading {s} of node {d}", .{ self.property, id })) orelse continue;
+                return ctx.storageFailure(err, "reading {s} of node {d}", .{ self.property, id })) orelse PropertyValue{ .null_val = {} };
             defer value.deinit(self.allocator);
             var buf: property_index.EntryKeyBuffer = undefined;
             const key = property_index.entryKeyFor(state.definition, value, id, &buf) orelse continue;
@@ -253,8 +256,15 @@ pub const IndexRangeScan = struct {
             fn lessThan(bytes: []const u8, a: OverlayEntry, b: OverlayEntry) bool {
                 return std.mem.order(u8, bytes[a.from..a.to], bytes[b.from..b.to]) == .lt;
             }
+            fn greaterThan(bytes: []const u8, a: OverlayEntry, b: OverlayEntry) bool {
+                return std.mem.order(u8, bytes[a.from..a.to], bytes[b.from..b.to]) == .gt;
+            }
         };
-        std.mem.sort(OverlayEntry, state.overlay.items, @as([]const u8, state.overlay_bytes.items), Sorter.lessThan);
+        const bytes: []const u8 = state.overlay_bytes.items;
+        if (self.descending)
+            std.mem.sort(OverlayEntry, state.overlay.items, bytes, Sorter.greaterThan)
+        else
+            std.mem.sort(OverlayEntry, state.overlay.items, bytes, Sorter.lessThan);
     }
 
     /// The next committed entry the overlay does not hold.
@@ -262,13 +272,19 @@ pub const IndexRangeScan = struct {
         while (true) {
             if (state.chunk_pos == state.ends.items.len) {
                 if (state.exhausted) return null;
-                // Start after the last key read: it followed by a zero byte
-                // is the least key above it.
                 if (state.ends.items.len > 0) {
                     const last = state.keys.items[self.keyFrom(state, state.ends.items.len - 1)..];
-                    @memcpy(state.start[0..last.len], last);
-                    state.start[last.len] = 0;
-                    state.start_len = last.len + 1;
+                    if (self.descending) {
+                        // End at the last key read, which the end excludes.
+                        @memcpy(state.end[0..last.len], last);
+                        state.end_len = last.len;
+                    } else {
+                        // Start after the last key read: it followed by a
+                        // zero byte is the least key above it.
+                        @memcpy(state.start[0..last.len], last);
+                        state.start[last.len] = 0;
+                        state.start_len = last.len + 1;
+                    }
                 }
                 state.keys.clearRetainingCapacity();
                 state.ends.clearRetainingCapacity();
@@ -277,6 +293,7 @@ pub const IndexRangeScan = struct {
                     return ctx.fail(OperatorError.StorageError, null, "The property index on {s}.{s} is gone", .{ self.label, self.property }));
                 state.exhausted = index.readRange(
                     .node,
+                    if (self.descending) .backward else .forward,
                     state.start[0..state.start_len],
                     state.end[0..state.end_len],
                     CHUNK,
@@ -308,7 +325,8 @@ pub const IndexRangeScan = struct {
             break :blk .{ .key = state.overlay_bytes.items[e.from..e.to], .id = e.id };
         } else null;
         if (overlay) |o| {
-            if (state.pending == null or std.mem.order(u8, o.key, state.pending.?.key) == .lt) {
+            const first: std.math.Order = if (self.descending) .gt else .lt;
+            if (state.pending == null or std.mem.order(u8, o.key, state.pending.?.key) == first) {
                 state.overlay_pos += 1;
                 return o;
             }
@@ -333,31 +351,45 @@ pub const IndexRangeScan = struct {
         return true;
     }
 
-    fn nextId(self: *Self, ctx: *ExecutionContext) OperatorError!?NodeId {
-        const state = &(self.state orelse return OperatorError.NotInitialized);
-        while (!state.done_index) {
-            const entry = (try self.nextIndexed(state, ctx)) orelse {
-                state.done_index = true;
-                break;
-            };
-            if (needsCheck(state) and !try self.passes(entry.id, ctx)) continue;
+    /// The next id in the scan's order, before any check.
+    fn nextOrdered(self: *Self, state: *State, ctx: *ExecutionContext) OperatorError!?NodeId {
+        if (!self.descending) {
+            const entry = (try self.nextIndexed(state, ctx)) orelse return null;
             return entry.id;
         }
-
-        const scan = state.missing orelse return null;
-        const op = scan.operator();
-        if (!state.missing_open) {
-            try op.open(ctx);
-            state.missing_open = true;
+        if (state.run_left == 0) {
+            // Gather the next run of equal values. Its first entry's key
+            // goes stale on the next read, so its value is copied first.
+            const first = state.lookahead orelse (try self.nextIndexed(state, ctx)) orelse return null;
+            state.lookahead = null;
+            var value_buf: [property_index.ORDERED_VALUE_MAX]u8 = undefined;
+            const first_value = property_index.orderedValueOf(first.key);
+            @memcpy(value_buf[0..first_value.len], first_value);
+            const value = value_buf[0..first_value.len];
+            state.run.clearRetainingCapacity();
+            state.run.append(self.allocator, first.id) catch return OperatorError.OutOfMemory;
+            while (try self.nextIndexed(state, ctx)) |entry| {
+                if (!std.mem.eql(u8, property_index.orderedValueOf(entry.key), value)) {
+                    state.lookahead = entry;
+                    break;
+                }
+                state.run.append(self.allocator, entry.id) catch return OperatorError.OutOfMemory;
+            }
+            state.run_left = state.run.items.len;
         }
-        while (try op.next(ctx)) |row| {
-            const id = switch (row.slots[self.output_slot]) {
-                .node_ref => |n| n,
-                else => continue,
+        state.run_left -= 1;
+        return state.run.items[state.run_left];
+    }
+
+    fn nextId(self: *Self, ctx: *ExecutionContext) OperatorError!?NodeId {
+        const state = &(self.state orelse return OperatorError.NotInitialized);
+        while (!state.done) {
+            const id = (try self.nextOrdered(state, ctx)) orelse {
+                state.done = true;
+                break;
             };
-            var value = (self.database.getNodePropertyByKeyInTxn(ctx.txn, id, state.definition.property_id, self.allocator, null) catch |err|
-                return ctx.storageFailure(err, "reading {s} of node {d}", .{ self.property, id })) orelse return id;
-            value.deinit(self.allocator);
+            if (needsCheck(state) and !try self.passes(id, ctx)) continue;
+            return id;
         }
         return null;
     }
@@ -375,9 +407,9 @@ pub const IndexRangeScan = struct {
         return row;
     }
 
-    fn release(self: *Self, ctx: ?*ExecutionContext) void {
+    fn release(self: *Self) void {
         if (self.state) |*state| {
-            state.deinit(self.allocator, ctx);
+            state.deinit(self.allocator);
             self.state = null;
         }
         if (self.ids) |ids| {
@@ -386,20 +418,20 @@ pub const IndexRangeScan = struct {
         }
     }
 
-    fn close(ptr: *anyopaque, ctx: *ExecutionContext) void {
+    fn close(ptr: *anyopaque, _: *ExecutionContext) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        self.release(ctx);
+        self.release();
     }
 
     fn deinit(ptr: *anyopaque, allocator: Allocator) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
-        self.release(null);
+        self.release();
         allocator.destroy(self);
     }
 };
 
-/// Passes rows through until no later row can be among the first k of an
-/// ascending sort on `sort_key`, then ends its input early.
+/// Passes rows through until no later row can be among the first k of a
+/// sort on `sort_key`, then ends its input early.
 ///
 /// Its input has to arrive in that order already, up to ties: the planner
 /// puts it above an IndexRangeScan read in order, with only filters and
@@ -427,7 +459,8 @@ pub const OrderedCutoff = struct {
 
     const Self = @This();
 
-    /// Above every value in the encoding: where nulls sort.
+    /// Not the group of any value. Only compared for equality, so the
+    /// direction of the sort does not matter.
     const NULL_GROUP = [_]u8{0xFF};
 
     pub fn init(

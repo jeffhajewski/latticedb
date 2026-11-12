@@ -40,8 +40,8 @@ map projection, label expressions and `RETURN *`, among others listed under
 *Cypher*. What is still missing fails with an error that names it.
 
 Property indexes keep their values in order, so the planner reads ranges,
-`STARTS WITH` prefixes and ascending `ORDER BY ... LIMIT` from them, not only
-equalities; a file with such an index needs this release to open.
+`STARTS WITH` prefixes and `ORDER BY ... LIMIT` in either direction from them,
+not only equalities; a file with such an index needs this release to open.
 
 `lattice import` and `lattice export` read and write RDF in Turtle and
 N-Triples, so vocabularies and data sets kept as RDF can be queried with Cypher,
@@ -642,8 +642,11 @@ the GQL-only clauses. `book/src/cypher/overview.md` lists them.
 **Property indexes answer ranges, prefixes and sorting.** `<`, `<=`, `>`, `>=`
 (several on one property joined by `AND` become one range) and `STARTS WITH` on
 an indexed property read only the matching entries, and `ORDER BY n.p [SKIP s]
-LIMIT k` ascending on an indexed property, over one pattern, reads the index in
-order and stops after the first `s + k` rows. 200,000 `:Person` nodes, release
+LIMIT k` on an indexed property, ascending or descending, over one pattern,
+reads the index in order and stops after the first `s + k` rows, with the same
+rows, ties and nulls included, as the full sort. A label's index holds the
+nodes without the property too, which costs a node created without it about
+0.4 µs per such index. 200,000 `:Person` nodes, release
 build, median of seven runs on a busy machine (12 November 2026), the same
 release without and with the index:
 
@@ -653,6 +656,7 @@ release without and with the index:
 | `WHERE n.score >= 500 AND n.score < 505`, 978 rows | 76 ms | 0.62 ms |
 | `WHERE n.name STARTS WITH 'Jo'`, 293 rows | 66 ms | 0.11 ms |
 | `ORDER BY n.score LIMIT 10` | 64 ms | 0.010 ms |
+| `ORDER BY n.score DESC LIMIT 10` | 58 ms | 0.016 ms |
 | `WHERE n.age >= 50 RETURN count(n)`, 100,066 nodes | 64 ms | 3.7 ms |
 | `WHERE n.age >= 0`, every node | 146 ms | 120 ms |
 
@@ -1009,9 +1013,7 @@ with relationships is one range probe, under 1 µs.
 - **A read-only recovery is bounded by memory**, 64 MB plus four times the size
   of the log and journal; beyond that the read-only open fails with
   `LATTICE_ERROR_FULL`. `lattice check` does not recover first.
-- **Descending `ORDER BY ... LIMIT` sorts every row**, even on an indexed
-  property; only ascending order is read from an index. Relationship property
-  indexes answer equality only in Cypher.
+- **Relationship property indexes answer equality only in Cypher.**
 - **Indexes created by 0.16.0 answer equality only** until dropped and created
   again.
 - **There is no index from relationship type to relationship**; a pattern that

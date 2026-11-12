@@ -2581,6 +2581,24 @@ pub const BTree = struct {
         };
     }
 
+    /// Iterate the keys in [start_key, end_key) from the last down.
+    ///
+    /// Every key in the leaves before the one `end_key` leads to is below
+    /// it, so the walk starts at that leaf, below `end_key`'s slot, and
+    /// follows the links each leaf keeps to the one before it.
+    pub fn rangeBackward(self: *Self, start_key: ?[]const u8, end_key: []const u8) BTreeError!BackwardIterator {
+        const leaf_page = try self.findLeafForKey(end_key);
+        const frame = self.bp.fetchPage(leaf_page, .shared) catch return BTreeError.BufferPoolFull;
+        const result = LeafNode.searchSlot(frame.data, end_key, self.comparator);
+        return .{
+            .tree = self,
+            .current_frame = frame,
+            .remaining = result.slot,
+            .start_key = start_key,
+            .scratch_value = null,
+        };
+    }
+
     fn findLeafForKey(self: *Self, key: []const u8) BTreeError!PageId {
         var page_id = self.root_page;
 
@@ -2714,6 +2732,68 @@ pub const BTree = struct {
 
         /// Clean up the iterator
         pub fn deinit(self: *Iterator) void {
+            if (self.scratch_value) |scratch| {
+                self.tree.allocator.free(scratch);
+                self.scratch_value = null;
+            }
+            if (self.current_frame) |frame| {
+                self.tree.bp.unpinPage(frame, false);
+                self.current_frame = null;
+            }
+        }
+    };
+
+    /// Iterator over a range from its last key down (`rangeBackward`).
+    pub const BackwardIterator = struct {
+        tree: *BTree,
+        current_frame: ?*BufferFrame,
+        /// The entries of the current leaf not yet returned: slots below this.
+        remaining: u16,
+        start_key: ?[]const u8,
+        scratch_value: ?[]u8,
+
+        /// Get the previous key-value pair
+        pub fn next(self: *BackwardIterator) BTreeError!?Entry {
+            if (self.scratch_value) |scratch| {
+                self.tree.allocator.free(scratch);
+                self.scratch_value = null;
+            }
+            while (true) {
+                const frame = self.current_frame orelse return null;
+                if (self.remaining == 0) {
+                    const prev_page = LeafNode.getPrevLeaf(frame.data);
+                    self.tree.bp.unpinPage(frame, false);
+                    self.current_frame = null;
+                    if (prev_page == NULL_PAGE) return null;
+                    const prev = self.tree.bp.fetchPage(prev_page, .shared) catch return BTreeError.BufferPoolFull;
+                    self.current_frame = prev;
+                    const header: *const PageHeader = @ptrCast(@alignCast(prev.data.ptr));
+                    if (header.page_type != .btree_leaf) return BTreeError.InvalidPage;
+                    self.remaining = LeafNode.getNumEntries(prev.data);
+                    continue;
+                }
+                self.remaining -= 1;
+                const stored_entry = LeafNode.getStoredEntry(frame.data, self.remaining);
+                if (self.start_key) |start| {
+                    if (self.tree.comparator(stored_entry.key, start) == .lt) {
+                        self.tree.bp.unpinPage(frame, false);
+                        self.current_frame = null;
+                        return null;
+                    }
+                }
+                if (stored_entry.overflow) {
+                    const materialized = try self.tree.materializeStoredValue(.{
+                        .value = stored_entry.value,
+                        .overflow = true,
+                    });
+                    self.scratch_value = materialized;
+                    return .{ .key = stored_entry.key, .value = materialized };
+                }
+                return .{ .key = stored_entry.key, .value = stored_entry.value };
+            }
+        }
+
+        pub fn deinit(self: *BackwardIterator) void {
             if (self.scratch_value) |scratch| {
                 self.tree.allocator.free(scratch);
                 self.scratch_value = null;
@@ -3604,5 +3684,89 @@ test "in-place leaf delete keeps the entry heap contiguous" {
             // Contiguous: the heap holds exactly the live entries.
             try std.testing.expectEqual(@as(usize, 4096) - used, BTree.leafHeapTop(&buf, 4096));
         }
+    }
+}
+
+test "btree backward range returns the forward range reversed, after splits and merges" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const path = "/tmp/lattice_btree_test_lgr_backward_range.db";
+    vfs_impl.delete(path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 4 * 1024 * 1024);
+    defer bp.deinit();
+
+    var tree = try BTree.init(allocator, &bp);
+    var prng = std.Random.DefaultPrng.init(0x1a77);
+    const random = prng.random();
+    var present = [_]bool{false} ** 4000;
+    var key_buf: [16]u8 = undefined;
+    const value = [_]u8{'v'} ** 200;
+
+    // Inserts in random order with values of varying size split leaves
+    // unevenly; deleting most of a stretch merges and redistributes them.
+    for (0..3) |round| {
+        for (0..6000) |_| {
+            const i = random.uintLessThan(usize, present.len);
+            const key = std.fmt.bufPrint(&key_buf, "k{d:06}", .{i}) catch unreachable;
+            if (present[i]) continue;
+            try tree.insert(key, value[0..random.uintLessThan(usize, value.len)]);
+            present[i] = true;
+        }
+        const from = random.uintLessThan(usize, present.len / 2);
+        for (from..from + present.len / 3) |i| {
+            if (!present[i] or (round == 1 and i % 7 == 0)) continue;
+            const key = std.fmt.bufPrint(&key_buf, "k{d:06}", .{i}) catch unreachable;
+            try tree.delete(key);
+            present[i] = false;
+        }
+    }
+
+    const bounds = [_][2][]const u8{
+        .{ "k", "l" },
+        .{ "k000000", "k004000" },
+        .{ "k001000", "k001500" },
+        .{ "k0012345", "k002" },
+        .{ "k003999", "k0040" },
+        .{ "a", "b" },
+        .{ "k0020", "k0020" },
+    };
+    for (bounds) |bound| {
+        var forward: std.ArrayList([]u8) = .empty;
+        defer {
+            for (forward.items) |k| allocator.free(k);
+            forward.deinit(allocator);
+        }
+        var iter = try tree.range(bound[0], bound[1]);
+        while (try iter.next()) |entry| try forward.append(allocator, try allocator.dupe(u8, entry.key));
+        iter.deinit();
+
+        var expected: usize = 0;
+        for (present, 0..) |p, i| {
+            const key = std.fmt.bufPrint(&key_buf, "k{d:06}", .{i}) catch unreachable;
+            if (p and std.mem.order(u8, key, bound[0]) != .lt and std.mem.order(u8, key, bound[1]) == .lt) expected += 1;
+        }
+        try std.testing.expectEqual(expected, forward.items.len);
+
+        var back = try tree.rangeBackward(bound[0], bound[1]);
+        defer back.deinit();
+        var n: usize = forward.items.len;
+        while (try back.next()) |entry| {
+            try std.testing.expect(n > 0);
+            n -= 1;
+            try std.testing.expectEqualStrings(forward.items[n], entry.key);
+        }
+        try std.testing.expectEqual(@as(usize, 0), n);
     }
 }

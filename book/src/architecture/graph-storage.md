@@ -427,11 +427,18 @@ edges.
 
 | Tree | Key | Value |
 |------|-----|-------|
-| Catalog | kind (1 node, 2 edge), scope id u16 BE, property id u16 BE | encoding: empty = digest, `[1]` = ordered |
+| Catalog | kind (1 node, 2 edge), scope id u16 BE, property id u16 BE | encoding: empty = digest, `[1]` = ordered, `[2]` = ordered and dense |
 | Node / edge entries | scope id u16 BE, property id u16 BE, encoded value, entity id u64 BE | empty |
 
-Indexes created by this release use the **ordered** encoding, whose byte order
-is `ORDER BY`'s order, so a range of values is a range of keys:
+Indexes created by this release key values in an **ordered** encoding, whose
+byte order is `ORDER BY`'s order, so a range of values is a range of keys. A
+label's index is also **dense**: every node with the label has an entry, the
+ones without the property under `0xF0`, after every value, where `ORDER BY`
+puts nulls. So the index read forward or backward is the label's nodes in
+ascending or descending order, nulls included; a node created without the
+property costs one more key per such index, about 0.4 µs at 200,000 nodes. A
+relationship type's index holds only the edges with the property, and an index
+whose keys hold no nulls is used for ranges and equality only. The tags:
 
 | Tag | Values | Bytes after the tag |
 |-----|--------|---------------------|
@@ -441,7 +448,7 @@ is `ORDER BY`'s order, so a range of values is a range of keys:
 | `0x40` | booleans | one byte |
 | `0x50` | integers and floats | the largest double not above the value, as 8 bytes that sort like it (`-0` as `+0`), then a u16 BE remainder for integers a double cannot hold |
 | `0x51` | NaN | nothing; after every number |
-| none | null | not indexed |
+| `0xF0` | null (property missing) | nothing; dense indexes only |
 
 So `3` and `3.0` share a key, and an integer and a float compare exactly, as
 the query engine compares them. A truncated string or a digest stands for

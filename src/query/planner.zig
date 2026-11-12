@@ -226,6 +226,7 @@ pub const QueryPlanner = struct {
         variable: []const u8,
         property: []const u8,
         sort_key: *const ast.Expression,
+        descending: bool,
     };
 
     /// How the planner resolved a node pattern to rows.
@@ -1404,6 +1405,7 @@ pub const QueryPlanner = struct {
                                 scan_label_name,
                                 choice.property,
                                 choice.conditions,
+                                choice.descending,
                                 database,
                             ) catch return PlannerError.OutOfMemory;
                             self.last_scan_kind = if (choice.conditions.len == 0) .property_order_scan else .property_range_scan;
@@ -2000,6 +2002,8 @@ pub const QueryPlanner = struct {
         property: []const u8,
         /// Empty for a read of the whole label in the property's order.
         conditions: []const range_ops.Condition,
+        /// Read from the last value down.
+        descending: bool,
     };
 
     const RangeConjunct = struct {
@@ -2049,7 +2053,7 @@ pub const QueryPlanner = struct {
         var chosen_label: usize = 0;
         var ordered = false;
         if (hint) |h| {
-            if (self.orderedIndexLabel(labels, h.property)) |label_idx| {
+            if (self.orderedIndexLabel(labels, h.property, false)) |label_idx| {
                 if (hasConjunctOn(conjuncts[0..count], h.property)) {
                     chosen_property = h.property;
                     chosen_label = label_idx;
@@ -2059,7 +2063,7 @@ pub const QueryPlanner = struct {
         }
         if (chosen_property == null) {
             for (conjuncts[0..count]) |conjunct| {
-                if (self.orderedIndexLabel(labels, conjunct.property)) |label_idx| {
+                if (self.orderedIndexLabel(labels, conjunct.property, false)) |label_idx| {
                     chosen_property = conjunct.property;
                     chosen_label = label_idx;
                     break;
@@ -2067,8 +2071,9 @@ pub const QueryPlanner = struct {
             }
         }
         if (chosen_property == null) {
+            // Every node with the label, nulls included: a dense index.
             if (hint) |h| {
-                if (self.orderedIndexLabel(labels, h.property)) |label_idx| {
+                if (self.orderedIndexLabel(labels, h.property, true)) |label_idx| {
                     chosen_property = h.property;
                     chosen_label = label_idx;
                     ordered = true;
@@ -2091,15 +2096,17 @@ pub const QueryPlanner = struct {
             .label_index = chosen_label,
             .property = property,
             .conditions = conditions.toOwnedSlice(self.allocator) catch return PlannerError.OutOfMemory,
+            .descending = ordered and hint.?.descending,
         };
     }
 
-    /// The first of `labels` with an ordered index on `property`.
-    fn orderedIndexLabel(self: *Self, labels: []const []const u8, property: []const u8) ?usize {
+    /// The first of `labels` with an ordered index on `property`, one that
+    /// also holds the nodes without the property when `dense`.
+    fn orderedIndexLabel(self: *Self, labels: []const []const u8, property: []const u8, dense: bool) ?usize {
         const database = self.storage.database orelse return null;
         for (labels, 0..) |label_name, label_idx| {
             const definition = (database.nodePropertyIndex(label_name, property) catch null) orelse continue;
-            if (definition.encoding == .ordered) return label_idx;
+            if (if (dense) definition.encoding == .ordered_dense else definition.encoding.isOrdered()) return label_idx;
         }
         return null;
     }
@@ -2188,8 +2195,8 @@ pub const QueryPlanner = struct {
 
     /// The ORDER BY a query's first scan could serve in order: a single
     /// MATCH pattern, an optional WHERE, then a RETURN that neither
-    /// aggregates nor deduplicates, sorted ascending first by a property of
-    /// a variable, with a LIMIT.
+    /// aggregates nor deduplicates, sorted first by a property of a
+    /// variable, either way, with a LIMIT.
     fn orderHintFor(clauses: []const ast.Clause) ?OrderHint {
         if (clauses.len < 3) return null;
         const match = switch (clauses[0]) {
@@ -2213,7 +2220,7 @@ pub const QueryPlanner = struct {
             .order_by => |o| o,
             else => return null,
         };
-        if (order.items.len == 0 or order.items[0].descending) return null;
+        if (order.items.len == 0) return null;
         var limited = false;
         for (clauses[i + 2 ..]) |clause| {
             switch (clause) {
@@ -2232,7 +2239,7 @@ pub const QueryPlanner = struct {
             .variable => |variable| variable,
             else => return null,
         };
-        return .{ .variable = variable.name, .property = access.property, .sort_key = key };
+        return .{ .variable = variable.name, .property = access.property, .sort_key = key, .descending = order.items[0].descending };
     }
 
     /// The input, under a cutoff when a scan below reads in the sort's order.

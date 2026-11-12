@@ -44,8 +44,8 @@ predicates remain scan-backed so the planner cannot discard rows from the
 other branch.
 
 The same index answers ranges and prefixes on its property (`<`, `<=`, `>`, `>=`
-and `STARTS WITH`, several of them joined by `AND`), and an ascending
-`ORDER BY` on it with a `LIMIT` reads it in order; see
+and `STARTS WITH`, several of them joined by `AND`), and an `ORDER BY` on it
+with a `LIMIT`, ascending or descending, reads it in order; see
 [Property Indexes](../guides/property-indexes.md#ranges-prefixes-and-sorting).
 
 `MATCH (n)` with no label returns nodes in id order.

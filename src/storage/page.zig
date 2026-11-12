@@ -167,6 +167,18 @@ pub const FileHeader = extern struct {
         return self.extension_magic == EXTENSION_MAGIC;
     }
 
+    /// Whether every page of the file that is in use carries its checksum,
+    /// so that a page whose stored checksum is zero is damage, even one
+    /// that is entirely zero. See `FileFlags.SEALED_PAGES`.
+    ///
+    /// The bit lives in `flags`, which 0.16.0 copies along when it writes the
+    /// header, but 0.16.0 extends the file with pages it does not seal. It
+    /// also zeroes the format-4 fields when it writes, so the bit counts
+    /// only while `extension_magic` says this release wrote the header last.
+    pub fn pagesSealed(self: *const FileHeader) bool {
+        return self.hasExtension() and self.flags & FileFlags.SEALED_PAGES != 0;
+    }
+
     /// Start keeping the format-4 fields, discarding whatever they held.
     pub fn resetExtension(self: *FileHeader) void {
         self.extension_magic = EXTENSION_MAGIC;
@@ -226,7 +238,8 @@ pub const FileHeader = extern struct {
             .format_version = types.FORMAT_VERSION,
             .min_reader_version = types.MIN_READER_VERSION,
             .page_size = DEFAULT_PAGE_SIZE,
-            .flags = 0x08, // Checksums enabled by default
+            // Checksums enabled; every page this release writes is sealed.
+            .flags = FileFlags.CHECKSUMS_ENABLED | FileFlags.SEALED_PAGES,
             .node_count = 0,
             .edge_count = 0,
             .btree_root_page = types.NULL_PAGE,
@@ -278,6 +291,12 @@ pub const FileFlags = struct {
     pub const COMPRESSION_ENABLED: u32 = 0x04;
     pub const CHECKSUMS_ENABLED: u32 = 0x08;
     pub const LARGE_FILE_MODE: u32 = 0x10;
+    /// Every page in use carries a checksum: a zero checksum on a page that
+    /// is read is damage, not a page nothing has written. Set when this
+    /// release creates a file (it seals the pages it extends the file with,
+    /// where 0.16.0 wrote them as zeros); meaningful only with the format-4
+    /// header fields present (`FileHeader.pagesSealed`).
+    pub const SEALED_PAGES: u32 = 0x20;
 };
 
 /// Calculate CRC32C checksum (Castagnoli polynomial).

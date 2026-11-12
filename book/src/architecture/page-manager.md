@@ -280,16 +280,29 @@ the page header — so the page type and flags in bytes 0–1 are not covered.
 2. **Detect torn writes**: Partial page writes from crashes
 3. **Validate reads**: Catch errors before using bad data
 
-Pages are allocated with a checksum of 0 until they are first written in a flush, so
-a stored checksum of 0 is accepted only for a page that is exactly what allocation
-writes: the free page type and every other byte zero. Any other page with a checksum
-of 0 fails verification. That is what catches damage that zeroed the first sector
-of a written page, checksum included.
+0.16.0 extended a file with pages of zeros, checksum 0 included, and a crash can
+leave such a page behind. A file this release creates says in its header that it
+never does (flag `SEALED_PAGES`, 0x20): the free page it extends the file with is
+written with its checksum, so every page in the file carries one, and any page whose
+checksum does not match fails verification, a page of zeros included. A B+Tree or
+overflow pointer to a page that a fault turned to zeros is then an error, not an
+empty free page.
 
-The detection has two gaps worth knowing. A page that is entirely zero still passes,
-since nothing tells it apart from a page allocated and never written; a B+Tree or
-overflow pointer to such a page reads it as an empty free page. And the header page
-has no checksum at all (the journal checksums its copy of it during a flush).
+A file without the flag, one that 0.16.0 created, keeps the older rule: a stored
+checksum of 0 is accepted only for a page that is exactly what 0.16.0's allocation
+wrote, the free page type and every other byte zero. Any other page with a checksum
+of 0 fails, which catches damage that zeroed the first sector of a written page. A
+page that is entirely zero still passes there. 0.16.0 copies the header's flags when
+it writes the header but extends the file with unsealed pages, so the flag counts
+only while the format-4 header fields are present, and a read-write open that finds
+them gone clears it. Only a new file gets the flag: no operation rewrites every page
+of an existing one, so an older file gains it by export and import into a new
+database.
+
+Scans over every page, which meet pages that nothing refers to (`lattice check`,
+truncating the free tail in `compact`), still take an all-zero page for a blank one
+(`readPageForScan`); `lattice check` counts them. The header page has no checksum
+at all (the journal checksums its copy of it during a flush).
 
 ### Checksum Calculation
 
@@ -336,17 +349,21 @@ pub fn readPage(self: *Self, page_id: PageId, buf: []u8) !void {
     const header: *const PageHeader = @ptrCast(@alignCast(buf.ptr));
     const expected = calculateChecksum(buf[8..]);
 
-    // A mismatch passes only for a page as allocation writes it: type free,
+    // In a file whose pages are all sealed, any mismatch is damage. Otherwise
+    // one passes only for a page as 0.16.0's allocation wrote it: type free,
     // every other byte zero (checksum 0 included)
-    if (header.checksum != expected and !isUnsealedFreePage(buf)) {
-        return error.ChecksumMismatch;
+    if (header.checksum != expected) {
+        if (self.header.pagesSealed() or !isUnsealedFreePage(buf)) {
+            return error.ChecksumMismatch;
+        }
     }
 }
 ```
 
 The extra check runs only when the checksum does not match, so a read that verifies
-costs what it always did. Every page except a freshly allocated one has been sealed
-with its checksum by every release, so no file that opened before is refused.
+costs what it always did. Every page except one freshly allocated by 0.16.0 has been
+sealed with its checksum by every release, and only files this release creates
+refuse an unsealed one, so no file that opened before is refused.
 
 ## Read-Only Mode
 

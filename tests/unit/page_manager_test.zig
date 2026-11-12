@@ -733,8 +733,82 @@ test "page_manager: ldur a zero checksum does not excuse a page with data in it"
     try file.write(@as(u64, page_id) * 4096, &zeroes);
     try std.testing.expectError(PageManagerError.ChecksumMismatch, pm.readPage(page_id, &buf));
 
-    // Zeroes all through still read, as a page of a file grown with zeroes.
+    // This release seals the pages it extends a file with, so in a file it
+    // created a page that is zeroes all through, checksum included, is
+    // damage too. A scan over every page, which meets pages a crash kept
+    // from being written, still takes it for a blank one.
     const all_zero = [_]u8{0} ** 4096;
     try file.write(@as(u64, page_id) * 4096, &all_zero);
+    try std.testing.expect(pm.getHeader().pagesSealed());
+    try std.testing.expectError(PageManagerError.ChecksumMismatch, pm.readPage(page_id, &buf));
+    try std.testing.expect(try pm.readPageForScan(page_id, &buf));
+    try std.testing.expect(!try pm.readPageForScan(fresh, &buf));
+}
+
+test "page_manager: lfmt a page this release extends the file with is sealed" {
+    const allocator = std.testing.allocator;
+    var memory = lattice.storage.memory_vfs.MemoryVfs.init(allocator);
+    defer memory.deinit();
+    const vfs_impl = memory.vfs();
+
+    var pm = try PageManager.init(allocator, vfs_impl, "db", .{ .create = true });
+    defer pm.deinit();
+    try std.testing.expect(pm.getHeader().flags & lattice.storage.page.FileFlags.SEALED_PAGES != 0);
+    try std.testing.expect(pm.getHeader().pagesSealed());
+
+    const page_id = try pm.allocatePage();
+    var raw: [4096]u8 align(4096) = undefined;
+    const file = try vfs_impl.open("db", .{});
+    defer file.close();
+    _ = try file.read(@as(u64, page_id) * 4096, &raw);
+    try std.testing.expect(std.mem.readInt(u32, raw[4..8], .little) != 0);
+
+    var buf: [4096]u8 align(4096) = undefined;
     try pm.readPage(page_id, &buf);
+    try std.testing.expect(!try pm.readPageForScan(page_id, &buf));
+}
+
+test "page_manager: lfmt a file 0.16.0 wrote last does not count as sealed" {
+    const allocator = std.testing.allocator;
+    var memory = lattice.storage.memory_vfs.MemoryVfs.init(allocator);
+    defer memory.deinit();
+    const vfs_impl = memory.vfs();
+    const FileHeader = lattice.storage.page.FileHeader;
+    const SEALED_PAGES = lattice.storage.page.FileFlags.SEALED_PAGES;
+
+    var page_id: types.PageId = undefined;
+    {
+        var pm = try PageManager.init(allocator, vfs_impl, "db", .{ .create = true });
+        defer pm.deinit();
+        page_id = try pm.allocatePage();
+    }
+
+    // 0.16.0 copies `flags` along, bit included, when it writes the header,
+    // and zeroes what follows its own fields; it extends the file with
+    // pages of zeroes.
+    {
+        const file = try vfs_impl.open("db", .{ .write = true });
+        defer file.close();
+        const tail = [_]u8{0} ** (@sizeOf(FileHeader) - FileHeader.LEGACY_SIZE);
+        try file.write(FileHeader.LEGACY_SIZE, &tail);
+        const all_zero = [_]u8{0} ** 4096;
+        try file.write(@as(u64, page_id) * 4096, &all_zero);
+    }
+
+    var buf: [4096]u8 align(4096) = undefined;
+    {
+        var pm = try PageManager.init(allocator, vfs_impl, "db", .{ .read_only = true });
+        defer pm.deinit();
+        try std.testing.expect(pm.getHeader().flags & SEALED_PAGES != 0);
+        try std.testing.expect(!pm.getHeader().pagesSealed());
+        try pm.readPage(page_id, &buf);
+    }
+    {
+        var pm = try PageManager.init(allocator, vfs_impl, "db", .{});
+        defer pm.deinit();
+        try std.testing.expect(pm.getHeader().hasExtension());
+        try std.testing.expect(pm.getHeader().flags & SEALED_PAGES == 0);
+        try std.testing.expect(!pm.getHeader().pagesSealed());
+        try pm.readPage(page_id, &buf);
+    }
 }

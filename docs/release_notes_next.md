@@ -148,7 +148,11 @@ skipped when another transaction's records follow them.
 **A zeroed page header is caught.** A page whose stored checksum was zero passed
 verification whatever it held, so damage that zeroed a page's first sector,
 checksum included, was read as a valid page. A zero checksum now passes only for
-a page exactly as allocation writes it.
+a page exactly as 0.16.0's allocation wrote it, and in a file this release
+creates not even for that: such a file is marked as having every page sealed
+(header flag 0x20), so a page in use that a fault turned to zeros is reported as
+damage instead of being read as an empty page. `lattice check` counts the blank
+pages a crash can leave unused.
 
 **Open and close empty the log.** Recovery replayed the log and left it in
 place, and closing through the Zig API or the CLI never checkpointed, so every
@@ -1051,9 +1055,11 @@ with relationships is one range probe, under 1 µs.
   after a later sync can vouch that a frame was synced, so damage to the last
   frames before the most recent sync, with nothing written after them, is cut
   off, and the commits in them are lost without an error.
-- **A page that is entirely zero still passes its checksum**, since nothing
-  tells it apart from a page allocated and never written; a pointer to such a
-  page reads it as an empty free page.
+- **In a file created by 0.16.0, a page that is entirely zero still passes its
+  checksum**, since nothing tells it apart from a page 0.16.0 allocated and
+  never wrote; a pointer to such a page reads it as an empty free page. Files
+  this release creates are sealed and refuse it; export and import an older
+  file into a new database to get the same.
 - **A read-only recovery is bounded by memory**, 64 MB plus four times the size
   of the log and journal; beyond that the read-only open fails with
   `LATTICE_ERROR_FULL`. `lattice check` does not recover first.

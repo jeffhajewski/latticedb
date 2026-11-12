@@ -59,6 +59,8 @@ const CheckError = error{
 
 const CheckStats = struct {
     pages_checked: u32,
+    /// Pages never written (all zeros), counted in pages_checked.
+    blank_pages: u32 = 0,
     wal_present: bool,
 };
 
@@ -1345,14 +1347,18 @@ fn cmdCheck(
         .table => {
             output.printSuccess(stdout, "Database file checks passed", .{});
             try stdout.print("  Pages checked: {d}\n", .{stats.pages_checked});
+            if (stats.blank_pages > 0) {
+                try stdout.print("  Blank pages:   {d} (never written; a crash can leave these unused)\n", .{stats.blank_pages});
+            }
             if (stats.wal_present) {
                 try stdout.writeAll("  Note: sibling WAL file exists but was not validated\n");
             }
         },
         .json => {
-            try stdout.print("{{\"path\":\"{s}\",\"pages_checked\":{d},\"wal_present\":{},\"wal_validated\":false}}\n", .{
+            try stdout.print("{{\"path\":\"{s}\",\"pages_checked\":{d},\"blank_pages\":{d},\"wal_present\":{},\"wal_validated\":false}}\n", .{
                 path,
                 stats.pages_checked,
+                stats.blank_pages,
                 stats.wal_present,
             });
         },
@@ -1360,6 +1366,7 @@ fn cmdCheck(
             try stdout.writeAll("property,value\n");
             try stdout.print("path,{s}\n", .{path});
             try stdout.print("pages_checked,{d}\n", .{stats.pages_checked});
+            try stdout.print("blank_pages,{d}\n", .{stats.blank_pages});
             try stdout.print("wal_present,{}\n", .{stats.wal_present});
             try stdout.writeAll("wal_validated,false\n");
         },
@@ -1387,13 +1394,20 @@ fn checkDatabaseFile(allocator: std.mem.Allocator, path: []const u8, lock: bool)
     };
     defer allocator.free(page_buf);
 
+    // A blank page is one the file was extended with and nothing wrote,
+    // which a crash can leave behind unused. Whether anything refers to one
+    // is not known here; the engine refuses to read one that is in use in a
+    // file whose pages are all sealed.
     const page_count = page_manager.pageCount();
+    var blank_pages: u32 = 0;
     var page_id: u32 = 1;
     while (page_id < page_count) : (page_id += 1) {
-        page_manager.readPage(page_id, page_buf) catch |err| return mapPageManagerCheckError(err);
+        const blank = page_manager.readPageForScan(page_id, page_buf) catch |err| return mapPageManagerCheckError(err);
+        if (blank) blank_pages += 1;
     }
 
     return .{
+        .blank_pages = blank_pages,
         .pages_checked = page_count -| 1,
         .wal_present = hasWalSibling(path),
     };

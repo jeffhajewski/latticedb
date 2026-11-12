@@ -21,6 +21,7 @@ const OpenFlags = vfs.OpenFlags;
 const PageId = types.PageId;
 const PageType = page.PageType;
 const PageHeader = page.PageHeader;
+const FileFlags = page.FileFlags;
 const FileHeader = page.FileHeader;
 const calculateChecksum = page.calculateChecksum;
 
@@ -265,6 +266,10 @@ pub const PageManager = struct {
         // database fills them in from the file's contents as it opens.
         if (!self.read_only and !self.header.hasExtension()) {
             self.header.resetExtension();
+            // 0.16.0 keeps this bit when it writes the header but does not
+            // seal the pages it adds, so after it the file has unsealed
+            // pages in use again.
+            self.header.flags &= ~FileFlags.SEALED_PAGES;
             self.header_dirty = true;
         }
 
@@ -335,9 +340,11 @@ pub const PageManager = struct {
         defer self.allocator.free(zeros);
         @memset(zeros, 0);
 
-        // Set up as free page initially
+        // Set up as free page initially, sealed where the file promises
+        // that every page in use is.
         const header_ptr: *PageHeader = @ptrCast(@alignCast(zeros.ptr));
         header_ptr.* = PageHeader.init(.free);
+        if (self.header.pagesSealed()) header_ptr.checksum = calculateChecksum(zeros[8..]);
 
         self.file.write(offset, zeros) catch return PageManagerError.IoError;
         self.noteWritten(page_id);
@@ -504,9 +511,30 @@ pub const PageManager = struct {
         // Verify checksum
         const header_ptr: *const PageHeader = @ptrCast(@alignCast(buf.ptr));
         const expected = calculateChecksum(buf[8..]);
-        if (header_ptr.checksum != expected and !isUnsealedFreePage(buf)) {
-            return PageManagerError.ChecksumMismatch;
+        if (header_ptr.checksum != expected) {
+            // A file whose pages are all sealed has no page without its
+            // checksum in use: a zero one, whatever follows it, is damage.
+            if (self.header.pagesSealed() or !isUnsealedFreePage(buf)) {
+                return PageManagerError.ChecksumMismatch;
+            }
         }
+    }
+
+    /// `readPage` for a scan over every page, which meets pages that are not
+    /// in use: an all-zero page there is one the file was extended with and
+    /// a crash kept from being written, whatever the file says about sealed
+    /// pages, and it reads as an empty free page. A page that a tree or the
+    /// freelist refers to is read with `readPage`. Returns whether the page
+    /// was such a blank one.
+    pub fn readPageForScan(self: *Self, page_id: PageId, buf: []u8) PageManagerError!bool {
+        self.readPage(page_id, buf) catch |err| switch (err) {
+            PageManagerError.ChecksumMismatch => {
+                if (!isUnsealedFreePage(buf)) return err;
+                return true;
+            },
+            else => return err,
+        };
+        return isUnsealedFreePage(buf);
     }
 
     /// Whether a page is one the file was extended with and nothing has
@@ -586,7 +614,7 @@ pub const PageManager = struct {
         var tail_start = pages_before;
         while (tail_start > 1) {
             const candidate = tail_start - 1;
-            try self.readPage(candidate, buf);
+            _ = try self.readPageForScan(candidate, buf);
             const header: *const PageHeader = @ptrCast(@alignCast(buf.ptr));
             if (header.page_type != .free) break;
             tail_start = candidate;
@@ -607,7 +635,7 @@ pub const PageManager = struct {
         var freelist_head = NULL_PAGE;
         var page_id: PageId = 1;
         while (page_id < tail_start) : (page_id += 1) {
-            try self.readPage(page_id, buf);
+            _ = try self.readPageForScan(page_id, buf);
             const header: *PageHeader = @ptrCast(@alignCast(buf.ptr));
             if (header.page_type != .free) continue;
 

@@ -459,6 +459,43 @@ test "cli: check finishes an interrupted flush from the journal, in memory" {
     try std.testing.expectEqualSlices(u8, journal_before, journal_after);
 }
 
+test "cli: info and check say when and why 0.16.0 cannot open a database" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lfmt_cli_reader_reasons.ltdb";
+    deleteDatabaseFiles(path);
+    defer deleteDatabaseFiles(path);
+
+    const created = try runCli(allocator, &.{ "create", path });
+    defer created.deinit(allocator);
+    try std.testing.expect(created.succeeded());
+    for ([_][]const u8{ "info", "check" }) |command| {
+        const run = try runCli(allocator, &.{ command, path, "--format=json" });
+        defer run.deinit(allocator);
+        if (!run.succeeded() or std.mem.indexOf(u8, run.stdout, "\"min_reader_version\":3,\"min_reader_reasons\":[]") == null) {
+            std.debug.print("{s}: exit {?d}\nstdout: {s}\nstderr: {s}\n", .{ command, run.exit_code, run.stdout, run.stderr });
+            return error.TestUnexpectedResult;
+        }
+    }
+
+    // The first change records changefeed events.
+    const wrote = try runCli(allocator, &.{ "exec", path, "--query=CREATE (:Person {name: 'Ada'})" });
+    defer wrote.deinit(allocator);
+    try std.testing.expect(wrote.succeeded());
+    for ([_][]const u8{ "info", "check" }) |command| {
+        const json = try runCli(allocator, &.{ command, path, "--format=json" });
+        defer json.deinit(allocator);
+        const table = try runCli(allocator, &.{ command, path });
+        defer table.deinit(allocator);
+        if (!json.succeeded() or
+            std.mem.indexOf(u8, json.stdout, "\"min_reader_version\":4,\"min_reader_reasons\":[\"changefeed events\"]") == null or
+            std.mem.indexOf(u8, table.stdout, "v4, so 0.16.0 cannot open it (changefeed events)") == null)
+        {
+            std.debug.print("{s}: exit {?d}\njson: {s}\ntable: {s}\n", .{ command, json.exit_code, json.stdout, table.stdout });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
 test "cli: the dot product metric has one name, from create to info" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lfmt_cli_dot_product.ltdb";

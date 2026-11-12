@@ -34,6 +34,7 @@ const DatabaseConfig = lattice.storage.database.DatabaseConfig;
 const OpenOptions = lattice.storage.database.OpenOptions;
 const QueryResult = lattice.storage.database.QueryResult;
 const PageHeader = lattice.storage.page.PageHeader;
+const FileHeader = lattice.storage.page.FileHeader;
 const PageManager = lattice.storage.page_manager.PageManager;
 const PageManagerError = lattice.storage.page_manager.PageManagerError;
 const PosixVfs = lattice.storage.vfs.PosixVfs;
@@ -61,12 +62,44 @@ const CheckError = error{
 
 const CheckStats = struct {
     pages_checked: u32,
+    /// The header's `min_reader_version` and the reasons it records.
+    min_reader_version: u16 = 0,
+    min_reader_reasons: u16 = 0,
     /// Pages never written (all zeros), counted in pages_checked.
     blank_pages: u32 = 0,
     /// A flush a crash cut short was finished from the journal, in memory.
     journal_applied: bool = false,
     wal_present: bool,
 };
+
+/// The names of the `FileHeader.ReaderReason` bits in `reasons`, joined by
+/// `separator`, each in quotes when `quoted`.
+fn writeReaderReasons(writer: anytype, reasons: u16, separator: []const u8, quoted: bool) !void {
+    var first = true;
+    for (FileHeader.ReaderReason.all) |reason| {
+        if (reasons & reason.bit == 0) continue;
+        if (!first) try writer.writeAll(separator);
+        first = false;
+        if (quoted) try writer.writeAll("\"");
+        try writer.writeAll(reason.name);
+        if (quoted) try writer.writeAll("\"");
+    }
+}
+
+/// The table line for the reader version: why 0.16.0 is refused, when it is.
+fn writeReaderVersionLine(writer: anytype, label: []const u8, version: u16, reasons: u16) !void {
+    try writer.print("{s}v{d}", .{ label, version });
+    if (version > lattice.core.types.MIN_READER_VERSION) {
+        try writer.writeAll(", so 0.16.0 cannot open it (");
+        if (reasons == 0) {
+            try writer.writeAll("reason not recorded");
+        } else {
+            try writeReaderReasons(writer, reasons, ", ", false);
+        }
+        try writer.writeAll(")");
+    }
+    try writer.writeAll("\n");
+}
 
 fn failCommand(stderr: anytype, comptime fmt: []const u8, args: anytype) CliError {
     output.printError(stderr, fmt, args);
@@ -349,6 +382,9 @@ fn cmdInfo(
         return failCommand(stderr, "Failed to list the property indexes: {s}", .{@errorName(err)});
     };
     defer lattice.storage.database.Database.freePropertyIndexes(allocator, indexes);
+    const file_header = db.page_manager.getHeader();
+    const reader_version = file_header.min_reader_version;
+    const reader_reasons = file_header.readerReasons();
 
     switch (parsed_args.format) {
         .table => {
@@ -358,6 +394,7 @@ fn cmdInfo(
             try stdout.print("Nodes:        {d}\n", .{node_count});
             try stdout.print("Edges:        {d}\n", .{edge_count});
             try stdout.print("Format:       v{d}\n", .{lattice.core.types.FORMAT_VERSION});
+            try writeReaderVersionLine(stdout, "Min reader:   ", reader_version, reader_reasons);
             try stdout.print("Vector:       {s}\n", .{if (db.hasPersistedVectorIndex()) "enabled" else "disabled"});
             if (vector_config) |config| {
                 try stdout.print("  Dimensions: {d}\n", .{config.dimensions});
@@ -390,6 +427,9 @@ fn cmdInfo(
                 lattice.core.types.FORMAT_VERSION,
                 db.hasPersistedVectorIndex(),
             });
+            try stdout.print("\"min_reader_version\":{d},\"min_reader_reasons\":[", .{reader_version});
+            try writeReaderReasons(stdout, reader_reasons, ",", true);
+            try stdout.writeAll("],");
             if (vector_config) |config| {
                 try stdout.print("\"vector_dimensions\":{d},\"vector_metric\":\"{s}\",\"vector_m\":{d},\"vector_ef_construction\":{d},", .{
                     config.dimensions,
@@ -422,6 +462,9 @@ fn cmdInfo(
             try stdout.print("nodes,{d}\n", .{node_count});
             try stdout.print("edges,{d}\n", .{edge_count});
             try stdout.print("format_version,{d}\n", .{lattice.core.types.FORMAT_VERSION});
+            try stdout.print("min_reader_version,{d}\nmin_reader_reasons,", .{reader_version});
+            try writeReaderReasons(stdout, reader_reasons, ";", false);
+            try stdout.writeAll("\n");
             try stdout.print("vector_enabled,{}\n", .{db.hasPersistedVectorIndex()});
             if (vector_config) |config| {
                 try stdout.print("vector_dimensions,{d}\n", .{config.dimensions});
@@ -1391,6 +1434,7 @@ fn cmdCheck(
         .table => {
             output.printSuccess(stdout, "Database file checks passed", .{});
             try stdout.print("  Pages checked: {d}\n", .{stats.pages_checked});
+            try writeReaderVersionLine(stdout, "  Min reader:    ", stats.min_reader_version, stats.min_reader_reasons);
             if (stats.blank_pages > 0) {
                 try stdout.print("  Blank pages:   {d} (never written; a crash can leave these unused)\n", .{stats.blank_pages});
             }
@@ -1402,13 +1446,16 @@ fn cmdCheck(
             }
         },
         .json => {
-            try stdout.print("{{\"path\":\"{s}\",\"pages_checked\":{d},\"blank_pages\":{d},\"journal_applied\":{},\"wal_present\":{},\"wal_validated\":false}}\n", .{
+            try stdout.print("{{\"path\":\"{s}\",\"pages_checked\":{d},\"blank_pages\":{d},\"journal_applied\":{},\"wal_present\":{},\"wal_validated\":false,\"min_reader_version\":{d},\"min_reader_reasons\":[", .{
                 path,
                 stats.pages_checked,
                 stats.blank_pages,
                 stats.journal_applied,
                 stats.wal_present,
+                stats.min_reader_version,
             });
+            try writeReaderReasons(stdout, stats.min_reader_reasons, ",", true);
+            try stdout.writeAll("]}\n");
         },
         .csv => {
             try stdout.writeAll("property,value\n");
@@ -1418,6 +1465,9 @@ fn cmdCheck(
             try stdout.print("journal_applied,{}\n", .{stats.journal_applied});
             try stdout.print("wal_present,{}\n", .{stats.wal_present});
             try stdout.writeAll("wal_validated,false\n");
+            try stdout.print("min_reader_version,{d}\nmin_reader_reasons,", .{stats.min_reader_version});
+            try writeReaderReasons(stdout, stats.min_reader_reasons, ";", false);
+            try stdout.writeAll("\n");
         },
     }
 }
@@ -1512,6 +1562,8 @@ fn checkDatabaseFile(allocator: std.mem.Allocator, path: []const u8, lock: bool)
     return .{
         .blank_pages = blank_pages,
         .journal_applied = journal_applied,
+        .min_reader_version = page_manager.getHeader().min_reader_version,
+        .min_reader_reasons = page_manager.getHeader().readerReasons(),
         .pages_checked = page_count -| 1,
         .wal_present = hasWalSibling(path),
     };

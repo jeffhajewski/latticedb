@@ -92,6 +92,9 @@ type OpenOptions struct {
 	VectorMetric         uint8
 	VectorM              uint16
 	VectorEfConstruction uint16
+	// A lattice_changefeed_retention and its value (events or milliseconds).
+	ChangefeedRetention      uint8
+	ChangefeedRetentionValue uint64
 }
 
 type QueryResult struct {
@@ -174,21 +177,23 @@ func Open(path string, opts OpenOptions) (*DB, error) {
 	defer C.free(unsafe.Pointer(cPath))
 
 	cOpts := C.lattice_open_options_v5{
-		struct_size:            C.size_t(unsafe.Sizeof(C.lattice_open_options_v5{})),
-		create:                 C.bool(opts.Create),
-		read_only:              C.bool(opts.ReadOnly),
-		cache_size_mb:          C.uint32_t(opts.CacheSizeMB),
-		page_size:              C.uint32_t(opts.PageSize),
-		enable_vector:          C.bool(opts.EnableVector),
-		vector_dimensions:      C.uint16_t(opts.VectorDimensions),
-		enable_wal:             C.bool(opts.EnableWAL),
-		enable_adjacency_cache: C.bool(opts.EnableAdjacencyCache),
-		lock:                   C.bool(opts.Lock),
-		sync_mode:              C.uint8_t(opts.SyncMode),
-		full_fsync:             C.uint8_t(opts.FullFsync),
-		vector_metric:          C.uint8_t(opts.VectorMetric),
-		vector_m:               C.uint16_t(opts.VectorM),
-		vector_ef_construction: C.uint16_t(opts.VectorEfConstruction),
+		struct_size:                C.size_t(unsafe.Sizeof(C.lattice_open_options_v5{})),
+		create:                     C.bool(opts.Create),
+		read_only:                  C.bool(opts.ReadOnly),
+		cache_size_mb:              C.uint32_t(opts.CacheSizeMB),
+		page_size:                  C.uint32_t(opts.PageSize),
+		enable_vector:              C.bool(opts.EnableVector),
+		vector_dimensions:          C.uint16_t(opts.VectorDimensions),
+		enable_wal:                 C.bool(opts.EnableWAL),
+		enable_adjacency_cache:     C.bool(opts.EnableAdjacencyCache),
+		lock:                       C.bool(opts.Lock),
+		sync_mode:                  C.uint8_t(opts.SyncMode),
+		full_fsync:                 C.uint8_t(opts.FullFsync),
+		vector_metric:              C.uint8_t(opts.VectorMetric),
+		vector_m:                   C.uint16_t(opts.VectorM),
+		vector_ef_construction:     C.uint16_t(opts.VectorEfConstruction),
+		changefeed_retention:       C.uint8_t(opts.ChangefeedRetention),
+		changefeed_retention_value: C.uint64_t(opts.ChangefeedRetentionValue),
 	}
 
 	var db *C.lattice_database
@@ -1099,6 +1104,27 @@ func (db *DB) ReadStream(stream string, afterSequence uint64, limit uint, timeou
 	}
 
 	return records, nil
+}
+
+// ChangefeedStatus returns the changefeed's retention mode and value, the
+// oldest event held (0 when none is) and the last sequence handed out.
+func (db *DB) ChangefeedStatus() (uint8, uint64, uint64, uint64, error) {
+	var mode C.uint8_t
+	var value, oldest, last C.uint64_t
+	if err := errorFromCode(ErrorCode(C.lattice_changefeed_status(db.ptr, &mode, &value, &oldest, &last))); err != nil {
+		return 0, 0, 0, 0, err
+	}
+	return uint8(mode), uint64(value), uint64(oldest), uint64(last), nil
+}
+
+// ChangefeedTrim applies the retention policy in full and returns the number
+// of events dropped.
+func (db *DB) ChangefeedTrim() (uint64, error) {
+	var removed C.uint64_t
+	if err := errorFromCode(ErrorCode(C.lattice_changefeed_trim(db.ptr, &removed))); err != nil {
+		return 0, err
+	}
+	return uint64(removed), nil
 }
 
 func (db *DB) GetStreamOffset(stream, consumer string) (uint64, bool, error) {

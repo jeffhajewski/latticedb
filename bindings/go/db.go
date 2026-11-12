@@ -2,6 +2,7 @@ package latticedb
 
 import (
 	"errors"
+	"fmt"
 
 	cgobridge "github.com/jeffhajewski/latticedb/bindings/go/internal/cgo"
 )
@@ -18,22 +19,28 @@ func Version() string {
 
 func Open(path string, opts OpenOptions) (*DB, error) {
 	opts = opts.withDefaults()
+	retention, retentionValue, err := changefeedRetentionCode(opts.ChangefeedRetention)
+	if err != nil {
+		return nil, err
+	}
 
 	raw, err := cgobridge.Open(path, cgobridge.OpenOptions{
-		Create:               opts.Create,
-		ReadOnly:             opts.ReadOnly,
-		CacheSizeMB:          opts.CacheSizeMB,
-		PageSize:             opts.PageSize,
-		EnableWAL:            opts.EnableWAL,
-		EnableAdjacencyCache: opts.EnableAdjacencyCache,
-		EnableVector:         opts.vectorsEnabled(),
-		VectorDimensions:     opts.VectorDimensions,
-		Lock:                 !opts.DisableLock,
-		SyncMode:             uint8(opts.SyncMode),
-		FullFsync:            uint8(opts.FullFsync),
-		VectorMetric:         uint8(opts.VectorMetric),
-		VectorM:              opts.VectorM,
-		VectorEfConstruction: opts.VectorEfConstruction,
+		Create:                   opts.Create,
+		ReadOnly:                 opts.ReadOnly,
+		CacheSizeMB:              opts.CacheSizeMB,
+		PageSize:                 opts.PageSize,
+		EnableWAL:                opts.EnableWAL,
+		EnableAdjacencyCache:     opts.EnableAdjacencyCache,
+		EnableVector:             opts.vectorsEnabled(),
+		VectorDimensions:         opts.VectorDimensions,
+		Lock:                     !opts.DisableLock,
+		SyncMode:                 uint8(opts.SyncMode),
+		FullFsync:                uint8(opts.FullFsync),
+		VectorMetric:             uint8(opts.VectorMetric),
+		VectorM:                  opts.VectorM,
+		VectorEfConstruction:     opts.VectorEfConstruction,
+		ChangefeedRetention:      retention,
+		ChangefeedRetentionValue: retentionValue,
 	})
 	if err != nil {
 		return nil, wrapError(err)
@@ -451,8 +458,60 @@ func (db *DB) GetStreamOffset(stream, consumer string) (uint64, bool, error) {
 	return offset, ok, nil
 }
 
+// Changes reads graph changefeed records from __lattice_changes: up to limit
+// records with a sequence greater than afterSequence, oldest first.
+// afterSequence 0 reads from the oldest event held.
+//
+// When retention or a trim has dropped the events after afterSequence, the
+// reader has missed changes and the error matches ErrChangesTrimmed (code
+// ErrorNotFound). When the policy is "off" the error has code
+// ErrorUnsupported.
 func (db *DB) Changes(afterSequence uint64, limit uint, timeoutMs uint32) ([]StreamRecord, error) {
-	return db.ReadStream("__lattice_changes", afterSequence, limit, timeoutMs)
+	records, err := db.ReadStream("__lattice_changes", afterSequence, limit, timeoutMs)
+	var latticeErr *Error
+	if errors.As(err, &latticeErr) {
+		switch latticeErr.Code {
+		case ErrorNotFound:
+			return nil, &Error{Code: ErrorNotFound, Message: fmt.Sprintf(
+				"the changefeed no longer holds the events after sequence %d: "+
+					"its retention policy or a trim dropped them", afterSequence)}
+		case ErrorUnsupported:
+			return nil, &Error{Code: ErrorUnsupported, Message: `the changefeed is off (ChangefeedRetention "off")`}
+		}
+	}
+	return records, err
+}
+
+// ChangefeedStatus returns the changefeed's retention policy and the events
+// it holds.
+func (db *DB) ChangefeedStatus() (ChangefeedStatus, error) {
+	if db == nil || db.raw == nil {
+		return ChangefeedStatus{}, ErrDatabaseClosed
+	}
+	mode, value, oldest, last, err := db.raw.ChangefeedStatus()
+	if err != nil {
+		return ChangefeedStatus{}, wrapError(err)
+	}
+	return ChangefeedStatus{
+		Retention:      changefeedRetentionText(mode, value),
+		OldestSequence: oldest,
+		LastSequence:   last,
+	}, nil
+}
+
+// TrimChangefeed applies the changefeed's retention policy in full now
+// (checkpoints apply it a bounded number of events at a time) and makes that
+// durable. It returns the number of events dropped, and an error with code
+// ErrorLockTimeout while a write transaction is open.
+func (db *DB) TrimChangefeed() (uint64, error) {
+	if db == nil || db.raw == nil {
+		return 0, ErrDatabaseClosed
+	}
+	removed, err := db.raw.ChangefeedTrim()
+	if err != nil {
+		return 0, wrapError(err)
+	}
+	return removed, nil
 }
 
 func convertFTSResults(results []cgobridge.FTSSearchResult) []FTSSearchResult {

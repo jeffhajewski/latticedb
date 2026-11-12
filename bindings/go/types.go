@@ -55,6 +55,16 @@ type OpenOptions struct {
 	// VectorEfConstruction is the HNSW candidate list size while building a new
 	// index, 1..4096. 0 means the file's, or 200.
 	VectorEfConstruction uint16
+	// ChangefeedRetention is how much of the changefeed (see DB.Changes) to
+	// keep: "all", "off", "last:<events>" or "age:<duration>" with a duration
+	// such as "500ms", "90s", "30m", "12h" or "7d". The file records its
+	// policy. The empty string keeps the file's, which is "all" unless
+	// something set another (for a new database, the
+	// LATTICE_CHANGEFEED_RETENTION environment variable). A value set here
+	// replaces the file's policy when the database is opened for writing; a
+	// read-only open never changes it. Retention drops the oldest events at
+	// checkpoints; DB.TrimChangefeed applies it at once.
+	ChangefeedRetention string
 }
 
 // SyncMode sets when a commit waits for the disk.

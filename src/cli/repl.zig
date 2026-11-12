@@ -733,8 +733,7 @@ pub const Repl = struct {
             // text made the padding that follows it underflow.
             .float_val => |f| blk: {
                 var buf: [FLOAT_DISPLAY_MAX]u8 = undefined;
-                const slice = std.fmt.bufPrint(&buf, "{d:.6}", .{f}) catch break :blk 0;
-                break :blk slice.len;
+                break :blk formatTableFloat(&buf, f).len;
             },
             .string_val => |s| s.len + 2, // Include quotes
             .node_id => |id| 6 + countDigits(id), // "Node(N)"
@@ -786,7 +785,7 @@ pub const Repl = struct {
             },
             .float_val => |f| {
                 var buf: [FLOAT_DISPLAY_MAX]u8 = undefined;
-                const slice = std.fmt.bufPrint(&buf, "{d:.6}", .{f}) catch return 0;
+                const slice = formatTableFloat(&buf, f);
                 try writer.writeAll(slice);
                 return slice.len;
             },
@@ -1053,11 +1052,25 @@ pub const Repl = struct {
     }
 };
 
-/// Count decimal digits in a number
-/// Room for any f64 printed with six decimals: the largest has 309 digits
-/// before the point.
-const FLOAT_DISPLAY_MAX = 336;
+/// Room for any float `formatTableFloat` writes.
+const FLOAT_DISPLAY_MAX = 64;
 
+/// A float as a table cell shows it: six decimals at ordinary magnitudes,
+/// and the shortest scientific form that reads back as the same number
+/// where six decimals would run to hundreds of digits (1e300) or show a
+/// non-zero number as 0.000000 (1e-300). JSON and CSV output are not
+/// affected; they print every float in full.
+fn formatTableFloat(buf: *[FLOAT_DISPLAY_MAX]u8, f: f64) []const u8 {
+    const magnitude = @abs(f);
+    const scientific = std.math.isFinite(f) and f != 0 and (magnitude >= 1e16 or magnitude < 1e-6);
+    const written = if (scientific)
+        std.fmt.bufPrint(buf, "{e}", .{f})
+    else
+        std.fmt.bufPrint(buf, "{d:.6}", .{f});
+    return written catch unreachable; // 1e16 has 17 digits before the point
+}
+
+/// Count decimal digits in a number
 fn countDigits(n: u64) usize {
     if (n == 0) return 1;
     var count: usize = 0;
@@ -1170,4 +1183,17 @@ test "repl initialization" {
     const allocator = std.testing.allocator;
     _ = allocator;
     // Can't easily test full REPL without a database, but struct creation works
+}
+
+test "table cells write huge and tiny floats in scientific form" {
+    var buf: [FLOAT_DISPLAY_MAX]u8 = undefined;
+    try std.testing.expectEqualStrings("0.100000", formatTableFloat(&buf, 0.1));
+    try std.testing.expectEqualStrings("0.000000", formatTableFloat(&buf, 0));
+    try std.testing.expectEqualStrings("-12345.500000", formatTableFloat(&buf, -12345.5));
+    try std.testing.expectEqualStrings("9999999999999998.000000", formatTableFloat(&buf, 9999999999999998.0));
+    // Six decimals wrote 1e300 as 301 digits and 1e-300 as 0.000000.
+    try std.testing.expectEqualStrings("1e300", formatTableFloat(&buf, 1e300));
+    try std.testing.expectEqualStrings("-1.5e-300", formatTableFloat(&buf, -1.5e-300));
+    try std.testing.expectEqualStrings("1.7976931348623157e308", formatTableFloat(&buf, std.math.floatMax(f64)));
+    try std.testing.expectEqualStrings("inf", formatTableFloat(&buf, std.math.inf(f64)));
 }

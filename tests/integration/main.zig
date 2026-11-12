@@ -25,6 +25,7 @@ const lrdf_rdf_test = @import("lrdf_rdf_test.zig");
 const lgr_graph_storage_test = @import("lgr_graph_storage_test.zig");
 const lcf_changefeed_golden_test = @import("lcf_changefeed_golden_test.zig");
 const lcf_changefeed_retention_test = @import("lcf_changefeed_retention_test.zig");
+const lcy_cypher_features_test = @import("lcy_cypher_features_test.zig");
 
 // Re-export tests from all modules
 test {
@@ -62,6 +63,8 @@ test {
     _ = lgr_graph_storage_test;
     _ = lcf_changefeed_golden_test;
     _ = lcf_changefeed_retention_test;
+    // OPTIONAL MATCH, UNION, CASE, comprehensions, paths, CALL, FOREACH
+    _ = lcy_cypher_features_test;
 }
 
 test "integration test runner initialized" {

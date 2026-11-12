@@ -289,6 +289,10 @@ pub const Expression = union(enum) {
     list: *ListExpr,
     map: *MapExpr,
 
+    // Subscripts
+    index: *IndexExpr,
+    slice: *SliceExpr,
+
     /// Get source location for this expression
     pub fn getLocation(self: *const Expression) SourceLocation {
         return switch (self.*) {
@@ -301,8 +305,27 @@ pub const Expression = union(enum) {
             .function_call => |f| f.location,
             .list => |l| l.location,
             .map => |m| m.location,
+            .index => |i| i.location,
+            .slice => |s| s.location,
         };
     }
+};
+
+/// `object[index]`: a list element by position, or a map entry, node or
+/// relationship property by name.
+pub const IndexExpr = struct {
+    object: *Expression,
+    index: *Expression,
+    location: SourceLocation,
+};
+
+/// `list[from..to]`: the elements from `from` up to but not including `to`.
+/// Either bound may be left out.
+pub const SliceExpr = struct {
+    object: *Expression,
+    from: ?*Expression,
+    to: ?*Expression,
+    location: SourceLocation,
 };
 
 /// Literal value

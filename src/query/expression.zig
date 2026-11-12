@@ -591,6 +591,8 @@ pub const ExpressionEvaluator = struct {
             .function_call => |f| self.evaluateFunction(f, row, ctx) catch |err| self.functionFailure(f, err, row, ctx),
             .list => |l| self.evaluateList(l, row, ctx),
             .map => |m| self.evaluateMap(m, row, ctx),
+            .index => |i| self.evaluateIndex(i, row, ctx),
+            .slice => |s| self.evaluateSlice(s, row, ctx),
         };
     }
 
@@ -652,6 +654,112 @@ pub const ExpressionEvaluator = struct {
             EvalError.TypeError => ctx.fail(err, b.location, "Type error: {s} {s} {s} is not defined", .{ typeName(left), symbol, typeName(right) }),
             else => ctx.fail(err, b.location, "{f} {s} {f} failed: {s}", .{ l, symbol, r, @errorName(err) }),
         };
+    }
+
+    /// `object[index]`.
+    ///
+    /// A string index reads a map entry, node property or relationship
+    /// property by name, exactly as `object.name` would, so `n['age']` and
+    /// `n.age` cannot disagree. An integer index reads a list element: from
+    /// the front when it is 0 or more, from the back when it is negative
+    /// (`[-1]` is the last). An index outside the list gives null, as does a
+    /// null list or a null index. Any other combination is a type error.
+    fn evaluateIndex(
+        self: *Self,
+        ix: *const ast.IndexExpr,
+        row: *const Row,
+        ctx: *const ExecutionContext,
+    ) EvalError!EvalResult {
+        const index = try self.evaluate(ix.index, row, ctx);
+        switch (index) {
+            .null_val => return .{ .null_val = {} },
+            .string_val => |key| {
+                const object = try self.evaluate(ix.object, row, ctx);
+                switch (object) {
+                    .null_val => return .{ .null_val = {} },
+                    .map_val => |entries| {
+                        for (entries) |entry| {
+                            if (std.mem.eql(u8, entry.key, key)) return entry.value;
+                        }
+                        return .{ .null_val = {} };
+                    },
+                    // Read through the property access itself, which looks
+                    // the object up again: a node or relationship is a
+                    // variable or something as cheap in practice.
+                    .node_ref, .edge_ref => {
+                        const access = ast.PropertyAccess{ .object = ix.object, .property = key, .location = ix.location };
+                        return self.evaluatePropertyAccess(&access, row, ctx);
+                    },
+                    else => return ctx.fail(EvalError.TypeError, ix.location, "Type error: {s}[string] is not defined; a string key reads a map, node or relationship", .{typeName(object)}),
+                }
+            },
+            .int_val => |i| {
+                const object = try self.evaluate(ix.object, row, ctx);
+                const items = switch (object) {
+                    .null_val => return .{ .null_val = {} },
+                    .list_val => |l| l,
+                    else => return ctx.fail(EvalError.TypeError, ix.location, "Type error: {s}[integer] is not defined; an integer index reads a list", .{typeName(object)}),
+                };
+                const pos = listPosition(i, items.len) orelse return .{ .null_val = {} };
+                if (pos >= items.len) return .{ .null_val = {} };
+                return items[pos];
+            },
+            else => return ctx.fail(EvalError.TypeError, ix.location, "Type error: an index must be an integer or a string, but this is {f}", .{Brief{ .value = index }}),
+        }
+    }
+
+    /// `list[from..to]`: the elements from `from` up to but not including
+    /// `to`. Negative bounds count from the end, bounds past either end are
+    /// clamped to it, a missing bound means that end of the list, and a
+    /// range that ends before it starts is empty. A null list or a null
+    /// bound gives null.
+    fn evaluateSlice(
+        self: *Self,
+        sl: *const ast.SliceExpr,
+        row: *const Row,
+        ctx: *const ExecutionContext,
+    ) EvalError!EvalResult {
+        const object = try self.evaluate(sl.object, row, ctx);
+        const items = switch (object) {
+            .null_val => return .{ .null_val = {} },
+            .list_val => |l| l,
+            else => return ctx.fail(EvalError.TypeError, sl.location, "Type error: {s}[..] is not defined; a range of positions reads a list", .{typeName(object)}),
+        };
+        const from = try self.sliceBound(sl.from, row, ctx, 0, items.len) orelse return .{ .null_val = {} };
+        const to = try self.sliceBound(sl.to, row, ctx, items.len, items.len) orelse return .{ .null_val = {} };
+        if (to <= from) return .{ .list_val = &[_]EvalResult{} };
+        return .{ .list_val = items[from..to] };
+    }
+
+    /// One bound of a slice as a position in `0..len`, or null when the bound
+    /// evaluates to null.
+    fn sliceBound(
+        self: *Self,
+        bound: ?*const ast.Expression,
+        row: *const Row,
+        ctx: *const ExecutionContext,
+        default: usize,
+        len: usize,
+    ) EvalError!?usize {
+        const expr = bound orelse return default;
+        const value = try self.evaluate(expr, row, ctx);
+        const i = switch (value) {
+            .null_val => return null,
+            .int_val => |i| i,
+            else => return ctx.fail(EvalError.TypeError, expr.getLocation(), "Type error: the bounds of a list range must be integers, but this is {f}", .{Brief{ .value = value }}),
+        };
+        return @min(listPosition(i, len) orelse 0, len);
+    }
+
+    /// A list index as a position from the front: `i` itself when it is 0 or
+    /// more, `len + i` when it is negative. Null when a negative index
+    /// reaches before the start.
+    fn listPosition(i: i64, len: usize) ?usize {
+        if (i >= 0) return std.math.cast(usize, i) orelse std.math.maxInt(usize);
+        // -(i + 1) cannot overflow, even for the smallest i64.
+        const back = (std.math.cast(usize, -(i + 1)) orelse return null) + 1;
+        if (back > len) return null;
+        return len - back;
     }
 
     /// Evaluate a literal expression

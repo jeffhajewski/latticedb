@@ -788,6 +788,15 @@ pub const SemanticAnalyzer = struct {
             .function_call => |f| self.analyzeFunctionCall(f),
             .list => |l| self.analyzeListExpr(l),
             .map => |m| self.analyzeMapExpr(m),
+            .index => |i| {
+                self.analyzeExpression(i.object);
+                self.analyzeExpression(i.index);
+            },
+            .slice => |sl| {
+                self.analyzeExpression(sl.object);
+                if (sl.from) |from| self.analyzeExpression(from);
+                if (sl.to) |to| self.analyzeExpression(to);
+            },
         }
     }
 
@@ -863,6 +872,8 @@ pub const SemanticAnalyzer = struct {
             .function_call => .any, // Would need function registry for precise types
             .list => .list,
             .map => .map,
+            .index => .any,
+            .slice => .any,
         };
     }
 

@@ -540,6 +540,16 @@ pub fn containsAggregate(expr: *const ast.Expression) bool {
         .binary => |b| containsAggregate(b.left) or containsAggregate(b.right),
         .unary => |u| containsAggregate(u.operand),
         .property_access => |p| containsAggregate(p.object),
+        .list => |l| for (l.elements) |e| {
+            if (containsAggregate(e)) break true;
+        } else false,
+        .map => |m| for (m.entries) |e| {
+            if (containsAggregate(e.value)) break true;
+        } else false,
+        .index => |i| containsAggregate(i.object) or containsAggregate(i.index),
+        .slice => |s| containsAggregate(s.object) or
+            (if (s.from) |f| containsAggregate(f) else false) or
+            (if (s.to) |t| containsAggregate(t) else false),
         else => false,
     };
 }

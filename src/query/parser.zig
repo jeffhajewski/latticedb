@@ -1499,7 +1499,7 @@ pub const Parser = struct {
             .plus, .dash => .term,
             .star, .slash, .percent => .factor,
             .caret => .power,
-            .dot => .primary,
+            .dot, .lbracket => .primary,
             .kw_is => .equality,
             else => .none,
         };
@@ -1519,6 +1519,12 @@ pub const Parser = struct {
             const prop_name = self.current.text;
             self.advance();
             return self.makePropertyAccess(left, prop_name, loc);
+        }
+
+        // Subscript: list[i], list[a..b], map['key']
+        if (token == .lbracket) {
+            self.advance();
+            return self.parseSubscript(left, loc);
         }
 
         // IS NULL / IS NOT NULL
@@ -1564,6 +1570,33 @@ pub const Parser = struct {
         const right = self.parsePrecedence(next_prec) orelse return null;
 
         return self.makeBinary(left, op, right, loc);
+    }
+
+    /// The rest of `object[...]` after the `[`: an index (`[i]`, `['key']`)
+    /// or a slice (`[a..b]`, `[a..]`, `[..b]`, `[..]`).
+    fn parseSubscript(self: *Self, object: *ast.Expression, loc: ast.SourceLocation) ?*ast.Expression {
+        var from: ?*ast.Expression = null;
+        if (!self.check(.dotdot)) {
+            from = self.parseExpression() orelse return null;
+        }
+        if (self.match(.dotdot)) {
+            var to: ?*ast.Expression = null;
+            if (!self.check(.rbracket)) {
+                to = self.parseExpression() orelse return null;
+            }
+            if (!self.consume(.rbracket, "Expected ']' after slice")) return null;
+            const slice = self.arena.allocator().create(ast.SliceExpr) catch return null;
+            slice.* = .{ .object = object, .from = from, .to = to, .location = loc };
+            const expr = self.arena.allocator().create(ast.Expression) catch return null;
+            expr.* = .{ .slice = slice };
+            return expr;
+        }
+        if (!self.consume(.rbracket, "Expected ']' after index")) return null;
+        const index = self.arena.allocator().create(ast.IndexExpr) catch return null;
+        index.* = .{ .object = object, .index = from.?, .location = loc };
+        const expr = self.arena.allocator().create(ast.Expression) catch return null;
+        expr.* = .{ .index = index };
+        return expr;
     }
 
     fn getNextPrecedence(self: *Self, prec: Precedence) Precedence {

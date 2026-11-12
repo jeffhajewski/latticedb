@@ -2383,20 +2383,10 @@ pub const QueryPlanner = struct {
         }
     };
 
-    /// Finds a variable other than the aggregate-slot ones the rewrite put in.
-    const FreeVariableCheck = struct {
-        found: ?[]const u8 = null,
-
-        pub fn replace(self: *FreeVariableCheck, e: *ast.Expression) ast_util.RewriteError!?*ast.Expression {
-            switch (e.*) {
-                .variable => |v| {
-                    if (!std.mem.startsWith(u8, v.name, AGGREGATE_SLOT_PREFIX) and self.found == null) self.found = v.name;
-                },
-                else => {},
-            }
-            return null;
-        }
-    };
+    /// The aggregate-slot variables the rewrite put in, which are not free.
+    fn isAggregateSlotName(name: []const u8) bool {
+        return std.mem.startsWith(u8, name, AGGREGATE_SLOT_PREFIX);
+    }
 
     const AGGREGATE_SLOT_PREFIX = "  aggregate slot ";
 
@@ -2474,9 +2464,7 @@ pub const QueryPlanner = struct {
             else
                 self.aggregateSlotVariable(slot) catch return PlannerError.OutOfMemory;
 
-            var check = FreeVariableCheck{};
-            _ = ast_util.rewrite(self.allocator, expr, &check) catch return PlannerError.OutOfMemory;
-            if (check.found) |name| {
+            if (ast_util.firstFreeVariable(expr, &isAggregateSlotName)) |name| {
                 self.setPlanDetail(
                     "{s} item `{s}` uses `{s}` outside an aggregate, but `{s}` is not a grouping key; return it as an item of its own or aggregate it",
                     .{ clause_name, item.text, name, name },

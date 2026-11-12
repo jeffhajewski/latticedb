@@ -180,7 +180,8 @@ fn evalResultToSlot(result: EvalResult, allocator: Allocator) Allocator.Error!Sl
         .bytes_val => |v| .{ .property = .{ .bytes_val = v } },
         .bool_val => |v| .{ .property = .{ .bool_val = v } },
         .null_val => .{ .property = .{ .null_val = {} } },
-        .list_val, .vector_val, .map_val => .{ .property = try result.toPropertyValue(allocator) },
+        .vector_val => .{ .property = try result.toPropertyValue(allocator) },
+        .list_val, .map_val => try result.containerToSlotValue(allocator),
         .path_val => |p| .{ .path = p },
     };
 }

@@ -527,3 +527,83 @@ test "lcy: named paths" {
     try expectFailure(db, "MERGE p = (:X)", .parse, "A named path in MERGE is not supported");
     try expectFailure(db, "MATCH p (a) RETURN a", .parse, "Expected '=' after a path variable");
 }
+
+test "lcy: list comprehensions" {
+    const path = "/tmp/lcy_comprehension.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedItems(db);
+
+    try expectResult(db, "RETURN [x IN [1, 2, 3, 4] WHERE x % 2 = 0 | x * 10] AS l", "l\n[20, 40]");
+    try expectResult(db, "RETURN [x IN [1, 2, 3] | x + 1] AS a, [x IN [1, null, 3] WHERE x > 1] AS b, [x IN [1, 2]] AS c", "a | b | c\n[2, 3, 4] | [3] | [1, 2]");
+    try expectResult(db, "RETURN [x IN [] | x] AS a, [x IN null | x] AS b", "a | b\n[] | null");
+    // Nested, with an outer variable, and shadowing one.
+    try expectResult(db, "WITH 10 AS k RETURN [x IN [1, 2] | [y IN [x, x + 1] | y * k]] AS l", "l\n[[10, 20], [20, 30]]");
+    try expectResult(db, "WITH 5 AS x RETURN [x IN [1, 2] | x] AS inner, x AS outer", "inner | outer\n[1, 2] | 5");
+    // Over nodes, into aggregates, and in WHERE.
+    try expectResult(db, "MATCH (i:Item) WITH collect(i) AS items RETURN [i IN items WHERE i.n > 1 | i.name] AS names", "names\n[\"b\", \"c\"]");
+    try expectResult(db, "MATCH (i:Item) RETURN [n IN collect(i.n) WHERE n >= 2] AS big, size([n IN collect(i.n) | n]) AS c", "big | c\n[2, 3] | 3");
+    try expectResult(db, "MATCH (i:Item) WHERE size([c IN [i.name, 'z'] WHERE c = 'b']) > 0 RETURN i.name", "i.name\n\"b\"");
+    // A non-list is a type error.
+    try expectFailure(db, "RETURN [x IN 5 | x] AS l", .execution, "`x IN integer` is not defined");
+    try expectFailure(db, "RETURN [x IN [1] | y] AS l", .semantic, "Variable 'y' is not defined");
+    try expectFailure(db, "RETURN [x IN [1] | x] AS l, x", .semantic, "Variable 'x' is not defined");
+}
+
+test "lcy: all, any, none and single" {
+    const path = "/tmp/lcy_quantifiers.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedItems(db);
+
+    try expectResult(db,
+        \\RETURN all(x IN [1, 2] WHERE x > 0) AS a, any(x IN [1, 2] WHERE x > 1) AS b, none(x IN [1, 2] WHERE x > 5) AS c, single(x IN [1, 2] WHERE x > 1) AS d
+    , "a | b | c | d\ntrue | true | true | true");
+    try expectResult(db,
+        \\RETURN all(x IN [] WHERE false) AS a, any(x IN [] WHERE true) AS b, none(x IN [] WHERE true) AS c, single(x IN [] WHERE true) AS d
+    , "a | b | c | d\ntrue | false | true | false");
+    // Three-valued: a null condition is unknown.
+    try expectResult(db,
+        \\RETURN all(x IN [1, null] WHERE x > 0) AS a, any(x IN [1, null] WHERE x > 0) AS b, any(x IN [0, null] WHERE x > 0) AS c, none(x IN [0, null] WHERE x > 0) AS d, single(x IN [1, null] WHERE x > 0) AS e, all(x IN [0, null] WHERE x > 0) AS f
+    , "a | b | c | d | e | f\nnull | true | null | null | null | false");
+    try expectResult(db, "RETURN all(x IN null WHERE true) AS a, single(x IN [1, 1] WHERE x = 1) AS b", "a | b\nnull | false");
+    try expectResult(db, "MATCH (i:Item) WHERE any(k IN [2, 3] WHERE i.n = k) RETURN i.name ORDER BY i.name", "i.name\n\"b\"\n\"c\"");
+    // The names stay usable: a property, a variable, a function-like call.
+    try expectResult(db, "WITH {all: 1, any: 2} AS m, 3 AS single RETURN m.all, m.any, single", "m.all | m.any | single\n1 | 2 | 3");
+    try expectFailure(db, "RETURN all(x IN [1]) AS a", .parse, "Expected WHERE in all(), any(), none() or single()");
+}
+
+test "lcy: reduce" {
+    const path = "/tmp/lcy_reduce.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedItems(db);
+
+    try expectResult(db, "RETURN reduce(s = 0, x IN [1, 2, 3] | s + x) AS sum, reduce(s = '', x IN ['a', 'b'] | s + x) AS cat", "sum | cat\n6 | \"ab\"");
+    try expectResult(db, "RETURN reduce(s = 7, x IN [] | s + x) AS a, reduce(s = 7, x IN null | s + x) AS b", "a | b\n7 | null");
+    try expectResult(db, "MATCH (i:Item) RETURN reduce(t = 0, n IN collect(i.n) | t + n * n) AS squares", "squares\n14");
+    try expectResult(db, "RETURN reduce(acc = [], x IN [1, 2, 3] | [x] + acc) AS rev", "rev\n[3, 2, 1]");
+    try expectFailure(db, "RETURN reduce(s = 0, s IN [1] | s) AS a", .semantic, "reduce() needs two different names");
+    try expectFailure(db, "RETURN reduce(s = 0, x IN [1]) AS a", .parse, "Expected '|' before the expression in reduce()");
+    try expectFailure(db, "RETURN reduce(s 0, x IN [1] | s) AS a", .parse, "");
+}
+
+test "lcy: nodes and relationships inside lists stay nodes and relationships" {
+    const path = "/tmp/lcy_ref_lists.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedPeople(db);
+
+    // They used to become their ids once a list of them was stored in a
+    // row, so `n.name` on an element was null.
+    try expectResult(db, "MATCH (p:P) WITH collect(p) AS ps UNWIND ps AS q RETURN q.name ORDER BY q.name", "q.name\n\"ann\"\n\"bob\"\n\"cy\"\n\"dee\"");
+    try expectResult(db, "MATCH (p:P {name: 'ann'}) RETURN collect(p) AS ps, [p] AS l, {who: p} AS m", "ps | l | m\n[N] | [N] | {who: N}");
+    try expectResult(db, "MATCH (p:P {name: 'ann'}) WITH {who: p} AS m RETURN m.who.name AS name", "name\n\"ann\"");
+    try expectResult(db,
+        \\MATCH p = (:P {name: 'ann'})-->(:P {name: 'bob'})-->() WITH nodes(p) AS ns, relationships(p) AS rs
+        \\RETURN [n IN ns | n.name] AS names, [r IN rs | r.since] AS since
+    , "names | since\n[\"ann\", \"bob\", \"cy\"] | [2001, 2020]");
+    try expectResult(db, "MATCH (p:P) WITH collect(p) AS ps RETURN DISTINCT size(ps) AS n", "n\n4");
+    // Plain lists are unchanged.
+    try expectResult(db, "WITH [1, 'a'] AS l RETURN l, l[1]", "l | l[1]\n[1, \"a\"] | \"a\"");
+}

@@ -9671,6 +9671,52 @@ pub const Database = struct {
             .edge_ref => |id| .{ .edge_id = id },
             .property => |prop| try self.propertyToResultValue(prop),
             .path => |path| try self.pathToResultValue(path.*),
+            .value => |value| try self.evalToResultValue(value.*),
+        };
+    }
+
+    /// A list or map that holds nodes, relationships or paths, with those
+    /// kept as they are rather than turned into ids.
+    fn evalToResultValue(self: *Self, value: lattice.query.expression.EvalResult) QueryError!ResultValue {
+        const a = self.allocator;
+        return switch (value) {
+            .node_ref => |id| .{ .node_id = id },
+            .edge_ref => |id| .{ .edge_id = id },
+            .path_val => |path| try self.pathToResultValue(path.*),
+            .list_val => |list| blk: {
+                const out = a.alloc(ResultValue, list.len) catch return QueryError.OutOfMemory;
+                var done: usize = 0;
+                errdefer {
+                    for (out[0..done]) |*item| item.deinit(a);
+                    a.free(out);
+                }
+                for (list, out) |item, *o| {
+                    o.* = try self.evalToResultValue(item);
+                    done += 1;
+                }
+                break :blk .{ .list_val = out };
+            },
+            .map_val => |map| blk: {
+                const out = a.alloc(ResultValue.MapEntry, map.len) catch return QueryError.OutOfMemory;
+                var done: usize = 0;
+                errdefer {
+                    for (out[0..done]) |*entry| {
+                        a.free(entry.key);
+                        entry.value.deinit(a);
+                    }
+                    a.free(out);
+                }
+                for (map, out) |entry, *o| {
+                    const key = a.dupe(u8, entry.key) catch return QueryError.OutOfMemory;
+                    o.* = .{ .key = key, .value = self.evalToResultValue(entry.value) catch |err| {
+                        a.free(key);
+                        return err;
+                    } };
+                    done += 1;
+                }
+                break :blk .{ .map_val = out };
+            },
+            else => try self.propertyToResultValue(value.toPropertyValue(a) catch return QueryError.OutOfMemory),
         };
     }
 

@@ -491,8 +491,7 @@ fn resultToSlotValue(result: EvalResult, allocator: Allocator) Allocator.Error!S
         .string_val => |s| .{ .property = .{ .string_val = s } },
         .bytes_val => |b| .{ .property = .{ .bytes_val = b } },
         .vector_val => |v| .{ .property = .{ .vector_val = v } },
-        .list_val => .{ .property = try result.toPropertyValue(allocator) },
-        .map_val => .{ .property = try result.toPropertyValue(allocator) },
+        .list_val, .map_val => try result.containerToSlotValue(allocator),
         .path_val => |p| .{ .path = p },
     };
 }
@@ -561,6 +560,10 @@ pub fn containsAggregate(expr: *const ast.Expression) bool {
             if (c.else_expr) |e| break :blk containsAggregate(e);
             break :blk false;
         },
+        .comprehension => |c| containsAggregate(c.list) or
+            (if (c.where) |w| containsAggregate(w) else false) or
+            (if (c.map) |m| containsAggregate(m) else false),
+        .reduce => |r| containsAggregate(r.initial) or containsAggregate(r.list) or containsAggregate(r.expression),
         else => false,
     };
 }

@@ -164,6 +164,9 @@ pub const SlotValue = union(enum) {
     property: PropertyValue,
     /// A path, in memory that lasts as long as the query.
     path: *const Path,
+    /// A list or map with nodes, relationships or paths in it, which a
+    /// property value cannot hold, in memory that lasts as long as the query.
+    value: *const @import("expression.zig").EvalResult,
 
     const Self = @This();
 

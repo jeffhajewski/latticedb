@@ -815,6 +815,51 @@ pub const SemanticAnalyzer = struct {
                 }
                 if (c.else_expr) |e| self.analyzeExpression(e);
             },
+            .comprehension => |c| {
+                self.analyzeExpression(c.list);
+                const names = [_][]const u8{c.variable};
+                const saved = self.enterLocalScope(&names, c.location) orelse return;
+                defer self.leaveLocalScope(&names, saved);
+                if (c.where) |w| self.analyzeExpression(w);
+                if (c.map) |m| self.analyzeExpression(m);
+            },
+            .reduce => |r| {
+                self.analyzeExpression(r.initial);
+                self.analyzeExpression(r.list);
+                if (std.mem.eql(u8, r.accumulator, r.variable)) {
+                    self.addErrorFmt(.duplicate_variable, r.location, "reduce() needs two different names, but both are '{s}'", .{r.variable});
+                    return;
+                }
+                const names = [_][]const u8{ r.accumulator, r.variable };
+                const saved = self.enterLocalScope(&names, r.location) orelse return;
+                defer self.leaveLocalScope(&names, saved);
+                self.analyzeExpression(r.expression);
+            },
+        }
+    }
+
+    /// Variables of an expression's own (a list comprehension's, reduce's),
+    /// visible only inside part of it. They hide a variable of the same name
+    /// from the query, which comes back afterwards. Null when out of memory.
+    fn enterLocalScope(self: *Self, names: []const []const u8, location: ast.SourceLocation) ?[2]?VariableInfo {
+        var saved: [2]?VariableInfo = .{ null, null };
+        for (names, 0..) |name, i| {
+            saved[i] = self.variables.get(name);
+            self.variables.put(name, .{ .name = name, .kind = .alias, .location = location }) catch {
+                self.addErrorFmt(.internal_error, location, "Failed to register variable '{s}': out of memory", .{name});
+                return null;
+            };
+        }
+        return saved;
+    }
+
+    fn leaveLocalScope(self: *Self, names: []const []const u8, saved: [2]?VariableInfo) void {
+        for (names, 0..) |name, i| {
+            if (saved[i]) |info| {
+                self.variables.put(name, info) catch {};
+            } else {
+                _ = self.variables.remove(name);
+            }
         }
     }
 
@@ -893,6 +938,8 @@ pub const SemanticAnalyzer = struct {
             .index => .any,
             .slice => .any,
             .case_expr => .any,
+            .comprehension => |c| if (c.kind == .list) .list else .boolean,
+            .reduce => .any,
         };
     }
 

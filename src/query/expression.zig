@@ -304,6 +304,57 @@ pub const EvalResult = union(enum) {
         return self == .null_val;
     }
 
+    /// Whether this is a list or map with a node, relationship or path in
+    /// it, at any depth: what converting it to a property value would lose.
+    pub fn holdsReferences(self: Self) bool {
+        return switch (self) {
+            .list_val => |l| for (l) |item| {
+                if (item.isReference() or item.holdsReferences()) break true;
+            } else false,
+            .map_val => |m| for (m) |entry| {
+                if (entry.value.isReference() or entry.value.holdsReferences()) break true;
+            } else false,
+            else => false,
+        };
+    }
+
+    fn isReference(self: Self) bool {
+        return self == .node_ref or self == .edge_ref or self == .path_val;
+    }
+
+    /// The slot value for a list or map: a property value, unless it holds
+    /// nodes, relationships or paths, which are kept as they are.
+    pub fn containerToSlotValue(self: Self, allocator: Allocator) Allocator.Error!SlotValue {
+        if (self.holdsReferences()) {
+            const copy = try allocator.create(EvalResult);
+            copy.* = try self.cloneInto(allocator);
+            return .{ .value = copy };
+        }
+        return .{ .property = try self.toPropertyValue(allocator) };
+    }
+
+    /// A copy whose lists, maps and strings are in `allocator`, so that it
+    /// outlives whatever produced it, as `toPropertyValue` does for values
+    /// without references.
+    fn cloneInto(self: Self, allocator: Allocator) error{OutOfMemory}!EvalResult {
+        return switch (self) {
+            .string_val => |v| .{ .string_val = try allocator.dupe(u8, v) },
+            .bytes_val => |v| .{ .bytes_val = try allocator.dupe(u8, v) },
+            .vector_val => |v| .{ .vector_val = try allocator.dupe(f32, v) },
+            .list_val => |l| blk: {
+                const out = try allocator.alloc(EvalResult, l.len);
+                for (l, out) |item, *o| o.* = try item.cloneInto(allocator);
+                break :blk .{ .list_val = out };
+            },
+            .map_val => |m| blk: {
+                const out = try allocator.alloc(MapEntry, m.len);
+                for (m, out) |entry, *o| o.* = .{ .key = try allocator.dupe(u8, entry.key), .value = try entry.value.cloneInto(allocator) };
+                break :blk .{ .map_val = out };
+            },
+            else => self,
+        };
+    }
+
     /// Check if result is truthy.
     ///
     /// Two-valued: null counts as false here. That is the right reading for a
@@ -585,6 +636,15 @@ pub const ExpressionEvaluator = struct {
     /// The same for the relationship whose property was read last.
     edge_record: NodeRecordCache = .{},
 
+    /// Variables bound by the comprehension or reduce() being evaluated,
+    /// innermost last. They live here rather than in the row, so they take
+    /// no slots; a name here hides the query's variable of that name.
+    locals: [MAX_LOCALS]Local = undefined,
+    locals_len: u8 = 0,
+
+    const MAX_LOCALS = 16;
+    const Local = struct { name: []const u8, value: EvalResult };
+
     const KEY_CACHE_SIZE = 8;
     const KeyCacheEntry = struct { name: []const u8, id: SymbolId };
 
@@ -617,6 +677,8 @@ pub const ExpressionEvaluator = struct {
             .index => |i| self.evaluateIndex(i, row, ctx),
             .slice => |s| self.evaluateSlice(s, row, ctx),
             .case_expr => |c| self.evaluateCase(c, row, ctx),
+            .comprehension => |c| self.evaluateComprehension(c, row, ctx),
+            .reduce => |r| self.evaluateReduce(r, row, ctx),
         };
     }
 
@@ -678,6 +740,101 @@ pub const ExpressionEvaluator = struct {
             EvalError.TypeError => ctx.fail(err, b.location, "Type error: {s} {s} {s} is not defined", .{ typeName(left), symbol, typeName(right) }),
             else => ctx.fail(err, b.location, "{f} {s} {f} failed: {s}", .{ l, symbol, r, @errorName(err) }),
         };
+    }
+
+    /// Bind a comprehension's variable. Paired with `popLocal`.
+    fn pushLocal(
+        self: *Self,
+        name: []const u8,
+        value: EvalResult,
+        ctx: *const ExecutionContext,
+        location: ast.SourceLocation,
+    ) EvalError!void {
+        if (self.locals_len == MAX_LOCALS) {
+            return ctx.fail(EvalError.InvalidOperation, location, "List comprehensions, quantifiers and reduce() can be nested at most {d} variables deep", .{MAX_LOCALS});
+        }
+        self.locals[self.locals_len] = .{ .name = name, .value = value };
+        self.locals_len += 1;
+    }
+
+    fn popLocal(self: *Self) void {
+        self.locals_len -= 1;
+    }
+
+    /// The list a comprehension, quantifier or reduce() iterates over, or
+    /// null when it is null.
+    fn iteratedList(self: *Self, list_expr: *const ast.Expression, row: *const Row, ctx: *const ExecutionContext) EvalError!?[]const EvalResult {
+        const value = try self.evaluate(list_expr, row, ctx);
+        return switch (value) {
+            .list_val => |l| l,
+            .null_val => null,
+            else => ctx.fail(EvalError.TypeError, list_expr.getLocation(), "Type error: `x IN {s}` is not defined; a comprehension, quantifier or reduce() iterates over a list", .{typeName(value)}),
+        };
+    }
+
+    /// `[x IN list WHERE cond | value]`, and the quantifiers over the same
+    /// shape. An element is kept when its condition is true (null is not).
+    /// The quantifiers follow openCypher's three-valued logic: a null
+    /// condition is unknown, so `all` over [true, null] is null, while `any`
+    /// over [true, null] is true. A null list gives null.
+    fn evaluateComprehension(
+        self: *Self,
+        c: *const ast.ListComprehension,
+        row: *const Row,
+        ctx: *const ExecutionContext,
+    ) EvalError!EvalResult {
+        const list = try self.iteratedList(c.list, row, ctx) orelse return .{ .null_val = {} };
+        var kept: std.ArrayListUnmanaged(EvalResult) = .empty;
+        var trues: usize = 0;
+        var unknowns: usize = 0;
+        for (list) |element| {
+            try self.pushLocal(c.variable, element, ctx, c.location);
+            defer self.popLocal();
+            const truth: TruthValue = if (c.where) |w| truthValue(try self.evaluate(w, row, ctx)) else .true_;
+            switch (truth) {
+                .true_ => trues += 1,
+                .unknown => unknowns += 1,
+                .false_ => {},
+            }
+            switch (c.kind) {
+                .list => if (truth == .true_) {
+                    const value = if (c.map) |m| try self.evaluate(m, row, ctx) else element;
+                    kept.append(self.allocator, value) catch return EvalError.OutOfMemory;
+                },
+                // Settled as soon as one element decides it.
+                .any => if (truth == .true_) return .{ .bool_val = true },
+                .none => if (truth == .true_) return .{ .bool_val = false },
+                .all => if (truth == .false_) return .{ .bool_val = false },
+                .single => if (trues > 1) return .{ .bool_val = false },
+            }
+        }
+        return switch (c.kind) {
+            .list => .{ .list_val = kept.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory },
+            .any => if (unknowns > 0) .{ .null_val = {} } else .{ .bool_val = false },
+            .none => if (unknowns > 0) .{ .null_val = {} } else .{ .bool_val = true },
+            .all => if (unknowns > 0) .{ .null_val = {} } else .{ .bool_val = true },
+            .single => if (unknowns > 0) .{ .null_val = {} } else .{ .bool_val = trues == 1 },
+        };
+    }
+
+    /// `reduce(acc = initial, x IN list | expression)`. A null list gives
+    /// null; an empty one gives `initial`.
+    fn evaluateReduce(
+        self: *Self,
+        r: *const ast.ReduceExpr,
+        row: *const Row,
+        ctx: *const ExecutionContext,
+    ) EvalError!EvalResult {
+        var acc = try self.evaluate(r.initial, row, ctx);
+        const list = try self.iteratedList(r.list, row, ctx) orelse return .{ .null_val = {} };
+        for (list) |element| {
+            try self.pushLocal(r.accumulator, acc, ctx, r.location);
+            defer self.popLocal();
+            try self.pushLocal(r.variable, element, ctx, r.location);
+            defer self.popLocal();
+            acc = try self.evaluate(r.expression, row, ctx);
+        }
+        return acc;
     }
 
     /// CASE picks the first branch that applies and evaluates only that
@@ -838,6 +995,13 @@ pub const ExpressionEvaluator = struct {
         row: *const Row,
         ctx: *const ExecutionContext,
     ) EvalError!EvalResult {
+        // A comprehension's own variable first: it hides the query's.
+        var i = self.locals_len;
+        while (i > 0) {
+            i -= 1;
+            if (std.mem.eql(u8, self.locals[i].name, v.name)) return self.locals[i].value;
+        }
+
         // Look up the slot for this variable
         const slot = ctx.getVariableSlot(v.name) orelse
             return ctx.fail(EvalError.UnboundVariable, v.location, "Variable `{s}` is not defined here", .{v.name});
@@ -852,6 +1016,7 @@ pub const ExpressionEvaluator = struct {
             .edge_ref => |id| .{ .edge_ref = id },
             .property => |pv| try EvalResult.fromPropertyValue(pv, self.allocator),
             .path => |p| .{ .path_val = p },
+            .value => |held| held.*,
         };
     }
 
@@ -1776,6 +1941,7 @@ pub const ExpressionEvaluator = struct {
     // ========================================================================
 
     fn arithmeticAdd(self: *Self, left: EvalResult, right: EvalResult) EvalError!EvalResult {
+        if (left == .list_val or right == .list_val) return self.listConcat(left, right);
         return switch (left) {
             .int_val => |l| switch (right) {
                 .int_val => |r| .{ .int_val = try checkedInt(std.math.add(i64, l, r)) },
@@ -1798,6 +1964,18 @@ pub const ExpressionEvaluator = struct {
             },
             else => .{ .null_val = {} },
         };
+    }
+
+    /// `list + list` joins two lists; `list + x` and `x + list` add one
+    /// element at the end or the front. With a null side the result is null.
+    fn listConcat(self: *Self, left: EvalResult, right: EvalResult) EvalError!EvalResult {
+        if (left.isNull() or right.isNull()) return .{ .null_val = {} };
+        const l: []const EvalResult = if (left == .list_val) left.list_val else &.{left};
+        const r: []const EvalResult = if (right == .list_val) right.list_val else &.{right};
+        const out = self.allocator.alloc(EvalResult, l.len + r.len) catch return EvalError.OutOfMemory;
+        @memcpy(out[0..l.len], l);
+        @memcpy(out[l.len..], r);
+        return .{ .list_val = out };
     }
 
     fn arithmeticSub(_: *Self, left: EvalResult, right: EvalResult) EvalError!EvalResult {

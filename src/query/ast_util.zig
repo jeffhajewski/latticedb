@@ -51,6 +51,17 @@ pub fn expressionsEqual(a: *const ast.Expression, b: *const ast.Expression) bool
             }
             break :blk true;
         },
+        .comprehension => |ac| blk: {
+            const bc = b.comprehension;
+            break :blk ac.kind == bc.kind and std.mem.eql(u8, ac.variable, bc.variable) and
+                expressionsEqual(ac.list, bc.list) and optionalEqual(ac.where, bc.where) and optionalEqual(ac.map, bc.map);
+        },
+        .reduce => |ar| blk: {
+            const br = b.reduce;
+            break :blk std.mem.eql(u8, ar.accumulator, br.accumulator) and std.mem.eql(u8, ar.variable, br.variable) and
+                expressionsEqual(ar.initial, br.initial) and expressionsEqual(ar.list, br.list) and
+                expressionsEqual(ar.expression, br.expression);
+        },
     };
 }
 
@@ -164,8 +175,94 @@ pub fn rewrite(allocator: std.mem.Allocator, expr: *ast.Expression, context: any
             copy.branches = branches;
             out.* = .{ .case_expr = copy };
         },
+        // Only the list is the enclosing expression's: the rest sees the
+        // comprehension's own variable, which a replacement made for the
+        // enclosing scope must not reach.
+        .comprehension => |c| {
+            const copy = try allocator.create(ast.ListComprehension);
+            copy.* = c.*;
+            copy.list = try rewrite(allocator, c.list, context);
+            out.* = .{ .comprehension = copy };
+        },
+        .reduce => |r| {
+            const copy = try allocator.create(ast.ReduceExpr);
+            copy.* = r.*;
+            copy.initial = try rewrite(allocator, r.initial, context);
+            copy.list = try rewrite(allocator, r.list, context);
+            out.* = .{ .reduce = copy };
+        },
     }
     return out;
+}
+
+/// The first variable `expr` reads from its enclosing scope, skipping those
+/// `ignore(name)` accepts and those a comprehension or reduce inside it
+/// binds itself.
+pub fn firstFreeVariable(expr: *const ast.Expression, ignore: *const fn ([]const u8) bool) ?[]const u8 {
+    var scope: Scope = .{};
+    return freeIn(expr, ignore, &scope);
+}
+
+const Scope = struct {
+    names: [32][]const u8 = undefined,
+    len: usize = 0,
+
+    fn has(self: *const Scope, name: []const u8) bool {
+        for (self.names[0..self.len]) |n| {
+            if (std.mem.eql(u8, n, name)) return true;
+        }
+        return false;
+    }
+};
+
+fn freeIn(expr: *const ast.Expression, ignore: *const fn ([]const u8) bool, scope: *Scope) ?[]const u8 {
+    switch (expr.*) {
+        .literal, .parameter => return null,
+        .variable => |v| return if (scope.has(v.name) or ignore(v.name)) null else v.name,
+        .property_access => |p| return freeIn(p.object, ignore, scope),
+        .binary => |b| return freeIn(b.left, ignore, scope) orelse freeIn(b.right, ignore, scope),
+        .unary => |u| return freeIn(u.operand, ignore, scope),
+        .function_call => |f| return freeInAll(f.arguments, ignore, scope),
+        .list => |l| return freeInAll(l.elements, ignore, scope),
+        .map => |m| {
+            for (m.entries) |e| if (freeIn(e.value, ignore, scope)) |name| return name;
+            return null;
+        },
+        .index => |i| return freeIn(i.object, ignore, scope) orelse freeIn(i.index, ignore, scope),
+        .slice => |s| return freeIn(s.object, ignore, scope) orelse freeInOptional(s.from, ignore, scope) orelse
+            freeInOptional(s.to, ignore, scope),
+        .case_expr => |c| {
+            if (freeInOptional(c.subject, ignore, scope)) |name| return name;
+            for (c.branches) |b| if (freeIn(b.when, ignore, scope) orelse freeIn(b.then, ignore, scope)) |name| return name;
+            return freeInOptional(c.else_expr, ignore, scope);
+        },
+        .comprehension => |c| {
+            if (freeIn(c.list, ignore, scope)) |name| return name;
+            if (scope.len == scope.names.len) return null;
+            scope.names[scope.len] = c.variable;
+            scope.len += 1;
+            defer scope.len -= 1;
+            return freeInOptional(c.where, ignore, scope) orelse freeInOptional(c.map, ignore, scope);
+        },
+        .reduce => |r| {
+            if (freeIn(r.initial, ignore, scope) orelse freeIn(r.list, ignore, scope)) |name| return name;
+            if (scope.len + 2 > scope.names.len) return null;
+            scope.names[scope.len] = r.accumulator;
+            scope.names[scope.len + 1] = r.variable;
+            scope.len += 2;
+            defer scope.len -= 2;
+            return freeIn(r.expression, ignore, scope);
+        },
+    }
+}
+
+fn freeInAll(exprs: []const *ast.Expression, ignore: *const fn ([]const u8) bool, scope: *Scope) ?[]const u8 {
+    for (exprs) |e| if (freeIn(e, ignore, scope)) |name| return name;
+    return null;
+}
+
+fn freeInOptional(expr: ?*const ast.Expression, ignore: *const fn ([]const u8) bool, scope: *Scope) ?[]const u8 {
+    return freeIn(expr orelse return null, ignore, scope);
 }
 
 fn rewriteAll(allocator: std.mem.Allocator, exprs: []*ast.Expression, context: anytype) RewriteError![]*ast.Expression {

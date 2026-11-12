@@ -168,8 +168,7 @@ fn resultToSlotValue(result: EvalResult, allocator: Allocator) Allocator.Error!S
         .string_val => |s| .{ .property = .{ .string_val = s } },
         .bytes_val => |b| .{ .property = .{ .bytes_val = b } },
         .vector_val => |v| .{ .property = .{ .vector_val = v } },
-        .list_val => .{ .property = try result.toPropertyValue(allocator) },
-        .map_val => .{ .property = try result.toPropertyValue(allocator) },
+        .list_val, .map_val => try result.containerToSlotValue(allocator),
         .path_val => |p| .{ .path = p },
     };
 }

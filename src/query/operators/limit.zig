@@ -516,6 +516,7 @@ fn keyFromSlot(row: *const Row, slot: u8, allocator: Allocator) Allocator.Error!
             else => try EvalResult.fromPropertyValue(pv, allocator),
         },
         .path => |p| .{ .path_val = p },
+        .value => |v| v.*,
     };
 }
 

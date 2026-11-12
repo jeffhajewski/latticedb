@@ -322,6 +322,10 @@ pub const Expression = union(enum) {
     // Conditionals
     case_expr: *CaseExpr,
 
+    // Iteration over a list, with a variable of its own
+    comprehension: *ListComprehension,
+    reduce: *ReduceExpr,
+
     /// Get source location for this expression
     pub fn getLocation(self: *const Expression) SourceLocation {
         return switch (self.*) {
@@ -337,8 +341,38 @@ pub const Expression = union(enum) {
             .index => |i| i.location,
             .slice => |s| s.location,
             .case_expr => |c| c.location,
+            .comprehension => |c| c.location,
+            .reduce => |r| r.location,
         };
     }
+};
+
+/// `[x IN list WHERE cond | value]`, and the quantifiers
+/// `all|any|none|single(x IN list WHERE cond)`, which share its shape.
+/// `variable` is bound to each element in turn, only inside `where` and
+/// `map`.
+pub const ListComprehension = struct {
+    kind: Kind,
+    variable: []const u8,
+    list: *Expression,
+    where: ?*Expression,
+    /// The value for each element kept; the element itself when absent.
+    /// Only a list comprehension has one.
+    map: ?*Expression,
+    location: SourceLocation,
+
+    pub const Kind = enum { list, all, any, none, single };
+};
+
+/// `reduce(acc = initial, x IN list | expression)`: `expression` computes
+/// the next `acc` from it and each element `x` in turn.
+pub const ReduceExpr = struct {
+    accumulator: []const u8,
+    initial: *Expression,
+    variable: []const u8,
+    list: *Expression,
+    expression: *Expression,
+    location: SourceLocation,
 };
 
 /// `object[index]`: a list element by position, or a map entry, node or

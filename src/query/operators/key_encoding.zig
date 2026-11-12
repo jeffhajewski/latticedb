@@ -45,6 +45,10 @@ pub fn appendSlotValueKey(buf: *std.ArrayList(u8), allocator: Allocator, value: 
             try buf.append(allocator, 4);
             try appendPathKey(buf, allocator, p.*);
         },
+        .value => |v| {
+            try buf.append(allocator, 5);
+            try appendEvalResultKey(buf, allocator, v.*);
+        },
     }
 }
 

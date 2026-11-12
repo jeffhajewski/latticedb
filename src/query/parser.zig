@@ -1490,6 +1490,14 @@ pub const Parser = struct {
 
             // Check for function call
             if (self.match(.lparen)) {
+                if (self.checkVariable()) {
+                    if (quantifierKind(name)) |kind| {
+                        if (self.peekType() == .kw_in) return self.parseIteration(kind, loc, .rparen);
+                    }
+                    if (std.ascii.eqlIgnoreCase(name, "reduce") and self.peekType() == .eq) {
+                        return self.parseReduce(loc);
+                    }
+                }
                 return self.parseFunctionCall(name, loc);
             }
 
@@ -1538,6 +1546,11 @@ pub const Parser = struct {
     fn parseListLiteral(self: *Self, loc: ast.SourceLocation) ?*ast.Expression {
         var elements: std.ArrayList(*ast.Expression) = .empty;
 
+        // `[x IN list ...]` is a list comprehension, as openCypher reads it.
+        if (self.checkVariable() and self.peekType() == .kw_in) {
+            return self.parseIteration(.list, loc, .rbracket);
+        }
+
         if (!self.check(.rbracket)) {
             const first = self.parseExpression() orelse return null;
             elements.append(self.arena.allocator(), first) catch return null;
@@ -1560,6 +1573,81 @@ pub const Parser = struct {
 
         const expr = self.arena.allocator().create(ast.Expression) catch return null;
         expr.* = .{ .list = list };
+        return expr;
+    }
+
+    /// The type of the token after the current one.
+    fn peekType(self: *const Self) TokenType {
+        var lexer = self.lexer;
+        return lexer.nextToken().token_type;
+    }
+
+    fn quantifierKind(name: []const u8) ?ast.ListComprehension.Kind {
+        if (std.ascii.eqlIgnoreCase(name, "all")) return .all;
+        if (std.ascii.eqlIgnoreCase(name, "any")) return .any;
+        if (std.ascii.eqlIgnoreCase(name, "none")) return .none;
+        if (std.ascii.eqlIgnoreCase(name, "single")) return .single;
+        return null;
+    }
+
+    /// `x IN list [WHERE cond] [| value]` up to `close`: the inside of a list
+    /// comprehension, or of a quantifier, whose WHERE is required and which
+    /// takes no `| value`.
+    fn parseIteration(self: *Self, kind: ast.ListComprehension.Kind, loc: ast.SourceLocation, close: TokenType) ?*ast.Expression {
+        const variable = self.current.text;
+        self.advance();
+        if (!self.consume(.kw_in, "Expected IN after the variable")) return null;
+        const list = self.parseExpression() orelse return null;
+        var where: ?*ast.Expression = null;
+        if (self.match(.kw_where)) {
+            where = self.parseExpression() orelse return null;
+        } else if (kind != .list) {
+            self.errorAtCurrent("Expected WHERE in all(), any(), none() or single()");
+            return null;
+        }
+        var map: ?*ast.Expression = null;
+        if (kind == .list and self.match(.pipe)) {
+            map = self.parseExpression() orelse return null;
+        }
+        if (!self.consume(close, if (close == .rbracket) "Expected ']' to close the list comprehension" else "Expected ')' after the condition")) return null;
+
+        const node = self.arena.allocator().create(ast.ListComprehension) catch return null;
+        node.* = .{ .kind = kind, .variable = variable, .list = list, .where = where, .map = map, .location = loc };
+        const expr = self.arena.allocator().create(ast.Expression) catch return null;
+        expr.* = .{ .comprehension = node };
+        return expr;
+    }
+
+    /// `acc = initial, x IN list | expression)`, after `reduce(`.
+    fn parseReduce(self: *Self, loc: ast.SourceLocation) ?*ast.Expression {
+        const accumulator = self.current.text;
+        self.advance();
+        if (!self.consume(.eq, "Expected '=' after the accumulator in reduce()")) return null;
+        const initial = self.parseExpression() orelse return null;
+        if (!self.consume(.comma, "Expected ',' after the initial value in reduce()")) return null;
+        if (!self.checkVariable()) {
+            self.errorAtCurrent("Expected a variable in reduce()");
+            return null;
+        }
+        const variable = self.current.text;
+        self.advance();
+        if (!self.consume(.kw_in, "Expected IN after the variable")) return null;
+        const list = self.parseExpression() orelse return null;
+        if (!self.consume(.pipe, "Expected '|' before the expression in reduce()")) return null;
+        const expression = self.parseExpression() orelse return null;
+        if (!self.consume(.rparen, "Expected ')' to close reduce()")) return null;
+
+        const node = self.arena.allocator().create(ast.ReduceExpr) catch return null;
+        node.* = .{
+            .accumulator = accumulator,
+            .initial = initial,
+            .variable = variable,
+            .list = list,
+            .expression = expression,
+            .location = loc,
+        };
+        const expr = self.arena.allocator().create(ast.Expression) catch return null;
+        expr.* = .{ .reduce = node };
         return expr;
     }
 

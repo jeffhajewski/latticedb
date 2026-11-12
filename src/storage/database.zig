@@ -8091,6 +8091,79 @@ pub const Database = struct {
         return null;
     }
 
+    /// One property of an edge as `txn` sees it, decoded into `allocator`;
+    /// null when the edge does not exist or lacks the property.
+    ///
+    /// The edge counterpart of getNodePropertyByKeyInTxn, for the query
+    /// engine's per-row reads: getEdgePropertyByIdInTxn copies the whole
+    /// edge, twice, and resolves the key name again, to return one value.
+    pub fn getEdgePropertyByKeyInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        edge_id: EdgeId,
+        key_id: symbols_mod.SymbolId,
+        allocator: Allocator,
+        cache: ?*node_mod.RecordCache,
+    ) DatabaseError!?PropertyValue {
+        if (txn) |t| {
+            if (self.getTxnOverlay(t)) |overlay| {
+                if (overlay.edge_states.getPtr(edge_id)) |state| {
+                    if (!state.exists) return null;
+                    for (state.properties) |prop| {
+                        if (prop.key_id == key_id) return prop.value.clone(allocator) catch return DatabaseError.OutOfMemory;
+                    }
+                    return null;
+                }
+            }
+        }
+        return self.edge_store.getProperty(edge_id, key_id, allocator, cache) catch |err| switch (err) {
+            edge_mod.EdgeError.NotFound => null,
+            edge_mod.EdgeError.OutOfMemory => DatabaseError.OutOfMemory,
+            else => DatabaseError.IoError,
+        };
+    }
+
+    /// An edge's type as `txn` sees it, without reading its properties;
+    /// null when the edge does not exist.
+    pub fn getEdgeTypeInTxn(self: *Self, txn: ?*Transaction, edge_id: EdgeId) DatabaseError!?symbols_mod.SymbolId {
+        if (txn) |t| {
+            if (self.getTxnOverlay(t)) |overlay| {
+                if (overlay.edge_states.getPtr(edge_id)) |state| {
+                    return if (state.exists) state.edge_type else null;
+                }
+            }
+        }
+        const ref = self.edge_store.getRefById(edge_id) catch |err| return switch (err) {
+            edge_mod.EdgeError.NotFound => null,
+            edge_mod.EdgeError.OutOfMemory => DatabaseError.OutOfMemory,
+            else => DatabaseError.IoError,
+        };
+        return ref.edge_type;
+    }
+
+    /// A node's label ids as `txn` sees it, copied into `allocator`, without
+    /// reading its properties; null when the node does not exist.
+    pub fn getNodeLabelIdsInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        node_id: NodeId,
+        allocator: Allocator,
+    ) DatabaseError!?[]symbols_mod.SymbolId {
+        if (txn) |t| {
+            if (self.getTxnOverlay(t)) |overlay| {
+                if (overlay.node_states.getPtr(node_id)) |state| {
+                    if (!state.exists) return null;
+                    return allocator.dupe(symbols_mod.SymbolId, state.labels) catch return DatabaseError.OutOfMemory;
+                }
+            }
+        }
+        return self.node_store.getLabelIds(node_id, allocator) catch |err| switch (err) {
+            node_mod.NodeError.NotFound => null,
+            node_mod.NodeError.OutOfMemory => DatabaseError.OutOfMemory,
+            else => DatabaseError.IoError,
+        };
+    }
+
     /// Get all properties for an edge by stable edge ID.
     /// Returns an allocated slice that the caller must free with freePropertyEntries.
     pub fn getEdgeProperties(self: *Self, edge_id: EdgeId) DatabaseError![]PropertyEntry {

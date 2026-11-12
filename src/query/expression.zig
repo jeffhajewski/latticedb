@@ -559,6 +559,8 @@ pub const ExpressionEvaluator = struct {
     /// `n.a, n.b, n.c` on one row finds `n` in the B-tree once. Used only
     /// when the query does not write (`ExecutionContext.stable_reads`).
     node_record: NodeRecordCache = .{},
+    /// The same for the relationship whose property was read last.
+    edge_record: NodeRecordCache = .{},
 
     const KEY_CACHE_SIZE = 8;
     const KeyCacheEntry = struct { name: []const u8, id: SymbolId };
@@ -747,14 +749,17 @@ pub const ExpressionEvaluator = struct {
         if (obj == .edge_ref) {
             const edge_id = obj.edge_ref;
 
-            // Get the database from context
             const database = ctx.database orelse return .{ .null_val = {} };
+            const symbol_table = ctx.symbol_table orelse return .{ .null_val = {} };
 
-            var prop = (database.getEdgePropertyByIdInTxn(ctx.txn, edge_id, pa.property) catch |err|
-                return readFailure(ctx, err, pa.location, "reading property '{s}' of relationship {d}", .{ pa.property, edge_id })) orelse return .{ .null_val = {} };
-            defer prop.deinit(ctx.allocator);
-
-            return EvalResult.fromPropertyValue(prop, self.allocator);
+            // As for a node: resolve the key once, decode only its value.
+            const key_id = (self.propertyKeyId(symbol_table, pa.property) catch |err|
+                return readFailure(ctx, err, pa.location, "looking up property key '{s}'", .{pa.property})) orelse return .{ .null_val = {} };
+            const record_cache = if (ctx.stable_reads) &self.edge_record else null;
+            const found = database.getEdgePropertyByKeyInTxn(ctx.txn, edge_id, key_id, self.allocator, record_cache) catch |err|
+                return readFailure(ctx, err, pa.location, "reading property '{s}' of relationship {d}", .{ pa.property, edge_id });
+            const value = found orelse return .{ .null_val = {} };
+            return evalResultFromOwned(value, self.allocator);
         }
 
         // A map's entry by key. A key the map does not have reads as null,
@@ -1236,10 +1241,10 @@ pub const ExpressionEvaluator = struct {
                 .edge_ref => |edge_id| blk: {
                     const symbol_table = ctx.symbol_table orelse break :blk .{ .null_val = {} };
                     const database = ctx.database orelse break :blk .{ .null_val = {} };
-                    var edge = (database.getEdgeInTxn(ctx.txn, edge_id) catch |err|
+                    // The type alone, not the relationship's properties.
+                    const edge_type = (database.getEdgeTypeInTxn(ctx.txn, edge_id) catch |err|
                         return readFailure(ctx, err, f.location, "reading relationship {d}", .{edge_id})) orelse break :blk .{ .null_val = {} };
-                    defer edge.deinit(ctx.allocator);
-                    const resolved = symbol_table.resolve(edge.edge_type) catch |err|
+                    const resolved = symbol_table.resolve(edge_type) catch |err|
                         return readFailure(ctx, err, f.location, "resolving the type of relationship {d}", .{edge_id});
                     defer symbol_table.freeString(resolved);
                     const owned = self.allocator.dupe(u8, resolved) catch return EvalError.OutOfMemory;
@@ -1257,11 +1262,12 @@ pub const ExpressionEvaluator = struct {
                 .node_ref => |node_id| blk: {
                     const database = ctx.database orelse break :blk .{ .null_val = {} };
                     const symbol_table = ctx.symbol_table orelse break :blk .{ .null_val = {} };
-                    var node = (database.getNodeInTxn(ctx.txn, node_id) catch |err|
+                    // The labels alone, not the node's properties.
+                    const label_ids = (database.getNodeLabelIdsInTxn(ctx.txn, node_id, self.allocator) catch |err|
                         return readFailure(ctx, err, f.location, "reading node {d}", .{node_id})) orelse break :blk .{ .null_val = {} };
-                    defer node.deinit(ctx.allocator);
+                    defer self.allocator.free(label_ids);
                     var label_list: std.ArrayListUnmanaged(EvalResult) = .empty;
-                    for (node.labels) |label_id| {
+                    for (label_ids) |label_id| {
                         const resolved = symbol_table.resolve(label_id) catch |err|
                             return readFailure(ctx, err, f.location, "resolving label {d} of node {d}", .{ label_id, node_id });
                         defer symbol_table.freeString(resolved);

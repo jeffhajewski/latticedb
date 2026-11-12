@@ -237,6 +237,18 @@ pub const NodeStore = struct {
         return decodeProperty(allocator, serialized, key_id);
     }
 
+    /// A node's label ids, copied into `allocator`, without decoding its
+    /// properties.
+    pub fn getLabelIds(self: *Self, node_id: NodeId, allocator: Allocator) NodeError![]SymbolId {
+        var key_buf: [8]u8 = undefined;
+        std.mem.writeInt(u64, &key_buf, node_id, .little);
+
+        const serialized = (self.tree.get(&key_buf) catch |err| return mapBTreeError(err)) orelse
+            return NodeError.NotFound;
+        defer self.tree.freeValue(serialized);
+        return decodeLabelIds(allocator, serialized);
+    }
+
     /// `getProperty` through a cache of the last record read, so reading
     /// several properties of one node finds it in the B-tree once.
     ///
@@ -513,14 +525,39 @@ fn findSerializedProperty(allocator: Allocator, data: []const u8, key_id: Symbol
 
     const num_labels = try reader.readInt(u16, .little);
     try skipBytes(&stream, @as(usize, num_labels) * 2);
+    return findInPropertyList(allocator, &stream, key_id);
+}
 
+/// Decode the value of property `key_id` from a serialized property list
+/// (a u16 count, then key and value pairs), as both node and edge records
+/// end with one. Null when the list has no such key.
+pub fn findStoredProperty(allocator: Allocator, list: []const u8, key_id: SymbolId) NodeError!?PropertyValue {
+    var stream = @import("compat").fixedBufferStream(list);
+    return findInPropertyList(allocator, &stream, key_id) catch |err| switch (err) {
+        error.OutOfMemory => NodeError.OutOfMemory,
+        else => NodeError.InvalidData,
+    };
+}
+
+fn findInPropertyList(allocator: Allocator, stream: anytype, key_id: SymbolId) !?PropertyValue {
+    const reader = stream.reader();
     const num_props = try reader.readInt(u16, .little);
     for (0..num_props) |_| {
         const prop_key = try reader.readInt(u16, .little);
         if (prop_key == key_id) return try deserializeValue(allocator, reader);
-        try skipValue(&stream);
+        try skipValue(stream);
     }
     return null;
+}
+
+/// The label ids of a serialized node, copied into `allocator`.
+fn decodeLabelIds(allocator: Allocator, data: []const u8) NodeError![]SymbolId {
+    if (data.len < 2) return NodeError.InvalidData;
+    const count = std.mem.readInt(u16, data[0..2], .little);
+    if (data.len < 2 + @as(usize, count) * 2) return NodeError.InvalidData;
+    const ids = allocator.alloc(SymbolId, count) catch return NodeError.OutOfMemory;
+    for (ids, 0..) |*id, i| id.* = std.mem.readInt(u16, data[2 + i * 2 ..][0..2], .little);
+    return ids;
 }
 
 fn skipBytes(stream: anytype, n: usize) error{EndOfStream}!void {

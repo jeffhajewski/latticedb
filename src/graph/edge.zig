@@ -454,6 +454,58 @@ pub const EdgeStore = struct {
         };
     }
 
+    /// An edge's endpoints and type, without decoding its properties.
+    pub fn getRefById(self: *Self, edge_id: EdgeId) EdgeError!EdgeRef {
+        const id_key = edgeIdToKey(edge_id);
+        var value = (self.edge_id_index.getBorrowed(&id_key) catch |err| return mapBTreeError(err)) orelse
+            return EdgeError.NotFound;
+        defer value.release();
+        if (value.bytes.len == 0) return EdgeError.NotFound;
+        return deserializeEdgeRef(edge_id, value.bytes) catch EdgeError.InvalidData;
+    }
+
+    /// One property of an edge, decoded into `allocator`, or null when the
+    /// edge has no property `key_id`. `getById` decodes and copies every
+    /// property; a query reading `r.weight` needs one.
+    ///
+    /// `cache`, when given, keeps the record read last, so `r.a, r.b` on one
+    /// row finds `r` in the B-tree once. Its buffer comes from `allocator`,
+    /// which must outlive it, and it must not be used across a write.
+    pub fn getProperty(
+        self: *Self,
+        edge_id: EdgeId,
+        key_id: SymbolId,
+        allocator: Allocator,
+        cache: ?*node_mod.RecordCache,
+    ) EdgeError!?PropertyValue {
+        if (cache) |c| {
+            if (c.node_id != edge_id) {
+                c.node_id = null;
+                const id_key = edgeIdToKey(edge_id);
+                var value = (self.edge_id_index.getBorrowed(&id_key) catch |err| return mapBTreeError(err)) orelse
+                    return EdgeError.NotFound;
+                defer value.release();
+                if (value.bytes.len == 0) return EdgeError.NotFound;
+                if (value.bytes.len > c.buffer.len) {
+                    const new_len = @max(value.bytes.len, 2 * c.buffer.len, 256);
+                    allocator.free(c.buffer);
+                    c.buffer = &.{};
+                    c.buffer = allocator.alloc(u8, new_len) catch return EdgeError.OutOfMemory;
+                }
+                @memcpy(c.buffer[0..value.bytes.len], value.bytes);
+                c.len = value.bytes.len;
+                c.node_id = edge_id;
+            }
+            return decodeEdgeProperty(allocator, c.buffer[0..c.len], key_id);
+        }
+        const id_key = edgeIdToKey(edge_id);
+        var value = (self.edge_id_index.getBorrowed(&id_key) catch |err| return mapBTreeError(err)) orelse
+            return EdgeError.NotFound;
+        defer value.release();
+        if (value.bytes.len == 0) return EdgeError.NotFound;
+        return decodeEdgeProperty(allocator, value.bytes, key_id);
+    }
+
     /// Lightweight iterator over every edge identity, each returned once
     /// rather than once per traversal direction. It walks the edge ID index
     /// in key order, and those keys are little-endian, so the order is
@@ -1396,6 +1448,17 @@ fn deserializeEdge(
         .target = target,
         .edge_type = edge_type,
         .properties = properties,
+    };
+}
+
+/// Bytes before an edge record's property list: source, target and type.
+const EDGE_REF_LEN = 18;
+
+fn decodeEdgeProperty(allocator: Allocator, data: []const u8, key_id: SymbolId) EdgeError!?PropertyValue {
+    if (data.len < EDGE_REF_LEN) return EdgeError.InvalidData;
+    return node_mod.findStoredProperty(allocator, data[EDGE_REF_LEN..], key_id) catch |err| switch (err) {
+        error.OutOfMemory => EdgeError.OutOfMemory,
+        else => EdgeError.InvalidData,
     };
 }
 

@@ -25,6 +25,22 @@ fn cleanupTestDb(db: *Database, path: []const u8) void {
     @import("compat").fs.cwd().deleteFile(path) catch {};
 }
 
+/// A database with a log, which explicit transactions need.
+fn openTxnTestDb(comptime path: []const u8) !*Database {
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    return try Database.open(std.testing.allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = true },
+    });
+}
+
+fn cleanupTxnTestDb(db: *Database, comptime path: []const u8) void {
+    db.close();
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+}
+
 fn run(db: *Database, cypher: []const u8) !void {
     var result = try db.query(cypher);
     result.deinit();
@@ -413,6 +429,42 @@ test "lqs: a null argument makes a function null" {
     for (others.rows[0].values) |value| try std.testing.expect(value == .null_val);
     // A wrong type that is not null is still an error.
     try expectFailure(db, "RETURN substring('abc', 'x')", .execution, "TypeError", "Type error: substring(string, string) is not defined; substring takes (string, integer[, integer])");
+}
+
+// ============================================================================
+// Reads of relationships and pending edges
+// ============================================================================
+
+test "lqs: relationship properties, types and labels read as the transaction sees them" {
+    const path = "/tmp/lattice_lqs_edge_reads.ltdb";
+    const db = try openTxnTestDb(path);
+    defer cleanupTxnTestDb(db, path);
+    try run(db, "CREATE (:A {k: 1})-[:R {w: 1.5, note: 'kept', tags: ['x']}]->(:B {k: 2})");
+
+    var plain = try db.query("MATCH (:A)-[r:R]->(b) RETURN r.w, r.note, r.tags, r.missing, type(r), labels(b)");
+    defer plain.deinit();
+    try std.testing.expectEqual(@as(f64, 1.5), plain.rows[0].values[0].float_val);
+    try std.testing.expectEqualStrings("kept", plain.rows[0].values[1].string_val);
+    try std.testing.expectEqualStrings("x", plain.rows[0].values[2].list_val[0].string_val);
+    try std.testing.expect(plain.rows[0].values[3] == .null_val);
+    try std.testing.expectEqualStrings("R", plain.rows[0].values[4].string_val);
+    try std.testing.expectEqualStrings("B", plain.rows[0].values[5].list_val[0].string_val);
+
+    var txn = try db.beginTransaction(.read_write);
+    defer db.abortTransaction(&txn) catch {};
+    var changed = try db.queryInTxn(&txn, "MATCH (:A)-[r:R]->(b) SET r.w = 2, b:C REMOVE r.note " ++
+        "CREATE (b)-[s:S {w: 7}]->(b) RETURN r.w, r.note, type(s), s.w, labels(b)");
+    defer changed.deinit();
+    try std.testing.expectEqual(@as(i64, 2), changed.rows[0].values[0].int_val);
+    try std.testing.expect(changed.rows[0].values[1] == .null_val);
+    try std.testing.expectEqualStrings("S", changed.rows[0].values[2].string_val);
+    try std.testing.expectEqual(@as(i64, 7), changed.rows[0].values[3].int_val);
+    try std.testing.expectEqual(@as(usize, 2), changed.rows[0].values[4].list_val.len);
+    // A relationship deleted in the transaction reads as nothing.
+    var deleted = try db.queryInTxn(&txn, "MATCH (:A)-[r:R]->() DELETE r RETURN r.w, type(r)");
+    defer deleted.deinit();
+    try std.testing.expect(deleted.rows[0].values[0] == .null_val);
+    try std.testing.expect(deleted.rows[0].values[1] == .null_val);
 }
 
 // ============================================================================

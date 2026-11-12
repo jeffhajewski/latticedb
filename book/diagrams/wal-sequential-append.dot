@@ -33,7 +33,7 @@ digraph wal_sequential_append {
     sw [shape=plaintext style="" fillcolor="transparent"
         label="one write position"
         fontname="Helvetica,Arial,sans-serif" fontsize=10 fontcolor="#2f7d32"]
-    LOG [label="log  log  log  log  …  ▸" fillcolor="#eaf5ea" color="#2f7d32"]
+    LOG [label="log  log  log  log  …  →" fillcolor="#eaf5ea" color="#2f7d32"]
     sw -> LOG [color="#2f7d32"]
   }
 }

@@ -432,3 +432,131 @@ test "buffer_pool: flush all writes dirty pages" {
         try std.testing.expectEqual(@as(usize, 0), stats.dirty_frames);
     }
 }
+
+// ============================================================================
+// Contract: a page found in the table is the page, not what the frame held
+// ============================================================================
+
+/// A memory filesystem whose reads of one range stall until let through.
+const GatedVfs = struct {
+    memory: lattice.storage.memory_vfs.MemoryVfs,
+    gate_offset: u64 = std.math.maxInt(u64),
+    open_gate: std.atomic.Value(bool) = .init(true),
+    reader_waiting: std.atomic.Value(bool) = .init(false),
+    inner: vfs.File = undefined,
+
+    fn vfsOf(self: *GatedVfs) vfs.Vfs {
+        return .{ .ptr = self, .vtable = &vtable };
+    }
+
+    const vtable = vfs.Vfs.VTable{ .open = open, .delete = delete, .exists = exists };
+
+    fn open(ptr: *anyopaque, path: []const u8, flags: vfs.OpenFlags) vfs.VfsError!vfs.File {
+        const self: *GatedVfs = @ptrCast(@alignCast(ptr));
+        self.inner = try self.memory.vfs().open(path, flags);
+        return .{ .ptr = self, .vtable = &file_vtable };
+    }
+    fn delete(ptr: *anyopaque, path: []const u8) vfs.VfsError!void {
+        const self: *GatedVfs = @ptrCast(@alignCast(ptr));
+        return self.memory.vfs().delete(path);
+    }
+    fn exists(ptr: *anyopaque, path: []const u8) bool {
+        const self: *GatedVfs = @ptrCast(@alignCast(ptr));
+        return self.memory.vfs().exists(path);
+    }
+
+    const file_vtable = vfs.File.VTable{
+        .read = read,
+        .write = write,
+        .sync = sync,
+        .truncate = truncate,
+        .size = size,
+        .close = close,
+        .lock = lock,
+        .tryLock = tryLock,
+        .unlock = unlock,
+    };
+    fn me(ptr: *anyopaque) *GatedVfs {
+        return @ptrCast(@alignCast(ptr));
+    }
+    fn read(ptr: *anyopaque, offset: u64, buf: []u8) vfs.VfsError!usize {
+        const self = me(ptr);
+        if (offset == self.gate_offset) {
+            self.reader_waiting.store(true, .release);
+            while (!self.open_gate.load(.acquire)) std.atomic.spinLoopHint();
+        }
+        return self.inner.read(offset, buf);
+    }
+    fn write(ptr: *anyopaque, offset: u64, data: []const u8) vfs.VfsError!void {
+        return me(ptr).inner.write(offset, data);
+    }
+    fn sync(ptr: *anyopaque) vfs.VfsError!void {
+        return me(ptr).inner.sync();
+    }
+    fn truncate(ptr: *anyopaque, n: u64) vfs.VfsError!void {
+        return me(ptr).inner.truncate(n);
+    }
+    fn size(ptr: *anyopaque) vfs.VfsError!u64 {
+        return me(ptr).inner.size();
+    }
+    fn close(ptr: *anyopaque) void {
+        me(ptr).inner.close();
+    }
+    fn lock(ptr: *anyopaque, mode: vfs.LockMode) vfs.VfsError!void {
+        return me(ptr).inner.lock(mode);
+    }
+    fn tryLock(ptr: *anyopaque, mode: vfs.LockMode) vfs.VfsError!bool {
+        return me(ptr).inner.tryLock(mode);
+    }
+    fn unlock(ptr: *anyopaque) void {
+        me(ptr).inner.unlock();
+    }
+};
+
+test "buffer_pool: ldur a fetch of a page still being read waits for it" {
+    const allocator = std.testing.allocator;
+    var gated = GatedVfs{ .memory = lattice.storage.memory_vfs.MemoryVfs.init(allocator) };
+    defer gated.memory.deinit();
+
+    var pm = try PageManager.init(allocator, gated.vfsOf(), "db", .{ .create = true });
+    defer pm.deinit();
+    const page_id = try pm.allocatePage();
+    var buf: [4096]u8 align(4096) = undefined;
+    @memset(&buf, 0x5A);
+    try pm.writePage(page_id, &buf);
+
+    var bp = try BufferPool.init(allocator, &pm, 16 * 4096);
+    defer bp.deinit();
+
+    gated.gate_offset = @as(u64, page_id) * 4096;
+    gated.open_gate.store(false, .release);
+
+    const Fetch = struct {
+        fn run(pool: *BufferPool, id: u32, seen: *std.atomic.Value(u8), done: *std.atomic.Value(bool)) void {
+            const frame = pool.fetchPage(id, .shared) catch return;
+            seen.store(frame.data[100], .release);
+            pool.unpinPage(frame, false);
+            done.store(true, .release);
+        }
+    };
+    var first_seen = std.atomic.Value(u8).init(0);
+    var first_done = std.atomic.Value(bool).init(false);
+    const first = try std.Thread.spawn(.{}, Fetch.run, .{ &bp, page_id, &first_seen, &first_done });
+    while (!gated.reader_waiting.load(.acquire)) std.atomic.spinLoopHint();
+
+    // The first fetch is reading the page. A second one finds it in the
+    // table, and must not take the frame's bytes until they are the page's.
+    var second_seen = std.atomic.Value(u8).init(0);
+    var second_done = std.atomic.Value(bool).init(false);
+    const second = try std.Thread.spawn(.{}, Fetch.run, .{ &bp, page_id, &second_seen, &second_done });
+    @import("compat").sleep(50 * std.time.ns_per_ms);
+    const returned_early = second_done.load(.acquire);
+
+    gated.open_gate.store(true, .release);
+    first.join();
+    second.join();
+
+    try std.testing.expect(!returned_early);
+    try std.testing.expectEqual(@as(u8, 0x5A), first_seen.load(.acquire));
+    try std.testing.expectEqual(@as(u8, 0x5A), second_seen.load(.acquire));
+}

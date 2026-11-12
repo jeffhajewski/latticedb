@@ -192,7 +192,7 @@ pub const BufferPool = struct {
     /// Fetch a page into the buffer pool and pin it.
     /// The page is latched according to the specified mode.
     /// Caller must call unpinPage when done with the page.
-    pub fn fetchPage(self: *Self, page_id: PageId, mode: LatchMode) !*BufferFrame {
+    pub fn fetchPage(self: *Self, page_id: PageId, mode: LatchMode) BufferPoolError!*BufferFrame {
         if (page_id == NULL_PAGE) {
             return BufferPoolError.InvalidPageId;
         }
@@ -211,8 +211,14 @@ pub const BufferPool = struct {
 
             self.mutex.unlock();
 
-            // Acquire latch based on mode (outside mutex to avoid deadlock)
+            // Acquire latch based on mode (outside mutex to avoid deadlock).
+            // A fetch still reading the page from disk holds it exclusively,
+            // so this waits for the page to be in the frame.
             self.acquireLatch(frame, mode);
+            if (frame.page_id != page_id or mode == .none) {
+                @branchHint(.unlikely);
+                return self.settleHit(frame, page_id, mode);
+            }
 
             return frame;
         }
@@ -234,16 +240,28 @@ pub const BufferPool = struct {
             return BufferPoolError.IoError;
         };
 
+        // The page is in the table before its bytes are in the frame, and a
+        // fetch of the same page that found it there read whatever the frame
+        // held before. The frame is latched exclusively until the read is
+        // done, and such a fetch waits on the latch. Nobody else holds the
+        // latch of a frame that was free or evicted, so this takes it at once.
+        const latched = frame.latch.tryAcquireExclusive();
+        std.debug.assert(latched);
+
         self.mutex.unlock();
 
         // 4. Read page from disk (outside mutex)
         self.pm.readPage(page_id, frame.data) catch |err| {
-            // On read failure, clean up
+            // On read failure, clean up. A fetch waiting on the latch has
+            // pinned the frame too; it sees the frame no longer holds the
+            // page and lets go, and the frame is then reclaimed like any
+            // other unpinned one.
             self.mutex.lock();
             _ = self.page_table.remove(page_id);
             frame.page_id = NULL_PAGE;
-            _ = frame.pin_count.fetchSub(1, .monotonic);
-            self.returnFrame(frame_id);
+            const others = frame.pin_count.fetchSub(1, .monotonic) - 1;
+            frame.latch.releaseExclusive();
+            if (others == 0) self.returnFrame(frame_id);
             self.mutex.unlock();
 
             return switch (err) {
@@ -252,9 +270,33 @@ pub const BufferPool = struct {
             };
         };
 
-        // 5. Acquire latch
-        self.acquireLatch(frame, mode);
+        // 5. Keep the latch the caller asked for.
+        switch (mode) {
+            .exclusive => {},
+            .shared => {
+                frame.latch.releaseExclusive();
+                self.acquireLatch(frame, .shared);
+            },
+            .none => frame.latch.releaseExclusive(),
+        }
 
+        return frame;
+    }
+
+    /// The rare ends of a fetch that found its page in the table: the read
+    /// that was bringing the page in failed, so the frame no longer holds it;
+    /// or the caller takes no latch, and so has not yet waited for a read
+    /// still in progress.
+    fn settleHit(self: *Self, frame: *BufferFrame, page_id: PageId, mode: LatchMode) BufferPoolError!*BufferFrame {
+        if (mode == .none) {
+            self.acquireLatch(frame, .shared);
+            frame.latch.releaseShared();
+        }
+        if (frame.page_id != page_id) {
+            self.releaseLatch(frame);
+            _ = frame.pin_count.fetchSub(1, .monotonic);
+            return self.fetchPage(page_id, mode);
+        }
         return frame;
     }
 

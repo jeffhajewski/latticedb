@@ -235,3 +235,69 @@ test "a committed change to a node that is not there and is not deleted later re
     defer image.deinit(allocator);
     try expectOpenRefused(allocator, &image);
 }
+
+test "a transaction cut off while its large value was being logged does not block later opens" {
+    const allocator = std.testing.allocator;
+    var fs = FaultVfs.init(allocator);
+    defer fs.deinit();
+
+    var before: NodeId = undefined;
+    var image = blk: {
+        var db = try open(allocator, &fs, true);
+        defer db.close();
+        var txn = try db.beginTransaction(.read_write);
+        before = try db.createNode(&txn, &.{"A"});
+        try db.commitTransaction(&txn);
+
+        // A value logged as a record in fragments over several frames.
+        const big = try allocator.alloc(u8, 30_000);
+        defer allocator.free(big);
+        @memset(big, 'x');
+        const start = fs.traceLen();
+        txn = try db.beginTransaction(.read_write);
+        const id = try db.createNode(&txn, &.{"A"});
+        try db.setNodeProperty(&txn, id, "s", .{ .string_val = big });
+        try db.commitTransaction(&txn);
+
+        // The process dies after the first two frames of fragments reached
+        // the log, long before the commit record.
+        const wal_inode = fs.names.get(WAL_PATH).?;
+        var frames: usize = 0;
+        var cut: ?usize = null;
+        for (fs.trace.items[start..], start..) |op, i| switch (op) {
+            .write => |w| if (w.inode == wal_inode and w.offset >= wal_mod.WAL_HEADER_SIZE) {
+                frames += 1;
+                if (frames == 3) cut = i;
+            },
+            else => {},
+        };
+        var model = fault.DiskModel.init(allocator);
+        defer model.deinit();
+        try model.applyAll(fs.trace.items[0..cut.?]);
+        var prng = std.Random.DefaultPrng.init(0);
+        break :blk try model.crash(prng.random(), .everything);
+    };
+    defer image.deinit(allocator);
+
+    var crashed = try FaultVfs.initFromImage(allocator, &image);
+    defer crashed.deinit();
+    var after: NodeId = undefined;
+    {
+        // The open finds the cut-off transaction and leaves it out; the log
+        // is not emptied, and the next commit is logged after it.
+        var db = try open(allocator, &crashed, false);
+        defer db.close();
+        try std.testing.expectEqual(@as(u64, 1), db.nodeCount());
+        var txn = try db.beginTransaction(.read_write);
+        after = try db.createNode(&txn, &.{"A"});
+        try db.commitTransaction(&txn);
+    }
+
+    // Replaying that log met the cut-off value's fragments followed by
+    // another transaction's records, and refused the database.
+    var db = try open(allocator, &crashed, false);
+    defer db.close();
+    try std.testing.expect(try db.nodeExists(before));
+    try std.testing.expect(try db.nodeExists(after));
+    try std.testing.expectEqual(@as(u64, 2), db.nodeCount());
+}

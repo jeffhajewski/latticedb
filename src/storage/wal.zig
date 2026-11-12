@@ -876,19 +876,24 @@ pub const WalIterator = struct {
     /// Get the next record
     pub fn next(self: *Self, payload_buf: []u8) WalError!?WalRecord {
         var physical_buf: [MAX_RECORD_PAYLOAD_SIZE]u8 = undefined;
-        const physical = (try self.nextPhysical(&physical_buf)) orelse return null;
-        if (physical.header.record_type != .large_fragment) {
-            if (physical.payload.len > payload_buf.len) return WalError.RecordTooLarge;
-            if (physical.payload.len > 0) {
-                @memcpy(payload_buf[0..physical.payload.len], physical.payload);
+        while (true) {
+            const physical = (try self.nextPhysical(&physical_buf)) orelse return null;
+            if (physical.header.record_type != .large_fragment) {
+                if (physical.payload.len > payload_buf.len) return WalError.RecordTooLarge;
+                if (physical.payload.len > 0) {
+                    @memcpy(payload_buf[0..physical.payload.len], physical.payload);
+                }
+                return .{
+                    .header = physical.header,
+                    .payload = payload_buf[0..physical.payload.len],
+                };
             }
-            return .{
-                .header = physical.header,
-                .payload = payload_buf[0..physical.payload.len],
+
+            return self.reassembleLargeRecord(physical, &physical_buf, payload_buf) catch |err| switch (err) {
+                error.AbandonedRecord => continue,
+                else => |e| return e,
             };
         }
-
-        return try self.reassembleLargeRecord(physical, &physical_buf, payload_buf);
     }
 
     /// Get the next logical record with an owned payload.
@@ -896,31 +901,38 @@ pub const WalIterator = struct {
         const physical_buf = allocator.alloc(u8, self.wal.maxRecordPayloadSize()) catch return WalError.IoError;
         defer allocator.free(physical_buf);
 
-        const physical = (try self.nextPhysical(physical_buf)) orelse return null;
-        if (physical.header.record_type != .large_fragment) {
-            const owned = allocator.alloc(u8, physical.payload.len) catch return WalError.IoError;
-            if (physical.payload.len > 0) @memcpy(owned, physical.payload);
+        while (true) {
+            const physical = (try self.nextPhysical(physical_buf)) orelse return null;
+            if (physical.header.record_type != .large_fragment) {
+                const owned = allocator.alloc(u8, physical.payload.len) catch return WalError.IoError;
+                if (physical.payload.len > 0) @memcpy(owned, physical.payload);
+                return .{
+                    .header = physical.header,
+                    .payload = owned,
+                    .allocator = allocator,
+                };
+            }
+
+            const first = try parseLargeFragmentPayload(physical.payload);
+            const owned = allocator.alloc(u8, first.total_len) catch return WalError.IoError;
+
+            const logical = (self.reassembleLargeRecordInto(physical, first, physical_buf, owned) catch |err| {
+                allocator.free(owned);
+                switch (err) {
+                    error.AbandonedRecord => continue,
+                    else => |e| return e,
+                }
+            }) orelse {
+                allocator.free(owned);
+                return null;
+            };
+
             return .{
-                .header = physical.header,
+                .header = logical,
                 .payload = owned,
                 .allocator = allocator,
             };
         }
-
-        const first = try parseLargeFragmentPayload(physical.payload);
-        const owned = allocator.alloc(u8, first.total_len) catch return WalError.IoError;
-        errdefer allocator.free(owned);
-
-        const logical = (try self.reassembleLargeRecordInto(physical, first, physical_buf, owned)) orelse {
-            allocator.free(owned);
-            return null;
-        };
-
-        return .{
-            .header = logical,
-            .payload = owned,
-            .allocator = allocator,
-        };
     }
 
     fn nextPhysical(self: *Self, payload_buf: []u8) WalError!?WalRecord {
@@ -976,12 +988,18 @@ pub const WalIterator = struct {
         }
     }
 
+    /// A large record whose fragments stop before its last one, with another
+    /// transaction's records after it. That is a transaction a crash cut
+    /// off while its record was being written, followed by what was logged
+    /// after the restart. It has no commit record, so it is skipped.
+    const ReassembleError = WalError || error{AbandonedRecord};
+
     fn reassembleLargeRecord(
         self: *Self,
         first_record: WalRecord,
         physical_buf: []u8,
         payload_buf: []u8,
-    ) WalError!?WalRecord {
+    ) ReassembleError!?WalRecord {
         const first = try parseLargeFragmentPayload(first_record.payload);
         if (first.total_len > payload_buf.len) return WalError.RecordTooLarge;
         const header = (try self.reassembleLargeRecordInto(
@@ -1002,7 +1020,7 @@ pub const WalIterator = struct {
         first: LargeFragmentInfo,
         physical_buf: []u8,
         output: []u8,
-    ) WalError!?WalRecordHeader {
+    ) ReassembleError!?WalRecordHeader {
         if (first.fragment_index != 0 or first.fragment_offset != 0) return WalError.CorruptedFrame;
         if (first.total_len != output.len) return WalError.RecordTooLarge;
 
@@ -1020,9 +1038,15 @@ pub const WalIterator = struct {
         var last_lsn = first_record.header.lsn;
 
         while (expected_index < first.fragment_count) : (expected_index += 1) {
+            const resume_frame = self.current_frame;
+            const resume_offset = self.current_offset;
             const next_record = (try self.nextPhysical(physical_buf)) orelse return null;
+            if (next_record.header.txn_id != first_record.header.txn_id) {
+                // Read the record that broke the chain again, as itself.
+                try self.rewind(resume_frame, resume_offset);
+                return error.AbandonedRecord;
+            }
             if (next_record.header.record_type != .large_fragment) return WalError.CorruptedFrame;
-            if (next_record.header.txn_id != first_record.header.txn_id) return WalError.CorruptedFrame;
 
             const fragment = try parseLargeFragmentPayload(next_record.payload);
             if (fragment.record_type != first.record_type or
@@ -1045,6 +1069,16 @@ pub const WalIterator = struct {
         if (expected_offset != first.total_len) return WalError.CorruptedFrame;
         logical_header.lsn = last_lsn;
         return logical_header;
+    }
+
+    /// Go back to a position taken from `current_frame` and
+    /// `current_offset`, reloading the frame if the iterator has moved on.
+    fn rewind(self: *Self, frame: u64, offset: usize) WalError!void {
+        if (self.current_frame != frame) {
+            self.current_frame = frame - 1;
+            if (!try self.loadNextFrame()) return WalError.CorruptedFrame;
+        }
+        self.current_offset = offset;
     }
 
     /// Load the next frame

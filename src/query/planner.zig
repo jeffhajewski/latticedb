@@ -3105,15 +3105,40 @@ pub const QueryPlanner = struct {
     const AggregateRewrite = struct {
         planner: *QueryPlanner,
         calls: *std.ArrayList(AggregateCall),
-        keys: []const aggregate_ops.GroupKey,
+        keys: *std.ArrayList(aggregate_ops.GroupKey),
         aggs: *std.ArrayList(aggregate_ops.AggregateItem),
         /// Slots of the aggregate's output row already taken.
         used: *u16,
         clause_name: []const u8,
 
         pub fn replace(self: *AggregateRewrite, e: *ast.Expression) ast_util.RewriteError!?*ast.Expression {
-            for (self.keys) |key| {
+            for (self.keys.items) |key| {
                 if (ast_util.expressionsEqual(key.expr, e)) return try self.planner.aggregateSlotVariable(key.output_slot);
+            }
+            // A subquery beside an aggregate, `count(m) + COUNT { (n)-->() }`,
+            // reads only grouping keys, so its value is one per group: it is
+            // computed before grouping, as one more key.
+            if (e.* == .subquery) {
+                const Ignore = struct {
+                    rewrite: *AggregateRewrite,
+                    pub fn skip(ig: @This(), name: []const u8) bool {
+                        for (ig.rewrite.keys.items) |key| {
+                            if (key.expr.* == .variable and std.mem.eql(u8, key.expr.variable.name, name)) return true;
+                        }
+                        // Bound inside the subquery, not around it.
+                        return !ig.rewrite.planner.bindings.contains(name);
+                    }
+                };
+                if (ast_util.firstFreeVariableWith(e, Ignore{ .rewrite = self })) |name| {
+                    self.planner.setPlanDetail(
+                        "{s} uses `{s}` in {s} beside an aggregate, but `{s}` is not a grouping key; return it as an item of its own",
+                        .{ self.clause_name, name, e.subquery.name(), name },
+                    );
+                    return error.Refused;
+                }
+                const slot = try self.freeSlot();
+                try self.keys.append(self.planner.allocator, .{ .expr = e, .output_slot = slot });
+                return try self.planner.aggregateSlotVariable(slot);
             }
             const call = switch (e.*) {
                 .function_call => |f| f,
@@ -3133,6 +3158,19 @@ pub const QueryPlanner = struct {
                     return error.Refused;
                 }
             }
+            const slot = try self.freeSlot();
+            try self.aggs.append(self.planner.allocator, .{
+                .func = info.func,
+                .expr = info.arg,
+                .output_slot = slot,
+                .distinct = info.distinct,
+            });
+            try self.calls.append(self.planner.allocator, .{ .expr = e, .slot = slot });
+            return try self.planner.aggregateSlotVariable(slot);
+        }
+
+        /// A slot of the aggregate's output row no key or aggregate holds.
+        fn freeSlot(self: *AggregateRewrite) ast_util.RewriteError!u8 {
             const free = all_slots & ~self.used.*;
             if (free == 0) {
                 self.planner.setPlanDetail(
@@ -3143,14 +3181,7 @@ pub const QueryPlanner = struct {
             }
             const slot: u8 = @ctz(free);
             self.used.* |= slotBit(slot);
-            try self.aggs.append(self.planner.allocator, .{
-                .func = info.func,
-                .expr = info.arg,
-                .output_slot = slot,
-                .distinct = info.distinct,
-            });
-            try self.calls.append(self.planner.allocator, .{ .expr = e, .slot = slot });
-            return try self.planner.aggregateSlotVariable(slot);
+            return slot;
         }
     };
 
@@ -3219,7 +3250,7 @@ pub const QueryPlanner = struct {
         var rewriter = AggregateRewrite{
             .planner = self,
             .calls = &calls,
-            .keys = keys.items,
+            .keys = &keys,
             .aggs = &aggs,
             .used = &used,
             .clause_name = clause_name,
@@ -3300,6 +3331,27 @@ pub const QueryPlanner = struct {
         return expr;
     }
 
+    /// Substitute, in an ORDER BY item that runs before projection, each
+    /// RETURN alias it uses with the expression the alias stands for:
+    /// `ORDER BY toUpper(nm)` after `RETURN n.name AS nm`.
+    fn substituteOrderAliases(self: *Self, expr: *ast.Expression, ret: ?*const ast.ReturnClause) PlannerError!*ast.Expression {
+        const clause = ret orelse return expr;
+        if (expr.* == .variable) return resolveOrderAlias(expr, ret);
+        const Substitute = struct {
+            clause: *const ast.ReturnClause,
+            pub fn replace(sub: *@This(), e: *ast.Expression) ast_util.RewriteError!?*ast.Expression {
+                if (e.* != .variable) return null;
+                for (sub.clause.items) |item| {
+                    const alias = item.alias orelse continue;
+                    if (std.mem.eql(u8, alias, e.variable.name)) return item.expression;
+                }
+                return null;
+            }
+        };
+        var substitute = Substitute{ .clause = clause };
+        return ast_util.rewrite(self.allocator, expr, &substitute) catch PlannerError.OutOfMemory;
+    }
+
     /// Does this RETURN clause aggregate?
     fn returnAggregates(ret: *const ast.ReturnClause) bool {
         for (ret.items) |item| {
@@ -3354,6 +3406,18 @@ pub const QueryPlanner = struct {
         };
     }
 
+    /// Replaces what names a RETURN column, its alias or an item written
+    /// the same way, with that column of the projected row.
+    const OutputColumnRewrite = struct {
+        planner: *QueryPlanner,
+        ret: *const ast.ReturnClause,
+
+        pub fn replace(self: *OutputColumnRewrite, e: *ast.Expression) ast_util.RewriteError!?*ast.Expression {
+            const slot = outputSlotFor(e, self.ret) orelse return null;
+            return try self.planner.aggregateSlotVariable(slot);
+        }
+    };
+
     /// Plan an ORDER BY that runs after projection, sorting by output column.
     fn planOrderByOnOutput(
         self: *Self,
@@ -3370,19 +3434,33 @@ pub const QueryPlanner = struct {
         errdefer self.allocator.free(sort_items);
 
         for (order.items, 0..) |item, i| {
-            // Naming something the projection does not produce is an error
-            // rather than something to sort arbitrarily by. Silently returning
-            // rows in an unhelpful order is how this went unnoticed before.
-            const slot = outputSlotFor(item.expression, ret) orelse {
-                self.allocator.free(sort_items);
-                self.setPlanDetail("After an aggregating RETURN, ORDER BY can only name a returned column or its alias; ORDER BY item {d} is neither", .{i + 1});
+            if (outputSlotFor(item.expression, ret)) |slot| {
+                sort_items[i] = .{
+                    .expr = item.expression,
+                    .descending = item.descending,
+                    .nulls = item.nulls,
+                    .slot = slot,
+                };
+                continue;
+            }
+            // An expression over returned columns, `ORDER BY m.name` after
+            // `RETURN n AS m, count(*)`: each column it uses is read from
+            // the projected row. Anything else has no value after grouping,
+            // and naming it is an error rather than an arbitrary order.
+            var rewriter = OutputColumnRewrite{ .planner = self, .ret = ret };
+            const expr = ast_util.rewrite(self.allocator, item.expression, &rewriter) catch return PlannerError.OutOfMemory;
+            if (aggregate_ops.containsAggregate(expr)) {
+                self.setPlanDetail("ORDER BY item {d} aggregates, but the RETURN does not return that aggregate; return it and order by its alias", .{i + 1});
                 return PlannerError.InvalidQuery;
-            };
+            }
+            if (ast_util.firstFreeVariable(expr, &isAggregateSlotName)) |name| {
+                self.setPlanDetail("ORDER BY item {d} uses `{s}`, which the aggregating RETURN does not return; return it, or order by a returned column", .{ i + 1, name });
+                return PlannerError.InvalidQuery;
+            }
             sort_items[i] = .{
-                .expr = item.expression,
+                .expr = expr,
                 .descending = item.descending,
                 .nulls = item.nulls,
-                .slot = slot,
             };
         }
 
@@ -3410,7 +3488,7 @@ pub const QueryPlanner = struct {
 
         for (order.items, 0..) |item, i| {
             sort_items[i] = .{
-                .expr = resolveOrderAlias(item.expression, ret),
+                .expr = try self.substituteOrderAliases(item.expression, ret),
                 .descending = item.descending,
                 .nulls = item.nulls,
             };

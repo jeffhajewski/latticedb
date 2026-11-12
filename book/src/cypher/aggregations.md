@@ -90,6 +90,28 @@ ORDER BY papers DESC
 
 Here `p.name` is the grouping key, and `count(doc)` and `collect(doc.title)` are computed per group.
 
+A `COUNT { }`, `EXISTS { }`, `COLLECT { }` or pattern comprehension beside an
+aggregate may read the grouping keys: `RETURN p, count(f) + COUNT { (p)<--() }`
+groups by `p` and counts for each group. A subquery that reads a variable that
+is not a grouping key fails before the query runs, as `RETURN p.name, count(f) +
+COUNT { (p)<--() }` does, since grouping by `p.name` leaves no single `p`.
+
+Aggregates belong in `RETURN` and `WITH`. In `WHERE`, `SET`, `UNWIND`,
+`FOREACH`, `MATCH` properties, `SKIP` or `LIMIT` there are no rows to
+aggregate, and the query fails before it runs:
+
+```text
+collect() aggregates rows, which FOREACH cannot do; aggregate in a WITH first, as in WITH collect(n.v) AS vs
+```
+
+Aggregate in a `WITH` and use the result:
+
+```cypher
+MATCH (p:Person)
+WITH collect(p.name) AS names
+FOREACH (name IN names | CREATE (:Tag {name: name}))
+```
+
 ## Filtering Aggregated Results
 
 Use `WITH` to filter on aggregated values:

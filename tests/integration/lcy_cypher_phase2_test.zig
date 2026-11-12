@@ -846,6 +846,93 @@ test "lcy: search predicates inside CALL { } and after WITH *" {
 }
 
 // ============================================================================
+// Planning errors that say what is wrong, and what they used to refuse
+// ============================================================================
+
+test "lcy: ORDER BY after aggregation takes expressions over returned columns" {
+    const path = "/tmp/lcy_order_after_aggregation.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedTriangle(db);
+
+    try expectResult(db, "MATCH (p:P)-->(q) RETURN p AS m, count(q) AS c ORDER BY m.n DESC", "m | c\nN | 1\nN | 2");
+    try expectResult(db, "MATCH (p:P)-->(q) RETURN p.n AS nm, count(q) AS c ORDER BY toUpper(nm) DESC", "nm | c\n\"b\" | 1\n\"a\" | 2");
+    try expectResult(db, "MATCH (p:P)-->(q) RETURN p.n AS nm, count(q) AS c ORDER BY c * -1, nm", "nm | c\n\"a\" | 2\n\"b\" | 1");
+    try expectResult(db, "MATCH (p:P)-->(q) RETURN p.n, count(q) AS c ORDER BY p.n DESC", "p.n | c\n\"b\" | 1\n\"a\" | 2");
+    try expectResult(db, "MATCH (p:P)-->(q) RETURN p, count(q) AS c ORDER BY p.n DESC", "p | c\nN | 1\nN | 2");
+    // Before aggregation too: an alias inside an expression.
+    try expectResult(db, "MATCH (p:P) RETURN p.n AS nm ORDER BY toUpper(nm) DESC", "nm\n\"c\"\n\"b\"\n\"a\"");
+    try expectResult(db, "MATCH (p:P) RETURN DISTINCT p.n AS nm ORDER BY toUpper(nm) DESC LIMIT 1", "nm\n\"c\"");
+    // What the RETURN does not keep has no value after grouping.
+    try expectFailure(db, "MATCH (p:P) RETURN count(p) AS c ORDER BY p.n", .plan, "ORDER BY item 1 uses `p`, which the aggregating RETURN does not return; return it, or order by a returned column");
+    try expectFailure(db, "MATCH (p:P) RETURN p.n AS nm, count(*) AS c ORDER BY nm, sum(p.v)", .plan, "ORDER BY item 2 aggregates, but the RETURN does not return that aggregate");
+}
+
+test "lcy: a subquery beside an aggregate reads grouping keys" {
+    const path = "/tmp/lcy_subquery_beside_aggregate.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedTriangle(db);
+
+    try expectResult(db, "MATCH (p:P)-->(q) RETURN p.n AS nm, p, count(q) + COUNT { (p)<--() } AS c ORDER BY nm", "nm | p | c\n\"a\" | N | 2\n\"b\" | N | 2");
+    try expectResult(db, "MATCH (p:P)-->(q) RETURN p, collect(q.n) + COLLECT { MATCH (p)<--(r) RETURN r.n } AS c ORDER BY c[0]", "p | c\nN | [\"b\", \"c\"]\nN | [\"c\", \"a\"]");
+    // A grouping key that is a property does not make its variable one.
+    try expectFailure(db, "MATCH (p:P) RETURN p.n, count(p) + COUNT { (p)-->() } AS c", .plan, "RETURN uses `p` in COUNT { ... } beside an aggregate, but `p` is not a grouping key");
+    try expectFailure(db, "MATCH (p:P) RETURN p.n, count(*) * size([(p)-->(x) | x]) AS c", .plan, "in a pattern comprehension beside an aggregate");
+}
+
+test "lcy: aggregates where they cannot aggregate, and their argument counts" {
+    const path = "/tmp/lcy_misplaced_aggregates.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedTriangle(db);
+
+    // These failed at run time as an unknown function, or not at all over
+    // an empty graph.
+    try expectFailure(db, "MATCH (p:P) FOREACH (k IN collect(p.n) | CREATE (:Q {k: k}))", .semantic, "collect() aggregates rows, which FOREACH cannot do; aggregate in a WITH first");
+    try expectFailure(db, "MATCH (p:P) WHERE count(p) > 1 RETURN p", .semantic, "count() aggregates rows, which WHERE cannot do");
+    try expectFailure(db, "MATCH (p:P) WITH p, count(*) AS c WHERE count(*) > 1 RETURN p", .semantic, "which WHERE cannot do");
+    try expectFailure(db, "MATCH (p:P) SET p.c = count(*)", .semantic, "which SET cannot do");
+    try expectFailure(db, "UNWIND collect(1) AS x RETURN x", .semantic, "which UNWIND cannot do");
+    try expectFailure(db, "MATCH (p:P {n: max(1)}) RETURN p", .semantic, "which MATCH cannot do");
+    try expectFailure(db, "RETURN 1 LIMIT count(*)", .semantic, "which LIMIT cannot do");
+    // Where they can.
+    try expectResult(db, "MATCH (p:P) WITH collect(p.n) AS ns FOREACH (k IN ns | CREATE (:Q {k: k})) RETURN size(ns) AS s", "s\n3");
+    try expectResult(db, "MATCH (p:P) RETURN [x IN collect(p.n) WHERE x <> 'a'] AS l", "l\n[\"b\", \"c\"]");
+    // Argument counts, found before the query runs.
+    try expectFailure(db, "RETURN count(1, 2)", .semantic, "count takes one argument or *, but was given 2 arguments");
+    try expectFailure(db, "RETURN sum()", .semantic, "sum takes one argument, but was given 0 arguments");
+    try expectFailure(db, "RETURN collect(1, 2)", .semantic, "collect takes one argument, but was given 2 arguments");
+}
+
+test "lcy: a pattern is a test, not a value" {
+    const path = "/tmp/lcy_pattern_not_value.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedTriangle(db);
+
+    const message = "A pattern, or EXISTS { ... }, is a test, true or false, not a value; COUNT { ... } counts its matches";
+    try expectFailure(db, "MATCH (p:P) RETURN (p)-->() - 1 AS x", .semantic, message);
+    try expectFailure(db, "MATCH (p:P) RETURN 1 + (p)-->() AS x", .semantic, message);
+    try expectFailure(db, "MATCH (p:P) RETURN EXISTS { (p)-->() } * 2 AS x", .semantic, message);
+    try expectFailure(db, "RETURN 'a' - 1 AS x", .semantic, "Operator not valid for these types: string and integer");
+    // As a test it works, and COUNT gives the number.
+    try expectResult(db, "MATCH (p:P) RETURN p.n, (p)-->() AS out, COUNT { (p)-->() } - 1 AS less ORDER BY p.n", "p.n | out | less\n\"a\" | true | 1\n\"b\" | true | 0\n\"c\" | false | -1");
+    try expectFailure(db, "MATCH (a)-(b) RETURN a", .parse, "Expected '->' or '-' to end relationship");
+}
+
+test "lcy: YIELD * brings the procedure's columns into scope" {
+    const path = "/tmp/lcy_yield_star.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedTriangle(db);
+
+    try expectResult(db, "CALL db.labels() YIELD *", "label\n\"P\"");
+    // It was "RETURN * is not allowed when there are no variables in scope".
+    try expectFailure(db, "CALL db.labels() YIELD * RETURN *", .plan, "YIELD * is only allowed when CALL db.labels() is the whole query");
+}
+
+// ============================================================================
 // Small fixes
 // ============================================================================
 

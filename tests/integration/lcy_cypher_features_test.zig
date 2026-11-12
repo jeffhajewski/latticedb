@@ -286,7 +286,7 @@ test "lcy: aggregates in expressions that cannot be planned say why" {
     try expectFailure(db, "MATCH (i:Item) RETURN i.n + count(*)", .plan, "RETURN item `i.n + count(*)` uses `i` outside an aggregate, but `i` is not a grouping key");
     try expectFailure(db, "MATCH (i:Item) RETURN count(count(*)) + 1", .plan, "count() cannot take an aggregate as its argument");
     try expectFailure(db, "MATCH (i:Item) RETURN sum(count(*))", .plan, "sum() cannot take an aggregate as its argument");
-    try expectFailure(db, "MATCH (i:Item) RETURN sum(i.n, 2) + 1", .plan, "sum() takes one argument");
+    try expectFailure(db, "MATCH (i:Item) RETURN sum(i.n, 2) + 1", .semantic, "sum takes one argument, but was given 2 arguments");
     try expectFailure(db, "MATCH (i:Item) WITH count(*) + i.n AS x RETURN x", .plan, "WITH item `count(*) + i.n` uses `i`");
     // More aggregates and keys than a row has slots.
     try expectFailure(db,

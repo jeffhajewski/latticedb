@@ -7,6 +7,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const ast = @import("ast.zig");
+const procedures = @import("procedures.zig");
 const lexer_mod = @import("lexer.zig");
 const Lexer = lexer_mod.Lexer;
 
@@ -273,6 +274,9 @@ pub const Parser = struct {
     /// of a comprehension, reduce() and FOREACH. A label test there reads
     /// `x:A | ...` as the end of the expression; `x:(A|B)` still works.
     pipe_ends_expression: bool = false,
+    /// Set while a pattern is read inside an expression, where a '-' after
+    /// it can be a minus.
+    pattern_in_expression: bool = false,
 
     const Self = @This();
 
@@ -837,6 +841,8 @@ pub const Parser = struct {
             },
             .call => |c| if (c.yields) |yields| {
                 for (yields) |y| self.addToScope(y.alias orelse y.column);
+            } else if (c.yield_all) {
+                if (procedures.Procedure.find(c.procedure)) |p| for (p.columns()) |column| self.addToScope(column);
             },
             // What the subquery returns joins the scope.
             .call_subquery => |sq| {
@@ -1478,8 +1484,17 @@ pub const Parser = struct {
         return true;
     }
 
+    /// Whether a relationship starts here. In an expression, a '-' not
+    /// followed by '[', '-' or '->' is a minus after a pattern, as in
+    /// `(n)-->() - 1`.
     fn checkEdgeStart(self: *Self) bool {
-        return self.check(.dash) or self.check(.arrow_left);
+        if (self.check(.arrow_left)) return true;
+        if (!self.check(.dash)) return false;
+        if (!self.pattern_in_expression) return true;
+        return switch (self.peekType()) {
+            .lbracket, .dash, .arrow_right => true,
+            else => false,
+        };
     }
 
     fn parseNodePattern(self: *Self) ?ast.NodePattern {
@@ -2156,6 +2171,9 @@ pub const Parser = struct {
     /// the pattern also has to be followed by WHERE or `|`.
     fn tryPattern(self: *Self, comprehension: bool) ?ast.Pattern {
         const saved = self.checkpoint();
+        const saved_flag = self.pattern_in_expression;
+        self.pattern_in_expression = true;
+        defer self.pattern_in_expression = saved_flag;
         if (self.parsePattern()) |pattern| {
             const follows = !comprehension or self.check(.kw_where) or self.check(.pipe);
             if (!self.had_error and pattern.elements.len > 1 and follows) return pattern;

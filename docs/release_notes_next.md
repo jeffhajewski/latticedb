@@ -749,6 +749,23 @@ with relationships is one range probe, under 1 µs.
   `LIMIT` and `SKIP` bounding the vector search, as `LIMIT` alone did. The
   answer is HNSW's approximate top k; before, every match under the threshold was
   sorted.
+- `ORDER BY` after an aggregating `RETURN` takes expressions over the returned
+  columns (`RETURN p, count(f) AS c ORDER BY p.name, c * -1`), and an alias
+  works inside an expression (`RETURN n.name AS nm ORDER BY toUpper(nm)`, which
+  failed with "Variable `nm` is not defined here"). Ordering by what the `RETURN`
+  does not keep fails before the query runs and says which item.
+- A `COUNT { }`, `EXISTS { }`, `COLLECT { }` or pattern comprehension beside an
+  aggregate reads the grouping keys; one that reads a variable that is not a key
+  fails and names it.
+- An aggregate in `WHERE`, `SET`, `UNWIND`, `FOREACH`, `MATCH` properties, `SKIP`
+  or `LIMIT` fails before the query runs with "collect() aggregates rows, which
+  FOREACH cannot do; aggregate in a WITH first". It failed as an unknown function
+  when a row reached it, or not at all over no rows. `count(1, 2)` and `sum()`
+  fail before the query runs too.
+- A pattern used as a number, as in `(n)-->() - 1`, fails with a message that
+  points to `COUNT { }`, where it said "Operator not valid for these types".
+- `CALL db.labels() YIELD * RETURN *` fails with "YIELD * is only allowed when
+  CALL db.labels() is the whole query", where it said no variables were in scope.
 
 **Full-text search**
 

@@ -133,6 +133,21 @@ the query fails.
 With a following `LIMIT`, the sort keeps only the rows it can return, so
 `ORDER BY ... LIMIT 10` does not hold every row in memory.
 
+`ORDER BY` sees both the variables of the query and the columns the `RETURN`
+names, so an alias can be used inside an expression:
+`RETURN n.name AS name ORDER BY toUpper(name)`. After an aggregating `RETURN`
+only the returned columns are left, and expressions over them:
+
+```cypher
+MATCH (p:Person)-[:KNOWS]->(f)
+RETURN p, count(f) AS friends
+ORDER BY p.name, friends * -1
+```
+
+`ORDER BY f.name` there fails before the query runs, since `f` is not returned
+and has no single value per group; so does ordering by an aggregate the
+`RETURN` does not return.
+
 ## Pagination
 
 Use `LIMIT` and `SKIP` for pagination:

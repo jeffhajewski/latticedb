@@ -10,6 +10,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const ast = @import("ast.zig");
+const procedures = @import("procedures.zig");
 const ast_util = @import("ast_util.zig");
 const parser_types = @import("parser.zig");
 const expression = @import("expression.zig");
@@ -51,6 +52,8 @@ pub const ErrorCode = enum {
     unknown_function,
     /// A call with more or fewer arguments than the function takes.
     wrong_argument_count,
+    /// An aggregate where there are no rows to aggregate over: WHERE, SET...
+    invalid_aggregate,
     internal_error,
 };
 
@@ -104,6 +107,10 @@ pub const SemanticAnalyzer = struct {
     /// variable inside one may not take a name from them that it did not
     /// import.
     enclosing: std.ArrayList(Enclosing) = .empty,
+    /// The clause being analysed when it is one where an aggregate has no
+    /// rows to aggregate over (WHERE, SET, UNWIND, ...); null in RETURN,
+    /// WITH and ORDER BY, where the planner places them.
+    aggregates_refused_in: ?[]const u8 = null,
 
     const Enclosing = struct {
         variables: *const std.StringHashMap(VariableInfo),
@@ -155,8 +162,25 @@ pub const SemanticAnalyzer = struct {
     }
 
     fn analyzeClauses(self: *Self, clauses: []const ast.Clause) void {
+        const saved_refusal = self.aggregates_refused_in;
+        defer self.aggregates_refused_in = saved_refusal;
         // Process clauses in order
         for (clauses, 0..) |clause, i| {
+            self.aggregates_refused_in = switch (clause) {
+                .match => "MATCH",
+                .where => "WHERE",
+                .create => "CREATE",
+                .delete => "DELETE",
+                .set => "SET",
+                .remove => "REMOVE",
+                .merge => "MERGE",
+                .unwind => "UNWIND",
+                .foreach => "FOREACH",
+                .limit => "LIMIT",
+                .skip => "SKIP",
+                .call => "CALL",
+                .return_, .with, .order_by, .call_subquery => null,
+            };
             switch (clause) {
                 .match => |m| self.analyzeMatchClause(m),
                 .where => |w| {
@@ -178,9 +202,11 @@ pub const SemanticAnalyzer = struct {
                 .call_subquery => |sq| self.analyzeCallSubquery(sq),
                 .call => |c| {
                     for (c.arguments) |arg| self.analyzeExpression(arg);
-                    if (c.yields) |items| for (items) |item| {
-                        self.registerVariable(item.alias orelse item.column, .alias, item.location);
-                    };
+                    if (c.yields) |items| {
+                        for (items) |item| self.registerVariable(item.alias orelse item.column, .alias, item.location);
+                    } else if (c.yield_all) {
+                        if (procedures.Procedure.find(c.procedure)) |p| for (p.columns()) |column| self.registerVariable(column, .alias, c.location);
+                    }
                 },
             }
         }
@@ -580,6 +606,9 @@ pub const SemanticAnalyzer = struct {
 
         // WHERE after WITH must be validated against projected scope.
         if (clause.where) |condition| {
+            const saved_refusal = self.aggregates_refused_in;
+            defer self.aggregates_refused_in = saved_refusal;
+            self.aggregates_refused_in = "WHERE";
             self.analyzeExpression(condition);
         }
     }
@@ -1100,6 +1129,11 @@ pub const SemanticAnalyzer = struct {
         };
         const listed = self.variable_list.items.len;
         const clause = ast.MatchClause{ .patterns = sq.patterns, .location = sq.location };
+        // An aggregate here has no group at all, which the planner says
+        // more exactly than "WHERE cannot aggregate".
+        const saved_refusal = self.aggregates_refused_in;
+        defer self.aggregates_refused_in = saved_refusal;
+        self.aggregates_refused_in = null;
         self.analyzeMatchClause(&clause);
         if (sq.where) |w| self.analyzeExpression(w);
         if (sq.map) |m| self.analyzeExpression(m);
@@ -1223,7 +1257,23 @@ pub const SemanticAnalyzer = struct {
             }
             return;
         }
-        if (aggregate_ops.isAggregateFunction(func.name)) return;
+        if (aggregate_ops.isAggregateFunction(func.name)) {
+            const n = func.arguments.len;
+            const is_count = std.ascii.eqlIgnoreCase(func.name, "count");
+            if (is_count and n > 1) {
+                self.addErrorFmt(.wrong_argument_count, func.location, "{s} takes one argument or *, but was given {d} arguments", .{ func.name, n });
+            } else if (!is_count and n != 1) {
+                self.addErrorFmt(.wrong_argument_count, func.location, "{s} takes one argument, but was given {d} arguments", .{ func.name, n });
+            } else if (self.aggregates_refused_in) |clause| {
+                self.addErrorFmt(
+                    .invalid_aggregate,
+                    func.location,
+                    "{s}() aggregates rows, which {s} cannot do; aggregate in a WITH first, as in WITH collect(n.v) AS vs",
+                    .{ func.name, clause },
+                );
+            }
+            return;
+        }
         self.addErrorFmt(.unknown_function, func.location, "Unknown function '{s}'", .{func.name});
     }
 
@@ -1349,7 +1399,13 @@ pub const SemanticAnalyzer = struct {
         };
 
         if (!valid) {
-            self.addError(.invalid_operator_types, expr.location, "Operator not valid for these types");
+            for ([_]*const ast.Expression{ expr.left, expr.right }) |operand| {
+                if (operand.* == .subquery and operand.subquery.kind == .exists) {
+                    self.addError(.invalid_operator_types, operand.getLocation(), "A pattern, or EXISTS { ... }, is a test, true or false, not a value; COUNT { ... } counts its matches and [(a)-->(b) | b] lists them");
+                    return;
+                }
+            }
+            self.addErrorFmt(.invalid_operator_types, expr.location, "Operator not valid for these types: {s} and {s}", .{ @tagName(left_type), @tagName(right_type) });
         }
     }
 

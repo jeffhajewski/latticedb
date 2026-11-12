@@ -668,6 +668,15 @@ pub const QueryPlanner = struct {
         for (self.subquery_plans.items) |p| {
             if (p.node == sq) return;
         }
+        // Each match is one value, not a group: an aggregate has nothing to
+        // aggregate over there.
+        for ([_]?*ast.Expression{ sq.where, sq.map }) |part| {
+            const expr = part orelse continue;
+            if (aggregate_ops.containsAggregate(expr)) {
+                self.setPlanDetail("An aggregate cannot be used inside a pattern comprehension, EXISTS {{...}} or COUNT {{...}} (line {d}, column {d})", .{ sq.location.line, sq.location.column });
+                return PlannerError.InvalidQuery;
+            }
+        }
         const slots_before = self.used_slots;
         var introduced: std.ArrayList([]const u8) = .empty;
         for (sq.patterns) |pattern| {

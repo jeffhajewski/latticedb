@@ -661,6 +661,9 @@ test "lcy: pattern comprehensions" {
     , "l | e\n[] | false");
     // A list literal that starts with a parenthesis is still a list.
     try expectResult(db, "WITH 2 AS a RETURN [(a), (a) + 1] AS l", "l\n[2, 3]");
+    // An aggregate has no group inside a subquery (was an execution error).
+    try expectFailure(db, "MATCH (p:P) RETURN [(p)-->(f) | count(f)] AS l", .plan, "An aggregate cannot be used inside a pattern comprehension");
+    try expectFailure(db, "MATCH (p:P) WHERE EXISTS { (p)-->(f) WHERE count(f) > 1 } RETURN p", .plan, "An aggregate cannot be used inside a pattern comprehension, EXISTS {...} or COUNT {...}");
 }
 
 test "lcy: CALL built-in procedures" {

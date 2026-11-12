@@ -78,3 +78,103 @@ fn literalsEqual(a: ast.LiteralValue, b: ast.LiteralValue) bool {
         .null_value => true,
     };
 }
+
+pub const RewriteError = error{ OutOfMemory, Refused };
+
+/// A copy of `expr` with some subexpressions replaced.
+///
+/// `context.replace(e)` is asked about every subexpression, outermost first.
+/// It returns the replacement, or null to keep `e` and look inside it. The
+/// copy is allocated in `allocator`; nothing in `expr` changes, because the
+/// tree may be shared through the query cache.
+pub fn rewrite(allocator: std.mem.Allocator, expr: *ast.Expression, context: anytype) RewriteError!*ast.Expression {
+    if (try context.replace(expr)) |replacement| return replacement;
+    const out = try allocator.create(ast.Expression);
+    out.* = expr.*;
+    switch (expr.*) {
+        .literal, .variable, .parameter => {},
+        .property_access => |pa| {
+            const copy = try allocator.create(ast.PropertyAccess);
+            copy.* = pa.*;
+            copy.object = try rewrite(allocator, pa.object, context);
+            out.* = .{ .property_access = copy };
+        },
+        .binary => |b| {
+            const copy = try allocator.create(ast.BinaryExpr);
+            copy.* = b.*;
+            copy.left = try rewrite(allocator, b.left, context);
+            copy.right = try rewrite(allocator, b.right, context);
+            out.* = .{ .binary = copy };
+        },
+        .unary => |u| {
+            const copy = try allocator.create(ast.UnaryExpr);
+            copy.* = u.*;
+            copy.operand = try rewrite(allocator, u.operand, context);
+            out.* = .{ .unary = copy };
+        },
+        .function_call => |f| {
+            const copy = try allocator.create(ast.FunctionCall);
+            copy.* = f.*;
+            copy.arguments = try rewriteAll(allocator, f.arguments, context);
+            out.* = .{ .function_call = copy };
+        },
+        .list => |l| {
+            const copy = try allocator.create(ast.ListExpr);
+            copy.* = l.*;
+            copy.elements = try rewriteAll(allocator, l.elements, context);
+            out.* = .{ .list = copy };
+        },
+        .map => |m| {
+            const copy = try allocator.create(ast.MapExpr);
+            copy.* = m.*;
+            const entries = try allocator.alloc(ast.PropertyEntry, m.entries.len);
+            for (m.entries, entries) |entry, *new_entry| {
+                new_entry.* = .{ .key = entry.key, .value = try rewrite(allocator, entry.value, context) };
+            }
+            copy.entries = entries;
+            out.* = .{ .map = copy };
+        },
+        .index => |i| {
+            const copy = try allocator.create(ast.IndexExpr);
+            copy.* = i.*;
+            copy.object = try rewrite(allocator, i.object, context);
+            copy.index = try rewrite(allocator, i.index, context);
+            out.* = .{ .index = copy };
+        },
+        .slice => |s| {
+            const copy = try allocator.create(ast.SliceExpr);
+            copy.* = s.*;
+            copy.object = try rewrite(allocator, s.object, context);
+            copy.from = try rewriteOptional(allocator, s.from, context);
+            copy.to = try rewriteOptional(allocator, s.to, context);
+            out.* = .{ .slice = copy };
+        },
+        .case_expr => |c| {
+            const copy = try allocator.create(ast.CaseExpr);
+            copy.* = c.*;
+            copy.subject = try rewriteOptional(allocator, c.subject, context);
+            copy.else_expr = try rewriteOptional(allocator, c.else_expr, context);
+            const branches = try allocator.alloc(ast.CaseBranch, c.branches.len);
+            for (c.branches, branches) |branch, *new_branch| {
+                new_branch.* = .{
+                    .when = try rewrite(allocator, branch.when, context),
+                    .then = try rewrite(allocator, branch.then, context),
+                };
+            }
+            copy.branches = branches;
+            out.* = .{ .case_expr = copy };
+        },
+    }
+    return out;
+}
+
+fn rewriteAll(allocator: std.mem.Allocator, exprs: []*ast.Expression, context: anytype) RewriteError![]*ast.Expression {
+    const out = try allocator.alloc(*ast.Expression, exprs.len);
+    for (exprs, out) |e, *o| o.* = try rewrite(allocator, e, context);
+    return out;
+}
+
+fn rewriteOptional(allocator: std.mem.Allocator, expr: ?*ast.Expression, context: anytype) RewriteError!?*ast.Expression {
+    const e = expr orelse return null;
+    return try rewrite(allocator, e, context);
+}

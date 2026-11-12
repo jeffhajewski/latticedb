@@ -2044,6 +2044,12 @@ pub const QueryPlanner = struct {
         input_op: Operator,
         slots: ?[]const u8,
     ) PlannerError!Operator {
+        for (ret.items) |item| {
+            if (self.needsAggregateProjection(item.expression)) {
+                return self.planAggregateProjection(ret, input_op, slots);
+            }
+        }
+
         self.output_columns = @intCast(ret.items.len);
 
         // Separate items into grouping keys and aggregates
@@ -2117,6 +2123,193 @@ pub const QueryPlanner = struct {
         // The aggregate operator already outputs to the correct slots,
         // so we can return it directly without an additional projection
         return aggregate.operator();
+    }
+
+    /// Whether a projection item needs aggregates computed first and an
+    /// expression evaluated over them afterwards: `count(n) + 1`, an
+    /// aggregate inside CASE, or an aggregate nested in another (which is
+    /// refused there).
+    fn needsAggregateProjection(self: *Self, expr: *const ast.Expression) bool {
+        if (!aggregate_ops.containsAggregate(expr)) return false;
+        const direct = self.isDirectAggregate(expr) orelse return true;
+        const arg = direct.arg orelse return false;
+        return aggregate_ops.containsAggregate(arg);
+    }
+
+    /// One aggregate call of an aggregating projection and the slot of the
+    /// aggregate's output row that holds its value.
+    const AggregateCall = struct {
+        expr: *const ast.Expression,
+        slot: u8,
+    };
+
+    /// Replaces aggregate calls and grouping keys inside a projection item
+    /// with the slots that hold their values after aggregation.
+    const AggregateRewrite = struct {
+        planner: *QueryPlanner,
+        calls: *std.ArrayList(AggregateCall),
+        keys: []const aggregate_ops.GroupKey,
+        aggs: *std.ArrayList(aggregate_ops.AggregateItem),
+        /// Slots of the aggregate's output row already taken.
+        used: *u16,
+        clause_name: []const u8,
+
+        pub fn replace(self: *AggregateRewrite, e: *ast.Expression) ast_util.RewriteError!?*ast.Expression {
+            for (self.keys) |key| {
+                if (ast_util.expressionsEqual(key.expr, e)) return try self.planner.aggregateSlotVariable(key.output_slot);
+            }
+            const call = switch (e.*) {
+                .function_call => |f| f,
+                else => return null,
+            };
+            if (!aggregate_ops.isAggregateFunction(call.name)) return null;
+            for (self.calls.items) |known| {
+                if (ast_util.expressionsEqual(known.expr, e)) return try self.planner.aggregateSlotVariable(known.slot);
+            }
+            const info = self.planner.isDirectAggregate(e) orelse {
+                self.planner.setPlanDetail("{s}() takes one argument", .{call.name});
+                return error.Refused;
+            };
+            if (info.arg) |arg| {
+                if (aggregate_ops.containsAggregate(arg)) {
+                    self.planner.setPlanDetail("{s}() cannot take an aggregate as its argument; aggregates do not nest", .{call.name});
+                    return error.Refused;
+                }
+            }
+            const free = all_slots & ~self.used.*;
+            if (free == 0) {
+                self.planner.setPlanDetail(
+                    "{s} needs more than {d} values for its grouping keys and aggregates; a row holds {d}",
+                    .{ self.clause_name, MAX_SLOTS, MAX_SLOTS },
+                );
+                return error.Refused;
+            }
+            const slot: u8 = @ctz(free);
+            self.used.* |= slotBit(slot);
+            try self.aggs.append(self.planner.allocator, .{
+                .func = info.func,
+                .expr = info.arg,
+                .output_slot = slot,
+                .distinct = info.distinct,
+            });
+            try self.calls.append(self.planner.allocator, .{ .expr = e, .slot = slot });
+            return try self.planner.aggregateSlotVariable(slot);
+        }
+    };
+
+    /// Finds a variable other than the aggregate-slot ones the rewrite put in.
+    const FreeVariableCheck = struct {
+        found: ?[]const u8 = null,
+
+        pub fn replace(self: *FreeVariableCheck, e: *ast.Expression) ast_util.RewriteError!?*ast.Expression {
+            switch (e.*) {
+                .variable => |v| {
+                    if (!std.mem.startsWith(u8, v.name, AGGREGATE_SLOT_PREFIX) and self.found == null) self.found = v.name;
+                },
+                else => {},
+            }
+            return null;
+        }
+    };
+
+    const AGGREGATE_SLOT_PREFIX = "  aggregate slot ";
+
+    /// A reference to slot `slot` of an aggregate's output row, by a name
+    /// no query can spell (it starts with spaces), registered for execution.
+    fn aggregateSlotVariable(self: *Self, slot: u8) error{OutOfMemory}!*ast.Expression {
+        const name = std.fmt.allocPrint(self.allocator, AGGREGATE_SLOT_PREFIX ++ "{d}", .{slot}) catch return error.OutOfMemory;
+        self.outer_bindings.put(name, .{ .name = name, .slot = slot, .kind = .alias }) catch return error.OutOfMemory;
+        const expr = self.allocator.create(ast.Expression) catch return error.OutOfMemory;
+        expr.* = .{ .variable = .{ .name = name, .location = .{ .line = 0, .column = 0 } } };
+        return expr;
+    }
+
+    /// Plan a projection whose items are expressions over aggregates, such
+    /// as `count(n) + 1`, `sum(n.x) / count(n)` or an aggregate inside CASE.
+    ///
+    /// The aggregation is planned over the distinct aggregate calls found in
+    /// the items, each written to a slot of the aggregate's output row, and
+    /// grouped by the items that contain no aggregate. A projection then
+    /// evaluates each item over that row, with every aggregate call and every
+    /// grouping key replaced by the slot holding its value. Anything else an
+    /// item uses outside an aggregate would have no value after grouping, so
+    /// it is refused, as openCypher refuses it.
+    fn planAggregateProjection(
+        self: *Self,
+        ret: *const ast.ReturnClause,
+        input_op: Operator,
+        slots: ?[]const u8,
+    ) PlannerError!Operator {
+        const items = ret.items;
+        const clause_name: []const u8 = if (slots == null) "RETURN" else "WITH";
+        self.output_columns = @intCast(items.len);
+
+        var keys: std.ArrayList(aggregate_ops.GroupKey) = .empty;
+        var aggs: std.ArrayList(aggregate_ops.AggregateItem) = .empty;
+        var calls: std.ArrayList(AggregateCall) = .empty;
+        var used: u16 = 0;
+
+        // Grouping keys and plain aggregate items keep their output slots.
+        for (items, 0..) |item, i| {
+            const slot: u8 = if (slots) |given| given[i] else @intCast(i);
+            self.output_column_names[i] = columnName(self, item);
+            if (!aggregate_ops.containsAggregate(item.expression)) {
+                keys.append(self.allocator, .{ .expr = item.expression, .output_slot = slot }) catch return PlannerError.OutOfMemory;
+                used |= slotBit(slot);
+            } else if (!self.needsAggregateProjection(item.expression)) {
+                const info = self.isDirectAggregate(item.expression).?;
+                aggs.append(self.allocator, .{
+                    .func = info.func,
+                    .expr = info.arg,
+                    .output_slot = slot,
+                    .distinct = info.distinct,
+                }) catch return PlannerError.OutOfMemory;
+                calls.append(self.allocator, .{ .expr = item.expression, .slot = slot }) catch return PlannerError.OutOfMemory;
+                used |= slotBit(slot);
+            }
+        }
+
+        var rewriter = AggregateRewrite{
+            .planner = self,
+            .calls = &calls,
+            .keys = keys.items,
+            .aggs = &aggs,
+            .used = &used,
+            .clause_name = clause_name,
+        };
+        const project_items = self.allocator.alloc(project_ops.ProjectItem, items.len) catch return PlannerError.OutOfMemory;
+        for (items, project_items, 0..) |item, *project_item, i| {
+            const slot: u8 = if (slots) |given| given[i] else @intCast(i);
+            const expr = if (self.needsAggregateProjection(item.expression))
+                ast_util.rewrite(self.allocator, item.expression, &rewriter) catch |err| return switch (err) {
+                    error.OutOfMemory => PlannerError.OutOfMemory,
+                    error.Refused => PlannerError.InvalidQuery,
+                }
+            else
+                self.aggregateSlotVariable(slot) catch return PlannerError.OutOfMemory;
+
+            var check = FreeVariableCheck{};
+            _ = ast_util.rewrite(self.allocator, expr, &check) catch return PlannerError.OutOfMemory;
+            if (check.found) |name| {
+                self.setPlanDetail(
+                    "{s} item `{s}` uses `{s}` outside an aggregate, but `{s}` is not a grouping key; return it as an item of its own or aggregate it",
+                    .{ clause_name, item.text, name, name },
+                );
+                return PlannerError.InvalidQuery;
+            }
+            project_item.* = .{ .expr = expr, .output_slot = slot };
+        }
+
+        const aggregate = aggregate_ops.Aggregate.init(
+            self.allocator,
+            input_op,
+            keys.toOwnedSlice(self.allocator) catch return PlannerError.OutOfMemory,
+            aggs.toOwnedSlice(self.allocator) catch return PlannerError.OutOfMemory,
+        ) catch return PlannerError.OutOfMemory;
+        const project = project_ops.Project.init(self.allocator, aggregate.operator(), project_items) catch {
+            return PlannerError.OutOfMemory;
+        };
+        return project.operator();
     }
 
     /// Check if an expression is a direct aggregate function call (e.g., count(n), sum(n.val))

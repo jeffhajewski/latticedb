@@ -245,3 +245,51 @@ test "lcy: the new keywords stay usable as names" {
     try expectResult(db, "MATCH (start:Case)-[when]->(end) RETURN end.else AS x, type(when) AS t", "x | t\n\"x\" | \"END\"");
     try expectResult(db, "UNWIND [1, 2] AS then RETURN then ORDER BY then DESC", "then\n2\n1");
 }
+
+// ============================================================================
+// Aggregates inside expressions
+// ============================================================================
+
+test "lcy: aggregates inside larger expressions" {
+    const path = "/tmp/lcy_agg_expr.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedItems(db);
+
+    try expectResult(db, "MATCH (i:Item) RETURN count(i) + 1 AS c", "c\n5");
+    try expectResult(db, "MATCH (i:Item) RETURN sum(i.n) / count(i.n) AS mean, toFloat(count(i)) AS f, count(*) AS n", "mean | f | n\n2 | 4 | 4");
+    try expectResult(db, "MATCH (i:Item) RETURN CASE WHEN count(i.n) = count(*) THEN 'all' ELSE 'some' END AS has_n", "has_n\n\"some\"");
+    try expectResult(db, "MATCH (i:Item) RETURN collect(i.name)[0..2] AS first, size(collect(i.n)) AS sized", "first | sized\n[\"a\", \"b\"] | 3");
+    // The same aggregate written twice is computed once and used in both places.
+    try expectResult(db, "MATCH (i:Item) RETURN count(*), count(*) * 10 AS ten", "count(*) | ten\n4 | 40");
+    // Grouping keys that are expressions, and keys used inside an aggregating item.
+    try expectResult(db,
+        \\MATCH (i:Item) RETURN i.n % 2 AS parity, count(*) * 100 + coalesce(i.n % 2, -1) AS code ORDER BY parity
+    , "parity | code\n0 | 100\n1 | 201\nnull | 99");
+    try expectResult(db, "MATCH (i:Item) WHERE i.n IS NOT NULL RETURN i, i.name AS name, max(i.n) + i.n AS twice ORDER BY name", "i | name | twice\nN | \"a\" | 2\nN | \"b\" | 4\nN | \"c\" | 6");
+    // Over no rows, a global aggregate still produces its one row.
+    try expectResult(db, "MATCH (i:Nothing) RETURN count(i) + 1 AS c, coalesce(max(i.n), 0) AS m", "c | m\n1 | 0");
+    // In WITH, then on.
+    try expectResult(db, "MATCH (i:Item) WITH count(i) * 2 AS doubled, collect(i.n) AS ns RETURN doubled, size(ns) AS s", "doubled | s\n8 | 3");
+    try expectResult(db, "MATCH (i:Item) WITH i.n IS NULL AS missing, count(*) + 0 AS c WHERE c > 1 RETURN missing, c", "missing | c\nfalse | 3");
+    // DISTINCT and ORDER BY over the computed column.
+    try expectResult(db, "UNWIND [1, 1, 2] AS x RETURN DISTINCT count(*) - count(*) AS z", "z\n0");
+    try expectResult(db, "UNWIND [1, 1, 2] AS x RETURN x, count(*) * -1 AS c ORDER BY c", "x | c\n1 | -2\n2 | -1");
+}
+
+test "lcy: aggregates in expressions that cannot be planned say why" {
+    const path = "/tmp/lcy_agg_expr_errors.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedItems(db);
+
+    try expectFailure(db, "MATCH (i:Item) RETURN i.n + count(*)", .plan, "RETURN item `i.n + count(*)` uses `i` outside an aggregate, but `i` is not a grouping key");
+    try expectFailure(db, "MATCH (i:Item) RETURN count(count(*)) + 1", .plan, "count() cannot take an aggregate as its argument");
+    try expectFailure(db, "MATCH (i:Item) RETURN sum(count(*))", .plan, "sum() cannot take an aggregate as its argument");
+    try expectFailure(db, "MATCH (i:Item) RETURN sum(i.n, 2) + 1", .plan, "sum() takes one argument");
+    try expectFailure(db, "MATCH (i:Item) WITH count(*) + i.n AS x RETURN x", .plan, "WITH item `count(*) + i.n` uses `i`");
+    // More aggregates and keys than a row has slots.
+    try expectFailure(db,
+        \\MATCH (i:Item) RETURN i.n AS a, i.name AS b, count(*) + sum(i.n) + min(i.n) + max(i.n) + avg(i.n) + count(i.n) + sum(i.n + 1) + sum(i.n + 2) + sum(i.n + 3) + sum(i.n + 4) + sum(i.n + 5) + sum(i.n + 6) + sum(i.n + 7) + sum(i.n + 8) + sum(i.n + 9) AS big
+    , .plan, "RETURN needs more than 16 values for its grouping keys and aggregates");
+}

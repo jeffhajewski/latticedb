@@ -181,8 +181,19 @@ test "fts query: committing a document changes its score only as the statistics 
     for (before, after) |b, a| try std.testing.expectEqual(b.doc_id, a.doc_id);
 }
 
+/// What the planner made of `cypher`: how many index seeks it let a LIMIT
+/// bound, and how its last MATCH reads its first node.
+const PlanFacts = struct {
+    bounded_seeks: u32,
+    scan: lattice.query.planner.QueryPlanner.ScanKind,
+};
+
 /// How many index seeks the planner let a LIMIT bound for `cypher`.
 fn boundedSeeks(db: *Database, cypher: []const u8) !u32 {
+    return (try planFacts(db, cypher)).bounded_seeks;
+}
+
+fn planFacts(db: *Database, cypher: []const u8) !PlanFacts {
     const allocator = std.testing.allocator;
     var parser = lattice.query.parser.Parser.init(allocator, cypher);
     defer parser.deinit();
@@ -213,7 +224,7 @@ fn boundedSeeks(db: *Database, cypher: []const u8) !u32 {
         .errors_dropped = false,
     };
     _ = try planner.plan(parse_result.query.?, &analysis_result);
-    return planner.fts_bounded_seeks;
+    return .{ .bounded_seeks = planner.fts_bounded_seeks, .scan = planner.last_scan_kind };
 }
 
 /// The scores a query returned in its second column.
@@ -307,4 +318,75 @@ test "fts query: text @@ a query of only exclusions fails, as it does against an
     // Before, a refused query read as null, so a WHERE dropped every row
     // and the query succeeded.
     try std.testing.expectError(error.ExecutionError, db.query("RETURN 'the quick fox' @@ '-dog'"));
+}
+
+/// The rows of a query, as (rank, score) pairs.
+fn rankScores(db: *Database, cypher: []const u8, out: [][2]f64) !usize {
+    var result = try db.query(cypher);
+    defer result.deinit();
+    for (result.rows, 0..) |row, i| {
+        out[i][0] = @floatFromInt(row.values[0].int_val);
+        out[i][1] = switch (row.values[1]) {
+            .float_val => |f| f,
+            else => -1,
+        };
+    }
+    return result.rows.len;
+}
+
+test "fts query: a range on an indexed property beside @@ answers and scores as without the index" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lse_fts_query_range.ltdb";
+    const db = try openDb(allocator, path);
+    defer {
+        db.close();
+        removeFiles(path);
+    }
+    try db.createNodeFtsIndex("Doc", "text");
+    var buf: [512]u8 = undefined;
+    for (0..200) |i| {
+        var w: std.Io.Writer = .fixed(&buf);
+        for (0..i % 7 + 1) |_| try w.writeAll("common ");
+        if (i % 5 == 0) try w.writeAll("rare ");
+        for (0..i % 11) |j| try w.print("filler{d} ", .{j});
+        const id = try db.createNode(null, &[_][]const u8{"Doc"});
+        try db.setNodeProperty(null, id, "text", .{ .string_val = w.buffered() });
+        try db.setNodeProperty(null, id, "rank", .{ .int_val = @intCast(i) });
+    }
+
+    const cases = [_][]const u8{
+        "MATCH (d:Doc) WHERE d.rank >= 50 AND d.text @@ 'common' RETURN d.rank, score(d) ORDER BY score(d) DESC LIMIT 5",
+        "MATCH (d:Doc) WHERE d.text @@ 'common' AND d.rank < 120 AND d.rank > 30 RETURN d.rank, score(d) ORDER BY score(d) DESC LIMIT 5",
+        "MATCH (d:Doc) WHERE d.rank >= 50 AND d.text @@ 'common' RETURN d.rank, score(d) ORDER BY score(d) DESC SKIP 3 LIMIT 4",
+        "MATCH (d:Doc) WHERE d.rank >= 50 AND (d.text @@ 'rare' OR d.text @@ 'filler9') RETURN d.rank, score(d) ORDER BY score(d) DESC LIMIT 5",
+        "MATCH (d:Doc) WHERE d.rank >= 50 AND d.text @@ 'common' RETURN d.rank, score(d) ORDER BY d.rank LIMIT 5",
+    };
+    var want: [cases.len][16][2]f64 = undefined;
+    var want_len: [cases.len]usize = undefined;
+    var want_plan: [cases.len]PlanFacts = undefined;
+    for (cases, 0..) |cypher, c| {
+        want_len[c] = try rankScores(db, cypher, &want[c]);
+        want_plan[c] = try planFacts(db, cypher);
+    }
+
+    try db.createNodePropertyIndex("Doc", "rank");
+    for (cases, 0..) |cypher, c| {
+        var got: [16][2]f64 = undefined;
+        const n = try rankScores(db, cypher, &got);
+        const plan = try planFacts(db, cypher);
+        try std.testing.expectEqual(want_len[c], n);
+        try std.testing.expect(n > 0);
+        for (got[0..n], want[c][0..n]) |g, w| {
+            try std.testing.expectEqual(w[0], g[0]);
+            try std.testing.expectApproxEqAbs(w[1], g[1], 1e-6);
+            try std.testing.expect(g[1] > 0);
+        }
+        // A LIMIT bounds the seek the same way with the index or without.
+        try std.testing.expectEqual(want_plan[c].bounded_seeks, plan.bounded_seeks);
+        // An OR of searches beside the range leaves the range to the index,
+        // and the searches still score what they match.
+        if (std.mem.indexOf(u8, cypher, " OR ") != null) {
+            try std.testing.expectEqual(.property_range_scan, plan.scan);
+        }
+    }
 }

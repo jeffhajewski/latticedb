@@ -1895,6 +1895,25 @@ pub const QueryPlanner = struct {
             }
         }
 
+        // An OR of searches beside other conditions runs as that search, so
+        // it scores what it matches, and the rest filters its rows. As a
+        // filter alone it matched the same rows but left score() null,
+        // unless an index range scan had taken the other conditions.
+        if (condition.* == .binary and condition.binary.operator == .and_) {
+            var disjuncts: [MAX_FTS_DISJUNCTS]FtsSearchInfo = undefined;
+            if (self.ftsDisjunctionConjunct(condition, &disjuncts)) |found| {
+                const search = try self.planFtsSearch(input_op, disjuncts[0..found.count]);
+                std.debug.assert(self.consumed_conjuncts.items.len == 0);
+                self.consumed_conjuncts.append(self.allocator, found.conjunct) catch return PlannerError.OutOfMemory;
+                const rest = try self.residualCondition(condition);
+                self.consumed_conjuncts.clearRetainingCapacity();
+                const filter = filter_ops.Filter.init(self.allocator, search, rest.?) catch {
+                    return PlannerError.OutOfMemory;
+                };
+                return filter.operator();
+            }
+        }
+
         // Default: create a filter operator
         const filter = filter_ops.Filter.init(self.allocator, input_op, condition) catch {
             return PlannerError.OutOfMemory;
@@ -2255,6 +2274,25 @@ pub const QueryPlanner = struct {
         out[count.*] = info;
         count.* += 1;
         return true;
+    }
+
+    /// The first conjunct of `expr`, an AND, that is an OR of `@@`
+    /// predicates `collectFtsDisjuncts` can plan as one search, with the
+    /// searches in `out`.
+    fn ftsDisjunctionConjunct(
+        self: *Self,
+        expr: *const ast.Expression,
+        out: *[MAX_FTS_DISJUNCTS]FtsSearchInfo,
+    ) ?struct { conjunct: *const ast.Expression, count: usize } {
+        if (expr.* != .binary) return null;
+        const binary = expr.binary;
+        if (binary.operator == .and_) {
+            return self.ftsDisjunctionConjunct(binary.left, out) orelse self.ftsDisjunctionConjunct(binary.right, out);
+        }
+        if (binary.operator != .or_) return null;
+        var count: usize = 0;
+        if (!self.collectFtsDisjuncts(expr, out, &count) or count < 2) return null;
+        return .{ .conjunct = expr, .count = count };
     }
 
     /// Extract FTS search info from a binary expression with fts_match operator

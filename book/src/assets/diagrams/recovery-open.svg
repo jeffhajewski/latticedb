@@ -1,162 +1,222 @@
-<svg width="869" height="972"
- viewBox="0.00 0.00 652.00 729.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 724.73)">
+<svg width="996" height="1207"
+ viewBox="0.00 0.00 747.00 905.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 900.73)">
 <title>recovery_open</title>
 <!-- start -->
 <g id="node1" class="node">
 <title>start</title>
-<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M188.93,-720.73C188.93,-720.73 96.38,-720.73 96.38,-720.73 90.38,-720.73 84.38,-714.73 84.38,-708.73 84.38,-708.73 84.38,-696.73 84.38,-696.73 84.38,-690.73 90.38,-684.73 96.38,-684.73 96.38,-684.73 188.93,-684.73 188.93,-684.73 194.93,-684.73 200.93,-690.73 200.93,-696.73 200.93,-696.73 200.93,-708.73 200.93,-708.73 200.93,-714.73 194.93,-720.73 188.93,-720.73"/>
-<text xml:space="preserve" text-anchor="middle" x="142.65" y="-699.03" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Database.open</text>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M340.42,-896.73C340.42,-896.73 247.87,-896.73 247.87,-896.73 241.87,-896.73 235.87,-890.73 235.87,-884.73 235.87,-884.73 235.87,-872.73 235.87,-872.73 235.87,-866.73 241.87,-860.73 247.87,-860.73 247.87,-860.73 340.42,-860.73 340.42,-860.73 346.42,-860.73 352.42,-866.73 352.42,-872.73 352.42,-872.73 352.42,-884.73 352.42,-884.73 352.42,-890.73 346.42,-896.73 340.42,-896.73"/>
+<text xml:space="preserve" text-anchor="middle" x="294.15" y="-875.03" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Database.open</text>
+</g>
+<!-- rogate -->
+<g id="node2" class="node">
+<title>rogate</title>
+<polygon fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" points="294.15,-837.73 248.01,-819.73 294.15,-801.73 340.29,-819.73 294.15,-837.73"/>
+<text xml:space="preserve" text-anchor="middle" x="294.15" y="-815.28" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#1a1a1a">read&#45;only?</text>
+</g>
+<!-- start&#45;&gt;rogate -->
+<g id="edge1" class="edge">
+<title>start&#45;&gt;rogate</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M294.15,-860.32C294.15,-856.01 294.15,-851.3 294.15,-846.68"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="296.6,-846.7 294.15,-839.7 291.7,-846.7 296.6,-846.7"/>
+</g>
+<!-- pending -->
+<g id="node3" class="node">
+<title>pending</title>
+<polygon fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" points="221.15,-768.48 153.14,-738.72 221.15,-708.96 289.16,-738.72 221.15,-768.48"/>
+<text xml:space="preserve" text-anchor="middle" x="221.15" y="-740.27" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#1a1a1a">log or journal</text>
+<text xml:space="preserve" text-anchor="middle" x="221.15" y="-728.27" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#1a1a1a">not empty?</text>
+</g>
+<!-- rogate&#45;&gt;pending -->
+<g id="edge3" class="edge">
+<title>rogate&#45;&gt;pending</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M282.42,-806.04C272.65,-795.46 258.41,-780.04 246.11,-766.73"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="247.93,-765.1 241.38,-761.62 244.33,-768.42 247.93,-765.1"/>
+<text xml:space="preserve" text-anchor="middle" x="277.21" y="-781.23" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;yes</text>
 </g>
 <!-- journal -->
-<g id="node2" class="node">
+<g id="node5" class="node">
 <title>journal</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M273.3,-661.73C273.3,-661.73 12,-661.73 12,-661.73 6,-661.73 0,-655.73 0,-649.73 0,-649.73 0,-602.45 0,-602.45 0,-596.45 6,-590.45 12,-590.45 12,-590.45 273.3,-590.45 273.3,-590.45 279.3,-590.45 285.3,-596.45 285.3,-602.45 285.3,-602.45 285.3,-649.73 285.3,-649.73 285.3,-655.73 279.3,-661.73 273.3,-661.73"/>
-<text xml:space="preserve" text-anchor="start" x="14.4" y="-642.64" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">1. Finish an interrupted flush</text>
-<text xml:space="preserve" text-anchor="start" x="14.4" y="-629.14" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;complete journal: write it in place</text>
-<text xml:space="preserve" text-anchor="start" x="14.4" y="-615.64" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;(read&#45;only: refuse to open)</text>
-<text xml:space="preserve" text-anchor="start" x="14.4" y="-602.14" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;incomplete journal: discard it</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M435.8,-608.43C435.8,-608.43 174.5,-608.43 174.5,-608.43 168.5,-608.43 162.5,-602.43 162.5,-596.43 162.5,-596.43 162.5,-562.65 162.5,-562.65 162.5,-556.65 168.5,-550.65 174.5,-550.65 174.5,-550.65 435.8,-550.65 435.8,-550.65 441.8,-550.65 447.8,-556.65 447.8,-562.65 447.8,-562.65 447.8,-596.43 447.8,-596.43 447.8,-602.43 441.8,-608.43 435.8,-608.43"/>
+<text xml:space="preserve" text-anchor="start" x="176.9" y="-589.34" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">1. Finish an interrupted flush</text>
+<text xml:space="preserve" text-anchor="start" x="176.9" y="-575.84" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;complete journal: write it in place</text>
+<text xml:space="preserve" text-anchor="start" x="176.9" y="-562.34" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;incomplete journal: discard it</text>
 </g>
-<!-- start&#45;&gt;journal -->
-<g id="edge1" class="edge">
-<title>start&#45;&gt;journal</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M142.65,-684.42C142.65,-680.27 142.65,-675.66 142.65,-670.9"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="145.1,-670.92 142.65,-663.92 140.2,-670.92 145.1,-670.92"/>
-</g>
-<!-- gate -->
-<g id="node3" class="node">
-<title>gate</title>
-<polygon fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" points="142.65,-567.45 65.64,-537.69 142.65,-507.93 219.66,-537.69 142.65,-567.45"/>
-<text xml:space="preserve" text-anchor="middle" x="142.65" y="-539.24" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#1a1a1a">read&#45;write,</text>
-<text xml:space="preserve" text-anchor="middle" x="142.65" y="-527.24" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#1a1a1a">WAL enabled?</text>
-</g>
-<!-- journal&#45;&gt;gate -->
+<!-- rogate&#45;&gt;journal -->
 <g id="edge2" class="edge">
-<title>journal&#45;&gt;gate</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M142.65,-589.95C142.65,-585.51 142.65,-580.95 142.65,-576.47"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="145.1,-576.67 142.65,-569.67 140.2,-576.67 145.1,-576.67"/>
+<title>rogate&#45;&gt;journal</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M301.11,-804.14C312.79,-778.74 335.87,-724.46 344.15,-675.71 347.44,-656.31 350.47,-650.07 344.15,-631.43 342.35,-626.12 339.75,-620.93 336.73,-616.01"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="338.91,-614.86 332.97,-610.41 334.84,-617.59 338.91,-614.86"/>
+<text xml:space="preserve" text-anchor="middle" x="350.02" y="-688.46" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;no</text>
+</g>
+<!-- overlay -->
+<g id="node4" class="node">
+<title>overlay</title>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M321.42,-675.71C321.42,-675.71 120.87,-675.71 120.87,-675.71 114.87,-675.71 108.87,-669.71 108.87,-663.71 108.87,-663.71 108.87,-643.43 108.87,-643.43 108.87,-637.43 114.87,-631.43 120.87,-631.43 120.87,-631.43 321.42,-631.43 321.42,-631.43 327.42,-631.43 333.42,-637.43 333.42,-643.43 333.42,-643.43 333.42,-663.71 333.42,-663.71 333.42,-669.71 327.42,-675.71 321.42,-675.71"/>
+<text xml:space="preserve" text-anchor="start" x="123.27" y="-656.62" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Open on an in&#45;memory overlay:</text>
+<text xml:space="preserve" text-anchor="start" x="123.27" y="-643.12" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">files read, never written</text>
+</g>
+<!-- pending&#45;&gt;overlay -->
+<g id="edge4" class="edge">
+<title>pending&#45;&gt;overlay</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M221.15,-708.64C221.15,-700.88 221.15,-692.48 221.15,-684.67"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="223.6,-684.83 221.15,-677.83 218.7,-684.83 223.6,-684.83"/>
+<text xml:space="preserve" text-anchor="middle" x="232.02" y="-688.46" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;yes</text>
 </g>
 <!-- ro -->
-<g id="node4" class="node">
+<g id="node7" class="node">
 <title>ro</title>
-<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M186.8,-419.4C186.8,-419.4 60.5,-419.4 60.5,-419.4 54.5,-419.4 48.5,-413.4 48.5,-407.4 48.5,-407.4 48.5,-387.12 48.5,-387.12 48.5,-381.12 54.5,-375.12 60.5,-375.12 60.5,-375.12 186.8,-375.12 186.8,-375.12 192.8,-375.12 198.8,-381.12 198.8,-387.12 198.8,-387.12 198.8,-407.4 198.8,-407.4 198.8,-413.4 192.8,-419.4 186.8,-419.4"/>
-<text xml:space="preserve" text-anchor="start" x="62.9" y="-400.31" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">File only: no log,</text>
-<text xml:space="preserve" text-anchor="start" x="62.9" y="-386.81" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">no recovery</text>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M138.3,-458.4C138.3,-458.4 12,-458.4 12,-458.4 6,-458.4 0,-452.4 0,-446.4 0,-446.4 0,-426.12 0,-426.12 0,-420.12 6,-414.12 12,-414.12 12,-414.12 138.3,-414.12 138.3,-414.12 144.3,-414.12 150.3,-420.12 150.3,-426.12 150.3,-426.12 150.3,-446.4 150.3,-446.4 150.3,-452.4 144.3,-458.4 138.3,-458.4"/>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-439.31" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">File only: no log,</text>
+<text xml:space="preserve" text-anchor="start" x="14.4" y="-425.81" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">no recovery</text>
+</g>
+<!-- pending&#45;&gt;ro -->
+<g id="edge5" class="edge">
+<title>pending&#45;&gt;ro</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M171.31,-730.31C129.02,-720.86 75.15,-699.93 75.15,-654.57 75.15,-654.57 75.15,-654.57 75.15,-508.65 75.15,-495.06 75.15,-480 75.15,-467.24"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="77.6,-467.48 75.15,-460.48 72.7,-467.48 77.6,-467.48"/>
+<text xml:space="preserve" text-anchor="middle" x="83.4" y="-575.66" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;no</text>
+</g>
+<!-- overlay&#45;&gt;journal -->
+<g id="edge6" class="edge">
+<title>overlay&#45;&gt;journal</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M246.35,-630.96C252.44,-625.74 259.09,-620.03 265.67,-614.4"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="267.2,-616.31 270.92,-609.89 264.01,-612.59 267.2,-616.31"/>
+</g>
+<!-- gate -->
+<g id="node6" class="node">
+<title>gate</title>
+<polygon fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" points="305.15,-527.65 242.55,-509.65 305.15,-491.65 367.75,-509.65 305.15,-527.65"/>
+<text xml:space="preserve" text-anchor="middle" x="305.15" y="-505.2" font-family="Helvetica,Arial,sans-serif" font-size="11.00" fill="#1a1a1a">WAL enabled?</text>
+</g>
+<!-- journal&#45;&gt;gate -->
+<g id="edge7" class="edge">
+<title>journal&#45;&gt;gate</title>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M305.15,-550.14C305.15,-545.54 305.15,-540.79 305.15,-536.26"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="307.6,-536.56 305.15,-529.56 302.7,-536.56 307.6,-536.56"/>
 </g>
 <!-- gate&#45;&gt;ro -->
-<g id="edge3" class="edge">
+<g id="edge8" class="edge">
 <title>gate&#45;&gt;ro</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M138.85,-509.01C135.65,-485.68 131.08,-452.36 127.78,-428.37"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="130.24,-428.24 126.86,-421.64 125.38,-428.9 130.24,-428.24"/>
-<text xml:space="preserve" text-anchor="middle" x="145.36" y="-487.43" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;no</text>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M276.02,-499.61C245.25,-490.06 195.41,-474.59 153.08,-461.45"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="154,-459.17 146.58,-459.43 152.54,-463.85 154,-459.17"/>
+<text xml:space="preserve" text-anchor="middle" x="219" y="-471.15" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;no</text>
 </g>
 <!-- wal -->
-<g id="node5" class="node">
+<g id="node8" class="node">
 <title>wal</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M474.92,-474.68C474.92,-474.68 166.38,-474.68 166.38,-474.68 160.38,-474.68 154.37,-468.68 154.37,-462.68 154.37,-462.68 154.37,-442.4 154.37,-442.4 154.37,-436.4 160.37,-430.4 166.37,-430.4 166.37,-430.4 474.92,-430.4 474.92,-430.4 480.92,-430.4 486.92,-436.4 486.92,-442.4 486.92,-442.4 486.92,-462.68 486.92,-462.68 486.92,-468.68 480.92,-474.68 474.92,-474.68"/>
-<text xml:space="preserve" text-anchor="start" x="168.77" y="-455.59" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">2. Open the log, check the database id</text>
-<text xml:space="preserve" text-anchor="start" x="168.77" y="-442.09" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;cut off a torn tail, rebuild a torn header</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M526.3,-458.4C526.3,-458.4 184,-458.4 184,-458.4 178,-458.4 172,-452.4 172,-446.4 172,-446.4 172,-426.12 172,-426.12 172,-420.12 178,-414.12 184,-414.12 184,-414.12 526.3,-414.12 526.3,-414.12 532.3,-414.12 538.3,-420.12 538.3,-426.12 538.3,-426.12 538.3,-446.4 538.3,-446.4 538.3,-452.4 532.3,-458.4 526.3,-458.4"/>
+<text xml:space="preserve" text-anchor="start" x="186.4" y="-439.31" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">2. Open the log, check the database id</text>
+<text xml:space="preserve" text-anchor="start" x="186.4" y="-425.81" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;cut off an unsynced tail, rebuild a torn header</text>
 </g>
 <!-- gate&#45;&gt;wal -->
-<g id="edge4" class="edge">
+<g id="edge9" class="edge">
 <title>gate&#45;&gt;wal</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M176.97,-520.66C202.38,-508.79 237.5,-492.38 266.66,-478.76"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="267.5,-481.07 272.81,-475.89 265.43,-476.63 267.5,-481.07"/>
-<text xml:space="preserve" text-anchor="middle" x="258.47" y="-487.43" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;yes</text>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M315.27,-494.2C321.01,-486.01 328.4,-475.46 335.25,-465.68"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="337.15,-467.23 339.16,-460.09 333.13,-464.42 337.15,-467.23"/>
+<text xml:space="preserve" text-anchor="middle" x="342.52" y="-471.15" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;yes</text>
 </g>
 <!-- ready -->
-<g id="node12" class="node">
+<g id="node15" class="node">
 <title>ready</title>
-<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.2" d="M162.93,-36C162.93,-36 124.38,-36 124.38,-36 118.38,-36 112.38,-30 112.38,-24 112.38,-24 112.38,-12 112.38,-12 112.38,-6 118.38,0 124.38,0 124.38,0 162.93,0 162.93,0 168.93,0 174.93,-6 174.93,-12 174.93,-12 174.93,-24 174.93,-24 174.93,-30 168.93,-36 162.93,-36"/>
-<text xml:space="preserve" text-anchor="middle" x="143.65" y="-14.3" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Ready</text>
+<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.2" d="M154.42,-36C154.42,-36 115.87,-36 115.87,-36 109.87,-36 103.87,-30 103.87,-24 103.87,-24 103.87,-12 103.87,-12 103.87,-6 109.87,0 115.87,0 115.87,0 154.42,0 154.42,0 160.42,0 166.42,-6 166.42,-12 166.42,-12 166.42,-24 166.42,-24 166.42,-30 160.42,-36 154.42,-36"/>
+<text xml:space="preserve" text-anchor="middle" x="135.15" y="-14.3" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Ready</text>
 </g>
 <!-- ro&#45;&gt;ready -->
-<g id="edge12" class="edge">
+<g id="edge18" class="edge">
 <title>ro&#45;&gt;ready</title>
-<path fill="none" stroke="#c7d0da" stroke-width="1.1" stroke-dasharray="5,2" d="M126.16,-374.8C127.8,-358.9 129.65,-336.69 129.65,-317.12 129.65,-317.12 129.65,-317.12 129.65,-80.14 129.65,-68.28 132.18,-55.45 135.09,-44.62"/>
-<polygon fill="#c7d0da" stroke="#c7d0da" stroke-width="1.1" points="137.41,-45.42 137.01,-38.02 132.71,-44.06 137.41,-45.42"/>
+<path fill="none" stroke="#c7d0da" stroke-width="1.1" stroke-dasharray="5,2" d="M101.91,-413.67C112.03,-403.04 121.15,-389.26 121.15,-374.12 121.15,-374.12 121.15,-374.12 121.15,-80.14 121.15,-68.28 123.68,-55.45 126.59,-44.62"/>
+<polygon fill="#c7d0da" stroke="#c7d0da" stroke-width="1.1" points="128.91,-45.42 128.51,-38.02 124.21,-44.06 128.91,-45.42"/>
 </g>
 <!-- load -->
-<g id="node6" class="node">
+<g id="node9" class="node">
 <title>load</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M457.05,-364.12C457.05,-364.12 182.25,-364.12 182.25,-364.12 176.25,-364.12 170.25,-358.12 170.25,-352.12 170.25,-352.12 170.25,-340.12 170.25,-340.12 170.25,-334.12 176.25,-328.12 182.25,-328.12 182.25,-328.12 457.05,-328.12 457.05,-328.12 463.05,-328.12 469.05,-334.12 469.05,-340.12 469.05,-340.12 469.05,-352.12 469.05,-352.12 469.05,-358.12 463.05,-364.12 457.05,-364.12"/>
-<text xml:space="preserve" text-anchor="middle" x="319.65" y="-342.42" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">3. Load trees, stores, FTS, vector index</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M486.55,-391.12C486.55,-391.12 211.75,-391.12 211.75,-391.12 205.75,-391.12 199.75,-385.12 199.75,-379.12 199.75,-379.12 199.75,-367.12 199.75,-367.12 199.75,-361.12 205.75,-355.12 211.75,-355.12 211.75,-355.12 486.55,-355.12 486.55,-355.12 492.55,-355.12 498.55,-361.12 498.55,-367.12 498.55,-367.12 498.55,-379.12 498.55,-379.12 498.55,-385.12 492.55,-391.12 486.55,-391.12"/>
+<text xml:space="preserve" text-anchor="middle" x="349.15" y="-369.42" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">3. Load trees, stores, FTS, vector index</text>
 </g>
 <!-- wal&#45;&gt;load -->
-<g id="edge5" class="edge">
+<g id="edge10" class="edge">
 <title>wal&#45;&gt;load</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M320.44,-429.9C320.28,-413.42 320.07,-390.66 319.9,-373.18"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="322.35,-373.22 319.83,-366.24 317.45,-373.27 322.35,-373.22"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M353.02,-413.53C352.58,-409.1 352.12,-404.39 351.67,-399.83"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="354.13,-399.75 351,-393.02 349.25,-400.22 354.13,-399.75"/>
 </g>
 <!-- analyse -->
-<g id="node7" class="node">
+<g id="node10" class="node">
 <title>analyse</title>
-<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M458.42,-300.98C458.42,-300.98 176.88,-300.98 176.88,-300.98 170.88,-300.98 164.87,-294.98 164.87,-288.98 164.87,-288.98 164.87,-276.98 164.87,-276.98 164.87,-270.98 170.87,-264.98 176.87,-264.98 176.87,-264.98 458.42,-264.98 458.42,-264.98 464.42,-264.98 470.42,-270.98 470.42,-276.98 470.42,-276.98 470.42,-288.98 470.42,-288.98 470.42,-294.98 464.42,-300.98 458.42,-300.98"/>
-<text xml:space="preserve" text-anchor="middle" x="317.65" y="-279.28" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">4. Analysis: which transactions committed</text>
+<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M471.92,-321.23C471.92,-321.23 190.38,-321.23 190.38,-321.23 184.38,-321.23 178.37,-315.23 178.37,-309.23 178.37,-309.23 178.37,-297.23 178.37,-297.23 178.37,-291.23 184.37,-285.23 190.37,-285.23 190.37,-285.23 471.92,-285.23 471.92,-285.23 477.92,-285.23 483.92,-291.23 483.92,-297.23 483.92,-297.23 483.92,-309.23 483.92,-309.23 483.92,-315.23 477.92,-321.23 471.92,-321.23"/>
+<text xml:space="preserve" text-anchor="middle" x="331.15" y="-299.53" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">4. Analysis: which transactions committed</text>
 </g>
 <!-- load&#45;&gt;analyse -->
-<g id="edge6" class="edge">
+<g id="edge11" class="edge">
 <title>load&#45;&gt;analyse</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M319.08,-327.76C318.9,-322.17 318.69,-315.84 318.49,-309.76"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="320.94,-309.75 318.27,-302.83 316.05,-309.91 320.94,-309.75"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M344.51,-354.64C342.5,-347.06 340.11,-338.03 337.91,-329.72"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="340.3,-329.17 336.13,-323.03 335.56,-330.42 340.3,-329.17"/>
 </g>
 <!-- refuse -->
-<g id="node8" class="node">
+<g id="node11" class="node">
 <title>refuse</title>
-<path fill="#fdf0ea" stroke="#c2703f" stroke-width="1.2" d="M631.67,-305.12C631.67,-305.12 525.62,-305.12 525.62,-305.12 519.62,-305.12 513.62,-299.12 513.62,-293.12 513.62,-293.12 513.62,-272.84 513.62,-272.84 513.62,-266.84 519.62,-260.84 525.62,-260.84 525.62,-260.84 631.67,-260.84 631.67,-260.84 637.67,-260.84 643.67,-266.84 643.67,-272.84 643.67,-272.84 643.67,-293.12 643.67,-293.12 643.67,-299.12 637.67,-305.12 631.67,-305.12"/>
-<text xml:space="preserve" text-anchor="start" x="528.02" y="-286.03" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Damage mid&#45;log:</text>
-<text xml:space="preserve" text-anchor="start" x="528.02" y="-272.53" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">refuse to open</text>
+<path fill="#fdf0ea" stroke="#c2703f" stroke-width="1.2" d="M726.67,-332.12C726.67,-332.12 539.62,-332.12 539.62,-332.12 533.62,-332.12 527.62,-326.12 527.62,-320.12 527.62,-320.12 527.62,-286.34 527.62,-286.34 527.62,-280.34 533.62,-274.34 539.62,-274.34 539.62,-274.34 726.67,-274.34 726.67,-274.34 732.67,-274.34 738.67,-280.34 738.67,-286.34 738.67,-286.34 738.67,-320.12 738.67,-320.12 738.67,-326.12 732.67,-332.12 726.67,-332.12"/>
+<text xml:space="preserve" text-anchor="start" x="542.02" y="-313.03" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">Damage in synced frames,</text>
+<text xml:space="preserve" text-anchor="start" x="542.02" y="-299.53" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">or a record that cannot</text>
+<text xml:space="preserve" text-anchor="start" x="542.02" y="-286.03" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">be replayed: refuse to open</text>
 </g>
 <!-- analyse&#45;&gt;refuse -->
-<g id="edge11" class="edge">
+<g id="edge16" class="edge">
 <title>analyse&#45;&gt;refuse</title>
-<path fill="none" stroke="#c7d0da" stroke-width="1.1" stroke-dasharray="5,2" d="M470.83,-282.98C482.13,-282.98 493.43,-282.98 504.73,-282.98"/>
-<polygon fill="#c7d0da" stroke="#c7d0da" stroke-width="1.1" points="504.71,-285.43 511.71,-282.98 504.71,-280.53 504.71,-285.43"/>
+<path fill="none" stroke="#c7d0da" stroke-width="1.1" stroke-dasharray="5,2" d="M484.51,-303.23C495.96,-303.23 507.4,-303.23 518.85,-303.23"/>
+<polygon fill="#c7d0da" stroke="#c7d0da" stroke-width="1.1" points="518.52,-305.68 525.52,-303.23 518.52,-300.78 518.52,-305.68"/>
 </g>
 <!-- redo -->
-<g id="node9" class="node">
+<g id="node12" class="node">
 <title>redo</title>
-<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M447.3,-237.84C447.3,-237.84 186,-237.84 186,-237.84 180,-237.84 174,-231.84 174,-225.84 174,-225.84 174,-205.56 174,-205.56 174,-199.56 180,-193.56 186,-193.56 186,-193.56 447.3,-193.56 447.3,-193.56 453.3,-193.56 459.3,-199.56 459.3,-205.56 459.3,-205.56 459.3,-225.84 459.3,-225.84 459.3,-231.84 453.3,-237.84 447.3,-237.84"/>
-<text xml:space="preserve" text-anchor="start" x="188.4" y="-218.75" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">5. Redo committed records in log order</text>
-<text xml:space="preserve" text-anchor="start" x="188.4" y="-205.25" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;flushing early if the pool fills</text>
+<path fill="#dbe9f8" stroke="#4a90d9" stroke-width="1.2" d="M465.17,-251.34C465.17,-251.34 197.12,-251.34 197.12,-251.34 191.12,-251.34 185.12,-245.34 185.12,-239.34 185.12,-239.34 185.12,-205.56 185.12,-205.56 185.12,-199.56 191.12,-193.56 197.12,-193.56 197.12,-193.56 465.17,-193.56 465.17,-193.56 471.17,-193.56 477.17,-199.56 477.17,-205.56 477.17,-205.56 477.17,-239.34 477.17,-239.34 477.17,-245.34 471.17,-251.34 465.17,-251.34"/>
+<text xml:space="preserve" text-anchor="start" x="199.52" y="-232.25" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">5. Redo committed records in log order,</text>
+<text xml:space="preserve" text-anchor="start" x="199.52" y="-218.75" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;each as an assignment,</text>
+<text xml:space="preserve" text-anchor="start" x="199.52" y="-205.25" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;flushing early if the pool fills</text>
 </g>
 <!-- analyse&#45;&gt;redo -->
-<g id="edge7" class="edge">
+<g id="edge12" class="edge">
 <title>analyse&#45;&gt;redo</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M317.38,-264.49C317.3,-258.88 317.2,-252.5 317.1,-246.28"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="319.56,-246.59 317,-239.63 314.66,-246.67 319.56,-246.59"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M331.15,-284.75C331.15,-277.47 331.15,-268.73 331.15,-260.17"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="333.6,-260.38 331.15,-253.38 328.7,-260.38 333.6,-260.38"/>
+</g>
+<!-- redo&#45;&gt;refuse -->
+<g id="edge17" class="edge">
+<title>redo&#45;&gt;refuse</title>
+<path fill="none" stroke="#c7d0da" stroke-width="1.1" stroke-dasharray="5,2" d="M440.27,-251.91C465.79,-258.57 493.05,-265.68 518.8,-272.4"/>
+<polygon fill="#c7d0da" stroke="#c7d0da" stroke-width="1.1" points="518.1,-274.75 525.49,-274.15 519.33,-270.01 518.1,-274.75"/>
 </g>
 <!-- rebuild -->
-<g id="node10" class="node">
+<g id="node13" class="node">
 <title>rebuild</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M431.8,-170.56C431.8,-170.56 197.5,-170.56 197.5,-170.56 191.5,-170.56 185.5,-164.56 185.5,-158.56 185.5,-158.56 185.5,-138.28 185.5,-138.28 185.5,-132.28 191.5,-126.28 197.5,-126.28 197.5,-126.28 431.8,-126.28 431.8,-126.28 437.8,-126.28 443.8,-132.28 443.8,-138.28 443.8,-138.28 443.8,-158.56 443.8,-158.56 443.8,-164.56 437.8,-170.56 431.8,-170.56"/>
-<text xml:space="preserve" text-anchor="start" x="199.9" y="-151.47" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">6. If anything was redone: rebuild</text>
-<text xml:space="preserve" text-anchor="start" x="199.9" y="-137.97" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;property and FTS indexes, flush</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M441.3,-170.56C441.3,-170.56 207,-170.56 207,-170.56 201,-170.56 195,-164.56 195,-158.56 195,-158.56 195,-138.28 195,-138.28 195,-132.28 201,-126.28 207,-126.28 207,-126.28 441.3,-126.28 441.3,-126.28 447.3,-126.28 453.3,-132.28 453.3,-138.28 453.3,-138.28 453.3,-158.56 453.3,-158.56 453.3,-164.56 447.3,-170.56 441.3,-170.56"/>
+<text xml:space="preserve" text-anchor="start" x="209.4" y="-151.47" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">6. If anything was redone: rebuild</text>
+<text xml:space="preserve" text-anchor="start" x="209.4" y="-137.97" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;property and FTS indexes, flush</text>
 </g>
 <!-- redo&#45;&gt;rebuild -->
-<g id="edge8" class="edge">
+<g id="edge13" class="edge">
 <title>redo&#45;&gt;rebuild</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M315.98,-192.96C315.85,-188.62 315.71,-183.99 315.57,-179.43"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="318.02,-179.43 315.36,-172.5 313.12,-179.58 318.02,-179.43"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M328.38,-192.98C327.95,-188.48 327.49,-183.81 327.05,-179.27"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="329.5,-179.18 326.39,-172.45 324.63,-179.66 329.5,-179.18"/>
 </g>
 <!-- ckpt -->
-<g id="node11" class="node">
+<g id="node14" class="node">
 <title>ckpt</title>
-<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.6" d="M451.05,-103.28C451.05,-103.28 176.25,-103.28 176.25,-103.28 170.25,-103.28 164.25,-97.28 164.25,-91.28 164.25,-91.28 164.25,-71 164.25,-71 164.25,-65 170.25,-59 176.25,-59 176.25,-59 451.05,-59 451.05,-59 457.05,-59 463.05,-65 463.05,-71 463.05,-71 463.05,-91.28 463.05,-91.28 463.05,-97.28 457.05,-103.28 451.05,-103.28"/>
-<text xml:space="preserve" text-anchor="start" x="178.65" y="-84.19" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">7. Number transactions above the log,</text>
-<text xml:space="preserve" text-anchor="start" x="178.65" y="-70.69" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;then checkpoint: flush, empty the log</text>
+<path fill="#eaf5ea" stroke="#2f7d32" stroke-width="1.6" d="M447.55,-103.28C447.55,-103.28 172.75,-103.28 172.75,-103.28 166.75,-103.28 160.75,-97.28 160.75,-91.28 160.75,-91.28 160.75,-71 160.75,-71 160.75,-65 166.75,-59 172.75,-59 172.75,-59 447.55,-59 447.55,-59 453.55,-59 459.55,-65 459.55,-71 459.55,-71 459.55,-91.28 459.55,-91.28 459.55,-97.28 453.55,-103.28 447.55,-103.28"/>
+<text xml:space="preserve" text-anchor="start" x="175.15" y="-84.19" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">7. Number transactions above the log,</text>
+<text xml:space="preserve" text-anchor="start" x="175.15" y="-70.69" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;then checkpoint: flush, empty the log</text>
 </g>
 <!-- rebuild&#45;&gt;ckpt -->
-<g id="edge9" class="edge">
+<g id="edge14" class="edge">
 <title>rebuild&#45;&gt;ckpt</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M314.32,-125.68C314.25,-121.43 314.18,-116.91 314.11,-112.44"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="316.57,-112.63 314.01,-105.67 311.67,-112.71 316.57,-112.63"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M319.49,-125.68C318.58,-121.43 317.61,-116.91 316.65,-112.44"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="319.05,-111.96 315.19,-105.63 314.26,-112.99 319.05,-111.96"/>
 </g>
 <!-- ckpt&#45;&gt;ready -->
-<g id="edge10" class="edge">
+<g id="edge15" class="edge">
 <title>ckpt&#45;&gt;ready</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M252.76,-58.24C229.54,-49.89 203.71,-40.6 183.02,-33.16"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="184.05,-30.92 176.63,-30.86 182.39,-35.54 184.05,-30.92"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M247.47,-58.24C223.29,-49.79 196.36,-40.38 174.93,-32.9"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="175.99,-30.67 168.57,-30.68 174.37,-35.3 175.99,-30.67"/>
 </g>
 </g>
 </svg>

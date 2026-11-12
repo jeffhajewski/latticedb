@@ -52,15 +52,16 @@ The WAL contains everything we need. After a crash:
 Recovery is not one function but a sequence spread through `Database.open`:
 
 <img class="diagram" src="../assets/diagrams/recovery-open.svg"
-     alt="What Database.open does about a crash, in order. 1. Finish an interrupted flush: a complete journal is written in place, a read-only open refuses instead, and an incomplete journal is discarded. Then, only for a read-write open with the WAL enabled: 2. Open the log, check the database id, cut off a torn tail and rebuild a torn header. 3. Load the trees, stores, FTS and vector index. 4. Analysis: which transactions committed; damage in the middle of the log refuses the open. 5. Redo committed records in log order, flushing early if the pool fills. 6. If anything was redone, rebuild the property and FTS indexes and flush. 7. Number new transactions above the log, then checkpoint: flush and empty the log. Ready. A read-only open, or one without the WAL, uses the file only, with no log and no recovery">
+     alt="What Database.open does about a crash, in order. A read-only open whose log and journal are empty uses the file only. A read-only open with something in either opens on an in-memory overlay, where the files are read and never written, and then goes through the same steps as a read-write open. 1. Finish an interrupted flush: a complete journal is written in place and an incomplete one discarded. Then, with the WAL enabled: 2. Open the log, check the database id, cut off an unsynced tail and rebuild a torn header. 3. Load the trees, stores, FTS and vector index. 4. Analysis: which transactions committed. 5. Redo committed records in log order, each as an assignment, flushing early if the pool fills. Damage in synced frames, or a record that cannot be replayed, refuses the open. 6. If anything was redone, rebuild the property and FTS indexes and flush. 7. Number new transactions above the log, then checkpoint: flush and empty the log. Ready. Without the WAL the open uses the file only">
 
 1. The page manager finishes any interrupted flush from the journal, before it reads
    the file's header.
-2. The log is opened: its database id is checked, a torn tail is cut off and a torn
-   header rebuilt.
+2. The log is opened: its database id is checked, an unsynced tail is cut off and a
+   torn header rebuilt.
 3. The trees, graph stores, full-text index and vector index are loaded from the
    file. The vector index has to exist before replay, because replay needs
-   somewhere to put vectors.
+   somewhere to put vectors; the file records the index's configuration, so it is
+   loaded whatever the open's options say.
 4. Analysis and redo run (below).
 5. If anything was redone, the property and full-text indexes are rebuilt from the
    trees, since replay does not maintain them, and the result is flushed.
@@ -71,9 +72,22 @@ Recovery is not one function but a sequence spread through `Database.open`:
    of new ones. A log that ends at its own last checkpoint is left as it is, since
    the file already holds everything in it.
 
-A **read-only** open, or a database opened with `enable_wal = false`, never opens the
-log and never runs recovery. A read-only open after a crash therefore sees only what
-had reached the database file; open read-write once to replay the log.
+A database opened with `enable_wal = false` never opens the log and never replays
+it.
+
+A **read-only** open of a database whose log holds frames, or whose journal holds a
+flush, runs exactly these steps on an overlay filesystem (`OverlayVfs`): the files
+are opened for reading only, and every write recovery makes, the journal applied,
+the replay and the checkpoint that folds it in, goes to memory in 4 KB blocks over
+the files. The handle is then read-only as usual. Nothing reaches the disk, and the
+next read-write open recovers the files itself. The overlay may hold at most 64 MB
+plus four times the size of the log and journal; a recovery that needs more fails
+the open with `BufferPoolFull`, and a read-write open recovers such a database. A
+read-only open with an empty log and no journal reads the file directly, as before.
+
+The reader's shared lock keeps a writer out while it reads. Opened without locking
+beside a live writer, a read-only handle recovers the log as far as it had been
+written at that moment.
 
 ## Finishing an Interrupted Flush
 
@@ -85,8 +99,9 @@ it was being written, before the database file was touched, and is discarded:
 applying the images that verify and skipping the rest would recreate the torn image
 the journal exists to prevent.
 
-A read-only open cannot write the file, so finding a complete journal refuses the
-open instead. Opening the database once read-write finishes the flush.
+A read-only open applies the journal to its in-memory overlay, so it sees the
+finished flush without writing the file; the next read-write open applies it to the
+file.
 
 After this step the file is a whole image, from before the flush or after it.
 
@@ -98,11 +113,18 @@ the middle of a rewrite; it is rebuilt, with its frame count taken from the file
 length and `checkpoint_lsn` reset to zero, so the whole log is replayed.
 
 Then the end of the log is found. The header's frame count says how many frames were
-written, not how many survived. Frames are verified in order; at the first one that
-fails, the rest of the file is checked. If no later frame is valid, the bad frame is
-a torn write at the tail: the log is cut back to the frames that verify and the
-header rewritten. If a later frame is valid, the log is left exactly as found, for
-recovery to report.
+written, not how many survived. Every frame is checked, and each frame that verifies
+says how many frames had been synced when it was written (`synced_frames`, see
+[Write-Ahead Log](./wal.md#the-checksum)). The largest of those claims divides the
+log. A bad frame at or above it belongs to the unsynced tail, which a power cut can
+leave in any state: the log is cut back to the frame before it and the header
+rewritten. A bad frame below it was synced, and its damage is real: the log is left
+exactly as found, for recovery to refuse. A log written entirely by 0.16.0 carries
+no claims, and a bad frame in it is damage if any later frame verifies.
+
+A non-empty log is synced before anything new is written after it, since a killed
+process's frames may still be only in the operating system's cache, and bytes past
+the frames the header counts are removed.
 
 ## Two-Phase Recovery
 
@@ -275,12 +297,22 @@ checkpoint wrote changes that are still in the log, and a flush in the middle of
 commit can have written part of a transaction. Recovery does not know which records
 the image reflects, and does not try to.
 
-That works because the records state outcomes rather than changes: "node 42 exists
-with label Person", "property `age` of node 42 is 31", "edge 9 does not exist".
+That works because each record is applied as an assignment of the state it logged,
+never as a change to whatever is there:
+
+| Record | Applied as |
+|--------|------------|
+| node insert | the node exists with exactly the logged labels, their label-index entries, and no properties (its property records follow it in the log) |
+| property set or removal, label add or remove | exactly that key or label, and its label-index entry, is set or cleared |
+| node or edge delete | the node or edge is absent |
+| edge insert | the edge exists with exactly the logged endpoints and type, and no properties |
+
 Replaying one onto a state that already has it changes nothing. Replaying an older
 record onto a newer state can change something, but the later record is in the log
 after it and is replayed after it, and the image never runs ahead of the log, since
-the log is synced before every flush.
+the log is synced before every flush. A record that finds its node or edge missing is
+accepted only when a later committed record in the same log deletes it, which means
+the file is from after that delete.
 
 The vector index needed an exception. Inserting a vector the index already holds is
 a replacement, which unlinks the node from its neighbours and links it again, and
@@ -290,56 +322,75 @@ vector for the node.
 
 ### Replay errors
 
-A graph or stream redo step that fails is skipped rather than failing recovery;
-some failures are expected (a node insert whose node is already in the file fails,
-and that failure is the replay being a no-op). Vector records are stricter: a vector
-record that cannot be applied, or any vector record when the database was opened
-without vectors enabled, fails the open, since skipping it would leave committed
-vectors missing. The one exception is a vector removal in a file that has never held
-vectors, which 0.16.0 logged for every deleted node and which has nothing to remove.
+A committed record that cannot be replayed fails the open rather than being skipped,
+since skipping it would open a database missing a change that was acknowledged:
 
-The `page_write` record type (a full page image) is still handled by the redo pass,
-but nothing writes it.
+| What recovery meets | The open fails with |
+|---------------------|---------------------|
+| A payload that does not decode, a payload type no release writes, a `page_write` (page image) record, or a change to a node or edge that is missing and not deleted later in the log | `InvalidDatabase` (`LATTICE_ERROR_CORRUPTION`) |
+| A store that reports an error while applying a record | `IoError` |
+| Memory running out | `OutOfMemory` |
+| Vector records, with no vector index to replay them into | `IoError` |
+
+The last case can only arise for a database last written by 0.16.0 whose
+dimensions cannot be read from its vector pages, since every other database records
+its index; the CLI recognises it and asks for the dimensions. The one vector record
+that is skipped is a removal in a file that has never held vectors, which 0.16.0
+logged for every deleted node and which has nothing to remove.
 
 ## Corruption Detection
 
-When recovery encounters a checksum mismatch, it must determine whether this is:
+When a frame fails its checksum, recovery must determine whether this is:
 
-1. **Tail corruption** - A torn write at the end of the WAL (safe to proceed)
-2. **Mid-log corruption** - Real corruption with valid data after it (unsafe)
+1. **An unsynced tail** - frames a power cut or a kill caught before they were synced
+   (safe to drop: nothing in them was promised)
+2. **Damage to synced data** - a frame that was promised durable (unsafe to drop)
 
-Opening the log has normally cut a torn tail off already (see
-[Opening the Log](#opening-the-log)); recovery checks again as it reads.
+Opening the log has already sorted every bad frame into one or the other (see
+[Opening the Log](#opening-the-log)): it cut an unsynced tail off and recorded
+damage, which recovery reports.
 
-### Scan-Ahead Detection
+### Telling Them Apart
 
-On checksum mismatch, recovery checks every later frame in the log for a valid one:
+Each frame says how many frames had been synced when it was written. Take the
+largest such claim among the frames that verify:
 
-**Scenario 1 — tail corruption (a torn write)**
+**Scenario 1 — an unsynced tail**
 
-| Frame | Checksum |
-|------:|----------|
-| 0 | OK |
-| 1 | OK |
-| 2 | Mismatch |
-| 3 | Nothing valid |
-| 4 | Nothing valid |
+| Frame | Checksum | `synced_frames` |
+|------:|----------|----------------:|
+| 0 | OK | 0 |
+| 1 | OK | 1 |
+| 2 | Mismatch | |
+| 3 | OK | 2 |
+| 4 | Mismatch | |
 
-No valid frames follow the corruption, so this is a torn write at the end of the WAL.
-Recovery proceeds with frames 0 and 1.
+The largest claim is 2, and the first bad frame is frame 2, which no frame claims was
+synced. Frames 2 to 4 were written after the last sync and a power cut left them in
+any order, frame 3 whole and frames 2 and 4 not. The log is cut back to frames 0
+and 1. A kill without a power cut would leave all of them whole; the old rule, which
+called any bad frame with a good one after it corruption, refused such a database.
 
-**Scenario 2 — mid-log corruption (real corruption)**
+**Scenario 2 — damage to synced data**
 
-| Frame | Checksum |
-|------:|----------|
-| 0 | OK |
-| 1 | Mismatch |
-| 2 | OK |
-| 3 | OK |
+| Frame | Checksum | `synced_frames` |
+|------:|----------|----------------:|
+| 0 | OK | 0 |
+| 1 | Mismatch | |
+| 2 | OK | 2 |
+| 3 | OK | 3 |
 
-Valid frames exist *after* the corrupt one, so this cannot be a torn tail. Recovery
-fails with `MidLogCorruption`, and the open fails with `InvalidDatabase`, rather than
-silently discarding committed data.
+Frame 2 says two frames had been synced before it, so frame 1 was durable and its
+damage is real. Recovery fails with `MidLogCorruption`, and the open fails with
+`InvalidDatabase`, rather than silently discarding committed data.
+
+A frame verifies only if it holds records. A frame that never reached the disk reads
+back as zeroes, which would otherwise pass as an empty frame and let recovery read on
+past it into the whole frames after it, replaying a transaction without the records
+of the lost frame.
+
+A log written by 0.16.0 carries no claims, and keeps the rule it was written under:
+a bad frame with any valid frame after it is damage.
 
 ### Why This Matters
 
@@ -356,19 +407,22 @@ By failing on mid-log corruption, we force manual intervention (restore from bac
 ### Implementation
 
 ```zig
-fn hasValidFramesAfter(wal: *WalManager, corrupted_frame: u64) bool {
-    // Check every later frame, to the end of the log
-    for (corrupted_frame + 1 .. frame_count) |frame_num| {
-        if (frameHasValidChecksum(frame_num)) {
-            return true;  // Mid-log corruption!
-        }
-    }
-    return false;  // Tail corruption, safe to stop
-}
+// At open (WalManager.findLogEnd), over every frame the header counts:
+//   S = the largest synced_frames among frames that verify (version 3)
+//   b = the first frame that does not verify
+const corrupt = if (any_version3_frame) b < S else valid_frame_after_b;
+if (corrupt) wal.damaged_frame = b      // recovery returns MidLogCorruption
+else truncate the log to b frames       // an unsynced tail
 ```
 
-Opening the log makes the same check over every later frame, so the two always
-agree on where the log ends.
+A frame that goes bad after the open, while recovery reads it, is judged by the
+0.16.0 rule: any frame that verifies after it makes it damage.
+
+A large record is logged as a chain of fragments over several frames. A process
+killed while writing the chain leaves its first fragments and no commit record.
+When the record after an unfinished chain belongs to another transaction, the chain
+is skipped and that record read as itself; a break inside one transaction's chain is
+still damage.
 
 ## When an Open Is Refused
 
@@ -376,11 +430,11 @@ Opening refuses, rather than guess, when:
 
 - the log belongs to a different database, or its header is damaged beyond the
   torn-header case above;
-- the log is damaged in the middle;
-- a read-only open finds a complete journal it may not apply;
-- the log holds a vector record and the database was opened without the vector
-  index (apart from the removal case above);
-- on a read-write open, the node tree cannot be scanned to find the next node id:
+- the log is damaged in frames that had been synced;
+- a committed record cannot be replayed ([Replay errors](#replay-errors));
+- a read-only recovery would need more memory than its overlay may hold;
+- on a read-write open of a file that does not record its node id counter (one last
+  written by 0.16.0), the node tree cannot be scanned to find the next node id:
   starting the ids over at 1 would overwrite existing nodes;
 - on a read-write open of an existing file, the symbol table cannot be scanned or
   the edge id counter cannot be read: restarting either would give a new label,
@@ -400,7 +454,12 @@ The guarantee depends on what failed, the sync mode and, on macOS, whether
 
 "Acknowledged" means the commit call returned. A commit that was running when the
 process died is either wholly present or wholly absent, according to whether its
-commit record reached the disk.
+commit record reached the disk. In `.normal` mode the database after a power cut
+holds a whole number of transactions up to some point no earlier than the last log
+sync, none applied in part. In every mode a crash during recovery, a second power
+cut included, changes nothing: the next recovery reaches the same state.
+[Durability and the Log](../configuration/durability.md#what-survives-what) states
+the guarantee in full.
 
 ## Statistics
 
@@ -454,38 +513,38 @@ without changing anything.
 
 ## Known Limits
 
-- **Unsynced frames can reach the disk out of order.** A power cut can leave a later
-  unsynced frame whole and an earlier one torn. The earlier frame then looks like
-  mid-log damage and the open is refused, where dropping the unsynced frames would
-  have been right. In the default sync mode this can only affect a commit that was
-  still being written; in `.normal`, any frames since the last sync.
-- **Replay errors are swallowed** for graph and stream records, as above, so a
-  failure that is not the expected "already there" can leave a committed change out
-  without an error.
-- **The tests simulate kills, not power loss.** The crash tests copy the database
-  and log while the database is open, as a kill would leave them, or cut the
-  database file back to its header so everything has to come from the log; they
-  cover torn and missing frames, a flush interrupted part way, and recovery after
-  automatic checkpoints and early flushes. Nothing injects faults at the storage
-  layer or reorders writes, so the power-loss column above rests on reasoning rather
-  than a test.
+- **Damage in the newest sync batch reads as a torn tail.** Only a frame written
+  after a later sync can vouch that a frame was synced. Damage to the last frames
+  before the most recent sync, with nothing written after them, is cut off as an
+  unsynced tail, and the commits in them are lost without an error.
+- **A read-only recovery is bounded by memory**: 64 MB plus four times the size of
+  the log and journal. Beyond that the read-only open fails, and a read-write open
+  is needed.
+- **`lattice check` does not recover first.** It reads pages directly, so it reports
+  a flush a crash interrupted as an error until a read-write open finishes it.
+- **What the power-loss tests do not reach.** The power-loss simulation (see
+  [Running Tests](../development/testing.md#power-loss-tests)) drives the Zig API on
+  an in-memory disk model. Backup, restore and replication use the filesystem
+  directly, outside the model, and the C API layer, Cypher and streams are not in its
+  workload.
 
 ## Summary
 
 | Concept | Purpose |
 |---------|---------|
 | Journal | Finish or discard an interrupted flush, so the file is one whole image |
-| Torn-tail trim | Cut a half-written last frame off the log at open |
+| Unsynced-tail trim | Cut frames written after the last sync off the log at open, if any is bad |
 | Analysis phase | Determine transaction outcomes |
 | Redo phase | Apply committed operations |
 | checkpoint_lsn | Recovery starting point |
 | Transaction states | committed, aborted, in_progress |
 | Checksum verification | Detect corruption/partial writes |
-| Tail corruption | Torn write at end, safe to tolerate |
-| Mid-log corruption | Real corruption, fail to prevent data loss |
-| Scan-ahead detection | Distinguish tail from mid-log corruption |
+| Unsynced tail | Frames a crash caught before their sync, safe to drop |
+| Synced damage | Real corruption, fail to prevent data loss |
+| `synced_frames` | Each frame's claim of how much was synced, which tells the two apart |
+| Read-only recovery | The same recovery over an in-memory overlay, writing nothing |
 | No Undo | Uncommitted changes stay in the overlay, never applied |
-| Logical redo | Committed records re-executed through the stores; safe to repeat |
+| Logical redo | Committed records applied as assignments through the stores; safe to repeat, and a record that cannot be applied refuses the open |
 | Checkpoint at open | Empty the log once recovery is done |
 
 Recovery transforms a potentially inconsistent crash state into a consistent database by leveraging the WAL as the authoritative record of committed transactions.

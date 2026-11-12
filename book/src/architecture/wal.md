@@ -123,7 +123,7 @@ and an existing log keeps the frame size it was created with.
 | `frame_count` | How many frames have been written |
 | `checkpoint_lsn` | Where recovery starts replaying |
 | `database_uuid` | Binds this WAL to one database file |
-| `version` | WAL format version (currently 2) |
+| `version` | WAL format version: 3 while the log holds frames, 2 when it is empty |
 | `checksum` | CRC32C of the rest of the header |
 
 **Frame header (32 bytes, at the start of every frame)**
@@ -134,7 +134,16 @@ and an existing log keeps the frame size it was created with.
 | `record_count` | How many records the frame carries |
 | `data_size` | Bytes of the frame actually used |
 | `prev_frame_lsn` | LSN of the last record in the previous frame |
-| `checksum` | CRC32C over the frame's data area |
+| `checksum` | CRC32C over the other header fields and the frame's data area |
+| `synced_frames` | How many frames, from the start of the log, had been synced when this frame was written |
+
+A log that holds frames is format version 3. An empty log is the same in every
+version, so its header says 2, and 0.16.0, which reads versions up to 2, still
+opens a database this release closed cleanly or checkpointed. A log this release
+left holding frames after a crash says 3, and 0.16.0 refuses it rather than misread
+it. This release reads logs written by 0.16.0, whose frames carry no
+`synced_frames` and have a checksum of the data alone; appending to such a log adds
+version 3 frames after the old ones.
 
 Each record has its own 32-byte header — `record_type`, `flags`, `payload_size`,
 `txn_id`, `lsn`, `prev_lsn` — followed by its payload.
@@ -225,11 +234,17 @@ record above that limit returns `ValueTooLarge`.
 Vector replacements and removals are logical transaction records too. Recovery
 replays them into the vector index only for committed transactions; an index that
 cannot replay a vector record causes open to fail rather than return incomplete
-search results. Open with vector support and the same dimensions as the writer.
-Deleting a node logs a vector removal only when the node has a committed vector,
-so a database that never stored a vector never needs vectors enabled to reopen.
-(Logs written by 0.16.0 hold a removal for every deleted node; recovery skips those
-when the file holds no vector data.)
+search results. The database file records its vector index, and the index is
+written to the file at the open that creates it, before any vector record can be
+logged, so recovery always has the index to replay into without being told its
+dimensions. Deleting a node logs a vector removal only when the node has a
+committed vector. (Logs written by 0.16.0 hold a removal for every deleted node;
+recovery skips those when the file holds no vector data.)
+
+The log file is created when a database is first opened for writing, and again if
+it has gone missing, as when a backup is put back without its log. Creating it
+syncs the new file and its directory entry, once per file, so a power cut cannot
+lose the log's name together with the commits in it. No commit pays for this.
 
 ## Commit Protocol
 
@@ -265,10 +280,21 @@ all.
 On startup, we need to:
 
 1. **Find the end of valid log** - Verify each frame's checksum; a torn tail is cut
-   off when the log is opened
-2. **Redo committed transactions** - Re-execute the logical records of every transaction with a commit record
+   off when the log is opened, and damage to frames that had been synced refuses the
+   open
+2. **Redo committed transactions** - Apply the logical records of every transaction
+   with a commit record, each as an assignment of the state it logged
 3. **Skip everything else** - Records of transactions without a commit record are ignored; there is no undo pass
 4. **Empty the log** - Checkpoint, so the next open has nothing to replay
+
+Redo is exact. Every record sets the state it describes, whether or not the file
+already holds it: a node insert makes the node exist with exactly the logged labels
+and no properties (its property records follow it), a property or label record sets
+or clears exactly that key or label and its index entry, a delete makes the node or
+edge absent. Replaying a record twice, or into a file a flush had already brought
+up to date, gives the same result. A record that cannot be applied fails the open
+instead of being skipped; see
+[Recovery](./recovery.md#replay-errors).
 
 | LSN | Record | Transaction |
 |----:|--------|------------:|
@@ -318,26 +344,56 @@ format used for normal records.
 
 We use CRC32C (the Castagnoli polynomial, the same function as page checksums) to detect corruption:
 
-Every frame stores a CRC32C of its data area in its header:
+Every frame stores, in its header, a CRC32C of the header's other fields and of
+its data area, so a damaged `synced_frames` cannot pass:
 
 | Frame region | Contents |
 |--------------|----------|
-| Header | `checksum = 0xABCD1234` |
+| Header | `frame_number`, `record_count`, `data_size`, `prev_frame_lsn`, `checksum = 0xABCD1234`, `synced_frames` |
 | Data | `[record 1][record 2][record 3]` |
 
-On read the checksum is recomputed and compared:
+On read the checksum is recomputed and compared. A frame verifies only if it also
+holds at least one record: a frame that never reached the disk reads back as zeroes,
+and a frame of zeroes would otherwise pass as an empty one. Every reader of the log
+(the open, recovery and replication) applies the same check. Frames written by
+0.16.0 have a checksum of the data alone; a frame is read as old or new by which of
+the two checksums it matches.
 
-1. Read the frame.
-2. Compute `CRC32C(data)`.
-3. Compare against the stored checksum.
+**Telling a torn tail from damage.** After a power cut, the frames written since the
+last sync can be in any state: some whole, some torn or never written, in any order,
+because a disk need not write them in the order they were issued. None of them was
+promised durable, so none of that is damage. A frame that was synced and then fails
+its checksum is damage. `synced_frames` tells the two apart. Opening the log takes
+the largest `synced_frames` among the frames that verify; call it S. The first frame
+that fails is:
 
-Opening the log checks every frame the header counts. A frame that fails, with no
-valid frame after it, is a torn tail from a crash during an append: the log is cut
-back to the frames that verify, so the next frame written takes its place. A frame
-that fails with valid frames after it is damage in the middle of the log; it is left
-as found, and recovery refuses the open rather than skip what might be a commit
-record (see [Recovery](./recovery.md#corruption-detection)). A frame with no records
-in it counts as bad; one is never written.
+- **below S**: it had been synced, so this is damage to data that was promised
+  durable. It is left exactly as found, and recovery refuses the open (see
+  [Recovery](./recovery.md#corruption-detection)) rather than drop the commits in it.
+- **at or above S**: it belongs to the unsynced tail. The log is cut back to the
+  frame before it, and the next frame written takes its place.
+
+A log of 0.16.0 frames only carries no such statement and keeps the rule it was
+written under: a bad frame with any frame that verifies after it is damage, and one
+with none after it is a torn tail.
+
+The rule costs a commit nothing: the claim is the frame count at the last completed
+sync, already in memory, and no extra write or sync is made for it. In exchange, the
+open syncs a non-empty log before any new frame vouches for it, because a killed
+process's frames may be only in the operating system's cache, and removes any bytes
+past the frames the header counts, so a stale frame cannot later be read as part of
+the log.
+
+**The limit.** Only frames written after a later sync can vouch for a frame. Damage
+to the last frames of the newest sync batch, with nothing written after them, cannot
+be told from a torn write and is cut off as a torn tail: the commits in those frames
+are lost without an error.
+
+A transaction whose large record was being written as fragments when the process
+died leaves the first fragments in whole frames and no commit record. When the next
+record belongs to another transaction, as it does once later commits have been
+logged after it, the unfinished fragments are skipped; a break in the fragments of
+one transaction is still damage.
 
 The header has a checksum too. A header whose checksum fails but whose magic,
 version, frame size and database id are intact was torn while being rewritten; it is
@@ -399,7 +455,8 @@ property update; label add or remove; vector set or remove; stream append, offse
 or trim). Checkpoints write `checkpoint_begin`/`checkpoint_end`, which recovery
 treats as informational. `savepoint` and `savepoint_rollback` are only written by
 the transaction manager's internal savepoint calls, and `page_write` and `clr` are
-reserved: nothing writes them.
+reserved: nothing writes them, and recovery refuses a log that holds a committed
+`page_write` record, as it refuses a payload type no release writes.
 
 ## WalManager API
 
@@ -437,6 +494,7 @@ try wal.truncateToEmpty();
 | Sync mode | `.full` fsyncs every commit; `.normal` leaves it to the next checkpoint or sync |
 | prev_lsn chain | Per-transaction back links (written; only fragment reassembly reads them) |
 | Frames | Page-sized, checksummed units of writing; a torn tail is cut off at open |
+| `synced_frames` | Each frame says how much of the log was synced before it, so damage to synced frames refuses the open instead of being cut off |
 | Checksums | Detect corruption and torn writes |
 | UUID | Match WAL to correct database file |
 

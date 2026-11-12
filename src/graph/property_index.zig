@@ -278,7 +278,8 @@ pub const ValueRange = struct {
     }
 
     /// Narrow to the values a comparison `property <op> bound` lets
-    /// through. `op` is one of `lt`, `lte`, `gt`, `gte`, `starts_with`.
+    /// through. `op` is one of `eq`, `lt`, `lte`, `gt`, `gte`,
+    /// `starts_with`.
     pub fn constrain(self: *ValueRange, op: RangeOp, bound: PropertyValue) void {
         var next = ValueRange{};
         constrainOne(&next, op, bound);
@@ -294,9 +295,33 @@ pub const ValueRange = struct {
     }
 };
 
-pub const RangeOp = enum { lt, lte, gt, gte, starts_with };
+pub const RangeOp = enum { eq, lt, lte, gt, gte, starts_with };
 
 fn constrainOne(range: *ValueRange, op: RangeOp, bound: PropertyValue) void {
+    if (op == .eq) {
+        const encoded = encodeOrderedValue(bound) orelse {
+            // Nothing equals null.
+            range.empty = true;
+            return;
+        };
+        switch (encoded.buf[0]) {
+            // Nor NaN.
+            OrderedTag.nan => range.empty = true,
+            // A list equals one whose numbers are of the other kind, which
+            // has another digest: every list, map and vector, to be checked.
+            OrderedTag.other => {
+                range.setStart(&.{OrderedTag.other});
+                range.setEnd(&.{OrderedTag.other + 1});
+                range.exact = false;
+            },
+            else => {
+                range.setStart(encoded.bytes());
+                range.setEndAfter(encoded.bytes());
+                range.exact = !encoded.truncated;
+            },
+        }
+        return;
+    }
     if (op == .starts_with) {
         const prefix = switch (bound) {
             .string_val => |s| s,
@@ -340,7 +365,7 @@ fn constrainOne(range: *ValueRange, op: RangeOp, bound: PropertyValue) void {
         .gt => if (encoded.truncated) range.setStart(encoded.bytes()) else range.setStartAfter(encoded.bytes()),
         .lt => if (encoded.truncated) range.setEndAfter(encoded.bytes()) else range.setEnd(encoded.bytes()),
         .lte => range.setEndAfter(encoded.bytes()),
-        .starts_with => unreachable,
+        .eq, .starts_with => unreachable,
     }
 }
 
@@ -695,6 +720,18 @@ pub const PropertyIndex = struct {
                 return readEntries(&iter, max, allocator, keys, ends);
             },
         }
+    }
+
+    /// How many entries of an index lie in [start, end), counting no
+    /// further than `max`.
+    pub fn countRange(self: *Self, kind: EntityKind, start: []const u8, end: []const u8, max: usize) PropertyIndexError!usize {
+        var iter = self.entryTree(kind).range(start, end) catch |err| return mapBTreeError(err);
+        defer iter.deinit();
+        var count: usize = 0;
+        while (count < max) : (count += 1) {
+            _ = (iter.next() catch |err| return mapBTreeError(err)) orelse break;
+        }
+        return count;
     }
 
     fn readEntries(
@@ -1116,4 +1153,20 @@ test "value ranges hold exactly the values their comparisons accept" {
     var none = ValueRange.all();
     none.constrain(.gt, .{ .null_val = {} });
     try std.testing.expect(none.empty);
+
+    var eq = ValueRange.all();
+    eq.constrain(.eq, .{ .int_val = 3 });
+    try std.testing.expect(eq.exact and !eq.empty);
+    try std.testing.expect(rangeHas(&eq, .{ .float_val = 3.0 }));
+    try std.testing.expect(!rangeHas(&eq, .{ .int_val = 4 }));
+    try std.testing.expect(!rangeHas(&eq, .{ .float_val = 2.9999999 }));
+    var eq_nan = ValueRange.all();
+    eq_nan.constrain(.eq, .{ .float_val = std.math.nan(f64) });
+    try std.testing.expect(eq_nan.empty);
+    const list = [_]PropertyValue{.{ .int_val = 1 }};
+    const list_f = [_]PropertyValue{.{ .float_val = 1.0 }};
+    var eq_list = ValueRange.all();
+    eq_list.constrain(.eq, .{ .list_val = &list });
+    try std.testing.expect(!eq_list.exact);
+    try std.testing.expect(rangeHas(&eq_list, .{ .list_val = &list_f }));
 }

@@ -247,6 +247,9 @@ pub const QueryPlanner = struct {
         /// A pattern starting from a relationship type, as one walk of the
         /// edges rather than an expand from every node.
         edge_type_scan,
+        /// The same from a relationship type's property index: the
+        /// relationships whose property lies in a range or equals a value.
+        edge_range_scan,
     };
 
     const Self = @This();
@@ -1613,7 +1616,29 @@ pub const QueryPlanner = struct {
                     const type_scan = starts_with_all_nodes and element_index == 1 and
                         edge_pattern.quantifier == null and edge_types.len > 0 and
                         expand_dir != .both and bound_target == null and distinct_from.len == 0;
-                    if (type_scan) {
+                    const edge_range = if (type_scan and edge_types.len == 1)
+                        try self.chooseEdgeRangeScan(edge_pattern.types[0], edge_var_name, edge_pattern.properties, where_hint)
+                    else
+                        null;
+                    if (edge_range) |choice| {
+                        op.?.deinit(self.allocator);
+                        const scan = range_ops.IndexRangeScan.init(
+                            self.allocator,
+                            source_slot,
+                            edge_pattern.types[0],
+                            choice.property,
+                            choice.conditions,
+                            false,
+                            database,
+                        ) catch return PlannerError.OutOfMemory;
+                        scan.edges = .{ .end_slot = target_slot, .edge_slot = edge_slot, .incoming = expand_dir == .incoming };
+                        op = scan.operator();
+                        self.last_scan_kind = .edge_range_scan;
+                        if (pattern.path_variable != null) {
+                            path_steps.append(self.allocator, .{ .single = .{ .edge_slot = edge_slot.?, .node_slot = target_slot } }) catch
+                                return PlannerError.OutOfMemory;
+                        }
+                    } else if (type_scan) {
                         op.?.deinit(self.allocator);
                         const scan = edge_type_scan_ops.EdgeTypeScan.init(
                             self.allocator,
@@ -2046,7 +2071,7 @@ pub const QueryPlanner = struct {
         var conjuncts: [MAX_RANGE_CONJUNCTS]RangeConjunct = undefined;
         var count: usize = 0;
         if (where_hint) |condition| {
-            if (!searches) collectRangeConjuncts(variable_name, condition, &conjuncts, &count);
+            if (!searches) collectRangeConjuncts(variable_name, condition, false, &conjuncts, &count);
         }
 
         var chosen_property: ?[]const u8 = null;
@@ -2100,6 +2125,55 @@ pub const QueryPlanner = struct {
         };
     }
 
+    const EdgeRangeChoice = struct {
+        property: []const u8,
+        conditions: []const range_ops.Condition,
+    };
+
+    /// Whether a pattern that starts from a relationship type can read the
+    /// type's property index instead of walking every relationship: some
+    /// conjunct of the WHERE, or an entry of the relationship's inline map,
+    /// compares an indexed property with a value (`=`, `<`, `<=`, `>`,
+    /// `>=`, `STARTS WITH`). The conditions stay in the WHERE and the
+    /// inline map's filter, which check every row the index returns.
+    fn chooseEdgeRangeScan(
+        self: *Self,
+        edge_type: []const u8,
+        variable_name: ?[]const u8,
+        inline_properties: ?[]ast.PropertyEntry,
+        where_hint: ?*const ast.Expression,
+    ) PlannerError!?EdgeRangeChoice {
+        const database = self.storage.database orelse return null;
+        var conjuncts: [MAX_RANGE_CONJUNCTS]RangeConjunct = undefined;
+        var count: usize = 0;
+        if (inline_properties) |entries| {
+            for (entries) |entry| {
+                if (count == conjuncts.len or !isIndependentExpression(entry.value)) continue;
+                conjuncts[count] = .{ .property = entry.key, .condition = .{ .op = .eq, .value = entry.value, .predicate = entry.value } };
+                count += 1;
+            }
+        }
+        if (variable_name) |name| {
+            if (where_hint) |condition| {
+                if (!hasSearchConjunct(condition)) collectRangeConjuncts(name, condition, true, &conjuncts, &count);
+            }
+        }
+        const property = for (conjuncts[0..count]) |conjunct| {
+            const definition = (database.edgePropertyIndex(edge_type, conjunct.property) catch null) orelse continue;
+            if (definition.encoding.isOrdered()) break conjunct.property;
+        } else return null;
+
+        var conditions: std.ArrayList(range_ops.Condition) = .empty;
+        for (conjuncts[0..count]) |conjunct| {
+            if (!std.mem.eql(u8, conjunct.property, property)) continue;
+            conditions.append(self.allocator, conjunct.condition) catch return PlannerError.OutOfMemory;
+        }
+        return .{
+            .property = property,
+            .conditions = conditions.toOwnedSlice(self.allocator) catch return PlannerError.OutOfMemory,
+        };
+    }
+
     /// The first of `labels` with an ordered index on `property`, one that
     /// also holds the nodes without the property when `dense`.
     fn orderedIndexLabel(self: *Self, labels: []const []const u8, property: []const u8, dense: bool) ?usize {
@@ -2138,6 +2212,7 @@ pub const QueryPlanner = struct {
     fn collectRangeConjuncts(
         variable_name: []const u8,
         expr: *const ast.Expression,
+        with_equality: bool,
         out: *[MAX_RANGE_CONJUNCTS]RangeConjunct,
         count: *usize,
     ) void {
@@ -2146,8 +2221,8 @@ pub const QueryPlanner = struct {
             else => return,
         };
         if (binary.operator == .and_) {
-            collectRangeConjuncts(variable_name, binary.left, out, count);
-            collectRangeConjuncts(variable_name, binary.right, out, count);
+            collectRangeConjuncts(variable_name, binary.left, with_equality, out, count);
+            collectRangeConjuncts(variable_name, binary.right, with_equality, out, count);
             return;
         }
         if (count.* == out.len) return;
@@ -2157,6 +2232,7 @@ pub const QueryPlanner = struct {
             .gt => .{ .gt, .lt },
             .gte => .{ .gte, .lte },
             .starts_with => .{ .starts_with, .starts_with },
+            .eq => if (with_equality) .{ .eq, .eq } else return,
             else => return,
         };
         if (propertyEqualityForVariable(variable_name, binary.left, binary.right)) |found| {

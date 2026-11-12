@@ -250,6 +250,37 @@ On 200,000 `:Person` nodes (a release build, median of seven runs):
 | `WHERE p.age >= 50 RETURN count(p)` (half the nodes) | 64 ms | 3.7 ms |
 | `WHERE p.age >= 0` (every node) | 146 ms | 120 ms |
 
+A relationship type's index answers the same comparisons, and equality, for a
+pattern that starts from the relationship: a single relationship type, with
+nothing known about the node it starts from. With an index on `KNOWS(since)`:
+
+```cypher
+MATCH (a)-[r:KNOWS]->(b) WHERE r.since >= 2020 RETURN a.name, b.name, r.since ORDER BY r.since
+```
+
+```
+┌─────────┬─────────┬─────────┐
+│ a.name  │ b.name  │ r.since │
+├─────────┼─────────┼─────────┤
+│ "Alice" │ "Carol" │ 2021    │
+│ "Bob"   │ "Alan"  │ 2023    │
+└─────────┴─────────┴─────────┘
+```
+
+An inline map, `-[r:KNOWS {since: 2021}]->`, works the same way. Reading a
+relationship through the index costs about four times what walking every
+relationship costs per relationship, so when the range holds a fifth of them or
+more, the query walks them instead. On 1,000,000 `:KNOWS` relationships with
+`w` spread over 0 to 9,999:
+
+| query | without an index | with one |
+|---|---:|---:|
+| `WHERE r.w = 1234` (115 rows) | 173 ms | 0.09 ms |
+| `WHERE r.w > 9990` (944 rows) | 174 ms | 0.75 ms |
+| `WHERE r.w >= 100 AND r.w < 200` (about 10,000 rows) | 221 ms | 8.5 ms |
+| `WHERE r.name STARTS WITH 'Jo'` (1,447 rows) | 180 ms | 1.2 ms |
+| `WHERE r.w >= 5000` (half) | 191 ms | 215 ms |
+
 Values of different types are kept in the order `ORDER BY` puts them in, and
 integers and floats compare by exact value, as in the rest of Cypher: `3` and
 `3.0` are one value, and `9007199254740993` is greater than
@@ -305,7 +336,8 @@ Some things worth knowing before you add one:
 
 - **Index for lookups you actually perform.** An index on a property nothing
   looks up is pure cost.
-- **Indexes answer equality, ranges and prefixes**, not text inside a longer
+- **Indexes answer equality, ranges and prefixes** (on relationships, for a
+  pattern that starts from the relationship type), not text inside a longer
   string (`CONTAINS`, `ENDS WITH`). For finding words in text, you want
   [full-text search](./full-text-search.md) instead.
 - **High-variety properties benefit most.** An index on `email`, where almost

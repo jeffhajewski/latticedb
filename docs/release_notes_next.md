@@ -663,6 +663,23 @@ release without and with the index:
 Without statistics, the planner always reads a range from the index; the last
 row shows that even a range that holds every node is no slower.
 
+**Relationship property indexes answer Cypher.** They were used only by the
+`find_edges_by_type_property` calls. A pattern that starts from one
+relationship type, `MATCH (a)-[r:KNOWS]->(b)`, now reads the type's index for
+`=`, ranges and `STARTS WITH` on an indexed property, in the `WHERE` or the
+inline map. A relationship read through the index costs about four times a
+step of the walk over every relationship, so a range holding a fifth of them or
+more walks them instead. 1,000,000 `:KNOWS` relationships, `w` spread over
+0–9,999, release build:
+
+| query | walk | index |
+|---|---:|---:|
+| `WHERE r.w = 1234`, 115 rows | 173 ms | 0.09 ms |
+| `WHERE r.w > 9990`, 944 rows | 174 ms | 0.75 ms |
+| `WHERE r.w >= 100 AND r.w < 200`, about 10,000 rows | 221 ms | 8.5 ms |
+| `WHERE r.name STARTS WITH 'Jo'`, 1,447 rows | 180 ms | 1.2 ms |
+| `WHERE r.w >= 5000`, half of them | 191 ms | 215 ms |
+
 <!-- Measured on 11 November 2026 on an Apple M5 in ordinary use, not a quiet
      machine: v0.16.0 and this release built ReleaseFast and run alternately,
      medians of three runs for the first table and single runs for the second.
@@ -1013,7 +1030,6 @@ with relationships is one range probe, under 1 µs.
 - **A read-only recovery is bounded by memory**, 64 MB plus four times the size
   of the log and journal; beyond that the read-only open fails with
   `LATTICE_ERROR_FULL`. `lattice check` does not recover first.
-- **Relationship property indexes answer equality only in Cypher.**
 - **Indexes created by 0.16.0 answer equality only** until dropped and created
   again.
 - **There is no index from relationship type to relationship**; a pattern that

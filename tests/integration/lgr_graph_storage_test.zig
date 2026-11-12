@@ -1009,3 +1009,126 @@ test "lgr: every ordering comparison with NaN is false, and <> is true" {
     defer ranged.deinit();
     try std.testing.expectEqual(@as(i64, 3), ranged.rows[0].values[0].int_val);
 }
+
+fn mixedValue(i: usize) ?PropertyValue {
+    return switch (i % 11) {
+        0 => .{ .int_val = @as(i64, @intCast(i % 50)) - 20 },
+        1 => .{ .float_val = @as(f64, @floatFromInt(i % 40)) / 4.0 - 3.0 },
+        2 => .{ .string_val = ([_][]const u8{ "Jo", "John", "Joan", "Jp", "J", "", "b" })[i % 7] },
+        3 => .{ .bool_val = i % 2 == 0 },
+        4 => null,
+        5 => .{ .float_val = std.math.nan(f64) },
+        6 => .{ .float_val = -0.0 },
+        7 => .{ .float_val = @floatFromInt(i % 9) },
+        else => .{ .int_val = @intCast(i % 9) },
+    };
+}
+
+/// Relationships of two types between nodes, with mixed values of `w`.
+fn fillEdges(db: *Database, txn: ?*lattice.transaction.manager.Transaction, nodes: []const u64, count: usize, seed: usize) !void {
+    for (0..count) |k| {
+        const i = k + seed;
+        const a = nodes[(i * 7) % nodes.len];
+        const b = nodes[(i * 13 + 5) % nodes.len];
+        const id = try db.createEdgeAndGetId(txn, a, b, if (i % 5 == 0) "LIKES" else "KNOWS");
+        if (mixedValue(i)) |v| try db.setEdgePropertyById(txn, id, "w", v);
+        if (i % 3 == 0) try db.setEdgePropertyById(txn, id, "k", .{ .int_val = @intCast(i % 4) });
+    }
+}
+
+const edge_range_queries = [_][]const u8{
+    "MATCH (a)-[r:KNOWS]->(b) WHERE r.w > 3 RETURN id(a), id(r), id(b), r.w",
+    "MATCH (a)-[r:KNOWS]->(b) WHERE r.w >= -2 AND r.w < 5.5 RETURN id(a), id(r), id(b)",
+    "MATCH (a)-[r:KNOWS]->(b) WHERE 5 > r.w AND r.w > 0 RETURN id(r)",
+    "MATCH (a)-[r:KNOWS]->(b) WHERE r.w = 3 RETURN id(a), id(r), id(b)",
+    "MATCH (a)-[r:KNOWS]->(b) WHERE r.w = 3.0 RETURN id(r)",
+    "MATCH (a)-[r:KNOWS]->(b) WHERE r.w = 0 RETURN id(r), r.w",
+    "MATCH (a)-[r:KNOWS]->(b) WHERE r.w = 'Jo' RETURN id(r)",
+    "MATCH (a)-[r:KNOWS]->(b) WHERE r.w STARTS WITH 'Jo' RETURN id(r), r.w",
+    "MATCH (a)-[r:KNOWS]->(b) WHERE r.w > 'J' AND r.w < 'Jp' RETURN id(r)",
+    "MATCH (a)-[r:KNOWS]->(b) WHERE r.w > false RETURN id(r)",
+    "MATCH (a)-[r:KNOWS]->(b) WHERE r.w = null RETURN id(r)",
+    "MATCH (a)-[r:KNOWS]->(b) WHERE r.w > 2 AND r.k = 1 RETURN id(r)",
+    "MATCH (a)-[r:KNOWS]->(b) WHERE r.w > 2 OR r.k = 1 RETURN id(r)",
+    "MATCH (a)-[r:KNOWS]->(b) WHERE r.w > $p RETURN id(r)",
+    "MATCH (a)<-[r:KNOWS]-(b) WHERE r.w <= 2 RETURN id(a), id(r), id(b)",
+    "MATCH ()-[r:KNOWS {w: 4}]->(b) RETURN id(r), id(b)",
+    "MATCH ()-[:KNOWS {w: 4}]->(b) RETURN id(b)",
+    "MATCH (a)-[r:KNOWS]->(b)-[s:LIKES]->(c) WHERE r.w < 1 RETURN id(r), id(s), id(c)",
+    "MATCH (a)-[r:KNOWS]->(b) WHERE r.w >= 0 RETURN count(r)",
+    "MATCH (a)-[r:KNOWS|LIKES]->(b) WHERE r.w > 3 RETURN id(r)",
+    "MATCH (a)-[r:LIKES]->(b) WHERE r.w > 3 RETURN id(r)",
+};
+
+fn compareEdgeRanges(indexed: *Database, plain: *Database, ti: ?*lattice.transaction.manager.Transaction, tp: ?*lattice.transaction.manager.Transaction) !void {
+    for (edge_range_queries) |cypher| {
+        const a = try sortedRenderParam(indexed, ti, cypher);
+        defer std.testing.allocator.free(a);
+        const b = try sortedRenderParam(plain, tp, cypher);
+        defer std.testing.allocator.free(b);
+        if (!std.mem.eql(u8, a, b)) {
+            std.debug.print("query: {s}\nindexed:\n{s}\nplain:\n{s}\n", .{ cypher, a, b });
+            return error.TestExpectedEqual;
+        }
+    }
+}
+
+fn sortedRenderParam(db: *Database, txn: ?*lattice.transaction.manager.Transaction, cypher: []const u8) ![]u8 {
+    if (std.mem.indexOf(u8, cypher, "$p") == null) return sortedRender(db, txn, cypher);
+    // A parameter as the bound: the same query with the value written in.
+    const replaced = try std.mem.replaceOwned(u8, std.testing.allocator, cypher, "$p", "1.5");
+    defer std.testing.allocator.free(replaced);
+    return sortedRender(db, txn, replaced);
+}
+
+test "lgr: a relationship type's index answers ranges and equality for a pattern that starts from it" {
+    const path_i = "/tmp/lgr_edge_range_indexed.ltdb";
+    const path_p = "/tmp/lgr_edge_range_plain.ltdb";
+    defer removeFiles(path_i);
+    defer removeFiles(path_p);
+    var indexed = try openDb(path_i, true);
+    defer indexed.close();
+    var plain = try openDb(path_p, true);
+    defer plain.close();
+
+    var nodes: [120]u64 = undefined;
+    for ([_]*Database{ indexed, plain }) |db| {
+        var txn = try db.beginTransaction(.read_write);
+        for (&nodes) |*n| n.* = try db.createNode(&txn, &.{});
+        try fillEdges(db, &txn, &nodes, 900, 0);
+        try db.commitTransaction(&txn);
+    }
+    try indexed.createEdgePropertyIndex("KNOWS", "w");
+
+    const Kind = lattice.query.planner.QueryPlanner.ScanKind;
+    try std.testing.expectEqual(Kind.edge_range_scan, try planScanKind(indexed, "MATCH (a)-[r:KNOWS]->(b) WHERE r.w > 3 RETURN r"));
+    try std.testing.expectEqual(Kind.edge_range_scan, try planScanKind(indexed, "MATCH (a)-[r:KNOWS]->(b) WHERE r.w STARTS WITH 'Jo' RETURN r"));
+    try std.testing.expectEqual(Kind.edge_range_scan, try planScanKind(indexed, "MATCH (a)-[r:KNOWS]->(b) WHERE r.w = 3 RETURN r"));
+    try std.testing.expectEqual(Kind.edge_range_scan, try planScanKind(indexed, "MATCH (a)<-[r:KNOWS {w: 3}]-(b) RETURN r"));
+    try std.testing.expectEqual(Kind.edge_range_scan, try planScanKind(indexed, "MATCH ()-[:KNOWS {w: 3}]->(b) RETURN b"));
+    try std.testing.expectEqual(Kind.edge_type_scan, try planScanKind(indexed, "MATCH (a)-[r:KNOWS]->(b) RETURN r"));
+    try std.testing.expectEqual(Kind.edge_type_scan, try planScanKind(indexed, "MATCH (a)-[r:KNOWS]->(b) WHERE r.w > 3 OR r.k = 1 RETURN r"));
+    try std.testing.expectEqual(Kind.edge_type_scan, try planScanKind(indexed, "MATCH (a)-[r:KNOWS|LIKES]->(b) WHERE r.w > 3 RETURN r"));
+    try std.testing.expectEqual(Kind.edge_type_scan, try planScanKind(indexed, "MATCH (a)-[r:KNOWS]->(b) WHERE r.k > 3 RETURN r"));
+    try std.testing.expectEqual(Kind.edge_type_scan, try planScanKind(plain, "MATCH (a)-[r:KNOWS]->(b) WHERE r.w > 3 RETURN r"));
+
+    try compareEdgeRanges(indexed, plain, null, null);
+
+    // Inside a transaction that adds relationships, changes and removes
+    // values and deletes some: the scan merges the transaction's own in.
+    var ti = try indexed.beginTransaction(.read_write);
+    var tp = try plain.beginTransaction(.read_write);
+    for ([_]*Database{ indexed, plain }, [_]*lattice.transaction.manager.Transaction{ &ti, &tp }) |db, txn| {
+        try fillEdges(db, txn, &nodes, 80, 2000);
+        var id: u64 = 1;
+        while (id < 900) : (id += 37) try db.setEdgePropertyById(txn, id, "w", .{ .int_val = @intCast(id % 9) });
+        id = 5;
+        while (id < 900) : (id += 41) try db.removeEdgePropertyById(txn, id, "w");
+        id = 7;
+        while (id < 900) : (id += 53) try db.deleteEdgeById(txn, id);
+    }
+    try compareEdgeRanges(indexed, plain, &ti, &tp);
+    try indexed.commitTransaction(&ti);
+    try plain.commitTransaction(&tp);
+    try compareEdgeRanges(indexed, plain, null, null);
+}

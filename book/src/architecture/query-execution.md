@@ -208,6 +208,15 @@ edge-ID index, 256 edges at a time, keeping edges of the wanted types whose
 start node exists, plus the transaction's staged edges. There is no index from
 type to edge (see [Graph Storage](./graph-storage.md#current-limitations)); this
 replaces an expand from every node. Rows come in the edge-ID index's order.
+When the one type named has an ordered property index and the `WHERE` or the
+inline map compares that property with a value (`=`, a range or `STARTS
+WITH`), the planner uses IndexRangeScan over the type's index instead
+(`edge_range_scan`), which fills the same three slots in the index's order. The
+`WHERE` keeps the conditions and checks each row. A relationship read through
+the index costs about 0.8 µs against 0.18 µs per relationship for the walk, so
+when it opens the scan counts the range's keys, up to a fifth of the highest
+relationship id, and walks the type with EdgeTypeScan instead when it gets
+there.
 
 All of them produce rows with node references (EdgeTypeScan also fills the
 relationship and the other node). None keeps a B+Tree iterator open between

@@ -4119,6 +4119,17 @@ pub const Database = struct {
         return index.resolve(definition) catch |err| return mapPropertyIndexError(err);
     }
 
+    /// The declared index on a relationship type's property as the catalog
+    /// holds it, with its encoding, or null when there is none.
+    pub fn edgePropertyIndex(self: *Self, edge_type: []const u8, property: []const u8) DatabaseError!?PropertyIndexDefinition {
+        const definition = self.propertyIndexDefinition(.edge, edge_type, property, false) catch |err| switch (err) {
+            DatabaseError.MissingIndex => return null,
+            else => return err,
+        };
+        var index = &(self.property_index orelse return null);
+        return index.resolve(definition) catch |err| return mapPropertyIndexError(err);
+    }
+
     pub fn dropNodePropertyIndex(self: *Self, label: []const u8, property: []const u8) DatabaseError!void {
         try self.dropPropertyIndex(.node, label, property);
     }
@@ -6362,6 +6373,33 @@ pub const Database = struct {
         const t = txn orelse return false;
         const overlay = self.getTxnOverlay(t) orelse return false;
         return overlay.edge_states.contains(edge_id);
+    }
+
+    /// An edge's endpoints and type as `txn` sees it, without its
+    /// properties; null when the edge does not exist.
+    pub fn getEdgeRefInTxn(self: *Self, txn: ?*Transaction, edge_id: EdgeId) DatabaseError!?EdgeRef {
+        if (txn) |t| {
+            if (self.getTxnOverlay(t)) |overlay| {
+                if (overlay.edge_states.getPtr(edge_id)) |state| {
+                    return if (state.exists) edgeStateToRef(edge_id, state.*) else null;
+                }
+            }
+        }
+        return self.edge_store.getRefById(edge_id) catch |err| switch (err) {
+            edge_mod.EdgeError.NotFound => null,
+            edge_mod.EdgeError.OutOfMemory => DatabaseError.OutOfMemory,
+            else => DatabaseError.IoError,
+        };
+    }
+
+    /// Whether a node exists as `txn` sees it, without decoding it.
+    pub fn nodeVisibleInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError!bool {
+        if (txn) |t| {
+            if (self.getTxnOverlay(t)) |overlay| {
+                if (overlay.node_states.getPtr(node_id)) |state| return state.exists;
+            }
+        }
+        return self.nodeExists(node_id);
     }
 
     /// Whether the transaction's overlay holds any edge.

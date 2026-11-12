@@ -45,7 +45,9 @@ other branch.
 
 The same index answers ranges and prefixes on its property (`<`, `<=`, `>`, `>=`
 and `STARTS WITH`, several of them joined by `AND`), and an `ORDER BY` on it
-with a `LIMIT`, ascending or descending, reads it in order; see
+with a `LIMIT`, ascending or descending, reads it in order. A relationship
+type's index answers equality, ranges and prefixes for a pattern that starts
+from the relationship, `MATCH (a)-[r:KNOWS]->(b) WHERE r.since >= 2020`; see
 [Property Indexes](../guides/property-indexes.md#ranges-prefixes-and-sorting).
 
 `MATCH (n)` with no label returns nodes in id order.

@@ -4,6 +4,8 @@
 //!   range (`<`, `<=`, `>`, `>=`, `STARTS WITH`, any conjunction of them on
 //!   the property), or, with no range, every node with the label in the order
 //!   of the property, ascending or descending, nulls where ORDER BY puts them.
+//!   Over a relationship type's index, the relationships whose property lies
+//!   in a range or equals a value, for a pattern that starts from the type.
 //! - OrderedCutoff: under a sort by that property with a LIMIT, stops
 //!   reading once no further row can be among the first k.
 
@@ -18,6 +20,7 @@ const ExecutionContext = executor.ExecutionContext;
 
 const types = @import("../../core/types.zig");
 const NodeId = types.NodeId;
+const EdgeRef = @import("../../graph/edge.zig").EdgeRef;
 const PropertyValue = types.PropertyValue;
 
 const database_mod = @import("../../storage/database.zig");
@@ -36,6 +39,7 @@ const ExpressionEvaluator = expression.ExpressionEvaluator;
 const EvalError = expression.EvalError;
 
 const limit_ops = @import("limit.zig");
+const edge_type_scan_ops = @import("edge_type_scan.zig");
 
 /// One conjunct of the WHERE that the scan answers: `property <op> value`.
 pub const Condition = struct {
@@ -65,6 +69,20 @@ pub const Condition = struct {
 /// Read descending, the index gives equal values with the highest id first,
 /// so the scan collects each run of equal keys and returns it from the end.
 ///
+/// With `edges` set, `label` is a relationship type and the scan reads its
+/// index, ascending only, for the relationships of a pattern that starts
+/// from the type, as EdgeTypeScan does: the start node in `output_slot`, the
+/// other end and the relationship in the slots `edges` names. Those rows
+/// still pass under the WHERE, which keeps the conditions. A relationship
+/// type's index holds only the relationships with the property, so a scan
+/// of one always has conditions.
+///
+/// Reading a relationship through the index costs about four times what
+/// the walk of every relationship costs per relationship (0.8 against 0.18
+/// µs at 1,000,000), so when the range holds a fifth of them or more, by
+/// the count of its keys up to that point, the scan walks the type instead
+/// (`EdgeTypeScan`), which the WHERE above makes the same rows.
+///
 /// A query that only reads streams the index `CHUNK` keys at a time. One
 /// that writes takes every id when it opens, as LabelScan does, so that its
 /// own writes cannot change which nodes the scan visits.
@@ -77,12 +95,25 @@ pub const IndexRangeScan = struct {
     descending: bool,
     database: *Database,
     evaluator: ExpressionEvaluator,
+    edges: ?EdgeOutput = null,
 
     current_row: ?*Row = null,
     state: ?State = null,
     /// Every id, in order (queries that write).
     ids: ?[]NodeId = null,
     ids_pos: usize = 0,
+    /// Every relationship, in order (queries that write, `edges` set).
+    refs: ?[]EdgeRef = null,
+    /// The walk of the type a wide relationship range reads instead.
+    fallback: ?*edge_type_scan_ops.EdgeTypeScan = null,
+    fallback_type: [1]SymbolId = undefined,
+
+    pub const EdgeOutput = struct {
+        end_slot: u8,
+        edge_slot: ?u8,
+        /// The pattern starts from the relationship's target.
+        incoming: bool,
+    };
 
     pub const CHUNK = 256;
 
@@ -172,7 +203,11 @@ pub const IndexRangeScan = struct {
         self.release();
         self.current_row = ctx.allocRow() catch return OperatorError.OutOfMemory;
 
-        const definition = (self.database.nodePropertyIndex(self.label, self.property) catch |err|
+        const found = if (self.edges != null)
+            self.database.edgePropertyIndex(self.label, self.property)
+        else
+            self.database.nodePropertyIndex(self.label, self.property);
+        const definition = (found catch |err|
             return ctx.storageFailure(err, "reading the property index on {s}.{s}", .{ self.label, self.property })) orelse {
             // Dropped since the plan was made.
             return ctx.fail(OperatorError.StorageError, null, "The property index on {s}.{s} is gone", .{ self.label, self.property });
@@ -197,16 +232,50 @@ pub const IndexRangeScan = struct {
             state.done = true;
         } else {
             setBounds(state, range.startBytes(), range.endBytes());
+            if (self.edges) |edges| {
+                if (try self.rangeIsWide(state, ctx)) {
+                    self.fallback_type = .{state.label_id};
+                    const scan = edge_type_scan_ops.EdgeTypeScan.init(
+                        self.allocator,
+                        self.output_slot,
+                        edges.end_slot,
+                        edges.edge_slot,
+                        &self.fallback_type,
+                        edges.incoming,
+                        self.database,
+                    ) catch return OperatorError.OutOfMemory;
+                    self.fallback = scan;
+                    return scan.operator().open(ctx);
+                }
+            }
             try self.collectOverlay(state, ctx);
         }
 
-        if (!ctx.stable_reads) {
+        if (!ctx.stable_reads and self.edges != null) {
+            var refs: std.ArrayList(EdgeRef) = .empty;
+            errdefer refs.deinit(self.allocator);
+            while (try self.nextEdge(ctx)) |ref| refs.append(self.allocator, ref) catch return OperatorError.OutOfMemory;
+            self.refs = refs.toOwnedSlice(self.allocator) catch return OperatorError.OutOfMemory;
+            self.ids_pos = 0;
+        } else if (!ctx.stable_reads) {
             var ids: std.ArrayList(NodeId) = .empty;
             errdefer ids.deinit(self.allocator);
             while (try self.nextId(ctx)) |id| ids.append(self.allocator, id) catch return OperatorError.OutOfMemory;
             self.ids = ids.toOwnedSlice(self.allocator) catch return OperatorError.OutOfMemory;
             self.ids_pos = 0;
         }
+    }
+
+    /// Whether the committed relationships in the range are a fifth or more
+    /// of every relationship. The highest id handed out bounds their number
+    /// from above at no cost.
+    fn rangeIsWide(self: *Self, state: *State, ctx: *ExecutionContext) OperatorError!bool {
+        const cap: usize = @intCast(self.database.edge_store.next_edge_id / 5);
+        if (cap == 0) return false;
+        var index = &(self.database.property_index orelse return false);
+        const count = index.countRange(.edge, state.start[0..state.start_len], state.end[0..state.end_len], cap) catch |err|
+            return ctx.storageFailure(err, "reading the property index on {s}.{s}", .{ self.label, self.property });
+        return count >= cap;
     }
 
     fn setBounds(state: *State, start_value: []const u8, end_value: []const u8) void {
@@ -232,25 +301,19 @@ pub const IndexRangeScan = struct {
         return result.toPropertyValue(ctx.row_arena.allocator()) catch OperatorError.OutOfMemory;
     }
 
-    /// The overlay's nodes with the label whose value falls in the range.
+    /// The overlay's nodes with the label, or relationships of the type,
+    /// whose value falls in the range.
     fn collectOverlay(self: *Self, state: *State, ctx: *ExecutionContext) OperatorError!void {
-        const ids = self.database.overlayNodesWithLabel(ctx.txn, state.label_id) catch |err|
-            return ctx.storageFailure(err, "reading the transaction's :{s} nodes", .{self.label});
-        defer self.database.allocator.free(ids);
-        if (ids.len == 0) return;
-
-        for (ids) |id| {
-            // Null is the property missing, which a dense index keys too.
-            var value = (self.database.getNodePropertyByKeyInTxn(ctx.txn, id, state.definition.property_id, self.allocator, null) catch |err|
-                return ctx.storageFailure(err, "reading {s} of node {d}", .{ self.property, id })) orelse PropertyValue{ .null_val = {} };
-            defer value.deinit(self.allocator);
-            var buf: property_index.EntryKeyBuffer = undefined;
-            const key = property_index.entryKeyFor(state.definition, value, id, &buf) orelse continue;
-            if (!inRange(state, key)) continue;
-            const from: u32 = @intCast(state.overlay_bytes.items.len);
-            state.overlay_bytes.appendSlice(self.allocator, key) catch return OperatorError.OutOfMemory;
-            state.overlay.append(self.allocator, .{ .from = from, .to = @intCast(state.overlay_bytes.items.len), .id = id }) catch
-                return OperatorError.OutOfMemory;
+        if (self.edges != null) {
+            const refs = self.database.overlayEdgesOfTypes(ctx.txn, &.{state.label_id}) catch |err|
+                return ctx.storageFailure(err, "reading the transaction's :{s} relationships", .{self.label});
+            defer self.database.allocator.free(refs);
+            for (refs) |ref| try self.addOverlay(state, ctx, ref.id);
+        } else {
+            const ids = self.database.overlayNodesWithLabel(ctx.txn, state.label_id) catch |err|
+                return ctx.storageFailure(err, "reading the transaction's :{s} nodes", .{self.label});
+            defer self.database.allocator.free(ids);
+            for (ids) |id| try self.addOverlay(state, ctx, id);
         }
         const Sorter = struct {
             fn lessThan(bytes: []const u8, a: OverlayEntry, b: OverlayEntry) bool {
@@ -265,6 +328,24 @@ pub const IndexRangeScan = struct {
             std.mem.sort(OverlayEntry, state.overlay.items, bytes, Sorter.greaterThan)
         else
             std.mem.sort(OverlayEntry, state.overlay.items, bytes, Sorter.lessThan);
+    }
+
+    fn addOverlay(self: *Self, state: *State, ctx: *ExecutionContext, id: u64) OperatorError!void {
+        // Null is the property missing, which a dense index keys too.
+        const read = if (self.edges != null)
+            self.database.getEdgePropertyByKeyInTxn(ctx.txn, id, state.definition.property_id, self.allocator, null)
+        else
+            self.database.getNodePropertyByKeyInTxn(ctx.txn, id, state.definition.property_id, self.allocator, null);
+        var value = (read catch |err|
+            return ctx.storageFailure(err, "reading {s} of {d}", .{ self.property, id })) orelse PropertyValue{ .null_val = {} };
+        defer value.deinit(self.allocator);
+        var buf: property_index.EntryKeyBuffer = undefined;
+        const key = property_index.entryKeyFor(state.definition, value, id, &buf) orelse return;
+        if (!inRange(state, key)) return;
+        const from: u32 = @intCast(state.overlay_bytes.items.len);
+        state.overlay_bytes.appendSlice(self.allocator, key) catch return OperatorError.OutOfMemory;
+        state.overlay.append(self.allocator, .{ .from = from, .to = @intCast(state.overlay_bytes.items.len), .id = id }) catch
+            return OperatorError.OutOfMemory;
     }
 
     /// The next committed entry the overlay does not hold.
@@ -292,7 +373,7 @@ pub const IndexRangeScan = struct {
                 var index = &(self.database.property_index orelse
                     return ctx.fail(OperatorError.StorageError, null, "The property index on {s}.{s} is gone", .{ self.label, self.property }));
                 state.exhausted = index.readRange(
-                    .node,
+                    if (self.edges != null) .edge else .node,
                     if (self.descending) .backward else .forward,
                     state.start[0..state.start_len],
                     state.end[0..state.end_len],
@@ -307,8 +388,10 @@ pub const IndexRangeScan = struct {
             const key = state.keys.items[from..state.ends.items[state.chunk_pos]];
             state.chunk_pos += 1;
             const id = property_index.entityIdOf(key);
-            // A node the overlay holds is in `overlay` if it belongs.
-            if (self.database.overlayNodeHasLabel(ctx.txn, id, state.label_id) != null) continue;
+            // What the overlay holds is in `overlay` if it belongs.
+            if (self.edges != null) {
+                if (self.database.overlayHoldsEdge(ctx.txn, id)) continue;
+            } else if (self.database.overlayNodeHasLabel(ctx.txn, id, state.label_id) != null) continue;
             return .{ .key = key, .id = id };
         }
     }
@@ -336,8 +419,9 @@ pub const IndexRangeScan = struct {
         return committed;
     }
 
-    fn needsCheck(state: *const State) bool {
-        return !state.range.exact;
+    fn needsCheck(self: *const Self, state: *const State) bool {
+        // The WHERE above a relationship scan checks its rows itself.
+        return !state.range.exact and self.edges == null;
     }
 
     fn passes(self: *Self, id: NodeId, ctx: *ExecutionContext) OperatorError!bool {
@@ -388,8 +472,23 @@ pub const IndexRangeScan = struct {
                 state.done = true;
                 break;
             };
-            if (needsCheck(state) and !try self.passes(id, ctx)) continue;
+            if (self.needsCheck(state) and !try self.passes(id, ctx)) continue;
             return id;
+        }
+        return null;
+    }
+
+    /// The next relationship whose start node exists, as EdgeTypeScan
+    /// returns them.
+    fn nextEdge(self: *Self, ctx: *ExecutionContext) OperatorError!?EdgeRef {
+        const edges = self.edges.?;
+        while (try self.nextId(ctx)) |id| {
+            const ref = (self.database.getEdgeRefInTxn(ctx.txn, id) catch |err|
+                return ctx.storageFailure(err, "reading relationship {d}", .{id})) orelse continue;
+            const start = if (edges.incoming) ref.target else ref.source;
+            if (!(self.database.nodeVisibleInTxn(ctx.txn, start) catch |err|
+                return ctx.storageFailure(err, "reading node {d}", .{start}))) continue;
+            return ref;
         }
         return null;
     }
@@ -397,6 +496,19 @@ pub const IndexRangeScan = struct {
     fn next(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!?*Row {
         const self: *Self = @ptrCast(@alignCast(ptr));
         const row = self.current_row orelse return OperatorError.NotInitialized;
+        if (self.fallback) |scan| return scan.operator().next(ctx);
+        if (self.edges) |edges| {
+            const ref: EdgeRef = if (self.refs) |refs| blk: {
+                if (self.ids_pos >= refs.len) return null;
+                self.ids_pos += 1;
+                break :blk refs[self.ids_pos - 1];
+            } else (try self.nextEdge(ctx)) orelse return null;
+            row.clear();
+            row.setSlot(self.output_slot, .{ .node_ref = if (edges.incoming) ref.target else ref.source });
+            row.setSlot(edges.end_slot, .{ .node_ref = if (edges.incoming) ref.source else ref.target });
+            if (edges.edge_slot) |slot| row.setSlot(slot, .{ .edge_ref = ref.id });
+            return row;
+        }
         const id: NodeId = if (self.ids) |ids| blk: {
             if (self.ids_pos >= ids.len) return null;
             self.ids_pos += 1;
@@ -415,6 +527,15 @@ pub const IndexRangeScan = struct {
         if (self.ids) |ids| {
             self.allocator.free(ids);
             self.ids = null;
+        }
+        if (self.refs) |refs| {
+            self.allocator.free(refs);
+            self.refs = null;
+        }
+        if (self.fallback) |scan| {
+            // Its deinit releases what it holds; it keeps nothing open.
+            scan.operator().deinit(self.allocator);
+            self.fallback = null;
         }
     }
 

@@ -5556,6 +5556,45 @@ test "database: an edge search sees the transaction's own uncommitted writes" {
     try std.testing.expectEqual(@as(usize, 1), committed.len);
 }
 
+test "database: fuzzy search inside a transaction sees pending edges and fills its limit" {
+    const allocator = std.testing.allocator;
+    const db = try Database.open(allocator, ":memory:", .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = false },
+    });
+    defer db.close();
+
+    try db.createEdgeFtsIndex("REVIEWED", "note");
+    try db.createNodeFtsIndex("Doc", "body");
+
+    // The short document outranks the long one for "thorough".
+    const short = try db.createNode(null, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(null, short, "body", .{ .string_val = "thorough" });
+    const long = try db.createNode(null, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(null, long, "body", .{ .string_val = "a thorough review of every chapter and appendix" });
+
+    var txn = try db.beginTransaction(.read_write);
+    defer db.abortTransaction(&txn) catch {};
+    const a = try db.createNode(&txn, &[_][]const u8{"Person"});
+    const b = try db.createNode(&txn, &[_][]const u8{"Paper"});
+    const e = try db.createEdgeAndGetId(&txn, a, b, "REVIEWED");
+    try db.setEdgePropertyById(&txn, e, "note", .{ .string_val = "thorough and well argued" });
+
+    // An edge written in this transaction is found, as the exact search finds it.
+    const edges = try db.ftsSearchIndexFuzzy(&txn, .edge, "REVIEWED", "note", "thorough", 10, 1, 4);
+    defer db.freeFtsSearchResults(edges);
+    try std.testing.expectEqual(@as(usize, 1), edges.len);
+    try std.testing.expectEqual(e, edges[0].doc_id);
+
+    // The best indexed match stops matching in this transaction. The one left
+    // still fills a limit of one.
+    try db.setNodeProperty(&txn, short, "body", .{ .string_val = "sloppy" });
+    const nodes = try db.ftsSearchIndexFuzzy(&txn, .node, "Doc", "body", "thorough", 1, 1, 4);
+    defer db.freeFtsSearchResults(nodes);
+    try std.testing.expectEqual(@as(usize, 1), nodes.len);
+    try std.testing.expectEqual(long, nodes[0].doc_id);
+}
+
 test "database: a node and an edge full-text index cannot share a name and property" {
     const allocator = std.testing.allocator;
     const db = try Database.open(allocator, ":memory:", .{

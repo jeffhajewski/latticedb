@@ -3809,16 +3809,28 @@ pub const Database = struct {
             .max_distance = max_distance,
             .min_term_length = min_term_length,
         };
-        const base = index.searchFuzzy(query_text, config, limit) catch |err| return mapFtsError(err);
-
         const overlay = blk: {
-            if (definition.kind != .node) break :blk null;
             const t = txn orelse break :blk null;
             const found = self.getTxnOverlay(t) orelse break :blk null;
-            if (found.node_states.count() == 0) break :blk null;
+            const pending = switch (definition.kind) {
+                .node => found.node_states.count(),
+                .edge => found.edge_states.count(),
+            };
+            if (pending == 0) break :blk null;
             break :blk found;
         };
-        const pending = overlay orelse return base;
+        const pending = overlay orelse {
+            return index.searchFuzzy(query_text, config, limit) catch |err| return mapFtsError(err);
+        };
+
+        // Each pending entity can knock at most one indexed result out, so asking
+        // for that many more keeps the merge from coming up short. Saturating, as
+        // in `ftsSearchDefinitionInTxn`.
+        const extra: u32 = @intCast(switch (definition.kind) {
+            .node => pending.node_states.count(),
+            .edge => pending.edge_states.count(),
+        });
+        const base = index.searchFuzzy(query_text, config, limit +| extra) catch |err| return mapFtsError(err);
         defer self.freeFtsSearchResults(base);
 
         return self.mergePendingFts(definition, pending, base, query_text, limit);

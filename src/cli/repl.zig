@@ -858,58 +858,12 @@ pub const Repl = struct {
     /// Display result as JSON
     fn displayResultJson(self: *Self, result: *QueryResult, stdout: anytype) !void {
         _ = self;
-        try stdout.writeAll("{\"columns\":[");
-
-        for (result.columns, 0..) |col, i| {
-            if (i > 0) try stdout.writeByte(',');
-            try stdout.writeByte('"');
-            try stdout.writeAll(col);
-            try stdout.writeByte('"');
-        }
-
-        try stdout.writeAll("],\"rows\":[");
-
-        for (result.rows, 0..) |row, row_idx| {
-            if (row_idx > 0) try stdout.writeByte(',');
-            try stdout.writeByte('{');
-
-            for (row.values, 0..) |val, i| {
-                if (i > 0) try stdout.writeByte(',');
-                try stdout.writeByte('"');
-                if (i < result.columns.len) {
-                    try stdout.writeAll(result.columns[i]);
-                }
-                try stdout.writeAll("\":");
-                try writeJsonValue(stdout, val);
-            }
-
-            try stdout.writeByte('}');
-        }
-
-        try stdout.print("],\"count\":{d}}}\n", .{result.rows.len});
+        try writeResultJson(stdout, result);
     }
 
     /// Display result as CSV
     fn displayResultCsv(self: *Self, result: *QueryResult, stdout: anytype) !void {
-        _ = self;
-        // A query that returns nothing, such as a bare CREATE, has no header
-        // to write either.
-        if (result.columns.len == 0) return;
-        // Header
-        for (result.columns, 0..) |col, i| {
-            if (i > 0) try stdout.writeByte(',');
-            try stdout.writeAll(col);
-        }
-        try stdout.writeByte('\n');
-
-        // Rows
-        for (result.rows) |row| {
-            for (row.values, 0..) |val, i| {
-                if (i > 0) try stdout.writeByte(',');
-                try writeCsvValue(stdout, val);
-            }
-            try stdout.writeByte('\n');
-        }
+        try writeResultCsv(self.allocator, stdout, result);
     }
 
     fn showLabels(self: *Self, stdout: anytype, stderr: anytype) !void {
@@ -1089,20 +1043,7 @@ fn writeJsonValue(writer: anytype, val: ResultValue) !void {
         .bool_val => |b| try writer.writeAll(if (b) "true" else "false"),
         .int_val => |i| try writer.print("{d}", .{i}),
         .float_val => |f| try writer.print("{d}", .{f}),
-        .string_val => |s| {
-            try writer.writeByte('"');
-            for (s) |c| {
-                switch (c) {
-                    '"' => try writer.writeAll("\\\""),
-                    '\\' => try writer.writeAll("\\\\"),
-                    '\n' => try writer.writeAll("\\n"),
-                    '\r' => try writer.writeAll("\\r"),
-                    '\t' => try writer.writeAll("\\t"),
-                    else => try writer.writeByte(c),
-                }
-            }
-            try writer.writeByte('"');
-        },
+        .string_val => |s| try writeJsonString(writer, s),
         .node_id => |id| try writer.print("{d}", .{id}),
         .edge_id => |id| try writer.print("{d}", .{id}),
         .bytes_val => |b| {
@@ -1129,7 +1070,8 @@ fn writeJsonValue(writer: anytype, val: ResultValue) !void {
             try writer.writeByte('{');
             for (map, 0..) |entry, i| {
                 if (i > 0) try writer.writeByte(',');
-                try writer.print("\"{s}\":", .{entry.key});
+                try writeJsonString(writer, entry.key);
+                try writer.writeByte(':');
                 try writeJsonValue(writer, entry.value);
             }
             try writer.writeByte('}');
@@ -1137,46 +1079,114 @@ fn writeJsonValue(writer: anytype, val: ResultValue) !void {
     }
 }
 
+/// Write a result as JSON: the column names, then each row as an object
+/// keyed by them, then the row count.
+fn writeResultJson(writer: anytype, result: *const QueryResult) !void {
+    try writer.writeAll("{\"columns\":[");
+
+    for (result.columns, 0..) |col, i| {
+        if (i > 0) try writer.writeByte(',');
+        try writeJsonString(writer, col);
+    }
+
+    try writer.writeAll("],\"rows\":[");
+
+    for (result.rows, 0..) |row, row_idx| {
+        if (row_idx > 0) try writer.writeByte(',');
+        try writer.writeByte('{');
+
+        for (row.values, 0..) |val, i| {
+            if (i > 0) try writer.writeByte(',');
+            try writeJsonString(writer, if (i < result.columns.len) result.columns[i] else "");
+            try writer.writeByte(':');
+            try writeJsonValue(writer, val);
+        }
+
+        try writer.writeByte('}');
+    }
+
+    try writer.print("],\"count\":{d}}}\n", .{result.rows.len});
+}
+
+/// A JSON string: quotes, backslashes and control characters escaped.
+fn writeJsonString(writer: anytype, s: []const u8) !void {
+    try writer.writeByte('"');
+    for (s) |c| {
+        switch (c) {
+            '"' => try writer.writeAll("\\\""),
+            '\\' => try writer.writeAll("\\\\"),
+            '\n' => try writer.writeAll("\\n"),
+            '\r' => try writer.writeAll("\\r"),
+            '\t' => try writer.writeAll("\\t"),
+            else => if (c < 0x20)
+                try writer.print("\\u{x:0>4}", .{c})
+            else
+                try writer.writeByte(c),
+        }
+    }
+    try writer.writeByte('"');
+}
+
+/// Write a result as CSV, as RFC 4180 has it: a header of the column
+/// names, then a line per row, with any field that holds a comma, a quote
+/// or a line break quoted and each quote in it doubled. A query that
+/// returns nothing, such as a bare CREATE, writes nothing, not even a
+/// header.
+fn writeResultCsv(allocator: std.mem.Allocator, writer: anytype, result: *const QueryResult) !void {
+    if (result.columns.len == 0) return;
+    for (result.columns, 0..) |col, i| {
+        if (i > 0) try writer.writeByte(',');
+        try writeCsvField(writer, col);
+    }
+    try writer.writeByte('\n');
+
+    for (result.rows) |row| {
+        for (row.values, 0..) |val, i| {
+            if (i > 0) try writer.writeByte(',');
+            try writeCsvValue(allocator, writer, val);
+        }
+        try writer.writeByte('\n');
+    }
+}
+
+/// A CSV field, quoted when it has to be.
+fn writeCsvField(writer: anytype, s: []const u8) !void {
+    for (s) |c| {
+        if (c == ',' or c == '"' or c == '\n' or c == '\r') return writeCsvQuoted(writer, s);
+    }
+    try writer.writeAll(s);
+}
+
+/// A CSV field in quotes, with each quote in it doubled.
+fn writeCsvQuoted(writer: anytype, s: []const u8) !void {
+    try writer.writeByte('"');
+    for (s) |c| {
+        if (c == '"') try writer.writeByte('"');
+        try writer.writeByte(c);
+    }
+    try writer.writeByte('"');
+}
+
 /// Write a value as CSV
-fn writeCsvValue(writer: anytype, val: ResultValue) !void {
+fn writeCsvValue(allocator: std.mem.Allocator, writer: anytype, val: ResultValue) !void {
     switch (val) {
         .null_val => {},
         .bool_val => |b| try writer.writeAll(if (b) "true" else "false"),
         .int_val => |i| try writer.print("{d}", .{i}),
         .float_val => |f| try writer.print("{d}", .{f}),
-        .string_val => |s| {
-            // Quote if contains comma, quote, or newline
-            var needs_quote = false;
-            for (s) |c| {
-                if (c == ',' or c == '"' or c == '\n' or c == '\r') {
-                    needs_quote = true;
-                    break;
-                }
-            }
-
-            if (needs_quote) {
-                try writer.writeByte('"');
-                for (s) |c| {
-                    if (c == '"') {
-                        try writer.writeAll("\"\"");
-                    } else {
-                        try writer.writeByte(c);
-                    }
-                }
-                try writer.writeByte('"');
-            } else {
-                try writer.writeAll(s);
-            }
-        },
+        .string_val => |s| try writeCsvField(writer, s),
         .node_id => |id| try writer.print("{d}", .{id}),
         .edge_id => |id| try writer.print("{d}", .{id}),
         .bytes_val => |b| try writer.print("<bytes:{d}>", .{b.len}),
         .vector_val => |v| try writer.print("<vector:{d}>", .{v.len}),
         .list_val, .map_val => {
-            // For CSV, output complex types as quoted JSON
-            try writer.writeByte('"');
-            try writeJsonValue(writer, val);
-            try writer.writeByte('"');
+            // As JSON, whose quotes are doubled like any other: written
+            // between quotes as they were, `{"k":"v"}` ended the field at
+            // the first quote inside it.
+            var json: std.Io.Writer.Allocating = .init(allocator);
+            defer json.deinit();
+            try writeJsonValue(&json.writer, val);
+            try writeCsvQuoted(writer, json.written());
         },
     }
 }
@@ -1186,6 +1196,46 @@ test "repl initialization" {
     const allocator = std.testing.allocator;
     _ = allocator;
     // Can't easily test full REPL without a database, but struct creation works
+}
+
+test "results in CSV quote what RFC 4180 says to, inside lists and maps too" {
+    const a = std.testing.allocator;
+    var columns = [_][]const u8{ "a,b", "say \"x\"", "m", "l" };
+    const entries = [_]ResultValue.MapEntry{
+        .{ .key = "k", .value = .{ .string_val = "say \"hi\"" } },
+        .{ .key = "odd\"key", .value = .{ .int_val = 1 } },
+    };
+    const list = [_]ResultValue{ .{ .string_val = "q" }, .{ .int_val = 1 } };
+    var values = [_]ResultValue{
+        .{ .string_val = "x,y" },
+        .{ .string_val = "plain" },
+        .{ .map_val = &entries },
+        .{ .list_val = &list },
+    };
+    var rows = [_]lattice.storage.database.ResultRow{.{ .values = &values }};
+    const result: QueryResult = .{ .columns = &columns, .rows = &rows, .allocator = a };
+
+    var out: std.Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+    // A map was written between quotes with its own quotes as they were,
+    // "{"k":...}", which ends the field at the second character.
+    try writeResultCsv(a, &out.writer, &result);
+    try std.testing.expectEqualStrings("\"a,b\",\"say \"\"x\"\"\",m,l\n\"x,y\",plain,\"{\"\"k\"\":\"\"say \\\"\"hi\\\"\"\"\",\"\"odd\\\"\"key\"\":1}\",\"[\"\"q\"\",1]\"\n", out.written());
+
+    // The JSON escapes column names and map keys as it does strings.
+    out.clearRetainingCapacity();
+    try writeResultJson(&out.writer, &result);
+    try std.testing.expectEqualStrings("{\"columns\":[\"a,b\",\"say \\\"x\\\"\",\"m\",\"l\"],\"rows\":[{\"a,b\":\"x,y\",\"say \\\"x\\\"\":\"plain\",\"m\":{\"k\":\"say \\\"hi\\\"\",\"odd\\\"key\":1},\"l\":[\"q\",1]}],\"count\":1}\n", out.written());
+    out.clearRetainingCapacity();
+    try writeJsonValue(&out.writer, .{ .string_val = "tab\there\x01" });
+    try std.testing.expectEqualStrings("\"tab\\there\\u0001\"", out.written());
+
+    // A query that returns nothing writes nothing.
+    var no_columns = [_][]const u8{};
+    var no_rows = [_]lattice.storage.database.ResultRow{};
+    out.clearRetainingCapacity();
+    try writeResultCsv(a, &out.writer, &.{ .columns = &no_columns, .rows = &no_rows, .allocator = a });
+    try std.testing.expectEqualStrings("", out.written());
 }
 
 test "table cells write huge and tiny floats in scientific form" {

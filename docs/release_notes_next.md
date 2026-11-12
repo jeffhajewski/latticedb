@@ -873,6 +873,12 @@ with relationships is one range probe, under 1 µs.
   flushed after every pass.
 - The result table no longer fails on the smallest integer, on floats wider
   than ten characters, or on large node ids.
+- A query's CSV quotes lists and maps as RFC 4180 says: the quotes of the JSON
+  inside are doubled, where `{"k":"v"}` was written between quotes as it was and
+  ended the field at its first quote. Column names are quoted when they hold a
+  comma or a quote; a backticked `` `a,b` `` made two columns of the header. The
+  JSON output escapes column names and map keys, and control characters in
+  strings, which it wrote as they were.
 
 **C API and bindings**
 

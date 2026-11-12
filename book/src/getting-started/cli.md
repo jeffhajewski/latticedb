@@ -828,6 +828,12 @@ somewhere else, and print floats in full, as plain decimals:
 lattice exec social.lattice --query="MATCH (p:Person) RETURN p.name" --format=json | jq
 ```
 
+A query's CSV follows RFC 4180, with one line per row ending in a newline: a
+column name or value that holds a comma, a quote or a line break is put in
+quotes, with each quote inside doubled. A list or map is written as its JSON, in
+quotes, so `{k: 'v'}` becomes `"{""k"":""v""}"`. A query without `RETURN` prints
+nothing in CSV, an empty `columns` list in JSON and "Query executed" in a table.
+
 Output redirected to a file can be appended to with `>>`, for example to keep a
 log of counts taken over time:
 

@@ -1011,6 +1011,28 @@ test "lcy: an aggregate over DISTINCT values says so in its column name" {
     try expectResult(db, "UNWIND [1, 1, 2] AS x WITH x RETURN sum(  DISTINCT x ), count(*)", "sum(DISTINCT x) | count(*)\n3 | 3");
 }
 
+test "lcy: a refused DELETE says where the node is named" {
+    const path = "/tmp/lcy_delete_location.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try expectResult(db, "CREATE (:P)-[:R]->(:Q)", "");
+
+    // The failure had no location. q, named first, is checked first.
+    var detailed = try db.queryDetailed("MATCH (q:Q), (p:P)\nDELETE q, p");
+    defer detailed.deinit();
+    switch (detailed) {
+        .success => return error.TestUnexpectedResult,
+        .failure => |f| {
+            try std.testing.expectEqualStrings("Cannot delete node 2 because it still has relationships; delete them first, or use DETACH DELETE", f.message);
+            const loc = f.location orelse return error.TestUnexpectedResult;
+            try std.testing.expectEqual(@as(u32, 2), loc.line);
+            try std.testing.expectEqual(@as(u32, 8), loc.column);
+            try std.testing.expectEqual(@as(u32, 1), loc.length);
+        },
+    }
+    try expectResult(db, "MATCH (n) RETURN count(n) AS c", "c\n2");
+}
+
 test "lcy: properties() of a map is the map" {
     const path = "/tmp/lcy_properties_map.ltdb";
     const db = try openTestDb(path);

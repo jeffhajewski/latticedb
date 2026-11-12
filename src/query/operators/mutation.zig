@@ -371,6 +371,8 @@ pub const DeleteNode = struct {
     done: bool = false,
     /// Next row to return
     output_index: usize = 0,
+    /// Where the query names the node, for the error that refuses it
+    location: ?ast.SourceLocation = null,
 
     const Self = @This();
 
@@ -466,21 +468,21 @@ pub const DeleteNode = struct {
         for (targets.items) |node_id| {
             const has_relationships = self.database.nodeHasRelationshipsInTxn(ctx.txn, node_id) catch |err|
                 return ctx.storageFailure(err, "reading the relationships of node {d}", .{node_id});
-            if (has_relationships) return hasRelationshipsFailure(ctx, node_id);
+            if (has_relationships) return self.hasRelationshipsFailure(ctx, node_id);
         }
 
         for (targets.items) |node_id| {
             self.database.deleteNode(ctx.txn, node_id) catch |err| return switch (err) {
-                error.NodeHasRelationships => hasRelationshipsFailure(ctx, node_id),
+                error.NodeHasRelationships => self.hasRelationshipsFailure(ctx, node_id),
                 else => ctx.storageFailure(err, "deleting node {d}", .{node_id}),
             };
         }
     }
 
-    fn hasRelationshipsFailure(ctx: *ExecutionContext, node_id: NodeId) OperatorError {
+    fn hasRelationshipsFailure(self: *const Self, ctx: *ExecutionContext, node_id: NodeId) OperatorError {
         return ctx.fail(
             OperatorError.NodeHasRelationships,
-            null,
+            self.location,
             "Cannot delete node {d} because it still has relationships; delete them first, or use DETACH DELETE",
             .{node_id},
         );

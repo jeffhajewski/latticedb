@@ -781,6 +781,9 @@ with relationships is one range probe, under 1 µs.
   CALL db.labels() is the whole query", where it said no variables were in scope.
 - An aggregate over distinct values is named for it: `count(DISTINCT x)`, where
   the column was `count(x)` and could not be told from `count(x)` beside it.
+- A `DELETE` refused because the node still has relationships gives the line
+  and column of the variable in the `DELETE`, as other execution errors do; it
+  gave none.
 
 **Full-text search**
 

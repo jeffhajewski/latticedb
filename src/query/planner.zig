@@ -3707,6 +3707,7 @@ pub const QueryPlanner = struct {
                     delete.detach,
                     database,
                 ) catch return PlannerError.OutOfMemory;
+                delete_node.location = expr.getLocation();
 
                 op = delete_node.operator();
             } else if (binding.kind == .edge) {

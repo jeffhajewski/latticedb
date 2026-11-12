@@ -679,6 +679,16 @@ copying a database file, so the copy is complete on its own, and on a database
 that has been open a very long time under heavy writes, if you want to pick the
 moment the flush happens rather than let it land mid-request.
 
+How often a command's commits checkpoint is set with `--auto-checkpoint=<frames>`
+on any command that writes: a checkpoint runs once the log holds that many frames
+(one per page written), and `0` means none while the command runs, though closing
+still folds the log into the file. Without the option the
+`LATTICE_AUTO_CHECKPOINT_FRAMES` environment variable decides, else 1000:
+
+```bash
+lattice import social.lattice --file=people.jsonl --auto-checkpoint=0
+```
+
 This is not the same as `compact`. Checkpointing shrinks the log, not the
 database file.
 

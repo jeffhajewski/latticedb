@@ -235,6 +235,11 @@ roughly a thousand small write transactions. The automatic checkpoint is best
 effort: it runs after the commit has succeeded, and if it fails, or is refused
 because a transaction has records in the log, the commit still reports success and
 the next commit tries again. Setting `auto_checkpoint = null` turns it off.
+`Database.setAutoCheckpoint` changes the policy commits follow on an open database
+(null or 0 frames for none) without changing what open and close do; the C API's
+`lattice_set_auto_checkpoint`, each binding's setter, the CLI's
+`--auto-checkpoint=<frames>` and the `LATTICE_AUTO_CHECKPOINT_FRAMES` variable all
+set it.
 
 It runs inside the commit call that crossed the threshold, not on a background
 thread, so that one call returns later. Measured through the C API on macOS (20,000
@@ -242,7 +247,8 @@ single-node commits, default settings, release build, a busy machine), commits t
 about 50 µs and the ones that ran a checkpoint, about every thousandth, took 5 to
 12 ms and up to 27 ms. Taking the checkpoint off the commit path would need a
 background checkpointer, which LatticeDB does not have; a program that cannot
-afford the pause can turn the automatic checkpoint off and run checkpoints itself.
+afford the pause can raise the interval, or turn the automatic checkpoint off and
+run checkpoints itself.
 
 **At open**, after recovery, if the log holds records after its last checkpoint,
 so the next open has nothing to replay and a torn frame at the log's tail does not
@@ -262,7 +268,8 @@ from its log, and the journal is deleted. Both the open and the close checkpoint
 are skipped on a failed handle.
 
 **On request**:
-- **`Database.checkpoint(mode)`** in the Zig API.
+- **`Database.checkpoint(mode)`** in the Zig API, `lattice_checkpoint(db, mode,
+  &stats)` in C, and each binding's `checkpoint`.
 - **`lattice checkpoint <path>`**: opens the database and runs a truncate checkpoint.
 - **`backup` and `serialize`**: run a full checkpoint so the copied file stands on
   its own (see [Portable Databases](./portable-databases.md)).

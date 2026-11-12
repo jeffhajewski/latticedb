@@ -108,15 +108,14 @@ LATTICE_FULL_FSYNC=1       # or true; 0 or false turns it off; other values are 
 ## Environment variables
 
 The engine reads these when a database is opened, whatever API opened it.
-`LATTICE_SYNC_MODE` and `LATTICE_FULL_FSYNC` apply only when the program did not set
-the option itself. `LATTICE_BUFFER_POOL_MB` overrides the cache size even when the
-program set one.
+Each applies only when the program did not set the option itself.
 
 | Variable | Values | Default | Effect |
 |----------|--------|---------|--------|
 | `LATTICE_SYNC_MODE` | `full`, `normal` | unset (`full`) | Whether a commit waits for the disk; see [Sync mode](#sync-mode) |
 | `LATTICE_FULL_FSYNC` | `1`/`true`, `0`/`false` | unset (off) | `F_FULLFSYNC` on macOS; see [Full fsync on macOS](#full-fsync-on-macos) |
 | `LATTICE_BUFFER_POOL_MB` | a positive integer | unset | Page cache size where the program sets none (an explicit size wins); see [Opening a Database](./opening.md#memory-and-caching) |
+| `LATTICE_AUTO_CHECKPOINT_FRAMES` | a non-negative integer | unset (1000) | Log frames a commit waits for before checkpointing, 0 for none, in the C API, the bindings and the CLI; see [Checkpointing](#checkpointing) |
 
 ## Running without the log
 
@@ -203,11 +202,18 @@ background, so that one commit takes longer. Measured through the C API on macOS
 (20,000 single-node commits, default settings, release build, a busy machine), most
 commits took about 50 µs and the ones that ran a checkpoint, about every
 thousandth, took 5 to 12 ms and up to 27 ms. If a pause of that size matters to
-you, turn the automatic checkpoint off from Zig and run checkpoints at moments you
-choose.
+you, set a larger or smaller interval, or turn the automatic checkpoint off and run
+checkpoints at moments you choose. A larger interval means fewer pauses, each
+longer, a longer log on disk and more to replay after a crash; a smaller one means
+shorter pauses, more often.
 
-`auto_checkpoint` decides when (it is set through the Zig API; the C API, the
-bindings and the CLI always use the defaults below):
+`auto_checkpoint` decides when. Zig sets it in `DatabaseConfig`, or on an open
+database with `Database.setAutoCheckpoint`; C with
+`lattice_set_auto_checkpoint(db, max_wal_frames, min_interval_ms)`; the bindings
+with `set_auto_checkpoint` (Python), `setAutoCheckpoint` (TypeScript, Java) and
+`SetAutoCheckpoint` (Go); the CLI with `--auto-checkpoint=<frames>`. Where none of
+those is used, the C API, the bindings and the CLI take the frame count from
+`LATTICE_AUTO_CHECKPOINT_FRAMES` if it is set:
 
 | Setting | Default | What it does |
 |---------|---------|--------------|
@@ -215,9 +221,10 @@ bindings and the CLI always use the defaults below):
 | `min_interval_ns` | 0 | Shortest gap between two checkpoints. |
 | `mode` | `truncate` | Only `truncate` resets the log, so it is the only mode that bounds its size. |
 
-From Zig, set `auto_checkpoint` to null to manage this yourself, which is worth doing if you
-want to choose the moment rather than have it land mid-request. That also turns off
-the checkpoints at open and close described below.
+A frame count of 0 turns the checkpoints inside commits off, which is worth doing if
+you want to choose the moment rather than have it land mid-request; the database
+still checkpoints at open and close. From Zig, opening with `auto_checkpoint` set to
+null also turns off the checkpoints at open and close described below.
 
 The minimum interval defaults to zero deliberately. Under `truncate` the frame
 threshold already limits the rate, because a checkpoint resets the frame count and
@@ -239,7 +246,10 @@ lattice checkpoint social.lattice
 
 You mostly do not need this. It is worth running before copying a database file,
 so the copy is complete on its own, and on a database that has been open a very
-long time under heavy writes if you would rather pick the moment.
+long time under heavy writes if you would rather pick the moment. A program
+checkpoints its open database with `lattice_checkpoint(db, mode, &stats)` in C,
+`checkpoint()` in Python, TypeScript and Java, `Checkpoint` in Go, or
+`Database.checkpoint` in Zig.
 
 This is not `compact`. Checkpointing shrinks the log, not the database file.
 

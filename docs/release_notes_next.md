@@ -533,17 +533,21 @@ the GQL-only clauses. `book/src/cypher/overview.md` lists them.
   with it whatever the options say; `enable_vector` now means "create an index if
   there is none". Options that contradict the file are refused with the new
   `LATTICE_ERROR_CONFIG_MISMATCH` (-18), where wrong dimensions were refused as
-  an invalid argument, or misread the pages. Python and TypeScript accept
-  `vector_dimensions=0` (`vectorDimensions: 0`) for "the file's"; Go and Java
-  cannot express that, so leave vectors off when reopening there.
+  an invalid argument, or misread the pages. Every binding accepts vector
+  dimensions 0 with vectors enabled for "the file's" (`vector_dimensions=0`,
+  `vectorDimensions: 0`, `VectorDimensions: 0`, `vectorDimensions(0)`); where an
+  index would have to be created that is `LATTICE_ERROR_INVALID_ARG`. Go used to
+  turn 0 into 128, and Java refused it.
 - **`<=>` and vector search use the database's metric.** New indexes can use
   Euclidean (L2) distance or the negated dot product as well as cosine, and other
   `m` and `ef_construction`: `vector_metric`, `vector_m` and
   `vector_ef_construction` in every binding and in `lattice_open_options_v5`, and
   `lattice create --vector-metric=cosine|euclidean|dot_product --vector-m=<n>
-  --vector-ef-construction=<n>`. They are fixed once the index exists; export and
-  import to change them. Under Euclidean and dot product vectors are stored as
-  given; cosine still normalises them.
+  --vector-ef-construction=<n>`; `lattice info` shows them. They are fixed once
+  the index exists; export and import into a database created with others to
+  change them. Under Euclidean and dot product vectors are stored as given;
+  cosine still normalises them. A dot product distance of zero is `0.0`, not
+  `-0.0`.
 - **A node keeps its vector when its last label is removed.** Removing the only
   label a node had also deleted its vector, in a transaction and outside one,
   and adding a label back did not restore it. Nothing about having no labels
@@ -576,6 +580,49 @@ the GQL-only clauses. `book/src/cypher/overview.md` lists them.
   in Python, TypeScript, Go and Java, and rolling it back afterwards does
   nothing. Leaving a `with` block, `Database.write` or try-with-resources raised
   the error a second time, and Go's `IsActive` stayed true.
+- **More C functions return the specific error.** `lattice_node_create`,
+  `lattice_batch_insert`, `lattice_node_delete`, `lattice_node_detach_delete`,
+  `lattice_edge_create`, `lattice_edge_get_outgoing`, `_incoming`,
+  `_outgoing_by_type`, `_incoming_by_type`, `lattice_edge_scan`, `lattice_begin`
+  and `lattice_rollback` returned the generic `LATTICE_ERROR` (-1) for errors
+  that have a code of their own; they now return it (-2 for I/O, -4, -6, -9,
+  -15 and the rest). Query planning and execution failures without a more
+  specific code, and embedding service errors, stay -1.
+- **A file written by a newer release is a version mismatch**, -11
+  (`LATTICE_ERROR_VERSION_MISMATCH`), with a message saying a newer LatticeDB
+  wrote it, for read-write and read-only opens alike; it was reported as an I/O
+  error (-2), and a log too new as corruption (-3). The CLI says the same, `check`
+  included.
+- **An explicit cache size wins over `LATTICE_BUFFER_POOL_MB`.** The variable
+  overrode every size a program set; now it applies only when the program sets
+  none. `cache_size_mb` 0 in any options version means "not set": the variable's
+  size if it is set, else 100 MB. The bindings leave the size unset unless given
+  one, and `lattice create --cache-size` wins over the variable too.
+- **TypeScript exports `LatticeErrorCode`** from the package root, and it and
+  `QueryErrorStage` are plain enums, readable at run time; they were const enums
+  that compiled away.
+- **Deserialize takes the v5 options.** `lattice_deserialize_v5` and
+  `lattice_deserialize_borrowed_v5` take `lattice_open_options_v5`, so bytes
+  open with a sync mode and a vector metric, `m` and `ef_construction`, which are
+  checked against the index the bytes record as an open checks them. Every
+  binding's deserialize passes them.
+- **An open that cannot create the database creates nothing.** Read-only with
+  create on a missing path, and vectors on with dimensions 0 where an index would
+  be created, left an empty database file behind as they failed.
+- **Checkpoints can be run and tuned from C, the bindings and the CLI.**
+  `lattice_checkpoint(db, mode, stats)` runs a passive, full or truncate
+  checkpoint now and reports pages written, duration, the log position and
+  whether the log was emptied. `lattice_set_auto_checkpoint(db, frames,
+  min_interval_ms)` sets how many log frames a commit waits for before
+  checkpointing, and the shortest gap between two; 0 frames switches commits'
+  checkpoints off (close still folds the log into the file).
+  `LATTICE_AUTO_CHECKPOINT_FRAMES` sets the default (1000) for the C API, the
+  bindings and the CLI, which takes `--auto-checkpoint=<frames>`. Python
+  `checkpoint()` and `set_auto_checkpoint()`, TypeScript `checkpoint()` and
+  `setAutoCheckpoint()`, Go `Checkpoint` and `SetAutoCheckpoint`, Java
+  `checkpoint` and `setAutoCheckpoint`. A larger interval means fewer, longer
+  pauses, a longer log and a longer recovery; a smaller one shorter pauses, more
+  often.
 - **The Go binding needs a library with `lattice_open_v5`**, since it links the
   library rather than looking for the function. Python and TypeScript fall back
   to the older open functions, and raise their Unsupported error if one of the
@@ -980,8 +1027,22 @@ with relationships is one range probe, under 1 µs.
   transaction. `check` finishes a flush the crash interrupted from the journal,
   in memory, before it checks the pages (`journal_applied` in JSON and CSV); it
   failed with "IoError" on such a file.
-- A file that needs a newer writer is refused by the commands that write, with a
-  message naming the commands that still read it.
+- `exec` opens the database read-only for a statement that cannot write, and
+  `backup` always does, so neither takes the write lock or checkpoints a crashed
+  database's log into its file, and both work on a file that needs a newer
+  writer. `query` falls back to read-only on such a file, with a notice. The
+  commands that write (`import`, `compact`, `checkpoint`, a writing `exec`)
+  refuse it with a message naming the commands that still read it.
+- `--vector-dims`, `--vector-metric`, `--vector-m` and `--vector-ef-construction`
+  without `--enable-vector` are refused; `create` made a database with no vector
+  index. `--interval` without `--follow` is refused; `replicate` ran once.
+- `info` shows a vector index's dimensions, metric, `m` and `ef_construction`.
+- JSON exports and dumps record the vector index's metric, `m` and
+  `ef_construction` beside its dimensions (`vector_metric`, `vector_m`,
+  `vector_ef_construction`; 0.16.0 skips them), and an import with
+  `--enable-vector` into a database without an index builds one with them, and
+  with the file's dimensions unless `--vector-dims` is given. An import into a
+  database that has an index keeps its settings.
 - A CSV file that cannot be read as CSV, such as one with an unclosed quote,
   names the line and the reason; it said "Import failed: ParseError". It says to
   fix the file, since `--on-error=skip` cannot read past such a fault and is no
@@ -1036,8 +1097,8 @@ with relationships is one range probe, under 1 µs.
   `vector_metric`, `vector_m`, `vector_ef_construction`, `changefeed_retention`
   and `changefeed_retention_value`; 0 means "not set",
   and an out-of-range value is `LATTICE_ERROR_INVALID_ARG`. The older open
-  functions behave as v5 with those fields at 0. `lattice_deserialize` still
-  takes the v4 options.
+  functions behave as v5 with those fields at 0, and `lattice_deserialize_v5`
+  and `lattice_deserialize_borrowed_v5` take them too.
 - A second fetch of a page another thread was still reading from disk could see
   the frame's previous contents, another page's or zeroes; it now waits for the
   read.
@@ -1051,8 +1112,10 @@ with relationships is one range probe, under 1 µs.
 - **The automatic checkpoint runs inside the commit that triggers it.** About
   every thousandth small commit takes 5 to 12 ms, up to 27 ms, against about
   50 µs for the others (C API, macOS, a busy machine). There is no background
-  checkpointer; from Zig, turn the automatic checkpoint off and run checkpoints
-  at moments you choose.
+  checkpointer; set the interval (`lattice_set_auto_checkpoint`, each binding's
+  `set_auto_checkpoint`/`setAutoCheckpoint`/`SetAutoCheckpoint`,
+  `LATTICE_AUTO_CHECKPOINT_FRAMES`, `--auto-checkpoint`), or turn it off and
+  checkpoint at moments you choose.
 - **Damage in the newest sync batch reads as a torn tail.** Only a frame written
   after a later sync can vouch that a frame was synced, so damage to the last
   frames before the most recent sync, with nothing written after them, is cut
@@ -1079,10 +1142,10 @@ with relationships is one range probe, under 1 µs.
   0.16.0 left in the log to be shipped as frames. A pass with nothing changed
   still ships nothing, and a process that stays open and calls `replicateTo`
   on its own handle ships frames as before.
-- **Files that need a newer writer.** `exec`, `query`, `import`, `backup`,
-  `compact` and `checkpoint` open the database for writing, so the CLI cannot run
-  them, not even a read-only query through `exec`, on a file whose header asks
-  for a newer writer. 0.16.0 does not know that gate and writes such a file
+- **Files that need a newer writer.** The CLI reads them (`exec` of a reading
+  statement, `query` read-only, `backup`, `export` and the other read-only
+  commands) but cannot write them (`exec` of a writing statement, `import`,
+  `compact`, `checkpoint`). 0.16.0 does not know that gate and writes such a file
   anyway.
 - **Some Cypher is not implemented**, each part with an error that names it:
   quantified path patterns (`((a)-->(b)){1,3}`, `(x) ((a)-->(b))+`) and

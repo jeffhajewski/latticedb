@@ -321,7 +321,12 @@ pub const QueryPlanner = struct {
 
     /// Plan the clauses of one single query, in order.
     fn planClauses(self: *Self, clauses: []const ast.Clause) PlannerError!?Operator {
-        var current_op: ?Operator = null;
+        return self.planClausesOver(clauses, null);
+    }
+
+    /// Plan clauses over `input`, the rows they start from.
+    fn planClausesOver(self: *Self, clauses: []const ast.Clause, input: ?Operator) PlannerError!?Operator {
+        var current_op: ?Operator = input;
 
         // Process each clause. RETURN + trailing ORDER BY/SKIP/LIMIT is
         // planned as sort/window first, then projection, so ORDER BY can
@@ -441,6 +446,7 @@ pub const QueryPlanner = struct {
                 .with => |w| current_op = try self.planWith(w, current_op orelse try self.singleRow()),
                 .merge => |m| current_op = try self.planMerge(m, current_op),
                 .unwind => |u| current_op = try self.planUnwind(u, current_op),
+                .foreach => |f| current_op = try self.planForeach(f, current_op orelse try self.singleRow()),
                 .call => |c| {
                     // A CALL that is the whole query (with at most a WHERE on
                     // what it yields) returns its columns itself.
@@ -634,6 +640,7 @@ pub const QueryPlanner = struct {
             },
             // Elsewhere a subquery is left unplanned, and `hostSubqueries`
             // refuses the query.
+            .foreach => |f| try self.planSubqueriesIn(f.list),
             .match, .create, .merge, .remove, .limit, .skip, .call => {},
         }
     }
@@ -718,6 +725,49 @@ pub const QueryPlanner = struct {
         const plans = self.subquery_plans.toOwnedSlice(self.allocator) catch return PlannerError.OutOfMemory;
         const host = subquery_ops.SubqueryHost.init(self.allocator, root, plans) catch return PlannerError.OutOfMemory;
         return host.operator();
+    }
+
+    /// Plan `FOREACH (x IN list | clauses)`: an UNWIND of the list and the
+    /// clauses, over an Argument leaf, run to the end for each input row,
+    /// which then passes on unchanged. What FOREACH binds goes out of scope
+    /// after it, and the slots it took are free again.
+    fn planForeach(self: *Self, f: *const ast.ForeachClause, input: Operator) PlannerError!Operator {
+        const slots_before = self.used_slots;
+        var bound_before = std.StringHashMap(void).init(self.allocator);
+        defer bound_before.deinit();
+        var names = self.bindings.keyIterator();
+        while (names.next()) |name| bound_before.put(name.*, {}) catch return PlannerError.OutOfMemory;
+
+        const argument = optional_ops.Argument.init(self.allocator) catch return PlannerError.OutOfMemory;
+        const unwind = self.allocator.create(ast.UnwindClause) catch return PlannerError.OutOfMemory;
+        unwind.* = .{ .expression = f.list, .variable = f.variable, .location = f.location };
+        const over_list = self.planUnwind(unwind, argument.operator()) catch |err| {
+            argument.operator().deinit(self.allocator);
+            return err;
+        };
+        const inner = (try self.planClausesOver(f.clauses, over_list)) orelse return PlannerError.InvalidQuery;
+
+        var introduced: std.ArrayList([]const u8) = .empty;
+        defer introduced.deinit(self.allocator);
+        var bound = self.bindings.keyIterator();
+        while (bound.next()) |name| {
+            if (!bound_before.contains(name.*)) introduced.append(self.allocator, name.*) catch return PlannerError.OutOfMemory;
+        }
+        for (introduced.items) |name| {
+            if (self.bindings.fetchRemove(name)) |entry| {
+                self.outer_bindings.put(entry.key, entry.value) catch return PlannerError.OutOfMemory;
+            }
+            _ = self.pattern_labels.remove(name);
+            _ = self.pattern_edge_types.remove(name);
+            _ = self.edge_bindings.remove(name);
+        }
+        self.used_slots = slots_before;
+
+        // The writes run while the input is still being read: read it in
+        // full first, as SET and DELETE do, to release its page latches.
+        const materialized = try self.materializeInput(input);
+        const foreach = optional_ops.Foreach.init(self.allocator, materialized, inner, argument) catch return PlannerError.OutOfMemory;
+        return foreach.operator();
     }
 
     /// Plan `CALL procedure() [YIELD ...]`: each input row once per row of the

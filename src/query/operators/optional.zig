@@ -1,4 +1,5 @@
-//! Operators that run a plan once for each row of another: OPTIONAL MATCH.
+//! Operators that run a plan once for each row of another: OPTIONAL MATCH
+//! and FOREACH.
 //!
 //! `Apply` takes a row from its input, hands it to the plan's `Argument` leaf,
 //! and passes on every row the plan produces from it. The plan is opened once;
@@ -51,10 +52,9 @@ pub const Argument = struct {
         .deinit = deinitOp,
     };
 
-    fn open(ptr: *anyopaque, _: *ExecutionContext) OperatorError!void {
-        const self: *Self = @ptrCast(@alignCast(ptr));
-        self.pending = false;
-    }
+    /// A row set before opening is kept: FOREACH sets the row and then
+    /// opens its plan, since a Materialize in it reads its input on open.
+    fn open(_: *anyopaque, _: *ExecutionContext) OperatorError!void {}
 
     fn next(ptr: *anyopaque, _: *ExecutionContext) OperatorError!?*Row {
         const self: *Self = @ptrCast(@alignCast(ptr));
@@ -63,7 +63,10 @@ pub const Argument = struct {
         return self.row;
     }
 
-    fn close(_: *anyopaque, _: *ExecutionContext) void {}
+    fn close(ptr: *anyopaque, _: *ExecutionContext) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.pending = false;
+    }
 
     fn deinitOp(ptr: *anyopaque, allocator: Allocator) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
@@ -182,6 +185,70 @@ pub const Apply = struct {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.input.deinit(allocator);
         // The inner plan's leaf is the argument, which it frees.
+        self.inner.deinit(allocator);
+        allocator.destroy(self);
+    }
+};
+
+/// FOREACH: for each input row, runs the plan to the end for what it
+/// writes, and passes the input row on unchanged.
+///
+/// Unlike `Apply`, it opens and closes the plan once per row: the writes in
+/// it read their input in full when opened (see `Materialize`), so the row
+/// has to be in the argument by then.
+pub const Foreach = struct {
+    input: Operator,
+    inner: Operator,
+    argument: *Argument,
+    opened: bool = false,
+
+    const Self = @This();
+
+    pub fn init(allocator: Allocator, input: Operator, inner: Operator, argument: *Argument) !*Self {
+        const self = try allocator.create(Self);
+        self.* = .{ .input = input, .inner = inner, .argument = argument };
+        return self;
+    }
+
+    pub fn operator(self: *Self) Operator {
+        return .{ .vtable = &vtable, .ptr = self };
+    }
+
+    const vtable = Operator.VTable{
+        .open = open,
+        .next = next,
+        .close = close,
+        .deinit = deinitOp,
+    };
+
+    fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        try self.input.open(ctx);
+        self.opened = true;
+    }
+
+    fn next(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!?*Row {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        if (!self.opened) return OperatorError.NotInitialized;
+        const row = try self.input.next(ctx) orelse return null;
+        self.argument.set(row);
+        try self.inner.open(ctx);
+        defer self.inner.close(ctx);
+        while (try self.inner.next(ctx)) |_| {}
+        return row;
+    }
+
+    fn close(ptr: *anyopaque, ctx: *ExecutionContext) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        if (self.opened) {
+            self.input.close(ctx);
+            self.opened = false;
+        }
+    }
+
+    fn deinitOp(ptr: *anyopaque, allocator: Allocator) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.input.deinit(allocator);
         self.inner.deinit(allocator);
         allocator.destroy(self);
     }

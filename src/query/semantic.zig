@@ -158,6 +158,7 @@ pub const SemanticAnalyzer = struct {
                 .with => |w| self.analyzeWithClause(w),
                 .merge => |m| self.analyzeMergeClause(m),
                 .unwind => |u| self.analyzeUnwindClause(u),
+                .foreach => |f| self.analyzeForeach(f),
                 .call => |c| {
                     for (c.arguments) |arg| self.analyzeExpression(arg);
                     if (c.yields) |items| for (items) |item| {
@@ -843,6 +844,22 @@ pub const SemanticAnalyzer = struct {
             },
             .subquery => |sq| self.analyzeSubquery(sq),
         }
+    }
+
+    /// FOREACH's variable and whatever its clauses create are visible only
+    /// inside it.
+    fn analyzeForeach(self: *Self, f: *const ast.ForeachClause) void {
+        self.analyzeExpression(f.list);
+        var outer = self.variables.clone() catch {
+            self.addError(.internal_error, f.location, "Failed to check FOREACH: out of memory");
+            return;
+        };
+        const listed = self.variable_list.items.len;
+        self.variables.put(f.variable, .{ .name = f.variable, .kind = .alias, .location = f.location }) catch {};
+        self.analyzeClauses(f.clauses);
+        std.mem.swap(std.StringHashMap(VariableInfo), &self.variables, &outer);
+        outer.deinit();
+        self.variable_list.shrinkRetainingCapacity(listed);
     }
 
     /// A subquery's patterns are checked as a MATCH, in a scope of its own:

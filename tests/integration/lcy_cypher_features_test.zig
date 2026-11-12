@@ -703,3 +703,63 @@ test "lcy: CALL on an empty database" {
     try expectResult(db, "CALL db.indexes()", "type | entityType | labelOrType | property");
     try expectResult(db, "CALL db.propertyKeys()", "propertyKey");
 }
+
+// ============================================================================
+// FOREACH
+// ============================================================================
+
+test "lcy: FOREACH writes once per element" {
+    const path = "/tmp/lcy_foreach.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedPeople(db);
+
+    try run(db, "FOREACH (x IN [1, 2, 3] | CREATE (:N {v: x}))");
+    try expectResult(db, "MATCH (n:N) RETURN n.v ORDER BY n.v", "n.v\n1\n2\n3");
+    // SET per element, seeing the previous element's write; the outer rows
+    // pass on unchanged.
+    try expectResult(db,
+        \\MATCH (p:P) FOREACH (k IN [1, 2] | SET p.score = coalesce(p.score, 0) + k) RETURN p.name, p.score ORDER BY p.name
+    , "p.name | p.score\n\"ann\" | 3\n\"bob\" | 3\n\"cy\" | 3\n\"dee\" | 3");
+    // A conditional write through CASE.
+    try run(db, "MATCH (p:P) FOREACH (x IN CASE WHEN p.name < 'c' THEN [1] ELSE [] END | SET p.early = true)");
+    try expectResult(db, "MATCH (p:P) WHERE p.early RETURN p.name ORDER BY p.name", "p.name\n\"ann\"\n\"bob\"");
+    // Nested, with the outer variable in the inner one.
+    try run(db, "FOREACH (i IN [1, 2] | FOREACH (j IN [10, 20] | CREATE (:M {v: i + j})))");
+    try expectResult(db, "MATCH (m:M) RETURN collect(m.v) AS vs", "vs\n[11, 21, 12, 22]");
+    // Relationships from a bound node, and MERGE.
+    try run(db, "MATCH (a:P {name: 'ann'}) FOREACH (n IN ['x', 'y'] | CREATE (a)-[:OWNS]->(:Item {name: n}))");
+    try expectResult(db, "MATCH (:P {name: 'ann'})-[:OWNS]->(i) RETURN i.name ORDER BY i.name", "i.name\n\"x\"\n\"y\"");
+    try run(db, "FOREACH (name IN ['ann', 'zed', 'zed'] | MERGE (:P {name: name}))");
+    try expectResult(db, "MATCH (p:P) RETURN count(p) AS c", "c\n5");
+    // DELETE and REMOVE. As with UNWIND, a list element is a value, which
+    // DELETE refuses; a variable bound before FOREACH can be deleted.
+    try run(db, "MATCH (m:M) FOREACH (x IN [1] | DELETE m)");
+    try expectResult(db, "MATCH (m:M) RETURN count(m) AS c", "c\n0");
+    try expectFailure(db, "MATCH (i:Item) WITH collect(i) AS items FOREACH (i IN items | DETACH DELETE i)", .semantic, "DELETE needs a node or relationship; 'i' is a value");
+    try run(db, "MATCH (p:P) FOREACH (x IN [1] | REMOVE p.score)");
+    try expectResult(db, "MATCH (p:P) WHERE p.score IS NOT NULL RETURN count(p) AS c", "c\n0");
+    // A null or empty list writes nothing; rows still pass on.
+    try expectResult(db, "MATCH (p:P {name: 'ann'}) FOREACH (x IN null | CREATE (:Z)) FOREACH (x IN [] | CREATE (:Z)) RETURN p.name", "p.name\n\"ann\"");
+    try expectResult(db, "MATCH (z:Z) RETURN count(z) AS c", "c\n0");
+    // FOREACH stays usable as a name.
+    try expectResult(db, "WITH 1 AS foreach RETURN foreach", "foreach\n1");
+}
+
+test "lcy: FOREACH scope and what it refuses" {
+    const path = "/tmp/lcy_foreach_errors.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+
+    try expectFailure(db, "FOREACH (x IN [1] | CREATE (:Q)) RETURN x", .semantic, "Variable 'x' is not defined");
+    try expectFailure(db, "FOREACH (x IN [1] | CREATE (q:Q)) RETURN q", .semantic, "Variable 'q' is not defined");
+    try expectFailure(db, "FOREACH (x IN [1] | MATCH (n) DELETE n)", .parse, "FOREACH can only contain CREATE, MERGE, SET, REMOVE, DELETE and FOREACH");
+    try expectFailure(db, "FOREACH (x IN [1] | CREATE (:Q) RETURN x)", .parse, "FOREACH can only contain");
+    try expectFailure(db, "FOREACH (x IN [1])", .parse, "Expected '|' before FOREACH's clauses");
+    try expectFailure(db, "FOREACH (x IN [1] | )", .parse, "Expected a clause in FOREACH");
+    try expectFailure(db, "FOREACH x IN [1] | CREATE (:Q)", .parse, "Expected '(' after FOREACH");
+    try expectFailure(db, "FOREACH (x IN [1] | CREATE (:Q)", .parse, "Expected ')' to close FOREACH");
+    // As with UNWIND, a value that is not a list is a list of one.
+    try run(db, "FOREACH (x IN 5 | CREATE (:Q {v: x}))");
+    try expectResult(db, "MATCH (q:Q) RETURN q.v", "q.v\n5");
+}

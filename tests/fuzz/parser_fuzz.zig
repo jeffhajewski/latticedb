@@ -64,6 +64,7 @@ fn validateClause(clause: lattice.query.ast.Clause) bool {
         .merge => true,
         .unwind => true,
         .call => true,
+        .foreach => true,
     };
 }
 
@@ -243,6 +244,19 @@ test "parser: handles the syntax added after 0.16" {
         "CREATE p = (a)",
         "MERGE p = (a)",
         "MATCH p = = (a) RETURN p",
+        "FOREACH (x IN [1, 2] | CREATE (:N {v: x}))",
+        "MATCH (n) FOREACH (i IN [1] | FOREACH (j IN [i] | SET n.v = j) REMOVE n.w) RETURN n",
+        "FOREACH (x IN [1] | MERGE (:N {v: x}) DELETE n)",
+        "FOREACH",
+        "FOREACH (",
+        "FOREACH (x",
+        "FOREACH (x IN",
+        "FOREACH (x IN [1]",
+        "FOREACH (x IN [1] |",
+        "FOREACH (x IN [1] | )",
+        "FOREACH (x IN [1] | CREATE (n)",
+        "FOREACH (x IN [1] | MATCH (n) RETURN n)",
+        "FOREACH (x IN [1] | FOREACH (y IN [x] | ))",
     };
     for (corpus) |input| try fuzzParser(allocator, input);
 }

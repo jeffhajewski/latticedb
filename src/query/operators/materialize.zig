@@ -61,6 +61,9 @@ pub const Materialize = struct {
         try self.input.open(ctx);
         errdefer self.input.close(ctx);
 
+        // Opened again for each row of FOREACH: start empty.
+        self.rows.clearRetainingCapacity();
+
         while (true) {
             const row = try self.input.next(ctx) orelse break;
             self.rows.append(self.allocator, row.clone()) catch return OperatorError.OutOfMemory;

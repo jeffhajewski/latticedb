@@ -65,7 +65,7 @@ pub const Query = struct {
     fn clausesWriteData(clauses: []const Clause) bool {
         for (clauses) |clause| {
             switch (clause) {
-                .create, .delete, .set, .remove, .merge => return true,
+                .create, .delete, .set, .remove, .merge, .foreach => return true,
                 .match, .where, .return_, .order_by, .limit, .skip, .with, .unwind, .call => {},
             }
         }
@@ -97,6 +97,17 @@ pub const Clause = union(enum) {
     merge: *MergeClause,
     unwind: *UnwindClause,
     call: *CallClause,
+    foreach: *ForeachClause,
+};
+
+/// `FOREACH (variable IN list | clauses)`: the updating clauses run once
+/// for each element, and each input row passes on once, unchanged.
+pub const ForeachClause = struct {
+    variable: []const u8,
+    list: *Expression,
+    /// CREATE, MERGE, SET, REMOVE, DELETE and FOREACH only.
+    clauses: []Clause,
+    location: SourceLocation,
 };
 
 /// `CALL procedure(args) [YIELD column [AS name], ... | YIELD *]`.

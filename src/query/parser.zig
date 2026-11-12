@@ -418,6 +418,8 @@ pub const Parser = struct {
             return self.parseOptionalMatchClause();
         } else if (self.checkWord("call")) {
             return self.parseCallClause();
+        } else if (self.checkWord("foreach")) {
+            return self.parseForeachClause();
         } else if (self.match(.kw_where)) {
             return self.parseWhereClause();
         } else if (self.match(.kw_return)) {
@@ -491,6 +493,47 @@ pub const Parser = struct {
         const clause = self.parseMatchClause() orelse return null;
         clause.match.optional = true;
         return clause;
+    }
+
+    /// `FOREACH (x IN list | clause ...)`. FOREACH is not reserved.
+    fn parseForeachClause(self: *Self) ?ast.Clause {
+        const loc = self.currentLocation();
+        self.advance();
+        if (!self.consume(.lparen, "Expected '(' after FOREACH")) return null;
+        if (!self.checkVariable()) {
+            self.errorAtCurrent("Expected a variable in FOREACH");
+            return null;
+        }
+        const variable = self.current.text;
+        self.advance();
+        if (!self.consume(.kw_in, "Expected IN after the variable")) return null;
+        const list = self.parseExpression() orelse return null;
+        if (!self.consume(.pipe, "Expected '|' before FOREACH's clauses")) return null;
+        const a = self.arena.allocator();
+        var clauses: std.ArrayList(ast.Clause) = .empty;
+        while (!self.check(.rparen)) {
+            if (self.check(.eof)) {
+                self.errorAtCurrent("Expected ')' to close FOREACH");
+                return null;
+            }
+            const clause = self.parseClause() orelse return null;
+            switch (clause) {
+                .create, .merge, .set, .remove, .delete, .foreach => {},
+                else => {
+                    self.errorAt(loc, "FOREACH can only contain CREATE, MERGE, SET, REMOVE, DELETE and FOREACH");
+                    return null;
+                },
+            }
+            clauses.append(a, clause) catch return null;
+        }
+        if (clauses.items.len == 0) {
+            self.errorAtCurrent("Expected a clause in FOREACH");
+            return null;
+        }
+        self.advance();
+        const node = a.create(ast.ForeachClause) catch return null;
+        node.* = .{ .variable = variable, .list = list, .clauses = clauses.items, .location = loc };
+        return .{ .foreach = node };
     }
 
     /// `CALL name(args) [YIELD ...]`. CALL and YIELD are not reserved.

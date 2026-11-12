@@ -490,6 +490,10 @@ pub const ExecutionContext = struct {
     /// Variable name to slot mapping
     variables: std.StringHashMap(u8),
 
+    /// The plans of the pattern subqueries in the query's expressions, set
+    /// while the query runs when it has any.
+    subqueries: ?*@import("operators/subquery.zig").SubqueryHost = null,
+
     /// Node store for property lookups (optional)
     node_store: ?*NodeStore,
 

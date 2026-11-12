@@ -679,6 +679,60 @@ pub const ExpressionEvaluator = struct {
             .case_expr => |c| self.evaluateCase(c, row, ctx),
             .comprehension => |c| self.evaluateComprehension(c, row, ctx),
             .reduce => |r| self.evaluateReduce(r, row, ctx),
+            .subquery => |sq| self.evaluateSubquery(sq, row, ctx),
+        };
+    }
+
+    /// Run a pattern subquery's plan for this row: whether it matches, how
+    /// many times, or the list of its value per match.
+    fn evaluateSubquery(
+        self: *Self,
+        sq: *const ast.PatternSubquery,
+        row: *const Row,
+        ctx: *const ExecutionContext,
+    ) EvalError!EvalResult {
+        const host = ctx.subqueries orelse
+            return ctx.fail(EvalError.InvalidOperation, sq.location, "This subquery was not planned, so it cannot run here", .{});
+        const plan = host.find(sq) orelse
+            return ctx.fail(EvalError.InvalidOperation, sq.location, "This subquery was not planned, so it cannot run here", .{});
+        const Visitor = struct {
+            evaluator: *Self,
+            node: *const ast.PatternSubquery,
+            ctx: *const ExecutionContext,
+            count: i64 = 0,
+            values: std.ArrayListUnmanaged(EvalResult) = .empty,
+            failed: ?EvalError = null,
+
+            pub fn visit(v: *@This(), match: *Row) executor.OperatorError!void {
+                v.count += 1;
+                const map = v.node.map orelse return;
+                const value = v.evaluator.evaluate(map, match, v.ctx) catch |err| {
+                    v.failed = err;
+                    return executor.OperatorError.EvaluationError;
+                };
+                v.values.append(v.evaluator.allocator, value) catch return executor.OperatorError.OutOfMemory;
+            }
+        };
+        var visitor = Visitor{ .evaluator = self, .node = sq, .ctx = ctx };
+        // Operators take the context they run in as mutable; evaluation is
+        // handed it as const only because expressions do not change it.
+        plan.run(@constCast(ctx), row, &visitor) catch |err| {
+            if (visitor.failed) |failed| return failed;
+            const mapped: EvalError = switch (err) {
+                executor.OperatorError.OutOfMemory => EvalError.OutOfMemory,
+                executor.OperatorError.TypeError => EvalError.TypeError,
+                executor.OperatorError.StorageError => EvalError.StorageError,
+                else => EvalError.InvalidOperation,
+            };
+            // The operator that failed has usually said why already.
+            if (ctx.failureRecorded()) return mapped;
+            if (plan.running) return ctx.fail(mapped, sq.location, "A subquery cannot run inside itself", .{});
+            return ctx.fail(mapped, sq.location, "The subquery failed: {s}", .{@errorName(err)});
+        };
+        return switch (sq.kind) {
+            .exists => .{ .bool_val = visitor.count > 0 },
+            .count => .{ .int_val = visitor.count },
+            .comprehension => .{ .list_val = visitor.values.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory },
         };
     }
 

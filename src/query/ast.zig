@@ -38,6 +38,9 @@ pub const Query = struct {
     allocator: Allocator,
     /// Each UNION and the single query after it, in order.
     unions: []UnionBranch = &.{},
+    /// Every pattern subquery in the query's expressions, so that the
+    /// planner can tell whether it planned them all.
+    subqueries: []*PatternSubquery = &.{},
 
     pub fn deinit(self: *Query) void {
         _ = self;
@@ -326,6 +329,9 @@ pub const Expression = union(enum) {
     comprehension: *ListComprehension,
     reduce: *ReduceExpr,
 
+    // Patterns matched from inside an expression
+    subquery: *PatternSubquery,
+
     /// Get source location for this expression
     pub fn getLocation(self: *const Expression) SourceLocation {
         return switch (self.*) {
@@ -343,6 +349,7 @@ pub const Expression = union(enum) {
             .case_expr => |c| c.location,
             .comprehension => |c| c.location,
             .reduce => |r| r.location,
+            .subquery => |s| s.location,
         };
     }
 };
@@ -373,6 +380,22 @@ pub const ReduceExpr = struct {
     list: *Expression,
     expression: *Expression,
     location: SourceLocation,
+};
+
+/// Patterns matched for each row an expression is evaluated on, with the
+/// row's variables bound: `EXISTS { MATCH patterns WHERE cond }` and a
+/// pattern used as a predicate, `COUNT { ... }`, and a pattern
+/// comprehension `[pattern WHERE cond | value]`. Variables the patterns
+/// introduce are visible only inside it.
+pub const PatternSubquery = struct {
+    kind: Kind,
+    patterns: []Pattern,
+    where: ?*Expression,
+    /// The value per match of a pattern comprehension.
+    map: ?*Expression,
+    location: SourceLocation,
+
+    pub const Kind = enum { exists, count, comprehension };
 };
 
 /// `object[index]`: a list element by position, or a map entry, node or

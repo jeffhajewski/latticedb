@@ -259,6 +259,8 @@ pub const Parser = struct {
     /// When false, the arena is owned externally (e.g., by the query cache)
     /// and deinit will not free it.
     owns_arena: bool = true,
+    /// Every pattern subquery parsed, in the arena.
+    subqueries: std.ArrayList(*ast.PatternSubquery) = .empty,
 
     const Self = @This();
 
@@ -354,6 +356,7 @@ pub const Parser = struct {
             .clauses = clauses.toOwnedSlice(self.arena.allocator()) catch &[_]ast.Clause{},
             .allocator = self.arena.allocator(),
             .unions = unions.branches.items,
+            .subqueries = self.subqueries.items,
         };
 
         return .{
@@ -1470,6 +1473,13 @@ pub const Parser = struct {
             return self.parseMapLiteral(loc);
         }
 
+        // A pattern as a predicate: `(a)-->(b)` is true when it matches.
+        if (self.check(.lparen)) {
+            if (self.tryPattern(false)) |pattern| {
+                return self.makeSubquery(.exists, &.{pattern}, null, null, loc);
+            }
+        }
+
         // Grouped expression
         if (self.match(.lparen)) {
             const expr = self.parseExpression() orelse return null;
@@ -1488,8 +1498,21 @@ pub const Parser = struct {
             self.advance();
             const name = self.previous.text;
 
+            // EXISTS { ... } and COUNT { ... }
+            if (self.check(.lbrace)) {
+                if (std.ascii.eqlIgnoreCase(name, "exists")) return self.parseSubqueryBlock(.exists, loc);
+                if (std.ascii.eqlIgnoreCase(name, "count")) return self.parseSubqueryBlock(.count, loc);
+            }
+
             // Check for function call
             if (self.match(.lparen)) {
+                // exists((a)-->(b)) is the pattern predicate itself.
+                if (std.ascii.eqlIgnoreCase(name, "exists") and self.check(.lparen)) {
+                    if (self.tryPattern(false)) |pattern| {
+                        if (!self.consume(.rparen, "Expected ')' after the pattern")) return null;
+                        return self.makeSubquery(.exists, &.{pattern}, null, null, loc);
+                    }
+                }
                 if (self.checkVariable()) {
                     if (quantifierKind(name)) |kind| {
                         if (self.peekType() == .kw_in) return self.parseIteration(kind, loc, .rparen);
@@ -1551,6 +1574,11 @@ pub const Parser = struct {
             return self.parseIteration(.list, loc, .rbracket);
         }
 
+        // `[(a)-->(b) WHERE cond | value]` is a pattern comprehension.
+        if (self.check(.lparen) or (self.checkVariable() and self.peekType() == .eq)) {
+            if (self.tryPattern(true)) |pattern| return self.parsePatternComprehension(pattern, loc);
+        }
+
         if (!self.check(.rbracket)) {
             const first = self.parseExpression() orelse return null;
             elements.append(self.arena.allocator(), first) catch return null;
@@ -1574,6 +1602,110 @@ pub const Parser = struct {
         const expr = self.arena.allocator().create(ast.Expression) catch return null;
         expr.* = .{ .list = list };
         return expr;
+    }
+
+    const Checkpoint = struct {
+        lexer: Lexer,
+        current: Token,
+        previous: Token,
+        errors: usize,
+        had_error: bool,
+        panic_mode: bool,
+        errors_dropped: bool,
+    };
+
+    fn checkpoint(self: *const Self) Checkpoint {
+        return .{
+            .lexer = self.lexer,
+            .current = self.current,
+            .previous = self.previous,
+            .errors = self.errors.items.len,
+            .had_error = self.had_error,
+            .panic_mode = self.panic_mode,
+            .errors_dropped = self.errors_dropped,
+        };
+    }
+
+    fn restore(self: *Self, saved: Checkpoint) void {
+        self.lexer = saved.lexer;
+        self.current = saved.current;
+        self.previous = saved.previous;
+        self.errors.shrinkRetainingCapacity(saved.errors);
+        self.had_error = saved.had_error;
+        self.panic_mode = saved.panic_mode;
+        self.errors_dropped = saved.errors_dropped;
+    }
+
+    /// A pattern with at least one relationship where an expression starts,
+    /// or null (with nothing consumed) when what follows is not one: then it
+    /// is a parenthesised expression, or a list. In a list (`comprehension`)
+    /// the pattern also has to be followed by WHERE or `|`.
+    fn tryPattern(self: *Self, comprehension: bool) ?ast.Pattern {
+        const saved = self.checkpoint();
+        if (self.parsePattern()) |pattern| {
+            const follows = !comprehension or self.check(.kw_where) or self.check(.pipe);
+            if (!self.had_error and pattern.elements.len > 1 and follows) return pattern;
+        }
+        self.restore(saved);
+        return null;
+    }
+
+    fn makeSubquery(
+        self: *Self,
+        kind: ast.PatternSubquery.Kind,
+        patterns: []const ast.Pattern,
+        where: ?*ast.Expression,
+        map: ?*ast.Expression,
+        loc: ast.SourceLocation,
+    ) ?*ast.Expression {
+        const a = self.arena.allocator();
+        const node = a.create(ast.PatternSubquery) catch return null;
+        node.* = .{
+            .kind = kind,
+            .patterns = a.dupe(ast.Pattern, patterns) catch return null,
+            .where = where,
+            .map = map,
+            .location = loc,
+        };
+        self.subqueries.append(a, node) catch return null;
+        const expr = a.create(ast.Expression) catch return null;
+        expr.* = .{ .subquery = node };
+        return expr;
+    }
+
+    /// `[pattern WHERE cond | value]`, after the pattern.
+    fn parsePatternComprehension(self: *Self, pattern: ast.Pattern, loc: ast.SourceLocation) ?*ast.Expression {
+        var where: ?*ast.Expression = null;
+        if (self.match(.kw_where)) where = self.parseExpression() orelse return null;
+        if (!self.consume(.pipe, "Expected '|' in the pattern comprehension")) return null;
+        const map = self.parseExpression() orelse return null;
+        if (!self.consume(.rbracket, "Expected ']' to close the pattern comprehension")) return null;
+        return self.makeSubquery(.comprehension, &.{pattern}, where, map, loc);
+    }
+
+    /// `{ [MATCH] patterns [WHERE cond] }` after EXISTS or COUNT. A full
+    /// query inside the braces (RETURN, WITH, ...) is not supported.
+    fn parseSubqueryBlock(self: *Self, kind: ast.PatternSubquery.Kind, loc: ast.SourceLocation) ?*ast.Expression {
+        self.advance();
+        _ = self.match(.kw_match);
+        var patterns: std.ArrayList(ast.Pattern) = .empty;
+        const a = self.arena.allocator();
+        while (true) {
+            const pattern = self.parsePattern() orelse return null;
+            patterns.append(a, pattern) catch return null;
+            if (!self.match(.comma)) break;
+        }
+        var where: ?*ast.Expression = null;
+        if (self.match(.kw_where)) where = self.parseExpression() orelse return null;
+        if (!self.check(.rbrace)) {
+            self.errorAtCurrent(if (kind == .exists)
+                "EXISTS { ... } supports only a MATCH pattern and WHERE; subqueries with other clauses are not supported"
+            else
+                "COUNT { ... } supports only a MATCH pattern and WHERE; subqueries with other clauses are not supported");
+            return null;
+        }
+        self.advance();
+        return self.makeSubquery(kind, patterns.items, where, null, loc);
     }
 
     /// The type of the token after the current one.

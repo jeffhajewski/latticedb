@@ -607,3 +607,58 @@ test "lcy: nodes and relationships inside lists stay nodes and relationships" {
     // Plain lists are unchanged.
     try expectResult(db, "WITH [1, 'a'] AS l RETURN l, l[1]", "l | l[1]\n[1, \"a\"] | \"a\"");
 }
+
+test "lcy: pattern predicates, EXISTS and COUNT" {
+    const path = "/tmp/lcy_pattern_predicates.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedPeople(db);
+
+    try expectResult(db, "MATCH (p:P) WHERE (p)-[:KNOWS]->() RETURN p.name ORDER BY p.name", "p.name\n\"ann\"\n\"bob\"");
+    try expectResult(db, "MATCH (p:P) WHERE NOT (p)-->() RETURN p.name ORDER BY p.name", "p.name\n\"cy\"\n\"dee\"");
+    try expectResult(db, "MATCH (p:P) WHERE exists((p)<--()) RETURN p.name ORDER BY p.name", "p.name\n\"bob\"\n\"cy\"");
+    try expectResult(db,
+        \\MATCH (p:P) WHERE EXISTS { MATCH (p)-[k:KNOWS]->(f) WHERE k.since > 2015 } RETURN p.name
+    , "p.name\n\"bob\"");
+    try expectResult(db, "MATCH (p:P) WHERE EXISTS { (p)-->(:P {name: 'cy'}) } RETURN p.name ORDER BY p.name", "p.name\n\"ann\"\n\"bob\"");
+    // Both ends bound.
+    try expectResult(db, "MATCH (a:P), (b:P) WHERE a.name < b.name AND (a)-->(b) RETURN a.name, b.name ORDER BY a.name, b.name", "a.name | b.name\n\"ann\" | \"bob\"\n\"ann\" | \"cy\"\n\"bob\" | \"cy\"");
+    // As values, counted, and in an aggregate.
+    try expectResult(db,
+        \\MATCH (p:P) RETURN p.name, (p)-->() AS knows, COUNT { (p)-->() } AS out, COUNT { MATCH (p)<--(q) WHERE q.name <> 'ann' } AS fans ORDER BY p.name
+    , "p.name | knows | out | fans\n\"ann\" | true | 2 | 0\n\"bob\" | true | 1 | 0\n\"cy\" | false | 0 | 1\n\"dee\" | false | 0 | 0");
+    try expectResult(db, "MATCH (p:P) RETURN sum(COUNT { (p)-->() }) AS edges", "edges\n3");
+    // After WITH, in its WHERE, and in OPTIONAL MATCH's WHERE.
+    try expectResult(db, "MATCH (p:P) WITH p AS q WHERE (q)-->() RETURN count(*) AS c", "c\n2");
+    try expectResult(db,
+        \\MATCH (p:P {name: 'dee'}) OPTIONAL MATCH (q:P) WHERE (q)-->(:P {name: 'bob'}) RETURN q.name
+    , "q.name\n\"ann\"");
+    // A variable the subquery introduces stays inside it.
+    try expectFailure(db, "MATCH (p:P) WHERE (p)-->(f) RETURN f", .semantic, "Variable 'f' is not defined");
+    // Not a pattern: still a parenthesised expression.
+    try expectResult(db, "WITH 3 AS a RETURN (a) - 1 AS x, (a)-1 AS y, (a) < -1 AS z", "x | y | z\n2 | 2 | false");
+    try expectFailure(db, "MATCH (p) WHERE EXISTS { MATCH (p)-->(q) RETURN q } RETURN p", .parse, "EXISTS { ... } supports only a MATCH pattern and WHERE");
+    try expectFailure(db, "MATCH (p {x: EXISTS { (p)-->() }}) RETURN p", .plan, "is not supported here");
+    try expectFailure(db, "MATCH (p:P) RETURN [x IN [1] WHERE (p)-->()] AS l", .plan, "inside a list comprehension, quantifier or reduce() is not supported");
+}
+
+test "lcy: pattern comprehensions" {
+    const path = "/tmp/lcy_pattern_comprehension.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedPeople(db);
+
+    try expectResult(db,
+        \\MATCH (p:P) RETURN p.name, [(p)-[k:KNOWS]->(f) WHERE k.since < 2015 | f.name] AS early ORDER BY p.name
+    , "p.name | early\n\"ann\" | [\"bob\", \"cy\"]\n\"bob\" | []\n\"cy\" | []\n\"dee\" | []");
+    try expectResult(db, "MATCH (p:P {name: 'ann'}) RETURN size([(p)-->(f) | f]) AS n, [x = (p)-->()-->() | length(x)] AS lens", "n | lens\n2 | [2]");
+    // Nested inside another subquery, and over the result of OPTIONAL MATCH.
+    try expectResult(db,
+        \\MATCH (p:P {name: 'ann'}) RETURN [(p)-->(f) WHERE (f)-->() | f.name] AS hubs
+    , "hubs\n[\"bob\"]");
+    try expectResult(db,
+        \\MATCH (p:P {name: 'dee'}) OPTIONAL MATCH (p)-->(f) RETURN [(f)-->(g) | g] AS l, (f)-->() AS e
+    , "l | e\n[] | false");
+    // A list literal that starts with a parenthesis is still a list.
+    try expectResult(db, "WITH 2 AS a RETURN [(a), (a) + 1] AS l", "l\n[2, 3]");
+}

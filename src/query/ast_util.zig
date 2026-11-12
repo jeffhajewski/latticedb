@@ -56,6 +56,9 @@ pub fn expressionsEqual(a: *const ast.Expression, b: *const ast.Expression) bool
             break :blk ac.kind == bc.kind and std.mem.eql(u8, ac.variable, bc.variable) and
                 expressionsEqual(ac.list, bc.list) and optionalEqual(ac.where, bc.where) and optionalEqual(ac.map, bc.map);
         },
+        // The same subquery, not one written the same way: each has a plan
+        // of its own.
+        .subquery => |as| as == b.subquery,
         .reduce => |ar| blk: {
             const br = b.reduce;
             break :blk std.mem.eql(u8, ar.accumulator, br.accumulator) and std.mem.eql(u8, ar.variable, br.variable) and
@@ -178,6 +181,8 @@ pub fn rewrite(allocator: std.mem.Allocator, expr: *ast.Expression, context: any
         // Only the list is the enclosing expression's: the rest sees the
         // comprehension's own variable, which a replacement made for the
         // enclosing scope must not reach.
+        // Kept as it is: its plan is found by this node.
+        .subquery => {},
         .comprehension => |c| {
             const copy = try allocator.create(ast.ListComprehension);
             copy.* = c.*;
@@ -193,6 +198,57 @@ pub fn rewrite(allocator: std.mem.Allocator, expr: *ast.Expression, context: any
         },
     }
     return out;
+}
+
+/// The pattern subqueries in `expr`, outermost only: those inside one are
+/// its own.
+pub fn collectSubqueries(allocator: std.mem.Allocator, expr: *const ast.Expression, out: *std.ArrayList(*const ast.PatternSubquery)) error{ OutOfMemory, Refused }!void {
+    return collect(allocator, expr, out, false);
+}
+
+fn collect(allocator: std.mem.Allocator, expr: *const ast.Expression, out: *std.ArrayList(*const ast.PatternSubquery), local: bool) error{ OutOfMemory, Refused }!void {
+    switch (expr.*) {
+        .literal, .parameter, .variable => {},
+        // Its plan runs apart from the evaluator that holds a comprehension's
+        // variable, so it could not see one.
+        .subquery => |sq| if (local) return error.Refused else try out.append(allocator, sq),
+        .property_access => |p| try collect(allocator, p.object, out, local),
+        .binary => |b| {
+            try collect(allocator, b.left, out, local);
+            try collect(allocator, b.right, out, local);
+        },
+        .unary => |u| try collect(allocator, u.operand, out, local),
+        .function_call => |f| for (f.arguments) |a| try collect(allocator, a, out, local),
+        .list => |l| for (l.elements) |e| try collect(allocator, e, out, local),
+        .map => |m| for (m.entries) |e| try collect(allocator, e.value, out, local),
+        .index => |i| {
+            try collect(allocator, i.object, out, local);
+            try collect(allocator, i.index, out, local);
+        },
+        .slice => |s| {
+            try collect(allocator, s.object, out, local);
+            if (s.from) |f| try collect(allocator, f, out, local);
+            if (s.to) |t| try collect(allocator, t, out, local);
+        },
+        .case_expr => |c| {
+            if (c.subject) |s| try collect(allocator, s, out, local);
+            for (c.branches) |b| {
+                try collect(allocator, b.when, out, local);
+                try collect(allocator, b.then, out, local);
+            }
+            if (c.else_expr) |e| try collect(allocator, e, out, local);
+        },
+        .comprehension => |c| {
+            try collect(allocator, c.list, out, local);
+            if (c.where) |w| try collect(allocator, w, out, true);
+            if (c.map) |m| try collect(allocator, m, out, true);
+        },
+        .reduce => |r| {
+            try collect(allocator, r.initial, out, local);
+            try collect(allocator, r.list, out, local);
+            try collect(allocator, r.expression, out, true);
+        },
+    }
 }
 
 /// The first variable `expr` reads from its enclosing scope, skipping those
@@ -218,6 +274,19 @@ const Scope = struct {
 fn freeIn(expr: *const ast.Expression, ignore: *const fn ([]const u8) bool, scope: *Scope) ?[]const u8 {
     switch (expr.*) {
         .literal, .parameter => return null,
+        // What it reads from the enclosing row is in its patterns and WHERE,
+        // whose variables a free-variable check would also have to scope.
+        // Reported as its first pattern variable bound outside, if any.
+        .subquery => |sq| {
+            for (sq.patterns) |pattern| for (pattern.elements) |element| {
+                const name = switch (element) {
+                    .node => |n| n.variable,
+                    .edge => |e| e.variable,
+                } orelse continue;
+                if (!scope.has(name) and !ignore(name)) return name;
+            };
+            return null;
+        },
         .variable => |v| return if (scope.has(v.name) or ignore(v.name)) null else v.name,
         .property_access => |p| return freeIn(p.object, ignore, scope),
         .binary => |b| return freeIn(b.left, ignore, scope) orelse freeIn(b.right, ignore, scope),

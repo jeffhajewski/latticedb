@@ -835,7 +835,25 @@ pub const SemanticAnalyzer = struct {
                 defer self.leaveLocalScope(&names, saved);
                 self.analyzeExpression(r.expression);
             },
+            .subquery => |sq| self.analyzeSubquery(sq),
         }
+    }
+
+    /// A subquery's patterns are checked as a MATCH, in a scope of its own:
+    /// the variables they introduce are gone afterwards.
+    fn analyzeSubquery(self: *Self, sq: *const ast.PatternSubquery) void {
+        var outer = self.variables.clone() catch {
+            self.addError(.internal_error, sq.location, "Failed to check subquery: out of memory");
+            return;
+        };
+        const listed = self.variable_list.items.len;
+        const clause = ast.MatchClause{ .patterns = sq.patterns, .location = sq.location };
+        self.analyzeMatchClause(&clause);
+        if (sq.where) |w| self.analyzeExpression(w);
+        if (sq.map) |m| self.analyzeExpression(m);
+        std.mem.swap(std.StringHashMap(VariableInfo), &self.variables, &outer);
+        outer.deinit();
+        self.variable_list.shrinkRetainingCapacity(listed);
     }
 
     /// Variables of an expression's own (a list comprehension's, reduce's),
@@ -940,6 +958,7 @@ pub const SemanticAnalyzer = struct {
             .case_expr => .any,
             .comprehension => |c| if (c.kind == .list) .list else .boolean,
             .reduce => .any,
+            .subquery => |sq| if (sq.kind == .exists) .boolean else if (sq.kind == .count) .integer else .list,
         };
     }
 

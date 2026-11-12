@@ -41,6 +41,7 @@ const cross_product_ops = @import("operators/cross_product.zig");
 const union_ops = @import("operators/union.zig");
 const optional_ops = @import("operators/optional.zig");
 const path_ops = @import("operators/path.zig");
+const subquery_ops = @import("operators/subquery.zig");
 
 const btree = @import("../storage/btree.zig");
 const BTree = btree.BTree;
@@ -179,6 +180,10 @@ pub const QueryPlanner = struct {
     output_columns: u8 = 0,
     /// Explicit output column names from RETURN aliases.
     output_column_names: [MAX_SLOTS]?[]const u8,
+    /// Plans of the pattern subqueries found so far, made only for a query
+    /// that has some (`has_subqueries`).
+    subquery_plans: std.ArrayList(subquery_ops.SubqueryPlan) = .empty,
+    has_subqueries: bool = false,
     /// Which scan the planner chose for the most recent node pattern.
     ///
     /// An index scan and a label scan return the same rows, so behaviour alone
@@ -289,11 +294,15 @@ pub const QueryPlanner = struct {
         self.consumed_conjuncts.clearRetainingCapacity();
         self.order_hint = orderHintFor(query.clauses);
         self.order_cutoff_key = null;
+        self.subquery_plans = .empty;
+        self.has_subqueries = query.subqueries.len > 0;
 
-        const current_op: ?Operator = if (query.unions.len == 0)
+        var current_op: ?Operator = if (query.unions.len == 0)
             try self.planClauses(query.clauses)
         else
             try self.planUnion(query);
+
+        if (self.has_subqueries) current_op = try self.hostSubqueries(query, current_op orelse return PlannerError.InvalidQuery);
 
         if (self.slot_conflict) |name| {
             self.setPlanDetail("Variable '{s}' is bound again where its earlier slot is taken; use a different name", .{name});
@@ -319,6 +328,7 @@ pub const QueryPlanner = struct {
         var clause_idx: usize = 0;
         while (clause_idx < clauses.len) : (clause_idx += 1) {
             const clause = clauses[clause_idx];
+            if (self.has_subqueries) try self.planClauseSubqueries(clause);
             switch (clause) {
                 .match => |m| if (m.optional) {
                     const where: ?*const ast.WhereClause = if (clause_idx + 1 < clauses.len)
@@ -575,6 +585,7 @@ pub const QueryPlanner = struct {
             return err;
         };
         if (where) |w| {
+            if (self.has_subqueries) try self.planSubqueriesIn(w.condition);
             // A plain filter: the vector and full-text access paths that
             // planWhere can choose consume their input up front, which an
             // argument that yields one row per round does not allow.
@@ -591,6 +602,112 @@ pub const QueryPlanner = struct {
             return PlannerError.OutOfMemory;
         };
         return apply.operator();
+    }
+
+    /// Plan the pattern subqueries in the expressions a clause evaluates
+    /// over the rows in scope before it. A WHERE after WITH or OPTIONAL
+    /// MATCH sees the variables they bind, so its subqueries are planned
+    /// there instead.
+    fn planClauseSubqueries(self: *Self, clause: ast.Clause) PlannerError!void {
+        switch (clause) {
+            .where => |w| try self.planSubqueriesIn(w.condition),
+            .return_ => |r| for (r.items) |item| try self.planSubqueriesIn(item.expression),
+            .with => |w| for (w.items) |item| try self.planSubqueriesIn(item.expression),
+            .order_by => |o| for (o.items) |item| try self.planSubqueriesIn(item.expression),
+            .unwind => |u| try self.planSubqueriesIn(u.expression),
+            .delete => |d| for (d.expressions) |e| try self.planSubqueriesIn(e),
+            .set => |s| for (s.items) |item| switch (item) {
+                .property => |p| try self.planSubqueriesIn(p.value),
+                .replace_properties => |p| try self.planSubqueriesIn(p.map),
+                .merge_properties => |p| try self.planSubqueriesIn(p.map),
+                .labels => {},
+            },
+            // Elsewhere a subquery is left unplanned, and `hostSubqueries`
+            // refuses the query.
+            .match, .create, .merge, .remove, .limit, .skip => {},
+        }
+    }
+
+    /// Plan every subquery in `expr` not planned yet, outermost first; one
+    /// inside another is planned with the outer one, which binds what it
+    /// sees.
+    fn planSubqueriesIn(self: *Self, expr: *const ast.Expression) PlannerError!void {
+        var found: std.ArrayList(*const ast.PatternSubquery) = .empty;
+        ast_util.collectSubqueries(self.allocator, expr, &found) catch |err| switch (err) {
+            error.OutOfMemory => return PlannerError.OutOfMemory,
+            error.Refused => {
+                self.setPlanDetail("A pattern predicate, EXISTS {{...}}, COUNT {{...}} or pattern comprehension inside a list comprehension, quantifier or reduce() is not supported", .{});
+                return PlannerError.InvalidQuery;
+            },
+        };
+        for (found.items) |sq| try self.planSubquery(sq);
+    }
+
+    /// Plan one subquery over an Argument leaf, as an OPTIONAL MATCH is
+    /// planned, in a scope of its own: the variables it introduces are
+    /// dropped from scope afterwards, and the slots they took are free again
+    /// for the clauses that follow, since its matches are rows of its own.
+    fn planSubquery(self: *Self, sq: *const ast.PatternSubquery) PlannerError!void {
+        for (self.subquery_plans.items) |p| {
+            if (p.node == sq) return;
+        }
+        const slots_before = self.used_slots;
+        var introduced: std.ArrayList([]const u8) = .empty;
+        for (sq.patterns) |pattern| {
+            if (pattern.path_variable) |name| {
+                if (!self.bindings.contains(name)) introduced.append(self.allocator, name) catch return PlannerError.OutOfMemory;
+            }
+            for (pattern.elements) |element| {
+                const name = switch (element) {
+                    .node => |n| n.variable,
+                    .edge => |e| e.variable,
+                } orelse continue;
+                if (!self.bindings.contains(name)) introduced.append(self.allocator, name) catch return PlannerError.OutOfMemory;
+            }
+        }
+
+        const argument = optional_ops.Argument.init(self.allocator) catch return PlannerError.OutOfMemory;
+        const clause = self.allocator.create(ast.MatchClause) catch return PlannerError.OutOfMemory;
+        clause.* = .{ .patterns = sq.patterns, .location = sq.location };
+        var op = self.planMatch(clause, argument.operator(), sq.where) catch |err| {
+            argument.operator().deinit(self.allocator);
+            return err;
+        };
+        if (sq.where) |condition| {
+            try self.planSubqueriesIn(condition);
+            const filter = filter_ops.Filter.init(self.allocator, op, condition) catch return PlannerError.OutOfMemory;
+            op = filter.operator();
+        }
+        if (sq.map) |map| try self.planSubqueriesIn(map);
+        self.subquery_plans.append(self.allocator, .{ .node = sq, .plan = op, .argument = argument }) catch
+            return PlannerError.OutOfMemory;
+
+        for (introduced.items) |name| {
+            if (self.bindings.fetchRemove(name)) |entry| {
+                self.outer_bindings.put(entry.key, entry.value) catch return PlannerError.OutOfMemory;
+            }
+            _ = self.pattern_labels.remove(name);
+            _ = self.pattern_edge_types.remove(name);
+            _ = self.edge_bindings.remove(name);
+        }
+        self.used_slots = slots_before;
+    }
+
+    /// Put the subqueries' plans at the root, where execution can find them,
+    /// after checking that every subquery was planned: one where none is
+    /// planned (in a MATCH or CREATE pattern's properties, say) is refused.
+    fn hostSubqueries(self: *Self, query: *const ast.Query, root: Operator) PlannerError!Operator {
+        for (query.subqueries) |sq| {
+            for (self.subquery_plans.items) |p| {
+                if (p.node == sq) break;
+            } else {
+                self.setPlanDetail("A pattern predicate, EXISTS {{...}}, COUNT {{...}} or pattern comprehension is not supported here (line {d}, column {d})", .{ sq.location.line, sq.location.column });
+                return PlannerError.InvalidQuery;
+            }
+        }
+        const plans = self.subquery_plans.toOwnedSlice(self.allocator) catch return PlannerError.OutOfMemory;
+        const host = subquery_ops.SubqueryHost.init(self.allocator, root, plans) catch return PlannerError.OutOfMemory;
+        return host.operator();
     }
 
     /// The relationships of one MATCH clause, for relationship uniqueness.
@@ -3110,6 +3227,7 @@ pub const QueryPlanner = struct {
 
         // Add WHERE filter if present
         if (with_clause.where) |condition| {
+            if (self.has_subqueries) try self.planSubqueriesIn(condition);
             const filter = filter_ops.Filter.init(self.allocator, op, condition) catch {
                 return PlannerError.OutOfMemory;
             };

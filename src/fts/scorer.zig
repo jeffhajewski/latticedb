@@ -16,6 +16,7 @@ const NodeId = lattice.core.types.NodeId;
 
 const posting = @import("posting.zig");
 const DocId = posting.DocId;
+const fuzzy = @import("fuzzy.zig");
 
 /// Scorer errors
 pub const ScorerError = error{
@@ -381,8 +382,9 @@ pub const Bm25Scorer = struct {
         return idf * tf_norm;
     }
 
-    /// Calculate BM25 score with fuzzy distance penalty
-    /// Applies quadratic penalty: score * (1 - (distance/max_distance)^2)
+    /// Calculate BM25 score with fuzzy distance penalty: the term's score
+    /// times `fuzzy.distancePenalty`, positive for every match within
+    /// `max_distance` and larger the closer the match.
     pub fn scoreTermFuzzy(
         self: *Self,
         stats: DocStats,
@@ -393,19 +395,7 @@ pub const Bm25Scorer = struct {
         max_distance: u32,
     ) f32 {
         const base_score = self.scoreTerm(stats, term_freq, doc_freq, doc_length);
-
-        // Apply distance penalty
-        if (max_distance == 0) {
-            return if (edit_distance == 0) base_score else 0.0;
-        }
-        if (edit_distance >= max_distance) {
-            return 0.0;
-        }
-
-        const ratio = @as(f32, @floatFromInt(edit_distance)) / @as(f32, @floatFromInt(max_distance));
-        const penalty = 1.0 - (ratio * ratio);
-
-        return base_score * penalty;
+        return base_score * fuzzy.distancePenalty(edit_distance, max_distance);
     }
 
     /// Calculate BM25 score for a document with multiple terms

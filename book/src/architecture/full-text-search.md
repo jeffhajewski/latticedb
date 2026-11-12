@@ -675,7 +675,7 @@ Scan dictionary for terms within edit distance 2:
   - "datastore" (distance=3) ✗
   ↓
 Search matching terms with distance penalty:
-  - Score("database") × penalty(1) = Score × 0.75
+  - Score("database") × penalty(1) = Score × 0.89
   ↓
 Return ranked results
 ```
@@ -691,13 +691,18 @@ valid after the walk unpins them.
 **Distance penalty formula:**
 
 ```
-penalty = 1.0 - (distance / max_distance)²
+penalty = 1.0 - (distance / (max_distance + 1))²
 
 Examples (max_distance = 2):
 - distance 0: 1.00 (exact match)
-- distance 1: 0.75 (25% penalty)
-- distance 2: 0.00 (filtered out)
+- distance 1: 0.89
+- distance 2: 0.56
 ```
+
+Every match the search returns keeps part of its score, and a closer match
+always more. Dividing by `max_distance` instead, as earlier releases did,
+scored a match at the full distance 0: returned, but ranked with documents
+that matched nothing.
 
 **Levenshtein distance** counts the minimum single-character edits needed:
 - **Insertion**: "helo" → "hello" (distance 1)

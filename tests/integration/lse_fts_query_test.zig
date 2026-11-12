@@ -390,3 +390,42 @@ test "fts query: a range on an indexed property beside @@ answers and scores as 
         }
     }
 }
+
+test "fts query: a fuzzy match at the full edit distance scores, below closer ones" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lse_fts_query_fuzzy_edge.ltdb";
+    const db = try openDb(allocator, path);
+    defer {
+        db.close();
+        removeFiles(path);
+    }
+    try db.createNodeFtsIndex("Doc", "text");
+    // One word each, each in one document: only the edit distance from
+    // "zorbex" tells their scores apart. The last is three edits away.
+    const words = [_][]const u8{ "zorbex", "zorbix", "zarbix", "zxrbiy" };
+    var ids: [words.len]u64 = undefined;
+    for (words, &ids) |word, *id| {
+        id.* = try db.createNode(null, &[_][]const u8{"Doc"});
+        try db.setNodeProperty(null, id.*, "text", .{ .string_val = word });
+    }
+
+    var result = try db.query("MATCH (d:Doc) WHERE d.text @@ 'zorbex~2' RETURN id(d), score(d) ORDER BY score(d) DESC");
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 3), result.rows.len);
+    var previous = std.math.inf(f64);
+    for (result.rows, ids[0..3]) |row, id| {
+        try std.testing.expectEqual(id, @as(u64, @intCast(row.values[0].int_val)));
+        const score = row.values[1].float_val;
+        try std.testing.expect(score > 0);
+        try std.testing.expect(score < previous);
+        previous = score;
+    }
+
+    // The direct search gives the same scores.
+    const direct = try db.ftsSearchIndexFuzzy(null, .node, "Doc", "text", "zorbex", 10, 2, 0);
+    defer db.freeFtsSearchResults(direct);
+    try std.testing.expectEqual(@as(usize, 3), direct.len);
+    for (direct, result.rows) |hit, row| {
+        try std.testing.expectApproxEqAbs(row.values[1].float_val, @as(f64, hit.score), 1e-6);
+    }
+}

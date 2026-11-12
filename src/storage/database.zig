@@ -866,7 +866,8 @@ const TxnOverlay = struct {
     /// The changefeed events of this transaction, staged at commit.
     changefeed: changefeed_mod.Batch = .{},
     /// The ids of `node_states` and `edge_states` in ascending order, sorted
-    /// once at commit when the changefeed is staged and used again to apply.
+    /// once at commit when the stored states are read, and used again to
+    /// stage the changefeed and to apply.
     sorted_node_ids: ?[]NodeId = null,
     sorted_edge_ids: ?[]EdgeId = null,
     has_staged_writes: bool = false,
@@ -874,6 +875,12 @@ const TxnOverlay = struct {
     node_lookup: OverlayLookup = .{},
     /// Staged edges by indexed value.
     edge_lookup: OverlayLookup = .{},
+    /// What the store holds for each node and edge in `node_states` and
+    /// `edge_states`, read once when the transaction commits, for the
+    /// readers' snapshots, the changefeed, the log and the apply alike. A
+    /// record the store does not hold has no entry.
+    stored_nodes: std.AutoHashMapUnmanaged(NodeId, TxnNodeState) = .{},
+    stored_edges: std.AutoHashMapUnmanaged(EdgeId, TxnEdgeState) = .{},
 
     fn hasChanges(self: *const TxnOverlay) bool {
         return self.has_staged_writes;
@@ -945,8 +952,20 @@ const TxnOverlay = struct {
 
         self.node_lookup.deinit(allocator);
         self.edge_lookup.deinit(allocator);
+        self.clearStored(allocator);
+        self.stored_nodes.deinit(allocator);
+        self.stored_edges.deinit(allocator);
 
         self.* = .{};
+    }
+
+    fn clearStored(self: *TxnOverlay, allocator: Allocator) void {
+        var node_iter = self.stored_nodes.valueIterator();
+        while (node_iter.next()) |state| state.deinit(allocator);
+        self.stored_nodes.clearRetainingCapacity();
+        var edge_iter = self.stored_edges.valueIterator();
+        while (edge_iter.next()) |state| state.deinit(allocator);
+        self.stored_edges.clearRetainingCapacity();
     }
 };
 
@@ -2478,6 +2497,7 @@ pub const Database = struct {
             if (self.txn_overlays.getPtr(txn.id)) |overlay| {
                 if (overlay.hasChanges()) {
                     has_changes = true;
+                    try self.readStoredStatesForCommit(overlay);
                     try self.captureTxnSnapshotsForCommit(txn.id, overlay);
                     try self.stageGraphChangefeed(overlay);
                     try self.assignStreamSequences(overlay);
@@ -2580,6 +2600,48 @@ pub const Database = struct {
         return DatabaseError.TransactionsNotEnabled;
     }
 
+    /// Read what the store holds for every node and edge the transaction
+    /// changes, once, into `stored_nodes` and `stored_edges`. Everything
+    /// the commit does with a record compares it with this: the readers'
+    /// snapshots, the changefeed, the log and the apply. The store cannot
+    /// change between here and the apply, since only the one writer
+    /// changes it, and applying one record does not change another's.
+    ///
+    /// The ids are sorted here and kept on the overlay, and the records read
+    /// in that order; the changefeed and the apply walk the same ids. A
+    /// commit that fails before its commit point leaves the transaction
+    /// open to further changes, so each attempt sorts and reads afresh.
+    fn readStoredStatesForCommit(self: *Self, overlay: *TxnOverlay) DatabaseError!void {
+        overlay.clearStored(self.allocator);
+        overlay.clearSortedIds(self.allocator);
+
+        const node_ids = sortedIdsAlloc(NodeId, self.allocator, &overlay.node_states) catch
+            return DatabaseError.OutOfMemory;
+        overlay.sorted_node_ids = node_ids;
+        const edge_ids = sortedIdsAlloc(EdgeId, self.allocator, &overlay.edge_states) catch
+            return DatabaseError.OutOfMemory;
+        overlay.sorted_edge_ids = edge_ids;
+
+        for (node_ids) |node_id| try self.keepStoredNodeState(overlay, node_id);
+        for (edge_ids) |edge_id| try self.keepStoredEdgeState(overlay, edge_id);
+    }
+
+    fn keepStoredNodeState(self: *Self, overlay: *TxnOverlay, node_id: NodeId) DatabaseError!void {
+        var state = (try self.readBaseNodeState(node_id)) orelse return;
+        overlay.stored_nodes.put(self.allocator, node_id, state) catch {
+            state.deinit(self.allocator);
+            return DatabaseError.OutOfMemory;
+        };
+    }
+
+    fn keepStoredEdgeState(self: *Self, overlay: *TxnOverlay, edge_id: EdgeId) DatabaseError!void {
+        var state = (try self.readBaseEdgeState(edge_id)) orelse return;
+        overlay.stored_edges.put(self.allocator, edge_id, state) catch {
+            state.deinit(self.allocator);
+            return DatabaseError.OutOfMemory;
+        };
+    }
+
     fn captureTxnSnapshotsForCommit(
         self: *Self,
         writer_txn_id: u64,
@@ -2595,7 +2657,8 @@ pub const Database = struct {
                 const node_id = node_entry.key_ptr.*;
                 if (reader_overlay.node_states.contains(node_id)) continue;
 
-                if (try self.readBaseNodeState(node_id)) |state| {
+                if (overlay.stored_nodes.get(node_id)) |stored| {
+                    const state = stored.clone(self.allocator) catch return DatabaseError.OutOfMemory;
                     try self.storeNodeOverlayState(reader_overlay, node_id, state);
                 } else {
                     try self.storeNodeOverlayState(reader_overlay, node_id, .{
@@ -2611,7 +2674,8 @@ pub const Database = struct {
                 const edge_id = edge_entry.key_ptr.*;
                 if (reader_overlay.edge_states.contains(edge_id)) continue;
 
-                if (try self.readBaseEdgeState(edge_id)) |state| {
+                if (overlay.stored_edges.get(edge_id)) |stored| {
+                    const state = stored.clone(self.allocator) catch return DatabaseError.OutOfMemory;
                     try self.storeEdgeOverlayState(reader_overlay, edge_id, state);
                 } else {
                     try self.storeEdgeOverlayState(reader_overlay, edge_id, .{
@@ -2641,12 +2705,14 @@ pub const Database = struct {
     ) DatabaseError!void {
         var node_iter = overlay.node_states.iterator();
         while (node_iter.next()) |entry| {
-            try self.logCommittedNodeState(txn, entry.key_ptr.*, entry.value_ptr.*);
+            const node_id = entry.key_ptr.*;
+            try self.logCommittedNodeState(txn, node_id, entry.value_ptr.*, overlay.stored_nodes.get(node_id));
         }
 
         var edge_iter = overlay.edge_states.iterator();
         while (edge_iter.next()) |entry| {
-            try self.logCommittedEdgeState(txn, entry.key_ptr.*, entry.value_ptr.*);
+            const edge_id = entry.key_ptr.*;
+            try self.logCommittedEdgeState(txn, edge_id, entry.value_ptr.*, overlay.stored_edges.get(edge_id));
         }
 
         var vector_iter = overlay.vector_states.iterator();
@@ -2686,13 +2752,8 @@ pub const Database = struct {
         txn: *Transaction,
         node_id: NodeId,
         state: TxnNodeState,
+        current: ?TxnNodeState,
     ) DatabaseError!void {
-        const current = try self.readBaseNodeState(node_id);
-        defer if (current) |existing| {
-            var owned_existing = existing;
-            owned_existing.deinit(self.allocator);
-        };
-
         if (!state.exists) {
             if (current) |existing| {
                 try self.logWalNodeDelete(txn, node_id, existing);
@@ -2744,13 +2805,8 @@ pub const Database = struct {
         txn: *Transaction,
         edge_id: EdgeId,
         state: TxnEdgeState,
+        current: ?TxnEdgeState,
     ) DatabaseError!void {
-        const current = try self.readBaseEdgeState(edge_id);
-        defer if (current) |existing| {
-            var owned_existing = existing;
-            owned_existing.deinit(self.allocator);
-        };
-
         if (!state.exists) {
             if (current) |existing| {
                 try self.logWalEdgeSnapshot(txn, edge_id, existing, .delete);
@@ -3080,28 +3136,28 @@ pub const Database = struct {
         // fill their pages densely, instead of in hash-map order, which
         // splits them down the middle. Order does not change the outcome:
         // each state is applied on its own.
-        // Staging the changefeed has usually sorted them already.
+        // Reading the stored states has sorted them already.
         if (overlay.sortedNodeIds()) |ids| {
-            for (ids) |node_id| try self.applyNodeState(node_id, overlay.node_states.get(node_id).?);
+            for (ids) |node_id| try self.applyNodeState(node_id, overlay.node_states.get(node_id).?, overlay.stored_nodes.get(node_id));
         } else if (sortedKeysAlloc(NodeId, self.allocator, &overlay.node_states)) |ids| {
             defer self.allocator.free(ids);
-            for (ids) |node_id| try self.applyNodeState(node_id, overlay.node_states.get(node_id).?);
+            for (ids) |node_id| try self.applyNodeState(node_id, overlay.node_states.get(node_id).?, overlay.stored_nodes.get(node_id));
         } else {
             var node_iter = overlay.node_states.iterator();
             while (node_iter.next()) |entry| {
-                try self.applyNodeState(entry.key_ptr.*, entry.value_ptr.*);
+                try self.applyNodeState(entry.key_ptr.*, entry.value_ptr.*, overlay.stored_nodes.get(entry.key_ptr.*));
             }
         }
 
         if (overlay.sortedEdgeIds()) |ids| {
-            for (ids) |edge_id| try self.applyEdgeState(edge_id, overlay.edge_states.get(edge_id).?);
+            for (ids) |edge_id| try self.applyEdgeState(edge_id, overlay.edge_states.get(edge_id).?, overlay.stored_edges.get(edge_id));
         } else if (sortedKeysAlloc(EdgeId, self.allocator, &overlay.edge_states)) |ids| {
             defer self.allocator.free(ids);
-            for (ids) |edge_id| try self.applyEdgeState(edge_id, overlay.edge_states.get(edge_id).?);
+            for (ids) |edge_id| try self.applyEdgeState(edge_id, overlay.edge_states.get(edge_id).?, overlay.stored_edges.get(edge_id));
         } else {
             var edge_iter = overlay.edge_states.iterator();
             while (edge_iter.next()) |entry| {
-                try self.applyEdgeState(entry.key_ptr.*, entry.value_ptr.*);
+                try self.applyEdgeState(entry.key_ptr.*, entry.value_ptr.*, overlay.stored_edges.get(entry.key_ptr.*));
             }
         }
         if (overlay.edge_states.count() > 0) {
@@ -3210,13 +3266,10 @@ pub const Database = struct {
         try self.ftsReplaceEdge(edge_id, old_type, old_properties, new_type, new_properties, true, true);
     }
 
-    fn applyNodeState(self: *Self, node_id: NodeId, state: TxnNodeState) DatabaseError!void {
+    /// Apply one node's committed state; `current` is what the store held
+    /// before, as `readStoredStatesForCommit` read it.
+    fn applyNodeState(self: *Self, node_id: NodeId, state: TxnNodeState, current: ?TxnNodeState) DatabaseError!void {
         self.relieveApplyPressure();
-        const current = try self.readBaseNodeState(node_id);
-        defer if (current) |existing| {
-            var owned_existing = existing;
-            owned_existing.deinit(self.allocator);
-        };
 
         if (!state.exists) {
             if (current) |existing| {
@@ -3269,13 +3322,8 @@ pub const Database = struct {
         try self.ftsReplaceNode(node_id, &.{}, &.{}, state.labels, state.properties);
     }
 
-    fn applyEdgeState(self: *Self, edge_id: EdgeId, state: TxnEdgeState) DatabaseError!void {
+    fn applyEdgeState(self: *Self, edge_id: EdgeId, state: TxnEdgeState, current: ?TxnEdgeState) DatabaseError!void {
         self.relieveApplyPressure();
-        const current = try self.readBaseEdgeState(edge_id);
-        defer if (current) |existing| {
-            var owned_existing = existing;
-            owned_existing.deinit(self.allocator);
-        };
 
         if (!state.exists) {
             if (current != null) {
@@ -5949,22 +5997,19 @@ pub const Database = struct {
     ///
     /// A commit that fails before its commit point leaves the transaction
     /// open, and the caller may change it further and commit again, so
-    /// everything is staged afresh each time: the events and the sorted ids
-    /// from an earlier attempt describe a transaction that no longer exists.
+    /// everything is staged afresh each time: the events, the sorted ids and
+    /// the stored states from an earlier attempt describe a transaction that
+    /// no longer exists (the ids and states are redone by
+    /// `readStoredStatesForCommit`, which runs first).
     fn stageGraphChangefeed(self: *Self, overlay: *TxnOverlay) DatabaseError!void {
         overlay.changefeed.deinit(self.allocator);
-        overlay.clearSortedIds(self.allocator);
         if (self.changefeed_retention == .off) return;
         if (overlay.node_states.count() == 0 and overlay.edge_states.count() == 0) return;
         const commit_ms: u64 = @intCast(@max(0, @import("compat").milliTimestamp()));
 
-        // Kept on the overlay: applying it walks the ids in the same order.
-        const node_ids = sortedIdsAlloc(NodeId, self.allocator, &overlay.node_states) catch
-            return DatabaseError.OutOfMemory;
-        overlay.sorted_node_ids = node_ids;
-        const edge_ids = sortedIdsAlloc(EdgeId, self.allocator, &overlay.edge_states) catch
-            return DatabaseError.OutOfMemory;
-        overlay.sorted_edge_ids = edge_ids;
+        // Sorted when the stored states were read, on this attempt.
+        const node_ids = overlay.sortedNodeIds() orelse return DatabaseError.IoError;
+        const edge_ids = overlay.sortedEdgeIds() orelse return DatabaseError.IoError;
 
         for (edge_ids) |id| {
             const state = overlay.edge_states.get(id).?;
@@ -5991,11 +6036,7 @@ pub const Database = struct {
     /// The events for one node: the difference between its committed state
     /// and `state`.
     fn stageNodeChangefeed(self: *Self, overlay: *TxnOverlay, node_id: NodeId, state: TxnNodeState, commit_ms: u64) DatabaseError!void {
-        const current = try self.readBaseNodeState(node_id);
-        defer if (current) |existing| {
-            var owned_existing = existing;
-            owned_existing.deinit(self.allocator);
-        };
+        const current = overlay.stored_nodes.get(node_id);
 
         if (!state.exists) {
             if (current != null) {
@@ -6050,11 +6091,7 @@ pub const Database = struct {
     /// The events for one edge: the difference between its committed state
     /// and `state`.
     fn stageEdgeChangefeed(self: *Self, overlay: *TxnOverlay, edge_id: EdgeId, state: TxnEdgeState, commit_ms: u64) DatabaseError!void {
-        const current = try self.readBaseEdgeState(edge_id);
-        defer if (current) |existing| {
-            var owned_existing = existing;
-            owned_existing.deinit(self.allocator);
-        };
+        const current = overlay.stored_edges.get(edge_id);
 
         if (!state.exists) {
             if (current) |existing| {

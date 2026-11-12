@@ -1610,3 +1610,134 @@ test "lgr: a node's edges in a transaction, with staged edges elsewhere, here, o
     try check(db, null, nodes[0], false, &.{ committed[3], committed[6], later });
     try StagedEdges.checkAll(db, null, 8);
 }
+
+// ============================================================================
+// A commit reads each changed record once
+// ============================================================================
+
+const commit_once_checks = [_][]const u8{
+    "MATCH (n) RETURN n.k, labels(n), n.x, n.y",
+    "MATCH (a)-[r]->(b) RETURN a.k, type(r), r.w, r.z, b.k",
+    "MATCH (n:P) WHERE n.x > 4 RETURN n.k",
+    "MATCH (n:P) RETURN n.k ORDER BY n.x DESC LIMIT 3",
+    "MATCH ()-[r:KNOWS]->() WHERE r.w >= 2 RETURN r.w",
+};
+
+/// Every check's sorted rows, one block after another.
+fn renderCommitOnceChecks(db: *Database, txn: ?*lattice.transaction.manager.Transaction) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(std.testing.allocator);
+    for (commit_once_checks) |cypher| {
+        const rows = try sortedRender(db, txn, cypher);
+        defer std.testing.allocator.free(rows);
+        try out.print(std.testing.allocator, "{s}\n{s}", .{ cypher, rows });
+    }
+    return out.toOwnedSlice(std.testing.allocator);
+}
+
+/// The kinds of the changefeed's events, in order.
+fn changefeedKinds(db: *Database) ![]u8 {
+    var batch = try db.readChanges(0, 1000, 0);
+    defer batch.deinit();
+    var out: std.ArrayList(u8) = .empty;
+    for (batch.records) |record| try out.print(std.testing.allocator, "{s}\n", .{record.kind});
+    return out.toOwnedSlice(std.testing.allocator);
+}
+
+fn openCommitOnceDb(path: []const u8) !*Database {
+    var db = try openDb(path, true);
+    errdefer db.close();
+    for ([_][]const u8{
+        "CREATE (:P {k: 1, x: 1, y: 2}), (:P {k: 2}), (:P {k: 3, x: 3}), (:Q {k: 4})",
+        "MATCH (a {k: 1}), (b {k: 2}) CREATE (a)-[:KNOWS {w: 1, z: 2}]->(b)",
+        "MATCH (b {k: 2}), (c {k: 3}) CREATE (b)-[:KNOWS {w: 3}]->(c)",
+        "MATCH (c {k: 3}), (a {k: 1}) CREATE (c)-[:KNOWS {w: 5}]->(a)",
+    }) |cypher| {
+        var result = try db.query(cypher);
+        result.deinit();
+    }
+    try db.createNodePropertyIndex("P", "x");
+    try db.createEdgePropertyIndex("KNOWS", "w");
+    try db.sync();
+    return db;
+}
+
+/// Changes every kind of record a commit compares with what is stored:
+/// properties set, removed and set to the value they had, labels added
+/// and removed, a node and its relationships deleted, new nodes and
+/// relationships, and a relationship's properties changed.
+fn stageCommitOnceChanges(db: *Database, txn: *lattice.transaction.manager.Transaction) !void {
+    for ([_][]const u8{
+        "MATCH (n {k: 1}) SET n.x = 10, n:R REMOVE n.y",
+        "MATCH (n {k: 2}) SET n.x = 5 REMOVE n:P",
+        "MATCH (n {k: 3}) DETACH DELETE n",
+        "MATCH (n {k: 4}) SET n.k = 4",
+        "CREATE (:P {k: 5, x: 7})",
+        "MATCH ({k: 1})-[r:KNOWS]->({k: 2}) SET r.w = 2 REMOVE r.z",
+        "MATCH (a {k: 1}), (f {k: 5}) CREATE (a)-[:LIKES {w: 9}]->(f)",
+        "MATCH (a {k: 2}), (f {k: 5}) CREATE (a)-[:KNOWS {w: 4}]->(f)",
+    }) |cypher| {
+        var result = try db.queryInTxn(txn, cypher);
+        result.deinit();
+    }
+}
+
+test "lgr: a commit reads each changed record once and applies, logs and snapshots the same changes" {
+    const applied_path = "/tmp/lgr_commit_once_applied.ltdb";
+    const replayed_path = "/tmp/lgr_commit_once_replayed.ltdb";
+    defer removeFiles(applied_path);
+    defer removeFiles(replayed_path);
+
+    // Applied in this process, with a reader open across the commit.
+    var applied = try openCommitOnceDb(applied_path);
+    defer applied.close();
+    var reader = try applied.beginTransaction(.read_only);
+    const before = try renderCommitOnceChecks(applied, &reader);
+    defer std.testing.allocator.free(before);
+    {
+        var txn = try applied.beginTransaction(.read_write);
+        try stageCommitOnceChanges(applied, &txn);
+        try applied.commitTransaction(&txn);
+    }
+    const reader_after = try renderCommitOnceChecks(applied, &reader);
+    defer std.testing.allocator.free(reader_after);
+    try std.testing.expectEqualStrings(before, reader_after);
+    try applied.abortTransaction(&reader);
+    const after = try renderCommitOnceChecks(applied, null);
+    defer std.testing.allocator.free(after);
+    try std.testing.expect(!std.mem.eql(u8, before, after));
+
+    // What the changes are, through the two indexes.
+    {
+        const rows = try sortedRender(applied, null, "MATCH (n:P) WHERE n.x > 4 RETURN n.k");
+        defer std.testing.allocator.free(rows);
+        try std.testing.expectEqualStrings("i1 \ni5 \n", rows);
+        const ws = try sortedRender(applied, null, "MATCH ()-[r:KNOWS]->() WHERE r.w >= 2 RETURN r.w");
+        defer std.testing.allocator.free(ws);
+        try std.testing.expectEqualStrings("i2 \ni4 \n", ws);
+        const labels = try sortedRender(applied, null, "MATCH (n {k: 2}) RETURN labels(n), n.x");
+        defer std.testing.allocator.free(labels);
+        try std.testing.expectEqualStrings("[] i5 \n", labels);
+    }
+
+    // The same commit logged and not applied: recovery replays the log.
+    {
+        var replayed = try openCommitOnceDb(replayed_path);
+        var txn = try replayed.beginTransaction(.read_write);
+        try stageCommitOnceChanges(replayed, &txn);
+        replayed.fail_next_apply_for_testing = true;
+        try std.testing.expectError(error.IoError, replayed.commitTransaction(&txn));
+        replayed.close();
+    }
+    var replayed = try reopenDb(replayed_path);
+    defer replayed.close();
+    const recovered = try renderCommitOnceChecks(replayed, null);
+    defer std.testing.allocator.free(recovered);
+    try std.testing.expectEqualStrings(after, recovered);
+
+    const applied_kinds = try changefeedKinds(applied);
+    defer std.testing.allocator.free(applied_kinds);
+    const replayed_kinds = try changefeedKinds(replayed);
+    defer std.testing.allocator.free(replayed_kinds);
+    try std.testing.expectEqualStrings(applied_kinds, replayed_kinds);
+}

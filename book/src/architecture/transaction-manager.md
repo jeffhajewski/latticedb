@@ -175,6 +175,13 @@ holds changes, it runs, in order:
    pool is dirty and nothing is pinned, and wake stream readers if streams changed.
 7. Run an automatic checkpoint if the WAL has reached its threshold (best effort).
 
+Steps 1, 2, 3 and 5 all compare each changed node and edge with what the store
+holds for it. That is read once, before step 1, in id order, and kept on the
+overlay until it is discarded; the store cannot change in between, since only the
+one writer changes it. A commit holds those pre-images, the decoded records of
+the nodes and edges it updates or deletes (not the ones it creates), alongside
+the overlay until step 6.
+
 A transaction with no changes, read-only or not, goes straight to `tm.commit`,
 which writes nothing.
 

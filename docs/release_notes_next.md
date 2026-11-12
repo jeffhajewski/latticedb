@@ -766,6 +766,10 @@ Other changes, measured by their commits on a busy machine:
   transaction's changes or builds a set of the ids returned: a one-hop
   `count` over 1,000,000 relationships from 100,000 nodes, 100–137 ms to
   72–87 ms; `lattice_edge_scan` of all of them, 126–134 ms to 71–72 ms.
+- A commit reads each node and relationship it changes from the store once,
+  instead of once each for the open readers' snapshots, the changefeed, the log
+  and the apply: committing 100,000 property changes in transactions of 10,000,
+  189–228 ms to 148–191 ms; 100,000 new nodes, 484–556 ms to 444–535 ms.
 - `r.prop`, `type(r)` and `labels(n)` decode only what they need: `RETURN r.w,
   r.note` over 20,000 relationships, 15.3 ms to 10.2 ms.
 - A `WHERE` that is the same `@@` search the `MATCH` already ran no longer runs

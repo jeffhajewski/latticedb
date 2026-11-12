@@ -373,7 +373,9 @@ pub const DatabaseConfig = struct {
     enable_vector: bool = false,
     /// Vector dimensions (required if enable_vector is true)
     vector_dimensions: u16 = 128,
-    /// Enable in-memory adjacency cache for accelerated graph traversals
+    /// Keep an in-memory adjacency cache. Only `getOutgoingEdgesCached` reads
+    /// it; the query engine and the C API do not, so for them it speeds up
+    /// nothing and costs an invalidation on each edge write.
     enable_adjacency_cache: bool = false,
     /// Enable query cache for parsed ASTs
     enable_query_cache: bool = true,

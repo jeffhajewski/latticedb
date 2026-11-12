@@ -167,7 +167,10 @@ typedef struct {
     bool enable_vector;     /* Enable vector storage for embeddings */
     uint16_t vector_dimensions; /* Vector dimensions, 1..4096 (default: 128) */
     bool enable_wal;        /* Enable WAL-backed transactions (default: true) */
-    bool enable_adjacency_cache; /* Enable in-memory graph adjacency cache */
+    /* Keep an in-memory adjacency cache. Nothing in this API reads it yet:
+     * queries and the edge functions go to the B+Tree either way, so it
+     * speeds up nothing here and costs a little on each edge write. */
+    bool enable_adjacency_cache;
 } lattice_open_options_v3;
 
 /* Default open options v3 */
@@ -183,7 +186,10 @@ typedef struct {
     bool enable_vector;     /* Enable vector storage for embeddings */
     uint16_t vector_dimensions; /* Vector dimensions, 1..4096 (default: 128) */
     bool enable_wal;        /* Enable WAL-backed transactions (default: true) */
-    bool enable_adjacency_cache; /* Enable in-memory graph adjacency cache */
+    /* Keep an in-memory adjacency cache. Nothing in this API reads it yet:
+     * queries and the edge functions go to the B+Tree either way, so it
+     * speeds up nothing here and costs a little on each edge write. */
+    bool enable_adjacency_cache;
     /* Take a lock on the file so two processes cannot tread on each other
      * (default: true). A read-write handle takes the file exclusively and a
      * read-only handle shares it, so opening returns LATTICE_ERROR_DATABASE_LOCKED

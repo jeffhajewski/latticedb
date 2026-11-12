@@ -542,6 +542,8 @@ pub const lattice_open_options_v3 = extern struct {
     enable_vector: bool = false,
     vector_dimensions: u16 = 128,
     enable_wal: bool = true,
+    /// Keep an in-memory adjacency cache. Nothing in this API reads it yet:
+    /// queries and the edge functions go to the B+Tree either way.
     enable_adjacency_cache: bool = false,
 };
 
@@ -555,6 +557,8 @@ pub const lattice_open_options_v4 = extern struct {
     enable_vector: bool = false,
     vector_dimensions: u16 = 128,
     enable_wal: bool = true,
+    /// Keep an in-memory adjacency cache. Nothing in this API reads it yet:
+    /// queries and the edge functions go to the B+Tree either way.
     enable_adjacency_cache: bool = false,
     /// Take a lock on the file so two processes cannot tread on each other.
     ///

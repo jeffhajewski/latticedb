@@ -3,6 +3,9 @@
 //! Maps NodeId → []CachedEdge to bypass B+Tree lookups for repeated
 //! traversals. Populated lazily on first access, invalidated on edge mutations.
 //! Opt-in via DatabaseConfig.enable_adjacency_cache.
+//!
+//! Only `Database.getOutgoingEdgesCached` reads it, and only the graph
+//! benchmarks call that; the query engine and the C API traverse the B+Tree.
 
 const std = @import("std");
 const lattice = @import("lattice");

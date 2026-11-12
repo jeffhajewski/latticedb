@@ -431,7 +431,16 @@ lattice_error lattice_rollback(lattice_txn* txn);
  */
 
 /* Create a node with an optional single label.
- * Pass NULL or "" to create an unlabeled node. */
+ * Pass NULL or "" to create an unlabeled node.
+ *
+ * The id is the node's once lattice_commit has returned LATTICE_OK. Ids are
+ * never handed out twice by one open database, and a committed node's id is
+ * never reused, even after it is deleted or the process crashes. After a
+ * crash, ids handed out to transactions that never committed (after the last
+ * committed creation) can be handed out again: they never existed in the
+ * database. A program that stores an id elsewhere before the commit returns
+ * must treat it as unassigned if the commit fails or the process dies first;
+ * if it died inside lattice_commit, read the node back to find out. */
 lattice_error lattice_node_create(
     lattice_txn* txn,
     const char* label,

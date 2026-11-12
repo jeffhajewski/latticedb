@@ -179,6 +179,52 @@ test "lfmt: node ids handed out before a crash are not reused after recovery" {
     try std.testing.expectEqual(last + 1, try db.createNode(null, &.{"A"}));
 }
 
+test "lfmt: after a crash, ids resume past the last committed creation; only uncommitted ones come back" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lfmt_node_id_uncommitted.ltdb";
+    const killed = "/tmp/lfmt_node_id_uncommitted_killed.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+    cleanup(killed);
+    defer cleanup(killed);
+
+    var rolled_back: NodeId = undefined;
+    var committed: NodeId = undefined;
+    var uncommitted: NodeId = undefined;
+    {
+        var db = try Database.open(allocator, path, .{ .create = true, .config = .{ .enable_fts = false, .auto_checkpoint = null } });
+        defer db.close();
+        try db.sync();
+
+        var txn = try db.beginTransaction(.read_write);
+        rolled_back = try db.createNode(&txn, &.{"A"});
+        try db.abortTransaction(&txn);
+
+        txn = try db.beginTransaction(.read_write);
+        committed = try db.createNode(&txn, &.{"A"});
+        try db.commitTransaction(&txn);
+        try std.testing.expect(committed > rolled_back);
+
+        // Killed while this transaction is open: nothing of it is in the
+        // log or the file.
+        txn = try db.beginTransaction(.read_write);
+        uncommitted = try db.createNode(&txn, &.{"A"});
+        try copyFile(path, killed);
+        try copyFile(path ++ "-wal", killed ++ "-wal");
+        try db.abortTransaction(&txn);
+    }
+
+    var db = try Database.open(allocator, killed, .{ .config = plain_config });
+    defer db.close();
+    try std.testing.expect(try db.nodeExists(committed));
+    try std.testing.expect(!try db.nodeExists(rolled_back));
+    // The rolled-back id lies below a committed creation and stays unused.
+    // The id the uncommitted transaction had is the next one handed out: it
+    // was never in the database, in the log or in any commit's result.
+    try std.testing.expectEqual(uncommitted, try db.createNode(null, &.{"A"}));
+    try std.testing.expectEqual(committed + 1, uncommitted);
+}
+
 fn copyFile(src: []const u8, dst: []const u8) !void {
     const cwd = @import("compat").fs.cwd();
     const in = try cwd.openFile(src, .{});

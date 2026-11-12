@@ -6795,6 +6795,19 @@ pub const Database = struct {
     /// Create a new node with the given labels
     /// Returns the new node's ID
     /// If txn is null, the operation is auto-committed
+    ///
+    /// The id belongs to the node once the transaction's commit has returned.
+    /// Ids are never handed out twice within a process, and an id that a
+    /// committed node had is never handed out again, crash or not. After a
+    /// crash the counter resumes past the highest id any committed
+    /// transaction created and past the counter of the last flush, so the
+    /// only ids that can come back are ones that transactions which did not
+    /// commit received after both: ids that were never in the database, the
+    /// log, or any result another transaction could read. A program that
+    /// copies an id out of the database before its commit returns must treat
+    /// it as unassigned if the commit fails or the process dies first, as it
+    /// would for a rollback; if the process died during the commit call, read
+    /// the node back to learn whether the commit happened.
     pub fn createNode(self: *Self, txn: ?*Transaction, labels: []const []const u8) !NodeId {
         if (self.read_only) return DatabaseError.PermissionDenied;
         if (txn == null) self.relieveBufferPressure();

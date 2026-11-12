@@ -72,8 +72,15 @@ pub const Row = struct {
     distances: [16]f32,        // Vector search distances
     scores: [16]f32,           // FTS relevance scores
     populated: u16,            // Bitmask of populated slots
+    measured: u16,             // Slots whose distance a vector search set
+    scored: u16,               // Slots whose score a full-text search set
 };
 ```
+
+`measured` and `scored` say which slots' `distances` and `scores` belong to the
+entity now in the slot. Setting a slot clears both bits, so a distance or score
+never outlives the node it was measured for, and projection carries them only for
+an item that is the same variable in the same slot (`WITH d`, not `WITH d AS e`).
 
 ### Slot Values
 
@@ -125,8 +132,10 @@ the transaction's overlay when it holds the node and otherwise walks the stored
 record to the one value. In a query that only reads, the evaluator also keeps the
 last record it read, so `n.a, n.b, n.c` costs one B+Tree lookup. A storage error
 during the read fails the query rather than reading as null. Relationship
-properties, `labels()`, `properties()` and `type()` still copy the whole node or
-relationship.
+properties take the same path (`getEdgePropertyByKeyInTxn`, which decodes only the
+wanted value of the stored record, with a one-record cache in queries that only
+read). `type(r)` reads only the relationship's endpoints and type, and `labels(n)`
+only the node's label ids. `properties()` still decodes the whole record.
 
 ## Operators
 
@@ -260,8 +269,18 @@ relationship of the clause, and a single-hop relationship that a later one could
 collide with (their type sets overlap, or either is untyped) keeps its edge in a
 slot, hidden if it has no variable. Each later expand skips edges already held in
 those slots. An undirected expand also skips a self-loop in its incoming half, so
-the loop is returned once. A single-hop relationship after a variable-length one
-cannot see that path's edges, which the row does not hold, and may reuse one.
+the loop is returned once. When a later relationship could collide with a
+variable-length one, the variable-length expand writes the ids of its path's
+edges, as a list, into a hidden slot, and `EdgeConstraints.usedEarlier` skips an
+edge found in such a list as it skips one held in an edge slot. The list is built
+only when a later relationship needs it, in the row arena so that a row kept by
+`ORDER BY` or `collect()` stays valid.
+
+Inside a write transaction, the expand merges the stored edges with the
+transaction's own. The transaction's overlay files each edge it creates under both
+endpoints (`edges_by_node`), so expanding a node reads only that node's pending
+edges, not every edge the transaction has touched; the check that refuses deleting
+a node with relationships reads the same list.
 
 When the far end of the relationship is a node that is already bound, the expand
 keeps only edges that lead to it, and a bound node at the start of a pattern is
@@ -365,11 +384,19 @@ next():
 The input rows are the candidates, so the pattern's label narrows the answer, and
 a threshold query returns every candidate within it. `<` is strict and `<=` is
 not. The LIMIT bound applies only when a `RETURN` with a `LIMIT` follows with no
-`ORDER BY`, `DISTINCT` or aggregation in between. What stays approximate is HNSW
-recall when the search stops before the end of the index. The property name in
-`x.prop` is not used to choose an index: a database has one vector index.
+`DISTINCT` or aggregation in between, and with no `ORDER BY` unless that `ORDER BY`
+is one ascending `<=>` of this same search (or the alias of a `RETURN` item that is),
+the order the search already returns its rows in. What stays approximate is HNSW
+recall when the search stops before the end of the index; with that `ORDER BY` the
+answer is the index's approximate top `k`, as it is under a plain `LIMIT`. The
+property name in `x.prop` is not used to choose an index: a database has one
+vector index. Distances are measured with the metric recorded for the index, and
+the operator measures candidates the search did not return with the same metric.
 
-The distance is stored in the row for use in expressions or sorting. (A leaf
+The distance is stored in the row and marked as measured. The planner records each
+vector search's variable, property and query (`VectorQueries`), and an `x.prop <=>
+query` elsewhere in the query written the same way returns the stored distance
+instead of computing it again. (A leaf
 `VectorSearch` operator, which emits the search results directly, also exists
 in `vector.zig`, but the planner does not use it.)
 
@@ -402,7 +429,12 @@ index named. It is what runs when the entity is already bound by an upstream
 expand, so the input decides which rows exist and the index can only narrow them.
 
 Both run their searches through one shared function, so they cannot come to
-disagree about what a disjunction of `@@` predicates means.
+disagree about what a disjunction of `@@` predicates means. Both store each hit's
+BM25 score in the row and mark it as scored, which is what `score(d)` reads.
+
+When the `MATCH` has a seek with a single search and its `WHERE` is that same
+search (same variable, index, and query text or parameter), the planner adds no
+`FtsSearchWithInput` for it: every row the seek emits already matches.
 
 The full reasoning, including the measurements that motivated the seek, is in
 [Full-Text Search](./full-text-search.md), section 16.
@@ -432,12 +464,18 @@ fn next(self: *CreateNode, ctx: *ExecutionContext) !?*Row {
 ```text
 first next():
     drain the input, collecting each target node once (null targets are skipped)
-    without DETACH: if any collected node still has a relationship,
-        fail with NodeHasRelationships before deleting anything
-    with DETACH: delete each node's relationships by id
-    delete the nodes
+    without DETACH: if any collected node still has a relationship
+        (Database.nodeHasRelationshipsInTxn), fail with NodeHasRelationships
+        before deleting anything; then Database.deleteNode each node
+    with DETACH: Database.detachDeleteNode each node
 then: return the drained rows one at a time
 ```
+
+The rule lives in the database, so `lattice_node_delete` refuses the same nodes and
+`lattice_node_detach_delete` does what `DETACH DELETE` does. A refused `DELETE`
+returns `LATTICE_ERROR_HAS_RELATIONSHIPS` through the C API, and a `CREATE` of a
+relationship to a node deleted earlier in the query `LATTICE_ERROR_NOT_FOUND`, the
+codes the direct calls return.
 
 Draining first is what lets `DELETE r, n` work: the `DeleteEdge` below it in the
 chain has removed every `r` before any node is checked. **DeleteEdge** treats a
@@ -510,7 +548,7 @@ has never seen means nothing can match.
 | `aggregate.zig` | Aggregate (`count`, `count(*)`, `sum`, `avg`, `min`, `max`, `collect`) |
 | `distinct.zig` | Distinct |
 | `limit.zig` | Limit, Skip, Sort |
-| `materialize.zig` | Materialize (drains its input before mutations run, so reads release their pages first) |
+| `materialize.zig` | Materialize (drains its input before mutations run, so a clause's reads finish before its first write and see the graph as it was when the clause began) |
 | `unwind.zig` | Unwind |
 | `vector.zig` | VectorSearchWithInput (and the unused leaf VectorSearch) |
 | `fts.zig` | FtsIndexSeek, FtsSearchWithInput |
@@ -557,6 +595,15 @@ true
 - Numeric and conversion: `abs()`, `toInteger()`, `toFloat()`, `toString()`, `coalesce()`
 - String: `toUpper()`, `toLower()`, `trim()`, `replace()`, `substring()`, `split()`
 - List: `size()`, `head()`, `last()`, `tail()`, `range()`
+- Search: `score()`
+
+Each built-in function is described once, in `builtin_functions` in
+`expression.zig` (name, argument counts, signature text). Semantic analysis checks
+every call against it, so an unknown name or a wrong argument count is a semantic
+error with its location before anything is planned, and a unit test keeps the
+table and `evaluateFunction` in step. String functions count and cut in Unicode
+code points and case-map with the simple one-to-one mappings the full-text
+tokenizer folds with.
 
 **Aggregates** (planned as an `Aggregate` operator): `count()`, `count(*)`,
 `sum()`, `avg()`, `min()`, `max()`, `collect()`. Every aggregate but `count(*)`
@@ -605,6 +652,12 @@ Numeric operations promote integers to floats when mixed:
 ```
 42 + 3.14  →  45.14 (float)
 ```
+
+Comparisons do not: an integer and a float compare by their exact values
+(`compareIntFloat`), in `=`, `<` and the other comparisons, in `ORDER BY`, and in
+`MERGE`. Keys for `DISTINCT` and grouping write a float that an `i64` can hold
+exactly as that integer, `-0.0` as `0` and every NaN as one NaN, so the groups are
+the classes `=` defines.
 
 Null propagates through most operations, and comparisons follow Cypher's
 three-valued logic:
@@ -920,6 +973,32 @@ if (result) |res| {
     else => std.debug.print("Query failed: {}\n", .{err}),
 }
 ```
+
+`query()` keeps only the stage. `queryDetailed()` returns a `QueryDetailedResult`,
+whose `failure` case is a `QueryFailure`: the stage, the message, a diagnostic
+code (`"DivisionByZero"`, `"unknown_function"`, ...), the line, column and length
+of the part of the query at fault, and a `cause` that says whether the query itself
+failed (`.query`), the storage underneath it (`.storage`), or memory ran out
+(`.out_of_memory`):
+
+```zig
+var detailed = try db.queryDetailed("RETURN 1/0");
+defer detailed.deinit();
+switch (detailed) {
+    .success => |res| { _ = res; },
+    .failure => |f| std.debug.print("{s}: {s}\n", .{ @tagName(f.stage), f.message }),
+    // execution: Division by zero: 1 / 0
+}
+```
+
+Operators and the evaluator record the message and location through
+`ExecutionContext.fail` at the point of failure, and `executeParsed` copies them
+into the `QueryFailure`. The C API maps `cause` to `LATTICE_ERROR_IO` or
+`LATTICE_ERROR_OUT_OF_MEMORY`, and the execution codes `NodeHasRelationships` and
+`NotFound` to the codes `lattice_node_delete` and `lattice_edge_create` return;
+any other failure is `LATTICE_ERROR_INVALID_ARG` (parse, semantic) or
+`LATTICE_ERROR` (plan, execution). Planner refusals carry a detail saying what is
+not supported, such as "CREATE needs a node at each end of a relationship".
 
 ### Internal Pipeline
 

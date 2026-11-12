@@ -1,7 +1,6 @@
 package latticedb
 
 import (
-	"errors"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -203,7 +202,7 @@ func TestStreamPublishSequenceRollbackIsNotDurable(t *testing.T) {
 	}
 }
 
-func TestStreamWritesRequireWAL(t *testing.T) {
+func TestStreamWritesWorkWithoutWAL(t *testing.T) {
 	db, err := Open(filepath.Join(t.TempDir(), "no-wal.db"), OpenOptions{
 		Create:     true,
 		DisableWAL: true,
@@ -217,12 +216,17 @@ func TestStreamWritesRequireWAL(t *testing.T) {
 		}
 	})
 
-	err = db.Update(func(tx *Tx) error {
-		return tx.PublishStream("events", "message", "hidden")
-	})
-	var latticeErr *Error
-	if !errors.As(err, &latticeErr) || latticeErr.Code != ErrorUnsupported {
-		t.Fatalf("expected unsupported error, got %v", err)
+	if err := db.Update(func(tx *Tx) error {
+		return tx.PublishStream("events", "message", "visible")
+	}); err != nil {
+		t.Fatalf("publish without WAL: %v", err)
+	}
+	records, err := db.ReadStream("events", 0, 10, 0)
+	if err != nil {
+		t.Fatalf("read stream: %v", err)
+	}
+	if len(records) != 1 {
+		t.Fatalf("read %d records, want 1", len(records))
 	}
 }
 

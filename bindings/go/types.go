@@ -12,10 +12,11 @@ type OpenOptions struct {
 	ReadOnly    bool
 	CacheSizeMB uint32
 	PageSize    uint32
-	// EnableWAL controls WAL-backed transactions. The normalized default is true.
+	// EnableWAL logs every commit so it survives a crash. The normalized default
+	// is true. Transactions work either way.
 	EnableWAL bool
-	// DisableWAL explicitly opens without WAL-backed transactions. It exists because
-	// Go bool fields cannot distinguish an omitted EnableWAL from EnableWAL=false.
+	// DisableWAL explicitly opens without the log. It exists because Go bool
+	// fields cannot distinguish an omitted EnableWAL from EnableWAL=false.
 	DisableWAL bool
 	// EnableAdjacencyCache is accepted for compatibility. Queries and the other
 	// methods here read edges from storage either way, so it does not change

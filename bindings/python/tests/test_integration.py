@@ -1374,13 +1374,15 @@ class TestStreams:
 
             assert [record.sequence for record in db.read_stream("events")] == [1]
 
-    def test_enable_wal_false_rejects_stream_writes(self, tmp_path):
+    def test_enable_wal_false_still_publishes_streams(self, tmp_path):
         db_path = tmp_path / "stream_no_wal.lattice"
 
         with Database(db_path, create=True, enable_wal=False) as db:
-            with pytest.raises(LatticeUnsupportedError):
-                with db.write() as txn:
-                    txn.publish_stream("events", "hidden")
+            with db.write() as txn:
+                txn.publish_stream("events", "visible")
+                txn.commit()
+
+            assert [record.payload for record in db.read_stream("events")] == ["visible"]
 
 
 class TestPropertyIndexes:

@@ -313,10 +313,10 @@ why the ratio falls rather than rises as the database grows.
 An in-memory database has no flush journal: with no file behind it there is no
 crash for a journal to survive.
 
-The log stays enabled in memory, incidentally, and that is worth knowing. Turning
-it off looks free — a process holding the only copy of a database loses everything
-when it dies anyway — but transactions are built on it, so a database without a log
-has no `BEGIN`, no rollback, and no multi-statement atomicity.
+The log stays enabled in memory, incidentally. Turning it off with
+`enable_wal = false` is allowed and changes less than it looks: transactions do not
+depend on the log, so rollback and all-or-nothing queries work the same, and an
+in-memory database has no crash for the log to protect against anyway.
 
 ## Error Handling
 

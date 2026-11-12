@@ -9404,9 +9404,9 @@ pub const Database = struct {
         var auto_txn_committed = false;
         if (txn == null and ast_query.writesData() and !self.read_only) {
             auto_txn = self.beginTransaction(.read_write) catch |err| switch (err) {
-                // A database built without transactions still has the old
-                // behaviour available, and refusing the query outright would be
-                // worse than running it the way it has always run.
+                // Every handle that can write has transactions, log or no
+                // log, so this is not reached; were it, running the query
+                // directly would still beat refusing it.
                 DatabaseError.TransactionsNotEnabled => null,
                 DatabaseError.OutOfMemory => return QueryError.OutOfMemory,
                 else => return QueryError.ExecutionError,

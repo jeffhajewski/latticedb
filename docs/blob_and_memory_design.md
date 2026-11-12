@@ -237,10 +237,13 @@ rollback. That is a far larger hole than the allocations it saves, and it would
 make in-memory databases quietly less capable than file-backed ones in a way
 nobody would expect.
 
+(That was 0.16. Since 0.17.0 a database without a log has transactions too, and
+`enable_wal = false` gives up only durability between flushes; the log stays on
+for in-memory databases for the reasons above all the same.)
+
 The log becomes a second file in the same memory VFS, bounded by automatic
 checkpointing at a thousand frames, which is a few megabytes next to the database
-it protects. Anyone who genuinely wants it off can still say so and accept losing
-transactions with it.
+it protects. Anyone who genuinely wants it off can still say so.
 
 Bare writing queries keep working either way, because the implicit-transaction
 path falls back to the older behaviour when transactions are unavailable rather

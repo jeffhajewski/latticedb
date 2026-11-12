@@ -1375,16 +1375,25 @@ describeIfNative('Database Integration', () => {
       expect(Date.now() - started).toBeLessThan(4000);
     });
 
-    test('enableWal false rejects stream writes', async () => {
+    test('enableWal false still has write transactions', async () => {
       await db.close();
       cleanupDb(dbPath);
 
       db = new Database(dbPath, { create: true, enableWal: false });
       await db.open();
 
-      await expect(db.write(async (txn) => {
-        txn.publishStream('events', 'hidden');
-      })).rejects.toMatchObject({ code: LatticeErrorCode.Unsupported });
+      await db.write(async (txn) => {
+        txn.publishStream('events', 'visible');
+      });
+      await expect(db.readStream('events')).resolves.toMatchObject([
+        { sequence: BigInt(1), payload: 'visible' },
+      ]);
+
+      // A query that fails part-way is rolled back, log or no log.
+      await db.query('CREATE (:D {i: 1})-[:R]->(:D {i: 2}), (:D {i: 3})');
+      await expect(db.query('MATCH (a:D {i: 3}), (b:D {i: 2}) DELETE a CREATE (b)-[:R]->(a)')).rejects.toBeDefined();
+      const result = await db.query('MATCH (n:D) RETURN count(n) AS c');
+      expect(Number(result.rows[0]?.c)).toBe(3);
     });
   });
 

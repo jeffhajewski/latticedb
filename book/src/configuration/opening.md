@@ -136,14 +136,16 @@ when to use which.
 
 ## Durability
 
-`enable_wal` looks like a performance knob and is not. See
-[Durability and the Log](./durability.md) — the short version is that
-transactions are built on the log, so a database without one has no `BEGIN`, no
-rollback, and no multi-statement atomicity.
+`enable_wal = false` means only that nothing is logged. Transactions, rollback and
+all-or-nothing queries work the same without the log; what you give up is that a
+commit survives a crash only once its pages have been flushed to the file, at
+`sync()` or close. See
+[Running without the log](./durability.md#running-without-the-log) for exactly
+what a crash leaves and what it saves.
 
 | Option | Default | What it does |
 |--------|---------|--------------|
-| `enable_wal` | on | Write-ahead logging, and with it transactions. |
+| `enable_wal` | on | Write-ahead logging: a commit survives a crash as soon as it returns. Off, commits survive from the next flush. |
 | `sync_mode` | `.full` | Whether a commit waits for its log record to reach the disk. `.normal` survives a killed process but can lose the latest commits to a power cut. When the program leaves it unset, `LATTICE_SYNC_MODE` applies. |
 | `full_fsync` | off | On macOS, sync with `F_FULLFSYNC` so commits survive power loss, at several milliseconds per sync. When the program leaves it unset, `LATTICE_FULL_FSYNC` applies. |
 | `auto_checkpoint` | every 1000 log frames, truncating | How often the log is folded back into the database file. Zig API only. |

@@ -118,25 +118,46 @@ program set one.
 | `LATTICE_FULL_FSYNC` | `1`/`true`, `0`/`false` | unset (off) | `F_FULLFSYNC` on macOS; see [Full fsync on macOS](#full-fsync-on-macos) |
 | `LATTICE_BUFFER_POOL_MB` | a positive integer | unset | Page cache size; see [Opening a Database](./opening.md#memory-and-caching) |
 
-## Turning the log off is not a performance knob
+## Running without the log
 
-`enable_wal` looks like a trade of safety for speed. It is not, and the reason is
-worth knowing before you reach for it.
+`enable_wal = false` means one thing: nothing is logged. Everything else works as it
+does with a log. Transactions begin, commit and roll back; a writing query outside
+a transaction gets one of its own and is all or nothing; one writer at a time;
+readers keep their snapshot; property indexes, full-text search, vectors, streams
+and the changefeed are updated at commit and untouched by a rollback. There is no
+`-wal` file.
 
-**Transactions are built on the log.** Without one, `beginTransaction` returns
-`TransactionsNotEnabled`. No `BEGIN`, no rollback, no multi-statement atomicity.
-Not slower — absent.
+What you give up is durability between flushes. A commit changes pages in memory,
+and they reach the file only when they are flushed: on `sync()`, at close, or at
+the end of a commit once half the page cache holds changes. A flush never happens
+in the middle of applying a transaction, and each flush goes through the journal,
+so the file always holds a whole number of transactions.
 
-Single queries still work, because a writing query without a transaction falls
-back to the older behaviour rather than being refused. But you have given up the
-ability to make two changes succeed or fail together, which is usually the reason
-someone wanted a database rather than a file. Without a log, changes reach the file
-only when pages are flushed: on `sync()`, at close, or early when half the cache is
-dirty. Call `sync()` when you need them on disk.
+| Event | What a database without a log keeps |
+|-------|-------------------------------------|
+| Process killed, or the machine loses power | The transactions up to some point at or after the last `sync()` or close that returned. Never part of one. Commits after that point may be lost, from the end only. |
+| A commit fails while it is being applied (the disk is full, say) | The handle marks itself failed and writes nothing more. Reopened, the database holds the state of the last flush: that commit and every one since are lost. |
+| Clean close | Everything. |
 
-There is one case where turning it off is reasonable: bulk-loading a database you
-are about to serialize or discard, where nothing needs to survive a crash and
-nothing needs to be atomic. Even then, measure first.
+Call `sync()` after anything you could not redo. The power-loss case assumes the
+same of the storage as [What survives what](#what-survives-what) does.
+
+Two costs come with it. A transaction's changed pages stay in memory until the whole
+transaction has been applied, so one very large transaction can hold the page cache
+above its configured size until it commits. And in the Zig API, a write passed a
+`null` transaction is applied as it is made, with or without a log, and is never
+logged; without a log that makes no difference to what survives, but it is not part
+of any transaction, so it does not appear in the changefeed.
+
+Turning the log off saves less than it looks. Loading 1,000,000 nodes and 2,000,000
+relationships through the Zig API in transactions of 10,000 (release build, a busy
+macOS machine, three runs each) took 107 to 111 s with the log in either sync mode,
+and BULK_F without it. Raising the checkpoint threshold changed nothing. The
+transactions, not the log, are most of the cost: the same load written directly with
+a `null` transaction and no log took 73 to 77 s, and produced a 391 MB file
+instead of 2.5 GB, because direct writes record nothing in the changefeed. Building
+the database in memory (`:memory:`) and serializing it took 49 to 57 s, at about
+5 GB of memory.
 
 ## Checkpointing
 

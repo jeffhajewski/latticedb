@@ -98,7 +98,7 @@ interface DatabaseOptions {
   create?: boolean;          // Create if not exists (default: false)
   readOnly?: boolean;        // Open read-only (default: false)
   cacheSizeMb?: number;      // Cache size in MB (default: 100)
-  enableWal?: boolean;       // WAL-backed transactions and crash recovery (default: true)
+  enableWal?: boolean;       // log commits so they survive a crash (default: true)
   enableAdjacencyCache?: boolean; // In-memory graph adjacency cache (default: false)
   enableVectors?: boolean;   // Create a vector index if the file has none
   enableVector?: boolean;    // Deprecated compatibility alias

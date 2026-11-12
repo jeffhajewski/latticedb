@@ -34,7 +34,7 @@ export interface DatabaseOptions {
   readOnly?: boolean;
   /** Cache size in megabytes */
   cacheSizeMb?: number;
-  /** Enable WAL-backed transactions (default: true) */
+  /** Log every commit so it survives a crash (default: true). Transactions work either way. */
   enableWal?: boolean;
   /**
    * Accepted for compatibility. Queries and the other methods here read edges

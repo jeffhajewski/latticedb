@@ -180,7 +180,9 @@ class Database:
             create: Create the database if it doesn't exist.
             read_only: Open in read-only mode.
             cache_size_mb: Size of the page cache in megabytes.
-            enable_wal: Enable WAL-backed transactions.
+            enable_wal: Log every commit, so it survives a crash. Without the
+                log, transactions work the same and changes reach the file
+                when it is next flushed (at close, for one).
             enable_adjacency_cache: Accepted for compatibility. Queries and the
                 other methods here read edges from storage either way, so it
                 does not change their speed or results.

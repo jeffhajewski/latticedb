@@ -86,7 +86,7 @@ public final class OpenOptions {
         return this;
     }
 
-    /** Enable WAL-backed transactions. Default true. */
+    /** Log every commit so it survives a crash. Default true. Transactions work either way. */
     public OpenOptions enableWal(boolean enableWal) {
         this.enableWal = enableWal;
         return this;

@@ -71,7 +71,7 @@ Database(
     create: bool = False,        # Create if doesn't exist
     read_only: bool = False,     # Open in read-only mode
     cache_size_mb: int = 100,    # Page cache size
-    enable_wal: bool = True,     # WAL-backed transactions and crash recovery
+    enable_wal: bool = True,     # log commits so they survive a crash
     enable_adjacency_cache: bool = False, # In-memory graph adjacency cache
     enable_vectors: bool | None = None, # Create a vector index if the file has none
     enable_vector: bool | None = None,  # Deprecated compatibility alias

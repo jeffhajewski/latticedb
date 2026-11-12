@@ -96,4 +96,21 @@ CALL { WITH t CREATE (:Audit {team: t.name}) }
 RETURN count(*)
 ```
 
+A `MATCH` inside searches as it would on its own, once for each incoming row:
+`WHERE d.text @@ 'x'` scores its matches, and a bare `WHERE d.embedding <=> $q`
+with a `LIMIT` gives each row its own nearest:
+
+```cypher
+MATCH (p:Person)
+CALL {
+  WITH p
+  MATCH (p)-[:WROTE]->(d:Doc) WHERE d.embedding <=> $q
+  RETURN d.title AS nearest LIMIT 1
+}
+RETURN p.name, nearest
+```
+
+`WITH * WHERE ...` is a `WITH`'s `WHERE`, checked row by row: `@@` there
+matches without a score, and `<=>` needs a bound.
+
 `CALL { ... } IN TRANSACTIONS` is not supported.

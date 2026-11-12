@@ -14,6 +14,7 @@ const Database = lattice.storage.database.Database;
 const QueryResult = lattice.storage.database.QueryResult;
 const ResultValue = lattice.storage.database.ResultValue;
 const QueryFailureStage = lattice.storage.database.QueryFailureStage;
+const Params = std.StringHashMap(lattice.core.types.PropertyValue);
 
 fn openTestDb(path: []const u8) !*Database {
     @import("compat").fs.cwd().deleteFile(path) catch {};
@@ -87,7 +88,11 @@ fn render(result: QueryResult) ![]u8 {
 
 /// Run a query and compare its whole result, columns first, as text.
 fn expectResult(db: *Database, cypher: []const u8, expected: []const u8) !void {
-    var detailed = try db.queryDetailed(cypher);
+    return expectResultWith(db, null, cypher, expected);
+}
+
+fn expectResultWith(db: *Database, params: ?*const Params, cypher: []const u8, expected: []const u8) !void {
+    var detailed = if (params) |p| try db.queryWithParamsDetailed(cypher, p) else try db.queryDetailed(cypher);
     defer detailed.deinit();
     switch (detailed) {
         .failure => |f| {
@@ -107,7 +112,11 @@ fn expectResult(db: *Database, cypher: []const u8, expected: []const u8) !void {
 
 /// Run a query that must fail at `stage` with a message containing `needle`.
 fn expectFailure(db: *Database, cypher: []const u8, stage: QueryFailureStage, needle: []const u8) !void {
-    var detailed = try db.queryDetailed(cypher);
+    return expectFailureWith(db, null, cypher, stage, needle);
+}
+
+fn expectFailureWith(db: *Database, params: ?*const Params, cypher: []const u8, stage: QueryFailureStage, needle: []const u8) !void {
+    var detailed = if (params) |p| try db.queryWithParamsDetailed(cypher, p) else try db.queryDetailed(cypher);
     defer detailed.deinit();
     switch (detailed) {
         .success => |result| {
@@ -658,6 +667,92 @@ test "lcy: label expression errors" {
     try expectFailure(db, "MATCH (a)-[:!R]->(b) RETURN a", .parse, "A relationship's types take only '|', as in -[:A|B]->");
     try expectFailure(db, "MATCH (a)-[:R&S]->(b) RETURN a", .parse, "A relationship's types take only '|'");
     try expectFailure(db, "MATCH (a)-[:R|%]->(b) RETURN a", .parse, "A relationship's types take only '|'");
+}
+
+// ============================================================================
+// Search predicates where phase 2 adds a WHERE: CALL { } and WITH *
+// ============================================================================
+
+/// A full-text and vector database: Docs 0..11 with text "rare common" for
+/// every third and "common" otherwise, and the vector [i, 1]; Person A
+/// wrote the even ones, B every fifth.
+fn openSearchDb(comptime path: []const u8) !*Database {
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    const db = try Database.open(std.testing.allocator, path, .{
+        .create = true,
+        .config = .{ .enable_fts = true, .enable_vector = true, .vector_dimensions = 2 },
+    });
+    errdefer db.close();
+    try db.createNodeFtsIndex("Doc", "text");
+    var txn = try db.beginTransaction(.read_write);
+    errdefer db.abortTransaction(&txn) catch {};
+    var people: [2]u64 = undefined;
+    for (&people, [_][]const u8{ "A", "B" }) |*p, name| {
+        p.* = try db.createNode(&txn, &.{"Person"});
+        try db.setNodeProperty(&txn, p.*, "name", .{ .string_val = name });
+    }
+    for (0..12) |i| {
+        const d = try db.createNode(&txn, &.{"Doc"});
+        try db.setNodeProperty(&txn, d, "i", .{ .int_val = @intCast(i) });
+        try db.setNodeProperty(&txn, d, "text", .{ .string_val = if (i % 3 == 0) "rare common" else "common" });
+        try db.setNodeVectorInTxn(&txn, d, &[_]f32{ @floatFromInt(i), 1 });
+        if (i % 2 == 0) try db.createEdge(&txn, people[0], d, "WROTE");
+        if (i % 5 == 0) try db.createEdge(&txn, people[1], d, "WROTE");
+    }
+    try db.commitTransaction(&txn);
+    return db;
+}
+
+fn closeSearchDb(db: *Database, comptime path: []const u8) void {
+    db.close();
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+}
+
+test "lcy: search predicates inside CALL { } and after WITH *" {
+    const path = "/tmp/lcy_search_constructs.ltdb";
+    const db = try openSearchDb(path);
+    defer closeSearchDb(db, path);
+    var params = Params.init(std.testing.allocator);
+    defer params.deinit();
+    const origin = [_]f32{ 0, 1 };
+    const five = [_]f32{ 5, 1 };
+    try params.put("q", .{ .vector_val = &origin });
+    try params.put("r", .{ .vector_val = &five });
+
+    // The plain search, for its score.
+    var plain = try db.query("MATCH (d:Doc) WHERE d.text @@ 'rare' RETURN score(d) AS s LIMIT 1");
+    defer plain.deinit();
+    const s = plain.rows[0].values[0].float_val;
+    try std.testing.expect(s > 0);
+    var buf: [512]u8 = undefined;
+
+    // CALL { } runs its MATCH as that MATCH would run alone, for each
+    // incoming row: the same documents, scored.
+    var w: std.Io.Writer = .fixed(&buf);
+    try w.writeAll("p.name | i | scored");
+    for ([_][]const u8{ "A", "B" }) |name| {
+        for ([_]i64{ 0, 3, 6, 9 }) |i| try w.print("\n\"{s}\" | {d} | true", .{ name, i });
+    }
+    try expectResult(db, "MATCH (p:Person) CALL { MATCH (d:Doc) WHERE d.text @@ 'rare' RETURN d.i AS i, score(d) AS s } RETURN p.name, i, s > 0 AS scored ORDER BY p.name, i", w.buffered());
+    // Correlated through a relationship: each person's own documents, still
+    // scored, and a LIMIT inside bounds each run.
+    try expectResult(db, "MATCH (p:Person) CALL { WITH p MATCH (p)-[:WROTE]->(d:Doc) WHERE d.text @@ 'rare' RETURN d.i AS i, score(d) > 0 AS scored } RETURN p.name, i, scored ORDER BY p.name, i", "p.name | i | scored\n\"A\" | 0 | true\n\"A\" | 6 | true\n\"B\" | 0 | true");
+    // A bare <=> is a search per incoming row: each person's nearest to [5, 1].
+    try expectResultWith(db, &params, "MATCH (p:Person) CALL { WITH p MATCH (p)-[:WROTE]->(d:Doc) WHERE d.embedding <=> $r RETURN d.i AS i LIMIT 1 } RETURN p.name, i ORDER BY p.name", "p.name | i\n\"A\" | 6\n\"B\" | 5");
+    try expectResultWith(db, &params, "MATCH (p:Person) CALL { WITH p MATCH (p)-[:WROTE]->(d:Doc) WHERE d.embedding <=> $r RETURN d.i AS i } RETURN p.name, collect(i) AS near ORDER BY p.name", "p.name | near\n\"A\" | [6, 4, 8, 10, 2, 0]\n\"B\" | [5, 10, 0]");
+    // A bound: only [0, 1] itself is that close to [0, 1].
+    try expectResultWith(db, &params, "MATCH (p:Person) CALL { WITH p MATCH (p)-[:WROTE]->(d:Doc) WHERE d.embedding <=> $q < 0.1 RETURN d.i AS i } RETURN p.name, i ORDER BY p.name", "p.name | i\n\"A\" | 0\n\"B\" | 0");
+
+    // WITH * WHERE is a WITH's WHERE: checked row by row, so the right
+    // documents and no score, and a bare <=> there is refused.
+    try expectResult(db, "MATCH (d:Doc) WITH * WHERE d.text @@ 'rare' RETURN d.i, score(d) AS s ORDER BY d.i", "d.i | s\n0 | null\n3 | null\n6 | null\n9 | null");
+    try expectFailureWith(db, &params, "MATCH (d:Doc) WITH * WHERE d.embedding <=> $q RETURN d.i", .plan, "A WHERE of only `<=>` ranks the rows of a MATCH by distance, which WITH cannot do");
+    try expectFailureWith(db, &params, "MATCH (p:Person) CALL { WITH p MATCH (p)-[:WROTE]->(d:Doc) WITH * WHERE d.embedding <=> $q RETURN d.i AS i } RETURN i", .plan, "which WITH cannot do");
+    try expectResultWith(db, &params, "MATCH (d:Doc) WITH * WHERE d.embedding <=> $q < 0.1 RETURN d.i", "d.i\n0");
+    // A score passes through WITH * as through WITH d.
+    try expectResult(db, "MATCH (d:Doc) WHERE d.text @@ 'rare' WITH * RETURN d.i, score(d) > 0 AS scored ORDER BY d.i", "d.i | scored\n0 | true\n3 | true\n6 | true\n9 | true");
 }
 
 // ============================================================================

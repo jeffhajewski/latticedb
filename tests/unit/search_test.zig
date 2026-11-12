@@ -588,7 +588,7 @@ test "fts: stats reflect actual document count" {
     var index = FtsIndex.init(allocator, db.bp, &dict_tree, &lengths_tree, &reverse_tree, .{});
 
     // Initially empty
-    var stats = index.getStats();
+    var stats = try index.getStats();
     try std.testing.expectEqual(@as(u64, 0), stats.total_docs);
 
     // Add documents
@@ -596,14 +596,14 @@ test "fts: stats reflect actual document count" {
     _ = try index.indexDocument(2, "second document");
     _ = try index.indexDocument(3, "third document");
 
-    stats = index.getStats();
+    stats = try index.getStats();
     try std.testing.expectEqual(@as(u64, 3), stats.total_docs);
     try std.testing.expect(stats.unique_tokens > 0);
 
     // Remove one
     try index.removeDocument(2);
 
-    stats = index.getStats();
+    stats = try index.getStats();
     try std.testing.expectEqual(@as(u64, 2), stats.total_docs);
 }
 
@@ -656,7 +656,7 @@ test "fts: indexing thousands of repeated terms remains responsive" {
 
     try std.testing.expectEqual(@as(usize, 10), results.len);
 
-    const stats = index.getStats();
+    const stats = try index.getStats();
     try std.testing.expectEqual(@as(u64, 3000), stats.total_docs);
 }
 

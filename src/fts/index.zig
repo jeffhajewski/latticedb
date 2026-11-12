@@ -442,30 +442,12 @@ pub const FtsIndex = struct {
             const term = entry.key_ptr.*;
             const info = entry.value_ptr.*;
 
-            // Get or create token in dictionary
-            const token_id = self.dictionary.getOrCreate(term) catch {
+            // One read of the term's entry and one write back: the entry
+            // carries the list's head, its last page and its counts.
+            const existing = self.dictionary.get(term) catch {
                 return FtsError.DictionaryError;
             };
 
-            // Get current dictionary entry
-            var dict_entry = self.dictionary.get(term) catch {
-                return FtsError.DictionaryError;
-            } orelse {
-                return FtsError.DictionaryError;
-            };
-
-            // Create posting list if needed
-            if (dict_entry.posting_page == 0) {
-                const page_id = self.posting_store.create(token_id) catch {
-                    return FtsError.PostingError;
-                };
-                self.dictionary.setPostingPage(term, page_id) catch {
-                    return FtsError.DictionaryError;
-                };
-                dict_entry.posting_page = page_id;
-            }
-
-            // Append posting entry with positions if configured
             const posting_entry = PostingEntry{
                 .doc_id = doc_id,
                 .term_freq = info.freq,
@@ -475,16 +457,44 @@ pub const FtsIndex = struct {
                     null,
             };
 
-            _ = self.posting_store.appendWithPositions(
+            var dict_entry: DictionaryEntry = if (existing) |found| found else blk: {
+                const head = self.posting_store.createList() catch {
+                    return FtsError.PostingError;
+                };
+                break :blk .{
+                    .token_id = head,
+                    .doc_freq = 0,
+                    .total_freq = 0,
+                    .posting_page = head,
+                    .tail_page = head,
+                };
+            };
+            // A list an earlier release made, with no head yet, gets one.
+            if (dict_entry.posting_page == 0) {
+                const head = self.posting_store.createList() catch {
+                    return FtsError.PostingError;
+                };
+                dict_entry.posting_page = head;
+                dict_entry.token_id = head;
+                dict_entry.tail_page = head;
+            }
+            // Lists written before the tail was kept carry a counter value as
+            // their id; from their first append here they carry the head.
+            dict_entry.token_id = dict_entry.posting_page;
+
+            dict_entry.tail_page = self.posting_store.appendAt(
                 dict_entry.posting_page,
+                dict_entry.token_id,
+                dict_entry.tail_page,
                 posting_entry,
                 self.config.store_positions,
             ) catch {
                 return FtsError.PostingError;
             };
+            dict_entry.doc_freq +|= 1;
+            dict_entry.total_freq +|= info.freq;
 
-            // Update document frequency
-            self.dictionary.incrementDocFreq(term) catch {
+            self.dictionary.put(term, dict_entry) catch {
                 return FtsError.DictionaryError;
             };
         }
@@ -579,11 +589,7 @@ pub const FtsIndex = struct {
                     if (entry.posting_page != 0) {
                         const result = self.posting_store.removeEntry(entry.posting_page, doc_id) catch continue;
                         if (result.found) {
-                            // Update dictionary statistics - track failures
-                            self.dictionary.decrementDocFreq(term) catch {
-                                stats_update_failed = true;
-                            };
-                            self.dictionary.subtractTotalFreq(term, result.term_freq) catch {
+                            self.dictionary.put(term, entryAfterRemoval(entry, result.term_freq)) catch {
                                 stats_update_failed = true;
                             };
                         }
@@ -683,13 +689,22 @@ pub const FtsIndex = struct {
             const result = self.posting_store.removeEntry(ref.posting_page, doc_id) catch continue;
             if (!result.found) continue;
 
-            self.dictionary.decrementDocFreq(ref.term) catch {
+            const entry = (self.dictionary.get(ref.term) catch {
                 stats_update_failed.* = true;
-            };
-            self.dictionary.subtractTotalFreq(ref.term, result.term_freq) catch {
+                continue;
+            }) orelse continue;
+            self.dictionary.put(ref.term, entryAfterRemoval(entry, result.term_freq)) catch {
                 stats_update_failed.* = true;
             };
         }
+    }
+
+    /// A term's entry once one document holding it `term_freq` times is gone.
+    fn entryAfterRemoval(entry: DictionaryEntry, term_freq: u32) DictionaryEntry {
+        var updated = entry;
+        updated.doc_freq -|= 1;
+        updated.total_freq -|= term_freq;
+        return updated;
     }
 
     // ========================================================================
@@ -2052,12 +2067,15 @@ pub const FtsIndex = struct {
     // ========================================================================
 
     /// Get FTS index statistics
-    pub fn getStats(self: *Self) FtsStats {
+    ///
+    /// `unique_tokens` counts the dictionary, which is a walk over every term:
+    /// the count used to come from a counter that restarted at every open.
+    pub fn getStats(self: *Self) FtsError!FtsStats {
         const doc_stats = self.doc_lengths.getStats();
         return FtsStats{
             .total_docs = doc_stats.total_docs,
             .total_tokens = doc_stats.total_tokens,
-            .unique_tokens = self.dictionary.tokenCount(),
+            .unique_tokens = self.dictionary.countTerms() catch return FtsError.DictionaryError,
             .avg_doc_length = doc_stats.avg_doc_length,
         };
     }
@@ -2104,7 +2122,7 @@ test "fts index basic" {
     try std.testing.expect(doc3_tokens > 0);
 
     // Check stats
-    const stats = index.getStats();
+    const stats = try index.getStats();
     try std.testing.expectEqual(@as(u64, 3), stats.total_docs);
     try std.testing.expect(stats.unique_tokens > 0);
 
@@ -2184,7 +2202,7 @@ test "fts indexDocument survives large (>=9 KiB) documents" {
         doc_id += 1;
     }
 
-    const stats = index.getStats();
+    const stats = try index.getStats();
     try std.testing.expect(stats.total_docs == sizes.len);
 }
 
@@ -3448,4 +3466,45 @@ test "fts an index with documents but no stored stats is not taken for empty" {
     const got = try again.search("ller", 10);
     defer again.freeResults(got);
     try std.testing.expectEqual(@as(usize, 3), got.len);
+}
+
+test "fts dictionary entries keep their counts, their tail and the term count across opens" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/lse_fts_dictionary_counts_test.db");
+    defer fx.destroy(allocator);
+
+    // Enough documents that "alpha" spans several posting pages.
+    for (1..1501) |id| {
+        _ = try fx.index.indexDocument(@intCast(id), if (id % 2 == 0) "alpha alpha beta" else "alpha gamma");
+    }
+    var entry = (try fx.index.dictionary.get("alpha")).?;
+    try std.testing.expectEqual(@as(u32, 1500), entry.doc_freq);
+    // total_freq used to stay at 0.
+    try std.testing.expectEqual(@as(u64, 2250), entry.total_freq);
+    try std.testing.expect(entry.tail_page != 0 and entry.tail_page != entry.posting_page);
+
+    // The term count no longer restarts when the index is opened again.
+    var reopened = FtsIndex.init(allocator, &fx.bp, &fx.dict_tree, &fx.lengths_tree, &fx.reverse_tree, .{});
+    try std.testing.expectEqual(@as(u64, 3), (try reopened.getStats()).unique_tokens);
+
+    // 0.16.0 rewrites an entry it updates with no tail and a counter id;
+    // the next append here walks from the head and finds the tail again.
+    entry.tail_page = 0;
+    entry.token_id = 3;
+    try reopened.dictionary.put("alpha", entry);
+    _ = try reopened.indexDocument(2000, "alpha");
+    const after = (try reopened.dictionary.get("alpha")).?;
+    try std.testing.expectEqual(@as(u32, 1501), after.doc_freq);
+    try std.testing.expect(after.tail_page != 0);
+    try std.testing.expectEqual(after.posting_page, after.token_id);
+
+    const got = try reopened.search("alpha", std.math.maxInt(u32));
+    defer reopened.freeResults(got);
+    try std.testing.expectEqual(@as(usize, 1501), got.len);
+
+    try reopened.removeDocument(2000);
+    try reopened.removeDocument(2);
+    const removed = (try reopened.dictionary.get("alpha")).?;
+    try std.testing.expectEqual(@as(u32, 1499), removed.doc_freq);
+    try std.testing.expectEqual(@as(u64, 2248), removed.total_freq);
 }

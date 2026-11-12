@@ -404,17 +404,47 @@ pub const PostingStore = struct {
         return page_id;
     }
 
+    /// Create the first page of a new list, carrying its own page id as the
+    /// list's identity (see `appendAt`).
+    pub fn createList(self: *Self) PostingError!PageId {
+        const page_id = try self.create(0);
+        const frame = self.bp.fetchPage(page_id, .exclusive) catch {
+            return PostingError.BufferPoolError;
+        };
+        var meta = self.readPageMeta(frame.data, false);
+        meta.token_id = page_id;
+        meta.write(frame.data);
+        self.bp.unpinPage(frame, true);
+        return page_id;
+    }
+
     /// Append a posting entry to a list
     /// Returns the page ID where the entry was stored (may be different if overflow)
     pub fn append(self: *Self, page_id: PageId, entry: PostingEntry) PostingError!PageId {
         return self.appendWithPositions(page_id, entry, false);
     }
 
-    /// Append a posting entry with optional position storage
+    /// Append from the head of the list, with no remembered tail.
+    pub fn appendWithPositions(self: *Self, page_id: PageId, entry: PostingEntry, store_positions: bool) PostingError!PageId {
+        return self.appendAt(page_id, 0, 0, entry, store_positions);
+    }
+
+    /// Append a posting entry, optionally storing its positions, to the first
+    /// page with room at or after where the walk starts, and return that page.
     ///
-    /// Walks to the tail of the list and appends there, adding a page when the
-    /// tail is full. This is a loop rather than recursion: a long list is many
-    /// pages, and each level of recursion used to carry its own encode buffer.
+    /// The walk starts at `tail_hint` when the caller has one (0 for none),
+    /// which should be the page the previous append returned: the list's last
+    /// page, or one near it. Starting there makes an append cost a page or two
+    /// however long the list is; starting at the head reads every page, which
+    /// made indexing a document with a common term cost time in proportion to
+    /// that term's list. The hint is trusted only if it is a posting page
+    /// carrying `stamp`, the identity this list's pages carry in their
+    /// header's token id field (the head page id, for lists `createList`
+    /// made); otherwise the walk starts from the head. The page the entry goes
+    /// on, and any page added to the list, is given `stamp`, so a list written
+    /// by an earlier release, whose pages carry a counter value instead, takes
+    /// it on from its first append. A `stamp` of 0 means none: no hint is
+    /// trusted and nothing is stamped.
     ///
     /// Whether a page's entries carry positions is a property of the page, set by
     /// its first entry. An entry whose positions disagree with the page is written
@@ -425,19 +455,46 @@ pub const PostingStore = struct {
     ///
     /// An entry always fits in an empty page: positions beyond what one page can
     /// hold are not stored (see `encodeEntry`).
-    pub fn appendWithPositions(self: *Self, page_id: PageId, entry: PostingEntry, store_positions: bool) PostingError!PageId {
+    pub fn appendAt(
+        self: *Self,
+        head: PageId,
+        stamp: TokenId,
+        tail_hint: PageId,
+        entry: PostingEntry,
+        store_positions: bool,
+    ) PostingError!PageId {
         const wants_positions = store_positions and entry.positions != null;
         var encode_buf: [PAGE_DATA_CAPACITY]u8 = undefined;
 
-        var current_page = page_id;
+        var current_page = head;
+        var checking_hint = false;
+        if (stamp != 0 and tail_hint != 0 and tail_hint != head and self.bp.pm.isValidPage(tail_hint)) {
+            current_page = tail_hint;
+            checking_hint = true;
+        }
         while (true) {
             const frame = self.bp.fetchPage(current_page, .exclusive) catch {
+                if (checking_hint) {
+                    checking_hint = false;
+                    current_page = head;
+                    continue;
+                }
                 return PostingError.BufferPoolError;
             };
             var frame_dirty = false;
             errdefer self.bp.unpinPage(frame, frame_dirty);
 
             const data = frame.data;
+            if (checking_hint) {
+                checking_hint = false;
+                if (pageHeaderConst(data).page_type != .fts_posting or
+                    self.readPageMeta(data, false).token_id != stamp)
+                {
+                    self.bp.unpinPage(frame, false);
+                    current_page = head;
+                    continue;
+                }
+            }
             var posting_header = self.readPageMeta(data, true);
 
             if (posting_header.layout == .v1) {
@@ -462,6 +519,7 @@ pub const PostingStore = struct {
                 }
 
                 // Need to allocate overflow page
+                if (stamp != 0) posting_header.token_id = stamp;
                 const new_page_id = try self.create(posting_header.token_id);
                 posting_header.next_page = new_page_id;
                 posting_header.write(data);
@@ -475,6 +533,7 @@ pub const PostingStore = struct {
             } else {
                 posting_header.flags &= ~POSTING_ENTRY_FLAG_HAS_POSITIONS;
             }
+            if (stamp != 0) posting_header.token_id = stamp;
 
             // Write entry
             @memcpy(data[current_end..][0..encode_len], encode_buf[0..encode_len]);
@@ -1363,5 +1422,72 @@ test "posting store releases full pages before appending to overflow tail" {
         }, true);
 
         try std.testing.expectEqual(@as(usize, 0), bp.getStats().pinned_frames);
+    }
+}
+
+test "posting append trusts a tail hint only on a page of its own list" {
+    const allocator = std.testing.allocator;
+
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const db_path = "/tmp/lse_posting_tail_hint_test.db";
+    vfs_impl.delete(db_path) catch {};
+
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+
+    var bp = try BufferPool.init(allocator, &pm, 128 * 4096);
+    defer bp.deinit();
+
+    var store = PostingStore.init(allocator, &bp);
+
+    // A list as 0.16.0 made it: its pages carry a counter value, not the head.
+    const legacy = try store.create(7);
+    for (1..1501) |i| {
+        _ = try store.append(legacy, .{ .doc_id = @intCast(i), .term_freq = 1, .positions = null });
+    }
+    // Another list, made here, several pages long.
+    const other = try store.createList();
+    var other_tail = other;
+    for (1..1501) |i| {
+        other_tail = try store.appendAt(other, other, other_tail, .{ .doc_id = @intCast(i), .term_freq = 1, .positions = null }, false);
+    }
+    try std.testing.expect(other_tail != other);
+
+    // A hint at another list's page is ignored: the entry goes on the
+    // legacy list's own last page, which takes on the list's head as its id.
+    var tail = try store.appendAt(legacy, legacy, other_tail, .{ .doc_id = 5000, .term_freq = 1, .positions = null }, false);
+    try std.testing.expect(tail != legacy and tail != other_tail);
+    // A hint at a page that is not a posting page, or past the file, too.
+    tail = try store.appendAt(legacy, legacy, pm.pageCount() + 10, .{ .doc_id = 5001, .term_freq = 1, .positions = null }, false);
+    const freed = try store.createList();
+    try bp.freePage(freed);
+    try std.testing.expectEqual(tail, try store.appendAt(legacy, legacy, freed, .{ .doc_id = 5002, .term_freq = 1, .positions = null }, false));
+    // The stamped tail is now trusted.
+    try std.testing.expectEqual(tail, try store.appendAt(legacy, legacy, tail, .{ .doc_id = 5003, .term_freq = 1, .positions = null }, false));
+    // And 0.16.0, appending from the head, still reaches the same tail.
+    try std.testing.expectEqual(tail, try store.append(legacy, .{ .doc_id = 5004, .term_freq = 1, .positions = null }));
+
+    for ([_]struct { head: PageId, want: usize, last: DocId }{
+        .{ .head = legacy, .want = 1505, .last = 5004 },
+        .{ .head = other, .want = 1500, .last = 1500 },
+    }) |list| {
+        var iter = try store.iterate(list.head);
+        defer iter.deinit();
+        var count: usize = 0;
+        var last: DocId = 0;
+        while (try iter.next()) |entry| {
+            count += 1;
+            last = entry.doc_id;
+        }
+        try std.testing.expectEqual(list.want, count);
+        try std.testing.expectEqual(list.last, last);
     }
 }

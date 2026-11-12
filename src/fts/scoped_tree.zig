@@ -89,6 +89,19 @@ pub const ScopedTree = struct {
         return self.tree.get(try self.storedKey(key, &buf));
     }
 
+    /// A value lent rather than copied; see `BTree.getBorrowed`. Release it
+    /// before writing to the tree.
+    pub fn getBorrowed(self: Self, key: []const u8) ScopedTreeError!?BTree.BorrowedValue {
+        var buf: [MAX_KEY_SIZE]u8 = undefined;
+        return self.tree.getBorrowed(try self.storedKey(key, &buf));
+    }
+
+    /// Insert, or replace the value of a key already present, in one descent.
+    pub fn put(self: Self, key: []const u8, value: []const u8) ScopedTreeError!void {
+        var buf: [MAX_KEY_SIZE]u8 = undefined;
+        return self.tree.put(try self.storedKey(key, &buf), value);
+    }
+
     pub fn delete(self: Self, key: []const u8) ScopedTreeError!void {
         var buf: [MAX_KEY_SIZE]u8 = undefined;
         return self.tree.delete(try self.storedKey(key, &buf));

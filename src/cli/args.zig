@@ -5,6 +5,7 @@ const lattice = @import("lattice");
 
 const types = lattice.core.types;
 const page_manager = lattice.storage.page_manager;
+const VectorMetric = lattice.storage.database.VectorMetric;
 
 /// Managed array list for allocator tracking
 fn ManagedArrayList(comptime T: type) type {
@@ -231,6 +232,13 @@ pub const Args = struct {
     // Database options
     enable_vector: bool = false,
     vector_dims: u16 = 128,
+    /// Whether --vector-dims was given. Opening an existing database without
+    /// it takes the dimensions from the file.
+    vector_dims_set: bool = false,
+    /// --vector-metric, --vector-m and --vector-ef-construction, for `create`.
+    vector_metric: ?VectorMetric = null,
+    vector_m: ?u16 = null,
+    vector_ef_construction: ?u16 = null,
     enable_fts: bool = true,
     cache_size_mb: u32 = 64,
     page_size: u32 = 4096,
@@ -288,6 +296,27 @@ pub const Args = struct {
                     };
                     types.validateVectorDimensions(parsed_dims) catch return error.InvalidVectorDims;
                     args.vector_dims = @intCast(parsed_dims);
+                    args.vector_dims_set = true;
+                } else if (std.mem.startsWith(u8, arg, "--vector-metric=")) {
+                    const value = arg["--vector-metric=".len..];
+                    args.vector_metric = if (std.mem.eql(u8, value, "cosine"))
+                        .cosine
+                    else if (std.mem.eql(u8, value, "euclidean"))
+                        .euclidean
+                    else if (std.mem.eql(u8, value, "dot"))
+                        .inner_product
+                    else
+                        return error.InvalidVectorMetric;
+                } else if (std.mem.startsWith(u8, arg, "--vector-m=")) {
+                    const value = arg["--vector-m=".len..];
+                    const m = std.fmt.parseInt(u16, value, 10) catch return error.InvalidVectorM;
+                    if (m < 2 or m > 32) return error.InvalidVectorM;
+                    args.vector_m = m;
+                } else if (std.mem.startsWith(u8, arg, "--vector-ef-construction=")) {
+                    const value = arg["--vector-ef-construction=".len..];
+                    const ef = std.fmt.parseInt(u16, value, 10) catch return error.InvalidVectorEfConstruction;
+                    if (ef < 1 or ef > 4096) return error.InvalidVectorEfConstruction;
+                    args.vector_ef_construction = ef;
                 } else if (std.mem.eql(u8, arg, "--enable-fts")) {
                     args.enable_fts = true;
                 } else if (std.mem.eql(u8, arg, "--no-fts")) {
@@ -386,6 +415,9 @@ pub const Error = error{
     InvalidInterval,
     InvalidTimestamp,
     InvalidVectorDims,
+    InvalidVectorMetric,
+    InvalidVectorM,
+    InvalidVectorEfConstruction,
     InvalidCacheSize,
     InvalidPageSize,
     InvalidBatchSize,
@@ -438,6 +470,26 @@ test "parse vector dimensions range" {
 
     try std.testing.expectError(error.InvalidVectorDims, Args.parse(allocator, &.{ "lattice", "create", "test.db", "--vector-dims=0" }));
     try std.testing.expectError(error.InvalidVectorDims, Args.parse(allocator, &.{ "lattice", "create", "test.db", "--vector-dims=4097" }));
+}
+
+test "parse vector index options for create" {
+    const allocator = std.testing.allocator;
+    var args = try Args.parse(allocator, &.{ "lattice", "create", "test.db", "--enable-vector", "--vector-dims=8", "--vector-metric=dot", "--vector-m=24", "--vector-ef-construction=64" });
+    defer args.deinit(allocator);
+    try std.testing.expect(args.vector_dims_set);
+    try std.testing.expectEqual(@as(?VectorMetric, .inner_product), args.vector_metric);
+    try std.testing.expectEqual(@as(?u16, 24), args.vector_m);
+    try std.testing.expectEqual(@as(?u16, 64), args.vector_ef_construction);
+
+    var plain = try Args.parse(allocator, &.{ "lattice", "info", "test.db", "--enable-vector" });
+    defer plain.deinit(allocator);
+    try std.testing.expect(!plain.vector_dims_set);
+    try std.testing.expect(plain.vector_metric == null);
+
+    try std.testing.expectError(error.InvalidVectorMetric, Args.parse(allocator, &.{ "lattice", "create", "t.db", "--vector-metric=manhattan" }));
+    try std.testing.expectError(error.InvalidVectorM, Args.parse(allocator, &.{ "lattice", "create", "t.db", "--vector-m=1" }));
+    try std.testing.expectError(error.InvalidVectorM, Args.parse(allocator, &.{ "lattice", "create", "t.db", "--vector-m=33" }));
+    try std.testing.expectError(error.InvalidVectorEfConstruction, Args.parse(allocator, &.{ "lattice", "create", "t.db", "--vector-ef-construction=0" }));
 }
 
 test "parse page size option" {

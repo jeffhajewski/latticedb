@@ -86,6 +86,9 @@ pub fn main(init: std.process.Init) !u8 {
             error.UnknownOption => output.printError(stderr, "Unknown option. Use 'lattice help' for available options.", .{}),
             error.InvalidFormat => output.printError(stderr, "Invalid format. Use: table, json, or csv", .{}),
             error.InvalidVectorDims => output.printError(stderr, "Invalid vector dimensions. Must be in the range 1..4096.", .{}),
+            error.InvalidVectorMetric => output.printError(stderr, "Invalid vector metric. Use: cosine, euclidean, or dot", .{}),
+            error.InvalidVectorM => output.printError(stderr, "Invalid --vector-m. Must be in the range 2..32.", .{}),
+            error.InvalidVectorEfConstruction => output.printError(stderr, "Invalid --vector-ef-construction. Must be in the range 1..4096.", .{}),
             error.InvalidCacheSize => output.printError(stderr, "Invalid cache size. Must be a positive integer.", .{}),
             error.InvalidPageSize => output.printError(stderr, "Invalid page size. Must be in the range 4096..65535 bytes.", .{}),
             error.InvalidBatchSize => output.printError(stderr, "Invalid batch size. Must be a positive integer.", .{}),
@@ -259,6 +262,9 @@ fn cmdCreate(
     const config = DatabaseConfig{
         .enable_vector = parsed_args.enable_vector,
         .vector_dimensions = parsed_args.vector_dims,
+        .vector_metric = parsed_args.vector_metric,
+        .vector_m = parsed_args.vector_m,
+        .vector_ef_construction = parsed_args.vector_ef_construction,
         .enable_fts = parsed_args.enable_fts,
         .buffer_pool_size = @as(usize, parsed_args.cache_size_mb) * 1024 * 1024,
     };
@@ -276,7 +282,12 @@ fn cmdCreate(
     output.printSuccess(stdout, "Created database: {s}", .{path});
 
     if (parsed_args.enable_vector) {
-        try stdout.print("  Vector index enabled (dimensions: {d})\n", .{parsed_args.vector_dims});
+        const metric_name = if (parsed_args.vector_metric) |metric| switch (metric) {
+            .euclidean => "euclidean",
+            .inner_product => "dot",
+            else => "cosine",
+        } else "cosine";
+        try stdout.print("  Vector index enabled (dimensions: {d}, metric: {s})\n", .{ parsed_args.vector_dims, metric_name });
     }
     if (parsed_args.enable_fts) {
         try stdout.writeAll("  Full-text search enabled\n");
@@ -919,16 +930,18 @@ const OpenMode = enum { read_only, read_write };
 
 /// The options every command that opens an existing database passes.
 ///
-/// The vector options matter beyond vector search: a database whose log holds
-/// committed vector changes can only be opened with vectors enabled at the
-/// dimensions it was written with, because replaying the log needs the index.
+/// A database with a vector index records its configuration and opens with
+/// it, so the vector options are not needed to open one. They still serve two
+/// purposes: creating an index in a database that has none, and opening a
+/// database written by 0.16.0 whose vector pages cannot be read for their
+/// dimensions. Without --vector-dims the dimensions are the file's.
 fn openOptions(parsed_args: *const Args, mode: OpenMode) OpenOptions {
     return .{
         .read_only = mode == .read_only,
         .lock = !parsed_args.no_lock,
         .config = .{
             .enable_vector = parsed_args.enable_vector,
-            .vector_dimensions = parsed_args.vector_dims,
+            .vector_dimensions = if (parsed_args.vector_dims_set) parsed_args.vector_dims else 0,
         },
     };
 }
@@ -961,23 +974,40 @@ fn failOpen(stderr: anytype, path: []const u8, err: anyerror, vectors_enabled: b
     if (err == DatabaseError.NotFound or err == error.FileNotFound) {
         return failCommand(stderr, "Database not found: {s}. Create it first with 'lattice create'.", .{path});
     }
-    // An unreplayable vector change in the log surfaces as IoError, and so do
-    // dimensions that do not match what the file was written with.
-    if (err == DatabaseError.IoError and !vectors_enabled) {
+    if (err == DatabaseError.VectorConfigMismatch) {
         return failCommand(
             stderr,
-            "Failed to open database {s}: IoError. If it stores vectors, its write-ahead log may hold vector changes " ++
-                "that can only be replayed with vectors enabled. Retry with --enable-vector --vector-dims=<n>, " ++
-                "where <n> is the number of dimensions the database was created with.",
+            "Failed to open database {s}: its vector index has a different number of dimensions than --vector-dims " ++
+                "gives. A database with a vector index opens with it as it was created; leave out --vector-dims.",
             .{path},
         );
     }
-    if ((err == DatabaseError.IoError or err == DatabaseError.InvalidArgument) and vectors_enabled) {
+    if (err == DatabaseError.InvalidArgument and vectors_enabled) {
         return failCommand(
             stderr,
-            "Failed to open database {s}: {s}. With --enable-vector, check that the database has a vector " ++
-                "index and that --vector-dims matches the number of dimensions it was created with.",
-            .{ path, @errorName(err) },
+            "Failed to open database {s}: it has no vector index to open. To create one, give its dimensions " ++
+                "with --vector-dims=<n>.",
+            .{path},
+        );
+    }
+    // A database written by 0.16.0 records no vector configuration. Its
+    // dimensions are read from its vector pages, and only when that fails
+    // does replaying vector changes in its log need them spelled out.
+    if (err == DatabaseError.IoError and !vectors_enabled) {
+        return failCommand(
+            stderr,
+            "Failed to open database {s}: IoError. If it was written by LatticeDB 0.16.0 and stores vectors, its " ++
+                "write-ahead log may hold vector changes that need the vector index. Retry with --enable-vector " ++
+                "--vector-dims=<n>, where <n> is the number of dimensions the database was created with.",
+            .{path},
+        );
+    }
+    if (err == DatabaseError.IoError and vectors_enabled) {
+        return failCommand(
+            stderr,
+            "Failed to open database {s}: IoError. With --enable-vector, check that --vector-dims matches the " ++
+                "number of dimensions the database was created with.",
+            .{path},
         );
     }
     return failCommand(stderr, "Failed to open database {s}: {s}", .{ path, @errorName(err) });
@@ -1573,9 +1603,10 @@ fn failExport(stderr: anytype, err: anyerror) anyerror {
 
 /// Say so when a database has vectors that an export or dump will not include.
 ///
-/// Vectors can only be read through the vector index, and its dimensions are
-/// not recorded where opening the file could find them, so they are included
-/// only when the command was told the dimensions.
+/// Vectors can only be read through the vector index. A database opens with
+/// its index whenever the file records the index's configuration or its
+/// vector pages show the dimensions, so this only fires for a 0.16.0 database
+/// where neither works and the command was not told the dimensions.
 fn warnIfVectorsLeftOut(stderr: anytype, db: *Database, path: []const u8) void {
     if (!db.hasPersistedVectorIndex() or import_export.vectorDimensions(db) != null) return;
     stderr.print(
@@ -1660,10 +1691,10 @@ fn printUsage(writer: anytype) void {
         \\
         \\Options:
         \\  --format=<fmt>        Output format: table, json, csv (default: table)
-        \\  --enable-vector       Create or open with the vector index. A database
-        \\                        that stores vectors needs this, with its
-        \\                        dimensions, once its log holds vector changes.
-        \\  --vector-dims=<n>     Vector dimensions, 1..4096 (default: 128)
+        \\  --enable-vector       Create a vector index. A database that has one
+        \\                        opens with it without this flag.
+        \\  --vector-dims=<n>     Vector dimensions, 1..4096 (default for create: 128)
+        \\  --vector-metric=<m>   With create: cosine, euclidean or dot (default: cosine)
         \\  --enable-fts          Enable full-text search (default: on)
         \\  --no-fts              Disable full-text search
         \\  --cache-size=<mb>     Buffer pool size in MB (default: 64)
@@ -1696,6 +1727,11 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\Options:
             \\  --enable-vector       Enable HNSW vector index
             \\  --vector-dims=<n>     Vector dimensions (default: 128, max: 4096)
+            \\  --vector-metric=<m>   Distance: cosine, euclidean, or dot (negative
+            \\                        dot product) (default: cosine)
+            \\  --vector-m=<n>        HNSW connections per node, 2..32 (default: 16)
+            \\  --vector-ef-construction=<n>
+            \\                        HNSW build candidate list, 1..4096 (default: 200)
             \\  --enable-fts          Enable BM25 full-text search (default: on)
             \\  --no-fts              Disable full-text search
             \\  --cache-size=<mb>     Buffer pool size in MB (default: 64)
@@ -1704,6 +1740,9 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\Examples:
             \\  lattice create mydb.lattice
             \\  lattice create embeddings.lattice --enable-vector --vector-dims=1536
+            \\
+            \\The vector index's configuration is stored in the database, and
+            \\later commands open the index with it without any vector flags.
             \\
         ) catch {},
         .update => writer.writeAll(
@@ -1720,11 +1759,11 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\Start an interactive Cypher query shell.
             \\
             \\Options:
-            \\  --enable-vector       Open with the vector index. A database that
-            \\                        stores vectors needs this once its log holds
-            \\                        vector changes.
-            \\  --vector-dims=<n>     Dimensions the database was created with
-            \\                        (default: 128)
+            \\  --enable-vector       Create a vector index if the database has
+            \\                        none (needs --vector-dims). A database with
+            \\                        one opens with it without this flag.
+            \\  --vector-dims=<n>     Dimensions for a new index, or for a 0.16.0
+            \\                        database whose dimensions cannot be read
             \\
             \\REPL Commands:
             \\  .help                 Show REPL help
@@ -1756,11 +1795,11 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\Options:
             \\  --file=<path>         Where to write the copy
             \\  --format=<fmt>        Output format: table, json, csv
-            \\  --enable-vector       Open with the vector index. A database that
-            \\                        stores vectors needs this once its log holds
-            \\                        vector changes.
-            \\  --vector-dims=<n>     Dimensions the database was created with
-            \\                        (default: 128)
+            \\  --enable-vector       Create a vector index if the database has
+            \\                        none (needs --vector-dims). A database with
+            \\                        one opens with it without this flag.
+            \\  --vector-dims=<n>     Dimensions for a new index, or for a 0.16.0
+            \\                        database whose dimensions cannot be read
             \\
             \\Example:
             \\  lattice backup mydb.lattice --file=/backups/mydb-$(date +%F).lattice
@@ -1799,11 +1838,11 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\  --follow              Keep running, shipping on an interval
             \\  --interval=<seconds>  How long to wait between passes (default 10)
             \\  --format=<fmt>        Output format: table, json, csv
-            \\  --enable-vector       Open with the vector index. A database that
-            \\                        stores vectors needs this once its log holds
-            \\                        vector changes.
-            \\  --vector-dims=<n>     Dimensions the database was created with
-            \\                        (default: 128)
+            \\  --enable-vector       Create a vector index if the database has
+            \\                        none (needs --vector-dims). A database with
+            \\                        one opens with it without this flag.
+            \\  --vector-dims=<n>     Dimensions for a new index, or for a 0.16.0
+            \\                        database whose dimensions cannot be read
             \\
             \\Examples:
             \\  lattice replicate mydb.lattice --to=/mnt/backup/mydb
@@ -1850,11 +1889,11 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\
             \\Options:
             \\  --format=<fmt>        Output format: table, json, csv
-            \\  --enable-vector       Open with the vector index. A database that
-            \\                        stores vectors needs this once its log holds
-            \\                        vector changes.
-            \\  --vector-dims=<n>     Dimensions the database was created with
-            \\                        (default: 128)
+            \\  --enable-vector       Create a vector index if the database has
+            \\                        none (needs --vector-dims). A database with
+            \\                        one opens with it without this flag.
+            \\  --vector-dims=<n>     Dimensions for a new index, or for a 0.16.0
+            \\                        database whose dimensions cannot be read
             \\
             \\Example:
             \\  lattice checkpoint mydb.lattice
@@ -1869,11 +1908,11 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\
             \\Options:
             \\  --format=<fmt>        Output format: table, json, csv
-            \\  --enable-vector       Open with the vector index. A database that
-            \\                        stores vectors needs this once its log holds
-            \\                        vector changes.
-            \\  --vector-dims=<n>     Dimensions the database was created with
-            \\                        (default: 128)
+            \\  --enable-vector       Create a vector index if the database has
+            \\                        none (needs --vector-dims). A database with
+            \\                        one opens with it without this flag.
+            \\  --vector-dims=<n>     Dimensions for a new index, or for a 0.16.0
+            \\                        database whose dimensions cannot be read
             \\
             \\Example:
             \\  lattice compact mydb.lattice
@@ -1905,11 +1944,11 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\  --query=<cypher>      The Cypher query to execute
             \\  --file=<path>         Read query from file instead
             \\  --format=<fmt>        Output format: table, json, csv
-            \\  --enable-vector       Open with the vector index. A database that
-            \\                        stores vectors needs this once its log holds
-            \\                        vector changes.
-            \\  --vector-dims=<n>     Dimensions the database was created with
-            \\                        (default: 128)
+            \\  --enable-vector       Create a vector index if the database has
+            \\                        none (needs --vector-dims). A database with
+            \\                        one opens with it without this flag.
+            \\  --vector-dims=<n>     Dimensions for a new index, or for a 0.16.0
+            \\                        database whose dimensions cannot be read
             \\
             \\Examples:
             \\  lattice exec mydb.lattice --query="MATCH (n) RETURN count(n)"
@@ -1925,11 +1964,11 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\  --file=<path>         Input file (.json, .jsonl, .csv)
             \\  --batch-size=<n>      Commit every N items (default: 1000)
             \\  --on-error=skip       Skip invalid records instead of aborting
-            \\  --enable-vector       Open with the vector index. A database that
-            \\                        stores vectors needs this once its log holds
-            \\                        vector changes.
-            \\  --vector-dims=<n>     Dimensions the database was created with
-            \\                        (default: 128)
+            \\  --enable-vector       Create a vector index if the database has
+            \\                        none (needs --vector-dims). A database with
+            \\                        one opens with it without this flag.
+            \\  --vector-dims=<n>     Dimensions for a new index, or for a 0.16.0
+            \\                        database whose dimensions cannot be read
             \\
             \\Without --on-error=skip, the import stops at the first invalid record
             \\and says which it was; batches committed before it are kept. With it,
@@ -1956,11 +1995,11 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\Options:
             \\  --file=<path>         Output file path (.json, .jsonl, .csv, .dot)
             \\  --format=<fmt>        CLI output format: table, json, csv
-            \\  --enable-vector       Open with the vector index. A database that
-            \\                        stores vectors needs this once its log holds
-            \\                        vector changes.
-            \\  --vector-dims=<n>     Dimensions the database was created with
-            \\                        (default: 128)
+            \\  --enable-vector       Create a vector index if the database has
+            \\                        none (needs --vector-dims). A database with
+            \\                        one opens with it without this flag.
+            \\  --vector-dims=<n>     Dimensions for a new index, or for a 0.16.0
+            \\                        database whose dimensions cannot be read
             \\  --labels=<list>       Filter by labels (comma-separated)
             \\  --query=<cypher>      Export query results instead
             \\
@@ -1981,9 +2020,10 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             writer.writeAll(
                 \\Options:
                 \\  --format=<fmt>        Output format: table, json, csv
-                \\  --enable-vector       Open with the vector index
-                \\  --vector-dims=<n>     Dimensions the database was created with
-                \\                        (default: 128)
+                \\  --enable-vector       Create a vector index if the database has
+                \\                        none (needs --vector-dims)
+                \\  --vector-dims=<n>     Dimensions for a new index, or for a 0.16.0
+                \\                        database whose dimensions cannot be read
                 \\  --no-lock             Skip the file lock, for filesystems without one
                 \\
             ) catch {};

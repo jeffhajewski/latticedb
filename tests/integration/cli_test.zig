@@ -213,7 +213,7 @@ fn makeKilledVectorDatabase(allocator: std.mem.Allocator, source: []const u8, ki
     try copyAsIfKilled(allocator, source, killed);
 }
 
-test "cli: every command that opens a database can enable vectors, and says to when it must" {
+test "cli: every command that opens a database opens its vector index, and refuses other dimensions" {
     const allocator = std.testing.allocator;
     const source = "/tmp/lattice_cli_vecopen_source.ltdb";
     const killed = "/tmp/lattice_cli_vecopen_killed.ltdb";
@@ -242,27 +242,34 @@ test "cli: every command that opens a database can enable vectors, and says to w
     };
 
     for (commands) |command| {
-        try makeKilledVectorDatabase(allocator, source, killed);
-        deleteDatabaseFiles(backup);
-        compat.fs.cwd().deleteTree(replica) catch {};
+        // The file records its vector index, so the vector changes in its log
+        // replay without vector options (0.16.0 refused this open), with
+        // options that agree, and not with options that contradict it.
+        const variants = [_]struct { extra: []const []const u8, ok: bool }{
+            .{ .extra = &.{}, .ok = true },
+            .{ .extra = &.{ "--enable-vector", "--vector-dims=8" }, .ok = true },
+            .{ .extra = &.{ "--enable-vector", "--vector-dims=16" }, .ok = false },
+        };
+        for (variants) |variant| {
+            try makeKilledVectorDatabase(allocator, source, killed);
+            deleteDatabaseFiles(backup);
+            compat.fs.cwd().deleteTree(replica) catch {};
 
-        const refused = try runCli(allocator, command);
-        defer refused.deinit(allocator);
-        if (refused.succeeded() or std.mem.indexOf(u8, refused.stderr, "--enable-vector --vector-dims") == null) {
-            std.debug.print("{s} without vector options: exit {?d}\nstderr: {s}\n", .{ command[0], refused.exit_code, refused.stderr });
-            return error.TestUnexpectedResult;
-        }
+            var argv: std.ArrayList([]const u8) = .empty;
+            defer argv.deinit(allocator);
+            try argv.appendSlice(allocator, command);
+            try argv.appendSlice(allocator, variant.extra);
 
-        var with_vectors: std.ArrayList([]const u8) = .empty;
-        defer with_vectors.deinit(allocator);
-        try with_vectors.appendSlice(allocator, command);
-        try with_vectors.appendSlice(allocator, &.{ "--enable-vector", "--vector-dims=8" });
-
-        const opened = try runCli(allocator, with_vectors.items);
-        defer opened.deinit(allocator);
-        if (!opened.succeeded()) {
-            std.debug.print("{s} with vector options: exit {?d}\nstderr: {s}\n", .{ command[0], opened.exit_code, opened.stderr });
-            return error.TestUnexpectedResult;
+            const run = try runCli(allocator, argv.items);
+            defer run.deinit(allocator);
+            const as_expected = if (variant.ok)
+                run.succeeded()
+            else
+                !run.succeeded() and std.mem.indexOf(u8, run.stderr, "leave out --vector-dims") != null;
+            if (!as_expected) {
+                std.debug.print("{s} {s}: exit {?d}\nstderr: {s}\n", .{ command[0], if (variant.extra.len > 0) variant.extra[1] else "(no vector options)", run.exit_code, run.stderr });
+                return error.TestUnexpectedResult;
+            }
         }
     }
 }
@@ -291,7 +298,7 @@ fn readFileAlloc(allocator: std.mem.Allocator, path: []const u8) ![]u8 {
     return file.readToEndAlloc(allocator, 1 << 30);
 }
 
-test "cli: export includes vectors when told the dimensions, and warns when it leaves them out" {
+test "cli: export includes vectors, with or without the vector options" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_cli_export_vectors.ltdb";
     const out = "/tmp/lattice_cli_export_vectors.json";
@@ -309,13 +316,14 @@ test "cli: export includes vectors when told the dimensions, and warns when it l
         try db.setNodeVector(node, &[_]f32{ 1, 0, 0, 0 });
     }
 
+    // The file says what its index is, so no vector options are needed.
     const without = try runCli(allocator, &.{ "export", path, "--file=" ++ out });
     defer without.deinit(allocator);
     try std.testing.expect(without.succeeded());
-    try std.testing.expect(std.mem.indexOf(u8, without.stderr, "--enable-vector") != null);
+    try std.testing.expectEqual(@as(usize, 0), without.stderr.len);
     const plain = try readFileAlloc(allocator, out);
     defer allocator.free(plain);
-    try std.testing.expect(std.mem.indexOf(u8, plain, "\"vector\"") == null);
+    try std.testing.expect(std.mem.indexOf(u8, plain, "\"vector\":[1.0,0.0,0.0,0.0]") != null);
 
     const with = try runCli(allocator, &.{ "export", path, "--file=" ++ out, "--enable-vector", "--vector-dims=4" });
     defer with.deinit(allocator);

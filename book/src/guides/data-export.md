@@ -171,3 +171,5 @@ binding.
 - `.jsonl`: one record per line, for pipelines.
 - `.csv`: tabular extraction for spreadsheets and BI tooling.
 - `.dot`: graph visualization with Graphviz-compatible tooling.
+- `.ttl`, `.nt`: RDF in Turtle or N-Triples, for RDF tools and ontology
+  editors; see [RDF: Turtle and N-Triples](./rdf.md).

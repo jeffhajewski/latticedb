@@ -33,6 +33,10 @@ format version 2, Unicode full-text tokenization and stricter `set_vector` keys.
 The file format is version 4 and the log format version 3; *Upgrade notes* says
 exactly what 0.16.0 can still open.
 
+`lattice import` and `lattice export` read and write RDF in Turtle and
+N-Triples, so vocabularies and data sets kept as RDF can be queried with Cypher,
+full-text and vector search, and written back out.
+
 ## Durability
 
 **Checkpoints save what they depend on.** A truncating checkpoint flushed the
@@ -191,6 +195,31 @@ program does not set them, and are how the CLI sets them.
   owners or entries pointing at freed pages.
 - `sync()` on a handle whose commit failed is refused. It could write a
   half-applied transaction into the file, and the C API's close calls it.
+
+## RDF import and export
+
+`lattice import` reads Turtle (`.ttl`) and N-Triples (`.nt`), including
+Turtle-star and N-Triples-star, and passes the W3C RDF 1.1 Turtle and
+N-Triples suites (383 tests). Each IRI becomes a node labelled `Resource` with
+an `iri` property, found through a `Resource(iri)` property index the import
+declares, so later files add to the same nodes. `rdf:type` becomes labels (or
+edges, with more than 1,000 classes or `--rdf-types=edges`), literals typed
+properties, other objects edges, and annotations edge properties. Names are
+`<prefix>_<local>` (`rdfs_label`, `skos_prefLabel`), strings in other languages
+than `--rdf-lang` get properties of their own (`rdfs_label_de`), and
+`--rdf-fts` declares full-text indexes on the result. A statement is one record
+for `--on-error=skip`; an integer that does not fit in 64 bits fails its
+statement.
+
+`lattice export` writes Turtle, grouped by subject and abbreviated with the
+prefixes import stored, or N-Triples, streaming in both cases. Edge properties
+are RDF-star annotations, or `rdf:Statement`s with
+`--rdf-edge-properties=reify`. A graph that never came from RDF exports too:
+its names under `urn:lattice:` (or `--base`), nodes as blank nodes or, with
+`--base`, as IRIs. Turtle to a database and back gives the same RDF graph;
+[RDF: Turtle and N-Triples](../book/src/guides/rdf.md) lists what changes in
+each direction. JSON-LD, RDF/XML, TriG, N-Quads, SPARQL and inference are not
+supported.
 
 ## Breaking changes
 

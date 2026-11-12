@@ -237,7 +237,9 @@ FTS:          enabled
 
 ### Importing
 
-`import` reads JSON, JSONL or CSV, chosen by the file extension:
+`import` reads JSON, JSONL or CSV, chosen by the file extension. It also reads
+RDF in Turtle (`.ttl`) and N-Triples (`.nt`), which
+[RDF: Turtle and N-Triples](../guides/rdf.md) describes:
 
 ```bash
 lattice import social.lattice --file=people.json
@@ -374,7 +376,8 @@ cost you the import.
 
 ### Exporting
 
-`export` writes JSON, JSONL, CSV, or DOT. It picks the format from the file extension:
+`export` writes JSON, JSONL, CSV, or DOT, or RDF as Turtle or N-Triples. It
+picks the format from the file extension:
 
 ```bash
 lattice export social.lattice --file=backup.json

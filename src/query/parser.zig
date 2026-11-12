@@ -1781,6 +1781,7 @@ pub const Parser = struct {
             // or a function's name.
             if (self.previous.token_type == .quoted_identifier) {
                 if (self.match(.lparen)) return self.parseFunctionCall(name, loc);
+                if (self.check(.lbrace)) return self.parseMapProjection(name, loc);
                 return self.makeVariable(name, loc);
             }
 
@@ -1792,8 +1793,7 @@ pub const Parser = struct {
                     self.errorAtCurrent("COLLECT { ... } subqueries are not supported; use collect() or a pattern comprehension");
                     return null;
                 }
-                self.errorAtCurrent("Map projection (n {.name, key: value}) is not supported; use a map literal such as {name: n.name}");
-                return null;
+                return self.parseMapProjection(name, loc);
             }
 
             // Check for function call
@@ -2100,6 +2100,62 @@ pub const Parser = struct {
 
         const expr = self.arena.allocator().create(ast.Expression) catch return null;
         expr.* = .{ .map = map };
+        return expr;
+    }
+
+    /// `name {.key, .*, key: value, variable}`, at the '{'.
+    fn parseMapProjection(self: *Self, name: []const u8, loc: ast.SourceLocation) ?*ast.Expression {
+        const a = self.arena.allocator();
+        self.advance();
+        var entries: std.ArrayList(ast.MapProjection.Entry) = .empty;
+        if (!self.check(.rbrace)) {
+            while (true) {
+                const entry_loc = self.currentLocation();
+                if (self.match(.dot)) {
+                    if (self.match(.star)) {
+                        entries.append(a, .{ .key = "", .value = null }) catch return null;
+                    } else if (self.checkName()) {
+                        const key = self.currentName();
+                        self.advance();
+                        const access = a.create(ast.PropertyAccess) catch return null;
+                        access.* = .{ .object = self.makeVariable(name, entry_loc) orelse return null, .property = key, .location = entry_loc };
+                        const value = a.create(ast.Expression) catch return null;
+                        value.* = .{ .property_access = access };
+                        entries.append(a, .{ .key = key, .value = value }) catch return null;
+                    } else {
+                        self.errorAtCurrent("Expected a property name or * after '.' in a map projection");
+                        return null;
+                    }
+                } else if (self.checkName()) {
+                    const key = self.currentName();
+                    const key_token = self.current.token_type;
+                    self.advance();
+                    if (self.match(.colon)) {
+                        const value = self.parseExpression() orelse return null;
+                        entries.append(a, .{ .key = key, .value = value }) catch return null;
+                    } else if (key_token == .identifier or key_token == .quoted_identifier) {
+                        // A variable stands for `variable: variable`.
+                        entries.append(a, .{ .key = key, .value = self.makeVariable(key, entry_loc) orelse return null }) catch return null;
+                    } else {
+                        self.errorAtCurrent("Expected ':' after a key in a map projection");
+                        return null;
+                    }
+                } else {
+                    self.errorAtCurrent("Expected .property, .*, key: value or a variable in a map projection");
+                    return null;
+                }
+                if (!self.match(.comma)) break;
+            }
+        }
+        if (!self.consume(.rbrace, "Expected '}' to close the map projection")) return null;
+        const projection = a.create(ast.MapProjection) catch return null;
+        projection.* = .{
+            .subject = self.makeVariable(name, loc) orelse return null,
+            .entries = entries.toOwnedSlice(a) catch return null,
+            .location = loc,
+        };
+        const expr = a.create(ast.Expression) catch return null;
+        expr.* = .{ .map_projection = projection };
         return expr;
     }
 

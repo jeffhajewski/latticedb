@@ -564,6 +564,9 @@ pub fn containsAggregate(expr: *const ast.Expression) bool {
             (if (c.where) |w| containsAggregate(w) else false) or
             (if (c.map) |m| containsAggregate(m) else false),
         .reduce => |r| containsAggregate(r.initial) or containsAggregate(r.list) or containsAggregate(r.expression),
+        .map_projection => |m| for (m.entries) |e| {
+            if (e.value) |v| if (containsAggregate(v)) break true;
+        } else false,
         // Its WHERE and value belong to its own matches, not to the rows
         // being grouped.
         .subquery => false,

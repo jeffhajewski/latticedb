@@ -367,6 +367,9 @@ pub const Expression = union(enum) {
     // Patterns matched from inside an expression
     subquery: *PatternSubquery,
 
+    // `n {.name, key: value, .*}`
+    map_projection: *MapProjection,
+
     /// Get source location for this expression
     pub fn getLocation(self: *const Expression) SourceLocation {
         return switch (self.*) {
@@ -385,6 +388,7 @@ pub const Expression = union(enum) {
             .comprehension => |c| c.location,
             .reduce => |r| r.location,
             .subquery => |s| s.location,
+            .map_projection => |m| m.location,
         };
     }
 };
@@ -537,6 +541,23 @@ pub const ListExpr = struct {
 pub const MapExpr = struct {
     entries: []PropertyEntry,
     location: SourceLocation,
+};
+
+/// `n {.name, key: value, x, .*}`: a map built from a node, relationship
+/// or map. The parser turns `.name` into the entry `name: n.name` and `x`
+/// into `x: x`; `.*` is an entry with no value, standing for every
+/// property. A later entry replaces an earlier one with the same key.
+pub const MapProjection = struct {
+    /// The variable projected, as a variable expression.
+    subject: *Expression,
+    entries: []Entry,
+    location: SourceLocation,
+
+    pub const Entry = struct {
+        key: []const u8,
+        /// Null for `.*`.
+        value: ?*Expression,
+    };
 };
 
 // ============================================================================

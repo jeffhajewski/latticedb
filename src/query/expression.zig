@@ -681,6 +681,7 @@ pub const ExpressionEvaluator = struct {
             .comprehension => |c| self.evaluateComprehension(c, row, ctx),
             .reduce => |r| self.evaluateReduce(r, row, ctx),
             .subquery => |sq| self.evaluateSubquery(sq, row, ctx),
+            .map_projection => |m| self.evaluateMapProjection(m, row, ctx),
         };
     }
 
@@ -1686,51 +1687,7 @@ pub const ExpressionEvaluator = struct {
         if (std.ascii.eqlIgnoreCase(f.name, "properties")) {
             if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
-            if (arg == .node_ref) {
-                const node_id = arg.node_ref;
-                const database = ctx.database orelse return .{ .null_val = {} };
-                const symbol_table = ctx.symbol_table orelse return .{ .null_val = {} };
-                var node = (database.getNodeInTxn(ctx.txn, node_id) catch |err|
-                    return readFailure(ctx, err, f.location, "reading node {d}", .{node_id})) orelse return .{ .null_val = {} };
-                defer node.deinit(ctx.allocator);
-                var entries: std.ArrayListUnmanaged(EvalResult.MapEntry) = .empty;
-                for (node.properties) |prop| {
-                    const key = symbol_table.resolve(prop.key_id) catch |err|
-                        return readFailure(ctx, err, f.location, "resolving property key {d} of node {d}", .{ prop.key_id, node_id });
-                    defer symbol_table.freeString(key);
-                    const owned_key = self.allocator.dupe(u8, key) catch return EvalError.OutOfMemory;
-                    entries.append(self.allocator, .{
-                        .key = owned_key,
-                        .value = try EvalResult.fromPropertyValue(prop.value, self.allocator),
-                    }) catch return EvalError.OutOfMemory;
-                }
-                return .{ .map_val = entries.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory };
-            } else if (arg == .edge_ref) {
-                const edge_id = arg.edge_ref;
-                const database = ctx.database orelse return .{ .null_val = {} };
-                const symbol_table = ctx.symbol_table orelse return .{ .null_val = {} };
-                var edge = (database.getEdgeInTxn(ctx.txn, edge_id) catch |err|
-                    return readFailure(ctx, err, f.location, "reading relationship {d}", .{edge_id})) orelse return .{ .null_val = {} };
-                defer edge.deinit(ctx.allocator);
-                var entries: std.ArrayListUnmanaged(EvalResult.MapEntry) = .empty;
-                for (edge.properties) |prop| {
-                    const key = symbol_table.resolve(prop.key_id) catch |err|
-                        return readFailure(ctx, err, f.location, "resolving property key {d} of relationship {d}", .{ prop.key_id, edge_id });
-                    defer symbol_table.freeString(key);
-                    const owned_key = self.allocator.dupe(u8, key) catch return EvalError.OutOfMemory;
-                    entries.append(self.allocator, .{
-                        .key = owned_key,
-                        .value = try EvalResult.fromPropertyValue(prop.value, self.allocator),
-                    }) catch return EvalError.OutOfMemory;
-                }
-                return .{ .map_val = entries.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory };
-            } else if (arg == .null_val) {
-                return .{ .null_val = {} };
-            } else if (arg == .map_val) {
-                // A map's properties are its entries.
-                return arg;
-            }
-            return EvalError.TypeError;
+            return self.propertiesOf(arg, f.location, ctx);
         }
 
         if (std.ascii.eqlIgnoreCase(f.name, "length") or
@@ -1749,6 +1706,96 @@ pub const ExpressionEvaluator = struct {
         }
 
         return EvalError.UnknownFunction;
+    }
+
+    /// The properties of a node or relationship as a map, a map as it is,
+    /// null for null; anything else is a type error.
+    fn propertiesOf(self: *Self, arg: EvalResult, location: ast.SourceLocation, ctx: *const ExecutionContext) EvalError!EvalResult {
+        if (arg == .node_ref) {
+            const node_id = arg.node_ref;
+            const database = ctx.database orelse return .{ .null_val = {} };
+            const symbol_table = ctx.symbol_table orelse return .{ .null_val = {} };
+            var node = (database.getNodeInTxn(ctx.txn, node_id) catch |err|
+                return readFailure(ctx, err, location, "reading node {d}", .{node_id})) orelse return .{ .null_val = {} };
+            defer node.deinit(ctx.allocator);
+            var entries: std.ArrayListUnmanaged(EvalResult.MapEntry) = .empty;
+            for (node.properties) |prop| {
+                const key = symbol_table.resolve(prop.key_id) catch |err|
+                    return readFailure(ctx, err, location, "resolving property key {d} of node {d}", .{ prop.key_id, node_id });
+                defer symbol_table.freeString(key);
+                const owned_key = self.allocator.dupe(u8, key) catch return EvalError.OutOfMemory;
+                entries.append(self.allocator, .{
+                    .key = owned_key,
+                    .value = try EvalResult.fromPropertyValue(prop.value, self.allocator),
+                }) catch return EvalError.OutOfMemory;
+            }
+            return .{ .map_val = entries.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory };
+        } else if (arg == .edge_ref) {
+            const edge_id = arg.edge_ref;
+            const database = ctx.database orelse return .{ .null_val = {} };
+            const symbol_table = ctx.symbol_table orelse return .{ .null_val = {} };
+            var edge = (database.getEdgeInTxn(ctx.txn, edge_id) catch |err|
+                return readFailure(ctx, err, location, "reading relationship {d}", .{edge_id})) orelse return .{ .null_val = {} };
+            defer edge.deinit(ctx.allocator);
+            var entries: std.ArrayListUnmanaged(EvalResult.MapEntry) = .empty;
+            for (edge.properties) |prop| {
+                const key = symbol_table.resolve(prop.key_id) catch |err|
+                    return readFailure(ctx, err, location, "resolving property key {d} of relationship {d}", .{ prop.key_id, edge_id });
+                defer symbol_table.freeString(key);
+                const owned_key = self.allocator.dupe(u8, key) catch return EvalError.OutOfMemory;
+                entries.append(self.allocator, .{
+                    .key = owned_key,
+                    .value = try EvalResult.fromPropertyValue(prop.value, self.allocator),
+                }) catch return EvalError.OutOfMemory;
+            }
+            return .{ .map_val = entries.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory };
+        } else if (arg == .null_val) {
+            return .{ .null_val = {} };
+        } else if (arg == .map_val) {
+            // A map's properties are its entries.
+            return arg;
+        }
+        return EvalError.TypeError;
+    }
+
+    /// `n {.name, key: value, .*}`: null for a null subject; the entries in
+    /// order, a later one replacing an earlier one of the same key.
+    fn evaluateMapProjection(
+        self: *Self,
+        m: *const ast.MapProjection,
+        row: *const Row,
+        ctx: *const ExecutionContext,
+    ) EvalError!EvalResult {
+        const subject = try self.evaluate(m.subject, row, ctx);
+        switch (subject) {
+            .null_val => return .{ .null_val = {} },
+            .node_ref, .edge_ref, .map_val => {},
+            else => return ctx.fail(EvalError.TypeError, m.location, "A map projection needs a node, relationship or map, but `{s}` is {s}", .{
+                m.subject.variable.name, typeName(subject),
+            }),
+        }
+        var entries: std.ArrayListUnmanaged(EvalResult.MapEntry) = .empty;
+        for (m.entries) |entry| {
+            if (entry.value) |value_expr| {
+                const value = try self.evaluate(value_expr, row, ctx);
+                try putEntry(self.allocator, &entries, entry.key, value);
+            } else {
+                const all = try self.propertiesOf(subject, m.location, ctx);
+                if (all != .map_val) continue;
+                for (all.map_val) |e| try putEntry(self.allocator, &entries, e.key, e.value);
+            }
+        }
+        return .{ .map_val = entries.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory };
+    }
+
+    fn putEntry(allocator: Allocator, entries: *std.ArrayListUnmanaged(EvalResult.MapEntry), key: []const u8, value: EvalResult) EvalError!void {
+        for (entries.items) |*e| {
+            if (std.mem.eql(u8, e.key, key)) {
+                e.value = value;
+                return;
+            }
+        }
+        entries.append(allocator, .{ .key = key, .value = value }) catch return EvalError.OutOfMemory;
     }
 
     /// `length(p)`, the number of relationships in a path; `nodes(p)` and

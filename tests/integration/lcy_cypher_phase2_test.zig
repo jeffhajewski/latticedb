@@ -296,6 +296,71 @@ test "lcy: RETURN * with nothing in scope is an error" {
 }
 
 // ============================================================================
+// Map projection
+// ============================================================================
+
+test "lcy: map projection of a node, a relationship and a map" {
+    const path = "/tmp/lcy_map_projection.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try run(db, "CREATE (:P {name: 'ann', age: 30})-[:K {since: 2020}]->(:P {name: 'bo'})");
+
+    try expectResult(db,
+        \\MATCH (n:P {name: 'ann'}) RETURN n {.name, .missing, k: 1 + 1}
+    , "n {.name, .missing, k: 1 + 1}\n{name: \"ann\", missing: null, k: 2}");
+    // .* is every property; a later entry replaces an earlier one in place.
+    try expectResult(db,
+        \\MATCH (n:P {name: 'ann'}) RETURN n {.*, name: 'zed', extra: true} AS m
+    , "m\n{name: \"zed\", age: 30, extra: true}");
+    try expectResult(db,
+        \\MATCH (n:P {name: 'ann'}) RETURN n {name: 'first', .name} AS m
+    , "m\n{name: \"ann\"}");
+    // A variable stands for an entry of its own name.
+    try expectResult(db,
+        \\WITH 5 AS x MATCH (n:P {name: 'bo'}) RETURN n {.name, x} AS m
+    , "m\n{name: \"bo\", x: 5}");
+    try expectResult(db,
+        \\MATCH (:P)-[r:K]->(b) RETURN r {.since, to: b.name} AS m
+    , "m\n{since: 2020, to: \"bo\"}");
+    try expectResult(db,
+        \\WITH {a: 1, b: 2} AS m RETURN m {.b, .c} AS x, m {.*} AS y, m {} AS z
+    , "x | y | z\n{b: 2, c: null} | {a: 1, b: 2} | {}");
+    // A null subject gives null, not a map of nulls.
+    try expectResult(db,
+        \\MATCH (n:P {name: 'bo'}) OPTIONAL MATCH (n)-[:K]->(o) RETURN o {.name} AS m
+    , "m\nnull");
+    // Anywhere an expression is: aggregates, property access, ORDER BY,
+    // comprehensions, and with keywords and backticks as names.
+    try expectResult(db,
+        \\MATCH (n:P) RETURN collect(n {.name}) AS ms
+    , "ms\n[{name: \"ann\"}, {name: \"bo\"}]");
+    try expectResult(db,
+        \\MATCH (n:P) RETURN (n {.name}).name AS name ORDER BY n {.age}.age
+    , "name\n\"ann\"\n\"bo\"");
+    try expectResult(db,
+        \\MATCH (n:P {name: 'ann'}) RETURN [k IN [1] | n {.age, k}] AS l, n {end: 1, `a b`: 2} AS q, `n` {.age} AS r
+    , "l | q | r\n[{age: 30, k: 1}] | {end: 1, a b: 2} | {age: 30}");
+    // The same projection twice is one grouping key.
+    try expectResult(db,
+        \\UNWIND [1, 2] AS i MATCH (n:P) RETURN n {.name} AS m, count(*) AS c, n.name AS k ORDER BY k
+    , "m | c | k\n{name: \"ann\"} | 2 | \"ann\"\n{name: \"bo\"} | 2 | \"bo\"");
+}
+
+test "lcy: map projection errors" {
+    const path = "/tmp/lcy_map_projection_errors.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+
+    try expectFailure(db, "WITH 1 AS x RETURN x {.a}", .execution, "A map projection needs a node, relationship or map, but `x` is integer");
+    try expectFailure(db, "RETURN q {.a}", .semantic, "Variable 'q' is not defined");
+    try expectFailure(db, "WITH {} AS m RETURN m {.a, y}", .semantic, "Variable 'y' is not defined");
+    try expectFailure(db, "WITH {} AS m RETURN m {.}", .parse, "Expected a property name or * after '.' in a map projection");
+    try expectFailure(db, "WITH {} AS m RETURN m {.a", .parse, "Expected '}' to close the map projection");
+    try expectFailure(db, "WITH {} AS m RETURN m {1}", .parse, "Expected .property, .*, key: value or a variable in a map projection");
+    try expectFailure(db, "WITH {} AS m RETURN m {end}", .parse, "Expected ':' after a key in a map projection");
+}
+
+// ============================================================================
 // Small fixes
 // ============================================================================
 

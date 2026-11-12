@@ -67,6 +67,26 @@ RETURN 1 + 2
 
 `RETURN` and `WITH` take at most 16 items; a query with more fails to plan.
 
+## Map Projection
+
+`variable {...}` builds a map from a node, relationship or map:
+
+```cypher
+MATCH (n:Person)-[k:KNOWS]->(f)
+RETURN n {.name, .age, friend: f.name, k}
+// {name: "Alice", age: 30, friend: "Bob", k: <relationship>}
+```
+
+- `.key` is the property `key`, null if it is missing;
+- `.*` is every property;
+- `key: expression` is any value;
+- a variable `x` on its own is the entry `x: x`.
+
+Entries keep the order written, and a later entry replaces an earlier one with
+the same key, so `n {.*, name: 'anonymous'}` overrides one property. A null
+subject (from an `OPTIONAL MATCH` that found nothing) gives null; any other
+value that is not a node, relationship or map is an error.
+
 ## Literals
 
 Return literal values:

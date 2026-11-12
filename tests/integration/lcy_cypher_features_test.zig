@@ -941,7 +941,6 @@ test "lcy: unsupported constructs are named" {
         .{ .query = "MATCH (n:!A) RETURN n", .message = "label expressions (:A&B, :!A), which are not supported" },
         .{ .query = "MATCH (n:A WHERE n.v > 1) RETURN n", .message = "WHERE inside a node pattern is not supported" },
         .{ .query = "MATCH (a)-[r WHERE r.v > 1]->(b) RETURN r", .message = "WHERE inside a relationship pattern is not supported" },
-        .{ .query = "MATCH (n) RETURN n {.name, .age}", .message = "Map projection (n {.name, key: value}) is not supported" },
         .{ .query = "MATCH (n) RETURN COLLECT { MATCH (n)-->(m) RETURN m } AS c", .message = "COLLECT { ... } subqueries are not supported" },
         .{ .query = "RETURN 1 IS :: INTEGER AS t", .message = "Type predicates (IS :: TYPE) are not supported" },
         .{ .query = "RETURN 1 IS NOT TYPED INTEGER AS t", .message = "Type predicates (IS :: TYPE) are not supported" },

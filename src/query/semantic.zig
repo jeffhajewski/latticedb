@@ -843,6 +843,10 @@ pub const SemanticAnalyzer = struct {
                 self.analyzeExpression(r.expression);
             },
             .subquery => |sq| self.analyzeSubquery(sq),
+            .map_projection => |m| {
+                self.analyzeExpression(m.subject);
+                for (m.entries) |entry| if (entry.value) |v| self.analyzeExpression(v);
+            },
         }
     }
 
@@ -982,6 +986,7 @@ pub const SemanticAnalyzer = struct {
             .comprehension => |c| if (c.kind == .list) .list else .boolean,
             .reduce => .any,
             .subquery => |sq| if (sq.kind == .exists) .boolean else if (sq.kind == .count) .integer else .list,
+            .map_projection => .map,
         };
     }
 

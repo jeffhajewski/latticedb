@@ -59,6 +59,14 @@ pub fn expressionsEqual(a: *const ast.Expression, b: *const ast.Expression) bool
         // The same subquery, not one written the same way: each has a plan
         // of its own.
         .subquery => |as| as == b.subquery,
+        .map_projection => |am| blk: {
+            const bm = b.map_projection;
+            if (!expressionsEqual(am.subject, bm.subject) or am.entries.len != bm.entries.len) break :blk false;
+            for (am.entries, bm.entries) |ae, be| {
+                if (!std.mem.eql(u8, ae.key, be.key) or !optionalEqual(ae.value, be.value)) break :blk false;
+            }
+            break :blk true;
+        },
         .reduce => |ar| blk: {
             const br = b.reduce;
             break :blk std.mem.eql(u8, ar.accumulator, br.accumulator) and std.mem.eql(u8, ar.variable, br.variable) and
@@ -189,6 +197,17 @@ pub fn rewrite(allocator: std.mem.Allocator, expr: *ast.Expression, context: any
             copy.list = try rewrite(allocator, c.list, context);
             out.* = .{ .comprehension = copy };
         },
+        .map_projection => |m| {
+            const copy = try allocator.create(ast.MapProjection);
+            copy.* = m.*;
+            copy.subject = try rewrite(allocator, m.subject, context);
+            const entries = try allocator.alloc(ast.MapProjection.Entry, m.entries.len);
+            for (m.entries, entries) |entry, *new_entry| {
+                new_entry.* = .{ .key = entry.key, .value = try rewriteOptional(allocator, entry.value, context) };
+            }
+            copy.entries = entries;
+            out.* = .{ .map_projection = copy };
+        },
         .reduce => |r| {
             const copy = try allocator.create(ast.ReduceExpr);
             copy.* = r.*;
@@ -242,6 +261,10 @@ fn collect(allocator: std.mem.Allocator, expr: *const ast.Expression, out: *std.
             try collect(allocator, c.list, out, local);
             if (c.where) |w| try collect(allocator, w, out, true);
             if (c.map) |m| try collect(allocator, m, out, true);
+        },
+        .map_projection => |m| {
+            try collect(allocator, m.subject, out, local);
+            for (m.entries) |e| if (e.value) |v| try collect(allocator, v, out, local);
         },
         .reduce => |r| {
             try collect(allocator, r.initial, out, local);
@@ -312,6 +335,11 @@ fn freeIn(expr: *const ast.Expression, ignore: *const fn ([]const u8) bool, scop
             scope.len += 1;
             defer scope.len -= 1;
             return freeInOptional(c.where, ignore, scope) orelse freeInOptional(c.map, ignore, scope);
+        },
+        .map_projection => |m| {
+            if (freeIn(m.subject, ignore, scope)) |name| return name;
+            for (m.entries) |e| if (freeInOptional(e.value, ignore, scope)) |name| return name;
+            return null;
         },
         .reduce => |r| {
             if (freeIn(r.initial, ignore, scope) orelse freeIn(r.list, ignore, scope)) |name| return name;

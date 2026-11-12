@@ -41,7 +41,7 @@ When the executor calls `root.next()`:
 1. Project calls Limit.next()
 2. Limit checks its count (returns null if the limit is reached), then calls Filter.next()
 3. Filter calls LabelScan.next()
-4. LabelScan returns a row for the next node id it collected from storage
+4. LabelScan returns a row for the next node id with the label, reading the label index a batch at a time
 5. Filter evaluates predicate—if false, pulls another row
 6. Limit counts the row and passes it up
 7. Project evaluates expressions, transforms row
@@ -53,9 +53,12 @@ aggregated values that only exist after grouping.
 
 ### Lazy Evaluation
 
-Rows are produced only when `next()` is called. Scans collect the node ids they
-will visit when they open, but building, filtering and projecting each row
-happens on demand: with `LIMIT 10`, evaluation stops after 10 matching rows.
+Rows are produced only when `next()` is called, and building, filtering and
+projecting each row happens on demand: with `LIMIT 10`, evaluation stops after 10
+matching rows. In a query that only reads, a label scan also reads its ids on
+demand, so `MATCH (n:Person) RETURN n LIMIT 1` reads one batch of the label index
+rather than every `Person`. The other scans, and a label scan in a query that
+writes, collect their ids when they open.
 
 ## Rows and Slots
 
@@ -96,13 +99,32 @@ relationship's target node before the relationship itself:
 | `[r:KNOWS]` | 2 |
 
 A row has 16 slots, so a query can bind at most 16 variables (including
-internal ones the planner adds).
+internal ones the planner adds, such as a slot that holds an anonymous
+relationship so a later expand can avoid reusing it), and `RETURN` or `WITH` can
+take at most 16 items; more fails to plan with `TooManyVariables`.
+
+A name keeps the slot it was first bound to for the whole query. `WITH` puts an
+item named like an earlier variable back in that variable's slot, and new names
+take slots no earlier scope used while any are left. If a name would ever need a
+second slot, the plan is refused rather than run with expressions reading the
+wrong slot. A null result (from `UNWIND`, `WITH` or an aggregate) is stored as a
+bound null, so reading it gives null; only a slot that was never filled is an
+"unbound variable" error.
 
 The execution context maintains the mapping from names to slots for expression evaluation.
 
 ### Lazy Materialization
 
 Rows store **references** (NodeId, EdgeId), not full objects. Properties are fetched on-demand during expression evaluation. This avoids loading data that's never accessed.
+
+A node property read (`n.name`) decodes just that property: the evaluator resolves
+the key's id once per query, and `Database.getNodePropertyByKeyInTxn` answers from
+the transaction's overlay when it holds the node and otherwise walks the stored
+record to the one value. In a query that only reads, the evaluator also keeps the
+last record it read, so `n.a, n.b, n.c` costs one B+Tree lookup. A storage error
+during the read fails the query rather than reading as null. Relationship
+properties, `labels()`, `properties()` and `type()` still copy the whole node or
+relationship.
 
 ## Operators
 
@@ -119,20 +141,37 @@ close(): Free the slice
 **LabelScan**: Iterates nodes with a specific label.
 
 ```
-open():  Collect the ids of nodes carrying the label (label index, plus the
-         transaction's own changes) into a slice
-next():  Take the next id from the slice, set output slot
-close(): Free the slice
+open():  Query only reads: allocate a 256-id buffer and take the ids the
+           transaction's overlay gives the label
+         Query writes: collect every id carrying the label (label index, plus
+           the transaction's own changes) into a slice
+next():  Streaming: refill the buffer from the label index after the last id
+           read, skip ids the overlay says lost the label, and merge in the
+           overlay's ids in id order
+         Collected: take the next id from the slice
+         Then set the output slot
+close(): Free the buffer or the slice
 ```
+
+A query that writes collects its ids up front so that nodes it creates, relabels
+or deletes while scanning cannot change which nodes the scan visits. Streaming
+relies on nothing else changing the overlay or the index during a read-only
+query, which holds because the C API runs one call per database handle at a time.
 
 **PropertyIndexScan**: Used instead of a label scan when an explicit property
 index covers an equality on the pattern's label (inline `{k: v}` or a `WHERE`
 equality right after the `MATCH`). It evaluates the value once at open and
 reads the matching ids from the index.
 
-All three produce rows with a single slot containing a node reference. Because
-they hold id slices rather than open B+Tree iterators, no pages stay pinned
-between `next()` calls.
+All three produce rows with a single slot containing a node reference. None
+keeps a B+Tree iterator open between `next()` calls: the streaming label scan
+opens and closes its own range for each batch, so no page stays pinned or latched
+between calls.
+
+A property index keys a value by a digest of its type and bits, so an integer and
+the float with the same value land under different keys. `PropertyIndexScan`
+looks up both forms and merges them, so `{age: 30}` finds a node stored with
+`30.0`, as a scan would.
 
 ### Filter Operator
 
@@ -153,6 +192,10 @@ fn next(self: *Filter, ctx: *ExecutionContext) !?*Row {
 ```
 
 Supports short-circuit evaluation for `AND`/`OR`.
+
+**LabelFilter** checks a node's label through the label index
+(`Database.nodeHasLabelInTxn`, which asks the transaction's overlay first)
+instead of reading the whole node, and a storage error fails the query.
 
 ### Project Operator
 
@@ -205,8 +248,31 @@ next():
         edges = database.getOutgoingEdgeRefs[ByType]InTxn(txn, source[, type])
 ```
 
-`VariableLengthExpand` handles `-[*min..max]->` patterns. When the target node
-carries labels, the planner adds a `LabelFilter` above the expand.
+A relationship's types reach the expand as an `EdgeConstraints` value. With one
+type the storage layer filters the edges; with several (`-[:A|B]->`) the operator
+reads the node's edges and keeps those whose type is in the set. A type the
+database has never seen matches nothing.
+
+Within one `MATCH`, a relationship is used once. The planner lists every
+relationship of the clause, and a single-hop relationship that a later one could
+collide with (their type sets overlap, or either is untyped) keeps its edge in a
+slot, hidden if it has no variable. Each later expand skips edges already held in
+those slots. An undirected expand also skips a self-loop in its incoming half, so
+the loop is returned once. A single-hop relationship after a variable-length one
+cannot see that path's edges, which the row does not hold, and may reuse one.
+
+When the far end of the relationship is a node that is already bound, the expand
+keeps only edges that lead to it, and a bound node at the start of a pattern is
+checked against its labels and properties rather than scanned again.
+
+`VariableLengthExpand` handles `-[*min..max]->` patterns. It is a depth-first
+search over a stack of frames that tracks the edges on the current path: an edge
+already on the path is skipped, nodes may repeat, and every step whose length is
+within the bounds emits a row, so a node reached by two paths is returned twice.
+There is no hop cap; an unbounded pattern ends because a path cannot use more
+relationships than exist, though the number of paths can grow exponentially on a
+dense graph. Edge lists are read only for frames that can still extend. When the
+target node carries labels, the planner adds a `LabelFilter` above the expand.
 
 This is a **one-to-many** operator: one input row can produce multiple output rows.
 
@@ -244,25 +310,28 @@ fn next(self: *Skip, ctx: *ExecutionContext) !?*Row {
 
 Sort must see all input before producing any output—it's a **blocking operator**.
 
-```zig
-fn open(self: *Sort, ctx: *ExecutionContext) !void {
-    try self.input.open(ctx);
-
-    // Materialize all input rows
-    while (try self.input.next(ctx)) |row| {
-        try self.rows.append(row.*);
-    }
-
-    // Sort in memory
-    self.sortRows();
-}
-
-fn next(self: *Sort, ctx: *ExecutionContext) !?*Row {
-    if (self.index >= self.rows.items.len) return null;
-    defer self.index += 1;
-    return &self.rows.items[self.index];
-}
+```text
+open():
+    for each input row:
+        evaluate the row's sort keys once and keep them beside the row
+        (an evaluation error fails the query)
+        with a bound: keep the row only if it is among the best SKIP + LIMIT
+        so far, in a bounded max-heap
+    order the kept rows by their keys, ties by arrival order
+next():
+    return the next kept row
 ```
+
+The planner hands Sort the `SKIP` and `LIMIT` that follow it, so `ORDER BY ...
+LIMIT k` over n rows costs n log k comparisons and k rows of memory. Sort still
+reads all of its input, so writes below it happen. Ties keep input order, so the
+result is the same as a stable sort of everything followed by `SKIP` and `LIMIT`.
+
+The keys are compared by `orderValues`, a total order over all values: maps,
+nodes, relationships, lists, vectors, bytes, strings, booleans, numbers, then
+null. Nodes and relationships order by id. Integers and floats compare by exact
+value (converting the integer to a float would round above 2^53), and NaN is
+above every other number.
 
 This breaks the streaming model but is necessary for ordering.
 
@@ -275,18 +344,28 @@ the scan:
 
 ```text
 open():
-    results = database.vectorSearchInTxn(txn, query, k = 100, default ef_search)
-    allowed = node ids in results within the threshold
-    drain the input, keeping the rows whose node is in `allowed`
+    resolve the threshold (a literal or a parameter; null matches nothing)
+    k = what bounds the answer: SKIP + LIMIT, or 100 (DEFAULT_K)
+    loop:
+        results = database.vectorSearchInTxn(txn, query, k, default ef_search)
+        match results against the input rows (read once, keeping by node only
+        the rows whose node the search returned)
+        stop when: with a threshold, the farthest result is beyond it;
+                   with a LIMIT, there are SKIP + LIMIT candidate rows;
+                   otherwise, there are 100 candidate nodes;
+                   or the index has nothing more to return
+        k = 2 * k
+    if the whole index was searched, measure the candidates it did not return
 next():
     emit kept rows in distance order, storing each row's distance
 ```
 
-The candidate set is the **100 nearest vectors** in the whole index, a value
-fixed in the planner. The pattern's label scan still runs, and a node the scan
-produces that is not among those 100 is dropped even if it is within the
-threshold. The property name in `x.prop` is not used to choose an index: a
-database has one vector index.
+The input rows are the candidates, so the pattern's label narrows the answer, and
+a threshold query returns every candidate within it. `<` is strict and `<=` is
+not. The LIMIT bound applies only when a `RETURN` with a `LIMIT` follows with no
+`ORDER BY`, `DISTINCT` or aggregation in between. What stays approximate is HNSW
+recall when the search stops before the end of the index. The property name in
+`x.prop` is not used to choose an index: a database has one vector index.
 
 The distance is stored in the row for use in expressions or sorting. (A leaf
 `VectorSearch` operator, which emits the search results directly, also exists
@@ -348,19 +427,20 @@ fn next(self: *CreateNode, ctx: *ExecutionContext) !?*Row {
 
 **DeleteNode**: Removes nodes from the graph. With DETACH, also removes connected edges.
 
-```zig
-fn next(self: *DeleteNode, ctx: *ExecutionContext) !?*Row {
-    const row = try self.input.next(ctx) orelse return null;
-    const node_id = row.slots[self.target_slot].node_ref;
-
-    if (self.detach) {
-        try ctx.storage.detachDelete(node_id);
-    } else {
-        try ctx.storage.deleteNode(node_id);
-    }
-    return row;  // Pass through for chaining
-}
+```text
+first next():
+    drain the input, collecting each target node once (null targets are skipped)
+    without DETACH: if any collected node still has a relationship,
+        fail with NodeHasRelationships before deleting anything
+    with DETACH: delete each node's relationships by id
+    delete the nodes
+then: return the drained rows one at a time
 ```
+
+Draining first is what lets `DELETE r, n` work: the `DeleteEdge` below it in the
+chain has removed every `r` before any node is checked. **DeleteEdge** treats a
+relationship this statement already deleted as done, since an undirected match
+lists each relationship from both ends.
 
 **SetProperty**: Updates properties on nodes or edges.
 
@@ -405,6 +485,14 @@ MATCH (n:Person {name: "Alice"}) REMOVE n:Verified
 The remaining mutation operators are **CreateEdge**, **DeleteEdge**,
 **SetPropertiesReplace** (`SET n = {...}`), **SetPropertiesMerge**
 (`SET n += {...}`), and **MergeNode** / **MergeEdge** for `MERGE`.
+
+**MergeNode** evaluates the pattern's properties once (a null value is an
+error), then takes candidates from a property index on one of the pattern's
+labels when one exists, otherwise from the first label's index, otherwise from
+every node. It keeps the candidates that carry every label and every property,
+comparing as `=` does, and emits a row for each, applying `ON MATCH` to each. It
+creates a node only when nothing matches. A label or property name the database
+has never seen means nothing can match.
 
 ### Operator Inventory
 
@@ -462,14 +550,22 @@ operation with a null operand is null, `NOT`/`AND`/`OR` are Kleene (`false AND n
 is false, `true OR null` is true), and Filter keeps a row only when the predicate is
 true
 
-**Functions** (names are case-sensitive):
+**Functions** (names are matched without regard to case):
 - Graph and type: `id()`, `labels()`, `type()`, `properties()`
 - Numeric and conversion: `abs()`, `toInteger()`, `toFloat()`, `toString()`, `coalesce()`
 - String: `toUpper()`, `toLower()`, `trim()`, `replace()`, `substring()`, `split()`
 - List: `size()`, `head()`, `last()`, `tail()`, `range()`
 
 **Aggregates** (planned as an `Aggregate` operator): `count()`, `count(*)`,
-`sum()`, `avg()`, `min()`, `max()`, `collect()`
+`sum()`, `avg()`, `min()`, `max()`, `collect()`. Every aggregate but `count(*)`
+skips nulls. `sum` of integers is computed exactly in an `i128` and must fit in
+an `i64`; any float makes it a float.
+
+**Regular expressions**: `=~` compiles its pattern with `src/query/regex.zig` into
+a small program and runs it as a Pike VM, which follows every alternative at once,
+so matching takes time proportional to the text length times the program size.
+Each execution caches up to 32 compiled patterns. The supported syntax is listed
+in that file; backreferences and lookaround fail the query.
 
 **Vector Search**: `<=>` (vector distance operator)
 ```cypher
@@ -494,9 +590,11 @@ branch can admit entities the index never names and seeking would silently drop
 them.
 
 Vector search does not avoid the scan. The `<=>` pattern is recognised only when
-it is the whole `WHERE` clause; it is then planned as `VectorSearchWithInput`
-over the label (or all-nodes) scan, keeping only nodes among the 100 nearest vectors (see
-[Vector Search Operator](#vector-search-operator)).
+it is the whole `WHERE` clause and its threshold is a number or a parameter; it
+is then planned as `VectorSearchWithInput` over the label (or all-nodes) scan,
+which widens its search until it has the candidates the predicate asks for (see
+[Vector Search Operator](#vector-search-operator)). Any other `<=>` predicate is
+evaluated by `Filter`, row by row and exactly.
 
 ### Type Coercion
 
@@ -689,6 +787,11 @@ fn close(ptr: *anyopaque, _: *ExecutionContext) void {
 Operators that do hold storage resources across calls must release them here,
 or pinned pages leak.
 
+The executor closes the tree only after a successful `open()`. An operator that
+drains its input while opening (Aggregate, Distinct, Sort, Materialize,
+CrossProduct) therefore closes that input itself when the drain fails, so a
+query that fails during open leaves nothing open behind it.
+
 ## Future Optimizations
 
 The current planner uses simple heuristics. Future improvements could include:
@@ -852,6 +955,16 @@ The query cache holds up to 128 entries by default (`enable_query_cache`,
 execution is planned afresh, so planning decisions follow the current indexes
 and data. Schema changes, such as creating or dropping an index, invalidate the
 cache.
+
+A prepared query takes a shorter path. `Database.prepareCached` parses and
+analyses through the cache and returns the entry pinned; the C API keeps it on
+the query handle, `lattice_query_writes` answers from its AST, execution runs it
+through `executePreparedDetailedInTxn` (steps 4 to 9 above), and
+`lattice_query_free` unpins it. A pinned entry survives cache clears and
+eviction, and a prepared query run N times counts as one cache lookup, at
+prepare. A query that does not parse still prepares, without an entry, and
+executing it parses it and reports the error. With more than 128 prepared
+queries open, new ones fall back to uncached parsing.
 
 The automatic transaction is why a single write query is atomic. Only one
 read-write transaction may be open at a time, so a write query run while

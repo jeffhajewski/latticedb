@@ -112,8 +112,10 @@ The limits of `shortestPath` are listed under
 
 A query that fails says where and why: the stage that refused it (parse,
 semantic, plan or execution), a diagnostic code, a message, and the line and column
-of the part of the query at fault. The CLI prints them with a marker under that
-part:
+of the part of the query at fault. A plan error has no line and column; its
+message names the part instead, as in "ORDER BY item 2 aggregates, but the
+RETURN does not return that aggregate". The CLI prints the place with a marker
+under that part:
 
 ```text
 $ lattice exec db.lattice --query="RETURN 1/0"

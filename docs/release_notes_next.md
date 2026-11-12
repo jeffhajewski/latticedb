@@ -967,6 +967,13 @@ with relationships is one range probe, under 1 µs.
   `LOAD CSV`, type predicates (`IS :: INTEGER`), `||`, temporal and spatial
   types, and schema and administration statements (`CREATE INDEX`, `SHOW`,
   `EXPLAIN`).
+- **Plan errors have no line and column.** Their message names the part of the
+  query instead (`ORDER BY item 2`, ``RETURN uses `p` in COUNT { ... }``).
+  Parse, semantic and execution errors carry both.
+- **A label alternation reads every node.** `(n:A|B)`, `(n:!A)` and `(n:%)` are
+  checked on each node; `(n:A&B)` and `(n:A:B)` still start from a label scan.
+  A property map on a variable-length relationship (`-[:R*1..3 {k: 1}]->`)
+  filters the paths after the walk and does not shorten it.
 - **`shortestPath` takes one relationship pattern** with a lower bound of 0 or 1
   and no property map, only in `MATCH`, and a `WHERE` that reads the path is
   refused, since the search would not look further for a longer path that passes.

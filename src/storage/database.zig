@@ -3868,10 +3868,22 @@ pub const Database = struct {
         try self.ensurePropertyIndexTreesForWrite();
         self.initializePropertyIndex();
 
-        const definition = try self.propertyIndexDefinition(kind, scope, property, true);
+        var definition = try self.propertyIndexDefinition(kind, scope, property, true);
+        definition.encoding = .ordered;
         var index = &(self.property_index orelse return DatabaseError.IoError);
         if (index.hasDefinition(definition) catch |err| return mapPropertyIndexError(err)) {
             return DatabaseError.AlreadyExists;
+        }
+        // 0.16.0 would take the ordered keys for digests and find nothing
+        // under them, and leave them stale as it wrote. The file says so
+        // before it holds any, so that release refuses to open it.
+        const header = self.page_manager.getHeader();
+        if (header.min_reader_version < types.FORMAT_VERSION) {
+            var raised = header.*;
+            raised.min_reader_version = types.FORMAT_VERSION;
+            self.page_manager.updateHeader(&raised) catch return DatabaseError.IoError;
+            try self.sync();
+            self.page_manager.sync() catch return DatabaseError.IoError;
         }
         index.clearEntries(definition) catch |err| return mapPropertyIndexError(err);
         try self.populatePropertyIndexDefinition(definition);
@@ -3914,6 +3926,17 @@ pub const Database = struct {
         };
         var index = &(self.property_index orelse return false);
         return index.hasDefinition(definition) catch |err| return mapPropertyIndexError(err);
+    }
+
+    /// The declared index on a label's property as the catalog holds it, with
+    /// its encoding, or null when there is none.
+    pub fn nodePropertyIndex(self: *Self, label: []const u8, property: []const u8) DatabaseError!?PropertyIndexDefinition {
+        const definition = self.propertyIndexDefinition(.node, label, property, false) catch |err| switch (err) {
+            DatabaseError.MissingIndex => return null,
+            else => return err,
+        };
+        var index = &(self.property_index orelse return null);
+        return index.resolve(definition) catch |err| return mapPropertyIndexError(err);
     }
 
     pub fn dropNodePropertyIndex(self: *Self, label: []const u8, property: []const u8) DatabaseError!void {

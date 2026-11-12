@@ -259,3 +259,372 @@ test "lgr: MATCH (n) returns nodes in id order, as a label scan does" {
     }
     try db.abortTransaction(&txn);
 }
+
+// ============================================================================
+// Ordered property indexes
+// ============================================================================
+
+/// Plan `cypher` against `db` and report which scan the planner chose.
+fn planScanKind(db: *Database, cypher: []const u8) !lattice.query.planner.QueryPlanner.ScanKind {
+    const allocator = std.testing.allocator;
+    var parser = lattice.query.parser.Parser.init(allocator, cypher);
+    defer parser.deinit();
+    const parse_result = parser.parse();
+    if (parse_result.query == null) return error.ParseFailed;
+
+    var analyzer = lattice.query.semantic.SemanticAnalyzer.init(allocator);
+    defer analyzer.deinit();
+    const analysis = analyzer.analyze(parse_result.query.?);
+    if (!analysis.success) return error.SemanticFailed;
+
+    const storage_ctx = lattice.query.planner.StorageContext{
+        .node_tree = &db.node_tree,
+        .label_index = &db.label_index,
+        .edge_store = &db.edge_store,
+        .symbol_table = &db.symbol_table,
+        .hnsw_index = if (db.hnsw_index) |*hnsw| hnsw else null,
+        .fts_index = null,
+        .database = db,
+    };
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var planner = lattice.query.planner.QueryPlanner.init(arena.allocator(), storage_ctx);
+    defer planner.deinit();
+    const analysis_result = lattice.query.semantic.AnalysisResult{
+        .success = true,
+        .errors = &[_]lattice.query.semantic.SemanticError{},
+        .variables = analysis.variables,
+        .errors_dropped = false,
+    };
+    _ = try planner.plan(parse_result.query.?, &analysis_result);
+    return planner.last_scan_kind;
+}
+
+fn printValue(out: *std.ArrayList(u8), value: lattice.storage.database.ResultValue) !void {
+    const a = std.testing.allocator;
+    switch (value) {
+        .null_val => try out.appendSlice(a, "null"),
+        .bool_val => |b| try out.appendSlice(a, if (b) "true" else "false"),
+        .int_val => |i| try out.print(a, "i{d}", .{i}),
+        .float_val => |f| if (std.math.isNan(f)) try out.appendSlice(a, "NaN") else try out.print(a, "f{d}", .{f}),
+        .string_val => |s| try out.print(a, "s{d}:{s}", .{ s.len, s }),
+        .bytes_val => |s| try out.print(a, "b{d}", .{s.len}),
+        .node_id => |id| try out.print(a, "n{d}", .{id}),
+        .edge_id => |id| try out.print(a, "e{d}", .{id}),
+        .vector_val => |v| try out.print(a, "v{d}", .{v.len}),
+        .list_val => |items| {
+            try out.append(a, '[');
+            for (items) |item| {
+                try printValue(out, item);
+                try out.append(a, ',');
+            }
+            try out.append(a, ']');
+        },
+        .map_val => |entries| try out.print(a, "map{d}", .{entries.len}),
+    }
+}
+
+fn render(result: QueryResult) ![]u8 {
+    var out: std.ArrayList(u8) = .empty;
+    errdefer out.deinit(std.testing.allocator);
+    for (result.rows) |row| {
+        for (row.values) |value| {
+            try printValue(&out, value);
+            try out.append(std.testing.allocator, ' ');
+        }
+        try out.append(std.testing.allocator, '\n');
+    }
+    return out.toOwnedSlice(std.testing.allocator);
+}
+
+/// The same query on a database with the index and one without must give
+/// the same rows in the same order.
+fn expectSameAnswer(indexed: *Database, plain: *Database, ti: ?*lattice.transaction.manager.Transaction, tp: ?*lattice.transaction.manager.Transaction, cypher: []const u8) !void {
+    var a = try indexed.queryInTxn(ti, cypher);
+    defer a.deinit();
+    var b = try plain.queryInTxn(tp, cypher);
+    defer b.deinit();
+    const ra = try render(a);
+    defer std.testing.allocator.free(ra);
+    const rb = try render(b);
+    defer std.testing.allocator.free(rb);
+    if (!std.mem.eql(u8, ra, rb)) {
+        std.debug.print("query: {s}\nindexed:\n{s}\nplain:\n{s}\n", .{ cypher, ra, rb });
+        return error.TestExpectedEqual;
+    }
+}
+
+fn fillMixed(db: *Database, txn: ?*lattice.transaction.manager.Transaction, count: usize) !void {
+    var long_a: [300]u8 = undefined;
+    @memset(&long_a, 'm');
+    for (0..count) |i| {
+        const id = try db.createNode(txn, &.{"P"});
+        try db.setNodeProperty(txn, id, "id", .{ .int_val = @intCast(i) });
+        const value: ?PropertyValue = switch (i % 13) {
+            0 => .{ .int_val = @as(i64, @intCast(i % 50)) - 20 },
+            1 => .{ .float_val = @as(f64, @floatFromInt(i % 40)) / 4.0 - 3.0 },
+            2 => .{ .float_val = @floatFromInt(i % 30) },
+            3 => .{ .string_val = ([_][]const u8{ "Jo", "John", "Joan", "Jp", "J", "", "Jo\x00x", "b", "ab" })[i % 9] },
+            4 => .{ .string_val = long_a[0 .. 120 + (i % 20)] },
+            5 => .{ .bool_val = i % 2 == 0 },
+            6 => null,
+            7 => .{ .float_val = std.math.nan(f64) },
+            8 => .{ .int_val = (@as(i64, 1) << 60) + @as(i64, @intCast(i % 3)) },
+            9 => .{ .float_val = 0x1p60 },
+            10 => .{ .int_val = std.math.maxInt(i64) - @as(i64, @intCast(i % 2)) },
+            11 => .{ .float_val = -0.0 },
+            else => .{ .int_val = @intCast(i % 7) },
+        };
+        if (value) |v| try db.setNodeProperty(txn, id, "v", v);
+        if (i % 5 == 0) try db.setNodeProperty(txn, id, "w", .{ .int_val = @intCast(i % 11) });
+    }
+}
+
+const range_queries = [_][]const u8{
+    "MATCH (n:P) WHERE n.v > 3 RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v >= 3 RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v < 3 RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v <= 3.0 RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v >= -2 AND n.v < 5.5 RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE 5 > n.v AND n.v > 0 RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v > 1152921504606846976 RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v >= 1152921504606846976 AND n.v <= 1152921504606846977 RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v > 9223372036854775806 RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v STARTS WITH 'Jo' RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v STARTS WITH '' RETURN n.id ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v > 'J' AND n.v < 'Jp' RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v >= 'mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm' RETURN n.id ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v < 'mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm' RETURN n.id ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v STARTS WITH 'mmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmmm' RETURN n.id ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v > false RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v > 1 AND n.v < 'x' RETURN n.id ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v > null RETURN n.id ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v > 2 AND n.w = 3 RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v > 2 OR n.w = 3 RETURN n.id ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v > 2 AND n.v > 4 AND n.v <= 6 RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) RETURN n.id, n.v ORDER BY n.v LIMIT 15",
+    "MATCH (n:P) RETURN n.id, n.v ORDER BY n.v, n.id SKIP 20 LIMIT 30",
+    "MATCH (n:P) RETURN n.id, n.v ORDER BY n.v LIMIT 100000",
+    "MATCH (n:P) RETURN n.v AS v, n.id ORDER BY v LIMIT 40",
+    "MATCH (n:P) WHERE n.v > 0 RETURN n.id, n.v ORDER BY n.v LIMIT 12",
+    "MATCH (n:P) WHERE n.w > 3 RETURN n.id, n.v ORDER BY n.v LIMIT 12",
+    "MATCH (n:P) WHERE n.v STARTS WITH 'J' RETURN n.id, n.v ORDER BY n.v LIMIT 3",
+    "MATCH (n:P) RETURN n.id, n.v ORDER BY n.v LIMIT 0",
+    "MATCH (n:P) RETURN count(n)",
+    "MATCH (n:P) WHERE n.v >= 0 RETURN count(n)",
+    // Integers against floats, where rounding the integer would answer
+    // differently from comparing exactly (2^60 + 1 > 2^60.0).
+    "MATCH (n:P) WHERE n.v > 1152921504606846976.0 RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v >= 1152921504606846976.0 AND n.v < 1152921504606846978 RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v <= 1152921504606846976.0 AND n.v > 1e18 RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v > 9.223372036854775e18 RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v < 9223372036854775807.0 AND n.v >= 9.2e18 RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v = 1152921504606846977 RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v = 1152921504606846976 RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v = 1152921504606846976.0 RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v >= -0.0 AND n.v <= 0 RETURN n.id, n.v ORDER BY id(n)",
+    "MATCH (n:P) WHERE n.v > -0.5 AND n.v < 0.5 RETURN n.id, n.v ORDER BY id(n)",
+};
+
+test "lgr: number keys order as the engine compares integers with floats" {
+    const encode = lattice.graph.property_index.encodeOrderedValue;
+    const compareIntFloat = lattice.query.expression.compareIntFloat;
+    const two60: i64 = 1 << 60;
+    const ints = [_]i64{
+        std.math.minInt(i64),     std.math.minInt(i64) + 1, -two60 - 257, -two60 - 256, -two60 - 1,  -two60,
+        -(1 << 53) - 1,           -3,                       -1,           0,            1,           2,
+        (1 << 53) + 1,            two60 - 1,                two60,        two60 + 1,    two60 + 255, two60 + 256,
+        std.math.maxInt(i64) - 1, std.math.maxInt(i64),
+    };
+    const floats = [_]f64{
+        -std.math.inf(f64), -0x1p63, -0x1p60 - 256.0, -0x1p60, -0x1p53, -2.5,           -1.0,                 -0.5,   -0.0,              0.0,
+        0.5,                1.0,     2.0,             0x1p53,  0x1p60,  0x1p60 + 256.0, 9.223372036854775e18, 0x1p63, std.math.inf(f64),
+    };
+    for (ints) |i| {
+        const ei = encode(.{ .int_val = i }).?;
+        for (floats) |f| {
+            const ef = encode(.{ .float_val = f }).?;
+            const want = compareIntFloat(i, f).?;
+            const got = std.mem.order(u8, ei.bytes(), ef.bytes());
+            if (want != got) {
+                std.debug.print("{d} vs {d}: engine {s}, keys {s}\n", .{ i, f, @tagName(want), @tagName(got) });
+                return error.TestExpectedEqual;
+            }
+        }
+        for (ints) |j| {
+            const ej = encode(.{ .int_val = j }).?;
+            try std.testing.expectEqual(std.math.order(i, j), std.mem.order(u8, ei.bytes(), ej.bytes()));
+        }
+    }
+    for (floats) |f| {
+        for (floats) |g| {
+            const want = std.math.order(f, g);
+            try std.testing.expectEqual(want, std.mem.order(u8, encode(.{ .float_val = f }).?.bytes(), encode(.{ .float_val = g }).?.bytes()));
+        }
+    }
+}
+
+fn compareAll(indexed: *Database, plain: *Database, ti: ?*lattice.transaction.manager.Transaction, tp: ?*lattice.transaction.manager.Transaction) !void {
+    for (range_queries) |cypher| try expectSameAnswer(indexed, plain, ti, tp, cypher);
+}
+
+test "lgr: an ordered index answers ranges and ORDER BY ... LIMIT exactly as a scan does" {
+    const path_i = "/tmp/lgr_range_indexed.ltdb";
+    const path_p = "/tmp/lgr_range_plain.ltdb";
+    defer removeFiles(path_i);
+    defer removeFiles(path_p);
+    var indexed = try openDb(path_i, true);
+    defer indexed.close();
+    var plain = try openDb(path_p, true);
+    defer plain.close();
+
+    for ([_]*Database{ indexed, plain }) |db| {
+        var txn = try db.beginTransaction(.read_write);
+        try fillMixed(db, &txn, 700);
+        try db.commitTransaction(&txn);
+    }
+    try indexed.createNodePropertyIndex("P", "v");
+
+    const Kind = lattice.query.planner.QueryPlanner.ScanKind;
+    try std.testing.expectEqual(Kind.property_range_scan, try planScanKind(indexed, "MATCH (n:P) WHERE n.v > 3 RETURN n"));
+    try std.testing.expectEqual(Kind.property_range_scan, try planScanKind(indexed, "MATCH (n:P) WHERE n.v STARTS WITH 'Jo' RETURN n"));
+    try std.testing.expectEqual(Kind.property_order_scan, try planScanKind(indexed, "MATCH (n:P) RETURN n ORDER BY n.v LIMIT 10"));
+    try std.testing.expectEqual(Kind.property_index_scan, try planScanKind(indexed, "MATCH (n:P) WHERE n.v = 3 AND n.v > 1 RETURN n"));
+    // Not without a LIMIT, not descending, not through an OR.
+    try std.testing.expectEqual(Kind.label_scan, try planScanKind(indexed, "MATCH (n:P) RETURN n ORDER BY n.v"));
+    try std.testing.expectEqual(Kind.label_scan, try planScanKind(indexed, "MATCH (n:P) RETURN n ORDER BY n.v DESC LIMIT 3"));
+    try std.testing.expectEqual(Kind.label_scan, try planScanKind(indexed, "MATCH (n:P) WHERE n.v > 3 OR n.w = 1 RETURN n"));
+    try std.testing.expectEqual(Kind.label_scan, try planScanKind(plain, "MATCH (n:P) WHERE n.v > 3 RETURN n"));
+
+    try compareAll(indexed, plain, null, null);
+
+    // Inside a transaction that changed some of the values: the scan merges
+    // the transaction's own nodes in.
+    var ti = try indexed.beginTransaction(.read_write);
+    var tp = try plain.beginTransaction(.read_write);
+    for ([_]*Database{ indexed, plain }, [_]*lattice.transaction.manager.Transaction{ &ti, &tp }) |db, txn| {
+        try fillMixed(db, txn, 60);
+        var id: u64 = 1;
+        while (id < 700) : (id += 37) {
+            try db.setNodeProperty(txn, id, "v", .{ .int_val = @intCast(id % 9) });
+        }
+        id = 5;
+        while (id < 700) : (id += 41) try db.removeNodeProperty(txn, id, "v");
+        id = 7;
+        while (id < 700) : (id += 53) try db.deleteNode(txn, id);
+    }
+    try compareAll(indexed, plain, &ti, &tp);
+    try indexed.commitTransaction(&ti);
+    try plain.commitTransaction(&tp);
+    try compareAll(indexed, plain, null, null);
+}
+
+test "lgr: ORDER BY ... LIMIT is not read in index order under a vector search" {
+    const path = "/tmp/lgr_order_vector.ltdb";
+    removeFiles(path);
+    defer removeFiles(path);
+    var db = try Database.open(std.testing.allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_fts = false, .enable_vector = true, .vector_dimensions = 4 },
+    });
+    defer db.close();
+    // Nearest to [1, 0, 0, 0] first is highest rank first.
+    for (0..100) |i| {
+        const node = try db.createNode(null, &.{"Doc"});
+        try db.setNodeProperty(null, node, "rank", .{ .int_val = @intCast(99 - i) });
+        const angle = @as(f32, @floatFromInt(i)) * (std.math.pi / 2.0) / 100.0;
+        try db.setNodeVector(node, &[_]f32{ @cos(angle), @sin(angle), 0, 0 });
+    }
+    try db.createNodePropertyIndex("Doc", "rank");
+
+    // The search emits its rows nearest first, so the scan below it cannot
+    // be read in the ORDER BY's order and cut off.
+    const cypher = "MATCH (d:Doc) WHERE d.embedding <=> [1.0, 0.0, 0.0, 0.0] < 2.0 RETURN d.rank ORDER BY d.rank LIMIT 3";
+    const Kind = lattice.query.planner.QueryPlanner.ScanKind;
+    try std.testing.expectEqual(Kind.label_scan, try planScanKind(db, cypher));
+    var result = try db.query(cypher);
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 3), result.rowCount());
+    for (result.rows, 0..) |row, want| try std.testing.expectEqual(@as(i64, @intCast(want)), row.values[0].int_val);
+}
+
+test "lgr: a query that writes takes the range up front" {
+    const path = "/tmp/lgr_range_write.ltdb";
+    defer removeFiles(path);
+    var db = try openDb(path, true);
+    defer db.close();
+    var txn = try db.beginTransaction(.read_write);
+    for (0..50) |i| {
+        const id = try db.createNode(&txn, &.{"P"});
+        try db.setNodeProperty(&txn, id, "v", .{ .int_val = @intCast(i) });
+    }
+    try db.commitTransaction(&txn);
+    try db.createNodePropertyIndex("P", "v");
+
+    // Moving each node past the end of the range must not bring it back.
+    {
+        var result = try db.query("MATCH (n:P) WHERE n.v >= 10 SET n.v = n.v + 100 RETURN count(n)");
+        defer result.deinit();
+        try std.testing.expectEqual(@as(i64, 40), result.rows[0].values[0].int_val);
+    }
+    {
+        var result = try db.query("MATCH (n:P) WHERE n.v >= 110 RETURN count(n)");
+        defer result.deinit();
+        try std.testing.expectEqual(@as(i64, 40), result.rows[0].values[0].int_val);
+    }
+}
+
+test "lgr: an ordered index raises the minimum reader version, an old index keeps working" {
+    const path = "/tmp/lgr_index_versions.ltdb";
+    defer removeFiles(path);
+    {
+        var db = try openDb(path, true);
+        defer db.close();
+        try std.testing.expectEqual(lattice.core.types.MIN_READER_VERSION, db.page_manager.getHeader().min_reader_version);
+        var txn = try db.beginTransaction(.read_write);
+        for (0..30) |i| {
+            const id = try db.createNode(&txn, &.{"P"});
+            try db.setNodeProperty(&txn, id, "v", .{ .int_val = @intCast(i) });
+            try db.setNodeProperty(&txn, id, "u", .{ .int_val = @intCast(i % 3) });
+        }
+        try db.commitTransaction(&txn);
+
+        // An index as 0.16.0 declared it: an empty catalog value, digests.
+        const label = try db.symbol_table.intern("P");
+        const prop = try db.symbol_table.intern("u");
+        var index = &db.property_index.?;
+        const legacy = lattice.graph.property_index.Definition{ .kind = .node, .scope_id = label, .property_id = prop };
+        const it = try db.label_index.getNodesByLabel(label);
+        defer std.testing.allocator.free(it);
+        for (it) |node_id| {
+            const value = (try db.getNodePropertyByKeyInTxn(null, node_id, prop, std.testing.allocator, null)).?;
+            try index.add(legacy, node_id, value);
+        }
+        try index.createDefinition(legacy);
+        try db.sync();
+    }
+    {
+        var db = try reopenDb(path);
+        defer db.close();
+        // Still format 3's minimum: nothing here 0.16.0 would misread.
+        try std.testing.expectEqual(lattice.core.types.MIN_READER_VERSION, db.page_manager.getHeader().min_reader_version);
+        // The old index answers equality and is not used for ranges.
+        const Kind = lattice.query.planner.QueryPlanner.ScanKind;
+        try std.testing.expectEqual(Kind.property_index_scan, try planScanKind(db, "MATCH (n:P) WHERE n.u = 1 RETURN n"));
+        try std.testing.expectEqual(Kind.label_scan, try planScanKind(db, "MATCH (n:P) WHERE n.u > 1 RETURN n"));
+        var result = try db.query("MATCH (n:P) WHERE n.u = 1 RETURN count(n)");
+        defer result.deinit();
+        try std.testing.expectEqual(@as(i64, 10), result.rows[0].values[0].int_val);
+
+        try db.createNodePropertyIndex("P", "v");
+        try std.testing.expectEqual(lattice.core.types.FORMAT_VERSION, db.page_manager.getHeader().min_reader_version);
+    }
+    {
+        var db = try reopenDb(path);
+        defer db.close();
+        try std.testing.expectEqual(lattice.core.types.FORMAT_VERSION, db.page_manager.getHeader().min_reader_version);
+        var result = try db.query("MATCH (n:P) WHERE n.v >= 25 RETURN count(n)");
+        defer result.deinit();
+        try std.testing.expectEqual(@as(i64, 5), result.rows[0].values[0].int_val);
+    }
+}

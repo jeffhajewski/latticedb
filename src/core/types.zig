@@ -41,7 +41,9 @@ pub const DEFAULT_PAGE_SIZE: u32 = 4096;
 /// File format version.
 ///
 /// 4 added the node id counter and the vector index configuration to the
-/// file header, past the end of the header 3 knows (see `FileHeader`).
+/// file header, past the end of the header 3 knows (see `FileHeader`), and
+/// ordered property indexes, whose entries 0.16.0 (format 3) would read as
+/// if they were digests and so answer every lookup with nothing.
 pub const FORMAT_VERSION: u16 = 4;
 
 /// The `min_reader_version` this release writes for a file that uses nothing
@@ -49,7 +51,8 @@ pub const FORMAT_VERSION: u16 = 4;
 /// format-4 header fields and drops them when it writes the header, which
 /// this release notices and recovers from, so it is not locked out. A file
 /// whose vector index uses a metric or connection count format 3 cannot
-/// express gets FORMAT_VERSION instead.
+/// express, or that holds an ordered property index, gets FORMAT_VERSION
+/// instead.
 pub const MIN_READER_VERSION: u16 = 3;
 
 /// Property value - a tagged union supporting multiple types

@@ -28,6 +28,7 @@ const var_expand_ops = @import("operators/var_expand.zig");
 const limit_ops = @import("operators/limit.zig");
 const vector_ops = @import("operators/vector.zig");
 const fts_ops = @import("operators/fts.zig");
+const range_ops = @import("operators/index_range_scan.zig");
 const mutation_ops = @import("operators/mutation.zig");
 const aggregate_ops = @import("operators/aggregate.zig");
 const distinct_ops = @import("operators/distinct.zig");
@@ -193,6 +194,20 @@ pub const QueryPlanner = struct {
     /// The query each slot's vector search uses; see
     /// ExecutionContext.vector_queries.
     vector_queries: executor.VectorQueries = .{},
+    /// WHERE conjuncts an index range scan answers, which the WHERE's filter
+    /// then leaves out.
+    consumed_conjuncts: std.ArrayList(*const ast.Expression) = .empty,
+    /// An ascending ORDER BY on a node's property, with a LIMIT, that the
+    /// first scan of the query could serve by reading an index in order.
+    order_hint: ?OrderHint = null,
+    /// Set once a scan reads in that order: the sort key to cut off on.
+    order_cutoff_key: ?*const ast.Expression = null,
+
+    const OrderHint = struct {
+        variable: []const u8,
+        property: []const u8,
+        sort_key: *const ast.Expression,
+    };
 
     /// How the planner resolved a node pattern to rows.
     pub const ScanKind = enum {
@@ -202,6 +217,11 @@ pub const QueryPlanner = struct {
         label_scan,
         /// Straight to the matching nodes through a property index.
         property_index_scan,
+        /// A range of an ordered property index (`<`, `>=`, `STARTS WITH`...).
+        property_range_scan,
+        /// Every node with the label, read through an ordered index in the
+        /// order an ORDER BY asks for.
+        property_order_scan,
         /// Straight to the matching entities through a full-text index.
         fts_index_seek,
     };
@@ -237,6 +257,7 @@ pub const QueryPlanner = struct {
         self.edge_bindings.deinit();
         self.name_slots.deinit();
         self.outer_bindings.deinit();
+        self.consumed_conjuncts.deinit(self.allocator);
     }
 
     /// Plan a complete query
@@ -257,6 +278,9 @@ pub const QueryPlanner = struct {
         self.next_slot = 0;
         self.output_columns = 0;
         self.output_column_names = [_]?[]const u8{null} ** MAX_SLOTS;
+        self.consumed_conjuncts.clearRetainingCapacity();
+        self.order_hint = orderHintFor(query.clauses);
+        self.order_cutoff_key = null;
 
         var current_op: ?Operator = null;
 
@@ -314,7 +338,7 @@ pub const QueryPlanner = struct {
                         switch (query.clauses[lookahead]) {
                             .order_by => |o| input_for_return = try self.planOrderBy(
                                 o,
-                                input_for_return,
+                                try self.orderedCutoff(input_for_return, query.clauses[lookahead + 1 ..]),
                                 r,
                                 if (r.distinct) &.{} else query.clauses[lookahead + 1 ..],
                             ),
@@ -640,6 +664,15 @@ pub const QueryPlanner = struct {
                             }
                         }
 
+                        // An ordered index answers ranges, and reads in order.
+                        var range_choice: ?RangeChoice = null;
+                        if (indexed_property == null and fts_candidate_count == 0) {
+                            if (node_var_name) |variable_name| {
+                                range_choice = try self.chooseRangeScan(variable_name, node_pattern.labels, where_hint, op == null);
+                                if (range_choice) |choice| scan_label_index = choice.label_index;
+                            }
+                        }
+
                         const scan_label_name = node_pattern.labels[scan_label_index];
                         const label_id = symbol_table.lookup(scan_label_name) catch |err| switch (err) {
                             symbols.SymbolError.NotFound => symbols.NULL_SYMBOL,
@@ -677,6 +710,17 @@ pub const QueryPlanner = struct {
                             ) catch return PlannerError.OutOfMemory;
                             self.last_scan_kind = .property_index_scan;
                             break :blk property_scan.operator();
+                        } else if (range_choice) |choice| blk: {
+                            const range_scan = range_ops.IndexRangeScan.init(
+                                self.allocator,
+                                slot,
+                                scan_label_name,
+                                choice.property,
+                                choice.conditions,
+                                database,
+                            ) catch return PlannerError.OutOfMemory;
+                            self.last_scan_kind = if (choice.conditions.len == 0) .property_order_scan else .property_range_scan;
+                            break :blk range_scan.operator();
                         } else blk: {
                             const label_scan = scan_ops.LabelScan.init(self.allocator, slot, label_id, database) catch {
                                 return PlannerError.OutOfMemory;
@@ -1066,6 +1110,253 @@ pub const QueryPlanner = struct {
         };
     }
 
+    const RangeChoice = struct {
+        label_index: usize,
+        property: []const u8,
+        /// Empty for a read of the whole label in the property's order.
+        conditions: []const range_ops.Condition,
+    };
+
+    const RangeConjunct = struct {
+        property: []const u8,
+        condition: range_ops.Condition,
+    };
+
+    const MAX_RANGE_CONJUNCTS = 16;
+
+    /// Whether to read the node pattern's label through an ordered index, and
+    /// which conjuncts of the WHERE that answers.
+    ///
+    /// The rule, without statistics to go on: a range on an indexed property
+    /// is always read from the index, which reads only matching entries and
+    /// so is never much worse than the label scan and filter it replaces
+    /// (measured at 200,000 nodes, a range matching every node costs about the
+    /// same either way). Equality indexes win over ranges (planned before
+    /// this), and ranges over the ORDER BY: a range on the ORDER BY's property
+    /// is read in order; a range on another property is read as a range and
+    /// sorted. With no usable range, an ORDER BY on an indexed property with a
+    /// LIMIT reads the index in order and stops after the first k rows.
+    fn chooseRangeScan(
+        self: *Self,
+        variable_name: []const u8,
+        labels: []const []const u8,
+        where_hint: ?*const ast.Expression,
+        first_scan: bool,
+    ) PlannerError!?RangeChoice {
+        // Vector and full-text predicates plan their own access paths from
+        // the WHERE as written, and emit their rows nearest or best first,
+        // not in the index's order.
+        const searches = if (where_hint) |condition| hasSearchConjunct(condition) else false;
+        var hint: ?OrderHint = null;
+        if (first_scan and !searches) {
+            if (self.order_hint) |h| {
+                if (std.mem.eql(u8, h.variable, variable_name)) hint = h;
+            }
+        }
+
+        var conjuncts: [MAX_RANGE_CONJUNCTS]RangeConjunct = undefined;
+        var count: usize = 0;
+        if (where_hint) |condition| {
+            if (!searches) collectRangeConjuncts(variable_name, condition, &conjuncts, &count);
+        }
+
+        var chosen_property: ?[]const u8 = null;
+        var chosen_label: usize = 0;
+        var ordered = false;
+        if (hint) |h| {
+            if (self.orderedIndexLabel(labels, h.property)) |label_idx| {
+                if (hasConjunctOn(conjuncts[0..count], h.property)) {
+                    chosen_property = h.property;
+                    chosen_label = label_idx;
+                    ordered = true;
+                }
+            }
+        }
+        if (chosen_property == null) {
+            for (conjuncts[0..count]) |conjunct| {
+                if (self.orderedIndexLabel(labels, conjunct.property)) |label_idx| {
+                    chosen_property = conjunct.property;
+                    chosen_label = label_idx;
+                    break;
+                }
+            }
+        }
+        if (chosen_property == null) {
+            if (hint) |h| {
+                if (self.orderedIndexLabel(labels, h.property)) |label_idx| {
+                    chosen_property = h.property;
+                    chosen_label = label_idx;
+                    ordered = true;
+                }
+            }
+        }
+        const property = chosen_property orelse return null;
+
+        var conditions: std.ArrayList(range_ops.Condition) = .empty;
+        for (conjuncts[0..count]) |conjunct| {
+            if (!std.mem.eql(u8, conjunct.property, property)) continue;
+            conditions.append(self.allocator, conjunct.condition) catch return PlannerError.OutOfMemory;
+            self.consumed_conjuncts.append(self.allocator, conjunct.condition.predicate) catch return PlannerError.OutOfMemory;
+        }
+        if (ordered) {
+            self.order_cutoff_key = hint.?.sort_key;
+            self.order_hint = null;
+        }
+        return .{
+            .label_index = chosen_label,
+            .property = property,
+            .conditions = conditions.toOwnedSlice(self.allocator) catch return PlannerError.OutOfMemory,
+        };
+    }
+
+    /// The first of `labels` with an ordered index on `property`.
+    fn orderedIndexLabel(self: *Self, labels: []const []const u8, property: []const u8) ?usize {
+        const database = self.storage.database orelse return null;
+        for (labels, 0..) |label_name, label_idx| {
+            const definition = (database.nodePropertyIndex(label_name, property) catch null) orelse continue;
+            if (definition.encoding == .ordered) return label_idx;
+        }
+        return null;
+    }
+
+    fn hasConjunctOn(conjuncts: []const RangeConjunct, property: []const u8) bool {
+        for (conjuncts) |conjunct| {
+            if (std.mem.eql(u8, conjunct.property, property)) return true;
+        }
+        return false;
+    }
+
+    /// Whether a conjunct of `expr` is a vector or full-text predicate.
+    fn hasSearchConjunct(expr: *const ast.Expression) bool {
+        const binary = switch (expr.*) {
+            .binary => |binary| binary,
+            else => return false,
+        };
+        switch (binary.operator) {
+            .and_ => return hasSearchConjunct(binary.left) or hasSearchConjunct(binary.right),
+            .vector_distance, .fts_match => return true,
+            .lt, .lte => return binary.left.* == .binary and binary.left.binary.operator == .vector_distance,
+            else => return false,
+        }
+    }
+
+    /// The conjuncts of `expr` that compare a property of `variable_name`
+    /// with a value independent of the row: `<`, `<=`, `>`, `>=` either way
+    /// round, and `STARTS WITH`.
+    fn collectRangeConjuncts(
+        variable_name: []const u8,
+        expr: *const ast.Expression,
+        out: *[MAX_RANGE_CONJUNCTS]RangeConjunct,
+        count: *usize,
+    ) void {
+        const binary = switch (expr.*) {
+            .binary => |binary| binary,
+            else => return,
+        };
+        if (binary.operator == .and_) {
+            collectRangeConjuncts(variable_name, binary.left, out, count);
+            collectRangeConjuncts(variable_name, binary.right, out, count);
+            return;
+        }
+        if (count.* == out.len) return;
+        const op: range_ops.RangeOp, const flipped: range_ops.RangeOp = switch (binary.operator) {
+            .lt => .{ .lt, .gt },
+            .lte => .{ .lte, .gte },
+            .gt => .{ .gt, .lt },
+            .gte => .{ .gte, .lte },
+            .starts_with => .{ .starts_with, .starts_with },
+            else => return,
+        };
+        if (propertyEqualityForVariable(variable_name, binary.left, binary.right)) |found| {
+            out[count.*] = .{ .property = found.name, .condition = .{ .op = op, .value = found.value, .predicate = expr } };
+            count.* += 1;
+        } else if (op != .starts_with) {
+            if (propertyEqualityForVariable(variable_name, binary.right, binary.left)) |found| {
+                out[count.*] = .{ .property = found.name, .condition = .{ .op = flipped, .value = found.value, .predicate = expr } };
+                count.* += 1;
+            }
+        }
+    }
+
+    /// `expr` without the conjuncts a scan below answers, or null when
+    /// nothing is left.
+    fn residualCondition(self: *Self, expr: *const ast.Expression) PlannerError!?*const ast.Expression {
+        for (self.consumed_conjuncts.items) |consumed| {
+            if (consumed == expr) return null;
+        }
+        const binary = switch (expr.*) {
+            .binary => |binary| binary,
+            else => return expr,
+        };
+        if (binary.operator != .and_) return expr;
+        const left = try self.residualCondition(binary.left);
+        const right = try self.residualCondition(binary.right);
+        const l = left orelse return right;
+        const r = right orelse return l;
+        if (l == binary.left and r == binary.right) return expr;
+        const narrowed = self.allocator.create(ast.BinaryExpr) catch return PlannerError.OutOfMemory;
+        narrowed.* = .{ .left = @constCast(l), .operator = .and_, .right = @constCast(r), .location = binary.location };
+        const result = self.allocator.create(ast.Expression) catch return PlannerError.OutOfMemory;
+        result.* = .{ .binary = narrowed };
+        return result;
+    }
+
+    /// The ORDER BY a query's first scan could serve in order: a single
+    /// MATCH pattern, an optional WHERE, then a RETURN that neither
+    /// aggregates nor deduplicates, sorted ascending first by a property of
+    /// a variable, with a LIMIT.
+    fn orderHintFor(clauses: []const ast.Clause) ?OrderHint {
+        if (clauses.len < 3) return null;
+        const match = switch (clauses[0]) {
+            .match => |m| m,
+            else => return null,
+        };
+        if (match.patterns.len != 1) return null;
+        var i: usize = 1;
+        if (std.meta.activeTag(clauses[i]) == .where) i += 1;
+        if (i + 1 >= clauses.len) return null;
+        const ret = switch (clauses[i]) {
+            .return_ => |r| r,
+            else => return null,
+        };
+        if (ret.distinct or returnAggregates(ret)) return null;
+        const order = switch (clauses[i + 1]) {
+            .order_by => |o| o,
+            else => return null,
+        };
+        if (order.items.len == 0 or order.items[0].descending) return null;
+        var limited = false;
+        for (clauses[i + 2 ..]) |clause| {
+            switch (clause) {
+                .limit => limited = true,
+                .skip => {},
+                else => break,
+            }
+        }
+        if (!limited) return null;
+        const key = resolveOrderAlias(order.items[0].expression, ret);
+        const access = switch (key.*) {
+            .property_access => |access| access,
+            else => return null,
+        };
+        const variable = switch (access.object.*) {
+            .variable => |variable| variable,
+            else => return null,
+        };
+        return .{ .variable = variable.name, .property = access.property, .sort_key = key };
+    }
+
+    /// The input, under a cutoff when a scan below reads in the sort's order.
+    fn orderedCutoff(self: *Self, input: ?Operator, following: []const ast.Clause) PlannerError!?Operator {
+        const key = self.order_cutoff_key orelse return input;
+        self.order_cutoff_key = null;
+        const input_op = input orelse return input;
+        const cutoff = range_ops.OrderedCutoff.init(self.allocator, input_op, key, try self.sortBounds(following)) catch {
+            return PlannerError.OutOfMemory;
+        };
+        return cutoff.operator();
+    }
+
     /// Plan a WHERE clause
     /// Detects vector distance (<=>)  and FTS match (@@) operators and creates
     /// specialized search operators for them instead of generic filters.
@@ -1079,8 +1370,16 @@ pub const QueryPlanner = struct {
         // A seek answers only the WHERE of its own MATCH, planned next.
         defer self.fts_seek_mask = 0;
 
+        // What an index range scan below already answers is left out.
+        var condition: *const ast.Expression = where.condition;
+        if (self.consumed_conjuncts.items.len > 0) {
+            const residual = try self.residualCondition(where.condition);
+            self.consumed_conjuncts.clearRetainingCapacity();
+            condition = residual orelse return input_op;
+        }
+
         // Check for vector search pattern: x.embedding <=> $query [< threshold]
-        if (self.detectVectorSearch(where.condition)) |vector_info| {
+        if (self.detectVectorSearch(condition)) |vector_info| {
             // An ORDER BY keeps the LIMIT bounding the search only when it
             // sorts nearest first by this search's own distance, the order
             // the search already returns its results in.
@@ -1092,7 +1391,7 @@ pub const QueryPlanner = struct {
         }
 
         // Check for FTS pattern: x.text @@ $query, or a disjunction of them
-        if (self.detectFtsSearch(where.condition)) |fts_info| {
+        if (self.detectFtsSearch(condition)) |fts_info| {
             // The MATCH already seeks this very search for the variable, and
             // every row it gives matches: searching again filters nothing
             // out. It used to run the whole search a second time.
@@ -1102,13 +1401,13 @@ pub const QueryPlanner = struct {
         {
             var disjuncts: [MAX_FTS_DISJUNCTS]FtsSearchInfo = undefined;
             var count: usize = 0;
-            if (self.collectFtsDisjuncts(where.condition, &disjuncts, &count) and count > 1) {
+            if (self.collectFtsDisjuncts(condition, &disjuncts, &count) and count > 1) {
                 return self.planFtsSearch(input_op, disjuncts[0..count]);
             }
         }
 
         // Default: create a filter operator
-        const filter = filter_ops.Filter.init(self.allocator, input_op, where.condition) catch {
+        const filter = filter_ops.Filter.init(self.allocator, input_op, condition) catch {
             return PlannerError.OutOfMemory;
         };
 

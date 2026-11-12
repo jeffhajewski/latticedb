@@ -173,6 +173,8 @@ comptime {
     _ = &c_api.lattice_stream_batch_free;
     _ = &c_api.lattice_stream_get_offset;
     _ = &c_api.lattice_stream_get_last_sequence;
+    _ = &c_api.lattice_changefeed_status;
+    _ = &c_api.lattice_changefeed_trim;
     _ = &c_api.lattice_stream_set_offset;
     _ = &c_api.lattice_stream_trim;
 }

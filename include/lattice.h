@@ -251,6 +251,29 @@ typedef enum {
     LATTICE_VECTOR_METRIC_DOT_PRODUCT = 3
 } lattice_vector_metric;
 
+/* How much of the changefeed (__lattice_changes) to keep
+ * (lattice_open_options_v5.changefeed_retention). The database file records
+ * its policy; retention drops the oldest events at checkpoints and on
+ * lattice_changefeed_trim(). */
+typedef enum {
+    /* The policy the file records, or ALL if it records none. A new database
+     * takes LATTICE_CHANGEFEED_RETENTION from the environment if it is set
+     * ("all", "off", "last:<events>", "age:<duration>" such as "7d"). */
+    LATTICE_CHANGEFEED_RETENTION_DEFAULT = 0,
+    /* Keep every event. */
+    LATTICE_CHANGEFEED_RETENTION_ALL = 1,
+    /* Keep the newest changefeed_retention_value events. */
+    LATTICE_CHANGEFEED_RETENTION_LAST = 2,
+    /* Keep events committed within the last changefeed_retention_value
+     * milliseconds. */
+    LATTICE_CHANGEFEED_RETENTION_AGE = 3,
+    /* Write no events and drop the ones there are. Reading the changefeed
+     * then returns LATTICE_ERROR_UNSUPPORTED. Switching back on leaves one
+     * sequence number unused, so a reader that read before the feed went off
+     * gets LATTICE_ERROR_NOT_FOUND instead of silently missing changes. */
+    LATTICE_CHANGEFEED_RETENTION_OFF = 4
+} lattice_changefeed_retention;
+
 /* Open options v5.
  *
  * Every v4 field keeps its meaning. The new fields use 0 for "not set":
@@ -269,6 +292,12 @@ typedef enum {
  * 0.16.0 records no configuration; its index is cosine, m 16, ef_construction
  * 200, with the dimensions its vector pages carry, and that configuration is
  * recorded the first time this release opens it for writing.
+ *
+ * changefeed_retention takes a lattice_changefeed_retention, with
+ * changefeed_retention_value the number of events (LAST) or milliseconds (AGE),
+ * which must then be at least 1. A value other than DEFAULT replaces the
+ * policy the file records when the database is opened for writing; a read-only
+ * open never changes it.
  */
 typedef struct {
     size_t struct_size;     /* Must be sizeof(lattice_open_options_v5) */
@@ -290,10 +319,12 @@ typedef struct {
     /* HNSW candidate list size while building, 1..4096. 0 means the file's, or
      * 200 for a new index. Fixed once the index exists. */
     uint16_t vector_ef_construction;
+    uint8_t changefeed_retention; /* A lattice_changefeed_retention (default: 0) */
+    uint64_t changefeed_retention_value; /* Events (LAST) or milliseconds (AGE) */
 } lattice_open_options_v5;
 
 /* Default open options v5 */
-#define LATTICE_OPEN_OPTIONS_V5_DEFAULT { sizeof(lattice_open_options_v5), false, false, 100, 4096, false, 128, true, false, true, 0, 0, 0, 0, 0 }
+#define LATTICE_OPEN_OPTIONS_V5_DEFAULT { sizeof(lattice_open_options_v5), false, false, 100, 4096, false, 128, true, false, true, 0, 0, 0, 0, 0, 0, 0 }
 
 /*
  * Database operations
@@ -721,6 +752,27 @@ lattice_error lattice_stream_get_last_sequence(
     size_t stream_len,
     uint64_t* sequence_out
 );
+
+/* The changefeed's retention policy (a lattice_changefeed_retention and its
+ * value), the oldest event it holds (0 when it holds none), and the last
+ * sequence it handed out. Any output pointer may be NULL.
+ *
+ * Reading the changefeed after a sequence whose next event retention or a trim
+ * has dropped returns LATTICE_ERROR_NOT_FOUND: the reader missed changes. An
+ * after_sequence of 0 always reads from the oldest event held. */
+lattice_error lattice_changefeed_status(
+    lattice_database* db,
+    uint8_t* retention_out,
+    uint64_t* retention_value_out,
+    uint64_t* oldest_sequence_out,
+    uint64_t* last_sequence_out
+);
+
+/* Apply the retention policy in full now, rather than a bounded part of it at
+ * each checkpoint, and make the result durable. removed_out (may be NULL)
+ * receives the number of events dropped. Returns LATTICE_ERROR_LOCK_TIMEOUT
+ * while a write transaction is open. */
+lattice_error lattice_changefeed_trim(lattice_database* db, uint64_t* removed_out);
 
 lattice_error lattice_stream_set_offset(
     lattice_txn* txn,

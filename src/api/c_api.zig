@@ -30,6 +30,7 @@ const StreamBatch = database.StreamBatch;
 const hash_embed_mod = lattice.vector.hash_embed;
 const embedding_mod = lattice.vector.embedding;
 const node_mod = lattice.graph.node;
+const changefeed_mod = lattice.stream.changefeed;
 const txn_mod = lattice.transaction.manager;
 const Transaction = txn_mod.Transaction;
 const TxnMode = txn_mod.TxnMode;
@@ -656,6 +657,22 @@ pub const lattice_open_options_v5 = extern struct {
     /// HNSW build candidate list size, 1..4096, for a new index; 0 for the
     /// file's or 200.
     vector_ef_construction: u16 = 0,
+    /// A lattice_changefeed_retention; 0 keeps the file's policy.
+    changefeed_retention: u8 = 0,
+    /// The number of events (LAST) or milliseconds (AGE) to keep.
+    changefeed_retention_value: u64 = 0,
+};
+
+/// Values of lattice_open_options_v5.changefeed_retention.
+pub const lattice_changefeed_retention = enum(u8) {
+    /// The policy the file records; keep everything if it records none
+    /// (LATTICE_CHANGEFEED_RETENTION from the environment for a new file).
+    default = 0,
+    all = 1,
+    last = 2,
+    age = 3,
+    off = 4,
+    _,
 };
 
 comptime {
@@ -669,6 +686,9 @@ comptime {
     std.debug.assert(@offsetOf(lattice_open_options_v5, "vector_metric") == @sizeOf(usize) + 21);
     std.debug.assert(@offsetOf(lattice_open_options_v5, "vector_m") == @sizeOf(usize) + 22);
     std.debug.assert(@offsetOf(lattice_open_options_v5, "vector_ef_construction") == @sizeOf(usize) + 24);
+    std.debug.assert(@offsetOf(lattice_open_options_v5, "changefeed_retention") == @sizeOf(usize) + 26);
+    std.debug.assert(@offsetOf(lattice_open_options_v5, "changefeed_retention_value") ==
+        std.mem.alignForward(usize, @sizeOf(usize) + 27, @alignOf(u64)));
 }
 
 // ============================================================================
@@ -1511,6 +1531,11 @@ fn buildOpenOptionsV5(options: ?*const lattice_open_options_v5) DatabaseError!Op
         };
         zig_options.config.vector_m = if (opts.vector_m == 0) null else opts.vector_m;
         zig_options.config.vector_ef_construction = if (opts.vector_ef_construction == 0) null else opts.vector_ef_construction;
+        zig_options.config.changefeed_retention = if (opts.changefeed_retention == 0)
+            null
+        else
+            changefeed_mod.Retention.fromMode(opts.changefeed_retention, opts.changefeed_retention_value) orelse
+                return DatabaseError.InvalidArgument;
     }
 
     return zig_options;
@@ -2811,6 +2836,52 @@ pub export fn lattice_stream_get_last_sequence(
     sequence_out.* = db_handle.db.getStreamLastSequence(stream_slice) catch |err| {
         return mapDatabaseError(err);
     };
+    return .ok;
+}
+
+/// Report the changefeed's retention policy, the oldest event it holds
+/// (0 when it holds none) and the last sequence it handed out.
+pub export fn lattice_changefeed_status(
+    db: ?*lattice_database,
+    retention_out: ?*u8,
+    retention_value_out: ?*u64,
+    oldest_sequence_out: ?*u64,
+    last_sequence_out: ?*u64,
+) lattice_error {
+    const db_handle = acquireDb(db) orelse return .err_invalid_arg;
+    defer releaseDb(db_handle);
+
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active = ensureActiveDbLocked(db_handle);
+    if (active != .ok) return active;
+
+    const status = db_handle.db.changefeedStatus() catch |err| return mapDatabaseError(err);
+    if (retention_out) |out| out.* = status.retention.mode();
+    if (retention_value_out) |out| out.* = status.retention.value();
+    if (oldest_sequence_out) |out| out.* = status.oldest_sequence orelse 0;
+    if (last_sequence_out) |out| out.* = status.last_sequence;
+    return .ok;
+}
+
+/// Apply the changefeed's retention policy in full now and make the result
+/// durable. Returns LATTICE_ERROR_LOCK_TIMEOUT while a write transaction is
+/// open and LATTICE_ERROR_READ_ONLY on a read-only handle.
+pub export fn lattice_changefeed_trim(
+    db: ?*lattice_database,
+    removed_out: ?*u64,
+) lattice_error {
+    const db_handle = acquireDb(db) orelse return .err_invalid_arg;
+    defer releaseDb(db_handle);
+    if (removed_out) |out| out.* = 0;
+
+    db_handle.mutex.lock();
+    defer db_handle.mutex.unlock();
+    const active = ensureActiveDbLocked(db_handle);
+    if (active != .ok) return active;
+
+    const removed = db_handle.db.trimChangefeed() catch |err| return mapDatabaseError(err);
+    if (removed_out) |out| out.* = removed;
     return .ok;
 }
 

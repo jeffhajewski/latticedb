@@ -23,6 +23,7 @@ const transaction_test = @import("transaction_test.zig");
 const quipu_repro_test = @import("quipu_longmemeval_repro.zig");
 const vector_test = @import("vector_test.zig");
 const lcf_btree_split_test = @import("lcf_btree_split_test.zig");
+const lcf_c_api_changefeed_test = @import("lcf_c_api_changefeed_test.zig");
 
 // Re-export tests from all modules
 test {
@@ -79,6 +80,7 @@ test {
     _ = quipu_repro_test;
     _ = vector_test;
     _ = lcf_btree_split_test;
+    _ = lcf_c_api_changefeed_test;
 }
 
 test "lattice version" {

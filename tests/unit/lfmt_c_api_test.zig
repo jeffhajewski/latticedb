@@ -22,7 +22,10 @@ test "lfmt c_api: v5 open options keep their ABI layout" {
     try std.testing.expectEqual(@as(usize, word + 22), @offsetOf(Options, "vector_m"));
     try std.testing.expectEqual(@as(usize, word + 21), @offsetOf(Options, "vector_metric"));
     try std.testing.expectEqual(@as(usize, word + 24), @offsetOf(Options, "vector_ef_construction"));
-    try std.testing.expectEqual(std.mem.alignForward(usize, word + 26, word), @sizeOf(Options));
+    try std.testing.expectEqual(@as(usize, word + 26), @offsetOf(Options, "changefeed_retention"));
+    const value_at = std.mem.alignForward(usize, word + 27, @alignOf(u64));
+    try std.testing.expectEqual(value_at, @offsetOf(Options, "changefeed_retention_value"));
+    try std.testing.expectEqual(std.mem.alignForward(usize, value_at + 8, word), @sizeOf(Options));
 }
 
 test "lfmt c_api: a v5 open records the metric, and a contradicting open is refused" {

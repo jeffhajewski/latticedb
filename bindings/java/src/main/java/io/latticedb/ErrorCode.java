@@ -30,6 +30,10 @@ public enum ErrorCode {
      * records: its dimensions, metric, M or ef_construction (native code
      * -18). */
     CONFIG_MISMATCH(-18),
+    /** The database file was written by a newer release that does not let
+     * this one write it (native code -19). It opens with
+     * {@code readOnly(true)}; a writable open writes nothing. */
+    NEEDS_NEWER_WRITER(-19),
     /** Placeholder for native codes this binding does not recognize. The
      * original numeric code is preserved on the exception that carries it
      * (see {@link LatticeException#getNativeCode()}). */

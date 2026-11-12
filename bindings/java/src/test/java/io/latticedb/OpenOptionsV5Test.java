@@ -3,6 +3,8 @@ package io.latticedb;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
 
+import java.io.IOException;
+import java.io.RandomAccessFile;
 import java.nio.file.Path;
 import java.util.List;
 
@@ -61,6 +63,27 @@ class OpenOptionsV5Test {
         assertCode(ErrorCode.CONFIG_MISMATCH, () -> Database.open(path,
                 OpenOptions.defaults().vectorM(12)).close());
         assertThrows(IllegalArgumentException.class, () -> OpenOptions.defaults().vectorM(64));
+    }
+
+    @Test
+    void fileMarkedForNewerWritersOpensOnlyReadOnly() throws IOException {
+        String path = dir.resolve("newer-writer.db").toString();
+        try (Database db = Database.open(path, OpenOptions.defaults().create(true))) {
+            db.write(tx -> tx.createNode(List.of("Old")));
+        }
+
+        // min_writer_version is a little-endian u16 at byte 222 of the header.
+        try (RandomAccessFile file = new RandomAccessFile(path, "rw")) {
+            file.seek(222);
+            file.write(new byte[]{5, 0});
+        }
+
+        assertCode(ErrorCode.NEEDS_NEWER_WRITER,
+                () -> Database.open(path, OpenOptions.defaults()).close());
+        try (Database db = Database.open(path, OpenOptions.defaults().readOnly(true))) {
+            Object c = db.query("MATCH (n:Old) RETURN count(n) AS c").rows().get(0).get("c");
+            assertEquals(1L, ((Number) c).longValue());
+        }
     }
 
     @Test

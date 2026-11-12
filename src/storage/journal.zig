@@ -82,6 +82,7 @@ pub const PageImage = struct {
 
 pub const Journal = struct {
     allocator: Allocator,
+    vfs: Vfs,
     file: File,
     /// Set while the journal's directory entry may not be on disk yet.
     unsynced_dir_path: ?[]u8 = null,
@@ -95,7 +96,7 @@ pub const Journal = struct {
         const file = vfs_impl.open(path, .{ .read = true, .write = true, .create = true }) catch {
             return JournalError.IoError;
         };
-        return .{ .allocator = allocator, .file = file };
+        return .{ .allocator = allocator, .vfs = vfs_impl, .file = file };
     }
 
     pub fn deinit(self: *Self) void {
@@ -155,7 +156,7 @@ pub const Journal = struct {
         self.file.sync() catch return JournalError.IoError;
 
         if (self.unsynced_dir_path) |path| {
-            vfs_mod.PosixVfs.syncParentDir(path);
+            self.vfs.syncParentDir(path);
             self.allocator.free(path);
             self.unsynced_dir_path = null;
         }

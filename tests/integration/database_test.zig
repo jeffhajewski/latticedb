@@ -4481,7 +4481,7 @@ test "database: deserialize can borrow the caller's bytes" {
 
         borrowed_bytes = switch (db.vfs) {
             .memory => |*m| m.byteCount(),
-            .posix => 0,
+            .posix, .external => 0,
         };
     }
 
@@ -4497,7 +4497,7 @@ test "database: deserialize can borrow the caller's bytes" {
 
         copied_bytes = switch (db.vfs) {
             .memory => |*m| m.byteCount(),
-            .posix => 0,
+            .posix, .external => 0,
         };
     }
 

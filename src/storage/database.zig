@@ -983,11 +983,17 @@ pub fn isMemoryPath(path: []const u8) bool {
 pub const Backend = union(enum) {
     posix: PosixVfs,
     memory: memory_vfs_mod.MemoryVfs,
+    /// A filesystem the caller owns and keeps alive for the life of the
+    /// database. Treated like a disk: the database keeps a flush journal on
+    /// it. For tests that need to see every write, such as the power-loss
+    /// simulation.
+    external: vfs_mod.Vfs,
 
     pub fn vfs(self: *Backend) vfs_mod.Vfs {
         return switch (self.*) {
             .posix => |*p| p.vfs(),
             .memory => |*m| m.vfs(),
+            .external => |v| v,
         };
     }
 
@@ -997,6 +1003,7 @@ pub const Backend = union(enum) {
             // closed by whoever opened them.
             .posix => {},
             .memory => |*m| m.deinit(),
+            .external => {},
         }
     }
 };
@@ -1093,6 +1100,12 @@ pub const Database = struct {
         return openWithBackend(allocator, path, options, null);
     }
 
+    /// Open a database on a filesystem the caller supplies, which has to
+    /// outlive the database. It is used like a disk, journal included.
+    pub fn openWithVfs(allocator: Allocator, path: []const u8, options: OpenOptions, vfs: vfs_mod.Vfs) DatabaseError!*Self {
+        return openWithBackend(allocator, path, options, Backend{ .external = vfs });
+    }
+
     /// Open a database, optionally against a backend that already holds it.
     ///
     /// `deserialize` uses this to hand over a memory backend it has already
@@ -1133,7 +1146,7 @@ pub const Database = struct {
         errdefer self.vfs.deinit();
         switch (self.vfs) {
             .posix => |*posix| posix.full_fsync = options.config.effectiveFullFsync(),
-            .memory => {},
+            .memory, .external => {},
         }
 
         // 2. Open/create PageManager
@@ -1196,7 +1209,7 @@ pub const Database = struct {
         const configured_pool_size = self.config.effectiveBufferPoolSize();
         const memory_pool_size = MIN_MEMORY_POOL_FRAMES * @as(usize, self.page_manager.getPageSize());
         const effective_pool_size = switch (self.vfs) {
-            .posix => configured_pool_size,
+            .posix, .external => configured_pool_size,
             .memory => @min(configured_pool_size, memory_pool_size),
         };
         self.buffer_pool = BufferPool.init(allocator, &self.page_manager, effective_pool_size) catch {
@@ -1212,7 +1225,7 @@ pub const Database = struct {
         // Anything a crash left in it was applied when the page manager
         // opened the file.
         self.journal = null;
-        if (!options.read_only and self.vfs == .posix) {
+        if (!options.read_only and self.vfs != .memory) {
             const journal_path = std.fmt.allocPrint(allocator, "{s}-journal", .{path}) catch {
                 return DatabaseError.OutOfMemory;
             };
@@ -1411,7 +1424,7 @@ pub const Database = struct {
             try self.sync();
             self.page_manager.sync() catch return DatabaseError.IoError;
             // The files are durable; make their names durable too.
-            if (self.vfs == .posix) PosixVfs.syncParentDir(path);
+            self.vfs.vfs().syncParentDir(path);
         }
 
         // Recover only after the vector index is available for logical redo.

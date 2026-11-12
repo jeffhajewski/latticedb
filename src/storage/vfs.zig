@@ -129,6 +129,11 @@ pub const Vfs = struct {
         delete: *const fn (ptr: *anyopaque, path: []const u8) VfsError!void,
         /// Check if file exists.
         exists: *const fn (ptr: *anyopaque, path: []const u8) bool,
+        /// Make the directory entries in the directory holding `path`
+        /// durable: names created or removed there survive a power cut once
+        /// this returns. Best effort, and optional: a backend with no
+        /// directories to sync leaves it null.
+        syncParentDir: ?*const fn (ptr: *anyopaque, path: []const u8) void = null,
     };
 
     /// Open a file with the given flags.
@@ -144,6 +149,16 @@ pub const Vfs = struct {
     /// Check if a file exists.
     pub fn exists(self: Vfs, path: []const u8) bool {
         return self.vtable.exists(self.ptr, path);
+    }
+
+    /// Make the names in the directory holding `path` durable.
+    ///
+    /// fsync on a file covers its contents, not the name that leads to it. A
+    /// file created just before a power cut can be complete on disk and still
+    /// missing from its directory. Best effort: a directory that cannot be
+    /// synced is not a reason to fail the caller.
+    pub fn syncParentDir(self: Vfs, path: []const u8) void {
+        if (self.vtable.syncParentDir) |sync_dir| sync_dir(self.ptr, path);
     }
 };
 
@@ -177,7 +192,13 @@ pub const PosixVfs = struct {
         .open = vfsOpen,
         .delete = vfsDelete,
         .exists = vfsExists,
+        .syncParentDir = vfsSyncParentDir,
     };
+
+    fn vfsSyncParentDir(ptr: *anyopaque, path: []const u8) void {
+        _ = ptr;
+        syncParentDir(path);
+    }
 
     fn vfsOpen(ptr: *anyopaque, path: []const u8, flags: OpenFlags) VfsError!File {
         const self: *Self = @ptrCast(@alignCast(ptr));

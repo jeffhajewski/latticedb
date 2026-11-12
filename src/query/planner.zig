@@ -42,6 +42,7 @@ const union_ops = @import("operators/union.zig");
 const optional_ops = @import("operators/optional.zig");
 const path_ops = @import("operators/path.zig");
 const subquery_ops = @import("operators/subquery.zig");
+const procedure_ops = @import("operators/procedure.zig");
 
 const btree = @import("../storage/btree.zig");
 const BTree = btree.BTree;
@@ -440,6 +441,15 @@ pub const QueryPlanner = struct {
                 .with => |w| current_op = try self.planWith(w, current_op orelse try self.singleRow()),
                 .merge => |m| current_op = try self.planMerge(m, current_op),
                 .unwind => |u| current_op = try self.planUnwind(u, current_op),
+                .call => |c| {
+                    // A CALL that is the whole query (with at most a WHERE on
+                    // what it yields) returns its columns itself.
+                    var standalone = clause_idx == 0;
+                    for (clauses[clause_idx + 1 ..]) |rest| {
+                        if (rest != .where) standalone = false;
+                    }
+                    current_op = try self.planCall(c, current_op orelse try self.singleRow(), standalone);
+                },
             }
         }
         return current_op;
@@ -624,7 +634,7 @@ pub const QueryPlanner = struct {
             },
             // Elsewhere a subquery is left unplanned, and `hostSubqueries`
             // refuses the query.
-            .match, .create, .merge, .remove, .limit, .skip => {},
+            .match, .create, .merge, .remove, .limit, .skip, .call => {},
         }
     }
 
@@ -708,6 +718,88 @@ pub const QueryPlanner = struct {
         const plans = self.subquery_plans.toOwnedSlice(self.allocator) catch return PlannerError.OutOfMemory;
         const host = subquery_ops.SubqueryHost.init(self.allocator, root, plans) catch return PlannerError.OutOfMemory;
         return host.operator();
+    }
+
+    /// Plan `CALL procedure() [YIELD ...]`: each input row once per row of the
+    /// procedure's answer, with the yielded columns bound as variables.
+    fn planCall(self: *Self, call: *const ast.CallClause, input: Operator, standalone: bool) PlannerError!Operator {
+        const procedure = procedure_ops.Procedure.find(call.procedure) orelse {
+            self.setPlanDetail("Unknown procedure '{s}'; the procedures are db.labels(), db.relationshipTypes(), db.propertyKeys() and db.indexes()", .{call.procedure});
+            return PlannerError.InvalidQuery;
+        };
+        if (call.arguments.len > 0) {
+            self.setPlanDetail("{s}() takes no arguments", .{procedure.name()});
+            return PlannerError.InvalidQuery;
+        }
+        if (!standalone and call.yield_all) {
+            self.setPlanDetail("YIELD * is only allowed when CALL {s}() is the whole query", .{procedure.name()});
+            return PlannerError.InvalidQuery;
+        }
+        if (!standalone and call.yields == null) {
+            self.setPlanDetail("CALL {s}() inside a larger query needs YIELD to name the columns it adds", .{procedure.name()});
+            return PlannerError.InvalidQuery;
+        }
+        const columns = procedure.columns();
+        const slots = self.allocator.alloc(?u8, columns.len) catch return PlannerError.OutOfMemory;
+        @memset(slots, null);
+        var names: [MAX_SLOTS][]const u8 = undefined;
+        var order: [MAX_SLOTS]u8 = undefined;
+        var count: usize = 0;
+
+        if (call.yields) |items| {
+            for (items) |item| {
+                const index = for (columns, 0..) |column, i| {
+                    if (std.mem.eql(u8, column, item.column)) break i;
+                } else {
+                    self.setPlanDetail("{s}() has no column `{s}`; it yields {s}", .{ procedure.name(), item.column, columnList(procedure) });
+                    return PlannerError.InvalidQuery;
+                };
+                if (slots[index] != null) {
+                    self.setPlanDetail("Column `{s}` is yielded twice", .{item.column});
+                    return PlannerError.InvalidQuery;
+                }
+                const name = item.alias orelse item.column;
+                const slot = try self.allocateNamedSlot(name);
+                try self.bindVariable(name, slot, .alias);
+                slots[index] = slot;
+                names[count] = name;
+                order[count] = slot;
+                count += 1;
+            }
+        } else {
+            for (columns, 0..) |column, i| {
+                const slot = try self.allocateNamedSlot(column);
+                try self.bindVariable(column, slot, .alias);
+                slots[i] = slot;
+                names[count] = column;
+                order[count] = slot;
+                count += 1;
+            }
+        }
+
+        if (standalone) {
+            // The columns are the result: the yielded ones, in the order
+            // asked for, which is the order their slots were taken in.
+            for (order[0..count], 0..) |slot, i| {
+                if (slot != i) return PlannerError.InvalidQuery;
+                self.output_column_names[i] = names[i];
+            }
+            self.output_columns = @intCast(count);
+        }
+
+        const database = self.storage.database orelse return PlannerError.MissingStorage;
+        const op = procedure_ops.ProcedureCall.init(self.allocator, input, procedure, slots, database) catch
+            return PlannerError.OutOfMemory;
+        return op.operator();
+    }
+
+    fn columnList(procedure: procedure_ops.Procedure) []const u8 {
+        return switch (procedure) {
+            .labels => "`label`",
+            .relationship_types => "`relationshipType`",
+            .property_keys => "`propertyKey`",
+            .indexes => "`type`, `entityType`, `labelOrType` and `property`",
+        };
     }
 
     /// The relationships of one MATCH clause, for relationship uniqueness.

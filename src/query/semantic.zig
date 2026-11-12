@@ -158,6 +158,12 @@ pub const SemanticAnalyzer = struct {
                 .with => |w| self.analyzeWithClause(w),
                 .merge => |m| self.analyzeMergeClause(m),
                 .unwind => |u| self.analyzeUnwindClause(u),
+                .call => |c| {
+                    for (c.arguments) |arg| self.analyzeExpression(arg);
+                    if (c.yields) |items| for (items) |item| {
+                        self.registerVariable(item.alias orelse item.column, .alias, item.location);
+                    };
+                },
             }
         }
     }

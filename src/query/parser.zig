@@ -416,6 +416,8 @@ pub const Parser = struct {
             return self.parseMatchClause();
         } else if (self.checkWord("optional")) {
             return self.parseOptionalMatchClause();
+        } else if (self.checkWord("call")) {
+            return self.parseCallClause();
         } else if (self.match(.kw_where)) {
             return self.parseWhereClause();
         } else if (self.match(.kw_return)) {
@@ -489,6 +491,85 @@ pub const Parser = struct {
         const clause = self.parseMatchClause() orelse return null;
         clause.match.optional = true;
         return clause;
+    }
+
+    /// `CALL name(args) [YIELD ...]`. CALL and YIELD are not reserved.
+    fn parseCallClause(self: *Self) ?ast.Clause {
+        const loc = self.currentLocation();
+        self.advance();
+        const a = self.arena.allocator();
+        if (self.check(.lbrace)) {
+            self.errorAtCurrent("CALL { ... } subqueries are not supported");
+            return null;
+        }
+        if (!self.checkName()) {
+            self.errorAtCurrent("Expected a procedure name after CALL");
+            return null;
+        }
+        var name: std.ArrayList(u8) = .empty;
+        name.appendSlice(a, self.current.text) catch return null;
+        self.advance();
+        while (self.match(.dot)) {
+            if (!self.checkName()) {
+                self.errorAtCurrent("Expected a procedure name after '.'");
+                return null;
+            }
+            name.append(a, '.') catch return null;
+            name.appendSlice(a, self.current.text) catch return null;
+            self.advance();
+        }
+        if (!self.consume(.lparen, "Expected '(' after the procedure name")) return null;
+        var args: std.ArrayList(*ast.Expression) = .empty;
+        if (!self.check(.rparen)) {
+            while (true) {
+                const arg = self.parseExpression() orelse return null;
+                args.append(a, arg) catch return null;
+                if (!self.match(.comma)) break;
+            }
+        }
+        if (!self.consume(.rparen, "Expected ')' after the procedure's arguments")) return null;
+
+        var yields: ?[]ast.YieldItem = null;
+        var yield_all = false;
+        if (self.checkWord("yield")) {
+            self.advance();
+            if (self.match(.star)) {
+                yield_all = true;
+            } else {
+                var items: std.ArrayList(ast.YieldItem) = .empty;
+                while (true) {
+                    if (!self.checkVariable()) {
+                        self.errorAtCurrent("Expected a column name after YIELD");
+                        return null;
+                    }
+                    const item_loc = self.currentLocation();
+                    const column = self.current.text;
+                    self.advance();
+                    var alias: ?[]const u8 = null;
+                    if (self.match(.kw_as)) {
+                        if (!self.checkVariable()) {
+                            self.errorAtCurrent("Expected a name after AS");
+                            return null;
+                        }
+                        alias = self.current.text;
+                        self.advance();
+                    }
+                    items.append(a, .{ .column = column, .alias = alias, .location = item_loc }) catch return null;
+                    if (!self.match(.comma)) break;
+                }
+                yields = items.items;
+            }
+        }
+
+        const clause = a.create(ast.CallClause) catch return null;
+        clause.* = .{
+            .procedure = name.items,
+            .arguments = args.items,
+            .yields = yields,
+            .yield_all = yield_all,
+            .location = loc,
+        };
+        return .{ .call = clause };
     }
 
     /// Whether the current token is an identifier spelled `word`, in any

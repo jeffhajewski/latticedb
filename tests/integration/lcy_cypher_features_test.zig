@@ -662,3 +662,44 @@ test "lcy: pattern comprehensions" {
     // A list literal that starts with a parenthesis is still a list.
     try expectResult(db, "WITH 2 AS a RETURN [(a), (a) + 1] AS l", "l\n[2, 3]");
 }
+
+test "lcy: CALL built-in procedures" {
+    const path = "/tmp/lcy_call.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedPeople(db);
+    try run(db, "CREATE (:Tag {label: 'x'})");
+    try db.createNodePropertyIndex("P", "name");
+    try db.createNodeFtsIndex("Tag", "label");
+
+    try expectResult(db, "CALL db.labels()", "label\n\"P\"\n\"Tag\"");
+    try expectResult(db, "CALL db.relationshipTypes()", "relationshipType\n\"KNOWS\"");
+    try expectResult(db, "CALL db.propertyKeys()", "propertyKey\n\"label\"\n\"name\"\n\"since\"");
+    try expectResult(db, "CALL db.indexes()", "type | entityType | labelOrType | property\n\"fulltext\" | \"NODE\" | \"Tag\" | \"label\"\n\"property\" | \"NODE\" | \"P\" | \"name\"");
+    // YIELD picks, renames and orders columns; WHERE filters them.
+    try expectResult(db, "CALL db.indexes() YIELD property, type AS kind WHERE kind = 'property'", "property | kind\n\"name\" | \"property\"");
+    try expectResult(db, "call DB.LABELS() yield *", "label\n\"P\"\n\"Tag\"");
+    // Inside a query.
+    try expectResult(db, "CALL db.labels() YIELD label MATCH (n) WHERE label IN labels(n) RETURN label, count(n) AS c ORDER BY label", "label | c\n\"P\" | 4\n\"Tag\" | 1");
+    try expectResult(db, "MATCH (p:P {name: 'ann'}) CALL db.relationshipTypes() YIELD relationshipType AS t RETURN p.name, t", "p.name | t\n\"ann\" | \"KNOWS\"");
+    try expectResult(db, "UNWIND [1, 2] AS i CALL db.labels() YIELD label RETURN i, label ORDER BY i, label", "i | label\n1 | \"P\"\n1 | \"Tag\"\n2 | \"P\"\n2 | \"Tag\"");
+    // CALL and YIELD stay usable as names.
+    try expectResult(db, "WITH 1 AS call, 2 AS yield RETURN call + yield AS s", "s\n3");
+
+    try expectFailure(db, "CALL db.nope()", .plan, "Unknown procedure 'db.nope'");
+    try expectFailure(db, "CALL db.labels(1)", .plan, "db.labels() takes no arguments");
+    try expectFailure(db, "CALL db.labels() YIELD name", .plan, "db.labels() has no column `name`; it yields `label`");
+    try expectFailure(db, "CALL db.labels() RETURN 1 AS x", .plan, "CALL db.labels() inside a larger query needs YIELD");
+    try expectFailure(db, "CALL db.labels() YIELD * RETURN 1 AS x", .plan, "YIELD * is only allowed when CALL db.labels() is the whole query");
+    try expectFailure(db, "CALL db.labels() YIELD label, label", .semantic, "already defined");
+    try expectFailure(db, "CALL { MATCH (n) RETURN n } RETURN 1", .parse, "CALL { ... } subqueries are not supported");
+}
+
+test "lcy: CALL on an empty database" {
+    const path = "/tmp/lcy_call_empty.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try expectResult(db, "CALL db.labels()", "label");
+    try expectResult(db, "CALL db.indexes()", "type | entityType | labelOrType | property");
+    try expectResult(db, "CALL db.propertyKeys()", "propertyKey");
+}

@@ -63,6 +63,7 @@ fn validateClause(clause: lattice.query.ast.Clause) bool {
         .with => true,
         .merge => true,
         .unwind => true,
+        .call => true,
     };
 }
 
@@ -228,6 +229,15 @@ test "parser: handles the syntax added after 0.16" {
         "RETURN COUNT { (a) ",
         "RETURN [(a)-->(b) |",
         "RETURN [(a)-->(b) WHERE",
+        "CALL db.labels()",
+        "CALL db.indexes() YIELD type AS t, property WHERE t = 'x' RETURN t",
+        "CALL db.labels() YIELD *",
+        "CALL",
+        "CALL db.",
+        "CALL db.labels(",
+        "CALL db.labels() YIELD",
+        "CALL db.labels() YIELD a AS",
+        "CALL { RETURN 1 }",
         "MATCH p (a) RETURN p",
         "MATCH p = RETURN p",
         "CREATE p = (a)",

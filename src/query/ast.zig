@@ -66,7 +66,7 @@ pub const Query = struct {
         for (clauses) |clause| {
             switch (clause) {
                 .create, .delete, .set, .remove, .merge => return true,
-                .match, .where, .return_, .order_by, .limit, .skip, .with, .unwind => {},
+                .match, .where, .return_, .order_by, .limit, .skip, .with, .unwind, .call => {},
             }
         }
         return false;
@@ -96,6 +96,25 @@ pub const Clause = union(enum) {
     with: *WithClause,
     merge: *MergeClause,
     unwind: *UnwindClause,
+    call: *CallClause,
+};
+
+/// `CALL procedure(args) [YIELD column [AS name], ... | YIELD *]`.
+pub const CallClause = struct {
+    /// The dotted name, as written: `db.labels`.
+    procedure: []const u8,
+    arguments: []*Expression,
+    /// The columns asked for; null without YIELD.
+    yields: ?[]YieldItem,
+    /// `YIELD *`.
+    yield_all: bool,
+    location: SourceLocation,
+};
+
+pub const YieldItem = struct {
+    column: []const u8,
+    alias: ?[]const u8,
+    location: SourceLocation,
 };
 
 // ============================================================================

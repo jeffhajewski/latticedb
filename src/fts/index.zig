@@ -378,6 +378,15 @@ pub const FtsIndex = struct {
         defer self.allocator.free(tokens);
 
         if (tokens.len == 0) {
+            // Record that the document has no terms. Without an entry,
+            // removing it later cannot tell "no terms" from "too many terms
+            // to record" and walks every posting list in the index.
+            if (self.reverse_index) |*ri| {
+                ri.setDocTerms(doc_id, &.{}) catch |err| return switch (err) {
+                    reverse_index_mod.ReverseIndexError.OutOfMemory => FtsError.OutOfMemory,
+                    else => FtsError.IoError,
+                };
+            }
             return 0;
         }
 
@@ -587,7 +596,9 @@ pub const FtsIndex = struct {
             } else {
                 // Reverse index has no entry for this doc. This happens when
                 // indexDocument skipped populating it because the serialized
-                // term list exceeded a single btree leaf page. Fall back to a
+                // term list exceeded a single btree leaf page, or when an
+                // earlier release indexed a document with no terms and wrote
+                // no entry for it. Fall back to a
                 // full dictionary scan so stale posting entries for doc_id do
                 // not survive removal (and resurrect on re-index under the
                 // same id).
@@ -2792,6 +2803,35 @@ test "fts searchWithMode excludes a phrase rather than requiring it" {
             }
         }
     }
+}
+
+test "fts a document with no terms is removed without walking the dictionary" {
+    const allocator = std.testing.allocator;
+    const fx = try AndSearchFixture.create(allocator, "/tmp/s3_lattice_fts_no_terms_test.db");
+    defer fx.destroy(allocator);
+
+    _ = try fx.index.indexDocument(1, "apple banana");
+    // Empty, and nothing but stop words: both analyse to no terms.
+    try std.testing.expectEqual(@as(u32, 0), try fx.index.indexDocument(2, ""));
+    try std.testing.expectEqual(@as(u32, 0), try fx.index.indexDocument(3, "the of and"));
+
+    // An entry with no terms tells removal there is nothing to clean up;
+    // without one it has to look through every posting list.
+    const ri = &fx.index.reverse_index.?;
+    for ([_]DocId{ 2, 3 }) |doc_id| {
+        const terms = (try ri.getDocTerms(doc_id)) orelse return error.TestExpectedReverseEntry;
+        defer ri.freeTerms(terms);
+        try std.testing.expectEqual(@as(usize, 0), terms.len);
+    }
+
+    try fx.index.removeDocument(2);
+    try fx.index.removeDocument(3);
+    try std.testing.expect(!ri.contains(2));
+    try std.testing.expect(!ri.contains(3));
+
+    const results = try fx.index.search("apple", 10);
+    defer fx.index.freeResults(results);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
 }
 
 test "fts AND search with a term no document contains matches nothing" {

@@ -724,7 +724,7 @@ pub const Repl = struct {
             .bool_val => |b| if (b) 4 else 5, // "true" or "false"
             .int_val => |i| blk: {
                 if (i == 0) break :blk 1;
-                var n = if (i < 0) @as(u64, @intCast(-i)) else @as(u64, @intCast(i));
+                var n: u64 = @abs(i);
                 var len: usize = if (i < 0) 1 else 0;
                 while (n > 0) : (n /= 10) len += 1;
                 break :blk len;

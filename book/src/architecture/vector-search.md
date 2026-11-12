@@ -5,7 +5,7 @@
 Lattice provides approximate nearest neighbor (ANN) search using the HNSW (Hierarchical Navigable Small World) algorithm. This enables semantic search over high-dimensional embedding vectors—a core requirement for AI/RAG applications.
 
 <img class="diagram" src="../assets/diagrams/vector-search-stack.svg"
-     alt="The vector search stack: an optional EmbeddingClient produces float32 vectors for the HnswIndex. The index persists into three structures backed by the buffer pool: VectorStorage pages holding the vectors, connection-pool pages holding each node's neighbour lists, and the hnsw_node_tree B+Tree registry that is saved on sync and loaded on open">
+     alt="The vector search stack: an optional EmbeddingClient or hash_embed helper produces float32 vectors, which the caller passes to the HnswIndex. The index persists into three structures backed by the buffer pool: VectorStorage pages holding the vectors, connection-pool pages holding each node's neighbour lists, and the hnsw_node_tree B+Tree registry, which is saved at every flush and checkpoint and loaded or rebuilt on open">
 
 ## Embedding Generation
 

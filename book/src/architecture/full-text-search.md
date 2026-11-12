@@ -38,7 +38,7 @@ Notice "The", "the", and "over" are missing—they're **stop words**.
 ### How It Works
 
 <img class="diagram" src="../assets/diagrams/fts-tokenize.svg"
-     alt="Tokenizing the string Hello, World! This is a TEST. Step one splits on anything that is not an ASCII letter, digit or underscore, so bytes of non-ASCII characters also split words. Step two applies a length filter dropping the single letter a. Step three drops the stop words this and is, comparing in lowercase. Step four is the index lowercasing what remains, leaving hello, world and test with their positions">
+     alt="Tokenizing the string Hello, World! This is a TEST. Step one splits it into words, runs of letters, digits and marks in any script, with each Han or hiragana character a word of its own. Step two keeps words of 2 to 64 bytes, dropping a. Step three drops the stop words this and is, compared after folding. Step four lowercases, folds accents and stems if enabled, so café becomes cafe, leaving hello, world and test at positions 0, 1 and 2">
 
 The tokenizer decodes UTF-8. A word is a run of code points that are letters,
 digits or combining marks in any script, plus `_`; spaces, punctuation, symbols
@@ -470,12 +470,12 @@ Total Score for Document 42 = 4.96 + 5.10 = 10.06
 ### Single-Term Search
 
 <img class="diagram" src="../assets/diagrams/fts-search-single.svg"
-     alt="Single-term search for database: tokenize the query, look the token up in the dictionary to get token id 3 with doc_freq 50 on posting page 44, walk that posting list computing a BM25 score per document, then sort by score and return the top K">
+     alt="Single-term search for database: tokenize the query, look the term up in the dictionary to get doc_freq 50 and posting page 44, read the posting list 128 entries per page pin, look up every document's length in one sorted pass and compute a BM25 score for each entry, then keep the best K in a bounded heap">
 
 ### Multi-Term Search (AND Semantics)
 
 <img class="diagram" src="../assets/diagrams/fts-search-and.svg"
-     alt="Multi-term AND search: tokenize into database and optimization, look each term up in the dictionary and order them rarest first, walk the rarest term's posting list and skip each other list forward to the same document, keep documents present in every list with their summed BM25 score, stop after twice K matches, then sort and return the top K">
+     alt="Multi-term AND search for database optimization: tokenize, normalise and dedupe into at most 32 terms; look each term up in the dictionary, returning no results if any term is missing, and order the terms rarest first; build a candidate map from the rarest term's posting list, read every other list once counting matches, and keep the candidates found in every list; then look up their lengths, score every match and keep the best K in a bounded heap">
 
 A query is split into at most 32 distinct normalised terms. A document matches
 only if it contains every term, so a term that is not in the dictionary at all
@@ -539,7 +539,7 @@ const results = try fts.searchWithMode("database -mysql -oracle", .@"and", 10);
 ```
 
 <img class="diagram" src="../assets/diagrams/fts-search-exclusion.svg"
-     alt="Exclusion search for database minus mysql: parse into positive terms and excluded terms, search the positive terms for up to twice K candidates, build the set of document ids containing mysql, then remove those candidates and return the top K, which can be fewer than K">
+     alt="Exclusion search for database minus mysql: parse into the positive term database and the excluded term mysql, search the positive terms for every matching document, build the set of document ids containing mysql, then remove the candidates in that set, sort and return the top K">
 
 Exclusion is applied after the candidate search, and so are phrase
 intersections. Every sub-search that is narrowed afterwards runs without a
@@ -865,7 +865,7 @@ what one document costs whenever it is indexed.
 ### Indexing one document
 
 <img class="diagram" src="../assets/diagrams/fts-index-document.svg"
-     alt="Indexing document 42 with the text The quick database optimization guide: tokenize into four terms, count their frequencies, then for each term get or create a dictionary entry, allocate a posting page if needed, append the posting and increment doc_freq, then store the document length of 4 and update the corpus totals, and finally record the document's terms in the reverse index so the document can be removed later">
+     alt="Indexing document 42 with the text The quick database optimization guide: tokenize with the index's recorded analysis, recording it first if the index is empty, giving quick, database, optimization and guide; normalise and count term frequencies; for each term get or create a dictionary entry, allocate a posting page if needed, append to the first posting page with room and increment doc_freq; store the document length of 4 and update and save the corpus totals; then record the document's terms in the reverse index, skipped when they exceed 32 KiB; it returns 4 tokens indexed">
 
 ---
 

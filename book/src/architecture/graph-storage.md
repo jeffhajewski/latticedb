@@ -337,8 +337,8 @@ LABEL_INDEX B+Tree:
 
 ```
 When creating node Alice with labels [Person, Employee]:
-  Insert: (Person, Alice) → ∅
-  Insert: (Employee, Alice) → ∅
+  Insert: (Person, Alice) → empty
+  Insert: (Employee, Alice) → empty
 
 Query "all Person nodes":
   Range scan: (Person, 0) to (Person, MAX)
@@ -394,7 +394,7 @@ Creating node Alice:Person with name="Alice":
    - Insert: 1 → serialized_data
 
 3. Label Index:
-   - Insert: (1000, 1) → ∅
+   - Insert: (1000, 1) → empty
 
 
 Creating edge (Alice)-[:KNOWS]->(Bob):
@@ -404,7 +404,7 @@ Creating edge (Alice)-[:KNOWS]->(Bob):
 
 2. Edge Store:
    - Allocate edge_id = 1
-   - Insert traversal keys: (1, OUT, 1002, 2, 1) → ∅ and (2, IN, 1002, 1, 1) → ∅
+   - Insert traversal keys: (1, OUT, 1002, 2, 1) → empty and (2, IN, 1002, 1, 1) → empty
    - Insert payload: 1 → serialized edge data and properties
    - Update edge-ID key 0: next_edge_id = 2
 ```

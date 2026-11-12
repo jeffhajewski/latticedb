@@ -1,0 +1,11 @@
+# Names that need cleaning up, that collide, and that are reserved.
+@prefix ex: <http://example.org/> .
+@prefix other: <http://other.example/ns/> .
+ex:s ex:first-name "a" ;
+    ex:first_name "b" ;
+    other:first_name "c" ;
+    <http://example.org/has%20space> "d" ;
+    <urn:isbn:0451450523> "e" ;
+    ex:iri "f" ;
+    ex:Resource "g" .
+ex:s a ex:Resource .

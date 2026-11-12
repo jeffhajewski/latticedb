@@ -1,0 +1,7 @@
+# Labelled and anonymous blank nodes, nested property lists.
+@prefix ex: <http://example.org/> .
+_:a ex:knows _:b .
+_:b ex:name "B" ; ex:knows _:a .
+[] ex:name "anonymous subject" .
+ex:s ex:address [ ex:city "Paris" ; ex:geo [ ex:lat 48.85 ; ex:long 2.35 ] ] .
+[ ex:name "as subject with properties" ] ex:p ex:o .

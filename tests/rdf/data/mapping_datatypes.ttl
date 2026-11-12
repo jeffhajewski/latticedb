@@ -1,0 +1,18 @@
+# Each datatype's value, one property seen with values of three kinds, and
+# one seen with two datatypes for strings.
+@prefix ex: <http://example.org/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+@prefix rdf: <http://www.w3.org/1999/02/22-rdf-syntax-ns#> .
+ex:s ex:int "17"^^xsd:int ;
+    ex:long "-9223372036854775808"^^xsd:long ;
+    ex:exactDecimal 2.5 ;
+    ex:inexactDecimal 0.1000000000000000000001 ;
+    ex:float "1.25"^^xsd:float ;
+    ex:bool "1"^^xsd:boolean ;
+    ex:bytes "aGVsbG8="^^xsd:base64Binary ;
+    ex:json "{\"a\":[1,2]}"^^rdf:JSON ;
+    ex:custom "x-42"^^ex:Code ;
+    ex:mixed 1 .
+ex:t ex:mixed "one" ;
+    ex:custom "plain" .
+ex:u ex:mixed 2.5e0 .

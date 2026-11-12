@@ -1,0 +1,7 @@
+# Repeated predicates, repeated triples, and edges between the same nodes.
+@prefix ex: <http://example.org/> .
+ex:s ex:alias "a", "b", "c" ;
+    ex:alias "a" ;
+    ex:links ex:t, ex:t ;
+    ex:links ex:u .
+ex:s ex:links ex:t .

@@ -1,0 +1,7 @@
+# The --rdf-lang language is the primary property; others get suffixed names,
+# and so do plain strings once the primary property holds English ones.
+@prefix ex: <http://example.org/> .
+@prefix skos: <http://www.w3.org/2004/02/skos/core#> .
+ex:c skos:prefLabel "Cat"@en, "Chat"@fr, "Katze"@de ;
+    skos:altLabel "Kitty"@en, "Puss"@en .
+ex:d skos:prefLabel "Dog" .

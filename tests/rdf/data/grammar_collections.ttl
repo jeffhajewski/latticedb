@@ -1,0 +1,8 @@
+# Collections of literals, of resources, empty and nested.
+@prefix ex: <http://example.org/> .
+ex:s ex:tags ( "red" "green" "blue" ) ;
+    ex:numbers ( 1 2 3 ) ;
+    ex:members ( ex:a ex:b ) ;
+    ex:empty () ;
+    ex:nested ( ( "x" ) "y" ) .
+ex:t ex:tags ( "only" ) .

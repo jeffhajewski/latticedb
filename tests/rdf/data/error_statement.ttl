@@ -1,0 +1,5 @@
+# The middle statement cannot be stored: its integer does not fit in 64 bits.
+@prefix ex: <http://example.org/> .
+ex:a ex:name "A" .
+ex:b ex:name "B" ; ex:count 123456789012345678901234567890 .
+ex:c ex:name "C" .

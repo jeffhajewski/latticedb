@@ -1,0 +1,6 @@
+# rdf:type becomes labels; several types give several labels.
+@prefix ex: <http://example.org/> .
+@prefix foaf: <http://xmlns.com/foaf/0.1/> .
+ex:ann a foaf:Person, ex:Employee ; foaf:name "Ann" .
+ex:acme a foaf:Organization ; foaf:name "Acme" .
+ex:Employee a <http://www.w3.org/2000/01/rdf-schema#Class> .

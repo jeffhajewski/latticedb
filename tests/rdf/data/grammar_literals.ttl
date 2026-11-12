@@ -1,0 +1,15 @@
+# Every way Turtle writes a literal.
+@prefix ex: <http://example.org/> .
+@prefix xsd: <http://www.w3.org/2001/XMLSchema#> .
+ex:s ex:short "double", 'single' ;
+    ex:long """three
+lines with "quotes" inside""", '''single
+long''' ;
+    ex:escapes "tab\tnewline\nquote\"backslash\\" ;
+    ex:unicode "café \U0001F600 naïve" ;
+    ex:lang "colour"@en-GB, "Farbe"@de ;
+    ex:integer 42, -7, +3 ;
+    ex:decimal 0.5, -12.25 ;
+    ex:double 1.5e3, -2E-2 ;
+    ex:boolean true, false ;
+    ex:typed "2024-03-01"^^xsd:date, "P1D"^^<http://www.w3.org/2001/XMLSchema#duration> .

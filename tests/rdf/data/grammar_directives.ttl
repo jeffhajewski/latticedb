@@ -1,0 +1,10 @@
+# Prefix and base directives in both spellings, and relative IRIs.
+@prefix ex: <http://example.org/> .
+PREFIX dc: <http://purl.org/dc/terms/>
+@base <http://example.org/docs/> .
+<report> dc:title "Annual report" ; ex:next <../people/ann> .
+BASE <http://example.org/other/>
+<a#frag> ex:seeAlso <?q=1>, <//host.example/x> .
+@prefix : <http://example.org/empty#> .
+:bare :p :o .
+ex:with.dots ex:p ex:x\~y .

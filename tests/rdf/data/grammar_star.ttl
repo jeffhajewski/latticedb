@@ -1,0 +1,5 @@
+# RDF-star: annotations on asserted triples, and statements about triples.
+@prefix ex: <http://example.org/> .
+ex:ann ex:worksFor ex:acme {| ex:since 2019 ; ex:role "engineer" |} .
+ex:ann ex:knows ex:bob .
+<< ex:ann ex:knows ex:bob >> ex:certainty 0.9 .

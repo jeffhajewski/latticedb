@@ -236,9 +236,19 @@ effort: it runs after the commit has succeeded, and if it fails, or is refused
 because a transaction has records in the log, the commit still reports success and
 the next commit tries again. Setting `auto_checkpoint = null` turns it off.
 
+It runs inside the commit call that crossed the threshold, not on a background
+thread, so that one call returns later. Measured through the C API on macOS (20,000
+single-node commits, default settings, release build, a busy machine), commits took
+about 50 µs and the ones that ran a checkpoint, about every thousandth, took 5 to
+12 ms and up to 27 ms. Taking the checkpoint off the commit path would need a
+background checkpointer, which LatticeDB does not have; a program that cannot
+afford the pause can turn the automatic checkpoint off and run checkpoints itself.
+
 **At open**, after recovery, if the log holds records after its last checkpoint,
 so the next open has nothing to replay and a torn frame at the log's tail does not
-sit in front of new ones.
+sit in front of new ones. A read-only open that recovers a crashed database runs
+this checkpoint too, on its in-memory overlay of the files, so it changes nothing on
+disk (see [Recovery](./recovery.md#the-order-of-work-at-open)).
 
 **At close**, for the same reason: `Database.close()` runs a truncate checkpoint when
 the log holds records after its last checkpoint, and the C API's `lattice_close`

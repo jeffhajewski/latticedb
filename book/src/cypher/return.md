@@ -29,6 +29,26 @@ RETURN n.name AS name, n.age AS age
 
 Without `AS`, a column is named after the text of its expression: `n.name`,
 `n.age + 1`, `coalesce(n.nickname, n.name)`, `count(*)`.
+Two columns cannot have the same name: `RETURN n.name, n.name` fails with
+"Column `n.name` is returned twice; give one of them another name with AS".
+
+## Every Variable: `RETURN *`
+
+`*` stands for every variable in scope, each as a column named after it, in
+alphabetical order. More items may follow it:
+
+```cypher
+MATCH (a:Person)-[k:KNOWS]->(b)
+RETURN *, b.name AS friend
+// columns: a, b, k, friend
+```
+
+Variables in scope are those the earlier clauses bound by name: pattern
+variables of `MATCH`, `OPTIONAL MATCH`, `CREATE` and `MERGE`, named paths,
+`UNWIND ... AS`, `CALL ... YIELD` columns, and what the last `WITH` passed on.
+Anonymous nodes and relationships are not included, nor is a `FOREACH` variable.
+`RETURN *` with nothing in scope fails with "RETURN * is not allowed when there
+are no variables in scope", and `*` must be the first item.
 
 ## Expressions
 

@@ -413,6 +413,10 @@ format, is `book/src/guides/changefeed.md`.
   `toString(null)` is null, where it was the string `'null'`.
 - **`CREATE` cannot add labels or properties to a bound variable.**
   `MATCH (n) CREATE (n:Extra {p: 1})` silently dropped them; it is now rejected.
+- **Two `RETURN` columns cannot share a name.** `RETURN n.v, n.v` returned two
+  columns called `n.v`, which no caller could tell apart by name; it now fails
+  with "Column `n.v` is returned twice; give one of them another name with AS".
+  `WITH` already refused a name twice.
 
 ### Storage, API and formats
 

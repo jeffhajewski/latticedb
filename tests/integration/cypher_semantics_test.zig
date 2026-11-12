@@ -279,7 +279,9 @@ test "cypher: RETURN and WITH accept up to 16 items" {
     const db = try openTestDb(path);
     defer cleanupTestDb(db, path);
 
-    var result = try db.query("UNWIND [7] AS x RETURN x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x");
+    var result = try db.query("UNWIND [7] AS x RETURN " ++
+        "x AS c1, x AS c2, x AS c3, x AS c4, x AS c5, x AS c6, x AS c7, x AS c8, x AS c9, " ++
+        "x AS c10, x AS c11, x AS c12, x AS c13, x AS c14, x AS c15, x AS c16");
     defer result.deinit();
     try std.testing.expectEqual(@as(usize, 1), result.rowCount());
     try std.testing.expectEqual(@as(usize, 16), result.columns.len);
@@ -300,11 +302,15 @@ test "cypher: more than 16 RETURN or WITH items is a plan error" {
 
     try std.testing.expectError(
         QueryError.PlanError,
-        db.query("UNWIND [7] AS x RETURN x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x"),
+        db.query("UNWIND [7] AS x RETURN " ++
+            "x AS c1, x AS c2, x AS c3, x AS c4, x AS c5, x AS c6, x AS c7, x AS c8, x AS c9, " ++
+            "x AS c10, x AS c11, x AS c12, x AS c13, x AS c14, x AS c15, x AS c16, x AS c17"),
     );
     try std.testing.expectError(
         QueryError.PlanError,
-        db.query("UNWIND [7] AS x RETURN x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, count(x)"),
+        db.query("UNWIND [7] AS x RETURN " ++
+            "x AS c1, x AS c2, x AS c3, x AS c4, x AS c5, x AS c6, x AS c7, x AS c8, x AS c9, " ++
+            "x AS c10, x AS c11, x AS c12, x AS c13, x AS c14, x AS c15, x AS c16, count(x)"),
     );
     try std.testing.expectError(
         QueryError.PlanError,
@@ -312,7 +318,9 @@ test "cypher: more than 16 RETURN or WITH items is a plan error" {
             "x AS i, x AS j, x AS k, x AS l, x AS m, x AS n, x AS o, x AS p, x AS q RETURN q"),
     );
 
-    var detailed = try db.queryDetailed("UNWIND [7] AS x RETURN x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x, x");
+    var detailed = try db.queryDetailed("UNWIND [7] AS x RETURN " ++
+        "x AS c1, x AS c2, x AS c3, x AS c4, x AS c5, x AS c6, x AS c7, x AS c8, x AS c9, " ++
+        "x AS c10, x AS c11, x AS c12, x AS c13, x AS c14, x AS c15, x AS c16, x AS c17");
     defer detailed.deinit();
     try std.testing.expect(detailed == .failure);
     try std.testing.expectEqualStrings("RETURN has 17 items, but at most 16 are supported.", detailed.failure.message);

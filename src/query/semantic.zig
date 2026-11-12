@@ -243,8 +243,21 @@ pub const SemanticAnalyzer = struct {
     }
 
     fn analyzeReturnClause(self: *Self, clause: *const ast.ReturnClause) void {
-        for (clause.items) |item| {
+        for (clause.items, 0..) |item, i| {
             self.analyzeExpression(item.expression);
+            // Two columns of one name could not be told apart.
+            const name = item.alias orelse item.text;
+            for (clause.items[0..i]) |earlier| {
+                if (std.mem.eql(u8, earlier.alias orelse earlier.text, name)) {
+                    self.addErrorFmt(
+                        .duplicate_variable,
+                        item.expression.getLocation(),
+                        "Column `{s}` is returned twice; give one of them another name with AS",
+                        .{name},
+                    );
+                    break;
+                }
+            }
         }
 
         // An alias introduced here is a name a following ORDER BY may use, as

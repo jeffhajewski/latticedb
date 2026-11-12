@@ -35,6 +35,15 @@ RETURN a.name, friend_count
 
 In this example, `b` is not available after the `WITH` clause — only `a` and `friend_count` are. Naming `b` after it fails with "Variable 'b' is not defined".
 
+`WITH *` passes on every variable in scope, and items after it add more:
+
+```cypher
+MATCH (a:Person)-[:KNOWS]->(b:Person)
+WITH *, a.age - b.age AS gap
+WHERE gap > 10
+RETURN a.name, b.name, gap
+```
+
 ## Multi-Stage Queries
 
 A `MATCH` after `WITH` can continue from a node the `WITH` passed on:

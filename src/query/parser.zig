@@ -263,6 +263,10 @@ pub const Parser = struct {
     owns_arena: bool = true,
     /// Every pattern subquery parsed, in the arena.
     subqueries: std.ArrayList(*ast.PatternSubquery) = .empty,
+    /// The variables the clauses parsed so far leave in scope, for
+    /// `RETURN *` and `WITH *`. Cypher's scoping is by syntax, so the
+    /// parser can follow it.
+    scope: std.ArrayList([]const u8) = .empty,
 
     const Self = @This();
 
@@ -327,6 +331,7 @@ pub const Parser = struct {
                     self.errorAtCurrent("Out of memory");
                     break;
                 };
+                self.updateScope(clause);
             } else {
                 self.synchronize();
             }
@@ -386,6 +391,8 @@ pub const Parser = struct {
         const all = self.checkWord("all");
         if (all) self.advance();
 
+        // Each single query of a UNION has its own variables.
+        self.scope.clearRetainingCapacity();
         if (clauses.items.len == 0) {
             self.errorAt(loc, "UNION needs a query before it");
             return;
@@ -684,39 +691,103 @@ pub const Parser = struct {
         const loc = self.previousLocation();
         const distinct = self.match(.kw_distinct);
 
-        var items: std.ArrayList(ast.ReturnItem) = .empty;
-
-        // Parse first return item
-        if (self.parseReturnItem()) |item| {
-            items.append(self.arena.allocator(), item) catch return null;
-        } else {
-            return null;
-        }
-
-        // Parse additional comma-separated items
-        while (self.match(.comma)) {
-            if (self.parseReturnItem()) |item| {
-                items.append(self.arena.allocator(), item) catch return null;
-            } else {
-                return null;
-            }
-        }
+        const items = self.parseProjectionItems("RETURN") orelse return null;
 
         const clause = self.arena.allocator().create(ast.ReturnClause) catch return null;
         clause.* = .{
             .distinct = distinct,
-            .items = items.toOwnedSlice(self.arena.allocator()) catch return null,
+            .items = items,
             .location = loc,
         };
 
         return .{ .return_ = clause };
     }
 
-    fn parseReturnItem(self: *Self) ?ast.ReturnItem {
+    /// The items of a RETURN or WITH. A leading `*` stands for every
+    /// variable in scope, in alphabetical order, each named after itself;
+    /// more items may follow it.
+    fn parseProjectionItems(self: *Self, keyword: []const u8) ?[]ast.ReturnItem {
+        const a = self.arena.allocator();
+        var items: std.ArrayList(ast.ReturnItem) = .empty;
+        var more = true;
         if (self.check(.star)) {
-            self.errorAtCurrent("RETURN * and WITH * are not supported; name the variables");
-            return null;
+            const star = self.currentLocation();
+            self.advance();
+            const names = a.dupe([]const u8, self.scope.items) catch return null;
+            std.mem.sort([]const u8, names, {}, struct {
+                fn lessThan(_: void, x: []const u8, y: []const u8) bool {
+                    return std.mem.lessThan(u8, x, y);
+                }
+            }.lessThan);
+            for (names) |name| {
+                const expr = a.create(ast.Expression) catch return null;
+                expr.* = .{ .variable = .{ .name = name, .location = star } };
+                items.append(a, .{ .expression = expr, .alias = null, .text = name }) catch return null;
+            }
+            more = self.match(.comma);
+            if (!more and names.len == 0) {
+                self.errorAt(star, if (std.mem.eql(u8, keyword, "RETURN"))
+                    "RETURN * is not allowed when there are no variables in scope"
+                else
+                    "WITH * is not allowed when there are no variables in scope");
+                return null;
+            }
         }
+        while (more) {
+            if (self.check(.star)) {
+                self.errorAtCurrent("* must come first in RETURN or WITH");
+                return null;
+            }
+            const item = self.parseReturnItem() orelse return null;
+            items.append(a, item) catch return null;
+            more = self.match(.comma);
+        }
+        return items.toOwnedSlice(a) catch null;
+    }
+
+    /// Follow the variables a top-level clause leaves in scope.
+    fn updateScope(self: *Self, clause: ast.Clause) void {
+        switch (clause) {
+            .match => |m| for (m.patterns) |pattern| self.scopePattern(pattern),
+            .create => |c| for (c.patterns) |pattern| self.scopePattern(pattern),
+            .merge => |m| self.scopePattern(m.pattern),
+            .unwind => |u| self.addToScope(u.variable),
+            .with => |w| {
+                // WITH keeps only what it projects.
+                self.scope.clearRetainingCapacity();
+                for (w.items) |item| {
+                    if (item.alias) |alias| {
+                        self.addToScope(alias);
+                    } else if (item.expression.* == .variable) {
+                        self.addToScope(item.expression.variable.name);
+                    }
+                }
+            },
+            .call => |c| if (c.yields) |yields| {
+                for (yields) |y| self.addToScope(y.alias orelse y.column);
+            },
+            else => {},
+        }
+    }
+
+    fn scopePattern(self: *Self, pattern: ast.Pattern) void {
+        if (pattern.path_variable) |name| self.addToScope(name);
+        for (pattern.elements) |element| switch (element) {
+            .node => |n| if (n.variable) |name| self.addToScope(name),
+            .edge => |e| if (e.variable) |name| self.addToScope(name),
+        };
+    }
+
+    fn addToScope(self: *Self, name: []const u8) void {
+        for (self.scope.items) |known| {
+            if (std.mem.eql(u8, known, name)) return;
+        }
+        self.scope.append(self.arena.allocator(), name) catch {
+            self.errors_dropped = true;
+        };
+    }
+
+    fn parseReturnItem(self: *Self) ?ast.ReturnItem {
         const first = self.current.text;
         const expr = self.parseExpression() orelse return null;
         const text = sourceSpan(first, self.previous.text);
@@ -1138,23 +1209,7 @@ pub const Parser = struct {
         const loc = self.previousLocation();
         const distinct = self.match(.kw_distinct);
 
-        var items: std.ArrayList(ast.ReturnItem) = .empty;
-
-        // Parse first WITH item (same syntax as RETURN items)
-        if (self.parseReturnItem()) |item| {
-            items.append(self.arena.allocator(), item) catch return null;
-        } else {
-            return null;
-        }
-
-        // Parse additional comma-separated items
-        while (self.match(.comma)) {
-            if (self.parseReturnItem()) |item| {
-                items.append(self.arena.allocator(), item) catch return null;
-            } else {
-                return null;
-            }
-        }
+        const items = self.parseProjectionItems("WITH") orelse return null;
 
         // Optional WHERE after WITH
         var where_expr: ?*ast.Expression = null;
@@ -1166,7 +1221,7 @@ pub const Parser = struct {
         const clause = self.arena.allocator().create(ast.WithClause) catch return null;
         clause.* = .{
             .distinct = distinct,
-            .items = items.toOwnedSlice(self.arena.allocator()) catch return null,
+            .items = items,
             .where = where_expr,
             .location = loc,
         };

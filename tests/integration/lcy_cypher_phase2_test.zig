@@ -219,3 +219,78 @@ test "lcy: a variable-length relationship's variable is a list, not a relationsh
     try expectFailure(db, "MATCH (a)-[r*1..2]->(b) SET r.w = 1", .execution, "");
     try expectFailure(db, "CREATE (a)-[r:R*1..2]->(b)", .semantic, "Variable-length relationships are only supported in MATCH");
 }
+
+// ============================================================================
+// RETURN * and WITH *
+// ============================================================================
+
+test "lcy: RETURN * returns every variable in scope, in alphabetical order" {
+    const path = "/tmp/lcy_return_star.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedChain(db);
+
+    try expectResult(db,
+        \\MATCH (x:V {name: 'a'})-[rel:S]->(b) RETURN *
+    , "b | rel | x\nN | E | N");
+    try expectResult(db,
+        \\MATCH p = (x:V {name: 'a'})-[:S]->(b) UNWIND [1, 2] AS k RETURN * ORDER BY k
+    , "b | k | p | x\nN | 1 | {nodes: [N, N], relationships: [E]} | N\nN | 2 | {nodes: [N, N], relationships: [E]} | N");
+    // With more items after it, and DISTINCT.
+    try expectResult(db,
+        \\MATCH (x:V {name: 'a'}) RETURN *, x.name AS name
+    , "x | name\nN | \"a\"");
+    try expectResult(db,
+        \\UNWIND [1, 1, 2] AS k RETURN DISTINCT * ORDER BY k
+    , "k\n1\n2");
+    // WITH * keeps every variable and adds the new ones; WITH narrows again.
+    try expectResult(db,
+        \\MATCH (x:V {name: 'a'}) WITH *, x.name AS name WITH *, size(name) AS len RETURN *
+    , "len | name | x\n1 | \"a\" | N");
+    try expectResult(db,
+        \\MATCH (x:V {name: 'a'})-->(y) WITH y.name AS n RETURN * ORDER BY n
+    , "n\n\"b\"\n\"d\"");
+    try expectResult(db,
+        \\MATCH (x:V {name: 'a'}) WITH * WHERE x.name = 'a' RETURN x.name
+    , "x.name\n\"a\"");
+    // Aggregating over it groups by every variable.
+    try expectResult(db,
+        \\UNWIND [1, 1, 2] AS k RETURN *, count(*) AS c ORDER BY k
+    , "k | c\n1 | 2\n2 | 1");
+    // OPTIONAL MATCH, CALL ... YIELD, UNWIND, CREATE and MERGE bring variables in.
+    try expectResult(db,
+        \\MATCH (x:V {name: 'd'}) OPTIONAL MATCH (x)-[o]->(y) RETURN *
+    , "o | x | y\nnull | N | null");
+    try expectResult(db,
+        \\CALL db.labels() YIELD label AS l RETURN *
+    , "l\n\"V\"");
+    try expectResult(db,
+        \\CREATE (c:Tmp {v: 1}) MERGE (m:Tmp {v: 2}) RETURN *
+    , "c | m\nN | N");
+    // Each query of a UNION has its own variables.
+    try expectResult(db,
+        \\UNWIND [1] AS a RETURN * UNION UNWIND [2] AS a RETURN *
+    , "a\n1\n2");
+    // FOREACH's variable stays inside it.
+    try expectResult(db,
+        \\UNWIND [1] AS a FOREACH (i IN [1] | CREATE (:Tmp)) RETURN *
+    , "a\n1");
+}
+
+test "lcy: RETURN * with nothing in scope is an error" {
+    const path = "/tmp/lcy_return_star_errors.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+
+    try expectFailure(db, "RETURN *", .parse, "RETURN * is not allowed when there are no variables in scope");
+    try expectFailure(db, "MATCH () RETURN *", .parse, "RETURN * is not allowed when there are no variables in scope");
+    try expectFailure(db, "MATCH (n) WITH n.v AS v, 1 AS w WITH 1 AS z UNION RETURN *", .parse, "RETURN * is not allowed");
+    try expectFailure(db, "WITH * RETURN 1", .parse, "WITH * is not allowed when there are no variables in scope");
+    try expectFailure(db, "MATCH (n) RETURN n, *", .parse, "* must come first in RETURN or WITH");
+    try expectFailure(db, "MATCH (n) RETURN *, n", .semantic, "Column `n` is returned twice; give one of them another name with AS");
+    try expectFailure(db, "MATCH (n) RETURN n.v, n.v", .semantic, "Column `n.v` is returned twice");
+    try expectFailure(db, "MATCH (n) RETURN n.v AS a, n.w AS a", .semantic, "Column `a` is returned twice");
+    try expectFailure(db, "MATCH (n) WITH *, n RETURN 1", .semantic, "Variable 'n' is already defined");
+    // With other items, an empty * is fine.
+    try expectResult(db, "RETURN *, 1 AS one", "one\n1");
+}

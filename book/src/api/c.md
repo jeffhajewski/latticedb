@@ -74,7 +74,22 @@ LATTICE_ERROR_OUT_OF_MEMORY // -13 - Out of memory
 LATTICE_ERROR_UNSUPPORTED   // -14 - Unsupported operation or value type
 LATTICE_ERROR_VALUE_TOO_LARGE // -15 - Value exceeds engine storage limits
 LATTICE_ERROR_DATABASE_LOCKED // -16 - Database is open in another process
+LATTICE_ERROR_HAS_RELATIONSHIPS // -17 - Node still has relationships
+LATTICE_ERROR_CONFIG_MISMATCH // -18 - Open options contradict the file's vector index
+LATTICE_ERROR_NEEDS_NEWER_WRITER // -19 - File may be written only by a newer release
 ```
+
+Some codes come from more than one place:
+
+| Code | Returned by |
+|------|-------------|
+| `LATTICE_ERROR_CORRUPTION` | An open whose log holds damage in frames that had been synced, or a committed change that cannot be replayed |
+| `LATTICE_ERROR_NOT_FOUND` | `lattice_edge_create` when either end does not exist; a query that creates a relationship to a node deleted earlier in it |
+| `LATTICE_ERROR_FULL` | A read-only open whose crash recovery needs more memory than it is allowed (see [Read-only opens after a crash](#read-only-opens-after-a-crash)) |
+| `LATTICE_ERROR_HAS_RELATIONSHIPS` | `lattice_node_delete`, and a query whose `DELETE` names a node that still has relationships |
+| `LATTICE_ERROR_CONFIG_MISMATCH` | `lattice_open*` with vector options that contradict the index the file records |
+| `LATTICE_ERROR_NEEDS_NEWER_WRITER` | A read-write open of a file whose header says only a newer release may write it; it still opens read-only |
+| `LATTICE_ERROR_IO`, `LATTICE_ERROR_OUT_OF_MEMORY` | Also `lattice_query_execute`, when the storage or an allocation failed under the query rather than the query itself |
 
 ### Value Types
 
@@ -113,14 +128,18 @@ typedef struct {
 ### Open
 
 ```c
-lattice_open_options opts = LATTICE_OPEN_OPTIONS_DEFAULT;
-opts.create = true;
-opts.enable_vector = true;
-opts.vector_dimensions = 128;
+lattice_open_options_v5 options = LATTICE_OPEN_OPTIONS_V5_DEFAULT;
+options.create = true;
+options.enable_vector = true;
+options.vector_dimensions = 128;
 
 lattice_database* db;
-lattice_error err = lattice_open("mydb.ltdb", &opts, &db);
+lattice_error err = lattice_open_v5("mydb.ltdb", &options, &db);
 ```
+
+`lattice_open_v5` is the newest open function; the older ones (`lattice_open`
+through `lattice_open_v4`, below) still work and behave as it does with the v5
+fields left at 0.
 
 ### Close
 
@@ -144,8 +163,8 @@ typedef struct {
     bool read_only;           // Open in read-only mode
     uint32_t cache_size_mb;   // Cache size in MB (default: 100)
     uint32_t page_size;       // Page size in bytes (default: 4096)
-    bool enable_vector;       // Enable vector storage
-    uint16_t vector_dimensions; // Vector dimensions (default: 128)
+    bool enable_vector;       // Create a vector index if the database has none
+    uint16_t vector_dimensions; // Vector dimensions, 1..4096 (default: 128)
 } lattice_open_options;
 ```
 
@@ -156,14 +175,15 @@ against the old size, so newer options come as new structs. Each starts with its
 own size, which is how the library knows which version you compiled against.
 
 ```c
-lattice_open_options_v4 options = LATTICE_OPEN_OPTIONS_V4_DEFAULT;
+lattice_open_options_v5 options = LATTICE_OPEN_OPTIONS_V5_DEFAULT;
 options.create = true;
 options.enable_vector = true;
 options.vector_dimensions = 1536;
-options.enable_adjacency_cache = true;
+options.vector_metric = LATTICE_VECTOR_METRIC_EUCLIDEAN;
+options.sync_mode = LATTICE_SYNC_MODE_NORMAL;
 
 lattice_database* db;
-lattice_open_v4("graph.lattice", &options, &db);
+lattice_open_v5("graph.lattice", &options, &db);
 ```
 
 Use `lattice_open_v2` with `lattice_open_options_v2`, which adds `enable_wal` to
@@ -173,6 +193,81 @@ in-memory map of which nodes connect to which. Nothing behind the C API reads
 that map yet, so leave it off.
 `lattice_open_options_v4` adds `lock`, which defaults to true and is described
 below.
+`lattice_open_options_v5` adds the durability settings and the vector index's
+configuration, described in the next two sections. Each new field is 0 for "not
+set", and a value outside its range makes the open return
+`LATTICE_ERROR_INVALID_ARG`.
+
+| Field | Values | When 0 |
+|-------|--------|--------|
+| `sync_mode` | `LATTICE_SYNC_MODE_FULL` (1), `LATTICE_SYNC_MODE_NORMAL` (2) | `LATTICE_SYNC_MODE` from the environment, else full |
+| `full_fsync` | `LATTICE_FULL_FSYNC_OFF` (1), `LATTICE_FULL_FSYNC_ON` (2) | `LATTICE_FULL_FSYNC` from the environment, else off |
+| `vector_metric` | `LATTICE_VECTOR_METRIC_COSINE` (1), `_EUCLIDEAN` (2), `_DOT_PRODUCT` (3) | The file's metric, or cosine for a new index |
+| `vector_m` | 2..32, HNSW connections per node (layer 0 keeps twice as many) | The file's, or 16 for a new index |
+| `vector_ef_construction` | 1..4096, HNSW candidate list size while building | The file's, or 200 for a new index |
+
+`lattice_deserialize` and `lattice_deserialize_borrowed` take the v4 options;
+there is no v5 form of them.
+
+### Durability settings
+
+`sync_mode` chooses when a commit waits for the disk. `FULL`, the default, syncs
+the log on every commit, so a commit that has returned survives a power cut.
+`NORMAL` hands the commit to the operating system and returns: it survives the
+process being killed, but a power cut or OS crash can lose the most recent
+commits, from the end only, and the database stays consistent. `full_fsync`, on
+macOS only, makes each sync ask the drive to flush its own cache
+(`F_FULLFSYNC`); it makes each commit several milliseconds slower and has no
+effect elsewhere. A value set in the options wins over the `LATTICE_SYNC_MODE`
+and `LATTICE_FULL_FSYNC` environment variables, which apply only to a handle
+that leaves the field at 0, as every older open function does. See
+[Durability and the Log](../configuration/durability.md).
+
+### Vector index configuration
+
+The database file records its vector index: the dimensions, the metric, `m`
+and `ef_construction`. A database that has an index opens with it whether or
+not `enable_vector` is set, so reopening needs no vector options at all, also
+after a crash. `enable_vector` means "create an index if the database has none",
+and `vector_metric`, `vector_m` and `vector_ef_construction` configure that new
+index. Once the index exists they are fixed; to change them, export the data
+and import it into a new database.
+
+Any of those three fields that is set, and `vector_dimensions` when
+`enable_vector` is set, must match what the file records, or the open returns
+`LATTICE_ERROR_CONFIG_MISMATCH` before anything is read. To open a database
+whose dimensions you do not know, leave `enable_vector` off.
+
+The metric decides what a search's distance is, smallest first, and what the
+Cypher `<=>` operator returns:
+
+| Metric | Distance | Vectors are stored |
+|--------|----------|--------------------|
+| `LATTICE_VECTOR_METRIC_COSINE` | `1 - cos(a, b)`, in [0, 2] | scaled to unit length |
+| `LATTICE_VECTOR_METRIC_EUCLIDEAN` | `sqrt(sum((a - b)^2))` | as given |
+| `LATTICE_VECTOR_METRIC_DOT_PRODUCT` | `-(a . b)`, so the largest dot product comes first | as given |
+
+A database written by 0.16.0 records no configuration. Its index is cosine with
+`m` 16 and `ef_construction` 200, at the dimensions its vector pages carry, and
+that configuration is written into the file the first time this release opens
+it for writing.
+
+### Files written by newer releases
+
+The file header says which releases may read the file and which may write it. A
+file that only a newer release may write opens with `read_only` set; a
+read-write open returns `LATTICE_ERROR_NEEDS_NEWER_WRITER` and writes nothing.
+
+### Read-only opens after a crash
+
+A read-only open of a database that was not closed cleanly recovers it in
+memory: the journal and log are applied as a read-write open would apply them,
+every write that recovery makes is kept in memory, and nothing reaches the
+files. The handle sees every committed transaction. The memory is bounded at
+64 MB plus four times the size of the log and journal; a recovery that needs
+more returns `LATTICE_ERROR_FULL`, and opening the database read-write once
+recovers it on disk. A database with an empty log and no journal opens read-only
+exactly as before.
 
 Always initialise from the matching `_DEFAULT` macro rather than zeroing the
 struct yourself, because `struct_size` has to be set correctly. With `lock` this
@@ -281,8 +376,19 @@ lattice_node_exists(txn, node_id, &exists);
 ### Delete a Node
 
 ```c
-lattice_node_delete(txn, node_id);
+lattice_error err = lattice_node_delete(txn, node_id);
+if (err == LATTICE_ERROR_HAS_RELATIONSHIPS) {
+    // The node still has relationships; nothing was deleted.
+    lattice_node_detach_delete(txn, node_id);   // deletes them with it
+}
 ```
+
+`lattice_node_delete` refuses a node that still has relationships the
+transaction can see, its own uncommitted ones included, with
+`LATTICE_ERROR_HAS_RELATIONSHIPS`, as Cypher's `DELETE` does: deleting the node
+alone would leave edges pointing at nothing. `lattice_node_detach_delete`
+deletes the node and every relationship it has, as `DETACH DELETE` does, all in
+the transaction. Deleting a node that does not exist succeeds and does nothing.
 
 ### Get Labels
 
@@ -382,7 +488,9 @@ lattice_edge_delete(txn, source_id, target_id, "KNOWS");
 ```
 
 The returned `lattice_edge_id` is stable. Use it for edge property APIs and to
-identify traversal results.
+identify traversal results. `lattice_edge_create` returns
+`LATTICE_ERROR_NOT_FOUND` unless both ends exist as the transaction sees them: a
+node the transaction created counts, and one it deleted does not.
 
 ### Edge Properties
 
@@ -746,8 +854,20 @@ work is discarded.
 
 `lattice_query_prepare` only stores the query text; parsing, analysis, planning
 and execution all happen in `lattice_query_execute`, so that is where a bad query
-fails. The return code tells you that something failed but not what. These
-functions describe the failure, and they read from the query handle:
+fails. The return code says which kind of failure it was:
+
+| Return code | Meaning |
+|-------------|---------|
+| `LATTICE_ERROR_INVALID_ARG` | The query does not parse, or does not make sense (an unknown function, a wrong argument count) |
+| `LATTICE_ERROR` | It could not be planned, or failed while running (division by zero, integer overflow, a type error) |
+| `LATTICE_ERROR_HAS_RELATIONSHIPS` | A `DELETE` named a node that still has relationships, as `lattice_node_delete` reports it |
+| `LATTICE_ERROR_NOT_FOUND` | A write needed a node or relationship that does not exist, such as a relationship to a node deleted earlier in the query, as `lattice_edge_create` reports it |
+| `LATTICE_ERROR_IO` | The storage failed under the query; the query itself may be fine |
+| `LATTICE_ERROR_OUT_OF_MEMORY` | An allocation failed under the query |
+
+A storage or allocation failure fails the query; it is never read as a missing
+value. These functions describe the failure, and they read from the query
+handle:
 
 ```c
 if (lattice_query_execute(query, txn, &result) != LATTICE_OK) {
@@ -764,8 +884,27 @@ if (lattice_query_execute(query, txn, &result) != LATTICE_OK) {
 }
 ```
 
-The location is what lets you point at the offending part of the query, the way
-the `lattice` command-line tool underlines it.
+For `RETURN 1/0` this prints:
+
+```text
+DivisionByZero: Division by zero: 1 / 0
+  at line 1, column 9, length 1
+```
+
+and for `MATCH (p:P) DELETE p` over a node with a relationship, with
+`lattice_query_execute` returning `LATTICE_ERROR_HAS_RELATIONSHIPS`:
+
+```text
+NodeHasRelationships: Cannot delete node 3 because it still has relationships; delete them first, or use DETACH DELETE
+```
+
+Execution errors carry a location when the failure belongs to one expression or
+clause; a refused delete does not. The location is what lets you point at the
+offending part of the query, the way the `lattice` command-line tool underlines
+it. The diagnostic code is a stable name for the kind of failure:
+parse and semantic failures use lowercase names such as `unknown_function`, and
+execution failures the engine's error names, such as `DivisionByZero`,
+`IntegerOverflow`, `TypeError` or `NodeHasRelationships`.
 
 `lattice_query_last_error_stage` tells you how far the query got:
 

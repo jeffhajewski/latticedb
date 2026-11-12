@@ -20,6 +20,7 @@ const NodeRecordCache = @import("../graph/node.zig").RecordCache;
 
 const vector_distance = @import("../vector/distance.zig");
 const fts_ops = @import("operators/fts.zig");
+const tokenizer = @import("../fts/tokenizer.zig");
 
 const Row = executor.Row;
 
@@ -425,6 +426,39 @@ fn checkedInt(result: anytype) EvalError!i64 {
         // reject that before dividing.
         return EvalError.DivisionByZero;
     };
+}
+
+/// The bytes of the character starting at `s[i]`: its UTF-8 length, or 1
+/// for a byte that does not start a valid sequence, which string functions
+/// then treat as a character of its own.
+fn codepointLen(s: []const u8, i: usize) usize {
+    const c = s[i];
+    if (c < 0x80) return 1;
+    const n = std.unicode.utf8ByteSequenceLength(c) catch return 1;
+    if (i + n > s.len) return 1;
+    _ = std.unicode.utf8Decode(s[i .. i + n]) catch return 1;
+    return n;
+}
+
+/// How many characters `s` holds, by `codepointLen`.
+fn codepointCount(s: []const u8) usize {
+    // The library count is fast on ASCII, but refuses invalid UTF-8.
+    if (std.unicode.utf8CountCodepoints(s)) |n| return n else |_| {}
+    var count: usize = 0;
+    var i: usize = 0;
+    while (i < s.len) : (count += 1) i += codepointLen(s, i);
+    return count;
+}
+
+/// The byte offset `count` characters after byte offset `from`, or the end
+/// of `s` when it has fewer.
+fn advanceCodepoints(s: []const u8, from: usize, count: usize) usize {
+    var i = from;
+    var left = count;
+    while (left > 0 and i < s.len) : (left -= 1) {
+        i += if (s[i] < 0x80) 1 else codepointLen(s, i);
+    }
+    return i;
 }
 
 /// How an integer compares with a float, exactly: by the numbers they are,
@@ -941,7 +975,8 @@ pub const ExpressionEvaluator = struct {
             if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             return switch (arg) {
-                .string_val => |s| .{ .int_val = @intCast(s.len) },
+                // Characters (code points), not bytes: size('é') is 1.
+                .string_val => |s| .{ .int_val = @intCast(codepointCount(s)) },
                 .bytes_val => |b| .{ .int_val = @intCast(b.len) },
                 .list_val => |l| .{ .int_val = @intCast(l.len) },
                 .null_val => .{ .null_val = {} },
@@ -1002,13 +1037,7 @@ pub const ExpressionEvaluator = struct {
             if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             return switch (arg) {
-                .string_val => |s| blk: {
-                    const copy = self.allocator.dupe(u8, s) catch return EvalError.OutOfMemory;
-                    for (copy) |*c| {
-                        c.* = std.ascii.toLower(c.*);
-                    }
-                    break :blk .{ .string_val = copy };
-                },
+                .string_val => |s| .{ .string_val = try self.mapCase(s, .lower) },
                 .null_val => .{ .null_val = {} },
                 else => EvalError.TypeError,
             };
@@ -1018,13 +1047,7 @@ pub const ExpressionEvaluator = struct {
             if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             return switch (arg) {
-                .string_val => |s| blk: {
-                    const copy = self.allocator.dupe(u8, s) catch return EvalError.OutOfMemory;
-                    for (copy) |*c| {
-                        c.* = std.ascii.toUpper(c.*);
-                    }
-                    break :blk .{ .string_val = copy };
-                },
+                .string_val => |s| .{ .string_val = try self.mapCase(s, .upper) },
                 .null_val => .{ .null_val = {} },
                 else => EvalError.TypeError,
             };
@@ -1044,20 +1067,20 @@ pub const ExpressionEvaluator = struct {
             if (f.arguments.len < 2 or f.arguments.len > 3) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             const start_arg = try self.evaluate(f.arguments[1], row, ctx);
+            const len_arg: EvalResult = if (f.arguments.len == 3) try self.evaluate(f.arguments[2], row, ctx) else .{ .int_val = std.math.maxInt(i64) };
+            // A null in any argument makes the answer null.
+            if (arg.isNull() or start_arg.isNull() or len_arg.isNull()) return .{ .null_val = {} };
             const s = switch (arg) {
                 .string_val => |sv| sv,
-                .null_val => return .{ .null_val = {} },
                 else => return EvalError.TypeError,
             };
             const start_raw = start_arg.toInt() orelse return EvalError.TypeError;
-            const start: usize = if (start_raw < 0) 0 else @intCast(@min(start_raw, @as(i64, @intCast(s.len))));
-            if (f.arguments.len == 3) {
-                const len_arg = try self.evaluate(f.arguments[2], row, ctx);
-                const length_raw = len_arg.toInt() orelse return EvalError.TypeError;
-                const length: usize = if (length_raw < 0) 0 else @intCast(@min(length_raw, @as(i64, @intCast(s.len - start))));
-                return .{ .string_val = s[start .. start + length] };
-            }
-            return .{ .string_val = s[start..] };
+            const length_raw = len_arg.toInt() orelse return EvalError.TypeError;
+            // Positions count characters (code points), not bytes, so a
+            // multi-byte character is never cut in half.
+            const begin = advanceCodepoints(s, 0, if (start_raw < 0) 0 else @intCast(start_raw));
+            const end = advanceCodepoints(s, begin, if (length_raw < 0) 0 else @intCast(length_raw));
+            return .{ .string_val = s[begin..end] };
         }
 
         if (std.ascii.eqlIgnoreCase(f.name, "replace")) {
@@ -1065,9 +1088,10 @@ pub const ExpressionEvaluator = struct {
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             const search_arg = try self.evaluate(f.arguments[1], row, ctx);
             const replace_arg = try self.evaluate(f.arguments[2], row, ctx);
+            // A null in any argument makes the answer null.
+            if (arg.isNull() or search_arg.isNull() or replace_arg.isNull()) return .{ .null_val = {} };
             const s = switch (arg) {
                 .string_val => |sv| sv,
-                .null_val => return .{ .null_val = {} },
                 else => return EvalError.TypeError,
             };
             const search = switch (search_arg) {
@@ -1100,9 +1124,10 @@ pub const ExpressionEvaluator = struct {
             if (f.arguments.len != 2) return EvalError.InvalidArgumentCount;
             const arg = try self.evaluate(f.arguments[0], row, ctx);
             const delim_arg = try self.evaluate(f.arguments[1], row, ctx);
+            // A null in any argument makes the answer null.
+            if (arg.isNull() or delim_arg.isNull()) return .{ .null_val = {} };
             const s = switch (arg) {
                 .string_val => |sv| sv,
-                .null_val => return .{ .null_val = {} },
                 else => return EvalError.TypeError,
             };
             const delimiter = switch (delim_arg) {
@@ -1111,6 +1136,17 @@ pub const ExpressionEvaluator = struct {
             };
             var parts: std.ArrayListUnmanaged(EvalResult) = .empty;
             errdefer parts.deinit(self.allocator);
+            if (delimiter.len == 0) {
+                // An empty delimiter splits between characters. It used to
+                // reach splitSequence, which asserts a non-empty delimiter.
+                var i: usize = 0;
+                while (i < s.len) {
+                    const n = codepointLen(s, i);
+                    parts.append(self.allocator, .{ .string_val = s[i .. i + n] }) catch return EvalError.OutOfMemory;
+                    i += n;
+                }
+                return .{ .list_val = parts.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory };
+            }
             var iter = std.mem.splitSequence(u8, s, delimiter);
             while (iter.next()) |part| {
                 parts.append(self.allocator, .{ .string_val = part }) catch return EvalError.OutOfMemory;
@@ -1316,6 +1352,38 @@ pub const ExpressionEvaluator = struct {
         }
 
         return .{ .map_val = entries };
+    }
+
+    /// `s` in lower or upper case, copied into the evaluator's allocator.
+    /// ASCII is mapped a byte at a time; other characters through the case
+    /// tables full-text search uses (Latin, Greek, Cyrillic, Armenian, and
+    /// full-width Latin). Bytes that are not valid UTF-8 are kept as they
+    /// are. No mapping makes a character longer, so the copy never grows.
+    fn mapCase(self: *Self, s: []const u8, comptime to: enum { lower, upper }) EvalError![]const u8 {
+        const out = self.allocator.alloc(u8, s.len) catch return EvalError.OutOfMemory;
+        var len: usize = 0;
+        var i: usize = 0;
+        while (i < s.len) {
+            const c = s[i];
+            if (c < 0x80) {
+                out[len] = if (to == .lower) std.ascii.toLower(c) else std.ascii.toUpper(c);
+                len += 1;
+                i += 1;
+                continue;
+            }
+            const n = codepointLen(s, i);
+            if (n == 1) {
+                out[len] = c;
+                len += 1;
+                i += 1;
+                continue;
+            }
+            const cp = std.unicode.utf8Decode(s[i .. i + n]) catch unreachable; // codepointLen checked it
+            const mapped = if (to == .lower) tokenizer.lowerCodepoint(cp) else tokenizer.upperCodepoint(cp);
+            len += std.unicode.utf8Encode(mapped, out[len..]) catch unreachable; // never longer
+            i += n;
+        }
+        return out[0..len];
     }
 
     // ========================================================================

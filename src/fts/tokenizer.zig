@@ -410,6 +410,45 @@ fn foldCase(cp: u21) u21 {
     };
 }
 
+/// The lowercase form of one code point, as `toLower` in a query writes it:
+/// the same table full-text search folds words with, so a string the query
+/// lowercases matches what the index stored.
+pub fn lowerCodepoint(cp: u21) u21 {
+    return foldCase(cp);
+}
+
+/// The uppercase form of one code point: `foldCase` run backwards, over the
+/// same scripts. A letter with no single uppercase code point, like 'ß',
+/// keeps its case. Every mapping keeps the UTF-8 length except 'ı', which
+/// becomes the one-byte 'I'.
+pub fn upperCodepoint(cp: u21) u21 {
+    return switch (cp) {
+        'a'...'z' => cp - 0x20,
+        0xE0...0xF6, 0xF8...0xFE => cp - 0x20,
+        0xFF => 0x178,
+        0x131 => 'I',
+        0x101...0x12F, 0x133...0x137, 0x14B...0x177 => if (cp & 1 == 1) cp - 1 else cp,
+        0x13A...0x148, 0x17A...0x17E => if (cp & 1 == 0) cp - 1 else cp,
+        0x1A1, 0x1B0 => cp - 1,
+        0x1CE...0x1DC => if (cp & 1 == 0) cp - 1 else cp,
+        0x219, 0x21B => cp - 1,
+        0x3AC => 0x386,
+        0x3AD...0x3AF => cp - 0x25,
+        0x3CC => 0x38C,
+        0x3CD...0x3CE => cp - 0x3F,
+        0x3C2 => 0x3A3,
+        0x3B1...0x3C1, 0x3C3...0x3CB => cp - 0x20,
+        0x450...0x45F => cp - 0x50,
+        0x430...0x44F => cp - 0x20,
+        0x461...0x481, 0x48B...0x4BF, 0x4D1...0x52F => if (cp & 1 == 1) cp - 1 else cp,
+        0x4C2...0x4CE => if (cp & 1 == 0) cp - 1 else cp,
+        0x561...0x586 => cp - 0x30,
+        0x1E01...0x1E95, 0x1EA1...0x1EFF => if (cp & 1 == 1) cp - 1 else cp,
+        0xFF41...0xFF5A => cp - 0x20,
+        else => cp,
+    };
+}
+
 /// The unaccented form of a lowercase letter, or null when it has none.
 /// Latin letters fold to ASCII ("ß" to "ss", "æ" to "ae"); Greek letters
 /// lose their tonos and dialytika. Never longer than the letter's UTF-8.

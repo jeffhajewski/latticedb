@@ -323,3 +323,94 @@ test "lqs: MERGE matches an integer and a float exactly" {
     try run(db, "MATCH (a:E {k: 1}), (b:E {k: 2}) MERGE (a)-[:R {w: 1.5}]->(b)");
     try std.testing.expectEqual(@as(i64, 2), try queryInt(db, "MATCH (:E)-[r:R]->(:E) RETURN count(r)"));
 }
+
+// ============================================================================
+// Strings are characters, not bytes; functions of null are null
+// ============================================================================
+
+fn expectStrings(db: *Database, cypher: []const u8, expected: []const ?[]const u8) !void {
+    var result = try db.query(cypher);
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 1), result.rowCount());
+    try std.testing.expectEqual(expected.len, result.rows[0].values.len);
+    for (expected, result.rows[0].values, 0..) |want, got, col| {
+        if (want) |w| {
+            if (got != .string_val or !std.mem.eql(u8, got.string_val, w)) {
+                std.debug.print("{s}: column {d} want \"{s}\", got {any}\n", .{ cypher, col, w, got });
+                return error.TestUnexpectedResult;
+            }
+        } else if (got != .null_val) {
+            std.debug.print("{s}: column {d} want null, got {any}\n", .{ cypher, col, got });
+            return error.TestUnexpectedResult;
+        }
+    }
+}
+
+test "lqs: string functions count and cut characters, not bytes" {
+    const path = "/tmp/lattice_lqs_unicode.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    // size() counted bytes: 'é' was 2 and '€' 3.
+    try std.testing.expectEqual(@as(i64, 5), try queryInt(db, "RETURN size('héllo')"));
+    try std.testing.expectEqual(@as(i64, 1), try queryInt(db, "RETURN size('€')"));
+    try std.testing.expectEqual(@as(i64, 2), try queryInt(db, "RETURN size('東京')"));
+    try std.testing.expectEqual(@as(i64, 3), try queryInt(db, "RETURN size(['é', 1, null])"));
+
+    // substring() cut bytes, so it could split a character in two.
+    try expectStrings(db, "RETURN substring('héllo wörld', 1, 4), substring('東京タワー', 2), " ++
+        "substring('aé', 1, 1), substring('abc', 5), substring('abc', 1, 0)", &.{ "éllo", "タワー", "é", "", "" });
+    try expectStrings(db, "RETURN substring('abc', 0, 2), substring('abc', 1)", &.{ "ab", "bc" });
+
+    // toUpper() and toLower() changed ASCII letters only.
+    try expectStrings(db, "RETURN toUpper('héllo wörld'), toLower('ÀÉÎ İSTANBUL'), toUpper('москва'), " ++
+        "toLower('ΑΘΗΝΑ'), toUpper('ßtraße'), toUpper('ı')", &.{
+        "HÉLLO WÖRLD",
+        "àéî istanbul",
+        "МОСКВА",
+        "αθηνα",
+        "ßTRAßE",
+        "I",
+    });
+    // Unchanged where nothing has case, and ASCII as before.
+    try expectStrings(db, "RETURN toUpper('東京 123 abc'), toLower('MiXeD')", &.{ "東京 123 ABC", "mixed" });
+
+    // split() with an empty delimiter splits between characters; it used to
+    // reach a library call that requires a non-empty one.
+    var parts = try db.query("RETURN split('aé€', '') AS p");
+    defer parts.deinit();
+    const list = parts.rows[0].values[0].list_val;
+    try std.testing.expectEqual(@as(usize, 3), list.len);
+    try std.testing.expectEqualStrings("é", list[1].string_val);
+    try std.testing.expectEqualStrings("€", list[2].string_val);
+
+    // Byte-wise operators agree with characters on valid UTF-8.
+    try expectBools(db, "RETURN 'héllo' STARTS WITH 'hé', 'héllo' ENDS WITH 'llo', 'wörld' CONTAINS 'ö', " ++
+        "'é' CONTAINS 'e'", &.{ true, true, true, false });
+}
+
+test "lqs: a null argument makes a function null" {
+    const path = "/tmp/lattice_lqs_null_args.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    // substring, replace and split were type errors when a later argument
+    // was null, and null only when the string was.
+    try expectStrings(db, "RETURN substring('abc', null), substring('abc', 1, null), substring(null, 1), " ++
+        "replace('abc', null, 'x'), replace('abc', 'b', null), replace(null, 'b', 'x')", &.{ null, null, null, null, null, null });
+    var split = try db.query("RETURN split('a,b', null) AS a, split(null, ',') AS b");
+    defer split.deinit();
+    try std.testing.expect(split.rows[0].values[0] == .null_val);
+    try std.testing.expect(split.rows[0].values[1] == .null_val);
+    // Null still wins over an argument of the wrong type.
+    try expectStrings(db, "RETURN substring(null, 'x'), replace(1, null, 'x')", &.{ null, null });
+
+    // The rest already were, and stay so.
+    try expectStrings(db, "RETURN toUpper(null), toLower(null), trim(null), toString(null), type(null)", &.{ null, null, null, null, null });
+    var others = try db.query("RETURN size(null), abs(null), head(null), last(null), tail(null), " ++
+        "toInteger(null), toFloat(null), range(1, null), id(null), labels(null), properties(null), coalesce(null, null)");
+    defer others.deinit();
+    for (others.rows[0].values) |value| try std.testing.expect(value == .null_val);
+    // A wrong type that is not null is still an error.
+    try expectFailure(db, "RETURN substring('abc', 'x')", .execution, "TypeError", "Type error: substring(string, string) is not defined; substring takes (string, integer[, integer])");
+}

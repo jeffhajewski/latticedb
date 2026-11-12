@@ -1599,9 +1599,16 @@ pub const HnswIndex = struct {
                 );
             }
 
-            // Use best candidate as entry for next layer
-            if (candidates.len > 0) {
-                current = candidates[0].node_id;
+            // Use the best candidate other than this node as the entry for the
+            // next layer. When a vector is replaced, nodes its old vector did
+            // not link back to still link to this id, so the search can reach
+            // the node itself, at distance zero. Its lower lists are still
+            // empty, so a search starting there would find nothing and leave
+            // it with no neighbours on every layer below.
+            for (candidates) |candidate| {
+                if (candidate.node_id == vector_id) continue;
+                current = candidate.node_id;
+                break;
             }
 
             if (insert_layer == 0) break;
@@ -2466,6 +2473,71 @@ test "hnsw search returns k results when k exceeds ef_search" {
         try std.testing.expectEqual(@as(usize, 30), results.len);
         for (results[1..], results[0 .. results.len - 1]) |later, earlier| {
             try std.testing.expect(earlier.distance <= later.distance);
+        }
+    }
+}
+
+test "hnsw replacing a vector leaves the node linked on every layer" {
+    const allocator = std.testing.allocator;
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+    const db_path = "/tmp/s3_lattice_hnsw_replace_links_test.db";
+    vfs_impl.delete(db_path) catch {};
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+    var bp = try buffer_pool.BufferPool.init(allocator, &pm, 512 * 4096);
+    defer bp.deinit();
+
+    const dims = 8;
+    var vs = try VectorStorage.init(allocator, &bp, dims);
+    var index = HnswIndex.init(allocator, &bp, &vs, .{
+        .dimensions = dims,
+        .m = 4,
+        .m_max0 = 8,
+        .ef_construction = 32,
+        .ef_search = 32,
+    });
+    defer index.deinit();
+    index.rng = std.Random.DefaultPrng.init(7);
+
+    var prng = std.Random.DefaultPrng.init(42);
+    const random = prng.random();
+    const count = 300;
+    var vectors: [count][dims]f32 = undefined;
+    for (&vectors, 0..) |*v, i| {
+        for (v) |*x| x.* = random.float(f32);
+        try index.insert(i + 1, v);
+    }
+
+    // Move every vector a little, twice over. Other nodes still link to the
+    // one being moved (links it did not return), so the searches that place
+    // it again can reach it, at distance zero from itself.
+    var conn_buf: [HnswIndex.MAX_NEIGHBORS]u64 = undefined;
+    for (0..2) |_| {
+        for (&vectors, 0..) |*v, i| {
+            for (v) |*x| x.* += (random.float(f32) - 0.5) * 0.05;
+            try index.insert(i + 1, v);
+
+            const node = index.getNode(i + 1).?;
+            var layer: u16 = 0;
+            while (layer <= node.max_layer) : (layer += 1) {
+                // Layers above every other node's top have no one to link to.
+                var others: usize = 0;
+                var it = index.nodes.iterator();
+                while (it.next()) |e| {
+                    if (e.key_ptr.* != i + 1 and e.value_ptr.max_layer >= layer) others += 1;
+                }
+                if (others == 0) continue;
+                const links = try index.connection_pool.getConnectionsInto(node.connections_loc, @intCast(layer), &conn_buf);
+                try std.testing.expect(links.len > 0);
+                try std.testing.expect(std.mem.indexOfScalar(u64, links, i + 1) == null);
+            }
         }
     }
 }

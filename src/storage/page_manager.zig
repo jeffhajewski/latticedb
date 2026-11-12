@@ -39,6 +39,9 @@ pub const PageManagerError = error{
     InvalidMagic,
     InvalidPageSize,
     VersionTooNew,
+    /// The file may be read but needs a newer release to write it (its
+    /// `min_writer_version` is above this build's format version).
+    WriterVersionTooNew,
     ChecksumMismatch,
     InvalidPageId,
     PageNotAllocated,
@@ -233,6 +236,13 @@ pub const PageManager = struct {
         if (self.header.min_reader_version > FORMAT_VERSION) {
             return PageManagerError.VersionTooNew;
         }
+        // Checked before anything below writes to the header. A file 0.16.0
+        // wrote last has no extension, and zero here: no restriction.
+        if (!self.read_only and self.header.hasExtension() and
+            self.header.min_writer_version > FORMAT_VERSION)
+        {
+            return PageManagerError.WriterVersionTooNew;
+        }
 
         // Use the page size from the file
         self.page_size = self.header.page_size;
@@ -255,6 +265,14 @@ pub const PageManager = struct {
         // database fills them in from the file's contents as it opens.
         if (!self.read_only and !self.header.hasExtension()) {
             self.header.resetExtension();
+            self.header_dirty = true;
+        }
+
+        // A file this release writes declares that releases older than its
+        // format must not write it. Never lowered: the check above has
+        // already refused a file that asks for a newer writer.
+        if (!self.read_only and self.header.min_writer_version < FORMAT_VERSION) {
+            self.header.min_writer_version = FORMAT_VERSION;
             self.header_dirty = true;
         }
 

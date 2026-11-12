@@ -974,6 +974,14 @@ fn failOpen(stderr: anytype, path: []const u8, err: anyerror, vectors_enabled: b
     if (err == DatabaseError.NotFound or err == error.FileNotFound) {
         return failCommand(stderr, "Database not found: {s}. Create it first with 'lattice create'.", .{path});
     }
+    if (err == DatabaseError.NeedsNewerWriter) {
+        return failCommand(
+            stderr,
+            "{s} was written by a newer LatticeDB that does not let this version write to it. " ++
+                "info, count, labels, types, schema, export and dump still read it; use that newer version for anything else.",
+            .{path},
+        );
+    }
     if (err == DatabaseError.VectorConfigMismatch) {
         return failCommand(
             stderr,

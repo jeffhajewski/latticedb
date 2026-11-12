@@ -146,3 +146,33 @@ test "lfmt c_api: edge_create reports a missing endpoint as not found" {
     try std.testing.expectEqual(lattice_error.err_not_found, c_api.lattice_edge_create(txn, 999, a, "R", &edge_id));
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
 }
+
+test "lfmt c_api: a file that needs a newer writer opens read-only, and a writable open is refused" {
+    const path = "/tmp/lfmt_capi_min_writer.db";
+    cleanup(path);
+    defer cleanup(path);
+    {
+        var db: ?*lattice_database = null;
+        const options = Options{ .create = true };
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open_v5(path, &options, &db));
+        _ = c_api.lattice_close(db);
+    }
+    {
+        const FileHeader = lattice.storage.page.FileHeader;
+        const file = try @import("compat").fs.cwd().openFile(path, .{ .mode = .read_write });
+        defer file.close();
+        var buf: [4096]u8 = undefined;
+        _ = try file.preadAll(&buf, 0);
+        const at = @offsetOf(FileHeader, "min_writer_version");
+        std.mem.writeInt(u16, buf[at..][0..2], lattice.core.types.FORMAT_VERSION + 1, .little);
+        try file.pwriteAll(&buf, 0);
+    }
+
+    var db: ?*lattice_database = null;
+    const writable = Options{};
+    try std.testing.expectEqual(lattice_error.err_needs_newer_writer, c_api.lattice_open_v5(path, &writable, &db));
+    try std.testing.expect(db == null);
+    const read_only = Options{ .read_only = true };
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open_v5(path, &read_only, &db));
+    _ = c_api.lattice_close(db);
+}

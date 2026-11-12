@@ -65,7 +65,11 @@ typedef enum {
     /* The open options contradict the vector index configuration the database
      * file records: a different vector_dimensions, vector_metric, vector_m or
      * vector_ef_construction. Nothing was read with the wrong configuration. */
-    LATTICE_ERROR_CONFIG_MISMATCH = -18
+    LATTICE_ERROR_CONFIG_MISMATCH = -18,
+    /* The database file was written by a newer release that does not allow
+     * this one to write it (its header's min_writer_version is above this
+     * release's format version). It opens read-only. Nothing was written. */
+    LATTICE_ERROR_NEEDS_NEWER_WRITER = -19
 } lattice_error;
 
 /* Transaction modes */
@@ -329,8 +333,9 @@ lattice_error lattice_open_v4(
 /* Open a database file with v5 options; see lattice_open_options_v5.
  * Returns LATTICE_ERROR_CONFIG_MISMATCH if the options contradict the vector
  * index configuration the file records, and LATTICE_ERROR_INVALID_ARG for a
- * value out of range. The older open functions behave as this one with the v5
- * fields at 0. */
+ * value out of range. A file a newer release has marked as not writable by
+ * this one opens only read-only; otherwise LATTICE_ERROR_NEEDS_NEWER_WRITER.
+ * The older open functions behave as this one with the v5 fields at 0. */
 lattice_error lattice_open_v5(
     const char* path,
     const lattice_open_options_v5* options,

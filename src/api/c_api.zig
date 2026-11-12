@@ -370,6 +370,9 @@ pub const lattice_error = enum(c_int) {
     /// The open options contradict the vector index configuration the file
     /// records (dimensions, metric or HNSW parameters).
     err_config_mismatch = -18,
+    /// The file was written by a newer release that does not let this one
+    /// write it. Open it read-only, or with that release.
+    err_needs_newer_writer = -19,
 };
 
 /// Query diagnostic stage for prepared query execution failures.
@@ -404,6 +407,7 @@ fn mapDatabaseError(err: DatabaseError) lattice_error {
         DatabaseError.DatabaseLocked => .err_database_locked,
         DatabaseError.NodeHasRelationships => .err_has_relationships,
         DatabaseError.VectorConfigMismatch => .err_config_mismatch,
+        DatabaseError.NeedsNewerWriter => .err_needs_newer_writer,
     };
 }
 
@@ -4201,6 +4205,7 @@ pub export fn lattice_error_message(code: lattice_error) [*c]const u8 {
         .err_database_locked => "Database is open in another process",
         .err_has_relationships => "Node still has relationships; delete them first or detach-delete the node",
         .err_config_mismatch => "Open options contradict the vector index configuration stored in the database",
+        .err_needs_newer_writer => "Database needs a newer LatticeDB to write it; open it read-only",
     };
 }
 

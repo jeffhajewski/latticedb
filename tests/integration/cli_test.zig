@@ -274,6 +274,36 @@ test "cli: every command that opens a database opens its vector index, and refus
     }
 }
 
+test "cli: a database that needs a newer writer is read by read-only commands and refused by the rest" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_cli_min_writer.ltdb";
+    deleteDatabaseFiles(path);
+    defer deleteDatabaseFiles(path);
+    {
+        var db = try Database.open(allocator, path, .{ .create = true, .config = .{ .enable_fts = false } });
+        defer db.close();
+        _ = try db.createNode(null, &.{"A"});
+    }
+    {
+        const file = try compat.fs.cwd().openFile(path, .{ .mode = .read_write });
+        defer file.close();
+        var buf: [4096]u8 = undefined;
+        _ = try file.preadAll(&buf, 0);
+        const at = @offsetOf(lattice.storage.page.FileHeader, "min_writer_version");
+        std.mem.writeInt(u16, buf[at..][0..2], lattice.core.types.FORMAT_VERSION + 1, .little);
+        try file.pwriteAll(&buf, 0);
+    }
+
+    const count = try runCli(allocator, &.{ "count", path });
+    defer count.deinit(allocator);
+    try std.testing.expect(count.succeeded());
+
+    const write = try runCli(allocator, &.{ "exec", path, "--query=CREATE (:A)" });
+    defer write.deinit(allocator);
+    try std.testing.expect(!write.succeeded());
+    try std.testing.expect(std.mem.indexOf(u8, write.stderr, "newer LatticeDB") != null);
+}
+
 test "cli: help for every command that opens a database lists the vector options" {
     const allocator = std.testing.allocator;
     const commands = [_][]const u8{

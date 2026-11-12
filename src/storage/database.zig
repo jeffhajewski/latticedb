@@ -179,6 +179,9 @@ pub const DatabaseError = error{
     /// The open options contradict the vector index configuration the file
     /// records: a different dimension count, metric, or HNSW parameter.
     VectorConfigMismatch,
+    /// The file was written by a newer release that allows only releases of
+    /// its format or later to write it. It can still be opened read-only.
+    NeedsNewerWriter,
 };
 
 /// Query execution errors
@@ -1156,6 +1159,7 @@ pub const Database = struct {
                 PageManagerError.InvalidPageSize => DatabaseError.InvalidArgument,
                 PageManagerError.OutOfMemory => DatabaseError.OutOfMemory,
                 PageManagerError.InvalidMagic, PageManagerError.InvalidHeader => DatabaseError.InvalidDatabase,
+                PageManagerError.WriterVersionTooNew => DatabaseError.NeedsNewerWriter,
                 else => DatabaseError.IoError,
             };
         };

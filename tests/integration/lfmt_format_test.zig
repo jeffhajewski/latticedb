@@ -196,6 +196,80 @@ fn copyFile(src: []const u8, dst: []const u8) !void {
 }
 
 // ============================================================================
+// Writer version gate
+// ============================================================================
+
+fn readHeaderPage(path: []const u8) ![4096]u8 {
+    const file = try @import("compat").fs.cwd().openFile(path, .{});
+    defer file.close();
+    var buf: [4096]u8 = undefined;
+    _ = try file.preadAll(&buf, 0);
+    return buf;
+}
+
+test "lfmt: a file that needs a newer writer opens read-only and refuses writable opens" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lfmt_min_writer.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    {
+        var db = try Database.open(allocator, path, .{ .create = true, .config = plain_config });
+        defer db.close();
+        _ = try db.createNode(null, &.{"A"});
+    }
+    const created = try readHeader(path);
+    try std.testing.expectEqual(types.FORMAT_VERSION, created.min_writer_version);
+    try std.testing.expectEqual(types.MIN_READER_VERSION, created.min_reader_version);
+
+    // What a later release writes when the file holds something this one
+    // would not keep correct: readable here, not writable.
+    try patchHeader(path, "min_writer_version", types.FORMAT_VERSION + 1);
+    const before = try readHeaderPage(path);
+
+    {
+        var db = try Database.open(allocator, path, .{ .read_only = true, .config = plain_config });
+        defer db.close();
+        try std.testing.expectEqual(@as(u64, 1), db.nodeCount());
+    }
+    try std.testing.expectError(DatabaseError.NeedsNewerWriter, Database.open(allocator, path, .{ .config = plain_config }));
+    try std.testing.expectError(DatabaseError.NeedsNewerWriter, Database.open(allocator, path, .{ .config = .{ .enable_fts = false, .enable_vector = true, .vector_dimensions = 4 } }));
+
+    // Neither open changed the header.
+    const after = try readHeaderPage(path);
+    try std.testing.expectEqualSlices(u8, &before, &after);
+}
+
+test "lfmt: no min_writer_version means no restriction, and a write records this release's" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lfmt_min_writer_zero.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    {
+        var db = try Database.open(allocator, path, .{ .create = true, .config = plain_config });
+        db.close();
+    }
+    // Zero with the format-4 fields present, as well as a 0.16.0 header.
+    try patchHeader(path, "min_writer_version", @as(u16, 0));
+    {
+        var db = try Database.open(allocator, path, .{ .config = plain_config });
+        _ = try db.createNode(null, &.{"A"});
+        db.close();
+    }
+    try std.testing.expectEqual(types.FORMAT_VERSION, (try readHeader(path)).min_writer_version);
+
+    try writeHeaderAs016(path);
+    try std.testing.expectEqual(@as(u16, 0), (try readHeader(path)).min_writer_version);
+    {
+        var db = try Database.open(allocator, path, .{ .config = plain_config });
+        _ = try db.createNode(null, &.{"A"});
+        db.close();
+    }
+    try std.testing.expectEqual(types.FORMAT_VERSION, (try readHeader(path)).min_writer_version);
+}
+
+// ============================================================================
 // Vector configuration
 // ============================================================================
 

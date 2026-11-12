@@ -118,7 +118,16 @@ pub const FileHeader = extern struct {
     vector_m_max0: u16,
     /// HNSW candidate list size while building. Affects quality, not layout.
     vector_ef_construction: u16,
-    reserved3: [10]u8,
+    /// The oldest format version allowed to write to this file. A release
+    /// whose FORMAT_VERSION is lower may still read it (that is
+    /// `min_reader_version`'s call) but must open it read-only: the file can
+    /// hold something such a release would not keep correct when it writes,
+    /// such as a rule it does not know to enforce. 0, which is what a 0.16.0
+    /// header has here, means no restriction. 0.16.0 predates this field and
+    /// does not honour it; a file that must be kept from 0.16.0's writes has
+    /// to raise `min_reader_version` instead.
+    min_writer_version: u16,
+    reserved3: [8]u8,
 
     /// Marks the format-4 fields as written by a release that keeps them.
     pub const EXTENSION_MAGIC: u32 = 0x3458_544C; // "LTX4"
@@ -168,7 +177,8 @@ pub const FileHeader = extern struct {
         self.vector_m = 0;
         self.vector_m_max0 = 0;
         self.vector_ef_construction = 0;
-        self.reserved3 = [_]u8{0} ** 10;
+        self.min_writer_version = 0;
+        self.reserved3 = [_]u8{0} ** 8;
     }
 
     /// The stored node id counter, or null when the file does not have one.
@@ -240,7 +250,8 @@ pub const FileHeader = extern struct {
             .vector_m = 0,
             .vector_m_max0 = 0,
             .vector_ef_construction = 0,
-            .reserved3 = [_]u8{0} ** 10,
+            .min_writer_version = types.FORMAT_VERSION,
+            .reserved3 = [_]u8{0} ** 8,
         };
     }
 
@@ -316,6 +327,7 @@ test "file header keeps 0.16.0's layout and puts the format-4 fields after it" {
     try std.testing.expectEqual(@as(usize, 216), @offsetOf(FileHeader, "vector_m"));
     try std.testing.expectEqual(@as(usize, 218), @offsetOf(FileHeader, "vector_m_max0"));
     try std.testing.expectEqual(@as(usize, 220), @offsetOf(FileHeader, "vector_ef_construction"));
+    try std.testing.expectEqual(@as(usize, 222), @offsetOf(FileHeader, "min_writer_version"));
     try std.testing.expectEqual(@as(usize, 232), @sizeOf(FileHeader));
     try std.testing.expect(@sizeOf(FileHeader) <= DEFAULT_PAGE_SIZE);
 }
@@ -357,4 +369,13 @@ test "page type values" {
     try std.testing.expectEqual(@as(u8, 0x00), @intFromEnum(PageType.free));
     try std.testing.expectEqual(@as(u8, 0x01), @intFromEnum(PageType.btree_internal));
     try std.testing.expectEqual(@as(u8, 0x02), @intFromEnum(PageType.btree_leaf));
+}
+
+test "min_writer_version is the current format in a new header and no restriction once zeroed" {
+    var header = FileHeader.init();
+    try std.testing.expectEqual(types.FORMAT_VERSION, header.min_writer_version);
+    header.resetExtension();
+    try std.testing.expectEqual(@as(u16, 0), header.min_writer_version);
+    const bytes = std.mem.asBytes(&header);
+    try std.testing.expectEqual(@as(u16, 0), std.mem.readInt(u16, bytes[222..224], .little));
 }

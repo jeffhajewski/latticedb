@@ -201,6 +201,12 @@ pub fn highlight(
             }
         }
 
+        // The context is measured in bytes; widen it to whole characters so a
+        // snippet never starts or ends inside a multi-byte one. Matches are
+        // tokens, which already begin and end on character boundaries.
+        region_start = charStart(text, region_start);
+        region_end = charEnd(text, region_end);
+
         // Store region with its matches (copy the matches array)
         const region_matches_copy = allocator.dupe(Match, region_matches.items) catch
             return HighlightError.OutOfMemory;
@@ -248,6 +254,29 @@ pub fn highlight(
         .snippets = snippets,
         .total_matches = @intCast(matches.len),
     };
+}
+
+/// Whether `byte` continues a UTF-8 character rather than starting one.
+fn isContinuationByte(byte: u8) bool {
+    return byte & 0xC0 == 0x80;
+}
+
+/// `offset` moved back to the start of the UTF-8 character it falls inside.
+/// A character has at most three continuation bytes, so text that is not
+/// UTF-8 moves it no further than that.
+fn charStart(text: []const u8, offset: u32) u32 {
+    var o = offset;
+    var steps: u32 = 0;
+    while (o > 0 and o < text.len and steps < 3 and isContinuationByte(text[o])) : (steps += 1) o -= 1;
+    return o;
+}
+
+/// `offset` moved forward to the end of the UTF-8 character it falls inside.
+fn charEnd(text: []const u8, offset: u32) u32 {
+    var o = offset;
+    var steps: u32 = 0;
+    while (o < text.len and steps < 3 and isContinuationByte(text[o])) : (steps += 1) o += 1;
+    return o;
 }
 
 /// Insert highlight markers around matches in a text region
@@ -560,4 +589,30 @@ test "highlight - with stemming" {
     // "runners" stems to "runner" (not "run"), so only "running" -> "run" matches
     try std.testing.expectEqual(@as(u32, 1), result.total_matches);
     try std.testing.expect(std.mem.indexOf(u8, result.snippets[0].text, "**running**") != null);
+}
+
+test "highlight - context never splits a UTF-8 character" {
+    const allocator = std.testing.allocator;
+
+    // Each "é" is two bytes, so cutting the context by bytes lands inside one
+    // on both sides of the match.
+    const text = "ééééé database ééééé";
+    const terms = [_][]const u8{"database"};
+
+    for (1..12) |context| {
+        const result = try highlight(allocator, text, &terms, .{
+            .use_stemming = false,
+            .remove_stop_words = false,
+        }, .{
+            .context_chars = @intCast(context),
+            .ellipsis = "...",
+        });
+        defer freeResult(allocator, result);
+
+        try std.testing.expectEqual(@as(usize, 1), result.snippets.len);
+        const snippet = result.snippets[0];
+        try std.testing.expect(std.unicode.utf8ValidateSlice(snippet.text));
+        try std.testing.expect(std.unicode.utf8ValidateSlice(text[snippet.doc_offset..]));
+        try std.testing.expect(std.mem.indexOf(u8, snippet.text, "<em>database</em>") != null);
+    }
 }

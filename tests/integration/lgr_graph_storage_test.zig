@@ -219,3 +219,43 @@ test "lgr: an edge record with an unknown value tag is refused, not read as null
 
     try std.testing.expectError(lattice.graph.edge.EdgeError.InvalidData, db.edge_store.getById(edge_id));
 }
+
+fn expectIdsAscending(result: QueryResult, expected_rows: usize) !void {
+    try std.testing.expectEqual(expected_rows, result.rows.len);
+    var previous: ?u64 = null;
+    for (result.rows) |row| {
+        const id = row.values[0].node_id;
+        if (previous) |p| try std.testing.expect(id > p);
+        previous = id;
+    }
+}
+
+test "lgr: MATCH (n) returns nodes in id order, as a label scan does" {
+    const path = "/tmp/lgr_all_nodes_order.ltdb";
+    defer removeFiles(path);
+    var db = try openDb(path, true);
+    defer db.close();
+
+    var txn = try db.beginTransaction(.read_write);
+    var ids: [300]u64 = undefined;
+    for (&ids) |*id| id.* = try db.createNode(&txn, &.{"P"});
+    try db.commitTransaction(&txn);
+
+    {
+        var result = try db.query("MATCH (n) RETURN n");
+        defer result.deinit();
+        try expectIdsAscending(result, 300);
+        try std.testing.expectEqual(ids[0], result.rows[0].values[0].node_id);
+    }
+
+    // With the transaction's own changes merged in.
+    txn = try db.beginTransaction(.read_write);
+    try db.deleteNode(&txn, ids[3]);
+    _ = try db.createNode(&txn, &.{"Q"});
+    {
+        var result = try db.queryInTxn(&txn, "MATCH (n) RETURN n");
+        defer result.deinit();
+        try expectIdsAscending(result, 300);
+    }
+    try db.abortTransaction(&txn);
+}

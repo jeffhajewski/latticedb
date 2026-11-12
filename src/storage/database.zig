@@ -5773,12 +5773,17 @@ pub const Database = struct {
         };
     }
 
+    /// Ids of every node `txn` sees, ascending.
+    ///
+    /// The node tree's keys are little-endian, so its own order is not id
+    /// order (256 before 2); the ids are sorted so that `MATCH (n)` comes
+    /// back in the order a label scan does.
     fn collectVisibleNodeIds(self: *Self, txn: ?*Transaction) DatabaseError![]NodeId {
         var ids: std.ArrayListUnmanaged(NodeId) = .empty;
         errdefer ids.deinit(self.allocator);
 
-        var seen: std.AutoHashMapUnmanaged(NodeId, void) = .{};
-        defer seen.deinit(self.allocator);
+        const overlay: ?*TxnOverlay = if (txn) |t| self.getTxnOverlay(t) else null;
+        const has_node_states = if (overlay) |o| o.node_states.count() > 0 else false;
 
         var iter = self.node_tree.range(null, null) catch return DatabaseError.IoError;
         defer iter.deinit();
@@ -5788,34 +5793,23 @@ pub const Database = struct {
             if (entry) |e| {
                 if (e.key.len < 8) continue;
                 const node_id = std.mem.readInt(u64, e.key[0..8], .little);
-                var include = true;
-                if (txn) |t| {
-                    if (self.getTxnOverlay(t)) |overlay| {
-                        if (overlay.node_states.get(node_id)) |state| {
-                            include = state.exists;
-                        }
-                    }
-                }
-                try seen.put(self.allocator, node_id, {});
-                if (include) {
-                    try ids.append(self.allocator, node_id);
-                }
+                // The overlay decides every node it holds; it is walked below.
+                if (has_node_states and overlay.?.node_states.contains(node_id)) continue;
+                try ids.append(self.allocator, node_id);
             } else {
                 break;
             }
         }
 
-        if (txn) |t| {
-            if (self.getTxnOverlay(t)) |overlay| {
-                var overlay_iter = overlay.node_states.iterator();
-                while (overlay_iter.next()) |entry| {
-                    if (seen.contains(entry.key_ptr.*)) continue;
-                    if (!entry.value_ptr.exists) continue;
-                    try ids.append(self.allocator, entry.key_ptr.*);
-                }
+        if (has_node_states) {
+            var overlay_iter = overlay.?.node_states.iterator();
+            while (overlay_iter.next()) |entry| {
+                if (!entry.value_ptr.exists) continue;
+                try ids.append(self.allocator, entry.key_ptr.*);
             }
         }
 
+        std.mem.sort(NodeId, ids.items, {}, std.sort.asc(NodeId));
         return ids.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
     }
 

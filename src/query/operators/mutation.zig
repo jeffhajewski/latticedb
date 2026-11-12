@@ -291,8 +291,8 @@ pub const CreateEdge = struct {
         const source_val = row.getSlot(self.source_slot) orelse return OperatorError.UnboundVariable;
         const target_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
 
-        const source_id = source_val.asNodeId() orelse return OperatorError.TypeError;
-        const target_id = target_val.asNodeId() orelse return OperatorError.TypeError;
+        const source_id = source_val.asNodeId() orelse return endpointFailure(ctx, "CREATE", source_val);
+        const target_id = target_val.asNodeId() orelse return endpointFailure(ctx, "CREATE", target_val);
 
         // Evaluate edge properties before mutation to avoid partial writes.
         var evaluated: std.ArrayList(EvaluatedProperty) = .empty;
@@ -567,6 +567,8 @@ pub const DeleteEdge = struct {
 
         // Get edge ID from row
         const edge_val = row.getSlot(self.edge_slot) orelse return OperatorError.UnboundVariable;
+        // Deleting null, an OPTIONAL MATCH that found nothing, does nothing.
+        if (edge_val.isNull()) return row;
         const edge_id = edge_val.asEdgeId() orelse return OperatorError.TypeError;
 
         self.database.deleteEdgeById(ctx.txn, edge_id) catch |err| switch (err) {
@@ -670,6 +672,8 @@ pub const SetProperty = struct {
 
         // Get target from row
         const target_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
+        // Writing to null, an OPTIONAL MATCH that found nothing, does nothing.
+        if (target_val.isNull()) return row;
 
         // Evaluate value expression
         const value = self.evaluator.evaluate(self.value_expr, row, ctx) catch {
@@ -788,6 +792,8 @@ pub const SetLabels = struct {
 
         // Get target node from row
         const target_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
+        // Writing to null, an OPTIONAL MATCH that found nothing, does nothing.
+        if (target_val.isNull()) return row;
         const node_id = target_val.asNodeId() orelse return OperatorError.TypeError;
 
         // Add each label
@@ -885,6 +891,8 @@ pub const SetPropertiesReplace = struct {
 
         // Get target from row
         const target_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
+        // Writing to null, an OPTIONAL MATCH that found nothing, does nothing.
+        if (target_val.isNull()) return row;
 
         // Evaluate all updates first so expression/type failures don't clear
         // existing properties or produce partial row-level writes.
@@ -1002,6 +1010,8 @@ pub const SetPropertiesMerge = struct {
 
         // Get target from row
         const target_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
+        // Writing to null, an OPTIONAL MATCH that found nothing, does nothing.
+        if (target_val.isNull()) return row;
 
         // Evaluate all updates first so expression/type failures don't produce
         // partial row-level writes.
@@ -1107,6 +1117,8 @@ pub const RemoveProperty = struct {
 
         // Get target from row
         const target_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
+        // Writing to null, an OPTIONAL MATCH that found nothing, does nothing.
+        if (target_val.isNull()) return row;
 
         // Remove property based on target type
         switch (target_val) {
@@ -1207,6 +1219,8 @@ pub const RemoveLabels = struct {
 
         // Get target node from row
         const target_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
+        // Writing to null, an OPTIONAL MATCH that found nothing, does nothing.
+        if (target_val.isNull()) return row;
         const node_id = target_val.asNodeId() orelse return OperatorError.TypeError;
 
         // Remove each label
@@ -1236,6 +1250,17 @@ pub const RemoveLabels = struct {
 // ============================================================================
 // Helpers
 // ============================================================================
+
+/// A relationship CREATE or MERGE cannot write because an end is not a node.
+/// openCypher makes a null end an error rather than skipping the row: the
+/// relationship the query asks for cannot exist.
+fn endpointFailure(ctx: *const ExecutionContext, comptime clause: []const u8, value: SlotValue) OperatorError {
+    @branchHint(.cold);
+    if (value.isNull()) {
+        return ctx.fail(OperatorError.TypeError, null, clause ++ " needs a node at each end of a relationship, but one end is null (an OPTIONAL MATCH that found nothing leaves its variables null)", .{});
+    }
+    return ctx.fail(OperatorError.TypeError, null, clause ++ " needs a node at each end of a relationship, but one end is not a node", .{});
+}
 
 /// Convert EvalResult to PropertyValue
 fn evalResultToPropertyValue(result: EvalResult, allocator: Allocator) Allocator.Error!?PropertyValue {
@@ -1767,8 +1792,8 @@ pub const MergeEdge = struct {
         const source_val = row.getSlot(self.source_slot) orelse return OperatorError.UnboundVariable;
         const target_val = row.getSlot(self.target_slot) orelse return OperatorError.UnboundVariable;
 
-        const source_id = source_val.asNodeId() orelse return OperatorError.TypeError;
-        const target_id = target_val.asNodeId() orelse return OperatorError.TypeError;
+        const source_id = source_val.asNodeId() orelse return endpointFailure(ctx, "MERGE", source_val);
+        const target_id = target_val.asNodeId() orelse return endpointFailure(ctx, "MERGE", target_val);
 
         const edge_id = try self.mergeEdge(ctx, row, source_id, target_id);
         if (self.output_slot) |slot| {

@@ -39,6 +39,7 @@ const source_ops = @import("operators/source.zig");
 const materialize_ops = @import("operators/materialize.zig");
 const cross_product_ops = @import("operators/cross_product.zig");
 const union_ops = @import("operators/union.zig");
+const optional_ops = @import("operators/optional.zig");
 
 const btree = @import("../storage/btree.zig");
 const BTree = btree.BTree;
@@ -318,7 +319,18 @@ pub const QueryPlanner = struct {
         while (clause_idx < clauses.len) : (clause_idx += 1) {
             const clause = clauses[clause_idx];
             switch (clause) {
-                .match => |m| {
+                .match => |m| if (m.optional) {
+                    const where: ?*const ast.WhereClause = if (clause_idx + 1 < clauses.len)
+                        switch (clauses[clause_idx + 1]) {
+                            .where => |w| w,
+                            else => null,
+                        }
+                    else
+                        null;
+                    // The WHERE is part of the OPTIONAL MATCH.
+                    if (where != null) clause_idx += 1;
+                    current_op = try self.planOptionalMatch(m, where, current_op orelse try self.singleRow());
+                } else {
                     const where_hint: ?*const ast.Expression = if (clause_idx + 1 < clauses.len)
                         switch (clauses[clause_idx + 1]) {
                             .where => |w| w.condition,
@@ -538,6 +550,46 @@ pub const QueryPlanner = struct {
         }
 
         return op orelse PlannerError.InvalidQuery;
+    }
+
+    /// Plan `OPTIONAL MATCH patterns [WHERE condition]` over `input`.
+    ///
+    /// The patterns and the WHERE are planned as for MATCH, but over an
+    /// Argument leaf instead of the input, and an Apply runs that plan once
+    /// for each input row: every row it produces is passed on, and an input
+    /// row it produces nothing from is passed on once with the slots the plan
+    /// binds set to null. The WHERE belongs to the OPTIONAL MATCH, so a row
+    /// it rejects becomes nulls rather than disappearing.
+    fn planOptionalMatch(
+        self: *Self,
+        match: *const ast.MatchClause,
+        where: ?*const ast.WhereClause,
+        input: Operator,
+    ) PlannerError!Operator {
+        const argument = optional_ops.Argument.init(self.allocator) catch return PlannerError.OutOfMemory;
+        const slots_before = self.used_slots;
+
+        var inner = self.planMatch(match, argument.operator(), if (where) |w| w.condition else null) catch |err| {
+            argument.operator().deinit(self.allocator);
+            return err;
+        };
+        if (where) |w| {
+            // A plain filter: the vector and full-text access paths that
+            // planWhere can choose consume their input up front, which an
+            // argument that yields one row per round does not allow.
+            const filter = filter_ops.Filter.init(self.allocator, inner, w.condition) catch {
+                inner.deinit(self.allocator);
+                return PlannerError.OutOfMemory;
+            };
+            inner = filter.operator();
+        }
+
+        const new_slots = self.used_slots & ~slots_before;
+        const apply = optional_ops.Apply.init(self.allocator, input, inner, argument, true, new_slots) catch {
+            inner.deinit(self.allocator);
+            return PlannerError.OutOfMemory;
+        };
+        return apply.operator();
     }
 
     /// The relationships of one MATCH clause, for relationship uniqueness.
@@ -1436,6 +1488,10 @@ pub const QueryPlanner = struct {
             else => return null,
         };
         if (match.patterns.len != 1) return null;
+        // OPTIONAL MATCH plans its pattern over an argument row, never as
+        // the query's first scan, and pads a miss with nulls; keep its order
+        // out of the scan's hands rather than rely on that.
+        if (match.optional) return null;
         var i: usize = 1;
         if (std.meta.activeTag(clauses[i]) == .where) i += 1;
         if (i + 1 >= clauses.len) return null;

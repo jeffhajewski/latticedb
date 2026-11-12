@@ -378,7 +378,7 @@ pub const Parser = struct {
         const loc = self.currentLocation();
         self.advance();
         // ALL is not reserved, so it is read here by its spelling.
-        const all = self.check(.identifier) and std.ascii.eqlIgnoreCase(self.current.text, "all");
+        const all = self.checkWord("all");
         if (all) self.advance();
 
         if (clauses.items.len == 0) {
@@ -411,6 +411,8 @@ pub const Parser = struct {
     fn parseClause(self: *Self) ?ast.Clause {
         if (self.match(.kw_match)) {
             return self.parseMatchClause();
+        } else if (self.checkWord("optional")) {
+            return self.parseOptionalMatchClause();
         } else if (self.match(.kw_where)) {
             return self.parseWhereClause();
         } else if (self.match(.kw_return)) {
@@ -474,6 +476,23 @@ pub const Parser = struct {
         };
 
         return .{ .match = clause };
+    }
+
+    /// `OPTIONAL MATCH`. OPTIONAL is not reserved, so that it stays usable
+    /// as a name; it is read by its spelling where a clause starts.
+    fn parseOptionalMatchClause(self: *Self) ?ast.Clause {
+        self.advance();
+        if (!self.consume(.kw_match, "Expected MATCH after OPTIONAL")) return null;
+        const clause = self.parseMatchClause() orelse return null;
+        clause.match.optional = true;
+        return clause;
+    }
+
+    /// Whether the current token is an identifier spelled `word`, in any
+    /// case: a word that means something only in one place, and so is not
+    /// reserved.
+    fn checkWord(self: *Self, word: []const u8) bool {
+        return self.check(.identifier) and std.ascii.eqlIgnoreCase(self.current.text, word);
     }
 
     fn parseWhereClause(self: *Self) ?ast.Clause {

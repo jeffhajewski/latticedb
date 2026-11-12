@@ -320,6 +320,9 @@ pub const VariableLengthExpand = struct {
     fn startTraversal(self: *Self) OperatorError!void {
         const input_row = self.current_input orelse return;
         const source_val = input_row.getSlot(self.source_slot) orelse return OperatorError.UnboundVariable;
+        // A null end, as an OPTIONAL MATCH that found nothing leaves, matches
+        // no path: the walk is not started and the next input row is taken.
+        if (source_val.isNull() or self.constraints.targetIsNull(input_row, self.target_slot)) return;
         const source_id = source_val.asNodeId() orelse return OperatorError.TypeError;
         self.bound_target = try self.constraints.boundTarget(input_row, self.target_slot);
 

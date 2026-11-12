@@ -103,6 +103,9 @@ pub const Clause = union(enum) {
 pub const MatchClause = struct {
     patterns: []Pattern,
     location: SourceLocation,
+    /// OPTIONAL MATCH: a row the patterns do not match is kept, with the
+    /// variables they would have bound set to null.
+    optional: bool = false,
 };
 
 /// WHERE clause - filtering condition

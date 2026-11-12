@@ -205,6 +205,12 @@ test "parser: handles the syntax added after 0.16" {
         "RETURN 1 UNION",
         "RETURN 1 UNION UNION RETURN 1",
         "RETURN 1 UNION RETURN 1 UNION ALL RETURN 1",
+        "MATCH (a) OPTIONAL MATCH (a)-[r]->(b) WHERE r.x > 1 RETURN a, b",
+        "OPTIONAL MATCH (n) RETURN n UNION OPTIONAL MATCH (n) RETURN n",
+        "OPTIONAL",
+        "OPTIONAL MATCH",
+        "OPTIONAL (n)",
+        "MATCH (optional) RETURN optional",
     };
     for (corpus) |input| try fuzzParser(allocator, input);
 }

@@ -357,3 +357,114 @@ test "lcy: UNION that cannot be planned says why" {
     try expectFailure(db, "RETURN 1 AS x UNION CREATE (:U)", .plan, "Every query in a UNION must end with RETURN; query 2 does not");
     try expectFailure(db, "CREATE (:U) UNION RETURN 1 AS x", .plan, "Every query in a UNION must end with RETURN; query 1 does not");
 }
+
+/// People and who they know: ann knows bob and cy, bob knows cy, cy and dee
+/// know nobody, and dee is not a Person's friend at all.
+fn seedPeople(db: *Database) !void {
+    try run(db, "CREATE (:P {name: 'ann'}), (:P {name: 'bob'}), (:P {name: 'cy'}), (:P {name: 'dee'})");
+    try run(db, "MATCH (a:P {name: 'ann'}), (b:P {name: 'bob'}) CREATE (a)-[:KNOWS {since: 2001}]->(b)");
+    try run(db, "MATCH (a:P {name: 'ann'}), (c:P {name: 'cy'}) CREATE (a)-[:KNOWS {since: 2010}]->(c)");
+    try run(db, "MATCH (b:P {name: 'bob'}), (c:P {name: 'cy'}) CREATE (b)-[:KNOWS {since: 2020}]->(c)");
+}
+
+test "lcy: OPTIONAL MATCH keeps rows that do not match, with nulls" {
+    const path = "/tmp/lcy_optional.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedPeople(db);
+
+    try expectResult(db,
+        \\MATCH (p:P) OPTIONAL MATCH (p)-[k:KNOWS]->(f) RETURN p.name, f.name, k.since ORDER BY p.name, f.name
+    , "p.name | f.name | k.since\n\"ann\" | \"bob\" | 2001\n\"ann\" | \"cy\" | 2010\n\"bob\" | \"cy\" | 2020\n\"cy\" | null | null\n\"dee\" | null | null");
+    // The WHERE belongs to the OPTIONAL MATCH: a rejected match becomes
+    // nulls, the row stays.
+    try expectResult(db,
+        \\MATCH (p:P) OPTIONAL MATCH (p)-[k:KNOWS]->(f) WHERE k.since > 2005 RETURN p.name, f.name ORDER BY p.name
+    , "p.name | f.name\n\"ann\" | \"cy\"\n\"bob\" | \"cy\"\n\"cy\" | null\n\"dee\" | null");
+    // A WHERE after a WITH that follows filters rows away as usual.
+    try expectResult(db,
+        \\MATCH (p:P) OPTIONAL MATCH (p)-->(f) WITH p, f WHERE f IS NULL RETURN p.name ORDER BY p.name
+    , "p.name\n\"cy\"\n\"dee\"");
+    // Counting the matches: nulls are not counted.
+    try expectResult(db,
+        \\MATCH (p:P) OPTIONAL MATCH (p)-->(f) RETURN p.name, count(f) AS friends ORDER BY p.name
+    , "p.name | friends\n\"ann\" | 2\n\"bob\" | 1\n\"cy\" | 0\n\"dee\" | 0");
+    // As the first clause, and with nothing to match: one row of nulls.
+    try expectResult(db, "OPTIONAL MATCH (n:Nope) RETURN n", "n\nnull");
+    try expectResult(db, "OPTIONAL MATCH (n:Nope) RETURN n.name, count(n) AS c", "n.name | c\nnull | 0");
+    // A node not connected to the input is a cross product per row.
+    try expectResult(db,
+        \\MATCH (p:P {name: 'dee'}) OPTIONAL MATCH (q:P) WHERE q.name < 'bz' RETURN p.name, q.name ORDER BY q.name
+    , "p.name | q.name\n\"dee\" | \"ann\"\n\"dee\" | \"bob\"");
+    // Undirected, once per input row: each round starts from its own row.
+    try expectResult(db,
+        \\MATCH (p:P) OPTIONAL MATCH (p)-[:KNOWS]-(f) RETURN p.name, count(f) AS c ORDER BY p.name
+    , "p.name | c\n\"ann\" | 2\n\"bob\" | 2\n\"cy\" | 2\n\"dee\" | 0");
+    // Undirected, both ends bound, and variable length.
+    try expectResult(db,
+        \\MATCH (p:P {name: 'cy'}) OPTIONAL MATCH (p)-[:KNOWS]-(f) RETURN f.name ORDER BY f.name
+    , "f.name\n\"ann\"\n\"bob\"");
+    try expectResult(db,
+        \\MATCH (a:P {name: 'cy'}), (b:P) OPTIONAL MATCH (a)<-[k]-(b) RETURN b.name, k.since ORDER BY b.name
+    , "b.name | k.since\n\"ann\" | 2010\n\"bob\" | 2020\n\"cy\" | null\n\"dee\" | null");
+    try expectResult(db,
+        \\MATCH (p:P) WHERE p.name IN ['ann', 'dee'] OPTIONAL MATCH (p)-[*2]->(f) RETURN p.name, f.name ORDER BY p.name
+    , "p.name | f.name\n\"ann\" | \"cy\"\n\"dee\" | null");
+}
+
+test "lcy: nulls from OPTIONAL MATCH flow into later clauses" {
+    const path = "/tmp/lcy_optional_chain.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedPeople(db);
+
+    // A second OPTIONAL MATCH from a null node matches nothing.
+    try expectResult(db,
+        \\MATCH (p:P) OPTIONAL MATCH (p)-->(f {name: 'bob'}) OPTIONAL MATCH (f)-->(g) RETURN p.name, f.name, g.name ORDER BY p.name
+    , "p.name | f.name | g.name\n\"ann\" | \"bob\" | \"cy\"\n\"bob\" | null | null\n\"cy\" | null | null\n\"dee\" | null | null");
+    // A MATCH from a null node matches nothing either (the row goes).
+    try expectResult(db,
+        \\MATCH (p:P) OPTIONAL MATCH (p)-->(f {name: 'bob'}) MATCH (f)-->(g) RETURN p.name, g.name
+    , "p.name | g.name\n\"ann\" | \"cy\"");
+    try expectResult(db,
+        \\MATCH (p:P {name: 'dee'}) OPTIONAL MATCH (p)-->(f) MATCH (f)-[*1..2]->(g) RETURN g
+    , "g");
+    try expectResult(db,
+        \\MATCH (p:P {name: 'dee'}) OPTIONAL MATCH (p)-->(f) MATCH (a:P {name: 'ann'})-->(f) RETURN a
+    , "a");
+    try expectResult(db,
+        \\MATCH (p:P {name: 'dee'}) OPTIONAL MATCH (p)-->(f) RETURN f, f.name, f IS NULL AS missing, coalesce(f.name, 'none') AS name
+    , "f | f.name | missing | name\nnull | null | true | \"none\"");
+}
+
+test "lcy: writing to what OPTIONAL MATCH did not find does nothing" {
+    const path = "/tmp/lcy_optional_writes.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedPeople(db);
+
+    try expectResult(db,
+        \\MATCH (p:P) OPTIONAL MATCH (p)-[k:KNOWS]->(f {name: 'bob'})
+        \\SET f.seen = true, k.seen = true, f:Seen, f.gone = 1 REMOVE f.gone, k.since, f:Seen
+        \\RETURN p.name, f IS NULL AS missing ORDER BY p.name
+    , "p.name | missing\n\"ann\" | false\n\"bob\" | true\n\"cy\" | true\n\"dee\" | true");
+    try expectResult(db, "MATCH (n) WHERE n.seen RETURN n.name, n.gone, labels(n) AS l", "n.name | n.gone | l\n\"bob\" | null | [\"P\"]");
+    try expectResult(db, "MATCH ()-[k]->() WHERE k.seen RETURN k.since", "k.since\nnull");
+    try expectResult(db,
+        \\MATCH (p:P {name: 'dee'}) OPTIONAL MATCH (p)-[k]->(f) SET f += {a: 1} SET k = {b: 2} DELETE k DETACH DELETE f RETURN p.name
+    , "p.name\n\"dee\"");
+    try expectResult(db, "MATCH (n) RETURN count(n) AS c", "c\n4");
+    // Creating a relationship to null is an error, as in openCypher.
+    try expectFailure(db, "MATCH (p:P {name: 'dee'}) OPTIONAL MATCH (p)-->(f) CREATE (p)-[:R]->(f)", .execution, "CREATE needs a node at each end of a relationship, but one end is null");
+}
+
+test "lcy: OPTIONAL stays usable as a name and needs MATCH" {
+    const path = "/tmp/lcy_optional_names.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+
+    try run(db, "CREATE (optional:Optional {optional: 1})");
+    try expectResult(db, "MATCH (optional:Optional) RETURN optional.optional", "optional.optional\n1");
+    try expectResult(db, "optional match (o:Optional) return o.optional", "o.optional\n1");
+    try expectFailure(db, "OPTIONAL (n) RETURN n", .parse, "Expected MATCH after OPTIONAL");
+}

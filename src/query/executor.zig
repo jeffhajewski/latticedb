@@ -162,6 +162,12 @@ pub const SlotValue = union(enum) {
         return self == .empty;
     }
 
+    /// Whether the slot holds null, as a variable that OPTIONAL MATCH did
+    /// not bind does.
+    pub fn isNull(self: Self) bool {
+        return self == .property and self.property == .null_val;
+    }
+
     /// Get as node ID if this is a node reference
     pub fn asNodeId(self: Self) ?NodeId {
         return switch (self) {

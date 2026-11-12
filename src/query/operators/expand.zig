@@ -86,6 +86,14 @@ pub const EdgeConstraints = struct {
         return false;
     }
 
+    /// Whether the pattern expands into a bound node that is null, which no
+    /// relationship reaches: a null variable matches nothing.
+    pub fn targetIsNull(self: EdgeConstraints, row: *const Row, target_slot: u8) bool {
+        if (!self.target_bound) return false;
+        const value = row.getSlot(target_slot) orelse return false;
+        return value.isNull();
+    }
+
     /// The node the target slot is bound to, when the pattern expands into a
     /// bound node.
     pub fn boundTarget(self: EdgeConstraints, row: *const Row, target_slot: u8) OperatorError!?NodeId {
@@ -244,6 +252,10 @@ pub const Expand = struct {
             self.closeCurrentIterators();
             self.in_incoming_phase = false;
 
+            // Cleared first: an input that runs out and later has rows again
+            // (an OPTIONAL MATCH's argument, once per outer row) must not
+            // leave the last row in place for the incoming half of `both`.
+            self.current_input = null;
             self.current_input = try self.input.next(ctx) orelse return null;
 
             // Start iterator for this node
@@ -277,6 +289,7 @@ pub const Expand = struct {
             index_ptr = &self.outgoing_index;
         }
 
+        if (self.constraints.targetIsNull(input_row, self.target_slot)) return null;
         const bound_target = try self.constraints.boundTarget(input_row, self.target_slot);
 
         while (index_ptr.* < edges.len) {
@@ -314,6 +327,9 @@ pub const Expand = struct {
     fn startIteratorForCurrentInput(self: *Self, ctx: *ExecutionContext) OperatorError!void {
         const input_row = self.current_input orelse return;
         const source_val = input_row.getSlot(self.source_slot) orelse return OperatorError.UnboundVariable;
+        // A null node, as an OPTIONAL MATCH that found nothing leaves, has no
+        // relationships.
+        if (source_val.isNull()) return;
 
         const node_id = source_val.asNodeId() orelse return OperatorError.TypeError;
 

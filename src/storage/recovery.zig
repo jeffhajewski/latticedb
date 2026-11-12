@@ -32,6 +32,7 @@ const NodeStore = node_mod.NodeStore;
 const EdgeStore = edge_mod.EdgeStore;
 const SymbolTable = symbols_mod.SymbolTable;
 const LabelIndex = label_index_mod.LabelIndex;
+const PropertyValue = lattice.core.types.PropertyValue;
 
 // WAL payload deserialization
 const wal_payload = lattice.transaction.wal_payload;
@@ -383,7 +384,43 @@ pub const RecoveryManager = struct {
         }
     }
 
-    /// Redo pass: apply committed operations
+    /// Redo pass: apply committed operations.
+    ///
+    /// Every record is applied as an assignment that gives the same result
+    /// whether or not the image already holds its change: the image can be
+    /// from any flush since the last checkpoint, so some records are already
+    /// in it and some are not, and recovery does not know which. For each
+    /// kind of record, what "already applied" looks like:
+    ///
+    /// - node insert: the node exists. It is set to the logged labels and no
+    ///   properties; the properties the insert committed are the property
+    ///   records that follow it, and any later change is later in the log.
+    /// - node property set or removal, label add or removal: the node holds
+    ///   the value, or lacks the key or label. A node that is missing
+    ///   altogether is accepted only when a later committed record in this
+    ///   log deletes it: the image is then from after that delete.
+    /// - node delete: the node is missing.
+    /// - edge insert: the edge exists. It is set to the logged endpoints and
+    ///   type and no properties, which follow as records of their own.
+    /// - edge property set or removal: as for a node, including the rule for
+    ///   an edge that a later record deletes.
+    /// - edge delete: the edge is missing. An edge snapshot logged as an
+    ///   update replaces the edge outright.
+    /// - vector set: the index holds exactly that vector for the node.
+    ///   Vector removal: the node has no vector.
+    /// - stream append: the event is there with the same sequence. Offset
+    ///   set: an assignment. Trim: nothing at or below the sequence.
+    ///
+    /// The label index is set alongside each node record, entry by entry,
+    /// rather than trusted to follow it, because an image can hold a node and
+    /// its index entries from different moments only through a bug, and
+    /// replay is where that would otherwise become permanent. The property
+    /// and full-text indexes are rebuilt after replay.
+    ///
+    /// Anything else that goes wrong fails the open: a payload that does not
+    /// decode, a payload type no release writes, a store that reports an
+    /// error. Skipping such a record would open a database missing a change
+    /// that was acknowledged.
     fn redoPass(
         self: *Self,
         pm: *PageManager,
@@ -391,6 +428,25 @@ pub const RecoveryManager = struct {
         redo_list: *std.ArrayListUnmanaged(RedoEntry),
         stats: *RecoveryStats,
     ) RecoveryError!void {
+        _ = pm;
+
+        // For each node and edge a committed transaction deletes, the last
+        // position in the log at which it does.
+        var deletes = Deletes{};
+        defer deletes.deinit(self.allocator);
+        for (redo_list.items) |entry| {
+            const txn_info = txn_states.get(entry.txn_id) orelse continue;
+            if (txn_info.state != .committed) continue;
+            if (entry.record_type != .delete or entry.payload.len == 0) continue;
+            if (entry.payload[0] == @intFromEnum(wal_payload.PayloadType.node_delete)) {
+                const p = wal_payload.deserializeNodeDelete(entry.payload) catch return RecoveryError.InvalidRecord;
+                deletes.nodes.put(self.allocator, p.node_id, entry.lsn) catch return RecoveryError.OutOfMemory;
+            } else if (entry.payload[0] == @intFromEnum(wal_payload.PayloadType.edge_delete)) {
+                const p = wal_payload.deserializeEdgeDelete(entry.payload) catch return RecoveryError.InvalidRecord;
+                deletes.edges.put(self.allocator, p.edge_id, entry.lsn) catch return RecoveryError.OutOfMemory;
+            }
+        }
+
         for (redo_list.items) |entry| {
             // Only redo if transaction committed
             const txn_info = txn_states.get(entry.txn_id) orelse continue;
@@ -398,56 +454,16 @@ pub const RecoveryManager = struct {
                 continue;
             }
 
-            // Apply the operation
             switch (entry.record_type) {
-                .page_write => {
-                    // Full page write - payload contains page_id + page data
-                    if (entry.payload.len >= 4) {
-                        const page_id = std.mem.readInt(u32, entry.payload[0..4], .little);
-                        const page_data = entry.payload[4..];
-
-                        if (page_data.len == pm.getPageSize()) {
-                            // Write page directly
-                            var buf: [4096]u8 align(4096) = undefined;
-                            @memcpy(buf[0..page_data.len], page_data);
-                            pm.writePage(page_id, &buf) catch {
-                                return RecoveryError.IoError;
-                            };
-                            stats.redo_operations += 1;
-                        }
-                    }
-                },
-
-                .insert => {
+                .insert, .update, .delete => {
                     if (self.logical_ctx) |ctx| {
-                        self.redoInsert(ctx, entry.payload) catch {};
+                        try self.redoRecord(ctx, &deletes, entry);
                     }
                     stats.redo_operations += 1;
                 },
-
-                .update => {
-                    if (self.logical_ctx) |ctx| {
-                        if (entry.payload.len > 0 and
-                            (entry.payload[0] == @intFromEnum(wal_payload.PayloadType.vector_set) or
-                                entry.payload[0] == @intFromEnum(wal_payload.PayloadType.vector_remove)))
-                        {
-                            self.redoVector(ctx, entry.payload) catch {
-                                return RecoveryError.IoError;
-                            };
-                        } else {
-                            self.redoUpdate(ctx, entry.payload) catch {};
-                        }
-                    }
-                    stats.redo_operations += 1;
-                },
-
-                .delete => {
-                    if (self.logical_ctx) |ctx| {
-                        self.redoDelete(ctx, entry.payload) catch {};
-                    }
-                    stats.redo_operations += 1;
-                },
-
+                // A whole page image. No release has written one: the log
+                // holds logical records only.
+                .page_write => return RecoveryError.InvalidRecord,
                 else => {},
             }
 
@@ -457,60 +473,268 @@ pub const RecoveryManager = struct {
         }
     }
 
-    /// Redo an insert operation
-    fn redoInsert(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) !void {
-        if (payload.len == 0) return;
+    const Deletes = struct {
+        nodes: std.AutoHashMapUnmanaged(u64, u64) = .empty,
+        edges: std.AutoHashMapUnmanaged(u64, u64) = .empty,
 
-        const payload_type = payload[0];
-
-        if (payload_type == @intFromEnum(wal_payload.PayloadType.stream_append)) {
-            const trees = ctx.stream_trees orelse return;
-            const append = stream_store.deserializeAppendWal(payload) catch return;
-            var value = stream_payload.decode(self.allocator, append.payload_bytes) catch return;
-            defer value.deinit(self.allocator);
-            stream_store.appendWithSequence(
-                trees,
-                self.allocator,
-                append.stream,
-                append.sequence,
-                append.kind,
-                value,
-            ) catch {};
-            return;
+        fn deinit(self: *Deletes, allocator: Allocator) void {
+            self.nodes.deinit(allocator);
+            self.edges.deinit(allocator);
         }
+    };
 
-        // Node insert
-        if (payload_type == @intFromEnum(wal_payload.PayloadType.node_insert)) {
-            const node_payload = wal_payload.deserializeNodeInsert(payload) catch return;
-            // Intern label strings to get label IDs
-            var label_ids: std.ArrayListUnmanaged(u16) = .empty;
-            defer label_ids.deinit(self.allocator);
-            var iter = node_payload.labelIterator();
-            while (iter.next()) |label| {
-                const label_id = ctx.symbol_table.intern(label) catch return;
-                label_ids.append(self.allocator, label_id) catch return;
+    /// A record that changes a node or edge found it missing. That is the
+    /// change already applied only if a later record deletes it.
+    fn missingIsDeletedLater(deleted_at: *const std.AutoHashMapUnmanaged(u64, u64), id: u64, lsn: u64) RecoveryError!void {
+        const at = deleted_at.get(id) orelse return RecoveryError.InvalidRecord;
+        if (at <= lsn) return RecoveryError.InvalidRecord;
+    }
+
+    fn redoRecord(self: *Self, ctx: LogicalRecoveryContext, deletes: *const Deletes, entry: RedoEntry) RecoveryError!void {
+        const payload = entry.payload;
+        if (payload.len == 0) return RecoveryError.InvalidRecord;
+        const payload_type = std.enums.fromInt(wal_payload.PayloadType, payload[0]) orelse return RecoveryError.InvalidRecord;
+
+        switch (entry.record_type) {
+            .insert => switch (payload_type) {
+                .node_insert => try self.redoNodeInsert(ctx, payload),
+                .edge_insert => try self.redoEdgeInsert(ctx, payload),
+                .stream_append => try self.redoStreamAppend(ctx, payload),
+                else => return RecoveryError.InvalidRecord,
+            },
+            .update => switch (payload_type) {
+                .node_update => try self.redoNodeProperty(ctx, deletes, entry.lsn, payload),
+                .label_add, .label_remove => try self.redoLabel(ctx, deletes, entry.lsn, payload, payload_type == .label_add),
+                .edge_property_update => try self.redoEdgeProperty(ctx, deletes, entry.lsn, payload),
+                .edge_delete => try self.redoEdgeSnapshot(ctx, payload),
+                .vector_set, .vector_remove => self.redoVector(ctx, payload) catch |err| return switch (err) {
+                    error.OutOfMemory => RecoveryError.OutOfMemory,
+                    error.InvalidRecord => RecoveryError.InvalidRecord,
+                    else => RecoveryError.IoError,
+                },
+                .stream_offset_set => try self.redoStreamOffset(ctx, payload),
+                else => return RecoveryError.InvalidRecord,
+            },
+            .delete => switch (payload_type) {
+                .node_delete => try self.redoNodeDelete(ctx, payload),
+                .edge_delete => try self.redoEdgeDelete(ctx, payload),
+                .stream_trim => try self.redoStreamTrim(ctx, payload),
+                else => return RecoveryError.InvalidRecord,
+            },
+            else => unreachable,
+        }
+    }
+
+    fn internAll(self: *Self, ctx: LogicalRecoveryContext, names: anytype, out: *std.ArrayListUnmanaged(symbols_mod.SymbolId)) RecoveryError!void {
+        var iter = names;
+        while (iter.next()) |name| {
+            const id = ctx.symbol_table.intern(name) catch return RecoveryError.IoError;
+            out.append(self.allocator, id) catch return RecoveryError.OutOfMemory;
+        }
+    }
+
+    fn containsId(ids: []const symbols_mod.SymbolId, id: symbols_mod.SymbolId) bool {
+        return std.mem.indexOfScalar(symbols_mod.SymbolId, ids, id) != null;
+    }
+
+    fn labelIndexSet(ctx: LogicalRecoveryContext, label_id: symbols_mod.SymbolId, node_id: u64, present: bool) RecoveryError!void {
+        const has = ctx.label_index.contains(label_id, node_id) catch return RecoveryError.IoError;
+        if (present and !has) {
+            ctx.label_index.add(label_id, node_id) catch return RecoveryError.IoError;
+        } else if (!present and has) {
+            ctx.label_index.remove(label_id, node_id) catch return RecoveryError.IoError;
+        }
+    }
+
+    /// The node as the trees hold it now, or null if it is missing.
+    fn getNode(ctx: LogicalRecoveryContext, node_id: u64) RecoveryError!?node_mod.Node {
+        return ctx.node_store.get(node_id) catch |err| switch (err) {
+            error.NotFound => null,
+            error.OutOfMemory => RecoveryError.OutOfMemory,
+            else => RecoveryError.IoError,
+        };
+    }
+
+    fn getEdge(ctx: LogicalRecoveryContext, edge_id: u64) RecoveryError!?edge_mod.Edge {
+        return ctx.edge_store.getById(edge_id) catch |err| switch (err) {
+            error.NotFound => null,
+            error.OutOfMemory => RecoveryError.OutOfMemory,
+            else => RecoveryError.IoError,
+        };
+    }
+
+    /// Make the node exist with exactly these labels and properties.
+    fn putNode(ctx: LogicalRecoveryContext, node_id: u64, exists: bool, labels: []const symbols_mod.SymbolId, properties: []const node_mod.Property) RecoveryError!void {
+        if (exists) {
+            ctx.node_store.update(node_id, labels, properties) catch return RecoveryError.IoError;
+        } else {
+            ctx.node_store.createWithId(node_id, labels, properties) catch return RecoveryError.IoError;
+        }
+    }
+
+    /// Make the edge exist with exactly these endpoints, type and properties.
+    fn putEdge(ctx: LogicalRecoveryContext, edge_id: u64, exists: bool, source: u64, target: u64, edge_type: symbols_mod.SymbolId, properties: []const node_mod.Property) RecoveryError!void {
+        if (exists) ctx.edge_store.deleteById(edge_id) catch return RecoveryError.IoError;
+        ctx.edge_store.createWithId(edge_id, source, target, edge_type, properties) catch return RecoveryError.IoError;
+    }
+
+    fn redoNodeInsert(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) RecoveryError!void {
+        const p = wal_payload.deserializeNodeInsert(payload) catch return RecoveryError.InvalidRecord;
+        var labels: std.ArrayListUnmanaged(symbols_mod.SymbolId) = .empty;
+        defer labels.deinit(self.allocator);
+        try self.internAll(ctx, p.labelIterator(), &labels);
+
+        var existing = try getNode(ctx, p.node_id);
+        defer if (existing) |*node| node.deinit(self.allocator);
+        if (existing) |node| {
+            for (node.labels) |label_id| {
+                if (!containsId(labels.items, label_id)) try labelIndexSet(ctx, label_id, p.node_id, false);
             }
-            // Re-create the node with its original ID
-            ctx.node_store.createWithId(
-                node_payload.node_id,
-                label_ids.items,
-                &[_]node_mod.Property{},
-            ) catch {};
-            ctx.label_index.addLabels(label_ids.items, node_payload.node_id) catch {};
         }
-        // Edge insert
-        else if (payload_type == @intFromEnum(wal_payload.PayloadType.edge_insert)) {
-            const edge_payload = wal_payload.deserializeEdgeInsert(payload) catch return;
-            // Intern edge type string to get type_id
-            const type_id = ctx.symbol_table.intern(edge_payload.edge_type) catch return;
-            ctx.edge_store.createWithId(
-                edge_payload.edge_id,
-                edge_payload.source,
-                edge_payload.target,
-                type_id,
-                &[_]node_mod.Property{},
-            ) catch {};
+        try putNode(ctx, p.node_id, existing != null, labels.items, &.{});
+        for (labels.items) |label_id| try labelIndexSet(ctx, label_id, p.node_id, true);
+    }
+
+    fn redoNodeDelete(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) RecoveryError!void {
+        const p = wal_payload.deserializeNodeDelete(payload) catch return RecoveryError.InvalidRecord;
+        var existing = (try getNode(ctx, p.node_id)) orelse return;
+        defer existing.deinit(self.allocator);
+        for (existing.labels) |label_id| try labelIndexSet(ctx, label_id, p.node_id, false);
+        ctx.node_store.delete(p.node_id) catch return RecoveryError.IoError;
+    }
+
+    fn redoNodeProperty(self: *Self, ctx: LogicalRecoveryContext, deletes: *const Deletes, lsn: u64, payload: []const u8) RecoveryError!void {
+        const p = wal_payload.deserializePropertyUpdate(payload) catch return RecoveryError.InvalidRecord;
+        var node = (try getNode(ctx, p.node_id)) orelse return missingIsDeletedLater(&deletes.nodes, p.node_id, lsn);
+        defer node.deinit(self.allocator);
+        const key_id = ctx.symbol_table.intern(p.key) catch return RecoveryError.IoError;
+
+        var new_value: ?PropertyValue = null;
+        if (p.new_value.len > 0) {
+            new_value = wal_payload.deserializePropertyValueFromBytes(self.allocator, p.new_value) catch return RecoveryError.InvalidRecord;
         }
+        defer if (new_value) |*v| v.deinit(self.allocator);
+
+        const props = try self.withProperty(node.properties, key_id, new_value);
+        defer self.allocator.free(props);
+        try putNode(ctx, p.node_id, true, node.labels, props);
+    }
+
+    /// `properties` with `key_id` set to `value`, or removed when it is null.
+    /// The values are borrowed, not copied.
+    fn withProperty(self: *Self, properties: []const node_mod.Property, key_id: symbols_mod.SymbolId, value: ?PropertyValue) RecoveryError![]node_mod.Property {
+        var out: std.ArrayListUnmanaged(node_mod.Property) = .empty;
+        errdefer out.deinit(self.allocator);
+        var found = false;
+        for (properties) |prop| {
+            if (prop.key_id == key_id) {
+                found = true;
+                if (value) |v| out.append(self.allocator, .{ .key_id = key_id, .value = v }) catch return RecoveryError.OutOfMemory;
+            } else {
+                out.append(self.allocator, prop) catch return RecoveryError.OutOfMemory;
+            }
+        }
+        if (!found) {
+            if (value) |v| out.append(self.allocator, .{ .key_id = key_id, .value = v }) catch return RecoveryError.OutOfMemory;
+        }
+        return out.toOwnedSlice(self.allocator) catch return RecoveryError.OutOfMemory;
+    }
+
+    fn redoLabel(self: *Self, ctx: LogicalRecoveryContext, deletes: *const Deletes, lsn: u64, payload: []const u8, add: bool) RecoveryError!void {
+        const p = (if (add) wal_payload.deserializeLabelAdd(payload) else wal_payload.deserializeLabelRemove(payload)) catch return RecoveryError.InvalidRecord;
+        var node = (try getNode(ctx, p.node_id)) orelse return missingIsDeletedLater(&deletes.nodes, p.node_id, lsn);
+        defer node.deinit(self.allocator);
+        const label_id = ctx.symbol_table.intern(p.label) catch return RecoveryError.IoError;
+
+        if (containsId(node.labels, label_id) != add) {
+            var labels: std.ArrayListUnmanaged(symbols_mod.SymbolId) = .empty;
+            defer labels.deinit(self.allocator);
+            for (node.labels) |existing| {
+                if (existing != label_id) labels.append(self.allocator, existing) catch return RecoveryError.OutOfMemory;
+            }
+            if (add) labels.append(self.allocator, label_id) catch return RecoveryError.OutOfMemory;
+            try putNode(ctx, p.node_id, true, labels.items, node.properties);
+        }
+        try labelIndexSet(ctx, label_id, p.node_id, add);
+    }
+
+    fn redoEdgeInsert(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) RecoveryError!void {
+        _ = self;
+        const p = wal_payload.deserializeEdgeInsert(payload) catch return RecoveryError.InvalidRecord;
+        const type_id = ctx.symbol_table.intern(p.edge_type) catch return RecoveryError.IoError;
+        var existing = try getEdge(ctx, p.edge_id);
+        const exists = existing != null;
+        if (existing) |*edge| edge.deinit(ctx.edge_store.allocator);
+        try putEdge(ctx, p.edge_id, exists, p.source, p.target, type_id, &.{});
+    }
+
+    fn redoEdgeDelete(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) RecoveryError!void {
+        _ = self;
+        const p = wal_payload.deserializeEdgeDelete(payload) catch return RecoveryError.InvalidRecord;
+        ctx.edge_store.deleteById(p.edge_id) catch |err| switch (err) {
+            error.NotFound => {},
+            else => return RecoveryError.IoError,
+        };
+    }
+
+    /// An edge's whole state, logged as an update. Nothing since 0.16.0
+    /// writes one; it replaces the edge outright.
+    fn redoEdgeSnapshot(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) RecoveryError!void {
+        const p = wal_payload.deserializeEdgeDelete(payload) catch return RecoveryError.InvalidRecord;
+        var properties: []wal_payload.Property = &.{};
+        if (p.properties.len > 0) {
+            properties = wal_payload.deserializeProperties(self.allocator, p.properties) catch return RecoveryError.InvalidRecord;
+        }
+        defer if (p.properties.len > 0) {
+            for (properties) |*prop| prop.value.deinit(self.allocator);
+            self.allocator.free(properties);
+        };
+        var existing = try getEdge(ctx, p.edge_id);
+        const exists = existing != null;
+        if (existing) |*edge| edge.deinit(self.allocator);
+        try putEdge(ctx, p.edge_id, exists, p.source, p.target, p.type_id, @ptrCast(properties));
+    }
+
+    fn redoEdgeProperty(self: *Self, ctx: LogicalRecoveryContext, deletes: *const Deletes, lsn: u64, payload: []const u8) RecoveryError!void {
+        const p = wal_payload.deserializeEdgePropertyUpdate(payload) catch return RecoveryError.InvalidRecord;
+        var edge = (try getEdge(ctx, p.edge_id)) orelse return missingIsDeletedLater(&deletes.edges, p.edge_id, lsn);
+        defer edge.deinit(self.allocator);
+        const key_id = ctx.symbol_table.intern(p.key) catch return RecoveryError.IoError;
+
+        var new_value: ?PropertyValue = null;
+        if (p.new_value.len > 0) {
+            new_value = wal_payload.deserializePropertyValueFromBytes(self.allocator, p.new_value) catch return RecoveryError.InvalidRecord;
+        }
+        defer if (new_value) |*v| v.deinit(self.allocator);
+
+        const props = try self.withProperty(edge.properties, key_id, new_value);
+        defer self.allocator.free(props);
+        try putEdge(ctx, p.edge_id, true, edge.source, edge.target, edge.edge_type, props);
+    }
+
+    fn streamTrees(ctx: LogicalRecoveryContext) RecoveryError!stream_store.TreeSet {
+        return ctx.stream_trees orelse RecoveryError.InvalidRecord;
+    }
+
+    fn redoStreamAppend(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) RecoveryError!void {
+        const trees = try streamTrees(ctx);
+        const append = stream_store.deserializeAppendWal(payload) catch return RecoveryError.InvalidRecord;
+        var value = stream_payload.decode(self.allocator, append.payload_bytes) catch return RecoveryError.InvalidRecord;
+        defer value.deinit(self.allocator);
+        // An event already there under its sequence is this one.
+        stream_store.appendWithSequence(trees, self.allocator, append.stream, append.sequence, append.kind, value) catch return RecoveryError.IoError;
+    }
+
+    fn redoStreamOffset(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) RecoveryError!void {
+        const trees = try streamTrees(ctx);
+        const offset = stream_store.deserializeOffsetWal(payload) catch return RecoveryError.InvalidRecord;
+        stream_store.setOffset(trees, self.allocator, offset.stream, offset.consumer, offset.sequence) catch return RecoveryError.IoError;
+    }
+
+    fn redoStreamTrim(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) RecoveryError!void {
+        const trees = try streamTrees(ctx);
+        const trim_payload = stream_store.deserializeTrimWal(payload) catch return RecoveryError.InvalidRecord;
+        stream_store.trim(trees, self.allocator, trim_payload.stream, trim_payload.through_sequence) catch return RecoveryError.IoError;
     }
 
     fn redoVector(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) !void {
@@ -530,7 +754,10 @@ pub const RecoveryManager = struct {
             // incompatible open instead.
             return RecoveryError.InvalidRecord;
         };
-        const mutation = try wal_payload.deserializeVectorMutation(self.allocator, payload);
+        const mutation = wal_payload.deserializeVectorMutation(self.allocator, payload) catch |err| switch (err) {
+            error.OutOfMemory => return error.OutOfMemory,
+            else => return RecoveryError.InvalidRecord,
+        };
         defer if (mutation.vector) |vector| self.allocator.free(vector);
         if (mutation.vector) |vector| {
             // Already in the file, from a flush after this record was
@@ -539,238 +766,6 @@ pub const RecoveryManager = struct {
             try hnsw.insert(mutation.node_id, vector);
         } else {
             try hnsw.remove(mutation.node_id);
-        }
-    }
-
-    /// Redo an update operation
-    fn redoUpdate(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) !void {
-        if (payload.len == 0) return;
-
-        const payload_type = payload[0];
-
-        if (payload_type == @intFromEnum(wal_payload.PayloadType.stream_offset_set)) {
-            const trees = ctx.stream_trees orelse return;
-            const offset = stream_store.deserializeOffsetWal(payload) catch return;
-            stream_store.setOffset(
-                trees,
-                self.allocator,
-                offset.stream,
-                offset.consumer,
-                offset.sequence,
-            ) catch {};
-            return;
-        }
-
-        // Property update
-        if (payload_type == @intFromEnum(wal_payload.PayloadType.node_update)) {
-            const update_payload = wal_payload.deserializePropertyUpdate(payload) catch return;
-
-            // Intern the property key string to get key_id
-            const key_id = ctx.symbol_table.intern(update_payload.key) catch return;
-
-            // Get the current node (should already exist from redoInsert)
-            var node = ctx.node_store.get(update_payload.node_id) catch return;
-            defer node.deinit(self.allocator);
-
-            if (update_payload.new_value.len == 0) {
-                // Property removed — rebuild properties without this key
-                var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
-                defer new_props.deinit(self.allocator);
-                for (node.properties) |prop| {
-                    if (prop.key_id != key_id) {
-                        new_props.append(self.allocator, prop) catch return;
-                    }
-                }
-                ctx.node_store.update(update_payload.node_id, node.labels, new_props.items) catch {};
-            } else {
-                // Deserialize the new property value from WAL bytes
-                var new_value = wal_payload.deserializePropertyValueFromBytes(
-                    self.allocator,
-                    update_payload.new_value,
-                ) catch return;
-                defer new_value.deinit(self.allocator);
-
-                // Build updated properties list: replace existing or append new
-                var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
-                defer new_props.deinit(self.allocator);
-                var found = false;
-                for (node.properties) |prop| {
-                    if (prop.key_id == key_id) {
-                        new_props.append(self.allocator, .{ .key_id = key_id, .value = new_value }) catch return;
-                        found = true;
-                    } else {
-                        new_props.append(self.allocator, prop) catch return;
-                    }
-                }
-                if (!found) {
-                    new_props.append(self.allocator, .{ .key_id = key_id, .value = new_value }) catch return;
-                }
-                ctx.node_store.update(update_payload.node_id, node.labels, new_props.items) catch {};
-            }
-        } else if (payload_type == @intFromEnum(wal_payload.PayloadType.edge_property_update)) {
-            const update_payload = wal_payload.deserializeEdgePropertyUpdate(payload) catch return;
-
-            var edge = ctx.edge_store.getById(update_payload.edge_id) catch return;
-            defer edge.deinit(self.allocator);
-
-            const key_id = ctx.symbol_table.intern(update_payload.key) catch return;
-
-            var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
-            defer {
-                for (new_props.items) |*prop| {
-                    var value = prop.value;
-                    value.deinit(self.allocator);
-                }
-                new_props.deinit(self.allocator);
-            }
-
-            if (update_payload.new_value.len == 0) {
-                for (edge.properties) |prop| {
-                    if (prop.key_id != key_id) {
-                        const cloned = prop.value.clone(self.allocator) catch return;
-                        new_props.append(self.allocator, .{ .key_id = prop.key_id, .value = cloned }) catch return;
-                    }
-                }
-            } else {
-                var new_value = wal_payload.deserializePropertyValueFromBytes(
-                    self.allocator,
-                    update_payload.new_value,
-                ) catch return;
-                defer new_value.deinit(self.allocator);
-
-                var found = false;
-                for (edge.properties) |prop| {
-                    if (prop.key_id == key_id) {
-                        const cloned = new_value.clone(self.allocator) catch return;
-                        new_props.append(self.allocator, .{ .key_id = key_id, .value = cloned }) catch return;
-                        found = true;
-                    } else {
-                        const cloned = prop.value.clone(self.allocator) catch return;
-                        new_props.append(self.allocator, .{ .key_id = prop.key_id, .value = cloned }) catch return;
-                    }
-                }
-                if (!found) {
-                    const cloned = new_value.clone(self.allocator) catch return;
-                    new_props.append(self.allocator, .{ .key_id = key_id, .value = cloned }) catch return;
-                }
-            }
-
-            ctx.edge_store.deleteById(update_payload.edge_id) catch {};
-            ctx.edge_store.createWithId(
-                update_payload.edge_id,
-                edge.source,
-                edge.target,
-                edge.edge_type,
-                new_props.items,
-            ) catch {};
-        } else if (payload_type == @intFromEnum(wal_payload.PayloadType.label_add)) {
-            const label_payload = wal_payload.deserializeLabelAdd(payload) catch return;
-            const label_id = ctx.symbol_table.intern(label_payload.label) catch return;
-
-            var node = ctx.node_store.get(label_payload.node_id) catch return;
-            defer node.deinit(self.allocator);
-
-            for (node.labels) |existing_label_id| {
-                if (existing_label_id == label_id) return;
-            }
-
-            var new_labels: std.ArrayListUnmanaged(symbols_mod.SymbolId) = .empty;
-            defer new_labels.deinit(self.allocator);
-
-            for (node.labels) |existing_label_id| {
-                new_labels.append(self.allocator, existing_label_id) catch return;
-            }
-            new_labels.append(self.allocator, label_id) catch return;
-
-            ctx.node_store.update(label_payload.node_id, new_labels.items, node.properties) catch {};
-            ctx.label_index.add(label_id, label_payload.node_id) catch {};
-        } else if (payload_type == @intFromEnum(wal_payload.PayloadType.label_remove)) {
-            const label_payload = wal_payload.deserializeLabelRemove(payload) catch return;
-            const label_id = ctx.symbol_table.lookup(label_payload.label) catch return;
-
-            var node = ctx.node_store.get(label_payload.node_id) catch return;
-            defer node.deinit(self.allocator);
-
-            var new_labels: std.ArrayListUnmanaged(symbols_mod.SymbolId) = .empty;
-            defer new_labels.deinit(self.allocator);
-
-            var found = false;
-            for (node.labels) |existing_label_id| {
-                if (existing_label_id == label_id) {
-                    found = true;
-                } else {
-                    new_labels.append(self.allocator, existing_label_id) catch return;
-                }
-            }
-            if (!found) return;
-
-            ctx.node_store.update(label_payload.node_id, new_labels.items, node.properties) catch {};
-            ctx.label_index.remove(label_id, label_payload.node_id) catch {};
-        } else if (payload_type == @intFromEnum(wal_payload.PayloadType.edge_delete)) {
-            // Edge update payload is stored as a full edge snapshot.
-            const edge_payload = wal_payload.deserializeEdgeDelete(payload) catch return;
-
-            var properties: []node_mod.Property = &[_]node_mod.Property{};
-            var owns_properties = false;
-            if (edge_payload.properties.len > 0) {
-                const wal_props = wal_payload.deserializeProperties(self.allocator, edge_payload.properties) catch &[_]wal_payload.Property{};
-                if (wal_props.len > 0) {
-                    properties = @ptrCast(@constCast(wal_props));
-                    owns_properties = true;
-                }
-            }
-            defer if (owns_properties) {
-                for (properties) |*prop| {
-                    var val = prop.value;
-                    val.deinit(self.allocator);
-                }
-                self.allocator.free(properties);
-            };
-
-            // Replace edge state with the snapshot from WAL.
-            ctx.edge_store.deleteById(edge_payload.edge_id) catch {};
-            ctx.edge_store.createWithId(
-                edge_payload.edge_id,
-                edge_payload.source,
-                edge_payload.target,
-                edge_payload.type_id,
-                properties,
-            ) catch {};
-        }
-    }
-
-    /// Redo a delete operation
-    fn redoDelete(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) !void {
-        if (payload.len == 0) return;
-
-        const payload_type = payload[0];
-
-        if (payload_type == @intFromEnum(wal_payload.PayloadType.stream_trim)) {
-            const trees = ctx.stream_trees orelse return;
-            const trim_payload = stream_store.deserializeTrimWal(payload) catch return;
-            stream_store.trim(
-                trees,
-                self.allocator,
-                trim_payload.stream,
-                trim_payload.through_sequence,
-            ) catch {};
-            return;
-        }
-
-        // Node delete
-        if (payload_type == @intFromEnum(wal_payload.PayloadType.node_delete)) {
-            const node_payload = wal_payload.deserializeNodeDelete(payload) catch return;
-            if (ctx.node_store.get(node_payload.node_id)) |existing| {
-                var node = existing;
-                defer node.deinit(self.allocator);
-                ctx.label_index.removeLabels(node.labels, node_payload.node_id) catch {};
-            } else |_| {}
-            ctx.node_store.delete(node_payload.node_id) catch {};
-        }
-        // Edge delete
-        else if (payload_type == @intFromEnum(wal_payload.PayloadType.edge_delete)) {
-            const edge_payload = wal_payload.deserializeEdgeDelete(payload) catch return;
-            ctx.edge_store.deleteById(edge_payload.edge_id) catch {};
         }
     }
 };

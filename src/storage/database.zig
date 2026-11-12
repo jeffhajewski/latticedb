@@ -1442,7 +1442,10 @@ pub const Database = struct {
                 .between_operations = .{ .context = self, .call = relieveBufferPressureHook },
             });
             const stats = rm.recover(wal, &self.page_manager) catch |err| switch (err) {
-                error.MidLogCorruption => return DatabaseError.InvalidDatabase,
+                // The log is damaged, or holds a committed record that cannot
+                // be applied. Opening without it would lose a commit.
+                error.MidLogCorruption, error.InvalidRecord, error.CorruptedWal => return DatabaseError.InvalidDatabase,
+                error.OutOfMemory => return DatabaseError.OutOfMemory,
                 else => return DatabaseError.IoError,
             };
             recovered_max_txn_id = stats.max_txn_id;

@@ -1,6 +1,10 @@
 package latticedb
 
-import cgobridge "github.com/jeffhajewski/latticedb/bindings/go/internal/cgo"
+import (
+	"errors"
+
+	cgobridge "github.com/jeffhajewski/latticedb/bindings/go/internal/cgo"
+)
 
 type Tx struct {
 	db       *DB
@@ -22,7 +26,10 @@ func (tx *Tx) Commit() error {
 		return ErrInactiveTx
 	}
 	err := wrapError(tx.raw.Commit())
-	if err == nil {
+	// A commit that fails with ErrorTxnAborted has retired the native handle,
+	// so there is nothing left to roll back. Any other failure leaves the
+	// transaction open for Rollback.
+	if err == nil || errors.Is(err, &Error{Code: ErrorTxnAborted}) {
 		tx.raw = nil
 		tx.active = false
 	}

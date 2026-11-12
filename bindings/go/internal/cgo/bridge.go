@@ -460,11 +460,14 @@ func (tx *Tx) Commit() error {
 	if tx == nil || tx.ptr == nil {
 		return nil
 	}
-	err := errorFromCode(ErrorCode(C.lattice_commit(tx.ptr)))
-	if err == nil {
+	code := ErrorCode(C.lattice_commit(tx.ptr))
+	// TXN_ABORTED means the C side has retired the handle (or had already): it
+	// cannot be committed or rolled back again. Any other failure leaves the
+	// transaction open for the caller to roll back.
+	if code == ErrorOK || code == ErrorTxnAborted {
 		tx.ptr = nil
 	}
-	return err
+	return errorFromCode(code)
 }
 
 func (tx *Tx) Rollback() error {

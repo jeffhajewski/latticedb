@@ -574,6 +574,51 @@ pub const EdgeStore = struct {
         }
     };
 
+    /// Where a chunked walk of the edge id index stands: after which key.
+    pub const RefCursor = struct {
+        after: ?[8]u8 = null,
+        done: bool = false,
+    };
+
+    /// Read up to `out.len` edges of the edge id index from where `cursor`
+    /// stands, in the index's (not numeric) order, and move the cursor past
+    /// them. Holds no page between calls. Returns how many were read.
+    pub fn readRefs(self: *Self, cursor: *RefCursor, out: []EdgeRef) EdgeError!usize {
+        if (cursor.done) return 0;
+        var start: [8]u8 = undefined;
+        const from: ?[]const u8 = if (cursor.after) |after| blk: {
+            start = after;
+            // The least key above `after`: keys are all eight bytes.
+            var i: usize = 8;
+            while (i > 0) {
+                i -= 1;
+                if (start[i] != 0xff) {
+                    start[i] += 1;
+                    @memset(start[i + 1 ..], 0);
+                    break :blk &start;
+                }
+            }
+            cursor.done = true;
+            return 0;
+        } else null;
+        var iter = self.edge_id_index.range(from, null) catch |err| return mapBTreeError(err);
+        defer iter.deinit();
+        var count: usize = 0;
+        while (count < out.len) {
+            const entry = (iter.next() catch |err| return mapBTreeError(err)) orelse {
+                cursor.done = true;
+                break;
+            };
+            if (entry.key.len != 8) continue;
+            cursor.after = entry.key[0..8].*;
+            const edge_id = std.mem.readInt(u64, entry.key[0..8], .little);
+            if (edge_id == EDGE_ID_META_KEY) continue;
+            out[count] = deserializeEdgeRef(edge_id, entry.value) catch return EdgeError.InvalidData;
+            count += 1;
+        }
+        return count;
+    }
+
     pub fn scanRefs(self: *Self) EdgeError!EdgeIdRefIterator {
         const iter = self.edge_id_index.range(null, null) catch |err| {
             return mapBTreeError(err);

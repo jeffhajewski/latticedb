@@ -5976,6 +5976,44 @@ pub const Database = struct {
         return state.exists and containsSymbolId(state.labels, label_id);
     }
 
+    /// Whether the transaction's overlay holds this edge, which then
+    /// decides whether and how it exists.
+    pub fn overlayHoldsEdge(self: *Self, txn: ?*Transaction, edge_id: EdgeId) bool {
+        const t = txn orelse return false;
+        const overlay = self.getTxnOverlay(t) orelse return false;
+        return overlay.edge_states.contains(edge_id);
+    }
+
+    /// Whether the transaction's overlay holds any edge.
+    pub fn overlayHasEdges(self: *Self, txn: ?*Transaction) bool {
+        const t = txn orelse return false;
+        const overlay = self.getTxnOverlay(t) orelse return false;
+        return overlay.edge_states.count() > 0;
+    }
+
+    /// The edges the overlay holds that exist and have one of `types`, in id
+    /// order. The slice belongs to `self.allocator`.
+    pub fn overlayEdgesOfTypes(self: *Self, txn: ?*Transaction, edge_types: []const symbols_mod.SymbolId) DatabaseError![]EdgeRef {
+        var refs: std.ArrayListUnmanaged(EdgeRef) = .empty;
+        errdefer refs.deinit(self.allocator);
+        if (txn) |t| {
+            if (self.getTxnOverlay(t)) |overlay| {
+                var iter = overlay.edge_states.iterator();
+                while (iter.next()) |entry| {
+                    const state = entry.value_ptr.*;
+                    if (!state.exists or !containsSymbolId(edge_types, state.edge_type)) continue;
+                    refs.append(self.allocator, edgeStateToRef(entry.key_ptr.*, state)) catch return DatabaseError.OutOfMemory;
+                }
+            }
+        }
+        std.mem.sort(EdgeRef, refs.items, {}, struct {
+            fn lessThan(_: void, a: EdgeRef, b: EdgeRef) bool {
+                return a.id < b.id;
+            }
+        }.lessThan);
+        return refs.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+    }
+
     fn orderNodeId(target: NodeId, item: NodeId) std.math.Order {
         return std.math.order(target, item);
     }

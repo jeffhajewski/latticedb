@@ -745,3 +745,107 @@ test "lgr: declaring and dropping indexes keeps the others maintained" {
     try db.createNodePropertyIndex("P", "k");
     try expectFoundNodes(db, null, .{ .int_val = 1 }, &.{ a, b, c, d });
 }
+
+// ============================================================================
+// Patterns that start from a relationship type
+// ============================================================================
+
+fn sortedRender(db: *Database, txn: ?*lattice.transaction.manager.Transaction, cypher: []const u8) ![]u8 {
+    var result = try db.queryInTxn(txn, cypher);
+    defer result.deinit();
+    const text = try render(result);
+    defer std.testing.allocator.free(text);
+    var lines: std.ArrayList([]const u8) = .empty;
+    defer lines.deinit(std.testing.allocator);
+    var it = std.mem.splitScalar(u8, text, '\n');
+    while (it.next()) |line| if (line.len > 0) try lines.append(std.testing.allocator, line);
+    std.mem.sort([]const u8, lines.items, {}, struct {
+        fn lessThan(_: void, a: []const u8, b: []const u8) bool {
+            return std.mem.order(u8, a, b) == .lt;
+        }
+    }.lessThan);
+    var out: std.ArrayList(u8) = .empty;
+    for (lines.items) |line| {
+        try out.appendSlice(std.testing.allocator, line);
+        try out.append(std.testing.allocator, '\n');
+    }
+    return out.toOwnedSlice(std.testing.allocator);
+}
+
+fn expectSameRows(db: *Database, txn: ?*lattice.transaction.manager.Transaction, typed: []const u8, untyped: []const u8) !void {
+    const a = try sortedRender(db, txn, typed);
+    defer std.testing.allocator.free(a);
+    const b = try sortedRender(db, txn, untyped);
+    defer std.testing.allocator.free(b);
+    if (!std.mem.eql(u8, a, b)) {
+        std.debug.print("typed: {s}\n{s}\nuntyped: {s}\n{s}\n", .{ typed, a, untyped, b });
+        return error.TestExpectedEqual;
+    }
+}
+
+fn compareTypePatterns(db: *Database, txn: ?*lattice.transaction.manager.Transaction) !void {
+    // Each typed pattern against the same pattern expanded from every node.
+    try expectSameRows(db, txn, "MATCH (a)-[r:KNOWS]->(b) RETURN id(a), id(r), id(b)", "MATCH (a)-[r]->(b) WHERE type(r) = 'KNOWS' RETURN id(a), id(r), id(b)");
+    try expectSameRows(db, txn, "MATCH (a)<-[r:KNOWS]-(b) RETURN id(a), id(r), id(b)", "MATCH (a)<-[r]-(b) WHERE type(r) = 'KNOWS' RETURN id(a), id(r), id(b)");
+    try expectSameRows(db, txn, "MATCH ()-[r:KNOWS|LIKES]->() RETURN id(r)", "MATCH ()-[r]->() WHERE type(r) = 'KNOWS' OR type(r) = 'LIKES' RETURN id(r)");
+    try expectSameRows(db, txn, "MATCH ()-[:KNOWS]->(b) RETURN id(b)", "MATCH ()-[r]->(b) WHERE type(r) = 'KNOWS' RETURN id(b)");
+    try expectSameRows(db, txn, "MATCH ()-[r:KNOWS {w: 1}]->() RETURN id(r)", "MATCH ()-[r]->() WHERE type(r) = 'KNOWS' AND r.w = 1 RETURN id(r)");
+    try expectSameRows(db, txn, "MATCH (a)-[r:KNOWS]->(b)-[s:LIKES]->(c) RETURN id(r), id(s), id(c)", "MATCH (a)-[r]->(b)-[s:LIKES]->(c) WHERE type(r) = 'KNOWS' RETURN id(r), id(s), id(c)");
+    try expectSameRows(db, txn, "MATCH ()-[r:NOPE]->() RETURN id(r)", "MATCH ()-[r]->() WHERE type(r) = 'NOPE' RETURN id(r)");
+    try expectSameRows(db, txn, "MATCH ()-[r:KNOWS]->() RETURN count(r)", "MATCH ()-[r]->() WHERE type(r) = 'KNOWS' RETURN count(r)");
+}
+
+test "lgr: a pattern from a relationship type walks the edges once, with the same rows" {
+    const path = "/tmp/lgr_edge_type_scan.ltdb";
+    defer removeFiles(path);
+    var db = try openDb(path, true);
+    defer db.close();
+
+    var txn = try db.beginTransaction(.read_write);
+    var nodes: [60]u64 = undefined;
+    for (&nodes) |*n| n.* = try db.createNode(&txn, &.{"N"});
+    for (0..600) |i| {
+        const a = nodes[(i * 7) % nodes.len];
+        const b = nodes[(i * 13 + 5) % nodes.len];
+        const t: []const u8 = switch (i % 3) {
+            0 => "KNOWS",
+            1 => "LIKES",
+            else => "OTHER",
+        };
+        const e = try db.createEdgeAndGetId(&txn, a, if (i % 50 == 0) a else b, t);
+        if (i % 4 == 0) try db.setEdgePropertyById(&txn, e, "w", .{ .int_val = 1 });
+    }
+    try db.commitTransaction(&txn);
+
+    const Kind = lattice.query.planner.QueryPlanner.ScanKind;
+    try std.testing.expectEqual(Kind.edge_type_scan, try planScanKind(db, "MATCH ()-[r:KNOWS]->() RETURN count(r)"));
+    try std.testing.expectEqual(Kind.label_scan, try planScanKind(db, "MATCH (a:N)-[r:KNOWS]->() RETURN count(r)"));
+
+    try compareTypePatterns(db, null);
+
+    // A node gone with its edges left behind, as 0.16.0's deleteNode left
+    // them (this release refuses that delete): the expand never started
+    // from it.
+    try db.label_index.remove(try db.symbol_table.lookup("N"), nodes[3]);
+    try db.node_store.delete(nodes[3]);
+    try compareTypePatterns(db, null);
+
+    // The transaction's own edges, created and deleted.
+    txn = try db.beginTransaction(.read_write);
+    for (4..44) |i| _ = try db.createEdgeAndGetId(&txn, nodes[i], nodes[i + 1], "KNOWS");
+    var dropped: u64 = 1;
+    while (dropped < 600) : (dropped += 29) db.deleteEdgeById(&txn, dropped) catch {};
+    try db.detachDeleteNode(&txn, nodes[10]);
+    try compareTypePatterns(db, &txn);
+
+    // A query that writes sees the edges as they were when it started.
+    {
+        var result = try db.queryInTxn(&txn, "MATCH (a)-[r:KNOWS]->(b) CREATE (a)-[:KNOWS]->(b) RETURN count(r)");
+        defer result.deinit();
+        var before = try db.queryInTxn(&txn, "MATCH ()-[r:KNOWS]->() RETURN count(r)");
+        defer before.deinit();
+        try std.testing.expectEqual(result.rows[0].values[0].int_val * 2, before.rows[0].values[0].int_val);
+    }
+    try db.commitTransaction(&txn);
+    try compareTypePatterns(db, null);
+}

@@ -29,6 +29,7 @@ const limit_ops = @import("operators/limit.zig");
 const vector_ops = @import("operators/vector.zig");
 const fts_ops = @import("operators/fts.zig");
 const range_ops = @import("operators/index_range_scan.zig");
+const edge_type_scan_ops = @import("operators/edge_type_scan.zig");
 const mutation_ops = @import("operators/mutation.zig");
 const aggregate_ops = @import("operators/aggregate.zig");
 const distinct_ops = @import("operators/distinct.zig");
@@ -224,6 +225,9 @@ pub const QueryPlanner = struct {
         property_order_scan,
         /// Straight to the matching entities through a full-text index.
         fts_index_seek,
+        /// A pattern starting from a relationship type, as one walk of the
+        /// edges rather than an expand from every node.
+        edge_type_scan,
     };
 
     const Self = @This();
@@ -504,6 +508,9 @@ pub const QueryPlanner = struct {
     ) PlannerError!Operator {
         var op = input;
         var prev_node_slot: ?u8 = null;
+        // The pattern starts with a scan of every node and nothing on top of
+        // it, which a relationship type can replace.
+        var starts_with_all_nodes = false;
 
         for (pattern.elements, 0..) |element, element_index| {
             switch (element) {
@@ -759,6 +766,7 @@ pub const QueryPlanner = struct {
                             return PlannerError.OutOfMemory;
                         };
                         op = all_scan.operator();
+                        starts_with_all_nodes = element_index == 0 and node_pattern.properties == null;
                     } else {
                         // No labels but existing operator — cross join with all nodes scan
                         _ = self.storage.node_tree orelse return PlannerError.MissingStorage;
@@ -886,7 +894,26 @@ pub const QueryPlanner = struct {
                     _ = self.storage.edge_store orelse return PlannerError.MissingStorage;
                     const database = self.storage.database orelse return PlannerError.MissingStorage;
 
-                    if (edge_pattern.quantifier) |quant| {
+                    // `(a)-[r:T]->(b)` from an unlabelled, unbound `a`: walk
+                    // the edges of those types once instead of expanding
+                    // every node.
+                    const type_scan = starts_with_all_nodes and element_index == 1 and
+                        edge_pattern.quantifier == null and edge_types.len > 0 and
+                        expand_dir != .both and bound_target == null and distinct_from.len == 0;
+                    if (type_scan) {
+                        op.?.deinit(self.allocator);
+                        const scan = edge_type_scan_ops.EdgeTypeScan.init(
+                            self.allocator,
+                            source_slot,
+                            target_slot,
+                            edge_slot,
+                            edge_types,
+                            expand_dir == .incoming,
+                            database,
+                        ) catch return PlannerError.OutOfMemory;
+                        op = scan.operator();
+                        self.last_scan_kind = .edge_type_scan;
+                    } else if (edge_pattern.quantifier) |quant| {
                         // Variable-length path: use VariableLengthExpand
                         const var_expand = var_expand_ops.VariableLengthExpand.init(
                             self.allocator,

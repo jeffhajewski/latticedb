@@ -300,6 +300,14 @@ transaction is one event, from its value before the transaction to its value
 after. Commit cost is unchanged (the ids are sorted once and the sort is reused
 to apply the transaction).
 
+**0.16.0 cannot open a file holding the new events.** It would open it and
+misread the changefeed: its `changes()` skips events in the new format without
+an error, and its trim leaves them in place. So the first commit that records
+an event raises the file's minimum reader version to 4, durably and before the
+event is logged or written, and 0.16.0 refuses the file from then on (see
+*Upgrade notes*). With retention `off` no event is recorded and the file stays
+open to 0.16.0.
+
 The guide, with when to choose each policy, the order of events and the stored
 format, is `book/src/guides/changefeed.md`.
 
@@ -1037,6 +1045,9 @@ with relationships is one range probe, under 1 µs.
   without `--enable-vector` are refused; `create` made a database with no vector
   index. `--interval` without `--follow` is refused; `replicate` ran once.
 - `info` shows a vector index's dimensions, metric, `m` and `ef_construction`.
+- `info` and `check` show the file's minimum reader version and, when it keeps
+  0.16.0 out, why: `Min reader: v4, so 0.16.0 cannot open it (changefeed
+  events)`; `min_reader_version` and `min_reader_reasons` in JSON and CSV.
 - JSON exports and dumps record the vector index's metric, `m` and
   `ef_construction` beside its dimensions (`vector_metric`, `vector_m`,
   `vector_ef_construction`; 0.16.0 skips them), and an import with
@@ -1180,7 +1191,8 @@ with relationships is one range probe, under 1 µs.
 
 - **The file format is version 4.** The header gains fields past the 200 bytes
   0.16.0 uses, behind a magic number: the node id counter, the vector index's
-  dimensions, metric and HNSW settings, and a minimum writer version. Data pages
+  dimensions, metric and HNSW settings, a minimum writer version, and what
+  raised the minimum reader version, if anything did. Data pages
   are laid out as before. Full-text indexes record how they analyse text when
   their first document goes in, under a new key.
 - **Opening a 0.16.0 file with this release.** The first read-write open
@@ -1199,18 +1211,43 @@ with relationships is one range probe, under 1 µs.
   or rebuilding an index with this release raises the header's minimum reader
   version to 4, so 0.16.0 refuses that file from then on, also after the index
   is dropped. Files without one are unaffected.
-- **Opening a file this release wrote with 0.16.0.** 0.16.0 opens and writes a
-  file whose vector index, if any, is cosine with `m` 16, whatever its
-  `ef_construction`. It writes zeros over the format-4 fields, and this release
-  derives them again at its next open, as for a 0.16.0 file. 0.16.0 refuses a
-  file whose index is Euclidean or dot product or has another `m`, reporting an
-  I/O error, and leaves the file untouched. It does not know the minimum writer
-  version: it writes a file that asks for a newer writer, and zeros the field.
-  A file it has written no longer counts as sealed (see *Durability*): this
-  release clears the flag at its next read-write open, since 0.16.0 extends a
-  file with pages it does not seal. A file a newer release wrote is refused by
-  0.16.0 as an I/O error and by this release as -11. JSON exports from this
-  release import into 0.16.0, which skips the vector metric and HNSW fields.
+- **0.16.0 no longer opens a file once this release has written to it with the
+  changefeed on**, which it is by default. The first commit that changes the
+  graph records changefeed events in a format 0.16.0 would misread, so that
+  commit first raises the file's minimum reader version to 4. The same happens
+  when a file gets a vector index whose metric is Euclidean or dot product or
+  whose `m` is not 16, or an ordered property index. 0.16.0 then refuses the
+  file and leaves it byte for byte as it was: its C API returns
+  `LATTICE_ERROR_IO` (-2, "I/O error"), its Python binding raises
+  `LatticeIOError: I/O error`, and its CLI says "Failed to open database:
+  IoError" (`check`: "Invalid database file"). Nothing lowers the version
+  again, also not a retention policy that later drops every event.
+  `lattice info` and `lattice check` show it and what raised it ("Min reader:
+  v4, so 0.16.0 cannot open it (changefeed events)").
+  - **If going back to 0.16.0 is a possibility, back the file up before this
+    release first writes to it** (copy it after a clean close, or `lattice
+    backup` with 0.16.0). The way back from a written file is a JSON export
+    with this release and an import with 0.16.0, which skips the fields it
+    does not know.
+  - **0.16.0 still opens** a file this release has only read (a read-only open
+    or command, or a read-write open that wrote nothing: the header becomes
+    format 4 but the minimum reader stays 3), and a file whose changefeed is
+    `off` (`lattice create --changefeed=off`, or `changefeed_retention="off"`
+    and its equivalents when the file is created) that has none of the other
+    features above. `off` costs the changefeed: no events are recorded,
+    reading it is an error, and a consumer cannot follow the graph's changes.
+    Turning it off on a file that already holds events does not make the file
+    readable by 0.16.0 again.
+  - On such a file 0.16.0 opens and writes as before. It writes zeros over the
+    format-4 fields, and this release derives them again at its next open, as
+    for a 0.16.0 file. It does not know the minimum writer version: it writes
+    a file that asks for a newer writer, and zeros the field. A file it has
+    written no longer counts as sealed (see *Durability*): this release clears
+    the flag at its next read-write open, since 0.16.0 extends a file with
+    pages it does not seal. It records changefeed events whatever the policy,
+    in its own format; this release drops them by the policy at its next
+    read-write session. A file a newer release wrote is refused by 0.16.0 as
+    an I/O error and by this release as -11.
 - **The log.** A log that holds frames is format version 3, which 0.16.0 refuses
   to open. A clean close or a truncating checkpoint leaves an empty log, written
   as version 2, which 0.16.0 opens. So close a database cleanly with this
@@ -1228,27 +1265,22 @@ with relationships is one range probe, under 1 µs.
   does not convert them. They are read alongside new events, in order.
   `lattice changefeed <db>` counts them. To shed them while keeping the graph,
   export it and import it into a new database.
-- **0.16.0 does not see this release's changefeed events.** It opens a file
-  holding them, and its `changes()` (`lattice_stream_read` on
-  `__lattice_changes`) returns only events in the old format, without an
-  error: on a file this release created, nothing until 0.16.0 writes. Events
-  0.16.0 writes continue the sequence numbers, and this release reads both
-  kinds in order. A 0.16.0 trim of `__lattice_changes` removes only old-format
-  events, so this release still returns newer-format events below the trim
-  point. 0.16.0 also records events whatever the retention policy; this
-  release drops them by the policy at its next read-write session. Read the
-  changefeed with this release once a file has been opened by it.
+- **A changefeed holding both formats** arises on a file 0.16.0 created and
+  this release later wrote to. This release reads it in order, the new events
+  continuing 0.16.0's sequence numbers; 0.16.0 can no longer open the file.
 - Check application code against the Cypher changes above, in particular plain
   `DELETE` of nodes that may have relationships, code that reads results by
   the name of an unaliased column, code that expects `sum` of integers to be a
   float, and `MERGE` patterns without a label or with several labels.
-- **Full-text indexes and 0.16.0.** Once a full-text index this release fills
-  holds a document, it stores word positions, and 0.16.0 would damage it by
-  appending entries without them; the file then asks for this release or later,
-  and 0.16.0 refuses to open it with an I/O error. A file whose full-text
-  indexes 0.16.0 built, or that this release has only declared, still opens in
-  0.16.0, which splits non-ASCII words the old way and will not find words with
-  non-ASCII letters indexed by this release.
+- **Full-text indexes and 0.16.0.** With the changefeed on, 0.16.0 does not
+  open a file this release has written to at all (see above). With it off, a
+  file whose full-text indexes 0.16.0 built, or that this release has only
+  declared, still opens in 0.16.0, which splits non-ASCII words the old way and
+  will not find words with non-ASCII letters indexed by this release. Once a
+  full-text index this release fills holds a document, it stores word
+  positions, and 0.16.0 would damage it by appending entries without them; the
+  file then asks for this release or later whatever the changefeed setting, and
+  0.16.0 refuses to open it with an I/O error.
 
 ## Upgrading
 

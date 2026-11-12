@@ -237,6 +237,10 @@ Nothing inside LatticeDB reads the changefeed, so `off` breaks nothing but
 your own readers: replication ships the log rather than events, backups copy
 the files, and your own durable streams are separate and keep working.
 
+`off` is also what keeps a file open to 0.16.0, if it is set when the file is
+created and the file has nothing else 0.16.0 cannot read (see
+[Opening with 0.16.0](#opening-with-0160)). Turning it off later does not.
+
 ## Choosing a policy
 
 | Setting | Policy | Why |
@@ -380,6 +384,8 @@ Changefeed of ontology.lattice
 the policy and range on one line (`Changefeed:   keep last:2, events 4..5`).
 Events still in the 0.16.0 format are counted separately
 (`Events held: 1200 (800 in the 0.16 format)`).
+`lattice info` and `lattice check` also say whether 0.16.0 can open the file
+(`Min reader:   v4, so 0.16.0 cannot open it (changefeed events)`).
 
 ### Environment
 
@@ -562,6 +568,26 @@ policy drops them (`lattice compact` does not convert them). To shed them while
 keeping everything else, export the graph and import it into a new database;
 the new database's changefeed starts with the import, and the old history stays
 behind in the old file.
+
+### Opening with 0.16.0
+
+0.16.0 does not know the compact form: it would skip compact events without an
+error and its trim would leave them in place. So the first commit that records
+a compact event raises the file's minimum reader version to 4 and records why
+(the header field at offset 224, described in
+[the page manager](../architecture/page-manager.md#format-versions)). The raise
+is written into the file header in place and synced before the commit is logged
+or any page is written, so no crash leaves a stored event under a header 0.16.0
+accepts. 0.16.0 then refuses the file: an I/O error from its C API and
+bindings, "Failed to open database: IoError" from its CLI. The version is never
+lowered, also not when a retention policy later drops every event, since a copy
+of an event may survive in a log or a backup.
+
+A file this release only reads, and a file created with retention `off`, keep
+version 3 and stay open to 0.16.0 unless something else raised it (a vector
+index 0.16.0 cannot describe, an ordered property index). To take a written
+file back to 0.16.0, export it to JSON with this release and import it with
+0.16.0; the changefeed stays behind.
 
 ### Compatibility promise
 

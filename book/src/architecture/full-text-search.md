@@ -85,9 +85,11 @@ index clears its record with the rest of its keys, so dropping and declaring it
 again rebuilds it with the new tokenizer; so does the rebuild that follows a
 recovery that replayed the log.
 
-No existing key or value changed, and 0.16.0 never reads the new key, so 0.16.0
-can still open and write a database this version wrote. It splits non-ASCII
-words its old way, though, so it does not find non-ASCII words this version
+No existing key or value changed, and 0.16.0 never reads the new key, so the
+index does not keep 0.16.0 out of a database this version wrote. (Other things
+do: see [Format Versions](page-manager.md#format-versions). With the changefeed
+on, the first write does.) Where 0.16.0 can open the database, it splits
+non-ASCII words its old way, so it does not find non-ASCII words this version
 indexed.
 
 ### Stop Words

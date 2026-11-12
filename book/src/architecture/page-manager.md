@@ -83,14 +83,16 @@ them, behind a magic number of their own:
 | 218–219 | 2 B | HNSW `m_max0`, connections on layer 0 (twice `m`) |
 | 220–221 | 2 B | HNSW `ef_construction` |
 | 222–223 | 2 B | Minimum writer version; 0 means no restriction |
-| 224–231 | 8 B | Reserved |
+| 224–225 | 2 B | Minimum reader reasons: what raised the minimum reader version (see below) |
+| 226–231 | 6 B | Reserved |
 
 0.16.0 copies only its own 200 bytes and writes the rest of page 0 as zeros, so after
 0.16.0 has written a file the extension magic no longer matches and the fields are
 ignored: the next open by this release finds the node id counter with one scan of
 the node tree, reads the vector configuration from the vector pages, and writes both
 back. That lets a file go back and forth between the two releases without either one
-trusting a value the other did not keep up to date.
+trusting a value the other did not keep up to date, for as long as 0.16.0 may open it
+at all: see [Format Versions](#format-versions) for what keeps it out.
 
 Key fields:
 
@@ -419,10 +421,35 @@ The header has two gates for older releases:
 This release is format 4. A read-write open of an older file sets the format version
 to 4 and writes the format-4 fields; it never lowers either gate, and raises the
 minimum writer version to 4. The minimum reader version stays 3, so 0.16.0 can still
-open the file, unless the vector index is one 0.16.0 would misread (a metric other
-than cosine, or an `m` other than 16), in which case it is 4 and 0.16.0 refuses the
-file. `ef_construction` only affects how new vectors are inserted, so a non-default
-value does not lock 0.16.0 out. A read-only open changes nothing.
+open the file, until the file holds something 0.16.0 would misread rather than
+refuse. Then it becomes 4, and the bit for the reason is set in the minimum reader
+reasons:
+
+| Bit | Reason | Raised when |
+|-----|--------|-------------|
+| `0x01` | vector index settings | the vector index uses a metric other than cosine or an `m` other than 16 (`ef_construction` only affects how new vectors are inserted, so it does not count) |
+| `0x02` | ordered property index | a property index is declared; 0.16.0 would take its keys for digests and find nothing |
+| `0x04` | changefeed events | a commit records its first changefeed event; 0.16.0's `changes()` would skip events in this release's format without an error, and its trim would leave them |
+
+Opening never raises it: a read-only open changes nothing, and a read-write open that
+writes nothing leaves the version at 3. A changefeed with retention `off` records no
+events, so it does not raise it either. Nothing lowers it again, not even a trim that
+drops every event, because the file cannot tell that no copy of an event survives in
+a log or a backup taken in between. `lattice info` and `lattice check` print the
+version and the reasons.
+
+The changefeed's raise is the one that happens in the middle of ordinary writing, so
+it is written ahead of everything else: the commit that stores the first event writes
+the two fields in place in page 0 and syncs the file before it logs the commit, or,
+without a log, before it writes a page. Only those two fields are written, because
+the header in memory runs ahead of the pages in the file (tree roots, the freelist)
+until the next flush; that flush writes the whole header with the same values. So
+every state a crash can leave holds either no durable event or a header that already
+refuses 0.16.0. Replaying a log's changefeed records raises the version again in the
+header the replay's flushes write, in case a stale journal put an older header back.
+The other two raise the header in memory, and it reaches the file no later than what
+they describe: in the same flush for a vector index, and before the first entry for
+a property index.
 
 0.16.0 predates the minimum writer version: it opens and writes a file that asks for
 a newer writer, and zeroes the field as it writes the header. So a later feature that

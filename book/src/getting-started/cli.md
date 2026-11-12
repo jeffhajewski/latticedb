@@ -231,6 +231,7 @@ Size:         64 KB
 Nodes:        2
 Edges:        1
 Format:       v4
+Min reader:   v4, so 0.16.0 cannot open it (changefeed events)
 Vector:       disabled
 FTS:          enabled
 Changefeed:   keep all, events 1..7
@@ -249,6 +250,12 @@ Index:        [:KNOWS](since)  ordered
 
 An index created by LatticeDB 0.16.0 shows `digest`: it answers equality only
 until `compact --upgrade-indexes` rebuilds it.
+
+`Min reader` is the oldest LatticeDB that can open the file, and, when 0.16.0
+cannot, what keeps it out. Storing changefeed events is the usual reason; a
+file created with `--changefeed=off` and only read by this release says `v3`
+and still opens in 0.16.0
+([Opening with 0.16.0](../guides/changefeed.md#opening-with-0160)).
 
 ## Moving data in and out
 
@@ -482,6 +489,7 @@ lattice check social.lattice
 ```text
 Database file checks passed
   Pages checked: 15
+  Min reader:    v4, so 0.16.0 cannot open it (changefeed events)
   Note: sibling WAL file exists but was not validated
 ```
 

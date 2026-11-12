@@ -20,6 +20,10 @@ through a node more than once, including the one it started from. A node reached
 by two different paths is therefore returned twice, which is why the examples
 below use `DISTINCT` where they want each node once.
 
+The relationships of a path also count toward the rest of its `MATCH`: no other
+relationship of the same `MATCH`, single-hop or variable-length, can use one of them
+again. See [Relationship Uniqueness](./match.md#relationship-uniqueness).
+
 ## Examples
 
 ### Fixed Range
@@ -55,7 +59,9 @@ RETURN DISTINCT b
 ```
 
 A variable-length relationship cannot be given a variable or inline properties:
-`-[r:KNOWS*1..3]->` and `-[:KNOWS*1..3 {since: 2020}]->` are rejected.
+`-[r:KNOWS*1..3]->` fails with the semantic error "Variable-length relationships
+do not support edge variables", and `-[:KNOWS*1..3 {since: 2020}]->` is rejected
+too.
 
 If the far end is a node that is already bound, only paths that end at it are
 returned.

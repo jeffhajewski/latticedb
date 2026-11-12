@@ -167,7 +167,16 @@ MATCH (a:Person {name: "Alice"})-[:KNOWS]-(b)-[:KNOWS]-(c)
 RETURN c.name
 ```
 
-The same holds across the comma-separated patterns of one `MATCH`. Separate `MATCH`
-clauses may reuse a relationship. One case is not covered: a single-hop
-relationship written after a variable-length one in the same `MATCH` can reuse a
-relationship from that path.
+The same holds across the comma-separated patterns of one `MATCH`, and for the
+relationships a variable-length hop walks: a later relationship of the same `MATCH`
+cannot use one of them again. Over the two-relationship cycle `x->y->x`:
+
+```cypher
+MATCH (a:C)-[:R*1..2]->(b)-[:R]->(c)
+RETURN a.name, b.name, c.name
+// x y x
+// y x y
+```
+
+The last hop never reuses a relationship of the path before it, so this returns
+two rows, not four. Separate `MATCH` clauses may reuse a relationship.

@@ -402,7 +402,7 @@ The LatticeDB figure searches a 100-document corpus; the other rows come from ot
 - Bulk vector node insertion for fast ingestion
 
 **Full-Text Search**
-- BM25-ranked inverted index with tokenization and English stop words
+- BM25-ranked inverted index; words split by Unicode, lowercased and accent-folded, with English stop words dropped
 - Fuzzy search with configurable Levenshtein distance
 
 **Cypher Query Language**
@@ -410,6 +410,7 @@ The LatticeDB figure searches a 100-document corpus; the other rows come from ot
 - ORDER BY, LIMIT, SKIP, DETACH DELETE
 - Vector distance operator: `<=>`
 - Full-text search operator: `@@`
+- Regular expressions: `=~`
 - Parameters: `$name`
 
 **Operations**
@@ -447,7 +448,7 @@ If your data fits naturally into rows and columns — sales records, user accoun
 LatticeDB stores everything in one file on one machine. It can ship that file's changes elsewhere continuously, so a disk failure costs you seconds rather than everything, but that is backup rather than clustering. If you need sharding, multi-node replicas serving reads, or distributed queries across billions of nodes, look at Neo4j cluster, Dgraph, or a managed service like Neptune.
 
 **You need the full Cypher language.**
-LatticeDB supports the core of Cypher but not all of it. `OPTIONAL MATCH`, `CALL` procedures, `UNION`, `CASE`, `EXISTS`, list indexing, regular expressions (`=~`), and relationship type alternation (`[:A|B]`) are not implemented, and a variable bound in one `MATCH` cannot be named again in a later `MATCH`. If your queries depend on these, Neo4j is the complete implementation.
+LatticeDB supports the core of Cypher but not all of it. `OPTIONAL MATCH`, `CALL` procedures, `UNION`, `CASE`, `EXISTS`, list indexing, list comprehensions and named paths are not implemented. If your queries depend on these, Neo4j is the complete implementation.
 
 **You need mature tooling and ecosystem.**
 Neo4j has visualization tools, admin dashboards, monitoring, drivers in every language, and years of community resources. PostgreSQL has decades of tooling. LatticeDB is new and lean — which is a strength for embedding, but a weakness if you need a rich operational ecosystem around your database.

@@ -149,9 +149,8 @@ results = db.query("""
 """, parameters={"query": query_vec})
 ```
 
-Write the whole path as one pattern. A variable bound in one `MATCH` cannot be
-named again in a later `MATCH` (or after `WITH`); the query is rejected with
-"Variable 'chunk' is already defined".
+The path can also be written in two `MATCH` clauses that share `chunk`; a node
+variable bound in one `MATCH` stands for the same node in the next.
 
 ### Combine Vector and Full-Text Search
 

@@ -290,15 +290,44 @@ pub const QueryPlanner = struct {
                             else => break,
                         }
                         if (aggregates) continue;
+                        // DISTINCT sits on top of the projection, and SKIP
+                        // and LIMIT count the rows it lets through. Planned
+                        // underneath they cut the input first, so
+                        // `RETURN DISTINCT x LIMIT 2` over 1, 1, 1, 2 returned
+                        // one row. The sort stays underneath, where it can
+                        // still see what the projection discards, but it
+                        // keeps every row: a bound would be the same cut.
+                        // Distinct passes rows on in the order they arrive.
                         switch (query.clauses[lookahead]) {
-                            .order_by => |o| input_for_return = try self.planOrderBy(o, input_for_return, r, query.clauses[lookahead + 1 ..]),
-                            .skip => |s| input_for_return = try self.planSkip(s, input_for_return),
-                            .limit => |l| input_for_return = try self.planLimit(l, input_for_return),
+                            .order_by => |o| input_for_return = try self.planOrderBy(
+                                o,
+                                input_for_return,
+                                r,
+                                if (r.distinct) &.{} else query.clauses[lookahead + 1 ..],
+                            ),
+                            .skip => |s| if (!r.distinct) {
+                                input_for_return = try self.planSkip(s, input_for_return);
+                            },
+                            .limit => |l| if (!r.distinct) {
+                                input_for_return = try self.planLimit(l, input_for_return);
+                            },
                             else => unreachable,
                         }
                     }
 
                     current_op = try self.planReturn(r, input_for_return);
+
+                    if (r.distinct and !aggregates) {
+                        var i = first_trailing;
+                        while (i < lookahead) : (i += 1) {
+                            switch (query.clauses[i]) {
+                                .order_by => {},
+                                .skip => |sk| current_op = try self.planSkip(sk, current_op),
+                                .limit => |l| current_op = try self.planLimit(l, current_op),
+                                else => unreachable,
+                            }
+                        }
+                    }
 
                     if (aggregates) {
                         var i = first_trailing;

@@ -1032,6 +1032,31 @@ test "cypher: function names ignore case, toString(null) is null, booleans order
     try std.testing.expectEqual(false, result.rows[0].values[3].bool_val);
 }
 
+test "cypher: RETURN DISTINCT applies SKIP and LIMIT to the distinct rows" {
+    const path = "/tmp/lattice_cs_distinct_limit.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    // The limit used to cut the input to 1, 1 before duplicates went.
+    var limited = try db.query("UNWIND [1, 1, 1, 2, 3] AS x RETURN DISTINCT x LIMIT 2");
+    defer limited.deinit();
+    try std.testing.expectEqual(@as(usize, 2), limited.rows.len);
+    try std.testing.expectEqual(@as(i64, 1), limited.rows[0].values[0].int_val);
+    try std.testing.expectEqual(@as(i64, 2), limited.rows[1].values[0].int_val);
+
+    var skipped = try db.query("UNWIND [1, 1, 2, 2, 3] AS x RETURN DISTINCT x SKIP 1 LIMIT 1");
+    defer skipped.deinit();
+    try std.testing.expectEqual(@as(usize, 1), skipped.rows.len);
+    try std.testing.expectEqual(@as(i64, 2), skipped.rows[0].values[0].int_val);
+
+    // A sort bounded by the limit would be the same cut one step earlier.
+    var ordered = try db.query("UNWIND [3, 3, 3, 2, 1] AS x RETURN DISTINCT x ORDER BY x DESC LIMIT 2");
+    defer ordered.deinit();
+    try std.testing.expectEqual(@as(usize, 2), ordered.rows.len);
+    try std.testing.expectEqual(@as(i64, 3), ordered.rows[0].values[0].int_val);
+    try std.testing.expectEqual(@as(i64, 2), ordered.rows[1].values[0].int_val);
+}
+
 test "cypher: functions of null are null and a map reads by key" {
     const path = "/tmp/lattice_cs_null_functions.ltdb";
     const db = try openTestDb(path);

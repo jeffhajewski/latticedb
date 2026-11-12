@@ -169,7 +169,8 @@ lattice_open_v4("graph.lattice", &options, &db);
 Use `lattice_open_v2` with `lattice_open_options_v2`, which adds `enable_wal` to
 the original set.
 `lattice_open_options_v3` adds `enable_adjacency_cache`, which keeps an
-in-memory map of which nodes connect to which and speeds up traversal.
+in-memory map of which nodes connect to which. Nothing behind the C API reads
+that map yet, so leave it off.
 `lattice_open_options_v4` adds `lock`, which defaults to true and is described
 below.
 

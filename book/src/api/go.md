@@ -53,7 +53,7 @@ defer db.Close()
 | `PageSize` | Page size in bytes |
 | `EnableVectors` | Turn on the vector index |
 | `VectorDimensions` | How many numbers are in each vector |
-| `EnableAdjacencyCache` | Keep an in-memory map of connections to speed up traversal |
+| `EnableAdjacencyCache` | Keep an in-memory map of connections. Queries and edge calls do not read it yet, so it speeds up nothing |
 | `DisableWAL` | Open without write-ahead logging |
 | `DisableLock` | Open without taking a lock on the file |
 

@@ -104,8 +104,12 @@ The default stays `.full`.
   node map, and replay re-linked every vector it saw, which could leave most of
   the graph unreachable by search (186 of 298 vectors in one test). Both are
   fixed.
-- Opening an existing database for writing fails if the node tree cannot be
-  scanned. It used to fall back to node id 1 and overwrite existing nodes.
+- Opening an existing database for writing fails if the node tree, the symbol
+  table or the edge id index cannot be read. The id counters used to restart,
+  so new nodes, names or edges would have taken ids already in use.
+- Declaring or dropping a property index, and dropping a full-text index, reach
+  the file before the call returns. A kill straight afterwards lost the
+  declaration or brought the dropped index back.
 - A B+Tree insert whose split fails part way, a delete whose overflow chain
   cannot be freed, and a damaged freelist head no longer leave pages with two
   owners or entries pointing at freed pages.
@@ -326,8 +330,16 @@ about 0.3 µs more.
   labels and map keys (`n.order`, `:Set`, `{limit: 1}`).
 - A query that failed while its operators were opening leaked memory, and reading
   `n.embedding` leaked a copy of the vector on every row.
-- Decoding a damaged node record no longer frees memory twice or trusts a length
-  field before allocating.
+- Decoding a damaged node or edge record no longer frees memory twice or trusts
+  a length field before allocating.
+- `RETURN DISTINCT x LIMIT n` applies `SKIP` and `LIMIT` to the distinct rows.
+  They were applied first, so `RETURN DISTINCT x LIMIT 2` over 1, 1, 1, 2
+  returned one row.
+- `min` and `max` order values as `ORDER BY` does. Over values of different
+  types they returned whichever came first, and they could not tell integers
+  apart beyond 2^53 when a float was among them.
+- `size`, `abs`, `id` and `range` return null for a null argument; they failed
+  the query. `{a: 1}.a` is 1; property access on a map was always null.
 
 **Full-text search**
 
@@ -342,6 +354,18 @@ about 0.3 µs more.
   twice, exclusions applied after ranking, and `searchWithMode` looping forever
   on punctuation or accented queries are fixed. `use_stemming` now stems.
 - Long posting entries no longer overrun their buffers.
+- A term whose first posting page had been emptied by deletes matched nothing,
+  however many documents on later pages still contained it.
+- A query of more than 32 words dropped the words after the 32nd, which made an
+  AND search match more than it should.
+- Fuzzy search inside a transaction sees uncommitted edges and fills its limit.
+- Declaring an index again after a declaration failed part way no longer
+  indexes some documents twice.
+- Deleting a document with no indexable words no longer walks the whole
+  dictionary (about 325 ms down to 12 µs at 20,000 documents).
+- Zig API: every phrase of a multi-phrase query is required, a phrase marked
+  with `-` is excluded instead of required, and highlight snippets no longer
+  cut a UTF-8 character in half.
 
 **Vector search**
 
@@ -350,6 +374,12 @@ about 0.3 µs more.
 - HNSW inserts and removes are all or nothing. `m` and `m_max0` are capped at 64.
 - Pending vectors are scored on the same scale as committed ones. Under cosine,
   committed vectors read back normalised (documented; unchanged).
+- Replacing a node's vector could leave the node with no neighbours, where no
+  search would reach it (113 of 600 replacements in one test).
+- Rebuilding the index at open, when the saved graph cannot be loaded, frees
+  the pages the old graph used instead of leaking them.
+- A neighbour whose vector cannot be read fails the insert instead of being
+  linked unchecked.
 
 **CLI**
 
@@ -365,6 +395,14 @@ about 0.3 µs more.
 - JSONL files can be imported.
 - `lattice ... >> file` appends; it overwrote the start of the file.
 - A failed export removes its partial file.
+- `replicate --follow` opens the database for each pass instead of holding it,
+  and its lock, for the whole run, so other processes can write between passes;
+  a pass that finds the database open elsewhere is skipped. Its output is
+  flushed after every pass.
+- A `replicate` pass with nothing changed ships nothing. Each run was taking a
+  full snapshot.
+- The result table no longer fails on the smallest integer, on floats wider
+  than ten characters, or on large node ids.
 
 **C API and bindings**
 

@@ -47,7 +47,7 @@ produces 1536 numbers, so that is the number you would pass for it.
 | `enable_vectors` | off | Turn on vector storage and the HNSW index. |
 | `enable_fts` | on | Turn on full-text search (Zig API only). |
 | `enable_wal` | on | Write-ahead logging. See below before turning this off. |
-| `enable_adjacency_cache` | off | Keep an in-memory map of which nodes connect to which, which speeds up traversal at the cost of memory. |
+| `enable_adjacency_cache` | off | Keep an in-memory map of which nodes connect to which. Queries and the C API's edge calls do not read it, so today it costs memory and a little work on each edge write and speeds up nothing reached through the bindings. |
 
 A database created without vector support has no vector storage. Opening it later
 with vectors enabled creates the vector storage then, so you can start adding

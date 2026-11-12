@@ -42,8 +42,8 @@ any of them goes into the database file. If the process or the machine dies part
 way through the flush, the next open finishes it from the journal, so the database
 file is always one whole image, never half of one flush and half of another. Leave
 the journal alone: a journal left after a crash is what the next open needs. A
-read-only open that finds a complete journal refuses to open (it may not write the
-file to finish the flush); open the database read-write once.
+read-only open finishes the flush in memory, without writing; see
+[Opening read-only after a crash](#opening-read-only-after-a-crash).
 
 In-memory databases have neither a journal nor files of their own.
 
@@ -60,10 +60,22 @@ With `.normal`, a transaction that has returned survives the process being kille
 and reaches the disk at the next checkpoint, `sync()` or flush. A power cut or an
 operating-system crash can lose the most recent commits. They are lost from the end
 only, the database stays consistent, and everything up to the last sync survives.
+[What survives what](#what-survives-what) states this exactly.
 
-`sync_mode` is a field of the Zig `DatabaseConfig`. Everywhere else (the C API, the
-bindings, the CLI) set it through the environment, which the engine reads when a
-database is opened and which overrides the field:
+Set it when you open the database:
+
+| API | Setting |
+|-----|---------|
+| Zig | `DatabaseConfig.sync_mode = .normal` |
+| C | `lattice_open_options_v5.sync_mode = LATTICE_SYNC_MODE_NORMAL` |
+| Python | `Database(..., sync_mode="normal")` |
+| TypeScript | `new Database(path, { syncMode: 'normal' })` |
+| Go | `OpenOptions{SyncMode: latticedb.SyncModeNormal}` |
+| Java | `OpenOptions.defaults().syncMode(SyncMode.NORMAL)` |
+
+A program that does not set it gets the `LATTICE_SYNC_MODE` environment variable if
+that is set, and `.full` otherwise. A value the program sets wins over the
+environment. The CLI has no flag for it, so there the variable is the way to set it:
 
 ```bash
 LATTICE_SYNC_MODE=normal   # or full; case does not matter, other values are ignored
@@ -82,7 +94,12 @@ either.
 
 It is off by default because it makes every sync, and so every commit in the
 default sync mode, several milliseconds slower. Turn it on if the database must
-survive power loss on a Mac. From the C API, the bindings and the CLI:
+survive power loss on a Mac: `full_fsync = true` in Zig,
+`LATTICE_FULL_FSYNC_ON` in the C API's `lattice_open_options_v5.full_fsync`,
+`full_fsync=True` in Python, `fullFsync: true` in TypeScript,
+`FullFsync: latticedb.FullFsyncOn` in Go, `.fullFsync(true)` in Java. As with
+`sync_mode`, a program that leaves it unset gets the environment variable, and the
+CLI is set only through it:
 
 ```bash
 LATTICE_FULL_FSYNC=1       # or true; 0 or false turns it off; other values are ignored
@@ -90,8 +107,10 @@ LATTICE_FULL_FSYNC=1       # or true; 0 or false turns it off; other values are 
 
 ## Environment variables
 
-The engine reads these when a database is opened, whatever API opened it. Each one
-overrides the corresponding setting.
+The engine reads these when a database is opened, whatever API opened it.
+`LATTICE_SYNC_MODE` and `LATTICE_FULL_FSYNC` apply only when the program did not set
+the option itself. `LATTICE_BUFFER_POOL_MB` overrides the cache size even when the
+program set one.
 
 | Variable | Values | Default | Effect |
 |----------|--------|---------|--------|
@@ -129,6 +148,15 @@ write transaction adds at least one frame, so with the defaults that is roughly
 every thousand write transactions. Open readers do not hold it back. It is skipped
 only while an open transaction already has records in the log (one whose commit
 failed part way and has not been rolled back yet), and the next commit tries again.
+
+The automatic checkpoint runs inside the commit that triggers it, not in the
+background, so that one commit takes longer. Measured through the C API on macOS
+(20,000 single-node commits, default settings, release build, a busy machine), most
+commits took about 50 µs and the ones that ran a checkpoint, about every
+thousandth, took 5 to 12 ms and up to 27 ms. If a pause of that size matters to
+you, turn the automatic checkpoint off from Zig and run checkpoints at moments you
+choose.
+
 `auto_checkpoint` decides when (it is set through the Zig API; the C API, the
 bindings and the CLI always use the defaults below):
 
@@ -168,12 +196,41 @@ This is not `compact`. Checkpointing shrinks the log, not the database file.
 
 ## What survives what
 
+The guarantee after a power cut, assuming the storage honours `fsync` (and
+`F_FULLFSYNC` on macOS when `full_fsync` is on) and that a completed sync is not
+later undone or damaged by the device:
+
+- **`sync_mode = .full`** (the default). A transaction whose commit call has
+  returned survives. A transaction whose commit had not returned is either wholly
+  there or wholly absent. After recovery the database holds exactly the
+  transactions committed up to some point at or after the last acknowledged one,
+  with every index consistent with the graph.
+- **`sync_mode = .normal`.** The log is handed to the operating system at commit,
+  and synced at checkpoints, on `sync()`, when a full cache forces a flush, and at
+  close. After a power cut the database holds exactly the transactions up to some
+  point no earlier than the last log sync: a whole number of transactions, none
+  applied in part. Commits acknowledged after the last log sync may be lost. A
+  process kill without a power cut loses nothing acknowledged.
+- **Both modes.** A crash during recovery, a second power cut included, changes
+  nothing: the next recovery reaches the same state. A log damaged where it had
+  already been synced refuses to open (`InvalidDatabase`,
+  `LATTICE_ERROR_CORRUPTION` in the C API) rather than silently dropping the
+  commits in it. The one exception is the newest sync batch: damage there that no
+  later frame vouches for cannot be told apart from a write the power cut tore, and
+  is cut off as a torn tail. See
+  [Write-Ahead Log](../architecture/wal.md#the-checksum) for how the log tells them
+  apart.
+
+These are checked by a power-loss simulation in the crash suite, which cuts the
+power at every sync point of a random workload; see
+[Running Tests](../development/testing.md#power-loss-tests).
+
 | Event | What happens |
 |-------|--------------|
 | Process crashes or is killed | Every commit that returned is there on the next open, in either sync mode. A commit that was running is either all there or not at all. |
-| Machine loses power, `sync_mode = .full`, Linux | Every commit that returned is there, as far as the disk honoured the flush. |
+| Machine loses power, `sync_mode = .full`, Linux | Every commit that returned is there, as above. |
 | Machine loses power, `sync_mode = .full`, macOS | The same only with `full_fsync` on. Without it, nothing is guaranteed. |
-| Machine loses power, `sync_mode = .normal` | Commits since the last checkpoint, flush or `sync()` may be lost, from the end only. |
+| Machine loses power, `sync_mode = .normal` | Commits since the last log sync may be lost, from the end only. |
 | Database file is copied while open | Broken. The log holds committed changes the file does not have. Use `backup`. |
 | The `-wal` or `-journal` file is deleted after a crash | Committed changes not yet in the file are gone, and an interrupted flush cannot be finished. Leave both in place. |
 | An in-memory database's process exits | Everything is gone. That is what in-memory means. |
@@ -182,9 +239,25 @@ The copy row is the one that catches people, and it fails silently at copy time 
 you find out at restore. [Backup and Replication](../guides/backup-and-replication.md)
 covers the tools that do it correctly.
 
-A read-only open does not read the log. After a crash it sees the database file as
-of its last flush, which can be behind the commits the log holds; opening the
-database read-write once recovers them.
+## Opening read-only after a crash
+
+A read-only open recovers a crashed database in memory. When the log holds frames
+or the journal holds a flush, the open reads the files without writing to them,
+finishes the flush and replays the log exactly as a read-write open would, and keeps
+every page that recovery changes in memory. The handle then shows every committed
+transaction, and nothing on disk changes; the next read-write open recovers the
+files itself. A database with an empty log and no journal opens read-only as it
+always did, with nothing extra in memory.
+
+The memory this takes is bounded at 64 MB plus four times the size of the log and
+the journal. A recovery that would need more fails the open with `BufferPoolFull`
+(`LATTICE_ERROR_FULL` in the C API); open the database read-write once to recover
+it on disk. A log damaged in its synced part refuses a read-only open as it refuses
+a read-write one.
+
+The CLI's read-only commands (`count`, `info`, `labels`, `export` and the rest) open
+this way. `lattice check` reads pages directly and does not recover first, so it
+reports an interrupted flush as an error.
 
 ## Where to go next
 

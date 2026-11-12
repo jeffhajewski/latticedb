@@ -16,27 +16,50 @@ db.open()  # or use it as a context manager: with latticedb.Database(...) as db:
 
 Not every option below is available everywhere. The bindings and the C API expose
 `create`, `read_only`, `cache_size_mb`, `enable_vectors`, `vector_dimensions`,
-`enable_wal`, `enable_adjacency_cache` and `lock`; the C API, Go and Java also
-take `page_size` (Python and TypeScript always use 4096). `enable_fts`, the query-cache settings and
+`vector_metric`, `vector_m`, `vector_ef_construction`, `enable_wal`,
+`enable_adjacency_cache`, `lock`, `sync_mode` and `full_fsync`; the C API, Go and
+Java also take `page_size` (Python and TypeScript always use 4096). In the C API
+the vector and durability settings after `lock` are fields of
+`lattice_open_options_v5`. `enable_fts`, the query-cache settings and
 `auto_checkpoint` are options of the Zig API only — everywhere else they keep
-their defaults. `sync_mode` and `full_fsync` are Zig options too, and elsewhere are
-set through the environment variables `LATTICE_SYNC_MODE` and `LATTICE_FULL_FSYNC`.
+their defaults.
 
 ## Decided at creation, and permanent
 
 | Option | What it does |
 |--------|--------------|
 | `page_size` | Size of a page in bytes, 4096 to 65535. Fixed when the file is created and stored in it. The default of 4096 matches almost every filesystem and is the right answer unless you have measured otherwise. |
-| `vector_dimensions` | How many numbers are in each vector, 1 to 4096. This has to match whatever produces your embeddings. |
+| `vector_dimensions` | How many numbers are in each vector, 1 to 4096 (default 128). This has to match whatever produces your embeddings. |
+| `vector_metric` | How the vector index measures distance: `cosine` (the default), `euclidean`, or `dot_product`. See below. |
+| `vector_m` | HNSW connections per node, 2 to 32 (default 16; layer 0 keeps twice as many). More connections give better recall for more memory and slower inserts. |
+| `vector_ef_construction` | HNSW candidate list size while building, 1 to 4096 (default 200). Larger builds a better graph, more slowly. |
 
-The file does not record `vector_dimensions`: it is taken from the options each
-time you open with vectors enabled, so pass the same value every time. Opening a
-database that already holds vectors with a different value is rejected with an
-invalid-argument error.
+The vector settings take effect when an open creates the vector index (with
+`enable_vectors` on a database that has none), and the file records them. A
+database that has a vector index opens with it whatever the options say, so
+reopening it needs no vector options at all, after a crash included. Any vector
+setting you do pass must match what the file records, or the open fails with a
+configuration-mismatch error (`LATTICE_ERROR_CONFIG_MISMATCH`): the settings cannot
+be changed after creation. To change them, export the data and import it into a new
+database. In Python and TypeScript `vector_dimensions=0` means "whatever the file
+records"; Go and Java turn 0 into the default or reject it, so there either leave
+vectors off when reopening or pass the dimensions the file has.
+
+The metric decides what `<=>` and vector search return, smallest first:
+
+| Metric | Distance | Vectors are stored |
+|--------|----------|--------------------|
+| `cosine` | 1 − cos(a, b), from 0 to 2 | scaled to unit length |
+| `euclidean` | the L2 distance, √Σ(aᵢ − bᵢ)² | as given |
+| `dot_product` | the negative dot product, −(a · b), so the largest product comes first | as given |
 
 Getting `vector_dimensions` wrong is the one that bites, because it is only
 discovered when the first vector is rejected. OpenAI's `text-embedding-3-small`
 produces 1536 numbers, so that is the number you would pass for it.
+
+0.16.0 refuses to open a file whose index uses `euclidean` or `dot_product`, or an
+`m` other than 16, because it would misread it. A cosine index with the default `m`
+stays readable by 0.16.0.
 
 ## Which features exist
 
@@ -44,14 +67,15 @@ produces 1536 numbers, so that is the number you would pass for it.
 |--------|---------|--------------|
 | `create` | off | Create the database if it is not there. Ignored for `:memory:`, which always creates. |
 | `read_only` | off | Open without the ability to write. Takes a shared lock, so several readers can share a database nobody is writing. |
-| `enable_vectors` | off | Turn on vector storage and the HNSW index. |
+| `enable_vectors` | off | Create vector storage and the HNSW index if the database has none. A database that has one opens with it without this. |
 | `enable_fts` | on | Turn on full-text search (Zig API only). |
 | `enable_wal` | on | Write-ahead logging. See below before turning this off. |
 | `enable_adjacency_cache` | off | Keep an in-memory map of which nodes connect to which. Queries and the C API's edge calls do not read it, so today it costs memory and a little work on each edge write and speeds up nothing reached through the bindings. |
 
 A database created without vector support has no vector storage. Opening it later
 with vectors enabled creates the vector storage then, so you can start adding
-vectors to an existing database.
+vectors to an existing database. The new index's configuration is written to the
+file during that open.
 
 ## Memory and caching
 
@@ -109,8 +133,8 @@ rollback, and no multi-statement atomicity.
 | Option | Default | What it does |
 |--------|---------|--------------|
 | `enable_wal` | on | Write-ahead logging, and with it transactions. |
-| `sync_mode` | `.full` | Whether a commit waits for its log record to reach the disk. `.normal` survives a killed process but can lose the latest commits to a power cut. Zig API, or `LATTICE_SYNC_MODE`. |
-| `full_fsync` | off | On macOS, sync with `F_FULLFSYNC` so commits survive power loss, at several milliseconds per sync. Zig API, or `LATTICE_FULL_FSYNC=1`. |
+| `sync_mode` | `.full` | Whether a commit waits for its log record to reach the disk. `.normal` survives a killed process but can lose the latest commits to a power cut. When the program leaves it unset, `LATTICE_SYNC_MODE` applies. |
+| `full_fsync` | off | On macOS, sync with `F_FULLFSYNC` so commits survive power loss, at several milliseconds per sync. When the program leaves it unset, `LATTICE_FULL_FSYNC` applies. |
 | `auto_checkpoint` | every 1000 log frames, truncating | How often the log is folded back into the database file. Zig API only. |
 
 [Durability and the Log](./durability.md) explains each of these and what survives
@@ -135,12 +159,12 @@ db, err := latticedb.Open("graph.lattice", latticedb.OpenOptions{
 ```
 
 ```c
-lattice_open_options_v4 options = LATTICE_OPEN_OPTIONS_V4_DEFAULT;
+lattice_open_options_v5 options = LATTICE_OPEN_OPTIONS_V5_DEFAULT;
 options.create = true;
 options.cache_size_mb = 64;
 
 lattice_database* db;
-lattice_open_v4("graph.lattice", &options, &db);
+lattice_open_v5("graph.lattice", &options, &db);
 ```
 
 The C API grows a new options struct rather than changing the old one, so a

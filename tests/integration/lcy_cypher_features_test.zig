@@ -678,7 +678,7 @@ test "lcy: CALL built-in procedures" {
     try expectResult(db, "CALL db.labels()", "label\n\"P\"\n\"Tag\"");
     try expectResult(db, "CALL db.relationshipTypes()", "relationshipType\n\"KNOWS\"");
     try expectResult(db, "CALL db.propertyKeys()", "propertyKey\n\"label\"\n\"name\"\n\"since\"");
-    try expectResult(db, "CALL db.indexes()", "type | entityType | labelOrType | property\n\"fulltext\" | \"NODE\" | \"Tag\" | \"label\"\n\"property\" | \"NODE\" | \"P\" | \"name\"");
+    try expectResult(db, "CALL db.indexes()", "type | entityType | labelOrType | property | encoding\n\"fulltext\" | \"NODE\" | \"Tag\" | \"label\" | \"fulltext\"\n\"property\" | \"NODE\" | \"P\" | \"name\" | \"ordered_dense\"");
     // YIELD picks, renames and orders columns; WHERE filters them.
     try expectResult(db, "CALL db.indexes() YIELD property, type AS kind WHERE kind = 'property'", "property | kind\n\"name\" | \"property\"");
     try expectResult(db, "call DB.LABELS() yield *", "label\n\"P\"\n\"Tag\"");
@@ -702,7 +702,7 @@ test "lcy: CALL on an empty database" {
     const db = try openTestDb(path);
     defer closeTestDb(db, path);
     try expectResult(db, "CALL db.labels()", "label");
-    try expectResult(db, "CALL db.indexes()", "type | entityType | labelOrType | property");
+    try expectResult(db, "CALL db.indexes()", "type | entityType | labelOrType | property | encoding");
     try expectResult(db, "CALL db.propertyKeys()", "propertyKey");
 }
 

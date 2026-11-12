@@ -233,7 +233,8 @@ value share a key (see [Graph Storage](./graph-storage.md#property-indexes)).
 An index 0.16.0 created keys a digest of the type and bits, so an integer and the
 equal float land under different keys; `PropertyIndexScan` looks up both forms
 and merges them, so `{age: 30}` finds a node stored with `30.0`, as a scan would,
-and such an index is never used for ranges.
+and such an index is never used for ranges until it is rebuilt
+(`Database.upgradePropertyIndexes`).
 
 ### Filter Operator
 

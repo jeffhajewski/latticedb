@@ -87,6 +87,7 @@ const PropertyIndex = property_index_mod.PropertyIndex;
 const PropertyIndexError = property_index_mod.PropertyIndexError;
 const PropertyIndexDefinition = property_index_mod.Definition;
 const PropertyIndexEntityKind = property_index_mod.EntityKind;
+const PropertyIndexEncoding = property_index_mod.Encoding;
 const OverlayLookup = lattice.storage.overlay_lookup.OverlayLookup;
 
 const adjacency_cache_mod = lattice.graph.adjacency_cache;
@@ -4049,22 +4050,12 @@ pub const Database = struct {
         // A label's index holds every node with the label, so that it can
         // be read in ORDER BY's order with the nulls; a relationship type's
         // only the edges with the property.
-        definition.encoding = if (kind == .node) .ordered_dense else .ordered;
+        definition.encoding = PropertyIndexEncoding.current(kind);
         var index = &(self.property_index orelse return DatabaseError.IoError);
         if (index.hasDefinition(definition) catch |err| return mapPropertyIndexError(err)) {
             return DatabaseError.AlreadyExists;
         }
-        // 0.16.0 would take the ordered keys for digests and find nothing
-        // under them, and leave them stale as it wrote. The file says so
-        // before it holds any, so that release refuses to open it.
-        const header = self.page_manager.getHeader();
-        if (header.min_reader_version < types.FORMAT_VERSION) {
-            var raised = header.*;
-            raised.min_reader_version = types.FORMAT_VERSION;
-            self.page_manager.updateHeader(&raised) catch return DatabaseError.IoError;
-            try self.sync();
-            self.page_manager.sync() catch return DatabaseError.IoError;
-        }
+        try self.closePropertyIndexesToOlderReaders();
         index.clearEntries(definition) catch |err| return mapPropertyIndexError(err);
         try self.populatePropertyIndexDefinition(definition);
         index.createDefinition(definition) catch |err| return mapPropertyIndexError(err);
@@ -4074,6 +4065,116 @@ pub const Database = struct {
         try self.sync();
         self.page_manager.sync() catch return DatabaseError.IoError;
         if (self.query_cache) |cache| cache.bumpSchemaVersion();
+    }
+
+    /// 0.16.0 would take ordered keys for digests and find nothing under
+    /// them, and leave them stale as it wrote. The file says so before it
+    /// holds any, so that release refuses to open it.
+    fn closePropertyIndexesToOlderReaders(self: *Self) DatabaseError!void {
+        const header = self.page_manager.getHeader();
+        if (header.min_reader_version < types.FORMAT_VERSION) {
+            var raised = header.*;
+            raised.min_reader_version = types.FORMAT_VERSION;
+            self.page_manager.updateHeader(&raised) catch return DatabaseError.IoError;
+            try self.sync();
+            self.page_manager.sync() catch return DatabaseError.IoError;
+        }
+    }
+
+    /// A declared property index as `propertyIndexes` lists it.
+    pub const PropertyIndexInfo = struct {
+        kind: PropertyIndexEntityKind,
+        /// The label or relationship type.
+        scope: []u8,
+        property: []u8,
+        encoding: PropertyIndexEncoding,
+    };
+
+    /// Every declared property index, nodes first, with the encoding its
+    /// entries are in. Free with `freePropertyIndexes`.
+    pub fn propertyIndexes(self: *Self, allocator: Allocator) DatabaseError![]PropertyIndexInfo {
+        var out: std.ArrayList(PropertyIndexInfo) = .empty;
+        errdefer {
+            for (out.items) |info| {
+                allocator.free(info.scope);
+                allocator.free(info.property);
+            }
+            out.deinit(allocator);
+        }
+        var index = if (self.property_index) |*property_index| property_index else return out.toOwnedSlice(allocator) catch DatabaseError.OutOfMemory;
+        inline for (.{ PropertyIndexEntityKind.node, PropertyIndexEntityKind.edge }) |kind| {
+            var iter: PropertyIndex.DefinitionIterator = undefined;
+            index.iterateDefinitions(kind, &iter) catch |err| return mapPropertyIndexError(err);
+            defer iter.deinit();
+            while (iter.next() catch |err| return mapPropertyIndexError(err)) |definition| {
+                const scope = try self.symbolNameCopy(allocator, definition.scope_id);
+                errdefer allocator.free(scope);
+                const property = try self.symbolNameCopy(allocator, definition.property_id);
+                errdefer allocator.free(property);
+                out.append(allocator, .{ .kind = kind, .scope = scope, .property = property, .encoding = definition.encoding }) catch
+                    return DatabaseError.OutOfMemory;
+            }
+        }
+        return out.toOwnedSlice(allocator) catch DatabaseError.OutOfMemory;
+    }
+
+    pub fn freePropertyIndexes(allocator: Allocator, infos: []PropertyIndexInfo) void {
+        for (infos) |info| {
+            allocator.free(info.scope);
+            allocator.free(info.property);
+        }
+        allocator.free(infos);
+    }
+
+    fn symbolNameCopy(self: *Self, allocator: Allocator, id: symbols_mod.SymbolId) DatabaseError![]u8 {
+        const name = self.symbol_table.resolve(id) catch return DatabaseError.IoError;
+        defer self.symbol_table.freeString(name);
+        return allocator.dupe(u8, name) catch DatabaseError.OutOfMemory;
+    }
+
+    /// Rebuild every declared property index whose encoding is not the one
+    /// this release creates, in place, and return how many there were.
+    ///
+    /// An index 0.16.0 created keys a digest and answers equality only; a
+    /// label's index without entries for the nodes lacking the property
+    /// cannot be read in ORDER BY's order. Rebuilt, each answers ranges,
+    /// prefixes and sorting as one created now does. Like creating an index
+    /// it raises the minimum reader version, so 0.16.0 no longer opens the
+    /// file, and it needs the database to itself. An index stays usable at
+    /// every point: a crash before its new encoding is recorded leaves the
+    /// old one, whose entries recovery rebuilds.
+    pub fn upgradePropertyIndexes(self: *Self) DatabaseError!usize {
+        if (self.read_only) return DatabaseError.ReadOnly;
+        if (self.active_writer_txn_id != null) return DatabaseError.TransactionConflict;
+        var index = if (self.property_index) |*property_index| property_index else return 0;
+
+        // Collected first: rewriting the catalog while walking it would
+        // move the walk.
+        var stale: std.ArrayList(PropertyIndexDefinition) = .empty;
+        defer stale.deinit(self.allocator);
+        inline for (.{ PropertyIndexEntityKind.node, PropertyIndexEntityKind.edge }) |kind| {
+            var iter: PropertyIndex.DefinitionIterator = undefined;
+            index.iterateDefinitions(kind, &iter) catch |err| return mapPropertyIndexError(err);
+            defer iter.deinit();
+            while (iter.next() catch |err| return mapPropertyIndexError(err)) |definition| {
+                if (definition.encoding == PropertyIndexEncoding.current(kind)) continue;
+                stale.append(self.allocator, definition) catch return DatabaseError.OutOfMemory;
+            }
+        }
+        if (stale.items.len == 0) return 0;
+
+        try self.closePropertyIndexesToOlderReaders();
+        for (stale.items) |old| {
+            var definition = old;
+            definition.encoding = PropertyIndexEncoding.current(definition.kind);
+            index.clearEntries(definition) catch |err| return mapPropertyIndexError(err);
+            try self.populatePropertyIndexDefinition(definition);
+            index.setEncoding(definition) catch |err| return mapPropertyIndexError(err);
+        }
+        try self.sync();
+        self.page_manager.sync() catch return DatabaseError.IoError;
+        if (self.query_cache) |cache| cache.bumpSchemaVersion();
+        return stale.items.len;
     }
 
     fn dropPropertyIndex(

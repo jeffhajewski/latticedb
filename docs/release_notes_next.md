@@ -1030,8 +1030,9 @@ with relationships is one range probe, under 1 µs.
 - **A read-only recovery is bounded by memory**, 64 MB plus four times the size
   of the log and journal; beyond that the read-only open fails with
   `LATTICE_ERROR_FULL`. `lattice check` does not recover first.
-- **Indexes created by 0.16.0 answer equality only** until dropped and created
-  again.
+- **Indexes created by 0.16.0 answer equality only** until rebuilt with
+  `lattice compact --upgrade-indexes` (or `Database.upgradePropertyIndexes`
+  from Zig, or dropped and created again).
 - **There is no index from relationship type to relationship**; a pattern that
   starts from a type walks every relationship once.
 - **The vector metric, `m` and `ef_construction` cannot be changed** once the
@@ -1094,9 +1095,12 @@ with relationships is one range probe, under 1 µs.
   opened with different dimensions it is refused with -18.
 - **Property indexes.** Indexes 0.16.0 created keep their encoding and answer
   equality as before; they are not used for ranges, prefixes or sorting until
-  dropped and created again. Creating an index with this release raises the
-  header's minimum reader version to 4, so 0.16.0 refuses that file from then
-  on, also after the index is dropped. Files without one are unaffected.
+  rebuilt. `lattice info` lists every index with its encoding (`digest` is
+  0.16.0's), as does the `encoding` column of `CALL db.indexes()`, and
+  `lattice compact --upgrade-indexes` rebuilds the old ones in place. Creating
+  or rebuilding an index with this release raises the header's minimum reader
+  version to 4, so 0.16.0 refuses that file from then on, also after the index
+  is dropped. Files without one are unaffected.
 - **Opening a file this release wrote with 0.16.0.** 0.16.0 opens and writes a
   file whose vector index, if any, is cosine with `m` 16, whatever its
   `ef_construction`. It writes zeros over the format-4 fields, and this release

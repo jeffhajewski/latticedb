@@ -60,6 +60,23 @@ pub const Encoding = enum(u8) {
     pub fn isOrdered(self: Encoding) bool {
         return self != .digest;
     }
+
+    /// What this release creates for an index of `kind`.
+    pub fn current(kind: EntityKind) Encoding {
+        return switch (kind) {
+            .node => .ordered_dense,
+            .edge => .ordered,
+        };
+    }
+
+    /// The name `lattice info` and `CALL db.indexes()` report.
+    pub fn name(self: Encoding) []const u8 {
+        return switch (self) {
+            .digest => "digest",
+            .ordered => "ordered",
+            .ordered_dense => "ordered_dense",
+        };
+    }
 };
 
 pub const Definition = struct {
@@ -416,6 +433,18 @@ pub const PropertyIndex = struct {
         };
         self.cache.loaded = false;
         self.catalog.insert(&key, value) catch |err| return mapBTreeError(err);
+    }
+
+    /// Record that a declared index's entries are now in `definition`'s
+    /// encoding.
+    pub fn setEncoding(self: *Self, definition: Definition) PropertyIndexError!void {
+        const key = definitionKey(definition);
+        const value: []const u8 = switch (definition.encoding) {
+            .digest => &.{},
+            .ordered, .ordered_dense => &.{@intFromEnum(definition.encoding)},
+        };
+        self.cache.loaded = false;
+        self.catalog.put(&key, value) catch |err| return mapBTreeError(err);
     }
 
     fn loadCache(self: *Self) PropertyIndexError!void {

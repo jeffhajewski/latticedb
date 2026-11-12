@@ -455,7 +455,13 @@ the query engine compares them. A truncated string or a digest stands for
 several values; lookups re-read the entity and compare, so neither can produce
 a wrong row. Indexes created by 0.16.0 have an empty catalog value and key a
 SHA-256 digest of the value: they answer equality only, and keep doing so, until
-dropped and created again.
+rebuilt. `Database.upgradePropertyIndexes` (`lattice compact
+--upgrade-indexes`) rebuilds each declaration whose catalog value is not the
+current encoding for its kind (a node index created by a development build
+between the two is ordered but not dense): it raises `min_reader_version`,
+removes the declaration's entries, writes them again from the label's nodes or
+the type's edges, then stores the new encoding in the catalog, all in one
+step, so a crash leaves the old index or the new one.
 
 Creating an ordered index raises the file header's `min_reader_version` to 4
 before the first key is written, so 0.16.0, which would read the keys as

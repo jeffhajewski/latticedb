@@ -8,8 +8,12 @@
 //! - `db.propertyKeys()`: `propertyKey`, every property key some node or
 //!   relationship has. This reads every node and relationship.
 //! - `db.indexes()`: `type` (`property` or `fulltext`), `entityType` (`NODE`
-//!   or `RELATIONSHIP`), `labelOrType`, `property`: every declared property
-//!   and full-text index.
+//!   or `RELATIONSHIP`), `labelOrType`, `property`, `encoding`: every
+//!   declared property and full-text index. A property index's encoding is
+//!   `ordered_dense` (a label's, created by this release), `ordered` (a
+//!   relationship type's), or `digest` (created by 0.16.0: equality only
+//!   until `lattice compact --upgrade-indexes` rebuilds it); a full-text
+//!   index's is `fulltext`.
 //!
 //! Only listing procedures exist; searching is done with `@@` and `<=>` in
 //! WHERE.
@@ -200,7 +204,7 @@ pub const ProcedureCall = struct {
                 index.iterateDefinitions(kind, &iter) catch |err| return ctx.storageFailure(err, "listing the property indexes for db.indexes()", .{});
                 defer iter.deinit();
                 while (iter.next() catch |err| return ctx.storageFailure(err, "listing the indexes for db.indexes()", .{})) |d| {
-                    try self.addSymbolRow(ctx, rows, &.{ "property", entityName(kind == .node) }, &.{ d.scope_id, d.property_id });
+                    try self.addIndexRow(ctx, rows, "property", kind == .node, d.scope_id, d.property_id, d.encoding.name());
                 }
             }
         }
@@ -211,10 +215,28 @@ pub const ProcedureCall = struct {
                 catalog.iterate(kind, &iter) catch |err| return ctx.storageFailure(err, "listing the full-text indexes for db.indexes()", .{});
                 defer iter.deinit();
                 while (iter.next() catch |err| return ctx.storageFailure(err, "listing the indexes for db.indexes()", .{})) |d| {
-                    try self.addSymbolRow(ctx, rows, &.{ "fulltext", entityName(kind == .node) }, &.{ d.scope_id, d.property_id });
+                    try self.addIndexRow(ctx, rows, "fulltext", kind == .node, d.scope_id, d.property_id, "fulltext");
                 }
             }
         }
+    }
+
+    fn addIndexRow(
+        self: *Self,
+        ctx: *ExecutionContext,
+        rows: *Rows,
+        index_type: []const u8,
+        node: bool,
+        scope_id: symbols.SymbolId,
+        property_id: symbols.SymbolId,
+        encoding: []const u8,
+    ) OperatorError!void {
+        const db = self.database;
+        const scope = db.symbol_table.resolve(scope_id) catch |err| return ctx.storageFailure(err, "reading the name of symbol {d}", .{scope_id});
+        defer db.symbol_table.freeString(scope);
+        const property = db.symbol_table.resolve(property_id) catch |err| return ctx.storageFailure(err, "reading the name of symbol {d}", .{property_id});
+        defer db.symbol_table.freeString(property);
+        try self.addRow(rows, &.{ index_type, entityName(node), scope, property, encoding });
     }
 
     fn entityName(node: bool) []const u8 {

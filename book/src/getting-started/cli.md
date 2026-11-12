@@ -236,7 +236,17 @@ Changefeed:   keep all, events 1..7
 
 The last line is the [changefeed](../guides/changefeed.md): the record of every
 change, which the database keeps by default. Here the two people and the edge
-between them took seven events.
+between them took seven events. A database with
+[property indexes](../guides/property-indexes.md) lists each on a line of its
+own, with how its keys are encoded:
+
+```text
+Index:        :Person(age)  ordered_dense
+Index:        [:KNOWS](since)  ordered
+```
+
+An index created by LatticeDB 0.16.0 shows `digest`: it answers equality only
+until `compact --upgrade-indexes` rebuilds it.
 
 ## Moving data in and out
 
@@ -703,6 +713,10 @@ knowing before you run it on real data:
   shrink much.
 - Live pages are never moved, which is what makes it safe to interrupt.
 - It will refuse to run on a read-only database, or while any transaction is open.
+
+With `--upgrade-indexes` it first rebuilds every property index still in an older
+encoding, so that one created by 0.16.0 answers ranges and sorting too, and
+reports how many it rebuilt as `Indexes rebuilt:`.
 
 ### Keeping the changefeed in check
 

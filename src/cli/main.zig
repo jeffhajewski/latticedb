@@ -330,6 +330,10 @@ fn cmdInfo(
     };
     var policy_buf: [48]u8 = undefined;
     const policy = feed.retention.format(&policy_buf);
+    const indexes = db.propertyIndexes(allocator) catch |err| {
+        return failCommand(stderr, "Failed to list the property indexes: {s}", .{@errorName(err)});
+    };
+    defer lattice.storage.database.Database.freePropertyIndexes(allocator, indexes);
 
     switch (parsed_args.format) {
         .table => {
@@ -351,9 +355,13 @@ fn cmdInfo(
             } else {
                 try stdout.print("no events held (last sequence {d})\n", .{feed.last_sequence});
             }
+            for (indexes) |index| {
+                const open_mark, const close_mark = if (index.kind == .node) .{ ":", "" } else .{ "[:", "]" };
+                try stdout.print("Index:        {s}{s}{s}({s})  {s}\n", .{ open_mark, index.scope, close_mark, index.property, index.encoding.name() });
+            }
         },
         .json => {
-            try stdout.print("{{\"path\":\"{s}\",\"size_kb\":{d},\"nodes\":{d},\"edges\":{d},\"format_version\":{d},\"vector_enabled\":{},\"fts_enabled\":{},\"changefeed_retention\":\"{s}\",\"changefeed_oldest_sequence\":{d},\"changefeed_last_sequence\":{d}}}\n", .{
+            try stdout.print("{{\"path\":\"{s}\",\"size_kb\":{d},\"nodes\":{d},\"edges\":{d},\"format_version\":{d},\"vector_enabled\":{},\"fts_enabled\":{},\"changefeed_retention\":\"{s}\",\"changefeed_oldest_sequence\":{d},\"changefeed_last_sequence\":{d},\"property_indexes\":[", .{
                 path,
                 size_kb,
                 node_count,
@@ -365,6 +373,16 @@ fn cmdInfo(
                 feed.oldest_sequence orelse 0,
                 feed.last_sequence,
             });
+            for (indexes, 0..) |index, i| {
+                if (i > 0) try stdout.writeAll(",");
+                try stdout.print("{{\"entity\":\"{s}\",\"scope\":{f},\"property\":{f},\"encoding\":\"{s}\"}}", .{
+                    if (index.kind == .node) "node" else "relationship",
+                    std.json.fmt(index.scope, .{}),
+                    std.json.fmt(index.property, .{}),
+                    index.encoding.name(),
+                });
+            }
+            try stdout.writeAll("]}\n");
         },
         .csv => {
             try stdout.writeAll("property,value\n");
@@ -378,6 +396,10 @@ fn cmdInfo(
             try stdout.print("changefeed_retention,{s}\n", .{policy});
             try stdout.print("changefeed_oldest_sequence,{d}\n", .{feed.oldest_sequence orelse 0});
             try stdout.print("changefeed_last_sequence,{d}\n", .{feed.last_sequence});
+            for (indexes) |index| {
+                const open_mark, const close_mark = if (index.kind == .node) .{ ":", "" } else .{ "[:", "]" };
+                try stdout.print("property_index,{s}{s}{s}({s}) {s}\n", .{ open_mark, index.scope, close_mark, index.property, index.encoding.name() });
+            }
         },
     }
 }
@@ -748,6 +770,14 @@ fn cmdCompact(
     const db = try openDatabase(allocator, stderr, parsed_args, .read_write);
     defer db.close();
 
+    // Rebuilt first, so that the pages the old entries free can go too.
+    const upgraded: ?usize = if (parsed_args.upgrade_indexes)
+        db.upgradePropertyIndexes() catch |err| {
+            return failCommand(stderr, "Failed to rebuild the property indexes: {s}", .{@errorName(err)});
+        }
+    else
+        null;
+
     const stats = db.compact() catch |err| {
         return failCommand(stderr, "Failed to compact database: {s}", .{@errorName(err)});
     };
@@ -755,21 +785,29 @@ fn cmdCompact(
     switch (parsed_args.format) {
         .table => {
             output.printSuccess(stdout, "Compacted database: {s}", .{path});
+            if (upgraded) |n| try stdout.print("  Indexes rebuilt: {d}\n", .{n});
             try stdout.print("  Pages before:    {d}\n", .{stats.pages_before});
             try stdout.print("  Pages after:     {d}\n", .{stats.pages_after});
             try stdout.print("  Pages removed:   {d}\n", .{stats.pages_removed});
             try stdout.print("  Bytes reclaimed: {d}\n", .{stats.bytes_reclaimed});
         },
-        .json => try stdout.print(
-            "{{\"path\":\"{s}\",\"pages_before\":{d},\"pages_after\":{d},\"pages_removed\":{d},\"bytes_reclaimed\":{d}}}\n",
-            .{ path, stats.pages_before, stats.pages_after, stats.pages_removed, stats.bytes_reclaimed },
-        ),
-        .csv => {
-            try stdout.writeAll("path,pages_before,pages_after,pages_removed,bytes_reclaimed\n");
+        .json => {
             try stdout.print(
-                "{s},{d},{d},{d},{d}\n",
+                "{{\"path\":\"{s}\",\"pages_before\":{d},\"pages_after\":{d},\"pages_removed\":{d},\"bytes_reclaimed\":{d}",
                 .{ path, stats.pages_before, stats.pages_after, stats.pages_removed, stats.bytes_reclaimed },
             );
+            if (upgraded) |n| try stdout.print(",\"indexes_rebuilt\":{d}", .{n});
+            try stdout.writeAll("}\n");
+        },
+        .csv => {
+            try stdout.writeAll("path,pages_before,pages_after,pages_removed,bytes_reclaimed");
+            if (upgraded != null) try stdout.writeAll(",indexes_rebuilt");
+            try stdout.print(
+                "\n{s},{d},{d},{d},{d}",
+                .{ path, stats.pages_before, stats.pages_after, stats.pages_removed, stats.bytes_reclaimed },
+            );
+            if (upgraded) |n| try stdout.print(",{d}", .{n});
+            try stdout.writeAll("\n");
         },
     }
 }
@@ -2060,6 +2098,10 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\                        one opens with it without this flag.
             \\  --vector-dims=<n>     Dimensions for a new index, or for a 0.16.0
             \\                        database whose dimensions cannot be read
+            \\  --upgrade-indexes     First rebuild property indexes an older
+            \\                        release created (equality only) so they
+            \\                        answer ranges and sorting. 0.16.0 cannot
+            \\                        open the file afterwards.
             \\
             \\Example:
             \\  lattice compact mydb.lattice

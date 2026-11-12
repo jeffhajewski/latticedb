@@ -28,7 +28,7 @@ pub const Procedure = enum {
             .labels => &.{"label"},
             .relationship_types => &.{"relationshipType"},
             .property_keys => &.{"propertyKey"},
-            .indexes => &.{ "type", "entityType", "labelOrType", "property" },
+            .indexes => &.{ "type", "entityType", "labelOrType", "property", "encoding" },
         };
     }
 

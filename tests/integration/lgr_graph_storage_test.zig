@@ -1177,3 +1177,117 @@ test "lgr: a relationship type's index answers ranges and equality for a pattern
     try plain.commitTransaction(&tp);
     try compareEdgeRanges(indexed, plain, null, null);
 }
+
+/// Put a declared index back in an older encoding, as a file from an older
+/// release would have it: 0.16.0's digest, or ordered without the nodes
+/// that lack the property.
+fn downgradeIndex(db: *Database, node: bool, scope: []const u8, property: []const u8, encoding: lattice.graph.property_index.Encoding) !void {
+    var index = &db.property_index.?;
+    var definition = (if (node) try db.nodePropertyIndex(scope, property) else try db.edgePropertyIndex(scope, property)).?;
+    try index.clearEntries(definition);
+    definition.encoding = encoding;
+    try index.setEncoding(definition);
+    if (node) {
+        const ids = try db.getAllNodeIdsInTxn(null);
+        defer db.allocator.free(ids);
+        for (ids) |id| {
+            var value = (try db.getNodeProperty(id, property)) orelse continue;
+            defer value.deinit(db.allocator);
+            try index.add(definition, id, value);
+        }
+    } else {
+        var id: u64 = 1;
+        while (id < db.edge_store.next_edge_id) : (id += 1) {
+            const ref = (try db.getEdgeRefInTxn(null, id)) orelse continue;
+            if (ref.edge_type != definition.scope_id) continue;
+            var value = (try db.getEdgePropertyById(id, property)) orelse continue;
+            defer value.deinit(db.allocator);
+            try index.add(definition, id, value);
+        }
+    }
+}
+
+fn expectEncodings(db: *Database, expected: []const []const u8) !void {
+    const infos = try db.propertyIndexes(std.testing.allocator);
+    defer Database.freePropertyIndexes(std.testing.allocator, infos);
+    var got: std.ArrayList(u8) = .empty;
+    defer got.deinit(std.testing.allocator);
+    for (infos) |info| {
+        try got.print(std.testing.allocator, "{s}.{s}={s};", .{ info.scope, info.property, info.encoding.name() });
+    }
+    var want: std.ArrayList(u8) = .empty;
+    defer want.deinit(std.testing.allocator);
+    for (expected) |e| try want.print(std.testing.allocator, "{s};", .{e});
+    try std.testing.expectEqualStrings(want.items, got.items);
+}
+
+test "lgr: indexes in an older encoding are rebuilt in place and then answer ranges and sorting" {
+    const path_i = "/tmp/lgr_upgrade_indexed.ltdb";
+    const path_p = "/tmp/lgr_upgrade_plain.ltdb";
+    defer removeFiles(path_i);
+    defer removeFiles(path_p);
+    var indexed = try openDb(path_i, true);
+    var plain = try openDb(path_p, true);
+    defer plain.close();
+
+    var nodes: [120]u64 = undefined;
+    for ([_]*Database{ indexed, plain }) |db| {
+        var txn = try db.beginTransaction(.read_write);
+        try fillMixed(db, &txn, 500);
+        for (&nodes) |*n| n.* = try db.createNode(&txn, &.{});
+        try fillEdges(db, &txn, &nodes, 700, 0);
+        try db.commitTransaction(&txn);
+    }
+    try indexed.createNodePropertyIndex("P", "v");
+    try indexed.createNodePropertyIndex("P", "w");
+    try indexed.createEdgePropertyIndex("KNOWS", "w");
+    try downgradeIndex(indexed, true, "P", "v", .digest);
+    try downgradeIndex(indexed, true, "P", "w", .ordered);
+    try downgradeIndex(indexed, false, "KNOWS", "w", .digest);
+    try expectEncodings(indexed, &.{ "P.v=digest", "P.w=ordered", "KNOWS.w=digest" });
+
+    // A digest answers equality only; an index without the nodes lacking
+    // the property answers ranges but is not read whole for a sort.
+    const Kind = lattice.query.planner.QueryPlanner.ScanKind;
+    try std.testing.expectEqual(Kind.label_scan, try planScanKind(indexed, "MATCH (n:P) WHERE n.v > 3 RETURN n"));
+    try std.testing.expectEqual(Kind.property_index_scan, try planScanKind(indexed, "MATCH (n:P) WHERE n.v = 3 RETURN n"));
+    try std.testing.expectEqual(Kind.property_range_scan, try planScanKind(indexed, "MATCH (n:P) WHERE n.w > 3 RETURN n"));
+    try std.testing.expectEqual(Kind.label_scan, try planScanKind(indexed, "MATCH (n:P) RETURN n ORDER BY n.w LIMIT 3"));
+    try std.testing.expectEqual(Kind.edge_type_scan, try planScanKind(indexed, "MATCH (a)-[r:KNOWS]->(b) WHERE r.w = 3 RETURN r"));
+    // The same rows. Here a sort by v reads w's range, so rows tied on v
+    // come in w's order rather than the label scan's, and a LIMIT that
+    // cuts a run of ties may keep others of them.
+    for (range_queries) |cypher| {
+        if (std.mem.indexOf(u8, cypher, "LIMIT") != null) continue;
+        const a = try sortedRender(indexed, null, cypher);
+        defer std.testing.allocator.free(a);
+        const b = try sortedRender(plain, null, cypher);
+        defer std.testing.allocator.free(b);
+        try std.testing.expectEqualStrings(b, a);
+    }
+    try compareEdgeRanges(indexed, plain, null, null);
+
+    try std.testing.expectEqual(@as(usize, 3), try indexed.upgradePropertyIndexes());
+    try expectEncodings(indexed, &.{ "P.v=ordered_dense", "P.w=ordered_dense", "KNOWS.w=ordered" });
+    try std.testing.expectEqual(Kind.property_range_scan, try planScanKind(indexed, "MATCH (n:P) WHERE n.v > 3 RETURN n"));
+    try std.testing.expectEqual(Kind.property_order_scan, try planScanKind(indexed, "MATCH (n:P) RETURN n ORDER BY n.w DESC LIMIT 3"));
+    try std.testing.expectEqual(Kind.edge_range_scan, try planScanKind(indexed, "MATCH (a)-[r:KNOWS]->(b) WHERE r.w = 3 RETURN r"));
+    try compareAll(indexed, plain, null, null);
+    try compareEdgeRanges(indexed, plain, null, null);
+    try std.testing.expectEqual(@as(usize, 0), try indexed.upgradePropertyIndexes());
+
+    // The rebuilt encodings are what the file says after reopening, and
+    // writes after the rebuild keep them current.
+    indexed.close();
+    indexed = try reopenDb(path_i);
+    defer indexed.close();
+    try expectEncodings(indexed, &.{ "P.v=ordered_dense", "P.w=ordered_dense", "KNOWS.w=ordered" });
+    for ([_]*Database{ indexed, plain }) |db| {
+        var txn = try db.beginTransaction(.read_write);
+        try fillMixed(db, &txn, 40);
+        try fillEdges(db, &txn, &nodes, 50, 3000);
+        try db.commitTransaction(&txn);
+    }
+    try compareAll(indexed, plain, null, null);
+    try compareEdgeRanges(indexed, plain, null, null);
+}

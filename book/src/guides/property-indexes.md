@@ -355,7 +355,41 @@ file without one stays readable by 0.16.0. Dropping the index does not undo
 the mark.
 
 An index that 0.16.0 created keeps working for equality, but is not used for
-ranges, prefixes or sorting until it is dropped and created again.
+ranges, prefixes or sorting until it is rebuilt. `lattice info` lists each
+index with its encoding: `digest` is the 0.16.0 one, `ordered_dense` (a
+label's) and `ordered` (a relationship type's) are this release's. The
+`encoding` column of `CALL db.indexes()` says the same:
+
+```bash
+lattice info people.lattice
+```
+
+```text
+...
+Index:        :Person(age)  digest
+```
+
+`lattice compact --upgrade-indexes` rebuilds every index in an older encoding
+in place, keeping its label or type and property, and then compacts as usual:
+
+```bash
+lattice compact people.lattice --upgrade-indexes
+```
+
+```text
+Compacted database: people.lattice
+  Indexes rebuilt: 1
+  Pages before:    1036
+  Pages after:     1036
+  Pages removed:   0
+  Bytes reclaimed: 0
+```
+
+From Zig, `Database.upgradePropertyIndexes()` does the same and returns how
+many it rebuilt. Either way it reads every node of the label (or relationship
+of the type) once, as creating the index does, in one step that a crash
+undoes completely, and it marks the file as needing format 4 as creating an
+index does.
 
 ## Where to go next
 

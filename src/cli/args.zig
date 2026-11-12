@@ -277,6 +277,9 @@ pub const Args = struct {
     at_ms: ?i64 = null,
     force: bool = false,
 
+    /// --upgrade-indexes, for `compact`.
+    upgrade_indexes: bool = false,
+
     // Remaining positional args
     positional: []const []const u8 = &.{},
 
@@ -381,6 +384,8 @@ pub const Args = struct {
                     args.output = arg["--output=".len..];
                 } else if (std.mem.eql(u8, arg, "--force")) {
                     args.force = true;
+                } else if (std.mem.eql(u8, arg, "--upgrade-indexes")) {
+                    args.upgrade_indexes = true;
                 } else if (std.mem.startsWith(u8, arg, "--at=")) {
                     args.at_ms = parseTimestamp(arg["--at=".len..]) orelse {
                         return error.InvalidTimestamp;
@@ -483,6 +488,19 @@ test "parse format option" {
     defer args.deinit(allocator);
 
     try std.testing.expectEqual(OutputFormat.json, args.format);
+}
+
+test "parse the index upgrade option for compact" {
+    const allocator = std.testing.allocator;
+    var plain = try Args.parse(allocator, &.{ "lattice", "compact", "test.db" });
+    defer plain.deinit(allocator);
+    try std.testing.expect(!plain.upgrade_indexes);
+
+    var args = try Args.parse(allocator, &.{ "lattice", "compact", "test.db", "--upgrade-indexes" });
+    defer args.deinit(allocator);
+    try std.testing.expectEqual(Command.compact, args.command.?);
+    try std.testing.expectEqualStrings("test.db", args.path.?);
+    try std.testing.expect(args.upgrade_indexes);
 }
 
 test "parse vector dimensions range" {

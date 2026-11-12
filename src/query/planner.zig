@@ -1125,7 +1125,7 @@ pub const QueryPlanner = struct {
             .labels => "`label`",
             .relationship_types => "`relationshipType`",
             .property_keys => "`propertyKey`",
-            .indexes => "`type`, `entityType`, `labelOrType` and `property`",
+            .indexes => "`type`, `entityType`, `labelOrType`, `property` and `encoding`",
         };
     }
 

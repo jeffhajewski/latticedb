@@ -35,6 +35,15 @@ A relationship in `CREATE` has exactly one type. A variable that is already boun
 can be used in `CREATE` to connect to it, as above, but not given new labels or
 properties there (`MATCH (n) CREATE (n:Extra)` is rejected); use `SET`.
 
+Both ends of a relationship must exist when it is created. A `CREATE` that would
+connect a node deleted earlier in the same query fails, with the same error code
+as a direct relationship create to a missing node, `LATTICE_ERROR_NOT_FOUND` (-4):
+
+```text
+$ lattice exec db.lattice --query="MATCH (a:C {name: 'x'}) DETACH DELETE a CREATE (a)-[:S]->(:C)"
+Error: Execution error (NotFound): Cannot complete creating a relationship from node 1 to node 3: a node or relationship it needs does not exist, or was deleted earlier in the query
+```
+
 ## SET
 
 ### Set Properties
@@ -81,7 +90,15 @@ DELETE n
 ```
 
 A node that still has relationships cannot be deleted with plain `DELETE`: the
-query fails with `NodeHasRelationships` and deletes nothing. Either delete the
+query fails and deletes nothing.
+
+```text
+$ lattice exec db.lattice --query="MATCH (n:C {name: 'x'}) DELETE n"
+Error: Execution error (NodeHasRelationships): Cannot delete node 1 because it still has relationships; delete them first, or use DETACH DELETE
+```
+
+Through the C API and the bindings the query returns the same error code as a
+direct node delete, `LATTICE_ERROR_HAS_RELATIONSHIPS` (-17). Either delete the
 relationships in the same statement, which are removed before any node is
 checked:
 

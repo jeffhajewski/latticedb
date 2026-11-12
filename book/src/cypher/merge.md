@@ -18,6 +18,10 @@ labels and properties on the node do not matter. A pattern without a label
 considers every node. Only when nothing matches is a node created, with all the
 pattern's labels and properties.
 
+A relationship in `MERGE` compares its properties the same way, so
+`MERGE (a)-[:R {w: 1}]->(b)` finds an existing relationship whose `w` is `1.0`
+instead of creating a second one.
+
 When several nodes match, `MERGE` returns one row for each of them:
 
 ```cypher

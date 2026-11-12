@@ -20,6 +20,10 @@ MATCH (n:Person) RETURN count(n) AS total
 nothing before it, `RETURN count(*)` returns 1. `count(DISTINCT x)` counts distinct
 non-null values.
 
+Grouping and `DISTINCT` treat values that `=` calls equal as one value: `1` and
+`1.0` fall into one group, and so do `0` and `-0.0`. Every NaN is one value, though
+`=` never matches it.
+
 Count with grouping:
 
 ```cypher

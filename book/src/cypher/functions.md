@@ -4,9 +4,26 @@ LatticeDB supports the following built-in functions in Cypher expressions.
 Function names are not case-sensitive: `toLower`, `tolower` and `TOLOWER` are the
 same function. Aggregates are covered in [Aggregations](./aggregations.md).
 
-An unknown function name is reported when the expression is first evaluated, not
-when the query is parsed, so a query that never reaches it (because it matches no
-rows) succeeds.
+Every function's name and number of arguments are checked before the query
+runs, so a misspelt name or a wrong argument count fails the same way whether the
+query would match rows or not:
+
+```text
+$ lattice exec db.lattice --query="MATCH (n:Nope) RETURN lenght(n)"
+Error: Semantic error (unknown_function) at 1:23: Unknown function 'lenght'
+  1 | MATCH (n:Nope) RETURN lenght(n)
+    |                       ^^^^^^
+$ lattice exec db.lattice --query="RETURN toLower('a', 'b')"
+Error: Semantic error (wrong_argument_count) at 1:8: toLower takes (string), but was given 2 arguments
+```
+
+An argument of the wrong type is found when the call is evaluated, and fails the
+query with a message naming what the function takes:
+
+```text
+$ lattice exec db.lattice --query="RETURN toLower(1)"
+Error: Execution error (TypeError) at 1:8: Type error: toLower(integer) is not defined; toLower takes (string)
+```
 
 ## id()
 
@@ -37,7 +54,8 @@ RETURN n.name, abs(n.score) AS abs_score
 
 ## size()
 
-Returns the length of a list, or of a string in bytes (`size("héllo")` is 6):
+Returns the length of a list, or the number of characters (Unicode code points)
+in a string (`size('Müller')` is 6):
 
 ```cypher
 MATCH (p:Person)-[:KNOWS]->(f:Person)
@@ -71,26 +89,48 @@ RETURN n.name, toFloat(n.age) AS float_age
 
 | Function | Returns |
 |----------|---------|
-| `toString(x)` | `x` as a string |
-| `toLower(s)` / `toUpper(s)` | `s` in lower or upper case (ASCII letters only) |
-| `trim(s)` | `s` without leading and trailing whitespace |
-| `substring(s, start[, length])` | Part of `s`, from a zero-based `start`; counted in bytes |
-| `replace(s, search, replacement)` | `s` with every `search` replaced |
-| `split(s, delimiter)` | A list of the parts of `s` |
-| `head(list)` / `last(list)` | The first or last element |
+| `toString(x)` | `x` as a string; null for a list or map |
+| `toLower(s)` / `toUpper(s)` | `s` in lower or upper case (see [Strings](#strings)) |
+| `trim(s)` | `s` without leading and trailing ASCII whitespace |
+| `substring(s, start[, length])` | Part of `s`, from a zero-based `start`, both counted in characters; a negative `start` counts as 0 |
+| `replace(s, search, replacement)` | `s` with every `search` replaced; an empty `search` returns `s` |
+| `split(s, delimiter)` | A list of the parts of `s`; an empty delimiter splits `s` into characters |
+| `head(list)` / `last(list)` | The first or last element; null for an empty list |
 | `tail(list)` | Every element but the first |
-| `range(start, end[, step])` | A list of integers from `start` to `end`, inclusive; more than ten million elements fails the query |
+| `range(start, end[, step])` | A list of integers from `start` to `end`, inclusive; a step of 0, or more than ten million elements, fails the query |
 | `type(r)` | A relationship's type |
 | `labels(n)` | A node's labels, as a list |
 | `properties(x)` | A node's or relationship's properties, as a map |
+| `score(d)` | The BM25 score of the full-text search that matched `d`; see [Full-Text Search](./full-text-search.md#reading-the-score) |
 
 `IN` tests list membership (`n.age IN [30, 40]`). `=~` matches a regular
 expression; see [WHERE](./where.md#regular-expressions). Lists and maps compare
 by value: `[1, 2] = [1, 2]` is true.
 
+## Strings
+
+`size`, `substring` and `split` work in characters (Unicode code points), not
+bytes, so they never cut a character in half. A byte that is not valid UTF-8 counts
+as one character.
+
+```cypher
+RETURN size('Müller')           // 6
+RETURN substring('Ärger', 1, 3) // "rge"
+RETURN split('añb', '')         // ["a", "ñ", "b"]
+RETURN toUpper('müller straße') // "MÜLLER STRAßE"
+RETURN toLower('ÄRGER ΣΟΦΙΑ')   // "ärger σοφια"
+```
+
+`toLower` and `toUpper` use Unicode's simple, one-to-one case mappings for Latin
+(including Latin-1, Latin Extended-A, -B and Additional), Greek, Cyrillic,
+Armenian and fullwidth ASCII letters; other characters are left as they are. Rules
+that need the full mappings or the surrounding text are not applied: `ß` stays `ß`
+in `toUpper` (not `SS`), a final `Σ` lowercases to `σ` (not `ς`), and there is no
+Turkish or other language-specific casing. `trim` removes ASCII whitespace only.
+
 ## Arithmetic
 
-Numeric operations automatically promote integers to floats when mixed:
+Numeric operations promote integers to floats when mixed:
 
 ```cypher
 RETURN 42 + 3.14   // Returns 45.14 (float)
@@ -104,12 +144,25 @@ does not fit in a 64-bit integer (`9223372036854775807 + 1`). Dividing by zero, 
 taking `%` of zero, fails the query for integers and floats alike.
 `-9223372036854775808` can be written as a literal.
 
+```text
+$ lattice exec db.lattice --query="RETURN 9223372036854775807 + 1"
+Error: Execution error (IntegerOverflow) at 1:28: Integer overflow: 9223372036854775807 + 1 does not fit in a 64-bit integer
+```
+
+Comparisons between an integer and a float use their exact values, without
+rounding the integer to a float first: `9007199254740993 = 9007199254740992.0` is
+false and `9007199254740993 > 9007199254740992.0` is true, as `ORDER BY` already
+ordered them. `1 = 1.0` and `-0.0 = 0` are true, and `DISTINCT` and grouping keep
+to the same equality: `1` and `1.0` are one value, and so are `0` and `-0.0`.
+
 ## Null
 
-Functions return null when their first argument is null (`toString(null)` and
-`size(null)` are null), and `coalesce` exists to replace nulls. A null in a
-later argument of `substring`, `replace` or `split` fails the query with a type
-error.
+A function given a null argument returns null (`toString(null)`, `size(null)`
+and `substring(null, 1)` are null); `coalesce` exists to replace nulls. A null in
+any argument wins over a wrong type in another, so `replace('abc', null, 1)` is
+null, not a type error. A wrong type is otherwise a type error, except that
+`toInteger`, `toFloat` and `toString` return null for a value they cannot
+convert.
 
 Null propagates through comparisons, arithmetic and the string operators, and
 `NOT`, `AND` and `OR` use three-valued logic; `IS NULL` and `IS NOT NULL` are always

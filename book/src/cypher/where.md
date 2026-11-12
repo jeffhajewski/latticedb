@@ -13,6 +13,10 @@ MATCH (n:Person) WHERE n.name = "Alice" RETURN n
 MATCH (n:Person) WHERE n.name <> "Alice" RETURN n
 ```
 
+An integer and a float compare by their exact values: `n.age = 30.0` matches an
+age stored as `30`, and an integer above 2^53 is not rounded to the nearest float
+before it is compared (`9007199254740993 > 9007199254740992.0` is true).
+
 ## Boolean Logic
 
 Combine conditions with `AND`, `OR`, `NOT`, and `XOR`:

@@ -244,6 +244,8 @@ pub const SortItem = struct {
     expr: *const ast.Expression,
     /// Sort descending
     descending: bool,
+    /// Where nulls go whichever the direction, when given.
+    nulls: ?ast.NullsOrder = null,
     /// Read this slot of the row instead of evaluating `expr`.
     ///
     /// Sorting the output of an aggregation cannot work by evaluating: the
@@ -423,6 +425,12 @@ pub const Sort = struct {
 
     fn compareEntries(self: *const Self, a: *const Entry, b: *const Entry) std.math.Order {
         for (self.sort_items, a.keys, b.keys) |item, a_key, b_key| {
+            if (item.nulls) |nulls| {
+                if (a_key.isNull() != b_key.isNull()) {
+                    const a_first = a_key.isNull() == (nulls == .first);
+                    return if (a_first) .lt else .gt;
+                }
+            }
             const cmp = orderValues(a_key, b_key);
             if (cmp != .eq) return if (item.descending) cmp.invert() else cmp;
         }

@@ -173,7 +173,12 @@ pub const OrderByClause = struct {
 pub const OrderItem = struct {
     expression: *Expression,
     descending: bool,
+    /// `NULLS FIRST` / `NULLS LAST`; without it nulls sort as the largest
+    /// value (last ascending, first descending).
+    nulls: ?NullsOrder = null,
 };
+
+pub const NullsOrder = enum { first, last };
 
 /// LIMIT clause
 pub const LimitClause = struct {

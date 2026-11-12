@@ -817,3 +817,88 @@ test "lcy: backtick-quoted names" {
     try expectFailure(db, "MATCH (n:`Person) RETURN n", .parse, "Expected '`' to close the name before the end of the line");
     try expectFailure(db, "MATCH (n:`Per\nson`) RETURN n", .parse, "Expected '`' to close the name before the end of the line");
 }
+
+// ============================================================================
+// Label predicates, NULLS FIRST/LAST, number literals, WITH ... WHERE
+// ============================================================================
+
+test "lcy: label predicates in expressions" {
+    const path = "/tmp/lcy_label_predicates.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try run(db, "CREATE (:A:B {k: 1}), (:A {k: 2}), (:B:`my label` {k: 3})");
+    try run(db, "MATCH (a {k: 1}), (b {k: 2}) CREATE (a)-[:R]->(b)");
+
+    try expectResult(db, "MATCH (n) WHERE n:A RETURN n.k ORDER BY n.k", "n.k\n1\n2");
+    try expectResult(db, "MATCH (n) WHERE n:A:B RETURN n.k", "n.k\n1");
+    try expectResult(db, "MATCH (n) WHERE NOT n:A RETURN n.k", "n.k\n3");
+    try expectResult(db, "MATCH (n) WHERE n:A AND NOT n:B OR n:`my label` RETURN n.k ORDER BY n.k", "n.k\n2\n3");
+    // As a value; the column is the text as written.
+    try expectResult(db, "MATCH (n) RETURN n.k, n:B ORDER BY n.k", "n.k | n:B\n1 | true\n2 | false\n3 | true");
+    try expectResult(db, "MATCH (n) RETURN CASE WHEN n:A:B THEN 'both' WHEN n:A THEN 'a' ELSE 'other' END AS c ORDER BY n.k", "c\n\"both\"\n\"a\"\n\"other\"");
+    // A null node gives null.
+    try expectResult(db, "MATCH (n {k: 3}) OPTIONAL MATCH (n)-->(m) RETURN m:A AS x", "x\nnull");
+    // In parentheses it is still an expression, not a pattern; next to a
+    // relationship it is a pattern.
+    try expectResult(db, "MATCH (n) WHERE (n:A) RETURN count(*) AS c", "c\n2");
+    try expectResult(db, "MATCH (n) WHERE (n:A)-->(:A) RETURN n.k", "n.k\n1");
+    try expectResult(db, "MATCH (n) RETURN [m IN collect(n) WHERE m:B | m.k] AS ks", "ks\n[1, 3]");
+    // Map literals and pattern properties are unaffected.
+    try expectResult(db, "MATCH (n:A {k: 2}) RETURN {k: n.k, a: n:A} AS m", "m\n{k: 2, a: true}");
+
+    try expectFailure(db, "MATCH (n) WHERE n:1 RETURN n", .parse, "Expected a label after ':'");
+    // Not a node: a type error, as in openCypher.
+    try expectFailure(db, "WITH 1 AS x RETURN x:A AS y", .execution, "labels(integer) is not defined");
+}
+
+test "lcy: ORDER BY with NULLS FIRST and NULLS LAST" {
+    const path = "/tmp/lcy_nulls_order.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedItems(db);
+
+    try expectResult(db, "MATCH (i:Item) RETURN i.name ORDER BY i.n", "i.name\n\"a\"\n\"b\"\n\"c\"\n\"d\"");
+    try expectResult(db, "MATCH (i:Item) RETURN i.name ORDER BY i.n NULLS FIRST", "i.name\n\"d\"\n\"a\"\n\"b\"\n\"c\"");
+    try expectResult(db, "MATCH (i:Item) RETURN i.name ORDER BY i.n ASC NULLS LAST", "i.name\n\"a\"\n\"b\"\n\"c\"\n\"d\"");
+    try expectResult(db, "MATCH (i:Item) RETURN i.name ORDER BY i.n DESC", "i.name\n\"d\"\n\"c\"\n\"b\"\n\"a\"");
+    try expectResult(db, "MATCH (i:Item) RETURN i.name ORDER BY i.n DESC NULLS LAST", "i.name\n\"c\"\n\"b\"\n\"a\"\n\"d\"");
+    try expectResult(db, "MATCH (i:Item) RETURN i.name ORDER BY i.n DESC NULLS FIRST", "i.name\n\"d\"\n\"c\"\n\"b\"\n\"a\"");
+    // With a limit (a bounded sort), after WITH, and on a returned alias.
+    try expectResult(db, "MATCH (i:Item) RETURN i.name ORDER BY i.n NULLS FIRST LIMIT 2", "i.name\n\"d\"\n\"a\"");
+    try expectResult(db, "MATCH (i:Item) WITH i ORDER BY i.n DESC NULLS LAST LIMIT 1 RETURN i.name", "i.name\n\"c\"");
+    try expectResult(db, "MATCH (i:Item) RETURN i.n AS n ORDER BY n NULLS FIRST SKIP 1 LIMIT 1", "n\n1");
+    // Two keys, each with its own placement.
+    try expectResult(db, "UNWIND [[1, null], [null, 1], [1, 2], [null, null]] AS p RETURN p ORDER BY p[0] NULLS FIRST, p[1] DESC NULLS LAST", "p\n[null, 1]\n[null, null]\n[1, 2]\n[1, null]");
+    // NULLS, FIRST and LAST stay usable as names.
+    try expectResult(db, "WITH 2 AS nulls, 1 AS first RETURN nulls, first ORDER BY nulls NULLS LAST", "nulls | first\n2 | 1");
+    try expectFailure(db, "MATCH (i:Item) RETURN i ORDER BY i.n NULLS MIDDLE", .parse, "Expected FIRST or LAST after NULLS");
+}
+
+test "lcy: hexadecimal and leading-dot number literals" {
+    const path = "/tmp/lcy_numbers.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try expectResult(db, "RETURN 0x1F AS h, 0XfF AS g, -0x10 AS n, .5 AS f, .25e2 AS e", "h | g | n | f | e\n31 | 255 | -16 | 0.5 | 25");
+    // Ranges and property access are unaffected.
+    try expectResult(db, "WITH [1, 2, 3] AS l, {a: 1} AS m RETURN l[0..2] AS s, l[1..] AS t, m.a AS a", "s | t | a\n[1, 2] | [2, 3] | 1");
+    try expectFailure(db, "RETURN 0x8000000000000000 AS h", .parse, "Invalid integer literal");
+}
+
+test "lcy: WITH ... WHERE and nested UNWIND" {
+    const path = "/tmp/lcy_with_where.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedItems(db);
+
+    // WHERE after aggregation, DISTINCT, ORDER BY/LIMIT, and chained.
+    try expectResult(db, "MATCH (i:Item) WITH i.n % 2 AS odd, count(*) AS c WHERE c > 1 RETURN odd, c", "odd | c\n1 | 2");
+    try expectResult(db, "UNWIND [1, 1, 2] AS x WITH DISTINCT x WHERE x > 1 RETURN x", "x\n2");
+    try expectResult(db, "MATCH (i:Item) WITH i ORDER BY i.n DESC LIMIT 2 WHERE i.n > 2 RETURN i.name", "i.name\n\"c\"");
+    try expectResult(db, "MATCH (i:Item) WITH i.n + 1 AS a WHERE a > 2 WITH a * 2 AS b WHERE b > 6 RETURN b", "b\n8");
+    try expectResult(db, "MATCH (i:Item) WITH i, i.n AS n WHERE n IS NULL OR i.name = 'a' RETURN i.name ORDER BY i.name", "i.name\n\"a\"\n\"d\"");
+    // Nested lists unwind one level at a time.
+    try expectResult(db, "UNWIND [[1, 2], [3], []] AS l UNWIND l AS x RETURN x", "x\n1\n2\n3");
+    try expectResult(db, "UNWIND [[1, [2, 3]], null] AS l RETURN l, size(l) AS s", "l | s\n[1, [2, 3]] | 2\nnull | null");
+    try expectResult(db, "UNWIND [[1, [2, 3]]] AS l UNWIND l AS x RETURN x", "x\n1\n[2, 3]");
+    try expectResult(db, "WITH [[1, 2], [3]] AS ls UNWIND ls AS l RETURN l[-1] AS last", "last\n2\n3");
+}

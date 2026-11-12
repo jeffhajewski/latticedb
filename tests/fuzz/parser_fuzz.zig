@@ -266,6 +266,11 @@ test "parser: handles the syntax added after 0.16" {
         "RETURN ```",
         "MATCH (n:`a\n`) RETURN n",
         "WITH 1 AS `match` RETURN `match`",
+        "MATCH (n) WHERE n:A:B AND NOT n:`c d` RETURN n:A, (n:B)",
+        "MATCH (n) WHERE n:",
+        "MATCH (n) RETURN n ORDER BY n.v NULLS FIRST, n.w DESC NULLS LAST",
+        "MATCH (n) RETURN n ORDER BY n.v NULLS",
+        "RETURN 0x1F, 0x, .5, .5e3, ., 0xffffffffffffffffff",
     };
     for (corpus) |input| try fuzzParser(allocator, input);
 }

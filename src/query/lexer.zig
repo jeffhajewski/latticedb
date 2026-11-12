@@ -59,6 +59,8 @@ pub const Lexer = struct {
                     _ = self.advance();
                     return self.makeTokenAt(.dotdot, start);
                 }
+                // `.5`: no name starts with a digit, so this is a number.
+                if (self.peek() != null and isDigit(self.peek().?)) return self.scanNumber(start);
                 return self.makeTokenAt(.dot, start);
             },
             '+' => {
@@ -284,7 +286,18 @@ pub const Lexer = struct {
             _ = self.advance();
         }
 
-        var is_float = false;
+        // Hexadecimal: 0x1F.
+        if (self.position - start == 1 and self.source[start] == '0' and
+            (self.peek() == 'x' or self.peek() == 'X') and
+            self.peekAhead(1) != null and std.ascii.isHex(self.peekAhead(1).?))
+        {
+            _ = self.advance();
+            while (!self.isAtEnd() and std.ascii.isHex(self.peek().?)) _ = self.advance();
+            return self.makeTokenAt(.integer, start);
+        }
+
+        // Started at the '.' of `.5`.
+        var is_float = self.source[start] == '.';
 
         // Check for decimal point
         if (self.peek() == '.' and self.peekAhead(1) != null and isDigit(self.peekAhead(1).?)) {

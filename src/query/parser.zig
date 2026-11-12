@@ -748,9 +748,26 @@ pub const Parser = struct {
             _ = self.match(.kw_asc); // optional ASC
         }
 
+        // `NULLS FIRST` / `NULLS LAST`: NULLS is not reserved, and no name
+        // can follow an ORDER BY item.
+        var nulls: ?ast.NullsOrder = null;
+        if (self.checkWord("nulls")) {
+            self.advance();
+            if (self.checkWord("first")) {
+                nulls = .first;
+            } else if (self.checkWord("last")) {
+                nulls = .last;
+            } else {
+                self.errorAtCurrent("Expected FIRST or LAST after NULLS");
+                return null;
+            }
+            self.advance();
+        }
+
         return .{
             .expression = expr,
             .descending = descending,
+            .nulls = nulls,
         };
     }
 
@@ -1981,6 +1998,32 @@ pub const Parser = struct {
         return expr;
     }
 
+    /// `n:A:B`, true when the node has every label: read as `'A' IN
+    /// labels(n) AND 'B' IN labels(n)`, which gives null for a null node and
+    /// a type error for a value that is not a node, as openCypher says.
+    fn parseLabelPredicate(self: *Self, left: *ast.Expression, loc: ast.SourceLocation) ?*ast.Expression {
+        const a = self.arena.allocator();
+        var result: ?*ast.Expression = null;
+        while (self.match(.colon)) {
+            if (!self.checkName()) {
+                self.errorAtCurrent("Expected a label after ':'");
+                return null;
+            }
+            const label = a.create(ast.Expression) catch return null;
+            label.* = .{ .literal = .{ .value = .{ .string = self.currentName() }, .location = self.currentLocation() } };
+            self.advance();
+            const args = a.alloc(*ast.Expression, 1) catch return null;
+            args[0] = left;
+            const call = a.create(ast.FunctionCall) catch return null;
+            call.* = .{ .name = "labels", .arguments = args, .location = loc };
+            const labels = a.create(ast.Expression) catch return null;
+            labels.* = .{ .function_call = call };
+            const has = self.makeBinary(label, .in_, labels, loc) orelse return null;
+            result = if (result) |r| self.makeBinary(r, .and_, has, loc) orelse return null else has;
+        }
+        return result;
+    }
+
     fn getInfixPrecedence(self: *Self) Precedence {
         return switch (self.current.token_type) {
             .kw_or => .or_,
@@ -1992,7 +2035,7 @@ pub const Parser = struct {
             .plus, .dash => .term,
             .star, .slash, .percent => .factor,
             .caret => .power,
-            .dot, .lbracket => .primary,
+            .dot, .lbracket, .colon => .primary,
             .kw_is => .equality,
             else => .none,
         };
@@ -2019,6 +2062,9 @@ pub const Parser = struct {
             self.advance();
             return self.parseSubscript(left, loc);
         }
+
+        // Label predicate: n:A:B
+        if (token == .colon) return self.parseLabelPredicate(left, loc);
 
         // IS NULL / IS NOT NULL
         if (token == .kw_is) {
@@ -2135,7 +2181,8 @@ pub const Parser = struct {
     // ========================================================================
 
     fn makeIntegerLiteral(self: *Self, text: []const u8, loc: ast.SourceLocation) ?*ast.Expression {
-        const value = std.fmt.parseInt(i64, text, 10) catch {
+        const hex = text.len > 2 and text[0] == '0' and (text[1] == 'x' or text[1] == 'X');
+        const value = (if (hex) std.fmt.parseInt(i64, text[2..], 16) else std.fmt.parseInt(i64, text, 10)) catch {
             self.errorAt(loc, "Invalid integer literal");
             return null;
         };

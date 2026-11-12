@@ -2872,6 +2872,7 @@ pub const QueryPlanner = struct {
             sort_items[i] = .{
                 .expr = item.expression,
                 .descending = item.descending,
+                .nulls = item.nulls,
                 .slot = slot,
             };
         }
@@ -2902,6 +2903,7 @@ pub const QueryPlanner = struct {
             sort_items[i] = .{
                 .expr = resolveOrderAlias(item.expression, ret),
                 .descending = item.descending,
+                .nulls = item.nulls,
             };
         }
 

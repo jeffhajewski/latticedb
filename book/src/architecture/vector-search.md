@@ -274,7 +274,9 @@ The graph itself is stored apart from the vectors:
   describes them. A save writes only the entries added, changed or removed since
   the last one (the whole registry after a rebuild). On open the registry is
   loaded from that tree and validated; if the tree is missing or fails
-  validation, the index is rebuilt from the stored vectors.
+  validation, the index is rebuilt from the stored vectors. The old graph's
+  connection pages are freed first and the rebuilt graph reuses them, so a rebuild
+  does not grow the file.
 - **Free vector records** are kept in an in-memory list, built by one walk of the
   vector page chain the first time a store needs it, so storing a vector reuses
   a deleted record without scanning the chain.

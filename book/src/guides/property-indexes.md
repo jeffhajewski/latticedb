@@ -175,7 +175,9 @@ with db.read() as txn:
 ```
 
 Indexes are stored in the database file, so they survive closing and reopening,
-and they are rebuilt during recovery if the process stops unexpectedly.
+and they are rebuilt during recovery if the process stops unexpectedly. Creating
+or dropping an index is written to the file before the call returns, so a crash
+right after it cannot undo it.
 
 ## Creating an index needs the database to itself
 

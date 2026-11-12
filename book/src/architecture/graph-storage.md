@@ -63,6 +63,11 @@ Symbol IDs are u16 (0-65535):
 - 1-999: Reserved for system use
 - 1000-65535: User-defined symbols
 
+The next ID to hand out is found when the database opens, by scanning the
+reverse tree for the highest one in use. If that scan fails when an existing
+database is opened for writing, the open fails: starting again at 1000 would give
+a new name the ID of an existing one, and the two names would become one.
+
 ### API
 
 ```zig
@@ -191,8 +196,9 @@ lets the storage layer restore or delete the exact edge during WAL recovery.
 ### Edge-ID Index
 
 The edge-ID tree is a separate B+Tree from the traversal tree. Unlike the
-traversal keys, its keys are **little-endian** u64 edge IDs, because it is only
-ever probed by exact ID, never prefix-scanned in ID order.
+traversal keys, its keys are **little-endian** u64 edge IDs, because nothing
+needs them in ID order: lookups are by exact ID, and a walk of the whole tree
+comes back in a stable order that is not numeric (edge 256 before edge 2).
 
 | Key | Value |
 |-----|-------|
@@ -202,7 +208,9 @@ ever probed by exact ID, never prefix-scanned in ID order.
 Key 0 is reserved: it stores the next edge ID to hand out, so IDs survive a
 reopen and are never reused. Edge IDs therefore start at 1. If the metadata
 entry is missing, the store derives it from the largest edge ID in the tree and
-writes it back.
+writes it back. If the tree cannot be read when an existing database is opened
+for writing, the open fails rather than counting from 1 again, which would hand
+out the IDs of existing edges.
 
 **Edge payload** (all integers little-endian)
 

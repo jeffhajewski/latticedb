@@ -68,7 +68,8 @@ Recovery is not one function but a sequence spread through `Database.open`:
    log contained.
 7. Unless `auto_checkpoint` is null, a truncate checkpoint empties the log, so a
    second crash does not replay it all again and a torn frame does not sit in front
-   of new ones.
+   of new ones. A log that ends at its own last checkpoint is left as it is, since
+   the file already holds everything in it.
 
 A **read-only** open, or a database opened with `enable_wal = false`, never opens the
 log and never runs recovery. A read-only open after a crash therefore sees only what
@@ -356,8 +357,8 @@ By failing on mid-log corruption, we force manual intervention (restore from bac
 
 ```zig
 fn hasValidFramesAfter(wal: *WalManager, corrupted_frame: u64) bool {
-    // Check the next nine frames (or up to the end of the log)
-    for (corrupted_frame + 1 .. min(corrupted_frame + 10, frame_count)) |frame_num| {
+    // Check every later frame, to the end of the log
+    for (corrupted_frame + 1 .. frame_count) |frame_num| {
         if (frameHasValidChecksum(frame_num)) {
             return true;  // Mid-log corruption!
         }
@@ -366,8 +367,8 @@ fn hasValidFramesAfter(wal: *WalManager, corrupted_frame: u64) bool {
 }
 ```
 
-Opening the log checks every later frame; this check during recovery looks only
-nine frames ahead. See [Known Limits](#known-limits).
+Opening the log makes the same check over every later frame, so the two always
+agree on where the log ends.
 
 ## When an Open Is Refused
 
@@ -380,7 +381,11 @@ Opening refuses, rather than guess, when:
 - the log holds a vector record and the database was opened without the vector
   index (apart from the removal case above);
 - on a read-write open, the node tree cannot be scanned to find the next node id:
-  starting the ids over at 1 would overwrite existing nodes.
+  starting the ids over at 1 would overwrite existing nodes;
+- on a read-write open of an existing file, the symbol table cannot be scanned or
+  the edge id counter cannot be read: restarting either would give a new label,
+  edge type or property name the id of an existing one, or a new edge the id of
+  an existing edge.
 
 ## What Survives What
 

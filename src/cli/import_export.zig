@@ -204,6 +204,16 @@ pub const Diagnostics = struct {
             self.omitted += 1;
             return;
         }
+        self.append(fmt, args);
+    }
+
+    /// Note the failure that stopped the import. It is always kept, as the
+    /// last message, however many skipped records came before it.
+    fn addFatal(self: *Diagnostics, comptime fmt: []const u8, args: anytype) void {
+        self.append(fmt, args);
+    }
+
+    fn append(self: *Diagnostics, comptime fmt: []const u8, args: anytype) void {
         const message = std.fmt.allocPrint(self.allocator, fmt, args) catch {
             self.omitted += 1;
             return;
@@ -1648,6 +1658,10 @@ const CsvReader = struct {
     content: []const u8,
     pos: usize = 0,
     line: usize = 1,
+    /// What made the text unreadable, after `next` fails with InvalidFormat.
+    problem: []const u8 = "",
+    /// The line the problem is on: where the unclosed quote opened.
+    problem_line: usize = 0,
 
     const Error = error{ InvalidFormat, OutOfMemory };
 
@@ -1678,10 +1692,13 @@ const CsvReader = struct {
     fn readField(self: *CsvReader, arena: std.mem.Allocator) Error![]const u8 {
         self.skipBlanks();
         if (self.pos < self.content.len and self.content[self.pos] == '"') {
+            const opened_on = self.line;
             self.pos += 1;
             var value: std.ArrayList(u8) = .empty;
             while (true) {
-                if (self.pos >= self.content.len) return error.InvalidFormat; // unterminated quote
+                if (self.pos >= self.content.len) {
+                    return self.invalid(opened_on, "a quoted field that starts here has no closing quote");
+                }
                 const c = self.content[self.pos];
                 self.pos += 1;
                 if (c == '"') {
@@ -1699,7 +1716,7 @@ const CsvReader = struct {
             if (self.pos < self.content.len and self.content[self.pos] != csv_field_separator and
                 self.content[self.pos] != '\n')
             {
-                return error.InvalidFormat; // text after a closing quote
+                return self.invalid(self.line, "text follows the closing quote of a field");
             }
             return value.items;
         }
@@ -1709,6 +1726,12 @@ const CsvReader = struct {
             self.content[self.pos] != '\n') : (self.pos += 1)
         {}
         return std.mem.trim(u8, self.content[begin..self.pos], csv_trim_chars);
+    }
+
+    fn invalid(self: *CsvReader, line: usize, problem: []const u8) error{InvalidFormat} {
+        self.problem = problem;
+        self.problem_line = line;
+        return error.InvalidFormat;
     }
 
     fn skipBlanks(self: *CsvReader) void {
@@ -1919,7 +1942,8 @@ fn importCsvTable(
     var header_arena = std.heap.ArenaAllocator.init(allocator);
     defer header_arena.deinit();
     var reader = CsvReader{ .content = content };
-    const header_record = (reader.next(header_arena.allocator()) catch |err| return mapCsvError(err)) orelse
+    const header_record = (reader.next(header_arena.allocator()) catch |err|
+        return csvReadFailure(options, stats, &reader, place, err)) orelse
         return ImportExportError.ParseError;
     const header = try CsvHeader.parse(header_arena.allocator(), header_record.fields);
     if (expected) |kind| {
@@ -1943,7 +1967,8 @@ fn importCsvEdgesTable(
     var header_arena = std.heap.ArenaAllocator.init(allocator);
     defer header_arena.deinit();
     var reader = CsvReader{ .content = content };
-    const header_record = (reader.next(header_arena.allocator()) catch |err| return mapCsvError(err)) orelse
+    const header_record = (reader.next(header_arena.allocator()) catch |err|
+        return csvReadFailure(options, stats, &reader, place, err)) orelse
         return ImportExportError.ParseError;
     const header = try CsvHeader.parse(header_arena.allocator(), header_record.fields);
     if (header.kind != .edges) return ImportExportError.InvalidFormat;
@@ -1967,7 +1992,8 @@ fn importCsvNodeRecords(
 
     while (true) {
         _ = record_arena.reset(.retain_capacity);
-        const record = (reader.next(record_arena.allocator()) catch |err| return mapCsvError(err)) orelse break;
+        const record = (reader.next(record_arena.allocator()) catch |err|
+            return csvReadFailure(options, stats, reader, place, err)) orelse break;
 
         const txn = try batcher.transaction();
         var problem = Problem{};
@@ -2002,7 +2028,8 @@ fn importCsvEdgeRecords(
 
     while (true) {
         _ = record_arena.reset(.retain_capacity);
-        const record = (reader.next(record_arena.allocator()) catch |err| return mapCsvError(err)) orelse break;
+        const record = (reader.next(record_arena.allocator()) catch |err|
+            return csvReadFailure(options, stats, reader, place, err)) orelse break;
 
         const txn = try batcher.transaction();
         var problem = Problem{};
@@ -2020,11 +2047,26 @@ fn importCsvEdgeRecords(
     try batcher.flush(stats);
 }
 
-fn mapCsvError(err: CsvReader.Error) ImportExportError {
-    return switch (err) {
-        error.OutOfMemory => ImportExportError.OutOfMemory,
-        error.InvalidFormat => ImportExportError.ParseError,
-    };
+/// The import error for CSV text that cannot be read, after noting where
+/// and why. The rest of the file cannot be read either, so this ends the
+/// import even with --on-error=skip.
+fn csvReadFailure(
+    options: ImportOptions,
+    stats: *const ImportStats,
+    reader: *const CsvReader,
+    place: []const u8,
+    err: CsvReader.Error,
+) ImportExportError {
+    switch (err) {
+        error.OutOfMemory => return ImportExportError.OutOfMemory,
+        error.InvalidFormat => {
+            if (options.diagnostics) |diagnostics| {
+                diagnostics.committed = stats.*;
+                diagnostics.addFatal("{s}line {d}: {s}", .{ place, reader.problem_line, reader.problem });
+            }
+            return ImportExportError.ParseError;
+        },
+    }
 }
 
 /// Read one property cell: a JSON-encoded value in a typed column, otherwise

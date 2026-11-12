@@ -922,6 +922,37 @@ test "import_export: CSV import reads quoted fields as RFC 4180 describes" {
         import_export.ImportExportError.ParseError,
         import_export.importCsvContent(allocator, db, "_id,_labels,name\nn3,Person,\"unterminated\n", .{}),
     );
+
+    // The failure says where and why; it used to be a bare ParseError.
+    var diagnostics = import_export.Diagnostics.init(allocator);
+    defer diagnostics.deinit();
+    try std.testing.expectError(
+        import_export.ImportExportError.ParseError,
+        import_export.importCsvContent(allocator, db, "_id,_labels,name\nn4,Person,ok\nn5,Person,\"open\nmore\n", .{
+            .diagnostics = &diagnostics,
+        }),
+    );
+    try std.testing.expectEqual(@as(usize, 1), diagnostics.messages.items.len);
+    try std.testing.expectEqualStrings(
+        "line 3: a quoted field that starts here has no closing quote",
+        diagnostics.messages.items[0],
+    );
+
+    // Skipping bad records cannot skip past it: the rest of the file is
+    // inside the quote. It is the last message, after the skipped records.
+    var skipped = import_export.Diagnostics.init(allocator);
+    defer skipped.deinit();
+    try std.testing.expectError(
+        import_export.ImportExportError.ParseError,
+        import_export.importCsvContent(allocator, db, "_id,_labels,name\nn6,Person,\"a\" b\n", .{
+            .diagnostics = &skipped,
+            .on_error_skip = true,
+        }),
+    );
+    try std.testing.expectEqualStrings(
+        "line 2: text follows the closing quote of a field",
+        skipped.messages.items[skipped.messages.items.len - 1],
+    );
 }
 
 const CsvExport = struct {

@@ -1349,7 +1349,10 @@ fn cmdImport(
     } else |err| {
         if (diagnostics.messages.items.len > 0) {
             const committed = diagnostics.committed;
-            output.printError(stderr, "Import failed at {s}", .{diagnostics.messages.items[0]});
+            // The failure that stopped the import is the last message; any
+            // before it are records --on-error=skip went past.
+            const messages = diagnostics.messages.items;
+            output.printError(stderr, "Import failed at {s}", .{messages[messages.len - 1]});
             if (committed.nodes_imported + committed.edges_imported > 0) {
                 try stderr.print(
                     "{d} nodes and {d} edges imported in earlier batches were kept. " ++

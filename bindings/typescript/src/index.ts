@@ -41,6 +41,7 @@ export {
   PropertyValue,
   CreateNodeOptions,
   CreateEdgeOptions,
+  DeleteNodeOptions,
   VectorSearchOptions,
   FtsSearchOptions,
 } from './types';
@@ -60,6 +61,8 @@ export {
   LatticeQueryError,
   QueryErrorStage,
   QueryErrorLocation,
+  SyncMode,
+  VectorMetric,
 } from './ffi';
 
 /**

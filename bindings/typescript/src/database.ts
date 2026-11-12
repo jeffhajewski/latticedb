@@ -17,6 +17,8 @@ import {
   LatticeError,
   LatticeErrorCode,
   DatabaseHandle,
+  SyncMode,
+  VectorMetric,
 } from './ffi';
 
 /**
@@ -33,11 +35,17 @@ export interface DatabaseOptions {
   enableWal?: boolean;
   /** Enable in-memory graph adjacency cache */
   enableAdjacencyCache?: boolean;
-  /** Enable vector storage and indexing */
+  /**
+   * Create a vector index if the database has none. A database that already
+   * has one opens with it whatever this says.
+   */
   enableVectors?: boolean;
   /** @deprecated Use enableVectors instead. */
   enableVector?: boolean;
-  /** Vector dimensions (default: 128) */
+  /**
+   * Vector dimensions when enableVectors is set (default: 128). It must match
+   * the index the file records, if it has one; 0 takes the file's.
+   */
   vectorDimensions?: number;
   /**
    * Take a lock on the file so two processes cannot tread on each other
@@ -47,6 +55,29 @@ export interface DatabaseOptions {
    * make concurrent access safe.
    */
   lock?: boolean;
+  /**
+   * When a commit waits for the disk. `'full'` syncs the log on every commit,
+   * so a commit that has returned survives a power cut. `'normal'` hands the
+   * commit to the operating system and returns: it survives the process being
+   * killed, but a power cut or OS crash can lose the most recent commits.
+   * Unset uses the LATTICE_SYNC_MODE environment variable, else full.
+   */
+  syncMode?: SyncMode;
+  /**
+   * On macOS, whether syncs ask the drive to flush its cache (F_FULLFSYNC).
+   * No effect elsewhere. Unset uses LATTICE_FULL_FSYNC, else off.
+   */
+  fullFsync?: boolean;
+  /**
+   * How a new vector index measures distance: `'cosine'` (1 - cos, vectors
+   * stored at unit length), `'euclidean'` (L2 distance) or `'dot_product'`
+   * (negative dot product). Unset means the file's, or cosine.
+   */
+  vectorMetric?: VectorMetric;
+  /** HNSW connections per node for a new index, 2..32. Unset: the file's, or 16. */
+  vectorM?: number;
+  /** HNSW build candidate list size for a new index, 1..4096. Unset: the file's, or 200. */
+  vectorEfConstruction?: number;
 }
 
 /**
@@ -133,6 +164,11 @@ export class Database {
       enableVector: this.options.enableVector,
       vectorDimensions: this.options.vectorDimensions,
       lock: this.options.lock,
+      syncMode: this.options.syncMode,
+      fullFsync: this.options.fullFsync,
+      vectorMetric: this.options.vectorMetric,
+      vectorM: this.options.vectorM,
+      vectorEfConstruction: this.options.vectorEfConstruction,
     });
   }
 

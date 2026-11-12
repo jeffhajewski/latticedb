@@ -11,6 +11,9 @@ import {
   QueryErrorStage,
   LatticeTxnMode,
   LatticeValueType,
+  LatticeSyncMode,
+  LatticeFullFsync,
+  LatticeVectorMetric,
 } from './types';
 import type { PropertyValue, StreamRecord } from '../types';
 
@@ -21,7 +24,15 @@ export {
   isElectronRuntime,
   ELECTRON_ASAR_UNPACK_GLOB,
 } from './library';
-export { LatticeErrorCode, QueryErrorStage, LatticeTxnMode, LatticeValueType } from './types';
+export {
+  LatticeErrorCode,
+  QueryErrorStage,
+  LatticeTxnMode,
+  LatticeValueType,
+  LatticeSyncMode,
+  LatticeFullFsync,
+  LatticeVectorMetric,
+} from './types';
 
 /**
  * Error class for Lattice operations.
@@ -107,6 +118,54 @@ export type StreamBatchHandle = unknown;
 export type EmbeddingClientHandle = unknown;
 
 /**
+ * When a commit waits for the disk: `'full'` syncs the log on every commit;
+ * `'normal'` hands it to the operating system and returns.
+ */
+export type SyncMode = 'full' | 'normal';
+
+/**
+ * How a vector index measures distance.
+ */
+export type VectorMetric = 'cosine' | 'euclidean' | 'dot_product';
+
+function syncModeCode(mode: SyncMode | undefined): number {
+  switch (mode) {
+    case undefined:
+      return LatticeSyncMode.Default;
+    case 'full':
+      return LatticeSyncMode.Full;
+    case 'normal':
+      return LatticeSyncMode.Normal;
+    default:
+      throw new TypeError(`syncMode must be 'full' or 'normal', not ${String(mode)}`);
+  }
+}
+
+function fullFsyncCode(fullFsync: boolean | undefined): number {
+  if (fullFsync === undefined) {
+    return LatticeFullFsync.Default;
+  }
+  return fullFsync ? LatticeFullFsync.On : LatticeFullFsync.Off;
+}
+
+function vectorMetricCode(metric: VectorMetric | undefined): number {
+  switch (metric) {
+    case undefined:
+      return LatticeVectorMetric.Default;
+    case 'cosine':
+      return LatticeVectorMetric.Cosine;
+    case 'euclidean':
+      return LatticeVectorMetric.Euclidean;
+    case 'dot_product':
+      return LatticeVectorMetric.DotProduct;
+    default:
+      throw new TypeError(
+        `vectorMetric must be 'cosine', 'euclidean' or 'dot_product', not ${String(metric)}`
+      );
+  }
+}
+
+/**
  * Options for opening a database.
  */
 export interface OpenOptions {
@@ -120,6 +179,11 @@ export interface OpenOptions {
   enableVector?: boolean;
   vectorDimensions?: number;
   lock?: boolean;
+  syncMode?: SyncMode;
+  fullFsync?: boolean;
+  vectorMetric?: VectorMetric;
+  vectorM?: number;
+  vectorEfConstruction?: number;
 }
 
 /**
@@ -231,6 +295,21 @@ export class LatticeFFI {
     const enableWal = options.enableWal ?? true;
     const enableAdjacencyCache = options.enableAdjacencyCache ?? false;
     const lock = options.lock ?? true;
+    const syncMode = syncModeCode(options.syncMode);
+    const fullFsync = fullFsyncCode(options.fullFsync);
+    const vectorMetric = vectorMetricCode(options.vectorMetric);
+    const vectorM = options.vectorM ?? 0;
+    const vectorEfConstruction = options.vectorEfConstruction ?? 0;
+    if (
+      !this.bindings.lattice_open_v5 &&
+      (syncMode || fullFsync || vectorMetric || vectorM || vectorEfConstruction)
+    ) {
+      throw new LatticeError(
+        'lattice_open_v5 is required for syncMode, fullFsync, vectorMetric, vectorM ' +
+          'and vectorEfConstruction',
+        LatticeErrorCode.Unsupported
+      );
+    }
     if (!this.bindings.lattice_open_v4 && !lock) {
       throw new LatticeError(
         'lattice_open_v4 is required to disable the file lock',
@@ -278,8 +357,20 @@ export class LatticeFFI {
       lock,
     };
 
+    const v5Opts = {
+      ...v4Opts,
+      struct_size: koffi.sizeof('lattice_open_options_v5'),
+      sync_mode: syncMode,
+      full_fsync: fullFsync,
+      vector_metric: vectorMetric,
+      vector_m: vectorM,
+      vector_ef_construction: vectorEfConstruction,
+    };
+
     const dbOut: unknown[] = [null];
-    const err = this.bindings.lattice_open_v4
+    const err = this.bindings.lattice_open_v5
+      ? this.bindings.lattice_open_v5(path, v5Opts, dbOut)
+      : this.bindings.lattice_open_v4
       ? this.bindings.lattice_open_v4(path, v4Opts, dbOut)
       : this.bindings.lattice_open_v3
       ? this.bindings.lattice_open_v3(path, v3Opts, dbOut)
@@ -422,10 +513,24 @@ export class LatticeFFI {
   }
 
   /**
-   * Delete a node.
+   * Delete a node. Fails with HasRelationships while the node has any.
    */
   deleteNode(txn: TransactionHandle, nodeId: bigint): void {
     const err = this.bindings.lattice_node_delete(txn, nodeId);
+    this.checkError(err);
+  }
+
+  /**
+   * Delete a node and every relationship it has.
+   */
+  detachDeleteNode(txn: TransactionHandle, nodeId: bigint): void {
+    if (!this.bindings.lattice_node_detach_delete) {
+      throw new LatticeError(
+        'lattice_node_detach_delete is required to delete a node with its relationships',
+        LatticeErrorCode.Unsupported
+      );
+    }
+    const err = this.bindings.lattice_node_detach_delete(txn, nodeId);
     this.checkError(err);
   }
 

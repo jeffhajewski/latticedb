@@ -8,6 +8,7 @@ import {
   PropertyValue,
   CreateNodeOptions,
   CreateEdgeOptions,
+  DeleteNodeOptions,
   QueryResult,
   VectorSearchOptions,
   VectorSearchResult,
@@ -140,11 +141,24 @@ export class Transaction {
   /**
    * Delete a node.
    *
+   * A node that still has relationships is not deleted unless `detach` is set,
+   * since deleting it alone would leave edges pointing at nothing; this matches
+   * Cypher's DELETE and DETACH DELETE. Deleting a node that does not exist does
+   * nothing.
+   *
    * @param nodeId - ID of the node to delete
+   * @param options - `detach: true` also deletes the node's relationships
+   * @throws LatticeError with code -17 (HasRelationships) if the node has
+   *   relationships this transaction can see and `detach` is not set; nothing
+   *   is deleted
    */
-  async deleteNode(nodeId: bigint): Promise<void> {
+  async deleteNode(nodeId: bigint, options: DeleteNodeOptions = {}): Promise<void> {
     this.ensureWritable();
-    this.ffi.deleteNode(this.txnHandle!, nodeId);
+    if (options.detach) {
+      this.ffi.detachDeleteNode(this.txnHandle!, nodeId);
+    } else {
+      this.ffi.deleteNode(this.txnHandle!, nodeId);
+    }
   }
 
   /**
@@ -261,6 +275,8 @@ export class Transaction {
    * @param edgeType - Edge type/label
    * @param options - Edge creation options
    * @returns The created edge
+   * @throws LatticeError with code -4 (NotFound) if either node does not exist
+   *   as this transaction sees it
    */
   async createEdge(
     sourceId: bigint,

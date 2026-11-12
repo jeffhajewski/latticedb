@@ -143,12 +143,35 @@ interface DatabaseOptions {
   cacheSizeMb?: number;      // Cache size in MB (default: 100)
   enableWal?: boolean;       // WAL-backed transactions and crash recovery (default: true)
   enableAdjacencyCache?: boolean; // In-memory graph adjacency cache (default: false)
-  enableVectors?: boolean;   // Preferred vector config flag
+  enableVectors?: boolean;   // Create a vector index if the file has none
   enableVector?: boolean;    // Deprecated compatibility alias
-  vectorDimensions?: number; // Vector dimensions (default: 128)
+  vectorDimensions?: number; // Vector dimensions (default: 128; 0 = the file's)
   lock?: boolean;            // Take a file lock (default: true)
+  syncMode?: 'full' | 'normal';   // Unset: LATTICE_SYNC_MODE, else 'full'
+  fullFsync?: boolean;            // macOS F_FULLFSYNC; unset: LATTICE_FULL_FSYNC, else off
+  vectorMetric?: 'cosine' | 'euclidean' | 'dot_product'; // For a new index (default: cosine)
+  vectorM?: number;               // HNSW connections per node, 2..32 (default: 16)
+  vectorEfConstruction?: number;  // HNSW build candidate list, 1..4096 (default: 200)
 }
 ```
+
+A database file records its vector index: dimensions, metric, `vectorM` and
+`vectorEfConstruction`. A database that has an index opens with it whether or
+not `enableVectors` is set, so reopening needs no vector options at all. Any
+vector option you do pass (and `vectorDimensions` when `enableVectors` is set)
+must match the file, or `open()` throws a `LatticeError` with code -18
+(`ConfigMismatch`). The metric decides search distances, smallest first: cosine
+distance (vectors stored at unit length), L2 distance, or the negative dot
+product (vectors stored as given).
+
+`syncMode: 'normal'` returns from a commit once the operating system has it: the
+commit survives the process being killed, but a power cut or OS crash can lose
+the most recent commits. The default, `'full'`, syncs the log on every commit.
+
+`syncMode`, `fullFsync` and the three vector index options need a native library
+with `lattice_open_v5`; against an older one, setting any of them throws with
+code -14 (`Unsupported`). `deserialize()` opens through the v4 options and
+ignores them.
 
 Node IDs, edge IDs and stream sequence numbers are `bigint`.
 
@@ -198,7 +221,7 @@ Node IDs, edge IDs and stream sequence numbers are `bigint`.
 #### Write Operations
 
 - `await txn.createNode({ labels, properties })` - Create a node
-- `await txn.deleteNode(nodeId)` - Delete a node
+- `await txn.deleteNode(nodeId, { detach })` - Delete a node. A node that still has relationships is refused with code -17 (`HasRelationships`) and nothing is deleted, as Cypher's `DELETE` does; `{ detach: true }` deletes its relationships with it, as `DETACH DELETE` does. Deleting a node that does not exist does nothing.
 - `await txn.setProperty(nodeId, key, value)` - Set a property. If a full-text index is declared for one of the node's labels and this property, the index is kept current.
 - `await txn.setVector(nodeId, key, vector)` - Set the node's vector embedding. A node has one vector, which Cypher reads as `n.embedding`; `key` must be `"embedding"` (or `""`), and any other key is rejected with an unsupported-operation error. A vector with NaN or infinite components is rejected as an invalid argument.
 - `await txn.batchInsertVectors(label, vectors)` - Insert vector-bearing nodes in one call
@@ -445,6 +468,12 @@ try {
   console.error("Database error:", error);
 }
 ```
+
+Errors from the native library are `LatticeError`s whose `code` is the C error
+code, for example -4 (not found, also from `createEdge` when either end does not
+exist), -16 (another process holds the file), -17 (a plain `deleteNode` of a node
+with relationships) and -18 (open options that contradict the file's vector
+index).
 
 ## Electron
 

@@ -121,6 +121,18 @@ export interface CreateNodeOptions {
 }
 
 /**
+ * Options for deleting a node.
+ */
+export interface DeleteNodeOptions {
+  /**
+   * Also delete every relationship the node has, as Cypher's DETACH DELETE
+   * does (default: false). Without it, deleting a node that has relationships
+   * throws a LatticeError with code -17 (HasRelationships).
+   */
+  detach?: boolean;
+}
+
+/**
  * Options for creating an edge.
  */
 export interface CreateEdgeOptions {

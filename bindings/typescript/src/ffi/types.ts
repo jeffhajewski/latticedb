@@ -26,6 +26,32 @@ export const enum LatticeErrorCode {
   Unsupported = -14,
   ValueTooLarge = -15,
   DatabaseLocked = -16,
+  /** A plain node delete was refused: the node still has relationships. */
+  HasRelationships = -17,
+  /** Open options contradict the vector index the database file records. */
+  ConfigMismatch = -18,
+}
+
+/**
+ * lattice_open_options_v5 enum values. 0 means "not set" for each.
+ */
+export const enum LatticeSyncMode {
+  Default = 0,
+  Full = 1,
+  Normal = 2,
+}
+
+export const enum LatticeFullFsync {
+  Default = 0,
+  Off = 1,
+  On = 2,
+}
+
+export const enum LatticeVectorMetric {
+  Default = 0,
+  Cosine = 1,
+  Euclidean = 2,
+  DotProduct = 3,
 }
 
 /**

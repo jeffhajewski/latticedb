@@ -112,6 +112,24 @@ const LatticeOpenOptionsV4 = defineNamedType('lattice_open_options_v4', () => ko
   lock: 'bool',
 }));
 
+const LatticeOpenOptionsV5 = defineNamedType('lattice_open_options_v5', () => koffi.struct('lattice_open_options_v5', {
+  struct_size: 'uintptr_t',
+  create: 'bool',
+  read_only: 'bool',
+  cache_size_mb: 'uint32',
+  page_size: 'uint32',
+  enable_vector: 'bool',
+  vector_dimensions: 'uint16',
+  enable_wal: 'bool',
+  enable_adjacency_cache: 'bool',
+  lock: 'bool',
+  sync_mode: 'uint8',
+  full_fsync: 'uint8',
+  vector_metric: 'uint8',
+  vector_m: 'uint16',
+  vector_ef_construction: 'uint16',
+}));
+
 // Define struct for string in value union
 const LatticeStringValue = defineNamedType('lattice_string_value', () => koffi.struct('lattice_string_value', {
   ptr: 'void*',
@@ -195,6 +213,11 @@ export interface LatticeBindings {
     options: unknown,
     db_out: unknown[]
   ) => number;
+  lattice_open_v5?: (
+    path: string,
+    options: unknown,
+    db_out: unknown[]
+  ) => number;
   lattice_serialize?: (
     db: unknown,
     bytes_out: unknown[],
@@ -241,6 +264,7 @@ export interface LatticeBindings {
     label: string
   ) => number;
   lattice_node_delete: (txn: unknown, node_id: bigint) => number;
+  lattice_node_detach_delete?: (txn: unknown, node_id: bigint) => number;
   lattice_node_exists: (
     txn: unknown,
     node_id: bigint,
@@ -711,6 +735,7 @@ function createBindings(): LatticeBindings {
   const OpenOptionsV2Ptr = koffi.pointer(LatticeOpenOptionsV2);
   const OpenOptionsV3Ptr = koffi.pointer(LatticeOpenOptionsV3);
   const OpenOptionsV4Ptr = koffi.pointer(LatticeOpenOptionsV4);
+  const OpenOptionsV5Ptr = koffi.pointer(LatticeOpenOptionsV5);
   const ValuePtr = koffi.pointer(LatticeValue);
   const ValueConstPtr = koffi.pointer(LatticeValue);
   const ValueConstPtrPtr = koffi.pointer(ValueConstPtr);
@@ -739,6 +764,11 @@ function createBindings(): LatticeBindings {
     lattice_open_v4: tryOptionalFunc(lib, 'lattice_open_v4', 'int', [
       'str', // path
       OpenOptionsV4Ptr, // options
+      koffi.out(DatabasePtrPtr), // db_out
+    ]),
+    lattice_open_v5: tryOptionalFunc(lib, 'lattice_open_v5', 'int', [
+      'str', // path
+      OpenOptionsV5Ptr, // options
       koffi.out(DatabasePtrPtr), // db_out
     ]),
     lattice_serialize: tryOptionalFunc(lib, 'lattice_serialize', 'int', [
@@ -790,6 +820,10 @@ function createBindings(): LatticeBindings {
       'str', // label
     ]),
     lattice_node_delete: lib.func('lattice_node_delete', 'int', [
+      TxnPtr,
+      'uint64', // node_id
+    ]),
+    lattice_node_detach_delete: tryOptionalFunc(lib, 'lattice_node_detach_delete', 'int', [
       TxnPtr,
       'uint64', // node_id
     ]),

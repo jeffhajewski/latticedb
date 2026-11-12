@@ -11,7 +11,8 @@
 //!
 //! - every transaction whose commit had returned before the cut, in the
 //!   default sync mode; in `.normal` mode every one that returned before the
-//!   log was last synced;
+//!   log was last synced; without a log, every one that returned before the
+//!   last `sync()` or close returned;
 //! - no transaction in part;
 //! - trees that can be walked, counts that agree, edges whose ends exist, a
 //!   label index, a property index, a full-text index and a vector index that
@@ -56,6 +57,10 @@ pub const Options = struct {
     /// Remove the log while the database is closed for a reopen, as when a
     /// backup is put in place without one.
     drop_log_on_reopen: bool = false,
+    /// Open the database without a log (`enable_wal = false`). Commits then
+    /// reach the file only when the pages are flushed, and a cut may lose
+    /// any of them since the last `sync()` or close, but never part of one.
+    no_log: bool = false,
     /// Cuts at random points, besides the ones at each sync.
     random_cuts: usize = 60,
     /// Every this many cuts, also cut the power during the recovery.
@@ -224,16 +229,21 @@ const Run = struct {
     /// Cuts before this point are not tested: the database is still being
     /// set up.
     start: usize = 0,
+    /// Where a `sync()` or a close returned, and how many transactions had
+    /// committed by then: without a log, what a cut must keep.
+    durable: std.ArrayListUnmanaged(struct { at: usize, k: usize }) = .empty,
 
     fn deinit(self: *Run) void {
         self.states.deinit(self.allocator);
         self.acked_at.deinit(self.allocator);
+        self.durable.deinit(self.allocator);
         self.fs.deinit();
     }
 };
 
 fn dbConfig(options: Options) DatabaseConfig {
     return .{
+        .enable_wal = !options.no_log,
         .enable_fts = options.fts,
         .enable_vector = options.vectors,
         .vector_dimensions = DIMS,
@@ -439,6 +449,9 @@ fn runWorkload(allocator: Allocator, options: Options) !Run {
     defer if (db_open) db.close();
     if (options.fts) try db.createNodeFtsIndex("Doc", "text");
     try db.createNodePropertyIndex("A", "n");
+    // Without a log the indexes reach the file with the next flush, and the
+    // cuts start from a file that has them.
+    if (options.no_log) try db.sync();
 
     result.start = result.fs.traceLen();
     try result.states.append(allocator, model.digest());
@@ -451,6 +464,7 @@ fn runWorkload(allocator: Allocator, options: Options) !Run {
         const roll = random.uintLessThan(u8, 100);
         if (roll < 4) {
             try db.sync();
+            try result.durable.append(allocator, .{ .at = result.fs.traceLen(), .k = k - 1 });
         } else if (roll < 6) {
             _ = try db.checkpoint(.full);
         } else if (roll < 9) {
@@ -467,6 +481,7 @@ fn runWorkload(allocator: Allocator, options: Options) !Run {
         if (k % reopen_every == 0) {
             db.close();
             db_open = false;
+            try result.durable.append(allocator, .{ .at = result.fs.traceLen(), .k = k - 1 });
             if (options.drop_log_on_reopen) {
                 try result.fs.vfs().delete(WAL_PATH);
                 result.fs.vfs().syncParentDir(WAL_PATH);
@@ -820,7 +835,12 @@ pub fn run(allocator: Allocator, options: Options) !Stats {
         while (acked + 1 < workload.acked_at.items.len and workload.acked_at.items[acked + 1] <= cut) acked += 1;
         const most = @min(acked + 1, workload.states.items.len - 1);
         var least = acked;
-        if (options.sync_mode == .normal) {
+        if (options.no_log) {
+            least = 0;
+            for (workload.durable.items) |d| {
+                if (d.at <= cut) least = d.k;
+            }
+        } else if (options.sync_mode == .normal) {
             least = 0;
             while (least + 1 < workload.acked_at.items.len and workload.acked_at.items[least + 1] <= last_log_sync) least += 1;
         }

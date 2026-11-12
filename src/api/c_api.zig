@@ -1735,6 +1735,10 @@ pub export fn lattice_begin(
     // Actually begin a transaction in the database
     const txn = db_handle.db.beginTransaction(txn_mode) catch |err| {
         return switch (err) {
+            // Only a handle opened read-only has no transactions; a database
+            // opened without a log has them like any other. A read
+            // transaction on a read-only handle is a stand-in that reads
+            // the committed state, which nothing can change under it.
             DatabaseError.TransactionsNotEnabled => {
                 if (txn_mode == .read_only) {
                     const txn_handle = global_allocator.create(TxnHandle) catch return .err_out_of_memory;

@@ -2,6 +2,10 @@
 //!
 //! Provides ACID transactions with WAL-based durability.
 //! Manages transaction lifecycle: begin, commit, abort, savepoints.
+//!
+//! The log is optional. A database opened without one still has
+//! transactions, with the same bookkeeping; they write no records, and
+//! nothing they commit survives a crash until the pages are next flushed.
 
 const std = @import("std");
 const lattice = @import("lattice");
@@ -185,8 +189,9 @@ const MAX_TRANSACTIONS: usize = 1024;
 /// Manages all transactions in the database
 pub const TxnManager = struct {
     allocator: Allocator,
-    /// WAL for durability
-    wal: *WalManager,
+    /// WAL for durability. Null for a database opened without a log, whose
+    /// transactions log nothing.
+    wal: ?*WalManager,
     /// Active transactions by ID
     active_txns: std.AutoHashMap(u64, TxnEntry),
     /// Next transaction ID
@@ -206,7 +211,7 @@ pub const TxnManager = struct {
     const Self = @This();
 
     /// Initialize the transaction manager
-    pub fn init(allocator: Allocator, wal: *WalManager) Self {
+    pub fn init(allocator: Allocator, wal: ?*WalManager) Self {
         return Self{
             .allocator = allocator,
             .wal = wal,
@@ -285,20 +290,22 @@ pub const TxnManager = struct {
             return TxnError.NotFound;
         };
 
-        // Nothing was logged, so there is nothing to make durable.
+        // Nothing was logged, so there is nothing to make durable. Without
+        // a log nothing ever is.
         if (entry.wal_started) {
+            const wal = self.wal.?;
             // Log TXN_COMMIT to WAL
-            _ = self.wal.appendRecord(.txn_commit, txn.id, entry.last_lsn, &[_]u8{}) catch |err| {
+            _ = wal.appendRecord(.txn_commit, txn.id, entry.last_lsn, &[_]u8{}) catch |err| {
                 return mapWalError(err);
             };
 
             // Sync WAL to ensure durability
             if (self.sync_on_commit) {
-                self.wal.sync() catch {
+                wal.sync() catch {
                     return TxnError.WalError;
                 };
             } else {
-                self.wal.flush() catch {
+                wal.flush() catch {
                     return TxnError.WalError;
                 };
             }
@@ -344,7 +351,7 @@ pub const TxnManager = struct {
         // record it finds, so an abort record that never reaches the disk
         // changes nothing.
         if (entry.wal_started) {
-            _ = self.wal.appendRecord(.txn_abort, txn.id, entry.last_lsn, &[_]u8{}) catch |err| {
+            _ = self.wal.?.appendRecord(.txn_abort, txn.id, entry.last_lsn, &[_]u8{}) catch |err| {
                 return mapWalError(err);
             };
         }
@@ -407,13 +414,15 @@ pub const TxnManager = struct {
             return TxnError.NotFound;
         };
 
-        try self.ensureBeginLogged(entry);
-
         // Log savepoint to WAL
-        const lsn = self.wal.appendRecord(.savepoint, txn.id, entry.last_lsn, name) catch |err| {
-            return mapWalError(err);
-        };
-        entry.last_lsn = lsn;
+        var lsn: u64 = 0;
+        if (self.wal) |wal| {
+            try self.ensureBeginLogged(wal, entry);
+            lsn = wal.appendRecord(.savepoint, txn.id, entry.last_lsn, name) catch |err| {
+                return mapWalError(err);
+            };
+            entry.last_lsn = lsn;
+        }
 
         // Record savepoint
         const sp = Savepoint{
@@ -452,13 +461,13 @@ pub const TxnManager = struct {
         const idx = found_idx orelse return TxnError.SavepointNotFound;
         const sp = entry.savepoints.items[idx];
 
-        try self.ensureBeginLogged(entry);
-
         // Log rollback to WAL
-        const lsn = self.wal.appendRecord(.savepoint_rollback, txn.id, entry.last_lsn, name) catch |err| {
-            return mapWalError(err);
-        };
-        entry.last_lsn = lsn;
+        if (self.wal) |wal| {
+            try self.ensureBeginLogged(wal, entry);
+            entry.last_lsn = wal.appendRecord(.savepoint_rollback, txn.id, entry.last_lsn, name) catch |err| {
+                return mapWalError(err);
+            };
+        }
 
         // Truncate undo log to savepoint position
         entry.undo_log.shrinkRetainingCapacity(sp.undo_position);
@@ -488,9 +497,11 @@ pub const TxnManager = struct {
             return TxnError.NotFound;
         };
 
-        try self.ensureBeginLogged(entry);
+        // Without a log there is no record and no position in it.
+        const wal = self.wal orelse return 0;
+        try self.ensureBeginLogged(wal, entry);
 
-        const lsn = self.wal.appendRecord(record_type, txn.id, entry.last_lsn, payload) catch |err| {
+        const lsn = wal.appendRecord(record_type, txn.id, entry.last_lsn, payload) catch |err| {
             return mapWalError(err);
         };
         entry.last_lsn = lsn;
@@ -499,9 +510,10 @@ pub const TxnManager = struct {
     }
 
     /// Write TXN_BEGIN ahead of a transaction's first record.
-    fn ensureBeginLogged(self: *Self, entry: *TxnEntry) TxnError!void {
+    fn ensureBeginLogged(self: *Self, wal: *WalManager, entry: *TxnEntry) TxnError!void {
+        _ = self;
         if (entry.wal_started) return;
-        const begin_lsn = self.wal.appendRecord(.txn_begin, entry.txn.id, 0, &[_]u8{}) catch |err| {
+        const begin_lsn = wal.appendRecord(.txn_begin, entry.txn.id, 0, &[_]u8{}) catch |err| {
             return mapWalError(err);
         };
         entry.begin_lsn = begin_lsn;

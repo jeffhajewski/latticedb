@@ -316,7 +316,7 @@ test "c_api: LongMemEval-shaped first write succeeds with larger page size" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
 }
 
-test "c_api: open v2 can disable WAL and rejects write transactions" {
+test "c_api: open v2 can disable WAL and still has transactions" {
     const path = "/tmp/lattice_capi_open_v2_no_wal_test.db";
     @import("compat").fs.cwd().deleteFile(path) catch {};
     @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
@@ -340,25 +340,30 @@ test "c_api: open v2 can disable WAL and rejects write transactions" {
         @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
     }
 
+    // Without a log a write transaction works as it does with one; it is
+    // only not logged.
     var write_txn: ?*lattice_txn = null;
-    try std.testing.expectEqual(
-        lattice_error.err_unsupported,
-        c_api.lattice_begin(db, .read_write, &write_txn),
-    );
-    try std.testing.expect(write_txn == null);
-
-    var read_txn: ?*lattice_txn = null;
-    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &read_txn));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &write_txn));
     var payload = lattice_value{
         .value_type = .string,
         .data = .{ .string_val = .{ .ptr = "payload".ptr, .len = "payload".len } },
     };
     try std.testing.expectEqual(
-        lattice_error.err_unsupported,
+        lattice_error.ok,
+        c_api.lattice_stream_publish(write_txn, "events".ptr, "events".len, null, 0, &payload),
+    );
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(write_txn));
+    try std.testing.expectError(error.FileNotFound, @import("compat").fs.cwd().access(path ++ "-wal", .{}));
+
+    // A read transaction refuses stream writes because it reads.
+    var read_txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &read_txn));
+    try std.testing.expectEqual(
+        lattice_error.err_read_only,
         c_api.lattice_stream_publish(read_txn, "events".ptr, "events".len, null, 0, &payload),
     );
     try std.testing.expectEqual(
-        lattice_error.err_unsupported,
+        lattice_error.err_read_only,
         c_api.lattice_stream_set_offset(
             read_txn,
             "events".ptr,
@@ -369,7 +374,7 @@ test "c_api: open v2 can disable WAL and rejects write transactions" {
         ),
     );
     try std.testing.expectEqual(
-        lattice_error.err_unsupported,
+        lattice_error.err_read_only,
         c_api.lattice_stream_trim(read_txn, "events".ptr, "events".len, 1),
     );
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_rollback(read_txn));

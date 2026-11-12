@@ -65,3 +65,11 @@ test "power loss: vectors and full-text" {
 test "power loss: a log removed while the database was closed" {
     try sweep(.{ .seed = 5, .txns = 25, .random_cuts = 20, .reopens = 2, .drop_log_on_reopen = true });
 }
+
+test "power loss: no log, so whole transactions up to the last flush" {
+    try sweep(.{ .seed = 6, .txns = 30, .random_cuts = 20, .no_log = true, .big_values = true });
+}
+
+test "power loss: no log, with vectors and full-text" {
+    try sweep(.{ .seed = 7, .txns = 25, .random_cuts = 20, .no_log = true, .vectors = true, .fts = true, .pool_pages = 40 });
+}

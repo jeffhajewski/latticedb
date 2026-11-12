@@ -1702,9 +1702,15 @@ pub const Database = struct {
         try self.openChangefeedRetention(options, is_new);
 
         // 9. Initialize Transaction Manager
+        //
+        // Every handle that can write has one, log or no log. Without a log
+        // its transactions write no records, and everything else about them
+        // is the same: a query or a transaction is applied whole or not at
+        // all, readers keep their snapshot, one writer at a time. Turning the
+        // log off gives up durability between flushes and nothing else.
         self.txn_manager = null;
-        if (self.wal) |*wal| {
-            self.txn_manager = TxnManager.init(allocator, wal);
+        if (!options.read_only) {
+            self.txn_manager = TxnManager.init(allocator, if (self.wal) |*wal| wal else null);
             // The log can outlive this session, so ids must not start over.
             self.txn_manager.?.next_txn_id = recovered_max_txn_id + 1;
             self.txn_manager.?.sync_on_commit = options.config.effectiveSyncMode() == .full;
@@ -2431,7 +2437,7 @@ pub const Database = struct {
                         overlay.changefeed.count() > 0 or
                         overlay.stream_offsets.items.len > 0 or
                         overlay.stream_trims.items.len > 0;
-                    try self.logTxnOverlayForCommit(txn, overlay);
+                    if (self.wal != null) try self.logTxnOverlayForCommit(txn, overlay);
                 }
             }
 
@@ -3109,6 +3115,20 @@ pub const Database = struct {
         }
     }
 
+    /// Flush early while a committed transaction is being applied, when the
+    /// log allows it.
+    ///
+    /// With a log, pages holding part of a transaction may reach the file:
+    /// its commit record is already durable, and recovery redoes the rest.
+    /// Without one, the file must only ever get whole transactions, since
+    /// nothing could finish a half-applied one after a crash. So the pages
+    /// stay in memory, and the buffer pool grows past its size if it must,
+    /// until the transaction is applied; the flush that the end of the
+    /// commit offers then writes it whole.
+    fn relieveApplyPressure(self: *Self) void {
+        if (self.wal != null) self.relieveBufferPressure();
+    }
+
     fn replaceNodePropertyIndex(
         self: *Self,
         node_id: NodeId,
@@ -3138,7 +3158,7 @@ pub const Database = struct {
     }
 
     fn applyNodeState(self: *Self, node_id: NodeId, state: TxnNodeState) DatabaseError!void {
-        self.relieveBufferPressure();
+        self.relieveApplyPressure();
         const current = try self.readBaseNodeState(node_id);
         defer if (current) |existing| {
             var owned_existing = existing;
@@ -3197,7 +3217,7 @@ pub const Database = struct {
     }
 
     fn applyEdgeState(self: *Self, edge_id: EdgeId, state: TxnEdgeState) DatabaseError!void {
-        self.relieveBufferPressure();
+        self.relieveApplyPressure();
         const current = try self.readBaseEdgeState(edge_id);
         defer if (current) |existing| {
             var owned_existing = existing;

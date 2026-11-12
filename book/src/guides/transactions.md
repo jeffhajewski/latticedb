@@ -86,9 +86,11 @@ LatticeDB uses a write-ahead log (WAL) for crash recovery:
 
 A commit that has returned survives the process crashing. Surviving a power cut as
 well depends on the settings: the default sync mode waits for the disk on every
-commit, `LATTICE_SYNC_MODE=normal` does not, and on macOS the disk's own cache is
-flushed only with `LATTICE_FULL_FSYNC=1`. See
-[Durability and the Log](../configuration/durability.md).
+commit, `sync_mode` `normal` does not, and on macOS the disk's own cache is flushed
+only with `full_fsync` on. Both are open options in every API, and the
+`LATTICE_SYNC_MODE` and `LATTICE_FULL_FSYNC` environment variables apply when a
+program does not set them. A transaction is never applied in part, after a crash or
+a power cut. See [Durability and the Log](../configuration/durability.md#what-survives-what).
 
 ## Concurrency
 
@@ -210,7 +212,7 @@ Error: social.lattice is open in another process. Close it first, or pass
 
 | Language | What you get |
 |----------|--------------|
-| C | `LATTICE_ERROR_DATABASE_LOCKED` (`-16`) returned from `lattice_open_v4` |
+| C | `LATTICE_ERROR_DATABASE_LOCKED` (`-16`) returned from `lattice_open_v5` (and the older open functions) |
 | Python | `LatticeDatabaseLockedError` raised |
 | TypeScript | `LatticeError` thrown, with `.code === -16` |
 | Go | `ErrorDatabaseLocked` on the returned error's `Code` |
@@ -224,10 +226,13 @@ means the database belongs to a different process entirely.
 
 It would be convenient to let another process read while yours writes, and it
 would also be wrong. A reader in another process cannot see the writer's buffered
-pages, and a read-only handle does not open the write-ahead log at all. What it
-would read is a stale version of the file that a checkpoint may be rewriting
-underneath it, which can produce a structurally inconsistent view rather than
-merely an out-of-date one.
+pages or the commits it has not yet folded into the file. What it would read is a
+version of the file that a checkpoint may be rewriting underneath it, which can
+produce a structurally inconsistent view rather than merely an out-of-date one.
+
+After a crash, when no writer holds the database, a read-only open does see every
+committed transaction: it replays the log in memory, without writing to the files.
+See [Durability and the Log](../configuration/durability.md#opening-read-only-after-a-crash).
 
 The lock does not create that restriction. It reports it.
 

@@ -443,6 +443,30 @@ pub fn build(b: *std.Build) void {
     const storage_bench_step = b.step("storage-benchmark", "Run storage-core micro-benchmarks");
     storage_bench_step.dependOn(&run_storage_bench.step);
 
+    // Space report: where a database file's bytes go, tree by tree.
+    const space_report_module = b.createModule(.{
+        .root_source_file = b.path("tests/benchmark/space_report.zig"),
+        .target = target,
+        .optimize = .ReleaseFast,
+        .imports = &.{
+            .{ .name = "lattice", .module = bench_lib_module },
+        },
+    });
+    space_report_module.addImport("compat", compat_module);
+    space_report_module.link_libc = true;
+
+    const space_report_exe = b.addExecutable(.{
+        .name = "space-report",
+        .root_module = space_report_module,
+    });
+
+    const run_space_report = b.addRunArtifact(space_report_exe);
+    if (b.args) |args| {
+        run_space_report.addArgs(args);
+    }
+    const space_report_step = b.step("space-report", "Report each B+Tree's pages and fill: zig build space-report -- <db>");
+    space_report_step.dependOn(&run_space_report.step);
+
     // SQLite comparison benchmark module
     const sqlite_bench_module = b.createModule(.{
         .root_source_file = b.path("tests/benchmark/sqlite_comparison.zig"),
@@ -513,6 +537,7 @@ pub fn build(b: *std.Build) void {
         vector_bench_exe,
         sqlite_bench_exe,
         graph_bench_exe,
+        space_report_exe,
     }) |exe| {
         bench_build_step.dependOn(&exe.step);
     }

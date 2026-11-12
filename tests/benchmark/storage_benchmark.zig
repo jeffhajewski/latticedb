@@ -30,6 +30,19 @@ fn report(name: []const u8, ns: i128, ops: usize) void {
     std.debug.print("{s:<44} {d:>10.1} ns/op  ({d} ops)\n", .{ name, per_op, ops });
 }
 
+/// How full a tree's pages are: what the split policy decides.
+fn reportFill(name: []const u8, tree: *BTree) !void {
+    const s = try tree.spaceStats();
+    std.debug.print("{s:<44} {d:>9.1}% leaf {d:>5.1}% internal  ({d} leaves, {d} internal, height {d})\n", .{
+        name,
+        s.leafFill() * 100,
+        s.internalFill() * 100,
+        s.leaf_pages,
+        s.internal_pages,
+        s.height,
+    });
+}
+
 const Store = struct {
     posix_vfs: vfs.PosixVfs,
     pm: *PageManager,
@@ -141,6 +154,7 @@ fn benchTree() !void {
     var start = now();
     for (ids) |id| try tree.insert(leKey(&key_buf, id), VALUE);
     report("btree insert, random u64 keys (200k)", now() - start, ids.len);
+    try reportFill("btree fill, random u64 keys (200k)", &tree);
 
     const lookups = try shuffled(TREE_KEYS, 11);
     defer allocator.free(lookups);
@@ -212,6 +226,81 @@ fn benchSequential() !void {
     const start = now();
     for (1..TREE_KEYS + 1) |id| try tree.insert(beKey(&key_buf, id), VALUE);
     report("btree insert, sequential BE keys (200k)", now() - start, TREE_KEYS);
+    try reportFill("btree fill, sequential BE keys (200k)", &tree);
+
+    // Oldest first, as a feed's retention trims it.
+    const trim_start = now();
+    for (1..TREE_KEYS / 2 + 1) |id| try tree.delete(beKey(&key_buf, id));
+    report("btree delete, oldest first (100k of 200k)", now() - trim_start, TREE_KEYS / 2);
+    try reportFill("btree fill, after deleting oldest half", &tree);
+}
+
+fn benchDescending() !void {
+    var store = try Store.open("/tmp/lattice_storage_bench_desc.db", 256 * 1024 * 1024);
+    defer store.close();
+    var tree = try BTree.init(allocator, store.bp);
+    var key_buf: [8]u8 = undefined;
+    const start = now();
+    var id: u64 = TREE_KEYS;
+    while (id > 0) : (id -= 1) try tree.insert(beKey(&key_buf, id), VALUE);
+    report("btree insert, descending BE keys (200k)", now() - start, TREE_KEYS);
+    try reportFill("btree fill, descending BE keys (200k)", &tree);
+}
+
+/// Several ascending runs inserted in turn, as a label index fills when
+/// nodes of a few labels are created interleaved: (label, node id) keys.
+fn benchInterleavedRuns() !void {
+    var store = try Store.open("/tmp/lattice_storage_bench_runs.db", 256 * 1024 * 1024);
+    defer store.close();
+    var tree = try BTree.init(allocator, store.bp);
+    var key_buf: [10]u8 = undefined;
+    const start = now();
+    for (1..TREE_KEYS + 1) |id| {
+        std.mem.writeInt(u16, key_buf[0..2], @intCast(id % 4), .big);
+        std.mem.writeInt(u64, key_buf[2..10], id, .big);
+        try tree.insert(&key_buf, "");
+    }
+    report("btree insert, 4 interleaved ascending runs", now() - start, TREE_KEYS);
+    try reportFill("btree fill, 4 interleaved ascending runs", &tree);
+}
+
+/// Each edge-split rule against each insert order, so the default can be
+/// chosen by what it does to fill and to insert time.
+fn benchSplitRules() !void {
+    if (!@hasDecl(BTree, "edge_split_rule")) return;
+    const saved = BTree.edge_split_rule;
+    defer BTree.edge_split_rule = saved;
+    const random_ids = try shuffled(TREE_KEYS, 7);
+    defer allocator.free(random_ids);
+
+    const orders = [_][]const u8{ "random", "ascending", "descending", "4 runs" };
+    inline for (.{ BTree.EdgeSplitRule.never, BTree.EdgeSplitRule.tree_ends, BTree.EdgeSplitRule.leaf_ends, BTree.EdgeSplitRule.last_insert }) |rule| {
+        BTree.edge_split_rule = rule;
+        for (orders, 0..) |order, which| {
+            var store = try Store.open("/tmp/lattice_storage_bench_rules.db", 256 * 1024 * 1024);
+            defer store.close();
+            var tree = try BTree.init(allocator, store.bp);
+            var key_buf: [10]u8 = undefined;
+            const start = now();
+            for (0..TREE_KEYS) |i| {
+                const id: u64 = switch (which) {
+                    0 => random_ids[i],
+                    1 => i + 1,
+                    2 => TREE_KEYS - i,
+                    else => i + 1,
+                };
+                std.mem.writeInt(u16, key_buf[0..2], if (which == 3) @intCast(id % 4) else 0, .big);
+                std.mem.writeInt(u64, key_buf[2..10], id, .big);
+                try tree.insert(&key_buf, VALUE);
+            }
+            const elapsed = now() - start;
+            var name_buf: [64]u8 = undefined;
+            const name = try std.fmt.bufPrint(&name_buf, "rule {s}, {s} insert", .{ @tagName(rule), order });
+            report(name, elapsed, TREE_KEYS);
+            const fill_name = try std.fmt.bufPrint(&name_buf, "rule {s}, {s} fill", .{ @tagName(rule), order });
+            try reportFill(fill_name, &tree);
+        }
+    }
 }
 
 fn benchOverflow() !void {
@@ -286,6 +375,9 @@ pub fn main() !void {
     try benchPageAlloc();
     try benchTree();
     try benchSequential();
+    try benchDescending();
+    try benchInterleavedRuns();
+    try benchSplitRules();
     try benchStringKeys();
     try benchOverflow();
     try benchCold();

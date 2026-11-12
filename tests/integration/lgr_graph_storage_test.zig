@@ -1417,3 +1417,95 @@ test "lgr: WHERE id(n) = k reads that node instead of every node" {
     try db.commitTransaction(&txn);
     try expectSeekAnswersAsScan(db, null, "MATCH (a) WHERE id(a) IN [5, 6, 8] RETURN id(a), a.seen");
 }
+
+/// The answer to `cypher` as text, or the error it was refused with.
+fn renderOrError(db: *Database, cypher: []const u8, params: *const std.StringHashMap(PropertyValue)) ![]u8 {
+    var result = db.queryWithParams(cypher, params) catch |err| return std.fmt.allocPrint(std.testing.allocator, "error {s}", .{@errorName(err)});
+    defer result.deinit();
+    return render(result);
+}
+
+test "lgr: index paths beside @@ and <=> answer as without the indexes" {
+    const DIMS = 8;
+    const path_i = "/tmp/lgr_search_indexed.ltdb";
+    const path_p = "/tmp/lgr_search_plain.ltdb";
+    defer removeFiles(path_i);
+    defer removeFiles(path_p);
+    var dbs: [2]*Database = undefined;
+    for (&dbs, [_][]const u8{ path_i, path_p }) |*db, path| {
+        removeFiles(path);
+        db.* = try Database.open(std.testing.allocator, path, .{
+            .create = true,
+            .config = .{ .enable_fts = true, .enable_vector = true, .vector_dimensions = DIMS, .vector_ef_construction = 32 },
+        });
+    }
+    defer for (dbs) |db| db.close();
+    const indexed = dbs[0];
+    const plain = dbs[1];
+
+    const words = [_][]const u8{ "alpha", "beta", "gamma", "delta" };
+    for (dbs) |db| {
+        try db.createNodeFtsIndex("P", "t");
+        var prng = std.Random.DefaultPrng.init(3);
+        const rnd = prng.random();
+        var txn = try db.beginTransaction(.read_write);
+        var nodes: [160]u64 = undefined;
+        for (&nodes, 0..) |*n, i| {
+            n.* = try db.createNode(&txn, &.{"P"});
+            try db.setNodeProperty(&txn, n.*, "v", .{ .int_val = @intCast(i % 50) });
+            var text_buf: [32]u8 = undefined;
+            const text = try std.fmt.bufPrint(&text_buf, "{s} {s}", .{ words[i % 4], words[(i / 4) % 4] });
+            try db.setNodeProperty(&txn, n.*, "t", .{ .string_val = text });
+            var v: [DIMS]f32 = undefined;
+            for (&v) |*x| x.* = rnd.float(f32) * 2 - 1;
+            try db.setNodeVectorInTxn(&txn, n.*, &v);
+        }
+        for (0..600) |k| {
+            const e = try db.createEdgeAndGetId(&txn, nodes[(k * 7) % nodes.len], nodes[(k * 13 + 5) % nodes.len], "KNOWS");
+            try db.setEdgePropertyById(&txn, e, "w", .{ .int_val = @intCast(k % 10) });
+        }
+        try db.commitTransaction(&txn);
+    }
+    try indexed.createNodePropertyIndex("P", "v");
+    try indexed.createEdgePropertyIndex("KNOWS", "w");
+
+    var query: [DIMS]f32 = undefined;
+    var prng = std.Random.DefaultPrng.init(9);
+    for (&query) |*x| x.* = prng.random().float(f32) * 2 - 1;
+    var params = std.StringHashMap(PropertyValue).init(std.testing.allocator);
+    defer params.deinit();
+    try params.put("q", .{ .vector_val = &query });
+
+    const cases = [_][]const u8{
+        // Node ranges, descending reads and seeks by id.
+        "MATCH (n:P) WHERE n.v > 30 AND n.t @@ 'alpha' RETURN id(n) ORDER BY id(n)",
+        "MATCH (n:P) WHERE n.v > 30 AND (n.t @@ 'alpha' OR n.t @@ 'beta') RETURN id(n) ORDER BY id(n)",
+        "MATCH (n:P) WHERE (n.t @@ 'alpha' OR n.t @@ 'gamma') AND n.v <= 10 RETURN id(n) ORDER BY id(n)",
+        "MATCH (n:P) WHERE n.t @@ 'alpha' RETURN id(n), n.v ORDER BY n.v DESC LIMIT 5",
+        "MATCH (n:P) WHERE n.t @@ 'alpha' OR n.t @@ 'gamma' RETURN id(n), n.v ORDER BY n.v LIMIT 7",
+        "MATCH (n:P) WHERE n.t @@ 'alpha' OR n.t @@ 'beta' RETURN id(n), n.v ORDER BY n.v DESC LIMIT 7",
+        "MATCH (n:P) WHERE n.v > 25 OR n.t @@ 'beta' RETURN id(n), n.v ORDER BY n.v LIMIT 7",
+        "MATCH (n:P) WHERE n.v >= 20 AND (n.embedding <=> $q) < 0.9 RETURN id(n) ORDER BY id(n)",
+        "MATCH (n:P) WHERE (n.embedding <=> $q) < 0.9 RETURN id(n), n.v ORDER BY n.v DESC LIMIT 5",
+        "MATCH (n:P) WHERE n.v > 40 AND n.embedding <=> $q RETURN id(n) LIMIT 4",
+        "MATCH (n:P) WHERE id(n) IN [1, 2, 3, 4, 5, 6, 7, 8] AND n.t @@ 'alpha' RETURN id(n) ORDER BY id(n)",
+        "MATCH (n:P) WHERE id(n) IN [1, 2, 3, 4, 5, 6, 7, 8] AND (n.t @@ 'alpha' OR n.t @@ 'beta') RETURN id(n) ORDER BY id(n)",
+        "MATCH (n:P) WHERE id(n) IN [1, 2, 3, 4, 5, 6, 7, 8] AND (n.embedding <=> $q) < 1.5 RETURN id(n) ORDER BY id(n)",
+        // Relationship ranges.
+        "MATCH (a)-[r:KNOWS]->(b:P) WHERE r.w > 6 AND b.t @@ 'alpha' RETURN id(r) ORDER BY id(r)",
+        "MATCH (a)-[r:KNOWS]->(b:P) WHERE r.w > 6 AND (b.t @@ 'alpha' OR b.t @@ 'beta') RETURN id(r) ORDER BY id(r)",
+        "MATCH (a)-[r:KNOWS {w: 3}]->(b:P) WHERE b.t @@ 'alpha' OR b.t @@ 'beta' RETURN id(r) ORDER BY id(r)",
+        "MATCH (a)-[r:KNOWS]->(b) WHERE r.w = 2 AND (b.embedding <=> $q) < 0.9 RETURN id(r) ORDER BY id(r)",
+        "MATCH (a)-[r:KNOWS {w: 1}]->(b) WHERE (b.embedding <=> $q) < 0.9 RETURN id(r) ORDER BY id(r)",
+    };
+    for (cases) |cypher| {
+        const a = try renderOrError(indexed, cypher, &params);
+        defer std.testing.allocator.free(a);
+        const b = try renderOrError(plain, cypher, &params);
+        defer std.testing.allocator.free(b);
+        if (!std.mem.eql(u8, a, b)) {
+            std.debug.print("query: {s}\nindexed:\n{s}\nplain:\n{s}\n", .{ cypher, a, b });
+            return error.TestExpectedEqual;
+        }
+    }
+}

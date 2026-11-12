@@ -2151,8 +2151,9 @@ pub const QueryPlanner = struct {
         // the WHERE as written, and emit their rows nearest or best first,
         // not in the index's order.
         const searches = if (where_hint) |condition| hasSearchConjunct(condition) else false;
+        const search_branch = if (where_hint) |condition| hasSearchBranch(condition) else false;
         var hint: ?OrderHint = null;
-        if (first_scan and !searches) {
+        if (first_scan and !search_branch) {
             if (self.order_hint) |h| {
                 if (std.mem.eql(u8, h.variable, variable_name)) hint = h;
             }
@@ -2295,6 +2296,21 @@ pub const QueryPlanner = struct {
             .lt, .lte => return binary.left.* == .binary and binary.left.binary.operator == .vector_distance,
             else => return false,
         }
+    }
+
+    /// Whether `expr` holds a vector or full-text predicate as a conjunct or
+    /// as a branch of an OR among its conjuncts. planWhere runs an OR of `@@`
+    /// predicates as one search beside the other conditions, and the search
+    /// emits its rows best first, so a scan below it cannot serve the sort.
+    fn hasSearchBranch(expr: *const ast.Expression) bool {
+        const binary = switch (expr.*) {
+            .binary => |binary| binary,
+            else => return false,
+        };
+        return switch (binary.operator) {
+            .and_, .or_ => hasSearchBranch(binary.left) or hasSearchBranch(binary.right),
+            else => hasSearchConjunct(expr),
+        };
     }
 
     /// The conjuncts of `expr` that compare a property of `variable_name`

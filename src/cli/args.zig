@@ -4,6 +4,7 @@ const std = @import("std");
 const lattice = @import("lattice");
 
 const types = lattice.core.types;
+const rdf_options = @import("rdf/options.zig");
 const page_manager = lattice.storage.page_manager;
 const VectorMetric = lattice.storage.database.VectorMetric;
 
@@ -247,6 +248,9 @@ pub const Args = struct {
     batch_size: u32 = 1000,
     on_error_skip: bool = false,
 
+    // RDF import and export options
+    rdf: rdf_options.Options = .{},
+
     // Filter options
     label_filter: ?[]const u8 = null,
 
@@ -284,9 +288,13 @@ pub const Args = struct {
                     args.command = .version;
                 } else if (std.mem.startsWith(u8, arg, "--format=")) {
                     const value = arg["--format=".len..];
-                    args.format = OutputFormat.fromString(value) orelse {
-                        return error.InvalidFormat;
-                    };
+                    if (rdf_options.syntaxFromName(value)) |syntax| {
+                        args.rdf.syntax = syntax;
+                    } else {
+                        args.format = OutputFormat.fromString(value) orelse {
+                            return error.InvalidFormat;
+                        };
+                    }
                 } else if (std.mem.eql(u8, arg, "--enable-vector")) {
                     args.enable_vector = true;
                 } else if (std.mem.startsWith(u8, arg, "--vector-dims=")) {
@@ -367,6 +375,8 @@ pub const Args = struct {
                     args.file = arg["--file=".len..];
                 } else if (std.mem.startsWith(u8, arg, "--query=")) {
                     args.query_string = arg["--query=".len..];
+                } else if (try rdf_options.parseArg(&args.rdf, arg)) {
+                    // An RDF import or export option.
                 } else {
                     return error.UnknownOption;
                 }

@@ -2438,6 +2438,37 @@ pub const ExportStats = struct {
     edges_exported: u64 = 0,
 };
 
+/// RDF import and export (Turtle, N-Triples), which live in rdf/.
+pub const rdf = @import("rdf/rdf.zig");
+
+/// What the RDF formats share with the formats in this file.
+pub const shared = struct {
+    pub const ExportSelection = Selection;
+
+    pub fn select(allocator: std.mem.Allocator, db: *Database, scope: ExportScope) !Selection {
+        return Selection.init(allocator, db, scope);
+    }
+
+    pub fn deselect(selection: *Selection) void {
+        selection.deinit();
+    }
+
+    pub fn includesEdge(selection: *const Selection, edge: Database.EdgeInfo) bool {
+        return selection.includesEdge(edge);
+    }
+
+    /// Write a value in the JSON export encoding (format version 2).
+    pub fn writeValue(writer: anytype, value: PropertyValue) !void {
+        return writeValueJson(null, writer, value);
+    }
+
+    /// Read a value written in the JSON export encoding, allocating in `arena`.
+    pub fn jsonToValue(arena: std.mem.Allocator, text: []const u8) !PropertyValue {
+        const parsed = try parseJson(arena, text);
+        return jsonToPropertyValue(arena, parsed.value, .v2);
+    }
+};
+
 fn cleanupTestDatabaseFiles(path: []const u8) void {
     @import("compat").fs.cwd().deleteFile(path) catch {};
 

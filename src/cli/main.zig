@@ -9,6 +9,7 @@ const args_mod = @import("args.zig");
 const output = @import("output.zig");
 const repl_mod = @import("repl.zig");
 const import_export = @import("import_export.zig");
+const rdf = import_export.rdf;
 
 // A file's tests reach the test binary only once something analyzes the file,
 // and much of the CLI is generic code no test instantiates, so the files are
@@ -18,7 +19,7 @@ test {
     _ = repl_mod;
     _ = import_export;
     _ = @import("history.zig");
-    _ = @import("rdf/syntax.zig");
+    _ = @import("rdf/rdf.zig");
 }
 
 const Args = args_mod.Args;
@@ -95,6 +96,7 @@ pub fn main(init: std.process.Init) !u8 {
             error.InvalidBatchSize => output.printError(stderr, "Invalid batch size. Must be a positive integer.", .{}),
             error.InvalidInterval => output.printError(stderr, "Invalid interval. Must be a whole number of seconds, at least 1.", .{}),
             error.InvalidTimestamp => output.printError(stderr, "Invalid time. Use a UTC time such as 2026-08-25T14:30:00Z or a date such as 2026-08-25.", .{}),
+            error.InvalidRdfOption => output.printError(stderr, "Invalid RDF option. See 'lattice import --help' for the values each --rdf-* option takes; --base takes an absolute IRI.", .{}),
             else => output.printError(stderr, "Failed to parse arguments", .{}),
         }
         stderr.flush() catch {};
@@ -1262,6 +1264,13 @@ fn cmdImport(
         return failCommand(stderr, "No import file specified. Use --file=<path>", .{});
     };
 
+    // Turtle and N-Triples, by --format or by extension.
+    if (rdf.command.syntaxOf(parsed_args, file)) |syntax| {
+        const db = try openDatabase(allocator, stderr, parsed_args, .read_write);
+        defer db.close();
+        return rdf.command.runImport(allocator, stdout, stderr, db, parsed_args, file, syntax);
+    }
+
     // Detect file format by extension
     const is_json = std.mem.endsWith(u8, file, ".json");
     const is_jsonl = std.mem.endsWith(u8, file, ".jsonl");
@@ -1436,6 +1445,10 @@ fn cmdExport(
 
     output.printInfo(stdout, "Exporting {s} to {s}...", .{ path, file });
     warnIfVectorsLeftOut(stderr, db, path);
+
+    if (rdf.command.syntaxOf(parsed_args, file)) |syntax| {
+        return rdf.command.runExport(allocator, stdout, stderr, db, parsed_args, file, syntax, scope);
+    }
 
     const ExportKind = enum { json, jsonl, csv, dot };
     const export_kind: ExportKind = blk: {
@@ -1686,8 +1699,8 @@ fn printUsage(writer: anytype) void {
         \\    exec <path>         Execute a single query
         \\
         \\  Import/Export:
-        \\    import <path>       Import data from JSON/JSONL/CSV
-        \\    export <path>       Export data to JSON/JSONL/CSV/DOT
+        \\    import <path>       Import data from JSON/JSONL/CSV, Turtle/N-Triples
+        \\    export <path>       Export data to JSON/JSONL/CSV/DOT, Turtle/N-Triples
         \\    dump <path>         Dump full database as canonical JSON
         \\
         \\  Introspection:
@@ -1970,10 +1983,11 @@ fn printCommandHelp(writer: anytype, command: Command) void {
         .import => writer.writeAll(
             \\Usage: lattice import <path> --file=<input> [options]
             \\
-            \\Import data from JSON, JSONL, or CSV files, such as those export writes.
+            \\Import data from JSON, JSONL, or CSV files, such as those export writes,
+            \\or RDF in Turtle or N-Triples.
             \\
             \\Options:
-            \\  --file=<path>         Input file (.json, .jsonl, .csv)
+            \\  --file=<path>         Input file (.json, .jsonl, .csv, .ttl, .nt)
             \\  --batch-size=<n>      Commit every N items (default: 1000)
             \\  --on-error=skip       Skip invalid records instead of aborting
             \\  --enable-vector       Create a vector index if the database has
@@ -1998,14 +2012,43 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\  _source,_target,_type,since
             \\  n1,n2,KNOWS,2020
             \\
+            \\RDF (Turtle .ttl, N-Triples .nt):
+            \\  Each IRI becomes a node labelled Resource with an iri property, found
+            \\  again by the index Resource(iri) the import declares; literals become
+            \\  properties, other objects edges, rdf:type labels. Names are
+            \\  <prefix>_<local>, such as foaf_name; the table of names and prefixes
+            \\  is kept in the database for export. A record is one statement: an
+            \\  invalid one is left out whole, and --batch-size counts triples,
+            \\  committed at the end of a statement. A Turtle syntax error stops
+            \\  the import; in N-Triples, --on-error=skip goes on at the next line.
+            \\
+            \\  --format=turtle|ntriples   The syntax, when the extension does not say
+            \\  --base=<iri>               Base for relative IRIs (default: the file's
+            \\                             file:// URL)
+            \\  --rdf-types=<mode>         rdf:type as labels, edges, or auto: labels
+            \\                             unless there are over 1000 classes (default)
+            \\  --rdf-lang=<tag>           Language whose strings take the plain name;
+            \\                             others get <name>_<tag> (default: en)
+            \\  --rdf-decimal=<mode>       xsd:decimal as float when that is exact, else
+            \\                             string (float, default), or always string
+            \\  --rdf-vectors=omit         Leave lattice:vector values out
+            \\  --rdf-fts=<names>          Declare full-text indexes on these
+            \\                             properties of Resource (comma-separated)
+            \\
+            \\Examples:
+            \\  lattice import mydb.lattice --file=data.json
+            \\  lattice import mydb.lattice --file=skos.ttl --rdf-fts=skos_prefLabel
+            \\
         ) catch {},
         .@"export" => writer.writeAll(
             \\Usage: lattice export <path> --file=<output> [options]
             \\
-            \\Export data to JSON, JSONL, CSV, or DOT files.
+            \\Export data to JSON, JSONL, CSV, or DOT files, or RDF in Turtle or
+            \\N-Triples.
             \\
             \\Options:
-            \\  --file=<path>         Output file path (.json, .jsonl, .csv, .dot)
+            \\  --file=<path>         Output file path (.json, .jsonl, .csv, .dot,
+            \\                        .ttl, .nt)
             \\  --format=<fmt>        CLI output format: table, json, csv
             \\  --enable-vector       Create a vector index if the database has
             \\                        none (needs --vector-dims). A database with
@@ -2015,11 +2058,26 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\  --labels=<list>       Filter by labels (comma-separated)
             \\  --query=<cypher>      Export query results instead
             \\
+            \\RDF (Turtle .ttl, N-Triples .nt):
+            \\  Nodes and names imported from RDF get their IRIs back. Other names are
+            \\  written under the base, other nodes as blank nodes, or under the base
+            \\  when --base is given. Turtle groups each node's triples and
+            \\  abbreviates with the prefixes the database knows.
+            \\
+            \\  --format=turtle|ntriples     The syntax, when the extension does not say
+            \\  --base=<iri>                 Base for names and nodes without an IRI
+            \\                               (default for names: urn:lattice:)
+            \\  --rdf-edge-properties=<mode> Edge properties as RDF-star annotations
+            \\                               (star, default), rdf:Statement nodes
+            \\                               (reify), or left out (drop)
+            \\  --rdf-vectors=omit           Leave node vectors out
+            \\
             \\Examples:
             \\  lattice export mydb.lattice --file=backup.json
             \\  lattice export mydb.lattice --file=graph.jsonl
             \\  lattice export mydb.lattice --file=graph.dot
             \\  lattice export mydb.lattice --file=people.csv --labels=Person
+            \\  lattice export mydb.lattice --file=graph.ttl --base=https://example.org/
             \\
         ) catch {},
         else => {

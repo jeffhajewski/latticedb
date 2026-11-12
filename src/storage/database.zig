@@ -420,9 +420,12 @@ pub const DatabaseConfig = struct {
     /// so a commit survives a process or OS crash but not necessarily a power
     /// cut. Off by default because it costs several milliseconds per commit.
     /// No effect on other platforms, where fsync already asks for the flush.
-    /// `LATTICE_FULL_FSYNC=1` in the environment turns it on for bindings
-    /// that cannot set this field.
-    full_fsync: bool = false,
+    ///
+    /// Null, the default, means off unless `LATTICE_FULL_FSYNC` is set to
+    /// `1`/`true` or `0`/`false` in the environment. A value set here wins
+    /// over the environment: the variable is a default for code that does
+    /// not choose, not an override of code that does.
+    full_fsync: ?bool = null,
 
     /// When a commit waits for the disk.
     ///
@@ -433,28 +436,32 @@ pub const DatabaseConfig = struct {
     /// power cut or an OS crash can lose the most recent commits. They are
     /// lost from the end only, and the database stays consistent. Most of
     /// the time a small write transaction takes is this one fsync.
-    /// `LATTICE_SYNC_MODE=normal` or `full` in the environment overrides it,
-    /// for bindings that cannot set this field.
-    sync_mode: SyncMode = .full,
+    ///
+    /// Null, the default, means `.full` unless `LATTICE_SYNC_MODE` is set to
+    /// `normal` or `full` in the environment. A value set here wins over the
+    /// environment, as with `full_fsync`.
+    sync_mode: ?SyncMode = null,
 
     pub const SyncMode = enum { full, normal };
 
     pub fn effectiveSyncMode(self: DatabaseConfig) SyncMode {
+        if (self.sync_mode) |mode| return mode;
         if (std.c.getenv("LATTICE_SYNC_MODE")) |value| {
             const text = std.mem.span(value);
             if (std.ascii.eqlIgnoreCase(text, "normal")) return .normal;
             if (std.ascii.eqlIgnoreCase(text, "full")) return .full;
         }
-        return self.sync_mode;
+        return .full;
     }
 
     pub fn effectiveFullFsync(self: DatabaseConfig) bool {
+        if (self.full_fsync) |enabled| return enabled;
         if (std.c.getenv("LATTICE_FULL_FSYNC")) |value| {
             const text = std.mem.span(value);
             if (std.mem.eql(u8, text, "1") or std.ascii.eqlIgnoreCase(text, "true")) return true;
             if (std.mem.eql(u8, text, "0") or std.ascii.eqlIgnoreCase(text, "false")) return false;
         }
-        return self.full_fsync;
+        return false;
     }
 
     /// Compute effective buffer pool size based on enabled features.

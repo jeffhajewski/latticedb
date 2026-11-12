@@ -279,8 +279,22 @@ fn collect(allocator: std.mem.Allocator, expr: *const ast.Expression, out: *std.
 /// binds itself.
 pub fn firstFreeVariable(expr: *const ast.Expression, ignore: *const fn ([]const u8) bool) ?[]const u8 {
     var scope: Scope = .{};
+    return freeIn(expr, IgnoreFn{ .f = ignore }, &scope);
+}
+
+/// The same, with `ignore.skip(name)` deciding, for a test that needs
+/// state of its own.
+pub fn firstFreeVariableWith(expr: *const ast.Expression, ignore: anytype) ?[]const u8 {
+    var scope: Scope = .{};
     return freeIn(expr, ignore, &scope);
 }
+
+const IgnoreFn = struct {
+    f: *const fn ([]const u8) bool,
+    fn skip(self: IgnoreFn, name: []const u8) bool {
+        return self.f(name);
+    }
+};
 
 const Scope = struct {
     names: [32][]const u8 = undefined,
@@ -294,7 +308,7 @@ const Scope = struct {
     }
 };
 
-fn freeIn(expr: *const ast.Expression, ignore: *const fn ([]const u8) bool, scope: *Scope) ?[]const u8 {
+fn freeIn(expr: *const ast.Expression, ignore: anytype, scope: *Scope) ?[]const u8 {
     switch (expr.*) {
         .literal, .parameter => return null,
         // What it reads from the enclosing row is in its patterns and WHERE,
@@ -306,11 +320,11 @@ fn freeIn(expr: *const ast.Expression, ignore: *const fn ([]const u8) bool, scop
                     .node => |n| n.variable,
                     .edge => |e| e.variable,
                 } orelse continue;
-                if (!scope.has(name) and !ignore(name)) return name;
+                if (!scope.has(name) and !ignore.skip(name)) return name;
             };
             return null;
         },
-        .variable => |v| return if (scope.has(v.name) or ignore(v.name)) null else v.name,
+        .variable => |v| return if (scope.has(v.name) or ignore.skip(v.name)) null else v.name,
         .property_access => |p| return freeIn(p.object, ignore, scope),
         .binary => |b| return freeIn(b.left, ignore, scope) orelse freeIn(b.right, ignore, scope),
         .unary => |u| return freeIn(u.operand, ignore, scope),
@@ -353,12 +367,12 @@ fn freeIn(expr: *const ast.Expression, ignore: *const fn ([]const u8) bool, scop
     }
 }
 
-fn freeInAll(exprs: []const *ast.Expression, ignore: *const fn ([]const u8) bool, scope: *Scope) ?[]const u8 {
+fn freeInAll(exprs: []const *ast.Expression, ignore: anytype, scope: *Scope) ?[]const u8 {
     for (exprs) |e| if (freeIn(e, ignore, scope)) |name| return name;
     return null;
 }
 
-fn freeInOptional(expr: ?*const ast.Expression, ignore: *const fn ([]const u8) bool, scope: *Scope) ?[]const u8 {
+fn freeInOptional(expr: ?*const ast.Expression, ignore: anytype, scope: *Scope) ?[]const u8 {
     return freeIn(expr orelse return null, ignore, scope);
 }
 

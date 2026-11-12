@@ -41,6 +41,7 @@ const cross_product_ops = @import("operators/cross_product.zig");
 const union_ops = @import("operators/union.zig");
 const optional_ops = @import("operators/optional.zig");
 const path_ops = @import("operators/path.zig");
+const shortest_path_ops = @import("operators/shortest_path.zig");
 const subquery_ops = @import("operators/subquery.zig");
 const procedure_ops = @import("operators/procedure.zig");
 
@@ -929,6 +930,7 @@ pub const QueryPlanner = struct {
         where_hint: ?*const ast.Expression,
         match_edges: *MatchEdges,
     ) PlannerError!Operator {
+        if (pattern.shortest != .none) return self.planShortestPath(pattern, input, where_hint, match_edges);
         var op = input;
         var prev_node_slot: ?u8 = null;
         // The pattern starts with a scan of every node and nothing on top of
@@ -1456,6 +1458,78 @@ pub const QueryPlanner = struct {
         }
 
         return op orelse PlannerError.InvalidQuery;
+    }
+
+    /// `p = shortestPath((a)-[r:T*..n]->(b))`: each end is matched as a
+    /// pattern of one node, then ShortestPath searches between them.
+    /// Semantic analysis has checked the shape.
+    fn planShortestPath(
+        self: *Self,
+        pattern: ast.Pattern,
+        input: ?Operator,
+        where_hint: ?*const ast.Expression,
+        match_edges: *MatchEdges,
+    ) PlannerError!Operator {
+        const edge = pattern.elements[1].edge;
+        var op = input;
+        var ends: [2]u8 = undefined;
+        for ([2]usize{ 0, 2 }, &ends) |index, *slot| {
+            var node = pattern.elements[index].node.*;
+            if (node.variable == null) node.variable = try self.hiddenName();
+            var elements = [_]ast.PatternElement{.{ .node = &node }};
+            op = try self.planPattern(.{ .elements = &elements }, op, where_hint, match_edges);
+            slot.* = self.boundNodeSlot(node.variable.?) orelse return PlannerError.InvalidQuery;
+        }
+
+        // The relationships of a shortest path are not kept from the
+        // MATCH's other relationships.
+        match_edges.slots[match_edges.planned] = null;
+        match_edges.planned += 1;
+
+        const database = self.storage.database orelse return PlannerError.MissingStorage;
+        const types = try self.resolveEdgeTypes(edge.types);
+        const quant = edge.quantifier orelse ast.RangeQuantifier{ .min_hops = 1, .max_hops = 1 };
+        const search = shortest_path_ops.ShortestPath.init(
+            self.allocator,
+            op.?,
+            ends[0],
+            ends[1],
+            .{ .types = types },
+            switch (edge.direction) {
+                .outgoing => .outgoing,
+                .incoming => .incoming,
+                .both => .both,
+            },
+            database,
+            quant.min_hops,
+            quant.max_hops,
+            pattern.shortest == .all,
+        ) catch return PlannerError.OutOfMemory;
+        if (edge.variable) |name| {
+            const slot = try self.allocateNamedSlot(name);
+            try self.bindVariable(name, slot, .alias);
+            search.rels_slot = slot;
+        }
+        if (pattern.path_variable) |name| {
+            const slot = try self.allocateNamedSlot(name);
+            try self.bindVariable(name, slot, .alias);
+            search.path_slot = slot;
+        }
+        return search.operator();
+    }
+
+    /// A name for an anonymous variable the planner needs to refer to,
+    /// which no query can spell.
+    fn hiddenName(self: *Self) PlannerError![]const u8 {
+        var attempt: u32 = 0;
+        while (true) : (attempt += 1) {
+            var buf: [32]u8 = undefined;
+            const candidate = std.fmt.bufPrint(&buf, "  end {d}", .{attempt}) catch return PlannerError.InternalError;
+            if (self.bindings.contains(candidate)) continue;
+            const owned = self.allocator.dupe(u8, candidate) catch return PlannerError.OutOfMemory;
+            self.hidden_binding_names.append(self.allocator, owned) catch return PlannerError.OutOfMemory;
+            return owned;
+        }
     }
 
     /// Keep the rows whose relationship list `rels` has every property of

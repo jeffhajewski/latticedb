@@ -81,6 +81,43 @@ on an unbounded pattern still costs as much as the walk without it.
 If the far end is a node that is already bound, only paths that end at it are
 returned.
 
+## Shortest Paths
+
+`shortestPath` finds one shortest path between two nodes, and `allShortestPaths`
+every path of that shortest length:
+
+```cypher
+MATCH (a:Person {name: "Alice"}), (b:Person {name: "Dan"})
+MATCH p = shortestPath((a)-[:KNOWS*]-(b))
+RETURN length(p), [n IN nodes(p) | n.name] AS route
+```
+
+The pattern inside is one relationship between two nodes, of any direction and
+types, with an optional upper bound (`*..6`) and a lower bound of 0 or 1. The ends
+can be bound earlier or matched by the pattern itself, with labels and
+properties; a `WHERE` on the ends filters them. For each pair of ends the search
+runs breadth-first from both ends at once and stops at the first length at which
+they meet, so it reads the neighbourhoods of the two ends, never every path.
+Pairs that are not connected within the bound give no row, or null after
+`OPTIONAL MATCH`. A relationship variable is the list of the path's relationships.
+From a node to itself the path has no relationships when the lower bound is 0,
+and there is none otherwise.
+
+Not supported, each with an error naming it: a property map on the
+relationship, a pattern of more than one relationship, a lower bound above 1,
+`shortestPath` outside `MATCH` (in `CREATE`, `MERGE`, `EXISTS { }` or as an
+expression), and a `WHERE` right after the `MATCH` that reads the path or its
+relationships, since the search would not look for a longer path that passes.
+The relationships of a shortest path are not kept apart from the other
+relationships of its `MATCH`.
+
+Each pair of ends is searched on its own, so ends that match many nodes multiply
+the work: give both ends labels and properties, or bind them first. On a graph
+of 100,000 nodes and 1,000,000 random directed relationships (ReleaseFast,
+macOS), a search between two random nodes, about five hops apart, took a median
+of 0.34 ms one way and 0.16 ms undirected; `allShortestPaths`, 0.19 ms for about
+five paths per pair.
+
 ## Performance
 
 Paths are expanded depth-first, one path at a time. There is no hop limit: an

@@ -361,6 +361,105 @@ test "lcy: map projection errors" {
 }
 
 // ============================================================================
+// shortestPath and allShortestPaths
+// ============================================================================
+
+/// a -> b -> c -> d, a -> x -> d, a -> y -> d, d -Q-> z, and a lone node w.
+fn seedRoutes(db: *Database) !void {
+    try run(db,
+        \\CREATE (a:S {n: 'a'}), (b:S {n: 'b'}), (c:S {n: 'c'}), (d:S {n: 'd'}), (x:S {n: 'x'}), (y:S {n: 'y'}),
+        \\       (z:S {n: 'z'}), (:S {n: 'w'}),
+        \\       (a)-[:R]->(b), (b)-[:R]->(c), (c)-[:R]->(d), (a)-[:R]->(x), (x)-[:R]->(d), (a)-[:R]->(y), (y)-[:R]->(d),
+        \\       (d)-[:Q]->(z)
+    );
+}
+
+test "lcy: shortestPath finds one shortest path between bound ends" {
+    const path = "/tmp/lcy_shortest.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedRoutes(db);
+
+    try expectResult(db,
+        \\MATCH p = shortestPath((a:S {n: 'a'})-[:R*]->(d:S {n: 'd'})) RETURN length(p), [v IN nodes(p) | v.n][0], [v IN nodes(p) | v.n][2]
+    , "length(p) | [v IN nodes(p) | v.n][0] | [v IN nodes(p) | v.n][2]\n2 | \"a\" | \"d\"");
+    // allShortestPaths: both paths of length 2, not the longer one.
+    try expectResult(db,
+        \\MATCH p = allShortestPaths((a:S {n: 'a'})-[:R*]->(d:S {n: 'd'})) RETURN [v IN nodes(p) | v.n] AS route ORDER BY route
+    , "route\n[\"a\", \"x\", \"d\"]\n[\"a\", \"y\", \"d\"]");
+    // The relationship variable is the list of the path's relationships.
+    try expectResult(db,
+        \\MATCH shortestPath((:S {n: 'a'})-[r*]->(:S {n: 'z'})) RETURN [e IN r | type(e)] AS types
+    , "types\n[\"R\", \"R\", \"Q\"]");
+    // Incoming and undirected; the path still runs from the first end.
+    try expectResult(db,
+        \\MATCH p = shortestPath((d:S {n: 'd'})<-[:R*]-(a:S {n: 'a'})) RETURN length(p), [v IN nodes(p) | v.n][0] AS first
+    , "length(p) | first\n2 | \"d\"");
+    try expectResult(db,
+        \\MATCH p = shortestPath((b:S {n: 'b'})-[*]-(z:S {n: 'z'})) RETURN [v IN nodes(p) | v.n] AS route
+    , "route\n[\"b\", \"c\", \"d\", \"z\"]");
+    // The upper bound: none within one hop; types restrict every hop.
+    try expectResult(db,
+        \\MATCH p = shortestPath((a:S {n: 'a'})-[*..1]->(d:S {n: 'd'})) RETURN length(p)
+    , "length(p)");
+    try expectResult(db,
+        \\MATCH p = shortestPath((a:S {n: 'a'})-[*..2]->(d:S {n: 'd'})) RETURN length(p)
+    , "length(p)\n2");
+    try expectResult(db,
+        \\MATCH p = shortestPath((a:S {n: 'a'})-[:Q*]->(d:S {n: 'z'})) RETURN length(p)
+    , "length(p)");
+    try expectResult(db,
+        \\MATCH p = shortestPath((a:S {n: 'a'})-[:R|Q*]->(z:S {n: 'z'})) RETURN length(p)
+    , "length(p)\n3");
+    // A single hop without a quantifier.
+    try expectResult(db,
+        \\MATCH p = shortestPath((a:S {n: 'a'})-[:R]->(x:S {n: 'x'})) RETURN length(p)
+    , "length(p)\n1");
+    // From a node to itself: a path of no relationships when the minimum is 0.
+    try expectResult(db,
+        \\MATCH p = shortestPath((a:S {n: 'a'})-[*0..]->(a)) RETURN length(p), size(nodes(p))
+    , "length(p) | size(nodes(p))\n0 | 1");
+    try expectResult(db,
+        \\MATCH p = shortestPath((a:S {n: 'a'})-[*]->(a)) RETURN length(p)
+    , "length(p)");
+    // Not connected: no row, or null after OPTIONAL MATCH.
+    try expectResult(db,
+        \\MATCH p = shortestPath((a:S {n: 'a'})-[*]-(w:S {n: 'w'})) RETURN length(p)
+    , "length(p)");
+    try expectResult(db,
+        \\MATCH (a:S {n: 'a'}), (w:S {n: 'w'}) OPTIONAL MATCH p = shortestPath((a)-[*]-(w)) RETURN p
+    , "p\nnull");
+    // One search per pair of ends, and a WHERE on the ends.
+    try expectResult(db,
+        \\MATCH (s:S {n: 'a'}), (t:S) WHERE t.n IN ['c', 'd', 'z'] MATCH p = shortestPath((s)-[*]->(t)) RETURN t.n, length(p) ORDER BY t.n
+    , "t.n | length(p)\n\"c\" | 2\n\"d\" | 2\n\"z\" | 3");
+    try expectResult(db,
+        \\MATCH p = shortestPath((s:S)-[*]->(t:S)) WHERE s.n = 'b' AND t.n = 'z' RETURN length(p)
+    , "length(p)\n3");
+}
+
+test "lcy: shortestPath errors name what is not supported" {
+    const path = "/tmp/lcy_shortest_errors.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+
+    try expectFailure(db, "MATCH p = shortestPath((a)-[*]->(b)-[*]->(c)) RETURN p", .semantic, "shortestPath() needs one relationship between two nodes");
+    try expectFailure(db, "MATCH p = shortestPath((a)) RETURN p", .semantic, "shortestPath() needs one relationship between two nodes");
+    try expectFailure(db, "MATCH p = shortestPath((a)-[*2..]->(b)) RETURN p", .semantic, "shortestPath() finds paths of at least 0 or 1 relationships, not 2");
+    try expectFailure(db, "MATCH p = shortestPath((a)-[* {w: 1}]->(b)) RETURN p", .semantic, "shortestPath() does not support a property map");
+    try expectFailure(db, "MATCH p = shortestPath((a)-[*]->(b)) WHERE length(p) > 1 RETURN p", .semantic, "A WHERE that reads `p` of a shortestPath() is not supported");
+    try expectFailure(db, "MATCH shortestPath((a)-[r*]->(b)) WHERE all(x IN r WHERE x.w > 1) RETURN a", .semantic, "A WHERE that reads `r` of a shortestPath()");
+    try expectFailure(db, "CREATE p = shortestPath((a)-[:R]->(b))", .parse, "A named path in CREATE is not supported");
+    try expectFailure(db, "CREATE shortestPath((a)-[:R]->(b))", .semantic, "shortestPath() and allShortestPaths() are only supported in MATCH");
+    try expectFailure(db, "MATCH (a), (b) RETURN shortestPath((a)-[*]->(b))", .parse, "only supported as a pattern in MATCH");
+    try expectFailure(db, "MATCH (a), (b) WHERE EXISTS { MATCH shortestPath((a)-[*]->(b)) } RETURN a", .semantic, "only supported in MATCH");
+    try expectFailure(db, "MATCH (a)-->shortestPath((b)-->(c)) RETURN a", .parse, "take a whole pattern");
+    try expectFailure(db, "MATCH p = shortestPath((a)-[*]->(b) RETURN p", .parse, "Expected ')' to close shortestPath()");
+    // The name is not reserved.
+    try expectResult(db, "WITH 1 AS shortestPath RETURN shortestPath", "shortestPath\n1");
+}
+
+// ============================================================================
 // Small fixes
 // ============================================================================
 

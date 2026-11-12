@@ -933,8 +933,6 @@ test "lcy: unsupported constructs are named" {
         .{ .query = "CREATE FULLTEXT INDEX ft FOR (n:T) ON EACH [n.v]", .message = "Schema statements" },
         .{ .query = "OPTIONAL CALL db.labels() YIELD label RETURN label", .message = "OPTIONAL CALL is not supported" },
         .{ .query = "CALL { MATCH (n) RETURN n } RETURN 1", .message = "CALL { ... } subqueries are not supported" },
-        .{ .query = "MATCH p = shortestPath((a)-[*]-(b)) RETURN p", .message = "shortestPath() is not supported" },
-        .{ .query = "MATCH p = allShortestPaths((a)-[*]-(b)) RETURN p", .message = "allShortestPaths() is not supported" },
         .{ .query = "MATCH ((a)-->(b)){1,3} RETURN a", .message = "Parenthesised path patterns, such as the quantified ((a)-->(b)){1,3}, are not supported" },
         .{ .query = "MATCH (n:A|B) RETURN n", .message = "Label expressions (:A|B, :!A, :A&B) are not supported" },
         .{ .query = "MATCH (n:A&B) RETURN n", .message = "label expressions (:A&B, :!A), which are not supported" },

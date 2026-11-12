@@ -289,6 +289,10 @@ pub const Pattern = struct {
     /// `p` in `p = (a)-->(b)`: a variable bound to the whole path.
     path_variable: ?[]const u8 = null,
     path_location: SourceLocation = .{ .line = 0, .column = 0 },
+    /// `shortestPath(...)` or `allShortestPaths(...)` around the pattern.
+    shortest: Shortest = .none,
+
+    pub const Shortest = enum { none, one, all };
 };
 
 /// Element in a pattern (node or edge)

@@ -10,6 +10,7 @@ const std = @import("std");
 const Allocator = std.mem.Allocator;
 
 const ast = @import("ast.zig");
+const ast_util = @import("ast_util.zig");
 const parser_types = @import("parser.zig");
 const expression = @import("expression.zig");
 const aggregate_ops = @import("operators/aggregate.zig");
@@ -143,10 +144,13 @@ pub const SemanticAnalyzer = struct {
 
     fn analyzeClauses(self: *Self, clauses: []const ast.Clause) void {
         // Process clauses in order
-        for (clauses) |clause| {
+        for (clauses, 0..) |clause, i| {
             switch (clause) {
                 .match => |m| self.analyzeMatchClause(m),
-                .where => |w| self.analyzeWhereClause(w),
+                .where => |w| {
+                    self.analyzeWhereClause(w);
+                    if (i > 0 and clauses[i - 1] == .match) self.checkShortestWhere(clauses[i - 1].match, w);
+                },
                 .return_ => |r| self.analyzeReturnClause(r),
                 .order_by => |o| self.analyzeOrderByClause(o),
                 .limit => |l| self.analyzeLimitClause(l),
@@ -175,6 +179,7 @@ pub const SemanticAnalyzer = struct {
 
     fn analyzeMatchClause(self: *Self, clause: *const ast.MatchClause) void {
         for (clause.patterns) |pattern| {
+            if (pattern.shortest != .none) self.checkShortestPattern(pattern);
             for (pattern.elements) |element| {
                 switch (element) {
                     .node => |n| self.registerMatchNode(n),
@@ -196,6 +201,61 @@ pub const SemanticAnalyzer = struct {
                 }
             }
             if (pattern.path_variable) |name| self.registerVariable(name, .alias, pattern.path_location);
+        }
+    }
+
+    /// shortestPath(): one relationship between two nodes, at least zero or
+    /// one long, without a property map.
+    fn checkShortestPattern(self: *Self, pattern: ast.Pattern) void {
+        const loc = pattern.elements[0].node.location;
+        if (pattern.elements.len != 3) {
+            self.addError(.unsupported_pattern, loc, "shortestPath() needs one relationship between two nodes, as in shortestPath((a)-[:R*]->(b))");
+            return;
+        }
+        const edge = pattern.elements[1].edge;
+        const min = if (edge.quantifier) |q| q.min_hops else 1;
+        if (min > 1) {
+            self.addErrorFmt(.unsupported_pattern, edge.location, "shortestPath() finds paths of at least 0 or 1 relationships, not {d}", .{min});
+        }
+        if (edge.properties != null) {
+            self.addError(.unsupported_pattern, edge.location, "shortestPath() does not support a property map on its relationship; the search could not take it into account");
+        }
+    }
+
+    /// A WHERE right after a MATCH filters what the MATCH found. For a
+    /// shortest path it would have to steer the search instead, to find the
+    /// shortest path that passes, so one that reads the path or its
+    /// relationships is refused rather than answered wrongly.
+    fn checkShortestWhere(self: *Self, match: *const ast.MatchClause, where: *const ast.WhereClause) void {
+        var names: [32][]const u8 = undefined;
+        var count: usize = 0;
+        for (match.patterns) |pattern| {
+            if (pattern.shortest == .none) continue;
+            if (pattern.path_variable) |p| {
+                if (count < names.len) names[count] = p;
+                count += 1;
+            }
+            if (pattern.elements.len == 3) if (pattern.elements[1].edge.variable) |r| {
+                if (count < names.len) names[count] = r;
+                count += 1;
+            };
+        }
+        if (count == 0) return;
+        const Only = struct {
+            names: []const []const u8,
+            pub fn skip(self_: @This(), name: []const u8) bool {
+                for (self_.names) |n| if (std.mem.eql(u8, n, name)) return false;
+                return true;
+            }
+        };
+        const only = Only{ .names = names[0..@min(count, names.len)] };
+        if (ast_util.firstFreeVariableWith(where.condition, only)) |name| {
+            self.addErrorFmt(
+                .unsupported_pattern,
+                where.condition.getLocation(),
+                "A WHERE that reads `{s}` of a shortestPath() is not supported: the search finds the shortest path first and would not look for a longer one that passes",
+                .{name},
+            );
         }
     }
 
@@ -304,6 +364,10 @@ pub const SemanticAnalyzer = struct {
         // an existing variable in CREATE means "use this node/edge", not
         // "create a new one".
         for (clause.patterns) |pattern| {
+            if (pattern.shortest != .none) {
+                self.addError(.unsupported_pattern, clause.location, "shortestPath() and allShortestPaths() are only supported in MATCH");
+                return;
+            }
             for (pattern.elements) |element| {
                 switch (element) {
                     .node => |n| {
@@ -515,6 +579,10 @@ pub const SemanticAnalyzer = struct {
     }
 
     fn analyzeMergeClause(self: *Self, clause: *const ast.MergeClause) void {
+        if (clause.pattern.shortest != .none) {
+            self.addError(.unsupported_pattern, clause.location, "shortestPath() and allShortestPaths() are only supported in MATCH");
+            return;
+        }
         const elem_count = clause.pattern.elements.len;
         if (elem_count != 1 and elem_count != 3) {
             self.addError(
@@ -869,6 +937,12 @@ pub const SemanticAnalyzer = struct {
     /// A subquery's patterns are checked as a MATCH, in a scope of its own:
     /// the variables they introduce are gone afterwards.
     fn analyzeSubquery(self: *Self, sq: *const ast.PatternSubquery) void {
+        for (sq.patterns) |pattern| {
+            if (pattern.shortest != .none) {
+                self.addError(.unsupported_pattern, sq.location, "shortestPath() and allShortestPaths() are only supported in MATCH");
+                return;
+            }
+        }
         var outer = self.variables.clone() catch {
             self.addError(.internal_error, sq.location, "Failed to check subquery: out of memory");
             return;

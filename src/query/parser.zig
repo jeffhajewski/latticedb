@@ -1324,10 +1324,17 @@ pub const Parser = struct {
         // names the path.
         var path_variable: ?[]const u8 = null;
         const path_location = self.currentLocation();
-        if (self.checkVariable()) {
+        if (self.checkVariable() and self.shortestKind() == .none) {
             path_variable = self.currentName();
             self.advance();
             if (!self.consume(.eq, "Expected '=' after a path variable")) return null;
+        }
+
+        // shortestPath(pattern) and allShortestPaths(pattern).
+        const shortest = self.shortestKind();
+        if (shortest != .none) {
+            self.advance();
+            self.advance();
         }
 
         // Pattern must start with a node
@@ -1360,11 +1367,22 @@ pub const Parser = struct {
             }
         }
 
+        if (shortest != .none and !self.consume(.rparen, "Expected ')' to close shortestPath()")) return null;
+
         return .{
             .elements = elements.toOwnedSlice(self.arena.allocator()) catch return null,
             .path_variable = path_variable,
             .path_location = path_location,
+            .shortest = shortest,
         };
+    }
+
+    /// Whether the current token starts shortestPath( or allShortestPaths(.
+    fn shortestKind(self: *Self) ast.Pattern.Shortest {
+        if (self.peekType() != .lparen) return .none;
+        if (self.checkWord("shortestpath")) return .one;
+        if (self.checkWord("allshortestpaths")) return .all;
+        return .none;
     }
 
     /// CREATE and MERGE do not bind a named path.
@@ -1380,12 +1398,8 @@ pub const Parser = struct {
 
     fn parseNodePattern(self: *Self) ?ast.NodePattern {
         if (self.peekType() == .lparen) {
-            if (self.checkWord("shortestpath")) {
-                self.errorAtCurrent("shortestPath() is not supported; a variable-length relationship -[*..n]-> finds paths of up to n hops");
-                return null;
-            }
-            if (self.checkWord("allshortestpaths")) {
-                self.errorAtCurrent("allShortestPaths() is not supported; a variable-length relationship -[*..n]-> finds paths of up to n hops");
+            if (self.shortestKind() != .none) {
+                self.errorAtCurrent("shortestPath() and allShortestPaths() take a whole pattern, as in MATCH p = shortestPath((a)-[*]->(b))");
                 return null;
             }
         }
@@ -1797,6 +1811,10 @@ pub const Parser = struct {
             }
 
             // Check for function call
+            if (self.check(.lparen) and (std.ascii.eqlIgnoreCase(name, "shortestpath") or std.ascii.eqlIgnoreCase(name, "allshortestpaths"))) {
+                self.errorAt(loc, "shortestPath() and allShortestPaths() are only supported as a pattern in MATCH, as in MATCH p = shortestPath((a)-[*]->(b))");
+                return null;
+            }
             if (self.match(.lparen)) {
                 // exists((a)-->(b)) is the pattern predicate itself.
                 if (std.ascii.eqlIgnoreCase(name, "exists") and self.check(.lparen)) {

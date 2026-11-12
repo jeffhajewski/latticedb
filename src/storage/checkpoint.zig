@@ -242,6 +242,32 @@ pub const Checkpointer = struct {
 
 /// Configuration for automatic checkpointing
 pub const AutoCheckpointConfig = struct {
+    /// The variable that sets the default for the C API, the bindings and
+    /// the CLI: frames between automatic checkpoints, 0 for none.
+    pub const environment_variable = "LATTICE_AUTO_CHECKPOINT_FRAMES";
+
+    /// The policy `LATTICE_AUTO_CHECKPOINT_FRAMES` asks for: the default one
+    /// with its frame count, or `.off` for 0. Null when it is unset or not a
+    /// whole number.
+    pub fn fromEnvironment() ?EnvironmentSetting {
+        const text = std.c.getenv(environment_variable) orelse return null;
+        const frames = std.fmt.parseInt(u64, std.mem.span(text), 10) catch return null;
+        if (frames == 0) return .off;
+        return .{ .policy = .{ .max_wal_frames = frames } };
+    }
+
+    pub const EnvironmentSetting = union(enum) {
+        off,
+        policy: AutoCheckpointConfig,
+
+        pub fn get(self: EnvironmentSetting) ?AutoCheckpointConfig {
+            return switch (self) {
+                .off => null,
+                .policy => |p| p,
+            };
+        }
+    };
+
     /// WAL frames written before a checkpoint is considered.
     max_wal_frames: u64 = 1000,
     /// Shortest gap between two automatic checkpoints, in nanoseconds.

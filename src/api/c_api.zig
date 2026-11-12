@@ -25,6 +25,7 @@ const QueryFailureStage = database.QueryFailureStage;
 const OpenOptions = database.OpenOptions;
 const DatabaseConfig = database.DatabaseConfig;
 const VectorSearchResult = database.VectorSearchResult;
+const checkpoint_mod = lattice.storage.checkpoint;
 const FtsSearchResult = database.FtsSearchResult;
 const StreamBatch = database.StreamBatch;
 const hash_embed_mod = lattice.vector.hash_embed;
@@ -624,6 +625,22 @@ pub const lattice_full_fsync = enum(u8) {
     off = 1,
     on = 2,
     _,
+};
+
+/// Values of lattice_checkpoint's mode.
+pub const lattice_checkpoint_mode = enum(c_int) {
+    passive = 0,
+    full = 1,
+    truncate = 2,
+    _,
+};
+
+/// What lattice_checkpoint reports.
+pub const lattice_checkpoint_stats = extern struct {
+    pages_flushed: u32,
+    duration_ns: u64,
+    checkpoint_lsn: u64,
+    wal_truncated: bool,
 };
 
 /// Values of lattice_open_options_v5.vector_metric.
@@ -1596,6 +1613,12 @@ fn adoptDatabase(db: *Database, db_out: *?*lattice_database) lattice_error {
         return register_result;
     }
 
+    // The default for a caller that does not choose: commits checkpoint as
+    // the variable says, while open and close still fold the log in.
+    if (checkpoint_mod.AutoCheckpointConfig.fromEnvironment()) |setting| {
+        db.setAutoCheckpoint(setting.get());
+    }
+
     db_out.* = toOpaque(lattice_database, handle);
     return .ok;
 }
@@ -1702,6 +1725,60 @@ pub export fn lattice_close(db: ?*lattice_database) lattice_error {
     detachDb(handle);
 
     return close_error orelse .ok;
+}
+
+/// Fold the log into the database file now.
+pub export fn lattice_checkpoint(
+    db: ?*lattice_database,
+    mode: lattice_checkpoint_mode,
+    stats_out: ?*lattice_checkpoint_stats,
+) lattice_error {
+    const handle = acquireDb(db) orelse return .err_invalid_arg;
+    defer releaseDb(handle);
+    const zig_mode: checkpoint_mod.CheckpointMode = switch (mode) {
+        .passive => .passive,
+        .full => .full,
+        .truncate => .truncate,
+        _ => return .err_invalid_arg,
+    };
+
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const active = ensureActiveDbLocked(handle);
+    if (active != .ok) return active;
+    if (handle.db.read_only) return .err_read_only;
+
+    const stats = handle.db.checkpoint(zig_mode) catch |err| return mapDatabaseError(err);
+    if (stats_out) |out| {
+        out.* = if (stats) |s| .{
+            .pages_flushed = s.pages_flushed,
+            .duration_ns = s.duration_ns,
+            .checkpoint_lsn = s.checkpoint_lsn,
+            .wal_truncated = s.wal_truncated,
+        } else .{ .pages_flushed = 0, .duration_ns = 0, .checkpoint_lsn = 0, .wal_truncated = false };
+    }
+    return .ok;
+}
+
+/// Set how commits checkpoint from now on; 0 frames switches them off.
+pub export fn lattice_set_auto_checkpoint(
+    db: ?*lattice_database,
+    max_wal_frames: u64,
+    min_interval_ms: u64,
+) lattice_error {
+    const handle = acquireDb(db) orelse return .err_invalid_arg;
+    defer releaseDb(handle);
+
+    handle.mutex.lock();
+    defer handle.mutex.unlock();
+    const active = ensureActiveDbLocked(handle);
+    if (active != .ok) return active;
+
+    handle.db.setAutoCheckpoint(if (max_wal_frames == 0) null else .{
+        .max_wal_frames = max_wal_frames,
+        .min_interval_ns = std.math.mul(u64, min_interval_ms, std.time.ns_per_ms) catch std.math.maxInt(u64),
+    });
+    return .ok;
 }
 
 /// Wake every `lattice_stream_read` waiting on this database and wait for them

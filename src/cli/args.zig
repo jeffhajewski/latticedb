@@ -252,6 +252,10 @@ pub const Args = struct {
     trim: bool = false,
     /// --cache-size; null when not given: LATTICE_BUFFER_POOL_MB if set, else 64.
     cache_size_mb: ?u32 = null,
+    /// --auto-checkpoint: log frames between the checkpoints commits run, 0
+    /// for none; null when not given (LATTICE_AUTO_CHECKPOINT_FRAMES, else
+    /// the engine's 1000).
+    auto_checkpoint_frames: ?u64 = null,
     page_size: u32 = 4096,
 
     // Import options
@@ -346,6 +350,11 @@ pub const Args = struct {
                     const value = arg["--cache-size=".len..];
                     args.cache_size_mb = std.fmt.parseInt(u32, value, 10) catch {
                         return error.InvalidCacheSize;
+                    };
+                } else if (std.mem.startsWith(u8, arg, "--auto-checkpoint=")) {
+                    const value = arg["--auto-checkpoint=".len..];
+                    args.auto_checkpoint_frames = std.fmt.parseInt(u64, value, 10) catch {
+                        return error.InvalidAutoCheckpoint;
                     };
                 } else if (std.mem.startsWith(u8, arg, "--page-size=")) {
                     const value = arg["--page-size=".len..];
@@ -458,6 +467,7 @@ pub const Error = error{
     VectorOptionWithoutEnableVector,
     IntervalWithoutFollow,
     InvalidCacheSize,
+    InvalidAutoCheckpoint,
     InvalidPageSize,
     InvalidBatchSize,
     UnknownOption,
@@ -561,6 +571,17 @@ test "lfmt vector options without --enable-vector are refused, not ignored" {
         var with = try Args.parse(allocator, &.{ "lattice", "create", "t.db", option, "--enable-vector" });
         with.deinit(allocator);
     }
+}
+
+test "lfmt --auto-checkpoint takes a frame count, 0 for none" {
+    const allocator = std.testing.allocator;
+    var off = try Args.parse(allocator, &.{ "lattice", "exec", "t.db", "--auto-checkpoint=0" });
+    defer off.deinit(allocator);
+    try std.testing.expectEqual(@as(?u64, 0), off.auto_checkpoint_frames);
+    var plain = try Args.parse(allocator, &.{ "lattice", "exec", "t.db" });
+    defer plain.deinit(allocator);
+    try std.testing.expect(plain.auto_checkpoint_frames == null);
+    try std.testing.expectError(error.InvalidAutoCheckpoint, Args.parse(allocator, &.{ "lattice", "exec", "t.db", "--auto-checkpoint=-1" }));
 }
 
 test "lfmt --interval without --follow is refused, not ignored" {

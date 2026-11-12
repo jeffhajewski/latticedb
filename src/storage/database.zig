@@ -1269,6 +1269,10 @@ pub const Database = struct {
     txn_overlays: std.AutoHashMap(u64, TxnOverlay),
     /// When the last automatic checkpoint ran, for the minimum-interval check.
     last_auto_checkpoint_ns: i128,
+    /// The policy commits checkpoint by: `config.auto_checkpoint` as opened,
+    /// then whatever `setAutoCheckpoint` last set. Whether the log is folded
+    /// in at open and close stays with `config.auto_checkpoint`.
+    auto_checkpoint: ?checkpoint_mod.AutoCheckpointConfig,
     active_writer_txn_id: ?u64,
     /// Set when a commit that is already in the log could not be applied, or
     /// when the log could not be synced. What this handle holds in memory no
@@ -1805,6 +1809,7 @@ pub const Database = struct {
         }
         self.txn_overlays = std.AutoHashMap(u64, TxnOverlay).init(allocator);
         self.last_auto_checkpoint_ns = @import("compat").nanoTimestamp();
+        self.auto_checkpoint = options.config.auto_checkpoint;
         self.active_writer_txn_id = null;
         self.failed = false;
         self.fail_next_apply_for_testing = false;
@@ -1909,6 +1914,29 @@ pub const Database = struct {
         _ = self.buffer_pool.flushAll() catch {};
     }
 
+    /// Change how commits checkpoint from now on: after `max_wal_frames`
+    /// frames, at most once per `min_interval_ns`; null stops them, leaving
+    /// checkpoints to `checkpoint`.
+    ///
+    /// Only commits follow it. Whether the log is folded into the file when
+    /// the database is opened and closed is decided by
+    /// `config.auto_checkpoint` as it was opened, so a handle opened with a
+    /// policy that switches it off here still leaves a single-file database
+    /// behind when it closes.
+    ///
+    /// The trade-off: a larger `max_wal_frames` means fewer checkpoints, each
+    /// longer (a checkpoint writes every page dirtied since the last one), a
+    /// longer log on disk and more to replay after a crash. A smaller one
+    /// means shorter pauses, more often.
+    pub fn setAutoCheckpoint(self: *Self, policy: ?checkpoint_mod.AutoCheckpointConfig) void {
+        self.auto_checkpoint = policy;
+    }
+
+    /// The policy commits checkpoint by, as `setAutoCheckpoint` describes.
+    pub fn autoCheckpoint(self: *const Self) ?checkpoint_mod.AutoCheckpointConfig {
+        return self.auto_checkpoint;
+    }
+
     pub fn checkpointWal(self: *Self, mode: checkpoint_mod.CheckpointMode) DatabaseError!void {
         _ = self.checkpoint(mode) catch |err| return err;
     }
@@ -2008,7 +2036,7 @@ pub const Database = struct {
     /// hold it back, so a long-lived reader no longer lets the log grow
     /// without limit.
     fn maybeAutoCheckpoint(self: *Self) void {
-        const policy = self.config.auto_checkpoint orelse return;
+        const policy = self.auto_checkpoint orelse return;
         if (self.read_only) return;
 
         const wal = if (self.wal) |*w| w else return;

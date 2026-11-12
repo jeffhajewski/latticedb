@@ -397,6 +397,68 @@ lattice_error lattice_open_v5(
 lattice_error lattice_close(lattice_database* db);
 
 /*
+ * Checkpoints
+ *
+ * A commit is durable once it is in the log (the -wal file). A checkpoint
+ * writes the pages the log's commits changed into the database file, through
+ * the flush journal, and can then empty the log. By default a commit runs one
+ * once the log holds 1000 frames (LATTICE_AUTO_CHECKPOINT_FRAMES in the
+ * environment sets another default, 0 for none), and opening and closing a
+ * database fold whatever the log holds into the file.
+ *
+ * The interval is a trade-off. A larger one means fewer checkpoints, each a
+ * longer pause for the commit that runs it (it writes every page changed
+ * since the last one), a longer log on disk and more to replay after a crash.
+ * A smaller one means shorter pauses, more often.
+ */
+
+typedef enum {
+    /* Write the changed pages and record the checkpoint in the log, but give
+     * way if any changed page is in use: then nothing is written and the
+     * stats report 0 pages. Leaves the log in place. */
+    LATTICE_CHECKPOINT_PASSIVE = 0,
+    /* Write every changed page. Leaves the log in place, so anything reading
+     * it (replication) keeps its position. */
+    LATTICE_CHECKPOINT_FULL = 1,
+    /* FULL, then empty the log. The only mode that bounds the log's size; what
+     * automatic checkpoints use. */
+    LATTICE_CHECKPOINT_TRUNCATE = 2
+} lattice_checkpoint_mode;
+
+typedef struct {
+    uint32_t pages_flushed;  /* Pages written into the database file */
+    uint64_t duration_ns;    /* How long the checkpoint took */
+    uint64_t checkpoint_lsn; /* The log position the file now holds */
+    bool wal_truncated;      /* Whether the log was emptied */
+} lattice_checkpoint_stats;
+
+/* Checkpoint now. stats_out may be NULL.
+ * An open transaction does not hold a checkpoint back while its changes are
+ * held in memory, which is how they are kept until commit. Should one already
+ * have records in the log, every mode is refused with
+ * LATTICE_ERROR_LOCK_TIMEOUT, because a checkpoint would cut its commit off
+ * from them. Returns LATTICE_ERROR_READ_ONLY for a read-only handle,
+ * LATTICE_ERROR_INVALID_ARG for an unknown mode, and LATTICE_ERROR_IO if
+ * writing failed (the log still holds every commit). */
+lattice_error lattice_checkpoint(
+    lattice_database* db,
+    lattice_checkpoint_mode mode,
+    lattice_checkpoint_stats* stats_out
+);
+
+/* Set when commits checkpoint (TRUNCATE) from now on: once the log holds
+ * max_wal_frames frames, and no sooner than min_interval_ms after the last
+ * automatic checkpoint (0 for no minimum). max_wal_frames 0 switches automatic
+ * checkpoints off, leaving them to lattice_checkpoint; the log then grows until
+ * one runs. Either way, close still folds the log into the file. Overrides
+ * LATTICE_AUTO_CHECKPOINT_FRAMES. Has no effect on a read-only handle. */
+lattice_error lattice_set_auto_checkpoint(
+    lattice_database* db,
+    uint64_t max_wal_frames,
+    uint64_t min_interval_ms
+);
+
+/*
  * Transaction operations
  */
 

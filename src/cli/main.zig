@@ -102,6 +102,7 @@ pub fn main(init: std.process.Init) !u8 {
             error.VectorOptionWithoutEnableVector => output.printError(stderr, "--vector-dims, --vector-metric, --vector-m and --vector-ef-construction need --enable-vector.", .{}),
             error.IntervalWithoutFollow => output.printError(stderr, "--interval needs --follow.", .{}),
             error.InvalidCacheSize => output.printError(stderr, "Invalid cache size. Must be a positive integer.", .{}),
+            error.InvalidAutoCheckpoint => output.printError(stderr, "Invalid --auto-checkpoint. Must be a whole number of log frames, 0 for none.", .{}),
             error.InvalidPageSize => output.printError(stderr, "Invalid page size. Must be in the range 4096..65535 bytes.", .{}),
             error.InvalidBatchSize => output.printError(stderr, "Invalid batch size. Must be a positive integer.", .{}),
             error.InvalidInterval => output.printError(stderr, "Invalid interval. Must be a whole number of seconds, at least 1.", .{}),
@@ -510,6 +511,7 @@ fn cmdQuery(
         break :blk reader;
     };
     defer db.close();
+    applyAutoCheckpoint(db, parsed_args);
 
     // Start REPL
     var repl = Repl.init(allocator, db, parsed_args.format);
@@ -1082,9 +1084,24 @@ fn openDatabase(
     mode: OpenMode,
 ) !*Database {
     const path = parsed_args.path.?;
-    return Database.open(allocator, path, openOptions(parsed_args, mode)) catch |err| {
+    const db = Database.open(allocator, path, openOptions(parsed_args, mode)) catch |err| {
         return failOpen(stderr, path, err, parsed_args.enable_vector);
     };
+    applyAutoCheckpoint(db, parsed_args);
+    return db;
+}
+
+/// How commits checkpoint: --auto-checkpoint, else
+/// LATTICE_AUTO_CHECKPOINT_FRAMES, else the engine's default. Off (0) stops
+/// the checkpoints commits run; the database is still folded into its file
+/// when the command closes it.
+fn applyAutoCheckpoint(db: *Database, parsed_args: *const Args) void {
+    const AutoCheckpointConfig = lattice.storage.checkpoint.AutoCheckpointConfig;
+    if (parsed_args.auto_checkpoint_frames) |frames| {
+        db.setAutoCheckpoint(if (frames == 0) null else .{ .max_wal_frames = frames });
+    } else if (AutoCheckpointConfig.fromEnvironment()) |setting| {
+        db.setAutoCheckpoint(setting.get());
+    }
 }
 
 /// What a file in a format this build cannot read gets, from every command.
@@ -1715,17 +1732,19 @@ fn openImportTarget(
     options.config.vector_m = declared.m;
     options.config.vector_ef_construction = declared.ef_construction;
 
-    return Database.open(allocator, path, options) catch |err| {
+    const db = Database.open(allocator, path, options) catch |err| blk: {
         // A database with an index that the file's settings contradict:
         // open it with its own, which the import then checks the vectors
         // against.
         if (err == DatabaseError.VectorConfigMismatch) {
-            return Database.open(allocator, path, plain) catch |retry_err| {
+            break :blk Database.open(allocator, path, plain) catch |retry_err| {
                 return failOpen(stderr, path, retry_err, parsed_args.enable_vector);
             };
         }
         return failOpen(stderr, path, err, parsed_args.enable_vector);
     };
+    applyAutoCheckpoint(db, parsed_args);
+    return db;
 }
 
 const CsvPair = struct {
@@ -2059,6 +2078,9 @@ fn printUsage(writer: anytype) void {
         \\  --no-fts              Disable full-text search
         \\  --cache-size=<mb>     Buffer pool size in MB (default: LATTICE_BUFFER_POOL_MB, else 64)
         \\  --page-size=<bytes>   Page size in bytes, 4096..65535 (default: 4096)
+        \\  --auto-checkpoint=<n> Checkpoint after n log frames, 0 for never during
+        \\                        the command (default: LATTICE_AUTO_CHECKPOINT_FRAMES,
+        \\                        else 1000). Closing still checkpoints.
         \\  --file=<path>         Input/output file for import/export
         \\  --query=<cypher>      Query string for exec command
         \\  --no-lock             Skip the file lock, for filesystems without one

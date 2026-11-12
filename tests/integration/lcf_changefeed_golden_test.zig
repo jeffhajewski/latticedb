@@ -2,7 +2,9 @@
 //! kind of event, compared with what 0.17.0-dev returned before the
 //! changefeed's storage changed (lcf_changefeed_golden.txt, captured from the
 //! code before that change). The encoding on disk and in the log may change;
-//! what an application reads may not.
+//! what an application reads may not. One deliberate change since: within a
+//! transaction, an edge's deletion now comes before its node's (events 23
+//! and 24; see lcf_changefeed_order_test.zig).
 
 const std = @import("std");
 const lattice = @import("lattice");

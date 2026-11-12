@@ -24,6 +24,7 @@ const llv_label_vector_test = @import("llv_label_vector_test.zig");
 const lrdf_rdf_test = @import("lrdf_rdf_test.zig");
 const lgr_graph_storage_test = @import("lgr_graph_storage_test.zig");
 const lcf_changefeed_golden_test = @import("lcf_changefeed_golden_test.zig");
+const lcf_changefeed_order_test = @import("lcf_changefeed_order_test.zig");
 const lcf_changefeed_retention_test = @import("lcf_changefeed_retention_test.zig");
 const lcy_cypher_features_test = @import("lcy_cypher_features_test.zig");
 const lnl_nolog_test = @import("lnl_nolog_test.zig");
@@ -67,6 +68,7 @@ test {
     // Graph storage: edge updates, ordered property indexes, type scans
     _ = lgr_graph_storage_test;
     _ = lcf_changefeed_golden_test;
+    _ = lcf_changefeed_order_test;
     _ = lcf_changefeed_retention_test;
     // OPTIONAL MATCH, UNION, CASE, comprehensions, paths, CALL, FOREACH
     _ = lcy_cypher_features_test;

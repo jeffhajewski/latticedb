@@ -864,6 +864,10 @@ const TxnOverlay = struct {
     stream_last_sequences: std.StringHashMapUnmanaged(u64) = .empty,
     /// The changefeed events of this transaction, staged at commit.
     changefeed: changefeed_mod.Batch = .{},
+    /// The ids of `node_states` and `edge_states` in ascending order, sorted
+    /// once at commit when the changefeed is staged and used again to apply.
+    sorted_node_ids: ?[]NodeId = null,
+    sorted_edge_ids: ?[]EdgeId = null,
     has_staged_writes: bool = false,
     /// Staged nodes by indexed value, for index lookups in the transaction.
     node_lookup: OverlayLookup = .{},
@@ -903,6 +907,8 @@ const TxnOverlay = struct {
 
         self.stream_last_sequences.deinit(allocator);
         self.changefeed.deinit(allocator);
+        if (self.sorted_node_ids) |ids| allocator.free(ids);
+        if (self.sorted_edge_ids) |ids| allocator.free(ids);
         for (self.stream_appends.items) |*append| {
             append.deinit(allocator);
         }
@@ -1014,6 +1020,17 @@ fn emptyProperties(allocator: Allocator) Allocator.Error![]node_mod.Property {
 fn sortedKeysAlloc(comptime K: type, allocator: Allocator, map: anytype) ?[]K {
     if (map.count() < 2) return null;
     const keys = allocator.alloc(K, map.count()) catch return null;
+    var iter = map.keyIterator();
+    var i: usize = 0;
+    while (iter.next()) |key| : (i += 1) keys[i] = key.*;
+    std.mem.sortUnstable(K, keys, {}, std.sort.asc(K));
+    return keys;
+}
+
+/// The keys of an id-keyed map in ascending order, always (unlike
+/// sortedKeysAlloc, which may fall back to the map's own order).
+fn sortedIdsAlloc(comptime K: type, allocator: Allocator, map: anytype) Allocator.Error![]K {
+    const keys = try allocator.alloc(K, map.count());
     var iter = map.keyIterator();
     var i: usize = 0;
     while (iter.next()) |key| : (i += 1) keys[i] = key.*;
@@ -3040,7 +3057,10 @@ pub const Database = struct {
         // fill their pages densely, instead of in hash-map order, which
         // splits them down the middle. Order does not change the outcome:
         // each state is applied on its own.
-        if (sortedKeysAlloc(NodeId, self.allocator, &overlay.node_states)) |ids| {
+        // Staging the changefeed has usually sorted them already.
+        if (overlay.sorted_node_ids) |ids| {
+            for (ids) |node_id| try self.applyNodeState(node_id, overlay.node_states.get(node_id).?);
+        } else if (sortedKeysAlloc(NodeId, self.allocator, &overlay.node_states)) |ids| {
             defer self.allocator.free(ids);
             for (ids) |node_id| try self.applyNodeState(node_id, overlay.node_states.get(node_id).?);
         } else {
@@ -3050,7 +3070,9 @@ pub const Database = struct {
             }
         }
 
-        if (sortedKeysAlloc(EdgeId, self.allocator, &overlay.edge_states)) |ids| {
+        if (overlay.sorted_edge_ids) |ids| {
+            for (ids) |edge_id| try self.applyEdgeState(edge_id, overlay.edge_states.get(edge_id).?);
+        } else if (sortedKeysAlloc(EdgeId, self.allocator, &overlay.edge_states)) |ids| {
             defer self.allocator.free(ids);
             for (ids) |edge_id| try self.applyEdgeState(edge_id, overlay.edge_states.get(edge_id).?);
         } else {
@@ -5776,126 +5798,162 @@ pub const Database = struct {
     /// comparing each node and edge it touched with its committed state.
     /// Events are encoded as they are found (see `stream/changefeed.zig`);
     /// symbols go in by id, and the log carries their names.
+    ///
+    /// The events are the transaction's net effect, in an order a consumer
+    /// applying them in sequence can replay: first the edges it deletes,
+    /// then the nodes that exist after it, then the edges that exist after
+    /// it, then the nodes it deletes, each group in ascending id order. So an edge is created after both its nodes and
+    /// deleted before either, a change to an entity comes after its
+    /// creation, and a node's deletion is the last event that names it. A
+    /// property set several times is one event, from its value before the
+    /// transaction to its value after.
     fn stageGraphChangefeed(self: *Self, overlay: *TxnOverlay) DatabaseError!void {
         if (self.changefeed_retention == .off) return;
         if (overlay.node_states.count() == 0 and overlay.edge_states.count() == 0) return;
         const commit_ms: u64 = @intCast(@max(0, @import("compat").milliTimestamp()));
 
-        var node_iter = overlay.node_states.iterator();
-        while (node_iter.next()) |entry| {
-            const node_id = entry.key_ptr.*;
-            const state = entry.value_ptr.*;
-            const current = try self.readBaseNodeState(node_id);
-            defer if (current) |existing| {
-                var owned_existing = existing;
-                owned_existing.deinit(self.allocator);
-            };
+        // Kept on the overlay: applying it walks the ids in the same order.
+        if (overlay.sorted_node_ids == null) {
+            overlay.sorted_node_ids = sortedIdsAlloc(NodeId, self.allocator, &overlay.node_states) catch
+                return DatabaseError.OutOfMemory;
+        }
+        if (overlay.sorted_edge_ids == null) {
+            overlay.sorted_edge_ids = sortedIdsAlloc(EdgeId, self.allocator, &overlay.edge_states) catch
+                return DatabaseError.OutOfMemory;
+        }
+        const node_ids = overlay.sorted_node_ids.?;
+        const edge_ids = overlay.sorted_edge_ids.?;
 
-            if (!state.exists) {
-                if (current != null) {
-                    try self.stageChangefeedEvent(overlay, .{ .op = .node_delete, .id = node_id }, commit_ms);
-                }
-                continue;
+        for (edge_ids) |id| {
+            const state = overlay.edge_states.get(id).?;
+            if (!state.exists) try self.stageEdgeChangefeed(overlay, id, state, commit_ms);
+        }
+        for (node_ids) |id| {
+            const state = overlay.node_states.get(id).?;
+            if (state.exists) try self.stageNodeChangefeed(overlay, id, state, commit_ms);
+        }
+        for (edge_ids) |id| {
+            const state = overlay.edge_states.get(id).?;
+            if (state.exists) try self.stageEdgeChangefeed(overlay, id, state, commit_ms);
+        }
+        for (node_ids) |id| {
+            const state = overlay.node_states.get(id).?;
+            if (!state.exists) try self.stageNodeChangefeed(overlay, id, state, commit_ms);
+        }
+    }
+
+    /// The events for one node: the difference between its committed state
+    /// and `state`.
+    fn stageNodeChangefeed(self: *Self, overlay: *TxnOverlay, node_id: NodeId, state: TxnNodeState, commit_ms: u64) DatabaseError!void {
+        const current = try self.readBaseNodeState(node_id);
+        defer if (current) |existing| {
+            var owned_existing = existing;
+            owned_existing.deinit(self.allocator);
+        };
+
+        if (!state.exists) {
+            if (current != null) {
+                try self.stageChangefeedEvent(overlay, .{ .op = .node_delete, .id = node_id }, commit_ms);
             }
-
-            if (current) |existing| {
-                for (existing.labels) |label_id| {
-                    if (!containsSymbolId(state.labels, label_id)) {
-                        try self.stageChangefeedEvent(overlay, .{ .op = .node_label_remove, .id = node_id, .symbol = .{ .id = label_id } }, commit_ms);
-                    }
-                }
-                for (state.labels) |label_id| {
-                    if (!containsSymbolId(existing.labels, label_id)) {
-                        try self.stageChangefeedEvent(overlay, .{ .op = .node_label_add, .id = node_id, .symbol = .{ .id = label_id } }, commit_ms);
-                    }
-                }
-
-                for (existing.properties) |prop| {
-                    if (findPropertyById(state.properties, prop.key_id) == null) {
-                        try self.stageChangefeedProperty(overlay, .node_property_remove, node_id, prop.key_id, prop.value, null, commit_ms);
-                    }
-                }
-                for (state.properties) |prop| {
-                    const old_prop = findPropertyById(existing.properties, prop.key_id);
-                    if (old_prop) |old| {
-                        if (propertyValueEqual(old.value, prop.value)) continue;
-                    }
-                    try self.stageChangefeedProperty(
-                        overlay,
-                        .node_property_set,
-                        node_id,
-                        prop.key_id,
-                        if (old_prop) |old| old.value else null,
-                        prop.value,
-                        commit_ms,
-                    );
-                }
-            } else {
-                try self.stageChangefeedEvent(overlay, .{ .op = .node_insert, .id = node_id }, commit_ms);
-                for (state.labels) |label_id| {
-                    try self.stageChangefeedEvent(overlay, .{ .op = .node_label_add, .id = node_id, .symbol = .{ .id = label_id } }, commit_ms);
-                }
-                for (state.properties) |prop| {
-                    try self.stageChangefeedProperty(overlay, .node_property_set, node_id, prop.key_id, null, prop.value, commit_ms);
-                }
-            }
+            return;
         }
 
-        var edge_iter = overlay.edge_states.iterator();
-        while (edge_iter.next()) |entry| {
-            const edge_id = entry.key_ptr.*;
-            const state = entry.value_ptr.*;
-            const current = try self.readBaseEdgeState(edge_id);
-            defer if (current) |existing| {
-                var owned_existing = existing;
-                owned_existing.deinit(self.allocator);
-            };
-
-            if (!state.exists) {
-                if (current) |existing| {
-                    try self.stageChangefeedEvent(overlay, .{
-                        .op = .edge_delete,
-                        .id = edge_id,
-                        .source = existing.source,
-                        .target = existing.target,
-                        .symbol = .{ .id = existing.edge_type },
-                    }, commit_ms);
+        if (current) |existing| {
+            for (existing.labels) |label_id| {
+                if (!containsSymbolId(state.labels, label_id)) {
+                    try self.stageChangefeedEvent(overlay, .{ .op = .node_label_remove, .id = node_id, .symbol = .{ .id = label_id } }, commit_ms);
                 }
-                continue;
+            }
+            for (state.labels) |label_id| {
+                if (!containsSymbolId(existing.labels, label_id)) {
+                    try self.stageChangefeedEvent(overlay, .{ .op = .node_label_add, .id = node_id, .symbol = .{ .id = label_id } }, commit_ms);
+                }
             }
 
+            for (existing.properties) |prop| {
+                if (findPropertyById(state.properties, prop.key_id) == null) {
+                    try self.stageChangefeedProperty(overlay, .node_property_remove, node_id, prop.key_id, prop.value, null, commit_ms);
+                }
+            }
+            for (state.properties) |prop| {
+                const old_prop = findPropertyById(existing.properties, prop.key_id);
+                if (old_prop) |old| {
+                    if (propertyValueEqual(old.value, prop.value)) continue;
+                }
+                try self.stageChangefeedProperty(
+                    overlay,
+                    .node_property_set,
+                    node_id,
+                    prop.key_id,
+                    if (old_prop) |old| old.value else null,
+                    prop.value,
+                    commit_ms,
+                );
+            }
+        } else {
+            try self.stageChangefeedEvent(overlay, .{ .op = .node_insert, .id = node_id }, commit_ms);
+            for (state.labels) |label_id| {
+                try self.stageChangefeedEvent(overlay, .{ .op = .node_label_add, .id = node_id, .symbol = .{ .id = label_id } }, commit_ms);
+            }
+            for (state.properties) |prop| {
+                try self.stageChangefeedProperty(overlay, .node_property_set, node_id, prop.key_id, null, prop.value, commit_ms);
+            }
+        }
+    }
+
+    /// The events for one edge: the difference between its committed state
+    /// and `state`.
+    fn stageEdgeChangefeed(self: *Self, overlay: *TxnOverlay, edge_id: EdgeId, state: TxnEdgeState, commit_ms: u64) DatabaseError!void {
+        const current = try self.readBaseEdgeState(edge_id);
+        defer if (current) |existing| {
+            var owned_existing = existing;
+            owned_existing.deinit(self.allocator);
+        };
+
+        if (!state.exists) {
             if (current) |existing| {
-                for (existing.properties) |prop| {
-                    if (findPropertyById(state.properties, prop.key_id) == null) {
-                        try self.stageChangefeedProperty(overlay, .edge_property_remove, edge_id, prop.key_id, prop.value, null, commit_ms);
-                    }
-                }
-                for (state.properties) |prop| {
-                    const old_prop = findPropertyById(existing.properties, prop.key_id);
-                    if (old_prop) |old| {
-                        if (propertyValueEqual(old.value, prop.value)) continue;
-                    }
-                    try self.stageChangefeedProperty(
-                        overlay,
-                        .edge_property_set,
-                        edge_id,
-                        prop.key_id,
-                        if (old_prop) |old| old.value else null,
-                        prop.value,
-                        commit_ms,
-                    );
-                }
-            } else {
                 try self.stageChangefeedEvent(overlay, .{
-                    .op = .edge_insert,
+                    .op = .edge_delete,
                     .id = edge_id,
-                    .source = state.source,
-                    .target = state.target,
-                    .symbol = .{ .id = state.edge_type },
+                    .source = existing.source,
+                    .target = existing.target,
+                    .symbol = .{ .id = existing.edge_type },
                 }, commit_ms);
-                for (state.properties) |prop| {
-                    try self.stageChangefeedProperty(overlay, .edge_property_set, edge_id, prop.key_id, null, prop.value, commit_ms);
+            }
+            return;
+        }
+
+        if (current) |existing| {
+            for (existing.properties) |prop| {
+                if (findPropertyById(state.properties, prop.key_id) == null) {
+                    try self.stageChangefeedProperty(overlay, .edge_property_remove, edge_id, prop.key_id, prop.value, null, commit_ms);
                 }
+            }
+            for (state.properties) |prop| {
+                const old_prop = findPropertyById(existing.properties, prop.key_id);
+                if (old_prop) |old| {
+                    if (propertyValueEqual(old.value, prop.value)) continue;
+                }
+                try self.stageChangefeedProperty(
+                    overlay,
+                    .edge_property_set,
+                    edge_id,
+                    prop.key_id,
+                    if (old_prop) |old| old.value else null,
+                    prop.value,
+                    commit_ms,
+                );
+            }
+        } else {
+            try self.stageChangefeedEvent(overlay, .{
+                .op = .edge_insert,
+                .id = edge_id,
+                .source = state.source,
+                .target = state.target,
+                .symbol = .{ .id = state.edge_type },
+            }, commit_ms);
+            for (state.properties) |prop| {
+                try self.stageChangefeedProperty(overlay, .edge_property_set, edge_id, prop.key_id, null, prop.value, commit_ms);
             }
         }
     }

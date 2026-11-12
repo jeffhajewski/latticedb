@@ -104,3 +104,63 @@ test "lcf c_api: an invalid changefeed policy is refused" {
     try std.testing.expectEqual(lattice_error.err_invalid_arg, c_api.lattice_open_v5(path, &unknown, &db));
     try std.testing.expect(db == null);
 }
+
+/// "kind id" for each changefeed event after `after`, one per line.
+fn renderChanges(buf: []u8, db: ?*lattice_database, after: u64) ![]const u8 {
+    var batch: ?*lattice_stream_batch = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_stream_read(db, "__lattice_changes", "__lattice_changes".len, after, 1000, 0, &batch));
+    defer c_api.lattice_stream_batch_free(batch);
+    var len: usize = 0;
+    for (0..c_api.lattice_stream_batch_count(batch)) |i| {
+        var sequence: u64 = 0;
+        var kind: [*c]const u8 = null;
+        var kind_len: usize = 0;
+        var payload: ?*const c_api.lattice_value = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_stream_batch_get(batch, i, &sequence, &kind, &kind_len, &payload));
+        const map = payload.?.data.map_val.?;
+        var id: i64 = -1;
+        for (map.entries[0..map.len]) |entry| {
+            const key = entry.key[0..entry.key_len];
+            if (std.mem.eql(u8, key, "node_id") or std.mem.eql(u8, key, "edge_id")) id = entry.value.data.int_val;
+        }
+        const line = try std.fmt.bufPrint(buf[len..], "{s} {d}\n", .{ kind[0..kind_len], id });
+        len += line.len;
+    }
+    return buf[0..len];
+}
+
+test "lcf c_api: a transaction's events come edges deleted, nodes, edges, nodes deleted, by id" {
+    const path = "/tmp/lcfo_capi_order.db";
+    cleanup(path);
+    defer cleanup(path);
+
+    var db: ?*lattice_database = null;
+    const options = Options{ .create = true };
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open_v5(path, &options, &db));
+    defer _ = c_api.lattice_close(db);
+
+    // Ten nodes in a ring, made in one transaction: nodes 1..10, then edges
+    // 1..10, whatever order the transaction keeps them in.
+    var txn: ?*lattice_txn = null;
+    var ids: [10]lattice_node_id = undefined;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+    for (&ids) |*id| try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "N", id));
+    for (ids, 0..) |id, i| {
+        var edge: c_api.lattice_edge_id = 0;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, id, ids[(i + 1) % ids.len], "NEXT", &edge));
+    }
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+
+    var buf: [4096]u8 = undefined;
+    var want: std.ArrayListUnmanaged(u8) = .empty;
+    defer want.deinit(std.testing.allocator);
+    for (1..11) |id| try want.print(std.testing.allocator, "node.insert {d}\nnode.label_add {d}\n", .{ id, id });
+    for (1..11) |id| try want.print(std.testing.allocator, "edge.insert {d}\n", .{id});
+    try std.testing.expectEqualStrings(want.items, try renderChanges(&buf, db, 0));
+
+    // Deleting node 3 with its two edges: the edges go first.
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_detach_delete(txn, ids[2]));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+    try std.testing.expectEqualStrings("edge.delete 2\nedge.delete 3\nnode.delete 3\n", try renderChanges(&buf, db, 30));
+}

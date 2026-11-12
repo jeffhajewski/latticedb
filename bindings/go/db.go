@@ -29,6 +29,11 @@ func Open(path string, opts OpenOptions) (*DB, error) {
 		EnableVector:         opts.vectorsEnabled(),
 		VectorDimensions:     opts.VectorDimensions,
 		Lock:                 !opts.DisableLock,
+		SyncMode:             uint8(opts.SyncMode),
+		FullFsync:            uint8(opts.FullFsync),
+		VectorMetric:         uint8(opts.VectorMetric),
+		VectorM:              opts.VectorM,
+		VectorEfConstruction: opts.VectorEfConstruction,
 	})
 	if err != nil {
 		return nil, wrapError(err)

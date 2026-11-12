@@ -14,23 +14,25 @@ import (
 type ErrorCode int
 
 const (
-	ErrorOK              ErrorCode = 0
-	ErrorGeneric         ErrorCode = -1
-	ErrorIO              ErrorCode = -2
-	ErrorCorruption      ErrorCode = -3
-	ErrorNotFound        ErrorCode = -4
-	ErrorAlreadyExists   ErrorCode = -5
-	ErrorInvalidArg      ErrorCode = -6
-	ErrorTxnAborted      ErrorCode = -7
-	ErrorLockTimeout     ErrorCode = -8
-	ErrorReadOnly        ErrorCode = -9
-	ErrorFull            ErrorCode = -10
-	ErrorVersionMismatch ErrorCode = -11
-	ErrorChecksum        ErrorCode = -12
-	ErrorOutOfMemory     ErrorCode = -13
-	ErrorUnsupported     ErrorCode = -14
-	ErrorValueTooLarge   ErrorCode = -15
-	ErrorDatabaseLocked  ErrorCode = -16
+	ErrorOK               ErrorCode = 0
+	ErrorGeneric          ErrorCode = -1
+	ErrorIO               ErrorCode = -2
+	ErrorCorruption       ErrorCode = -3
+	ErrorNotFound         ErrorCode = -4
+	ErrorAlreadyExists    ErrorCode = -5
+	ErrorInvalidArg       ErrorCode = -6
+	ErrorTxnAborted       ErrorCode = -7
+	ErrorLockTimeout      ErrorCode = -8
+	ErrorReadOnly         ErrorCode = -9
+	ErrorFull             ErrorCode = -10
+	ErrorVersionMismatch  ErrorCode = -11
+	ErrorChecksum         ErrorCode = -12
+	ErrorOutOfMemory      ErrorCode = -13
+	ErrorUnsupported      ErrorCode = -14
+	ErrorValueTooLarge    ErrorCode = -15
+	ErrorDatabaseLocked   ErrorCode = -16
+	ErrorHasRelationships ErrorCode = -17
+	ErrorConfigMismatch   ErrorCode = -18
 )
 
 type QueryErrorStage int
@@ -81,7 +83,14 @@ type OpenOptions struct {
 	// so Open returns an error rather than waiting. Turning it off is for
 	// filesystems where locking does not work; it does not make concurrent
 	// access safe.
-	Lock                 bool
+	Lock bool
+	// The lattice_open_options_v5 fields. 0 means "not set" for each; Deserialize
+	// ignores them.
+	SyncMode             uint8
+	FullFsync            uint8
+	VectorMetric         uint8
+	VectorM              uint16
+	VectorEfConstruction uint16
 }
 
 type QueryResult struct {
@@ -163,8 +172,8 @@ func Open(path string, opts OpenOptions) (*DB, error) {
 	cPath := C.CString(path)
 	defer C.free(unsafe.Pointer(cPath))
 
-	cOpts := C.lattice_open_options_v4{
-		struct_size:            C.size_t(unsafe.Sizeof(C.lattice_open_options_v4{})),
+	cOpts := C.lattice_open_options_v5{
+		struct_size:            C.size_t(unsafe.Sizeof(C.lattice_open_options_v5{})),
 		create:                 C.bool(opts.Create),
 		read_only:              C.bool(opts.ReadOnly),
 		cache_size_mb:          C.uint32_t(opts.CacheSizeMB),
@@ -174,10 +183,15 @@ func Open(path string, opts OpenOptions) (*DB, error) {
 		enable_wal:             C.bool(opts.EnableWAL),
 		enable_adjacency_cache: C.bool(opts.EnableAdjacencyCache),
 		lock:                   C.bool(opts.Lock),
+		sync_mode:              C.uint8_t(opts.SyncMode),
+		full_fsync:             C.uint8_t(opts.FullFsync),
+		vector_metric:          C.uint8_t(opts.VectorMetric),
+		vector_m:               C.uint16_t(opts.VectorM),
+		vector_ef_construction: C.uint16_t(opts.VectorEfConstruction),
 	}
 
 	var db *C.lattice_database
-	if err := errorFromCode(ErrorCode(C.lattice_open_v4(cPath, &cOpts, &db))); err != nil {
+	if err := errorFromCode(ErrorCode(C.lattice_open_v5(cPath, &cOpts, &db))); err != nil {
 		return nil, err
 	}
 
@@ -501,6 +515,10 @@ func (tx *Tx) AddNodeLabel(nodeID uint64, label string) error {
 
 func (tx *Tx) DeleteNode(nodeID uint64) error {
 	return errorFromCode(ErrorCode(C.lattice_node_delete(tx.ptr, C.lattice_node_id(nodeID))))
+}
+
+func (tx *Tx) DetachDeleteNode(nodeID uint64) error {
+	return errorFromCode(ErrorCode(C.lattice_node_detach_delete(tx.ptr, C.lattice_node_id(nodeID))))
 }
 
 func (tx *Tx) NodeExists(nodeID uint64) (bool, error) {

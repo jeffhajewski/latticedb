@@ -83,11 +83,25 @@ func (tx *Tx) CreateNode(opts CreateNodeOptions) (Node, error) {
 	}, nil
 }
 
+// DeleteNode deletes a node. A node that still has relationships is not
+// deleted: the call returns ErrorHasRelationships, as Cypher's DELETE does,
+// since deleting it alone would leave edges pointing at nothing. Use
+// DetachDeleteNode to delete them with it. Deleting a node that does not exist
+// does nothing.
 func (tx *Tx) DeleteNode(nodeID NodeID) error {
 	if err := tx.ensureWritable(); err != nil {
 		return err
 	}
 	return wrapError(tx.raw.DeleteNode(uint64(nodeID)))
+}
+
+// DetachDeleteNode deletes a node and every relationship it has, as Cypher's
+// DETACH DELETE does. All of it is part of the transaction.
+func (tx *Tx) DetachDeleteNode(nodeID NodeID) error {
+	if err := tx.ensureWritable(); err != nil {
+		return err
+	}
+	return wrapError(tx.raw.DetachDeleteNode(uint64(nodeID)))
 }
 
 func (tx *Tx) NodeExists(nodeID NodeID) (bool, error) {
@@ -167,6 +181,8 @@ func (tx *Tx) FindNodesByLabelProperty(
 	return out, nil
 }
 
+// CreateEdge creates an edge. It returns ErrorNotFound if either node does not
+// exist as this transaction sees it.
 func (tx *Tx) CreateEdge(sourceID, targetID NodeID, edgeType string, opts CreateEdgeOptions) (Edge, error) {
 	if err := tx.ensureWritable(); err != nil {
 		return Edge{}, err

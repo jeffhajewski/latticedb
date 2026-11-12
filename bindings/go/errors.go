@@ -27,6 +27,13 @@ const (
 	ErrorUnsupported     ErrorCode = ErrorCode(cgobridge.ErrorUnsupported)
 	ErrorValueTooLarge   ErrorCode = ErrorCode(cgobridge.ErrorValueTooLarge)
 	ErrorDatabaseLocked  ErrorCode = ErrorCode(cgobridge.ErrorDatabaseLocked)
+	// ErrorHasRelationships: DeleteNode refused a node that still has
+	// relationships. DetachDeleteNode deletes them with it.
+	ErrorHasRelationships ErrorCode = ErrorCode(cgobridge.ErrorHasRelationships)
+	// ErrorConfigMismatch: the open options contradict the vector index the
+	// database file records (dimensions, metric, VectorM or
+	// VectorEfConstruction).
+	ErrorConfigMismatch ErrorCode = ErrorCode(cgobridge.ErrorConfigMismatch)
 )
 
 type QueryErrorStage int

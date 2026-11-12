@@ -957,3 +957,134 @@ test "lcy: unsupported constructs are named" {
     try run(db, "CREATE (:Index {use: 1})");
     try expectResult(db, "MATCH (i:Index) RETURN i.use AS u", "u\n1");
 }
+
+// ============================================================================
+// Ordered index scans under the new constructs
+// ============================================================================
+
+/// The scan the planner chose last for `cypher`.
+fn planScanKind(db: *Database, cypher: []const u8) !lattice.query.planner.QueryPlanner.ScanKind {
+    const allocator = std.testing.allocator;
+    var parser = lattice.query.parser.Parser.init(allocator, cypher);
+    defer parser.deinit();
+    const parse_result = parser.parse();
+    const query = parse_result.query orelse return error.ParseFailed;
+
+    var analyzer = lattice.query.semantic.SemanticAnalyzer.init(allocator);
+    defer analyzer.deinit();
+    const analysis = analyzer.analyze(query);
+    if (!analysis.success) return error.SemanticFailed;
+
+    const storage_ctx = lattice.query.planner.StorageContext{
+        .node_tree = &db.node_tree,
+        .label_index = &db.label_index,
+        .edge_store = &db.edge_store,
+        .symbol_table = &db.symbol_table,
+        .hnsw_index = if (db.hnsw_index) |*hnsw| hnsw else null,
+        .fts_index = null,
+        .database = db,
+    };
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var planner = lattice.query.planner.QueryPlanner.init(arena.allocator(), storage_ctx);
+    defer planner.deinit();
+    _ = try planner.plan(query, &analysis);
+    return planner.last_scan_kind;
+}
+
+/// The same query on a database with ordered indexes and on one without
+/// must give the same rows in the same order: an index read in ORDER BY
+/// order and cut off after LIMIT rows would show as missing or extra rows.
+fn expectSameWithIndex(indexed: *Database, plain: *Database, cypher: []const u8) !void {
+    const answers = [_]*Database{ indexed, plain };
+    var texts: [2][]u8 = undefined;
+    var made: usize = 0;
+    defer for (texts[0..made]) |t| std.testing.allocator.free(t);
+    for (answers) |db| {
+        var detailed = try db.queryDetailed(cypher);
+        defer detailed.deinit();
+        switch (detailed) {
+            .success => |result| texts[made] = try render(result),
+            .failure => |f| {
+                std.debug.print("\nquery failed: {s}\n  {s}: {s}\n", .{ cypher, @tagName(f.stage), f.message });
+                return error.QueryFailed;
+            },
+        }
+        made += 1;
+    }
+    if (!std.mem.eql(u8, texts[0], texts[1])) {
+        std.debug.print("\nquery: {s}\nindexed:\n{s}\nplain:\n{s}\n", .{ cypher, texts[0], texts[1] });
+        return error.TestExpectedEqual;
+    }
+}
+
+test "lcy: the new constructs give the same rows over ordered index scans" {
+    const path_i = "/tmp/lcy_ordered_indexed.ltdb";
+    const path_p = "/tmp/lcy_ordered_plain.ltdb";
+    const indexed = try openTestDb(path_i);
+    defer closeTestDb(indexed, path_i);
+    const plain = try openTestDb(path_p);
+    defer closeTestDb(plain, path_p);
+    for ([_]*Database{ indexed, plain }) |db| {
+        // v is unique where present (37 and 80 are coprime), w groups by 7.
+        try run(db, "UNWIND range(0, 79) AS i CREATE (:P {id: i, v: (i * 37) % 80, w: i % 7, s: 'k' + toString(i % 13) + 'x'})");
+        try run(db, "MATCH (n:P) WHERE n.id % 9 = 0 REMOVE n.v");
+        try run(db, "UNWIND range(0, 9) AS j CREATE (:Q {id: 100 + j, w: j % 7, v: j * 9})");
+        try run(db, "MATCH (a:P), (b:P) WHERE b.id = (a.id * 7 + 3) % 80 CREATE (a)-[:R]->(b)");
+        try run(db, "MATCH (a:P), (q:Q) WHERE q.w = a.w AND a.id % 5 = 0 CREATE (a)-[:S]->(q)");
+    }
+    try indexed.createNodePropertyIndex("P", "v");
+    try indexed.createNodePropertyIndex("P", "w");
+    try indexed.createNodePropertyIndex("P", "s");
+
+    const Kind = lattice.query.planner.QueryPlanner.ScanKind;
+
+    // A plain MATCH with a new construct in RETURN may read in order.
+    const case_query = "MATCH (n:P) RETURN n.id AS a, CASE WHEN n.v > 40 THEN 'hi' ELSE 'lo' END AS b ORDER BY n.v LIMIT 4";
+    try std.testing.expectEqual(Kind.property_order_scan, try planScanKind(indexed, case_query));
+    try expectSameWithIndex(indexed, plain, case_query);
+    try expectSameWithIndex(indexed, plain, "MATCH (n:P) RETURN [n.v, n.w][1] AS x, n.id AS a ORDER BY n.v LIMIT 3");
+    try expectSameWithIndex(indexed, plain, "MATCH (n:P) WHERE n:P RETURN n.id AS a ORDER BY n.v LIMIT 3");
+
+    // OPTIONAL MATCH never reads in order, and a miss is still one row.
+    const optional_query = "OPTIONAL MATCH (n:P) RETURN n.id AS a ORDER BY n.v LIMIT 3";
+    try std.testing.expect(try planScanKind(indexed, optional_query) != Kind.property_order_scan);
+    try expectSameWithIndex(indexed, plain, optional_query);
+    try expectSameWithIndex(indexed, plain, "OPTIONAL MATCH (n:P) WHERE n.v > 1000 RETURN n.id AS a ORDER BY n.v LIMIT 2");
+    try expectSameWithIndex(indexed, plain, "MATCH (m:Q) OPTIONAL MATCH (n:P) WHERE n.v > 55 AND n.w = m.w RETURN m.id AS a, count(n) AS c ORDER BY a");
+
+    // Each query of a UNION orders itself; the first one's ORDER BY must
+    // not reach the second one's scan. Here the first cannot use an index
+    // (Q has none), and the second sorts by w after a scan that would
+    // otherwise be read by v and cut after three rows.
+    try expectSameWithIndex(indexed, plain, "MATCH (n:Q) RETURN n.id AS a ORDER BY n.v LIMIT 2 UNION ALL MATCH (n:P) RETURN n.id AS a ORDER BY n.w, n.id LIMIT 3");
+    try expectSameWithIndex(indexed, plain, "MATCH (n:Q) RETURN n.id AS a ORDER BY n.w, n.id LIMIT 2 UNION MATCH (n:P) RETURN n.id AS a ORDER BY n.v LIMIT 3");
+    try std.testing.expectEqual(Kind.property_order_scan, try planScanKind(indexed, "MATCH (n:Q) RETURN n.id AS a ORDER BY n.w LIMIT 2 UNION MATCH (n:P) RETURN n.id AS a ORDER BY n.v LIMIT 3"));
+
+    // Aggregates inside expressions group every row before the LIMIT.
+    for ([_][]const u8{
+        "MATCH (n:P) RETURN n.w AS g, count(*) + 0 AS c ORDER BY g LIMIT 3",
+        "MATCH (n:P) RETURN n.w AS g, CASE WHEN count(*) > 11 THEN 'many' ELSE 'few' END AS c ORDER BY g LIMIT 3",
+        "MATCH (n:P) RETURN n.w AS g, size([x IN collect(n.id) WHERE x > 5]) AS c ORDER BY g LIMIT 3",
+        "MATCH (n:P) RETURN n.w AS g, reduce(t = 0, x IN collect(n.id) | t + x) AS c ORDER BY g LIMIT 3",
+    }) |q| {
+        try std.testing.expect(try planScanKind(indexed, q) != Kind.property_order_scan);
+        try expectSameWithIndex(indexed, plain, q);
+    }
+
+    // Subqueries filter or decorate rows in the order they come.
+    try expectSameWithIndex(indexed, plain, "MATCH (n:P) RETURN n.id AS a, [(n)-[:R]->(m) | m.id] AS ms ORDER BY n.v LIMIT 4");
+    try expectSameWithIndex(indexed, plain, "MATCH (n:P) WHERE EXISTS { (n)-[:S]->(:Q) } RETURN n.id AS a ORDER BY n.v LIMIT 3");
+    try expectSameWithIndex(indexed, plain, "MATCH (n:P) WHERE n.v > 10 AND COUNT { (n)--() } > 1 RETURN n.id AS a ORDER BY n.v LIMIT 3");
+    try expectSameWithIndex(indexed, plain, "MATCH (n:P) WHERE n.s STARTS WITH 'k1' AND (n)-[:R]->() RETURN n.id AS a ORDER BY n.s, n.id LIMIT 3");
+    // A range scan inside a subquery, run once per row.
+    try expectSameWithIndex(indexed, plain, "MATCH (m:Q) RETURN m.id AS a, COUNT { MATCH (n:P) WHERE n.v > 30 AND n.w = m.w } AS c ORDER BY a");
+
+    // Paths, CALL, WITH and FOREACH.
+    try expectSameWithIndex(indexed, plain, "MATCH p = (n:P)-[:R]->(m) RETURN n.id AS a, length(p) AS l, m.id AS b ORDER BY n.v LIMIT 4");
+    try expectSameWithIndex(indexed, plain, "CALL db.labels() YIELD label MATCH (n:P) WHERE n.v < 5 RETURN label, n.id AS a ORDER BY n.v, label LIMIT 3");
+    try expectSameWithIndex(indexed, plain, "MATCH (n:P) WITH n ORDER BY n.v LIMIT 3 RETURN n.id AS a, [(n)-->(x) | x.id] AS b");
+    try run(indexed, "MATCH (n:P) WHERE n.v > 70 FOREACH (x IN [1, 2] | SET n.f = x)");
+    try run(plain, "MATCH (n:P) WHERE n.v > 70 FOREACH (x IN [1, 2] | SET n.f = x)");
+    try expectSameWithIndex(indexed, plain, "MATCH (n:P) WHERE n.f = 2 RETURN n.id AS a ORDER BY a");
+}

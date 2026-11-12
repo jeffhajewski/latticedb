@@ -429,3 +429,47 @@ test "fts query: a fuzzy match at the full edit distance scores, below closer on
         try std.testing.expectApproxEqAbs(row.values[1].float_val, @as(f64, hit.score), 1e-6);
     }
 }
+
+/// The message a failed query gave.
+fn failureMessage(db: *Database, cypher: []const u8, buf: []u8) ![]const u8 {
+    var detailed = try db.queryDetailed(cypher);
+    defer detailed.deinit();
+    switch (detailed) {
+        .success => return error.TestUnexpectedResult,
+        .failure => |failure| {
+            try std.testing.expectEqualStrings("InvalidArgument", failure.code orelse "");
+            const n = @min(buf.len, failure.message.len);
+            @memcpy(buf[0..n], failure.message[0..n]);
+            return buf[0..n];
+        },
+    }
+}
+
+test "fts query: a query an index refuses says why" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lse_fts_query_refused.ltdb";
+    removeFiles(path);
+    defer removeFiles(path);
+    var config: lattice.storage.database.DatabaseConfig = .{ .enable_wal = true, .enable_fts = true, .enable_vector = false };
+    config.fts_config.store_positions = false;
+    const db = try Database.open(allocator, path, .{ .create = true, .config = config });
+    defer db.close();
+    try db.createNodeFtsIndex("Doc", "text");
+    const id = try db.createNode(null, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(null, id, "text", .{ .string_val = "the quick brown fox" });
+
+    // It said "Cannot complete searching the full-text index on Doc.text:
+    // an argument is not valid".
+    var buf: [512]u8 = undefined;
+    try std.testing.expectEqualStrings(
+        "Full-text query 'fox OR -dog' only excludes; it needs a word to match (write NOT x @@ 'word' to exclude)",
+        try failureMessage(db, "MATCH (d:Doc) WHERE d.text @@ 'fox OR -dog' RETURN d", &buf),
+    );
+    try std.testing.expectEqualStrings(
+        "Full-text query '\"quick brown\"' has a phrase, and the index on Doc.text stores no word positions to match one (indexes built before 0.17.0 have none); drop the index and declare it again",
+        try failureMessage(db, "MATCH (d:Doc) WHERE d.text @@ '\"quick brown\"' RETURN d", &buf),
+    );
+    var ok = try db.query("MATCH (d:Doc) WHERE d.text @@ 'quick -dog' RETURN d");
+    defer ok.deinit();
+    try std.testing.expectEqual(@as(usize, 1), ok.rows.len);
+}

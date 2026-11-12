@@ -267,6 +267,34 @@ pub fn parse(arena: Allocator, text: []const u8, options: ParseOptions) ParseErr
     return .{ .branches = branches.items };
 }
 
+/// Why a search may have refused `text`, to say so in words: one of its
+/// branches only excludes (`parse` refuses it), or it holds a phrase (an
+/// index without word positions refuses it).
+pub const Refusal = enum { only_excludes, phrase, neither };
+
+pub fn refusalOf(allocator: Allocator, text: []const u8) Refusal {
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    const lexemes = lex(arena.allocator(), text) catch return .neither;
+    var phrase = false;
+    var units: usize = 0;
+    var required: usize = 0;
+    for (lexemes) |lexeme| switch (lexeme) {
+        .or_op => {
+            if (units > 0 and required == 0) return .only_excludes;
+            units = 0;
+            required = 0;
+        },
+        .unit => |unit| {
+            units += 1;
+            if (!unit.excluded) required += 1;
+            if (unit.quoted) phrase = true;
+        },
+    };
+    if (units > 0 and required == 0) return .only_excludes;
+    return if (phrase) .phrase else .neither;
+}
+
 /// Null when the branch can match nothing: every word it requires was
 /// dropped by analysis, or it requires a prefix too short to use.
 fn parseBranch(arena: Allocator, lexemes: []const Lexeme, options: ParseOptions) ParseError!?Branch {
@@ -598,6 +626,17 @@ test "query: escapes and quotes make operators literal" {
     try expectMatches("\"quick \\\" brown\" fox", "the quick brown fox", true);
     // Operators inside a phrase are text: '-' and '*' are punctuation.
     try expectMatches("\"quick -brown*\"", "the quick brown fox", true);
+}
+
+test "query: refusalOf names what a search refuses" {
+    const a = std.testing.allocator;
+    try std.testing.expectEqual(Refusal.only_excludes, refusalOf(a, "-fox"));
+    try std.testing.expectEqual(Refusal.only_excludes, refusalOf(a, "fox OR -cat -\"a b\""));
+    try std.testing.expectEqual(Refusal.phrase, refusalOf(a, "fox \"quick brown\""));
+    try std.testing.expectEqual(Refusal.phrase, refusalOf(a, "fox -\"quick brown\""));
+    try std.testing.expectEqual(Refusal.neither, refusalOf(a, "fox -cat OR dog"));
+    try std.testing.expectEqual(Refusal.neither, refusalOf(a, "\\-fox"));
+    try std.testing.expectEqual(Refusal.neither, refusalOf(a, "OR fox OR"));
 }
 
 test "query: a branch of only exclusions is refused, and stop words ask for nothing" {

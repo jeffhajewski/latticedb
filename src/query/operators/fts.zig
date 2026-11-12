@@ -24,6 +24,7 @@ const ExpressionEvaluator = @import("../expression.zig").ExpressionEvaluator;
 const limit_ops = @import("limit.zig");
 
 const fts_catalog = @import("../../fts/catalog.zig");
+const fts_query = @import("../../fts/query.zig");
 const FtsEntityKind = fts_catalog.FtsEntityKind;
 
 const database_mod = @import("../../storage/database.zig");
@@ -267,6 +268,24 @@ pub const FtsIndexSeek = struct {
     }
 };
 
+/// A failed index search as an operator error. A query the index refuses
+/// says why, in the words the per-row check uses; anything else is a
+/// storage failure.
+fn searchFailure(ctx: *ExecutionContext, err: anyerror, query_text: []const u8, search: Search) OperatorError {
+    if (err == error.InvalidArgument) {
+        const refusal = fts_query.refusalOf(ctx.allocator, query_text);
+        if (refusal != .neither) {
+            if (ctx.diagnostic) |d| switch (refusal) {
+                .only_excludes => d.record(.query, "InvalidArgument", null, "Full-text query '{s}' only excludes; it needs a word to match (write NOT x @@ 'word' to exclude)", .{query_text}),
+                .phrase => d.record(.query, "InvalidArgument", null, "Full-text query '{s}' has a phrase, and the index on {s}.{s} stores no word positions to match one (indexes built before 0.17.0 have none); drop the index and declare it again", .{ query_text, search.scope, search.property }),
+                .neither => unreachable,
+            };
+            return OperatorError.InvalidState;
+        }
+    }
+    return ctx.storageFailure(err, "searching the full-text index on {s}.{s}", .{ search.scope, search.property });
+}
+
 /// Run every search and union the results, taking each document's best score.
 ///
 /// Shared by the seek and the filtering operator so the two cannot disagree
@@ -300,7 +319,7 @@ fn runSearches(
             search.property,
             query_text,
             limit,
-        ) catch |err| return ctx.storageFailure(err, "searching the full-text index on {s}.{s}", .{ search.scope, search.property });
+        ) catch |err| return searchFailure(ctx, err, query_text, search);
         defer database.freeFtsSearchResults(hits);
 
         for (hits) |hit| {

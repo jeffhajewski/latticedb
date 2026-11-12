@@ -134,9 +134,19 @@ length), L2 distance, or the negative dot product (vectors stored as given).
 commit survives the process being killed, but a power cut or OS crash can lose
 the most recent commits. The default, `"full"`, syncs the log on every commit.
 
+A `sync_mode` or `full_fsync` you pass wins over the `LATTICE_SYNC_MODE` and
+`LATTICE_FULL_FSYNC` environment variables, which apply only when the option is
+left unset.
+
 `sync_mode`, `full_fsync` and the three vector index options need a native
 library with `lattice_open_v5`; against an older one, setting any of them raises
 `LatticeUnsupportedError`.
+
+`read_only=True` on a database that was not closed cleanly recovers it in
+memory: the handle sees every committed transaction and nothing is written to
+the files. A recovery that needs more than 64 MB plus four times the size of the
+log and journal raises `LatticeFullError`; open the database read-write once to
+recover it on disk.
 
 #### Methods
 
@@ -198,7 +208,7 @@ database from bytes produced by `serialize()`; it takes the same options as
 - `publish_stream_get_sequence(stream, payload, kind="message")` - Publish and return the record's sequence number
 - `set_stream_offset(stream, consumer, sequence)` - Commit a durable consumer offset
 - `trim_stream(stream, through_sequence)` - Delete stream records through a sequence
-- `commit()` / `rollback()` - Commit or rollback the transaction
+- `commit()` / `rollback()` - Commit or rollback the transaction. A commit that raises `LatticeTxnAbortedError` has ended the transaction, and rolling it back afterwards does nothing; after any other failure it stays open, and leaving the `with` block rolls it back
 
 ### Bulk Vector Insertion
 
@@ -415,6 +425,31 @@ file's vector index), `LatticeNeedsNewerWriterError` (a writable open of a file
 that a newer release has marked as not writable by this one; it still opens with
 `read_only=True`), `LatticeNotFoundError` (also `create_edge` when either end
 does not exist) and `LatticeDatabaseLockedError` (another process holds the file).
+
+A failed Cypher query raises `LatticeQueryError`, which says what failed and
+where:
+
+```python
+from latticedb import Database, LatticeQueryError
+
+with Database("graph.db", create=True) as db:
+    try:
+        db.query("RETURN 1/0")
+    except LatticeQueryError as e:
+        print(e)                    # Division by zero: 1 / 0
+        print(e.code)               # -1
+        print(e.stage)              # execution
+        print(e.diagnostic_code)    # DivisionByZero
+        print(e.location)           # {'line': 1, 'column': 9, 'length': 1}
+```
+
+`stage` is `"parse"`, `"semantic"`, `"plan"` or `"execution"`. Parse and semantic
+failures (an unknown function is `unknown_function`) have code -6 and execution
+failures -1, except that a `DELETE` of a node with relationships has code -17
+and a relationship created to a node deleted earlier in the query -4, as
+`delete_node` and `create_edge` report them. A storage failure under a query
+has code -2 and an allocation failure -13; `location` is `None` when the failure
+does not belong to one place in the query.
 
 ## Requirements
 

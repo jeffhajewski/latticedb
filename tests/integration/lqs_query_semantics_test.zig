@@ -710,9 +710,11 @@ test "lqs: <=> returns the search's distance, and ORDER BY it bounds the search"
 // ============================================================================
 
 test "lqs: a refused delete and a relationship to a deleted node say why" {
+    // With a log, because the second refusal comes after the query's DELETE
+    // has run, and only a transaction can take that back.
     const path = "/tmp/lattice_lqs_delete_rules.ltdb";
-    const db = try openTestDb(path);
-    defer cleanupTestDb(db, path);
+    const db = try openTxnTestDb(path);
+    defer cleanupTxnTestDb(db, path);
     try run(db, "CREATE (:D {i: 1})-[:R]->(:D {i: 2}), (:D {i: 3})");
 
     try expectFailure(

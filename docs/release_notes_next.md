@@ -864,7 +864,9 @@ with relationships is one range probe, under 1 µs.
 - A file that needs a newer writer is refused by the commands that write, with a
   message naming the commands that still read it.
 - A CSV file that cannot be read as CSV, such as one with an unclosed quote,
-  names the line and the reason; it said "Import failed: ParseError".
+  names the line and the reason; it said "Import failed: ParseError". It says to
+  fix the file, since `--on-error=skip` cannot read past such a fault and is no
+  help once given.
 - The result table prints floats of 1e16 and above, or below 1e-6, in size in
   the shortest scientific form (`1e300`, `1e-300`), where `1e300` took 301
   digits and `1e-300` printed as `0.000000`.

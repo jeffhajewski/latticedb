@@ -347,11 +347,12 @@ where the problem starts:
 
 ```text
 Error: Import failed at line 2: a quoted field that starts here has no closing quote
+Nothing was imported. Fix the file and import it again.
 ```
 
 `--on-error=skip` cannot skip past such a fault, since the reader cannot tell where
-the next record begins, so it stops the import too, although the message still
-suggests it.
+the next record begins, so it stops the import too, and the message does not
+suggest it.
 
 Two options are worth knowing about for large imports:
 

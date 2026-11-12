@@ -1451,12 +1451,18 @@ fn cmdImport(
             output.printError(stderr, "Import failed at {s}", .{messages[messages.len - 1]});
             if (committed.nodes_imported + committed.edges_imported > 0) {
                 try stderr.print(
-                    "{d} nodes and {d} edges imported in earlier batches were kept. " ++
-                        "Use --on-error=skip to import the records that are valid.\n",
+                    "{d} nodes and {d} edges imported in earlier batches were kept.",
                     .{ committed.nodes_imported, committed.edges_imported },
                 );
             } else {
-                try stderr.writeAll("Nothing was imported. Use --on-error=skip to import the records that are valid.\n");
+                try stderr.writeAll("Nothing was imported.");
+            }
+            // Skipping goes past a bad record, not past text that cannot be
+            // read, and is no advice to someone already skipping.
+            if (diagnostics.syntax or parsed_args.on_error_skip) {
+                try stderr.writeAll(" Fix the file and import it again.\n");
+            } else {
+                try stderr.writeAll(" Use --on-error=skip to import the records that are valid.\n");
             }
             return error.CommandFailed;
         }
@@ -2288,6 +2294,51 @@ fn runForTest(allocator: std.mem.Allocator, argv: []const []const u8, out: *std.
         .changefeed => try cmdChangefeed(allocator, &out.writer, &err_buf.writer, &parsed),
         .info => try cmdInfo(allocator, &out.writer, &err_buf.writer, &parsed),
         else => unreachable,
+    }
+}
+
+test "lcy an unreadable CSV import does not suggest --on-error=skip" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lcy_cli_csv_syntax.ltdb";
+    const csv_path = "/tmp/lcy_cli_csv_syntax.csv";
+    cleanupTestDatabaseFiles(path);
+    defer cleanupTestDatabaseFiles(path);
+    defer @import("compat").fs.cwd().deleteFile(csv_path) catch {};
+    {
+        var db = try Database.open(allocator, path, .{ .create = true, .config = .{ .enable_fts = false } });
+        db.close();
+    }
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+    var err: std.Io.Writer.Allocating = .init(allocator);
+    defer err.deinit();
+    const Case = struct { text: []const u8, skip: bool, advice: []const u8 };
+    const cases = [_]Case{
+        // An unclosed quote: no record past it can be read, skipping or not.
+        // Both runs said "Use --on-error=skip to import the records that are
+        // valid".
+        .{ .text = "_id,_labels,name\n1,P,\"bob\n2,P,ann\n", .skip = false, .advice = "Nothing was imported. Fix the file and import it again.\n" },
+        .{ .text = "_id,_labels,name\n1,P,\"bob\n2,P,ann\n", .skip = true, .advice = "Nothing was imported. Fix the file and import it again.\n" },
+        // A bad record: skipping it is the way on.
+        .{ .text = "_id,_labels,age:json\n1,P,{\n", .skip = false, .advice = "Nothing was imported. Use --on-error=skip to import the records that are valid.\n" },
+    };
+    for (cases) |case| {
+        {
+            const f = try @import("compat").fs.cwd().createFile(csv_path, .{ .truncate = true });
+            defer f.close();
+            try f.pwriteAll(case.text, 0);
+        }
+        out.clearRetainingCapacity();
+        err.clearRetainingCapacity();
+        const argv: []const []const u8 = if (case.skip)
+            &.{ "lattice", "import", path, "--file=" ++ csv_path, "--on-error=skip" }
+        else
+            &.{ "lattice", "import", path, "--file=" ++ csv_path };
+        var parsed = try Args.parse(allocator, argv);
+        defer parsed.deinit(allocator);
+        try std.testing.expectError(error.CommandFailed, cmdImport(allocator, &out.writer, &err.writer, &parsed));
+        try std.testing.expect(std.mem.endsWith(u8, err.written(), case.advice));
     }
 }
 

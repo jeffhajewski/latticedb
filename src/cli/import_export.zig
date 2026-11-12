@@ -187,6 +187,9 @@ pub const Diagnostics = struct {
     /// What was committed when the last failure happened. An import that
     /// stops keeps the batches committed before the failing one.
     committed: ImportStats = .{},
+    /// The import stopped because the file cannot be read past some point,
+    /// which --on-error=skip cannot get around.
+    syntax: bool = false,
 
     pub const max_messages = 20;
 
@@ -210,6 +213,7 @@ pub const Diagnostics = struct {
     /// Note the failure that stopped the import. It is always kept, as the
     /// last message, however many skipped records came before it.
     fn addFatal(self: *Diagnostics, comptime fmt: []const u8, args: anytype) void {
+        self.syntax = true;
         self.append(fmt, args);
     }
 

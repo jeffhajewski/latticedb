@@ -18,6 +18,7 @@ const lattice = @import("lattice");
 const compat = @import("compat");
 
 const Database = lattice.storage.database.Database;
+const DatabaseError = lattice.storage.database.DatabaseError;
 const PropertyValue = lattice.core.types.PropertyValue;
 
 fn cleanup(path: []const u8) void {
@@ -280,4 +281,173 @@ test "lcf changefeed order: a Cypher statement's events follow the same rules" {
         \\
     , .{});
     try expectReplayable(allocator, db);
+}
+
+// ============================================================================
+// A transaction that fails or is rolled back leaves nothing for the next
+// ============================================================================
+
+const Mode = enum { log, no_log };
+const modes = [_]Mode{ .log, .no_log };
+
+fn pathFor(buf: []u8, name: []const u8, mode: Mode) []const u8 {
+    return std.fmt.bufPrint(buf, "/tmp/lcfo_{s}_{s}.ltdb", .{ name, @tagName(mode) }) catch unreachable;
+}
+
+fn openMode(allocator: std.mem.Allocator, path: []const u8, mode: Mode) !*Database {
+    return Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_fts = false, .enable_wal = mode == .log },
+    });
+}
+
+fn countOf(db: *Database, cypher: []const u8) !i64 {
+    var result = try db.query(cypher);
+    defer result.deinit();
+    return result.rows[0].values[0].int_val;
+}
+
+fn lastSequence(db: *Database) !u64 {
+    var batch = try db.readChanges(0, 100_000, 0);
+    defer batch.deinit();
+    return if (batch.records.len == 0) 0 else batch.records[batch.records.len - 1].sequence;
+}
+
+test "lcf changefeed order: a commit retried after failing before its commit point applies and logs what the transaction holds then" {
+    const allocator = std.testing.allocator;
+    for (modes) |mode| {
+        var buf: [512]u8 = undefined;
+        const path = pathFor(&buf, "retry", mode);
+        cleanup(path);
+        defer cleanup(path);
+        var n: [3]u64 = undefined;
+        var e: [2]u64 = undefined;
+        {
+            var db = try openMode(allocator, path, mode);
+            defer db.close();
+            var txn = try db.beginTransaction(.read_write);
+            n[0] = try db.createNode(&txn, &[_][]const u8{});
+            n[1] = try db.createNode(&txn, &[_][]const u8{});
+            e[0] = try db.createEdgeAndGetId(&txn, n[0], n[1], "R");
+            db.fail_after_changefeed_staging_for_testing = true;
+            try std.testing.expectError(DatabaseError.IoError, db.commitTransaction(&txn));
+
+            // Still open: the caller adds to it and commits again.
+            n[2] = try db.createNode(&txn, &[_][]const u8{});
+            e[1] = try db.createEdgeAndGetId(&txn, n[1], n[2], "R");
+            try db.commitTransaction(&txn);
+
+            try std.testing.expectEqual(@as(i64, 3), try countOf(db, "MATCH (n) RETURN count(n)"));
+            try std.testing.expectEqual(@as(i64, 2), try countOf(db, "MATCH ()-[r]->() RETURN count(r)"));
+            // Each event once, from the attempt that committed.
+            try expectEvents(allocator, db, 0,
+                \\node.insert {d}
+                \\node.insert {d}
+                \\node.insert {d}
+                \\edge.insert {d} {d}>{d}
+                \\edge.insert {d} {d}>{d}
+                \\
+            , .{ n[0], n[1], n[2], e[0], n[0], n[1], e[1], n[1], n[2] });
+            try expectReplayable(allocator, db);
+        }
+        var db = try openMode(allocator, path, mode);
+        defer db.close();
+        try std.testing.expectEqual(@as(i64, 3), try countOf(db, "MATCH (n) RETURN count(n)"));
+        try std.testing.expectEqual(@as(i64, 2), try countOf(db, "MATCH ()-[r]->() RETURN count(r)"));
+        try std.testing.expectEqual(@as(u64, 5), try lastSequence(db));
+        try expectReplayable(allocator, db);
+    }
+}
+
+test "lcf changefeed order: after a rollback, and after a failed commit rolled back, the next transaction logs only itself" {
+    const allocator = std.testing.allocator;
+    for (modes) |mode| {
+        var buf: [512]u8 = undefined;
+        const path = pathFor(&buf, "rollback", mode);
+        cleanup(path);
+        defer cleanup(path);
+        var db = try openMode(allocator, path, mode);
+        defer db.close();
+
+        {
+            var txn = try db.beginTransaction(.read_write);
+            const a = try db.createNode(&txn, &[_][]const u8{"P"});
+            const b = try db.createNode(&txn, &[_][]const u8{"P"});
+            _ = try db.createEdgeAndGetId(&txn, a, b, "R");
+            try db.abortTransaction(&txn);
+        }
+        {
+            var txn = try db.beginTransaction(.read_write);
+            const a = try db.createNode(&txn, &[_][]const u8{"P"});
+            const b = try db.createNode(&txn, &[_][]const u8{"P"});
+            _ = try db.createEdgeAndGetId(&txn, a, b, "R");
+            db.fail_after_changefeed_staging_for_testing = true;
+            try std.testing.expectError(DatabaseError.IoError, db.commitTransaction(&txn));
+            try db.abortTransaction(&txn);
+        }
+        try std.testing.expectEqual(@as(u64, 0), try lastSequence(db));
+
+        var txn = try db.beginTransaction(.read_write);
+        const x = try db.createNode(&txn, &[_][]const u8{});
+        const y = try db.createNode(&txn, &[_][]const u8{});
+        const r = try db.createEdgeAndGetId(&txn, y, x, "R");
+        try db.commitTransaction(&txn);
+
+        try std.testing.expectEqual(@as(i64, 2), try countOf(db, "MATCH (n) RETURN count(n)"));
+        try std.testing.expectEqual(@as(i64, 1), try countOf(db, "MATCH ()-[r]->() RETURN count(r)"));
+        try expectEvents(allocator, db, 0,
+            \\node.insert {d}
+            \\node.insert {d}
+            \\edge.insert {d} {d}>{d}
+            \\
+        , .{ x, y, r, y, x });
+        try expectReplayable(allocator, db);
+    }
+}
+
+test "lcf changefeed order: a commit that fails to apply leaves a reopened database whose next transaction logs only itself" {
+    const allocator = std.testing.allocator;
+    for (modes) |mode| {
+        var buf: [512]u8 = undefined;
+        const path = pathFor(&buf, "failed_apply", mode);
+        cleanup(path);
+        defer cleanup(path);
+        {
+            var db = try openMode(allocator, path, mode);
+            defer db.close();
+            var r = try db.query("CREATE (:P {i: 1})");
+            r.deinit();
+            try db.sync();
+
+            var txn = try db.beginTransaction(.read_write);
+            const a = try db.createNode(&txn, &[_][]const u8{"P"});
+            const b = try db.createNode(&txn, &[_][]const u8{"P"});
+            _ = try db.createEdgeAndGetId(&txn, a, b, "R");
+            db.fail_next_apply_for_testing = true;
+            try std.testing.expectError(DatabaseError.IoError, db.commitTransaction(&txn));
+            try std.testing.expectError(DatabaseError.IoError, db.beginTransaction(.read_write));
+        }
+        var db = try openMode(allocator, path, mode);
+        defer db.close();
+        // With a log the failed commit is durable and recovery finishes it;
+        // without one the file holds the last flush.
+        const recovered: i64 = if (mode == .log) 1 else 0;
+        try std.testing.expectEqual(1 + 2 * recovered, try countOf(db, "MATCH (n:P) RETURN count(n)"));
+        try std.testing.expectEqual(recovered, try countOf(db, "MATCH ()-[r]->() RETURN count(r)"));
+        try expectReplayable(allocator, db);
+        const before = try lastSequence(db);
+
+        var txn = try db.beginTransaction(.read_write);
+        const x = try db.createNode(&txn, &[_][]const u8{});
+        const y = try db.createNode(&txn, &[_][]const u8{});
+        const r = try db.createEdgeAndGetId(&txn, x, y, "R");
+        try db.commitTransaction(&txn);
+        try expectEvents(allocator, db, before,
+            \\node.insert {d}
+            \\node.insert {d}
+            \\edge.insert {d} {d}>{d}
+            \\
+        , .{ x, y, r, x, y });
+        try expectReplayable(allocator, db);
+    }
 }

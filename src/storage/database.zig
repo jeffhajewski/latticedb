@@ -882,6 +882,25 @@ const TxnOverlay = struct {
         self.has_staged_writes = true;
     }
 
+    fn clearSortedIds(self: *TxnOverlay, allocator: Allocator) void {
+        if (self.sorted_node_ids) |ids| allocator.free(ids);
+        if (self.sorted_edge_ids) |ids| allocator.free(ids);
+        self.sorted_node_ids = null;
+        self.sorted_edge_ids = null;
+    }
+
+    /// The sorted node ids, if they were sorted for the overlay as it is.
+    fn sortedNodeIds(self: *const TxnOverlay) ?[]const NodeId {
+        const ids = self.sorted_node_ids orelse return null;
+        return if (ids.len == self.node_states.count()) ids else null;
+    }
+
+    /// The sorted edge ids, if they were sorted for the overlay as it is.
+    fn sortedEdgeIds(self: *const TxnOverlay) ?[]const EdgeId {
+        const ids = self.sorted_edge_ids orelse return null;
+        return if (ids.len == self.edge_states.count()) ids else null;
+    }
+
     fn deinit(self: *TxnOverlay, allocator: Allocator) void {
         var node_iter = self.node_states.iterator();
         while (node_iter.next()) |entry| {
@@ -907,8 +926,7 @@ const TxnOverlay = struct {
 
         self.stream_last_sequences.deinit(allocator);
         self.changefeed.deinit(allocator);
-        if (self.sorted_node_ids) |ids| allocator.free(ids);
-        if (self.sorted_edge_ids) |ids| allocator.free(ids);
+        self.clearSortedIds(allocator);
         for (self.stream_appends.items) |*append| {
             append.deinit(allocator);
         }
@@ -1226,6 +1244,9 @@ pub const Database = struct {
     /// Test hook: fail the next commit after its commit record is durable,
     /// in place of applying it.
     fail_next_apply_for_testing: bool = false,
+    /// Test hook: fail the next commit once its changefeed is staged, before
+    /// anything is logged, leaving the transaction open.
+    fail_after_changefeed_staging_for_testing: bool = false,
     stream_mutex: @import("compat").Mutex,
     stream_cond: @import("compat").Condition,
     stream_epoch: u64,
@@ -1741,6 +1762,7 @@ pub const Database = struct {
         self.active_writer_txn_id = null;
         self.failed = false;
         self.fail_next_apply_for_testing = false;
+        self.fail_after_changefeed_staging_for_testing = false;
         self.stream_epoch = 0;
 
         // 10. Initialize Adjacency Cache (optional)
@@ -3058,7 +3080,7 @@ pub const Database = struct {
         // splits them down the middle. Order does not change the outcome:
         // each state is applied on its own.
         // Staging the changefeed has usually sorted them already.
-        if (overlay.sorted_node_ids) |ids| {
+        if (overlay.sortedNodeIds()) |ids| {
             for (ids) |node_id| try self.applyNodeState(node_id, overlay.node_states.get(node_id).?);
         } else if (sortedKeysAlloc(NodeId, self.allocator, &overlay.node_states)) |ids| {
             defer self.allocator.free(ids);
@@ -3070,7 +3092,7 @@ pub const Database = struct {
             }
         }
 
-        if (overlay.sorted_edge_ids) |ids| {
+        if (overlay.sortedEdgeIds()) |ids| {
             for (ids) |edge_id| try self.applyEdgeState(edge_id, overlay.edge_states.get(edge_id).?);
         } else if (sortedKeysAlloc(EdgeId, self.allocator, &overlay.edge_states)) |ids| {
             defer self.allocator.free(ids);
@@ -5807,22 +5829,25 @@ pub const Database = struct {
     /// creation, and a node's deletion is the last event that names it. A
     /// property set several times is one event, from its value before the
     /// transaction to its value after.
+    ///
+    /// A commit that fails before its commit point leaves the transaction
+    /// open, and the caller may change it further and commit again, so
+    /// everything is staged afresh each time: the events and the sorted ids
+    /// from an earlier attempt describe a transaction that no longer exists.
     fn stageGraphChangefeed(self: *Self, overlay: *TxnOverlay) DatabaseError!void {
+        overlay.changefeed.deinit(self.allocator);
+        overlay.clearSortedIds(self.allocator);
         if (self.changefeed_retention == .off) return;
         if (overlay.node_states.count() == 0 and overlay.edge_states.count() == 0) return;
         const commit_ms: u64 = @intCast(@max(0, @import("compat").milliTimestamp()));
 
         // Kept on the overlay: applying it walks the ids in the same order.
-        if (overlay.sorted_node_ids == null) {
-            overlay.sorted_node_ids = sortedIdsAlloc(NodeId, self.allocator, &overlay.node_states) catch
-                return DatabaseError.OutOfMemory;
-        }
-        if (overlay.sorted_edge_ids == null) {
-            overlay.sorted_edge_ids = sortedIdsAlloc(EdgeId, self.allocator, &overlay.edge_states) catch
-                return DatabaseError.OutOfMemory;
-        }
-        const node_ids = overlay.sorted_node_ids.?;
-        const edge_ids = overlay.sorted_edge_ids.?;
+        const node_ids = sortedIdsAlloc(NodeId, self.allocator, &overlay.node_states) catch
+            return DatabaseError.OutOfMemory;
+        overlay.sorted_node_ids = node_ids;
+        const edge_ids = sortedIdsAlloc(EdgeId, self.allocator, &overlay.edge_states) catch
+            return DatabaseError.OutOfMemory;
+        overlay.sorted_edge_ids = edge_ids;
 
         for (edge_ids) |id| {
             const state = overlay.edge_states.get(id).?;
@@ -5839,6 +5864,10 @@ pub const Database = struct {
         for (node_ids) |id| {
             const state = overlay.node_states.get(id).?;
             if (!state.exists) try self.stageNodeChangefeed(overlay, id, state, commit_ms);
+        }
+        if (self.fail_after_changefeed_staging_for_testing) {
+            self.fail_after_changefeed_staging_for_testing = false;
+            return DatabaseError.IoError;
         }
     }
 

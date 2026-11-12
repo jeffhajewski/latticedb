@@ -1948,7 +1948,9 @@ pub const QueryPlanner = struct {
     fn boundSeek(self: *Self, input_op: Operator, info: FtsSearchInfo, hint: VectorLimitHint) void {
         const slot = info.variable_slot orelse return;
         const seek = self.fts_seek_ops[slot];
-        if (input_op.ptr != @as(*anyopaque, @ptrCast(seek))) return;
+        // A named path over the seek passes its rows on one for one.
+        const below = if (path_ops.BindPath.of(input_op)) |bind| bind.input else input_op;
+        if (below.ptr != @as(*anyopaque, @ptrCast(seek))) return;
         const limit = hint.limit orelse return;
         if (hint.order) |order| {
             if (!self.orderFollowsScore(order, hint.ret, slot)) return;

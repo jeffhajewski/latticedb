@@ -106,6 +106,9 @@ pub const CrossProduct = struct {
             while (slot < executor.MAX_SLOTS) : (slot += 1) {
                 if (inner_row.hasSlot(slot)) {
                     output.setSlot(slot, inner_row.slots[slot]);
+                    // The score or distance a search gave the inner row's
+                    // entity goes with it.
+                    output.copySearchMarks(inner_row, slot);
                 }
             }
 

@@ -491,3 +491,157 @@ test "fts query: a query an index refuses says why" {
     defer ok.deinit();
     try std.testing.expectEqual(@as(usize, 1), ok.rows.len);
 }
+
+/// (d.i, score(d)) rows of a query, score -1 when null.
+fn iScores(db: *Database, cypher: []const u8, out: [][2]f64) !usize {
+    var result = try db.query(cypher);
+    defer result.deinit();
+    for (result.rows, 0..) |row, i| {
+        out[i][0] = switch (row.values[0]) {
+            .int_val => |v| @floatFromInt(v),
+            else => -1,
+        };
+        out[i][1] = switch (row.values[1]) {
+            .float_val => |f| f,
+            else => -1,
+        };
+    }
+    return result.rows.len;
+}
+
+fn expectSameRows(want: []const [2]f64, got: []const [2]f64) !void {
+    try std.testing.expectEqual(want.len, got.len);
+    for (want, got) |w, g| {
+        try std.testing.expectEqual(w[0], g[0]);
+        try std.testing.expectApproxEqAbs(w[1], g[1], 1e-6);
+    }
+}
+
+test "fts query: @@ under OPTIONAL MATCH, UNION, subqueries, comprehensions and named paths" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lse_fts_query_constructs.ltdb";
+    const db = try openDb(allocator, path);
+    defer {
+        db.close();
+        removeFiles(path);
+    }
+    try db.createNodeFtsIndex("Doc", "text");
+    var people: [2]u64 = undefined;
+    for (&people, [_][]const u8{ "A", "B" }) |*p, name| {
+        p.* = try db.createNode(null, &[_][]const u8{"Person"});
+        try db.setNodeProperty(null, p.*, "name", .{ .string_val = name });
+    }
+    var buf: [512]u8 = undefined;
+    for (0..60) |i| {
+        var w: std.Io.Writer = .fixed(&buf);
+        for (0..i % 5 + 1) |_| try w.writeAll("common ");
+        if (i % 3 == 0) try w.writeAll("rare ");
+        for (0..i % 7) |j| try w.print("filler{d} ", .{j});
+        const id = try db.createNode(null, &[_][]const u8{"Doc"});
+        try db.setNodeProperty(null, id, "text", .{ .string_val = w.buffered() });
+        try db.setNodeProperty(null, id, "i", .{ .int_val = @intCast(i) });
+        // A wrote the even documents, B every fifth.
+        if (i % 2 == 0) try db.createEdge(null, people[0], id, "WROTE");
+        if (i % 5 == 0) try db.createEdge(null, people[1], id, "WROTE");
+    }
+
+    var want: [200][2]f64 = undefined;
+    var got: [200][2]f64 = undefined;
+    const ranked = "MATCH (d:Doc) WHERE d.text @@ 'rare' RETURN d.i, score(d) ORDER BY score(d) DESC, d.i";
+    const n_rare = try iScores(db, ranked, &want);
+    try std.testing.expectEqual(@as(usize, 20), n_rare);
+
+    // OPTIONAL MATCH of a labelled node reads the index once, and the
+    // scores survive the join with the argument row (they were null).
+    {
+        const n = try iScores(db, "OPTIONAL MATCH (d:Doc) WHERE d.text @@ 'rare' RETURN d.i, score(d) ORDER BY score(d) DESC, d.i", &got);
+        try expectSameRows(want[0..n_rare], got[0..n]);
+        var per_person = try db.query("MATCH (p:Person) OPTIONAL MATCH (d:Doc) WHERE d.text @@ 'rare' RETURN p.name, d.i, score(d)");
+        defer per_person.deinit();
+        try std.testing.expectEqual(2 * n_rare, per_person.rows.len);
+        for (per_person.rows) |row| try std.testing.expect(row.values[2].float_val > 0);
+        var none = try db.query("MATCH (p:Person) OPTIONAL MATCH (d:Doc) WHERE d.text @@ 'absent' RETURN p.name, d");
+        defer none.deinit();
+        try std.testing.expectEqual(@as(usize, 2), none.rows.len);
+        for (none.rows) |row| try std.testing.expect(row.values[1] == .null_val);
+    }
+    // Two disconnected patterns: the same join, the same scores.
+    {
+        var joined = try db.query("MATCH (p:Person), (d:Doc) WHERE d.text @@ 'rare' RETURN p.name, d.i, score(d)");
+        defer joined.deinit();
+        try std.testing.expectEqual(2 * n_rare, joined.rows.len);
+        for (joined.rows) |row| try std.testing.expect(row.values[2].float_val > 0);
+    }
+    // OPTIONAL MATCH reached through a relationship matches row by row: the
+    // right documents, and (as documented) no score.
+    {
+        var result = try db.query("MATCH (p:Person {name: 'B'}) OPTIONAL MATCH (p)-[:WROTE]->(d:Doc) WHERE d.text @@ 'rare' RETURN d.i, score(d) ORDER BY d.i");
+        defer result.deinit();
+        try std.testing.expectEqual(@as(usize, 4), result.rows.len); // i % 15 == 0
+        for (result.rows, 0..) |row, k| {
+            try std.testing.expectEqual(@as(i64, @intCast(k * 15)), row.values[0].int_val);
+            try std.testing.expect(row.values[1] == .null_val);
+        }
+    }
+
+    // Each part of a UNION ALL is the search it would be alone, its LIMIT
+    // bounding its own seek.
+    {
+        const a = "MATCH (d:Doc) WHERE d.text @@ 'rare' RETURN d.i AS i, score(d) AS s ORDER BY s DESC LIMIT 3";
+        const b = "MATCH (d:Doc) WHERE d.text @@ 'filler5' RETURN d.i AS i, score(d) AS s ORDER BY s DESC LIMIT 2";
+        const na = try iScores(db, a, &want);
+        const nb = try iScores(db, b, want[na..]);
+        const both = a ++ " UNION ALL " ++ b;
+        const n = try iScores(db, both, &got);
+        try expectSameRows(want[0 .. na + nb], got[0..n]);
+        try std.testing.expectEqual(@as(u32, 2), try boundedSeeks(db, both));
+    }
+
+    // EXISTS and a pattern comprehension, against what each person wrote.
+    for ([_][]const u8{ "A", "B" }, [_]usize{ 2, 5 }) |name, every| {
+        var expect_ids: [60]i64 = undefined;
+        var k: usize = 0;
+        for (0..60) |i| {
+            if (i % 3 == 0 and i % every == 0) {
+                expect_ids[k] = @intCast(i);
+                k += 1;
+            }
+        }
+        var q1: [256]u8 = undefined;
+        const comprehension = try std.fmt.bufPrint(&q1, "MATCH (p:Person {{name: '{s}'}}) RETURN [(p)-[:WROTE]->(d:Doc) WHERE d.text @@ 'rare' | d.i]", .{name});
+        var result = try db.query(comprehension);
+        defer result.deinit();
+        const list = result.rows[0].values[0].list_val;
+        var seen: [60]i64 = undefined;
+        for (list, 0..) |v, i| seen[i] = v.int_val;
+        std.mem.sort(i64, seen[0..list.len], {}, std.sort.asc(i64));
+        try std.testing.expectEqualSlices(i64, expect_ids[0..k], seen[0..list.len]);
+
+        var q2: [256]u8 = undefined;
+        const exists = try std.fmt.bufPrint(&q2, "MATCH (p:Person {{name: '{s}'}}) WHERE EXISTS {{ MATCH (p)-[:WROTE]->(d:Doc) WHERE d.text @@ 'rare filler4' }} RETURN p.name", .{name});
+        var found = try db.query(exists);
+        defer found.deinit();
+        // rare and filler4: i % 3 == 0 and i % 7 >= 5; A has 12 (even), B none
+        // (i % 5 == 0 and i % 3 == 0 and i % 7 >= 5: 0, 15, 30, 45 -> 6 and
+        // 5 at 30... checked against the plain search below).
+        var plain_buf: [128]u8 = undefined;
+        const plain = try std.fmt.bufPrint(&plain_buf, "MATCH (p:Person {{name: '{s}'}})-[:WROTE]->(d:Doc) WHERE d.text @@ 'rare filler4' RETURN count(d)", .{name});
+        var count = try db.query(plain);
+        defer count.deinit();
+        try std.testing.expectEqual(@as(usize, if (count.rows[0].values[0].int_val > 0) 1 else 0), found.rows.len);
+    }
+
+    // Under a named path, with the LIMIT still bounding the seek.
+    {
+        const with_path = "MATCH p = (d:Doc) WHERE d.text @@ 'rare' RETURN d.i, score(d), length(p) ORDER BY score(d) DESC LIMIT 4";
+        const n = try iScores(db, with_path, &got);
+        const m = try iScores(db, "MATCH (d:Doc) WHERE d.text @@ 'rare' RETURN d.i, score(d) ORDER BY score(d) DESC LIMIT 4", &want);
+        try std.testing.expectEqual(m, n);
+        for (want[0..m], got[0..n]) |w, g| try std.testing.expectApproxEqAbs(w[1], g[1], 1e-6);
+        try std.testing.expectEqual(@as(u32, 1), try boundedSeeks(db, with_path));
+        var walk = try db.query("MATCH p = (a:Person {name: 'A'})-[:WROTE]->(d:Doc) WHERE d.text @@ 'rare' RETURN length(p), score(d)");
+        defer walk.deinit();
+        try std.testing.expectEqual(@as(usize, 10), walk.rows.len);
+        for (walk.rows) |row| try std.testing.expectEqual(@as(i64, 1), row.values[0].int_val);
+    }
+}

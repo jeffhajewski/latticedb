@@ -52,6 +52,14 @@ pub const BindPath = struct {
         return .{ .vtable = &vtable, .ptr = self };
     }
 
+    /// The BindPath `op` is, if it is one. It passes on one row for each
+    /// row of its input, in order, so what bounds its rows bounds its
+    /// input's.
+    pub fn of(op: Operator) ?*Self {
+        if (op.vtable != &vtable) return null;
+        return @ptrCast(@alignCast(op.ptr));
+    }
+
     const vtable = Operator.VTable{
         .open = open,
         .next = next,

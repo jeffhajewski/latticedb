@@ -406,6 +406,59 @@ test "cli: a database in a format too new to read says so, from open and from ch
     }
 }
 
+test "cli: check finishes an interrupted flush from the journal, in memory" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lfmt_cli_check_journal.ltdb";
+    const journal_path = "/tmp/lfmt_cli_check_journal.ltdb-journal";
+    deleteDatabaseFiles(path);
+    defer deleteDatabaseFiles(path);
+    compat.fs.cwd().deleteFile(journal_path) catch {};
+    defer compat.fs.cwd().deleteFile(journal_path) catch {};
+    {
+        var db = try Database.open(allocator, path, .{ .create = true, .config = .{ .enable_fts = false } });
+        defer db.close();
+        _ = try db.createNode(null, &.{"A"});
+    }
+
+    // A crash in the middle of a flush: the journal holds page 1 whole, and
+    // page 1 in place is half written.
+    const page_size = 4096;
+    const before = try readWholeFile(allocator, path);
+    defer allocator.free(before);
+    {
+        var header: lattice.storage.page.FileHeader = undefined;
+        @memcpy(std.mem.asBytes(&header), before[0..@sizeOf(lattice.storage.page.FileHeader)]);
+        var posix = lattice.storage.vfs.PosixVfs.init(allocator);
+        var journal = try lattice.storage.journal.Journal.open(allocator, posix.vfs(), journal_path);
+        defer journal.deinit();
+        try journal.write(header.file_uuid, page_size, &.{.{ .page_id = 1, .data = before[page_size..][0..page_size] }});
+
+        const file = try compat.fs.cwd().openFile(path, .{ .mode = .read_write });
+        defer file.close();
+        const torn = [_]u8{0xA5} ** (page_size / 2);
+        try file.pwriteAll(&torn, page_size + page_size / 2);
+    }
+    const torn_file = try readWholeFile(allocator, path);
+    defer allocator.free(torn_file);
+    const journal_before = try readWholeFile(allocator, journal_path);
+    defer allocator.free(journal_before);
+
+    const run = try runCli(allocator, &.{ "check", path, "--format=json" });
+    defer run.deinit(allocator);
+    if (!run.succeeded() or std.mem.indexOf(u8, run.stdout, "\"journal_applied\":true") == null) {
+        std.debug.print("exit {?d}\nstdout: {s}\nstderr: {s}\n", .{ run.exit_code, run.stdout, run.stderr });
+        return error.TestUnexpectedResult;
+    }
+
+    // The check wrote nothing: the file and the journal are as they were.
+    const file_after = try readWholeFile(allocator, path);
+    defer allocator.free(file_after);
+    try std.testing.expectEqualSlices(u8, torn_file, file_after);
+    const journal_after = try readWholeFile(allocator, journal_path);
+    defer allocator.free(journal_after);
+    try std.testing.expectEqualSlices(u8, journal_before, journal_after);
+}
+
 test "cli: help for every command that opens a database lists the vector options" {
     const allocator = std.testing.allocator;
     const commands = [_][]const u8{

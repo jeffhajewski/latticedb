@@ -37,6 +37,8 @@ const PageHeader = lattice.storage.page.PageHeader;
 const PageManager = lattice.storage.page_manager.PageManager;
 const PageManagerError = lattice.storage.page_manager.PageManagerError;
 const PosixVfs = lattice.storage.vfs.PosixVfs;
+const OverlayVfs = lattice.storage.overlay_vfs.OverlayVfs;
+const journal_mod = lattice.storage.journal;
 
 pub const VERSION = lattice.VERSION;
 const INSTALL_SCRIPT_URL = "https://raw.githubusercontent.com/jeffhajewski/latticedb/main/dist/install.sh";
@@ -61,6 +63,8 @@ const CheckStats = struct {
     pages_checked: u32,
     /// Pages never written (all zeros), counted in pages_checked.
     blank_pages: u32 = 0,
+    /// A flush a crash cut short was finished from the journal, in memory.
+    journal_applied: bool = false,
     wal_present: bool,
 };
 
@@ -1350,15 +1354,19 @@ fn cmdCheck(
             if (stats.blank_pages > 0) {
                 try stdout.print("  Blank pages:   {d} (never written; a crash can leave these unused)\n", .{stats.blank_pages});
             }
+            if (stats.journal_applied) {
+                try stdout.writeAll("  Note: an interrupted flush was finished from the journal in memory; the file is unchanged until a read-write open finishes it\n");
+            }
             if (stats.wal_present) {
                 try stdout.writeAll("  Note: sibling WAL file exists but was not validated\n");
             }
         },
         .json => {
-            try stdout.print("{{\"path\":\"{s}\",\"pages_checked\":{d},\"blank_pages\":{d},\"wal_present\":{},\"wal_validated\":false}}\n", .{
+            try stdout.print("{{\"path\":\"{s}\",\"pages_checked\":{d},\"blank_pages\":{d},\"journal_applied\":{},\"wal_present\":{},\"wal_validated\":false}}\n", .{
                 path,
                 stats.pages_checked,
                 stats.blank_pages,
+                stats.journal_applied,
                 stats.wal_present,
             });
         },
@@ -1367,6 +1375,7 @@ fn cmdCheck(
             try stdout.print("path,{s}\n", .{path});
             try stdout.print("pages_checked,{d}\n", .{stats.pages_checked});
             try stdout.print("blank_pages,{d}\n", .{stats.blank_pages});
+            try stdout.print("journal_applied,{}\n", .{stats.journal_applied});
             try stdout.print("wal_present,{}\n", .{stats.wal_present});
             try stdout.writeAll("wal_validated,false\n");
         },
@@ -1377,13 +1386,67 @@ fn cmdCheck(
 ///
 /// Takes a shared lock by default, because reading pages while another process
 /// flushes them reports corruption that is not there.
+///
+/// A flush that a crash cut short leaves pages half written in place and the
+/// journal that finishes it. The engine applies the journal before it reads
+/// anything; so does the check, as a read-only open does, on an overlay that
+/// keeps what it writes in memory, so the file and the journal are left as
+/// they are. Without it the check refused such a file, or would report
+/// damage the journal repairs.
 fn checkDatabaseFile(allocator: std.mem.Allocator, path: []const u8, lock: bool) CheckError!CheckStats {
     var posix_vfs = PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();
 
-    var page_manager = PageManager.init(allocator, vfs_impl, path, .{
+    // The lock is held from before the journal is read, so that no writer
+    // can start a flush under the check. Locks belong to the open file, so
+    // the handles opened below do not disturb it.
+    const locked_file: ?lattice.storage.vfs.File = if (lock) blk: {
+        const file = vfs_impl.open(path, .{ .read = true }) catch |err| return switch (err) {
+            error.FileNotFound => CheckError.FileNotFound,
+            error.PermissionDenied => CheckError.PermissionDenied,
+            else => CheckError.IoError,
+        };
+        errdefer file.close();
+        const acquired = file.tryLock(.shared) catch return CheckError.IoError;
+        if (!acquired) return CheckError.DatabaseLocked;
+        break :blk file;
+    } else null;
+    defer if (locked_file) |file| {
+        file.unlock();
+        file.close();
+    };
+
+    const journal_path = std.fmt.allocPrint(allocator, "{s}-journal", .{path}) catch return CheckError.OutOfMemory;
+    defer allocator.free(journal_path);
+    const journal_size: u64 = if (vfs_impl.exists(journal_path)) blk: {
+        const file = vfs_impl.open(journal_path, .{ .read = true }) catch break :blk 0;
+        defer file.close();
+        break :blk file.size() catch 0;
+    } else 0;
+
+    // The overlay holds at most the pages the journal carries.
+    const overlay_budget = std.math.cast(usize, journal_size +| 1024 * 1024) orelse return CheckError.OutOfMemory;
+    var overlay = OverlayVfs.init(allocator, vfs_impl, overlay_budget);
+    defer overlay.deinit();
+    const check_vfs = overlay.vfs();
+
+    var journal_applied = false;
+    if (journal_size > 0) {
+        const db_file = check_vfs.open(path, .{ .read = true, .write = true }) catch |err| return switch (err) {
+            error.FileNotFound => CheckError.FileNotFound,
+            error.PermissionDenied => CheckError.PermissionDenied,
+            else => CheckError.IoError,
+        };
+        defer db_file.close();
+        journal_applied = journal_mod.recover(allocator, check_vfs, journal_path, db_file, false) catch |err| return switch (err) {
+            error.OutOfMemory => CheckError.OutOfMemory,
+            else => CheckError.IoError,
+        };
+    }
+
+    var page_manager = PageManager.init(allocator, check_vfs, path, .{
         .read_only = true,
-        .lock = lock,
+        .lock = false,
     }) catch |err| return mapPageManagerCheckError(err);
     defer page_manager.deinit();
 
@@ -1408,6 +1471,7 @@ fn checkDatabaseFile(allocator: std.mem.Allocator, path: []const u8, lock: bool)
 
     return .{
         .blank_pages = blank_pages,
+        .journal_applied = journal_applied,
         .pages_checked = page_count -| 1,
         .wal_present = hasWalSibling(path),
     };

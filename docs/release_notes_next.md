@@ -347,6 +347,14 @@ program does not set them, and are how the CLI sets them.
   --vector-ef-construction=<n>`. They are fixed once the index exists; export and
   import to change them. Under Euclidean and dot product vectors are stored as
   given; cosine still normalises them.
+- **A node keeps its vector when its last label is removed.** Removing the only
+  label a node had also deleted its vector, in a transaction and outside one,
+  and adding a label back did not restore it. Nothing about having no labels
+  puts a vector out of reach: a node created without labels can hold one, vector
+  search returns it and `MATCH (n) WHERE n.embedding <=> ...` finds it. A vector
+  now goes only when it is cleared or its node is deleted. If you relied on a
+  label removal to take a node out of vector search, clear its vector or delete
+  the node instead.
 - **A node's id is never handed out again.** Every open found the next node id
   by scanning for the highest one, so deleting the newest node and reopening gave
   its id to the next node created. The counter is now stored in the file. Ids
@@ -670,9 +678,6 @@ with relationships is one range probe, under 1 µs.
   `LATTICE_ERROR_FULL`. `lattice check` does not recover first.
 - **The vector metric, `m` and `ef_construction` cannot be changed** once the
   index exists; export and import into a new database to change them.
-- **Removing a node's last label removes its vector**, which takes the node out
-  of vector search. A node created without labels can be given a vector and
-  keeps it.
 - **`lattice replicate` takes a snapshot after any process that wrote has
   closed the database.** Closing now folds the log into the file and resets it,
   which begins a new replication generation. That was already so for the

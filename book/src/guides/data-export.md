@@ -93,25 +93,31 @@ options too.
 
 ## Vectors
 
-When the database is opened with its vector index, exports include each node's
-vector, and JSON exports and dumps record the dimensions:
+When the database has a vector index, exports include each node's vector, and
+JSON exports and dumps record the dimensions. No vector options are needed, because
+the database file records its index:
 
 ```bash
-lattice export embeddings.db --enable-vector --vector-dims=3 --file=docs.json
+lattice export embeddings.db --file=docs.json
 ```
 
 ```json
 {"version":2,"vector_dimensions":3,"nodes":[{"id":"1","labels":["Doc"],"properties":{"title":"cafe"},"vector":[0.6,0.8,0.0]}],"edges":[]}
 ```
 
-The database file does not record how many dimensions its vectors have, so
-without `--enable-vector` and `--vector-dims` the export leaves vectors out and
-prints a warning saying so. Under the cosine metric a vector is stored
-normalised, so the exported vector is the unit-length one: a node given
-`[3, 4, 0]` exports as `[0.6,0.8,0.0]`.
+Under the cosine metric a vector is stored normalised, so the exported vector is
+the unit-length one: a node given `[3, 4, 0]` exports as `[0.6,0.8,0.0]`. Under
+the `euclidean` and `dot` metrics vectors are stored as given and export as
+`[3.0,4.0,0.0]`. An export records the dimensions but not the metric or the HNSW
+settings: create the database you import into with the ones you want.
 
-Importing a file that holds vectors needs the target database opened with
-vectors of the same dimensions. A JSON import checks this before writing
+A database last written by 0.16.0 whose dimensions cannot be read from its vector
+pages is the one case where an export leaves vectors out, with a warning, unless
+it is given `--enable-vector --vector-dims=<n>`.
+
+Importing a file that holds vectors needs a target database with a vector index of
+the same dimensions; a database without one can be given one by the import itself,
+with `--enable-vector --vector-dims=<n>`. A JSON import checks this before writing
 anything (here `copy.db` was created with four dimensions); JSONL and CSV
 imports fail at the first node whose vector does not fit:
 

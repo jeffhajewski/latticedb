@@ -335,7 +335,7 @@ CLI export writes JSON format version 2, which `import` reads back with every va
 - Bytes, vector-valued properties and non-finite floats are written as single-key tagged objects (`{"$bytes": "<base64>"}`, `{"$vector": [...]}`, `{"$float": "NaN"}`), and a map whose only key starts with `$` is wrapped in `{"$map": ...}`.
 - A string is always imported as a string.
 - A file with no `"version"` field is read as version 1, what 0.16.0 and earlier wrote. There an array of numbers still reads as a `VECTOR`, and bytes, which version 1 wrote as hex strings, come back as strings. A version newer than the importer knows is refused.
-- Node vectors (the HNSW embedding, not a vector property) are exported and imported only when the database is opened with `--enable-vector` and its dimensions.
+- Node vectors (the HNSW embedding, not a vector property) are exported and imported whenever the database has a vector index, which the file records. A file records the vector dimensions but not the metric or the HNSW settings. Importing vectors into a database without an index needs `--enable-vector --vector-dims=<n>`, which creates one.
 
 ## Deliberately Unspecified Areas
 

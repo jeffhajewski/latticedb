@@ -60,17 +60,26 @@ Created database: social.lattice
 ```
 
 If you plan to store embeddings, turn the vector index on at creation time and say how
-many dimensions your vectors have. This has to be decided up front, because the index
-is built into the file:
+many dimensions your vectors have. This is decided up front, because the index is
+built into the file and the file records how it was built:
 
 ```bash
 lattice create embeddings.lattice --enable-vector --vector-dims=1536
+```
+
+```text
+Created database: embeddings.lattice
+  Vector index enabled (dimensions: 1536, metric: cosine)
+  Full-text search enabled
 ```
 
 | Option | What it does |
 |--------|--------------|
 | `--enable-vector` | Turn on the vector index for similarity search |
 | `--vector-dims=<n>` | How many numbers are in each vector, 1 to 4096 (default 128) |
+| `--vector-metric=<m>` | How distance is measured: `cosine` (default), `euclidean`, or `dot` (the negative dot product) |
+| `--vector-m=<n>` | HNSW connections per node, 2 to 32 (default 16) |
+| `--vector-ef-construction=<n>` | HNSW candidate list size while building, 1 to 4096 (default 200) |
 | `--enable-fts` | Turn on full-text search — already the default |
 | `--no-fts` | Leave full-text search out |
 | `--cache-size=<mb>` | How much memory to keep pages in, in MB (default 64) |
@@ -78,38 +87,33 @@ lattice create embeddings.lattice --enable-vector --vector-dims=1536
 
 Pick `--vector-dims` to match whatever produces your embeddings. OpenAI's
 `text-embedding-3-small` gives you 1536 numbers per vector, so that is the number you
-would use.
+would use. The metric and the two HNSW settings cannot be changed later either; to
+change them, export the data and import it into a new database.
 
 ### Opening a database that stores vectors
 
-The file does not record how many dimensions its vectors have, so every command
-that opens a database accepts `--enable-vector` and `--vector-dims` as well, and
-you pass the same values you created it with. Two situations need them:
+The database file records its vector index: dimensions, metric and build settings.
+Every command opens the index as it was created, with no vector options, including
+`export`, `dump` and `import`, which carry node vectors, and the first command after
+a crash, which replays the vector changes in the log.
 
-- **Moving vectors in or out.** `export`, `dump` and `import` include node
-  vectors only when the database is opened with its vector index.
-- **Opening after a crash.** If a process stopped without closing the database,
-  the write-ahead log can still hold committed vector changes, and replaying
-  them needs the vector index. Without the options, a command that replays the
-  log (any command that can write, such as `exec`, `import` or `checkpoint`)
-  fails and says what to do:
-
-```text
-Error: Failed to open database embeddings.lattice: IoError. If it stores vectors, its write-ahead log may hold vector changes that can only be replayed with vectors enabled. Retry with --enable-vector --vector-dims=<n>, where <n> is the number of dimensions the database was created with.
-```
-
-Retry with the options and the log is replayed and emptied (see
-[Flushing pending writes](#flushing-pending-writes) for why to do this before
-running the read-only commands after a crash). Dimensions that do
-not match the ones the database was created with are refused too:
+A `--vector-dims` that contradicts the file is refused:
 
 ```bash
 lattice count embeddings.lattice --enable-vector --vector-dims=4
 ```
 
 ```text
-Error: Failed to open database embeddings.lattice: InvalidArgument. With --enable-vector, check that the database has a vector index and that --vector-dims matches the number of dimensions it was created with.
+Error: Failed to open database embeddings.lattice: its vector index has a different number of dimensions than --vector-dims gives. A database with a vector index opens with it as it was created; leave out --vector-dims.
 ```
+
+The vector options of commands other than `create` are needed in two cases only.
+`--enable-vector --vector-dims=<n>` on a database that has no vector index creates
+one, for example to import a file that carries vectors into a database created
+without them. And a database last written by LatticeDB 0.16.0 records no vector
+settings: its dimensions are read from its vector pages, and in the rare case that
+fails, a command that has to replay vector changes from its log stops and asks for
+`--enable-vector --vector-dims=<n>` with the dimensions it was created with.
 
 ## Running queries
 
@@ -126,6 +130,29 @@ You can keep a longer query in a file instead of fighting with shell quoting:
 
 ```bash
 lattice exec social.lattice --file=report.cypher
+```
+
+When a query fails, the error says at which stage it failed, what went wrong and
+where, with a caret under the part of the query it is about, and the command exits
+with status 1:
+
+```bash
+lattice exec social.lattice --query="MATCH (p:Person) RETURN p.name, p.age / 0"
+```
+
+```text
+Error: Execution error (DivisionByZero) at 1:39: Division by zero: 30 / 0
+  1 | MATCH (p:Person) RETURN p.name, p.age / 0
+    |                                       ^
+```
+
+A misspelt function is found before the query runs, whether or not any rows would
+reach it:
+
+```text
+Error: Semantic error (unknown_function) at 1:25: Unknown function 'toUppr'
+  1 | MATCH (p:Person) RETURN toUppr(p.name)
+    |                         ^^^^^^
 ```
 
 ### An interactive shell
@@ -201,7 +228,7 @@ Database: social.lattice
 Size:         64 KB
 Nodes:        2
 Edges:        1
-Format:       v3
+Format:       v4
 Vector:       disabled
 FTS:          enabled
 ```
@@ -239,8 +266,9 @@ JSON should have a `nodes` array and an `edges` array:
 
 In JSON, `id` is a name local to the file: edges refer to nodes by it, and each
 node gets a fresh ID in the database. A node can also carry a `"vector"` array,
-which is stored as its embedding; that needs the database opened with
-`--enable-vector` and the matching `--vector-dims`. Files that `export` writes
+which is stored as its embedding; that needs a database with a vector index. Into a
+database without one, the import stops and asks for `--enable-vector
+--vector-dims=<n>`, which creates the index. Files that `export` writes
 also have a `"version"` field and write some values in a tagged form; see
 [Data Export](../guides/data-export.md) for the format.
 
@@ -305,6 +333,18 @@ in JSONL and CSV, `edges file line 4` when a CSV pair is imported together. A
 record is imported whole or not at all: a property that cannot be read or
 stored, a label or property of the wrong JSON type, or an edge whose endpoint
 names no node fails the record.
+
+A CSV file that cannot be read as CSV at all, such as one with a quote that is
+never closed or text after a field's closing quote, stops the import at the line
+where the problem starts:
+
+```text
+Error: Import failed at line 2: a quoted field that starts here has no closing quote
+```
+
+`--on-error=skip` cannot skip past such a fault, since the reader cannot tell where
+the next record begins, so it stops the import too, although the message still
+suggests it.
 
 Two options are worth knowing about for large imports:
 
@@ -383,13 +423,10 @@ The query has to return nodes or relationships, not just their properties
 (`RETURN p`, not `RETURN p.name`); otherwise the export fails and says so.
 `--labels` and `--query` cannot be combined.
 
-To include node vectors, open the database with `--enable-vector` and its
-`--vector-dims`. Exporting a database that has a vector index without them
-still works, with a warning that the vectors are left out:
-
-```text
-Warning: embeddings.lattice has a vector index, and vectors are not included without --enable-vector --vector-dims=<n>, where <n> is the number of dimensions the database was created with.
-```
+Node vectors are included whenever the database has a vector index. The one
+exception is a database last written by 0.16.0 whose dimensions cannot be read
+from its vector pages: its export works, with a warning that the vectors are left
+out unless you pass `--enable-vector --vector-dims=<n>`.
 
 An export that fails removes the file it was writing rather than leave a
 partial one behind.
@@ -622,12 +659,14 @@ moment the flush happens rather than let it land mid-request.
 This is not the same as `compact`. Checkpointing shrinks the log, not the
 database file.
 
-After a crash, run a command that writes, such as `checkpoint`, before anything
-else. The commands that only read (`info`, `count`, `labels`, `types`,
-`schema`, `check`, `export` and `dump`) open the file read-only and do not
-replay the log, so until something has replayed it they report what the file
-held before the crash, not what was committed. If the database stores vectors,
-give `checkpoint` the vector options as well.
+After a crash nothing has to be run first. The commands that only read
+(`info`, `count`, `labels`, `types`, `schema`, `export` and `dump`) open the file
+read-only and recover it in memory, so they show every committed transaction
+without changing the files; the first command that writes recovers the files
+themselves. `check` is the exception: it reads pages directly and does not
+recover first, so after a crash it checks the file as the crash left it, and
+reports a flush the crash interrupted as an error. Run a writing command such as
+`checkpoint` before it.
 
 ### Reclaiming space
 
@@ -700,6 +739,19 @@ filesystems where locking does not work, such as some network filesystems. It
 does not make concurrent access safe — it removes the thing that was going to
 tell you it was not.
 
+## Files from a newer release
+
+A database file can say that releases older than some version may read it but not
+write it. A command that writes stops on such a file and names the ones that
+still work:
+
+```text
+Error: future.lattice was written by a newer LatticeDB that does not let this version write to it. info, count, labels, types, schema, export and dump still read it; use that newer version for anything else.
+```
+
+`exec` and `query` open the database for writing, so they cannot run even a
+read-only query against such a file.
+
 ## Output formats
 
 Most commands can print in a different format, which is what you want when something
@@ -718,8 +770,11 @@ labels,1
 edge_types,1
 ```
 
-`table` is the default and is meant for reading. `json` and `csv` are meant for piping
-somewhere else:
+`table` is the default and is meant for reading. It prints floats with six
+decimals, and in the shortest scientific form that reads back as the same number
+when they are 1e16 or more, or below 1e-6, in size (`1e300`, `1e-300`), so a very
+small number never shows as `0.000000`. `json` and `csv` are meant for piping
+somewhere else, and print floats in full, as plain decimals:
 
 ```bash
 lattice exec social.lattice --query="MATCH (p:Person) RETURN p.name" --format=json | jq

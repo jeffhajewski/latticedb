@@ -175,21 +175,31 @@ repeated as a filter over the rows it produced.
 number the direct search calls return. Higher is better:
 
 ```cypher
-MATCH (d:Doc)
+MATCH (d:Document)
 WHERE d.text @@ 'starter'
 RETURN d.title, score(d) AS s
 ORDER BY s DESC
 ```
 
-For an `OR` of searches, it is the best score among the searches that matched.
+For an `OR` of searches, it is the best score among the searches that matched,
+also when the `OR` stands beside other conditions:
+
+```cypher
+MATCH (d:Document)
+WHERE d.year >= 2020 AND (d.title @@ 'sourdough' OR d.body @@ 'sourdough')
+RETURN d.title, score(d) AS s
+ORDER BY s DESC
+```
+
 `score(d)` is null when no single search scored `d`: the query has no `@@` on `d`,
 or the `MATCH` searched several indexes and chose between them as it ran. It is
 carried through `WITH d`, but not under another name (`WITH d AS e`) and not
 through an aggregation. Its argument must be a variable; `score(1)` fails with
 "score() takes a variable, as in score(d) after WHERE d.text @@ 'query'".
 
-`ORDER BY score(d) LIMIT k` sorts every match and then keeps `k`; unlike the vector
-search's `ORDER BY` on distance, it does not make the search itself stop early.
+`ORDER BY score(d) LIMIT k`, ascending, sorts every match and keeps the `k`
+weakest; only `ORDER BY score(d) DESC` lets the `LIMIT` bound the search (see
+[How it works](#how-it-works)).
 
 ## String queries
 

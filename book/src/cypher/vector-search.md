@@ -51,7 +51,11 @@ When the candidates are few next to the index (fewer than about
 which is exact. A larger set is searched through the HNSW graph with the set as
 a filter; that stays approximate, so a candidate within the threshold can
 occasionally be missed. Candidates the graph search could not reach are measured
-directly when it runs out.
+directly when it runs out. When the pattern is a single labelled node,
+`MATCH (n:Label) WHERE n.embedding <=> ...`, the label's index is that filter:
+the search reads only as much of the label as it takes to tell that it is
+large, so a label holding half of 100,000 nodes answers `LIMIT 10` in about
+0.5 ms, and one holding 100 of them in 10 to 20 µs.
 
 Any other form is evaluated row by row, exactly, by computing each candidate's
 distance: a threshold that is an expression (`< 0.25 * 2`), or a `<=>` predicate

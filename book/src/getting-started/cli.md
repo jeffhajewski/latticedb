@@ -686,10 +686,10 @@ After a crash nothing has to be run first. The commands that only read
 (`info`, `count`, `labels`, `types`, `schema`, `export` and `dump`) open the file
 read-only and recover it in memory, so they show every committed transaction
 without changing the files; the first command that writes recovers the files
-themselves. `check` is the exception: it reads pages directly and does not
-recover first, so after a crash it checks the file as the crash left it, and
-reports a flush the crash interrupted as an error. Run a writing command such as
-`checkpoint` before it.
+themselves. `check` reads the database file's pages rather than the log, but it
+too finishes a flush the crash interrupted, in memory from the journal, before it
+checks, and adds a note saying so; the files stay as they were until a writing
+command finishes the flush on disk.
 
 ### Reclaiming space
 

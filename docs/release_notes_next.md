@@ -977,7 +977,9 @@ with relationships is one range probe, under 1 µs.
   with a caret under the place.
 - The read-only commands (`info`, `count`, `labels`, `types`, `schema`, `export`,
   `dump`) recover a crashed database in memory and show every committed
-  transaction. `check` still reads pages as the crash left them.
+  transaction. `check` finishes a flush the crash interrupted from the journal,
+  in memory, before it checks the pages (`journal_applied` in JSON and CSV); it
+  failed with "IoError" on such a file.
 - A file that needs a newer writer is refused by the commands that write, with a
   message naming the commands that still read it.
 - A CSV file that cannot be read as CSV, such as one with an unclosed quote,
@@ -1062,7 +1064,7 @@ with relationships is one range probe, under 1 µs.
   file into a new database to get the same.
 - **A read-only recovery is bounded by memory**, 64 MB plus four times the size
   of the log and journal; beyond that the read-only open fails with
-  `LATTICE_ERROR_FULL`. `lattice check` does not recover first.
+  `LATTICE_ERROR_FULL`.
 - **Indexes created by 0.16.0 answer equality only** until rebuilt with
   `lattice compact --upgrade-indexes` (or `Database.upgradePropertyIndexes`
   from Zig, or dropped and created again).

@@ -305,8 +305,9 @@ it on disk. A log damaged in its synced part refuses a read-only open as it refu
 a read-write one.
 
 The CLI's read-only commands (`count`, `info`, `labels`, `export` and the rest) open
-this way. `lattice check` reads pages directly and does not recover first, so it
-reports an interrupted flush as an error.
+this way. `lattice check` reads the database file's pages, not the log, and
+finishes an interrupted flush from the journal in memory before it checks them, so
+it checks the file as the journal leaves it, without changing it.
 
 ## Where to go next
 

@@ -520,8 +520,6 @@ without changing anything.
 - **A read-only recovery is bounded by memory**: 64 MB plus four times the size of
   the log and journal. Beyond that the read-only open fails, and a read-write open
   is needed.
-- **`lattice check` does not recover first.** It reads pages directly, so it reports
-  a flush a crash interrupted as an error until a read-write open finishes it.
 - **What the power-loss tests do not reach.** The power-loss simulation (see
   [Running Tests](../development/testing.md#power-loss-tests)) drives the Zig API on
   an in-memory disk model. Backup, restore and replication use the filesystem

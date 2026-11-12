@@ -1463,6 +1463,17 @@ pub const Database = struct {
         // create finds it rather than replacing it.
         const effective_create = options.create or isMemoryPath(path);
 
+        // Options a new database cannot be created with are refused before
+        // the file is: a refused open must not leave an empty database
+        // behind for the next open to find. The range checks above already
+        // ran; what is left depends on whether there is a file.
+        if (effective_create and self.vfs != .memory and fileSize(self.vfs.vfs(), path) == 0) {
+            // Nothing to read, and a read-only handle may not write one.
+            if (options.read_only) return DatabaseError.FileNotFound;
+            // "The file's dimensions", with no file to ask.
+            if (options.config.enable_vector and options.config.vector_dimensions == 0) return DatabaseError.InvalidArgument;
+        }
+
         self.page_manager = PageManager.init(allocator, self.vfs.vfs(), path, .{
             .create = effective_create,
             .read_only = options.read_only,

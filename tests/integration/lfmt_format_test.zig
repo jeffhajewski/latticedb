@@ -436,6 +436,37 @@ test "lfmt: vector dimensions 0 cannot create an index" {
     try std.testing.expect(db.vectorConfig() == null);
 }
 
+fn exists(path: []const u8) bool {
+    @import("compat").fs.cwd().access(path, .{}) catch return false;
+    return true;
+}
+
+test "lfmt: options a new database cannot be created with are refused before any file exists" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lfmt_refused_create.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    const refused = [_]struct { options: lattice.storage.database.OpenOptions, err: DatabaseError }{
+        // Vectors on with "the file's dimensions", and no file to ask.
+        .{ .options = .{ .create = true, .config = .{ .enable_fts = false, .enable_vector = true, .vector_dimensions = 0 } }, .err = DatabaseError.InvalidArgument },
+        // Out-of-range values.
+        .{ .options = .{ .create = true, .config = .{ .enable_fts = false, .enable_vector = true, .vector_dimensions = 5000 } }, .err = DatabaseError.InvalidArgument },
+        .{ .options = .{ .create = true, .config = .{ .enable_fts = false, .enable_vector = true, .vector_dimensions = 4, .vector_m = 64 } }, .err = DatabaseError.InvalidArgument },
+        .{ .options = .{ .create = true, .page_size = 1000, .config = plain_config }, .err = DatabaseError.InvalidArgument },
+        // Nothing to read, and a read-only handle may not create it.
+        .{ .options = .{ .create = true, .read_only = true, .config = plain_config }, .err = DatabaseError.FileNotFound },
+    };
+    for (refused) |case| {
+        try std.testing.expectError(case.err, Database.open(allocator, path, case.options));
+        try std.testing.expect(!exists(path));
+        try std.testing.expect(!exists(path ++ "-wal"));
+        try std.testing.expect(!exists(path ++ "-journal"));
+    }
+    var db = try Database.open(allocator, path, .{ .create = true, .config = plain_config });
+    db.close();
+}
+
 test "lfmt: a 0.16.0 file with vectors opens with them, and records its configuration when written" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lfmt_vector_legacy.ltdb";

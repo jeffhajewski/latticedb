@@ -63,6 +63,15 @@ combined with others through `AND`. `<=>` has the same precedence as the
 comparison operators and groups left to right, so write the distance first, or in
 parentheses: `0.5 > n.embedding <=> $q` compares `0.5 > n.embedding` first.
 
+The `WHERE` of an `OPTIONAL MATCH`, of an `EXISTS { ... }` or `COUNT { ... }`
+subquery, of a pattern comprehension and of a `WITH` is always checked row by
+row, so a `<=>` there needs a bound (`WHERE n.embedding <=> $q < 0.5`). A bare
+`n.embedding <=> $q` there is refused ("A WHERE of only `<=>` ranks the rows of a
+MATCH by distance, which OPTIONAL MATCH cannot do; give it a bound instead").
+Each part of a `UNION` is planned as a query of its own, so a `<=>` with a
+`LIMIT` there is the search it would be alone; so is one under a named path
+(`MATCH p = (n:Chunk) WHERE n.embedding <=> $q`).
+
 `<=>` is also an ordinary expression. Outside such a search, in a `RETURN`, a
 `WITH`, an `ORDER BY` or a combined `WHERE`, it computes the distance between its
 two vectors with the database's metric (cosine in a database without a vector

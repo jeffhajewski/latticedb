@@ -1071,6 +1071,11 @@ pub const Database = struct {
             self.journal = journal_mod.Journal.open(allocator, self.vfs.vfs(), journal_path) catch {
                 return DatabaseError.IoError;
             };
+            self.journal.?.syncDirectoryOnFirstWrite(journal_path) catch {
+                self.journal.?.deinit();
+                self.journal = null;
+                return DatabaseError.OutOfMemory;
+            };
             self.buffer_pool.journal = &self.journal.?;
         }
         errdefer if (self.journal) |*journal| journal.deinit();

@@ -83,6 +83,8 @@ pub const PageImage = struct {
 pub const Journal = struct {
     allocator: Allocator,
     file: File,
+    /// Set while the journal's directory entry may not be on disk yet.
+    unsynced_dir_path: ?[]u8 = null,
 
     const Self = @This();
 
@@ -97,7 +99,21 @@ pub const Journal = struct {
     }
 
     pub fn deinit(self: *Self) void {
+        if (self.unsynced_dir_path) |path| self.allocator.free(path);
         self.file.close();
+    }
+
+    /// Have the first `write` make the journal's directory entry durable.
+    ///
+    /// The journal is created at open and removed at close, so in every
+    /// session it is a new file. fsync covers a file's contents and not the
+    /// name that leads to it: without this, a power cut during a flush could
+    /// leave pages half written in place and no journal to be found at the
+    /// next open. It is done at the first write and not at open so that a
+    /// session that never flushes pays nothing for it.
+    pub fn syncDirectoryOnFirstWrite(self: *Self, path: []const u8) JournalError!void {
+        if (self.unsynced_dir_path != null) return;
+        self.unsynced_dir_path = self.allocator.dupe(u8, path) catch return JournalError.OutOfMemory;
     }
 
     /// Record the pages and make the record durable. When this returns, the
@@ -137,6 +153,12 @@ pub const Journal = struct {
         self.file.write(0, &block) catch return JournalError.IoError;
 
         self.file.sync() catch return JournalError.IoError;
+
+        if (self.unsynced_dir_path) |path| {
+            vfs_mod.PosixVfs.syncParentDir(path);
+            self.allocator.free(path);
+            self.unsynced_dir_path = null;
+        }
     }
 
     /// The pages are in place and synced; the journal has done its job.
@@ -300,10 +322,14 @@ test "journal: a complete journal is applied and then emptied" {
     {
         var journal = try Journal.open(allocator, files.posix.vfs(), files.journal_path);
         defer journal.deinit();
+        // The directory entry is made durable by the first write, once.
+        try journal.syncDirectoryOnFirstWrite(files.journal_path);
+        try std.testing.expect(journal.unsynced_dir_path != null);
         try journal.write([_]u8{7} ** 16, BLOCK, &.{
             .{ .page_id = 1, .data = &new_one },
             .{ .page_id = 3, .data = &new_three },
         });
+        try std.testing.expect(journal.unsynced_dir_path == null);
     }
 
     try std.testing.expect(try recover(allocator, files.posix.vfs(), files.journal_path, db, false));

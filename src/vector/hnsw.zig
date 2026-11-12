@@ -258,6 +258,7 @@ const ConnectionPool = struct {
     total_pages: u64,
 
     const Self = @This();
+    /// The part of a page laid out here; see `PAGE_SIZE` in vector/storage.zig.
     const PAGE_SIZE: usize = 4096;
 
     fn init(allocator: Allocator, bp: *BufferPool, m: u16, m_max0: u16) Self {
@@ -730,6 +731,7 @@ pub const HnswIndex = struct {
     dangling: std.AutoHashMapUnmanaged(u64, void) = .empty,
 
     const Self = @This();
+    /// The part of a page laid out here; see `PAGE_SIZE` in vector/storage.zig.
     const PAGE_SIZE: usize = 4096;
 
     /// The most neighbours one list can hold; the stack buffers that read a

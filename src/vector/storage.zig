@@ -27,6 +27,12 @@ const PageType = page.PageType;
 const BufferPool = buffer_pool.BufferPool;
 const BufferFrame = buffer_pool.BufferFrame;
 const LatchMode = locking.LatchMode;
+/// The part of a page this code lays out, which is not the database's page
+/// size. Databases can use pages of 4096 to 65535 bytes; these pages use
+/// their first 4096 bytes whatever the page size and leave the rest unused.
+/// That is the layout files are written with, so it is a format constant:
+/// sizing the layout from the real page size would misread every page an
+/// existing large-page database already holds.
 const PAGE_SIZE: usize = 4096;
 
 /// Vector storage errors

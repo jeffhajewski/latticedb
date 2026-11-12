@@ -5674,6 +5674,57 @@ test "database: an unreadable symbol table is not opened for writing" {
     try std.testing.expectError(error.IoError, Database.open(allocator, path, .{ .config = .{ .enable_wal = false, .enable_fts = false } }));
 }
 
+test "database: vectors and full-text search work on pages larger than 4096 bytes" {
+    // Vector, HNSW and posting pages use the first 4096 bytes of a page
+    // whatever the page size: that layout is part of the file format, so a
+    // larger page wastes the rest rather than holding more. This checks that
+    // they still read back what they wrote, after a reopen, for vectors that
+    // fit in a page and vectors that span several.
+    const allocator = std.testing.allocator;
+    const path = "/tmp/s3_lattice_large_page_vectors_test.ltdb";
+    const cwd = @import("compat").fs.cwd();
+
+    for ([_]u16{ 16, 1536 }) |dims| {
+        cwd.deleteFile(path) catch {};
+        cwd.deleteFile(path ++ "-wal") catch {};
+        defer cwd.deleteFile(path) catch {};
+        defer cwd.deleteFile(path ++ "-wal") catch {};
+
+        const count = 60;
+        const vectors = try allocator.alloc(f32, count * @as(usize, dims));
+        defer allocator.free(vectors);
+        var prng = std.Random.DefaultPrng.init(dims);
+        for (vectors) |*x| x.* = prng.random().float(f32);
+        var ids: [count]u64 = undefined;
+
+        const config: lattice.storage.database.DatabaseConfig = .{ .enable_fts = true, .enable_vector = true, .vector_dimensions = dims };
+        {
+            const db = try Database.open(allocator, path, .{ .create = true, .page_size = 8192, .config = config });
+            defer db.close();
+            try db.createNodeFtsIndex("Doc", "body");
+            for (&ids, 0..) |*id, i| {
+                id.* = try db.createNode(null, &[_][]const u8{"Doc"});
+                try db.setNodeVector(id.*, vectors[i * dims ..][0..dims]);
+                try db.setNodeProperty(null, id.*, "body", .{ .string_val = if (i % 2 == 0) "even shared" else "odd shared" });
+            }
+            try db.sync();
+        }
+        {
+            const db = try Database.open(allocator, path, .{ .config = config });
+            defer db.close();
+            try std.testing.expectEqual(@as(u32, 8192), db.page_manager.getPageSize());
+            for (ids, 0..) |id, i| {
+                const results = try db.vectorSearch(vectors[i * dims ..][0..dims], 1, 64);
+                defer db.freeVectorSearchResults(results);
+                try std.testing.expectEqual(id, results[0].node_id);
+            }
+            const even = try db.ftsSearchIndex(.node, "Doc", "body", "even shared", 100);
+            defer db.freeFtsSearchResults(even);
+            try std.testing.expectEqual(@as(usize, count / 2), even.len);
+        }
+    }
+}
+
 test "database: a node and an edge full-text index cannot share a name and property" {
     const allocator = std.testing.allocator;
     const db = try Database.open(allocator, ":memory:", .{

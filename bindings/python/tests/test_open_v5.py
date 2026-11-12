@@ -14,6 +14,7 @@ from latticedb import (
     LatticeInvalidArgError,
     LatticeNeedsNewerWriterError,
     LatticeNotFoundError,
+    LatticeTxnAbortedError,
     LatticeUnsupportedError,
     library_available,
 )
@@ -188,4 +189,21 @@ class TestNodeDelete:
                     txn.create_edge(a.id, 987654, "R")
                 with pytest.raises(LatticeNotFoundError):
                     txn.create_edge(987654, a.id, "R")
+                txn.commit()
+
+
+class TestCommitAborted:
+    def test_commit_reporting_txn_aborted_ends_the_transaction(self, tmp_path):
+        with Database(tmp_path / "v5_aborted_commit.db", create=True) as db:
+            with db.write() as txn:
+                txn.create_node(labels=["N"])
+                # Retire the native handle behind the wrapper's back, so the
+                # wrapper's own commit gets TXN_ABORTED from the C side.
+                assert get_lib()._lib.lattice_commit(txn._handle) == 0
+                with pytest.raises(LatticeTxnAbortedError):
+                    txn.commit()
+                # Nothing is left to roll back; this must not reach the
+                # retired handle and raise again.
+                txn.rollback()
+            with pytest.raises(RuntimeError, match="rolled back"):
                 txn.commit()

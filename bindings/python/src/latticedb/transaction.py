@@ -9,6 +9,7 @@ from typing import TYPE_CHECKING, Any, Dict, List, Optional, cast
 
 from latticedb._bindings import (
     LATTICE_ERROR_NOT_FOUND,
+    LATTICE_ERROR_TXN_ABORTED,
     LATTICE_ERROR_UNSUPPORTED,
     LATTICE_TXN_READ_ONLY,
     LATTICE_TXN_READ_WRITE,
@@ -87,7 +88,13 @@ class Transaction:
         self._handle = txn_ptr
 
     def commit(self) -> None:
-        """Commit the transaction."""
+        """Commit the transaction.
+
+        If the commit fails with :class:`LatticeTxnAbortedError`, the native
+        transaction is already gone and this one is over: rolling it back
+        afterwards does nothing. After any other failure it stays open, and
+        leaving the ``with`` block (or calling :meth:`rollback`) rolls it back.
+        """
         if self._committed:
             raise RuntimeError("Transaction already committed")
         if self._rolled_back:
@@ -97,6 +104,11 @@ class Transaction:
 
         lib = get_lib()
         code = lib._lib.lattice_commit(self._handle)
+        if code == LATTICE_ERROR_TXN_ABORTED:
+            # The native side has retired the handle; it cannot be committed
+            # or rolled back again, so the transaction ended without committing.
+            self._handle = None
+            self._rolled_back = True
         check_error(code)
         self._handle = None
         self._committed = True

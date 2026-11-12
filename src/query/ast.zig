@@ -493,8 +493,22 @@ pub const PatternSubquery = struct {
     /// The value per match of a pattern comprehension.
     map: ?*Expression,
     location: SourceLocation,
+    /// A whole query in the braces, `EXISTS { MATCH ... WITH ... RETURN ... }`,
+    /// in place of the patterns and WHERE. It sees the variables around
+    /// it. COLLECT { } always has one, ending in a RETURN of one column.
+    body: ?*CallSubquery = null,
 
-    pub const Kind = enum { exists, count, comprehension };
+    pub const Kind = enum { exists, count, comprehension, collect };
+
+    /// What the subquery is called in messages.
+    pub fn name(self: *const PatternSubquery) []const u8 {
+        return switch (self.kind) {
+            .exists => "EXISTS { ... }",
+            .count => "COUNT { ... }",
+            .collect => "COLLECT { ... }",
+            .comprehension => "a pattern comprehension",
+        };
+    }
 };
 
 /// `object[index]`: a list element by position, or a map entry, node or

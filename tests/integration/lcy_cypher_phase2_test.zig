@@ -670,6 +670,96 @@ test "lcy: label expression errors" {
 }
 
 // ============================================================================
+// Whole queries in EXISTS { }, COUNT { } and COLLECT { }
+// ============================================================================
+
+/// a -> b, a -> c, b -> c, with names.
+fn seedTriangle(db: *Database) !void {
+    try run(db, "CREATE (a:P {n: 'a'}), (b:P {n: 'b'}), (c:P {n: 'c'}), (a)-[:K]->(b), (a)-[:K]->(c), (b)-[:K]->(c)");
+}
+
+test "lcy: EXISTS, COUNT and COLLECT take a whole query" {
+    const path = "/tmp/lcy_full_subqueries.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedTriangle(db);
+
+    // RETURN, WITH, aggregation, ORDER BY and LIMIT inside, per row.
+    try expectResult(db, "MATCH (p:P) RETURN p.n, COUNT { MATCH (p)-->(m) RETURN m } AS c ORDER BY p.n", "p.n | c\n\"a\" | 2\n\"b\" | 1\n\"c\" | 0");
+    try expectResult(db, "MATCH (p:P) WHERE EXISTS { MATCH (p)-->(m) WITH m WHERE m.n = 'c' RETURN m } RETURN p.n ORDER BY p.n", "p.n\n\"a\"\n\"b\"");
+    try expectResult(db, "MATCH (p:P) RETURN p.n, COLLECT { MATCH (p)-->(m) RETURN m.n ORDER BY m.n DESC } AS ms ORDER BY p.n", "p.n | ms\n\"a\" | [\"c\", \"b\"]\n\"b\" | [\"c\"]\n\"c\" | []");
+    try expectResult(db, "MATCH (p:P) RETURN p.n, COLLECT { MATCH (p)-->(m) RETURN m.n ORDER BY m.n LIMIT 1 } AS first ORDER BY p.n", "p.n | first\n\"a\" | [\"b\"]\n\"b\" | [\"c\"]\n\"c\" | []");
+    try expectResult(db, "MATCH (p:P) RETURN p.n, COLLECT { MATCH (p)-->(m) WITH count(m) AS k RETURN k } AS ks ORDER BY p.n", "p.n | ks\n\"a\" | [2]\n\"b\" | [1]\n\"c\" | [0]");
+    try expectResult(db, "MATCH (p:P) RETURN p.n, COUNT { MATCH (p)-[:K]-(m) WHERE m.n <> 'a' } AS c ORDER BY p.n", "p.n | c\n\"a\" | 2\n\"b\" | 1\n\"c\" | 1");
+    // OPTIONAL MATCH and UNWIND inside; a query without MATCH.
+    try expectResult(db, "MATCH (p:P {n: 'c'}) RETURN COUNT { OPTIONAL MATCH (p)-->(m) RETURN m } AS c", "c\n1");
+    try expectResult(db, "MATCH (p:P {n: 'a'}) RETURN COLLECT { UNWIND [1, 2] AS x RETURN x * 2 } AS xs", "xs\n[2, 4]");
+    // UNION and UNION ALL.
+    try expectResult(db, "MATCH (p:P) RETURN p.n, COUNT { MATCH (p)-->(m) RETURN m.n AS x UNION MATCH (p)<--(m) RETURN m.n AS x } AS c ORDER BY p.n", "p.n | c\n\"a\" | 2\n\"b\" | 2\n\"c\" | 2");
+    try expectResult(db, "MATCH (p:P {n: 'b'}) RETURN COLLECT { MATCH (p)-->(m) RETURN m.n AS x UNION ALL MATCH (p)<--(m) RETURN m.n AS x } AS c", "c\n[\"c\", \"a\"]");
+    // Nested, and in a WITH's WHERE.
+    try expectResult(db, "MATCH (p:P) RETURN p.n, COLLECT { MATCH (p)-->(m) RETURN COLLECT { MATCH (m)-->(o) RETURN o.n } AS x } AS c ORDER BY p.n", "p.n | c\n\"a\" | [[\"c\"], []]\n\"b\" | [[]]\n\"c\" | []");
+    try expectResult(db, "MATCH (p:P) WITH p, COUNT { MATCH (p)-->(m) RETURN m } AS c WHERE c > 0 RETURN p.n, c ORDER BY p.n", "p.n | c\n\"a\" | 2\n\"b\" | 1");
+    // Beside aggregation, when its outer variable is a grouping key.
+    try expectResult(db, "MATCH (p:P)-->() RETURN p.n, count(*) AS out, COLLECT { MATCH (p)<--(q) RETURN q.n } AS ins ORDER BY p.n", "p.n | out | ins\n\"a\" | 2 | []\n\"b\" | 1 | [\"a\"]");
+    // Without outer variables.
+    try expectResult(db, "RETURN COLLECT { MATCH (n:P) RETURN n.n ORDER BY n.n } AS c", "c\n[\"a\", \"b\", \"c\"]");
+    // The short form is unchanged, with or without MATCH.
+    try expectResult(db, "MATCH (p:P) RETURN p.n, EXISTS { MATCH (p)-->() } AS e, COUNT { (p)-->() } AS c ORDER BY p.n", "p.n | e | c\n\"a\" | true | 2\n\"b\" | true | 1\n\"c\" | false | 0");
+    try expectResult(db, "MATCH (p:P {n: 'a'}) RETURN EXISTS { path = (p)-->(:P {n: 'c'}) } AS e", "e\ntrue");
+    // What it binds stays inside.
+    try expectFailure(db, "MATCH (p:P) WHERE COUNT { MATCH (p)-->(m) RETURN m } > 0 RETURN m", .semantic, "Variable 'm' is not defined");
+}
+
+test "lcy: EXISTS, COUNT and COLLECT errors" {
+    const path = "/tmp/lcy_full_subquery_errors.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedTriangle(db);
+
+    try expectFailure(db, "MATCH (p:P) RETURN COLLECT { MATCH (p)-->(m) RETURN m.n, m } AS x", .semantic, "COLLECT { ... } must end with a RETURN of one column, the values it collects");
+    try expectFailure(db, "MATCH (p:P) RETURN COLLECT { MATCH (p)-->(m) } AS x", .semantic, "COLLECT { ... } must end with a RETURN of one column");
+    try expectFailure(db, "MATCH (p:P) RETURN COUNT { MATCH (p)-->(m) CREATE (:X) } AS x", .semantic, "COUNT { ... } cannot change the database; use CALL { ... } to write for each row");
+    try expectFailure(db, "MATCH (p:P) WHERE EXISTS { MATCH (p) SET p.x = 1 } RETURN p", .semantic, "EXISTS { ... } cannot change the database");
+    try expectFailure(db, "MATCH (p:P) RETURN COUNT { MATCH (p)-->(m) WITH m MATCH (p) RETURN p } AS x", .semantic, "Variable 'p' is already defined outside COUNT { ... }; use another name");
+    try expectFailure(db, "MATCH (p:P) RETURN COUNT { MATCH (p)-->(m) RETURN m UNION MATCH (p)<--(m) } AS x", .semantic, "Every query in a UNION inside COUNT { ... } must end with RETURN, or none");
+    try expectFailure(db, "MATCH (p:P) RETURN COUNT { MATCH (p)-->(m) RETURN m.n AS a UNION MATCH (p)<--(m) RETURN m.n AS b } AS x", .plan, "All queries in a UNION must return the same column names");
+    try expectFailure(db, "RETURN COUNT { } AS x", .parse, "COUNT { } needs a query inside the braces");
+    try expectFailure(db, "RETURN COLLECT { MATCH (n) RETURN n AS x", .parse, "Expected '}' to close COLLECT { ... }");
+    try expectFailure(db, "MATCH (p) WHERE EXISTS { (p)-->(q) RETURN q } RETURN p", .parse, "a subquery with more clauses starts with MATCH");
+    // collect() and COLLECT stay apart, and COLLECT is still a name.
+    try expectResult(db, "MATCH (p:P) RETURN collect(p.n) AS c", "c\n[\"a\", \"b\", \"c\"]");
+    try expectResult(db, "WITH 1 AS collect RETURN collect", "collect\n1");
+}
+
+test "lcy: search predicates inside EXISTS, COUNT and COLLECT" {
+    const path = "/tmp/lcy_search_subqueries.ltdb";
+    const db = try openSearchDb(path);
+    defer closeSearchDb(db, path);
+    var params = Params.init(std.testing.allocator);
+    defer params.deinit();
+    const origin = [_]f32{ 0, 1 };
+    const five = [_]f32{ 5, 1 };
+    try params.put("q", .{ .vector_val = &origin });
+    try params.put("r", .{ .vector_val = &five });
+
+    // A whole query searches as its MATCH would alone, for each row: the
+    // right documents, scored, with its own ORDER BY and LIMIT.
+    try expectResult(db, "MATCH (p:Person) RETURN p.name, COLLECT { MATCH (p)-[:WROTE]->(d:Doc) WHERE d.text @@ 'rare' RETURN d.i ORDER BY d.i } AS ds ORDER BY p.name", "p.name | ds\n\"A\" | [0, 6]\n\"B\" | [0]");
+    try expectResult(db, "MATCH (p:Person) RETURN p.name, COLLECT { MATCH (p)-[:WROTE]->(d:Doc) WHERE d.text @@ 'rare' RETURN score(d) > 0 } AS scored ORDER BY p.name", "p.name | scored\n\"A\" | [true, true]\n\"B\" | [true]");
+    try expectResult(db, "MATCH (p:Person) RETURN p.name, COUNT { MATCH (d:Doc) WHERE d.text @@ 'rare' RETURN d } AS c ORDER BY p.name", "p.name | c\n\"A\" | 4\n\"B\" | 4");
+    try expectResultWith(db, &params, "MATCH (p:Person) RETURN p.name, COLLECT { MATCH (p)-[:WROTE]->(d:Doc) WHERE d.embedding <=> $r RETURN d.i LIMIT 1 } AS nearest ORDER BY p.name", "p.name | nearest\n\"A\" | [6]\n\"B\" | [5]");
+    try expectResultWith(db, &params, "MATCH (p:Person) WHERE EXISTS { MATCH (p)-[:WROTE]->(d:Doc) WHERE d.embedding <=> $q < 0.1 RETURN d } RETURN p.name ORDER BY p.name", "p.name\n\"A\"\n\"B\"");
+    // The short form's WHERE is checked row by row: no score, and a bare
+    // <=> is refused, as before.
+    try expectResult(db, "MATCH (p:Person) RETURN p.name, COUNT { MATCH (p)-[:WROTE]->(d:Doc) WHERE d.text @@ 'rare' } AS c ORDER BY p.name", "p.name | c\n\"A\" | 2\n\"B\" | 1");
+    try expectFailureWith(db, &params, "MATCH (p:Person) WHERE EXISTS { MATCH (p)-[:WROTE]->(d:Doc) WHERE d.embedding <=> $q } RETURN p", .plan, "A WHERE of only `<=>` ranks the rows of a MATCH by distance, which a subquery or pattern comprehension cannot do");
+    // A WITH's WHERE inside is a WITH's: no score, bare <=> refused.
+    try expectResult(db, "MATCH (p:Person {name: 'A'}) RETURN COLLECT { MATCH (p)-[:WROTE]->(d:Doc) WITH d WHERE d.text @@ 'rare' RETURN score(d) } AS s", "s\n[null, null]");
+    try expectFailureWith(db, &params, "MATCH (p:Person) RETURN COUNT { MATCH (p)-[:WROTE]->(d:Doc) WITH d WHERE d.embedding <=> $q RETURN d } AS c", .plan, "which WITH cannot do");
+}
+
+// ============================================================================
 // Search predicates where phase 2 adds a WHERE: CALL { } and WITH *
 // ============================================================================
 

@@ -708,6 +708,19 @@ pub const ExpressionEvaluator = struct {
 
             pub fn visit(v: *@This(), match: *Row) executor.OperatorError!void {
                 v.count += 1;
+                // COLLECT { ... RETURN x }: the one column of each row.
+                if (v.node.kind == .collect) {
+                    const value: EvalResult = switch (match.getSlot(0) orelse SlotValue.empty) {
+                        .empty => .{ .null_val = {} },
+                        .node_ref => |id| .{ .node_ref = id },
+                        .edge_ref => |id| .{ .edge_ref = id },
+                        .property => |pv| EvalResult.fromPropertyValue(pv, v.evaluator.allocator) catch return executor.OperatorError.OutOfMemory,
+                        .path => |p| .{ .path_val = p },
+                        .value => |held| held.*,
+                    };
+                    v.values.append(v.evaluator.allocator, value) catch return executor.OperatorError.OutOfMemory;
+                    return;
+                }
                 const map = v.node.map orelse return;
                 const value = v.evaluator.evaluate(map, match, v.ctx) catch |err| {
                     v.failed = err;
@@ -735,7 +748,7 @@ pub const ExpressionEvaluator = struct {
         return switch (sq.kind) {
             .exists => .{ .bool_val = visitor.count > 0 },
             .count => .{ .int_val = visitor.count },
-            .comprehension => .{ .list_val = visitor.values.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory },
+            .comprehension, .collect => .{ .list_val = visitor.values.toOwnedSlice(self.allocator) catch return EvalError.OutOfMemory },
         };
     }
 

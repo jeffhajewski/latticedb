@@ -70,7 +70,7 @@ RETURN label ORDER BY label
 | List predicates | `all(x IN list WHERE x > 0)`, `any(...)`, `none(...)`, `single(...)` |
 | `reduce` | `reduce(total = 0, x IN list \| total + x)` |
 | Pattern predicate | `WHERE (n)-[:KNOWS]->()`, `WHERE NOT (n)-->()` |
-| `EXISTS { }` and `COUNT { }` | `EXISTS { (n)-[:KNOWS]->(m) WHERE m.age > 30 }`, `COUNT { (n)--() }` |
+| `EXISTS { }`, `COUNT { }`, `COLLECT { }` | `EXISTS { (n)-[:KNOWS]->(m) WHERE m.age > 30 }`, `COUNT { (n)--() }`, `COLLECT { MATCH (n)-->(m) RETURN m.name ORDER BY m.name }`; see [Subqueries in expressions](./with.md#subqueries-in-expressions-exists-count-collect) |
 | Pattern comprehension | `[(n)-[:KNOWS]->(m) WHERE m.age > 30 \| m.name]` |
 | Named path | `MATCH p = (a)-[:KNOWS*]->(b) RETURN length(p), nodes(p), relationships(p)` |
 | Shortest path | `MATCH p = shortestPath((a)-[:KNOWS*]-(b))`; see [Shortest Paths](./variable-length-paths.md#shortest-paths) |
@@ -90,8 +90,7 @@ with an error that names it:
 - `&`, `!` and `%` in a relationship's types, as in `-[:!KNOWS]->`; use
   `WHERE NOT r:KNOWS`
 - `WHERE` inside a pattern, as in `(n WHERE n.age > 30)`
-- `EXISTS { }` and `COUNT { }` holding clauses other than `MATCH` and `WHERE`,
-  and `COLLECT { }`
+- writing inside `EXISTS { }`, `COUNT { }` or `COLLECT { }`
 - `CALL { } IN TRANSACTIONS`, `OPTIONAL CALL`, and procedures other than the
   four catalog procedures above
 - `LOAD CSV`; import files with `lattice import` or through the API

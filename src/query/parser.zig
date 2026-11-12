@@ -671,6 +671,19 @@ pub const Parser = struct {
     /// `CALL { query }`, at the '{'. The query has its own scope: what a
     /// leading WITH imports from outside, or nothing.
     fn parseCallSubquery(self: *Self, loc: ast.SourceLocation) ?ast.Clause {
+        const node = self.parseBracedQuery(loc, "CALL", false) orelse return null;
+        if (self.check(.kw_in)) {
+            self.errorAtCurrent("CALL { ... } IN TRANSACTIONS is not supported; run the batches as separate queries");
+            return null;
+        }
+        return .{ .call_subquery = node };
+    }
+
+    /// `{ query [UNION query ...] }`, at the '{', for CALL (`what`), EXISTS,
+    /// COUNT or COLLECT. The query has a scope of its own: CALL's starts
+    /// with what a leading WITH imports, the others' with every variable
+    /// around them (`sees_outer`). The scope around comes back after it.
+    fn parseBracedQuery(self: *Self, loc: ast.SourceLocation, comptime what: []const u8, sees_outer: bool) ?*ast.CallSubquery {
         const a = self.arena.allocator();
         self.advance();
         const outer = a.dupe([]const u8, self.scope.items) catch return null;
@@ -680,19 +693,19 @@ pub const Parser = struct {
                 self.errors_dropped = true;
             };
         }
-        self.enterSubqueryScope(outer);
+        self.enterSubqueryScope(outer, sees_outer);
 
         var clauses: std.ArrayList(ast.Clause) = .empty;
         var unions = UnionParts{};
         while (!self.check(.rbrace)) {
             if (self.check(.eof)) {
-                self.errorAtCurrent("Expected '}' to close CALL { ... }");
+                self.errorAtCurrent("Expected '}' to close " ++ what ++ " { ... }");
                 return null;
             }
             if (self.check(.kw_union)) {
                 self.parseUnion(&unions, &clauses);
                 if (self.had_error) return null;
-                self.enterSubqueryScope(outer);
+                self.enterSubqueryScope(outer, sees_outer);
                 continue;
             }
             const clause = self.parseClause() orelse return null;
@@ -701,11 +714,7 @@ pub const Parser = struct {
         }
         self.advance();
         if (clauses.items.len == 0) {
-            self.errorAt(loc, if (unions.branches.items.len > 0) "Expected a query after UNION" else "CALL { } needs a query inside the braces");
-            return null;
-        }
-        if (self.check(.kw_in)) {
-            self.errorAtCurrent("CALL { ... } IN TRANSACTIONS is not supported; run the batches as separate queries");
+            self.errorAt(loc, if (unions.branches.items.len > 0) "Expected a query after UNION" else what ++ " { } needs a query inside the braces");
             return null;
         }
 
@@ -716,14 +725,14 @@ pub const Parser = struct {
         }
         const node = a.create(ast.CallSubquery) catch return null;
         node.* = .{ .clauses = first, .unions = unions.branches.items, .location = loc };
-        return .{ .call_subquery = node };
+        return node;
     }
 
-    /// The scope a query inside CALL { } starts with: the outer one, for a
-    /// leading WITH to import from, or none.
-    fn enterSubqueryScope(self: *Self, outer: []const []const u8) void {
+    /// The scope a query inside braces starts with: the outer one, for a
+    /// leading WITH to import from or for a subquery that sees it, or none.
+    fn enterSubqueryScope(self: *Self, outer: []const []const u8, sees_outer: bool) void {
         self.scope.clearRetainingCapacity();
-        if (self.check(.kw_with)) self.scope.appendSlice(self.arena.allocator(), outer) catch {
+        if (sees_outer or self.check(.kw_with)) self.scope.appendSlice(self.arena.allocator(), outer) catch {
             self.errors_dropped = true;
         };
     }
@@ -2001,10 +2010,7 @@ pub const Parser = struct {
             if (self.check(.lbrace)) {
                 if (std.ascii.eqlIgnoreCase(name, "exists")) return self.parseSubqueryBlock(.exists, loc);
                 if (std.ascii.eqlIgnoreCase(name, "count")) return self.parseSubqueryBlock(.count, loc);
-                if (std.ascii.eqlIgnoreCase(name, "collect")) {
-                    self.errorAtCurrent("COLLECT { ... } subqueries are not supported; use collect() or a pattern comprehension");
-                    return null;
-                }
+                if (std.ascii.eqlIgnoreCase(name, "collect")) return self.parseSubqueryBlock(.collect, loc);
                 return self.parseMapProjection(name, loc);
             }
 
@@ -2191,13 +2197,34 @@ pub const Parser = struct {
         return self.makeSubquery(.comprehension, &.{pattern}, where, map, loc);
     }
 
-    /// `{ [MATCH] patterns [WHERE cond] }` after EXISTS or COUNT. A full
-    /// query inside the braces (RETURN, WITH, ...) is not supported.
+    /// `{ patterns [WHERE cond] }` or `{ query }` after EXISTS, COUNT or
+    /// COLLECT. A query that is only `MATCH patterns [WHERE cond]` is kept
+    /// in the short form, which is planned as a pattern predicate is.
     fn parseSubqueryBlock(self: *Self, kind: ast.PatternSubquery.Kind, loc: ast.SourceLocation) ?*ast.Expression {
-        self.advance();
-        _ = self.match(.kw_match);
-        var patterns: std.ArrayList(ast.Pattern) = .empty;
         const a = self.arena.allocator();
+        // The short form starts with a pattern: `(`, or a path variable and `=`.
+        const short_form = switch (self.peekType()) {
+            .lparen => true,
+            .identifier, .quoted_identifier => self.peekSecondType() == .eq,
+            else => false,
+        };
+        if (kind == .collect or !short_form) {
+            const body = switch (kind) {
+                .exists => self.parseBracedQuery(loc, "EXISTS", true),
+                .count => self.parseBracedQuery(loc, "COUNT", true),
+                else => self.parseBracedQuery(loc, "COLLECT", true),
+            } orelse return null;
+            if (kind != .collect and body.unions.len == 0) {
+                const c = body.clauses;
+                const short = c.len >= 1 and c[0] == .match and (c.len == 1 or (c.len == 2 and c[1] == .where));
+                if (short) return self.makeSubquery(kind, c[0].match.patterns, if (c.len == 2) c[1].where.condition else null, null, loc);
+            }
+            const expr = self.makeSubquery(kind, &.{}, null, null, loc) orelse return null;
+            expr.subquery.body = body;
+            return expr;
+        }
+        self.advance();
+        var patterns: std.ArrayList(ast.Pattern) = .empty;
         while (true) {
             const pattern = self.parsePattern() orelse return null;
             patterns.append(a, pattern) catch return null;
@@ -2206,10 +2233,7 @@ pub const Parser = struct {
         var where: ?*ast.Expression = null;
         if (self.match(.kw_where)) where = self.parseExpression() orelse return null;
         if (!self.check(.rbrace)) {
-            self.errorAtCurrent(if (kind == .exists)
-                "EXISTS { ... } supports only a MATCH pattern and WHERE; subqueries with other clauses are not supported"
-            else
-                "COUNT { ... } supports only a MATCH pattern and WHERE; subqueries with other clauses are not supported");
+            self.errorAtCurrent("Expected '}' after the pattern; a subquery with more clauses starts with MATCH, as in EXISTS { MATCH (n)-->(m) WITH m ... }");
             return null;
         }
         self.advance();
@@ -2219,6 +2243,13 @@ pub const Parser = struct {
     /// The type of the token after the current one.
     fn peekType(self: *const Self) TokenType {
         var lexer = self.lexer;
+        return lexer.nextToken().token_type;
+    }
+
+    /// The type of the token two after the current one.
+    fn peekSecondType(self: *const Self) TokenType {
+        var lexer = self.lexer;
+        _ = lexer.nextToken();
         return lexer.nextToken().token_type;
     }
 

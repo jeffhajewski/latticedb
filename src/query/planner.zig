@@ -680,6 +680,7 @@ pub const QueryPlanner = struct {
         for (self.subquery_plans.items) |p| {
             if (p.node == sq) return;
         }
+        if (sq.body) |body| return self.planSubqueryBody(sq, body);
         // Each match is one value, not a group: an aggregate has nothing to
         // aggregate over there.
         for ([_]?*ast.Expression{ sq.where, sq.map }) |part| {
@@ -718,7 +719,9 @@ pub const QueryPlanner = struct {
             op = filter.operator();
         }
         if (sq.map) |map| try self.planSubqueriesIn(map);
-        self.subquery_plans.append(self.allocator, .{ .node = sq, .plan = op, .argument = argument }) catch
+        const arguments = self.allocator.alloc(*optional_ops.Argument, 1) catch return PlannerError.OutOfMemory;
+        arguments[0] = argument;
+        self.subquery_plans.append(self.allocator, .{ .node = sq, .plan = op, .arguments = arguments }) catch
             return PlannerError.OutOfMemory;
 
         for (introduced.items) |name| {
@@ -730,6 +733,100 @@ pub const QueryPlanner = struct {
             _ = self.edge_bindings.remove(name);
         }
         self.used_slots = slots_before;
+    }
+
+    /// Plan `EXISTS { query }`, `COUNT { query }` or `COLLECT { query }` as
+    /// CALL { } is planned, over an Argument leaf per query of a UNION,
+    /// except that every variable around it is in scope: each row the plan
+    /// gives is one row of the subquery, and COLLECT's value is its first
+    /// column. What it binds is out of scope again afterwards.
+    fn planSubqueryBody(self: *Self, sq: *const ast.PatternSubquery, body: *const ast.CallSubquery) PlannerError!void {
+        const a = self.allocator;
+        const saved_bindings = self.bindings.clone() catch return PlannerError.OutOfMemory;
+        const saved_labels = self.pattern_labels.clone() catch return PlannerError.OutOfMemory;
+        const saved_types = self.pattern_edge_types.clone() catch return PlannerError.OutOfMemory;
+        const saved_edges = self.edge_bindings.clone() catch return PlannerError.OutOfMemory;
+        const saved_used = self.used_slots;
+        const saved_reserved = self.reserved_slots;
+        const saved_columns = self.output_columns;
+        const saved_names = self.output_column_names;
+        const saved_hint = self.order_hint;
+        const saved_cutoff = self.order_cutoff_key;
+
+        const count = body.unions.len + 1;
+        const plans = a.alloc(Operator, count) catch return PlannerError.OutOfMemory;
+        const arguments = a.alloc(*optional_ops.Argument, count) catch return PlannerError.OutOfMemory;
+        var columns: u8 = 0;
+        var names: [MAX_SLOTS]?[]const u8 = undefined;
+        self.reserved_slots |= saved_used;
+        for (0..count) |b| {
+            const clauses = if (b == 0) body.clauses else body.unions[b - 1].clauses;
+            var it = self.bindings.iterator();
+            while (it.next()) |entry| {
+                if (self.outer_bindings.contains(entry.key_ptr.*)) continue;
+                self.outer_bindings.put(entry.key_ptr.*, entry.value_ptr.*) catch return PlannerError.OutOfMemory;
+            }
+            self.bindings.deinit();
+            self.bindings = saved_bindings.clone() catch return PlannerError.OutOfMemory;
+            self.pattern_labels.deinit();
+            self.pattern_labels = saved_labels.clone() catch return PlannerError.OutOfMemory;
+            self.pattern_edge_types.deinit();
+            self.pattern_edge_types = saved_types.clone() catch return PlannerError.OutOfMemory;
+            self.edge_bindings.deinit();
+            self.edge_bindings = saved_edges.clone() catch return PlannerError.OutOfMemory;
+            self.used_slots = saved_used;
+            self.output_columns = 0;
+            self.output_column_names = [_]?[]const u8{null} ** MAX_SLOTS;
+            self.order_hint = null;
+            self.order_cutoff_key = null;
+
+            const argument = optional_ops.Argument.init(a) catch return PlannerError.OutOfMemory;
+            arguments[b] = argument;
+            plans[b] = (try self.planClausesOver(clauses, argument.operator())) orelse argument.operator();
+            if (b == 0) {
+                columns = self.output_columns;
+                names = self.output_column_names;
+            } else if (self.output_columns != columns) {
+                self.setPlanDetail("All queries in a UNION must return the same number of columns; query 1 returns {d}, query {d} returns {d}", .{ columns, b + 1, self.output_columns });
+                return PlannerError.InvalidQuery;
+            } else for (0..columns) |c| {
+                const first = names[c] orelse "";
+                const this = self.output_column_names[c] orelse "";
+                if (!std.mem.eql(u8, first, this)) {
+                    self.setPlanDetail("All queries in a UNION must return the same column names; column {d} is `{s}` in query 1 and `{s}` in query {d}", .{ c + 1, first, this, b + 1 });
+                    return PlannerError.InvalidQuery;
+                }
+            }
+        }
+
+        var inner = plans[0];
+        if (count > 1) {
+            const union_op = union_ops.Union.init(a, plans) catch return PlannerError.OutOfMemory;
+            inner = union_op.operator();
+            if (!body.unions[0].all) {
+                const distinct = distinct_ops.Distinct.init(a, inner) catch return PlannerError.OutOfMemory;
+                inner = distinct.operator();
+            }
+        }
+
+        var it = self.bindings.iterator();
+        while (it.next()) |entry| {
+            if (self.outer_bindings.contains(entry.key_ptr.*)) continue;
+            self.outer_bindings.put(entry.key_ptr.*, entry.value_ptr.*) catch return PlannerError.OutOfMemory;
+        }
+        self.bindings = saved_bindings;
+        self.pattern_labels = saved_labels;
+        self.pattern_edge_types = saved_types;
+        self.edge_bindings = saved_edges;
+        self.used_slots = saved_used;
+        self.reserved_slots = saved_reserved;
+        self.output_columns = saved_columns;
+        self.output_column_names = saved_names;
+        self.order_hint = saved_hint;
+        self.order_cutoff_key = saved_cutoff;
+
+        self.subquery_plans.append(a, .{ .node = sq, .plan = inner, .arguments = arguments, .reopen = true }) catch
+            return PlannerError.OutOfMemory;
     }
 
     /// Put the subqueries' plans at the root, where execution can find them,

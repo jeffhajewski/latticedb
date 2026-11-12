@@ -114,3 +114,29 @@ RETURN p.name, nearest
 matches without a score, and `<=>` needs a bound.
 
 `CALL { ... } IN TRANSACTIONS` is not supported.
+
+## Subqueries in expressions: `EXISTS`, `COUNT`, `COLLECT`
+
+`EXISTS { ... }` is whether a query returns any row, `COUNT { ... }` how many it
+returns, and `COLLECT { ... }` the list of the one column it returns. Unlike
+`CALL { }`, the query sees every variable around it without importing it, and
+what it binds stays inside:
+
+```cypher
+MATCH (p:Person)
+WHERE EXISTS { MATCH (p)-[:WROTE]->(d) WITH d WHERE d.year > 2020 RETURN d }
+RETURN p.name,
+       COUNT { MATCH (p)-[:KNOWS]-(f) RETURN f } AS friends,
+       COLLECT { MATCH (p)-[:WROTE]->(d) RETURN d.title ORDER BY d.year DESC LIMIT 3 } AS recent
+```
+
+The query may use any reading clause, aggregation, `ORDER BY`, `LIMIT` and
+`UNION`, and runs once for each row. It cannot write (use `CALL { }`), and
+`COLLECT`'s must end with a `RETURN` of one column. A variable it binds after a
+`WITH` may not take the name of one outside.
+
+The short form, a pattern and a `WHERE` with or without `MATCH`
+(`EXISTS { (p)-[:WROTE]->(d) WHERE d.year > 2020 }`), is planned as a pattern
+predicate, and its `WHERE` is checked row by row: `@@` there matches without a
+score, and `<=>` needs a bound. A `MATCH` in a longer query searches as it would
+alone, as in `CALL { }`.

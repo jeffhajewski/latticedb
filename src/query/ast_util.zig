@@ -316,6 +316,17 @@ const Scope = struct {
     }
 };
 
+fn freeInPatterns(patterns: []const ast.Pattern, ignore: anytype, scope: *Scope) ?[]const u8 {
+    for (patterns) |pattern| for (pattern.elements) |element| {
+        const name = switch (element) {
+            .node => |n| n.variable,
+            .edge => |e| e.variable,
+        } orelse continue;
+        if (!scope.has(name) and !ignore.skip(name)) return name;
+    };
+    return null;
+}
+
 fn freeIn(expr: *const ast.Expression, ignore: anytype, scope: *Scope) ?[]const u8 {
     switch (expr.*) {
         .literal, .parameter => return null,
@@ -323,14 +334,16 @@ fn freeIn(expr: *const ast.Expression, ignore: anytype, scope: *Scope) ?[]const 
         // whose variables a free-variable check would also have to scope.
         // Reported as its first pattern variable bound outside, if any.
         .subquery => |sq| {
-            for (sq.patterns) |pattern| for (pattern.elements) |element| {
-                const name = switch (element) {
-                    .node => |n| n.variable,
-                    .edge => |e| e.variable,
-                } orelse continue;
-                if (!scope.has(name) and !ignore.skip(name)) return name;
-            };
-            return null;
+            if (sq.body) |body| {
+                // A whole query: the variables of its MATCH patterns, an
+                // approximation that misses what its other clauses read.
+                for (body.clauses) |clause| {
+                    if (clause != .match) continue;
+                    if (freeInPatterns(clause.match.patterns, ignore, scope)) |name| return name;
+                }
+                return null;
+            }
+            return freeInPatterns(sq.patterns, ignore, scope);
         },
         .variable => |v| return if (scope.has(v.name) or ignore.skip(v.name)) null else v.name,
         .property_access => |p| return freeIn(p.object, ignore, scope),

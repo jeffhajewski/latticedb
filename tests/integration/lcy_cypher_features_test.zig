@@ -637,7 +637,7 @@ test "lcy: pattern predicates, EXISTS and COUNT" {
     try expectFailure(db, "MATCH (p:P) WHERE (p)-->(f) RETURN f", .semantic, "Variable 'f' is not defined");
     // Not a pattern: still a parenthesised expression.
     try expectResult(db, "WITH 3 AS a RETURN (a) - 1 AS x, (a)-1 AS y, (a) < -1 AS z", "x | y | z\n2 | 2 | false");
-    try expectFailure(db, "MATCH (p) WHERE EXISTS { MATCH (p)-->(q) RETURN q } RETURN p", .parse, "EXISTS { ... } supports only a MATCH pattern and WHERE");
+    try expectFailure(db, "MATCH (p) WHERE EXISTS { (p)-->(q) RETURN q } RETURN p", .parse, "a subquery with more clauses starts with MATCH");
     try expectFailure(db, "MATCH (p {x: EXISTS { (p)-->() }}) RETURN p", .plan, "is not supported here");
     try expectFailure(db, "MATCH (p:P) RETURN [x IN [1] WHERE (p)-->()] AS l", .plan, "inside a list comprehension, quantifier or reduce() is not supported");
 }
@@ -935,7 +935,6 @@ test "lcy: unsupported constructs are named" {
         .{ .query = "MATCH (a)-[:!R]->(b) RETURN a", .message = "A relationship's types take only '|'" },
         .{ .query = "MATCH (n:A WHERE n.v > 1) RETURN n", .message = "WHERE inside a node pattern is not supported" },
         .{ .query = "MATCH (a)-[r WHERE r.v > 1]->(b) RETURN r", .message = "WHERE inside a relationship pattern is not supported" },
-        .{ .query = "MATCH (n) RETURN COLLECT { MATCH (n)-->(m) RETURN m } AS c", .message = "COLLECT { ... } subqueries are not supported" },
         .{ .query = "RETURN 1 IS :: INTEGER AS t", .message = "Type predicates (IS :: TYPE) are not supported" },
         .{ .query = "RETURN 1 IS NOT TYPED INTEGER AS t", .message = "Type predicates (IS :: TYPE) are not supported" },
         .{ .query = "RETURN 'a' || 'b' AS s", .message = "'||' is not supported; use +" },

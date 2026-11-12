@@ -35,9 +35,9 @@ exactly what 0.16.0 can still open.
 
 Much more of Cypher runs: `OPTIONAL MATCH`, `UNION`, `CASE`, `CALL { }`
 subqueries, `FOREACH`, named paths, `shortestPath`, list indexing and slicing,
-list and pattern comprehensions, `EXISTS { }` and `COUNT { }`, map projection
-and `RETURN *`, among others listed under *Cypher*. What is still missing fails
-with an error that names it.
+list and pattern comprehensions, `EXISTS`, `COUNT` and `COLLECT` subqueries,
+map projection, label expressions and `RETURN *`, among others listed under
+*Cypher*. What is still missing fails with an error that names it.
 
 `lattice import` and `lattice export` read and write RDF in Turtle and
 N-Triples, so vocabularies and data sets kept as RDF can be queried with Cypher,
@@ -322,9 +322,12 @@ or an unknown function, in 0.16.0:
 - **Lists:** indexing (`list[0]`, `list[-1]`), slicing (`list[1..3]`), access by
   key (`map['k']`, `n[$prop]`), comprehensions (`[x IN list WHERE x > 0 | x * 2]`),
   `all`, `any`, `none`, `single` and `reduce`.
-- **Patterns in expressions:** pattern predicates (`WHERE (n)-[:KNOWS]->()`),
-  `EXISTS { }` and `COUNT { }` with a pattern and `WHERE`, and pattern
-  comprehensions (`[(n)-->(m) | m.name]`).
+- **Patterns and subqueries in expressions:** pattern predicates
+  (`WHERE (n)-[:KNOWS]->()`), pattern comprehensions (`[(n)-->(m) | m.name]`),
+  and `EXISTS { }`, `COUNT { }` and `COLLECT { }` holding a pattern or a whole
+  query: `COLLECT { MATCH (p)-[:WROTE]->(d) RETURN d.title ORDER BY d.year DESC
+  LIMIT 3 }`. The query sees the variables around it, runs once per row, and
+  cannot write.
 - **Map projection**, `n {.name, .age, total: x}` and `n {.*}`, and `properties()`
   of a map.
 - **`RETURN *` and `WITH *`**, every variable in scope.
@@ -338,7 +341,7 @@ or an unknown function, in 0.16.0:
 
 What is not implemented fails with an error that names the construct, where
 0.16.0 reported the clauses it expected: quantified path patterns, `LOAD CSV`, `CALL { } IN TRANSACTIONS`, `OPTIONAL CALL`,
-`COLLECT { }`, type predicates, `||`, schema and administration statements, and
+type predicates, `||`, schema and administration statements, and
 the GQL-only clauses. `book/src/cypher/overview.md` lists them.
 
 ## Breaking changes
@@ -914,8 +917,8 @@ with relationships is one range probe, under 1 µs.
   anyway.
 - **Some Cypher is not implemented**, each part with an error that names it:
   quantified path patterns (`((a)-->(b)){1,3}`), `&`, `!` and `%` in a
-  relationship pattern's types (`-[:!KNOWS]->`), `WHERE` inside a pattern, `EXISTS { }` and `COUNT { }` holding
-  clauses other than `MATCH` and `WHERE`, `COLLECT { }`, `CALL { } IN
+  relationship pattern's types (`-[:!KNOWS]->`), `WHERE` inside a pattern,
+  writing inside `EXISTS { }`, `COUNT { }` or `COLLECT { }`, `CALL { } IN
   TRANSACTIONS`, `OPTIONAL CALL`, procedures other than the four catalog ones,
   `LOAD CSV`, type predicates (`IS :: INTEGER`), `||`, temporal and spatial
   types, and schema and administration statements (`CREATE INDEX`, `SHOW`,

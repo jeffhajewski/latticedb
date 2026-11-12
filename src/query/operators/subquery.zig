@@ -29,8 +29,13 @@ const optional_ops = @import("optional.zig");
 pub const SubqueryPlan = struct {
     node: *const ast.PatternSubquery,
     plan: Operator,
-    argument: *optional_ops.Argument,
+    /// The leaves that hand the plan its row: one, or one per query of a
+    /// UNION.
+    arguments: []const *optional_ops.Argument,
     opened: bool = false,
+    /// Opened and closed again for each row: a whole query, whose sorts,
+    /// aggregates and UNIONs read their input when opened.
+    reopen: bool = false,
     /// Set while a round is running, to refuse a subquery that would have
     /// to run inside itself.
     running: bool = false,
@@ -38,6 +43,15 @@ pub const SubqueryPlan = struct {
     /// Run the plan for `row`, calling `visitor.visit(match)` for each match.
     pub fn run(self: *SubqueryPlan, ctx: *ExecutionContext, row: *const Row, visitor: anytype) OperatorError!void {
         if (self.running) return OperatorError.EvaluationError;
+        if (self.reopen) {
+            for (self.arguments) |argument| argument.set(@constCast(row));
+            self.running = true;
+            defer self.running = false;
+            try self.plan.open(ctx);
+            defer self.plan.close(ctx);
+            while (try self.plan.next(ctx)) |match| try visitor.visit(match);
+            return;
+        }
         if (!self.opened) {
             try self.plan.open(ctx);
             self.opened = true;
@@ -45,7 +59,7 @@ pub const SubqueryPlan = struct {
         self.running = true;
         defer self.running = false;
         // The argument hands the row on; nothing writes through it.
-        self.argument.set(@constCast(row));
+        for (self.arguments) |argument| argument.set(@constCast(row));
         while (try self.plan.next(ctx)) |match| try visitor.visit(match);
     }
 };
@@ -111,7 +125,10 @@ pub const SubqueryHost = struct {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.input.deinit(allocator);
         // Each plan's leaf is its argument, which the plan frees.
-        for (self.plans) |p| p.plan.deinit(allocator);
+        for (self.plans) |p| {
+            p.plan.deinit(allocator);
+            allocator.free(p.arguments);
+        }
         allocator.free(self.plans);
         allocator.destroy(self);
     }

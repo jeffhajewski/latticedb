@@ -103,7 +103,14 @@ pub const SemanticAnalyzer = struct {
     /// The scopes around each CALL { } being analysed, innermost last. A
     /// variable inside one may not take a name from them that it did not
     /// import.
-    enclosing: std.ArrayList(*const std.StringHashMap(VariableInfo)) = .empty,
+    enclosing: std.ArrayList(Enclosing) = .empty,
+
+    const Enclosing = struct {
+        variables: *const std.StringHashMap(VariableInfo),
+        /// What the subquery is called in messages; null for CALL { },
+        /// whose message says how to import.
+        subquery: ?[]const u8 = null,
+    };
 
     const Self = @This();
 
@@ -887,13 +894,17 @@ pub const SemanticAnalyzer = struct {
     fn shadowsEnclosing(self: *Self, name: []const u8, location: ast.SourceLocation) bool {
         if (self.variables.contains(name)) return false;
         for (self.enclosing.items) |scope| {
-            if (scope.contains(name)) {
-                self.addErrorFmt(
-                    .duplicate_variable,
-                    location,
-                    "Variable '{s}' is already defined outside CALL {{ ... }}; import it with WITH {s}, or use another name",
-                    .{ name, name },
-                );
+            if (scope.variables.contains(name)) {
+                if (scope.subquery) |what| {
+                    self.addErrorFmt(.duplicate_variable, location, "Variable '{s}' is already defined outside {s}; use another name", .{ name, what });
+                } else {
+                    self.addErrorFmt(
+                        .duplicate_variable,
+                        location,
+                        "Variable '{s}' is already defined outside CALL {{ ... }}; import it with WITH {s}, or use another name",
+                        .{ name, name },
+                    );
+                }
                 return true;
             }
         }
@@ -908,7 +919,7 @@ pub const SemanticAnalyzer = struct {
         };
         defer outer.deinit();
         const listed = self.variable_list.items.len;
-        self.enclosing.append(self.allocator, &outer) catch {
+        self.enclosing.append(self.allocator, .{ .variables = &outer }) catch {
             self.addError(.internal_error, sq.location, "Failed to check CALL { ... }: out of memory");
             return;
         };
@@ -1076,6 +1087,7 @@ pub const SemanticAnalyzer = struct {
     /// A subquery's patterns are checked as a MATCH, in a scope of its own:
     /// the variables they introduce are gone afterwards.
     fn analyzeSubquery(self: *Self, sq: *const ast.PatternSubquery) void {
+        if (sq.body) |body| return self.analyzeSubqueryBody(sq, body);
         for (sq.patterns) |pattern| {
             if (pattern.shortest != .none) {
                 self.addError(.unsupported_pattern, sq.location, "shortestPath() and allShortestPaths() are only supported in MATCH");
@@ -1094,6 +1106,55 @@ pub const SemanticAnalyzer = struct {
         std.mem.swap(std.StringHashMap(VariableInfo), &self.variables, &outer);
         outer.deinit();
         self.variable_list.shrinkRetainingCapacity(listed);
+    }
+
+    /// `EXISTS { query }`, `COUNT { query }`, `COLLECT { query }`: the query
+    /// sees every variable around it and binds its own, which are gone
+    /// after it. It cannot write, and COLLECT's must return one column.
+    fn analyzeSubqueryBody(self: *Self, sq: *const ast.PatternSubquery, body: *const ast.CallSubquery) void {
+        const what = sq.name();
+        const q = ast.Query{ .clauses = body.clauses, .unions = body.unions, .allocator = self.allocator };
+        if (q.writesData()) {
+            self.addErrorFmt(.unsupported_pattern, sq.location, "{s} cannot change the database; use CALL {{ ... }} to write for each row", .{what});
+            return;
+        }
+        var outer = self.variables.clone() catch {
+            self.addError(.internal_error, sq.location, "Failed to check subquery: out of memory");
+            return;
+        };
+        defer outer.deinit();
+        const listed = self.variable_list.items.len;
+        self.enclosing.append(self.allocator, .{ .variables = &outer, .subquery = what }) catch {
+            self.addError(.internal_error, sq.location, "Failed to check subquery: out of memory");
+            return;
+        };
+        var returns = false;
+        for (0..body.unions.len + 1) |b| {
+            const clauses = if (b == 0) body.clauses else body.unions[b - 1].clauses;
+            const ret = returnOf(clauses);
+            if (b == 0) {
+                returns = ret != null;
+            } else if (returns != (ret != null)) {
+                self.addErrorFmt(.unsupported_pattern, sq.location, "Every query in a UNION inside {s} must end with RETURN, or none", .{what});
+                break;
+            }
+            if (sq.kind == .collect) {
+                if (ret == null or ret.?.items.len != 1) {
+                    self.addError(.unsupported_pattern, sq.location, "COLLECT { ... } must end with a RETURN of one column, the values it collects");
+                    break;
+                }
+            }
+            // Each query starts from the variables around the subquery.
+            self.variables.clearRetainingCapacity();
+            var it = outer.iterator();
+            while (it.next()) |entry| self.variables.put(entry.key_ptr.*, entry.value_ptr.*) catch {};
+            self.analyzeClauses(clauses);
+        }
+        _ = self.enclosing.pop();
+        self.variables.clearRetainingCapacity();
+        var it = outer.iterator();
+        while (it.next()) |entry| self.variables.put(entry.key_ptr.*, entry.value_ptr.*) catch {};
+        self.variable_list.shrinkRetainingCapacity(@min(listed, self.variable_list.items.len));
     }
 
     /// Variables of an expression's own (a list comprehension's, reduce's),

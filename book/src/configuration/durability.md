@@ -116,7 +116,7 @@ program set one.
 |----------|--------|---------|--------|
 | `LATTICE_SYNC_MODE` | `full`, `normal` | unset (`full`) | Whether a commit waits for the disk; see [Sync mode](#sync-mode) |
 | `LATTICE_FULL_FSYNC` | `1`/`true`, `0`/`false` | unset (off) | `F_FULLFSYNC` on macOS; see [Full fsync on macOS](#full-fsync-on-macos) |
-| `LATTICE_BUFFER_POOL_MB` | a positive integer | unset | Page cache size; see [Opening a Database](./opening.md#memory-and-caching) |
+| `LATTICE_BUFFER_POOL_MB` | a positive integer | unset | Page cache size where the program sets none (an explicit size wins); see [Opening a Database](./opening.md#memory-and-caching) |
 
 ## Running without the log
 

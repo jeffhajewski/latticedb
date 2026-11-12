@@ -32,7 +32,10 @@ export interface DatabaseOptions {
   create?: boolean;
   /** Open in read-only mode */
   readOnly?: boolean;
-  /** Cache size in megabytes */
+  /**
+   * Cache size in megabytes. Unset, the LATTICE_BUFFER_POOL_MB environment
+   * variable decides if it is set, else 100; a size given here wins over it.
+   */
   cacheSizeMb?: number;
   /** Log every commit so it survives a crash (default: true). Transactions work either way. */
   enableWal?: boolean;
@@ -133,7 +136,6 @@ export class Database {
     this.options = {
       create: false,
       readOnly: false,
-      cacheSizeMb: 100,
       enableWal: true,
       enableAdjacencyCache: false,
       enableVector: false,

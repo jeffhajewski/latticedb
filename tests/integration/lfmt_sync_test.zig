@@ -29,3 +29,25 @@ test "lfmt: an explicit sync setting wins over the environment" {
     try std.testing.expectEqual(DatabaseConfig.SyncMode.full, unset.effectiveSyncMode());
     try std.testing.expect(!unset.effectiveFullFsync());
 }
+
+test "lfmt: an explicit buffer pool size wins over LATTICE_BUFFER_POOL_MB, which is the default" {
+    const env = struct {
+        extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+        extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+    };
+    const mib: usize = 1024 * 1024;
+    _ = env.setenv("LATTICE_BUFFER_POOL_MB", "3", 1);
+    defer _ = env.unsetenv("LATTICE_BUFFER_POOL_MB");
+
+    const explicit = DatabaseConfig{ .buffer_pool_size = 8 * mib };
+    try std.testing.expectEqual(8 * mib, explicit.effectiveBufferPoolSize());
+    const unset = DatabaseConfig{ .enable_fts = false };
+    try std.testing.expectEqual(3 * mib, unset.effectiveBufferPoolSize());
+
+    // A value that is not a positive number of megabytes is ignored.
+    _ = env.setenv("LATTICE_BUFFER_POOL_MB", "lots", 1);
+    try std.testing.expectEqual(16 * mib, unset.effectiveBufferPoolSize());
+    _ = env.unsetenv("LATTICE_BUFFER_POOL_MB");
+    try std.testing.expectEqual(16 * mib, unset.effectiveBufferPoolSize());
+    try std.testing.expectEqual(8 * mib, explicit.effectiveBufferPoolSize());
+}

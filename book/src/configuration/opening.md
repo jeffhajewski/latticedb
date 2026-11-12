@@ -94,9 +94,12 @@ Only the Zig API can leave the size unset (`buffer_pool_size = 0`). The cache th
 sizes itself from the features you turned on: 16 MB for the graph, plus 12 MB each
 for full-text and vector search, so about 40 MB with both.
 
-The environment variable `LATTICE_BUFFER_POOL_MB` overrides all of these, including
-an explicit `cache_size_mb`, which is useful for trying a value without changing
-code.
+The environment variable `LATTICE_BUFFER_POOL_MB` sets the size wherever the program
+leaves it unset: `buffer_pool_size = 0` in Zig, `cache_size_mb = 0` in C, no cache
+size in a binding, no `--cache-size` in the CLI. A size the program sets wins over
+the variable, as with `LATTICE_SYNC_MODE` and `LATTICE_FULL_FSYNC`. The bindings
+and the C API leave it unset by default, so the variable is useful for trying a
+value without changing code; without it they use 100 MB.
 
 In-memory databases cap the cache at 64 pages (256 KB at the default page size)
 whatever you ask for, because a cache miss against memory is a copy rather than a

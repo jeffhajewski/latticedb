@@ -657,7 +657,7 @@ Java_io_latticedb_Native_open(JNIEnv *env, jclass cls, jstring path,
     opts.struct_size = sizeof(opts);
     opts.create = create == JNI_TRUE;
     opts.read_only = read_only == JNI_TRUE;
-    opts.cache_size_mb = cache_size_mb <= 0 ? 100 : (uint32_t)cache_size_mb;
+    opts.cache_size_mb = cache_size_mb <= 0 ? 0 : (uint32_t)cache_size_mb;
     opts.page_size = page_size <= 0 ? 4096 : (uint32_t)page_size;
     opts.enable_vector = enable_vector == JNI_TRUE;
     opts.vector_dimensions = vector_dimensions <= 0 ? 128 : (uint16_t)vector_dimensions;
@@ -728,7 +728,7 @@ Java_io_latticedb_Native_deserialize(JNIEnv *env, jclass cls, jbyteArray bytes,
     opts.struct_size = sizeof(opts);
     opts.create = false;
     opts.read_only = false;
-    opts.cache_size_mb = cache_size_mb <= 0 ? 100 : (uint32_t)cache_size_mb;
+    opts.cache_size_mb = cache_size_mb <= 0 ? 0 : (uint32_t)cache_size_mb;
     opts.page_size = page_size <= 0 ? 4096 : (uint32_t)page_size;
     opts.enable_vector = enable_vector == JNI_TRUE;
     opts.vector_dimensions = vector_dimensions <= 0 ? 128 : (uint16_t)vector_dimensions;

@@ -16,7 +16,7 @@ db.open()
 - For large databases (1M+ nodes), increase to 200-500 MB
 - For memory-constrained environments, reduce to 50 MB or less
 - The cache stores fixed-size pages (4 KB each at the default page size), so 100 MB holds ~25,000 pages
-- The `LATTICE_BUFFER_POOL_MB` environment variable overrides the size, including an explicit `cache_size_mb`
+- The `LATTICE_BUFFER_POOL_MB` environment variable sets the size when the program does not; an explicit `cache_size_mb` wins over it
 - In-memory (`:memory:`) databases cap the cache at 64 pages whatever you ask for
 
 ## Vector Search: ef_search

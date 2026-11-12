@@ -158,7 +158,7 @@ class Database:
         *,
         create: bool = False,
         read_only: bool = False,
-        cache_size_mb: int = 100,
+        cache_size_mb: Optional[int] = None,
         enable_wal: bool = True,
         enable_adjacency_cache: bool = False,
         enable_vectors: Optional[bool] = None,
@@ -179,7 +179,9 @@ class Database:
             path: Path to the database file.
             create: Create the database if it doesn't exist.
             read_only: Open in read-only mode.
-            cache_size_mb: Size of the page cache in megabytes.
+            cache_size_mb: Size of the page cache in megabytes. Unset, the
+                ``LATTICE_BUFFER_POOL_MB`` environment variable decides if it is
+                set, else 100; a size given here wins over the variable.
             enable_wal: Log every commit, so it survives a crash. Without the
                 log, transactions work the same and changes reach the file
                 when it is next flushed (at close, for one).
@@ -240,7 +242,7 @@ class Database:
         self._path = Path(path)
         self._create = create
         self._read_only = read_only
-        self._cache_size_mb = cache_size_mb
+        self._cache_size_mb = 0 if cache_size_mb is None else cache_size_mb
         self._enable_wal = enable_wal
         self._enable_adjacency_cache = enable_adjacency_cache
         if enable_vector is not None:
@@ -1193,7 +1195,7 @@ class Database:
 def deserialize(
     data: bytes,
     *,
-    cache_size_mb: int = 100,
+    cache_size_mb: Optional[int] = None,
     enable_wal: bool = True,
     enable_adjacency_cache: bool = False,
     enable_vectors: bool = False,
@@ -1238,7 +1240,7 @@ def deserialize(
         struct_size=ctypes.sizeof(OpenOptionsV4),
         create=False,
         read_only=False,
-        cache_size_mb=cache_size_mb,
+        cache_size_mb=0 if cache_size_mb is None else cache_size_mb,
         page_size=4096,
         enable_vector=enable_vectors,
         vector_dimensions=vector_dimensions,
@@ -1271,7 +1273,7 @@ def deserialize(
     db._path = Path("<deserialized>")
     db._create = False
     db._read_only = False
-    db._cache_size_mb = cache_size_mb
+    db._cache_size_mb = 0 if cache_size_mb is None else cache_size_mb
     db._enable_wal = enable_wal
     db._enable_adjacency_cache = enable_adjacency_cache
     db._enable_vectors = enable_vectors

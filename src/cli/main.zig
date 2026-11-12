@@ -272,7 +272,13 @@ fn cmdCreate(
         .vector_m = parsed_args.vector_m,
         .vector_ef_construction = parsed_args.vector_ef_construction,
         .enable_fts = parsed_args.enable_fts,
-        .buffer_pool_size = @as(usize, parsed_args.cache_size_mb) * 1024 * 1024,
+        // --cache-size wins over LATTICE_BUFFER_POOL_MB, which wins over 64 MB.
+        .buffer_pool_size = if (parsed_args.cache_size_mb) |mb|
+            @as(usize, mb) * 1024 * 1024
+        else if (DatabaseConfig.environmentBufferPoolSize() != null)
+            0
+        else
+            64 * 1024 * 1024,
         .changefeed_retention = parsed_args.changefeed_retention,
     };
 
@@ -1862,7 +1868,7 @@ fn printUsage(writer: anytype) void {
         \\  --vector-metric=<m>   With create: cosine, euclidean or dot (default: cosine)
         \\  --enable-fts          Enable full-text search (default: on)
         \\  --no-fts              Disable full-text search
-        \\  --cache-size=<mb>     Buffer pool size in MB (default: 64)
+        \\  --cache-size=<mb>     Buffer pool size in MB (default: LATTICE_BUFFER_POOL_MB, else 64)
         \\  --page-size=<bytes>   Page size in bytes, 4096..65535 (default: 4096)
         \\  --file=<path>         Input/output file for import/export
         \\  --query=<cypher>      Query string for exec command
@@ -1902,7 +1908,7 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\                        HNSW build candidate list, 1..4096 (default: 200)
             \\  --enable-fts          Enable BM25 full-text search (default: on)
             \\  --no-fts              Disable full-text search
-            \\  --cache-size=<mb>     Buffer pool size in MB (default: 64)
+            \\  --cache-size=<mb>     Buffer pool size in MB (default: LATTICE_BUFFER_POOL_MB, else 64)
             \\  --page-size=<bytes>   Page size in bytes (default: 4096)
             \\
             \\Examples:

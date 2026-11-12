@@ -378,9 +378,10 @@ var bp = try BufferPool.init(allocator, &pm, 64 * 1024 * 1024);
 The pool holds `pool_size / page_size` frames. A file-backed database sizes it
 from, in order of priority:
 
-1. The `LATTICE_BUFFER_POOL_MB` environment variable, if set to a positive number
-2. An explicit size: `buffer_pool_size` in the Zig `DatabaseConfig`, or
+1. An explicit size: `buffer_pool_size` in the Zig `DatabaseConfig`, or
    `cache_size_mb` in the C open options (`LATTICE_OPEN_OPTIONS_DEFAULT` sets 100)
+2. The `LATTICE_BUFFER_POOL_MB` environment variable, if set to a positive number
+   (a C `cache_size_mb` of 0 that finds it unset means 100 MB)
 3. Otherwise automatic sizing: 16 MB, plus 12 MB when full-text search is enabled
    (the Zig default) and 12 MB more when vectors are enabled
 

@@ -17,7 +17,7 @@ import java.util.Objects;
 public final class OpenOptions {
     private boolean create = false;
     private boolean readOnly = false;
-    private int cacheSizeMB = 100;
+    private int cacheSizeMB = 0;
     private int pageSize = 4096;
     private boolean enableVectors = false;
     private int vectorDimensions = 128;
@@ -59,6 +59,11 @@ public final class OpenOptions {
         return this;
     }
 
+    /**
+     * Page cache size in megabytes. Unset (0), the LATTICE_BUFFER_POOL_MB
+     * environment variable decides if it is set, else 100; a size set here
+     * wins over the variable.
+     */
     public OpenOptions cacheSizeMB(int cacheSizeMB) {
         this.cacheSizeMB = cacheSizeMB;
         return this;

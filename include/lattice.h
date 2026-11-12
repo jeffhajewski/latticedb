@@ -146,11 +146,17 @@ struct lattice_map_entry {
     lattice_value value;
 };
 
-/* Open options */
+/* Open options
+ *
+ * cache_size_mb, in every version: a size set here wins over the
+ * LATTICE_BUFFER_POOL_MB environment variable. 0 means not set: the variable's
+ * size if it is set to a positive number of megabytes, else 100 MB. A null
+ * options pointer leaves the size to the variable, else to the engine's own
+ * sizing (16 MB, plus 12 MB each for full-text search and vectors). */
 typedef struct {
     bool create;            /* Create if not exists */
     bool read_only;         /* Open in read-only mode */
-    uint32_t cache_size_mb; /* Cache size in MB (default: 100) */
+    uint32_t cache_size_mb; /* Cache size in MB (default: 100; 0: see below) */
     uint32_t page_size;     /* Page size in bytes (default: 4096) */
     bool enable_vector;     /* Create a vector index if none (see v5) */
     uint16_t vector_dimensions; /* Vector dimensions, 1..4096 (default: 128) */
@@ -164,7 +170,7 @@ typedef struct {
     size_t struct_size;     /* Must be sizeof(lattice_open_options_v2) */
     bool create;            /* Create if not exists */
     bool read_only;         /* Open in read-only mode */
-    uint32_t cache_size_mb; /* Cache size in MB (default: 100) */
+    uint32_t cache_size_mb; /* Cache size in MB (default: 100; 0: see below) */
     uint32_t page_size;     /* Page size in bytes (default: 4096) */
     bool enable_vector;     /* Create a vector index if none (see v5) */
     uint16_t vector_dimensions; /* Vector dimensions, 1..4096 (default: 128) */
@@ -179,7 +185,7 @@ typedef struct {
     size_t struct_size;     /* Must be sizeof(lattice_open_options_v3) */
     bool create;            /* Create if not exists */
     bool read_only;         /* Open in read-only mode */
-    uint32_t cache_size_mb; /* Cache size in MB (default: 100) */
+    uint32_t cache_size_mb; /* Cache size in MB (default: 100; 0: see below) */
     uint32_t page_size;     /* Page size in bytes (default: 4096) */
     bool enable_vector;     /* Create a vector index if none (see v5) */
     uint16_t vector_dimensions; /* Vector dimensions, 1..4096 (default: 128) */
@@ -198,7 +204,7 @@ typedef struct {
     size_t struct_size;     /* Must be sizeof(lattice_open_options_v4) */
     bool create;            /* Create if not exists */
     bool read_only;         /* Open in read-only mode */
-    uint32_t cache_size_mb; /* Cache size in MB (default: 100) */
+    uint32_t cache_size_mb; /* Cache size in MB (default: 100; 0: see below) */
     uint32_t page_size;     /* Page size in bytes (default: 4096) */
     bool enable_vector;     /* Create a vector index if none (see v5) */
     uint16_t vector_dimensions; /* Vector dimensions, 1..4096 (default: 128) */
@@ -309,7 +315,7 @@ typedef struct {
     size_t struct_size;     /* Must be sizeof(lattice_open_options_v5) */
     bool create;            /* Create if not exists */
     bool read_only;         /* Open in read-only mode */
-    uint32_t cache_size_mb; /* Cache size in MB (default: 100) */
+    uint32_t cache_size_mb; /* Cache size in MB (default: 100; 0: see below) */
     uint32_t page_size;     /* Page size in bytes (default: 4096) */
     bool enable_vector;     /* Create a vector index if the database has none */
     uint16_t vector_dimensions; /* Vector dimensions, 1..4096 (default: 128) */

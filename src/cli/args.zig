@@ -250,7 +250,8 @@ pub const Args = struct {
     changefeed_retention: ?Retention = null,
     /// --trim, for `changefeed`.
     trim: bool = false,
-    cache_size_mb: u32 = 64,
+    /// --cache-size; null when not given: LATTICE_BUFFER_POOL_MB if set, else 64.
+    cache_size_mb: ?u32 = null,
     page_size: u32 = 4096,
 
     // Import options

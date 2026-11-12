@@ -1389,6 +1389,17 @@ fn unlockTxnDb(txn_handle: *TxnHandle) void {
     txn_handle.db_handle.mutex.unlock();
 }
 
+/// The buffer pool size an options struct's `cache_size_mb` asks for. A size
+/// set there wins over `LATTICE_BUFFER_POOL_MB`; 0 means not set, and then
+/// the variable decides if it is set, else the 100 MB every options struct
+/// defaults to.
+fn cacheSizeBytes(cache_size_mb: u32) usize {
+    const mib: usize = 1024 * 1024;
+    if (cache_size_mb > 0) return @as(usize, cache_size_mb) * mib;
+    if (DatabaseConfig.environmentBufferPoolSize() != null) return 0;
+    return 100 * mib;
+}
+
 fn buildOpenOptionsV1(options: ?*const lattice_open_options) OpenOptions {
     var zig_options = OpenOptions{
         .create = false,
@@ -1402,7 +1413,7 @@ fn buildOpenOptionsV1(options: ?*const lattice_open_options) OpenOptions {
         zig_options.create = opts.create;
         zig_options.read_only = opts.read_only;
         zig_options.page_size = if (opts.page_size == 0) types.DEFAULT_PAGE_SIZE else opts.page_size;
-        zig_options.config.buffer_pool_size = @as(usize, opts.cache_size_mb) * 1024 * 1024;
+        zig_options.config.buffer_pool_size = cacheSizeBytes(opts.cache_size_mb);
         zig_options.config.enable_vector = opts.enable_vector;
         zig_options.config.vector_dimensions = opts.vector_dimensions;
     }
@@ -1427,7 +1438,7 @@ fn buildOpenOptionsV2(options: ?*const lattice_open_options_v2) DatabaseError!Op
         zig_options.create = opts.create;
         zig_options.read_only = opts.read_only;
         zig_options.page_size = if (opts.page_size == 0) types.DEFAULT_PAGE_SIZE else opts.page_size;
-        zig_options.config.buffer_pool_size = @as(usize, opts.cache_size_mb) * 1024 * 1024;
+        zig_options.config.buffer_pool_size = cacheSizeBytes(opts.cache_size_mb);
         zig_options.config.enable_vector = opts.enable_vector;
         zig_options.config.vector_dimensions = opts.vector_dimensions;
         zig_options.config.enable_wal = opts.enable_wal;
@@ -1453,7 +1464,7 @@ fn buildOpenOptionsV3(options: ?*const lattice_open_options_v3) DatabaseError!Op
         zig_options.create = opts.create;
         zig_options.read_only = opts.read_only;
         zig_options.page_size = if (opts.page_size == 0) types.DEFAULT_PAGE_SIZE else opts.page_size;
-        zig_options.config.buffer_pool_size = @as(usize, opts.cache_size_mb) * 1024 * 1024;
+        zig_options.config.buffer_pool_size = cacheSizeBytes(opts.cache_size_mb);
         zig_options.config.enable_vector = opts.enable_vector;
         zig_options.config.vector_dimensions = opts.vector_dimensions;
         zig_options.config.enable_wal = opts.enable_wal;
@@ -1480,7 +1491,7 @@ fn buildOpenOptionsV4(options: ?*const lattice_open_options_v4) DatabaseError!Op
         zig_options.create = opts.create;
         zig_options.read_only = opts.read_only;
         zig_options.page_size = if (opts.page_size == 0) types.DEFAULT_PAGE_SIZE else opts.page_size;
-        zig_options.config.buffer_pool_size = @as(usize, opts.cache_size_mb) * 1024 * 1024;
+        zig_options.config.buffer_pool_size = cacheSizeBytes(opts.cache_size_mb);
         zig_options.config.enable_vector = opts.enable_vector;
         zig_options.config.vector_dimensions = opts.vector_dimensions;
         zig_options.config.enable_wal = opts.enable_wal;
@@ -1508,7 +1519,7 @@ fn buildOpenOptionsV5(options: ?*const lattice_open_options_v5) DatabaseError!Op
         zig_options.create = opts.create;
         zig_options.read_only = opts.read_only;
         zig_options.page_size = if (opts.page_size == 0) types.DEFAULT_PAGE_SIZE else opts.page_size;
-        zig_options.config.buffer_pool_size = @as(usize, opts.cache_size_mb) * 1024 * 1024;
+        zig_options.config.buffer_pool_size = cacheSizeBytes(opts.cache_size_mb);
         zig_options.config.enable_vector = opts.enable_vector;
         zig_options.config.vector_dimensions = opts.vector_dimensions;
         zig_options.config.enable_wal = opts.enable_wal;
@@ -4706,4 +4717,21 @@ test "begin and rollback on a handle that failed report an I/O error" {
         defer releaseDb(handle);
         handle.db.failed = false;
     }
+}
+
+test "cache_size_mb wins over LATTICE_BUFFER_POOL_MB; 0 leaves it to the variable, else 100 MB" {
+    const env = struct {
+        extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
+        extern "c" fn unsetenv(name: [*:0]const u8) c_int;
+    };
+    const mib: usize = 1024 * 1024;
+    _ = env.setenv("LATTICE_BUFFER_POOL_MB", "3", 1);
+    defer _ = env.unsetenv("LATTICE_BUFFER_POOL_MB");
+    const set = buildOpenOptionsV5(&.{ .cache_size_mb = 8 }) catch unreachable;
+    try std.testing.expectEqual(8 * mib, set.config.effectiveBufferPoolSize());
+    const unset = buildOpenOptionsV5(&.{ .cache_size_mb = 0 }) catch unreachable;
+    try std.testing.expectEqual(3 * mib, unset.config.effectiveBufferPoolSize());
+    _ = env.unsetenv("LATTICE_BUFFER_POOL_MB");
+    const unset_no_env = buildOpenOptionsV5(&.{ .cache_size_mb = 0 }) catch unreachable;
+    try std.testing.expectEqual(100 * mib, unset_no_env.config.effectiveBufferPoolSize());
 }

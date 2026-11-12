@@ -8,8 +8,11 @@ type NodeID uint64
 type EdgeID uint64
 
 type OpenOptions struct {
-	Create      bool
-	ReadOnly    bool
+	Create   bool
+	ReadOnly bool
+	// CacheSizeMB is the page cache size. Zero leaves it to the
+	// LATTICE_BUFFER_POOL_MB environment variable if it is set, else 100; a
+	// size set here wins over the variable.
 	CacheSizeMB uint32
 	PageSize    uint32
 	// EnableWAL logs every commit so it survives a crash. The normalized default
@@ -191,9 +194,6 @@ type EmbeddingConfig struct {
 }
 
 func (o OpenOptions) withDefaults() OpenOptions {
-	if o.CacheSizeMB == 0 {
-		o.CacheSizeMB = 100
-	}
 	if o.PageSize == 0 {
 		o.PageSize = 4096
 	}

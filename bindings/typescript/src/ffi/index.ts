@@ -446,7 +446,7 @@ export class LatticeFFI {
     const baseOpts = {
       create: options.create ?? false,
       read_only: options.readOnly ?? false,
-      cache_size_mb: options.cacheSizeMb ?? 100,
+      cache_size_mb: options.cacheSizeMb ?? 0,
       page_size: options.pageSize ?? 4096,
       enable_vector: options.enableVectors ?? options.enableVector ?? false,
       vector_dimensions: options.vectorDimensions ?? 128,
@@ -545,7 +545,7 @@ export class LatticeFFI {
       struct_size: koffi.sizeof('lattice_open_options_v4'),
       create: false,
       read_only: false,
-      cache_size_mb: options.cacheSizeMb ?? 100,
+      cache_size_mb: options.cacheSizeMb ?? 0,
       page_size: options.pageSize ?? 4096,
       enable_vector: options.enableVectors ?? options.enableVector ?? false,
       vector_dimensions: options.vectorDimensions ?? 128,

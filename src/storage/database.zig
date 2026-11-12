@@ -394,8 +394,11 @@ pub const QueryResult = struct {
 
 /// Database configuration
 pub const DatabaseConfig = struct {
-    /// Buffer pool size in bytes (default 16MB, plus 12MB each for FTS and vectors)
-    /// Set to 0 to use automatic sizing based on enabled features
+    /// Buffer pool size in bytes. 0, the default, means not set: the
+    /// `LATTICE_BUFFER_POOL_MB` environment variable if it is set, else a size
+    /// from the enabled features (16 MB, plus 12 MB each for full-text search
+    /// and vectors). A size set here wins over the environment, as with
+    /// `sync_mode` and `full_fsync`.
     buffer_pool_size: usize = 0,
     /// Enable write-ahead logging
     enable_wal: bool = true,
@@ -504,28 +507,33 @@ pub const DatabaseConfig = struct {
     }
 
     /// Compute effective buffer pool size based on enabled features.
-    /// Priority: LATTICE_BUFFER_POOL_MB env var > explicit buffer_pool_size > auto-sizing.
+    /// Priority: explicit buffer_pool_size > LATTICE_BUFFER_POOL_MB > auto-sizing.
+    /// The variable is a default for code that does not choose a size, not an
+    /// override of code that does.
     /// Auto-sizing:
     /// - Base: 16MB for graph operations (covers ~50K edges comfortably)
     /// - FTS enabled: +12MB (dictionary B+Tree, posting lists)
     /// - Vector enabled: +12MB (HNSW connections, vector pages)
     pub fn effectiveBufferPoolSize(self: DatabaseConfig) usize {
-        // Environment variable override (useful for tuning without recompilation)
-        if (std.c.getenv("LATTICE_BUFFER_POOL_MB")) |mb_z| {
-            if (std.fmt.parseInt(usize, std.mem.span(mb_z), 10)) |mb| {
-                if (mb > 0) return mb * 1024 * 1024;
-            } else |_| {}
-        }
-
         if (self.buffer_pool_size > 0) {
             return self.buffer_pool_size;
         }
+        if (environmentBufferPoolSize()) |size| return size;
 
         const base_size: usize = 16 * 1024 * 1024; // 16MB
         const fts_size: usize = if (self.enable_fts) 12 * 1024 * 1024 else 0; // +12MB
         const vector_size: usize = if (self.enable_vector) 12 * 1024 * 1024 else 0; // +12MB
 
         return base_size + fts_size + vector_size;
+    }
+
+    /// The size `LATTICE_BUFFER_POOL_MB` asks for, or null when it is unset or
+    /// not a positive whole number of megabytes.
+    pub fn environmentBufferPoolSize() ?usize {
+        const mb_z = std.c.getenv("LATTICE_BUFFER_POOL_MB") orelse return null;
+        const mb = std.fmt.parseInt(usize, std.mem.span(mb_z), 10) catch return null;
+        if (mb == 0) return null;
+        return std.math.mul(usize, mb, 1024 * 1024) catch null;
     }
 };
 

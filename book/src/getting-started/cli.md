@@ -469,93 +469,118 @@ open. Neither announces itself at copy time — you find out at restore. Use
 ### Shipping changes somewhere else
 
 A backup taken by hand is only as good as the last time you remembered to take
-one. `replicate` keeps a directory up to date with a database, so a failed disk
-costs you the last few seconds of writes rather than everything since your last
-copy:
+one. `replicate` copies a database into a directory you can restore from later:
 
 ```bash
-lattice replicate social.lattice --to=/mnt/backup/social
+lattice replicate social.lattice --to=social-backup
 ```
 
 ```text
-Started generation 1 for social.lattice in /mnt/backup/social
-  Snapshot bytes:  73728
+Started generation 1 for social.lattice in social-backup
+  Snapshot bytes:  65536
+  Generation:      1
+  Frames shipped:  0
+  Bytes shipped:   0
+  Duration:        4 ms
+```
+
+The first pass starts a **generation**: a full snapshot of the database, which
+later passes extend with the write-ahead log frames written after it. Run it
+again with nothing changed and it ships nothing:
+
+```text
+Nothing new to ship for social.lattice
   Generation:      1
   Frames shipped:  0
   Bytes shipped:   0
   Duration:        2 ms
 ```
 
-The first pass copies the whole database. Every pass after that copies only the
-changes since the last one, which is why running it often is cheap:
+That is normal and not an error: the command exits successfully, so you can put
+it on a timer without filling your logs with things that look like failures.
 
-```text
-Shipped social.lattice to /mnt/backup/social
-  Generation:      1
-  Frames shipped:  5
-  Bytes shipped:   20480
-  Duration:        2 ms
-```
-
-A pass with nothing to ship is normal and is not an error. It tells you so and
-exits successfully, which means you can put this on a timer without your logs
-filling up with things that look like failures.
-
-Add `--follow` to leave it running instead:
+Frames can only be shipped while the log still holds them. A process that writes
+to the database and then closes it, as `lattice exec` or an application does,
+folds the log into the file and resets it, and a reset log starts a new
+generation. So when the writers are separate processes, as they are from the
+command line, every pass after a change takes a fresh snapshot:
 
 ```bash
-lattice replicate social.lattice --to=/mnt/backup/social --follow --interval=30
+lattice exec social.lattice --query="CREATE (:Person {name: 'Carol'})"
+lattice replicate social.lattice --to=social-backup
 ```
-
-Inside the destination you will find a manifest, a snapshot, and the changes
-that have arrived since:
 
 ```text
-/mnt/backup/social/manifest.json
-/mnt/backup/social/gen-0000000001/snapshot.lattice
-/mnt/backup/social/gen-0000000001/frames/0000000012-0000000016.frames
+Started generation 2 for social.lattice in social-backup
+  Snapshot bytes:  65536
+  Generation:      2
+  Frames shipped:  0
+  Bytes shipped:   0
+  Duration:        5 ms
 ```
 
-Every so often LatticeDB folds pending changes into the database file and starts
-the log over. When that happens, replication starts a **generation**: a fresh
-snapshot, followed by the changes that came after it. Older generations are left
-alone, because restoring to a moment inside one still needs them.
+The destination then holds a manifest and one directory per generation:
 
-There is one important limit. This command opens the database itself, so it
-cannot run against a database another process has open; it stops with the
-error described under [One process at a time](#one-process-at-a-time). To
-replicate a database while your application is using it, the application has to
-do it: the Zig API's `replicateTo` runs on the handle the application already
-has. The C API and the language bindings do not expose replication, so from
-Python, TypeScript, Go or Java, run this command while nothing else has the
-database open.
+```text
+social-backup/manifest.json
+social-backup/gen-0000000001/snapshot.lattice
+social-backup/gen-0000000002/snapshot.lattice
+```
+
+Older generations are left alone, because restoring to a moment inside one still
+needs them. Delete a `gen-` directory to reclaim its space, at the cost of
+restoring to any moment inside it.
+
+Passes that ship frames rather than snapshots come from a process that keeps the
+database open while it writes and replicates through the same handle: the Zig
+API's `replicateTo`. Its log is reset only by a checkpoint (automatically after
+about a thousand frames, by default) or when the database closes, and between
+resets each pass copies only the new frames, into a `frames/` directory inside
+the generation. The C API and the
+language bindings do not expose replication.
+
+This command opens the database for writing, so it takes the file lock. It
+cannot run against a database another process has open; it stops with the error
+described under [One process at a time](#one-process-at-a-time). `--follow`
+keeps it running and replicating on an interval:
+
+```bash
+lattice replicate social.lattice --to=social-backup --follow --interval=30
+```
+
+While it runs it holds the lock, so nothing else can open the database, and with
+no other writer its passes after the first have nothing to ship. To replicate a
+database that other processes write to, run the command on a timer between
+their runs instead; to replicate one your application keeps open, call
+`replicateTo` from the application.
 
 ### Getting a database back
 
 `restore` turns a replication directory back into a database:
 
 ```bash
-lattice restore /mnt/backup/social --output=recovered.lattice
+lattice restore social-backup --output=recovered.lattice
 ```
 
 ```text
-Restored /mnt/backup/social to recovered.lattice
-  Generation:      1
-  Segments:        2
-  Frames replayed: 20
-  Bytes written:   73728
-  Restored to:     2026-08-25T22:44:18Z
-  Duration:        468 ms
+Restored social-backup to recovered.lattice
+  Generation:      2
+  Segments:        0
+  Frames replayed: 0
+  Bytes written:   65536
+  Restored to:     2026-11-12T00:17:49Z
+  Duration:        500 ms
 ```
 
-It copies the snapshot, replays the changes shipped after it, and folds the
+It copies the snapshot, replays the frames shipped after it (none here, since
+every pass in this generation came from the command line), and folds the
 result into one file. You can open that file, copy it, or move it, with nothing
 else beside it that has to be kept together with it.
 
 To go back to an earlier moment, say when:
 
 ```bash
-lattice restore /mnt/backup/social --output=recovered.lattice --at="2026-08-25T14:00:00Z"
+lattice restore social-backup --output=recovered.lattice --at="2026-11-12T00:18:00Z"
 ```
 
 Times are read as UTC, so a restore means the same thing wherever you run it. A

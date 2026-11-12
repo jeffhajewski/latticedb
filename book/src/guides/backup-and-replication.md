@@ -56,39 +56,53 @@ want to lose the last hour", because an hour is exactly how much you lose.
 ## Keeping a copy up to date
 
 `replicate` ships changes into a directory. The first pass copies the whole
-database, and every pass after that copies only what has changed since:
+database; later passes copy the write-ahead log frames written since, when the
+log still holds them (see [Generations](#generations)):
 
 ```bash
 lattice replicate social.lattice --to=/mnt/backup/social
 ```
 
-Run it on an interval and the destination trails your database by roughly that
-interval:
+Run it on a timer, from cron or a scheduler, and the destination trails your
+database by roughly that interval. A pass with nothing to ship is normal, says
+so, and exits successfully, so this does not fill your logs with things that
+look like failures.
+
+`--follow` keeps the command running and replicating on an interval:
 
 ```bash
 lattice replicate social.lattice --to=/mnt/backup/social --follow --interval=30
 ```
 
-A pass with nothing to ship is normal, says so, and exits successfully, so this
-is safe to put on a timer without filling your logs with things that look like
-failures.
+While it runs it holds the database's file lock, so nothing else can open the
+database, and with no other writer its later passes have nothing to ship. For a
+database that other processes write to, use a timer instead.
 
 ### Why later passes are cheap
 
 Every change is written to the write-ahead log before it reaches the database
 file. Replication copies frames out of that log, so a pass has to move only what
-was actually written, not the whole database again.
+was actually written, not the whole database again. That holds while the log
+still has those frames, which is the case for an application that keeps the
+database open and replicates through its own handle (below).
 
 ### Generations
 
 Every so often LatticeDB folds pending changes into the database file and starts
 the log over. By default this happens once the log reaches a thousand frames, and
-again whenever the database closes.
+when a database that has been written to closes.
 
 When the log starts over, frame numbering restarts from zero. Frame 40 before the
 reset and frame 40 after it are completely different changes, so replication
 cannot simply keep counting. Instead it starts a **generation**: a fresh full
 snapshot, followed by the changes that came after it.
+
+A process that writes and then closes the database therefore leaves a reset log
+behind, and the next pass starts a new generation. When your writers are
+separate short-lived processes, such as `lattice exec` or a script, each pass
+after a change is a full snapshot, and a pass with nothing changed ships
+nothing. Frames are shipped incrementally only when the process doing the
+writing also does the replicating.
 
 You will see this in the destination:
 
@@ -98,6 +112,9 @@ You will see this in the destination:
 /mnt/backup/social/gen-0000000001/frames/0000000012-0000000016.frames
 /mnt/backup/social/gen-0000000002/snapshot.lattice
 ```
+
+(The `frames/` files come from passes made through `replicateTo`; passes made
+by the command against a closed database add only `gen-` snapshots.)
 
 Older generations are kept rather than cleaned up, because restoring to a moment
 inside one still needs its frames. If you want to reclaim the space, deleting a
@@ -193,7 +210,7 @@ should have the same bug rather than a different one.
 | A copy before an upgrade or a risky migration | `lattice backup` |
 | A nightly snapshot | `lattice backup` from cron |
 | To lose no more than a few seconds of work | `replicateTo` on a timer in your application (Zig only) |
-| To mirror a database nothing else has open | `lattice replicate --follow` |
+| To keep restore points of a database written by separate processes | `lattice replicate` on a timer |
 | To undo a bad migration or a bad delete | `lattice restore --at=...` |
 | Many small databases kept in a bucket | `serialize` and `deserialize` |
 | A database that never touches the disk | open `:memory:` |

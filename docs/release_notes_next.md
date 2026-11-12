@@ -330,13 +330,14 @@ or an unknown function, in 0.16.0:
 - **`RETURN *` and `WITH *`**, every variable in scope.
 - **Aggregates inside larger expressions:** `count(n) + 1`, `sum(x) / count(x)`,
   an aggregate inside `CASE`, and grouping keys that are expressions.
-- **Smaller additions:** `exists(n.prop)`, label tests in expressions
-  (`WHERE n:Person`), `ORDER BY ... NULLS FIRST | NULLS LAST`, backtick-quoted
+- **Label expressions:** `(n:A|B)`, `(n:A&!B)`, `(n:%)` and parentheses, in
+  patterns and as tests in expressions (`WHERE n:Person|Robot`). On a
+  relationship the test is of its type: `r:KNOWS`.
+- **Smaller additions:** `exists(n.prop)`, `ORDER BY ... NULLS FIRST | NULLS LAST`, backtick-quoted
   names (`` n.`first name` ``), hexadecimal integers (`0x1F`) and `.5`.
 
 What is not implemented fails with an error that names the construct, where
-0.16.0 reported the clauses it expected: quantified path patterns, label
-expressions, `LOAD CSV`, `CALL { } IN TRANSACTIONS`, `OPTIONAL CALL`,
+0.16.0 reported the clauses it expected: quantified path patterns, `LOAD CSV`, `CALL { } IN TRANSACTIONS`, `OPTIONAL CALL`,
 `COLLECT { }`, type predicates, `||`, schema and administration statements, and
 the GQL-only clauses. `book/src/cypher/overview.md` lists them.
 
@@ -912,9 +913,8 @@ with relationships is one range probe, under 1 µs.
   for a newer writer. 0.16.0 does not know that gate and writes such a file
   anyway.
 - **Some Cypher is not implemented**, each part with an error that names it:
-  quantified path patterns (`((a)-->(b)){1,3}`), label expressions
-  (`(n:A|B)`, `:A&B`, `:!A`) and relationship type tests (`r:KNOWS`) in
-  expressions, `WHERE` inside a pattern, `EXISTS { }` and `COUNT { }` holding
+  quantified path patterns (`((a)-->(b)){1,3}`), `&`, `!` and `%` in a
+  relationship pattern's types (`-[:!KNOWS]->`), `WHERE` inside a pattern, `EXISTS { }` and `COUNT { }` holding
   clauses other than `MATCH` and `WHERE`, `COLLECT { }`, `CALL { } IN
   TRANSACTIONS`, `OPTIONAL CALL`, procedures other than the four catalog ones,
   `LOAD CSV`, type predicates (`IS :: INTEGER`), `||`, temporal and spatial

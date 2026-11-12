@@ -74,7 +74,7 @@ RETURN label ORDER BY label
 | Pattern comprehension | `[(n)-[:KNOWS]->(m) WHERE m.age > 30 \| m.name]` |
 | Named path | `MATCH p = (a)-[:KNOWS*]->(b) RETURN length(p), nodes(p), relationships(p)` |
 | Shortest path | `MATCH p = shortestPath((a)-[:KNOWS*]-(b))`; see [Shortest Paths](./variable-length-paths.md#shortest-paths) |
-| Label test | `n:Person`, `n:Person:Admin` (all of the labels) |
+| Label test | `n:Person`, `n:Person:Admin`, `n:Person\|Robot`, `n:!Admin`; `r:KNOWS` tests a relationship's type; see [Label Expressions](./match.md#label-expressions) |
 | `exists()` on a property | `exists(n.email)`, the same as `n.email IS NOT NULL` |
 | Map projection | `n {.name, .age, friends: size(fs)}`, `n {.*}`; see [RETURN](./return.md) |
 | `RETURN *`, `WITH *` | every variable in scope; see [RETURN](./return.md) |
@@ -87,9 +87,8 @@ with an error that names it:
 
 - quantified and parenthesised path patterns, such as `((a)-->(b)){1,3}`; use a
   variable-length relationship `-[*1..3]->`
-- label expressions `(n:A|B)`, `(n:A&B)`, `(n:!A)`; `(n:A:B)` means all of the
-  labels. A relationship type test `r:KNOWS` in an expression is a type error;
-  use `type(r) = 'KNOWS'`
+- `&`, `!` and `%` in a relationship's types, as in `-[:!KNOWS]->`; use
+  `WHERE NOT r:KNOWS`
 - `WHERE` inside a pattern, as in `(n WHERE n.age > 30)`
 - `EXISTS { }` and `COUNT { }` holding clauses other than `MATCH` and `WHERE`,
   and `COLLECT { }`

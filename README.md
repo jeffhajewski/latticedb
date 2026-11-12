@@ -460,7 +460,7 @@ If your data fits naturally into rows and columns — sales records, user accoun
 LatticeDB stores everything in one file on one machine. It can ship that file's changes elsewhere continuously, so a disk failure costs you seconds rather than everything, but that is backup rather than clustering. If you need sharding, multi-node replicas serving reads, or distributed queries across billions of nodes, look at Neo4j cluster, Dgraph, or a managed service like Neptune.
 
 **You need the full Cypher language.**
-LatticeDB implements most of the Cypher people write day to day, including `OPTIONAL MATCH`, `UNION`, `CASE`, `CALL { }` subqueries, list and pattern comprehensions, named paths and `shortestPath`, but not all of it. Quantified path patterns, label expressions such as `(n:A|B)`, `LOAD CSV`, user-defined procedures, temporal and spatial types, and schema statements are not implemented. If your queries depend on these, Neo4j is the complete implementation.
+LatticeDB implements most of the Cypher people write day to day, including `OPTIONAL MATCH`, `UNION`, `CASE`, `CALL { }` subqueries, list and pattern comprehensions, named paths and `shortestPath`, but not all of it. Quantified path patterns, `LOAD CSV`, user-defined procedures, temporal and spatial types, and schema statements are not implemented. If your queries depend on these, Neo4j is the complete implementation.
 
 **You need mature tooling and ecosystem.**
 Neo4j has visualization tools, admin dashboards, monitoring, drivers in every language, and years of community resources. PostgreSQL has decades of tooling. LatticeDB is new and lean — which is a strength for embedding, but a weakness if you need a rich operational ecosystem around your database.

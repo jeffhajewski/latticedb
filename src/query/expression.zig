@@ -682,6 +682,7 @@ pub const ExpressionEvaluator = struct {
             .reduce => |r| self.evaluateReduce(r, row, ctx),
             .subquery => |sq| self.evaluateSubquery(sq, row, ctx),
             .map_projection => |m| self.evaluateMapProjection(m, row, ctx),
+            .label_test => |t| self.evaluateLabelTest(t, row, ctx),
         };
     }
 
@@ -1756,6 +1757,63 @@ pub const ExpressionEvaluator = struct {
             return arg;
         }
         return EvalError.TypeError;
+    }
+
+    /// `n:A|B`: whether a node has the labels the expression asks for, or a
+    /// relationship the type (it has one, so `r:A&B` is false and `r:%`
+    /// true). Null for a null subject; any other value is a type error.
+    fn evaluateLabelTest(
+        self: *Self,
+        t: *const ast.LabelTest,
+        row: *const Row,
+        ctx: *const ExecutionContext,
+    ) EvalError!EvalResult {
+        const subject = try self.evaluate(t.subject, row, ctx);
+        const database = ctx.database orelse return .{ .null_val = {} };
+        const symbol_table = ctx.symbol_table orelse return .{ .null_val = {} };
+        switch (subject) {
+            .null_val => return .{ .null_val = {} },
+            .node_ref => |node_id| {
+                const label_ids = (database.getNodeLabelIdsInTxn(ctx.txn, node_id, self.allocator) catch |err|
+                    return readFailure(ctx, err, t.location, "reading node {d}", .{node_id})) orelse return .{ .null_val = {} };
+                defer self.allocator.free(label_ids);
+                const has = try labelsSatisfy(t.labels, label_ids, symbol_table, ctx, t.location);
+                return .{ .bool_val = has };
+            },
+            .edge_ref => |edge_id| {
+                const edge_type = (database.getEdgeTypeInTxn(ctx.txn, edge_id) catch |err|
+                    return readFailure(ctx, err, t.location, "reading relationship {d}", .{edge_id})) orelse return .{ .null_val = {} };
+                const has = try labelsSatisfy(t.labels, &.{edge_type}, symbol_table, ctx, t.location);
+                return .{ .bool_val = has };
+            },
+            else => return ctx.fail(EvalError.TypeError, t.location, "A label test needs a node or relationship, but this is {s}", .{typeName(subject)}),
+        }
+    }
+
+    /// Whether an entity with the labels `ids` (a relationship: its type)
+    /// satisfies `e`. A label the database has never seen is on nothing.
+    fn labelsSatisfy(
+        e: *const ast.LabelExpr,
+        ids: []const SymbolId,
+        symbol_table: anytype,
+        ctx: *const ExecutionContext,
+        location: ast.SourceLocation,
+    ) EvalError!bool {
+        return switch (e.*) {
+            .label => |name| blk: {
+                const id = symbol_table.lookup(name) catch |err| switch (err) {
+                    error.NotFound => break :blk false,
+                    else => return readFailure(ctx, err, location, "looking up label {s}", .{name}),
+                };
+                break :blk std.mem.indexOfScalar(SymbolId, ids, id) != null;
+            },
+            .wildcard => ids.len > 0,
+            .not_ => |inner| !try labelsSatisfy(inner, ids, symbol_table, ctx, location),
+            .and_ => |pair| try labelsSatisfy(pair[0], ids, symbol_table, ctx, location) and
+                try labelsSatisfy(pair[1], ids, symbol_table, ctx, location),
+            .or_ => |pair| try labelsSatisfy(pair[0], ids, symbol_table, ctx, location) or
+                try labelsSatisfy(pair[1], ids, symbol_table, ctx, location),
+        };
     }
 
     /// `n {.name, key: value, .*}`: null for a null subject; the entries in

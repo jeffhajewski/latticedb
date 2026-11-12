@@ -75,6 +75,7 @@ pub const Lexer = struct {
             '%' => return self.makeTokenAt(.percent, start),
             '^' => return self.makeTokenAt(.caret, start),
             '|' => return self.makeTokenAt(.pipe, start),
+            '&' => return self.makeTokenAt(.ampersand, start),
             '=' => {
                 if (self.peek() == '~') {
                     _ = self.advance();
@@ -213,13 +214,13 @@ pub const Lexer = struct {
         return self.makeTokenAt(.invalid, start);
     }
 
-    /// Scan !: != (alternative to <>)
+    /// Scan !: != (alternative to <>), or ! of a label expression
     fn scanBang(self: *Self, start: usize) Token {
         if (self.peek() == '=') {
             _ = self.advance();
             return self.makeTokenAt(.neq, start);
         }
-        return self.makeTokenAt(.invalid, start);
+        return self.makeTokenAt(.bang, start);
     }
 
     /// Scan parameter: $name

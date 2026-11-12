@@ -1349,7 +1349,7 @@ pub const QueryPlanner = struct {
                             return PlannerError.OutOfMemory;
                         };
                         op = all_scan.operator();
-                        starts_with_all_nodes = element_index == 0 and node_pattern.properties == null;
+                        starts_with_all_nodes = element_index == 0 and node_pattern.properties == null and node_pattern.label_expr == null;
                     } else {
                         // No labels but existing operator — cross join with all nodes scan
                         _ = self.storage.node_tree orelse return PlannerError.MissingStorage;
@@ -1396,6 +1396,18 @@ pub const QueryPlanner = struct {
                             const prop_filter = filter_ops.Filter.init(self.allocator, op.?, predicate) catch return PlannerError.OutOfMemory;
                             op = prop_filter.operator();
                         }
+                    }
+
+                    // What a label expression asks beyond the labels every
+                    // match has, `(n:A|B)`, is checked on each node.
+                    if (node_pattern.label_expr) |labels| {
+                        const var_name = node_var_name orelse try self.bindInternalVariable(slot, .node);
+                        const subject = try self.newExpression(.{ .variable = .{ .name = var_name, .location = node_pattern.location } });
+                        const label_test = self.allocator.create(ast.LabelTest) catch return PlannerError.OutOfMemory;
+                        label_test.* = .{ .subject = subject, .labels = labels, .location = node_pattern.location };
+                        const predicate = try self.newExpression(.{ .label_test = label_test });
+                        const label_filter = filter_ops.Filter.init(self.allocator, op.?, predicate) catch return PlannerError.OutOfMemory;
+                        op = label_filter.operator();
                     }
 
                     prev_node_slot = slot;

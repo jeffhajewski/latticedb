@@ -374,6 +374,7 @@ pub const SemanticAnalyzer = struct {
                 self.addError(.unsupported_pattern, clause.location, "shortestPath() and allShortestPaths() are only supported in MATCH");
                 return;
             }
+            if (!self.checkPlainLabels(pattern, "CREATE")) return;
             for (pattern.elements) |element| {
                 switch (element) {
                     .node => |n| {
@@ -590,6 +591,7 @@ pub const SemanticAnalyzer = struct {
             self.addError(.unsupported_pattern, clause.location, "shortestPath() and allShortestPaths() are only supported in MATCH");
             return;
         }
+        if (!self.checkPlainLabels(clause.pattern, "MERGE")) return;
         const elem_count = clause.pattern.elements.len;
         if (elem_count != 1 and elem_count != 3) {
             self.addError(
@@ -817,6 +819,18 @@ pub const SemanticAnalyzer = struct {
     // Variable Registration
     // ========================================================================
 
+    /// CREATE and MERGE give a node the labels they name, so a label
+    /// expression that does not say which (`:A|B`, `:!A`) is refused.
+    fn checkPlainLabels(self: *Self, pattern: ast.Pattern, comptime clause_name: []const u8) bool {
+        for (pattern.elements) |element| {
+            if (element == .node and element.node.label_expr != null) {
+                self.addError(.unsupported_pattern, element.node.location, clause_name ++ " gives a node the labels it names, as in (n:A:B) or (n:A&B); a label expression with '|', '!' or '%' does not say which to give");
+                return false;
+            }
+        }
+        return true;
+    }
+
     fn registerNodeVariable(self: *Self, node: *const ast.NodePattern) void {
         if (node.variable) |name| {
             self.registerVariable(name, .node, node.location);
@@ -1035,6 +1049,7 @@ pub const SemanticAnalyzer = struct {
                 self.analyzeExpression(r.expression);
             },
             .subquery => |sq| self.analyzeSubquery(sq),
+            .label_test => |t| self.analyzeExpression(t.subject),
             .map_projection => |m| {
                 self.analyzeExpression(m.subject);
                 for (m.entries) |entry| if (entry.value) |v| self.analyzeExpression(v);
@@ -1185,6 +1200,7 @@ pub const SemanticAnalyzer = struct {
             .reduce => .any,
             .subquery => |sq| if (sq.kind == .exists) .boolean else if (sq.kind == .count) .integer else .list,
             .map_projection => .map,
+            .label_test => .boolean,
         };
     }
 

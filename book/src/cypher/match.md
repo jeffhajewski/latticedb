@@ -43,6 +43,31 @@ The comparison may be reversed or nested within an `AND` expression. `OR`
 predicates remain scan-backed so the planner cannot discard rows from the
 other branch.
 
+### Label Expressions
+
+`(n:A:B)` matches nodes with both labels. A label expression says more:
+
+| Expression | Matches nodes |
+|------------|---------------|
+| `(n:A\|B)` | with `A` or `B` (also written `:A\|:B`) |
+| `(n:A&B)` | with both, as `:A:B` |
+| `(n:!A)` | without `A` |
+| `(n:%)` | with at least one label; `(n:!%)`, with none |
+| `(n:(A\|B)&!C)` | parentheses group; `!` binds tighter than `&`, and `&` than `\|` |
+
+The labels joined by `&` at the top are scanned for as `:A:B` is; the rest is
+checked on each node, so `(n:A|B)` reads every node. `:A:B` cannot be mixed with
+the other operators; write `:A&B|C`. `CREATE` and `MERGE` take only labels to
+give, `:A:B` or `:A&B`.
+
+The same expressions test a value in `WHERE` or `RETURN`: `n:A|B` is true when
+the node has `A` or `B`. On a relationship they test its type, so `r:KNOWS` is
+`type(r) = 'KNOWS'` and `r:A&B` is false. A null gives null. Inside a list
+comprehension a `|` ends the condition, so write `[x IN list WHERE x:(A|B) | x]`.
+
+A relationship pattern takes alternative types, `-[:KNOWS|LIKES]->`, but not
+`&`, `!` or `%`; test the type in a `WHERE` instead (`WHERE NOT r:KNOWS`).
+
 ## Variables
 
 Parentheses bind a matched node to a variable:

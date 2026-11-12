@@ -59,6 +59,7 @@ pub fn expressionsEqual(a: *const ast.Expression, b: *const ast.Expression) bool
         // The same subquery, not one written the same way: each has a plan
         // of its own.
         .subquery => |as| as == b.subquery,
+        .label_test => |at| at.labels.eql(b.label_test.labels) and expressionsEqual(at.subject, b.label_test.subject),
         .map_projection => |am| blk: {
             const bm = b.map_projection;
             if (!expressionsEqual(am.subject, bm.subject) or am.entries.len != bm.entries.len) break :blk false;
@@ -197,6 +198,12 @@ pub fn rewrite(allocator: std.mem.Allocator, expr: *ast.Expression, context: any
             copy.list = try rewrite(allocator, c.list, context);
             out.* = .{ .comprehension = copy };
         },
+        .label_test => |t| {
+            const copy = try allocator.create(ast.LabelTest);
+            copy.* = t.*;
+            copy.subject = try rewrite(allocator, t.subject, context);
+            out.* = .{ .label_test = copy };
+        },
         .map_projection => |m| {
             const copy = try allocator.create(ast.MapProjection);
             copy.* = m.*;
@@ -262,6 +269,7 @@ fn collect(allocator: std.mem.Allocator, expr: *const ast.Expression, out: *std.
             if (c.where) |w| try collect(allocator, w, out, true);
             if (c.map) |m| try collect(allocator, m, out, true);
         },
+        .label_test => |t| try collect(allocator, t.subject, out, local),
         .map_projection => |m| {
             try collect(allocator, m.subject, out, local);
             for (m.entries) |e| if (e.value) |v| try collect(allocator, v, out, local);
@@ -350,6 +358,7 @@ fn freeIn(expr: *const ast.Expression, ignore: anytype, scope: *Scope) ?[]const 
             defer scope.len -= 1;
             return freeInOptional(c.where, ignore, scope) orelse freeInOptional(c.map, ignore, scope);
         },
+        .label_test => |t| return freeIn(t.subject, ignore, scope),
         .map_projection => |m| {
             if (freeIn(m.subject, ignore, scope)) |name| return name;
             for (m.entries) |e| if (freeInOptional(e.value, ignore, scope)) |name| return name;

@@ -323,8 +323,41 @@ pub const PatternElement = union(enum) {
 /// Node pattern: (variable:Label:Label {props})
 pub const NodePattern = struct {
     variable: ?[]const u8,
+    /// Labels the node must all have: `(n:A:B)`, and the `&`-joined plain
+    /// labels of a label expression.
     labels: [][]const u8,
     properties: ?[]PropertyEntry,
+    location: SourceLocation,
+    /// The rest of a label expression, which the labels above do not say:
+    /// `(n:A|B)`, `(n:!A)`, `(n:%)`. The node must also satisfy it.
+    label_expr: ?*LabelExpr = null,
+};
+
+/// A label expression: `A`, `%` (any label), `!e`, `e & e`, `e | e`.
+pub const LabelExpr = union(enum) {
+    label: []const u8,
+    wildcard,
+    not_: *LabelExpr,
+    and_: [2]*LabelExpr,
+    or_: [2]*LabelExpr,
+
+    pub fn eql(a: *const LabelExpr, b: *const LabelExpr) bool {
+        if (std.meta.activeTag(a.*) != std.meta.activeTag(b.*)) return false;
+        return switch (a.*) {
+            .label => |l| std.mem.eql(u8, l, b.label),
+            .wildcard => true,
+            .not_ => |e| e.eql(b.not_),
+            .and_ => |pair| pair[0].eql(b.and_[0]) and pair[1].eql(b.and_[1]),
+            .or_ => |pair| pair[0].eql(b.or_[0]) and pair[1].eql(b.or_[1]),
+        };
+    }
+};
+
+/// `x:A`, `x:A|B`, `x:!A`: whether a node has the labels, or a
+/// relationship the type, that the label expression asks for.
+pub const LabelTest = struct {
+    subject: *Expression,
+    labels: *LabelExpr,
     location: SourceLocation,
 };
 
@@ -393,6 +426,9 @@ pub const Expression = union(enum) {
     // `n {.name, key: value, .*}`
     map_projection: *MapProjection,
 
+    // `n:A|B`, `r:KNOWS`
+    label_test: *LabelTest,
+
     /// Get source location for this expression
     pub fn getLocation(self: *const Expression) SourceLocation {
         return switch (self.*) {
@@ -412,6 +448,7 @@ pub const Expression = union(enum) {
             .reduce => |r| r.location,
             .subquery => |s| s.location,
             .map_projection => |m| m.location,
+            .label_test => |t| t.location,
         };
     }
 };

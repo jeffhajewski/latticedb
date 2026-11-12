@@ -572,6 +572,95 @@ test "lcy: CALL { } errors" {
 }
 
 // ============================================================================
+// Label expressions and relationship type tests
+// ============================================================================
+
+fn seedLabels(db: *Database) !void {
+    try run(db, "CREATE (a:A:B {k: 1}), (b:A {k: 2}), (c:B {k: 3}), (d {k: 4}), (e:C {k: 5})");
+    try run(db, "MATCH (a {k: 1}), (b {k: 2}), (c {k: 3}) CREATE (a)-[:R]->(b), (b)-[:S]->(c), (c)-[:R]->(a)");
+}
+
+test "lcy: label expressions in node patterns" {
+    const path = "/tmp/lcy_label_expressions.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedLabels(db);
+
+    try expectResult(db, "MATCH (n:A|B) RETURN n.k ORDER BY n.k", "n.k\n1\n2\n3");
+    try expectResult(db, "MATCH (n:A|:C) RETURN n.k ORDER BY n.k", "n.k\n1\n2\n5");
+    try expectResult(db, "MATCH (n:A&B) RETURN n.k", "n.k\n1");
+    try expectResult(db, "MATCH (n:!A) RETURN n.k ORDER BY n.k", "n.k\n3\n4\n5");
+    try expectResult(db, "MATCH (n:A&!B) RETURN n.k", "n.k\n2");
+    try expectResult(db, "MATCH (n:%) RETURN count(n) AS c", "c\n4");
+    try expectResult(db, "MATCH (n:!%) RETURN n.k", "n.k\n4");
+    try expectResult(db, "MATCH (n:(A|B)&!(A&B)) RETURN n.k ORDER BY n.k", "n.k\n2\n3");
+    // `!` binds tighter than `&`, and `&` than `|`.
+    try expectResult(db, "MATCH (n:!A&B|C) RETURN n.k ORDER BY n.k", "n.k\n3\n5");
+    // A label no node has.
+    try expectResult(db, "MATCH (n:Nope|C) RETURN n.k", "n.k\n5");
+    try expectResult(db, "MATCH (n:!Nope) RETURN count(n) AS c", "c\n5");
+    // Anonymous nodes, ends of relationships, with properties, and OPTIONAL MATCH.
+    try expectResult(db, "MATCH (:A|C)-[r]->(:!A) RETURN type(r) AS t", "t\n\"S\"");
+    try expectResult(db, "MATCH (a)-->(b:B|C {k: 3}) RETURN a.k", "a.k\n2");
+    try expectResult(db, "MATCH (n {k: 4}) OPTIONAL MATCH (n)-->(m:A|B) RETURN m", "m\nnull");
+    try expectResult(db, "MATCH (a {k: 2}) MATCH (a:!B) RETURN a.k", "a.k\n2");
+    try expectResult(db, "MATCH (a {k: 1}) MATCH (a:!B) RETURN a.k", "a.k");
+    // In EXISTS and pattern comprehensions.
+    try expectResult(db, "MATCH (n) WHERE EXISTS { (n)-->(:A|C) } RETURN n.k ORDER BY n.k", "n.k\n1\n3");
+    try expectResult(db, "MATCH (n {k: 2}) RETURN [(n)--(m:!A) | m.k] AS ks", "ks\n[3]");
+    // CREATE and MERGE give the labels they name: `&` is every one of them.
+    try expectResult(db, "CREATE (x:X&Y {k: 9}) RETURN labels(x) AS l", "l\n[\"X\", \"Y\"]");
+    try expectResult(db, "MERGE (x:X&Y {k: 9}) RETURN x.k", "x.k\n9");
+    try expectFailure(db, "CREATE (:A|B)", .semantic, "CREATE gives a node the labels it names, as in (n:A:B) or (n:A&B)");
+    try expectFailure(db, "MERGE (:!A {k: 1})", .semantic, "MERGE gives a node the labels it names");
+    try expectFailure(db, "MATCH (a {k: 1}) CREATE (a)-[:R]->(:%)", .semantic, "CREATE gives a node the labels it names");
+}
+
+test "lcy: label and relationship type tests in expressions" {
+    const path = "/tmp/lcy_label_tests.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedLabels(db);
+
+    try expectResult(db, "MATCH (n) RETURN n.k, n:A|B AS ab, n:!A AS na ORDER BY n.k", "n.k | ab | na\n1 | true | false\n2 | true | false\n3 | true | true\n4 | false | true\n5 | false | true");
+    try expectResult(db, "MATCH (n) WHERE n:A&!B OR n:C RETURN n.k ORDER BY n.k", "n.k\n2\n5");
+    try expectResult(db, "MATCH (n) WHERE n:% RETURN count(*) AS c", "c\n4");
+    // A relationship's type: it has one, so `r:R:S` and `r:R&S` are false.
+    try expectResult(db, "MATCH ()-[r]->() RETURN type(r) AS t, r:R AS isr, r:R|S AS rs, r:!R AS notr, r:% AS any, r:R:S AS both ORDER BY t", "t | isr | rs | notr | any | both\n\"R\" | true | true | false | true | false\n\"R\" | true | true | false | true | false\n\"S\" | false | true | true | true | false");
+    try expectResult(db, "MATCH (a)-[r]->(b) WHERE r:S RETURN a.k, b.k", "a.k | b.k\n2 | 3");
+    try expectResult(db, "MATCH (a)-[r*2]->(b) WHERE all(x IN r WHERE x:R) RETURN a.k, b.k", "a.k | b.k\n3 | 2");
+    try expectResult(db, "MATCH (a)-[r*2]->(b) WHERE any(x IN r WHERE x:S) RETURN a.k, b.k ORDER BY a.k", "a.k | b.k\n1 | 3\n2 | 1");
+    // Null gives null; any other value is a type error.
+    try expectResult(db, "MATCH (n {k: 4}) OPTIONAL MATCH (n)-[r]->(m) RETURN m:A AS a, r:R AS b", "a | b\nnull | null");
+    try expectFailure(db, "WITH 1 AS x RETURN x:A AS y", .execution, "A label test needs a node or relationship, but this is integer");
+    // In a comprehension a '|' ends the condition; parentheses keep it.
+    try expectResult(db, "MATCH (n) RETURN [x IN collect(n) WHERE x:A | x.k] AS ks", "ks\n[1, 2]");
+    try expectResult(db, "MATCH (n) RETURN [x IN collect(n) WHERE x:(A|C) | x.k] AS ks", "ks\n[1, 2, 5]");
+    try expectResult(db, "MATCH (n) RETURN [x IN collect(n) WHERE x:A&!B | x.k] AS ks", "ks\n[2]");
+    try expectResult(db, "MATCH (n) RETURN [x IN collect(n) WHERE coalesce(x:A|C, false) | x.k] AS ks", "ks\n[1, 2, 5]");
+    try expectResult(db, "MATCH (n) RETURN [x IN collect(n) | x:A|C] AS ls", "ls\n[true, true, false, false, true]");
+    try expectResult(db, "MATCH (n) WITH collect(n) AS ns RETURN reduce(c = 0, x IN ns | c + CASE WHEN x:A|B THEN 1 ELSE 0 END) AS c", "c\n3");
+    // Grouping on a label test.
+    try expectResult(db, "MATCH (n) RETURN n:A|B AS ab, count(*) AS c ORDER BY ab", "ab | c\nfalse | 2\ntrue | 3");
+}
+
+test "lcy: label expression errors" {
+    const path = "/tmp/lcy_label_expression_errors.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+
+    try expectFailure(db, "MATCH (n:A|) RETURN n", .parse, "Expected a label after ':'");
+    try expectFailure(db, "MATCH (n:(A|B RETURN n", .parse, "Expected ')' to close the label expression");
+    try expectFailure(db, "MATCH (n:!) RETURN n", .parse, "Expected a label after ':'");
+    try expectFailure(db, "MATCH (n:A:B|C) RETURN n", .parse, "A label expression cannot follow :A:B; write it with &, as in :A&B|C");
+    try expectFailure(db, "MATCH (n:A:!B) RETURN n", .parse, "A label expression cannot follow :A:B; write it with &, as in :A&!B");
+    try expectFailure(db, "MATCH (n) WHERE n:A:B&C RETURN n", .parse, "A label expression cannot follow :A:B");
+    try expectFailure(db, "MATCH (a)-[:!R]->(b) RETURN a", .parse, "A relationship's types take only '|', as in -[:A|B]->");
+    try expectFailure(db, "MATCH (a)-[:R&S]->(b) RETURN a", .parse, "A relationship's types take only '|'");
+    try expectFailure(db, "MATCH (a)-[:R|%]->(b) RETURN a", .parse, "A relationship's types take only '|'");
+}
+
+// ============================================================================
 // Small fixes
 // ============================================================================
 

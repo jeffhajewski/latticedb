@@ -30,8 +30,7 @@ MATCH`, `UNION`, `CASE`, `CALL { }` subqueries, comprehensions and
 `shortestPath` among it, but not all of the language. These are not
 implemented:
 
-- quantified path patterns (`((a)-->(b)){1,3}`) and label expressions
-  (`(n:A|B)`)
+- quantified path patterns (`((a)-->(b)){1,3}`)
 - `LOAD CSV` and `CALL { } IN TRANSACTIONS`
 - user-defined procedures and functions; the only procedures are the catalog
   ones, such as `db.labels()`

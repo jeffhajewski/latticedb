@@ -850,7 +850,7 @@ test "lcy: label predicates in expressions" {
 
     try expectFailure(db, "MATCH (n) WHERE n:1 RETURN n", .parse, "Expected a label after ':'");
     // Not a node: a type error, as in openCypher.
-    try expectFailure(db, "WITH 1 AS x RETURN x:A AS y", .execution, "labels(integer) is not defined");
+    try expectFailure(db, "WITH 1 AS x RETURN x:A AS y", .execution, "A label test needs a node or relationship, but this is integer");
 }
 
 test "lcy: ORDER BY with NULLS FIRST and NULLS LAST" {
@@ -932,9 +932,7 @@ test "lcy: unsupported constructs are named" {
         .{ .query = "CREATE FULLTEXT INDEX ft FOR (n:T) ON EACH [n.v]", .message = "Schema statements" },
         .{ .query = "OPTIONAL CALL db.labels() YIELD label RETURN label", .message = "OPTIONAL CALL is not supported" },
         .{ .query = "MATCH ((a)-->(b)){1,3} RETURN a", .message = "Parenthesised path patterns, such as the quantified ((a)-->(b)){1,3}, are not supported" },
-        .{ .query = "MATCH (n:A|B) RETURN n", .message = "Label expressions (:A|B, :!A, :A&B) are not supported" },
-        .{ .query = "MATCH (n:A&B) RETURN n", .message = "label expressions (:A&B, :!A), which are not supported" },
-        .{ .query = "MATCH (n:!A) RETURN n", .message = "label expressions (:A&B, :!A), which are not supported" },
+        .{ .query = "MATCH (a)-[:!R]->(b) RETURN a", .message = "A relationship's types take only '|'" },
         .{ .query = "MATCH (n:A WHERE n.v > 1) RETURN n", .message = "WHERE inside a node pattern is not supported" },
         .{ .query = "MATCH (a)-[r WHERE r.v > 1]->(b) RETURN r", .message = "WHERE inside a relationship pattern is not supported" },
         .{ .query = "MATCH (n) RETURN COLLECT { MATCH (n)-->(m) RETURN m } AS c", .message = "COLLECT { ... } subqueries are not supported" },

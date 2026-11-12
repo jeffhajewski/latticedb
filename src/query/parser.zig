@@ -234,6 +234,8 @@ pub const TokenType = enum {
     dot,
     dotdot, // .. for range quantifiers
     pipe,
+    ampersand, // & in label expressions
+    bang, // ! in label expressions
     arrow_right,
     arrow_left,
     dash,
@@ -267,6 +269,10 @@ pub const Parser = struct {
     /// `RETURN *` and `WITH *`. Cypher's scoping is by syntax, so the
     /// parser can follow it.
     scope: std.ArrayList([]const u8) = .empty,
+    /// Set while reading an expression that a '|' ends: the list and WHERE
+    /// of a comprehension, reduce() and FOREACH. A label test there reads
+    /// `x:A | ...` as the end of the expression; `x:(A|B)` still works.
+    pipe_ends_expression: bool = false,
 
     const Self = @This();
 
@@ -557,7 +563,7 @@ pub const Parser = struct {
         const variable = self.currentName();
         self.advance();
         if (!self.consume(.kw_in, "Expected IN after the variable")) return null;
-        const list = self.parseExpression() orelse return null;
+        const list = self.parseExpressionBeforePipe() orelse return null;
         if (!self.consume(.pipe, "Expected '|' before FOREACH's clauses")) return null;
         const a = self.arena.allocator();
         var clauses: std.ArrayList(ast.Clause) = .empty;
@@ -1493,19 +1499,32 @@ pub const Parser = struct {
             self.advance();
         }
 
-        // Optional labels
-        while (self.match(.colon)) {
-            if (!self.checkName()) {
-                self.errorAtCurrent("Expected label after ':'");
-                return null;
+        // Optional labels: `:A:B`, or one label expression `:A|B`, `:A&!B`.
+        // The labels every match must have go in `labels`, where the planner
+        // can scan for them; the rest is checked on each node.
+        var label_expr: ?*ast.LabelExpr = null;
+        if (self.match(.colon)) {
+            const first = self.parseLabelExpr(true) orelse return null;
+            if (first.* == .label and self.check(.colon)) {
+                labels.append(self.arena.allocator(), first.label) catch return null;
+                while (self.match(.colon)) {
+                    if (!self.checkName()) {
+                        self.errorAtCurrent(if (self.check(.bang) or self.check(.percent) or self.check(.lparen))
+                            "A label expression cannot follow :A:B; write it with &, as in :A&!B"
+                        else
+                            "Expected label after ':'");
+                        return null;
+                    }
+                    labels.append(self.arena.allocator(), self.currentName()) catch return null;
+                    self.advance();
+                }
+                if (self.check(.pipe) or self.check(.ampersand)) {
+                    self.errorAtCurrent("A label expression cannot follow :A:B; write it with &, as in :A&B|C");
+                    return null;
+                }
+            } else {
+                label_expr = self.splitLabels(first, &labels) catch return null;
             }
-            labels.append(self.arena.allocator(), self.currentName()) catch return null;
-            self.advance();
-        }
-
-        if (self.check(.pipe)) {
-            self.errorAtCurrent("Label expressions (:A|B, :!A, :A&B) are not supported; a node pattern's labels must all match, as in (n:A:B)");
-            return null;
         }
 
         // Optional properties
@@ -1526,7 +1545,95 @@ pub const Parser = struct {
             .labels = labels.toOwnedSlice(self.arena.allocator()) catch return null,
             .properties = properties,
             .location = loc,
+            .label_expr = label_expr,
         };
+    }
+
+    /// Move the plain labels of `e`'s top-level `&` into `labels`, and
+    /// return what is left: null when nothing is.
+    fn splitLabels(self: *Self, e: *ast.LabelExpr, labels: *std.ArrayList([]const u8)) Allocator.Error!?*ast.LabelExpr {
+        switch (e.*) {
+            .label => |name| {
+                try labels.append(self.arena.allocator(), name);
+                return null;
+            },
+            .and_ => |pair| {
+                const left = try self.splitLabels(pair[0], labels) orelse return self.splitLabels(pair[1], labels);
+                const right = try self.splitLabels(pair[1], labels) orelse return left;
+                const both = try self.arena.allocator().create(ast.LabelExpr);
+                both.* = .{ .and_ = .{ left, right } };
+                return both;
+            },
+            else => return e,
+        }
+    }
+
+    /// A label expression, after the ':': `A`, `%`, `!e`, `e&e`, `e|e`
+    /// (also `e|:B`), and parentheses. In a pattern, '|' always continues
+    /// it; in an expression, not where `pipe_ends_expression` says a '|'
+    /// ends the expression.
+    fn parseLabelExpr(self: *Self, in_pattern: bool) ?*ast.LabelExpr {
+        var left = self.parseLabelTerm() orelse return null;
+        while (self.check(.pipe) and self.peekType() != .pipe and (in_pattern or !self.pipe_ends_expression)) {
+            self.advance();
+            _ = self.match(.colon);
+            const right = self.parseLabelTerm() orelse return null;
+            const both = self.arena.allocator().create(ast.LabelExpr) catch return null;
+            both.* = .{ .or_ = .{ left, right } };
+            left = both;
+        }
+        return left;
+    }
+
+    fn parseLabelTerm(self: *Self) ?*ast.LabelExpr {
+        var left = self.parseLabelFactor() orelse return null;
+        while (self.match(.ampersand)) {
+            const right = self.parseLabelFactor() orelse return null;
+            const both = self.arena.allocator().create(ast.LabelExpr) catch return null;
+            both.* = .{ .and_ = .{ left, right } };
+            left = both;
+        }
+        return left;
+    }
+
+    fn parseLabelFactor(self: *Self) ?*ast.LabelExpr {
+        const a = self.arena.allocator();
+        const e = a.create(ast.LabelExpr) catch return null;
+        if (self.match(.bang)) {
+            e.* = .{ .not_ = self.parseLabelFactor() orelse return null };
+        } else if (self.match(.percent)) {
+            e.* = .wildcard;
+        } else if (self.match(.lparen)) {
+            const saved = self.pipe_ends_expression;
+            self.pipe_ends_expression = false;
+            defer self.pipe_ends_expression = saved;
+            const inner = self.parseLabelExpr(true) orelse return null;
+            if (!self.consume(.rparen, "Expected ')' to close the label expression")) return null;
+            return inner;
+        } else if (self.checkName()) {
+            e.* = .{ .label = self.currentName() };
+            self.advance();
+        } else {
+            self.errorAtCurrent("Expected a label after ':'");
+            return null;
+        }
+        return e;
+    }
+
+    /// An expression a '|' ends, for a label test inside it.
+    fn parseExpressionBeforePipe(self: *Self) ?*ast.Expression {
+        const saved = self.pipe_ends_expression;
+        self.pipe_ends_expression = true;
+        defer self.pipe_ends_expression = saved;
+        return self.parseExpression();
+    }
+
+    const relationship_type_expression = "A relationship's types take only '|', as in -[:A|B]->; type expressions with '&', '!', '%' or parentheses are not supported, but a WHERE can test the type, as in WHERE NOT r:A";
+
+    /// Whether the token after a relationship pattern's ':' or '|' starts a
+    /// type expression other than a name.
+    fn relTypeExpressionAhead(self: *Self) bool {
+        return self.check(.bang) or self.check(.percent) or self.check(.lparen) or self.check(.ampersand);
     }
 
     fn parseEdgePattern(self: *Self) ?ast.EdgePattern {
@@ -1565,7 +1672,10 @@ pub const Parser = struct {
                     return null;
                 }
                 if (!self.checkName()) {
-                    self.errorAtCurrent("Expected relationship type after ':'");
+                    self.errorAtCurrent(if (self.relTypeExpressionAhead())
+                        relationship_type_expression
+                    else
+                        "Expected relationship type after ':'");
                     return null;
                 }
                 types_list.append(self.arena.allocator(), self.currentName()) catch return null;
@@ -1575,11 +1685,18 @@ pub const Parser = struct {
                 while (self.match(.pipe)) {
                     _ = self.match(.colon);
                     if (!self.checkName()) {
-                        self.errorAtCurrent("Expected relationship type after '|'");
+                        self.errorAtCurrent(if (self.relTypeExpressionAhead())
+                            relationship_type_expression
+                        else
+                            "Expected relationship type after '|'");
                         return null;
                     }
                     types_list.append(self.arena.allocator(), self.currentName()) catch return null;
                     self.advance();
+                }
+                if (self.check(.ampersand)) {
+                    self.errorAtCurrent(relationship_type_expression);
+                    return null;
                 }
             }
 
@@ -1765,6 +1882,16 @@ pub const Parser = struct {
 
     fn parsePrefixExpr(self: *Self) ?*ast.Expression {
         const loc = self.currentLocation();
+        // Inside brackets, braces, parentheses, a call or CASE, a '|' no
+        // longer ends the enclosing comprehension's expression.
+        const saved_pipe = self.pipe_ends_expression;
+        defer self.pipe_ends_expression = saved_pipe;
+        switch (self.current.token_type) {
+            .lparen, .lbracket, .lbrace, .kw_case => self.pipe_ends_expression = false,
+            else => if (self.peekType() == .lparen or self.peekType() == .lbrace) {
+                self.pipe_ends_expression = false;
+            },
+        }
 
         if (self.match(.kw_not)) {
             const operand = self.parsePrecedence(.not) orelse return null;
@@ -2057,7 +2184,7 @@ pub const Parser = struct {
     /// `[pattern WHERE cond | value]`, after the pattern.
     fn parsePatternComprehension(self: *Self, pattern: ast.Pattern, loc: ast.SourceLocation) ?*ast.Expression {
         var where: ?*ast.Expression = null;
-        if (self.match(.kw_where)) where = self.parseExpression() orelse return null;
+        if (self.match(.kw_where)) where = self.parseExpressionBeforePipe() orelse return null;
         if (!self.consume(.pipe, "Expected '|' in the pattern comprehension")) return null;
         const map = self.parseExpression() orelse return null;
         if (!self.consume(.rbracket, "Expected ']' to close the pattern comprehension")) return null;
@@ -2110,10 +2237,10 @@ pub const Parser = struct {
         const variable = self.currentName();
         self.advance();
         if (!self.consume(.kw_in, "Expected IN after the variable")) return null;
-        const list = self.parseExpression() orelse return null;
+        const list = self.parseExpressionBeforePipe() orelse return null;
         var where: ?*ast.Expression = null;
         if (self.match(.kw_where)) {
-            where = self.parseExpression() orelse return null;
+            where = self.parseExpressionBeforePipe() orelse return null;
         } else if (kind != .list) {
             self.errorAtCurrent("Expected WHERE in all(), any(), none() or single()");
             return null;
@@ -2145,7 +2272,7 @@ pub const Parser = struct {
         const variable = self.currentName();
         self.advance();
         if (!self.consume(.kw_in, "Expected IN after the variable")) return null;
-        const list = self.parseExpression() orelse return null;
+        const list = self.parseExpressionBeforePipe() orelse return null;
         if (!self.consume(.pipe, "Expected '|' before the expression in reduce()")) return null;
         const expression = self.parseExpression() orelse return null;
         if (!self.consume(.rparen, "Expected ')' to close reduce()")) return null;
@@ -2285,30 +2412,39 @@ pub const Parser = struct {
         return expr;
     }
 
-    /// `n:A:B`, true when the node has every label: read as `'A' IN
-    /// labels(n) AND 'B' IN labels(n)`, which gives null for a null node and
-    /// a type error for a value that is not a node, as openCypher says.
+    /// `n:A:B`, `n:A|B`, `r:KNOWS`: a label test, at the ':'. A node
+    /// passes when it has the labels the expression asks for, a relationship
+    /// when its type does; null gives null, and any other value a type error.
     fn parseLabelPredicate(self: *Self, left: *ast.Expression, loc: ast.SourceLocation) ?*ast.Expression {
         const a = self.arena.allocator();
-        var result: ?*ast.Expression = null;
-        while (self.match(.colon)) {
-            if (!self.checkName()) {
-                self.errorAtCurrent("Expected a label after ':'");
+        self.advance();
+        var labels = self.parseLabelExpr(false) orelse return null;
+        if (labels.* == .label and self.check(.colon)) {
+            while (self.match(.colon)) {
+                if (!self.checkName()) {
+                    self.errorAtCurrent(if (self.check(.bang) or self.check(.percent) or self.check(.lparen))
+                        "A label expression cannot follow :A:B; write it with &, as in :A&!B"
+                    else
+                        "Expected a label after ':'");
+                    return null;
+                }
+                const next = a.create(ast.LabelExpr) catch return null;
+                next.* = .{ .label = self.currentName() };
+                self.advance();
+                const both = a.create(ast.LabelExpr) catch return null;
+                both.* = .{ .and_ = .{ labels, next } };
+                labels = both;
+            }
+            if (self.check(.ampersand) or (self.check(.pipe) and self.peekType() != .pipe and !self.pipe_ends_expression)) {
+                self.errorAtCurrent("A label expression cannot follow :A:B; write it with &, as in :A&B|C");
                 return null;
             }
-            const label = a.create(ast.Expression) catch return null;
-            label.* = .{ .literal = .{ .value = .{ .string = self.currentName() }, .location = self.currentLocation() } };
-            self.advance();
-            const args = a.alloc(*ast.Expression, 1) catch return null;
-            args[0] = left;
-            const call = a.create(ast.FunctionCall) catch return null;
-            call.* = .{ .name = "labels", .arguments = args, .location = loc };
-            const labels = a.create(ast.Expression) catch return null;
-            labels.* = .{ .function_call = call };
-            const has = self.makeBinary(label, .in_, labels, loc) orelse return null;
-            result = if (result) |r| self.makeBinary(r, .and_, has, loc) orelse return null else has;
         }
-        return result;
+        const t = a.create(ast.LabelTest) catch return null;
+        t.* = .{ .subject = left, .labels = labels, .location = loc };
+        const expr = a.create(ast.Expression) catch return null;
+        expr.* = .{ .label_test = t };
+        return expr;
     }
 
     fn getInfixPrecedence(self: *Self) Precedence {
@@ -2669,8 +2805,6 @@ pub const Parser = struct {
                     "A backtick-quoted name cannot be empty"
                 else
                     "Expected '`' to close the name before the end of the line");
-            } else if (std.mem.eql(u8, text, "&") or std.mem.eql(u8, text, "!")) {
-                self.errorAtCurrent("Invalid token: '&' and '!' belong to label expressions (:A&B, :!A), which are not supported");
             } else {
                 self.errorAtCurrent("Invalid token");
             }

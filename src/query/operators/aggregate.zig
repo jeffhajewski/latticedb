@@ -557,6 +557,7 @@ pub fn containsAggregate(expr: *const ast.Expression) bool {
         .binary => |b| containsAggregate(b.left) or containsAggregate(b.right),
         .unary => |u| containsAggregate(u.operand),
         .property_access => |p| containsAggregate(p.object),
+        .label_test => |t| containsAggregate(t.subject),
         .list => |l| for (l.elements) |e| {
             if (containsAggregate(e)) break true;
         } else false,

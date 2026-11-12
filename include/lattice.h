@@ -674,6 +674,26 @@ lattice_error lattice_deserialize_borrowed(
     lattice_database** db_out
 );
 
+/* lattice_deserialize and lattice_deserialize_borrowed with v5 options, so a
+ * deserialized database opens with the same options as a file: the sync
+ * settings, and the vector index options, which must match the index the
+ * bytes record (LATTICE_ERROR_CONFIG_MISMATCH otherwise) or configure the one
+ * an enable_vector creates. create and read_only are ignored, as in the v4
+ * functions. The borrowed variant's bytes must outlive the database. */
+lattice_error lattice_deserialize_v5(
+    const uint8_t* bytes,
+    size_t len,
+    const lattice_open_options_v5* options,
+    lattice_database** db_out
+);
+
+lattice_error lattice_deserialize_borrowed_v5(
+    const uint8_t* bytes,
+    size_t len,
+    const lattice_open_options_v5* options,
+    lattice_database** db_out
+);
+
 /* Release a buffer returned by lattice_serialize. */
 void lattice_free_bytes(uint8_t* bytes, size_t len);
 

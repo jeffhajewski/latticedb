@@ -233,3 +233,88 @@ test "lfmt c_api: a log written in a newer format is a version mismatch" {
     try std.testing.expectEqual(lattice_error.err_version_mismatch, c_api.lattice_open_v5(path, &writable, &db));
     try std.testing.expect(db == null);
 }
+
+/// Distance from the origin to the second-nearest of the database's vectors.
+fn secondDistanceFromOrigin(db: ?*lattice_database) !f32 {
+    const q = [_]f32{ 0, 0 };
+    var results: ?*c_api.lattice_vector_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_vector_search(db, &q, 2, 2, 0, &results));
+    defer c_api.lattice_vector_result_free(results);
+    try std.testing.expectEqual(@as(u32, 2), c_api.lattice_vector_result_count(results));
+    var id: lattice_node_id = 0;
+    var distance: f32 = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_vector_result_get(results, 1, &id, &distance));
+    return distance;
+}
+
+fn addTwoVectors(db: ?*lattice_database) !void {
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+    var a: lattice_node_id = 0;
+    var b: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "V", &a));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "V", &b));
+    const va = [_]f32{ 0, 0 };
+    const vb = [_]f32{ 3, 4 };
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_vector(txn, a, "embedding", &va, 2));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_vector(txn, b, "embedding", &vb, 2));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+}
+
+test "lfmt c_api: deserialize takes v5 options, as an open of a file does" {
+    // Bytes of a database with a euclidean index.
+    var bytes: ?[*]u8 = null;
+    var len: usize = 0;
+    {
+        var db: ?*lattice_database = null;
+        const options = Options{ .enable_vector = true, .vector_dimensions = 2, .vector_metric = @intFromEnum(c_api.lattice_vector_metric.euclidean) };
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open_v5(":memory:", &options, &db));
+        defer _ = c_api.lattice_close(db);
+        try addTwoVectors(db);
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_serialize(db, &bytes, &len));
+    }
+    defer c_api.lattice_free_bytes(bytes, len);
+
+    // No vector options: the index and its metric are the bytes'.
+    for ([_]bool{ false, true }) |borrowed| {
+        var db: ?*lattice_database = null;
+        const options = Options{ .sync_mode = @intFromEnum(c_api.lattice_sync_mode.normal) };
+        const rc = if (borrowed)
+            c_api.lattice_deserialize_borrowed_v5(bytes, len, &options, &db)
+        else
+            c_api.lattice_deserialize_v5(bytes, len, &options, &db);
+        try std.testing.expectEqual(lattice_error.ok, rc);
+        defer _ = c_api.lattice_close(db);
+        try std.testing.expectApproxEqAbs(@as(f32, 5), try secondDistanceFromOrigin(db), 1e-4);
+    }
+
+    // Options that contradict the index are refused, and bad values too.
+    var db: ?*lattice_database = null;
+    const cosine = Options{ .vector_metric = @intFromEnum(c_api.lattice_vector_metric.cosine) };
+    try std.testing.expectEqual(lattice_error.err_config_mismatch, c_api.lattice_deserialize_v5(bytes, len, &cosine, &db));
+    try std.testing.expect(db == null);
+    const bad_sync = Options{ .sync_mode = 3 };
+    try std.testing.expectEqual(lattice_error.err_invalid_arg, c_api.lattice_deserialize_v5(bytes, len, &bad_sync, &db));
+    var short = Options{};
+    short.struct_size = @sizeOf(c_api.lattice_open_options_v4);
+    try std.testing.expectEqual(lattice_error.err_invalid_arg, c_api.lattice_deserialize_v5(bytes, len, &short, &db));
+}
+
+test "lfmt c_api: a deserialized database without an index gets the metric v5 asks for" {
+    var bytes: ?[*]u8 = null;
+    var len: usize = 0;
+    {
+        var db: ?*lattice_database = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open_v5(":memory:", &Options{}, &db));
+        defer _ = c_api.lattice_close(db);
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_serialize(db, &bytes, &len));
+    }
+    defer c_api.lattice_free_bytes(bytes, len);
+
+    var db: ?*lattice_database = null;
+    const options = Options{ .enable_vector = true, .vector_dimensions = 2, .vector_metric = @intFromEnum(c_api.lattice_vector_metric.euclidean) };
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_deserialize_v5(bytes, len, &options, &db));
+    defer _ = c_api.lattice_close(db);
+    try addTwoVectors(db);
+    try std.testing.expectApproxEqAbs(@as(f32, 5), try secondDistanceFromOrigin(db), 1e-4);
+}

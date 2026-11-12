@@ -1206,6 +1206,11 @@ with relationships is one range probe, under 1 µs.
   file whose index is Euclidean or dot product or has another `m`, reporting an
   I/O error, and leaves the file untouched. It does not know the minimum writer
   version: it writes a file that asks for a newer writer, and zeros the field.
+  A file it has written no longer counts as sealed (see *Durability*): this
+  release clears the flag at its next read-write open, since 0.16.0 extends a
+  file with pages it does not seal. A file a newer release wrote is refused by
+  0.16.0 as an I/O error and by this release as -11. JSON exports from this
+  release import into 0.16.0, which skips the vector metric and HNSW fields.
 - **The log.** A log that holds frames is format version 3, which 0.16.0 refuses
   to open. A clean close or a truncating checkpoint leaves an empty log, written
   as version 2, which 0.16.0 opens. So close a database cleanly with this
@@ -1223,6 +1228,16 @@ with relationships is one range probe, under 1 µs.
   does not convert them. They are read alongside new events, in order.
   `lattice changefeed <db>` counts them. To shed them while keeping the graph,
   export it and import it into a new database.
+- **0.16.0 does not see this release's changefeed events.** It opens a file
+  holding them, and its `changes()` (`lattice_stream_read` on
+  `__lattice_changes`) returns only events in the old format, without an
+  error: on a file this release created, nothing until 0.16.0 writes. Events
+  0.16.0 writes continue the sequence numbers, and this release reads both
+  kinds in order. A 0.16.0 trim of `__lattice_changes` removes only old-format
+  events, so this release still returns newer-format events below the trim
+  point. 0.16.0 also records events whatever the retention policy; this
+  release drops them by the policy at its next read-write session. Read the
+  changefeed with this release once a file has been opened by it.
 - Check application code against the Cypher changes above, in particular plain
   `DELETE` of nodes that may have relationships, code that reads results by
   the name of an unaliased column, code that expects `sum` of integers to be a

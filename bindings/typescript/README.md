@@ -168,10 +168,20 @@ product (vectors stored as given).
 commit survives the process being killed, but a power cut or OS crash can lose
 the most recent commits. The default, `'full'`, syncs the log on every commit.
 
+A `syncMode` or `fullFsync` you pass wins over the `LATTICE_SYNC_MODE` and
+`LATTICE_FULL_FSYNC` environment variables, which apply only when the option is
+left unset.
+
 `syncMode`, `fullFsync` and the three vector index options need a native library
 with `lattice_open_v5`; against an older one, setting any of them throws with
 code -14 (`Unsupported`). `deserialize()` opens through the v4 options and
 ignores them.
+
+`readOnly: true` on a database that was not closed cleanly recovers it in
+memory: the handle sees every committed transaction and nothing is written to
+the files. A recovery that needs more than 64 MB plus four times the size of the
+log and journal throws with code -10 (`Full`); open the database read-write once
+to recover it on disk.
 
 Node IDs, edge IDs and stream sequence numbers are `bigint`.
 
@@ -235,7 +245,7 @@ Node IDs, edge IDs and stream sequence numbers are `bigint`.
 - `txn.publishStreamGetSequence(stream, payload, kind?)` - Publish and return the record's sequence (`bigint`)
 - `txn.setStreamOffset(stream, consumer, sequence)` - Commit a durable consumer offset
 - `txn.trimStream(stream, throughSequence)` - Delete stream records through a sequence
-- `txn.commit()` / `txn.rollback()` - Commit or rollback
+- `txn.commit()` / `txn.rollback()` - Commit or rollback. A commit that throws with code -7 (`TxnAborted`) has ended the transaction, and `rollback()` afterwards does nothing; after any other failure it stays open for `rollback()`
 
 ### Bulk Vector Insertion
 
@@ -476,6 +486,32 @@ with relationships), -18 (open options that contradict the file's vector
 index) and -19 (`NeedsNewerWriter`: a writable open of a file that a newer
 release has marked as not writable by this one; it still opens with
 `readOnly: true`).
+
+A failed Cypher query throws a `LatticeQueryError`, a `LatticeError` that also
+says where the query failed:
+
+```typescript
+import { Database, LatticeQueryError } from "@hajewski/latticedb";
+
+try {
+  await db.query("RETURN 1/0");
+} catch (e) {
+  if (e instanceof LatticeQueryError) {
+    console.log(e.message);        // Division by zero: 1 / 0
+    console.log(e.code);           // -1
+    console.log(e.stage);          // 4 (execution)
+    console.log(e.diagnosticCode); // DivisionByZero
+    console.log(e.location);       // { line: 1, column: 9, length: 1 }
+  }
+}
+```
+
+`stage` is a `QueryErrorStage`: 1 parse, 2 semantic, 3 plan, 4 execution. Parse
+and semantic failures have code -6 and execution failures -1, except that a
+`DELETE` of a node with relationships has code -17 and a relationship created
+to a node deleted earlier in the query -4, as `deleteNode` and `createEdge`
+report them. A storage failure under a query has code -2 and an allocation
+failure -13.
 
 ## Electron
 

@@ -100,12 +100,75 @@ interface DatabaseOptions {
   cacheSizeMb?: number;      // Cache size in MB (default: 100)
   enableWal?: boolean;       // WAL-backed transactions and crash recovery (default: true)
   enableAdjacencyCache?: boolean; // In-memory graph adjacency cache (default: false)
-  enableVectors?: boolean;   // Preferred vector config flag
+  enableVectors?: boolean;   // Create a vector index if the file has none
   enableVector?: boolean;    // Deprecated compatibility alias
-  vectorDimensions?: number; // Vector dimensions (default: 128)
+  vectorDimensions?: number; // Vector dimensions (default: 128; 0 = the file's)
   lock?: boolean;            // Take the file lock (default: true)
+  syncMode?: 'full' | 'normal';   // Unset: LATTICE_SYNC_MODE, else 'full'
+  fullFsync?: boolean;            // macOS F_FULLFSYNC; unset: LATTICE_FULL_FSYNC, else off
+  vectorMetric?: 'cosine' | 'euclidean' | 'dot_product'; // For a new index (default: cosine)
+  vectorM?: number;               // HNSW connections per node, 2..32 (default: 16)
+  vectorEfConstruction?: number;  // HNSW build candidate list, 1..4096 (default: 200)
 }
 ```
+
+A database file records its vector index: dimensions, metric, `vectorM` and
+`vectorEfConstruction`. A database that has an index opens with it whether or
+not `enableVectors` is set, so reopening needs no vector options at all, also
+after a crash. `enableVectors` creates an index if the database has none, and
+`vectorMetric`, `vectorM` and `vectorEfConstruction` configure that new index;
+once it exists they are fixed. Any vector option you do pass (and
+`vectorDimensions` when `enableVectors` is set) must match the file, or `open()`
+throws a `LatticeError` with code -18 (`ConfigMismatch`).
+
+```typescript
+const db = new Database("vectors.db", {
+  create: true,
+  enableVectors: true,
+  vectorDimensions: 2,
+  vectorMetric: "euclidean",
+});
+await db.open();
+await db.write(async (txn) => {
+  const a = await txn.createNode({ labels: ["Doc"] });
+  await txn.setVector(a.id, "embedding", new Float32Array([1, 0]));
+  const b = await txn.createNode({ labels: ["Doc"] });
+  await txn.setVector(b.id, "embedding", new Float32Array([0, 2]));
+});
+await db.close();
+
+// No vector options: the file says how its index was built.
+const reopened = new Database("vectors.db");
+await reopened.open();
+console.log(await reopened.vectorSearch(new Float32Array([1, 0]), { k: 2 }));
+// [ { nodeId: 1n, distance: 0 }, { nodeId: 2n, distance: 2.2360680103302 } ]
+await reopened.close();
+```
+
+The metric decides search distances, smallest first: cosine distance (vectors
+stored at unit length), L2 distance, or the negative dot product (vectors stored
+as given).
+
+`syncMode: 'normal'` returns from a commit once the operating system has it: the
+commit survives the process being killed, but a power cut or OS crash can lose
+the most recent commits. The default, `'full'`, syncs the log on every commit.
+`fullFsync: true` makes each sync on macOS ask the drive to flush its cache. A
+value you pass wins over the `LATTICE_SYNC_MODE` and `LATTICE_FULL_FSYNC`
+environment variables; they apply only when you leave the option unset. See
+[Durability and the Log](../configuration/durability.md).
+
+`syncMode`, `fullFsync` and the three vector index options need a native library
+with `lattice_open_v5`; against an older one, setting any of them throws with
+code -14 (`Unsupported`). `deserialize()` opens through the older options and
+ignores them.
+
+`readOnly: true` on a database that was not closed cleanly recovers it in
+memory: the handle sees every committed transaction, and nothing is written to
+the files. If that recovery needs more than 64 MB plus four times the size of
+the log and journal, `open()` throws with code -10 (`Full`); open the database
+read-write once to recover it on disk. A file that a newer release has marked as
+not writable by this one opens only with `readOnly: true`; a writable open
+throws with code -19 (`NeedsNewerWriter`) and writes nothing.
 
 ```typescript
 const db = new Database(':memory:');
@@ -181,12 +244,12 @@ Node IDs, edge IDs and stream sequence numbers are `bigint`.
 #### Write Operations
 
 - `await txn.createNode({ labels, properties })` - Create a node
-- `await txn.deleteNode(nodeId)` - Delete a node
+- `await txn.deleteNode(nodeId, { detach })` - Delete a node. A node that still has relationships is refused with code -17 (`HasRelationships`) and nothing is deleted, as Cypher's `DELETE` does; `{ detach: true }` deletes its relationships with it, as `DETACH DELETE` does. Deleting a node that does not exist does nothing.
 - `await txn.setProperty(nodeId, key, value)` - Set a property
 - `await txn.setVector(nodeId, key, vector)` - Set the node's vector embedding. A node has one vector, which Cypher reads as `n.embedding`; `key` must be `"embedding"` (or `""`), and any other key is rejected with an unsupported-operation error. A vector with NaN or infinite components is rejected as an invalid argument.
 - `await txn.batchInsertVectors(label, vectors)` - Insert vector-bearing nodes in one call
 - `await txn.batchInsert(label, vectors)` - Deprecated compatibility alias for `batchInsertVectors`
-- `await txn.createEdge(sourceId, targetId, edgeType, options?)` - Create an edge and return its stable edge ID on the `Edge`
+- `await txn.createEdge(sourceId, targetId, edgeType, options?)` - Create an edge and return its stable edge ID on the `Edge`. Throws with code -4 (`NotFound`) unless both ends exist as the transaction sees them
 - `await txn.deleteEdge(sourceId, targetId, edgeType)` - Delete an edge
 - `await txn.setEdgeProperty(edgeId, key, value)` - Set an edge property by stable edge ID
 - `await txn.getEdgeProperty(edgeId, key)` - Get an edge property by stable edge ID
@@ -195,7 +258,7 @@ Node IDs, edge IDs and stream sequence numbers are `bigint`.
 - `txn.publishStreamGetSequence(stream, payload, kind?)` - Publish and return the record's sequence (`bigint`)
 - `txn.setStreamOffset(stream, consumer, sequence)` - Commit a durable consumer offset
 - `txn.trimStream(stream, throughSequence)` - Delete stream records through a sequence
-- `txn.commit()` / `txn.rollback()` - Commit or rollback
+- `txn.commit()` / `txn.rollback()` - Commit or rollback. A commit that throws with code -7 (`TxnAborted`) has ended the transaction, and `rollback()` afterwards does nothing; after any other failure it stays open for `rollback()`
 
 ### Batch Insert
 
@@ -406,6 +469,40 @@ try {
   console.error("Database error:", error);
 }
 ```
+
+Errors from the native library are `LatticeError`s whose `code` is the C error
+code, for example -4 (not found, also from `createEdge` when either end does not
+exist), -10 (a read-only open whose crash recovery needs more memory than it may
+use), -16 (another process holds the file), -17 (a plain `deleteNode` of a node
+with relationships), -18 (open options that contradict the file's vector index)
+and -19 (a writable open of a file only a newer release may write).
+
+A failed Cypher query throws a `LatticeQueryError`, a `LatticeError` that also
+says where the query failed:
+
+```typescript
+import { Database, LatticeQueryError } from "@hajewski/latticedb";
+
+try {
+  await db.query("RETURN 1/0");
+} catch (e) {
+  if (e instanceof LatticeQueryError) {
+    console.log(e.message);        // Division by zero: 1 / 0
+    console.log(e.code);           // -1
+    console.log(e.stage);          // 4 (execution)
+    console.log(e.diagnosticCode); // DivisionByZero
+    console.log(e.location);       // { line: 1, column: 9, length: 1 }
+  }
+}
+```
+
+`stage` is a `QueryErrorStage`: 1 parse, 2 semantic, 3 plan, 4 execution. Parse
+and semantic failures (an unknown function is `unknown_function`) have code -6
+and execution failures -1, except that a `DELETE` of a node with relationships
+has code -17 and a relationship created to a node deleted earlier in the query
+-4, as `deleteNode` and `createEdge` report them. A storage failure under a query
+has code -2 and an allocation failure -13. `location` is undefined when the
+failure does not belong to one place in the query.
 
 ## Building from Source
 

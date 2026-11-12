@@ -497,6 +497,28 @@ The guide, with when to choose each policy and the stored format, is
 - **A node and a relationship full-text index on the same name and property are
   refused** with `ALREADY_EXISTS`; they would share storage. Databases that
   already have both keep working as before.
+- **Full-text search has one query language**, the same in `@@`, `fts_search`,
+  `fts_search_fuzzy`, the C API and on uncommitted text: words side by side are
+  all required, `a OR b` either (in capitals), `-word` and `-"a phrase"`
+  exclude, `"a phrase"` needs the words adjacent and in order, `word*` is a
+  prefix, `word~` and `word~1` are within two or one edits, and a backslash
+  makes the next character literal. Before, `OR` was a stop word, so `cats OR
+  dogs` asked for both words, and quotes, `-`, `*` and `~` were punctuation, so
+  `fox -quick` asked for both. A query that only excludes (`-dog`) is an error
+  rather than a search; in Cypher write `NOT d.text @@ 'dog'`. `"text" @@
+  "query"` on a plain string uses the same language with whole words, where it
+  was a substring test of each word (`'databases' @@ 'data'` was true; it is
+  false, and `'data*'` is true).
+- **Full-text indexes store word positions**, for phrases, from their first
+  document; a phrase against an index 0.16.0 built, which has none, is an
+  error (`LATTICE_ERROR_INVALID_ARG`) instead of a search for the words in any
+  order. Drop and declare the index again to store them. Positions take about
+  1% more space. A file holding such an index cannot be opened by 0.16.0 (see
+  *Upgrade notes*).
+- **A fuzzy match at the full edit distance scores above zero.** A word two
+  edits away under `word~` scored 0, ranking with documents that did not match
+  that word at all. Fuzzy scores keep 89% at one edit and 56% at two (they kept
+  75% and 0%), so fuzzy scores and rankings change.
 - **Vectors with NaN or infinite components are rejected** with
   `INVALID_ARG`, when stored and when used as a query.
 - **`set_vector` refuses keys other than `"embedding"`**, `""` and `NULL`, with
@@ -576,6 +598,21 @@ Other changes, measured by their commits on a busy machine:
   r.note` over 20,000 relationships, 15.3 ms to 10.2 ms.
 - A `WHERE` that is the same `@@` search the `MATCH` already ran no longer runs
   it again: 366 µs to 235 µs at 663 hits of 2,000 documents.
+- `@@` with `ORDER BY score(d) DESC LIMIT k` (or a `LIMIT` alone) keeps only the
+  best `SKIP + LIMIT` matches instead of sorting every one: 18.8 ms to 6.2 ms
+  for `LIMIT 10` over 50,000 documents that all match.
+- Adding a document to a full-text index appends to each posting list at its
+  tail instead of rewriting it: 25.6 µs to 10.6 µs a document at 100,000
+  documents that share a word. Removing one closes its gap in place, and pages
+  and dictionary terms nothing uses any more are given back: deleting 50,000
+  documents took 3.5 s and now 1.2 s, and an index filled, emptied and filled
+  again with new words stays at about 26,500 pages, where it grew to 66,900.
+- `MATCH (n:Label) WHERE n.embedding <=> $q ... LIMIT k` searches the HNSW graph
+  with the label index as the filter, reading only as much of the label as it
+  needs. At 100,000 128-dimensional vectors and `LIMIT 10`: a label on half the
+  nodes 2.3 ms to 0.5 ms, on 1% 4.3–5.4 ms to 53–71 µs, on 0.1% 51 ms to
+  9–21 µs; recall against the exact nearest of the label was 97.6–99.9% and is
+  99.8–100%.
 - `ORDER BY d.embedding <=> $q LIMIT 10` keeps the vector search bounded, as
   `LIMIT` alone did: 598 µs to 227 µs at 2,000 vectors.
 - A B+Tree leaf that fills while keys arrive in order splits next to the new
@@ -658,6 +695,20 @@ with relationships is one range probe, under 1 µs.
 - Zig API: every phrase of a multi-phrase query is required, a phrase marked
   with `-` is excluded instead of required, and highlight snippets no longer
   cut a UTF-8 character in half.
+- Uncommitted text in a transaction is scored with BM25 and the index's
+  statistics. It scored the number of query words it held, so it ranked above
+  committed documents until the commit, then moved.
+- An `OR` of `@@` searches beside another condition
+  (`d.year >= 2020 AND (d.title @@ 'x' OR d.body @@ 'x')`) scores what it
+  matches; `score(d)` was null unless a property index had answered the other
+  condition.
+- A search a vector search ran over kept its score when the score was exactly
+  0; `score(d)` came back null.
+- An index refusing a query says why ("Full-text query '-dog' only excludes;
+  it needs a word to match"), where it said only that an argument was not
+  valid.
+- A full-text index whose declaration failed to reach the disk is no longer
+  reported as existing.
 
 **Vector search**
 
@@ -783,8 +834,11 @@ with relationships is one range probe, under 1 µs.
   Unicode mappings: `ß` stays `ß`, a final `Σ` lowercases to `σ`, and there is
   no language-specific casing such as Turkish. `trim` removes ASCII whitespace
   only.
-- **`ORDER BY score(d) LIMIT k` sorts every match**; it does not bound the
-  full-text search. Search distances and scores do not survive an aggregation.
+- **Search distances and scores do not survive an aggregation.**
+- **A full-text search scores every match**, also under `LIMIT`; the limit only
+  saves the sort. Skipping documents that cannot reach the top `k` needs posting
+  lists ordered by document, a format change. Full-text queries have no
+  parentheses.
 
 ## Upgrade notes
 
@@ -829,9 +883,13 @@ with relationships is one range probe, under 1 µs.
   `DELETE` of nodes that may have relationships, code that reads results by
   the name of an unaliased column, code that expects `sum` of integers to be a
   float, and `MERGE` patterns without a label or with several labels.
-- 0.16.0 can open a database whose full-text indexes this release wrote, but it
-  splits non-ASCII words the old way and will not find words with non-ASCII
-  letters indexed by this release.
+- **Full-text indexes and 0.16.0.** Once a full-text index this release fills
+  holds a document, it stores word positions, and 0.16.0 would damage it by
+  appending entries without them; the file then asks for this release or later,
+  and 0.16.0 refuses to open it with an I/O error. A file whose full-text
+  indexes 0.16.0 built, or that this release has only declared, still opens in
+  0.16.0, which splits non-ASCII words the old way and will not find words with
+  non-ASCII letters indexed by this release.
 
 ## Upgrading
 

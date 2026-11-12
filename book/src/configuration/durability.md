@@ -149,15 +149,43 @@ above its configured size until it commits. And in the Zig API, a write passed a
 logged; without a log that makes no difference to what survives, but it is not part
 of any transaction, so it does not appear in the changefeed.
 
-Turning the log off saves less than it looks. Loading 1,000,000 nodes and 2,000,000
-relationships through the Zig API in transactions of 10,000 (release build, a busy
-macOS machine, three runs each) took 107 to 111 s with the log in either sync mode,
-and BULK_F without it. Raising the checkpoint threshold changed nothing. The
-transactions, not the log, are most of the cost: the same load written directly with
-a `null` transaction and no log took 73 to 77 s, and produced a 391 MB file
-instead of 2.5 GB, because direct writes record nothing in the changefeed. Building
-the database in memory (`:memory:`) and serializing it took 49 to 57 s, at about
-5 GB of memory.
+### Bulk loading
+
+A load you can run again from its source does not need the log: if it is
+interrupted, delete the file and start over. For such a load:
+
+- open with `enable_wal = false`;
+- set `changefeed_retention` to `off` if nothing will read the load's changes
+  from the changefeed (the policy is kept in the file; open with `all` afterwards
+  to record changes from then on);
+- give it a page cache about twice the size the file will reach;
+- write in transactions of some thousands of rows, then `sync()` or close.
+
+The cache matters more than the log. A flush writes each changed page twice, once
+to the journal and once in place, and happens whenever half the cache holds
+changes. With a small cache and writes spread over the whole graph, the same pages
+are changed and written again flush after flush; once half the cache holds what the
+load changes, each page is written about twice in all.
+
+Loading 1,000,000 nodes and 2,000,000 relationships between random pairs of them,
+through the Zig API in transactions of 10,000 (release build, a busy macOS machine,
+two runs each; the Zig API's default cache here is 28 MB, the bindings' 100 MB):
+
+| Log | Changefeed | Cache | Time | Written to disk | File |
+|-----|------------|-------|------|-----------------|------|
+| on, `normal` sync | `all` | default | 75–76 s | 66 GB | 540 MB |
+| off | `all` | default | 39–41 s | 33 GB | 540 MB |
+| off | `off` | default | 36–38 s | 33 GB | 378 MB |
+| on, `normal` sync | `all` | 256 MB | 27–29 s | 20 GB | 540 MB |
+| off | `all` | 256 MB | 21–23 s | 13 GB | 540 MB |
+| on, `normal` sync | `all` | 1 GB | 22–25 s | 13 GB | 540 MB |
+| on, `normal` sync | `off` | 1 GB | 16–17 s | 10 GB | 378 MB |
+| off | `all` | 1 GB | 13–15 s | 2.1 GB | 540 MB |
+| off | `off` | 1 GB | 9–10 s | 1.1 GB | 378 MB |
+
+Peak memory was the cache plus 25 to 80 MB. With the log off, the
+changefeed off and a 1 GB cache, transactions cost no more than the same load
+written directly with a `null` transaction (10–11 s), and they still roll back.
 
 ## Checkpointing
 

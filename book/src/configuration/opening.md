@@ -87,7 +87,8 @@ file during that open.
 
 The C API and every binding default `cache_size_mb` to 100, and the CLI to 64
 (`--cache-size`). Set it when you know better — a machine with little memory, or a
-working set you have actually measured.
+working set you have actually measured. A bulk load gains most from a large cache;
+see [Bulk loading](./durability.md#bulk-loading).
 
 Only the Zig API can leave the size unset (`buffer_pool_size = 0`). The cache then
 sizes itself from the features you turned on: 16 MB for the graph, plus 12 MB each

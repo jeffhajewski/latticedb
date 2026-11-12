@@ -272,12 +272,13 @@ Other changes, measured by their commits on a busy machine:
 - **A read-only open does not read the log.** After a crash it shows the
   database file as of its last flush, which can be behind the commits the log
   holds. Open the database read-write once to recover them.
-<!-- Owner decision: fix before release, or ship with this limit. -->
-- **`lattice replicate` sends a full snapshot on every run.** Each CLI run
-  starts a new replication generation, so passes are not incremental. This is a
-  regression in this release, from emptying the log at open and close.
-- **The embedding client's timeout is not applied.** `timeout_ms` is accepted,
-  but a request waits as long as the server takes.
+- **`lattice replicate` takes a snapshot after any process that wrote has
+  closed the database.** Closing now folds the log into the file and resets it,
+  which begins a new replication generation. That was already so for the
+  language bindings; it is new for the CLI and for Zig callers, whose writes
+  0.16.0 left in the log to be shipped as frames. A pass with nothing changed
+  still ships nothing, and a process that stays open and calls `replicateTo`
+  on its own handle ships frames as before.
 - **`sync_mode` and `full_fsync` are set through the environment** outside Zig;
   the C API's open options do not include them.
 

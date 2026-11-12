@@ -3498,6 +3498,72 @@ test "database: replication starts a new generation after the log is truncated" 
     try std.testing.expect(manifest.generations[0].segments.len > 0);
 }
 
+test "database: a replication pass run from a fresh process is idle when nothing changed" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_replicate_idle_runs.ltdb";
+    const wal_path = "/tmp/lattice_replicate_idle_runs.ltdb-wal";
+    const dest = "/tmp/lattice_replicate_idle_runs_dest";
+
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(wal_path) catch {};
+    @import("compat").fs.cwd().deleteTree(dest) catch {};
+    defer @import("compat").fs.cwd().deleteFile(path) catch {};
+    defer @import("compat").fs.cwd().deleteFile(wal_path) catch {};
+    defer @import("compat").fs.cwd().deleteTree(dest) catch {};
+
+    // Default checkpoint policy, which is what the command-line tool opens
+    // with: open and close each empty a log that holds work.
+    const config = lattice.storage.database.DatabaseConfig{ .enable_fts = false, .enable_vector = false };
+    {
+        var db = try Database.open(allocator, path, .{ .create = true, .config = config });
+        defer db.close();
+        try writeNodes(db, "P", 50);
+    }
+
+    // Each pass is its own open and close, as `lattice replicate` on a timer
+    // is. The first takes the snapshot, and taking it leaves checkpoint
+    // records in the log. Closing must not count those as work and reset
+    // the log, or the next pass finds the reset counter moved and takes a
+    // snapshot of an unchanged database, and so does every pass after it.
+    for (0..3) |pass| {
+        var db = try Database.open(allocator, path, .{ .config = config });
+        defer db.close();
+        const stats = try db.replicateTo(dest);
+        try std.testing.expectEqual(@as(u64, 1), stats.generation);
+        try std.testing.expectEqual(pass == 0, stats.started_generation);
+        try std.testing.expectEqual(@as(u64, 0), stats.frames_shipped);
+    }
+
+    // A reader in between changes nothing either.
+    {
+        var db = try Database.open(allocator, path, .{ .config = config });
+        defer db.close();
+        var txn = try db.beginTransaction(.read_only);
+        try db.commitTransaction(&txn);
+    }
+    {
+        var db = try Database.open(allocator, path, .{ .config = config });
+        defer db.close();
+        const stats = try db.replicateTo(dest);
+        try std.testing.expect(!stats.started_generation);
+    }
+
+    // A writer that closes folds its work into the file and resets the log,
+    // so the pass after it starts a generation from a fresh snapshot.
+    {
+        var db = try Database.open(allocator, path, .{ .config = config });
+        defer db.close();
+        try writeNodes(db, "Q", 50);
+    }
+    {
+        var db = try Database.open(allocator, path, .{ .config = config });
+        defer db.close();
+        const stats = try db.replicateTo(dest);
+        try std.testing.expect(stats.started_generation);
+        try std.testing.expectEqual(@as(u64, 2), stats.generation);
+    }
+}
+
 test "database: replication refuses a destination holding another database" {
     const allocator = std.testing.allocator;
     const path_a = "/tmp/lattice_replicate_a.ltdb";

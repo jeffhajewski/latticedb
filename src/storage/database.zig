@@ -1405,6 +1405,12 @@ pub const Database = struct {
         if (self.config.auto_checkpoint == null) return;
         const wal = if (self.wal) |*w| w else return;
         if (wal.header.frame_count == 0) return;
+        // A log that ends at its own last checkpoint has nothing to fold in.
+        // Resetting it anyway would advance the reset counter for no change
+        // to the data, and replication reads that counter: taking a snapshot
+        // leaves exactly such a log behind, so every pass would find the
+        // counter moved by the pass before it and take another snapshot.
+        if (wal.getCurrentLsn() <= wal.getCheckpointLsn()) return;
         _ = self.runCheckpoint(wal, .truncate) catch {};
     }
 

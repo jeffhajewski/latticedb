@@ -409,10 +409,12 @@ Implementation details:
    or invalid on open, the whole graph is rebuilt from the stored vectors.
 3. **Cosine reads back normalised**: the file keeps only the unit-length copy
    of each vector, so the original magnitude is not recoverable.
-4. **Cypher `<=>` searches a fixed candidate set**: the query planner asks the
-   index for the 100 nearest vectors and then keeps those that match the rest of
-   the pattern (see [Query Execution](./query-execution.md)). A node outside
-   those 100 is never returned, however loose the distance threshold.
+4. **Cypher `<=>` widens until it has enough candidates**: the query planner asks
+   the index for neighbours, doubling the number, until it has every pattern
+   candidate within the threshold, or enough rows for the `LIMIT` (see
+   [Query Execution](./query-execution.md)). A label whose nodes are far from the
+   query vector can therefore take several rounds, up to a search of the whole
+   index.
 5. **Single-threaded**: No concurrent insert/search yet
 
 ## Future Enhancements

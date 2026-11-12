@@ -111,9 +111,10 @@ MATCH (c:Chunk) WHERE c.source = "web" RETURN c
 MATCH (n) WHERE n.source = "web" RETURN n
 ```
 
-A label does not narrow a `<=>` vector search: the search always takes the 100
-nearest vectors in the whole database first. See
-[Vector Search in Cypher](../cypher/vector-search.md).
+A label narrows a `<=>` vector search as well: the rows the pattern produces are
+the candidates, and the search widens until it has the candidates the predicate
+asks for. A label that is rare among the vectors therefore costs more searching
+than a common one. See [Vector Search in Cypher](../cypher/vector-search.md).
 
 ## Transaction Scope
 

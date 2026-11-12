@@ -26,21 +26,33 @@ stores only the normalised copy: a stored `[3, 4, 0, 0]` returns as
 A query vector must have the database's dimensions and finite components. A
 vector containing NaN or infinity fails the query, as it fails `set_vector`.
 
-When the query planner encounters `<=>` in a `WHERE` clause, it runs one HNSW
-search for the **100 nearest vectors in the whole database**, then keeps the rows of
-the `MATCH` pattern whose node is among those 100 and within the threshold. Three
-consequences:
+When the whole `WHERE` clause is a `<=>` predicate (`n.embedding <=> q < t`,
+`<= t`, or `n.embedding <=> q` on its own), with `q` a parameter or a list literal
+and `t` a number or a parameter, the planner answers it with the HNSW index. The
+rows the `MATCH` pattern produces are the candidates, and the search widens
+(doubling how many neighbours it asks for) until the answer is complete:
 
-- **The label does not narrow the search.** `MATCH (c:Chunk)` still searches every
-  vector; if nodes with other labels are nearer, they take places among the 100
-  and matching `Chunk` nodes can be missed.
-- **A threshold query returns at most 100 nodes**, however many are within the
-  distance.
-- **The threshold is inclusive**: `< 0.5` keeps a distance of exactly 0.5, the same
-  as `<= 0.5`.
+- **With a threshold**: every candidate within it. `<` excludes a distance of
+  exactly `t` and `<=` includes it. A null threshold matches nothing.
+- **Under a `RETURN` with a `LIMIT`**, and no `ORDER BY`, `DISTINCT` or
+  aggregation in between: until it has `SKIP` + `LIMIT` candidate rows.
+- **With neither**: the 100 nearest candidate nodes.
 
-When you need the nearest `k` for a `k` you choose, or more than 100 results, use
-the `vector_search` API (`db.vector_search(vector, k=...)`) instead. A `k` larger
+So the label narrows the search (`MATCH (c:Chunk)` returns Chunk nodes even when
+other nodes are nearer), and a threshold query returns every match, however many.
+If the search reaches the end of the index, candidates it did not return are
+measured directly. What stays approximate is HNSW itself: when the search stops
+before the end of the index, a candidate within the threshold can occasionally be
+missed.
+
+Any other form is evaluated row by row, exactly, by computing each candidate's
+distance: a threshold that is an expression (`< 0.25 * 2`), or a `<=>` predicate
+combined with others through `AND`. `<=>` has the same precedence as the
+comparison operators and groups left to right, so write the distance first, or in
+parentheses: `0.5 > n.embedding <=> $q` compares `0.5 > n.embedding` first.
+
+For the nearest `k` across the whole database, whatever the labels, use the
+`vector_search` API (`db.vector_search(vector, k=...)`). A `k` larger
 than `ef_search` widens the search to `k`, so asking for 500 neighbours returns 500
 when the database holds that many.
 

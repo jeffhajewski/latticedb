@@ -163,11 +163,10 @@ ORDER BY n.embedding <=> $query
 LIMIT 10
 ```
 
-In Cypher, `<=>` in `WHERE` first takes the 100 nearest vectors in the whole
-database, then keeps the rows of your pattern whose node is among them. The label
-in the pattern does not narrow the search, so a threshold query returns at most 100
-rows and can miss matches when nodes of other labels are nearer. For an exact top-k
-over the whole database, use `vector_search`. See
+In Cypher, `<=>` in `WHERE` searches among the nodes your pattern matches: a
+threshold query returns every `Chunk` within the distance, however many there are
+and whatever other nodes are nearer, and a `LIMIT` stops the search once it has
+enough. For the nearest `k` over the whole database, use `vector_search`. See
 [Vector Search in Cypher](../cypher/vector-search.md).
 
 ## Batch Insert

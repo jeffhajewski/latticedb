@@ -196,6 +196,14 @@ pub const LabelScan = struct {
         .deinit = deinit,
     };
 
+    /// The label scan `op` is, if it is one. Its rows carry nothing but
+    /// the node, one row per node, so an operator reading them can treat
+    /// the scan as the set "nodes with this label".
+    pub fn of(op: Operator) ?*Self {
+        if (op.vtable != &vtable) return null;
+        return @ptrCast(@alignCast(op.ptr));
+    }
+
     fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 

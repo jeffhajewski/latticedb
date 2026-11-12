@@ -7821,6 +7821,12 @@ pub const Database = struct {
         return c * c <= @as(u128, EXACT_SCAN_FACTOR) * ef * m_max0 * total;
     }
 
+    /// The most nodes `exactScanPays` measures one by one.
+    pub fn exactScanCount(total: u64, ef: u16, m_max0: u16) usize {
+        const bound: u128 = @as(u128, EXACT_SCAN_FACTOR) * ef * m_max0 * total;
+        return @intCast(std.math.sqrt(bound));
+    }
+
     const EXACT_SCAN_FACTOR: u32 = 1;
 
     fn mapVectorSearchError(err: HnswError) DatabaseError {

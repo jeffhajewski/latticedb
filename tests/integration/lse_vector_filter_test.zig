@@ -337,3 +337,91 @@ test "vector filter: euclidean measures the set by euclidean distance" {
 test "vector filter: dot product measures the set by negative dot product" {
     try checkMetric(.inner_product, "/tmp/lse_vector_filter_dot.ltdb");
 }
+
+test "vector filter: a large label is searched through the graph with the label index as the filter" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lse_vector_filter_label.ltdb";
+    const nodes = 1400;
+    removeFiles(path);
+    // m 8 puts the point past which a set is too large to measure node by
+    // node near a thousand vectors, so a small database takes the graph path.
+    const db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_vector = true, .vector_dimensions = DIMS, .vector_m = 8, .vector_ef_construction = EF_CONSTRUCTION },
+    });
+    defer {
+        db.close();
+        removeFiles(path);
+    }
+    var prng = std.Random.DefaultPrng.init(23);
+    const rnd = prng.random();
+    var ids: [nodes]u64 = undefined;
+    var vectors: [nodes][DIMS]f32 = undefined;
+    {
+        var txn = try db.beginTransaction(.read_write);
+        errdefer db.abortTransaction(&txn) catch {};
+        for (&ids, &vectors, 0..) |*id, *v, i| {
+            const labels: []const []const u8 = if (i % 20 != 0) &.{ "Item", "Most" } else &.{"Item"};
+            id.* = try db.createNode(&txn, labels);
+            for (v) |*x| x.* = rnd.float(f32) * 2 - 1;
+            try db.setNodeVectorInTxn(&txn, id.*, v);
+        }
+        try db.commitTransaction(&txn);
+    }
+    const hnsw = &db.hnsw_index.?;
+    try std.testing.expect(!Database.exactScanPays(nodes * 19 / 20, hnsw.vector_count, hnsw.config.ef_search, hnsw.config.m_max0));
+
+    var params = std.StringHashMap(lattice.core.types.PropertyValue).init(allocator);
+    defer params.deinit();
+    var query: [DIMS]f32 = undefined;
+    var hits: usize = 0;
+    for (0..10) |_| {
+        for (&query) |*x| x.* = rnd.float(f32) * 2 - 1;
+        try params.put("q", .{ .vector_val = &query });
+        var want: [10]u64 = undefined;
+        {
+            var all: std.ArrayListUnmanaged(VectorSearchResult) = .empty;
+            defer all.deinit(allocator);
+            for (ids, &vectors, 0..) |id, *v, i| {
+                if (i % 20 != 0) try all.append(allocator, .{ .node_id = id, .distance = db.vectorDistance(&query, v) });
+            }
+            std.mem.sort(VectorSearchResult, all.items, {}, struct {
+                fn lt(_: void, a: VectorSearchResult, b: VectorSearchResult) bool {
+                    return a.distance < b.distance;
+                }
+            }.lt);
+            for (&want, all.items[0..10]) |*w, r| w.* = r.node_id;
+        }
+        var result = try db.queryWithParams("MATCH (n:Most) WHERE n.embedding <=> $q RETURN id(n), n.embedding <=> $q LIMIT 10", &params);
+        defer result.deinit();
+        try std.testing.expectEqual(@as(usize, 10), result.rows.len);
+        var last = -std.math.inf(f64);
+        for (result.rows) |row| {
+            const id: u64 = @intCast(row.values[0].int_val);
+            const i = std.mem.indexOfScalar(u64, &ids, id).?;
+            try std.testing.expect(i % 20 != 0);
+            try std.testing.expect(row.values[1].float_val >= last);
+            last = row.values[1].float_val;
+            if (std.mem.indexOfScalar(u64, &want, id) != null) hits += 1;
+        }
+    }
+    try std.testing.expect(hits * 100 >= 10 * 10 * 80);
+
+    // A transaction's labels count: a node it gives the label, at the
+    // query itself, comes first; the nearest one it takes the label from
+    // is gone.
+    for (&query) |*x| x.* = rnd.float(f32) * 2 - 1;
+    try params.put("q", .{ .vector_val = &query });
+    var txn = try db.beginTransaction(.read_write);
+    defer db.abortTransaction(&txn) catch {};
+    var before = try db.queryWithParamsInTxn(&txn, "MATCH (n:Most) WHERE n.embedding <=> $q RETURN id(n) LIMIT 1", &params);
+    const nearest: u64 = @intCast(before.rows[0].values[0].int_val);
+    before.deinit();
+    try db.removeNodeLabel(&txn, nearest, "Most");
+    try db.addNodeLabel(&txn, ids[20], "Most");
+    try db.setNodeVectorInTxn(&txn, ids[20], &query);
+    var after = try db.queryWithParamsInTxn(&txn, "MATCH (n:Most) WHERE n.embedding <=> $q RETURN id(n) LIMIT 5", &params);
+    defer after.deinit();
+    try std.testing.expectEqual(ids[20], @as(u64, @intCast(after.rows[0].values[0].int_val)));
+    for (after.rows) |row| try std.testing.expect(@as(u64, @intCast(row.values[0].int_val)) != nearest);
+}

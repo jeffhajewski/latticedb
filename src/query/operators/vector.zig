@@ -25,6 +25,8 @@ const Database = database_mod.Database;
 const ast = @import("../ast.zig");
 const ExpressionEvaluator = @import("../expression.zig").ExpressionEvaluator;
 const limit_ops = @import("limit.zig");
+const scan_ops = @import("scan.zig");
+const SymbolId = @import("../../graph/symbols.zig").SymbolId;
 
 // ============================================================================
 // VectorSearch Operator
@@ -393,6 +395,12 @@ pub const VectorSearchWithInput = struct {
             if (wanted == 0) return;
         }
 
+        if (scan_ops.LabelScan.of(self.input)) |label_scan| {
+            if (label_scan.output_slot == self.output_slot) {
+                return self.openOverLabel(ctx, query_vector, rows_wanted, label_scan.label_id, first.?);
+            }
+        }
+
         // Every input row, grouped by node; the nodes are what the search
         // ranks.
         const bare_mask: u16 = @as(u16, 1) << @intCast(self.output_slot);
@@ -429,46 +437,154 @@ pub const VectorSearchWithInput = struct {
         // Each result is a candidate node with at least one row, so a LIMIT
         // or a node cap needs that many nodes; a threshold alone needs the
         // search widened until it passes the threshold.
-        var k: u32 = blk: {
+        const k: u32 = blk: {
             const start: usize = rows_wanted orelse self.node_cap orelse DEFAULT_K;
             break :blk @intCast(@max(@min(start, node_count, std.math.maxInt(u32) / 2), 1));
         };
         var found: std.AutoHashMapUnmanaged(NodeId, void) = .{};
         defer found.deinit(self.allocator);
-        var exhausted = false;
-        while (true) {
-            try self.search(ctx, query_vector, k, ids, member, &found);
-            const results = self.results orelse break;
-            // There are no more to give.
-            if (results.len < k) {
-                exhausted = true;
-                break;
-            }
-            if (rows_wanted != null or self.node_cap != null) break;
-            const t = self.threshold orelse break;
-            // Everything further out is beyond the threshold too.
-            if (!self.within(results[results.len - 1].distance, t)) break;
-            if (k >= node_count or k >= std.math.maxInt(u32) / 2) break;
-            k = @intCast(@min(@as(usize, k) * 2, node_count));
-        }
+        const exhausted = try self.searchWidening(ctx, query_vector, k, rows_wanted, node_count, .{ .set = .{ .ids = ids, .member = member } }, &found);
 
         // next() walks the results. Candidates a complete search did not
         // return (ones the graph could not reach) are measured directly.
         if (exhausted) try self.measureMissing(ctx, query_vector, &found);
     }
 
-    /// Ask for the k nearest vectors among `ids`; `found` becomes their nodes.
+    /// Search until the answer is complete: once for a LIMIT or a node cap,
+    /// doubling k for a threshold alone until the furthest result is beyond
+    /// it. Whether the search ran out of nodes to give.
+    fn searchWidening(
+        self: *Self,
+        ctx: *ExecutionContext,
+        query_vector: []const f32,
+        start_k: u32,
+        rows_wanted: ?usize,
+        node_count: usize,
+        among: Among,
+        found: *std.AutoHashMapUnmanaged(NodeId, void),
+    ) OperatorError!bool {
+        var k = start_k;
+        while (true) {
+            try self.search(ctx, query_vector, k, among, found);
+            const results = self.results orelse return false;
+            // There are no more to give.
+            if (results.len < k) return true;
+            if (rows_wanted != null or self.node_cap != null) return false;
+            const t = self.threshold orelse return false;
+            // Everything further out is beyond the threshold too.
+            if (!self.within(results[results.len - 1].distance, t)) return false;
+            if (k >= node_count or k >= std.math.maxInt(u32) / 2) return false;
+            k = @intCast(@min(@as(usize, k) * 2, node_count));
+        }
+    }
+
+    /// The candidates when the input is a label scan, as `openOverLabel`
+    /// gives them.
+    ///
+    /// Reading every input row and filing it by node cost more than the
+    /// search for a label holding many of the vectors: about 2 ms of the
+    /// 3 ms at 50k of 100k. A label scan's rows are its nodes, one each, so
+    /// a large label is searched through the graph with the label index as
+    /// the filter, and only as much of the scan is read as it takes to see
+    /// the label is too large to measure node by node.
+    const LabelFilter = struct {
+        database: *Database,
+        txn: @FieldType(ExecutionContext, "txn"),
+        label_id: SymbolId,
+        /// A failure the filter could not return; the search is failed
+        /// with it afterwards.
+        failure: ?anyerror = null,
+
+        fn allows(context: *const anyopaque, node_id: NodeId) bool {
+            const self: *LabelFilter = @ptrCast(@alignCast(@constCast(context)));
+            if (self.database.overlayNodeHasLabel(self.txn, node_id, self.label_id)) |has| return has;
+            return self.database.label_index.contains(self.label_id, node_id) catch |err| {
+                self.failure = err;
+                return false;
+            };
+        }
+    };
+
+    const Among = union(enum) {
+        /// These nodes; `member` tells whether a node is one of them.
+        set: struct { ids: []const NodeId, member: ?database_mod.VectorFilter },
+        /// The nodes the filter allows, through the graph.
+        filter: *LabelFilter,
+    };
+
+    /// `open` for an input that is a label scan (`first` is its first row).
+    ///
+    /// Reads the scan only until it holds more nodes than measuring each
+    /// would pay for (`Database.exactScanCount`). A label that ends before
+    /// that is measured node by node; a larger one is searched through the
+    /// graph with the label as the filter, and the rest of the scan is
+    /// never read. Only the nodes the search returns get a row.
+    fn openOverLabel(
+        self: *Self,
+        ctx: *ExecutionContext,
+        query_vector: []const f32,
+        rows_wanted: ?usize,
+        label_id: SymbolId,
+        first: *Row,
+    ) OperatorError!void {
+        const index = &(self.database.hnsw_index orelse return ctx.storageFailure(error.IoError, "searching the vector index", .{}));
+        const enough = Database.exactScanCount(index.vector_count, index.config.ef_search, index.config.m_max0);
+
+        var ids: std.ArrayListUnmanaged(NodeId) = .empty;
+        defer ids.deinit(self.allocator);
+        var next_row: ?*Row = first;
+        while (next_row) |row| {
+            const node_id = row.getSlot(self.output_slot).?.asNodeId().?;
+            ids.append(self.allocator, node_id) catch return OperatorError.OutOfMemory;
+            if (ids.items.len > enough) break;
+            next_row = try self.input.next(ctx);
+        }
+        const whole = next_row == null;
+
+        const start: usize = rows_wanted orelse self.node_cap orelse DEFAULT_K;
+        var found: std.AutoHashMapUnmanaged(NodeId, void) = .{};
+        defer found.deinit(self.allocator);
+        var filter: LabelFilter = .{ .database = self.database, .txn = ctx.txn, .label_id = label_id };
+        const exhausted = if (whole) blk: {
+            const k: u32 = @intCast(@max(@min(start, ids.items.len, std.math.maxInt(u32) / 2), 1));
+            break :blk try self.searchWidening(ctx, query_vector, k, rows_wanted, ids.items.len, .{ .set = .{ .ids = ids.items, .member = null } }, &found);
+        } else blk: {
+            const k: u32 = @intCast(@max(@min(start, std.math.maxInt(u32) / 2), 1));
+            const ran_out = try self.searchWidening(ctx, query_vector, k, rows_wanted, std.math.maxInt(u32), .{ .filter = &filter }, &found);
+            if (filter.failure) |err| return ctx.storageFailure(err, "reading the label index", .{});
+            break :blk ran_out;
+        };
+
+        // Rows for the nodes returned, each the scan's one row.
+        if (exhausted) {
+            // Rare: the search could not give as many as asked. Every node
+            // of the label is a candidate to measure, as on the general path.
+            if (!whole) {
+                while (try self.input.next(ctx)) |row| {
+                    ids.append(self.allocator, row.getSlot(self.output_slot).?.asNodeId().?) catch return OperatorError.OutOfMemory;
+                }
+            }
+            for (ids.items) |id| (try self.candidateFor(id)).bare_rows = 1;
+            try self.measureMissing(ctx, query_vector, &found);
+        }
+        for (self.results orelse &.{}) |result| (try self.candidateFor(result.node_id)).bare_rows = 1;
+    }
+
+    /// Ask for the k nearest vectors among `among`; `found` becomes their
+    /// nodes.
     fn search(
         self: *Self,
         ctx: *ExecutionContext,
         query_vector: []const f32,
         k: u32,
-        ids: []const NodeId,
-        member: database_mod.VectorFilter,
+        among: Among,
         found: *std.AutoHashMapUnmanaged(NodeId, void),
     ) OperatorError!void {
         self.freeResults();
-        const results = self.database.vectorSearchAmongInTxn(ctx.txn, query_vector, k, null, ids, member) catch |err|
+        const results = switch (among) {
+            .set => |set| self.database.vectorSearchAmongInTxn(ctx.txn, query_vector, k, null, set.ids, set.member),
+            .filter => |f| self.database.vectorSearchWhereInTxn(ctx.txn, query_vector, k, null, .{ .context = f, .allowsFn = LabelFilter.allows }),
+        } catch |err|
             return ctx.storageFailure(err, "searching the vector index", .{});
         self.results = results;
         found.clearRetainingCapacity();

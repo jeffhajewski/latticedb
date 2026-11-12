@@ -151,6 +151,19 @@ frequency, and document length — which is why a title mentioning a term beats 
 passing mention buried in a page of text.
 
 A query with no `LIMIT` returns every match. Writing `LIMIT` still limits.
+`score(d)` returns the BM25 score the search gave `d`. When `@@` is the whole
+`WHERE` and the `RETURN` has a `LIMIT` with no `ORDER BY`, or with
+`ORDER BY score(d) DESC`, the search keeps only the best `SKIP + LIMIT` matches
+instead of producing every match and sorting them:
+
+```cypher
+MATCH (d:Document) WHERE d.text @@ "neural networks"
+RETURN d.title, score(d) AS s ORDER BY s DESC LIMIT 10
+```
+
+Any other `ORDER BY`, a `DISTINCT` or aggregating `RETURN`, a longer pattern or
+another condition beside the `@@` makes the search find every match first, as
+before; the answer is the same either way.
 
 When the `WHERE` is exactly the search the `MATCH` already answered from the index
 (same variable, index, and query text or parameter), the search runs once; it is not
@@ -180,17 +193,18 @@ search's `ORDER BY` on distance, it does not make the search itself stop early.
 
 ## String queries
 
-The query is a list of terms, and all of them must match:
+Words written side by side must all match:
 
 ```cypher
 // Both "neural" and "networks" must appear
 MATCH (d:Document) WHERE d.text @@ "neural networks" RETURN d
 ```
 
-The query is split into terms the same way the indexed text is: words in any
-script, lowercased, accents folded, English stop words dropped, and punctuation,
-quotes and `-` treated as separators. A term that no document contains means no
-rows. The [full-text search guide](../guides/full-text-search.md#how-it-works)
+Words are split and normalised the same way the indexed text is: words in any
+script, lowercased, accents folded, English stop words dropped, and punctuation
+inside a word treated as a separator. A word that no document contains means no
+rows. `OR`, `-word`, `"a phrase"`, `word*` and `word~` are operators; see the
+[query syntax](../guides/full-text-search.md#query-syntax). The [full-text search guide](../guides/full-text-search.md#how-it-works)
 describes the tokenizer, and what changes for indexes built by 0.16.0.
 
 ## Using parameters

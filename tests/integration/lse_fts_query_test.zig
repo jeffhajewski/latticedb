@@ -180,3 +180,115 @@ test "fts query: committing a document changes its score only as the statistics 
     try std.testing.expectEqual(before.len, after.len);
     for (before, after) |b, a| try std.testing.expectEqual(b.doc_id, a.doc_id);
 }
+
+/// How many index seeks the planner let a LIMIT bound for `cypher`.
+fn boundedSeeks(db: *Database, cypher: []const u8) !u32 {
+    const allocator = std.testing.allocator;
+    var parser = lattice.query.parser.Parser.init(allocator, cypher);
+    defer parser.deinit();
+    const parse_result = parser.parse();
+    if (parse_result.query == null) return error.ParseFailed;
+
+    var analyzer = lattice.query.semantic.SemanticAnalyzer.init(allocator);
+    defer analyzer.deinit();
+    const analysis = analyzer.analyze(parse_result.query.?);
+    if (!analysis.success) return error.SemanticFailed;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var planner = lattice.query.planner.QueryPlanner.init(arena.allocator(), .{
+        .node_tree = &db.node_tree,
+        .label_index = &db.label_index,
+        .edge_store = &db.edge_store,
+        .symbol_table = &db.symbol_table,
+        .hnsw_index = if (db.hnsw_index) |*hnsw| hnsw else null,
+        .fts_index = if (db.fts_index) |*fts| fts else null,
+        .database = db,
+    });
+    defer planner.deinit();
+    const analysis_result = lattice.query.semantic.AnalysisResult{
+        .success = true,
+        .errors = &[_]lattice.query.semantic.SemanticError{},
+        .variables = analysis.variables,
+        .errors_dropped = false,
+    };
+    _ = try planner.plan(parse_result.query.?, &analysis_result);
+    return planner.fts_bounded_seeks;
+}
+
+/// The scores a query returned in its second column.
+fn scoresOf(db: *Database, txn: ?*lattice.Transaction, cypher: []const u8, params: ?*const std.StringHashMap(lattice.core.types.PropertyValue), out: []f64) !usize {
+    var result = if (params) |p| try db.queryWithParamsInTxn(txn, cypher, p) else try db.queryInTxn(txn, cypher);
+    defer result.deinit();
+    for (result.rows, 0..) |row, i| out[i] = row.values[1].float_val;
+    return result.rows.len;
+}
+
+test "fts query: ORDER BY score() DESC with a LIMIT keeps only the best matches" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lse_fts_query_topk.ltdb";
+    const db = try openDb(allocator, path);
+    defer {
+        db.close();
+        removeFiles(path);
+    }
+    try db.createNodeFtsIndex("Doc", "text");
+    // 120 documents that all say "common", as often and in texts as long
+    // as makes their scores differ.
+    var buf: [512]u8 = undefined;
+    for (0..120) |i| {
+        var w: std.Io.Writer = .fixed(&buf);
+        for (0..i % 7 + 1) |_| try w.writeAll("common ");
+        for (0..i % 11) |j| try w.print("filler{d} ", .{j});
+        const id = try db.createNode(null, &[_][]const u8{"Doc"});
+        try db.setNodeProperty(null, id, "text", .{ .string_val = w.buffered() });
+        try db.setNodeProperty(null, id, "i", .{ .int_val = @intCast(i) });
+    }
+
+    var all: [200]f64 = undefined;
+    const n = try scoresOf(db, null, "MATCH (d:Doc) WHERE d.text @@ 'common' RETURN d.i, score(d) ORDER BY score(d) DESC", null, &all);
+    try std.testing.expectEqual(@as(usize, 120), n);
+
+    var params = std.StringHashMap(lattice.core.types.PropertyValue).init(allocator);
+    defer params.deinit();
+    try params.put("k", .{ .int_val = 4 });
+    const bounded = [_]struct { cypher: []const u8, skip: usize, count: usize }{
+        .{ .cypher = "MATCH (d:Doc) WHERE d.text @@ 'common' RETURN d.i, score(d) ORDER BY score(d) DESC LIMIT 5", .skip = 0, .count = 5 },
+        .{ .cypher = "MATCH (d:Doc) WHERE d.text @@ 'common' RETURN d.i, score(d) AS s ORDER BY s DESC SKIP 7 LIMIT 3", .skip = 7, .count = 3 },
+        .{ .cypher = "MATCH (d:Doc) WHERE d.text @@ 'common' RETURN d.i, score(d) ORDER BY score(d) DESC LIMIT $k", .skip = 0, .count = 4 },
+        // With no ORDER BY the seek's own order, best first, reaches the LIMIT.
+        .{ .cypher = "MATCH (d:Doc) WHERE d.text @@ 'common' RETURN d.i, score(d) LIMIT 6", .skip = 0, .count = 6 },
+    };
+    for (bounded) |case| {
+        try std.testing.expectEqual(@as(u32, 1), try boundedSeeks(db, case.cypher));
+        var got: [200]f64 = undefined;
+        const m = try scoresOf(db, null, case.cypher, &params, &got);
+        try std.testing.expectEqual(case.count, m);
+        for (got[0..m], all[case.skip .. case.skip + m]) |g, want| try std.testing.expectApproxEqAbs(want, g, 1e-6);
+    }
+
+    // Orders the seek does not follow, and rows the LIMIT does not take one
+    // for one, leave the search unbounded.
+    const unbounded = [_][]const u8{
+        "MATCH (d:Doc) WHERE d.text @@ 'common' RETURN d.i, score(d) ORDER BY score(d) LIMIT 5",
+        "MATCH (d:Doc) WHERE d.text @@ 'common' RETURN d.i, score(d) ORDER BY d.i DESC LIMIT 5",
+        "MATCH (d:Doc) WHERE d.text @@ 'common' RETURN DISTINCT d.i, score(d) LIMIT 5",
+        "MATCH (d:Doc) WHERE d.text @@ 'common' AND d.i > 3 RETURN d.i, score(d) LIMIT 5",
+        "MATCH (d:Doc) WHERE d.text @@ 'common' RETURN d.i, score(d) ORDER BY score(d) DESC",
+    };
+    for (unbounded) |cypher| try std.testing.expectEqual(@as(u32, 0), try boundedSeeks(db, cypher));
+
+    // Inside a transaction, documents it wrote compete on the same terms.
+    var txn = try db.beginTransaction(.read_write);
+    defer db.abortTransaction(&txn) catch {};
+    const best = try db.createNode(&txn, &[_][]const u8{"Doc"});
+    try db.setNodeProperty(&txn, best, "text", .{ .string_val = "common common common common common common common common" });
+    try db.setNodeProperty(&txn, best, "i", .{ .int_val = 1000 });
+    var in_txn: [200]f64 = undefined;
+    const t = try scoresOf(db, &txn, "MATCH (d:Doc) WHERE d.text @@ 'common' RETURN d.i, score(d) ORDER BY score(d) DESC", null, &in_txn);
+    try std.testing.expectEqual(@as(usize, 121), t);
+    var top: [200]f64 = undefined;
+    const m = try scoresOf(db, &txn, "MATCH (d:Doc) WHERE d.text @@ 'common' RETURN d.i, score(d) ORDER BY score(d) DESC LIMIT 3", null, &top);
+    try std.testing.expectEqual(@as(usize, 3), m);
+    for (top[0..3], in_txn[0..3]) |g, want| try std.testing.expectApproxEqAbs(want, g, 1e-6);
+}

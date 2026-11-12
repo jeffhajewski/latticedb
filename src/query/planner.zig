@@ -198,10 +198,13 @@ pub const QueryPlanner = struct {
     /// slots in `fts_seek_mask` hold a search; the rest are undefined, so
     /// planning a query without one costs nothing here.
     fts_seeks: [MAX_SLOTS]fts_ops.Search = undefined,
+    fts_seek_ops: [MAX_SLOTS]*fts_ops.FtsIndexSeek = undefined,
     fts_seek_mask: u16 = 0,
     /// How many `@@` row filters (FtsSearchWithInput) the plan holds, so
     /// tests can see a search planned once rather than twice.
     fts_filter_count: u32 = 0,
+    /// How many index seeks a LIMIT bounds (see `boundSeek`), for tests.
+    fts_bounded_seeks: u32 = 0,
     /// The query each slot's vector search uses; see
     /// ExecutionContext.vector_queries.
     vector_queries: executor.VectorQueries = .{},
@@ -1124,6 +1127,7 @@ pub const QueryPlanner = struct {
                             // search, so it answers the predicate itself.
                             if (fts_candidate_count == 1) {
                                 self.fts_seeks[slot] = fts_candidates[0][0];
+                                self.fts_seek_ops[slot] = seek;
                                 self.fts_seek_mask |= @as(u16, 1) << @intCast(slot);
                             }
                             break :blk seek.operator();
@@ -1877,7 +1881,10 @@ pub const QueryPlanner = struct {
             // The MATCH already seeks this very search for the variable, and
             // every row it gives matches: searching again filters nothing
             // out. It used to run the whole search a second time.
-            if (self.seekAnswers(fts_info)) return input_op;
+            if (self.seekAnswers(fts_info)) {
+                self.boundSeek(input_op, fts_info, limit_hint);
+                return input_op;
+            }
             return self.planFtsSearch(input_op, &[_]FtsSearchInfo{fts_info});
         }
         {
@@ -1912,6 +1919,45 @@ pub const QueryPlanner = struct {
         // would; the seek's is the one its pattern's labels name.
         const resolved = self.resolveFtsIndex(info) catch return false;
         return resolved.kind == seek.kind and std.mem.eql(u8, resolved.scope, seek.scope);
+    }
+
+    /// Let the RETURN's LIMIT bound the seek that answers the WHERE, when
+    /// its rows reach the LIMIT one for one (nothing between the seek and
+    /// the WHERE) and in the seek's order: no ORDER BY, or `score(x)`
+    /// descending for the seek's variable. The seek then keeps the best
+    /// SKIP + LIMIT matches (an exact top k) instead of every match.
+    fn boundSeek(self: *Self, input_op: Operator, info: FtsSearchInfo, hint: VectorLimitHint) void {
+        const slot = info.variable_slot orelse return;
+        const seek = self.fts_seek_ops[slot];
+        if (input_op.ptr != @as(*anyopaque, @ptrCast(seek))) return;
+        const limit = hint.limit orelse return;
+        if (hint.order) |order| {
+            if (!self.orderFollowsScore(order, hint.ret, slot)) return;
+        }
+        seek.bound = .{ .limit = limit, .skip = hint.skip };
+        self.fts_bounded_seeks += 1;
+    }
+
+    /// Whether `order` is one descending `score(x)` for the variable in
+    /// `slot`, or the alias of a RETURN item that is.
+    fn orderFollowsScore(self: *Self, order: *const ast.OrderByClause, ret: ?*const ast.ReturnClause, slot: u8) bool {
+        if (order.items.len != 1 or !order.items[0].descending) return false;
+        var expr = order.items[0].expression;
+        if (expr.* == .variable) {
+            const r = ret orelse return false;
+            const name = expr.variable.name;
+            expr = for (r.items) |item| {
+                if (item.alias) |alias| {
+                    if (std.mem.eql(u8, alias, name)) break item.expression;
+                }
+            } else return false;
+        }
+        if (expr.* != .function_call) return false;
+        const call = expr.function_call;
+        if (!std.ascii.eqlIgnoreCase(call.name, "score") or call.arguments.len != 1) return false;
+        const arg = call.arguments[0];
+        if (arg.* != .variable) return false;
+        return self.getSlot(arg.variable.name) == slot;
     }
 
     fn optionalEql(a: ?[]const u8, b: ?[]const u8) bool {

@@ -255,6 +255,8 @@ pub const QueryPlanner = struct {
         /// The same from a relationship type's property index: the
         /// relationships whose property lies in a range or equals a value.
         edge_range_scan,
+        /// Straight to the nodes `WHERE id(n) = k` or `id(n) IN [...]` names.
+        node_id_seek,
     };
 
     const Self = @This();
@@ -1235,6 +1237,17 @@ pub const QueryPlanner = struct {
                     // Determine if we need to create a scan or filter
                     const is_target_of_edge = prev_node_slot != null and op != null;
 
+                    // `WHERE id(n) = k` names the node outright: read it, and
+                    // nothing else, whatever indexes the pattern could use.
+                    // Not beside a vector or full-text search, which plans its
+                    // own access path from the WHERE.
+                    const id_seek: ?IdSeek = blk: {
+                        const variable_name = node_var_name orelse break :blk null;
+                        const condition = where_hint orelse break :blk null;
+                        if (hasSearchConjunct(condition)) break :blk null;
+                        break :blk findWhereIdSeek(variable_name, condition);
+                    };
+
                     if (is_target_of_edge or (bound_slot != null and op != null)) {
                         // The node comes from the input: the target of an
                         // Expand, or a node bound earlier. Labels the pattern
@@ -1273,7 +1286,7 @@ pub const QueryPlanner = struct {
                         const database = self.storage.database orelse return PlannerError.MissingStorage;
                         var scan_label_index: usize = 0;
                         var indexed_property: ?IndexedProperty = null;
-                        if (node_pattern.properties) |properties| {
+                        if (id_seek == null) if (node_pattern.properties) |properties| {
                             search: for (node_pattern.labels, 0..) |label_name, label_idx| {
                                 for (properties) |property| {
                                     if (!isIndependentExpression(property.value)) continue;
@@ -1287,8 +1300,8 @@ pub const QueryPlanner = struct {
                                     }
                                 }
                             }
-                        }
-                        if (indexed_property == null) {
+                        };
+                        if (indexed_property == null and id_seek == null) {
                             if (node_var_name) |variable_name| {
                                 if (where_hint) |condition| {
                                     if (self.findWherePropertyIndex(
@@ -1311,7 +1324,7 @@ pub const QueryPlanner = struct {
                         // rather than sitting on top of one.
                         var fts_candidates: [MAX_FTS_DISJUNCTS][]const fts_ops.Search = undefined;
                         var fts_candidate_count: usize = 0;
-                        if (indexed_property == null) {
+                        if (indexed_property == null and id_seek == null) {
                             if (node_var_name) |variable_name| {
                                 if (where_hint) |condition| {
                                     var seek_infos: [MAX_FTS_DISJUNCTS]FtsSearchInfo = undefined;
@@ -1363,7 +1376,7 @@ pub const QueryPlanner = struct {
 
                         // An ordered index answers ranges, and reads in order.
                         var range_choice: ?RangeChoice = null;
-                        if (indexed_property == null and fts_candidate_count == 0) {
+                        if (indexed_property == null and fts_candidate_count == 0 and id_seek == null) {
                             if (node_var_name) |variable_name| {
                                 range_choice = try self.chooseRangeScan(variable_name, node_pattern.labels, where_hint, op == null);
                                 if (range_choice) |choice| scan_label_index = choice.label_index;
@@ -1376,7 +1389,12 @@ pub const QueryPlanner = struct {
                             else => return PlannerError.InternalError,
                         };
 
-                        var new_op: Operator = if (fts_candidate_count > 0) blk: {
+                        var new_op: Operator = if (id_seek) |seek| blk: {
+                            const id_scan = scan_ops.NodeIdSeek.init(self.allocator, slot, seek.value, seek.list, database) catch
+                                return PlannerError.OutOfMemory;
+                            self.last_scan_kind = .node_id_seek;
+                            break :blk id_scan.operator();
+                        } else if (fts_candidate_count > 0) blk: {
                             const owned = self.allocator.alloc([]const fts_ops.Search, fts_candidate_count) catch {
                                 return PlannerError.OutOfMemory;
                             };
@@ -1429,9 +1447,10 @@ pub const QueryPlanner = struct {
                             break :blk label_scan.operator();
                         };
 
-                        // Chain filters for additional labels (AND semantics)
+                        // Chain filters for additional labels (AND semantics);
+                        // a seek by id guarantees none of them.
                         for (node_pattern.labels, 0..) |label_name, label_idx| {
-                            if (label_idx == scan_label_index) continue;
+                            if (label_idx == scan_label_index and id_seek == null) continue;
                             const extra_id = symbol_table.lookup(label_name) catch |err| switch (err) {
                                 symbols.SymbolError.NotFound => symbols.NULL_SYMBOL,
                                 else => return PlannerError.InternalError,
@@ -1450,6 +1469,20 @@ pub const QueryPlanner = struct {
                             op = cross.operator();
                         } else {
                             op = new_op;
+                        }
+                    } else if (id_seek) |seek| {
+                        // No labels: the seek alone, or crossed with what came before.
+                        const database = self.storage.database orelse return PlannerError.MissingStorage;
+                        const id_scan = scan_ops.NodeIdSeek.init(self.allocator, slot, seek.value, seek.list, database) catch
+                            return PlannerError.OutOfMemory;
+                        self.last_scan_kind = .node_id_seek;
+                        if (op) |existing_op| {
+                            const cross = cross_product_ops.CrossProduct.init(self.allocator, existing_op, id_scan.operator()) catch {
+                                return PlannerError.OutOfMemory;
+                            };
+                            op = cross.operator();
+                        } else {
+                            op = id_scan.operator();
                         }
                     } else if (op == null) {
                         // All nodes scan (no labels, no previous operator)
@@ -1965,6 +1998,53 @@ pub const QueryPlanner = struct {
 
         out[count.*] = info;
         count.* += 1;
+    }
+
+    const IdSeek = struct {
+        value: *const ast.Expression,
+        /// `id(n) IN list` rather than `id(n) = value`.
+        list: bool,
+    };
+
+    /// Whether `expr` is `id(variable_name)`.
+    fn isIdOf(variable_name: []const u8, expr: *const ast.Expression) bool {
+        const call = switch (expr.*) {
+            .function_call => |call| call,
+            else => return false,
+        };
+        if (!std.ascii.eqlIgnoreCase(call.name, "id") or call.arguments.len != 1) return false;
+        return switch (call.arguments[0].*) {
+            .variable => |variable| std.mem.eql(u8, variable.name, variable_name),
+            else => false,
+        };
+    }
+
+    /// A conjunct of the WHERE that names the node by id: `id(n) = v`,
+    /// `v = id(n)` or `id(n) IN list`, with `v` and `list` not depending on
+    /// the row. The condition stays in the WHERE; this only picks the nodes
+    /// to look at.
+    fn findWhereIdSeek(variable_name: []const u8, expr: *const ast.Expression) ?IdSeek {
+        const binary = switch (expr.*) {
+            .binary => |binary| binary,
+            else => return null,
+        };
+        switch (binary.operator) {
+            .and_ => return findWhereIdSeek(variable_name, binary.left) orelse
+                findWhereIdSeek(variable_name, binary.right),
+            .eq => {
+                if (isIdOf(variable_name, binary.left) and isIndependentExpression(binary.right))
+                    return .{ .value = binary.right, .list = false };
+                if (isIdOf(variable_name, binary.right) and isIndependentExpression(binary.left))
+                    return .{ .value = binary.left, .list = false };
+                return null;
+            },
+            .in_ => {
+                if (isIdOf(variable_name, binary.left) and isIndependentExpression(binary.right))
+                    return .{ .value = binary.right, .list = true };
+                return null;
+            },
+            else => return null,
+        }
     }
 
     fn findWherePropertyIndex(

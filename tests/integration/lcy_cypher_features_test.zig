@@ -1125,4 +1125,37 @@ test "lcy: the new constructs give the same rows over ordered index scans" {
         "MATCH (m:Q) RETURN m.id AS a, COUNT { MATCH (x)-[r:R]->(y) WHERE r.k = m.w } AS c ORDER BY a",
         "MATCH (a)-[r:R]->(b) WHERE r.k > 8 RETURN count(*) AS c, sum(r.k) AS s",
     }) |q| try expectSameWithIndex(indexed, plain, q);
+
+    // A node named by id is read alone, under each construct: the same rows
+    // as the query written so that it cannot be (`id(a) + 0`), which scans.
+    try std.testing.expectEqual(Kind.node_id_seek, try planScanKind(indexed, "MATCH (a:P) WHERE id(a) IN [3, 4] RETURN a"));
+    for ([_][]const u8{
+        "MATCH (a:P) WHERE id(a) IN [3, 4, 9] RETURN a.id AS a, CASE WHEN a.v > 40 THEN 'hi' ELSE 'lo' END AS b",
+        "OPTIONAL MATCH (a:P) WHERE id(a) = 100000 RETURN a.id AS a",
+        "MATCH (m:Q) OPTIONAL MATCH (a:P) WHERE id(a) = 5 AND a.w = m.w RETURN m.id AS x, a.id AS a ORDER BY x",
+        "MATCH (a:P) WHERE id(a) = 3 RETURN a.id AS a UNION MATCH (a:Q) WHERE id(a) IN [81, 82] RETURN a.id AS a",
+        "MATCH (a:P) WHERE id(a) IN [3, 4, 5] RETURN a.id AS a, [(a)-[:R]->(m) | m.id] AS ms, COUNT { (a)--() } AS c",
+        "MATCH (a:P) WHERE id(a) IN [2, 3, 4, 5, 6] AND EXISTS { (a)-[:S]->(:Q) } RETURN a.id AS a",
+        "MATCH p = (a:P)-[:R]->(m)-[:R]->(o) WHERE id(a) = 7 RETURN length(p) AS l, [x IN nodes(p) | x.id] AS ids",
+        "MATCH (a:P) WHERE id(a) IN [7, 8] WITH a MATCH (a)-[r:R]->(b) WHERE r.k > 2 RETURN a.id AS a, b.id AS b ORDER BY a",
+        "MATCH (a:P) WHERE id(a) IN range(1, 30) AND a.v > 50 RETURN a.id AS a ORDER BY a.v DESC LIMIT 3",
+        "MATCH (m:Q) RETURN m.id AS x, COUNT { MATCH (a:P) WHERE id(a) IN [1, 2, 3] AND a.w = m.w } AS c ORDER BY x",
+    }) |q| {
+        const scan_form = try std.mem.replaceOwned(u8, std.testing.allocator, q, "id(a)", "(id(a) + 0)");
+        defer std.testing.allocator.free(scan_form);
+        for ([_]*Database{ indexed, plain }) |db| {
+            var seek = try db.query(q);
+            defer seek.deinit();
+            var scan = try db.query(scan_form);
+            defer scan.deinit();
+            const a = try render(seek);
+            defer std.testing.allocator.free(a);
+            const b = try render(scan);
+            defer std.testing.allocator.free(b);
+            if (!std.mem.eql(u8, a, b)) {
+                std.debug.print("\nquery: {s}\nseek:\n{s}\nscan:\n{s}\n", .{ q, a, b });
+                return error.TestExpectedEqual;
+            }
+        }
+    }
 }

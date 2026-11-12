@@ -1291,3 +1291,129 @@ test "lgr: indexes in an older encoding are rebuilt in place and then answer ran
     try compareAll(indexed, plain, null, null);
     try compareEdgeRanges(indexed, plain, null, null);
 }
+
+/// A query that seeks by id against the same query written so that it
+/// cannot (`id(n) + 0`): the same rows in the same order.
+fn expectSeekAnswersAsScan(db: *Database, txn: ?*lattice.transaction.manager.Transaction, cypher: []const u8) !void {
+    const scan_form = try std.mem.replaceOwned(u8, std.testing.allocator, cypher, "id(a)", "(id(a) + 0)");
+    defer std.testing.allocator.free(scan_form);
+    var a = try db.queryInTxn(txn, cypher);
+    defer a.deinit();
+    var b = try db.queryInTxn(txn, scan_form);
+    defer b.deinit();
+    const ra = try render(a);
+    defer std.testing.allocator.free(ra);
+    const rb = try render(b);
+    defer std.testing.allocator.free(rb);
+    if (!std.mem.eql(u8, ra, rb)) {
+        std.debug.print("query: {s}\nseek:\n{s}\nscan:\n{s}\n", .{ cypher, ra, rb });
+        return error.TestExpectedEqual;
+    }
+}
+
+const id_seek_queries = [_][]const u8{
+    "MATCH (a) WHERE id(a) = 5 RETURN id(a), a.id",
+    "MATCH (a:P) WHERE id(a) = 5 RETURN id(a)",
+    "MATCH (a:Q) WHERE id(a) = 5 RETURN id(a)",
+    "MATCH (a:P:Q) WHERE id(a) = 6 RETURN id(a)",
+    "MATCH (a:Q:P) WHERE id(a) IN [6, 7, 8] RETURN id(a)",
+    "MATCH (a) WHERE 7 = id(a) RETURN id(a)",
+    "MATCH (a) WHERE id(a) = 7.0 RETURN id(a)",
+    "MATCH (a) WHERE id(a) = 7.5 RETURN id(a)",
+    "MATCH (a) WHERE id(a) = -1 RETURN id(a)",
+    "MATCH (a) WHERE id(a) = null RETURN id(a)",
+    "MATCH (a) WHERE id(a) = '7' RETURN id(a)",
+    "MATCH (a) WHERE id(a) = 100000 RETURN id(a)",
+    "MATCH (a) WHERE id(a) IN [9, 3, 3, 100000, -1, 4.0, null, 'x', 2.5] RETURN id(a)",
+    "MATCH (a) WHERE id(a) IN [] RETURN id(a)",
+    "MATCH (a) WHERE id(a) IN null RETURN id(a)",
+    "MATCH (a) WHERE id(a) = 5 AND a.id > 100 RETURN id(a)",
+    "MATCH (a) WHERE a.id >= 0 AND id(a) IN [5, 6] RETURN id(a)",
+    "MATCH (a) WHERE id(a) = 5 OR id(a) = 6 RETURN id(a)",
+    "MATCH (a)-[r:KNOWS]->(b) WHERE id(a) = 5 RETURN id(r), id(b)",
+    "MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c) WHERE id(a) = 5 RETURN id(b), id(c)",
+    "MATCH (a:P)<-[r]-(b) WHERE id(a) IN [5, 13] RETURN id(a), id(r), id(b)",
+    "MATCH p = (a)-[:KNOWS]->(b) WHERE id(a) = 5 RETURN length(p), id(b)",
+    "MATCH (x {id: 2}), (a) WHERE id(a) IN [5, 6] RETURN x.id, id(a)",
+    "MATCH (a) WHERE id(a) = 5 MATCH (b) WHERE id(b) = 6 RETURN id(a), id(b)",
+    "OPTIONAL MATCH (a) WHERE id(a) = 100000 RETURN a",
+    "MATCH (x {id: 3}) OPTIONAL MATCH (a) WHERE id(a) = 100000 RETURN x.id, a",
+    "MATCH (a) WHERE id(a) = 5 RETURN a.id UNION MATCH (a) WHERE id(a) = 6 RETURN a.id",
+    "MATCH (a) WHERE id(a) IN [5, 6] RETURN id(a), COUNT { MATCH (a)-[:KNOWS]->(b) } AS out",
+    "MATCH (a) WHERE id(a) IN [5, 6, 7] RETURN id(a) ORDER BY a.id DESC LIMIT 2",
+};
+
+test "lgr: WHERE id(n) = k reads that node instead of every node" {
+    const path = "/tmp/lgr_id_seek.ltdb";
+    defer removeFiles(path);
+    var db = try openDb(path, true);
+    defer db.close();
+
+    var nodes: [40]u64 = undefined;
+    {
+        var txn = try db.beginTransaction(.read_write);
+        for (&nodes, 0..) |*n, i| {
+            n.* = try db.createNode(&txn, if (i % 3 == 0) &.{"P"} else if (i % 3 == 1) &.{ "P", "Q" } else &.{});
+            try db.setNodeProperty(&txn, n.*, "id", .{ .int_val = @intCast(i) });
+        }
+        try fillEdges(db, &txn, &nodes, 200, 0);
+        try db.commitTransaction(&txn);
+    }
+    {
+        var result = try db.query("MATCH (n) WHERE id(n) = 3 DETACH DELETE n");
+        result.deinit();
+    }
+
+    const Kind = lattice.query.planner.QueryPlanner.ScanKind;
+    try std.testing.expectEqual(Kind.node_id_seek, try planScanKind(db, "MATCH (a) WHERE id(a) = 5 RETURN a"));
+    try std.testing.expectEqual(Kind.node_id_seek, try planScanKind(db, "MATCH (a:P) WHERE id(a) IN [1, 2] RETURN a"));
+    try std.testing.expectEqual(Kind.node_id_seek, try planScanKind(db, "MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c) WHERE id(a) = $k RETURN c"));
+    try std.testing.expectEqual(Kind.none, try planScanKind(db, "MATCH (a) WHERE id(a) + 0 = 5 RETURN a"));
+    try std.testing.expectEqual(Kind.label_scan, try planScanKind(db, "MATCH (a:P) WHERE id(a) = 5 OR a.id = 1 RETURN a"));
+
+    for (id_seek_queries) |cypher| try expectSeekAnswersAsScan(db, null, cypher);
+
+    // A parameter, and a list of them.
+    var params = std.StringHashMap(PropertyValue).init(std.testing.allocator);
+    defer params.deinit();
+    try params.put("k", .{ .int_val = @intCast(nodes[5]) });
+    {
+        var result = try db.queryWithParams("MATCH (a) WHERE id(a) = $k RETURN a.id", &params);
+        defer result.deinit();
+        try std.testing.expectEqual(@as(usize, 1), result.rows.len);
+        try std.testing.expectEqual(@as(i64, 5), result.rows[0].values[0].int_val);
+    }
+
+    // Inside a transaction that created, deleted and relabelled nodes.
+    var txn = try db.beginTransaction(.read_write);
+    const created = try db.createNode(&txn, &.{"P"});
+    try db.setNodeProperty(&txn, created, "id", .{ .int_val = 99 });
+    _ = try db.createEdgeAndGetId(&txn, created, nodes[5], "KNOWS");
+    {
+        var result = try db.queryInTxn(&txn, "MATCH (n) WHERE n.id = 6 DETACH DELETE n");
+        result.deinit();
+    }
+    try db.removeNodeLabel(&txn, nodes[7], "Q");
+    var buf: [128]u8 = undefined;
+    const in_txn = [_][]const u8{
+        try std.fmt.bufPrint(&buf, "MATCH (a)-[:KNOWS]->(b) WHERE id(a) IN [{d}, 6, 7, 5] RETURN id(a), a.id, id(b)", .{created}),
+        "MATCH (a:Q) WHERE id(a) IN [6, 7, 8] RETURN id(a)",
+        "MATCH (a) WHERE id(a) = 3 RETURN id(a)",
+        "MATCH (a) WHERE id(a) IN [6, 7, 8] RETURN id(a), a.id",
+    };
+    for (in_txn) |cypher| try expectSeekAnswersAsScan(db, &txn, cypher);
+    {
+        var result = try db.queryInTxn(&txn, in_txn[0]);
+        defer result.deinit();
+        try std.testing.expect(result.rows.len > 0);
+    }
+
+    // A query that writes: it reads the named node once, before its writes.
+    {
+        var result = try db.queryInTxn(&txn, "MATCH (a) WHERE id(a) IN [5, 8] SET a.seen = true CREATE (:P {id: 1000}) RETURN id(a)");
+        defer result.deinit();
+        try std.testing.expectEqual(@as(usize, 2), result.rows.len);
+    }
+    try db.commitTransaction(&txn);
+    try expectSeekAnswersAsScan(db, null, "MATCH (a) WHERE id(a) IN [5, 6, 8] RETURN id(a), a.seen");
+}

@@ -176,6 +176,19 @@ index covers an equality on the pattern's label (inline `{k: v}` or a `WHERE`
 equality right after the `MATCH`). It evaluates the value once at open and
 reads the matching ids from the index.
 
+**NodeIdSeek**: Used when the `WHERE` right after the `MATCH` has, among
+its `AND`ed conditions, `id(n) = v`, `v = id(n)` or `id(n) IN list`, where `v`
+and `list` do not depend on the row (literals and parameters). It takes the
+place of every other scan for that node, labelled or not. At open it evaluates
+the value, takes every whole non-negative number in it as an id (so
+`id(n) = 3.0` finds node 3, as the comparison would), sorts and deduplicates
+them, and keeps those that exist as the transaction sees them. The condition
+stays in the `WHERE` and the pattern's labels are checked by `LabelFilter`s,
+so the seek only has to offer every node that could match. A `WHERE` with a
+vector or full-text search keeps its own access path. On 100,000 nodes and
+1,000,000 relationships, `MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c) WHERE id(a) =
+k` went from 1.17 s, expanding every node and filtering, to 10 µs.
+
 **IndexRangeScan** (`index_range_scan.zig`): Used when no equality applies and
 the `WHERE` right after the `MATCH` compares an indexed property of the
 pattern's node with a value that does not depend on the row (`<`, `<=`, `>`,

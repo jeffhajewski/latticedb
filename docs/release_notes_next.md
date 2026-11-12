@@ -663,6 +663,19 @@ release without and with the index:
 Without statistics, the planner always reads a range from the index; the last
 row shows that even a range that holds every node is no slower.
 
+**`WHERE id(n) = k` reads that node.** A `WHERE` right after the `MATCH`
+that names a node by `id(n) = k`, `id(n) = $param` or `id(n) IN [...]`
+(alone or under `AND`) reads those nodes from the node tree instead of
+scanning every node, or every node with the label, and expands from there.
+100,000 nodes, 1,000,000 relationships, release build, median of seven:
+
+| query | before | after |
+|---|---:|---:|
+| `MATCH (a) WHERE id(a) = 1234 RETURN a.id` | 4.4 ms | 0.001 ms |
+| `MATCH (a:N) WHERE id(a) IN [...8 ids] RETURN count(a)` | 7.7 ms | 0.003 ms |
+| `MATCH (a)-[:KNOWS]->(b) WHERE id(a) = 1234 RETURN count(b)` | 35 ms | 0.003 ms |
+| `MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c) WHERE id(a) = 1234 RETURN count(c)` | 1,170 ms | 0.010 ms |
+
 **Relationship property indexes answer Cypher.** They were used only by the
 `find_edges_by_type_property` calls. A pattern that starts from one
 relationship type, `MATCH (a)-[r:KNOWS]->(b)`, now reads the type's index for

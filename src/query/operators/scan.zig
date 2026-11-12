@@ -3,6 +3,8 @@
 //! Provides operators for scanning nodes:
 //! - AllNodesScan: Scans all nodes in the graph
 //! - LabelScan: Scans nodes with a specific label
+//! - PropertyIndexScan: The nodes an equality index names
+//! - NodeIdSeek: The nodes `WHERE id(n) = k` or `id(n) IN [...]` names
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -461,6 +463,134 @@ pub const PropertyIndexScan = struct {
 };
 
 // ============================================================================
+// NodeIdSeek Operator
+// ============================================================================
+
+/// The nodes `WHERE id(n) = k` or `WHERE id(n) IN [...]` names, read
+/// straight from the node tree rather than by scanning every node.
+///
+/// The value is evaluated once when the scan opens, so it may be a literal,
+/// a parameter or a list of them. Every number that is a whole non-negative
+/// value names an id (`id(n) = 3.0` holds for node 3, as Cypher compares);
+/// anything else names none. The ids are visited ascending, once each, and
+/// only those that exist as the transaction sees them. The WHERE keeps the
+/// condition and checks each row, and the pattern's labels are checked by
+/// filters above, so the seek only has to offer every node that could match.
+pub const NodeIdSeek = struct {
+    output_slot: u8,
+    value_expression: *const ast.Expression,
+    /// `IN`: the value is a list of ids rather than one.
+    list: bool,
+    database: *Database,
+    allocator: Allocator,
+    node_ids: std.ArrayList(NodeId) = .empty,
+    current_index: usize = 0,
+    current_row: ?*Row = null,
+
+    const Self = @This();
+
+    pub fn init(
+        allocator: Allocator,
+        output_slot: u8,
+        value_expression: *const ast.Expression,
+        list: bool,
+        database: *Database,
+    ) !*Self {
+        const self = try allocator.create(Self);
+        self.* = .{
+            .output_slot = output_slot,
+            .value_expression = value_expression,
+            .list = list,
+            .database = database,
+            .allocator = allocator,
+        };
+        return self;
+    }
+
+    pub fn operator(self: *Self) Operator {
+        return .{ .vtable = &vtable, .ptr = self };
+    }
+
+    const vtable = Operator.VTable{
+        .open = open,
+        .next = next,
+        .close = close,
+        .deinit = deinit,
+    };
+
+    /// The node id a value names, if any.
+    fn idOf(value: expression.EvalResult) ?NodeId {
+        return switch (value) {
+            .int_val => |i| if (i >= 0) @intCast(i) else null,
+            .float_val => |f| if (std.math.isFinite(f) and f >= 0 and f < 0x1p64 and @trunc(f) == f)
+                @intFromFloat(f)
+            else
+                null,
+            else => null,
+        };
+    }
+
+    fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.current_row = ctx.allocRow() catch return OperatorError.OutOfMemory;
+        self.node_ids.clearRetainingCapacity();
+        self.current_index = 0;
+
+        var evaluator = expression.ExpressionEvaluator.init(ctx.row_arena.allocator());
+        const empty_row = Row.init();
+        const value = evaluator.evaluate(self.value_expression, &empty_row, ctx) catch |err| return switch (err) {
+            error.OutOfMemory => OperatorError.OutOfMemory,
+            error.StorageError => OperatorError.StorageError,
+            else => OperatorError.EvaluationError,
+        };
+        if (self.list) {
+            switch (value) {
+                .list_val => |items| for (items) |item| {
+                    if (idOf(item)) |id| self.node_ids.append(self.allocator, id) catch return OperatorError.OutOfMemory;
+                },
+                else => {},
+            }
+        } else if (idOf(value)) |id| {
+            self.node_ids.append(self.allocator, id) catch return OperatorError.OutOfMemory;
+        }
+
+        std.mem.sort(NodeId, self.node_ids.items, {}, std.sort.asc(NodeId));
+        var kept: usize = 0;
+        for (self.node_ids.items) |id| {
+            if (kept > 0 and self.node_ids.items[kept - 1] == id) continue;
+            const visible = self.database.nodeVisibleInTxn(ctx.txn, id) catch |err|
+                return ctx.storageFailure(err, "reading node {d}", .{id});
+            if (!visible) continue;
+            self.node_ids.items[kept] = id;
+            kept += 1;
+        }
+        self.node_ids.shrinkRetainingCapacity(kept);
+    }
+
+    fn next(ptr: *anyopaque, _: *ExecutionContext) OperatorError!?*Row {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        const row = self.current_row orelse return OperatorError.NotInitialized;
+        if (self.current_index >= self.node_ids.items.len) return null;
+        const node_id = self.node_ids.items[self.current_index];
+        self.current_index += 1;
+        row.clear();
+        row.setSlot(self.output_slot, .{ .node_ref = node_id });
+        return row;
+    }
+
+    fn close(ptr: *anyopaque, _: *ExecutionContext) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.node_ids.clearRetainingCapacity();
+    }
+
+    fn deinit(ptr: *anyopaque, allocator: Allocator) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.node_ids.deinit(self.allocator);
+        allocator.destroy(self);
+    }
+};
+
+// ============================================================================
 // Tests
 // ============================================================================
 
@@ -480,6 +610,18 @@ test "LabelScan basic structure" {
     try std.testing.expect(@TypeOf(vtable.next) != void);
     try std.testing.expect(@TypeOf(vtable.close) != void);
     try std.testing.expect(@TypeOf(vtable.deinit) != void);
+}
+
+test "NodeIdSeek takes whole non-negative numbers as ids" {
+    try std.testing.expectEqual(@as(?NodeId, 3), NodeIdSeek.idOf(.{ .int_val = 3 }));
+    try std.testing.expectEqual(@as(?NodeId, 3), NodeIdSeek.idOf(.{ .float_val = 3.0 }));
+    try std.testing.expectEqual(@as(?NodeId, 0), NodeIdSeek.idOf(.{ .float_val = -0.0 }));
+    try std.testing.expectEqual(@as(?NodeId, null), NodeIdSeek.idOf(.{ .float_val = 3.5 }));
+    try std.testing.expectEqual(@as(?NodeId, null), NodeIdSeek.idOf(.{ .int_val = -1 }));
+    try std.testing.expectEqual(@as(?NodeId, null), NodeIdSeek.idOf(.{ .float_val = std.math.nan(f64) }));
+    try std.testing.expectEqual(@as(?NodeId, null), NodeIdSeek.idOf(.{ .float_val = 0x1p64 }));
+    try std.testing.expectEqual(@as(?NodeId, null), NodeIdSeek.idOf(.{ .string_val = "3" }));
+    try std.testing.expectEqual(@as(?NodeId, null), NodeIdSeek.idOf(.{ .null_val = {} }));
 }
 
 test "PropertyIndexScan basic structure" {

@@ -34,6 +34,30 @@ MATCH (n:Person)
 RETURN id(n), n.name
 ```
 
+A `WHERE` right after the `MATCH` that names the node by id, `id(n) = 42`,
+`id(n) = $id` or `id(n) IN [1, 2, 3]` (alone or joined to other conditions
+by `AND`), reads those nodes directly instead of scanning every node or
+every node with the label, and expands from there:
+
+```cypher
+MATCH (a:Person)-[:KNOWS]->(b)-[:KNOWS]->(c)
+WHERE id(a) = 1
+RETURN b.name, c.name
+```
+
+```text
+┌─────────┬────────┐
+│ b.name  │ c.name │
+├─────────┼────────┤
+│ "Bob"   │ "Alan" │
+│ "Carol" │ "Alan" │
+└─────────┴────────┘
+```
+
+The id must be written as a value, a parameter or a list of them; a
+condition such as `id(n) = m.ref` that depends on another node is checked
+row by row.
+
 ## coalesce()
 
 Returns the first non-null argument:

@@ -30,6 +30,11 @@ export const enum LatticeErrorCode {
   HasRelationships = -17,
   /** Open options contradict the vector index the database file records. */
   ConfigMismatch = -18,
+  /**
+   * The file was written by a newer release that does not let this one write
+   * it. It opens with readOnly: true; a writable open writes nothing.
+   */
+  NeedsNewerWriter = -19,
 }
 
 /**

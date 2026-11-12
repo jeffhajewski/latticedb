@@ -152,6 +152,35 @@ describeIfNative('open options v5, detach delete and edge endpoints', () => {
     }
   });
 
+  test('a file marked for newer writers opens only read-only', async () => {
+    const dbPath = path.join(dir, 'newer-writer.db');
+    const db = new Database(dbPath, { create: true });
+    await db.open();
+    await db.write(async (txn) => {
+      await txn.createNode({ labels: ['Old'] });
+    });
+    await db.close();
+
+    // min_writer_version is a little-endian u16 at byte 222 of the header.
+    const fd = fs.openSync(dbPath, 'r+');
+    try {
+      fs.writeSync(fd, Buffer.from([5, 0]), 0, 2, 222);
+    } finally {
+      fs.closeSync(fd);
+    }
+
+    expect(await codeOf(new Database(dbPath).open())).toBe(LatticeErrorCode.NeedsNewerWriter);
+
+    const reader = new Database(dbPath, { readOnly: true });
+    await reader.open();
+    try {
+      const result = await reader.query('MATCH (n:Old) RETURN count(n) AS c');
+      expect(Number(result.rows[0]!.c)).toBe(1);
+    } finally {
+      await reader.close();
+    }
+  });
+
   test('a plain delete of a node with relationships is refused', async () => {
     const db = new Database(path.join(dir, 'del.db'), { create: true });
     await db.open();

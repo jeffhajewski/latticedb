@@ -2,6 +2,7 @@ package latticedb
 
 import (
 	"math"
+	"os"
 	"path/filepath"
 	"testing"
 )
@@ -218,5 +219,53 @@ func TestCreateEdgeToMissingNodeIsNotFound(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("update: %v", err)
+	}
+}
+
+func TestFileMarkedForNewerWritersOpensOnlyReadOnly(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "v5-newer-writer.db")
+	db, err := Open(dbPath, OpenOptions{Create: true})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if err := db.Update(func(tx *Tx) error {
+		_, err := tx.CreateNode(CreateNodeOptions{Labels: []string{"Old"}})
+		return err
+	}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// min_writer_version is a little-endian u16 at byte 222 of the header.
+	f, err := os.OpenFile(dbPath, os.O_RDWR, 0)
+	if err != nil {
+		t.Fatalf("open file: %v", err)
+	}
+	if _, err := f.WriteAt([]byte{5, 0}, 222); err != nil {
+		t.Fatalf("patch header: %v", err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatalf("close file: %v", err)
+	}
+
+	writable, err := Open(dbPath, OpenOptions{})
+	if err == nil {
+		writable.Close()
+	}
+	wantCode(t, "writable open", err, ErrorNeedsNewerWriter)
+
+	reader, err := Open(dbPath, OpenOptions{ReadOnly: true})
+	if err != nil {
+		t.Fatalf("read-only open: %v", err)
+	}
+	defer reader.Close()
+	result, err := reader.Query("MATCH (n:Old) RETURN count(n) AS c", nil)
+	if err != nil {
+		t.Fatalf("count: %v", err)
+	}
+	if got := result.Rows[0]["c"]; got != int64(1) {
+		t.Fatalf("count = %v, want 1", got)
 	}
 }

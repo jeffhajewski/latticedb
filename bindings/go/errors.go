@@ -34,6 +34,10 @@ const (
 	// database file records (dimensions, metric, VectorM or
 	// VectorEfConstruction).
 	ErrorConfigMismatch ErrorCode = ErrorCode(cgobridge.ErrorConfigMismatch)
+	// ErrorNeedsNewerWriter: the file was written by a newer release that
+	// does not let this one write it. It opens with ReadOnly set; a writable
+	// open writes nothing.
+	ErrorNeedsNewerWriter ErrorCode = ErrorCode(cgobridge.ErrorNeedsNewerWriter)
 )
 
 type QueryErrorStage int

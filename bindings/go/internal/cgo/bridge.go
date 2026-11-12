@@ -33,6 +33,7 @@ const (
 	ErrorDatabaseLocked   ErrorCode = -16
 	ErrorHasRelationships ErrorCode = -17
 	ErrorConfigMismatch   ErrorCode = -18
+	ErrorNeedsNewerWriter ErrorCode = -19
 )
 
 type QueryErrorStage int

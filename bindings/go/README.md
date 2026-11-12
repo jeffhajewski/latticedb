@@ -183,6 +183,7 @@ For a larger end-to-end example, see [examples/go](../../examples/go).
   `Tx.FindNodesByLabelProperty` or `Tx.FindEdgesByTypeProperty`. Lookup limits
   must be positive, and a missing index returns `ErrorUnsupported` rather than
   falling back to a scan.
+- A file that a newer release has marked as not writable by this one opens with `ReadOnly: true`; a writable `Open` returns `ErrorNeedsNewerWriter` and writes nothing.
 - Durable streams use explicit cursors: `DB.ReadStream`, `DB.GetStreamOffset`, `DB.Changes`, `Tx.PublishStream`, `Tx.SetStreamOffset`, and `Tx.TrimStream`.
 
 ## Embeddings

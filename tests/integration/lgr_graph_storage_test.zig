@@ -192,3 +192,30 @@ test "lgr: setting and removing properties in a transaction changes only that pr
     try std.testing.expectError(DatabaseError.NotFound, db.removeEdgePropertyById(&txn, 999, "a"));
     try db.abortTransaction(&txn);
 }
+
+test "lgr: an edge record with an unknown value tag is refused, not read as null" {
+    const path = "/tmp/lgr_edge_unknown_tag.ltdb";
+    defer removeFiles(path);
+    var db = try openDb(path, false);
+    defer db.close();
+
+    const a = try db.createNode(null, &.{"P"});
+    const b = try db.createNode(null, &.{"P"});
+    const edge_id = try db.createEdgeAndGetId(null, a, b, "R");
+    const key_id = try db.symbol_table.intern("w");
+
+    // source, target, type, one property: key id, then tag 0x2a, which no
+    // writer produces.
+    var record: [8 + 8 + 2 + 2 + 2 + 1]u8 = undefined;
+    std.mem.writeInt(u64, record[0..8], a, .little);
+    std.mem.writeInt(u64, record[8..16], b, .little);
+    std.mem.writeInt(u16, record[16..18], try db.symbol_table.lookup("R"), .little);
+    std.mem.writeInt(u16, record[18..20], 1, .little);
+    std.mem.writeInt(u16, record[20..22], key_id, .little);
+    record[22] = 0x2a;
+    var id_key: [8]u8 = undefined;
+    std.mem.writeInt(u64, &id_key, edge_id, .little);
+    try db.edge_store.edge_id_index.replace(&id_key, &record);
+
+    try std.testing.expectError(lattice.graph.edge.EdgeError.InvalidData, db.edge_store.getById(edge_id));
+}

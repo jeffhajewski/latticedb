@@ -17,8 +17,12 @@
 //! Edge ID index, keyed by the edge id as 8 little-endian bytes:
 //!   edge_id -> (source, target, type_id, properties)
 //!   0       -> the next edge id to hand out (ids start at 1)
+//! Little-endian keys sort by their lowest byte first, so a walk of this
+//! index is in a stable order that is not id order (256 before 2).
 //!
-//! This layout preserves efficient traversal while storing edge payload once.
+//! The payload is stored once. A property change rewrites only the record
+//! under the edge id (`replaceProperties`); the traversal keys change only
+//! when an edge is created or deleted.
 
 const std = @import("std");
 const lattice = @import("lattice");
@@ -268,8 +272,9 @@ pub const EdgeStore = struct {
         return null;
     }
 
-    /// Create a new edge between two nodes
-    /// Uses double-write pattern: outgoing stores payload, incoming stores empty payload.
+    /// Create a new edge between two nodes and return its id.
+    /// Writes both traversal keys (empty values) and the record under the
+    /// edge id, which is where the properties live.
     pub fn createAndGetId(
         self: *Self,
         source: NodeId,
@@ -1589,7 +1594,9 @@ fn deserializeValue(allocator: Allocator, reader: anytype) !PropertyValue {
             }
             break :blk PropertyValue{ .map_val = map };
         },
-        else => PropertyValue{ .null_val = {} },
+        // A tag no writer produces means the record is damaged; reading it
+        // as null would hand back a property that was never stored.
+        else => error.InvalidData,
     };
 }
 

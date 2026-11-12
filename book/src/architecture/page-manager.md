@@ -42,13 +42,13 @@ Fixed-size pages make the buffer pool trivial - every frame is the same size, no
 ### Page 0: File Header
 
 The first page is special - it contains metadata about the database. It is the
-`FileHeader` extern struct from `src/storage/page.zig` (200 bytes, all integers
+`FileHeader` extern struct from `src/storage/page.zig` (232 bytes, all integers
 little-endian); the rest of page 0 is zero.
 
 | Offset | Size | Field |
 |--------|------|-------|
 | 0–3 | 4 B | Magic number — `0x4C544442` (`"LTDB"`) |
-| 4–5 | 2 B | Format version (currently 3) |
+| 4–5 | 2 B | Format version (currently 4) |
 | 6–7 | 2 B | Minimum reader version |
 | 8–11 | 4 B | Page size |
 | 12–15 | 4 B | Flags |
@@ -69,10 +69,34 @@ little-endian); the rest of page 0 is zero.
 | 160–167 | 8 B | Modified timestamp |
 | 168–199 | 32 B | Application id |
 
+The first 200 bytes are the header 0.16.0 knows. Format 4 added the fields after
+them, behind a magic number of their own:
+
+| Offset | Size | Field |
+|--------|------|-------|
+| 200–203 | 4 B | Extension magic — `0x3458544C` (`"LTX4"`); anything else means the fields below are absent |
+| 204–205 | 2 B | Vector dimensions; 0 when no vector index is recorded |
+| 206 | 1 B | Vector metric: 1 cosine, 2 euclidean, 3 dot product |
+| 207 | 1 B | Reserved |
+| 208–215 | 8 B | `next_node_id`, the id the next node created gets; 0 when absent |
+| 216–217 | 2 B | HNSW `m`, connections per node |
+| 218–219 | 2 B | HNSW `m_max0`, connections on layer 0 (twice `m`) |
+| 220–221 | 2 B | HNSW `ef_construction` |
+| 222–223 | 2 B | Minimum writer version; 0 means no restriction |
+| 224–231 | 8 B | Reserved |
+
+0.16.0 copies only its own 200 bytes and writes the rest of page 0 as zeros, so after
+0.16.0 has written a file the extension magic no longer matches and the fields are
+ignored: the next open by this release finds the node id counter with one scan of
+the node tree, reads the vector configuration from the vector pages, and writes both
+back. That lets a file go back and forth between the two releases without either one
+trusting a value the other did not keep up to date.
+
 Key fields:
 
 - **Magic number**: Identifies this as a Lattice database file. Opening a random file will fail fast.
-- **Format version**: Allows future changes to the format
+- **Format version, minimum reader and minimum writer version**: see
+  [Format Versions](#format-versions) below
 - **Freelist head**: Points to the first free page (for allocation)
 - **Tree roots**: The root page of each of the engine's B+Trees (nodes, edges,
   labels, symbols, FTS, HNSW, streams, property indexes), indexed by `TreeIndex`.
@@ -81,6 +105,17 @@ Key fields:
 - **Checkpoint sequence**: Incremented by every checkpoint that truncates the WAL,
   so anything following the log can tell frame 40 of one run from frame 40 of the next
 - **File UUID**: Unique identifier, used to match WAL files
+- **Node id counter**: written with every flush, in the same header image as the
+  node tree pages it describes, so opening needs no scan and a committed node's id
+  is never handed out again, even after the node is deleted. Ids handed out by a
+  transaction that rolled back, or that had not committed when the process died,
+  can be handed out again.
+- **Vector index configuration**: dimensions, metric and HNSW parameters, recorded
+  from the moment the index exists. A database that has a vector index opens with
+  it whatever the open options say, and options that contradict it are refused
+  with `VectorConfigMismatch` before anything is read. An index added to an existing
+  file is written to the header at that open, so the log can never hold vector
+  records for an index the file does not record.
 
 The header page is written raw: unlike every other page it has no page header and
 no checksum. Between flushes it changes only in memory; it reaches the file as the
@@ -245,10 +280,16 @@ the page header — so the page type and flags in bytes 0–1 are not covered.
 2. **Detect torn writes**: Partial page writes from crashes
 3. **Validate reads**: Catch errors before using bad data
 
-The detection has two gaps worth knowing. A stored checksum of 0 means "not
-checked", and pages are allocated with a checksum of 0 until they are first written
-in a flush. And the header page has no checksum at all (the journal checksums its
-copy of it during a flush).
+Pages are allocated with a checksum of 0 until they are first written in a flush, so
+a stored checksum of 0 is accepted only for a page that is exactly what allocation
+writes: the free page type and every other byte zero. Any other page with a checksum
+of 0 fails verification. That is what catches damage that zeroed the first sector
+of a written page, checksum included.
+
+The detection has two gaps worth knowing. A page that is entirely zero still passes,
+since nothing tells it apart from a page allocated and never written; a B+Tree or
+overflow pointer to such a page reads it as an empty free page. And the header page
+has no checksum at all (the journal checksums its copy of it during a flush).
 
 ### Checksum Calculation
 
@@ -295,14 +336,17 @@ pub fn readPage(self: *Self, page_id: PageId, buf: []u8) !void {
     const header: *const PageHeader = @ptrCast(@alignCast(buf.ptr));
     const expected = calculateChecksum(buf[8..]);
 
-    if (header.checksum != expected and header.checksum != 0) {
+    // A mismatch passes only for a page as allocation writes it: type free,
+    // every other byte zero (checksum 0 included)
+    if (header.checksum != expected and !isUnsealedFreePage(buf)) {
         return error.ChecksumMismatch;
     }
 }
 ```
 
-Note: A stored checksum of 0 skips verification. Newly allocated pages carry 0
-until they are first written.
+The extra check runs only when the checksum does not match, so a read that verifies
+costs what it always did. Every page except a freshly allocated one has been sealed
+with its checksum by every release, so no file that opened before is refused.
 
 ## Read-Only Mode
 
@@ -328,8 +372,8 @@ Useful for:
 When it opens a file, before reading the header, the page manager looks for
 `<database>-journal`. If a flush was interrupted, the journal holds every page it
 was writing; a complete journal for this database is written in place and synced,
-and an incomplete one is discarded. A read-only open that finds a complete journal
-is refused, since it may not write the file to finish the flush. See
+and an incomplete one is discarded. A read-only open of the database applies the
+journal to an in-memory overlay of the file instead, and writes nothing. See
 [Recovery](./recovery.md#finishing-an-interrupted-flush).
 
 ## File Locking
@@ -341,12 +385,29 @@ wait. A reader is therefore refused while another process has the database open
 for writing. The `lock` option turns this off for filesystems where locking does
 not work; it does not make cross-process sharing safe.
 
-## Format Upgrades
+## Format Versions
 
-Opening a file whose format version is older than the engine's (3) **read-write**
-rewrites its header to the current format version and minimum reader version. That
-happens silently, and afterwards an older engine refuses the file with
-`VersionTooNew`. A read-only open leaves the header alone.
+The header has two gates for older releases:
+
+- **Minimum reader version.** A release whose format version is lower may not open
+  the file at all; the page manager refuses it with `VersionTooNew` (reported as an
+  I/O error through the C API).
+- **Minimum writer version.** A release whose format version is lower may open the
+  file read-only but not for writing. A writable open is refused with
+  `NeedsNewerWriter` (`LATTICE_ERROR_NEEDS_NEWER_WRITER`) before anything is
+  written; a read-only open works. 0 means no restriction.
+
+This release is format 4. A read-write open of an older file sets the format version
+to 4 and writes the format-4 fields; it never lowers either gate, and raises the
+minimum writer version to 4. The minimum reader version stays 3, so 0.16.0 can still
+open the file, unless the vector index is one 0.16.0 would misread (a metric other
+than cosine, or an `m` other than 16), in which case it is 4 and 0.16.0 refuses the
+file. `ef_construction` only affects how new vectors are inserted, so a non-default
+value does not lock 0.16.0 out. A read-only open changes nothing.
+
+0.16.0 predates the minimum writer version: it opens and writes a file that asks for
+a newer writer, and zeroes the field as it writes the header. So a later feature that
+must keep 0.16.0 from writing a file has to raise the minimum reader version as well.
 
 ## Error Handling
 
@@ -355,7 +416,8 @@ pub const PageManagerError = error{
     InvalidHeader,      // File header is malformed
     InvalidMagic,       // Not a Lattice database file
     InvalidPageSize,    // Page size outside 4096..65535
-    VersionTooNew,      // File created by newer version
+    VersionTooNew,      // A newer reader is needed (min_reader_version)
+    WriterVersionTooNew, // Writable open of a file that needs a newer writer
     ChecksumMismatch,   // Data corruption detected
     InvalidPageId,      // Page ID out of range
     PageNotAllocated,   // Accessing unallocated page

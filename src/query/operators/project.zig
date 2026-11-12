@@ -44,6 +44,9 @@ pub const Project = struct {
     output_row: ?*Row,
     /// Whether the input has been opened
     opened: bool,
+    /// Output slots whose item is the variable already in that slot
+    /// (`WITH d`), so a search's distance and score stay with the entity.
+    keeps_marks: u16 = 0,
 
     const Self = @This();
 
@@ -81,6 +84,13 @@ pub const Project = struct {
         // Allocate output row
         self.output_row = ctx.allocRow() catch return OperatorError.OutOfMemory;
 
+        self.keeps_marks = 0;
+        for (self.items) |item| {
+            if (item.expr.* == .variable and ctx.getVariableSlot(item.expr.variable.name) == item.output_slot) {
+                self.keeps_marks |= @as(u16, 1) << @intCast(item.output_slot);
+            }
+        }
+
         // Open the input operator
         try self.input.open(ctx);
         self.opened = true;
@@ -110,8 +120,14 @@ pub const Project = struct {
 
             // Copy distances and scores from input if this is a passthrough
             if (input_row.hasSlot(item.output_slot)) {
-                output_row.setDistance(item.output_slot, input_row.getDistance(item.output_slot));
-                output_row.setScore(item.output_slot, input_row.getScore(item.output_slot));
+                const s = item.output_slot;
+                output_row.distances[s] = input_row.distances[s];
+                output_row.scores[s] = input_row.scores[s];
+                // What a search measured stays with its entity only when the
+                // item is that variable, kept in its slot (`WITH d`).
+                if (self.keeps_marks & (@as(u16, 1) << @intCast(s)) != 0) {
+                    output_row.copySearchMarks(input_row, s);
+                }
             }
         }
 

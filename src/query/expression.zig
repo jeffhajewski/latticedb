@@ -120,6 +120,7 @@ pub const builtin_functions = [_]FunctionSpec{
     .{ .name = "type", .min_args = 1, .max_args = 1, .signature = "(relationship)" },
     .{ .name = "labels", .min_args = 1, .max_args = 1, .signature = "(node)" },
     .{ .name = "properties", .min_args = 1, .max_args = 1, .signature = "(node, relationship or map)" },
+    .{ .name = "score", .min_args = 1, .max_args = 1, .signature = "(a variable a @@ search matched)" },
 };
 
 /// The built-in scalar function called `name`, ignoring case.
@@ -819,6 +820,13 @@ pub const ExpressionEvaluator = struct {
             return .{ .bool_val = false };
         }
 
+        // The distance a vector search already measured for this entity, when
+        // the expression asks for exactly that: the same property, compared
+        // with the same query. Anything else is computed below.
+        if (b.operator == .vector_distance) {
+            if (searchedDistance(b, row, ctx)) |distance| return .{ .float_val = distance };
+        }
+
         // Full-text match is answered by the index, not by looking at the text in
         // front of us, so it is handled before the left side is evaluated to a
         // string.
@@ -1265,6 +1273,21 @@ pub const ExpressionEvaluator = struct {
                 .null_val => .{ .null_val = {} },
                 else => EvalError.TypeError,
             };
+        }
+
+        if (std.ascii.eqlIgnoreCase(f.name, "score")) {
+            if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
+            // The relevance the full-text search that matched this row gave
+            // the entity: BM25, higher is better, the best of an OR's
+            // searches. Null for an entity no search scored on this row.
+            const variable = switch (f.arguments[0].*) {
+                .variable => |v| v,
+                else => return ctx.fail(EvalError.TypeError, f.location, "score() takes a variable, as in score(d) after WHERE d.text @@ 'query'", .{}),
+            };
+            const slot = ctx.getVariableSlot(variable.name) orelse
+                return ctx.fail(EvalError.UnboundVariable, variable.location, "Variable `{s}` is not defined here", .{variable.name});
+            const value = row.searchScore(slot) orelse return .{ .null_val = {} };
+            return .{ .float_val = value };
         }
 
         if (std.ascii.eqlIgnoreCase(f.name, "properties")) {
@@ -1766,6 +1789,47 @@ pub const ExpressionEvaluator = struct {
 
         if (saw_null) return .{ .null_val = {} };
         return .{ .bool_val = false };
+    }
+
+    /// The distance the row's vector search measured, if `b` is the
+    /// expression that search answered: `x.prop <=> $q` or a literal vector,
+    /// on the variable, property and query the search used.
+    fn searchedDistance(b: *const ast.BinaryExpr, row: *const Row, ctx: *const ExecutionContext) ?f64 {
+        const access = switch (b.left.*) {
+            .property_access => |pa| pa,
+            else => return null,
+        };
+        const variable = switch (access.object.*) {
+            .variable => |v| v,
+            else => return null,
+        };
+        const slot = ctx.getVariableSlot(variable.name) orelse return null;
+        const distance = row.searchDistance(slot) orelse return null;
+        const search = (ctx.vector_queries orelse return null).get(slot) orelse return null;
+        if (!std.mem.eql(u8, search.property, access.property)) return null;
+        switch (b.right.*) {
+            .parameter => |p| {
+                const name = search.param_name orelse return null;
+                if (!std.mem.eql(u8, name, p.name)) return null;
+            },
+            .list => |list| {
+                const literal = search.literal orelse return null;
+                if (literal.len != list.elements.len) return null;
+                for (literal, list.elements) |want, elem| {
+                    const got: f32 = switch (elem.*) {
+                        .literal => |lit| switch (lit.value) {
+                            .float => |f| @floatCast(f),
+                            .integer => |n| @floatFromInt(n),
+                            else => return null,
+                        },
+                        else => return null,
+                    };
+                    if (got != want) return null;
+                }
+            },
+            else => return null,
+        }
+        return distance;
     }
 
     /// `a <=> b`: the distance under the database's vector metric, the same

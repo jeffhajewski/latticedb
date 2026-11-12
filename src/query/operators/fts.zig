@@ -214,7 +214,14 @@ pub const FtsIndexSeek = struct {
             .{ .edge_ref = hit.doc_id }
         else
             .{ .node_ref = hit.doc_id });
-        row.setScore(self.output_slot, hit.score);
+        // With several candidates, which search ran is the planner's choice
+        // at run time, so its score would mean different things from one
+        // execution to the next: score() is null then.
+        if (self.candidates.len == 1) {
+            row.setScore(self.output_slot, hit.score);
+        } else {
+            row.scores[self.output_slot] = hit.score;
+        }
         return row;
     }
 

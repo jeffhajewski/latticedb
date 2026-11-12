@@ -451,3 +451,103 @@ test "lqs: a MATCH never binds one relationship twice, variable-length or not" {
     try run(db, "MATCH (a:U {n: 3}) CREATE (a)-[:S]->(:U {n: 4})");
     try std.testing.expectEqual(@as(i64, 1), try queryInt(db, "MATCH (:U {n: 1})-[:R*2..2]->(b)-[:S]->(c) RETURN count(*)"));
 }
+
+// ============================================================================
+// Search distances and scores as values
+// ============================================================================
+
+test "lqs: score() returns the relevance of the @@ search that matched the row" {
+    const path = "/tmp/lattice_lqs_score.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try db.createNodeFtsIndex("Doc", "text");
+    try db.createNodeFtsIndex("Doc", "title");
+    try run(db, "CREATE (:Doc {id: 1, title: 'bread', text: 'starter starter starter'}), " ++
+        "(:Doc {id: 2, title: 'starter', text: 'a starter for rye bread and other things'}), (:Doc {id: 3, title: 'x', text: 'rye'})");
+
+    var ranked = try db.query("MATCH (d:Doc) WHERE d.text @@ 'starter' RETURN d.id, score(d) AS s ORDER BY s DESC");
+    defer ranked.deinit();
+    try std.testing.expectEqual(@as(usize, 2), ranked.rowCount());
+    try std.testing.expectEqual(@as(i64, 1), ranked.rows[0].values[0].int_val);
+    const best = ranked.rows[0].values[1].float_val;
+    const second = ranked.rows[1].values[1].float_val;
+    try std.testing.expect(best > second and second > 0);
+
+    // Kept through WITH, and the same through either plan for the search.
+    var kept = try db.query("MATCH (d:Doc) WHERE d.text @@ 'starter' WITH d WHERE d.id = 1 RETURN score(d)");
+    defer kept.deinit();
+    try std.testing.expectEqual(best, kept.rows[0].values[0].float_val);
+
+    // An OR takes each entity's best score.
+    var either = try db.query("MATCH (d:Doc) WHERE d.text @@ 'rye' OR d.title @@ 'starter' RETURN d.id, score(d) ORDER BY d.id");
+    defer either.deinit();
+    try std.testing.expectEqual(@as(usize, 2), either.rowCount());
+    for (either.rows) |row| try std.testing.expect(row.values[1].float_val > 0);
+
+    // Null where no search scored the row: no @@ at all, an entity bound
+    // by something else, and an AND of searches, whose plan picks one of
+    // them at run time.
+    var none = try db.query("MATCH (d:Doc {id: 3}) RETURN score(d)");
+    defer none.deinit();
+    try std.testing.expect(none.rows[0].values[0] == .null_val);
+    var other = try db.query("MATCH (d:Doc), (e:Doc {id: 3}) WHERE d.text @@ 'rye' RETURN score(e)");
+    defer other.deinit();
+    try std.testing.expect(other.rows[0].values[0] == .null_val);
+    var both = try db.query("MATCH (d:Doc) WHERE d.text @@ 'starter' AND d.title @@ 'starter' RETURN d.id, score(d)");
+    defer both.deinit();
+    try std.testing.expectEqual(@as(usize, 1), both.rowCount());
+    try std.testing.expect(both.rows[0].values[1] == .null_val);
+
+    try expectFailure(db, "MATCH (d:Doc) WHERE d.text @@ 'rye' RETURN score(d.text)", .execution, "TypeError", "score() takes a variable, as in score(d) after WHERE d.text @@ 'query'");
+    try expectFailure(db, "RETURN score()", .semantic, "wrong_argument_count", "score takes (a variable a @@ search matched), but was given 0 arguments");
+}
+
+test "lqs: <=> returns the search's distance, and ORDER BY it bounds the search" {
+    const path = "/tmp/lattice_lqs_distance.ltdb";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    const db = try Database.open(std.testing.allocator, path, .{
+        .create = true,
+        .config = .{ .enable_wal = false, .enable_vector = true, .vector_dimensions = 4 },
+    });
+    defer cleanupTestDb(db, path);
+
+    // 200 documents on a quarter circle, so each has its own distance from
+    // [1, 0, 0, 0] and the order is known.
+    var i: usize = 0;
+    while (i < 200) : (i += 1) {
+        const node = try db.createNode(null, &[_][]const u8{"Doc"});
+        try db.setNodeProperty(null, node, "i", .{ .int_val = @intCast(i) });
+        const angle = @as(f32, @floatFromInt(i)) * (std.math.pi / 2.0) / 200.0;
+        try db.setNodeVector(node, &[_]f32{ @cos(angle), @sin(angle), 0, 0 });
+    }
+
+    // The distance a row was found at, returned as a value.
+    var near = try db.query("MATCH (d:Doc) WHERE d.embedding <=> [1.0, 0.0, 0.0, 0.0] < 0.001 " ++
+        "RETURN d.i, d.embedding <=> [1.0, 0.0, 0.0, 0.0] AS dist ORDER BY dist");
+    defer near.deinit();
+    try std.testing.expect(near.rowCount() > 1);
+    try std.testing.expectEqual(@as(i64, 0), near.rows[0].values[0].int_val);
+    for (near.rows) |row| try std.testing.expect(row.values[1].float_val < 0.001);
+    // Rows no search measured compute the distance, and agree with it.
+    var computed = try db.query("MATCH (d:Doc {i: 3}) RETURN d.embedding <=> [1.0, 0.0, 0.0, 0.0]");
+    defer computed.deinit();
+    try std.testing.expect(@abs(computed.rows[0].values[0].float_val - near.rows[3].values[1].float_val) < 1e-6);
+
+    // ORDER BY the search's own distance with a LIMIT asks the search for
+    // just SKIP + LIMIT results. Before, an ORDER BY dropped the bound and
+    // the search returned its default 100, so a SKIP past them found none.
+    var deep = try db.query("MATCH (d:Doc) WHERE d.embedding <=> [1.0, 0.0, 0.0, 0.0] " ++
+        "RETURN d.i ORDER BY d.embedding <=> [1.0, 0.0, 0.0, 0.0] SKIP 150 LIMIT 5");
+    defer deep.deinit();
+    try std.testing.expectEqual(@as(usize, 5), deep.rowCount());
+    for (deep.rows, 150..) |row, want| try std.testing.expectEqual(@as(i64, @intCast(want)), row.values[0].int_val);
+    // The same through an alias.
+    var aliased = try db.query("MATCH (d:Doc) WHERE d.embedding <=> [1.0, 0.0, 0.0, 0.0] " ++
+        "RETURN d.i, d.embedding <=> [1.0, 0.0, 0.0, 0.0] AS dist ORDER BY dist SKIP 120 LIMIT 1");
+    defer aliased.deinit();
+    try std.testing.expectEqual(@as(i64, 120), aliased.rows[0].values[0].int_val);
+    // Sorted by anything else, the bound cannot apply.
+    var by_i = try db.query("MATCH (d:Doc) WHERE d.embedding <=> [1.0, 0.0, 0.0, 0.0] RETURN d.i ORDER BY d.i DESC LIMIT 1");
+    defer by_i.deinit();
+    try std.testing.expectEqual(@as(usize, 1), by_i.rowCount());
+}

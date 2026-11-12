@@ -180,6 +180,9 @@ pub const QueryPlanner = struct {
     /// can assert an index is actually being used, rather than assuming it from
     /// a result set that would look identical either way.
     last_scan_kind: ScanKind = .none,
+    /// The query each slot's vector search uses; see
+    /// ExecutionContext.vector_queries.
+    vector_queries: executor.VectorQueries = .{},
 
     /// How the planner resolved a node pattern to rows.
     pub const ScanKind = enum {
@@ -1059,7 +1062,14 @@ pub const QueryPlanner = struct {
 
         // Check for vector search pattern: x.embedding <=> $query [< threshold]
         if (self.detectVectorSearch(where.condition)) |vector_info| {
-            return self.planVectorSearch(input_op, vector_info, limit_hint);
+            // An ORDER BY keeps the LIMIT bounding the search only when it
+            // sorts nearest first by this search's own distance, the order
+            // the search already returns its results in.
+            var hint = limit_hint;
+            if (hint.order) |order| {
+                if (!self.orderFollowsSearch(order, hint.ret, vector_info)) hint = .{};
+            }
+            return self.planVectorSearch(input_op, vector_info, hint);
         }
 
         // Check for FTS pattern: x.text @@ $query, or a disjunction of them
@@ -1086,12 +1096,17 @@ pub const QueryPlanner = struct {
     const VectorLimitHint = struct {
         limit: ?*const ast.Expression = null,
         skip: ?*const ast.Expression = null,
+        /// The ORDER BY between the RETURN and the LIMIT, which the hint
+        /// holds only if it sorts by the search's distance.
+        order: ?*const ast.OrderByClause = null,
+        ret: ?*const ast.ReturnClause = null,
     };
 
     /// The LIMIT (and SKIP) of the RETURN that follows a WHERE, when the rows
     /// the WHERE produces reach that LIMIT in order and one for one: a
-    /// RETURN that neither aggregates nor deduplicates, and no ORDER BY.
-    /// Anything else between them could drop or reorder rows, so no hint.
+    /// RETURN that neither aggregates nor deduplicates. An ORDER BY is
+    /// passed along for planWhere to check against the search. Anything
+    /// else between them could drop or reorder rows, so no hint.
     fn vectorLimitHint(rest: []const ast.Clause) VectorLimitHint {
         if (rest.len == 0) return .{};
         const ret = switch (rest[0]) {
@@ -1099,17 +1114,50 @@ pub const QueryPlanner = struct {
             else => return .{},
         };
         if (ret.distinct or returnAggregates(ret)) return .{};
-        var hint = VectorLimitHint{};
+        var hint = VectorLimitHint{ .ret = ret };
         for (rest[1..]) |clause| {
             switch (clause) {
                 .skip => |s| hint.skip = s.count,
                 .limit => |l| hint.limit = l.count,
-                .order_by => return .{},
+                .order_by => |o| hint.order = o,
                 else => break,
             }
         }
         if (hint.limit == null) return .{};
         return hint;
+    }
+
+    /// Whether `order` sorts nearest first by the distance the search in
+    /// `info` measures: one ascending item that is `x.prop <=> query` for the
+    /// search's variable, property and query, or the alias of a RETURN item
+    /// that is.
+    fn orderFollowsSearch(
+        self: *Self,
+        order: *const ast.OrderByClause,
+        ret: ?*const ast.ReturnClause,
+        info: VectorSearchInfo,
+    ) bool {
+        if (order.items.len != 1 or order.items[0].descending) return false;
+        var expr = order.items[0].expression;
+        if (expr.* == .variable) {
+            const r = ret orelse return false;
+            const name = expr.variable.name;
+            expr = for (r.items) |item| {
+                if (item.alias) |alias| {
+                    if (std.mem.eql(u8, alias, name)) break item.expression;
+                }
+            } else return false;
+        }
+        if (expr.* != .binary or expr.binary.operator != .vector_distance) return false;
+        const same = self.extractVectorInfo(expr.binary.*) orelse return false;
+        if (same.variable_slot != info.variable_slot) return false;
+        if (!std.mem.eql(u8, same.property_name orelse return false, info.property_name orelse return false)) return false;
+        if (info.param_name) |name| {
+            return same.param_name != null and std.mem.eql(u8, same.param_name.?, name);
+        }
+        const want = info.query_vector orelse return false;
+        const got = same.query_vector orelse return false;
+        return std.mem.eql(f32, want, got);
     }
 
     /// Information extracted from a vector search pattern
@@ -1210,6 +1258,11 @@ pub const QueryPlanner = struct {
         const database = self.storage.database orelse return PlannerError.MissingStorage;
 
         const output_slot = info.variable_slot orelse return PlannerError.InvalidQuery;
+        self.vector_queries.set(output_slot, .{
+            .property = info.property_name orelse return PlannerError.InvalidQuery,
+            .param_name = info.param_name,
+            .literal = info.query_vector,
+        });
 
         const bound = vector_ops.VectorSearchWithInput.Bound{
             .threshold = info.threshold,

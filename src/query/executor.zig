@@ -202,6 +202,11 @@ pub const Row = struct {
     scores: [MAX_SLOTS]f32,
     /// Bitmask indicating which slots are populated
     populated: u16,
+    /// Slots whose distance a vector search set, and whose score a full-text
+    /// search set, for this row's entity. A slot given a new value loses
+    /// both, so a number never outlives the entity it was measured for.
+    measured: u16 = 0,
+    scored: u16 = 0,
 
     const Self = @This();
 
@@ -219,7 +224,10 @@ pub const Row = struct {
     pub fn setSlot(self: *Self, slot: u8, value: SlotValue) void {
         std.debug.assert(slot < MAX_SLOTS);
         self.slots[slot] = value;
-        self.populated |= (@as(u16, 1) << @intCast(slot));
+        const bit = @as(u16, 1) << @intCast(slot);
+        self.populated |= bit;
+        self.measured &= ~bit;
+        self.scored &= ~bit;
     }
 
     /// Get a slot value, returns null if slot is not populated
@@ -241,6 +249,33 @@ pub const Row = struct {
     pub fn setDistance(self: *Self, slot: u8, distance: f32) void {
         std.debug.assert(slot < MAX_SLOTS);
         self.distances[slot] = distance;
+        self.measured |= @as(u16, 1) << @intCast(slot);
+    }
+
+    /// The distance a vector search measured for the entity in `slot`, or
+    /// null when no search did.
+    pub fn searchDistance(self: *const Self, slot: u8) ?f32 {
+        std.debug.assert(slot < MAX_SLOTS);
+        if (self.measured & (@as(u16, 1) << @intCast(slot)) == 0) return null;
+        return self.distances[slot];
+    }
+
+    /// The score a full-text search gave the entity in `slot`, or null when
+    /// no search did.
+    pub fn searchScore(self: *const Self, slot: u8) ?f32 {
+        std.debug.assert(slot < MAX_SLOTS);
+        if (self.scored & (@as(u16, 1) << @intCast(slot)) == 0) return null;
+        return self.scores[slot];
+    }
+
+    /// Carry `slot`'s search distance and score over from `other`, where
+    /// the slot holds the same entity in both.
+    pub fn copySearchMarks(self: *Self, other: *const Self, slot: u8) void {
+        const bit = @as(u16, 1) << @intCast(slot);
+        self.distances[slot] = other.distances[slot];
+        self.scores[slot] = other.scores[slot];
+        self.measured = (self.measured & ~bit) | (other.measured & bit);
+        self.scored = (self.scored & ~bit) | (other.scored & bit);
     }
 
     /// Get the distance for a slot
@@ -253,6 +288,7 @@ pub const Row = struct {
     pub fn setScore(self: *Self, slot: u8, score: f32) void {
         std.debug.assert(slot < MAX_SLOTS);
         self.scores[slot] = score;
+        self.scored |= @as(u16, 1) << @intCast(slot);
     }
 
     /// Get the score for a slot
@@ -277,6 +313,8 @@ pub const Row = struct {
                 self.populated |= (@as(u16, 1) << @intCast(i));
             }
         }
+        self.measured = (self.measured & ~other.populated) | other.measured;
+        self.scored = (self.scored & ~other.populated) | other.scored;
     }
 
     /// Clear all slots
@@ -285,6 +323,8 @@ pub const Row = struct {
         self.distances = [_]f32{0.0} ** MAX_SLOTS;
         self.scores = [_]f32{0.0} ** MAX_SLOTS;
         self.populated = 0;
+        self.measured = 0;
+        self.scored = 0;
     }
 };
 
@@ -393,6 +433,31 @@ pub const FtsFilterCache = struct {
 
 /// Runtime context for query execution.
 /// Provides access to storage, parameters, and memory management.
+/// What a planned vector search compared its entities with.
+pub const VectorQuery = struct {
+    property: []const u8,
+    param_name: ?[]const u8 = null,
+    literal: ?[]const f32 = null,
+};
+
+/// The vector search, if any, behind each slot. Only the slots in `mask`
+/// hold one and the rest of `items` is undefined, so a query without a
+/// vector search pays nothing to set this up.
+pub const VectorQueries = struct {
+    mask: u16 = 0,
+    items: [MAX_SLOTS]VectorQuery = undefined,
+
+    pub fn get(self: *const VectorQueries, slot: u8) ?VectorQuery {
+        if (self.mask & (@as(u16, 1) << @intCast(slot)) == 0) return null;
+        return self.items[slot];
+    }
+
+    pub fn set(self: *VectorQueries, slot: u8, query: VectorQuery) void {
+        self.items[slot] = query;
+        self.mask |= @as(u16, 1) << @intCast(slot);
+    }
+};
+
 pub const ExecutionContext = struct {
     /// Allocator for query lifetime allocations
     allocator: Allocator,
@@ -433,6 +498,14 @@ pub const ExecutionContext = struct {
     /// node record read once can be read again from memory. False unless
     /// the caller knows the query only reads.
     stable_reads: bool = false,
+
+    /// The vector search, if any, that put each slot's entity in the row:
+    /// which property it searched and with what query. `x.prop <=> query`
+    /// written the same way returns the distance that search measured
+    /// rather than computing it again.
+    /// The planner's, borrowed for the execution; null when no planner
+    /// set it.
+    vector_queries: ?*const VectorQueries = null,
 
     /// Where a failure is described for the caller, or null when nobody
     /// will read it. A pointer, so code holding a `*const ExecutionContext`

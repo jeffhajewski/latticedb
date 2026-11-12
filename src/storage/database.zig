@@ -9005,6 +9005,7 @@ pub const Database = struct {
         exec_ctx.database = self;
         exec_ctx.txn = if (auto_txn) |*t| t else txn;
         exec_ctx.stable_reads = !ast_query.writesData();
+        exec_ctx.vector_queries = &planner.vector_queries;
         var diagnostic: executor_mod.Diagnostic = .{};
         exec_ctx.diagnostic = &diagnostic;
         defer exec_ctx.deinit();

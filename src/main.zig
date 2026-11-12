@@ -14,6 +14,7 @@ pub const core = struct {
 pub const storage = struct {
     pub const vfs = @import("storage/vfs.zig");
     pub const memory_vfs = @import("storage/memory_vfs.zig");
+    pub const fault_vfs = @import("storage/fault_vfs.zig");
     pub const page = @import("storage/page.zig");
     pub const journal = @import("storage/journal.zig");
     pub const page_manager = @import("storage/page_manager.zig");
@@ -302,4 +303,7 @@ pub const VERSION_PATCH = 0;
 test {
     // Run tests from all modules
     std.testing.refAllDecls(@This());
+    // Nothing in the library uses the fault-injecting VFS, so its tests are
+    // not reached through the modules that are.
+    _ = storage.fault_vfs;
 }

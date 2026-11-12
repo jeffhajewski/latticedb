@@ -432,12 +432,19 @@ test "fts query: a fuzzy match at the full edit distance scores, below closer on
 
 /// The message a failed query gave.
 fn failureMessage(db: *Database, cypher: []const u8, buf: []u8) ![]const u8 {
+    return failureMessageAs(db, cypher, "InvalidArgument", buf);
+}
+
+/// The message a failed query gave, which failed with `code` as a fault in
+/// the query rather than in storage.
+fn failureMessageAs(db: *Database, cypher: []const u8, code: []const u8, buf: []u8) ![]const u8 {
     var detailed = try db.queryDetailed(cypher);
     defer detailed.deinit();
     switch (detailed) {
         .success => return error.TestUnexpectedResult,
         .failure => |failure| {
-            try std.testing.expectEqualStrings("InvalidArgument", failure.code orelse "");
+            try std.testing.expectEqual(lattice.storage.database.QueryFailure.Cause.query, failure.cause);
+            try std.testing.expectEqualStrings(code, failure.code orelse "");
             const n = @min(buf.len, failure.message.len);
             @memcpy(buf[0..n], failure.message[0..n]);
             return buf[0..n];
@@ -468,6 +475,17 @@ test "fts query: a query an index refuses says why" {
     try std.testing.expectEqualStrings(
         "Full-text query '\"quick brown\"' has a phrase, and the index on Doc.text stores no word positions to match one (indexes built before 0.17.0 have none); drop the index and declare it again",
         try failureMessage(db, "MATCH (d:Doc) WHERE d.text @@ '\"quick brown\"' RETURN d", &buf),
+    );
+    // The same refusals checked row by row, inside a larger condition. They
+    // were reported as storage errors ("Storage error while searching the
+    // full-text index for d.text: InvalidArgument").
+    try std.testing.expectEqualStrings(
+        "Full-text query '-dog' only excludes; it needs a word to match (write NOT x @@ 'word' to exclude)",
+        try failureMessageAs(db, "MATCH (d:Doc) WHERE d.text @@ '-dog' OR d.n = 1 RETURN d", "InvalidOperation", &buf),
+    );
+    try std.testing.expectEqualStrings(
+        "Full-text query '\"quick brown\"' has a phrase, and the index for d.text stores no word positions to match one (indexes built before 0.17.0 have none); drop the index and declare it again",
+        try failureMessageAs(db, "MATCH (d:Doc) WHERE d.text @@ '\"quick brown\"' OR d.n = 1 RETURN d", "InvalidOperation", &buf),
     );
     var ok = try db.query("MATCH (d:Doc) WHERE d.text @@ 'quick -dog' RETURN d");
     defer ok.deinit();

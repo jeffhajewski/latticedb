@@ -2376,10 +2376,18 @@ pub const ExpressionEvaluator = struct {
         const matched = (if (is_edge)
             database.ftsEdgeMatches(ctx.fts_cache, ctx.txn, doc_id, property_access.property, query, FTS_FILTER_LIMIT)
         else
-            database.ftsNodeMatches(ctx.fts_cache, ctx.txn, doc_id, property_access.property, query, FTS_FILTER_LIMIT)) catch |err|
+            database.ftsNodeMatches(ctx.fts_cache, ctx.txn, doc_id, property_access.property, query, FTS_FILTER_LIMIT)) catch |err| {
+            // A query the index refuses is the query's fault, said as the
+            // index scan says it.
+            if (err == error.InvalidArgument) switch (fts_query.refusalOf(self.allocator, query)) {
+                .only_excludes => return ctx.fail(EvalError.InvalidOperation, b.right.getLocation(), "Full-text query '{s}' only excludes; it needs a word to match (write NOT x @@ 'word' to exclude)", .{query}),
+                .phrase => return ctx.fail(EvalError.InvalidOperation, b.right.getLocation(), "Full-text query '{s}' has a phrase, and the index for {s}.{s} stores no word positions to match one (indexes built before 0.17.0 have none); drop the index and declare it again", .{ query, variable.name, property_access.property }),
+                .neither => {},
+            };
             // A failed search is an error. Reading it as null made a damaged
             // index look like a document that does not match.
             return readFailure(ctx, err, b.location, "searching the full-text index for {s}.{s}", .{ variable.name, property_access.property });
+        };
 
         // No index declared for this property on any label the node carries, or
         // on the edge's type. The

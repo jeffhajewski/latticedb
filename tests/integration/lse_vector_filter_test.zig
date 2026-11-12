@@ -425,3 +425,83 @@ test "vector filter: a large label is searched through the graph with the label 
     try std.testing.expectEqual(ids[20], @as(u64, @intCast(after.rows[0].values[0].int_val)));
     for (after.rows) |row| try std.testing.expect(@as(u64, @intCast(row.values[0].int_val)) != nearest);
 }
+
+test "vector filter: a range on an indexed property beside <=> answers as without the index" {
+    const allocator = std.testing.allocator;
+    const path = "lse_vector_filter_range.db";
+    const db = try openDb(allocator, path);
+    defer {
+        db.close();
+        removeFiles(path);
+    }
+    var prng = std.Random.DefaultPrng.init(11);
+    const rnd = prng.random();
+    var ids: [600]u64 = undefined;
+    {
+        var txn = try db.beginTransaction(.read_write);
+        errdefer db.abortTransaction(&txn) catch {};
+        for (&ids, 0..) |*id, i| {
+            id.* = try db.createNode(&txn, &.{"Item"});
+            try db.setNodeProperty(&txn, id.*, "rank", .{ .int_val = @intCast(i) });
+            var v: [DIMS]f32 = undefined;
+            for (&v) |*x| x.* = rnd.float(f32) * 2 - 1;
+            try db.setNodeVectorInTxn(&txn, id.*, &v);
+        }
+        try db.commitTransaction(&txn);
+    }
+    var query: [DIMS]f32 = undefined;
+    for (&query) |*x| x.* = rnd.float(f32) * 2 - 1;
+    var params = std.StringHashMap(lattice.core.types.PropertyValue).init(allocator);
+    defer params.deinit();
+    try params.put("q", .{ .vector_val = &query });
+
+    // Beside other conditions `<=>` is a distance bound checked on each row
+    // (an index range scan does not take the other conditions then), and
+    // a bare `<=>` there is refused; both the same with the index or
+    // without.
+    const cases = [_][]const u8{
+        "MATCH (n:Item) WHERE n.rank >= 400 AND (n.embedding <=> $q) < 0.9 RETURN id(n)",
+        "MATCH (n:Item) WHERE n.rank < 150 AND n.rank > 20 AND (n.embedding <=> $q) <= 0.9 RETURN id(n)",
+        "MATCH (n:Item) WHERE n.rank >= 400 AND (n.embedding <=> $q) < 0.9 RETURN id(n) ORDER BY n.embedding <=> $q LIMIT 5",
+        "MATCH (n:Item) WHERE n.rank >= 400 AND n.embedding <=> $q RETURN id(n) LIMIT 10",
+    };
+    const Answer = struct { ids: [200]u64 = undefined, len: usize = 0, err: ?anyerror = null };
+    var before: [cases.len]Answer = @splat(.{});
+    for (cases, 0..) |cypher, c| {
+        var r = db.queryWithParams(cypher, &params) catch |err| {
+            before[c].err = err;
+            continue;
+        };
+        defer r.deinit();
+        before[c].len = r.rows.len;
+        for (r.rows, 0..) |row, i| before[c].ids[i] = @intCast(row.values[0].int_val);
+    }
+    try std.testing.expect(before[3].err != null);
+
+    try db.createNodePropertyIndex("Item", "rank");
+    for (cases, 0..) |cypher, c| {
+        var r = db.queryWithParams(cypher, &params) catch |err| {
+            const refused: anyerror = err;
+            try std.testing.expect(before[c].err != null and before[c].err.? == refused);
+            continue;
+        };
+        defer r.deinit();
+        try std.testing.expectEqual(@as(?anyerror, null), before[c].err);
+        try std.testing.expectEqual(before[c].len, r.rows.len);
+        try std.testing.expect(r.rows.len > 0);
+        for (r.rows, 0..) |row, i| try std.testing.expectEqual(before[c].ids[i], @as(u64, @intCast(row.values[0].int_val)));
+    }
+
+    // The bound and the range both hold: exactly the nodes in the range
+    // within the distance, and with ORDER BY the nearest of them first.
+    const within = try exactNearest(db, allocator, null, &query, ids[400..600], 200);
+    defer allocator.free(within);
+    var count: usize = 0;
+    for (within) |w| {
+        if (w.distance >= 0.9) break;
+        try std.testing.expect(std.mem.indexOfScalar(u64, before[0].ids[0..before[0].len], w.node_id) != null);
+        if (count < 5) try std.testing.expectEqual(w.node_id, before[2].ids[count]);
+        count += 1;
+    }
+    try std.testing.expectEqual(count, before[0].len);
+}

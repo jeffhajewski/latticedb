@@ -112,10 +112,12 @@ pub const BufferPool = struct {
     /// How many slots of `overflow` are null, so that growing the pool
     /// only searches for one when there is one to find.
     overflow_holes: usize = 0,
-    /// The last clock sweep found every frame of the pool proper dirty.
-    /// Nothing but a flush or `abandonDirty` makes one clean, so until then
-    /// a sweep would find the same, and the pool grows without one: each
-    /// sweep walks every frame twice. Guarded by `mutex`.
+    /// The last clock sweep found no frame of the pool proper it could
+    /// evict, and nearly all of them dirty. Nothing but a flush or
+    /// `abandonDirty` makes a dirty frame clean, so until then a sweep would
+    /// find much the same, and the pool grows without one: each sweep walks
+    /// every frame twice. The few frames that were pinned and clean, and are
+    /// let go meanwhile, wait for the flush. Guarded by `mutex`.
     all_frames_dirty: bool = false,
     /// Where a flush records its pages before writing them in place. Null
     /// for a database with no file behind it, which has nothing to tear.
@@ -801,7 +803,7 @@ pub const BufferPool = struct {
         var iterations: usize = 0;
         const max_iterations = self.frame_count * 2; // Allow two full rotations
         var passed_over_dirty = false;
-        var saw_clean = false;
+        var passed_over_held_clean: usize = 0;
 
         while (iterations < max_iterations) {
             const frame = &self.frames[self.clock_hand];
@@ -809,7 +811,7 @@ pub const BufferPool = struct {
 
             // Skip if pinned
             if (frame.pin_count.load(.monotonic) > 0) {
-                if (!frame.dirty) saw_clean = true;
+                if (!frame.dirty) passed_over_held_clean += 1;
                 self.advanceClock();
                 iterations += 1;
                 continue;
@@ -841,7 +843,13 @@ pub const BufferPool = struct {
         // Every frame pinned is the caller holding too much at once, as it
         // always was. Frames that are merely dirty are a different matter.
         if (!passed_over_dirty) return BufferPoolError.BufferPoolFull;
-        if (!saw_clean) self.all_frames_dirty = true;
+        // Frames pinned and clean come free later. A few are the pages the
+        // caller holds while it reads the next one, as a B+Tree does on
+        // nearly every step; waiting for those would send every miss until
+        // the flush round the whole pool twice, so the pool grows instead
+        // and they are evicted after the flush. Many are readers at work,
+        // and worth the next sweep.
+        if (passed_over_held_clean * 8 < max_iterations) self.all_frames_dirty = true;
         return self.addOverflowFrame();
     }
 

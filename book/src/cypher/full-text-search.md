@@ -152,6 +152,32 @@ passing mention buried in a page of text.
 
 A query with no `LIMIT` returns every match. Writing `LIMIT` still limits.
 
+When the `WHERE` is exactly the search the `MATCH` already answered from the index
+(same variable, index, and query text or parameter), the search runs once; it is not
+repeated as a filter over the rows it produced.
+
+## Reading the score
+
+`score(d)` returns the BM25 score of the `@@` search that matched `d`, the same
+number the direct search calls return. Higher is better:
+
+```cypher
+MATCH (d:Doc)
+WHERE d.text @@ 'starter'
+RETURN d.title, score(d) AS s
+ORDER BY s DESC
+```
+
+For an `OR` of searches, it is the best score among the searches that matched.
+`score(d)` is null when no single search scored `d`: the query has no `@@` on `d`,
+or the `MATCH` searched several indexes and chose between them as it ran. It is
+carried through `WITH d`, but not under another name (`WITH d AS e`) and not
+through an aggregation. Its argument must be a variable; `score(1)` fails with
+"score() takes a variable, as in score(d) after WHERE d.text @@ 'query'".
+
+`ORDER BY score(d) LIMIT k` sorts every match and then keeps `k`; unlike the vector
+search's `ORDER BY` on distance, it does not make the search itself stop early.
+
 ## String queries
 
 The query is a list of terms, and all of them must match:

@@ -579,3 +579,186 @@ test "vector filter: a row whose search score is exactly zero keeps it" {
     }
     try std.testing.expectEqual(rare.len, seen);
 }
+
+/// The node ids in a query's first column, in order.
+fn idsOf(db: *Database, cypher: []const u8, params: *const std.StringHashMap(lattice.core.types.PropertyValue), out: []u64) !usize {
+    var result = try db.queryWithParams(cypher, params);
+    defer result.deinit();
+    for (result.rows, 0..) |row, i| out[i] = switch (row.values[0]) {
+        .int_val => |v| @intCast(v),
+        else => 0,
+    };
+    return result.rows.len;
+}
+
+fn sortIds(ids: []u64) void {
+    std.mem.sort(u64, ids, {}, std.sort.asc(u64));
+}
+
+test "vector filter: <=> under OPTIONAL MATCH, UNION, subqueries, comprehensions and named paths" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lse_vector_filter_constructs.ltdb";
+    const nodes = 1400;
+    removeFiles(path);
+    // As in the large-label test: m 8 puts "Most" past the point where the
+    // label is searched through the graph with the label index as filter.
+    const db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_vector = true, .vector_dimensions = DIMS, .vector_m = 8, .vector_ef_construction = EF_CONSTRUCTION },
+    });
+    defer {
+        db.close();
+        removeFiles(path);
+    }
+    var prng = std.Random.DefaultPrng.init(31);
+    const rnd = prng.random();
+    var ids: [nodes]u64 = undefined;
+    var vectors: [nodes][DIMS]f32 = undefined;
+    var people: [2]u64 = undefined;
+    {
+        var txn = try db.beginTransaction(.read_write);
+        errdefer db.abortTransaction(&txn) catch {};
+        for (&people, [_][]const u8{ "A", "B" }) |*p, name| {
+            p.* = try db.createNode(&txn, &.{"Person"});
+            try db.setNodeProperty(&txn, p.*, "name", .{ .string_val = name });
+        }
+        for (&ids, &vectors, 0..) |*id, *v, i| {
+            const labels: []const []const u8 = if (i % 20 != 0) &.{ "Item", "Most" } else &.{"Item"};
+            id.* = try db.createNode(&txn, labels);
+            for (v) |*x| x.* = rnd.float(f32) * 2 - 1;
+            try db.setNodeVectorInTxn(&txn, id.*, v);
+            // A likes every 7th node, B every 11th.
+            if (i % 7 == 0) try db.createEdge(&txn, people[0], id.*, "LIKES");
+            if (i % 11 == 0) try db.createEdge(&txn, people[1], id.*, "LIKES");
+        }
+        try db.commitTransaction(&txn);
+    }
+    const hnsw = &db.hnsw_index.?;
+    try std.testing.expect(!Database.exactScanPays(nodes * 19 / 20, hnsw.vector_count, hnsw.config.ef_search, hnsw.config.m_max0));
+
+    var params = std.StringHashMap(lattice.core.types.PropertyValue).init(allocator);
+    defer params.deinit();
+    var query: [DIMS]f32 = undefined;
+    for (&query) |*x| x.* = rnd.float(f32) * 2 - 1;
+    var other: [DIMS]f32 = undefined;
+    for (&other) |*x| x.* = rnd.float(f32) * 2 - 1;
+    try params.put("q", .{ .vector_val = &query });
+    try params.put("r", .{ .vector_val = &other });
+    // A bound that about forty Most nodes fall within.
+    var distances: [nodes]f32 = undefined;
+    for (&vectors, &distances) |*v, *d| d.* = db.vectorDistance(&query, v);
+    var sorted = distances;
+    std.mem.sort(f32, &sorted, {}, std.sort.asc(f32));
+    // Halfway between two distances, so rounding cannot put a node on
+    // either side of it.
+    const bound = (sorted[40] + sorted[41]) / 2;
+    try params.put("t", .{ .float_val = bound });
+
+    var want: [nodes]u64 = undefined;
+    var got: [nodes]u64 = undefined;
+
+    // Named path, over the label path: the same nodes in the same order as
+    // without the path, and each row's path is that node.
+    const plain_n = try idsOf(db, "MATCH (n:Most) WHERE n.embedding <=> $q RETURN id(n) LIMIT 10", &params, &want);
+    try std.testing.expectEqual(@as(usize, 10), plain_n);
+    {
+        var result = try db.queryWithParams("MATCH p = (n:Most) WHERE n.embedding <=> $q RETURN id(n), id(nodes(p)[0]), length(p) LIMIT 10", &params);
+        defer result.deinit();
+        try std.testing.expectEqual(plain_n, result.rows.len);
+        for (result.rows, want[0..plain_n]) |row, w| {
+            try std.testing.expectEqual(w, @as(u64, @intCast(row.values[0].int_val)));
+            try std.testing.expectEqual(w, @as(u64, @intCast(row.values[1].int_val)));
+            try std.testing.expectEqual(@as(i64, 0), row.values[2].int_val);
+        }
+    }
+
+    // Each part of a UNION ALL is the search it would be alone.
+    {
+        var second: [nodes]u64 = undefined;
+        const a = try idsOf(db, "MATCH (n:Most) WHERE n.embedding <=> $q RETURN id(n) AS i LIMIT 5", &params, &want);
+        const b = try idsOf(db, "MATCH (n:Most) WHERE n.embedding <=> $r RETURN id(n) AS i LIMIT 5", &params, &second);
+        const n = try idsOf(db, "MATCH (n:Most) WHERE n.embedding <=> $q RETURN id(n) AS i LIMIT 5 UNION ALL MATCH (n:Most) WHERE n.embedding <=> $r RETURN id(n) AS i LIMIT 5", &params, &got);
+        try std.testing.expectEqual(a + b, n);
+        try std.testing.expectEqualSlices(u64, want[0..a], got[0..a]);
+        try std.testing.expectEqualSlices(u64, second[0..b], got[a..n]);
+    }
+
+    // After a MATCH that binds another variable, the scan is not bare: the
+    // search is among the candidate rows, and with one person they are the
+    // label's nodes.
+    {
+        const n = try idsOf(db, "MATCH (a:Person {name: 'A'}) MATCH (n:Most) WHERE n.embedding <=> $q RETURN id(n) LIMIT 10", &params, &got);
+        const m = try idsOf(db, "MATCH (n:Most) WHERE n.embedding <=> $q RETURN id(n) LIMIT 10", &params, &want);
+        try std.testing.expectEqual(m, n);
+        try std.testing.expectEqualSlices(u64, want[0..m], got[0..n]);
+    }
+
+    // OPTIONAL MATCH plans its WHERE as a row filter over the argument row:
+    // a bound gives exactly the nodes within it, a bound nothing meets one
+    // row of nulls.
+    {
+        var k: usize = 0;
+        for (ids, distances, 0..) |id, d, i| {
+            if (i % 20 != 0 and d < bound) {
+                want[k] = id;
+                k += 1;
+            }
+        }
+        const n = try idsOf(db, "MATCH (a:Person {name: 'A'}) OPTIONAL MATCH (n:Most) WHERE n.embedding <=> $q < $t RETURN id(n)", &params, &got);
+        sortIds(got[0..n]);
+        try std.testing.expectEqualSlices(u64, want[0..k], got[0..n]);
+        var none = try db.queryWithParams("MATCH (a:Person {name: 'A'}) OPTIONAL MATCH (n:Most) WHERE n.embedding <=> $q < -1 RETURN a.name, n", &params);
+        defer none.deinit();
+        try std.testing.expectEqual(@as(usize, 1), none.rows.len);
+        try std.testing.expect(none.rows[0].values[1] == .null_val);
+    }
+
+    // EXISTS and a pattern comprehension, against what each person likes.
+    for (people, [_]usize{ 7, 11 }, [_][]const u8{ "A", "B" }) |_, every, name| {
+        var k: usize = 0;
+        for (ids, distances, 0..) |id, d, i| {
+            if (i % 20 != 0 and i % every == 0 and d < bound) {
+                want[k] = id;
+                k += 1;
+            }
+        }
+        var buf: [256]u8 = undefined;
+        const comprehension = try std.fmt.bufPrint(&buf, "MATCH (a:Person {{name: '{s}'}}) RETURN [(a)-[:LIKES]->(n:Most) WHERE n.embedding <=> $q < $t | id(n)]", .{name});
+        var result = try db.queryWithParams(comprehension, &params);
+        defer result.deinit();
+        const list = result.rows[0].values[0].list_val;
+        try std.testing.expectEqual(k, list.len);
+        for (list, 0..) |v, i| got[i] = @intCast(v.int_val);
+        sortIds(got[0..k]);
+        try std.testing.expectEqualSlices(u64, want[0..k], got[0..k]);
+
+        var buf2: [256]u8 = undefined;
+        const exists = try std.fmt.bufPrint(&buf2, "MATCH (a:Person {{name: '{s}'}}) WHERE EXISTS {{ MATCH (a)-[:LIKES]->(n:Most) WHERE n.embedding <=> $q < $t }} RETURN a.name", .{name});
+        var found = try db.queryWithParams(exists, &params);
+        defer found.deinit();
+        try std.testing.expectEqual(@as(usize, if (k > 0) 1 else 0), found.rows.len);
+    }
+
+    // A bare <=> where no search is planned is refused instead of read as a
+    // condition (it passed every row but an exact match, in no order).
+    const refused = [_][]const u8{
+        "MATCH (a:Person) OPTIONAL MATCH (n:Most) WHERE n.embedding <=> $q RETURN id(n) LIMIT 10",
+        "MATCH (a:Person) WHERE EXISTS { MATCH (a)-[:LIKES]->(n:Most) WHERE n.embedding <=> $q } RETURN a.name",
+        "MATCH (a:Person) RETURN [(a)-[:LIKES]->(n:Most) WHERE n.embedding <=> $q | id(n)]",
+        "MATCH (n:Most) WITH n WHERE n.embedding <=> $q RETURN id(n) LIMIT 10",
+    };
+    for (refused) |cypher| {
+        var detailed = try db.queryWithParamsDetailed(cypher, &params);
+        defer detailed.deinit();
+        switch (detailed) {
+            .success => {
+                std.debug.print("ran, but should be refused: {s}\n", .{cypher});
+                return error.TestUnexpectedResult;
+            },
+            .failure => |failure| {
+                try std.testing.expectEqual(lattice.storage.database.QueryFailure.Cause.query, failure.cause);
+                try std.testing.expect(std.mem.indexOf(u8, failure.message, "give it a bound") != null);
+            },
+        }
+    }
+}

@@ -605,6 +605,7 @@ pub const QueryPlanner = struct {
         };
         if (where) |w| {
             if (self.has_subqueries) try self.planSubqueriesIn(w.condition);
+            try self.refuseBareDistance(w.condition, "OPTIONAL MATCH");
             // A plain filter: the vector and full-text access paths that
             // planWhere can choose consume their input up front, which an
             // argument that yields one row per round does not allow.
@@ -704,6 +705,7 @@ pub const QueryPlanner = struct {
         };
         if (sq.where) |condition| {
             try self.planSubqueriesIn(condition);
+            try self.refuseBareDistance(condition, "a subquery or pattern comprehension");
             const filter = filter_ops.Filter.init(self.allocator, op, condition) catch return PlannerError.OutOfMemory;
             op = filter.operator();
         }
@@ -1915,11 +1917,22 @@ pub const QueryPlanner = struct {
         }
 
         // Default: create a filter operator
+        try self.refuseBareDistance(condition, "this MATCH");
         const filter = filter_ops.Filter.init(self.allocator, input_op, condition) catch {
             return PlannerError.OutOfMemory;
         };
 
         return filter.operator();
+    }
+
+    /// A WHERE that is a bare `x <=> q` is a search only where planWhere
+    /// plans it as one: the whole WHERE of a MATCH, over a property and a
+    /// vector. As a row filter it would be a distance read as true or false,
+    /// passing every row but an exact match, in no order; it is refused.
+    fn refuseBareDistance(self: *Self, condition: *const ast.Expression, comptime where_written: []const u8) PlannerError!void {
+        if (condition.* != .binary or condition.binary.operator != .vector_distance) return;
+        self.setPlanDetail("A WHERE of only `<=>` ranks the rows of a MATCH by distance, which " ++ where_written ++ " cannot do; give it a bound instead, as in `WHERE n.embedding <=> $q < 0.5`", .{});
+        return PlannerError.InvalidQuery;
     }
 
     /// Whether the index seek planned for the predicate's variable runs the
@@ -3470,6 +3483,7 @@ pub const QueryPlanner = struct {
         // Add WHERE filter if present
         if (with_clause.where) |condition| {
             if (self.has_subqueries) try self.planSubqueriesIn(condition);
+            try self.refuseBareDistance(condition, "WITH");
             const filter = filter_ops.Filter.init(self.allocator, op, condition) catch {
                 return PlannerError.OutOfMemory;
             };

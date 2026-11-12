@@ -3975,6 +3975,10 @@ pub const QueryPlanner = struct {
             op = filter.operator();
         }
 
+        // An aggregating WITH plans as a RETURN does, which names columns;
+        // a WITH returns none, so a query that ends in a write after it
+        // returns nothing.
+        self.output_columns = 0;
         return op;
     }
 

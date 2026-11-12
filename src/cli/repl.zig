@@ -892,6 +892,9 @@ pub const Repl = struct {
     /// Display result as CSV
     fn displayResultCsv(self: *Self, result: *QueryResult, stdout: anytype) !void {
         _ = self;
+        // A query that returns nothing, such as a bare CREATE, has no header
+        // to write either.
+        if (result.columns.len == 0) return;
         // Header
         for (result.columns, 0..) |col, i| {
             if (i > 0) try stdout.writeByte(',');

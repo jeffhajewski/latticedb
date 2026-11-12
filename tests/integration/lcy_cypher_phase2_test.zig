@@ -936,6 +936,25 @@ test "lcy: YIELD * brings the procedure's columns into scope" {
 // Small fixes
 // ============================================================================
 
+test "lcy: a query without RETURN returns no columns and no rows" {
+    const path = "/tmp/lcy_write_only_result.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+
+    // These returned their working slots, as `col0 | col1` or `vs` with a
+    // row of null per input row.
+    try expectResult(db, "CREATE (:P {v: 1})-[:R]->(:P {v: 2})", "");
+    try expectResult(db, "UNWIND [1, 2] AS x MERGE (:M {x: x})", "");
+    try expectResult(db, "MATCH (p:P) WITH collect(p.v) AS vs FOREACH (v IN vs | CREATE (:Q {v: v}))", "");
+    try expectResult(db, "MATCH (p:P) CALL { WITH p RETURN p.v * 10 AS w } SET p.w = w", "");
+    try expectResult(db, "MATCH (q:Q) DELETE q", "");
+    // The writes happened, and RETURN still names its columns.
+    try expectResult(db, "MATCH (p:P) RETURN p.w AS w ORDER BY w", "w\n10\n20");
+    try expectResult(db, "MATCH (n) RETURN count(n) AS c", "c\n4");
+    try expectResult(db, "CREATE (n:Z) RETURN n.v AS v", "v\nnull");
+    try expectResult(db, "CALL db.labels() YIELD label WITH label WHERE label = 'Z' RETURN label", "label\n\"Z\"");
+}
+
 test "lcy: properties() of a map is the map" {
     const path = "/tmp/lcy_properties_map.ltdb";
     const db = try openTestDb(path);

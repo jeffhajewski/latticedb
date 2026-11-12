@@ -9902,9 +9902,10 @@ pub const Database = struct {
         exec_result: *executor_mod.QueryResult,
         planner: *QueryPlanner,
     ) QueryError!QueryResult {
-        // Build column names from planner output columns (set by RETURN clause planning)
-        // Use output_columns when available (from RETURN), otherwise fall back to next_slot
-        const num_cols = if (planner.output_columns > 0) planner.output_columns else planner.next_slot;
+        // The columns are the ones RETURN (or a standalone CALL) names. A
+        // query without them, such as a bare CREATE, returns nothing: its
+        // slots are working state, not results.
+        const num_cols = planner.output_columns;
         var columns = self.allocator.alloc([]const u8, num_cols) catch {
             return QueryError.OutOfMemory;
         };
@@ -9950,7 +9951,8 @@ pub const Database = struct {
         }
 
         // Convert rows
-        var rows = self.allocator.alloc(ResultRow, exec_result.rows.items.len) catch {
+        const row_count = if (num_cols == 0) 0 else exec_result.rows.items.len;
+        var rows = self.allocator.alloc(ResultRow, row_count) catch {
             return QueryError.OutOfMemory;
         };
         var rows_built: usize = 0;
@@ -9961,7 +9963,7 @@ pub const Database = struct {
             self.allocator.free(rows);
         }
 
-        for (exec_result.rows.items, 0..) |exec_row, row_idx| {
+        for (exec_result.rows.items[0..row_count], 0..) |exec_row, row_idx| {
             var values = self.allocator.alloc(ResultValue, num_cols) catch {
                 return QueryError.OutOfMemory;
             };

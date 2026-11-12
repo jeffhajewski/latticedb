@@ -476,6 +476,14 @@ the GQL-only clauses. `book/src/cypher/overview.md` lists them.
   columns called `n.v`, which no caller could tell apart by name; it now fails
   with "Column `n.v` is returned twice; give one of them another name with AS".
   `WITH` already refused a name twice.
+- **A query without `RETURN` returns no columns and no rows.** A bare `CREATE`,
+  `MERGE`, `SET`, `DELETE` or `FOREACH` returned the engine's working slots as
+  columns named after its variables or `col0`, `col1`, ..., with a row for each
+  row it wrote: `CREATE (a)-[:R]->(b)` returned `a | b`, `UNWIND [1, 2] AS x
+  MERGE (:M {x: x})` returned `x | col1`, and a `FOREACH` after an aggregating
+  `WITH` returned a column of nulls. Add a `RETURN` to get values back. The CLI
+  prints "Query executed" in a table, `{"columns":[],"rows":[],"count":0}` in
+  JSON and nothing in CSV.
 
 ### Storage, API and formats
 

@@ -297,6 +297,18 @@ pub const Lexer = struct {
             return self.makeTokenAt(.integer, start);
         }
 
+        // Octal: 0o17. An 8 or 9 is read into the token, so that the parser
+        // can say the digit is not octal instead of reading `0o18` as
+        // `0o1` followed by 8.
+        if (self.position - start == 1 and self.source[start] == '0' and
+            (self.peek() == 'o' or self.peek() == 'O') and
+            self.peekAhead(1) != null and isDigit(self.peekAhead(1).?))
+        {
+            _ = self.advance();
+            while (!self.isAtEnd() and isDigit(self.peek().?)) _ = self.advance();
+            return self.makeTokenAt(.integer, start);
+        }
+
         // Started at the '.' of `.5`.
         var is_float = self.source[start] == '.';
 

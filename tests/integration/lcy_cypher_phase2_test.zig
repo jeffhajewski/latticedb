@@ -955,6 +955,28 @@ test "lcy: a query without RETURN returns no columns and no rows" {
     try expectResult(db, "CALL db.labels() YIELD label WITH label WHERE label = 'Z' RETURN label", "label\n\"Z\"");
 }
 
+test "lcy: octal integers, and a leading zero refused" {
+    const path = "/tmp/lcy_octal.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+
+    try expectResult(db, "RETURN 0o17 AS o, 0O7 AS p, -0o10 AS n, 0o0 AS z, 0o017 AS l", "o | p | n | z | l\n15 | 7 | -8 | 0 | 15");
+    try expectResult(db, "RETURN 0o777777777777777777777 AS max", "max\n9223372036854775807");
+    try expectFailure(db, "RETURN 0o1000000000000000000000 AS o", .parse, "Invalid integer literal");
+    try expectFailure(db, "RETURN 0o18 AS o", .parse, "An octal integer takes only the digits 0 to 7");
+    // A leading zero was read as decimal: 012 was 12, where openCypher 9
+    // read 10.
+    try expectFailure(db, "RETURN 012 AS a", .parse, "An integer cannot start with 0, as in 012: write 12 for the decimal number, or 0o12 for the octal one");
+    try expectFailure(db, "RETURN -019 AS a", .parse, "An integer cannot start with 0, as in 019: write 19");
+    try expectFailure(db, "RETURN 00 AS a", .parse, "An integer cannot start with 0, as in 00: write 0");
+    try expectFailure(db, "WITH [1, 2] AS l RETURN l[01] AS a", .parse, "An integer cannot start with 0");
+    // Zero itself, floats with a leading zero, hexadecimal and strings are
+    // as they were.
+    try expectResult(db, "RETURN 0 AS z, 0.5 AS h, 01.5 AS f, 007e1 AS e, 0x0F AS x, '012' AS s, [0, 1][0..1] AS l", "z | h | f | e | x | s | l\n0 | 0.5 | 1.5 | 70 | 15 | \"012\" | [0]");
+    // The o is part of the number only before a digit.
+    try expectResult(db, "WITH 0 AS o RETURN o, 0 AS other", "o | other\n0 | 0");
+}
+
 test "lcy: properties() of a map is the map" {
     const path = "/tmp/lcy_properties_map.ltdb";
     const db = try openTestDb(path);

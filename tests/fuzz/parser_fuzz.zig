@@ -273,6 +273,7 @@ test "parser: handles the syntax added after 0.16" {
         "MATCH (p) WHERE count(p) > 1 SET p.c = sum() RETURN count(1, 2)",
         "MATCH (p) RETURN (p)-->() - 1, 1 - (p)-->(), (p)-->()-1",
         "CALL db.labels() YIELD * RETURN *",
+        "RETURN 0o17, 0O7, -0o10, 0o18, 0o, 0or, 012, 00, 019, 01.5, 0o1000000000000000000000",
         "MATCH p (a) RETURN p",
         "MATCH p = RETURN p",
         "CREATE p = (a)",

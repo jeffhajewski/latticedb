@@ -2658,9 +2658,21 @@ pub const Parser = struct {
     // ========================================================================
 
     fn makeIntegerLiteral(self: *Self, text: []const u8, loc: ast.SourceLocation) ?*ast.Expression {
-        const hex = text.len > 2 and text[0] == '0' and (text[1] == 'x' or text[1] == 'X');
-        const value = (if (hex) std.fmt.parseInt(i64, text[2..], 16) else std.fmt.parseInt(i64, text, 10)) catch {
-            self.errorAt(loc, "Invalid integer literal");
+        // 0x1F is hexadecimal and 0o17 octal. A bare leading zero, 017, was
+        // octal in openCypher 9 and is decimal elsewhere, so it is refused
+        // rather than read one way when the writer meant the other.
+        const prefixed = text.len > 2 and text[0] == '0' and std.ascii.isAlphabetic(text[1]);
+        const base: u8 = if (!prefixed) 10 else if (text[1] == 'x' or text[1] == 'X') 16 else 8;
+        if (!prefixed and text.len > 1 and text[0] == '0') {
+            self.leadingZeroError(text, loc);
+            return null;
+        }
+        const value = std.fmt.parseInt(i64, if (prefixed) text[2..] else text, base) catch |err| {
+            if (base == 8 and err == error.InvalidCharacter) {
+                self.errorAt(loc, "An octal integer takes only the digits 0 to 7");
+            } else {
+                self.errorAt(loc, "Invalid integer literal");
+            }
             return null;
         };
         const expr = self.arena.allocator().create(ast.Expression) catch return null;
@@ -2671,6 +2683,21 @@ pub const Parser = struct {
             },
         };
         return expr;
+    }
+
+    /// `012`: say how to write each number it could have meant.
+    fn leadingZeroError(self: *Self, text: []const u8, loc: ast.SourceLocation) void {
+        const digits = std.mem.trimStart(u8, text, "0");
+        const decimal = if (digits.len == 0) "0" else digits;
+        const octal = digits.len > 0 and for (digits) |c| {
+            if (c > '7') break false;
+        } else true;
+        const a = self.arena.allocator();
+        const message = if (octal)
+            std.fmt.allocPrint(a, "An integer cannot start with 0, as in {s}: write {s} for the decimal number, or 0o{s} for the octal one", .{ text, decimal, decimal })
+        else
+            std.fmt.allocPrint(a, "An integer cannot start with 0, as in {s}: write {s}", .{ text, decimal });
+        self.errorAt(loc, message catch "An integer cannot start with 0; write 0o17 for an octal number");
     }
 
     fn makeFloatLiteral(self: *Self, text: []const u8, loc: ast.SourceLocation) ?*ast.Expression {

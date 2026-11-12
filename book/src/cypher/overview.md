@@ -78,7 +78,7 @@ RETURN label ORDER BY label
 | `exists()` on a property | `exists(n.email)`, the same as `n.email IS NOT NULL` |
 | Map projection | `n {.name, .age, friends: size(fs)}`, `n {.*}`; see [RETURN](./return.md) |
 | `RETURN *`, `WITH *` | every variable in scope; see [RETURN](./return.md) |
-| Literals | `0x1F`, `.5`, `` `a name with spaces` `` |
+| Literals | `0x1F`, `0o17`, `.5`, `` `a name with spaces` `` |
 
 ## Not Supported
 
@@ -100,7 +100,9 @@ with an error that names it:
   created through the API.
 - the GQL clauses `FINISH`, `FILTER`, `LET` and `INSERT`, and the legacy `START`
 - temporal and spatial values and the functions on them (`date()`, `point()`)
-- octal literals: `012` is read as the decimal 12
+- an integer with a leading zero, `012`: openCypher 9 read it as octal and other
+  dialects as decimal, so it is refused with a message giving both; write `12`,
+  or `0o12` for octal. Floats may start with zero (`01.5`).
 
 The limits of `shortestPath` are listed under
 [Shortest Paths](./variable-length-paths.md#shortest-paths).

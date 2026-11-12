@@ -337,7 +337,7 @@ or an unknown function, in 0.16.0:
   patterns and as tests in expressions (`WHERE n:Person|Robot`). On a
   relationship the test is of its type: `r:KNOWS`.
 - **Smaller additions:** `exists(n.prop)`, `ORDER BY ... NULLS FIRST | NULLS LAST`, backtick-quoted
-  names (`` n.`first name` ``), hexadecimal integers (`0x1F`) and `.5`.
+  names (`` n.`first name` ``), hexadecimal integers (`0x1F`), octal integers (`0o17`) and `.5`.
 
 What is not implemented fails with an error that names the construct, where
 0.16.0 reported the clauses it expected: quantified path patterns, `LOAD CSV`, `CALL { } IN TRANSACTIONS`, `OPTIONAL CALL`,
@@ -476,6 +476,11 @@ the GQL-only clauses. `book/src/cypher/overview.md` lists them.
   columns called `n.v`, which no caller could tell apart by name; it now fails
   with "Column `n.v` is returned twice; give one of them another name with AS".
   `WITH` already refused a name twice.
+- **An integer cannot start with 0.** `012` was read as the decimal 12, where
+  openCypher 9 reads it as the octal 10; it now fails to parse with "An integer
+  cannot start with 0, as in 012: write 12 for the decimal number, or 0o12 for
+  the octal one". Octal integers are written `0o12`. `0`, floats such as `01.5`
+  and hexadecimal `0x0F` are unchanged.
 - **A query without `RETURN` returns no columns and no rows.** A bare `CREATE`,
   `MERGE`, `SET`, `DELETE` or `FOREACH` returned the engine's working slots as
   columns named after its variables or `col0`, `col1`, ..., with a row for each
@@ -953,7 +958,7 @@ with relationships is one range probe, under 1 µs.
   TRANSACTIONS`, `OPTIONAL CALL`, procedures other than the four catalog ones,
   `LOAD CSV`, type predicates (`IS :: INTEGER`), `||`, temporal and spatial
   types, and schema and administration statements (`CREATE INDEX`, `SHOW`,
-  `EXPLAIN`). `012` is read as decimal 12, not octal.
+  `EXPLAIN`).
 - **`shortestPath` takes one relationship pattern** with a lower bound of 0 or 1
   and no property map, only in `MATCH`, and a `WHERE` that reads the path is
   refused, since the search would not look further for a longer path that passes.

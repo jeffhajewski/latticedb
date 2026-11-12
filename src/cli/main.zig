@@ -91,6 +91,7 @@ pub fn main(init: std.process.Init) !u8 {
             error.InvalidVectorMetric => output.printError(stderr, "Invalid vector metric. Use: cosine, euclidean, or dot", .{}),
             error.InvalidVectorM => output.printError(stderr, "Invalid --vector-m. Must be in the range 2..32.", .{}),
             error.InvalidVectorEfConstruction => output.printError(stderr, "Invalid --vector-ef-construction. Must be in the range 1..4096.", .{}),
+            error.InvalidChangefeedRetention => output.printError(stderr, "Invalid --changefeed. Use: all, off, last:<events> or age:<duration> (such as age:7d, age:12h, age:30m).", .{}),
             error.InvalidCacheSize => output.printError(stderr, "Invalid cache size. Must be a positive integer.", .{}),
             error.InvalidPageSize => output.printError(stderr, "Invalid page size. Must be in the range 4096..65535 bytes.", .{}),
             error.InvalidBatchSize => output.printError(stderr, "Invalid batch size. Must be a positive integer.", .{}),
@@ -186,6 +187,7 @@ fn runCommand(
         .info => try cmdInfo(allocator, stdout, stderr, parsed_args),
         .compact => try cmdCompact(allocator, stdout, stderr, parsed_args),
         .checkpoint => try cmdCheckpoint(allocator, stdout, stderr, parsed_args),
+        .changefeed => try cmdChangefeed(allocator, stdout, stderr, parsed_args),
         .backup => try cmdBackup(allocator, stdout, stderr, parsed_args),
         .replicate => try cmdReplicate(allocator, stdout, stderr, parsed_args),
         .restore => try cmdRestore(allocator, stdout, stderr, parsed_args),
@@ -270,6 +272,7 @@ fn cmdCreate(
         .vector_ef_construction = parsed_args.vector_ef_construction,
         .enable_fts = parsed_args.enable_fts,
         .buffer_pool_size = @as(usize, parsed_args.cache_size_mb) * 1024 * 1024,
+        .changefeed_retention = parsed_args.changefeed_retention,
     };
 
     // Create the database
@@ -322,6 +325,12 @@ fn cmdInfo(
     };
     const size_kb = stat.size / 1024;
 
+    const feed = db.changefeedStatus() catch |err| {
+        return failCommand(stderr, "Failed to read the changefeed: {s}", .{@errorName(err)});
+    };
+    var policy_buf: [48]u8 = undefined;
+    const policy = feed.retention.format(&policy_buf);
+
     switch (parsed_args.format) {
         .table => {
             try stdout.print("Database: {s}\n", .{path});
@@ -332,9 +341,15 @@ fn cmdInfo(
             try stdout.print("Format:       v{d}\n", .{lattice.core.types.FORMAT_VERSION});
             try stdout.print("Vector:       {s}\n", .{if (db.hasPersistedVectorIndex()) "enabled" else "disabled"});
             try stdout.print("FTS:          {s}\n", .{if (db.hasPersistedFtsIndex()) "enabled" else "disabled"});
+            try stdout.print("Changefeed:   keep {s}, ", .{policy});
+            if (feed.oldest_sequence) |oldest| {
+                try stdout.print("events {d}..{d}\n", .{ oldest, feed.last_sequence });
+            } else {
+                try stdout.print("no events held (last sequence {d})\n", .{feed.last_sequence});
+            }
         },
         .json => {
-            try stdout.print("{{\"path\":\"{s}\",\"size_kb\":{d},\"nodes\":{d},\"edges\":{d},\"format_version\":{d},\"vector_enabled\":{},\"fts_enabled\":{}}}\n", .{
+            try stdout.print("{{\"path\":\"{s}\",\"size_kb\":{d},\"nodes\":{d},\"edges\":{d},\"format_version\":{d},\"vector_enabled\":{},\"fts_enabled\":{},\"changefeed_retention\":\"{s}\",\"changefeed_oldest_sequence\":{d},\"changefeed_last_sequence\":{d}}}\n", .{
                 path,
                 size_kb,
                 node_count,
@@ -342,6 +357,9 @@ fn cmdInfo(
                 lattice.core.types.FORMAT_VERSION,
                 db.hasPersistedVectorIndex(),
                 db.hasPersistedFtsIndex(),
+                policy,
+                feed.oldest_sequence orelse 0,
+                feed.last_sequence,
             });
         },
         .csv => {
@@ -353,6 +371,9 @@ fn cmdInfo(
             try stdout.print("format_version,{d}\n", .{lattice.core.types.FORMAT_VERSION});
             try stdout.print("vector_enabled,{}\n", .{db.hasPersistedVectorIndex()});
             try stdout.print("fts_enabled,{}\n", .{db.hasPersistedFtsIndex()});
+            try stdout.print("changefeed_retention,{s}\n", .{policy});
+            try stdout.print("changefeed_oldest_sequence,{d}\n", .{feed.oldest_sequence orelse 0});
+            try stdout.print("changefeed_last_sequence,{d}\n", .{feed.last_sequence});
         },
     }
 }
@@ -945,6 +966,7 @@ fn openOptions(parsed_args: *const Args, mode: OpenMode) OpenOptions {
         .config = .{
             .enable_vector = parsed_args.enable_vector,
             .vector_dimensions = if (parsed_args.vector_dims_set) parsed_args.vector_dims else 0,
+            .changefeed_retention = parsed_args.changefeed_retention,
         },
     };
 }
@@ -1112,6 +1134,66 @@ fn cmdRestore(
                     stats.duration_ns,
                 },
             );
+        },
+    }
+}
+
+/// Show the changefeed's policy and what it holds, and with --trim apply
+/// the policy now. --changefeed=<policy> sets the policy first.
+fn cmdChangefeed(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    stderr: anytype,
+    parsed_args: *const Args,
+) !void {
+    const path = parsed_args.path.?;
+    const writes = parsed_args.trim or parsed_args.changefeed_retention != null;
+    const db = try openDatabase(allocator, stderr, parsed_args, if (writes) .read_write else .read_only);
+    defer db.close();
+
+    var removed: u64 = 0;
+    if (parsed_args.trim) {
+        removed = db.trimChangefeed() catch |err| {
+            return failCommand(stderr, "Failed to trim the changefeed: {s}", .{@errorName(err)});
+        };
+    }
+    const feed = db.changefeedStatus() catch |err| {
+        return failCommand(stderr, "Failed to read the changefeed: {s}", .{@errorName(err)});
+    };
+    const held = db.changefeedSize() catch |err| {
+        return failCommand(stderr, "Failed to read the changefeed: {s}", .{@errorName(err)});
+    };
+    var policy_buf: [48]u8 = undefined;
+    const policy = feed.retention.format(&policy_buf);
+
+    switch (parsed_args.format) {
+        .table => {
+            try stdout.print("Changefeed of {s}\n", .{path});
+            try stdout.print("  Retention:      {s}\n", .{policy});
+            try stdout.print("  Events held:    {d}", .{held.events});
+            if (held.legacy_events > 0) try stdout.print(" ({d} in the 0.16 format)", .{held.legacy_events});
+            try stdout.writeAll("\n");
+            try stdout.print("  Bytes:          {d}\n", .{held.bytes});
+            if (feed.oldest_sequence) |oldest| {
+                try stdout.print("  Sequences:      {d}..{d}\n", .{ oldest, feed.last_sequence });
+            } else {
+                try stdout.print("  Last sequence:  {d}\n", .{feed.last_sequence});
+            }
+            if (parsed_args.trim) try stdout.print("  Trimmed:        {d} events\n", .{removed});
+        },
+        .json => try stdout.print(
+            "{{\"path\":\"{s}\",\"retention\":\"{s}\",\"events\":{d},\"legacy_events\":{d},\"bytes\":{d},\"oldest_sequence\":{d},\"last_sequence\":{d},\"trimmed\":{d}}}\n",
+            .{ path, policy, held.events, held.legacy_events, held.bytes, feed.oldest_sequence orelse 0, feed.last_sequence, removed },
+        ),
+        .csv => {
+            try stdout.writeAll("property,value\n");
+            try stdout.print("retention,{s}\n", .{policy});
+            try stdout.print("events,{d}\n", .{held.events});
+            try stdout.print("legacy_events,{d}\n", .{held.legacy_events});
+            try stdout.print("bytes,{d}\n", .{held.bytes});
+            try stdout.print("oldest_sequence,{d}\n", .{feed.oldest_sequence orelse 0});
+            try stdout.print("last_sequence,{d}\n", .{feed.last_sequence});
+            try stdout.print("trimmed,{d}\n", .{removed});
         },
     }
 }
@@ -1689,6 +1771,7 @@ fn printUsage(writer: anytype) void {
         \\    info <path>         Show database information
         \\    compact <path>      Reclaim free pages from physical EOF
         \\    checkpoint <path>   Flush pending writes and reset the WAL
+        \\    changefeed <path>   Show or trim the changefeed (__lattice_changes)
         \\    backup <path>       Copy to another file, database stays open
         \\    replicate <path>    Ship changes to a directory, once or continuously
         \\    restore <dir>       Rebuild a database from what replication shipped
@@ -1727,6 +1810,9 @@ fn printUsage(writer: anytype) void {
         \\  --file=<path>         Input/output file for import/export
         \\  --query=<cypher>      Query string for exec command
         \\  --no-lock             Skip the file lock, for filesystems without one
+        \\  --changefeed=<policy> How much of the changefeed to keep: all, off,
+        \\                        last:<events> or age:<duration> (7d, 12h, 30m).
+        \\                        Recorded in the file; a writing command sets it.
         \\  -h, --help            Show help for a command
         \\  -v, --version         Show version
         \\
@@ -1899,6 +1985,32 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\Examples:
             \\  lattice restore /mnt/backup/social --output=recovered.lattice
             \\  lattice restore /mnt/backup/social --output=recovered.lattice --at="2026-08-25T14:00:00Z"
+            \\
+        ) catch {},
+        .changefeed => writer.writeAll(
+            \\Usage: lattice changefeed <path> [options]
+            \\
+            \\Show the changefeed (__lattice_changes): its retention policy, how
+            \\many events it holds and their sequence numbers.
+            \\
+            \\The file records the policy. Every event is kept unless a policy
+            \\says otherwise. Retention drops the oldest events as the database
+            \\checkpoints, a bounded number at a time; --trim applies it in full.
+            \\
+            \\Options:
+            \\  --changefeed=<policy> Set the policy: all, off, last:<events>, or
+            \\                        age:<duration> with ms, s, m, h or d
+            \\  --trim                Drop what the policy no longer keeps, now
+            \\  --format=<fmt>        Output format: table, json, csv
+            \\
+            \\A reader that asks for the events after one that has been dropped
+            \\gets an error rather than a silent gap. With the policy off, no
+            \\events are written and reading the changefeed is an error.
+            \\
+            \\Examples:
+            \\  lattice changefeed mydb.lattice
+            \\  lattice changefeed mydb.lattice --changefeed=age:30d --trim
+            \\  lattice changefeed mydb.lattice --changefeed=all
             \\
         ) catch {},
         .checkpoint => writer.writeAll(
@@ -2161,4 +2273,67 @@ test "parse and run version" {
     var args = try Args.parse(allocator, &.{ "lattice", "version" });
     defer args.deinit(allocator);
     try std.testing.expectEqual(Command.version, args.command.?);
+}
+
+fn runForTest(allocator: std.mem.Allocator, argv: []const []const u8, out: *std.Io.Writer.Allocating) !void {
+    var err_buf: std.Io.Writer.Allocating = .init(allocator);
+    defer err_buf.deinit();
+    var parsed = try Args.parse(allocator, argv);
+    defer parsed.deinit(allocator);
+    switch (parsed.command.?) {
+        .changefeed => try cmdChangefeed(allocator, &out.writer, &err_buf.writer, &parsed),
+        .info => try cmdInfo(allocator, &out.writer, &err_buf.writer, &parsed),
+        else => unreachable,
+    }
+}
+
+test "lcf changefeed command sets the policy, trims and reports it" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lcf_cli_changefeed.ltdb";
+    cleanupTestDatabaseFiles(path);
+    defer cleanupTestDatabaseFiles(path);
+
+    {
+        var db = try Database.open(allocator, path, .{
+            .create = true,
+            .config = .{ .enable_fts = false },
+        });
+        // Closing checkpoints, so the next open has no log to fold in (a
+        // checkpoint applies the policy too).
+        defer db.close();
+        for (0..5) |_| {
+            var txn = try db.beginTransaction(.read_write);
+            _ = try db.createNode(&txn, &.{"N"});
+            try db.commitTransaction(&txn);
+        } // events 1..10
+    }
+
+    var out: std.Io.Writer.Allocating = .init(allocator);
+    defer out.deinit();
+
+    // Reading leaves everything as it is: the default keeps every event.
+    try runForTest(allocator, &.{ "lattice", "changefeed", path, "--format=json" }, &out);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"retention\":\"all\",\"events\":10,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"oldest_sequence\":1,\"last_sequence\":10,\"trimmed\":0") != null);
+
+    // Setting a policy and trimming drops what it no longer keeps.
+    out.clearRetainingCapacity();
+    try runForTest(allocator, &.{ "lattice", "changefeed", path, "--changefeed=last:4", "--trim", "--format=json" }, &out);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"retention\":\"last:4\",\"events\":4,") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "\"oldest_sequence\":7,\"last_sequence\":10,\"trimmed\":6") != null);
+
+    // The file keeps the policy; info shows it.
+    out.clearRetainingCapacity();
+    try runForTest(allocator, &.{ "lattice", "info", path }, &out);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "Changefeed:   keep last:4, events 7..10") != null);
+    out.clearRetainingCapacity();
+    try runForTest(allocator, &.{ "lattice", "info", path, "--format=csv" }, &out);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "changefeed_retention,last:4\n") != null);
+
+    // Off: nothing held, and the last sequence stays where it was.
+    out.clearRetainingCapacity();
+    try runForTest(allocator, &.{ "lattice", "changefeed", path, "--changefeed=off", "--trim" }, &out);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "Retention:      off") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "Events held:    0") != null);
+    try std.testing.expect(std.mem.indexOf(u8, out.written(), "Last sequence:  10") != null);
 }

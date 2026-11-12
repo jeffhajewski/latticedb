@@ -7,6 +7,7 @@ const types = lattice.core.types;
 const rdf_options = @import("rdf/options.zig");
 const page_manager = lattice.storage.page_manager;
 const VectorMetric = lattice.storage.database.VectorMetric;
+const Retention = lattice.stream.changefeed.Retention;
 
 /// Managed array list for allocator tracking
 fn ManagedArrayList(comptime T: type) type {
@@ -32,6 +33,7 @@ pub const Command = enum {
     info,
     compact,
     checkpoint,
+    changefeed,
     backup,
     replicate,
     restore,
@@ -62,6 +64,7 @@ pub const Command = enum {
         if (std.mem.eql(u8, s, "info")) return .info;
         if (std.mem.eql(u8, s, "compact")) return .compact;
         if (std.mem.eql(u8, s, "checkpoint")) return .checkpoint;
+        if (std.mem.eql(u8, s, "changefeed")) return .changefeed;
         if (std.mem.eql(u8, s, "backup")) return .backup;
         if (std.mem.eql(u8, s, "replicate")) return .replicate;
         if (std.mem.eql(u8, s, "restore")) return .restore;
@@ -94,6 +97,7 @@ pub const Command = enum {
             .info => "Show database information",
             .compact => "Reclaim free pages from the end of a database file",
             .checkpoint => "Flush pending writes and reset the write-ahead log",
+            .changefeed => "Show or trim the changefeed and set how much of it to keep",
             .backup => "Copy a database to another file without closing it",
             .replicate => "Ship changes to a directory, once or continuously",
             .restore => "Rebuild a database from what replication shipped",
@@ -241,6 +245,11 @@ pub const Args = struct {
     vector_m: ?u16 = null,
     vector_ef_construction: ?u16 = null,
     enable_fts: bool = true,
+    /// --changefeed=<policy>: replaces the file's changefeed retention
+    /// policy when the database is opened for writing.
+    changefeed_retention: ?Retention = null,
+    /// --trim, for `changefeed`.
+    trim: bool = false,
     cache_size_mb: u32 = 64,
     page_size: u32 = 4096,
 
@@ -325,6 +334,11 @@ pub const Args = struct {
                     const ef = std.fmt.parseInt(u16, value, 10) catch return error.InvalidVectorEfConstruction;
                     if (ef < 1 or ef > 4096) return error.InvalidVectorEfConstruction;
                     args.vector_ef_construction = ef;
+                } else if (std.mem.startsWith(u8, arg, "--changefeed=")) {
+                    args.changefeed_retention = Retention.parse(arg["--changefeed=".len..]) orelse
+                        return error.InvalidChangefeedRetention;
+                } else if (std.mem.eql(u8, arg, "--trim")) {
+                    args.trim = true;
                 } else if (std.mem.eql(u8, arg, "--enable-fts")) {
                     args.enable_fts = true;
                 } else if (std.mem.eql(u8, arg, "--no-fts")) {
@@ -428,6 +442,7 @@ pub const Error = error{
     InvalidVectorMetric,
     InvalidVectorM,
     InvalidVectorEfConstruction,
+    InvalidChangefeedRetention,
     InvalidCacheSize,
     InvalidPageSize,
     InvalidBatchSize,
@@ -497,6 +512,12 @@ test "parse vector index options for create" {
     try std.testing.expect(plain.vector_metric == null);
 
     try std.testing.expectError(error.InvalidVectorMetric, Args.parse(allocator, &.{ "lattice", "create", "t.db", "--vector-metric=manhattan" }));
+    try std.testing.expectError(error.InvalidChangefeedRetention, Args.parse(allocator, &.{ "lattice", "create", "t.db", "--changefeed=sometimes" }));
+    var feed = try Args.parse(allocator, &.{ "lattice", "changefeed", "t.db", "--changefeed=last:1000", "--trim" });
+    defer feed.deinit(allocator);
+    try std.testing.expectEqual(@as(?Command, .changefeed), feed.command);
+    try std.testing.expectEqual(@as(u64, 1000), feed.changefeed_retention.?.keep_last);
+    try std.testing.expect(feed.trim);
     try std.testing.expectError(error.InvalidVectorM, Args.parse(allocator, &.{ "lattice", "create", "t.db", "--vector-m=1" }));
     try std.testing.expectError(error.InvalidVectorM, Args.parse(allocator, &.{ "lattice", "create", "t.db", "--vector-m=33" }));
     try std.testing.expectError(error.InvalidVectorEfConstruction, Args.parse(allocator, &.{ "lattice", "create", "t.db", "--vector-ef-construction=0" }));

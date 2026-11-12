@@ -49,7 +49,7 @@ Treat that as "the same order of operation, wildly different order of magnitude,
 
 Being honest about this matters more than the section above.
 
-**Broader Cypher coverage.** LatticeDB implements a subset. `OPTIONAL MATCH` and `CALL` procedures are not yet there — see [When to Use LatticeDB](../getting-started/when-to-use.md).
+**Broader Cypher coverage.** LatticeDB implements a subset. Quantified path patterns, `LOAD CSV`, user-defined procedures and functions, and temporal types are not there — see [When to Use LatticeDB](../getting-started/when-to-use.md).
 
 **A mature codebase with real production mileage.** Kùzu had years of academic and industrial work behind it, and LadybugDB inherits all of it. LatticeDB is new, and new means undiscovered bugs.
 

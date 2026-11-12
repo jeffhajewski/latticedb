@@ -25,19 +25,22 @@ LatticeDB stores everything in one file on one machine. If you need sharding, re
 
 ## You need the full Cypher language
 
-LatticeDB supports the core of Cypher but not all of it. These are not implemented:
+LatticeDB implements most of the Cypher people write day to day, `OPTIONAL
+MATCH`, `UNION`, `CASE`, `CALL { }` subqueries, comprehensions and
+`shortestPath` among it, but not all of the language. These are not
+implemented:
 
-- `OPTIONAL MATCH`
-- `CALL` procedures
-- `UNION`
-- `CASE`
-- `EXISTS`
-- list indexing
-- list comprehensions
-- named paths
+- quantified path patterns (`((a)-->(b)){1,3}`) and label expressions
+  (`(n:A|B)`)
+- `LOAD CSV` and `CALL { } IN TRANSACTIONS`
+- user-defined procedures and functions; the only procedures are the catalog
+  ones, such as `db.labels()`
+- temporal and spatial types
+- schema and administration statements (`CREATE INDEX`, `SHOW`, `EXPLAIN`)
 
 If your queries depend on these, Neo4j is the complete implementation. See
-[Not Supported](../cypher/overview.md#not-supported) for how each one fails.
+[Not Supported](../cypher/overview.md#not-supported) for the full list; each one
+fails with an error that names it.
 
 ## You need mature tooling and ecosystem
 

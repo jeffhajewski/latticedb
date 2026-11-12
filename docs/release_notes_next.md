@@ -33,6 +33,12 @@ format version 2, Unicode full-text tokenization and stricter `set_vector` keys.
 The file format is version 4 and the log format version 3; *Upgrade notes* says
 exactly what 0.16.0 can still open.
 
+Much more of Cypher runs: `OPTIONAL MATCH`, `UNION`, `CASE`, `CALL { }`
+subqueries, `FOREACH`, named paths, `shortestPath`, list indexing and slicing,
+list and pattern comprehensions, `EXISTS { }` and `COUNT { }`, map projection
+and `RETURN *`, among others listed under *Cypher*. What is still missing fails
+with an error that names it.
+
 `lattice import` and `lattice export` read and write RDF in Turtle and
 N-Triples, so vocabularies and data sets kept as RDF can be queried with Cypher,
 full-text and vector search, and written back out.
@@ -289,9 +295,58 @@ to apply the transaction).
 The guide, with when to choose each policy, the order of events and the stored
 format, is `book/src/guides/changefeed.md`.
 
+## Cypher
+
+Queries can use much more of the language. Each of these was a parse error,
+or an unknown function, in 0.16.0:
+
+- **`OPTIONAL MATCH`**, with its own `WHERE`: a row with no match is kept, with
+  the pattern's new variables null.
+- **`UNION` and `UNION ALL`.** The queries run in the order written.
+- **`CASE`**, in both the simple and the searched form, anywhere an expression
+  goes. Only the chosen branch is evaluated.
+- **`CALL { }` subqueries** run once per row, importing variables with a leading
+  `WITH`; aggregation, `ORDER BY` and `LIMIT` inside apply to each run, which
+  gives per-row top-k and counts. A subquery without `RETURN` runs for its writes.
+- **`CALL db.labels()`**, `db.relationshipTypes()`, `db.propertyKeys()` and
+  `db.indexes()` list the catalog, with `YIELD` to name their columns.
+- **`FOREACH (x IN list | ...)`** runs `CREATE`, `MERGE`, `SET`, `REMOVE`,
+  `DELETE` and nested `FOREACH` for each element.
+- **Named paths**, `p = (a)-[:R*]->(b)`, with `nodes(p)`, `relationships(p)` and
+  `length(p)`. The variable of a variable-length relationship, `-[r:R*]->`, is the
+  list of the relationships it matched, and a property map on it,
+  `-[:R* {since: 2020}]->`, applies to every relationship.
+- **`shortestPath` and `allShortestPaths`**, searched breadth-first from both
+  ends: about 0.35 ms between two random nodes of a 100,000-node,
+  1,000,000-relationship graph.
+- **Lists:** indexing (`list[0]`, `list[-1]`), slicing (`list[1..3]`), access by
+  key (`map['k']`, `n[$prop]`), comprehensions (`[x IN list WHERE x > 0 | x * 2]`),
+  `all`, `any`, `none`, `single` and `reduce`.
+- **Patterns in expressions:** pattern predicates (`WHERE (n)-[:KNOWS]->()`),
+  `EXISTS { }` and `COUNT { }` with a pattern and `WHERE`, and pattern
+  comprehensions (`[(n)-->(m) | m.name]`).
+- **Map projection**, `n {.name, .age, total: x}` and `n {.*}`, and `properties()`
+  of a map.
+- **`RETURN *` and `WITH *`**, every variable in scope.
+- **Aggregates inside larger expressions:** `count(n) + 1`, `sum(x) / count(x)`,
+  an aggregate inside `CASE`, and grouping keys that are expressions.
+- **Smaller additions:** `exists(n.prop)`, label tests in expressions
+  (`WHERE n:Person`), `ORDER BY ... NULLS FIRST | NULLS LAST`, backtick-quoted
+  names (`` n.`first name` ``), hexadecimal integers (`0x1F`) and `.5`.
+
+What is not implemented fails with an error that names the construct, where
+0.16.0 reported the clauses it expected: quantified path patterns, label
+expressions, `LOAD CSV`, `CALL { } IN TRANSACTIONS`, `OPTIONAL CALL`,
+`COLLECT { }`, type predicates, `||`, schema and administration statements, and
+the GQL-only clauses. `book/src/cypher/overview.md` lists them.
+
 ## Breaking changes
 
 ### Cypher
+
+- **`CASE` is a reserved word.** It cannot name a variable, since it now starts
+  an expression. It still works as a property name, label, relationship type or
+  map key, and `WHEN`, `THEN`, `ELSE`, `END` and `UNION` stay usable as names.
 
 - **Query errors say what failed and where.** A failed query reports its stage
   (parse, semantic, plan or execution), a diagnostic code, a message naming the
@@ -856,9 +911,18 @@ with relationships is one range probe, under 1 µs.
   them, not even a read-only query through `exec`, on a file whose header asks
   for a newer writer. 0.16.0 does not know that gate and writes such a file
   anyway.
-- **Some Cypher is not implemented.** `OPTIONAL MATCH`, `CASE`, `UNION`, `CALL`,
-  list indexing, list comprehensions and named paths fail with a parse error.
-  The message names the clauses the parser expected, not the missing feature.
+- **Some Cypher is not implemented**, each part with an error that names it:
+  quantified path patterns (`((a)-->(b)){1,3}`), label expressions
+  (`(n:A|B)`, `:A&B`, `:!A`) and relationship type tests (`r:KNOWS`) in
+  expressions, `WHERE` inside a pattern, `EXISTS { }` and `COUNT { }` holding
+  clauses other than `MATCH` and `WHERE`, `COLLECT { }`, `CALL { } IN
+  TRANSACTIONS`, `OPTIONAL CALL`, procedures other than the four catalog ones,
+  `LOAD CSV`, type predicates (`IS :: INTEGER`), `||`, temporal and spatial
+  types, and schema and administration statements (`CREATE INDEX`, `SHOW`,
+  `EXPLAIN`). `012` is read as decimal 12, not octal.
+- **`shortestPath` takes one relationship pattern** with a lower bound of 0 or 1
+  and no property map, only in `MATCH`, and a `WHERE` that reads the path is
+  refused, since the search would not look further for a longer path that passes.
 - **Case mapping is one to one.** `toUpper` and `toLower` use the simple
   Unicode mappings: `ß` stays `ß`, a final `Σ` lowercases to `σ`, and there is
   no language-specific casing such as Turkish. `trim` removes ASCII whitespace

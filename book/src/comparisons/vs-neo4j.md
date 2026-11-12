@@ -16,7 +16,7 @@ Neo4j does offer an embedded mode, but it is JVM-only — you embed it in a Java
 
 This is the important section, and [When to Use LatticeDB](../getting-started/when-to-use.md) says it plainly. Summarised:
 
-**Full Cypher.** LatticeDB implements a substantial subset. `OPTIONAL MATCH` and `CALL` procedures are not implemented. If your queries depend on them, Neo4j is the complete implementation and LatticeDB will simply fail to run your workload.
+**Full Cypher.** LatticeDB implements a substantial subset, including `OPTIONAL MATCH`, `UNION`, `CASE`, `CALL { }` subqueries and `shortestPath`. Quantified path patterns, label expressions, `LOAD CSV`, user-defined and APOC procedures, temporal and spatial types, and schema statements are not implemented. If your queries depend on them, Neo4j is the complete implementation and LatticeDB will refuse those queries.
 
 **Multi-client access.** LatticeDB is single-writer, single-process. One process opens the file and owns it. If several applications need to write concurrently over a network, you need a server, and that server is Neo4j or Postgres.
 

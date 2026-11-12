@@ -27,31 +27,85 @@ RETURN friend.name
 | [MERGE](./merge.md) | Match or create a pattern |
 | [WITH](./with.md) | Chain query parts, pipe results |
 | [UNWIND](./unwind.md) | Expand lists into rows |
-| ORDER BY | Sort results |
+| OPTIONAL MATCH | Match a pattern, or keep the row with nulls when it is absent |
+| UNION / UNION ALL | Combine the rows of queries with the same columns |
+| FOREACH | Run `CREATE`, `SET`, `MERGE`, `DELETE` or `REMOVE` for each element of a list |
+| [CALL { }](./with.md#subqueries-call--) | Run a subquery once for each row |
+| CALL db.labels() | List the catalog: `db.labels()`, `db.relationshipTypes()`, `db.propertyKeys()`, `db.indexes()` |
+| ORDER BY | Sort results, with `NULLS FIRST` or `NULLS LAST` |
 | LIMIT | Limit number of results |
 | SKIP | Skip first N results |
 
-A query may begin with `MATCH`, `CREATE`, `MERGE`, `UNWIND`, `WITH` or `RETURN`;
-`RETURN 1 + 2` on its own returns one row.
+A query may begin with `MATCH`, `OPTIONAL MATCH`, `CREATE`, `MERGE`, `UNWIND`,
+`WITH`, `RETURN`, `CALL` or `FOREACH`; `RETURN 1 + 2` on its own returns one row.
+
+```cypher
+MATCH (p:Person)
+OPTIONAL MATCH (p)-[:MANAGES]->(r:Person)
+RETURN p.name AS name, collect(r.name) AS reports
+UNION
+MATCH (t:Team) RETURN t.name AS name, [] AS reports
+```
+
+```cypher
+MATCH (a:Person {name: "Alice"})
+FOREACH (tag IN ["admin", "owner"] | CREATE (a)-[:HAS]->(:Tag {name: tag}))
+```
+
+A `CALL` of a catalog procedure that is the whole query returns its columns;
+inside a larger query it names them with `YIELD`:
+
+```cypher
+CALL db.labels() YIELD label
+RETURN label ORDER BY label
+```
+
+### Expressions beyond the basics
+
+| Construct | Example |
+|-----------|---------|
+| `CASE` | `CASE WHEN n.age >= 18 THEN 'adult' ELSE 'minor' END`, `CASE n.kind WHEN 'a' THEN 1 END` |
+| Indexing and slicing | `list[0]`, `list[-1]`, `list[1..3]`, `map['key']`, `n[$prop]` |
+| List comprehension | `[x IN list WHERE x > 0 \| x * 2]` |
+| List predicates | `all(x IN list WHERE x > 0)`, `any(...)`, `none(...)`, `single(...)` |
+| `reduce` | `reduce(total = 0, x IN list \| total + x)` |
+| Pattern predicate | `WHERE (n)-[:KNOWS]->()`, `WHERE NOT (n)-->()` |
+| `EXISTS { }` and `COUNT { }` | `EXISTS { (n)-[:KNOWS]->(m) WHERE m.age > 30 }`, `COUNT { (n)--() }` |
+| Pattern comprehension | `[(n)-[:KNOWS]->(m) WHERE m.age > 30 \| m.name]` |
+| Named path | `MATCH p = (a)-[:KNOWS*]->(b) RETURN length(p), nodes(p), relationships(p)` |
+| Shortest path | `MATCH p = shortestPath((a)-[:KNOWS*]-(b))`; see [Shortest Paths](./variable-length-paths.md#shortest-paths) |
+| Label test | `n:Person`, `n:Person:Admin` (all of the labels) |
+| `exists()` on a property | `exists(n.email)`, the same as `n.email IS NOT NULL` |
+| Map projection | `n {.name, .age, friends: size(fs)}`, `n {.*}`; see [RETURN](./return.md) |
+| `RETURN *`, `WITH *` | every variable in scope; see [RETURN](./return.md) |
+| Literals | `0x1F`, `.5`, `` `a name with spaces` `` |
 
 ## Not Supported
 
-These parts of Cypher are not implemented. A query that uses one fails with a
-parse error pointing at the first token it could not read:
+These parts of Cypher are not implemented. Each fails before the query runs,
+with an error that names it:
 
-- `OPTIONAL MATCH`
-- `CASE`
-- `UNION`
-- `CALL`
-- list indexing (`list[0]`)
-- list comprehensions
-- named paths (`p = (a)-->(b)`)
-- `NULLS FIRST` / `NULLS LAST`
+- quantified and parenthesised path patterns, such as `((a)-->(b)){1,3}`; use a
+  variable-length relationship `-[*1..3]->`
+- label expressions `(n:A|B)`, `(n:A&B)`, `(n:!A)`; `(n:A:B)` means all of the
+  labels. A relationship type test `r:KNOWS` in an expression is a type error;
+  use `type(r) = 'KNOWS'`
+- `WHERE` inside a pattern, as in `(n WHERE n.age > 30)`
+- `EXISTS { }` and `COUNT { }` holding clauses other than `MATCH` and `WHERE`,
+  and `COLLECT { }`
+- `CALL { } IN TRANSACTIONS`, `OPTIONAL CALL`, and procedures other than the
+  four catalog procedures above
+- `LOAD CSV`; import files with `lattice import` or through the API
+- type predicates (`x IS :: INTEGER`) and `||` for concatenation (use `+`)
+- schema and administration statements: `CREATE INDEX`, `CREATE CONSTRAINT`,
+  `DROP`, `SHOW`, `USE`, `EXPLAIN`, `PROFILE`, `GRANT` and the like. Indexes are
+  created through the API.
+- the GQL clauses `FINISH`, `FILTER`, `LET` and `INSERT`, and the legacy `START`
+- temporal and spatial values and the functions on them (`date()`, `point()`)
+- octal literals: `012` is read as the decimal 12
 
-`exists()` is not a function either, and fails before the query runs as an
-unknown function. The parse error names the clauses it expected rather than the
-feature, so `CASE` in `RETURN CASE WHEN ...` is reported as unexpected text at
-`WHEN`.
+The limits of `shortestPath` are listed under
+[Shortest Paths](./variable-length-paths.md#shortest-paths).
 
 ## Errors
 

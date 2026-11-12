@@ -260,8 +260,13 @@ MATCH (d:Document) WHERE d.title @@ "sourdough" OR d.body @@ "sourdough" RETURN 
 ```
 
 If an `OR` against a non-text condition is slow on a large label, the usual fix is
-to run two queries and merge the results in your application, so each side can
-use the index that suits it. (LatticeDB's Cypher has no `UNION`.)
+to split it with `UNION`, so each side can use the index that suits it:
+
+```cypher
+MATCH (d:Document) WHERE d.body @@ "sourdough" RETURN d.title AS title
+UNION
+MATCH (d:Document) WHERE d.year > 2020 RETURN d.title AS title
+```
 
 ### Asking for the best few
 

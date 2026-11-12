@@ -293,6 +293,9 @@ pub const Expression = union(enum) {
     index: *IndexExpr,
     slice: *SliceExpr,
 
+    // Conditionals
+    case_expr: *CaseExpr,
+
     /// Get source location for this expression
     pub fn getLocation(self: *const Expression) SourceLocation {
         return switch (self.*) {
@@ -307,6 +310,7 @@ pub const Expression = union(enum) {
             .map => |m| m.location,
             .index => |i| i.location,
             .slice => |s| s.location,
+            .case_expr => |c| c.location,
         };
     }
 };
@@ -317,6 +321,23 @@ pub const IndexExpr = struct {
     object: *Expression,
     index: *Expression,
     location: SourceLocation,
+};
+
+/// `CASE WHEN cond THEN value ... ELSE value END`, or with a subject,
+/// `CASE subject WHEN value THEN value ... END`.
+pub const CaseExpr = struct {
+    /// The value the simple form compares each WHEN against; null for the
+    /// searched form, whose WHENs are conditions.
+    subject: ?*Expression,
+    branches: []CaseBranch,
+    /// The value when no branch applies; null when there is no ELSE.
+    else_expr: ?*Expression,
+    location: SourceLocation,
+};
+
+pub const CaseBranch = struct {
+    when: *Expression,
+    then: *Expression,
 };
 
 /// `list[from..to]`: the elements from `from` up to but not including `to`.

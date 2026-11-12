@@ -190,6 +190,11 @@ pub const TokenType = enum {
     kw_distinct,
     kw_asc,
     kw_desc,
+    kw_case,
+    kw_when,
+    kw_then,
+    kw_else,
+    kw_end,
     // Literals
     integer,
     float,
@@ -471,7 +476,7 @@ pub const Parser = struct {
         var alias: ?[]const u8 = null;
 
         if (self.match(.kw_as)) {
-            if (!self.check(.identifier)) {
+            if (!self.checkVariable()) {
                 self.errorAtCurrent("Expected identifier after AS");
                 return null;
             }
@@ -663,7 +668,7 @@ pub const Parser = struct {
 
     fn parseSetItem(self: *Self) ?ast.SetItem {
         // Parse variable name first
-        if (!self.check(.identifier)) {
+        if (!self.checkVariable()) {
             self.errorAtCurrent("Expected variable name in SET");
             return null;
         }
@@ -787,7 +792,7 @@ pub const Parser = struct {
 
     fn parseRemoveItem(self: *Self) ?ast.RemoveItem {
         // Parse variable name first
-        if (!self.check(.identifier)) {
+        if (!self.checkVariable()) {
             self.errorAtCurrent("Expected variable name in REMOVE");
             return null;
         }
@@ -960,7 +965,7 @@ pub const Parser = struct {
         // Expect AS variable
         if (!self.consume(.kw_as, "Expected AS after UNWIND expression")) return null;
 
-        if (!self.check(.identifier)) {
+        if (!self.checkVariable()) {
             self.errorAtCurrent("Expected variable name after AS");
             return null;
         }
@@ -1034,7 +1039,7 @@ pub const Parser = struct {
         var properties: ?[]ast.PropertyEntry = null;
 
         // Optional variable
-        if (self.check(.identifier)) {
+        if (self.checkVariable()) {
             variable = self.current.text;
             self.advance();
         }
@@ -1088,7 +1093,7 @@ pub const Parser = struct {
 
         if (self.match(.lbracket)) {
             // Optional variable
-            if (self.check(.identifier)) {
+            if (self.checkVariable()) {
                 variable = self.current.text;
                 self.advance();
             }
@@ -1379,8 +1384,13 @@ pub const Parser = struct {
             return expr;
         }
 
+        if (self.match(.kw_case)) {
+            return self.parseCase(loc);
+        }
+
         // Identifier (variable or function call)
-        if (self.match(.identifier)) {
+        if (self.checkVariable()) {
+            self.advance();
             const name = self.previous.text;
 
             // Check for function call
@@ -1393,6 +1403,41 @@ pub const Parser = struct {
 
         self.errorAtCurrent("Expected expression");
         return null;
+    }
+
+    /// `CASE [subject] WHEN a THEN b [WHEN ...] [ELSE c] END`, after CASE.
+    fn parseCase(self: *Self, loc: ast.SourceLocation) ?*ast.Expression {
+        var subject: ?*ast.Expression = null;
+        if (!self.check(.kw_when)) {
+            subject = self.parseExpression() orelse return null;
+        }
+        var branches: std.ArrayList(ast.CaseBranch) = .empty;
+        while (self.match(.kw_when)) {
+            const when = self.parseExpression() orelse return null;
+            if (!self.consume(.kw_then, "Expected THEN after WHEN condition")) return null;
+            const then = self.parseExpression() orelse return null;
+            branches.append(self.arena.allocator(), .{ .when = when, .then = then }) catch return null;
+        }
+        if (branches.items.len == 0) {
+            self.errorAtCurrent("Expected WHEN in CASE");
+            return null;
+        }
+        var else_expr: ?*ast.Expression = null;
+        if (self.match(.kw_else)) {
+            else_expr = self.parseExpression() orelse return null;
+        }
+        if (!self.consume(.kw_end, "Expected END to close CASE")) return null;
+
+        const case_expr = self.arena.allocator().create(ast.CaseExpr) catch return null;
+        case_expr.* = .{
+            .subject = subject,
+            .branches = branches.toOwnedSlice(self.arena.allocator()) catch return null,
+            .else_expr = else_expr,
+            .location = loc,
+        };
+        const expr = self.arena.allocator().create(ast.Expression) catch return null;
+        expr.* = .{ .case_expr = case_expr };
+        return expr;
     }
 
     fn parseListLiteral(self: *Self, loc: ast.SourceLocation) ?*ast.Expression {
@@ -1841,6 +1886,19 @@ pub const Parser = struct {
     fn checkName(self: *const Self) bool {
         if (self.current.token_type == .identifier) return true;
         return std.mem.startsWith(u8, @tagName(self.current.token_type), "kw_");
+    }
+
+    /// Whether the current token can name a variable.
+    ///
+    /// Keywords added after 0.16 (WHEN, THEN, ELSE, END) only mean
+    /// something inside a CASE, where a variable cannot stand in their
+    /// place, so they stay usable as variable names: `MATCH (a)-->(end)`
+    /// kept working. CASE itself starts an expression and cannot.
+    fn checkVariable(self: *const Self) bool {
+        return switch (self.current.token_type) {
+            .identifier, .kw_when, .kw_then, .kw_else, .kw_end => true,
+            else => false,
+        };
     }
 
     fn check(self: *Self, token_type: TokenType) bool {

@@ -593,6 +593,7 @@ pub const ExpressionEvaluator = struct {
             .map => |m| self.evaluateMap(m, row, ctx),
             .index => |i| self.evaluateIndex(i, row, ctx),
             .slice => |s| self.evaluateSlice(s, row, ctx),
+            .case_expr => |c| self.evaluateCase(c, row, ctx),
         };
     }
 
@@ -654,6 +655,40 @@ pub const ExpressionEvaluator = struct {
             EvalError.TypeError => ctx.fail(err, b.location, "Type error: {s} {s} {s} is not defined", .{ typeName(left), symbol, typeName(right) }),
             else => ctx.fail(err, b.location, "{f} {s} {f} failed: {s}", .{ l, symbol, r, @errorName(err) }),
         };
+    }
+
+    /// CASE picks the first branch that applies and evaluates only that
+    /// branch's value, so a branch can guard against an error in another
+    /// (`CASE WHEN x = 0 THEN 0 ELSE 1 / x END`).
+    ///
+    /// The searched form applies a branch when its condition is true; a null
+    /// condition is not true. The simple form applies a branch when the
+    /// subject `=` its value is true, so a null subject or a null WHEN value
+    /// never matches, not even null. With no branch applying, the value is
+    /// the ELSE, or null without one.
+    fn evaluateCase(
+        self: *Self,
+        c: *const ast.CaseExpr,
+        row: *const Row,
+        ctx: *const ExecutionContext,
+    ) EvalError!EvalResult {
+        if (c.subject) |subject_expr| {
+            const subject = try self.evaluate(subject_expr, row, ctx);
+            for (c.branches) |branch| {
+                if (subject.isNull()) break;
+                const candidate = try self.evaluate(branch.when, row, ctx);
+                if (candidate.isNull()) continue;
+                const equal = self.compareEqual(subject, candidate).toBool() orelse false;
+                if (equal) return self.evaluate(branch.then, row, ctx);
+            }
+        } else {
+            for (c.branches) |branch| {
+                const condition = try self.evaluate(branch.when, row, ctx);
+                if (truthValue(condition) == .true_) return self.evaluate(branch.then, row, ctx);
+            }
+        }
+        if (c.else_expr) |else_expr| return self.evaluate(else_expr, row, ctx);
+        return .{ .null_val = {} };
     }
 
     /// `object[index]`.

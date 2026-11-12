@@ -13,6 +13,7 @@ const semantic = @import("semantic.zig");
 const executor = @import("executor.zig");
 const expression = @import("expression.zig");
 const parser = @import("parser.zig");
+const ast_util = @import("ast_util.zig");
 
 const Operator = executor.Operator;
 const OperatorError = executor.OperatorError;
@@ -2211,7 +2212,7 @@ pub const QueryPlanner = struct {
                 }
                 break :blk true;
             },
-            else => false,
+            else => ast_util.expressionsEqual(a, b),
         };
     }
 

@@ -177,3 +177,71 @@ test "lcy: map and property access by key" {
     try expectResult(db, "MATCH (n:P) WHERE n['name'] = 'Bob' RETURN n.name", "n.name\n\"Bob\"");
     try expectFailure(db, "WITH {a: 1} AS m RETURN m[0]", .execution, "map[integer] is not defined");
 }
+
+// ============================================================================
+// CASE
+// ============================================================================
+
+/// :Item nodes: a (n = 1), b (n = 2), c (n = 3) and d with no n.
+fn seedItems(db: *Database) !void {
+    try run(db, "CREATE (:Item {name: 'a', n: 1}), (:Item {name: 'b', n: 2}), (:Item {name: 'c', n: 3}), (:Item {name: 'd'})");
+}
+
+test "lcy: CASE, simple and searched" {
+    const path = "/tmp/lcy_case.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedItems(db);
+
+    try expectResult(db,
+        \\MATCH (i:Item) RETURN i.name, CASE i.n WHEN 1 THEN 'one' WHEN 2 THEN 'two' ELSE 'many' END AS w ORDER BY i.name
+    , "i.name | w\n\"a\" | \"one\"\n\"b\" | \"two\"\n\"c\" | \"many\"\n\"d\" | \"many\"");
+    try expectResult(db,
+        \\MATCH (i:Item) RETURN i.name, CASE WHEN i.n < 2 THEN 'low' WHEN i.n >= 2 THEN 'high' END AS w ORDER BY i.name
+    , "i.name | w\n\"a\" | \"low\"\n\"b\" | \"high\"\n\"c\" | \"high\"\n\"d\" | null");
+    // The first branch that applies wins.
+    try expectResult(db, "RETURN CASE WHEN true THEN 1 WHEN true THEN 2 END AS x", "x\n1");
+    // A null subject matches no WHEN, not even null; a null condition is not true.
+    try expectResult(db, "RETURN CASE null WHEN null THEN 'm' ELSE 'e' END AS a, CASE WHEN null THEN 'm' ELSE 'e' END AS b", "a | b\n\"e\" | \"e\"");
+    // Simple CASE compares with =, so 1 matches 1.0.
+    try expectResult(db, "RETURN CASE 1 WHEN 1.0 THEN 'eq' END AS x", "x\n\"eq\"");
+    // Only the chosen branch is evaluated.
+    try expectResult(db, "UNWIND [0, 2] AS z RETURN CASE WHEN z = 0 THEN 0 ELSE 10 / z END AS q", "q\n0\n5");
+    // Nested, and an unaliased column is named after its text.
+    try expectResult(db, "RETURN CASE WHEN 1 > 0 THEN CASE 2 WHEN 2 THEN 'in' END ELSE 'out' END", "CASE WHEN 1 > 0 THEN CASE 2 WHEN 2 THEN 'in' END ELSE 'out' END\n\"in\"");
+    try expectFailure(db, "RETURN CASE END", .parse, "Expected WHEN in CASE");
+    try expectFailure(db, "RETURN CASE WHEN true THEN 1", .parse, "Expected END to close CASE");
+    try expectFailure(db, "RETURN CASE WHEN true 1 END", .parse, "Expected THEN after WHEN condition");
+}
+
+test "lcy: CASE in WHERE, ORDER BY and inside aggregates" {
+    const path = "/tmp/lcy_case_places.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedItems(db);
+
+    try expectResult(db, "MATCH (i:Item) WHERE CASE WHEN i.n IS NULL THEN true ELSE i.n > 2 END RETURN i.name ORDER BY i.name", "i.name\n\"c\"\n\"d\"");
+    try expectResult(db, "MATCH (i:Item) RETURN i.name ORDER BY CASE i.name WHEN 'c' THEN 0 ELSE 1 END, i.name DESC", "i.name\n\"c\"\n\"d\"\n\"b\"\n\"a\"");
+    try expectResult(db, "MATCH (i:Item) RETURN sum(CASE WHEN i.n > 1 THEN 1 ELSE 0 END) AS big, count(CASE WHEN i.n IS NULL THEN 1 END) AS missing", "big | missing\n2 | 1");
+    // Grouping by a CASE, and ordering by the grouped CASE after aggregation.
+    try expectResult(db,
+        \\MATCH (i:Item) RETURN CASE WHEN i.n > 1 THEN 'big' ELSE 'small' END AS size, count(*) AS c ORDER BY CASE WHEN i.n > 1 THEN 'big' ELSE 'small' END
+    , "size | c\n\"big\" | 2\n\"small\" | 2");
+}
+
+test "lcy: the new keywords stay usable as names" {
+    const path = "/tmp/lcy_keyword_names.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+
+    // As property names, labels, relationship types and map keys.
+    try run(db, "CREATE (:Case:When {case: 1, when: 2, then: 3, else: 4, end: 5, union: 6, all: 7, optional: 8, exists: 9, call: 10, foreach: 11})");
+    try expectResult(db, "MATCH (n:Case:When) RETURN n.case, n.when, n.then, n.else, n.end", "n.case | n.when | n.then | n.else | n.end\n1 | 2 | 3 | 4 | 5");
+    try expectResult(db, "MATCH (n:Case) RETURN n.union, n.all, n.optional, n.exists, n.call, n.foreach", "n.union | n.all | n.optional | n.exists | n.call | n.foreach\n6 | 7 | 8 | 9 | 10 | 11");
+    try expectResult(db, "RETURN {case: 1, end: 2, union: 3}.end AS e", "e\n2");
+    try run(db, "MATCH (a:Case) CREATE (a)-[:END]->(:Then {else: 'x'})");
+    try expectResult(db, "MATCH (:Case)-[r:END]->(t:Then) RETURN t.else, type(r)", "t.else | type(r)\n\"x\" | \"END\"");
+    // As variable names, the way `(start)-->(end)` is commonly written.
+    try expectResult(db, "MATCH (start:Case)-[when]->(end) RETURN end.else AS x, type(when) AS t", "x | t\n\"x\" | \"END\"");
+    try expectResult(db, "UNWIND [1, 2] AS then RETURN then ORDER BY then DESC", "then\n2\n1");
+}

@@ -374,6 +374,11 @@ fn lookupKeyword(text: []const u8) ?TokenType {
     if (std.mem.eql(u8, lower, "asc")) return .kw_asc;
     if (std.mem.eql(u8, lower, "desc")) return .kw_desc;
     if (std.mem.eql(u8, lower, "xor")) return .kw_xor;
+    if (std.mem.eql(u8, lower, "case")) return .kw_case;
+    if (std.mem.eql(u8, lower, "when")) return .kw_when;
+    if (std.mem.eql(u8, lower, "then")) return .kw_then;
+    if (std.mem.eql(u8, lower, "else")) return .kw_else;
+    if (std.mem.eql(u8, lower, "end")) return .kw_end;
 
     return null;
 }
@@ -543,4 +548,13 @@ test "tokenize arrows" {
     try std.testing.expectEqual(TokenType.arrow_right, lexer.nextToken().token_type);
     try std.testing.expectEqual(TokenType.arrow_left, lexer.nextToken().token_type);
     try std.testing.expectEqual(TokenType.dash, lexer.nextToken().token_type);
+}
+
+test "tokenize CASE keywords in any case" {
+    var lexer = Lexer.init("case When THEN else END");
+    try std.testing.expectEqual(TokenType.kw_case, lexer.nextToken().token_type);
+    try std.testing.expectEqual(TokenType.kw_when, lexer.nextToken().token_type);
+    try std.testing.expectEqual(TokenType.kw_then, lexer.nextToken().token_type);
+    try std.testing.expectEqual(TokenType.kw_else, lexer.nextToken().token_type);
+    try std.testing.expectEqual(TokenType.kw_end, lexer.nextToken().token_type);
 }

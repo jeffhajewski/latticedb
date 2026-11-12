@@ -550,6 +550,16 @@ pub fn containsAggregate(expr: *const ast.Expression) bool {
         .slice => |s| containsAggregate(s.object) or
             (if (s.from) |f| containsAggregate(f) else false) or
             (if (s.to) |t| containsAggregate(t) else false),
+        .case_expr => |c| blk: {
+            if (c.subject) |subject| {
+                if (containsAggregate(subject)) break :blk true;
+            }
+            for (c.branches) |branch| {
+                if (containsAggregate(branch.when) or containsAggregate(branch.then)) break :blk true;
+            }
+            if (c.else_expr) |e| break :blk containsAggregate(e);
+            break :blk false;
+        },
         else => false,
     };
 }

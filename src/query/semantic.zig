@@ -797,6 +797,14 @@ pub const SemanticAnalyzer = struct {
                 if (sl.from) |from| self.analyzeExpression(from);
                 if (sl.to) |to| self.analyzeExpression(to);
             },
+            .case_expr => |c| {
+                if (c.subject) |subject| self.analyzeExpression(subject);
+                for (c.branches) |branch| {
+                    self.analyzeExpression(branch.when);
+                    self.analyzeExpression(branch.then);
+                }
+                if (c.else_expr) |e| self.analyzeExpression(e);
+            },
         }
     }
 
@@ -874,6 +882,7 @@ pub const SemanticAnalyzer = struct {
             .map => .map,
             .index => .any,
             .slice => .any,
+            .case_expr => .any,
         };
     }
 

@@ -981,6 +981,19 @@ fn emptyProperties(allocator: Allocator) Allocator.Error![]node_mod.Property {
     return allocator.alloc(node_mod.Property, 0);
 }
 
+/// The keys of an id-keyed map in ascending order, or null when there are
+/// fewer than two or the copy cannot be allocated (the caller then walks
+/// the map in its own order).
+fn sortedKeysAlloc(comptime K: type, allocator: Allocator, map: anytype) ?[]K {
+    if (map.count() < 2) return null;
+    const keys = allocator.alloc(K, map.count()) catch return null;
+    var iter = map.keyIterator();
+    var i: usize = 0;
+    while (iter.next()) |key| : (i += 1) keys[i] = key.*;
+    std.mem.sortUnstable(K, keys, {}, std.sort.asc(K));
+    return keys;
+}
+
 fn containsSymbolId(values: []const symbols_mod.SymbolId, needle: symbols_mod.SymbolId) bool {
     for (values) |value| {
         if (value == needle) return true;
@@ -2962,14 +2975,29 @@ pub const Database = struct {
         overlay: *TxnOverlay,
     ) DatabaseError!void {
         _ = writer_txn_id;
-        var node_iter = overlay.node_states.iterator();
-        while (node_iter.next()) |entry| {
-            try self.applyNodeState(entry.key_ptr.*, entry.value_ptr.*);
+        // In id order where the ids can be sorted, so that the label index
+        // and the node tree receive a transaction's keys in key order and
+        // fill their pages densely, instead of in hash-map order, which
+        // splits them down the middle. Order does not change the outcome:
+        // each state is applied on its own.
+        if (sortedKeysAlloc(NodeId, self.allocator, &overlay.node_states)) |ids| {
+            defer self.allocator.free(ids);
+            for (ids) |node_id| try self.applyNodeState(node_id, overlay.node_states.get(node_id).?);
+        } else {
+            var node_iter = overlay.node_states.iterator();
+            while (node_iter.next()) |entry| {
+                try self.applyNodeState(entry.key_ptr.*, entry.value_ptr.*);
+            }
         }
 
-        var edge_iter = overlay.edge_states.iterator();
-        while (edge_iter.next()) |entry| {
-            try self.applyEdgeState(entry.key_ptr.*, entry.value_ptr.*);
+        if (sortedKeysAlloc(EdgeId, self.allocator, &overlay.edge_states)) |ids| {
+            defer self.allocator.free(ids);
+            for (ids) |edge_id| try self.applyEdgeState(edge_id, overlay.edge_states.get(edge_id).?);
+        } else {
+            var edge_iter = overlay.edge_states.iterator();
+            while (edge_iter.next()) |entry| {
+                try self.applyEdgeState(entry.key_ptr.*, entry.value_ptr.*);
+            }
         }
         if (overlay.edge_states.count() > 0) {
             self.edge_store.syncNextEdgeId() catch return DatabaseError.IoError;

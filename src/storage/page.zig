@@ -127,7 +127,31 @@ pub const FileHeader = extern struct {
     /// does not honour it; a file that must be kept from 0.16.0's writes has
     /// to raise `min_reader_version` instead.
     min_writer_version: u16,
-    reserved3: [8]u8,
+    /// Why `min_reader_version` was raised above `MIN_READER_VERSION`: the
+    /// `ReaderReason` bits of what the file holds that a format-3 reader
+    /// (0.16.0) would misread. Informational; the version alone decides.
+    min_reader_reasons: u16,
+    reserved3: [6]u8,
+
+    /// What can raise `min_reader_version` to FORMAT_VERSION, as bits of
+    /// `min_reader_reasons`. Each is something 0.16.0 would read wrongly
+    /// rather than refuse.
+    pub const ReaderReason = struct {
+        /// A vector index whose metric or connection count 0.16.0 would take
+        /// for cosine with m = 16.
+        pub const vector_index: u16 = 0x01;
+        /// An ordered property index, whose keys 0.16.0 would take for digests.
+        pub const ordered_property_index: u16 = 0x02;
+        /// Changefeed events in the compact format, which 0.16.0's
+        /// changefeed reader skips and its trim leaves in place.
+        pub const changefeed_events: u16 = 0x04;
+
+        pub const all = [_]struct { bit: u16, name: []const u8 }{
+            .{ .bit = vector_index, .name = "vector index settings" },
+            .{ .bit = ordered_property_index, .name = "ordered property index" },
+            .{ .bit = changefeed_events, .name = "changefeed events" },
+        };
+    };
 
     /// Marks the format-4 fields as written by a release that keeps them.
     pub const EXTENSION_MAGIC: u32 = 0x3458_544C; // "LTX4"
@@ -210,7 +234,8 @@ pub const FileHeader = extern struct {
         self.vector_m_max0 = 0;
         self.vector_ef_construction = 0;
         self.min_writer_version = 0;
-        self.reserved3 = [_]u8{0} ** 8;
+        self.min_reader_reasons = 0;
+        self.reserved3 = [_]u8{0} ** 6;
     }
 
     /// The stored node id counter, or null when the file does not have one.
@@ -247,9 +272,20 @@ pub const FileHeader = extern struct {
         self.vector_m = config.m;
         self.vector_m_max0 = config.m_max0;
         self.vector_ef_construction = config.ef_construction;
-        if (!config.legacyReadable() and self.min_reader_version < types.FORMAT_VERSION) {
-            self.min_reader_version = types.FORMAT_VERSION;
-        }
+        if (!config.legacyReadable()) self.raiseMinReader(ReaderReason.vector_index);
+    }
+
+    /// Require a reader of this release's format, because the file holds
+    /// `reason` (a `ReaderReason` bit). Never lowers the version.
+    pub fn raiseMinReader(self: *FileHeader, reason: u16) void {
+        if (!self.hasExtension()) self.resetExtension();
+        if (self.min_reader_version < types.FORMAT_VERSION) self.min_reader_version = types.FORMAT_VERSION;
+        self.min_reader_reasons |= reason;
+    }
+
+    /// The recorded reasons for `min_reader_version`, 0 when none are.
+    pub fn readerReasons(self: *const FileHeader) u16 {
+        return if (self.hasExtension()) self.min_reader_reasons else 0;
     }
 
     pub fn init() FileHeader {
@@ -284,7 +320,8 @@ pub const FileHeader = extern struct {
             .vector_m_max0 = 0,
             .vector_ef_construction = 0,
             .min_writer_version = types.FORMAT_VERSION,
-            .reserved3 = [_]u8{0} ** 8,
+            .min_reader_reasons = 0,
+            .reserved3 = [_]u8{0} ** 6,
         };
     }
 
@@ -367,6 +404,7 @@ test "file header keeps 0.16.0's layout and puts the format-4 fields after it" {
     try std.testing.expectEqual(@as(usize, 218), @offsetOf(FileHeader, "vector_m_max0"));
     try std.testing.expectEqual(@as(usize, 220), @offsetOf(FileHeader, "vector_ef_construction"));
     try std.testing.expectEqual(@as(usize, 222), @offsetOf(FileHeader, "min_writer_version"));
+    try std.testing.expectEqual(@as(usize, 224), @offsetOf(FileHeader, "min_reader_reasons"));
     try std.testing.expectEqual(@as(usize, 232), @sizeOf(FileHeader));
     try std.testing.expect(@sizeOf(FileHeader) <= DEFAULT_PAGE_SIZE);
 }
@@ -390,6 +428,7 @@ test "a vector configuration 0.16.0 would misread raises min_reader_version" {
     var header = FileHeader.init();
     header.setVectorConfig(.{ .dimensions = 4, .metric = .dot_product, .m = 16, .m_max0 = 32, .ef_construction = 200 });
     try std.testing.expectEqual(types.FORMAT_VERSION, header.min_reader_version);
+    try std.testing.expectEqual(FileHeader.ReaderReason.vector_index, header.readerReasons());
 
     var other = FileHeader.init();
     other.setVectorConfig(.{ .dimensions = 4, .metric = .cosine, .m = 24, .m_max0 = 48, .ef_construction = 100 });
@@ -398,6 +437,7 @@ test "a vector configuration 0.16.0 would misread raises min_reader_version" {
     var tuned = FileHeader.init();
     tuned.setVectorConfig(.{ .dimensions = 4, .metric = .cosine, .m = 16, .m_max0 = 32, .ef_construction = 64 });
     try std.testing.expectEqual(types.MIN_READER_VERSION, tuned.min_reader_version);
+    try std.testing.expectEqual(@as(u16, 0), tuned.readerReasons());
 }
 
 test "page header size" {

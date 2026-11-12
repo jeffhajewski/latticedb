@@ -677,8 +677,10 @@ test "lgr: an ordered index raises the minimum reader version, an old index keep
     {
         var db = try reopenDb(path);
         defer db.close();
-        // Still format 3's minimum: nothing here 0.16.0 would misread.
-        try std.testing.expectEqual(lattice.core.types.MIN_READER_VERSION, db.page_manager.getHeader().min_reader_version);
+        // The commit's changefeed events raised the version; the old index
+        // is nothing 0.16.0 would misread, so it adds no reason.
+        const Reason = lattice.storage.page.FileHeader.ReaderReason;
+        try std.testing.expectEqual(Reason.changefeed_events, db.page_manager.getHeader().readerReasons());
         // The old index answers equality and is not used for ranges.
         const Kind = lattice.query.planner.QueryPlanner.ScanKind;
         try std.testing.expectEqual(Kind.property_index_scan, try planScanKind(db, "MATCH (n:P) WHERE n.u = 1 RETURN n"));
@@ -689,6 +691,7 @@ test "lgr: an ordered index raises the minimum reader version, an old index keep
 
         try db.createNodePropertyIndex("P", "v");
         try std.testing.expectEqual(lattice.core.types.FORMAT_VERSION, db.page_manager.getHeader().min_reader_version);
+        try std.testing.expectEqual(Reason.changefeed_events | Reason.ordered_property_index, db.page_manager.getHeader().readerReasons());
     }
     {
         var db = try reopenDb(path);

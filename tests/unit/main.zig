@@ -21,6 +21,7 @@ const lfmt_c_api_test = @import("lfmt_c_api_test.zig");
 const lnl_c_api_test = @import("lnl_c_api_test.zig");
 const lnl_buffer_pool_test = @import("lnl_buffer_pool_test.zig");
 const lfmt_checkpoint_test = @import("lfmt_checkpoint_test.zig");
+const lfmt_reader_gate_test = @import("lfmt_reader_gate_test.zig");
 const concurrency_test = @import("concurrency_test.zig");
 const transaction_test = @import("transaction_test.zig");
 const quipu_repro_test = @import("quipu_longmemeval_repro.zig");
@@ -81,6 +82,7 @@ test {
     _ = lnl_c_api_test;
     _ = lnl_buffer_pool_test;
     _ = lfmt_checkpoint_test;
+    _ = lfmt_reader_gate_test;
     _ = concurrency_test;
     _ = transaction_test;
     _ = quipu_repro_test;

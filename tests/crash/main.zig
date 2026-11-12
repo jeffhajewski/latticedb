@@ -12,6 +12,7 @@ const lcf_wal_creation_test = @import("lcf_wal_creation_test.zig");
 const lcf_changefeed_symbols_test = @import("lcf_changefeed_symbols_test.zig");
 const lfmt_sealed_test = @import("lfmt_sealed_test.zig");
 const lfmt_checkpoint_crash_test = @import("lfmt_checkpoint_crash_test.zig");
+const lfmt_gate_crash_test = @import("lfmt_gate_crash_test.zig");
 
 test {
     _ = crash_test;
@@ -23,4 +24,5 @@ test {
     _ = lcf_changefeed_symbols_test;
     _ = lfmt_sealed_test;
     _ = lfmt_checkpoint_crash_test;
+    _ = lfmt_gate_crash_test;
 }

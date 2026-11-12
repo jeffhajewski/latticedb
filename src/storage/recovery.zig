@@ -130,6 +130,9 @@ pub const LogicalRecoveryContext = struct {
     /// owner flush, so that replaying a long log does not have to hold all of
     /// it in dirty pages.
     between_operations: ?Hook = null,
+    /// The database's page manager, whose header a replayed changefeed run
+    /// raises the reader version in (see `redoChangefeed`).
+    page_manager: ?*PageManager = null,
 
     pub const Hook = struct {
         context: *anyopaque,
@@ -731,6 +734,11 @@ pub const RecoveryManager = struct {
     /// in the recovered table is stored with that id. Events below the floor
     /// were dropped by retention after they were logged and stay dropped.
     fn redoChangefeed(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) RecoveryError!void {
+        // The commit raised the file's reader version durably before it
+        // logged these events. The header that a flush may since have put
+        // back (a stale journal applied at open) carries the old version, so
+        // the replay raises it again, in the header its flushes write.
+        if (ctx.page_manager) |pm| pm.raiseMinReaderVersion(page.FileHeader.ReaderReason.changefeed_events);
         const trees = try streamTrees(ctx);
         changefeed.redoLogRecord(trees, self.allocator, payload, ctx.symbol_table, internForChangefeed) catch |err| return mapChangefeedError(err);
     }

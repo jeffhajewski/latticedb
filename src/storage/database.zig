@@ -1760,6 +1760,7 @@ pub const Database = struct {
                 .file_has_vectors = header.vector_segment_page != NULL_PAGE or
                     header.getTreeRoot(.hnsw_node) != NULL_PAGE,
                 .between_operations = .{ .context = self, .call = relieveBufferPressureHook },
+                .page_manager = &self.page_manager,
             });
             const stats = rm.recover(wal, &self.page_manager) catch |err| switch (err) {
                 // The log is damaged, or holds a committed record that cannot
@@ -2555,6 +2556,14 @@ pub const Database = struct {
                     try self.captureTxnSnapshotsForCommit(txn.id, overlay);
                     try self.stageGraphChangefeed(overlay);
                     try self.assignStreamSequences(overlay);
+                    // 0.16.0 opens a file holding compact changefeed events
+                    // and misreads its changefeed (see FileHeader.ReaderReason),
+                    // so the file refuses it before the first event is logged
+                    // or written. A no-op once raised.
+                    if (overlay.changefeed.count() > 0) {
+                        self.page_manager.raiseMinReaderVersionNow(page_mod.FileHeader.ReaderReason.changefeed_events) catch
+                            return DatabaseError.IoError;
+                    }
                     should_broadcast_streams = overlay.stream_appends.items.len > 0 or
                         overlay.changefeed.count() > 0 or
                         overlay.stream_offsets.items.len > 0 or
@@ -4174,9 +4183,10 @@ pub const Database = struct {
     /// holds any, so that release refuses to open it.
     fn closePropertyIndexesToOlderReaders(self: *Self) DatabaseError!void {
         const header = self.page_manager.getHeader();
-        if (header.min_reader_version < types.FORMAT_VERSION) {
+        const reason = page_mod.FileHeader.ReaderReason.ordered_property_index;
+        if (header.min_reader_version < types.FORMAT_VERSION or header.readerReasons() & reason == 0) {
             var raised = header.*;
-            raised.min_reader_version = types.FORMAT_VERSION;
+            raised.raiseMinReader(reason);
             self.page_manager.updateHeader(&raised) catch return DatabaseError.IoError;
             try self.sync();
             self.page_manager.sync() catch return DatabaseError.IoError;

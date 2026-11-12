@@ -703,6 +703,54 @@ pub const PageManager = struct {
         self.header_dirty = true;
     }
 
+    /// Require a reader of this release's format for `reason` (a
+    /// `FileHeader.ReaderReason` bit), durably before this returns.
+    ///
+    /// For something about to be written that an older release would
+    /// misread rather than refuse, raised ahead of it: once this returns, no
+    /// later write, flush or crash can leave that thing in a file whose
+    /// header still lets the older release in. Only `min_reader_version` and
+    /// `min_reader_reasons` are written, in place, and synced; the rest of the
+    /// header on disk is left as the last flush wrote it, since the header in
+    /// memory runs ahead of the pages in the file. The next flush writes the
+    /// whole header with the same values. Nothing is written when the version
+    /// is already raised; a reason added then reaches the file with the next
+    /// flush.
+    pub fn raiseMinReaderVersionNow(self: *Self, reason: u16) PageManagerError!void {
+        if (self.read_only) return PageManagerError.PermissionDenied;
+        if (self.header.min_reader_version >= types.FORMAT_VERSION) {
+            if (self.header.readerReasons() & reason != reason) {
+                self.header.raiseMinReader(reason);
+                self.header_dirty = true;
+            }
+            return;
+        }
+        self.header.raiseMinReader(reason);
+        self.header_dirty = true;
+
+        var version: [2]u8 = undefined;
+        std.mem.writeInt(u16, &version, self.header.min_reader_version, .little);
+        self.file.write(@offsetOf(FileHeader, "min_reader_version"), &version) catch return PageManagerError.IoError;
+        // The reasons land in the format-4 fields. If the file's own header
+        // does not have them yet (0.16.0 wrote it last), they are ignored on
+        // disk until the next flush writes the whole header.
+        var reasons: [2]u8 = undefined;
+        std.mem.writeInt(u16, &reasons, self.header.min_reader_reasons, .little);
+        self.file.write(@offsetOf(FileHeader, "min_reader_reasons"), &reasons) catch return PageManagerError.IoError;
+        self.file.sync() catch return PageManagerError.IoError;
+    }
+
+    /// Require a reader of this release's format for `reason` in the header
+    /// the next flush writes. For a replay, whose flushes carry the header
+    /// with the pages.
+    pub fn raiseMinReaderVersion(self: *Self, reason: u16) void {
+        if (self.read_only) return;
+        if (self.header.min_reader_version >= types.FORMAT_VERSION and
+            self.header.readerReasons() & reason == reason) return;
+        self.header.raiseMinReader(reason);
+        self.header_dirty = true;
+    }
+
     /// Record that the write-ahead log is about to be reset.
     ///
     /// This has to reach disk before the log is actually truncated, which the

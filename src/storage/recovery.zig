@@ -38,6 +38,7 @@ const PropertyValue = lattice.core.types.PropertyValue;
 const wal_payload = lattice.transaction.wal_payload;
 const stream_store = lattice.stream.store;
 const stream_payload = lattice.stream.payload;
+const changefeed = lattice.stream.changefeed;
 
 // ============================================================================
 // Types
@@ -481,6 +482,7 @@ pub const RecoveryManager = struct {
                 .node_insert => try self.redoNodeInsert(ctx, payload),
                 .edge_insert => try self.redoEdgeInsert(ctx, payload),
                 .stream_append => try self.redoStreamAppend(ctx, payload),
+                .changefeed_events => try self.redoChangefeed(ctx, payload),
                 else => return RecoveryError.InvalidRecord,
             },
             .update => switch (payload_type) {
@@ -708,9 +710,39 @@ pub const RecoveryManager = struct {
         return ctx.stream_trees orelse RecoveryError.InvalidRecord;
     }
 
+    fn mapChangefeedError(err: changefeed.Error) RecoveryError {
+        return switch (err) {
+            changefeed.Error.InvalidRecord => RecoveryError.InvalidRecord,
+            changefeed.Error.OutOfMemory => RecoveryError.OutOfMemory,
+            else => RecoveryError.IoError,
+        };
+    }
+
+    fn internForChangefeed(context: *anyopaque, name: []const u8) changefeed.Error!u16 {
+        const table: *SymbolTable = @ptrCast(@alignCast(context));
+        return table.intern(name) catch |err| switch (err) {
+            error.OutOfMemory => changefeed.Error.OutOfMemory,
+            else => changefeed.Error.IoError,
+        };
+    }
+
+    /// A run of changefeed events. The record names the symbols its events
+    /// use; they are interned here, and an event whose symbol has another id
+    /// in the recovered table is stored with that id. Events below the floor
+    /// were dropped by retention after they were logged and stay dropped.
+    fn redoChangefeed(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) RecoveryError!void {
+        const trees = try streamTrees(ctx);
+        changefeed.redoLogRecord(trees, self.allocator, payload, ctx.symbol_table, internForChangefeed) catch |err| return mapChangefeedError(err);
+    }
+
     fn redoStreamAppend(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) RecoveryError!void {
         const trees = try streamTrees(ctx);
         const append = stream_store.deserializeAppendWal(payload) catch return RecoveryError.InvalidRecord;
+        // A changefeed event logged by 0.16.0 that retention has dropped since.
+        if (std.mem.eql(u8, append.stream, stream_store.changes_stream)) {
+            const low = changefeed.floor(trees) catch |err| return mapChangefeedError(err);
+            if (append.sequence < low) return;
+        }
         var value = stream_payload.decode(self.allocator, append.payload_bytes) catch return RecoveryError.InvalidRecord;
         defer value.deinit(self.allocator);
         // An event already there under its sequence is this one.
@@ -726,6 +758,10 @@ pub const RecoveryManager = struct {
     fn redoStreamTrim(self: *Self, ctx: LogicalRecoveryContext, payload: []const u8) RecoveryError!void {
         const trees = try streamTrees(ctx);
         const trim_payload = stream_store.deserializeTrimWal(payload) catch return RecoveryError.InvalidRecord;
+        if (std.mem.eql(u8, trim_payload.stream, stream_store.changes_stream)) {
+            _ = changefeed.trimBelow(trees, self.allocator, trim_payload.through_sequence +| 1, std.math.maxInt(u64)) catch |err| return mapChangefeedError(err);
+            return;
+        }
         stream_store.trim(trees, self.allocator, trim_payload.stream, trim_payload.through_sequence) catch return RecoveryError.IoError;
     }
 

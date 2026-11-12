@@ -408,6 +408,10 @@ fn mapDatabaseError(err: DatabaseError) lattice_error {
         DatabaseError.NodeHasRelationships => .err_has_relationships,
         DatabaseError.VectorConfigMismatch => .err_config_mismatch,
         DatabaseError.NeedsNewerWriter => .err_needs_newer_writer,
+        // The changefeed dropped the events after the reader's position.
+        DatabaseError.ChangesTrimmed => .err_not_found,
+        // The changefeed's retention policy is off.
+        DatabaseError.ChangefeedOff => .err_unsupported,
     };
 }
 

@@ -35,6 +35,7 @@ pub const storage = struct {
 pub const stream = struct {
     pub const payload = @import("stream/payload.zig");
     pub const store = @import("stream/store.zig");
+    pub const changefeed = @import("stream/changefeed.zig");
 };
 
 // Vector search

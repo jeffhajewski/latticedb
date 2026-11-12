@@ -48,6 +48,7 @@ const journal_mod = lattice.storage.journal;
 const checkpoint_mod = lattice.storage.checkpoint;
 const stream_store_mod = lattice.stream.store;
 const stream_payload_mod = lattice.stream.payload;
+const changefeed_mod = lattice.stream.changefeed;
 pub const StreamBatch = stream_store_mod.Batch;
 pub const StreamRecord = stream_store_mod.Record;
 
@@ -184,6 +185,12 @@ pub const DatabaseError = error{
     /// The file was written by a newer release that allows only releases of
     /// its format or later to write it. It can still be opened read-only.
     NeedsNewerWriter,
+    /// The changefeed no longer holds the events after the position a reader
+    /// asked to read from: retention or a trim dropped them. The reader has
+    /// missed changes; it can start again from the oldest event held.
+    ChangesTrimmed,
+    /// The changefeed's retention policy is `off`: there are no events to read.
+    ChangefeedOff,
 };
 
 /// Query execution errors
@@ -452,6 +459,19 @@ pub const DatabaseConfig = struct {
     /// `normal` or `full` in the environment. A value set here wins over the
     /// environment, as with `full_fsync`.
     sync_mode: ?SyncMode = null,
+
+    /// How much of the changefeed (`__lattice_changes`) to keep.
+    ///
+    /// The file records its policy. Null, the default, keeps whatever the
+    /// file records, which for a file that records none is to keep every
+    /// event. A value set here replaces the file's policy when the database
+    /// is opened for writing; a read-only open never changes it. A new
+    /// database with no value here takes `LATTICE_CHANGEFEED_RETENTION` from
+    /// the environment if it is set (`all`, `off`, `last:<n>`, `age:<d>`).
+    ///
+    /// Retention acts at checkpoints and on `trimChangefeed`, oldest events
+    /// first. `off` writes no events at all.
+    changefeed_retention: ?changefeed_mod.Retention = null,
 
     pub const SyncMode = enum { full, normal };
 
@@ -838,6 +858,8 @@ const TxnOverlay = struct {
     /// every earlier append. Keys borrow the `stream` slice of the first
     /// append to that stream, which lives as long as the overlay.
     stream_last_sequences: std.StringHashMapUnmanaged(u64) = .empty,
+    /// The changefeed events of this transaction, staged at commit.
+    changefeed: changefeed_mod.Batch = .{},
     has_staged_writes: bool = false,
     /// Staged nodes by indexed value, for index lookups in the transaction.
     node_lookup: OverlayLookup = .{},
@@ -876,6 +898,7 @@ const TxnOverlay = struct {
         self.vector_states.deinit(allocator);
 
         self.stream_last_sequences.deinit(allocator);
+        self.changefeed.deinit(allocator);
         for (self.stream_appends.items) |*append| {
             append.deinit(allocator);
         }
@@ -1185,6 +1208,13 @@ pub const Database = struct {
     stream_mutex: @import("compat").Mutex,
     stream_cond: @import("compat").Condition,
     stream_epoch: u64,
+    /// The changefeed retention policy in force.
+    changefeed_retention: changefeed_mod.Retention,
+    /// Events committed since retention last trimmed, which bounds how much
+    /// a checkpoint's trimming pass takes on.
+    changefeed_appended_since_trim: u64,
+    /// Where property values are encoded for the changefeed.
+    changefeed_scratch: std.ArrayListUnmanaged(u8),
 
     // Caches
     adjacency_cache: ?AdjacencyCache,
@@ -1252,6 +1282,9 @@ pub const Database = struct {
         var writable = options;
         writable.read_only = false;
         writable.create = false;
+        // A reader never changes the file's changefeed policy, not even in
+        // the memory the overlay keeps.
+        writable.config.changefeed_retention = null;
         const db = openWithBackend(allocator, path, writable, Backend{ .overlay = replay }) catch |err| {
             if (exceeded) return DatabaseError.BufferPoolFull;
             return err;
@@ -1324,6 +1357,10 @@ pub const Database = struct {
         self.failed = false;
         // Only `deserialize` sets this, once its file has actually been opened.
         self.owns_backing_file = false;
+        self.changefeed_retention = .keep_all;
+        self.changefeed_appended_since_trim = 0;
+        self.changefeed_scratch = .empty;
+        errdefer self.changefeed_scratch.deinit(allocator);
 
         // Copy path for later use
         self.path = allocator.dupe(u8, path) catch return DatabaseError.OutOfMemory;
@@ -1662,6 +1699,8 @@ pub const Database = struct {
             self.page_manager.sync() catch return DatabaseError.IoError;
         }
 
+        try self.openChangefeedRetention(options, is_new);
+
         // 9. Initialize Transaction Manager
         self.txn_manager = null;
         if (self.wal) |*wal| {
@@ -1837,6 +1876,10 @@ pub const Database = struct {
         if (self.txn_manager) |*tm| {
             if (tm.hasLoggedActiveTxn()) return DatabaseError.TransactionConflict;
         }
+
+        // Retention drops old changefeed events here, a bounded number per
+        // checkpoint, and this checkpoint's flush makes that durable.
+        _ = try self.applyChangefeedRetention(changefeed_trim_slack + self.changefeed_appended_since_trim);
 
         // Into tree pages and the header first, so the flush carries them.
         try self.persistHnswIndex();
@@ -2249,6 +2292,7 @@ pub const Database = struct {
             entry.value_ptr.deinit(self.allocator);
         }
         self.txn_overlays.deinit();
+        self.changefeed_scratch.deinit(self.allocator);
 
         // 9. Transaction manager
         if (self.txn_manager) |*tm| {
@@ -2384,6 +2428,7 @@ pub const Database = struct {
                     try self.stageGraphChangefeed(overlay);
                     try self.assignStreamSequences(overlay);
                     should_broadcast_streams = overlay.stream_appends.items.len > 0 or
+                        overlay.changefeed.count() > 0 or
                         overlay.stream_offsets.items.len > 0 or
                         overlay.stream_trims.items.len > 0;
                     try self.logTxnOverlayForCommit(txn, overlay);
@@ -2573,6 +2618,7 @@ pub const Database = struct {
         for (overlay.stream_appends.items) |append| {
             try self.logWalStreamAppend(txn, append);
         }
+        try self.logChangefeed(txn, &overlay.changefeed);
         for (overlay.stream_offsets.items) |offset| {
             try self.logWalStreamOffset(txn, offset);
         }
@@ -3016,10 +3062,13 @@ pub const Database = struct {
         }
 
         if (overlay.stream_appends.items.len > 0 or
+            overlay.changefeed.count() > 0 or
             overlay.stream_offsets.items.len > 0 or
             overlay.stream_trims.items.len > 0)
         {
             const trees = try self.streamTreesForWrite();
+            changefeed_mod.applyBatch(trees, &overlay.changefeed) catch |err| return mapChangefeedError(err);
+            self.changefeed_appended_since_trim +|= overlay.changefeed.count();
             for (overlay.stream_appends.items) |append| {
                 const sequence = append.sequence orelse return DatabaseError.IoError;
                 stream_store_mod.appendWithSequence(
@@ -3041,6 +3090,15 @@ pub const Database = struct {
                 ) catch |err| return self.mapStreamError(err);
             }
             for (overlay.stream_trims.items) |trim_op| {
+                if (std.mem.eql(u8, trim_op.stream, stream_store_mod.changes_stream)) {
+                    _ = changefeed_mod.trimBelow(
+                        trees,
+                        self.allocator,
+                        trim_op.through_sequence +| 1,
+                        std.math.maxInt(u64),
+                    ) catch |err| return mapChangefeedError(err);
+                    continue;
+                }
                 stream_store_mod.trim(
                     trees,
                     self.allocator,
@@ -5103,6 +5161,12 @@ pub const Database = struct {
     }
 
     fn assignStreamSequences(self: *Self, overlay: *TxnOverlay) DatabaseError!void {
+        if (overlay.changefeed.count() > 0) {
+            const trees = try self.streamTreesForWrite();
+            const last = changefeed_mod.lastSequence(trees) catch |err| return mapChangefeedError(err);
+            if (last > std.math.maxInt(u64) - overlay.changefeed.count()) return DatabaseError.ValueTooLarge;
+            overlay.changefeed.first_sequence = last + 1;
+        }
         for (overlay.stream_appends.items) |*append| {
             if (append.sequence != null) continue;
 
@@ -5228,6 +5292,9 @@ pub const Database = struct {
         after_sequence: u64,
         limit: usize,
     ) DatabaseError!StreamBatch {
+        if (std.mem.eql(u8, stream, stream_store_mod.changes_stream)) {
+            return self.readChangesOnce(after_sequence, limit);
+        }
         return stream_store_mod.read(
             self.streamTrees(),
             self.allocator,
@@ -5279,6 +5346,176 @@ pub const Database = struct {
 
     pub fn readChanges(self: *Self, after_sequence: u64, limit: usize, timeout_ms: u64) DatabaseError!StreamBatch {
         return self.readStream(stream_store_mod.changes_stream, after_sequence, limit, timeout_ms);
+    }
+
+    // -----------------------------------------------------------------------
+    // The changefeed: reading, retention, status
+    // -----------------------------------------------------------------------
+
+    fn mapChangefeedError(err: changefeed_mod.Error) DatabaseError {
+        return switch (err) {
+            changefeed_mod.Error.OutOfMemory => DatabaseError.OutOfMemory,
+            changefeed_mod.Error.ValueTooLarge => DatabaseError.ValueTooLarge,
+            changefeed_mod.Error.InvalidRecord => DatabaseError.InvalidDatabase,
+            changefeed_mod.Error.IoError => DatabaseError.IoError,
+        };
+    }
+
+    fn resolveSymbolForChangefeed(context: *anyopaque, id: u16) changefeed_mod.Error![]const u8 {
+        const self: *Self = @ptrCast(@alignCast(context));
+        return self.symbol_table.resolve(id) catch |err| switch (err) {
+            error.OutOfMemory => changefeed_mod.Error.OutOfMemory,
+            else => changefeed_mod.Error.InvalidRecord,
+        };
+    }
+
+    fn freeSymbolForChangefeed(context: *anyopaque, name: []const u8) void {
+        const self: *Self = @ptrCast(@alignCast(context));
+        self.allocator.free(name);
+    }
+
+    fn changefeedResolver(self: *Self) changefeed_mod.Resolver {
+        return .{
+            .context = self,
+            .resolve = resolveSymbolForChangefeed,
+            .free = freeSymbolForChangefeed,
+        };
+    }
+
+    fn readChangesOnce(self: *Self, after_sequence: u64, limit: usize) DatabaseError!StreamBatch {
+        if (self.changefeed_retention == .off) return DatabaseError.ChangefeedOff;
+        const trees = self.streamTrees() orelse return .{
+            .allocator = self.allocator,
+            .records = self.allocator.alloc(stream_store_mod.Record, 0) catch return DatabaseError.OutOfMemory,
+        };
+        const from = changefeed_mod.readStart(trees, after_sequence) catch |err| return switch (err) {
+            error.Trimmed => DatabaseError.ChangesTrimmed,
+            else => |e| mapChangefeedError(e),
+        };
+        if (from == std.math.maxInt(u64) and after_sequence == std.math.maxInt(u64)) {
+            return .{
+                .allocator = self.allocator,
+                .records = self.allocator.alloc(stream_store_mod.Record, 0) catch return DatabaseError.OutOfMemory,
+            };
+        }
+        return changefeed_mod.read(trees, self.allocator, from, limit, self.changefeedResolver()) catch |err| mapChangefeedError(err);
+    }
+
+    /// Log a transaction's changefeed events, a frame's worth per record.
+    /// Each record carries the names of the symbols its events use, because
+    /// the symbol table is not logged: after a crash, replay interns the
+    /// names again and may give them other ids.
+    fn logChangefeed(self: *Self, txn: *Transaction, batch: *const changefeed_mod.Batch) DatabaseError!void {
+        const count = batch.count();
+        if (count == 0) return;
+        const tm = &(self.txn_manager orelse return DatabaseError.TransactionsNotEnabled);
+        var from: usize = 0;
+        while (from < count) {
+            var to = from + 1;
+            var bytes: usize = batch.event(from).len;
+            while (to < count) : (to += 1) {
+                const next = batch.event(to).len;
+                if (bytes + next > changefeed_mod.LOG_CHUNK_BYTES) break;
+                bytes += next;
+            }
+            const payload = changefeed_mod.encodeLogRecord(self.allocator, batch, from, to, self.changefeedResolver()) catch |err| return mapChangefeedError(err);
+            defer self.allocator.free(payload);
+            _ = tm.logOperation(txn, .insert, payload) catch |err| return mapTxnError(err);
+            from = to;
+        }
+    }
+
+    /// Events a checkpoint's retention pass may drop beyond those committed
+    /// since the last pass, so a backlog (a stricter policy, a feed turned
+    /// off) is worked off over several checkpoints instead of stalling one.
+    const changefeed_trim_slack: u64 = 4096;
+
+    /// Drop the events the retention policy no longer keeps, at most
+    /// `max_events` of them. The deletes are not logged: the floor, written
+    /// first and flushed with them, keeps replay from bringing them back.
+    fn applyChangefeedRetention(self: *Self, max_events: u64) DatabaseError!changefeed_mod.TrimResult {
+        if (self.read_only or self.failed) return .{};
+        const trees = self.streamTrees() orelse return .{};
+        const target = changefeed_mod.retentionTarget(
+            trees,
+            self.allocator,
+            self.changefeed_retention,
+            @intCast(@max(0, @import("compat").milliTimestamp())),
+            max_events,
+        ) catch |err| return mapChangefeedError(err);
+        const result = changefeed_mod.trimBelow(trees, self.allocator, target, max_events) catch |err| return mapChangefeedError(err);
+        if (result.done) self.changefeed_appended_since_trim = 0;
+        return result;
+    }
+
+    /// Apply the retention policy in full now, rather than a bounded part
+    /// of it at each checkpoint, and make the result durable. Returns the
+    /// number of events dropped. Fails with `TransactionConflict` while a
+    /// write transaction is open.
+    pub fn trimChangefeed(self: *Self) DatabaseError!u64 {
+        if (self.read_only) return DatabaseError.ReadOnly;
+        if (self.failed) return DatabaseError.IoError;
+        if (self.active_writer_txn_id != null) return DatabaseError.TransactionConflict;
+        const result = try self.applyChangefeedRetention(std.math.maxInt(u64));
+        if (result.removed > 0) try self.sync();
+        return result.removed;
+    }
+
+    pub const ChangefeedStatus = struct {
+        retention: changefeed_mod.Retention,
+        /// The oldest event held, or null when none is.
+        oldest_sequence: ?u64,
+        /// The last sequence handed out, 0 if none ever was.
+        last_sequence: u64,
+    };
+
+    pub fn changefeedStatus(self: *Self) DatabaseError!ChangefeedStatus {
+        const trees = self.streamTrees() orelse return .{
+            .retention = self.changefeed_retention,
+            .oldest_sequence = null,
+            .last_sequence = 0,
+        };
+        return .{
+            .retention = self.changefeed_retention,
+            .oldest_sequence = changefeed_mod.oldestSequence(trees, self.allocator) catch |err| return mapChangefeedError(err),
+            .last_sequence = changefeed_mod.lastSequence(trees) catch |err| return mapChangefeedError(err),
+        };
+    }
+
+    /// How many events the changefeed holds and the bytes their keys and
+    /// values take. Walks every event.
+    pub fn changefeedSize(self: *Self) DatabaseError!changefeed_mod.Size {
+        const trees = self.streamTrees() orelse return .{};
+        return changefeed_mod.size(trees, self.allocator) catch |err| mapChangefeedError(err);
+    }
+
+    /// Settle the retention policy at open: an explicit one replaces the
+    /// file's, the environment supplies one for a new file, and otherwise
+    /// the file's stands. A change is synced to the file at once, so it
+    /// cannot be half there after a crash.
+    fn openChangefeedRetention(self: *Self, options: OpenOptions, is_new: bool) DatabaseError!void {
+        const stored: ?changefeed_mod.Retention = if (self.streamTrees()) |trees|
+            changefeed_mod.storedRetention(trees) catch |err| return mapChangefeedError(err)
+        else
+            null;
+        const current = stored orelse changefeed_mod.Retention.keep_all;
+        self.changefeed_retention = current;
+        if (options.read_only) return;
+
+        var wanted = options.config.changefeed_retention;
+        if (wanted == null and is_new) {
+            if (std.c.getenv("LATTICE_CHANGEFEED_RETENTION")) |value| {
+                wanted = changefeed_mod.Retention.parse(std.mem.span(value));
+            }
+        }
+        const new = wanted orelse return;
+        if (new.eql(current) and (stored != null or new == .keep_all)) return;
+
+        const trees = try self.streamTreesForWrite();
+        changefeed_mod.storeRetention(trees, current, new) catch |err| return mapChangefeedError(err);
+        self.changefeed_retention = new;
+        try self.sync();
+        self.page_manager.sync() catch return DatabaseError.IoError;
     }
 
     fn propertyValueEqual(a: PropertyValue, b: PropertyValue) bool {
@@ -5360,160 +5597,109 @@ pub const Database = struct {
         return streamAppendPayloadFits(kind, .{ .map_val = entries });
     }
 
-    fn stageChangePayload(
-        self: *Self,
-        overlay: *TxnOverlay,
-        kind: []const u8,
-        entries: []const PropertyValue.MapEntry,
-    ) DatabaseError!void {
-        const payload = PropertyValue{ .map_val = entries };
-        _ = try self.stageStreamAppend(
-            overlay,
-            stream_store_mod.changes_stream,
-            kind,
-            payload,
-            false,
-        );
-    }
-
-    fn stagePropertyChangePayload(
-        self: *Self,
-        overlay: *TxnOverlay,
+    /// The old and new values a property event records: the values
+    /// themselves, or in place of one too large for the record a short
+    /// summary map (`__lattice_value_omitted`, `type`, `encoded_bytes`),
+    /// chosen exactly as the changefeed has always chosen it, by the size of
+    /// the record 0.16.0 wrote. `entries` and the summary arrays hold what
+    /// the returned values point into.
+    fn fitPropertyChangePayload(
         kind: []const u8,
         entries: *[6]PropertyValue.MapEntry,
+        old_summary_entries: *[3]PropertyValue.MapEntry,
+        new_summary_entries: *[3]PropertyValue.MapEntry,
         old_value: ?PropertyValue,
         new_value: ?PropertyValue,
     ) DatabaseError!void {
         entries[4].value = old_value orelse .{ .null_val = {} };
         entries[5].value = new_value orelse .{ .null_val = {} };
-        if (changePayloadFits(kind, entries[0..])) {
-            try self.stageChangePayload(overlay, kind, entries[0..]);
-            return;
-        }
+        if (changePayloadFits(kind, entries[0..])) return;
 
-        var old_summary_entries: [3]PropertyValue.MapEntry = undefined;
         if (old_value) |value| {
-            entries[4].value = summarizedChangefeedValue(value, &old_summary_entries);
-            if (changePayloadFits(kind, entries[0..])) {
-                try self.stageChangePayload(overlay, kind, entries[0..]);
-                return;
-            }
+            entries[4].value = summarizedChangefeedValue(value, old_summary_entries);
+            if (changePayloadFits(kind, entries[0..])) return;
         }
-
-        var new_summary_entries: [3]PropertyValue.MapEntry = undefined;
         if (new_value) |value| {
-            entries[5].value = summarizedChangefeedValue(value, &new_summary_entries);
-            if (changePayloadFits(kind, entries[0..])) {
-                try self.stageChangePayload(overlay, kind, entries[0..]);
-                return;
-            }
+            entries[5].value = summarizedChangefeedValue(value, new_summary_entries);
+            if (changePayloadFits(kind, entries[0..])) return;
         }
-
         return DatabaseError.ValueTooLarge;
     }
 
-    fn stageNodeChange(
+    /// Values this small leave the record far below every size limit, so
+    /// they are recorded as they are without working out the record's size.
+    const changefeed_inline_value_limit: usize = 1 << 20;
+
+    fn stageChangefeedEvent(
         self: *Self,
         overlay: *TxnOverlay,
-        kind: []const u8,
-        op: []const u8,
-        node_id: NodeId,
+        event: changefeed_mod.Event,
+        commit_ms: u64,
     ) DatabaseError!void {
-        var entries = [_]PropertyValue.MapEntry{
-            .{ .key = "entity", .value = .{ .string_val = "node" } },
-            .{ .key = "op", .value = .{ .string_val = op } },
-            .{ .key = "node_id", .value = idValue(node_id) },
-        };
-        try self.stageChangePayload(overlay, kind, &entries);
+        overlay.changefeed.append(self.allocator, event, commit_ms) catch |err| return mapChangefeedError(err);
     }
 
-    fn stageNodeLabelChange(
+    fn stageChangefeedProperty(
         self: *Self,
         overlay: *TxnOverlay,
-        kind: []const u8,
-        op: []const u8,
-        node_id: NodeId,
-        label_id: symbols_mod.SymbolId,
-    ) DatabaseError!void {
-        const label = self.symbol_table.resolve(label_id) catch return DatabaseError.IoError;
-        defer self.allocator.free(label);
-        var entries = [_]PropertyValue.MapEntry{
-            .{ .key = "entity", .value = .{ .string_val = "node" } },
-            .{ .key = "op", .value = .{ .string_val = op } },
-            .{ .key = "node_id", .value = idValue(node_id) },
-            .{ .key = "label", .value = .{ .string_val = label } },
-        };
-        try self.stageChangePayload(overlay, kind, &entries);
-    }
-
-    fn stageNodePropertyChange(
-        self: *Self,
-        overlay: *TxnOverlay,
-        kind: []const u8,
-        op: []const u8,
-        node_id: NodeId,
+        op: changefeed_mod.Op,
+        id: u64,
         key_id: symbols_mod.SymbolId,
         old_value: ?PropertyValue,
         new_value: ?PropertyValue,
+        commit_ms: u64,
     ) DatabaseError!void {
-        const key = self.symbol_table.resolve(key_id) catch return DatabaseError.IoError;
-        defer self.allocator.free(key);
-        var entries = [_]PropertyValue.MapEntry{
-            .{ .key = "entity", .value = .{ .string_val = "node" } },
-            .{ .key = "op", .value = .{ .string_val = op } },
-            .{ .key = "node_id", .value = idValue(node_id) },
-            .{ .key = "key", .value = .{ .string_val = key } },
-            .{ .key = "old_value", .value = .{ .null_val = {} } },
-            .{ .key = "new_value", .value = .{ .null_val = {} } },
-        };
-        try self.stagePropertyChangePayload(overlay, kind, &entries, old_value, new_value);
+        const null_value = PropertyValue{ .null_val = {} };
+        var old_recorded = old_value orelse null_value;
+        var new_recorded = new_value orelse null_value;
+        const old_size = wal_payload.propertyValueSize(old_recorded);
+        const new_size = wal_payload.propertyValueSize(new_recorded);
+
+        var entries: [6]PropertyValue.MapEntry = undefined;
+        var old_summary: [3]PropertyValue.MapEntry = undefined;
+        var new_summary: [3]PropertyValue.MapEntry = undefined;
+        var key_name: ?[]const u8 = null;
+        defer if (key_name) |name| self.allocator.free(name);
+        if (old_size > changefeed_inline_value_limit or new_size > changefeed_inline_value_limit) {
+            key_name = self.symbol_table.resolve(key_id) catch return DatabaseError.IoError;
+            const entity: []const u8 = if (op.isEdge()) "edge" else "node";
+            entries = .{
+                .{ .key = "entity", .value = .{ .string_val = entity } },
+                .{ .key = "op", .value = .{ .string_val = if (op == .node_property_set or op == .edge_property_set) "property_set" else "property_remove" } },
+                .{ .key = if (op.isEdge()) "edge_id" else "node_id", .value = idValue(id) },
+                .{ .key = "key", .value = .{ .string_val = key_name.? } },
+                .{ .key = "old_value", .value = null_value },
+                .{ .key = "new_value", .value = null_value },
+            };
+            try fitPropertyChangePayload(op.kind(), &entries, &old_summary, &new_summary, old_value, new_value);
+            old_recorded = entries[4].value;
+            new_recorded = entries[5].value;
+        }
+
+        const old_len = wal_payload.propertyValueSize(old_recorded);
+        const new_len = wal_payload.propertyValueSize(new_recorded);
+        const scratch = &self.changefeed_scratch;
+        scratch.resize(self.allocator, old_len + new_len) catch return DatabaseError.OutOfMemory;
+        _ = wal_payload.serializePropertyValueToBuf(scratch.items[0..old_len], old_recorded) catch return DatabaseError.IoError;
+        _ = wal_payload.serializePropertyValueToBuf(scratch.items[old_len..], new_recorded) catch return DatabaseError.IoError;
+        try self.stageChangefeedEvent(overlay, .{
+            .op = op,
+            .id = id,
+            .symbol = .{ .id = key_id },
+            .old_value = scratch.items[0..old_len],
+            .new_value = scratch.items[old_len..],
+        }, commit_ms);
     }
 
-    fn stageEdgeChange(
-        self: *Self,
-        overlay: *TxnOverlay,
-        kind: []const u8,
-        op: []const u8,
-        edge_id: EdgeId,
-        state: TxnEdgeState,
-    ) DatabaseError!void {
-        const type_name = self.symbol_table.resolve(state.edge_type) catch return DatabaseError.IoError;
-        defer self.allocator.free(type_name);
-        var entries = [_]PropertyValue.MapEntry{
-            .{ .key = "entity", .value = .{ .string_val = "edge" } },
-            .{ .key = "op", .value = .{ .string_val = op } },
-            .{ .key = "edge_id", .value = idValue(edge_id) },
-            .{ .key = "source_id", .value = idValue(state.source) },
-            .{ .key = "target_id", .value = idValue(state.target) },
-            .{ .key = "type", .value = .{ .string_val = type_name } },
-        };
-        try self.stageChangePayload(overlay, kind, &entries);
-    }
-
-    fn stageEdgePropertyChange(
-        self: *Self,
-        overlay: *TxnOverlay,
-        kind: []const u8,
-        op: []const u8,
-        edge_id: EdgeId,
-        key_id: symbols_mod.SymbolId,
-        old_value: ?PropertyValue,
-        new_value: ?PropertyValue,
-    ) DatabaseError!void {
-        const key = self.symbol_table.resolve(key_id) catch return DatabaseError.IoError;
-        defer self.allocator.free(key);
-        var entries = [_]PropertyValue.MapEntry{
-            .{ .key = "entity", .value = .{ .string_val = "edge" } },
-            .{ .key = "op", .value = .{ .string_val = op } },
-            .{ .key = "edge_id", .value = idValue(edge_id) },
-            .{ .key = "key", .value = .{ .string_val = key } },
-            .{ .key = "old_value", .value = .{ .null_val = {} } },
-            .{ .key = "new_value", .value = .{ .null_val = {} } },
-        };
-        try self.stagePropertyChangePayload(overlay, kind, &entries, old_value, new_value);
-    }
-
+    /// Stage the changefeed events for what this transaction changes, by
+    /// comparing each node and edge it touched with its committed state.
+    /// Events are encoded as they are found (see `stream/changefeed.zig`);
+    /// symbols go in by id, and the log carries their names.
     fn stageGraphChangefeed(self: *Self, overlay: *TxnOverlay) DatabaseError!void {
+        if (self.changefeed_retention == .off) return;
+        if (overlay.node_states.count() == 0 and overlay.edge_states.count() == 0) return;
+        const commit_ms: u64 = @intCast(@max(0, @import("compat").milliTimestamp()));
+
         var node_iter = overlay.node_states.iterator();
         while (node_iter.next()) |entry| {
             const node_id = entry.key_ptr.*;
@@ -5526,7 +5712,7 @@ pub const Database = struct {
 
             if (!state.exists) {
                 if (current != null) {
-                    try self.stageNodeChange(overlay, "node.delete", "delete", node_id);
+                    try self.stageChangefeedEvent(overlay, .{ .op = .node_delete, .id = node_id }, commit_ms);
                 }
                 continue;
             }
@@ -5534,26 +5720,18 @@ pub const Database = struct {
             if (current) |existing| {
                 for (existing.labels) |label_id| {
                     if (!containsSymbolId(state.labels, label_id)) {
-                        try self.stageNodeLabelChange(overlay, "node.label_remove", "label_remove", node_id, label_id);
+                        try self.stageChangefeedEvent(overlay, .{ .op = .node_label_remove, .id = node_id, .symbol = .{ .id = label_id } }, commit_ms);
                     }
                 }
                 for (state.labels) |label_id| {
                     if (!containsSymbolId(existing.labels, label_id)) {
-                        try self.stageNodeLabelChange(overlay, "node.label_add", "label_add", node_id, label_id);
+                        try self.stageChangefeedEvent(overlay, .{ .op = .node_label_add, .id = node_id, .symbol = .{ .id = label_id } }, commit_ms);
                     }
                 }
 
                 for (existing.properties) |prop| {
                     if (findPropertyById(state.properties, prop.key_id) == null) {
-                        try self.stageNodePropertyChange(
-                            overlay,
-                            "node.property_remove",
-                            "property_remove",
-                            node_id,
-                            prop.key_id,
-                            prop.value,
-                            null,
-                        );
+                        try self.stageChangefeedProperty(overlay, .node_property_remove, node_id, prop.key_id, prop.value, null, commit_ms);
                     }
                 }
                 for (state.properties) |prop| {
@@ -5561,31 +5739,23 @@ pub const Database = struct {
                     if (old_prop) |old| {
                         if (propertyValueEqual(old.value, prop.value)) continue;
                     }
-                    try self.stageNodePropertyChange(
+                    try self.stageChangefeedProperty(
                         overlay,
-                        "node.property_set",
-                        "property_set",
+                        .node_property_set,
                         node_id,
                         prop.key_id,
                         if (old_prop) |old| old.value else null,
                         prop.value,
+                        commit_ms,
                     );
                 }
             } else {
-                try self.stageNodeChange(overlay, "node.insert", "insert", node_id);
+                try self.stageChangefeedEvent(overlay, .{ .op = .node_insert, .id = node_id }, commit_ms);
                 for (state.labels) |label_id| {
-                    try self.stageNodeLabelChange(overlay, "node.label_add", "label_add", node_id, label_id);
+                    try self.stageChangefeedEvent(overlay, .{ .op = .node_label_add, .id = node_id, .symbol = .{ .id = label_id } }, commit_ms);
                 }
                 for (state.properties) |prop| {
-                    try self.stageNodePropertyChange(
-                        overlay,
-                        "node.property_set",
-                        "property_set",
-                        node_id,
-                        prop.key_id,
-                        null,
-                        prop.value,
-                    );
+                    try self.stageChangefeedProperty(overlay, .node_property_set, node_id, prop.key_id, null, prop.value, commit_ms);
                 }
             }
         }
@@ -5602,7 +5772,13 @@ pub const Database = struct {
 
             if (!state.exists) {
                 if (current) |existing| {
-                    try self.stageEdgeChange(overlay, "edge.delete", "delete", edge_id, existing);
+                    try self.stageChangefeedEvent(overlay, .{
+                        .op = .edge_delete,
+                        .id = edge_id,
+                        .source = existing.source,
+                        .target = existing.target,
+                        .symbol = .{ .id = existing.edge_type },
+                    }, commit_ms);
                 }
                 continue;
             }
@@ -5610,15 +5786,7 @@ pub const Database = struct {
             if (current) |existing| {
                 for (existing.properties) |prop| {
                     if (findPropertyById(state.properties, prop.key_id) == null) {
-                        try self.stageEdgePropertyChange(
-                            overlay,
-                            "edge.property_remove",
-                            "property_remove",
-                            edge_id,
-                            prop.key_id,
-                            prop.value,
-                            null,
-                        );
+                        try self.stageChangefeedProperty(overlay, .edge_property_remove, edge_id, prop.key_id, prop.value, null, commit_ms);
                     }
                 }
                 for (state.properties) |prop| {
@@ -5626,28 +5794,26 @@ pub const Database = struct {
                     if (old_prop) |old| {
                         if (propertyValueEqual(old.value, prop.value)) continue;
                     }
-                    try self.stageEdgePropertyChange(
+                    try self.stageChangefeedProperty(
                         overlay,
-                        "edge.property_set",
-                        "property_set",
+                        .edge_property_set,
                         edge_id,
                         prop.key_id,
                         if (old_prop) |old| old.value else null,
                         prop.value,
+                        commit_ms,
                     );
                 }
             } else {
-                try self.stageEdgeChange(overlay, "edge.insert", "insert", edge_id, state);
+                try self.stageChangefeedEvent(overlay, .{
+                    .op = .edge_insert,
+                    .id = edge_id,
+                    .source = state.source,
+                    .target = state.target,
+                    .symbol = .{ .id = state.edge_type },
+                }, commit_ms);
                 for (state.properties) |prop| {
-                    try self.stageEdgePropertyChange(
-                        overlay,
-                        "edge.property_set",
-                        "property_set",
-                        edge_id,
-                        prop.key_id,
-                        null,
-                        prop.value,
-                    );
+                    try self.stageChangefeedProperty(overlay, .edge_property_set, edge_id, prop.key_id, null, prop.value, commit_ms);
                 }
             }
         }

@@ -32,6 +32,8 @@ pub const PayloadType = enum(u8) {
     stream_append = 0x20,
     stream_offset_set = 0x21,
     stream_trim = 0x22,
+    /// A run of changefeed events (`stream/changefeed.zig`).
+    changefeed_events = 0x23,
 };
 
 /// Errors that can occur during payload serialization/deserialization

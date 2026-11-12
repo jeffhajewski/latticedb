@@ -218,7 +218,7 @@ pub fn serializeRecordValueAlloc(
     return bytes;
 }
 
-fn deserializeRecordValue(
+pub fn deserializeRecordValue(
     allocator: Allocator,
     sequence: u64,
     bytes: []const u8,

@@ -923,6 +923,48 @@ fn freeProperties(allocator: Allocator, properties: []node_mod.Property) void {
     allocator.free(properties);
 }
 
+/// Set property `key_id` to a copy of `value` in an owned property list, or
+/// remove it when `value` is null, changing nothing else: the other values
+/// stay where they are rather than being copied. Returns whether the list
+/// changed. On failure the list is as it was.
+fn editProperties(
+    allocator: Allocator,
+    properties: *[]node_mod.Property,
+    key_id: symbols_mod.SymbolId,
+    value: ?PropertyValue,
+) Allocator.Error!bool {
+    const index: ?usize = for (properties.*, 0..) |prop, i| {
+        if (prop.key_id == key_id) break i;
+    } else null;
+
+    const new_value = value orelse {
+        const i = index orelse return false;
+        const kept = try allocator.alloc(node_mod.Property, properties.len - 1);
+        @memcpy(kept[0..i], properties.*[0..i]);
+        @memcpy(kept[i..], properties.*[i + 1 ..]);
+        var removed = properties.*[i].value;
+        removed.deinit(allocator);
+        allocator.free(properties.*);
+        properties.* = kept;
+        return true;
+    };
+
+    var copy = try new_value.clone(allocator);
+    if (index) |i| {
+        var old = properties.*[i].value;
+        properties.*[i].value = copy;
+        old.deinit(allocator);
+        return true;
+    }
+    const grown = allocator.realloc(properties.*, properties.len + 1) catch |err| {
+        copy.deinit(allocator);
+        return err;
+    };
+    grown[grown.len - 1] = .{ .key_id = key_id, .value = copy };
+    properties.* = grown;
+    return true;
+}
+
 fn emptySymbolIds(allocator: Allocator) Allocator.Error![]symbols_mod.SymbolId {
     return allocator.alloc(symbols_mod.SymbolId, 0);
 }
@@ -5548,21 +5590,19 @@ pub const Database = struct {
     }
 
     fn readBaseNodeState(self: *Self, node_id: NodeId) DatabaseError!?TxnNodeState {
-        var node = self.node_store.get(node_id) catch |err| {
+        const node = self.node_store.get(node_id) catch |err| {
             return switch (err) {
                 node_mod.NodeError.NotFound => null,
                 node_mod.NodeError.OutOfMemory => DatabaseError.OutOfMemory,
                 else => DatabaseError.IoError,
             };
         };
-        defer node.deinit(self.allocator);
-
-        const labels = cloneSymbolIds(self.allocator, node.labels) catch return DatabaseError.OutOfMemory;
-        errdefer self.allocator.free(labels);
+        // The decoded node is already a private copy in this allocator; the
+        // state takes it over rather than copying it a second time.
         return .{
             .exists = true,
-            .labels = labels,
-            .properties = cloneProperties(self.allocator, node.properties) catch return DatabaseError.OutOfMemory,
+            .labels = node.labels,
+            .properties = node.properties,
         };
     }
 
@@ -5602,21 +5642,20 @@ pub const Database = struct {
     }
 
     fn readBaseEdgeState(self: *Self, edge_id: EdgeId) DatabaseError!?TxnEdgeState {
-        var edge = self.edge_store.getById(edge_id) catch |err| {
+        const edge = self.edge_store.getById(edge_id) catch |err| {
             return switch (err) {
                 edge_mod.EdgeError.NotFound => null,
                 edge_mod.EdgeError.OutOfMemory => DatabaseError.OutOfMemory,
                 else => DatabaseError.IoError,
             };
         };
-        defer edge.deinit(self.allocator);
-
+        // Taken over, as in readBaseNodeState.
         return .{
             .exists = true,
             .source = edge.source,
             .target = edge.target,
             .edge_type = edge.edge_type,
-            .properties = cloneProperties(self.allocator, edge.properties) catch return DatabaseError.OutOfMemory,
+            .properties = edge.properties,
         };
     }
 
@@ -6408,47 +6447,21 @@ pub const Database = struct {
             if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
             if (self.getTxnOverlay(t)) |overlay| {
                 var state = (try self.readVisibleNodeState(txn, node_id)) orelse return DatabaseError.NotFound;
-                defer state.deinit(self.allocator);
-                if (!state.exists) return DatabaseError.NotFound;
-
-                const key_id = self.symbol_table.intern(key) catch return DatabaseError.IoError;
-
-                var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
-                errdefer {
-                    for (new_props.items) |*prop| {
-                        var val = prop.value;
-                        val.deinit(self.allocator);
-                    }
-                    new_props.deinit(self.allocator);
+                if (!state.exists) {
+                    state.deinit(self.allocator);
+                    return DatabaseError.NotFound;
                 }
-
-                var found = false;
-                for (state.properties) |prop| {
-                    if (prop.key_id == key_id) {
-                        new_props.append(self.allocator, .{
-                            .key_id = key_id,
-                            .value = value.clone(self.allocator) catch return DatabaseError.OutOfMemory,
-                        }) catch return DatabaseError.OutOfMemory;
-                        found = true;
-                    } else {
-                        new_props.append(self.allocator, .{
-                            .key_id = prop.key_id,
-                            .value = prop.value.clone(self.allocator) catch return DatabaseError.OutOfMemory,
-                        }) catch return DatabaseError.OutOfMemory;
-                    }
-                }
-                if (!found) {
-                    new_props.append(self.allocator, .{
-                        .key_id = key_id,
-                        .value = value.clone(self.allocator) catch return DatabaseError.OutOfMemory,
-                    }) catch return DatabaseError.OutOfMemory;
-                }
-
-                try self.storeNodeOverlayState(overlay, node_id, .{
-                    .exists = true,
-                    .labels = cloneSymbolIds(self.allocator, state.labels) catch return DatabaseError.OutOfMemory,
-                    .properties = new_props.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory,
-                });
+                const key_id = self.symbol_table.intern(key) catch {
+                    state.deinit(self.allocator);
+                    return DatabaseError.IoError;
+                };
+                // The state is this call's own copy: change the one property
+                // in it rather than copying every other one again.
+                _ = editProperties(self.allocator, &state.properties, key_id, value) catch {
+                    state.deinit(self.allocator);
+                    return DatabaseError.OutOfMemory;
+                };
+                try self.storeNodeOverlayState(overlay, node_id, state);
                 overlay.markDirty();
                 return;
             }
@@ -6577,34 +6590,19 @@ pub const Database = struct {
             if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
             if (self.getTxnOverlay(t)) |overlay| {
                 var state = (try self.readVisibleNodeState(txn, node_id)) orelse return DatabaseError.NotFound;
-                defer state.deinit(self.allocator);
-                if (!state.exists) return DatabaseError.NotFound;
-
-                const key_id = self.symbol_table.intern(key) catch return DatabaseError.IoError;
-
-                var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
-                errdefer {
-                    for (new_props.items) |*prop| {
-                        var val = prop.value;
-                        val.deinit(self.allocator);
-                    }
-                    new_props.deinit(self.allocator);
+                if (!state.exists) {
+                    state.deinit(self.allocator);
+                    return DatabaseError.NotFound;
                 }
-
-                for (state.properties) |prop| {
-                    if (prop.key_id != key_id) {
-                        new_props.append(self.allocator, .{
-                            .key_id = prop.key_id,
-                            .value = prop.value.clone(self.allocator) catch return DatabaseError.OutOfMemory,
-                        }) catch return DatabaseError.OutOfMemory;
-                    }
-                }
-
-                try self.storeNodeOverlayState(overlay, node_id, .{
-                    .exists = true,
-                    .labels = cloneSymbolIds(self.allocator, state.labels) catch return DatabaseError.OutOfMemory,
-                    .properties = new_props.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory,
-                });
+                const key_id = self.symbol_table.intern(key) catch {
+                    state.deinit(self.allocator);
+                    return DatabaseError.IoError;
+                };
+                _ = editProperties(self.allocator, &state.properties, key_id, null) catch {
+                    state.deinit(self.allocator);
+                    return DatabaseError.OutOfMemory;
+                };
+                try self.storeNodeOverlayState(overlay, node_id, state);
                 overlay.markDirty();
                 return;
             }
@@ -7663,48 +7661,19 @@ pub const Database = struct {
             if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
             if (self.getTxnOverlay(t)) |overlay| {
                 var state = (try self.readVisibleEdgeState(txn, edge_id)) orelse return DatabaseError.NotFound;
-                defer state.deinit(self.allocator);
-                if (!state.exists) return DatabaseError.NotFound;
-
-                const key_id = self.symbol_table.intern(key) catch return DatabaseError.IoError;
-                var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
-                errdefer {
-                    for (new_props.items) |*prop| {
-                        var val = prop.value;
-                        val.deinit(self.allocator);
-                    }
-                    new_props.deinit(self.allocator);
+                if (!state.exists) {
+                    state.deinit(self.allocator);
+                    return DatabaseError.NotFound;
                 }
-
-                var found = false;
-                for (state.properties) |prop| {
-                    if (prop.key_id == key_id) {
-                        new_props.append(self.allocator, .{
-                            .key_id = key_id,
-                            .value = value.clone(self.allocator) catch return DatabaseError.OutOfMemory,
-                        }) catch return DatabaseError.OutOfMemory;
-                        found = true;
-                    } else {
-                        new_props.append(self.allocator, .{
-                            .key_id = prop.key_id,
-                            .value = prop.value.clone(self.allocator) catch return DatabaseError.OutOfMemory,
-                        }) catch return DatabaseError.OutOfMemory;
-                    }
-                }
-                if (!found) {
-                    new_props.append(self.allocator, .{
-                        .key_id = key_id,
-                        .value = value.clone(self.allocator) catch return DatabaseError.OutOfMemory,
-                    }) catch return DatabaseError.OutOfMemory;
-                }
-
-                try self.storeEdgeOverlayState(overlay, edge_id, .{
-                    .exists = true,
-                    .source = state.source,
-                    .target = state.target,
-                    .edge_type = state.edge_type,
-                    .properties = new_props.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory,
-                });
+                const key_id = self.symbol_table.intern(key) catch {
+                    state.deinit(self.allocator);
+                    return DatabaseError.IoError;
+                };
+                _ = editProperties(self.allocator, &state.properties, key_id, value) catch {
+                    state.deinit(self.allocator);
+                    return DatabaseError.OutOfMemory;
+                };
+                try self.storeEdgeOverlayState(overlay, edge_id, state);
                 overlay.markDirty();
                 return;
             }
@@ -7819,35 +7788,19 @@ pub const Database = struct {
             if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
             if (self.getTxnOverlay(t)) |overlay| {
                 var state = (try self.readVisibleEdgeState(txn, edge_id)) orelse return DatabaseError.NotFound;
-                defer state.deinit(self.allocator);
-                if (!state.exists) return DatabaseError.NotFound;
-
-                const key_id = self.symbol_table.intern(key) catch return DatabaseError.IoError;
-                var new_props: std.ArrayListUnmanaged(node_mod.Property) = .empty;
-                errdefer {
-                    for (new_props.items) |*prop| {
-                        var val = prop.value;
-                        val.deinit(self.allocator);
-                    }
-                    new_props.deinit(self.allocator);
+                if (!state.exists) {
+                    state.deinit(self.allocator);
+                    return DatabaseError.NotFound;
                 }
-
-                for (state.properties) |prop| {
-                    if (prop.key_id != key_id) {
-                        new_props.append(self.allocator, .{
-                            .key_id = prop.key_id,
-                            .value = prop.value.clone(self.allocator) catch return DatabaseError.OutOfMemory,
-                        }) catch return DatabaseError.OutOfMemory;
-                    }
-                }
-
-                try self.storeEdgeOverlayState(overlay, edge_id, .{
-                    .exists = true,
-                    .source = state.source,
-                    .target = state.target,
-                    .edge_type = state.edge_type,
-                    .properties = new_props.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory,
-                });
+                const key_id = self.symbol_table.intern(key) catch {
+                    state.deinit(self.allocator);
+                    return DatabaseError.IoError;
+                };
+                _ = editProperties(self.allocator, &state.properties, key_id, null) catch {
+                    state.deinit(self.allocator);
+                    return DatabaseError.OutOfMemory;
+                };
+                try self.storeEdgeOverlayState(overlay, edge_id, state);
                 overlay.markDirty();
                 return;
             }

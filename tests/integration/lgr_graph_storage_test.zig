@@ -139,3 +139,56 @@ test "lgr: an edge property update without a transaction rewrites the record onl
     defer edge.deinit(std.testing.allocator);
     try std.testing.expectEqual(@as(usize, 0), edge.properties.len);
 }
+
+test "lgr: setting and removing properties in a transaction changes only that property" {
+    const path = "/tmp/lgr_txn_property_edits.ltdb";
+    defer removeFiles(path);
+    var db = try openDb(path, true);
+    defer db.close();
+    const allocator = std.testing.allocator;
+
+    var txn = try db.beginTransaction(.read_write);
+    const n = try db.createNode(&txn, &.{"P"});
+    const m = try db.createNode(&txn, &.{"P"});
+    const e = try db.createEdgeAndGetId(&txn, n, m, "R");
+    for ([_][]const u8{ "a", "b", "c" }, 0..) |key, i| {
+        try db.setNodeProperty(&txn, n, key, .{ .int_val = @intCast(i) });
+        try db.setEdgePropertyById(&txn, e, key, .{ .int_val = @intCast(i) });
+    }
+    try db.commitTransaction(&txn);
+
+    txn = try db.beginTransaction(.read_write);
+    // Overwrite, add, remove, and remove something absent, on committed
+    // records and then again on the transaction's own copies.
+    try db.setNodeProperty(&txn, n, "b", .{ .string_val = "bee" });
+    try db.setNodeProperty(&txn, n, "d", .{ .int_val = 3 });
+    try db.removeNodeProperty(&txn, n, "a");
+    try db.removeNodeProperty(&txn, n, "zz");
+    try db.setNodeProperty(&txn, n, "b", .{ .string_val = "bumble" });
+    try db.setEdgePropertyById(&txn, e, "c", .{ .float_val = 1.5 });
+    try db.removeEdgePropertyById(&txn, e, "a");
+    try db.setEdgePropertyById(&txn, e, "e", .{ .bool_val = true });
+    try db.removeEdgePropertyById(&txn, e, "missing");
+    try db.commitTransaction(&txn);
+
+    const props = try db.getNodeProperties(n);
+    defer db.freePropertyEntries(props);
+    try std.testing.expectEqual(@as(usize, 3), props.len);
+    try std.testing.expectEqualStrings("b", props[0].key);
+    try std.testing.expectEqualStrings("bumble", props[0].value.string_val);
+    try std.testing.expectEqualStrings("c", props[1].key);
+    try std.testing.expectEqual(@as(i64, 2), props[1].value.int_val);
+    try std.testing.expectEqualStrings("d", props[2].key);
+
+    var edge = try db.edge_store.getById(e);
+    defer edge.deinit(allocator);
+    try std.testing.expectEqual(@as(usize, 3), edge.properties.len);
+    try std.testing.expectEqual(@as(f64, 1.5), edge.properties[1].value.float_val);
+    try std.testing.expect(edge.properties[2].value.bool_val);
+
+    // A node or edge that does not exist is still refused.
+    txn = try db.beginTransaction(.read_write);
+    try std.testing.expectError(DatabaseError.NotFound, db.setNodeProperty(&txn, 999, "a", .{ .int_val = 1 }));
+    try std.testing.expectError(DatabaseError.NotFound, db.removeEdgePropertyById(&txn, 999, "a"));
+    try db.abortTransaction(&txn);
+}

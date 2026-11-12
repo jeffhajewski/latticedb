@@ -1016,7 +1016,15 @@ pub const HnswIndex = struct {
             }
 
             const cand_node = self.getNode(candidate.node_id) orelse continue;
-            const cand_vec = self.vector_storage.borrowByLocation(cand_node.vector_loc) catch continue;
+            // As in `borrowNeighborVectors`: an id no longer in the index is
+            // skipped, but a vector that cannot be read is an error. Skipping
+            // it would let the backfill below take the candidate unchecked
+            // and report the insert as a success.
+            const cand_vec = self.vector_storage.borrowByLocation(cand_node.vector_loc) catch |err| return switch (err) {
+                error.OutOfMemory => HnswError.OutOfMemory,
+                error.BufferPoolError => HnswError.BufferPoolError,
+                else => HnswError.StorageError,
+            };
 
             var is_diverse = true;
             for (selected_vecs.items) |sel_vec| {
@@ -2627,4 +2635,54 @@ test "hnsw rebuild reuses the connection pages the old graph used" {
     const results = try index.search(&vectors[10], 1, null);
     defer index.freeResults(results);
     try std.testing.expectEqual(@as(u64, 11), results[0].node_id);
+}
+
+test "hnsw insert reports a candidate vector it could not read" {
+    const allocator = std.testing.allocator;
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+    const db_path = "/tmp/s3_lattice_hnsw_unreadable_candidate_test.db";
+    vfs_impl.delete(db_path) catch {};
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+    var bp = try buffer_pool.BufferPool.init(allocator, &pm, 256 * 4096);
+    defer bp.deinit();
+
+    // Vectors larger than a page are read into buffers the storage
+    // allocates, so a failed allocation makes a stored vector unreadable.
+    const dims = 1100;
+    var failing = std.testing.FailingAllocator.init(allocator, .{});
+    var vs = try VectorStorage.init(failing.allocator(), &bp, dims);
+    defer vs.deinit();
+    var index = HnswIndex.init(allocator, &bp, &vs, .{ .dimensions = dims, .m = 4, .m_max0 = 8, .ef_construction = 16 });
+    defer index.deinit();
+
+    var prng = std.Random.DefaultPrng.init(5);
+    const random = prng.random();
+    var vector: [dims]f32 = undefined;
+    for (1..40) |id| {
+        for (&vector) |*x| x.* = random.float(f32);
+        var fail_after: usize = 0;
+        while (true) : (fail_after += 1) {
+            failing.fail_index = failing.alloc_index + fail_after;
+            failing.has_induced_failure = false;
+            const inserted = index.insert(id, &vector);
+            const induced = failing.has_induced_failure;
+            failing.fail_index = std.math.maxInt(usize);
+            if (inserted) |_| {
+                // An insert that could not read a vector it needed must not
+                // report success.
+                try std.testing.expect(!induced);
+                break;
+            } else |_| {
+                try std.testing.expect(index.getNode(id) == null);
+            }
+        }
+    }
 }

@@ -37,6 +37,10 @@ exactly what 0.16.0 can still open.
 N-Triples, so vocabularies and data sets kept as RDF can be queried with Cypher,
 full-text and vector search, and written back out.
 
+Database files are much smaller: the built-in changefeed, which made up over 90%
+of a typical file, is stored about twelve times more compactly, and a retention
+policy can bound it or turn it off. Keeping every event is still the default.
+
 ## Durability
 
 **Checkpoints save what they depend on.** A truncating checkpoint flushed the
@@ -220,6 +224,53 @@ its names under `urn:lattice:` (or `--base`), nodes as blank nodes or, with
 [RDF: Turtle and N-Triples](../book/src/guides/rdf.md) lists what changes in
 each direction. JSON-LD, RDF/XML, TriG, N-Quads, SPARQL and inference are not
 supported.
+
+## The changefeed
+
+**Changefeed events are stored compactly.** Every committed change writes an
+event to the changefeed (`__lattice_changes`), and in 0.16.0 each took about
+300 bytes on disk: a 26-byte key and a value spelling out its kind and payload
+map in full. Events now take about 24: a 3- to 5-byte key and a binary value
+that refers to labels, types and property names by their symbol ids and
+carries the commit time once per transaction. What `changes()` and
+`lattice_stream_read` return is unchanged, byte for byte. Loading 200,000
+nodes with a label and two properties each:
+
+| | 0.16.0 | this release |
+|---|---:|---:|
+| file size | 256.4 MB | 35.7 MB |
+| bytes per node | 1,282 | 178.5 |
+| changefeed | 238.0 MB | 19.0 MB |
+| load time, 1,000 nodes per transaction | 2.8 s | 1.0 s |
+| one 20,000-node transaction, per node | 19–38 µs | 4.7–5.4 µs |
+| reopen after a crash, 999 transactions in the log | 12–15 ms | 6.3–7.9 ms |
+
+**Retention policies.** How much of the changefeed to keep is now a policy the
+file records: `all` (the default: every event, forever), `last:<N>` (the newest
+N events), `age:<duration>` (events committed within, say, `age:7d`) or `off`
+(no events; reading the changefeed is an error). Old events are dropped at
+checkpoints, a bounded number each time, or all at once with a trim. With
+`off`, the same file is 16.7 MB; with `last:10000`, 18.1 MB.
+
+- Set it with `changefeed_retention` (Python), `changefeedRetention`
+  (TypeScript), `ChangefeedRetention` (Go), `changefeedRetention` (Java),
+  `lattice_open_options_v5.changefeed_retention` and
+  `changefeed_retention_value` (C), `--changefeed=<policy>` on any writing CLI
+  command, or `LATTICE_CHANGEFEED_RETENTION` for a database being created. A
+  policy given when opening for writing replaces the file's; a read-only open
+  never changes it.
+- Inspect and apply it with `changefeed_status()` / `trim_changefeed()`
+  (Python), `changefeedStatus()` / `trimChangefeed()` (TypeScript, Java),
+  `ChangefeedStatus()` / `TrimChangefeed()` (Go), `lattice_changefeed_status` /
+  `lattice_changefeed_trim` (C), and `lattice changefeed <db> [--trim]`.
+  `lattice info` shows the policy and the range of events held.
+- A reader asking for events after one that has been dropped gets an error
+  (`LATTICE_ERROR_NOT_FOUND`; `LatticeChangesTrimmedError` in Python and
+  TypeScript, `ErrChangesTrimmed` in Go, `ChangesTrimmedException` in Java)
+  instead of a silent gap. Sequence numbers are never reused.
+
+The guide, with when to choose each policy and the stored format, is
+`book/src/guides/changefeed.md`.
 
 ## Breaking changes
 
@@ -527,6 +578,11 @@ Other changes, measured by their commits on a busy machine:
   it again: 366 µs to 235 µs at 663 hits of 2,000 documents.
 - `ORDER BY d.embedding <=> $q LIMIT 10` keeps the vector search bounded, as
   `LIMIT` alone did: 598 µs to 227 µs at 2,000 vectors.
+- A B+Tree leaf that fills while keys arrive in order splits next to the new
+  key instead of in the middle, so trees written in key order (the changefeed,
+  the label index, ids) fill their pages instead of leaving them half empty.
+  200,000 in-order inserts went from about 440 to about 290 ns each; random
+  inserts are unchanged within measurement noise (about 575 ns).
 
 Two checks cost a little. Creating an edge checks that both ends exist, two key
 probes: 100,000 edge creates in one transaction take 21–26 ms instead of 6–7 ms,
@@ -676,7 +732,8 @@ with relationships is one range probe, under 1 µs.
   outside the BMP survive error text and column names.
 - `LATTICE_PREFIX` on Windows looks for the DLL under `bin/`, then `lib/`.
 - `lattice_open_v5` and `lattice_open_options_v5` add `sync_mode`, `full_fsync`,
-  `vector_metric`, `vector_m` and `vector_ef_construction`; 0 means "not set",
+  `vector_metric`, `vector_m`, `vector_ef_construction`, `changefeed_retention`
+  and `changefeed_retention_value`; 0 means "not set",
   and an out-of-range value is `LATTICE_ERROR_INVALID_ARG`. The older open
   functions behave as v5 with those fields at 0. `lattice_deserialize` still
   takes the v4 options.
@@ -763,6 +820,11 @@ with relationships is one range probe, under 1 µs.
   the detach variant.
 - A program that relied on `LATTICE_SYNC_MODE` or `LATTICE_FULL_FSYNC` to
   override what it set in code now gets what it set.
+- **Changefeed events written by 0.16.0 stay in the old format** until the
+  retention policy drops them; nothing rewrites them, and `lattice compact`
+  does not convert them. They are read alongside new events, in order.
+  `lattice changefeed <db>` counts them. To shed them while keeping the graph,
+  export it and import it into a new database.
 - Check application code against the Cypher changes above, in particular plain
   `DELETE` of nodes that may have relationships, code that reads results by
   the name of an unaliased column, code that expects `sum` of integers to be a

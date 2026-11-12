@@ -61,6 +61,7 @@ defer db.Close()
 | `EnableAdjacencyCache` | Keep an in-memory map of connections. Queries and edge calls do not read it yet, so it speeds up nothing |
 | `DisableWAL` | Open without write-ahead logging |
 | `DisableLock` | Open without taking a lock on the file |
+| `ChangefeedRetention` | How much of the changefeed to keep: `"all"`, `"off"`, `"last:N"`, `"age:7d"`; empty keeps the file's. See [The Changefeed](../guides/changefeed.md) |
 
 ```go
 db, err := latticedb.Open(":memory:", latticedb.OpenOptions{})
@@ -360,7 +361,10 @@ sequence, exists, err := db.GetStreamOffset("events", "billing-worker")
 ```
 
 `Changes` reads the built-in stream of graph mutations, so you can react to
-writes without publishing anything yourself. `TrimStream` discards records every
+writes without publishing anything yourself. It returns an error matching
+`ErrChangesTrimmed` when retention has dropped the events after the sequence
+you pass; `ChangefeedStatus` reports the policy and the range held, and
+`TrimChangefeed` applies the policy in full now. `TrimStream` discards records every
 consumer has passed; nothing trims automatically.
 
 ## Errors

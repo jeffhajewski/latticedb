@@ -109,6 +109,7 @@ interface DatabaseOptions {
   vectorMetric?: 'cosine' | 'euclidean' | 'dot_product'; // For a new index (default: cosine)
   vectorM?: number;               // HNSW connections per node, 2..32 (default: 16)
   vectorEfConstruction?: number;  // HNSW build candidate list, 1..4096 (default: 200)
+  changefeedRetention?: ChangefeedRetention; // 'all', 'off', 'last:N', 'age:7d' (default: the file's)
 }
 ```
 
@@ -213,7 +214,9 @@ was not.
 - `await db.createEdgePropertyIndex(edgeType, property)` / `dropEdgePropertyIndex(...)` - Manage explicit edge equality indexes
 - `await db.readStream(stream, options?)` - Read durable stream records by cursor. With `timeoutMs > 0` the wait runs on a worker thread, so the event loop keeps running and a commit from the same process can end the wait
 - `await db.getStreamOffset(stream, consumer)` - Read a committed consumer offset
-- `await db.changes(options?)` - Read the built-in graph changefeed
+- `await db.changes(options?)` - Read the built-in graph changefeed. Rejects with `LatticeChangesTrimmedError` when retention has dropped the events after `afterSequence`
+- `await db.changefeedStatus()` - The changefeed's policy and range: `{ retention, oldestSequence, lastSequence }`, `oldestSequence` null when it holds no events
+- `await db.trimChangefeed()` - Apply the retention policy in full now; resolves to the number of events dropped
 - `await db.cacheClear()` - Clear the query cache
 - `await db.cacheStats()` - Get cache hit/miss statistics
 - `db.isOpen()` - Check if database is open
@@ -394,6 +397,9 @@ await db.write(async (txn) => {
 const records = await db.readStream("jobs", { afterSequence: 0n, limit: 100 });
 const changes = await db.changes({ afterSequence: 0n, limit: 100 });
 ```
+
+How much of the changefeed to keep is set with `changefeedRetention`; see
+[The Changefeed](../guides/changefeed.md).
 
 ### Cypher Queries
 

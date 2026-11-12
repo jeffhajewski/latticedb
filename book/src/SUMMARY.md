@@ -33,6 +33,7 @@
 - [Full-Text Search](./guides/full-text-search.md)
 - [Migrating to Per-Property FTS](./guides/migrating-to-per-property-fts.md)
 - [Durable Streams](./guides/durable-streams.md)
+- [The Changefeed](./guides/changefeed.md)
 - [Data Export](./guides/data-export.md)
 - [RDF: Turtle and N-Triples](./guides/rdf.md)
 - [Transactions and Durability](./guides/transactions.md)

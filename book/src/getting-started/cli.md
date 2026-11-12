@@ -231,7 +231,12 @@ Edges:        1
 Format:       v4
 Vector:       disabled
 FTS:          enabled
+Changefeed:   keep all, events 1..7
 ```
+
+The last line is the [changefeed](../guides/changefeed.md): the record of every
+change, which the database keeps by default. Here the two people and the edge
+between them took seven events.
 
 ## Moving data in and out
 
@@ -698,6 +703,46 @@ knowing before you run it on real data:
 - Live pages are never moved, which is what makes it safe to interrupt.
 - It will refuse to run on a read-only database, or while any transaction is open.
 
+### Keeping the changefeed in check
+
+Every change to the graph is recorded as an event in the changefeed, and by
+default every event is kept, so a database that is edited a lot grows with its
+history. `changefeed` shows how much there is and how much the file keeps:
+
+```bash
+lattice changefeed social.lattice
+```
+
+```text
+Changefeed of social.lattice
+  Retention:      all
+  Events held:    7
+  Bytes:          73
+  Sequences:      1..7
+```
+
+`--changefeed=<policy>` sets how much to keep: `all`, `off`, `last:<events>`,
+or `age:<duration>` such as `age:30d`. The file records it, and old events are
+dropped as the database checkpoints; `--trim` drops them now:
+
+```bash
+lattice changefeed social.lattice --changefeed=last:2 --trim
+```
+
+```text
+Changefeed of social.lattice
+  Retention:      last:2
+  Events held:    2
+  Bytes:          31
+  Sequences:      6..7
+  Trimmed:        5 events
+```
+
+Every command that writes takes `--changefeed` too, so
+`lattice create big.lattice --changefeed=off` makes a database that keeps no
+history at all. [The Changefeed](../guides/changefeed.md) explains what the
+history is for and how to choose.
+
 ### Updating
 
 `update` replaces your installed copy with the latest release:
@@ -798,6 +843,7 @@ lattice count social.lattice --format=csv >> counts.csv
 | `info <path>` | Show file size, counts, and enabled features |
 | `compact <path>` | Give free pages at the end of the file back to the OS |
 | `checkpoint <path>` | Flush pending writes into the file and reset the log |
+| `changefeed <path>` | Show the changefeed, set how much of it to keep, trim it |
 | `backup <path>` | Copy to another file while the database stays open |
 | `replicate <path>` | Keep a directory up to date with the database |
 | `restore <dir>` | Rebuild a database from a replication directory |

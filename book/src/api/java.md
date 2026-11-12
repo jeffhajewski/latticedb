@@ -39,8 +39,8 @@ try (Database db = Database.open("graph.lattice",
 (default true), `enableAdjacencyCache` and `lock` (default true), and, passed
 through `lattice_open_v5`, `syncMode(SyncMode.FULL | NORMAL)`,
 `fullFsync(Boolean)`, `vectorMetric(VectorMetric.COSINE | EUCLIDEAN |
-DOT_PRODUCT)`, `vectorM(int)` and `vectorEfConstruction(int)`, all unset by
-default (`null` or 0). `:memory:` opens an in-memory database, and
+DOT_PRODUCT)`, `vectorM(int)`, `vectorEfConstruction(int)` and
+`changefeedRetention(String)`, all unset by default (`null` or 0). `:memory:` opens an in-memory database, and
 `Database.deserialize(bytes)` opens one from the bytes `db.serialize()`
 returned; it takes the older options and ignores the v5 ones.
 
@@ -78,6 +78,14 @@ log and journal throws `ErrorCode.FULL`; open the database read-write once to
 recover it on disk. A file that a newer release has marked as not writable by
 this one opens only with `readOnly(true)`; a writable open throws
 `ErrorCode.NEEDS_NEWER_WRITER` and writes nothing.
+
+`changefeedRetention` sets how much of the changefeed the file keeps: `"all"`,
+`"off"`, `"last:N"` or `"age:7d"`; unset keeps the file's policy (see
+[The Changefeed](../guides/changefeed.md)). `db.changefeedStatus()` reports the
+policy and the range of events held, `db.trimChangefeed()` applies the policy
+in full now, and `db.changes(...)` throws `ChangesTrimmedException` (error code
+`NOT_FOUND`) when retention has dropped the events after the sequence it is
+given.
 
 `close()` is refused with `ErrorCode.INVALID_ARG` while a transaction or result
 from the database is still open. The `Database` then keeps its handle, so you can

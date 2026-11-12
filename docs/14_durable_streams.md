@@ -155,6 +155,14 @@ while True:
         print(change.kind, change.payload)
 ```
 
+## Retention and the stored format
+
+By default every changefeed event is kept. A retention policy recorded in the
+file (`all`, `last:<N>`, `age:<duration>`, `off`) bounds it, and events are
+stored in a compact binary encoding. Both are documented in the book, which is
+kept up to date: [The Changefeed](../book/src/guides/changefeed.md), published
+at <https://docs.latticedb.org/guides/changefeed>.
+
 ## V1 Scope
 
 The V1 stream surface is intentionally small. It provides durable named streams,

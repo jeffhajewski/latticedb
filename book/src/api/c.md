@@ -205,6 +205,8 @@ set", and a value outside its range makes the open return
 | `vector_metric` | `LATTICE_VECTOR_METRIC_COSINE` (1), `_EUCLIDEAN` (2), `_DOT_PRODUCT` (3) | The file's metric, or cosine for a new index |
 | `vector_m` | 2..32, HNSW connections per node (layer 0 keeps twice as many) | The file's, or 16 for a new index |
 | `vector_ef_construction` | 1..4096, HNSW candidate list size while building | The file's, or 200 for a new index |
+| `changefeed_retention` | `LATTICE_CHANGEFEED_RETENTION_ALL` (1), `_LAST` (2), `_AGE` (3), `_OFF` (4); see [the changefeed](#the-changefeed) | The file's policy, or `LATTICE_CHANGEFEED_RETENTION` from the environment for a new file, else all |
+| `changefeed_retention_value` | Events for `_LAST`, milliseconds for `_AGE`, at least 1 | Must be set for `_LAST` and `_AGE` |
 
 `lattice_deserialize` and `lattice_deserialize_borrowed` take the v4 options;
 there is no v5 form of them.
@@ -777,6 +779,29 @@ lattice_stream_trim(txn, "events", 6, /* through_sequence */ 5000);
 ```
 
 Nothing trims automatically. A stream you never trim grows forever.
+
+### The changefeed
+
+The reserved stream `__lattice_changes` records every committed graph change,
+and is read with `lattice_stream_read` like any other stream. It cannot be
+published to; `lattice_stream_trim` drops its events through a sequence, as for
+any stream. How much of it to keep is
+a retention policy recorded in the file, set through `lattice_open_options_v5`:
+
+```c
+lattice_open_options_v5 options = LATTICE_OPEN_OPTIONS_V5_DEFAULT;
+options.changefeed_retention = LATTICE_CHANGEFEED_RETENTION_LAST;
+options.changefeed_retention_value = 100000; /* events; milliseconds for AGE */
+lattice_open_v5("graph.lattice", &options, &db);
+```
+
+The values are `LATTICE_CHANGEFEED_RETENTION_DEFAULT` (keep the file's policy),
+`_ALL`, `_LAST`, `_AGE` and `_OFF`. `lattice_changefeed_status(db, &mode,
+&value, &oldest, &last)` reports the policy and the range held (`oldest` is 0
+when no events are held), and `lattice_changefeed_trim(db, &removed)` applies
+the policy in full now. Reading after a sequence whose next event was dropped
+returns `LATTICE_ERROR_NOT_FOUND`; reading while the policy is off returns
+`LATTICE_ERROR_UNSUPPORTED`. See [The Changefeed](../guides/changefeed.md).
 
 ## Query Operations
 

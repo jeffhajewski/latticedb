@@ -17,10 +17,10 @@ db.open()  # or use it as a context manager: with latticedb.Database(...) as db:
 Not every option below is available everywhere. The bindings and the C API expose
 `create`, `read_only`, `cache_size_mb`, `enable_vectors`, `vector_dimensions`,
 `vector_metric`, `vector_m`, `vector_ef_construction`, `enable_wal`,
-`enable_adjacency_cache`, `lock`, `sync_mode` and `full_fsync`; the C API, Go and
-Java also take `page_size` (Python and TypeScript always use 4096). In the C API
-the vector and durability settings after `lock` are fields of
-`lattice_open_options_v5`. `enable_fts`, the query-cache settings and
+`enable_adjacency_cache`, `lock`, `sync_mode`, `full_fsync` and
+`changefeed_retention`; the C API, Go and Java also take `page_size` (Python and
+TypeScript always use 4096). In the C API the vector, durability and changefeed
+settings after `lock` are fields of `lattice_open_options_v5`. `enable_fts`, the query-cache settings and
 `auto_checkpoint` are options of the Zig API only — everywhere else they keep
 their defaults.
 
@@ -122,6 +122,17 @@ filesystems. It does not make concurrent access safe; it removes the thing that
 was going to tell you it was not. Go phrases this as `DisableLock` because a Go
 `bool` cannot tell an omitted field from a deliberate `false`, and locking has to
 stay on when the caller says nothing.
+
+## The changefeed
+
+| Option | Default | What it does |
+|--------|---------|--------------|
+| `changefeed_retention` | the file's policy; `all` for a new file | How much of the changefeed (`__lattice_changes`) to keep: `all`, `last:<N>`, `age:<duration>` or `off`. Recorded in the file; a value given when opening for writing replaces the file's. Python `changefeed_retention`, TypeScript `changefeedRetention`, Go `ChangefeedRetention`, Java `changefeedRetention`, C `lattice_open_options_v5.changefeed_retention`, CLI `--changefeed`. `LATTICE_CHANGEFEED_RETENTION` sets it for a new database. |
+
+Every committed change is recorded as an event, and by default every event is
+kept, so the changefeed grows with the number of changes ever made. See
+[The Changefeed](../guides/changefeed.md) for the policies, what each costs and
+when to use which.
 
 ## Durability
 

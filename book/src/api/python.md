@@ -82,6 +82,7 @@ Database(
     vector_metric: str | None = None,   # "cosine", "euclidean" or "dot_product"
     vector_m: int | None = None,        # HNSW connections per node, 2..32 (default 16)
     vector_ef_construction: int | None = None, # HNSW build candidate list, 1..4096 (default 200)
+    changefeed_retention: str | None = None, # "all", "off", "last:N", "age:7d"; None = the file's
 )
 ```
 
@@ -193,7 +194,9 @@ was not.
 - `create_edge_property_index(edge_type, property_key)` / `drop_edge_property_index(...)` - Manage explicit edge equality indexes
 - `read_stream(stream, *, after_sequence=0, limit=100, timeout_ms=0)` - Read durable stream records by cursor
 - `get_stream_offset(stream, consumer)` - Read a committed consumer offset
-- `changes(*, after_sequence=0, limit=100, timeout_ms=0)` - Read the built-in graph changefeed
+- `changes(*, after_sequence=0, limit=100, timeout_ms=0)` - Read the built-in graph changefeed. Raises `LatticeChangesTrimmedError` (a `LatticeNotFoundError`) when retention has dropped the events after `after_sequence`
+- `changefeed_status()` - The changefeed's policy and range: `ChangefeedStatus(retention, oldest_sequence, last_sequence)`, `oldest_sequence` None when it holds no events
+- `trim_changefeed()` - Apply the retention policy in full now; returns the number of events dropped
 - `cache_clear()` - Clear the query cache
 - `cache_stats()` - Get cache hit/miss statistics
 
@@ -357,6 +360,9 @@ with db.write() as txn:
 records = db.read_stream("jobs", after_sequence=0, limit=100)
 changes = db.changes(after_sequence=0, limit=100)
 ```
+
+How much of the changefeed to keep is set with `changefeed_retention`; see
+[The Changefeed](../guides/changefeed.md).
 
 ### Cypher Queries
 

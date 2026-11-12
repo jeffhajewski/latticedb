@@ -548,11 +548,11 @@ keeps it running and replicating on an interval:
 lattice replicate social.lattice --to=social-backup --follow --interval=30
 ```
 
-While it runs it holds the lock, so nothing else can open the database, and with
-no other writer its passes after the first have nothing to ship. To replicate a
-database that other processes write to, run the command on a timer between
-their runs instead; to replicate one your application keeps open, call
-`replicateTo` from the application.
+Each pass opens the database and closes it again, so other processes can use
+the database between passes. A pass that finds the database open elsewhere is
+skipped until the next interval; a process that opens the database while a pass
+is running gets the same error and can retry. To replicate a database your
+application keeps open, call `replicateTo` from the application.
 
 ### Getting a database back
 

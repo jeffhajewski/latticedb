@@ -843,9 +843,6 @@ fn cmdReplicate(
         return failCommand(stderr, "No destination provided. Use --to=<directory>", .{});
     };
 
-    const db = try openDatabase(allocator, stderr, parsed_args, .read_write);
-    defer db.close();
-
     // The CSV header belongs above the rows rather than repeated per pass.
     if (parsed_args.format == .csv) {
         try stdout.writeAll(
@@ -855,31 +852,67 @@ fn cmdReplicate(
 
     const interval_ns = @as(u64, parsed_args.interval_secs) * std.time.ns_per_s;
 
-    while (true) {
-        const stats = db.replicateTo(dest) catch |err| switch (err) {
-            error.UuidMismatch => return failCommand(
-                stderr,
-                "{s} already holds backups of a different database",
-                .{dest},
-            ),
-            error.NoWal => return failCommand(
-                stderr,
-                "Database has no write-ahead log, so there is nothing to follow",
-                .{},
-            ),
-            error.UnsupportedManifest => return failCommand(
-                stderr,
-                "{s} holds a manifest this version does not understand",
-                .{dest},
-            ),
-            else => return failCommand(stderr, "Failed to replicate: {s}", .{@errorName(err)}),
-        };
-
-        try reportReplicationPass(stdout, parsed_args.format, path, dest, stats);
+    // Each pass opens the database and closes it again. Holding it open
+    // between passes would hold the file lock for as long as --follow runs,
+    // and then no other process could write anything for it to ship.
+    var first_pass = true;
+    while (true) : (first_pass = false) {
+        _ = try replicationPass(allocator, stdout, stderr, parsed_args, path, dest, !first_pass);
+        // A follower is read through a pipe or a log file, one pass at a time.
+        stdout.flush() catch {};
+        stderr.flush() catch {};
 
         if (!parsed_args.follow) break;
         @import("compat").sleep(interval_ns);
     }
+}
+
+const PassOutcome = enum { shipped, skipped_busy };
+
+/// One replication pass on a handle of its own.
+///
+/// `tolerate_busy` is for the passes of --follow after the first: a database
+/// another process has open at that moment is skipped until the next
+/// interval, where the first pass, like a single run, reports it and stops.
+fn replicationPass(
+    allocator: std.mem.Allocator,
+    stdout: anytype,
+    stderr: anytype,
+    parsed_args: *const Args,
+    path: []const u8,
+    dest: []const u8,
+    tolerate_busy: bool,
+) !PassOutcome {
+    const db = Database.open(allocator, path, openOptions(parsed_args, .read_write)) catch |err| {
+        if (tolerate_busy and err == DatabaseError.DatabaseLocked) {
+            output.printError(stderr, "{s} is open in another process; skipping this pass", .{path});
+            return .skipped_busy;
+        }
+        return failOpen(stderr, path, err, parsed_args.enable_vector);
+    };
+    defer db.close();
+
+    const stats = db.replicateTo(dest) catch |err| switch (err) {
+        error.UuidMismatch => return failCommand(
+            stderr,
+            "{s} already holds backups of a different database",
+            .{dest},
+        ),
+        error.NoWal => return failCommand(
+            stderr,
+            "Database has no write-ahead log, so there is nothing to follow",
+            .{},
+        ),
+        error.UnsupportedManifest => return failCommand(
+            stderr,
+            "{s} holds a manifest this version does not understand",
+            .{dest},
+        ),
+        else => return failCommand(stderr, "Failed to replicate: {s}", .{@errorName(err)}),
+    };
+
+    try reportReplicationPass(stdout, parsed_args.format, path, dest, stats);
+    return .shipped;
 }
 
 const OpenMode = enum { read_only, read_write };
@@ -1754,12 +1787,12 @@ fn printCommandHelp(writer: anytype, command: Command) void {
             \\into the file and resets it, so the pass after it starts a new
             \\generation. A pass with nothing changed ships nothing.
             \\
-            \\This command opens the database for writing, which takes the file
-            \\lock: it fails if another process has the database open, and nothing
-            \\else can open it while --follow is running. To replicate a database
-            \\while your application is using it, call replicateTo on your own
-            \\handle instead and let this command cover the case where nothing
-            \\else is running.
+            \\Each pass opens the database for writing, which takes the file lock,
+            \\and closes it again. A single run fails if another process has the
+            \\database open. With --follow, other processes can use the database
+            \\between passes, and a pass that finds it open elsewhere is skipped
+            \\until the next interval. To replicate a database your application
+            \\keeps open, call replicateTo on your own handle instead.
             \\
             \\Options:
             \\  --to=<directory>      Where to ship to, created if missing

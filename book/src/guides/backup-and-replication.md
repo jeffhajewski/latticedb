@@ -74,9 +74,12 @@ look like failures.
 lattice replicate social.lattice --to=/mnt/backup/social --follow --interval=30
 ```
 
-While it runs it holds the database's file lock, so nothing else can open the
-database, and with no other writer its later passes have nothing to ship. For a
-database that other processes write to, use a timer instead.
+Each pass opens the database, which takes its file lock, and closes it again,
+so other processes can use the database between passes. A pass that finds the
+database open in another process is skipped until the next interval, and a
+process that tries to open the database during the moment a pass is running is
+refused and can retry. A database your application keeps open the whole time
+cannot be followed this way; call `replicateTo` from the application.
 
 ### Why later passes are cheap
 

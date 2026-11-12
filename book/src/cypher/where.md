@@ -17,6 +17,24 @@ An integer and a float compare by their exact values: `n.age = 30.0` matches an
 age stored as `30`, and an integer above 2^53 is not rounded to the nearest float
 before it is compared (`9007199254740993 > 9007199254740992.0` is true).
 
+NaN is not above, below or equal to anything, itself included: every `<`, `<=`,
+`>`, `>=` and `=` with a NaN operand is false, and `<>` is true.
+
+```cypher
+WITH toFloat('NaN') AS x RETURN x > 1, x < 1, x = x, x <> x
+```
+
+```
+┌───────┬───────┬───────┬────────┐
+│ x > 1 │ x < 1 │ x = x │ x <> x │
+├───────┼───────┼───────┼────────┤
+│ false │ false │ false │ true   │
+└───────┴───────┴───────┴────────┘
+```
+
+`ORDER BY` still has to place NaN, and puts it after every other number (see
+[RETURN](./return.md)); a property index keeps it in the same place.
+
 ## Boolean Logic
 
 Combine conditions with `AND`, `OR`, `NOT`, and `XOR`:

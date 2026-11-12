@@ -915,3 +915,71 @@ test "lgr: the adjacency cache follows commits, not staged writes" {
         try std.testing.expectEqualSlices(u64, &.{b}, targets);
     }
 }
+
+// ============================================================================
+// NaN in comparisons
+// ============================================================================
+
+test "lgr: every ordering comparison with NaN is false, and <> is true" {
+    const path = "/tmp/lgr_nan_compare.ltdb";
+    removeFiles(path);
+    defer removeFiles(path);
+    var db = try openDb(path, false);
+    defer db.close();
+    const nan_node = try db.createNode(null, &.{"N"});
+    try db.setNodeProperty(null, nan_node, "v", .{ .float_val = std.math.nan(f64) });
+    try db.setNodeProperty(null, nan_node, "i", .{ .int_val = 0 });
+    for ([_]f64{ -1.0, 2.5 }, 1..) |f, i| {
+        const id = try db.createNode(null, &.{"N"});
+        try db.setNodeProperty(null, id, "v", .{ .float_val = f });
+        try db.setNodeProperty(null, id, "i", .{ .int_val = @intCast(i) });
+    }
+    const id = try db.createNode(null, &.{"N"});
+    try db.setNodeProperty(null, id, "v", .{ .int_val = 7 });
+    try db.setNodeProperty(null, id, "i", .{ .int_val = 3 });
+
+    // Both ways round, against a float, an integer and NaN itself. Before,
+    // `>` and `>=` were `NOT <=` and `NOT <`, so NaN was above everything
+    // and below nothing.
+    const falses = [_][]const u8{
+        "n.v > 1.0, n.v >= 1.0, n.v < 1.0, n.v <= 1.0, 1.0 > n.v, 1.0 >= n.v, 1.0 < n.v, 1.0 <= n.v",
+        "n.v > 1, 1 > n.v, n.v >= m.v, m.v >= n.v, n.v > n.v, n.v >= n.v, n.v = n.v",
+    };
+    for (falses) |items| {
+        const cypher = try std.fmt.allocPrint(std.testing.allocator, "MATCH (n:N {{i: 0}}) MATCH (m:N {{i: 3}}) RETURN {s}", .{items});
+        defer std.testing.allocator.free(cypher);
+        var result = try db.query(cypher);
+        defer result.deinit();
+        for (result.rows[0].values, 0..) |value, i| {
+            if (value != .bool_val or value.bool_val) {
+                std.debug.print("{s}: column {d} is not false\n", .{ items, i });
+                return error.TestExpectedEqual;
+            }
+        }
+    }
+    var unequal = try db.query("MATCH (n:N {i: 0}) RETURN n.v <> n.v, n.v <> 1");
+    defer unequal.deinit();
+    try std.testing.expect(unequal.rows[0].values[0].bool_val and unequal.rows[0].values[1].bool_val);
+
+    // A WHERE keeps NaN on neither side of a bound.
+    var above = try db.query("MATCH (n:N) WHERE n.v > 0 RETURN n.i ORDER BY n.i");
+    defer above.deinit();
+    try std.testing.expectEqual(@as(usize, 2), above.rowCount());
+    var below = try db.query("MATCH (n:N) WHERE 0 >= n.v RETURN n.i");
+    defer below.deinit();
+    try std.testing.expectEqual(@as(usize, 1), below.rowCount());
+    try std.testing.expectEqual(@as(i64, 1), below.rows[0].values[0].int_val);
+
+    // ORDER BY still has to put NaN somewhere: after every number, the
+    // place the ordered index keys it.
+    var sorted = try db.query("MATCH (n:N) RETURN n.i ORDER BY n.v");
+    defer sorted.deinit();
+    for (sorted.rows, [_]i64{ 1, 2, 3, 0 }) |r, want| try std.testing.expectEqual(want, r.values[0].int_val);
+    try db.createNodePropertyIndex("N", "v");
+    var indexed = try db.query("MATCH (n:N) RETURN n.i ORDER BY n.v LIMIT 4");
+    defer indexed.deinit();
+    for (indexed.rows, [_]i64{ 1, 2, 3, 0 }) |r, want| try std.testing.expectEqual(want, r.values[0].int_val);
+    var ranged = try db.query("MATCH (n:N) WHERE n.v > -100 RETURN count(n)");
+    defer ranged.deinit();
+    try std.testing.expectEqual(@as(i64, 3), ranged.rows[0].values[0].int_val);
+}

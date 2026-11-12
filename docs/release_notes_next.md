@@ -432,6 +432,11 @@ the GQL-only clauses. `book/src/cypher/overview.md` lists them.
   2^53), NaN sorts above all other numbers, booleans can be ordered, and a sort
   key that fails to evaluate fails the query (`ORDER BY 10 / x` with `x = 0` used
   to succeed).
+- **Every ordering comparison with NaN is false.** `>` and `>=` were computed as
+  `NOT <=` and `NOT <`, so `NaN > 1` and `NaN >= 1` were true while `NaN < 1`
+  was false. Now `<`, `<=`, `>`, `>=` and `=` with a NaN operand are false and
+  `<>` is true, as openCypher has it, so `WHERE n.x > 0` no longer keeps nodes
+  whose `x` is NaN. `ORDER BY` still sorts NaN after every number.
 - **`UNWIND` of null gives no rows**, where it gave one null row. An `UNWIND`
   whose expression fails, including a missing parameter, fails the query; it used
   to skip the row silently.

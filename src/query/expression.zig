@@ -1279,20 +1279,11 @@ pub const ExpressionEvaluator = struct {
             },
             .lt => self.compareLessThan(left, right),
             .lte => self.compareLessOrEqual(left, right),
-            .gt => blk: {
-                const lte = self.compareLessOrEqual(left, right);
-                if (lte.toBool()) |lte_val| {
-                    break :blk .{ .bool_val = !lte_val };
-                }
-                break :blk .{ .null_val = {} };
-            },
-            .gte => blk: {
-                const lt = self.compareLessThan(left, right);
-                if (lt.toBool()) |lt_val| {
-                    break :blk .{ .bool_val = !lt_val };
-                }
-                break :blk .{ .null_val = {} };
-            },
+            // `a > b` is `b < a`, not `NOT (a <= b)`: the two differ for NaN,
+            // which is neither above, below nor equal to anything, so every
+            // ordering comparison with it is false (and `<>` true).
+            .gt => self.compareLessThan(right, left),
+            .gte => self.compareLessOrEqual(right, left),
 
             // Logical operators (already handled above for short-circuit)
             .and_, .or_ => unreachable,

@@ -29,7 +29,6 @@ const SymbolId = symbols.SymbolId;
 const property_index = @import("../../graph/property_index.zig");
 const ValueRange = property_index.ValueRange;
 pub const RangeOp = property_index.RangeOp;
-const OrderedTag = property_index.OrderedTag;
 
 const ast = @import("../ast.zig");
 const expression = @import("../expression.zig");
@@ -54,9 +53,9 @@ pub const Condition = struct {
 /// and by id among equal values.
 ///
 /// The conditions leave the WHERE: the scan answers them. Where the index
-/// cannot tell (a string bound longer than the part of a value a key holds,
-/// a NaN bound, NaN values under a lower bound only) it evaluates the
-/// conditions on the row itself.
+/// cannot tell (a string bound longer than the part of a value a key holds)
+/// it evaluates the conditions on the row itself. NaN passes no comparison,
+/// so its keys, after every number, are outside every range.
 ///
 /// With no conditions it returns every node with the label, the ones with
 /// the property first, in order, then the ones without it in id order, which
@@ -95,11 +94,6 @@ pub const IndexRangeScan = struct {
         ends: std.ArrayList(u32) = .empty,
         chunk_pos: usize = 0,
         exhausted: bool = false,
-        /// NaN's keys, read after the range when a condition compares
-        /// with a number and the range does not hold them.
-        nan_segment: bool = false,
-        /// NaN's keys are still to be read.
-        nan_pending: bool = false,
         /// Nodes the transaction's overlay holds that fall in the range,
         /// sorted by key. The keys are slices of `overlay_bytes`.
         overlay: std.ArrayList(OverlayEntry) = .empty,
@@ -191,15 +185,9 @@ pub const IndexRangeScan = struct {
 
         self.state = .{ .definition = definition, .label_id = definition.scope_id, .range = range };
         const state = &self.state.?;
-        state.nan_segment = range.nan_check and !range.holdsNan();
-        state.nan_pending = state.nan_segment;
         if (range.empty) {
             state.exhausted = true;
-            if (state.nan_pending) {
-                setNanSegment(state);
-            } else {
-                state.done_index = true;
-            }
+            state.done_index = true;
         } else {
             setBounds(state, range.startBytes(), range.endBytes());
         }
@@ -229,19 +217,8 @@ pub const IndexRangeScan = struct {
         state.end_len = end.len;
     }
 
-    /// Move on to NaN's keys, after the range.
-    fn setNanSegment(state: *State) void {
-        setBounds(state, &.{OrderedTag.nan}, &.{OrderedTag.nan + 1});
-        state.nan_pending = false;
-        state.exhausted = false;
-        state.keys.clearRetainingCapacity();
-        state.ends.clearRetainingCapacity();
-        state.chunk_pos = 0;
-    }
-
     fn inRange(state: *const State, key: []const u8) bool {
         const value = property_index.orderedValueOf(key);
-        if (state.nan_segment and value[0] == OrderedTag.nan) return true;
         if (state.range.empty) return false;
         return std.mem.order(u8, value, state.range.startBytes()) != .lt and
             std.mem.order(u8, value, state.range.endBytes()) == .lt;
@@ -284,10 +261,7 @@ pub const IndexRangeScan = struct {
     fn nextCommitted(self: *Self, state: *State, ctx: *ExecutionContext) OperatorError!?Entry {
         while (true) {
             if (state.chunk_pos == state.ends.items.len) {
-                if (state.exhausted) {
-                    if (!state.nan_pending) return null;
-                    setNanSegment(state);
-                }
+                if (state.exhausted) return null;
                 // Start after the last key read: it followed by a zero byte
                 // is the least key above it.
                 if (state.ends.items.len > 0) {
@@ -344,9 +318,8 @@ pub const IndexRangeScan = struct {
         return committed;
     }
 
-    fn needsCheck(state: *const State, key: []const u8) bool {
-        if (!state.range.exact) return true;
-        return state.range.nan_check and property_index.orderedValueOf(key)[0] == OrderedTag.nan;
+    fn needsCheck(state: *const State) bool {
+        return !state.range.exact;
     }
 
     fn passes(self: *Self, id: NodeId, ctx: *ExecutionContext) OperatorError!bool {
@@ -367,7 +340,7 @@ pub const IndexRangeScan = struct {
                 state.done_index = true;
                 break;
             };
-            if (needsCheck(state, entry.key) and !try self.passes(entry.id, ctx)) continue;
+            if (needsCheck(state) and !try self.passes(entry.id, ctx)) continue;
             return entry.id;
         }
 

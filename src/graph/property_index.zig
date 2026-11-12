@@ -219,15 +219,9 @@ pub const ValueRange = struct {
     end_len: usize = 0,
     /// The range holds no key.
     empty: bool = false,
-    /// Every entry in the range satisfies the conditions, NaN aside. False
-    /// when a bound was a string cut short or NaN: the entries are then a
-    /// superset to be checked.
+    /// Every entry in the range satisfies the conditions. False when a bound
+    /// was a string cut short: the entries are then a superset to be checked.
     exact: bool = true,
-    /// A condition compares with a number, so NaN entries have to be read,
-    /// wherever they lie relative to the range, and checked. Whether NaN
-    /// passes a comparison is the evaluator's call, and it does not answer
-    /// `5 > x` and `x < 5` alike for NaN, so the index cannot.
-    nan_check: bool = false,
 
     pub fn startBytes(self: *const ValueRange) []const u8 {
         return self.start[0..self.start_len];
@@ -279,17 +273,9 @@ pub const ValueRange = struct {
     fn intersect(self: *ValueRange, other: *const ValueRange) void {
         if (other.empty) self.empty = true;
         if (!other.exact) self.exact = false;
-        if (other.nan_check) self.nan_check = true;
         if (std.mem.order(u8, other.startBytes(), self.startBytes()) == .gt) self.setStart(other.startBytes());
         if (std.mem.order(u8, other.endBytes(), self.endBytes()) == .lt) self.setEnd(other.endBytes());
         if (std.mem.order(u8, self.startBytes(), self.endBytes()) != .lt) self.empty = true;
-    }
-
-    /// Whether NaN's keys lie inside the range.
-    pub fn holdsNan(self: *const ValueRange) bool {
-        if (self.empty) return false;
-        const nan = [_]u8{OrderedTag.nan};
-        return std.mem.order(u8, self.startBytes(), &nan) != .gt and std.mem.order(u8, self.endBytes(), &nan) == .gt;
     }
 };
 
@@ -311,13 +297,11 @@ fn constrainOne(range: *ValueRange, op: RangeOp, bound: PropertyValue) void {
         return;
     }
 
-    // A comparison with a number can let NaN through.
-    if (bound == .int_val or bound == .float_val) range.nan_check = true;
-
     // The values a bound of this type can be compared with, as the
-    // comparison operators define it: anything else compares as null.
+    // comparison operators define it: anything else compares as null. NaN
+    // is not among them: every ordering comparison with it is false.
     const class_start: u8, const class_end: u8 = switch (bound) {
-        .int_val, .float_val => .{ OrderedTag.number, OrderedTag.nan + 1 },
+        .int_val, .float_val => .{ OrderedTag.number, OrderedTag.nan },
         .string_val => .{ OrderedTag.string, OrderedTag.string + 1 },
         .bytes_val => .{ OrderedTag.bytes, OrderedTag.bytes + 1 },
         .bool_val => .{ OrderedTag.boolean, OrderedTag.boolean + 1 },
@@ -331,8 +315,7 @@ fn constrainOne(range: *ValueRange, op: RangeOp, bound: PropertyValue) void {
 
     const encoded = encodeOrderedValue(bound).?;
     if (encoded.buf[0] == OrderedTag.nan) {
-        // Whatever the evaluator makes of NaN, the answer is among numbers.
-        range.exact = false;
+        range.empty = true;
         return;
     }
     if (encoded.truncated) range.exact = false;
@@ -1033,7 +1016,7 @@ test "value ranges hold exactly the values their comparisons accept" {
     var r = ValueRange.all();
     r.constrain(.gte, .{ .int_val = 18 });
     r.constrain(.lt, .{ .float_val = 65.0 });
-    try std.testing.expect(r.exact and !r.empty and r.nan_check and !r.holdsNan());
+    try std.testing.expect(r.exact and !r.empty);
     try std.testing.expect(rangeHas(&r, .{ .int_val = 18 }));
     try std.testing.expect(rangeHas(&r, .{ .float_val = 18.0 }));
     try std.testing.expect(rangeHas(&r, .{ .float_val = 64.999 }));
@@ -1047,8 +1030,11 @@ test "value ranges hold exactly the values their comparisons accept" {
     try std.testing.expect(!rangeHas(&gt, .{ .float_val = 60.0 }));
     try std.testing.expect(rangeHas(&gt, .{ .int_val = 61 }));
     try std.testing.expect(rangeHas(&gt, .{ .float_val = 60.0000001 }));
-    // NaN is in the range, to be checked by the evaluator.
-    try std.testing.expect(gt.nan_check and gt.holdsNan() and rangeHas(&gt, .{ .float_val = std.math.nan(f64) }));
+    // No comparison lets NaN through, whichever way round it is written.
+    try std.testing.expect(!rangeHas(&gt, .{ .float_val = std.math.nan(f64) }));
+    var nan_bound = ValueRange.all();
+    nan_bound.constrain(.lt, .{ .float_val = std.math.nan(f64) });
+    try std.testing.expect(nan_bound.empty);
 
     var prefix = ValueRange.all();
     prefix.constrain(.starts_with, .{ .string_val = "Jo" });

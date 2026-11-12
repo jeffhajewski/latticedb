@@ -341,7 +341,11 @@ fn cmdInfo(
             try stdout.print("Format:       v{d}\n", .{lattice.core.types.FORMAT_VERSION});
             try stdout.print("Vector:       {s}\n", .{if (db.hasPersistedVectorIndex()) "enabled" else "disabled"});
             try stdout.print("FTS:          {s}\n", .{if (db.hasPersistedFtsIndex()) "enabled" else "disabled"});
-            try stdout.print("Changefeed:   keep {s}, ", .{policy});
+            if (feed.retention == .off) {
+                try stdout.writeAll("Changefeed:   off, ");
+            } else {
+                try stdout.print("Changefeed:   keep {s}, ", .{policy});
+            }
             if (feed.oldest_sequence) |oldest| {
                 try stdout.print("events {d}..{d}\n", .{ oldest, feed.last_sequence });
             } else {

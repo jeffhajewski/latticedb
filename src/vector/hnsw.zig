@@ -87,6 +87,112 @@ pub const SearchResult = struct {
     distance: f32,
 };
 
+/// Which nodes a filtered search may return. Nodes it rules out are still
+/// walked through, since the graph's paths run through them; they are only
+/// kept out of the results.
+pub const Filter = struct {
+    context: *const anyopaque,
+    allowsFn: *const fn (context: *const anyopaque, node_id: NodeId) bool,
+
+    pub fn allows(self: Filter, node_id: NodeId) bool {
+        return self.allowsFn(self.context, node_id);
+    }
+};
+
+/// A binary heap of search results, nearest first or furthest first, over
+/// a list kept between searches.
+fn ResultHeap(comptime furthest_first: bool) type {
+    return struct {
+        items: std.ArrayListUnmanaged(SearchResult) = .empty,
+
+        const Heap = @This();
+
+        fn above(a: SearchResult, b: SearchResult) bool {
+            return if (furthest_first) a.distance > b.distance else a.distance < b.distance;
+        }
+
+        fn count(self: *const Heap) usize {
+            return self.items.items.len;
+        }
+
+        fn top(self: *const Heap) ?SearchResult {
+            return if (self.items.items.len == 0) null else self.items.items[0];
+        }
+
+        fn push(self: *Heap, allocator: Allocator, item: SearchResult) Allocator.Error!void {
+            try self.items.append(allocator, item);
+            const xs = self.items.items;
+            var i = xs.len - 1;
+            while (i > 0) {
+                const parent = (i - 1) / 2;
+                if (!above(xs[i], xs[parent])) break;
+                std.mem.swap(SearchResult, &xs[i], &xs[parent]);
+                i = parent;
+            }
+        }
+
+        fn pop(self: *Heap) ?SearchResult {
+            const xs = self.items.items;
+            if (xs.len == 0) return null;
+            const out = xs[0];
+            xs[0] = xs[xs.len - 1];
+            self.items.items.len -= 1;
+            const ys = self.items.items;
+            var i: usize = 0;
+            while (true) {
+                const l = 2 * i + 1;
+                if (l >= ys.len) break;
+                var best = l;
+                if (l + 1 < ys.len and above(ys[l + 1], ys[l])) best = l + 1;
+                if (!above(ys[best], ys[i])) break;
+                std.mem.swap(SearchResult, &ys[i], &ys[best]);
+                i = best;
+            }
+            return out;
+        }
+
+        fn clear(self: *Heap) void {
+            self.items.clearRetainingCapacity();
+        }
+
+        fn deinit(self: *Heap, allocator: Allocator) void {
+            self.items.deinit(allocator);
+        }
+    };
+}
+
+/// What one layer search works in: kept by the index between searches so a
+/// search allocates nothing once these have grown to its beam.
+const SearchScratch = struct {
+    candidates: ResultHeap(false) = .{},
+    results: ResultHeap(true) = .{},
+    visited: std.AutoHashMapUnmanaged(u64, void) = .empty,
+
+    /// A search that visits more than this many nodes (one that a filter
+    /// made walk much of the graph) gives the visited set back afterwards
+    /// rather than keep it for every later search.
+    const KEEP_VISITED: u32 = 1 << 14;
+
+    fn reset(self: *SearchScratch) void {
+        self.candidates.clear();
+        self.results.clear();
+        self.visited.clearRetainingCapacity();
+    }
+
+    fn trim(self: *SearchScratch, allocator: Allocator) void {
+        if (self.visited.capacity() > KEEP_VISITED) {
+            self.visited.deinit(allocator);
+            self.visited = .empty;
+        }
+    }
+
+    fn deinit(self: *SearchScratch, allocator: Allocator) void {
+        self.candidates.deinit(allocator);
+        self.results.deinit(allocator);
+        self.visited.deinit(allocator);
+    }
+};
+
 /// HNSW index statistics
 pub const HnswStats = struct {
     dimensions: VectorDimension,
@@ -730,6 +836,11 @@ pub const HnswIndex = struct {
     /// Removed ids that some list may still name; see `detach`.
     dangling: std.AutoHashMapUnmanaged(u64, void) = .empty,
 
+    /// Layer-search working space, reused by one search at a time; a search
+    /// that finds it taken (a nested or concurrent one) uses its own.
+    scratch: SearchScratch = .{},
+    scratch_taken: std.atomic.Value(bool) = .init(false),
+
     const Self = @This();
     /// The part of a page laid out here; see `PAGE_SIZE` in vector/storage.zig.
     const PAGE_SIZE: usize = 4096;
@@ -782,6 +893,7 @@ pub const HnswIndex = struct {
 
     /// Deinitialize the index
     pub fn deinit(self: *Self) void {
+        self.scratch.deinit(self.allocator);
         self.dangling.deinit(self.allocator);
         self.unsaved.deinit(self.allocator);
         self.journal.deinit(self.allocator);
@@ -1201,6 +1313,16 @@ pub const HnswIndex = struct {
 
     /// Search for k nearest neighbors
     pub fn search(self: *Self, query: []const f32, k: u32, ef_override: ?u16) HnswError![]SearchResult {
+        return self.searchFiltered(query, k, ef_override, null);
+    }
+
+    /// The k nearest neighbours that `filter` allows, through the graph.
+    ///
+    /// The layer-0 beam keeps only allowed nodes as results and walks through
+    /// the others, so it runs until it holds `ef` allowed nodes or runs out of
+    /// graph. The fewer nodes the filter allows, the more of the graph that
+    /// takes; for a small allowed set `searchExact` costs less.
+    pub fn searchFiltered(self: *Self, query: []const f32, k: u32, ef_override: ?u16, filter: ?Filter) HnswError![]SearchResult {
         if (!types.isValidVectorDimensions(self.config.dimensions) or query.len != self.config.dimensions) {
             return HnswError.DimensionMismatch;
         }
@@ -1233,8 +1355,11 @@ pub const HnswIndex = struct {
         }
 
         // Phase 2: Search layer 0 with beam width ef
-        const candidates = try self.searchLayer(search_query, current, 0, ef);
-        defer self.allocator.free(candidates);
+        var local: SearchScratch = .{};
+        defer local.deinit(self.allocator);
+        const scratch = self.takeScratch(&local);
+        defer self.giveScratch(scratch);
+        const candidates = try self.searchLayerInto(scratch, search_query, current, 0, ef, filter);
 
         // Return top k results
         const result_count = @min(k, candidates.len);
@@ -1242,6 +1367,66 @@ pub const HnswIndex = struct {
         @memcpy(results, candidates[0..result_count]);
 
         return results;
+    }
+
+    /// The k nearest of `ids` by measuring each, nearest first. Ids not in
+    /// the index are skipped; each id should appear once.
+    pub fn searchExact(self: *Self, query: []const f32, k: u32, ids: []const u64) HnswError![]SearchResult {
+        if (!types.isValidVectorDimensions(self.config.dimensions) or query.len != self.config.dimensions) {
+            return HnswError.DimensionMismatch;
+        }
+        var norm_buf: [4096]f32 = undefined;
+        const search_query = if (self.config.metric == .cosine) blk: {
+            @memcpy(norm_buf[0..query.len], query);
+            simd_distance.normalize(norm_buf[0..query.len]);
+            break :blk @as([]const f32, norm_buf[0..query.len]);
+        } else query;
+
+        var local: SearchScratch = .{};
+        defer local.deinit(self.allocator);
+        const scratch = self.takeScratch(&local);
+        defer self.giveScratch(scratch);
+        scratch.reset();
+        const best = &scratch.results;
+
+        var batch_buf: [MAX_NEIGHBORS]BatchEntry = undefined;
+        var dist_buf: [MAX_NEIGHBORS]f32 = undefined;
+        var start: usize = 0;
+        while (start < ids.len and k > 0) {
+            const chunk = ids[start..@min(ids.len, start + MAX_NEIGHBORS)];
+            start += chunk.len;
+            const count = try self.borrowNeighborVectors(chunk, &batch_buf);
+            self.batchComputeDistances(search_query, batch_buf[0..count], dist_buf[0..count]);
+            releaseBatch(batch_buf[0..count]);
+            for (batch_buf[0..count], dist_buf[0..count]) |be, dist| {
+                if (best.count() < k) {
+                    best.push(self.allocator, .{ .node_id = be.neighbor_id, .distance = dist }) catch return HnswError.OutOfMemory;
+                } else if (dist < best.top().?.distance) {
+                    _ = best.pop();
+                    best.push(self.allocator, .{ .node_id = be.neighbor_id, .distance = dist }) catch return HnswError.OutOfMemory;
+                }
+            }
+        }
+
+        const out = self.allocator.alloc(SearchResult, best.count()) catch return HnswError.OutOfMemory;
+        var i = out.len;
+        while (best.pop()) |r| {
+            i -= 1;
+            out[i] = r;
+        }
+        return out;
+    }
+
+    /// The index's scratch space, or `local` when another search holds it.
+    fn takeScratch(self: *Self, local: *SearchScratch) *SearchScratch {
+        if (self.scratch_taken.cmpxchgStrong(false, true, .acquire, .monotonic) == null) return &self.scratch;
+        return local;
+    }
+
+    fn giveScratch(self: *Self, scratch: *SearchScratch) void {
+        if (scratch != &self.scratch) return;
+        scratch.trim(self.allocator);
+        self.scratch_taken.store(false, .release);
     }
 
     /// Greedy search within a single layer (returns closest node)
@@ -1284,67 +1469,46 @@ pub const HnswIndex = struct {
         return current;
     }
 
-    fn compareSearchResults(_: void, a: SearchResult, b: SearchResult) std.math.Order {
-        return std.math.order(a.distance, b.distance);
+    /// Search layer with beam width (returns sorted candidates, owned by
+    /// the caller).
+    fn searchLayer(self: *Self, query: []const f32, entry: u64, layer: u8, ef: u16) HnswError![]SearchResult {
+        var local: SearchScratch = .{};
+        defer local.deinit(self.allocator);
+        const scratch = self.takeScratch(&local);
+        defer self.giveScratch(scratch);
+        const found = try self.searchLayerInto(scratch, query, entry, layer, ef, null);
+        return self.allocator.dupe(SearchResult, found) catch return HnswError.OutOfMemory;
     }
 
-    /// Search layer with beam width (returns sorted candidates).
+    /// Beam search of one layer, in `scratch`. Returns the results nearest
+    /// first, in `scratch`'s memory, valid until it is next used. With a
+    /// filter, only the nodes it allows are results.
     /// Uses batch borrow/compute/release to amortize pin/unpin overhead.
-    fn searchLayer(self: *Self, query: []const f32, entry: u64, layer: u8, ef: u16) HnswError![]SearchResult {
+    fn searchLayerInto(
+        self: *Self,
+        scratch: *SearchScratch,
+        query: []const f32,
+        entry: u64,
+        layer: u8,
+        ef: u16,
+        filter: ?Filter,
+    ) HnswError![]const SearchResult {
         const entry_node = self.getNode(entry) orelse return HnswError.NotFound;
-
-        const CandidateQueue = std.PriorityQueue(SearchResult, void, compareSearchResults);
-        var candidates = if (@hasDecl(CandidateQueue, "initContext"))
-            CandidateQueue.initContext({})
-        else
-            CandidateQueue.init(self.allocator, {});
-        defer if (@hasDecl(CandidateQueue, "initContext"))
-            candidates.deinit(self.allocator)
-        else
-            candidates.deinit();
-        if (@hasDecl(CandidateQueue, "initContext")) {
-            candidates.ensureTotalCapacity(self.allocator, ef) catch return HnswError.OutOfMemory;
-        } else if (@hasDecl(CandidateQueue, "ensureTotalCapacity")) {
-            candidates.ensureTotalCapacity(ef) catch return HnswError.OutOfMemory;
-        } else {
-            candidates.ensureCapacity(ef) catch return HnswError.OutOfMemory;
-        }
-
-        const ResultQueue = std.PriorityDequeue(SearchResult, void, compareSearchResults);
-        var results = if (@hasDecl(ResultQueue, "initContext"))
-            ResultQueue.initContext({})
-        else
-            ResultQueue.init(self.allocator, {});
-        defer if (@hasDecl(ResultQueue, "initContext"))
-            results.deinit(self.allocator)
-        else
-            results.deinit();
-        if (@hasDecl(ResultQueue, "initContext")) {
-            results.ensureTotalCapacity(self.allocator, ef) catch return HnswError.OutOfMemory;
-        } else if (@hasDecl(ResultQueue, "ensureTotalCapacity")) {
-            results.ensureTotalCapacity(ef) catch return HnswError.OutOfMemory;
-        } else {
-            results.ensureCapacity(ef) catch return HnswError.OutOfMemory;
-        }
-
-        var visited = std.AutoHashMap(u64, void).init(self.allocator);
-        defer visited.deinit();
-        visited.ensureTotalCapacity(@as(u32, @intCast(ef)) * 2) catch return HnswError.OutOfMemory;
+        const allocator = self.allocator;
+        scratch.reset();
+        const candidates = &scratch.candidates;
+        const results = &scratch.results;
+        const visited = &scratch.visited;
+        visited.ensureTotalCapacity(allocator, @as(u32, @intCast(ef)) * 2) catch return HnswError.OutOfMemory;
 
         // Initialize with entry point
         const entry_dist = try self.distanceTo(query, entry_node.vector_loc);
         const entry_result = SearchResult{ .node_id = entry, .distance = entry_dist };
-        if (@hasDecl(CandidateQueue, "push")) {
-            candidates.push(self.allocator, entry_result) catch return HnswError.OutOfMemory;
-        } else {
-            candidates.add(entry_result) catch return HnswError.OutOfMemory;
+        candidates.push(allocator, entry_result) catch return HnswError.OutOfMemory;
+        if (filter == null or filter.?.allows(entry)) {
+            results.push(allocator, entry_result) catch return HnswError.OutOfMemory;
         }
-        if (@hasDecl(ResultQueue, "push")) {
-            results.push(self.allocator, entry_result) catch return HnswError.OutOfMemory;
-        } else {
-            results.add(entry_result) catch return HnswError.OutOfMemory;
-        }
-        visited.put(entry, {}) catch return HnswError.OutOfMemory;
+        visited.put(allocator, entry, {}) catch return HnswError.OutOfMemory;
 
         // Stack buffers for batch processing
         var sl_conn_buf: [MAX_NEIGHBORS]u64 = undefined;
@@ -1352,14 +1516,9 @@ pub const HnswIndex = struct {
         var batch_buf: [MAX_NEIGHBORS]BatchEntry = undefined;
         var dist_buf: [MAX_NEIGHBORS]f32 = undefined;
 
-        while (candidates.count() > 0) {
-            const closest = if (@hasDecl(CandidateQueue, "pop"))
-                candidates.pop() orelse break
-            else
-                candidates.removeOrNull() orelse break;
-
+        while (candidates.pop()) |closest| {
             // Stop if closest candidate is worse than worst result
-            const furthest_dist = if (results.peekMax()) |r| r.distance else 0;
+            const furthest_dist = if (results.top()) |r| r.distance else 0;
             if (results.count() >= ef and closest.distance > furthest_dist) {
                 break;
             }
@@ -1372,8 +1531,8 @@ pub const HnswIndex = struct {
             // Phase 1: Filter — collect unvisited neighbor IDs, mark visited
             var unvisited_count: usize = 0;
             for (neighbors) |neighbor| {
-                if (visited.contains(neighbor)) continue;
-                visited.put(neighbor, {}) catch return HnswError.OutOfMemory;
+                const gop = visited.getOrPut(allocator, neighbor) catch return HnswError.OutOfMemory;
+                if (gop.found_existing) continue;
                 unvisited_buf[unvisited_count] = neighbor;
                 unvisited_count += 1;
             }
@@ -1389,41 +1548,30 @@ pub const HnswIndex = struct {
 
             // Phase 4: Process — insert into priority queues
             for (batch_buf[0..batch_count], dist_buf[0..batch_count]) |be, dist| {
-                const current_furthest = if (results.peekMax()) |r| r.distance else 0;
+                const current_furthest = if (results.top()) |r| r.distance else 0;
                 if (results.count() < ef or dist < current_furthest) {
                     const result = SearchResult{ .node_id = be.neighbor_id, .distance = dist };
-                    if (@hasDecl(CandidateQueue, "push")) {
-                        candidates.push(self.allocator, result) catch return HnswError.OutOfMemory;
-                    } else {
-                        candidates.add(result) catch return HnswError.OutOfMemory;
-                    }
-                    if (@hasDecl(ResultQueue, "push")) {
-                        results.push(self.allocator, result) catch return HnswError.OutOfMemory;
-                    } else {
-                        results.add(result) catch return HnswError.OutOfMemory;
-                    }
-
-                    if (results.count() > ef) {
-                        if (@hasDecl(ResultQueue, "popMax")) {
-                            _ = results.popMax();
-                        } else {
-                            _ = results.removeMaxOrNull();
-                        }
+                    candidates.push(allocator, result) catch return HnswError.OutOfMemory;
+                    if (filter == null or filter.?.allows(be.neighbor_id)) {
+                        results.push(allocator, result) catch return HnswError.OutOfMemory;
+                        if (results.count() > ef) _ = results.pop();
                     }
                 }
             }
         }
 
-        // Drain results in min-order
-        const result_count = results.count();
-        const output = self.allocator.alloc(SearchResult, result_count) catch return HnswError.OutOfMemory;
-        for (0..result_count) |i| {
-            output[i] = if (@hasDecl(ResultQueue, "popMin"))
-                results.popMin().?
-            else
-                results.removeMinOrNull().?;
+        // The results heap is furthest first; laid out nearest first, it is
+        // the answer. The candidates heap is done with, so it holds them.
+        const out = &candidates.items;
+        out.clearRetainingCapacity();
+        out.ensureTotalCapacity(allocator, results.count()) catch return HnswError.OutOfMemory;
+        out.items.len = results.count();
+        var i = out.items.len;
+        while (results.pop()) |r| {
+            i -= 1;
+            out.items[i] = r;
         }
-        return output;
+        return out.items;
     }
 
     // ========================================================================
@@ -2524,6 +2672,87 @@ test "hnsw search returns k results when k exceeds ef_search" {
             try std.testing.expect(earlier.distance <= later.distance);
         }
     }
+}
+
+test "hnsw filtered and exact searches keep to the allowed nodes" {
+    const allocator = std.testing.allocator;
+    const vfs = lattice.storage.vfs;
+    const page_manager = lattice.storage.page_manager;
+
+    var posix_vfs = vfs.PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+    const db_path = "/tmp/lattice_hnsw_filtered_test.db";
+    vfs_impl.delete(db_path) catch {};
+    var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
+    defer {
+        pm.deinit();
+        vfs_impl.delete(db_path) catch {};
+    }
+    var bp = try buffer_pool.BufferPool.init(allocator, &pm, 256 * 4096);
+    defer bp.deinit();
+    var vs = try VectorStorage.init(allocator, &bp, 4);
+    var index = HnswIndex.init(allocator, &bp, &vs, .{ .dimensions = 4, .m = 8, .m_max0 = 16, .ef_construction = 64, .ef_search = 32, .metric = .euclidean });
+    defer index.deinit();
+
+    var prng = std.Random.DefaultPrng.init(3);
+    const random = prng.random();
+    var vectors: [400][4]f32 = undefined;
+    for (&vectors, 1..) |*v, id| {
+        for (v) |*x| x.* = random.float(f32);
+        try index.insert(id, v);
+    }
+
+    // Every seventh id is allowed.
+    const Sevenths = struct {
+        fn allows(_: *const anyopaque, id: u64) bool {
+            return id % 7 == 0;
+        }
+    };
+    var allowed_ids: [57]u64 = undefined;
+    for (&allowed_ids, 1..) |*id, i| id.* = i * 7;
+
+    const query = [_]f32{ 0.3, 0.6, 0.2, 0.9 };
+    // The true nearest five of the allowed, measured here.
+    var truth: [57]SearchResult = undefined;
+    for (&truth, allowed_ids) |*t, id| t.* = .{ .node_id = id, .distance = euclideanDistance(&query, &vectors[id - 1]) };
+    std.mem.sort(SearchResult, &truth, {}, struct {
+        fn lt(_: void, a: SearchResult, b: SearchResult) bool {
+            return a.distance < b.distance;
+        }
+    }.lt);
+
+    const exact = try index.searchExact(&query, 5, &allowed_ids);
+    defer index.freeResults(exact);
+    try std.testing.expectEqual(@as(usize, 5), exact.len);
+    for (exact, truth[0..5]) |got, want| {
+        try std.testing.expectEqual(want.node_id, got.node_id);
+        try std.testing.expectApproxEqAbs(want.distance, got.distance, 1e-5);
+    }
+
+    // Asking for more than there are returns them all, nearest first.
+    const all = try index.searchExact(&query, 100, &allowed_ids);
+    defer index.freeResults(all);
+    try std.testing.expectEqual(@as(usize, 57), all.len);
+
+    var dummy: u8 = 0;
+    const filtered = try index.searchFiltered(&query, 5, null, .{ .context = &dummy, .allowsFn = Sevenths.allows });
+    defer index.freeResults(filtered);
+    try std.testing.expectEqual(@as(usize, 5), filtered.len);
+    var hits: usize = 0;
+    for (filtered) |r| {
+        try std.testing.expect(r.node_id % 7 == 0);
+        for (truth[0..5]) |t| {
+            if (t.node_id == r.node_id) hits += 1;
+        }
+    }
+    try std.testing.expect(hits >= 4);
+
+    // The unfiltered search is unchanged by the scratch space being reused.
+    const plain_a = try index.search(&query, 10, null);
+    defer index.freeResults(plain_a);
+    const plain_b = try index.search(&query, 10, null);
+    defer index.freeResults(plain_b);
+    try std.testing.expectEqualSlices(SearchResult, plain_a, plain_b);
 }
 
 test "hnsw replacing a vector leaves the node linked on every layer" {

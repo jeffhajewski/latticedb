@@ -366,17 +366,18 @@ the scan:
 ```text
 open():
     resolve the threshold (a literal or a parameter; null matches nothing)
-    k = what bounds the answer: SKIP + LIMIT, or 100 (DEFAULT_K)
+    read every input row, grouped by node; the nodes are the candidates
+    k = what bounds the answer: SKIP + LIMIT, or 100 (DEFAULT_K) nodes
     loop:
-        results = database.vectorSearchInTxn(txn, query, k, default ef_search)
-        match results against the input rows (read once, keeping by node only
-        the rows whose node the search returned)
-        stop when: with a threshold, the farthest result is beyond it;
-                   with a LIMIT, there are SKIP + LIMIT candidate rows;
-                   otherwise, there are 100 candidate nodes;
-                   or the index has nothing more to return
+        results = database.vectorSearchAmongInTxn(txn, query, k, ids = candidates)
+                  (a few candidates: each measured; many: a graph search
+                   that keeps only candidates as results)
+        stop when: with a LIMIT or neither bound, always (every result is a
+                   candidate with at least one row);
+                   with a threshold alone, the farthest result is beyond it;
+                   or fewer than k came back
         k = 2 * k
-    if the whole index was searched, measure the candidates it did not return
+    if fewer than k came back, measure the candidates the search did not return
 next():
     emit kept rows in distance order, storing each row's distance
 ```
@@ -386,8 +387,9 @@ a threshold query returns every candidate within it. `<` is strict and `<=` is
 not. The LIMIT bound applies only when a `RETURN` with a `LIMIT` follows with no
 `DISTINCT` or aggregation in between, and with no `ORDER BY` unless that `ORDER BY`
 is one ascending `<=>` of this same search (or the alias of a `RETURN` item that is),
-the order the search already returns its rows in. What stays approximate is HNSW
-recall when the search stops before the end of the index; with that `ORDER BY` the
+the order the search already returns its rows in. A set small enough to measure
+(see [Vector Search](./vector-search.md), limitation 4) is answered exactly; what
+stays approximate is HNSW recall over a large set, and with that `ORDER BY` the
 answer is the index's approximate top `k`, as it is under a plain `LIMIT`. The
 property name in `x.prop` is not used to choose an index: a database has one
 vector index. Distances are measured with the metric recorded for the index, and
@@ -642,7 +644,7 @@ them.
 Vector search does not avoid the scan. The `<=>` pattern is recognised only when
 it is the whole `WHERE` clause and its threshold is a number or a parameter; it
 is then planned as `VectorSearchWithInput` over the label (or all-nodes) scan,
-which widens its search until it has the candidates the predicate asks for (see
+which searches among the scan's nodes only (see
 [Vector Search Operator](#vector-search-operator)). Any other `<=>` predicate is
 evaluated by `Filter`, row by row and exactly.
 

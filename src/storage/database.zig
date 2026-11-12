@@ -123,6 +123,8 @@ const HnswError = hnsw_mod.HnswError;
 pub const VectorSearchResult = hnsw_mod.SearchResult;
 pub const VectorMetric = page_mod.FileHeader.VectorMetric;
 pub const VectorConfig = page_mod.FileHeader.VectorConfig;
+/// Which nodes a filtered vector search may return; see `vectorSearchWhere`.
+pub const VectorFilter = hnsw_mod.Filter;
 
 // Transactions
 const txn_mod = lattice.transaction.manager;
@@ -7619,71 +7621,214 @@ pub const Database = struct {
         k: u32,
         ef_search: ?u16,
     ) DatabaseError![]VectorSearchResult {
+        return self.vectorSearchWhereInTxn(txn, query_vector, k, ef_search, null);
+    }
+
+    /// The k nearest nodes `filter` allows (every node, when null), as `txn`
+    /// sees them: its pending vectors in place of the committed ones, and
+    /// without the nodes it deleted.
+    pub fn vectorSearchWhereInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        query_vector: []const f32,
+        k: u32,
+        ef_search: ?u16,
+        filter: ?VectorFilter,
+    ) DatabaseError![]VectorSearchResult {
         try self.validateVectorValue(query_vector);
 
-        if (txn) |t| {
-            if (self.getTxnOverlay(t)) |overlay| {
-                if (overlay.vector_states.count() == 0) {
-                    return self.vectorSearch(query_vector, k, ef_search);
-                }
-
-                const extra: u32 = @intCast(overlay.vector_states.count());
-                const base_results = try self.vectorSearch(query_vector, k +| extra, ef_search);
-                defer self.freeVectorSearchResults(base_results);
-
-                var merged: std.ArrayListUnmanaged(VectorSearchResult) = .empty;
-                errdefer merged.deinit(self.allocator);
-
-                var seen: std.AutoHashMapUnmanaged(NodeId, void) = .{};
-                defer seen.deinit(self.allocator);
-
-                for (base_results) |result| {
-                    try seen.put(self.allocator, result.node_id, {});
-                    if (!(try self.nodeExistsInTxn(txn, result.node_id))) continue;
-                    if (overlay.vector_states.get(result.node_id)) |state| {
-                        switch (state) {
-                            .absent => continue,
-                            .value => |vector| {
-                                merged.append(self.allocator, .{
-                                    .node_id = result.node_id,
-                                    .distance = self.vectorDistanceForSearch(query_vector, vector),
-                                }) catch return DatabaseError.OutOfMemory;
-                            },
-                        }
-                        continue;
-                    }
-                    merged.append(self.allocator, result) catch return DatabaseError.OutOfMemory;
-                }
-
-                var overlay_iter = overlay.vector_states.iterator();
-                while (overlay_iter.next()) |entry| {
-                    if (seen.contains(entry.key_ptr.*)) continue;
-                    if (!(try self.nodeExistsInTxn(txn, entry.key_ptr.*))) continue;
-                    switch (entry.value_ptr.*) {
-                        .absent => {},
-                        .value => |vector| {
-                            merged.append(self.allocator, .{
-                                .node_id = entry.key_ptr.*,
-                                .distance = self.vectorDistanceForSearch(query_vector, vector),
-                            }) catch return DatabaseError.OutOfMemory;
-                        },
-                    }
-                }
-
-                std.mem.sort(VectorSearchResult, merged.items, {}, struct {
-                    fn lessThan(_: void, lhs: VectorSearchResult, rhs: VectorSearchResult) bool {
-                        return lhs.distance < rhs.distance;
-                    }
-                }.lessThan);
-
-                if (merged.items.len > k) {
-                    merged.items.len = k;
-                }
-                return merged.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
-            }
+        const overlay = (if (txn) |t| self.getTxnOverlay(t) else null) orelse
+            return self.vectorSearchWhere(query_vector, k, ef_search, filter);
+        if (overlay.vector_states.count() == 0) {
+            return self.vectorSearchWhere(query_vector, k, ef_search, filter);
         }
 
-        return self.vectorSearch(query_vector, k, ef_search);
+        const extra: u32 = @intCast(overlay.vector_states.count());
+        const base_results = try self.vectorSearchWhere(query_vector, k +| extra, ef_search, filter);
+        defer self.freeVectorSearchResults(base_results);
+
+        var merged: std.ArrayListUnmanaged(VectorSearchResult) = .empty;
+        errdefer merged.deinit(self.allocator);
+
+        var seen: std.AutoHashMapUnmanaged(NodeId, void) = .{};
+        defer seen.deinit(self.allocator);
+
+        for (base_results) |result| {
+            try seen.put(self.allocator, result.node_id, {});
+            // The committed node exists (the search checked); only what
+            // the transaction did to it can hide it.
+            if (overlay.node_states.getPtr(result.node_id)) |state| {
+                if (!state.exists) continue;
+            }
+            if (overlay.vector_states.get(result.node_id)) |state| {
+                switch (state) {
+                    .absent => continue,
+                    .value => |vector| {
+                        merged.append(self.allocator, .{
+                            .node_id = result.node_id,
+                            .distance = self.vectorDistanceForSearch(query_vector, vector),
+                        }) catch return DatabaseError.OutOfMemory;
+                    },
+                }
+                continue;
+            }
+            merged.append(self.allocator, result) catch return DatabaseError.OutOfMemory;
+        }
+
+        var overlay_iter = overlay.vector_states.iterator();
+        while (overlay_iter.next()) |entry| {
+            const node_id = entry.key_ptr.*;
+            if (seen.contains(node_id)) continue;
+            if (filter) |f| {
+                if (!f.allows(node_id)) continue;
+            }
+            const vector = switch (entry.value_ptr.*) {
+                .absent => continue,
+                .value => |vector| vector,
+            };
+            if (!(try self.nodeVisibleInOverlay(overlay, node_id))) continue;
+            merged.append(self.allocator, .{
+                .node_id = node_id,
+                .distance = self.vectorDistanceForSearch(query_vector, vector),
+            }) catch return DatabaseError.OutOfMemory;
+        }
+
+        sortVectorResults(merged.items);
+        if (merged.items.len > k) {
+            merged.items.len = k;
+        }
+        return merged.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+    }
+
+    /// Whether a node exists for a transaction: as it left the node, or as
+    /// committed when it did not touch it.
+    fn nodeVisibleInOverlay(self: *Self, overlay: *TxnOverlay, node_id: NodeId) DatabaseError!bool {
+        if (overlay.node_states.getPtr(node_id)) |state| return state.exists;
+        return self.nodeExists(node_id);
+    }
+
+    fn sortVectorResults(results: []VectorSearchResult) void {
+        std.mem.sort(VectorSearchResult, results, {}, struct {
+            fn lessThan(_: void, lhs: VectorSearchResult, rhs: VectorSearchResult) bool {
+                return lhs.distance < rhs.distance;
+            }
+        }.lessThan);
+    }
+
+    /// The k nearest of the nodes `ids` names (each once), as `txn` sees
+    /// them. `member`, when given, tells whether a node is one of `ids`
+    /// without the search building a set of them.
+    ///
+    /// A small set is measured node by node, which is exact; a larger one is
+    /// searched through the graph with a filter (`vectorSearchWhereInTxn`),
+    /// which costs less once the set is large enough that the beam finds its
+    /// members quickly. `exactScanPays` is where one starts to cost less
+    /// than the other.
+    pub fn vectorSearchAmongInTxn(
+        self: *Self,
+        txn: ?*Transaction,
+        query_vector: []const f32,
+        k: u32,
+        ef_search: ?u16,
+        ids: []const NodeId,
+        member: ?VectorFilter,
+    ) DatabaseError![]VectorSearchResult {
+        try self.validateVectorValue(query_vector);
+        const hnsw = &(self.hnsw_index orelse return DatabaseError.IoError);
+
+        if (!exactScanPays(ids.len, hnsw.vector_count, ef_search orelse hnsw.config.ef_search, hnsw.config.m_max0)) {
+            if (member) |m| return self.vectorSearchWhereInTxn(txn, query_vector, k, ef_search, m);
+            var set: std.AutoHashMapUnmanaged(NodeId, void) = .{};
+            defer set.deinit(self.allocator);
+            set.ensureTotalCapacity(self.allocator, @intCast(ids.len)) catch return DatabaseError.OutOfMemory;
+            for (ids) |id| set.putAssumeCapacity(id, {});
+            return self.vectorSearchWhereInTxn(txn, query_vector, k, ef_search, .{
+                .context = &set,
+                .allowsFn = struct {
+                    fn allows(context: *const anyopaque, node_id: NodeId) bool {
+                        const s: *const std.AutoHashMapUnmanaged(NodeId, void) = @ptrCast(@alignCast(context));
+                        return s.contains(node_id);
+                    }
+                }.allows,
+            });
+        }
+
+        const overlay = if (txn) |t| self.getTxnOverlay(t) else null;
+        var merged: std.ArrayListUnmanaged(VectorSearchResult) = .empty;
+        errdefer merged.deinit(self.allocator);
+        var committed: std.ArrayListUnmanaged(NodeId) = .empty;
+        defer committed.deinit(self.allocator);
+        committed.ensureTotalCapacity(self.allocator, ids.len) catch return DatabaseError.OutOfMemory;
+
+        for (ids) |id| {
+            if (overlay) |o| {
+                if (o.node_states.getPtr(id)) |state| {
+                    if (!state.exists) continue;
+                }
+                if (o.vector_states.get(id)) |state| {
+                    switch (state) {
+                        .absent => {},
+                        .value => |vector| {
+                            if (try self.nodeVisibleInOverlay(o, id)) {
+                                merged.append(self.allocator, .{
+                                    .node_id = id,
+                                    .distance = self.vectorDistanceForSearch(query_vector, vector),
+                                }) catch return DatabaseError.OutOfMemory;
+                            }
+                        },
+                    }
+                    continue;
+                }
+            }
+            committed.appendAssumeCapacity(id);
+        }
+
+        // The committed vectors, measured; a node the index still holds but
+        // the store does not is skipped, as `vectorSearch` skips it.
+        var want: u32 = k;
+        while (true) {
+            const raw = hnsw.searchExact(query_vector, want, committed.items) catch |err| return mapVectorSearchError(err);
+            defer hnsw.freeResults(raw);
+            const before = merged.items.len;
+            var kept: u32 = 0;
+            for (raw) |result| {
+                if (kept >= k) break;
+                if (!(try self.nodeExists(result.node_id))) continue;
+                merged.append(self.allocator, result) catch return DatabaseError.OutOfMemory;
+                kept += 1;
+            }
+            if (kept >= k or raw.len < want or want >= committed.items.len) break;
+            merged.items.len = before;
+            want = @intCast(@min(@as(u64, want) * 2, committed.items.len));
+        }
+
+        sortVectorResults(merged.items);
+        if (merged.items.len > k) merged.items.len = k;
+        return merged.toOwnedSlice(self.allocator) catch return DatabaseError.OutOfMemory;
+    }
+
+    /// Whether measuring each of `count` nodes costs less than a filtered
+    /// walk of a graph of `total` vectors that allows them.
+    ///
+    /// The walk visits roughly `ef * m_max0` nodes per beam's worth of
+    /// members, and finds a member among every `total / count` it visits,
+    /// so it measures about `ef * m_max0 * total / count` vectors against
+    /// the scan's `count`. They cross where `count^2 = ef * m_max0 * total`;
+    /// the constant is from measuring both at 10k and 100k vectors of 128
+    /// dimensions (notes, item 9).
+    pub fn exactScanPays(count: usize, total: u64, ef: u16, m_max0: u16) bool {
+        const c: u128 = count;
+        return c * c <= @as(u128, EXACT_SCAN_FACTOR) * ef * m_max0 * total;
+    }
+
+    const EXACT_SCAN_FACTOR: u32 = 1;
+
+    fn mapVectorSearchError(err: HnswError) DatabaseError {
+        return switch (err) {
+            HnswError.DimensionMismatch => DatabaseError.InvalidArgument,
+            HnswError.OutOfMemory => DatabaseError.OutOfMemory,
+            else => DatabaseError.IoError,
+        };
     }
 
     /// Search for similar vectors using HNSW index.
@@ -7694,6 +7839,18 @@ pub const Database = struct {
         k: u32,
         ef_search: ?u16,
     ) DatabaseError![]VectorSearchResult {
+        return self.vectorSearchWhere(query_vector, k, ef_search, null);
+    }
+
+    /// The k nearest committed nodes that `filter` allows (every node, when
+    /// null), through the graph.
+    pub fn vectorSearchWhere(
+        self: *Self,
+        query_vector: []const f32,
+        k: u32,
+        ef_search: ?u16,
+        filter: ?VectorFilter,
+    ) DatabaseError![]VectorSearchResult {
         try self.validateVectorValue(query_vector);
         const hnsw = &(self.hnsw_index orelse return DatabaseError.IoError);
 
@@ -7702,7 +7859,7 @@ pub const Database = struct {
         // still leaves slack for skipping nodes that no longer exist.
         const beam: u64 = @max(k, ef_search orelse hnsw.config.ef_search);
         const search_limit: u32 = @intCast(@min(hnsw.vector_count, beam));
-        const raw_results = hnsw.search(query_vector, search_limit, ef_search) catch |err| {
+        const raw_results = hnsw.searchFiltered(query_vector, search_limit, ef_search, filter) catch |err| {
             return switch (err) {
                 HnswError.EmptyIndex => self.allocator.alloc(VectorSearchResult, 0) catch return DatabaseError.OutOfMemory,
                 HnswError.NotFound => self.allocator.alloc(VectorSearchResult, 0) catch return DatabaseError.OutOfMemory,

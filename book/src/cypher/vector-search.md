@@ -30,13 +30,13 @@ vector containing NaN or infinity fails the query, as it fails `set_vector`.
 When the whole `WHERE` clause is a `<=>` predicate (`n.embedding <=> q < t`,
 `<= t`, or `n.embedding <=> q` on its own), with `q` a parameter or a list literal
 and `t` a number or a parameter, the planner answers it with the HNSW index. The
-rows the `MATCH` pattern produces are the candidates, and the search widens
-(doubling how many neighbours it asks for) until the answer is complete:
+rows the `MATCH` pattern produces are the candidates, and the search looks only
+among their nodes:
 
 - **With a threshold**: every candidate within it. `<` excludes a distance of
   exactly `t` and `<=` includes it. A null threshold matches nothing.
 - **Under a `RETURN` with a `LIMIT`**, and no `DISTINCT` or aggregation in
-  between: until it has `SKIP` + `LIMIT` candidate rows. An `ORDER BY` in between
+  between: the `SKIP` + `LIMIT` nearest candidate nodes. An `ORDER BY` in between
   keeps this bound only when it sorts nearest first by the same distance, written
   as in the `WHERE` (`ORDER BY n.embedding <=> $q`, ascending) or as the alias of a
   `RETURN` item that is that distance, since the search returns its results in that
@@ -46,10 +46,12 @@ rows the `MATCH` pattern produces are the candidates, and the search widens
 
 So the label narrows the search (`MATCH (c:Chunk)` returns Chunk nodes even when
 other nodes are nearer), and a threshold query returns every match, however many.
-If the search reaches the end of the index, candidates it did not return are
-measured directly. What stays approximate is HNSW itself: when the search stops
-before the end of the index, a candidate within the threshold can occasionally be
-missed.
+When the candidates are few next to the index (fewer than about
+`sqrt(ef_search × 32 × vectors)`: some 14,000 of 100,000), each one is measured,
+which is exact. A larger set is searched through the HNSW graph with the set as
+a filter; that stays approximate, so a candidate within the threshold can
+occasionally be missed. Candidates the graph search could not reach are measured
+directly when it runs out.
 
 Any other form is evaluated row by row, exactly, by computing each candidate's
 distance: a threshold that is an expression (`< 0.25 * 2`), or a `<=>` predicate

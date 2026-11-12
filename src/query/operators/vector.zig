@@ -162,19 +162,21 @@ pub const VectorSearch = struct {
 /// `MATCH (d:Doc) WHERE d.embedding <=> $q < 0.3 RETURN d`.
 ///
 /// The input rows are the candidates. The operator reads them all, then asks
-/// the HNSW index for the nearest vectors, widening the search (doubling k)
-/// until it has what the predicate asks for among the candidates:
+/// for the nearest vectors among the candidates' nodes only
+/// (`Database.vectorSearchAmongInTxn`): a small set is measured node by
+/// node, a larger one searched through the graph with the set as a filter.
+/// Every result is a candidate, so it asks for as many nodes as it needs:
 ///
-/// - With a threshold (`< t` or `<= t`, a literal or a parameter): every
-///   candidate within it. The search widens until the farthest result is
-///   beyond the threshold or the index has nothing more to return.
-/// - Under a RETURN with a LIMIT and no ORDER BY: the search stops once it
-///   has SKIP + LIMIT candidate rows (within the threshold, if there is one).
+/// - Under a RETURN with a LIMIT and no ORDER BY: SKIP + LIMIT nodes (each
+///   has at least one row), within the threshold if there is one.
+/// - With a threshold alone (`< t` or `<= t`, a literal or a parameter):
+///   every candidate within it. The search widens (doubling k) until the
+///   farthest result is beyond the threshold or there are no more.
 /// - Otherwise: the `DEFAULT_K` nearest candidate nodes.
 ///
 /// Rows come out nearest first and carry their distance. What remains
-/// approximate is the index itself: HNSW can miss a true neighbour, so a
-/// candidate within the threshold is occasionally left out.
+/// approximate is the graph search of a large set: HNSW can miss a true
+/// neighbour, so a candidate within the threshold is occasionally left out.
 pub const VectorSearchWithInput = struct {
     /// Input operator providing candidate nodes to filter against
     input: Operator,
@@ -202,12 +204,8 @@ pub const VectorSearchWithInput = struct {
     current_index: usize,
     /// Current row index within the active node group
     current_node_row_index: usize,
-    /// Input rows grouped by node, for the nodes the search returned
+    /// Input rows grouped by node
     rows_by_node: std.AutoHashMapUnmanaged(NodeId, Candidate),
-    /// Input rows whose node the search has not returned (yet): the bare
-    /// ones as their node, the others in full
-    pending_bare: std.ArrayListUnmanaged(NodeId) = .empty,
-    pending_rows: std.ArrayListUnmanaged(Row) = .empty,
     /// Row built for candidates that carried nothing but their node
     scratch_row: ?*Row,
     /// Whether opened
@@ -389,103 +387,88 @@ pub const VectorSearchWithInput = struct {
             self.node_cap = DEFAULT_K;
         }
 
-        // Search first, then keep by node only the input rows whose node the
-        // index returned. The rest wait in the pending lists in case the
-        // search has to widen. A large label scan is thus only hashed
-        // against the results, not stored.
         const first = try self.input.next(ctx);
         if (empty or first == null) return;
         if (rows_wanted) |wanted| {
             if (wanted == 0) return;
         }
 
-        var k: u32 = blk: {
-            const start: usize = rows_wanted orelse self.node_cap orelse DEFAULT_K;
-            break :blk @intCast(@max(@min(start, std.math.maxInt(u32) / 2), 16));
-        };
-        var found: std.AutoHashMapUnmanaged(NodeId, void) = .{};
-        defer found.deinit(self.allocator);
-        try self.search(ctx, query_vector, k, &found);
-
+        // Every input row, grouped by node; the nodes are what the search
+        // ranks.
         const bare_mask: u16 = @as(u16, 1) << @intCast(self.output_slot);
         var next_row = first;
         while (next_row) |row| : (next_row = try self.input.next(ctx)) {
             const slot_val = row.getSlot(self.output_slot) orelse continue;
             const node_id = slot_val.asNodeId() orelse continue;
             const bare = row.populated == bare_mask and row.getDistance(self.output_slot) == 0 and row.getScore(self.output_slot) == 0;
-            if (found.contains(node_id)) {
-                const candidate = try self.candidateFor(node_id);
-                if (bare) {
-                    candidate.bare_rows += 1;
-                } else {
-                    candidate.rows.append(self.allocator, row.*) catch return OperatorError.OutOfMemory;
-                }
-            } else if (bare) {
-                self.pending_bare.append(self.allocator, node_id) catch return OperatorError.OutOfMemory;
+            const candidate = try self.candidateFor(node_id);
+            if (bare) {
+                candidate.bare_rows += 1;
             } else {
-                self.pending_rows.append(self.allocator, row.*) catch return OperatorError.OutOfMemory;
+                candidate.rows.append(self.allocator, row.*) catch return OperatorError.OutOfMemory;
             }
         }
+        const node_count = self.rows_by_node.count();
+        if (node_count == 0) return;
 
-        // Widen the search until the answer is complete.
+        const ids = self.allocator.alloc(NodeId, node_count) catch return OperatorError.OutOfMemory;
+        defer self.allocator.free(ids);
+        var keys = self.rows_by_node.keyIterator();
+        var n: usize = 0;
+        while (keys.next()) |id| : (n += 1) ids[n] = id.*;
+        const member: database_mod.VectorFilter = .{
+            .context = &self.rows_by_node,
+            .allowsFn = struct {
+                fn allows(context: *const anyopaque, node_id: NodeId) bool {
+                    const map: *const std.AutoHashMapUnmanaged(NodeId, Candidate) = @ptrCast(@alignCast(context));
+                    return map.contains(node_id);
+                }
+            }.allows,
+        };
+
+        // Each result is a candidate node with at least one row, so a LIMIT
+        // or a node cap needs that many nodes; a threshold alone needs the
+        // search widened until it passes the threshold.
+        var k: u32 = blk: {
+            const start: usize = rows_wanted orelse self.node_cap orelse DEFAULT_K;
+            break :blk @intCast(@max(@min(start, node_count, std.math.maxInt(u32) / 2), 1));
+        };
+        var found: std.AutoHashMapUnmanaged(NodeId, void) = .{};
+        defer found.deinit(self.allocator);
         var exhausted = false;
         while (true) {
+            try self.search(ctx, query_vector, k, ids, member, &found);
             const results = self.results orelse break;
-
-            // The index had no more to give.
+            // There are no more to give.
             if (results.len < k) {
                 exhausted = true;
                 break;
             }
-            if (self.threshold) |t| {
-                // Everything further out is beyond the threshold too.
-                if (!self.within(results[results.len - 1].distance, t)) break;
-            }
-            // Every candidate has been found.
-            if (self.pending_bare.items.len == 0 and self.pending_rows.items.len == 0) break;
-            if (rows_wanted != null or self.node_cap != null) {
-                var matched_rows: usize = 0;
-                var matched_nodes: usize = 0;
-                for (results) |result| {
-                    if (self.threshold) |t| {
-                        if (!self.within(result.distance, t)) break;
-                    }
-                    const candidate = self.rows_by_node.get(result.node_id) orelse continue;
-                    matched_rows += candidate.count();
-                    matched_nodes += 1;
-                }
-                if (rows_wanted) |wanted| {
-                    if (matched_rows >= wanted) break;
-                }
-                if (self.node_cap) |cap| {
-                    if (matched_nodes >= cap) break;
-                }
-            }
-            if (k >= std.math.maxInt(u32) / 2) break;
-            k *= 2;
-            try self.search(ctx, query_vector, k, &found);
-            try self.claimPending(&found);
+            if (rows_wanted != null or self.node_cap != null) break;
+            const t = self.threshold orelse break;
+            // Everything further out is beyond the threshold too.
+            if (!self.within(results[results.len - 1].distance, t)) break;
+            if (k >= node_count or k >= std.math.maxInt(u32) / 2) break;
+            k = @intCast(@min(@as(usize, k) * 2, node_count));
         }
 
-        // next() walks the results and skips nodes that are not candidates.
-        // When the whole index has been searched, candidates it did not
-        // return are measured directly.
-        if (exhausted) {
-            try self.claimPending(null);
-            try self.measureMissing(ctx, query_vector, &found);
-        }
+        // next() walks the results. Candidates a complete search did not
+        // return (ones the graph could not reach) are measured directly.
+        if (exhausted) try self.measureMissing(ctx, query_vector, &found);
     }
 
-    /// Ask the index for the k nearest vectors; `found` becomes their nodes.
+    /// Ask for the k nearest vectors among `ids`; `found` becomes their nodes.
     fn search(
         self: *Self,
         ctx: *ExecutionContext,
         query_vector: []const f32,
         k: u32,
+        ids: []const NodeId,
+        member: database_mod.VectorFilter,
         found: *std.AutoHashMapUnmanaged(NodeId, void),
     ) OperatorError!void {
         self.freeResults();
-        const results = self.database.vectorSearchInTxn(ctx.txn, query_vector, k, null) catch |err|
+        const results = self.database.vectorSearchAmongInTxn(ctx.txn, query_vector, k, null, ids, member) catch |err|
             return ctx.storageFailure(err, "searching the vector index", .{});
         self.results = results;
         found.clearRetainingCapacity();
@@ -499,44 +482,12 @@ pub const VectorSearchWithInput = struct {
         return gop.value_ptr;
     }
 
-    /// Move the pending rows whose node is in `found` (every pending row,
-    /// when `found` is null) to their candidates, keeping each node's rows
-    /// in input order.
-    fn claimPending(self: *Self, found: ?*const std.AutoHashMapUnmanaged(NodeId, void)) OperatorError!void {
-        var kept: usize = 0;
-        for (self.pending_bare.items) |node_id| {
-            if (found == null or found.?.contains(node_id)) {
-                const candidate = try self.candidateFor(node_id);
-                candidate.bare_rows += 1;
-            } else {
-                self.pending_bare.items[kept] = node_id;
-                kept += 1;
-            }
-        }
-        self.pending_bare.shrinkRetainingCapacity(kept);
-
-        kept = 0;
-        for (self.pending_rows.items) |*row| {
-            // Checked when the row was set aside.
-            const node_id = row.getSlot(self.output_slot).?.asNodeId().?;
-            if (found == null or found.?.contains(node_id)) {
-                const candidate = try self.candidateFor(node_id);
-                candidate.rows.append(self.allocator, row.*) catch return OperatorError.OutOfMemory;
-            } else {
-                self.pending_rows.items[kept] = row.*;
-                kept += 1;
-            }
-        }
-        self.pending_rows.shrinkRetainingCapacity(kept);
-    }
-
-    /// Add to the results, in distance order, the candidates an exhaustive
+    /// Add to the results, in distance order, the candidates a complete
     /// search did not return (`found` holds the nodes it did).
     ///
-    /// Such a candidate is either without a vector or one the index could
+    /// Such a candidate is either without a vector or one the graph could
     /// not reach: HNSW can leave a point unreachable from its entry point, as
     /// when a tight cluster's neighbour lists all point inside the cluster.
-    /// Measuring them costs no more than the exhaustive search already did.
     fn measureMissing(
         self: *Self,
         ctx: *ExecutionContext,
@@ -672,10 +623,6 @@ pub const VectorSearchWithInput = struct {
         }
         self.rows_by_node.deinit(self.allocator);
         self.rows_by_node = .{};
-        self.pending_bare.deinit(self.allocator);
-        self.pending_bare = .empty;
-        self.pending_rows.deinit(self.allocator);
-        self.pending_rows = .empty;
     }
 };
 

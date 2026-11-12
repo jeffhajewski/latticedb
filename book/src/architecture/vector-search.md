@@ -443,16 +443,19 @@ Implementation details:
    or invalid on open, the whole graph is rebuilt from the stored vectors.
 3. **Cosine reads back normalised**: the file keeps only the unit-length copy
    of each vector, so the original magnitude is not recoverable.
-4. **Cypher `<=>` widens until it has enough candidates**: the query planner asks
-   the index for neighbours, doubling the number, until it has every pattern
-   candidate within the threshold, or enough rows for the `LIMIT` (see
-   [Query Execution](./query-execution.md)). A label whose nodes are far from the
-   query vector can therefore take several rounds, up to a search of the whole
-   index.
+4. **Filtered search is exact or approximate by size**: Cypher `<=>` searches
+   among the pattern's candidate nodes (`Database.vectorSearchAmongInTxn`). A set
+   of `count` nodes with `count² ≤ ef_search × m_max0 × vectors` is measured node
+   by node (exact); a larger one goes through the graph with the set as a filter
+   (`HnswIndex.searchFiltered`), whose beam keeps only members as results and
+   walks through the rest. The crossover is where the two measured the same at
+   10k and 100k vectors of 128 dimensions. A threshold with no `LIMIT` still
+   doubles `k` until the farthest result passes it.
 5. **Single-threaded**: No concurrent insert/search yet
 
 ## Future Enhancements
 
 1. **Concurrent access**: Reader-writer locks for parallel search
 2. **Product quantization**: Compress vectors for larger datasets
-3. **Filtered search**: Push label/property predicates into the index search
+3. **Predicate push-down**: a `<=>` predicate combined with others through `AND`
+   is evaluated row by row; those predicates could become the search's filter

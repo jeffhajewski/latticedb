@@ -76,8 +76,21 @@ pub const BufferFrame = struct {
 pub const BufferPool = struct {
     /// All frames in the pool
     frames: []BufferFrame,
-    /// Maps page IDs to frame IDs for quick lookup
+    /// Maps page IDs to frame IDs for quick lookup.
+    ///
+    /// Every eviction removes a key and every miss adds one, and the map
+    /// marks a removed slot with a tombstone it never clears on its own. A
+    /// lookup of a page that is not there probes until it reaches a slot
+    /// that was never used, so once churn has turned most of those into
+    /// tombstones each miss walks much of the table. Removals go through
+    /// `forgetPage`, which rehashes the table often enough to keep free
+    /// slots, and the table is rebuilt at its usual size once the frames
+    /// beyond the pool are given back, so a load that grew it does not
+    /// leave it large.
     page_table: std.AutoHashMap(PageId, FrameId),
+    /// Keys removed from `page_table` since it was last rehashed: an upper
+    /// bound on its tombstones.
+    page_table_removals: usize = 0,
     /// List of free (unused) frame IDs
     free_list: std.ArrayList(FrameId),
     /// Clock hand position for eviction algorithm
@@ -257,7 +270,7 @@ pub const BufferPool = struct {
             // page and lets go, and the frame is then reclaimed like any
             // other unpinned one.
             self.mutex.lock();
-            _ = self.page_table.remove(page_id);
+            self.forgetPage(page_id);
             frame.page_id = NULL_PAGE;
             const others = frame.pin_count.fetchSub(1, .monotonic) - 1;
             frame.latch.releaseExclusive();
@@ -515,18 +528,21 @@ pub const BufferPool = struct {
 
         for (self.frames, 0..) |*frame, frame_index| {
             if (frame.page_id == NULL_PAGE) continue;
-            _ = self.page_table.remove(frame.page_id);
             frame.page_id = NULL_PAGE;
             frame.usage_count = 0;
             self.free_list.append(self.allocator, @intCast(frame_index)) catch return BufferPoolError.IoError;
         }
         for (self.overflow.items) |*slot| {
             const frame = slot.* orelse continue;
-            if (frame.page_id != NULL_PAGE) _ = self.page_table.remove(frame.page_id);
             self.allocator.free(frame.data);
             self.allocator.destroy(frame);
             slot.* = null;
         }
+        self.overflow.clearRetainingCapacity();
+        // Every page is gone, so the table starts over, without tombstones
+        // and at its usual size.
+        self.page_table.clearRetainingCapacity();
+        self.resizePageTable();
 
         return self.pm.truncateFreeTail() catch return BufferPoolError.IoError;
     }
@@ -636,17 +652,78 @@ pub const BufferPool = struct {
         self.mutex.lock();
         defer self.mutex.unlock();
 
+        var released: usize = 0;
         for (self.overflow.items) |*slot| {
             const frame = slot.* orelse continue;
             if (frame.isPinned() or frame.dirty) continue;
+            // Removed directly: the table is rebuilt below, which clears
+            // these tombstones with the rest.
             if (frame.page_id != NULL_PAGE) _ = self.page_table.remove(frame.page_id);
             self.allocator.free(frame.data);
             self.allocator.destroy(frame);
             slot.* = null;
+            released += 1;
         }
         while (self.overflow.items.len > 0 and self.overflow.items[self.overflow.items.len - 1] == null) {
             _ = self.overflow.pop();
         }
+        if (self.overflow.items.len == 0) self.overflow.clearAndFree(self.allocator);
+        if (released > 0) self.resizePageTable();
+    }
+
+    /// Take a page out of the page table. Caller must hold mutex.
+    fn forgetPage(self: *Self, page_id: PageId) void {
+        if (!self.page_table.remove(page_id)) return;
+        self.page_table_removals += 1;
+        // A quarter of the slots at most turn to tombstones between
+        // rehashes. The table is at most 80% full, so this leaves a free
+        // slot in every few for a probe to stop at, and the rehash, which
+        // walks every slot, costs a few slot visits per removal.
+        if (self.page_table_removals * 4 >= self.page_table.capacity()) {
+            self.page_table.rehash();
+            self.page_table_removals = 0;
+        }
+    }
+
+    /// Rebuild the page table at the size its entries need, or the pool's
+    /// frame count if that is more. The frames beyond the pool's size grow
+    /// it during a large load and it never shrinks on its own; a table many
+    /// times larger than its entries, full of tombstones, makes every miss
+    /// slow. Caller must hold mutex.
+    fn resizePageTable(self: *Self) void {
+        const wanted: u32 = @intCast(@max(self.frame_count, self.page_table.count()));
+        var table = std.AutoHashMap(PageId, FrameId).init(self.allocator);
+        if (table.ensureTotalCapacity(wanted)) |_| {
+            if (table.capacity() < self.page_table.capacity()) {
+                var it = self.page_table.iterator();
+                while (it.next()) |entry| table.putAssumeCapacityNoClobber(entry.key_ptr.*, entry.value_ptr.*);
+                self.page_table.deinit();
+                self.page_table = table;
+                self.page_table_removals = 0;
+                return;
+            }
+        } else |_| {}
+        // Already the right size, or no memory for a new one: clear the
+        // tombstones in place.
+        table.deinit();
+        self.page_table.rehash();
+        self.page_table_removals = 0;
+    }
+
+    /// How many slots of the page table have never held a key since it was
+    /// last rehashed or rebuilt. A lookup of a page that is not in the pool
+    /// probes until it reaches one. For tests.
+    pub fn pageTableFreeSlots(self: *Self) usize {
+        self.mutex.lock();
+        defer self.mutex.unlock();
+        const capacity = self.page_table.capacity();
+        const metadata = self.page_table.unmanaged.metadata orelse return 0;
+        var free: usize = 0;
+        for (metadata[0..capacity]) |slot| {
+            // A slot never used is all zero bits; a tombstone is not.
+            if (@as(u8, @bitCast(slot)) == 0) free += 1;
+        }
+        return free;
     }
 
     /// Grow the pool by one frame. Caller must hold mutex.
@@ -722,7 +799,7 @@ pub const BufferPool = struct {
             }
 
             // Found a clean victim - evict it
-            _ = self.page_table.remove(frame.page_id);
+            self.forgetPage(frame.page_id);
             frame.page_id = NULL_PAGE;
 
             self.advanceClock();

@@ -560,3 +560,104 @@ test "buffer_pool: ldur a fetch of a page still being read waits for it" {
     try std.testing.expectEqual(@as(u8, 0x5A), first_seen.load(.acquire));
     try std.testing.expectEqual(@as(u8, 0x5A), second_seen.load(.acquire));
 }
+
+// ============================================================================
+// Contract: a load larger than the pool leaves it its usual size, and misses
+// stay cheap however long the pool has been evicting
+// ============================================================================
+
+test "buffer_pool: ldur a load larger than the pool leaves the page table its usual size" {
+    const allocator = std.testing.allocator;
+
+    var posix_vfs = PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const path = try createTempPath(allocator, "bigload");
+    defer allocator.free(path);
+    defer vfs_impl.delete(path) catch {};
+
+    var pm = try PageManager.init(allocator, vfs_impl, path, .{ .create = true });
+    defer pm.deinit();
+
+    const frame_count = 16;
+    var bp = try BufferPool.init(allocator, &pm, frame_count * pm.getPageSize());
+    defer bp.deinit();
+
+    // Dirty far more pages than the pool holds, as a large commit does. The
+    // pool grows past its size to keep them, and its page table with it.
+    const page_count = 2000;
+    var pages: [page_count]u32 = undefined;
+    for (&pages, 0..) |*page_id, i| {
+        page_id.* = try pm.allocatePage();
+        const frame = try bp.fetchPage(page_id.*, .exclusive);
+        @memset(frame.data, @truncate(i));
+        bp.unpinPage(frame, true);
+    }
+    try std.testing.expect(bp.getStats().total_frames >= page_count);
+    try std.testing.expect(bp.page_table.capacity() >= page_count);
+
+    _ = try bp.flushAll();
+
+    // The flush gives back the frames beyond the pool's size, and the page
+    // table goes back to a size for the pool's own frames: one many times
+    // larger, full of tombstones, makes every miss walk it.
+    try std.testing.expectEqual(@as(usize, frame_count), bp.getStats().total_frames);
+    try std.testing.expectEqual(@as(usize, 0), bp.overflow.items.len);
+    try std.testing.expect(bp.page_table.capacity() <= 4 * frame_count);
+
+    // Read everything back twice over, every fetch a miss that evicts. A
+    // removed key leaves a tombstone, and a miss probes until it finds a
+    // slot that never held one; the table must keep such slots.
+    for (0..2) |_| {
+        for (pages, 0..) |page_id, i| {
+            const frame = try bp.fetchPage(page_id, .shared);
+            defer bp.unpinPage(frame, false);
+            try std.testing.expectEqual(@as(u8, @truncate(i)), frame.data[100]);
+        }
+    }
+    try std.testing.expect(bp.page_table.capacity() <= 4 * frame_count);
+    try std.testing.expect(bp.pageTableFreeSlots() * 5 >= bp.page_table.capacity());
+}
+
+test "buffer_pool: ldur long eviction churn keeps free slots in the page table" {
+    const allocator = std.testing.allocator;
+
+    var posix_vfs = PosixVfs.init(allocator);
+    const vfs_impl = posix_vfs.vfs();
+
+    const path = try createTempPath(allocator, "churn");
+    defer allocator.free(path);
+    defer vfs_impl.delete(path) catch {};
+
+    var pm = try PageManager.init(allocator, vfs_impl, path, .{ .create = true });
+    defer pm.deinit();
+
+    const frame_count = 16;
+    var bp = try BufferPool.init(allocator, &pm, frame_count * pm.getPageSize());
+    defer bp.deinit();
+
+    // Pages written a few at a time, so the pool never grows past its size.
+    const page_count = 200;
+    var pages: [page_count]u32 = undefined;
+    for (&pages, 0..) |*page_id, i| {
+        page_id.* = try pm.allocatePage();
+        const frame = try bp.fetchPage(page_id.*, .exclusive);
+        @memset(frame.data, @truncate(i));
+        bp.unpinPage(frame, true);
+        if (i % 4 == 3) _ = try bp.flushAll();
+    }
+    _ = try bp.flushAll();
+    try std.testing.expectEqual(@as(usize, 0), bp.overflow.items.len);
+
+    // Thousands of misses, each evicting a page. Each eviction leaves a
+    // tombstone; unless the table is rehashed, the slots that never held a
+    // key run out and every miss probes the whole table.
+    for (0..20) |_| {
+        for (pages, 0..) |page_id, i| {
+            const frame = try bp.fetchPage(page_id, .shared);
+            defer bp.unpinPage(frame, false);
+            try std.testing.expectEqual(@as(u8, @truncate(i)), frame.data[100]);
+        }
+    }
+    try std.testing.expect(bp.pageTableFreeSlots() * 5 >= bp.page_table.capacity());
+}

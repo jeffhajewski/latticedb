@@ -40,6 +40,7 @@ const materialize_ops = @import("operators/materialize.zig");
 const cross_product_ops = @import("operators/cross_product.zig");
 const union_ops = @import("operators/union.zig");
 const optional_ops = @import("operators/optional.zig");
+const path_ops = @import("operators/path.zig");
 
 const btree = @import("../storage/btree.zig");
 const BTree = btree.BTree;
@@ -660,6 +661,9 @@ pub const QueryPlanner = struct {
         // The pattern starts with a scan of every node and nothing on top of
         // it, which a relationship type can replace.
         var starts_with_all_nodes = false;
+        // A named path is put together from the slots its pattern fills.
+        var path_start: ?u8 = null;
+        var path_steps: std.ArrayList(path_ops.Step) = .empty;
 
         for (pattern.elements, 0..) |element, element_index| {
             switch (element) {
@@ -965,6 +969,7 @@ pub const QueryPlanner = struct {
                     }
 
                     prev_node_slot = slot;
+                    if (path_start == null) path_start = slot;
                 },
                 .edge => |edge_pattern| {
                     // Need previous node to expand from
@@ -1006,6 +1011,12 @@ pub const QueryPlanner = struct {
                             edge_slot = try self.allocateSlot();
                             edge_var_name = try self.bindInternalVariable(edge_slot.?, .edge);
                         }
+                    }
+
+                    // A named path needs every relationship it goes through.
+                    if (edge_slot == null and pattern.path_variable != null and edge_pattern.quantifier == null) {
+                        edge_slot = try self.allocateSlot();
+                        _ = try self.bindInternalVariable(edge_slot.?, .edge);
                     }
 
                     // Relationship uniqueness within the MATCH clause.
@@ -1062,6 +1073,10 @@ pub const QueryPlanner = struct {
                         ) catch return PlannerError.OutOfMemory;
                         op = scan.operator();
                         self.last_scan_kind = .edge_type_scan;
+                        if (pattern.path_variable != null) {
+                            path_steps.append(self.allocator, .{ .single = .{ .edge_slot = edge_slot.?, .node_slot = target_slot } }) catch
+                                return PlannerError.OutOfMemory;
+                        }
                     } else if (edge_pattern.quantifier) |quant| {
                         // Variable-length path: use VariableLengthExpand
                         const var_expand = var_expand_ops.VariableLengthExpand.init(
@@ -1078,6 +1093,12 @@ pub const QueryPlanner = struct {
                             return PlannerError.OutOfMemory;
                         };
                         var_expand.path_slot = path_slot;
+                        if (pattern.path_variable != null) {
+                            const walk_slot = try self.allocateSlot();
+                            _ = try self.bindInternalVariable(walk_slot, .alias);
+                            var_expand.walk_slot = walk_slot;
+                            path_steps.append(self.allocator, .{ .walk = walk_slot }) catch return PlannerError.OutOfMemory;
+                        }
                         op = var_expand.operator();
                     } else {
                         // Regular single-hop expand
@@ -1093,6 +1114,10 @@ pub const QueryPlanner = struct {
                         ) catch {
                             return PlannerError.OutOfMemory;
                         };
+                        if (pattern.path_variable != null) {
+                            path_steps.append(self.allocator, .{ .single = .{ .edge_slot = edge_slot.?, .node_slot = target_slot } }) catch
+                                return PlannerError.OutOfMemory;
+                        }
                         op = expand.operator();
                     }
 
@@ -1126,6 +1151,15 @@ pub const QueryPlanner = struct {
                     prev_node_slot = target_slot;
                 },
             }
+        }
+
+        if (pattern.path_variable) |name| {
+            const path_slot = try self.allocateNamedSlot(name);
+            try self.bindVariable(name, path_slot, .alias);
+            const steps = path_steps.toOwnedSlice(self.allocator) catch return PlannerError.OutOfMemory;
+            const bind = path_ops.BindPath.init(self.allocator, op orelse return PlannerError.InvalidQuery, path_start.?, steps, path_slot) catch
+                return PlannerError.OutOfMemory;
+            op = bind.operator();
         }
 
         return op orelse PlannerError.InvalidQuery;

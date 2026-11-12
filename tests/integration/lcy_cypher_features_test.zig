@@ -468,3 +468,51 @@ test "lcy: OPTIONAL stays usable as a name and needs MATCH" {
     try expectResult(db, "optional match (o:Optional) return o.optional", "o.optional\n1");
     try expectFailure(db, "OPTIONAL (n) RETURN n", .parse, "Expected MATCH after OPTIONAL");
 }
+
+test "lcy: named paths" {
+    const path = "/tmp/lcy_paths.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedPeople(db);
+
+    // Fixed length: the nodes in order, the relationships between them.
+    try expectResult(db,
+        \\MATCH p = (a:P {name: 'ann'})-[:KNOWS]->(b)-[:KNOWS]->(c)
+        \\RETURN length(p) AS len, [nodes(p)[0].name, nodes(p)[1].name, nodes(p)[2].name] AS names, [relationships(p)[0].since, relationships(p)[1].since] AS since
+    , "len | names | since\n2 | [\"ann\", \"bob\", \"cy\"] | [2001, 2020]");
+    // A path as a value: a map of its nodes and relationships.
+    try expectResult(db, "MATCH p = (:P {name: 'bob'})-->() RETURN p", "p\n{nodes: [N, N], relationships: [E]}");
+    // Anonymous relationships and an incoming hop keep the order written.
+    try expectResult(db,
+        \\MATCH p = (c:P {name: 'cy'})<--(b:P {name: 'bob'}) RETURN [nodes(p)[0].name, nodes(p)[1].name, nodes(p)[2].name] AS names, length(p) AS len
+    , "names | len\n[\"cy\", \"bob\", null] | 1");
+    // A single node is a path of length 0.
+    try expectResult(db, "MATCH p = (d:P {name: 'dee'}) RETURN length(p), size(nodes(p)) AS n, relationships(p) AS r", "length(p) | n | r\n0 | 1 | []");
+    // Variable length: each walk is its own path.
+    try expectResult(db,
+        \\MATCH p = (a:P {name: 'ann'})-[:KNOWS*1..2]->(x)
+        \\RETURN [nodes(p)[0].name, nodes(p)[1].name, nodes(p)[2].name] AS names, length(p) AS len ORDER BY len, names
+    , "names | len\n[\"ann\", \"bob\", null] | 1\n[\"ann\", \"cy\", null] | 1\n[\"ann\", \"bob\", \"cy\"] | 2");
+    try expectResult(db,
+        \\MATCH p = (a:P {name: 'ann'})-[*0..1]->(x)-->(y) RETURN [nodes(p)[0].name, nodes(p)[1].name, nodes(p)[2].name] AS names ORDER BY names
+    , "names\n[\"ann\", \"bob\", \"cy\"]\n[\"ann\", \"bob\", null]\n[\"ann\", \"cy\", null]");
+    // Paths through WITH, compared, grouped and filtered on.
+    try expectResult(db,
+        \\MATCH p = (:P)-[:KNOWS*]->(c:P {name: 'cy'}) WITH p WHERE length(p) > 1 RETURN length(p) AS len, count(*) AS c
+    , "len | c\n2 | 1");
+    try expectResult(db, "MATCH p = (a)-->(b) MATCH q = (a)-->(b) RETURN count(*) AS c, sum(CASE WHEN p = q THEN 1 ELSE 0 END) AS same", "c | same\n3 | 3");
+    try expectResult(db, "MATCH p = (a:P)-->() RETURN DISTINCT length(p) AS l", "l\n1");
+    // From an unlabelled node by type, which walks the relationships of
+    // that type instead of expanding every node: the hop is still there.
+    try expectResult(db, "MATCH p = (a)-[:KNOWS]->(b) RETURN length(p) AS len, size(nodes(p)) AS n", "len | n\n1 | 2\n1 | 2\n1 | 2");
+    try expectResult(db,
+        \\MATCH p = (a)<-[:KNOWS]-(b) RETURN [nodes(p)[0].name, nodes(p)[1].name] AS names, relationships(p)[0] IS NOT NULL AS r ORDER BY names
+    , "names | r\n[\"bob\", \"ann\"] | true\n[\"cy\", \"ann\"] | true\n[\"cy\", \"bob\"] | true");
+    // In OPTIONAL MATCH a path that is not there is null.
+    try expectResult(db,
+        \\MATCH (d:P {name: 'dee'}) OPTIONAL MATCH p = (d)-->() RETURN p, length(p) AS len, nodes(p) AS ns
+    , "p | len | ns\nnull | null | null");
+    try expectFailure(db, "CREATE p = (:X)-[:R]->(:Y)", .parse, "A named path in CREATE is not supported");
+    try expectFailure(db, "MERGE p = (:X)", .parse, "A named path in MERGE is not supported");
+    try expectFailure(db, "MATCH p (a) RETURN a", .parse, "Expected '=' after a path variable");
+}

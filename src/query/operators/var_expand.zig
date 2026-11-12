@@ -115,6 +115,9 @@ pub const VariableLengthExpand = struct {
     opened: bool,
     /// Allocator
     allocator: Allocator,
+    /// Where to put the walk that reached each result, as a path from the
+    /// source to the target, for a named path. Null when nothing needs it.
+    walk_slot: ?u8 = null,
 
     const Self = @This();
 
@@ -314,7 +317,26 @@ pub const VariableLengthExpand = struct {
             output_row.setSlot(slot, .{ .property = .{ .list_val = ids } });
         }
 
+        if (self.walk_slot) |slot| {
+            const walk = self.currentWalk() catch return OperatorError.OutOfMemory;
+            output_row.setSlot(slot, .{ .path = walk });
+        }
+
         return output_row;
+    }
+
+    /// The walk on the stack, from the source to the deepest node.
+    fn currentWalk(self: *Self) error{OutOfMemory}!*const executor.Path {
+        const frames = self.path_stack.items;
+        const nodes = try self.allocator.alloc(NodeId, frames.len);
+        const edges = try self.allocator.alloc(EdgeId, frames.len -| 1);
+        for (frames, 0..) |frame, i| {
+            nodes[i] = frame.node_id;
+            if (i > 0) edges[i - 1] = frame.via_edge.?;
+        }
+        const path = try self.allocator.create(executor.Path);
+        path.* = .{ .nodes = nodes, .edges = edges };
+        return path;
     }
 
     fn startTraversal(self: *Self) OperatorError!void {

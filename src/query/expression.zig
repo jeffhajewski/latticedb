@@ -121,6 +121,9 @@ pub const builtin_functions = [_]FunctionSpec{
     .{ .name = "labels", .min_args = 1, .max_args = 1, .signature = "(node)" },
     .{ .name = "properties", .min_args = 1, .max_args = 1, .signature = "(node, relationship or map)" },
     .{ .name = "score", .min_args = 1, .max_args = 1, .signature = "(a variable a @@ search matched)" },
+    .{ .name = "length", .min_args = 1, .max_args = 1, .signature = "(path)" },
+    .{ .name = "nodes", .min_args = 1, .max_args = 1, .signature = "(path)" },
+    .{ .name = "relationships", .min_args = 1, .max_args = 1, .signature = "(path)" },
 };
 
 /// The built-in scalar function called `name`, ignoring case.
@@ -173,6 +176,7 @@ pub fn typeName(value: EvalResult) []const u8 {
         .list_val => "list",
         .vector_val => "vector",
         .map_val => "map",
+        .path_val => "path",
     };
 }
 
@@ -284,6 +288,8 @@ pub const EvalResult = union(enum) {
     vector_val: []const f32,
     /// Map result (key-value pairs)
     map_val: []const MapEntry,
+    /// A path, in memory that lasts as long as the query.
+    path_val: *const executor.Path,
 
     pub const MapEntry = struct {
         key: []const u8,
@@ -316,6 +322,7 @@ pub const EvalResult = union(enum) {
             .list_val => |l| l.len > 0,
             .vector_val => |v| v.len > 0,
             .map_val => |m| m.len > 0,
+            .path_val => true,
         };
     }
 
@@ -411,7 +418,22 @@ pub const EvalResult = union(enum) {
                 }
                 break :blk .{ .map_val = entries };
             },
+            // A property cannot hold a path, or the nodes and relationships
+            // in it, so a path inside a list or map is kept as their ids.
+            .path_val => |path| try pathToPropertyValue(path.*, allocator),
         };
+    }
+
+    /// A path as a property value: `{nodes: [ids], relationships: [ids]}`.
+    pub fn pathToPropertyValue(path: executor.Path, allocator: Allocator) Allocator.Error!PropertyValue {
+        const nodes = try allocator.alloc(PropertyValue, path.nodes.len);
+        for (path.nodes, nodes) |id, *n| n.* = .{ .int_val = @intCast(id) };
+        const edges = try allocator.alloc(PropertyValue, path.edges.len);
+        for (path.edges, edges) |id, *e| e.* = .{ .int_val = @intCast(id) };
+        const entries = try allocator.alloc(PropertyValue.MapEntry, 2);
+        entries[0] = .{ .key = "nodes", .value = .{ .list_val = nodes } };
+        entries[1] = .{ .key = "relationships", .value = .{ .list_val = edges } };
+        return .{ .map_val = entries };
     }
 };
 
@@ -828,6 +850,7 @@ pub const ExpressionEvaluator = struct {
             .node_ref => |id| .{ .node_ref = id },
             .edge_ref => |id| .{ .edge_ref = id },
             .property => |pv| try EvalResult.fromPropertyValue(pv, self.allocator),
+            .path => |p| .{ .path_val = p },
         };
     }
 
@@ -1486,7 +1509,41 @@ pub const ExpressionEvaluator = struct {
             return EvalError.TypeError;
         }
 
+        if (std.ascii.eqlIgnoreCase(f.name, "length") or
+            std.ascii.eqlIgnoreCase(f.name, "nodes") or
+            std.ascii.eqlIgnoreCase(f.name, "relationships"))
+        {
+            return self.evaluatePathFunction(f, row, ctx);
+        }
+
         return EvalError.UnknownFunction;
+    }
+
+    /// `length(p)`, the number of relationships in a path; `nodes(p)` and
+    /// `relationships(p)`, its nodes and relationships in order. Null for a
+    /// null path; anything else is a type error.
+    fn evaluatePathFunction(
+        self: *Self,
+        f: *const ast.FunctionCall,
+        row: *const Row,
+        ctx: *const ExecutionContext,
+    ) EvalError!EvalResult {
+        if (f.arguments.len != 1) return EvalError.InvalidArgumentCount;
+        const arg = try self.evaluate(f.arguments[0], row, ctx);
+        const path = switch (arg) {
+            .path_val => |p| p,
+            .null_val => return .{ .null_val = {} },
+            else => return EvalError.TypeError,
+        };
+        if (std.ascii.eqlIgnoreCase(f.name, "length")) return .{ .int_val = @intCast(path.edges.len) };
+        if (std.ascii.eqlIgnoreCase(f.name, "nodes")) {
+            const out = self.allocator.alloc(EvalResult, path.nodes.len) catch return EvalError.OutOfMemory;
+            for (path.nodes, out) |id, *o| o.* = .{ .node_ref = id };
+            return .{ .list_val = out };
+        }
+        const out = self.allocator.alloc(EvalResult, path.edges.len) catch return EvalError.OutOfMemory;
+        for (path.edges, out) |id, *o| o.* = .{ .edge_ref = id };
+        return .{ .list_val = out };
     }
 
     /// Evaluate a list expression
@@ -1607,6 +1664,10 @@ pub const ExpressionEvaluator = struct {
                 .vector_val => |r| l.len == r.len and for (l, r) |a, b| {
                     if (a != b) break false;
                 } else true,
+                else => false,
+            },
+            .path_val => |l| switch (right) {
+                .path_val => |r| std.mem.eql(NodeId, l.nodes, r.nodes) and std.mem.eql(EdgeId, l.edges, r.edges),
                 else => false,
             },
             .null_val => return .{ .null_val = {} },

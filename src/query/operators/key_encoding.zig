@@ -41,6 +41,10 @@ pub fn appendSlotValueKey(buf: *std.ArrayList(u8), allocator: Allocator, value: 
             try buf.append(allocator, 3);
             try appendPropertyValueKey(buf, allocator, pv);
         },
+        .path => |p| {
+            try buf.append(allocator, 4);
+            try appendPathKey(buf, allocator, p.*);
+        },
     }
 }
 
@@ -57,6 +61,12 @@ fn appendFloatKey(buf: *std.ArrayList(u8), allocator: Allocator, f: f64) !void {
     try buf.append(allocator, 3);
     const canonical = if (std.math.isNan(f)) std.math.nan(f64) else f;
     try appendU64(buf, allocator, @bitCast(canonical));
+}
+
+fn appendPathKey(buf: *std.ArrayList(u8), allocator: Allocator, path: executor.Path) !void {
+    try appendLen(buf, allocator, path.nodes.len);
+    for (path.nodes) |id| try appendU64(buf, allocator, id);
+    for (path.edges) |id| try appendU64(buf, allocator, id);
 }
 
 pub fn appendPropertyValueKey(buf: *std.ArrayList(u8), allocator: Allocator, value: PropertyValue) !void {
@@ -149,6 +159,10 @@ pub fn appendEvalResultKey(buf: *std.ArrayList(u8), allocator: Allocator, value:
                 try appendBytes(buf, allocator, entry.key);
                 try appendEvalResultKey(buf, allocator, entry.value);
             }
+        },
+        .path_val => |p| {
+            try buf.append(allocator, 11);
+            try appendPathKey(buf, allocator, p.*);
         },
     }
 }

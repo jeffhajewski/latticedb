@@ -657,6 +657,7 @@ pub const Parser = struct {
 
         // Parse first pattern (reuse same pattern parsing as MATCH)
         if (self.parsePattern()) |pattern| {
+            if (self.refuseNamedPath(pattern, "CREATE")) return null;
             patterns.append(self.arena.allocator(), pattern) catch return null;
         } else {
             return null;
@@ -665,6 +666,7 @@ pub const Parser = struct {
         // Parse additional comma-separated patterns
         while (self.match(.comma)) {
             if (self.parsePattern()) |pattern| {
+                if (self.refuseNamedPath(pattern, "CREATE")) return null;
                 patterns.append(self.arena.allocator(), pattern) catch return null;
             } else {
                 return null;
@@ -977,6 +979,7 @@ pub const Parser = struct {
 
         // Parse a single pattern (MERGE takes exactly one pattern)
         const pattern = self.parsePattern() orelse return null;
+        if (self.refuseNamedPath(pattern, "MERGE")) return null;
 
         // Parse optional ON CREATE SET / ON MATCH SET
         var on_create: ?[]ast.SetItem = null;
@@ -1062,6 +1065,16 @@ pub const Parser = struct {
     fn parsePattern(self: *Self) ?ast.Pattern {
         var elements: std.ArrayList(ast.PatternElement) = .empty;
 
+        // `p = (a)-->(b)`: a pattern starts with a node, so a name here
+        // names the path.
+        var path_variable: ?[]const u8 = null;
+        const path_location = self.currentLocation();
+        if (self.checkVariable()) {
+            path_variable = self.current.text;
+            self.advance();
+            if (!self.consume(.eq, "Expected '=' after a path variable")) return null;
+        }
+
         // Pattern must start with a node
         if (self.parseNodePattern()) |node| {
             const node_ptr = self.arena.allocator().create(ast.NodePattern) catch return null;
@@ -1094,7 +1107,16 @@ pub const Parser = struct {
 
         return .{
             .elements = elements.toOwnedSlice(self.arena.allocator()) catch return null,
+            .path_variable = path_variable,
+            .path_location = path_location,
         };
+    }
+
+    /// CREATE and MERGE do not bind a named path.
+    fn refuseNamedPath(self: *Self, pattern: ast.Pattern, comptime clause: []const u8) bool {
+        if (pattern.path_variable == null) return false;
+        self.errorAt(pattern.path_location, "A named path in " ++ clause ++ " is not supported");
+        return true;
     }
 
     fn checkEdgeStart(self: *Self) bool {

@@ -493,6 +493,7 @@ fn resultToSlotValue(result: EvalResult, allocator: Allocator) Allocator.Error!S
         .vector_val => |v| .{ .property = .{ .vector_val = v } },
         .list_val => .{ .property = try result.toPropertyValue(allocator) },
         .map_val => .{ .property = try result.toPropertyValue(allocator) },
+        .path_val => |p| .{ .path = p },
     };
 }
 

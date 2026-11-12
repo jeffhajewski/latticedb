@@ -1272,7 +1272,7 @@ fn evalResultToPropertyValue(result: EvalResult, allocator: Allocator) Allocator
         .string_val => |s| .{ .string_val = s },
         .bytes_val => |b| .{ .bytes_val = b },
         .vector_val => |v| .{ .vector_val = v },
-        .node_ref, .edge_ref => null, // Can't convert refs to property
+        .node_ref, .edge_ref, .path_val => null, // Can't convert refs to property
         .list_val, .map_val => try result.toPropertyValue(allocator),
     };
 }

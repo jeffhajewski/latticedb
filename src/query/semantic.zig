@@ -188,6 +188,7 @@ pub const SemanticAnalyzer = struct {
                     },
                 }
             }
+            if (pattern.path_variable) |name| self.registerVariable(name, .alias, pattern.path_location);
         }
     }
 

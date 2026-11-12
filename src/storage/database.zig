@@ -9670,7 +9670,29 @@ pub const Database = struct {
             .node_ref => |id| .{ .node_id = id },
             .edge_ref => |id| .{ .edge_id = id },
             .property => |prop| try self.propertyToResultValue(prop),
+            .path => |path| try self.pathToResultValue(path.*),
         };
+    }
+
+    /// A path as a result: `{nodes: [node, ...], relationships: [rel, ...]}`.
+    /// The C API has no path type, so a path reaches it as this map (with
+    /// the nodes and relationships as their ids).
+    fn pathToResultValue(self: *Self, path: executor_mod.Path) QueryError!ResultValue {
+        const a = self.allocator;
+        const nodes = a.alloc(ResultValue, path.nodes.len) catch return QueryError.OutOfMemory;
+        errdefer a.free(nodes);
+        for (path.nodes, nodes) |id, *n| n.* = .{ .node_id = id };
+        const edges = a.alloc(ResultValue, path.edges.len) catch return QueryError.OutOfMemory;
+        errdefer a.free(edges);
+        for (path.edges, edges) |id, *e| e.* = .{ .edge_id = id };
+        const entries = a.alloc(ResultValue.MapEntry, 2) catch return QueryError.OutOfMemory;
+        errdefer a.free(entries);
+        const nodes_key = a.dupe(u8, "nodes") catch return QueryError.OutOfMemory;
+        errdefer a.free(nodes_key);
+        const edges_key = a.dupe(u8, "relationships") catch return QueryError.OutOfMemory;
+        entries[0] = .{ .key = nodes_key, .value = .{ .list_val = nodes } };
+        entries[1] = .{ .key = edges_key, .value = .{ .list_val = edges } };
+        return .{ .map_val = entries };
     }
 
     /// Convert a PropertyValue to a ResultValue (recursive for lists/maps).

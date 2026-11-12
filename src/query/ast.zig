@@ -248,6 +248,9 @@ pub const UnwindClause = struct {
 /// A graph pattern (sequence of nodes and edges)
 pub const Pattern = struct {
     elements: []PatternElement,
+    /// `p` in `p = (a)-->(b)`: a variable bound to the whole path.
+    path_variable: ?[]const u8 = null,
+    path_location: SourceLocation = .{ .line = 0, .column = 0 },
 };
 
 /// Element in a pattern (node or edge)

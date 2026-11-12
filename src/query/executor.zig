@@ -144,6 +144,14 @@ pub fn diagnosticKind(err: anyerror) Diagnostic.Kind {
 // Slot Value
 // ============================================================================
 
+/// A path: its nodes in order and the relationships between them, one fewer
+/// than the nodes. A named path (`p = (a)-->(b)`) and the walk of a
+/// variable-length relationship are held as one.
+pub const Path = struct {
+    nodes: []const NodeId,
+    edges: []const EdgeId,
+};
+
 /// A value stored in a row slot
 pub const SlotValue = union(enum) {
     /// Slot is empty/unset
@@ -154,6 +162,8 @@ pub const SlotValue = union(enum) {
     edge_ref: EdgeId,
     /// Scalar property value
     property: PropertyValue,
+    /// A path, in memory that lasts as long as the query.
+    path: *const Path,
 
     const Self = @This();
 

@@ -211,6 +211,12 @@ test "parser: handles the syntax added after 0.16" {
         "OPTIONAL MATCH",
         "OPTIONAL (n)",
         "MATCH (optional) RETURN optional",
+        "MATCH p = (a)-[*1..3]->(b), q = (c) RETURN length(p), nodes(q), relationships(p)",
+        "MATCH p (a) RETURN p",
+        "MATCH p = RETURN p",
+        "CREATE p = (a)",
+        "MERGE p = (a)",
+        "MATCH p = = (a) RETURN p",
     };
     for (corpus) |input| try fuzzParser(allocator, input);
 }

@@ -515,12 +515,13 @@ fn keyFromSlot(row: *const Row, slot: u8, allocator: Allocator) Allocator.Error!
             .vector_val => |v| .{ .vector_val = v },
             else => try EvalResult.fromPropertyValue(pv, allocator),
         },
+        .path => |p| .{ .path_val = p },
     };
 }
 
 /// Where a value's type falls in the order of values of different types,
 /// following Cypher's orderability: maps, nodes, relationships, lists,
-/// strings, booleans, numbers, then null. Vectors sort with lists and bytes
+/// paths, strings, booleans, numbers, then null. Vectors sort with lists and bytes
 /// just before strings; Cypher has neither.
 fn typeRank(value: EvalResult) u8 {
     return switch (value) {
@@ -528,13 +529,21 @@ fn typeRank(value: EvalResult) u8 {
         .node_ref => 1,
         .edge_ref => 2,
         .list_val => 3,
-        .vector_val => 4,
-        .bytes_val => 5,
-        .string_val => 6,
-        .bool_val => 7,
-        .int_val, .float_val => 8,
-        .null_val => 9,
+        .path_val => 4,
+        .vector_val => 5,
+        .bytes_val => 6,
+        .string_val => 7,
+        .bool_val => 8,
+        .int_val, .float_val => 9,
+        .null_val => 10,
     };
+}
+
+fn orderIds(a: []const u64, b: []const u64) std.math.Order {
+    for (a[0..@min(a.len, b.len)], b[0..@min(a.len, b.len)]) |x, y| {
+        if (x != y) return std.math.order(x, y);
+    }
+    return std.math.order(a.len, b.len);
 }
 
 /// A total order over all values, used by ORDER BY.
@@ -581,6 +590,13 @@ pub fn orderValues(a: EvalResult, b: EvalResult) std.math.Order {
                 if (cmp != .eq) break :blk cmp;
             }
             break :blk std.math.order(av.len, bv.len);
+        },
+        // Paths order by their nodes, then their relationships.
+        .path_val => |av| blk: {
+            const bv = b.path_val;
+            const by_nodes = orderIds(av.nodes, bv.nodes);
+            if (by_nodes != .eq) break :blk by_nodes;
+            break :blk orderIds(av.edges, bv.edges);
         },
         .map_val => |av| blk: {
             // Maps have no natural order; size, then entry by entry, is

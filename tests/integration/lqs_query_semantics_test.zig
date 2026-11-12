@@ -704,3 +704,32 @@ test "lqs: <=> returns the search's distance, and ORDER BY it bounds the search"
     defer by_i.deinit();
     try std.testing.expectEqual(@as(usize, 1), by_i.rowCount());
 }
+
+// ============================================================================
+// The database's delete and endpoint rules, reported like every other failure
+// ============================================================================
+
+test "lqs: a refused delete and a relationship to a deleted node say why" {
+    const path = "/tmp/lattice_lqs_delete_rules.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try run(db, "CREATE (:D {i: 1})-[:R]->(:D {i: 2}), (:D {i: 3})");
+
+    try expectFailure(
+        db,
+        "MATCH (a:D {i: 1}) DELETE a",
+        .execution,
+        "NodeHasRelationships",
+        "Cannot delete node 1 because it still has relationships; delete them first, or use DETACH DELETE",
+    );
+    try expectFailure(
+        db,
+        "MATCH (a:D {i: 3}), (b:D {i: 2}) DELETE a CREATE (b)-[:R]->(a)",
+        .execution,
+        "NotFound",
+        "Cannot complete creating a relationship from node 2 to node 3: a node or relationship it needs does not exist, or was deleted earlier in the query",
+    );
+    // Both refusals left the graph as it was.
+    try std.testing.expectEqual(@as(i64, 3), try queryInt(db, "MATCH (n:D) RETURN count(n)"));
+    try std.testing.expectEqual(@as(i64, 1), try queryInt(db, "MATCH (:D)-[r:R]->(:D) RETURN count(r)"));
+}

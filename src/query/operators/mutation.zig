@@ -307,7 +307,7 @@ pub const CreateEdge = struct {
         );
 
         const edge_id = self.database.createEdgeAndGetId(ctx.txn, source_id, target_id, self.edge_type) catch |err|
-            return ctx.storageFailure(err, "creating a relationship", .{});
+            return ctx.storageFailure(err, "creating a relationship from node {d} to node {d}", .{ source_id, target_id });
 
         for (evaluated.items) |item| {
             self.database.setEdgePropertyById(ctx.txn, edge_id, item.key, item.value) catch |err| {
@@ -1791,7 +1791,7 @@ pub const MergeEdge = struct {
         }
 
         const edge_id = self.database.createEdgeAndGetId(ctx.txn, source_id, target_id, self.edge_type) catch |err|
-            return ctx.storageFailure(err, "creating a relationship", .{});
+            return ctx.storageFailure(err, "creating a relationship from node {d} to node {d}", .{ source_id, target_id });
 
         // MERGE pattern properties initialize newly created relationships.
         try self.applyEdgeSetItems(edge_id, self.properties, ctx, row);

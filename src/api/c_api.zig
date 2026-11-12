@@ -440,6 +440,18 @@ fn mapQueryFailureToError(failure: QueryFailure) lattice_error {
         .storage => return .err_io,
         .out_of_memory => return .err_out_of_memory,
     }
+    // One condition, one error code, whichever path reached it: a Cypher
+    // DELETE refused for a node with relationships returns what
+    // lattice_node_delete does, and a write to a node or relationship that
+    // does not exist (CREATE of a relationship whose end was deleted earlier
+    // in the query) what lattice_edge_create does. The diagnostic code and
+    // message stay as they are.
+    if (failure.stage == .execution) {
+        if (failure.code) |code| {
+            if (std.mem.eql(u8, code, "NodeHasRelationships")) return .err_has_relationships;
+            if (std.mem.eql(u8, code, "NotFound")) return .err_not_found;
+        }
+    }
     return switch (failure.stage) {
         .parse, .semantic => .err_invalid_arg,
         .plan, .execution => .err,

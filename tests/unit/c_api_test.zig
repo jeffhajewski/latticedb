@@ -2695,6 +2695,71 @@ test "c_api: semantic query error diagnostics include code and location" {
     _ = c_api.lattice_commit(txn);
 }
 
+/// Run `cypher` in a transaction of its own; the error code, and the
+/// diagnostic code when it failed, written into `code_buf`.
+fn lqsExecute(db: ?*lattice_database, cypher: [*:0]const u8, code_buf: []u8) !struct { err: lattice_error, code: []const u8 } {
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+    var query: ?*lattice_query = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_prepare(db, cypher, &query));
+    defer c_api.lattice_query_free(query);
+    var result: ?*lattice_result = null;
+    const err = c_api.lattice_query_execute(query, txn, &result);
+    var len: usize = 0;
+    if (err == .ok) {
+        c_api.lattice_result_free(result);
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+    } else {
+        const code_ptr = c_api.lattice_query_last_error_code(query);
+        try std.testing.expect(code_ptr != null);
+        const code = std.mem.sliceTo(code_ptr, 0);
+        @memcpy(code_buf[0..code.len], code);
+        len = code.len;
+        _ = c_api.lattice_rollback(txn);
+    }
+    return .{ .err = err, .code = code_buf[0..len] };
+}
+
+test "lqs c_api: a query refused by the delete or endpoint rule returns the direct call's code" {
+    const path = "/tmp/lattice_capi_lqs_rule_codes_test.db";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 0,
+    };
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer {
+        _ = c_api.lattice_close(db);
+        @import("compat").fs.cwd().deleteFile(path) catch {};
+        @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    }
+
+    var buf: [64]u8 = undefined;
+    const created = try lqsExecute(db, "CREATE (:D {i: 1})-[:R]->(:D {i: 2}), (:D {i: 3})", &buf);
+    try std.testing.expectEqual(lattice_error.ok, created.err);
+
+    // lattice_node_delete returns err_has_relationships for this node.
+    const refused = try lqsExecute(db, "MATCH (a:D {i: 1}) DELETE a", &buf);
+    try std.testing.expectEqual(lattice_error.err_has_relationships, refused.err);
+    try std.testing.expectEqualStrings("NodeHasRelationships", refused.code);
+
+    // lattice_edge_create returns err_not_found for an end that is gone.
+    const missing = try lqsExecute(db, "MATCH (a:D {i: 3}), (b:D {i: 2}) DELETE a CREATE (b)-[:R]->(a)", &buf);
+    try std.testing.expectEqual(lattice_error.err_not_found, missing.err);
+    try std.testing.expectEqualStrings("NotFound", missing.code);
+
+    // Any other execution failure keeps the generic code.
+    const other = try lqsExecute(db, "RETURN 1 / 0", &buf);
+    try std.testing.expectEqual(lattice_error.err, other.err);
+}
+
 test "c_api: txn-scoped graph reads and queries hide uncommitted changes" {
     const path = "/tmp/lattice_capi_txn_graph_snapshot_test.db";
     @import("compat").fs.cwd().deleteFile(path) catch {};

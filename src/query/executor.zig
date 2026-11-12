@@ -572,6 +572,8 @@ pub const ExecutionContext = struct {
             error.TransactionConflict,
             error.InvalidArgument,
             error.MissingIndex,
+            error.NotFound,
+            error.NodeHasRelationships,
             => true,
             else => false,
         };
@@ -586,6 +588,8 @@ pub const ExecutionContext = struct {
             error.TransactionConflict => "another transaction conflicts with this one",
             error.InvalidArgument => "an argument is not valid",
             error.MissingIndex => "the index does not exist",
+            error.NotFound => "a node or relationship it needs does not exist, or was deleted earlier in the query",
+            error.NodeHasRelationships => "the node still has relationships; delete them first, or use DETACH DELETE",
             else => @errorName(err),
         };
     }

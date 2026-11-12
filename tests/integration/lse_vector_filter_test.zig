@@ -10,7 +10,10 @@ const Database = lattice.storage.database.Database;
 const VectorSearchResult = lattice.storage.database.VectorSearchResult;
 
 const DIMS = 16;
-const COUNT = 3000;
+const COUNT = 1000;
+/// A build list this short keeps the graph good enough for these sizes and
+/// the inserts cheap in a Debug build.
+const EF_CONSTRUCTION = 48;
 
 fn removeFiles(comptime path: []const u8) void {
     @import("compat").fs.cwd().deleteFile(path) catch {};
@@ -21,7 +24,7 @@ fn openDb(allocator: std.mem.Allocator, comptime path: []const u8) !*Database {
     removeFiles(path);
     return Database.open(allocator, path, .{
         .create = true,
-        .config = .{ .enable_vector = true, .vector_dimensions = DIMS },
+        .config = .{ .enable_vector = true, .vector_dimensions = DIMS, .vector_ef_construction = EF_CONSTRUCTION },
     });
 }
 
@@ -130,7 +133,9 @@ test "vector filter: a large set goes through the graph and still holds only its
     }
     const half = kept.items;
     const hnsw = &db.hnsw_index.?;
-    try std.testing.expect(!Database.exactScanPays(half.len, hnsw.vector_count, hnsw.config.ef_search, hnsw.config.m_max0));
+    // A narrow beam makes the graph cheaper than measuring each at this size.
+    const ef: u16 = 16;
+    try std.testing.expect(!Database.exactScanPays(half.len, hnsw.vector_count, ef, hnsw.config.m_max0));
 
     var members: std.AutoHashMapUnmanaged(u64, void) = .{};
     defer members.deinit(allocator);
@@ -146,7 +151,7 @@ test "vector filter: a large set goes through the graph and still holds only its
         // set takes; checked against brute force in the hnsw tests).
         const want = try hnsw.searchExact(&query, 10, half);
         defer hnsw.freeResults(want);
-        const got = try db.vectorSearchAmongInTxn(null, &query, 10, null, half, null);
+        const got = try db.vectorSearchAmongInTxn(null, &query, 10, ef, half, null);
         defer db.freeVectorSearchResults(got);
         try std.testing.expectEqual(@as(usize, 10), got.len);
         for (got) |g| {
@@ -194,4 +199,141 @@ test "vector filter: <=> under a narrow MATCH returns that label's nearest" {
     for (within.rows, want) |row, w| {
         try std.testing.expectEqual(w.node_id, @as(u64, @intCast(row.values[0].int_val)));
     }
+}
+
+/// One database per metric: the search among a set measures with the
+/// database's metric on both of its paths, and `<=>` under the MATCH returns
+/// the distance the search measured, which is the metric's distance.
+fn checkMetric(comptime metric: lattice.storage.database.VectorMetric, comptime path: []const u8) !void {
+    const allocator = std.testing.allocator;
+    const nodes = 1000;
+    removeFiles(path);
+    const db = try Database.open(allocator, path, .{
+        .create = true,
+        .config = .{ .enable_vector = true, .vector_dimensions = DIMS, .vector_metric = metric, .vector_ef_construction = EF_CONSTRUCTION },
+    });
+    defer {
+        db.close();
+        removeFiles(path);
+    }
+    try std.testing.expectEqual(metric, db.vectorConfig().?.metric);
+
+    var prng = std.Random.DefaultPrng.init(11);
+    const rnd = prng.random();
+    var ids: [nodes]u64 = undefined;
+    var vectors: [nodes][DIMS]f32 = undefined;
+    {
+        var txn = try db.beginTransaction(.read_write);
+        errdefer db.abortTransaction(&txn) catch {};
+        for (&ids, &vectors, 0..) |*id, *v, i| {
+            const labels: []const []const u8 = if (i % 50 == 0) &.{ "Item", "Rare" } else &.{"Item"};
+            id.* = try db.createNode(&txn, labels);
+            // Lengths vary, so cosine, euclidean and dot product rank differently.
+            const scale = 0.2 + 2 * rnd.float(f32);
+            for (v) |*x| x.* = (rnd.float(f32) * 2 - 1) * scale;
+            try db.setNodeVectorInTxn(&txn, id.*, v);
+        }
+        try db.commitTransaction(&txn);
+    }
+
+    // The truth, measured as `<=>` measures: on the vectors as given.
+    const Truth = struct {
+        fn nearest(d: *Database, alloc: std.mem.Allocator, q: []const f32, vs: []const [DIMS]f32, is: []const u64, member: []const bool, k: usize) ![]VectorSearchResult {
+            var all: std.ArrayListUnmanaged(VectorSearchResult) = .empty;
+            defer all.deinit(alloc);
+            for (vs, is, member) |*v, id, m| {
+                if (m) try all.append(alloc, .{ .node_id = id, .distance = d.vectorDistance(q, v) });
+            }
+            std.mem.sort(VectorSearchResult, all.items, {}, struct {
+                fn lt(_: void, a: VectorSearchResult, b: VectorSearchResult) bool {
+                    return a.distance < b.distance;
+                }
+            }.lt);
+            return alloc.dupe(VectorSearchResult, all.items[0..@min(k, all.items.len)]);
+        }
+    };
+
+    var rare_member: [nodes]bool = undefined;
+    var most_member: [nodes]bool = undefined;
+    var rare: std.ArrayListUnmanaged(u64) = .empty;
+    defer rare.deinit(allocator);
+    var most: std.ArrayListUnmanaged(u64) = .empty;
+    defer most.deinit(allocator);
+    for (ids, 0..) |id, i| {
+        rare_member[i] = i % 50 == 0;
+        most_member[i] = i % 10 != 0;
+        if (rare_member[i]) try rare.append(allocator, id);
+        if (most_member[i]) try most.append(allocator, id);
+    }
+
+    // Small set: measured one by one, exact.
+    const hnsw = &db.hnsw_index.?;
+    try std.testing.expect(Database.exactScanPays(rare.items.len, hnsw.vector_count, hnsw.config.ef_search, hnsw.config.m_max0));
+    var query: [DIMS]f32 = undefined;
+    for (&query) |*x| x.* = rnd.float(f32) * 2 - 1;
+    {
+        const want = try Truth.nearest(db, allocator, &query, &vectors, &ids, &rare_member, 5);
+        defer allocator.free(want);
+        const got = try db.vectorSearchAmongInTxn(null, &query, 5, null, rare.items, null);
+        defer db.freeVectorSearchResults(got);
+        try std.testing.expectEqual(want.len, got.len);
+        for (want, got) |w, g| {
+            try std.testing.expectEqual(w.node_id, g.node_id);
+            try std.testing.expectApproxEqAbs(w.distance, g.distance, 1e-4);
+        }
+    }
+
+    // Large set, with a narrow beam so the graph is cheaper than measuring
+    // each: members only, each at its metric distance, nearest first.
+    const ef: u16 = 16;
+    try std.testing.expect(!Database.exactScanPays(most.items.len, hnsw.vector_count, ef, hnsw.config.m_max0));
+    var hits: usize = 0;
+    for (0..10) |_| {
+        for (&query) |*x| x.* = rnd.float(f32) * 2 - 1;
+        const want = try Truth.nearest(db, allocator, &query, &vectors, &ids, &most_member, 10);
+        defer allocator.free(want);
+        const got = try db.vectorSearchAmongInTxn(null, &query, 10, ef, most.items, null);
+        defer db.freeVectorSearchResults(got);
+        try std.testing.expectEqual(@as(usize, 10), got.len);
+        var last = -std.math.inf(f32);
+        for (got) |g| {
+            const i = std.mem.indexOfScalar(u64, &ids, g.node_id).?;
+            try std.testing.expect(most_member[i]);
+            try std.testing.expectApproxEqAbs(db.vectorDistance(&query, &vectors[i]), g.distance, 1e-4);
+            try std.testing.expect(g.distance >= last);
+            last = g.distance;
+            for (want) |w| {
+                if (w.node_id == g.node_id) hits += 1;
+            }
+        }
+    }
+    try std.testing.expect(hits * 100 >= 10 * 10 * 60);
+
+    // Cypher: the nearest of the label, and the distance `<=>` returns is
+    // the one the search measured.
+    for (&query) |*x| x.* = rnd.float(f32) * 2 - 1;
+    const want = try Truth.nearest(db, allocator, &query, &vectors, &ids, &rare_member, 3);
+    defer allocator.free(want);
+    var params = std.StringHashMap(lattice.core.types.PropertyValue).init(allocator);
+    defer params.deinit();
+    try params.put("q", .{ .vector_val = &query });
+    var result = try db.queryWithParams("MATCH (n:Rare) WHERE n.embedding <=> $q RETURN id(n), n.embedding <=> $q LIMIT 3", &params);
+    defer result.deinit();
+    try std.testing.expectEqual(@as(usize, 3), result.rows.len);
+    for (result.rows, want) |row, w| {
+        try std.testing.expectEqual(w.node_id, @as(u64, @intCast(row.values[0].int_val)));
+        try std.testing.expectApproxEqAbs(w.distance, @as(f32, @floatCast(row.values[1].float_val)), 1e-4);
+    }
+}
+
+test "vector filter: cosine measures the set by cosine" {
+    try checkMetric(.cosine, "/tmp/lse_vector_filter_cosine.ltdb");
+}
+
+test "vector filter: euclidean measures the set by euclidean distance" {
+    try checkMetric(.euclidean, "/tmp/lse_vector_filter_euclidean.ltdb");
+}
+
+test "vector filter: dot product measures the set by negative dot product" {
+    try checkMetric(.inner_product, "/tmp/lse_vector_filter_dot.ltdb");
 }

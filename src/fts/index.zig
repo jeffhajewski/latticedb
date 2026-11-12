@@ -890,7 +890,7 @@ pub const FtsIndex = struct {
     /// a transaction commits its documents in hash order. Lists written that way
     /// by earlier releases are already on disk, so search has to be correct over
     /// them rather than only over lists written from now on. A merge that walks
-    /// the lists in step with `skipTo` silently drops any document stored behind
+    /// the lists in step (what 0.16.0 did, with skip pointers) drops any document stored behind
     /// its cursor.
     fn searchMultiTermAnd(self: *Self, terms: []const []const u8, limit: u32) FtsError![]ScoredDoc {
         if (terms.len == 0) {
@@ -2644,8 +2644,7 @@ test "fts AND search over unordered multi-page posting lists matches a scan" {
     const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_and_unordered_test.db");
     defer fx.destroy(allocator);
 
-    // Enough documents that "alpha" spans more than one posting page and every
-    // page carries skip pointers.
+    // Enough documents that "alpha" spans more than one posting page.
     const doc_count = 3000;
     var has_alpha = [_]bool{false} ** (doc_count + 1);
     var has_beta = [_]bool{false} ** (doc_count + 1);
@@ -3004,15 +3003,15 @@ test "fts posting entry with more positions than a page holds is stored" {
     try std.testing.expectEqual(@as(DocId, 1), echoes[0].doc_id);
 }
 
-test "fts removing from a page with skip pointers and a long entry" {
+test "fts removing from a page that holds a long entry" {
     const allocator = std.testing.allocator;
     const fx = try AndSearchFixture.create(allocator, "/tmp/lattice_fts_skip_rebuild_long_entry_test.db");
     defer fx.destroy(allocator);
     fx.index.config.store_positions = true;
 
-    // One entry of about 400 bytes among enough short ones that the page has
-    // skip pointers, so removing any entry rebuilds them and has to measure
-    // the long one.
+    // One entry of about 400 bytes among enough short ones that the page held
+    // skip pointers when they were kept, which removal rebuilt by measuring
+    // every entry, the long one included.
     const text = try repeatedWords(allocator, "delta", 200);
     defer allocator.free(text);
     _ = try fx.index.indexDocument(1, text);

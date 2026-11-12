@@ -7,9 +7,11 @@
 //!   followed by each position, again as itself
 //! - Entries are not kept in doc id order: an update removes a document's
 //!   entries and appends its new ones
-//! - Skip pointers every 128 entries within a page, read only by `skipTo`,
-//!   which assumes doc id order and so is not what search uses
 //! - Optional position lists for phrase queries
+//! - A skip-pointer area between the header and the entries, which releases
+//!   up to 0.16 filled every 128 entries. Nothing reads it: skip pointers
+//!   assume doc id order, which these lists do not have. Pages written now
+//!   leave it empty, and a page rewritten by a removal has it cleared.
 
 const std = @import("std");
 const lattice = @import("lattice");
@@ -34,8 +36,10 @@ const TokenId = dictionary.TokenId;
 /// Document ID (alias for NodeId)
 pub const DocId = NodeId;
 
-/// Skip pointer interval (create skip pointer every N entries)
-pub const SKIP_INTERVAL: u32 = 128;
+/// Bytes of one skip pointer (max doc id, byte offset, entry count) in the
+/// area earlier releases filled. Kept only to size that area, which fixes
+/// where entries start.
+const SKIP_POINTER_SIZE: usize = 16;
 
 /// Posting page flag in the shared PageHeader indicating the v2 on-disk layout.
 const POSTING_PAGE_FLAG_V2_LAYOUT: u8 = 0x01;
@@ -75,28 +79,6 @@ pub const PostingEntry = struct {
     doc_id: DocId,
     term_freq: u32,
     positions: ?[]const u32, // Optional position list for phrase queries
-};
-
-/// Skip pointer for fast intersection
-pub const SkipPointer = extern struct {
-    /// Max doc_id in this block
-    doc_id: DocId,
-    /// Offset in posting data
-    byte_offset: u32,
-    /// Number of entries before this pointer
-    entry_count: u32,
-
-    comptime {
-        std.debug.assert(@sizeOf(SkipPointer) == 16);
-    }
-
-    pub fn serialize(self: *const SkipPointer, buf: *[@sizeOf(SkipPointer)]u8) void {
-        @memcpy(buf, std.mem.asBytes(self));
-    }
-
-    pub fn deserialize(buf: []const u8) SkipPointer {
-        return std.mem.bytesAsValue(SkipPointer, buf[0..@sizeOf(SkipPointer)]).*;
-    }
 };
 
 /// Legacy posting page header (follows base PageHeader).
@@ -198,17 +180,6 @@ const PostingPageMeta = struct {
         };
     }
 
-    fn maxSkipPointers(self: PostingPageMeta) usize {
-        return switch (self.layout) {
-            .v1 => MAX_SKIP_POINTERS_V1,
-            .v2 => MAX_SKIP_POINTERS_V2,
-        };
-    }
-
-    fn skipPointerOffset(self: PostingPageMeta, index: usize) usize {
-        return self.headerEnd() + index * @sizeOf(SkipPointer);
-    }
-
     fn write(self: PostingPageMeta, data: []u8) void {
         setPostingPageLayout(data, self.layout);
         switch (self.layout) {
@@ -265,7 +236,7 @@ const HEADER_END_V2: usize = @sizeOf(PageHeader) + @sizeOf(PostingPageHeaderV2);
 const MAX_SKIP_POINTERS_V1: usize = 16;
 
 /// Reserved space for skip pointers in the v1 layout.
-const SKIP_POINTER_AREA_SIZE_V1: usize = MAX_SKIP_POINTERS_V1 * @sizeOf(SkipPointer);
+const SKIP_POINTER_AREA_SIZE_V1: usize = MAX_SKIP_POINTERS_V1 * SKIP_POINTER_SIZE;
 
 /// Data offset after headers and skip pointer area. This remains stable across
 /// v1 and v2 so lazy page upgrades do not need to move posting payload bytes.
@@ -275,7 +246,6 @@ const DATA_OFFSET: usize = HEADER_END_V1 + SKIP_POINTER_AREA_SIZE_V1;
 /// larger, so the skip reserve shrinks by 4 bytes while keeping DATA_OFFSET
 /// unchanged.
 const SKIP_POINTER_AREA_SIZE_V2: usize = DATA_OFFSET - HEADER_END_V2;
-const MAX_SKIP_POINTERS_V2: usize = SKIP_POINTER_AREA_SIZE_V2 / @sizeOf(SkipPointer);
 
 comptime {
     std.debug.assert(DATA_OFFSET == HEADER_END_V2 + SKIP_POINTER_AREA_SIZE_V2);
@@ -379,53 +349,6 @@ pub const PostingStore = struct {
         @memset(data[meta.headerEnd()..@as(usize, meta.data_start)], 0);
     }
 
-    fn rebuildSkipPointersFromEncoded(self: *Self, data: []u8, meta: *PostingPageMeta) void {
-        self.clearSkipPointers(data, meta.*);
-        meta.num_skip_pointers = 0;
-
-        if (meta.num_entries < SKIP_INTERVAL) return;
-
-        var offset: usize = meta.data_start;
-        var entries_read: u32 = 0;
-        var skip_count: usize = 0;
-
-        while (entries_read < meta.num_entries and offset < meta.data_end) {
-            const entry_offset = offset;
-            const doc_result = decodeVarint(data[offset..]);
-            offset += doc_result.bytes;
-
-            if (entries_read > 0 and entries_read % SKIP_INTERVAL == 0 and skip_count < meta.maxSkipPointers()) {
-                const skip_ptr = SkipPointer{
-                    .doc_id = doc_result.value,
-                    .byte_offset = @intCast(entry_offset - meta.data_start),
-                    .entry_count = entries_read,
-                };
-                const skip_offset = meta.skipPointerOffset(skip_count);
-                var skip_buf: [@sizeOf(SkipPointer)]u8 = undefined;
-                skip_ptr.serialize(&skip_buf);
-                @memcpy(data[skip_offset..][0..@sizeOf(SkipPointer)], &skip_buf);
-                skip_count += 1;
-            }
-
-            const freq_result = decodeVarint(data[offset..]);
-            offset += freq_result.bytes;
-
-            if (meta.hasPositions()) {
-                const pos_count_result = decodeVarint(data[offset..]);
-                offset += pos_count_result.bytes;
-                var pos_idx: usize = 0;
-                while (pos_idx < pos_count_result.value) : (pos_idx += 1) {
-                    const pos_result = decodeVarint(data[offset..]);
-                    offset += pos_result.bytes;
-                }
-            }
-
-            entries_read += 1;
-        }
-
-        meta.num_skip_pointers = @intCast(skip_count);
-    }
-
     fn upgradePageToV2(self: *Self, data: []u8, meta: *PostingPageMeta) PostingError!void {
         if (meta.layout == .v2) return;
 
@@ -438,7 +361,8 @@ pub const PostingStore = struct {
             upgraded.data_end = upgraded.data_start;
         }
 
-        self.rebuildSkipPointersFromEncoded(data, &upgraded);
+        self.clearSkipPointers(data, upgraded);
+        upgraded.num_skip_pointers = 0;
         upgraded.write(data);
         meta.* = upgraded;
     }
@@ -552,25 +476,6 @@ pub const PostingStore = struct {
                 posting_header.flags &= ~POSTING_ENTRY_FLAG_HAS_POSITIONS;
             }
 
-            // Write skip pointer if at SKIP_INTERVAL boundary
-            // Skip pointers point to entries at positions: SKIP_INTERVAL, 2*SKIP_INTERVAL, etc.
-            const entry_index = posting_header.num_entries;
-            if (entry_index > 0 and entry_index % SKIP_INTERVAL == 0) {
-                const skip_index = entry_index / SKIP_INTERVAL - 1;
-                if (skip_index < posting_header.maxSkipPointers()) {
-                    const skip_ptr = SkipPointer{
-                        .doc_id = entry.doc_id,
-                        .byte_offset = @intCast(current_end - posting_header.data_start),
-                        .entry_count = entry_index,
-                    };
-                    const skip_offset = posting_header.skipPointerOffset(skip_index);
-                    var skip_buf: [@sizeOf(SkipPointer)]u8 = undefined;
-                    skip_ptr.serialize(&skip_buf);
-                    @memcpy(data[skip_offset..][0..@sizeOf(SkipPointer)], &skip_buf);
-                    posting_header.num_skip_pointers = @intCast(skip_index + 1);
-                }
-            }
-
             // Write entry
             @memcpy(data[current_end..][0..encode_len], encode_buf[0..encode_len]);
 
@@ -678,8 +583,10 @@ pub const PostingStore = struct {
                 // Update header
                 header.num_entries = @intCast(kept_entries.items.len);
 
-                // Rebuild skip pointers
-                self.rebuildSkipPointers(data, &header, kept_entries.items, has_positions);
+                // Skip pointers, on a page an earlier release filled them
+                // on, name byte offsets the rewrite has moved.
+                self.clearSkipPointers(data, header);
+                header.num_skip_pointers = 0;
 
                 header.write(data);
                 self.bp.unpinPage(frame, true);
@@ -740,53 +647,6 @@ pub const PostingStore = struct {
 
         return @intCast(offset);
     }
-
-    /// Rebuild skip pointers after page modification
-    fn rebuildSkipPointers(self: *Self, data: []u8, header: *PostingPageMeta, entries: []const StoredEntry, has_positions: bool) void {
-        // Clear existing skip pointers
-        self.clearSkipPointers(data, header.*);
-        header.num_skip_pointers = 0;
-
-        if (entries.len < SKIP_INTERVAL) {
-            return;
-        }
-
-        // Scan through entries to build skip pointers
-        var offset: usize = header.data_start;
-        var skip_count: u16 = 0;
-
-        for (entries, 0..) |entry, idx| {
-            // Create skip pointer at SKIP_INTERVAL boundaries (e.g., at entry 128, 256, etc.)
-            if (idx > 0 and idx % SKIP_INTERVAL == 0 and skip_count < header.maxSkipPointers()) {
-                const skip_ptr = SkipPointer{
-                    .doc_id = entry.doc_id,
-                    .byte_offset = @intCast(offset - header.data_start),
-                    .entry_count = @intCast(idx),
-                };
-                const skip_offset = header.skipPointerOffset(skip_count);
-                var skip_buf: [@sizeOf(SkipPointer)]u8 = undefined;
-                skip_ptr.serialize(&skip_buf);
-                @memcpy(data[skip_offset..][0..@sizeOf(SkipPointer)], &skip_buf);
-                skip_count += 1;
-            }
-
-            // Advance past this entry. Measured rather than encoded into a
-            // scratch buffer: an entry with many positions is far longer than
-            // any small fixed buffer.
-            var entry_size: usize = varintLen(entry.doc_id) + varintLen(entry.term_freq);
-            if (has_positions) {
-                if (entry.positions) |positions| {
-                    entry_size += varintLen(positions.len);
-                    for (positions) |pos| entry_size += varintLen(pos);
-                } else {
-                    entry_size += varintLen(0);
-                }
-            }
-            offset += entry_size;
-        }
-
-        header.num_skip_pointers = skip_count;
-    }
 };
 
 /// Iterator for reading posting entries
@@ -796,9 +656,7 @@ pub const PostingIterator = struct {
     current_offset: usize,
     entries_read: u32,
     total_entries: u32,
-    data_start: usize, // Start of posting data (after skip pointers)
-    num_skip_pointers: u16,
-    skip_pointer_base: usize,
+    data_start: usize, // Start of posting data (after the skip-pointer area)
     last_doc_id: DocId, // Never read: entries store whole doc ids, not deltas
     has_positions: bool,
     done: bool,
@@ -829,8 +687,6 @@ pub const PostingIterator = struct {
             .entries_read = 0,
             .total_entries = header.num_entries,
             .data_start = header.data_start,
-            .num_skip_pointers = header.num_skip_pointers,
-            .skip_pointer_base = header.headerEnd(),
             .last_doc_id = 0,
             .has_positions = header.hasPositions(),
             // Not `num_entries == 0`: removals can empty the head page while
@@ -838,110 +694,6 @@ pub const PostingIterator = struct {
             // empty pages and decides when the list is finished.
             .done = false,
         };
-    }
-
-    /// Skip to the first entry with doc_id >= target
-    /// Returns the entry if found, null if no more entries >= target
-    pub fn skipTo(self: *Self, target: DocId) PostingError!?PostingEntry {
-        // Entries already decoded come first; the skip pointers only make sense
-        // from the position the decoding has reached.
-        while (self.batch_pos < self.batch_len) {
-            const e = self.batch[self.batch_pos];
-            self.batch_pos += 1;
-            if (e.doc_id >= target) return .{ .doc_id = e.doc_id, .term_freq = e.term_freq, .positions = null };
-        }
-        if (self.done) return null;
-
-        // Try to use skip pointers if available
-        if (self.num_skip_pointers > 0) {
-            const frame = self.store.bp.fetchPage(self.current_page, .shared) catch {
-                return PostingError.BufferPoolError;
-            };
-            defer self.store.bp.unpinPage(frame, false);
-
-            // Binary search skip pointers to find largest doc_id < target
-            var best_skip: ?SkipPointer = null;
-            var low: usize = 0;
-            var high: usize = self.num_skip_pointers;
-
-            while (low < high) {
-                const mid = low + (high - low) / 2;
-                const skip_offset = self.skip_pointer_base + mid * @sizeOf(SkipPointer);
-                const skip_ptr = SkipPointer.deserialize(frame.data[skip_offset..]);
-
-                if (skip_ptr.doc_id < target) {
-                    // This skip pointer is before target, could be useful
-                    best_skip = skip_ptr;
-                    low = mid + 1;
-                } else {
-                    // This skip pointer is >= target, look earlier
-                    high = mid;
-                }
-            }
-
-            // If we found a useful skip pointer, jump to it
-            if (best_skip) |skip| {
-                // Only use if it advances us past current position
-                const new_offset = self.data_start + skip.byte_offset;
-                if (skip.entry_count > self.entries_read) {
-                    self.current_offset = new_offset;
-                    self.entries_read = skip.entry_count;
-                }
-            }
-        }
-
-        // Linear scan from current position to find target
-        while (true) {
-            const entry = try self.next();
-            if (entry == null) return null;
-            if (entry.?.doc_id >= target) return entry;
-        }
-    }
-
-    /// Skip to target and return entry with positions
-    pub fn skipToWithPositions(self: *Self, target: DocId, allocator: Allocator) PostingError!?PostingEntry {
-        std.debug.assert(self.batch_pos == self.batch_len); // do not mix with next()
-        if (self.done) return null;
-
-        // Try to use skip pointers if available
-        if (self.num_skip_pointers > 0) {
-            const frame = self.store.bp.fetchPage(self.current_page, .shared) catch {
-                return PostingError.BufferPoolError;
-            };
-            defer self.store.bp.unpinPage(frame, false);
-
-            var best_skip: ?SkipPointer = null;
-            var low: usize = 0;
-            var high: usize = self.num_skip_pointers;
-
-            while (low < high) {
-                const mid = low + (high - low) / 2;
-                const skip_offset = self.skip_pointer_base + mid * @sizeOf(SkipPointer);
-                const skip_ptr = SkipPointer.deserialize(frame.data[skip_offset..]);
-
-                if (skip_ptr.doc_id < target) {
-                    best_skip = skip_ptr;
-                    low = mid + 1;
-                } else {
-                    high = mid;
-                }
-            }
-
-            if (best_skip) |skip| {
-                const new_offset = self.data_start + skip.byte_offset;
-                if (skip.entry_count > self.entries_read) {
-                    self.current_offset = new_offset;
-                    self.entries_read = skip.entry_count;
-                }
-            }
-        }
-
-        // Linear scan from current position to find target
-        while (true) {
-            const entry = try self.nextWithPositions(allocator);
-            if (entry == null) return null;
-            if (entry.?.doc_id >= target) return entry;
-        }
     }
 
     /// Get the next posting entry (without positions)
@@ -987,8 +739,6 @@ pub const PostingIterator = struct {
                 self.current_offset = next_header.data_start;
                 self.total_entries = next_header.num_entries;
                 self.data_start = next_header.data_start;
-                self.num_skip_pointers = next_header.num_skip_pointers;
-                self.skip_pointer_base = next_header.headerEnd();
                 self.has_positions = next_header.hasPositions();
                 continue;
             }
@@ -1053,8 +803,6 @@ pub const PostingIterator = struct {
                 self.current_offset = next_header.data_start;
                 self.total_entries = next_header.num_entries;
                 self.data_start = next_header.data_start;
-                self.num_skip_pointers = next_header.num_skip_pointers;
-                self.skip_pointer_base = next_header.headerEnd();
                 self.has_positions = next_header.hasPositions();
 
                 // Recursively get from next page
@@ -1289,7 +1037,7 @@ test "posting store create and append" {
     try std.testing.expect(entry4 == null);
 }
 
-test "skip pointers and skipTo" {
+test "posting pages keep no skip pointers and read pages that have them" {
     const allocator = std.testing.allocator;
 
     const vfs = lattice.storage.vfs;
@@ -1298,7 +1046,7 @@ test "skip pointers and skipTo" {
     var posix_vfs = vfs.PosixVfs.init(allocator);
     const vfs_impl = posix_vfs.vfs();
 
-    const db_path = "/tmp/lattice_skip_pointer_test.db";
+    const db_path = "/tmp/lse_posting_skip_area_test.db";
     vfs_impl.delete(db_path) catch {};
 
     var pm = try page_manager.PageManager.init(allocator, vfs_impl, db_path, .{ .create = true });
@@ -1311,54 +1059,67 @@ test "skip pointers and skipTo" {
     defer bp.deinit();
 
     var store = PostingStore.init(allocator, &bp);
-
-    // Create posting list
     const page_id = try store.create(1);
 
-    // Add 200 entries (more than SKIP_INTERVAL = 128 to trigger skip pointer creation)
-    // doc_ids: 10, 20, 30, ..., 2000
-    var i: u64 = 1;
-    while (i <= 200) : (i += 1) {
-        _ = try store.append(page_id, .{
-            .doc_id = i * 10,
-            .term_freq = @intCast(i % 5 + 1),
-            .positions = null,
-        });
+    // 300 entries fit one page; releases up to 0.16 wrote two skip pointers
+    // for them. None are written now.
+    for (1..301) |i| {
+        _ = try store.append(page_id, .{ .doc_id = @intCast(i * 10), .term_freq = 1, .positions = null });
+    }
+    {
+        const frame = try bp.fetchPage(page_id, .exclusive);
+        defer bp.unpinPage(frame, true);
+        var header = PostingPageHeader.read(frame.data);
+        try std.testing.expectEqual(@as(u32, 300), header.num_entries);
+        try std.testing.expectEqual(@as(u16, 0), header.num_skip_pointers);
+        // Make it look like a page 0.16.0 wrote: one skip pointer at entry 128.
+        var offset: usize = header.data_start;
+        for (0..128) |_| {
+            offset += decodeVarint(frame.data[offset..]).bytes;
+            offset += decodeVarint(frame.data[offset..]).bytes;
+        }
+        const area = frame.data[HEADER_END_V2..][0..SKIP_POINTER_SIZE];
+        std.mem.writeInt(u64, area[0..8], 1290, .little);
+        std.mem.writeInt(u32, area[8..12], @intCast(offset - header.data_start), .little);
+        std.mem.writeInt(u32, area[12..16], 128, .little);
+        header.num_skip_pointers = 1;
+        header.write(frame.data);
     }
 
-    // Verify skip pointer was created (at entry 128)
-    const frame = try bp.fetchPage(page_id, .shared);
-    defer bp.unpinPage(frame, false);
-    const header = PostingPageHeader.read(frame.data);
-    try std.testing.expect(header.num_skip_pointers >= 1);
+    // Appending leaves an earlier release's pointers as they are: they name
+    // entries that do not move.
+    _ = try store.append(page_id, .{ .doc_id = 5, .term_freq = 2, .positions = null });
+    {
+        const frame = try bp.fetchPage(page_id, .shared);
+        defer bp.unpinPage(frame, false);
+        try std.testing.expectEqual(@as(u16, 1), PostingPageHeader.read(frame.data).num_skip_pointers);
+    }
 
-    // Test skipTo - skip to doc_id 1500
     var iter = try store.iterate(page_id);
-    defer iter.deinit();
+    var count: usize = 0;
+    while (try iter.next()) |entry| {
+        count += 1;
+        if (count <= 300) try std.testing.expectEqual(@as(DocId, count * 10), entry.doc_id);
+    }
+    try std.testing.expectEqual(@as(usize, 301), count);
 
-    const entry = try iter.skipTo(1500);
-    try std.testing.expect(entry != null);
-    try std.testing.expectEqual(@as(DocId, 1500), entry.?.doc_id);
-
-    // Continue iteration should give next entry
-    const next = try iter.next();
-    try std.testing.expect(next != null);
-    try std.testing.expectEqual(@as(DocId, 1510), next.?.doc_id);
-
-    // Test skipTo past all entries
-    var iter2 = try store.iterate(page_id);
-    defer iter2.deinit();
-
-    const no_entry = try iter2.skipTo(3000);
-    try std.testing.expect(no_entry == null);
-
-    // Test skipTo to exact entry
-    var iter3 = try store.iterate(page_id);
-    defer iter3.deinit();
-
-    const exact = try iter3.skipTo(500);
-    try std.testing.expect(exact != null);
-    try std.testing.expectEqual(@as(DocId, 500), exact.?.doc_id);
+    // A removal moves entries, so it clears the area.
+    try std.testing.expect((try store.removeEntry(page_id, 10)).found);
+    {
+        const frame = try bp.fetchPage(page_id, .shared);
+        defer bp.unpinPage(frame, false);
+        const header = PostingPageHeader.read(frame.data);
+        try std.testing.expectEqual(@as(u16, 0), header.num_skip_pointers);
+        try std.testing.expectEqual(@as(u32, 300), header.num_entries);
+        for (frame.data[HEADER_END_V2..header.data_start]) |byte| try std.testing.expectEqual(@as(u8, 0), byte);
+    }
+    var after = try store.iterate(page_id);
+    count = 0;
+    while (try after.next()) |entry| {
+        try std.testing.expect(entry.doc_id != 10);
+        count += 1;
+    }
+    try std.testing.expectEqual(@as(usize, 300), count);
 }
 
 test "posting store lazily upgrades legacy v1 pages on append" {
@@ -1563,12 +1324,6 @@ test "posting iterator reads past a head page that removals emptied" {
     try std.testing.expect(first != null);
     try std.testing.expectEqual(@as(DocId, head_count + 1), first.?.doc_id);
     if (first.?.positions) |p| allocator.free(p);
-
-    var skip_iter = try store.iterate(head);
-    defer skip_iter.deinit();
-    const found = try skip_iter.skipTo(total);
-    try std.testing.expect(found != null);
-    try std.testing.expectEqual(total, found.?.doc_id);
 }
 
 test "posting store releases full pages before appending to overflow tail" {

@@ -1331,6 +1331,28 @@ Measured on eight thousand documents, one matching row:
 The point is not only the 59x. It is that the two rows now agree: how the author
 ordered the predicates no longer decides what the query costs.
 
+### When the seek already answered the `WHERE`
+
+`MATCH (d:Doc) WHERE d.text @@ 'starter' RETURN d` is planned as a seek on the
+`Doc.text` index, and every row the seek emits matches. Planning the same predicate
+again as a filter would run the whole search a second time and drop nothing, which
+made the commonest full-text query pay for its search twice. When a `MATCH`'s seek
+has a single candidate search and the `WHERE` is that same search (same variable,
+the index the filter would resolve, same query text or parameter), the planner adds
+no filter. A seek that chose among several indexes at run time, a different query,
+or another `MATCH`'s `WHERE` still filters. On 2,000 documents with 663 hits this
+took the query from 366 µs to 235 µs (busy machine).
+
+### The score in the row
+
+The seek and the filter both store each hit's BM25 score in the row and mark the
+slot as scored; giving the slot a new value clears the mark, so a score never
+outlives the entity it was computed for. `score(d)` reads it: the best score among
+the searches that matched for an `OR`, null when no single search scored `d` (no
+`@@` on it, or a seek that chose among indexes at run time). The mark goes through
+`WITH d` but not `WITH d AS e` and not through an aggregation. `ORDER BY score(d)
+LIMIT k` sorts all the matches; it does not bound the search.
+
 ### Disjunctions
 
 Several `@@` predicates on one variable joined by `OR` are planned as a single
@@ -1349,7 +1371,7 @@ query still answers correctly, through the row filter.
 
 | File | Purpose |
 |------|---------|
-| `src/fts/tokenizer.zig` | Unicode word splitting, term normalization (case, accents, stemming), the 0.16.0 ASCII mode, language config |
+| `src/fts/tokenizer.zig` | Unicode word splitting, term normalization (case, accents, stemming), the 0.16.0 ASCII mode, language config; its case tables also serve Cypher's `toLower` and `toUpper` |
 | `src/fts/stopwords.zig` | English stop word list (used for every language) |
 | `src/fts/dictionary.zig` | Token → TokenId mapping via B+Tree, range iteration |
 | `src/fts/posting.zig` | Posting list storage with varint encoding, entry removal |

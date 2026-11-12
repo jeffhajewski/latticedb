@@ -146,13 +146,34 @@ for M = 16 is ≈ 0.36 and puts about 6% of vectors above layer 0.)
 buffers during insert and search, so `init` lowers a larger value to 64. With
 `m_max0 = 2 × m`, that makes 32 the largest `m` that keeps the usual ratio.
 
-**What a database lets you change.** These fields matter only when you build an
-`HnswIndex` yourself. A database created with vector support always builds its
-index with the defaults above (cosine, `m = 16`, `m_max0 = 32`,
-`ef_construction = 200`, `ef_search = 64`); only `dimensions` comes from the
-database configuration. The one setting exposed per query is `ef_search`, as the
-`ef_search` argument of `lattice_vector_search` (0 means the default of 64) and
-the equivalent binding parameters.
+**What a database lets you choose.** A database builds its index from its
+configuration when the index is created: `dimensions`, `metric`, `m` (2 to 32,
+with `m_max0 = 2 × m`) and `ef_construction` (1 to 4096), defaulting to cosine,
+16, 32 and 200. In Zig these are `DatabaseConfig.vector_dimensions`,
+`vector_metric`, `vector_m` and `vector_ef_construction`; the C API's
+`lattice_open_options_v5`, the bindings and `lattice create`
+(`--vector-metric=cosine|euclidean|dot`, `--vector-m`, `--vector-ef-construction`)
+pass the same values.
+
+The file's header records all five from the moment the index exists, and every
+later open builds the index from what the file records, whatever the options say,
+so a database with vectors opens, and recovers its log, without being told its
+dimensions. An option that contradicts the file (a different dimension count,
+metric, `m` or `ef_construction`) is refused with `VectorConfigMismatch`
+(`LATTICE_ERROR_CONFIG_MISMATCH`) before anything is read, rather than reading the
+pages with the wrong layout. None of them can be changed afterwards: `m` decides
+the layout of the index's pages and the metric what its distances mean. To change
+them, export the database and import it into one created with the new settings.
+
+A file written by 0.16.0 has no such record. Its index can only be the one 0.16.0
+built (cosine, 16, 32, 200), so the dimension count is read from its first vector
+page, and the record is written at the first read-write open. An index whose metric
+is not cosine, or whose `m` is not 16, marks the file as needing a newer reader,
+and 0.16.0 refuses to open it.
+
+The one setting exposed per query is `ef_search`, as the `ef_search` argument of
+`lattice_vector_search` (0 means the default of 64) and the equivalent binding
+parameters.
 
 ### API Usage
 
@@ -211,7 +232,16 @@ layer and the vector count back as they were.
 | `.cosine` | 1 - (a·b)/(‖a‖‖b‖) | Text embeddings (normalized) |
 | `.inner_product` | -Σ(aᵢ × bᵢ) | When vectors are pre-normalized |
 
-For text embeddings from most models (OpenAI, Cohere, etc.), use `.cosine`.
+The CLI calls the last one `dot` and the bindings `dot_product`. Smaller is nearer
+under all three, so the inner product is negated, and its distances can be
+negative. For text embeddings from most models (OpenAI, Cohere, etc.), use
+`.cosine`.
+
+A database's search, Cypher's `<=>` (including `<=>` between two literal lists),
+and the scoring of vectors a transaction has set but not yet committed all use the
+metric the file records; a database without a vector index measures `<=>` with
+cosine. Under `.euclidean` and `.inner_product` vectors are stored and read back as
+given.
 
 With `.cosine`, the index normalizes each vector before storing it and
 normalizes each query, then computes the distance as `1 - a·b`. The index's
@@ -302,7 +332,8 @@ missing one.
 
 ### Tuning Guidelines
 
-Through a database, `ef_search` is the only knob:
+Through a database, `ef_search` is the only knob once the index exists; `m` and
+`ef_construction` are chosen when it is created:
 
 **For higher recall:**
 - Increase `ef_search` (e.g., 100-200)
@@ -314,9 +345,9 @@ Through a database, `ef_search` is the only knob:
 A `k` larger than `ef_search` widens the beam to `k` on its own, so there is no
 need to raise `ef_search` just to get more results.
 
-When you build an `HnswIndex` directly, you can also raise `ef_construction`
-(e.g., 400) for a better-connected graph, or raise `m` up to 32 (with
-`m_max0` up to 64; see [Configuration](#configuration)).
+When you create the database, or build an `HnswIndex` directly, you can also
+raise `ef_construction` (e.g., 400) for a better-connected graph, or raise `m` up
+to 32 (with `m_max0` up to 64; see [Configuration](#configuration)).
 
 ## Complete Example
 
@@ -403,9 +434,10 @@ Implementation details:
 
 ## Current Limitations
 
-1. **Fixed index settings per database**: `m`, `ef_construction` and the metric
-   (cosine) cannot be changed for a database's index; only `ef_search` is
-   exposed, per query.
+1. **Fixed index settings per database**: the metric, `m` and `ef_construction`
+   are chosen when the index is created and cannot be changed for it; only
+   `ef_search` can be set per query. Changing them means exporting and importing
+   into a new database.
 2. **Registry saved at flush**: the node registry is written to `hnsw_node_tree`
    before each flush of the buffer pool, not on every insert. If it is missing
    or invalid on open, the whole graph is rebuilt from the stored vectors.

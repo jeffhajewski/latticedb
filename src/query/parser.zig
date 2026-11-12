@@ -453,9 +453,46 @@ pub const Parser = struct {
         } else if (self.match(.kw_unwind)) {
             return self.parseUnwindClause();
         } else {
-            self.errorAtCurrent("Expected MATCH, WHERE, RETURN, CREATE, DELETE, SET, REMOVE, WITH, MERGE, UNWIND, ORDER BY, LIMIT, or SKIP");
+            self.errorAtCurrent(self.unsupportedAt() orelse
+                "Expected MATCH, OPTIONAL MATCH, WHERE, RETURN, CREATE, DELETE, SET, REMOVE, WITH, MERGE, UNWIND, CALL, FOREACH, UNION, ORDER BY, LIMIT, or SKIP");
             return null;
         }
+    }
+
+    /// Clauses of Cypher, GQL and Neo4j that are not supported, by the word
+    /// they start with, and what to say instead of "Expected MATCH, ...".
+    const unsupported_clauses = [_]struct { word: []const u8, message: []const u8 }{
+        .{ .word = "load", .message = "LOAD CSV is not supported; import files with the lattice CLI or the API" },
+        .{ .word = "use", .message = "USE is not supported: a query runs against the database it is sent to" },
+        .{ .word = "show", .message = "SHOW is not supported; CALL db.labels(), db.relationshipTypes(), db.propertyKeys() or db.indexes() lists the catalog" },
+        .{ .word = "explain", .message = "EXPLAIN is not supported" },
+        .{ .word = "profile", .message = "PROFILE is not supported" },
+        .{ .word = "drop", .message = "DROP is not supported" },
+        .{ .word = "alter", .message = "ALTER is not supported" },
+        .{ .word = "grant", .message = "GRANT is not supported" },
+        .{ .word = "revoke", .message = "REVOKE is not supported" },
+        .{ .word = "deny", .message = "DENY is not supported" },
+        .{ .word = "start", .message = "START is not supported; use MATCH" },
+        .{ .word = "finish", .message = "FINISH is not supported; a query without RETURN returns no columns to read" },
+        .{ .word = "filter", .message = "FILTER is not supported; use WHERE, or WITH ... WHERE" },
+        .{ .word = "let", .message = "LET is not supported; use WITH expression AS name" },
+        .{ .word = "insert", .message = "INSERT is not supported; use CREATE" },
+        .{ .word = "terminate", .message = "TERMINATE is not supported" },
+        .{ .word = "nodetach", .message = "NODETACH DELETE is not supported; DELETE already refuses a node that has relationships" },
+    };
+
+    /// The message for a construct this parser knows it does not support,
+    /// found where a clause should start, or null.
+    fn unsupportedAt(self: *Self) ?[]const u8 {
+        // `a || b` ends the expression before it at the first '|'.
+        if (self.check(.pipe) and self.peekType() == .pipe) {
+            return "'||' is not supported; use + to concatenate strings and lists";
+        }
+        if (!self.check(.identifier)) return null;
+        for (unsupported_clauses) |c| {
+            if (std.ascii.eqlIgnoreCase(self.current.text, c.word)) return c.message;
+        }
+        return null;
     }
 
     fn parseMatchClause(self: *Self) ?ast.Clause {
@@ -491,6 +528,10 @@ pub const Parser = struct {
     /// as a name; it is read by its spelling where a clause starts.
     fn parseOptionalMatchClause(self: *Self) ?ast.Clause {
         self.advance();
+        if (self.checkWord("call")) {
+            self.errorAtCurrent("OPTIONAL CALL is not supported");
+            return null;
+        }
         if (!self.consume(.kw_match, "Expected MATCH after OPTIONAL")) return null;
         const clause = self.parseMatchClause() orelse return null;
         clause.match.optional = true;
@@ -672,6 +713,10 @@ pub const Parser = struct {
     }
 
     fn parseReturnItem(self: *Self) ?ast.ReturnItem {
+        if (self.check(.star)) {
+            self.errorAtCurrent("RETURN * and WITH * are not supported; name the variables");
+            return null;
+        }
         const first = self.current.text;
         const expr = self.parseExpression() orelse return null;
         const text = sourceSpan(first, self.previous.text);
@@ -800,6 +845,15 @@ pub const Parser = struct {
     fn parseCreateClause(self: *Self) ?ast.Clause {
         const loc = self.previousLocation();
         var patterns: std.ArrayList(ast.Pattern) = .empty;
+
+        // Schema statements: CREATE INDEX, CREATE CONSTRAINT and the like.
+        // A pattern starts with '(' or a path variable and '='.
+        if (self.check(.identifier) and self.peekType() != .eq) {
+            if (self.checkWord("index") or self.checkWord("constraint") or self.peekType() == .identifier) {
+                self.errorAtCurrent("Schema statements (CREATE INDEX, CREATE CONSTRAINT, ...) are not supported; indexes are created through the API");
+                return null;
+            }
+        }
 
         // Parse first pattern (reuse same pattern parsing as MATCH)
         if (self.parsePattern()) |pattern| {
@@ -1270,7 +1324,21 @@ pub const Parser = struct {
     }
 
     fn parseNodePattern(self: *Self) ?ast.NodePattern {
+        if (self.peekType() == .lparen) {
+            if (self.checkWord("shortestpath")) {
+                self.errorAtCurrent("shortestPath() is not supported; a variable-length relationship -[*..n]-> finds paths of up to n hops");
+                return null;
+            }
+            if (self.checkWord("allshortestpaths")) {
+                self.errorAtCurrent("allShortestPaths() is not supported; a variable-length relationship -[*..n]-> finds paths of up to n hops");
+                return null;
+            }
+        }
         if (!self.consume(.lparen, "Expected '(' to start node pattern")) {
+            return null;
+        }
+        if (self.check(.lparen)) {
+            self.errorAtCurrent("Parenthesised path patterns, such as the quantified ((a)-->(b)){1,3}, are not supported; use a variable-length relationship -[*1..3]->");
             return null;
         }
 
@@ -1295,11 +1363,20 @@ pub const Parser = struct {
             self.advance();
         }
 
+        if (self.check(.pipe)) {
+            self.errorAtCurrent("Label expressions (:A|B, :!A, :A&B) are not supported; a node pattern's labels must all match, as in (n:A:B)");
+            return null;
+        }
+
         // Optional properties
         if (self.check(.lbrace)) {
             properties = self.parsePropertyMap();
         }
 
+        if (self.check(.kw_where)) {
+            self.errorAtCurrent("WHERE inside a node pattern is not supported; put the condition in a WHERE after the pattern");
+            return null;
+        }
         if (!self.consume(.rparen, "Expected ')' to end node pattern")) {
             return null;
         }
@@ -1376,6 +1453,10 @@ pub const Parser = struct {
                 properties = self.parsePropertyMap();
             }
 
+            if (self.check(.kw_where)) {
+                self.errorAtCurrent("WHERE inside a relationship pattern is not supported; put the condition in a WHERE after the pattern");
+                return null;
+            }
             if (!self.consume(.rbracket, "Expected ']' to end relationship")) {
                 return null;
             }
@@ -1652,6 +1733,12 @@ pub const Parser = struct {
             if (self.check(.lbrace)) {
                 if (std.ascii.eqlIgnoreCase(name, "exists")) return self.parseSubqueryBlock(.exists, loc);
                 if (std.ascii.eqlIgnoreCase(name, "count")) return self.parseSubqueryBlock(.count, loc);
+                if (std.ascii.eqlIgnoreCase(name, "collect")) {
+                    self.errorAtCurrent("COLLECT { ... } subqueries are not supported; use collect() or a pattern comprehension");
+                    return null;
+                }
+                self.errorAtCurrent("Map projection (n {.name, key: value}) is not supported; use a map literal such as {name: n.name}");
+                return null;
             }
 
             // Check for function call
@@ -2069,7 +2156,12 @@ pub const Parser = struct {
         // IS NULL / IS NOT NULL
         if (token == .kw_is) {
             self.advance();
-            if (self.match(.kw_not)) {
+            _ = self.match(.kw_not);
+            if (self.check(.colon) or self.checkWord("typed")) {
+                self.errorAtCurrent("Type predicates (IS :: TYPE) are not supported");
+                return null;
+            }
+            if (self.previous.token_type == .kw_not) {
                 if (!self.consume(.kw_null, "Expected NULL after IS NOT")) {
                     return null;
                 }
@@ -2377,6 +2469,8 @@ pub const Parser = struct {
                     "A backtick-quoted name cannot be empty"
                 else
                     "Expected '`' to close the name before the end of the line");
+            } else if (std.mem.eql(u8, text, "&") or std.mem.eql(u8, text, "!")) {
+                self.errorAtCurrent("Invalid token: '&' and '!' belong to label expressions (:A&B, :!A), which are not supported");
             } else {
                 self.errorAtCurrent("Invalid token");
             }

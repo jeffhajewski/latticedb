@@ -902,3 +902,55 @@ test "lcy: WITH ... WHERE and nested UNWIND" {
     try expectResult(db, "UNWIND [[1, [2, 3]]] AS l UNWIND l AS x RETURN x", "x\n1\n[2, 3]");
     try expectResult(db, "WITH [[1, 2], [3]] AS ls UNWIND ls AS l RETURN l[-1] AS last", "last\n2\n3");
 }
+
+// ============================================================================
+// What is still not supported says so
+// ============================================================================
+
+test "lcy: unsupported constructs are named" {
+    const path = "/tmp/lcy_unsupported.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+
+    const cases = [_]struct { query: []const u8, message: []const u8 }{
+        .{ .query = "LOAD CSV FROM 'f.csv' AS row RETURN row", .message = "LOAD CSV is not supported" },
+        .{ .query = "USE other MATCH (n) RETURN n", .message = "USE is not supported" },
+        .{ .query = "SHOW INDEXES", .message = "SHOW is not supported; CALL db.labels()" },
+        .{ .query = "EXPLAIN MATCH (n) RETURN n", .message = "EXPLAIN is not supported" },
+        .{ .query = "PROFILE MATCH (n) RETURN n", .message = "PROFILE is not supported" },
+        .{ .query = "DROP INDEX ix", .message = "DROP is not supported" },
+        .{ .query = "START n = node(1) RETURN n", .message = "START is not supported" },
+        .{ .query = "MATCH (n) FILTER n.v > 1 RETURN n", .message = "FILTER is not supported" },
+        .{ .query = "LET x = 1 RETURN x", .message = "LET is not supported" },
+        .{ .query = "INSERT (:T)", .message = "INSERT is not supported" },
+        .{ .query = "MATCH (n) RETURN n FINISH", .message = "FINISH is not supported" },
+        .{ .query = "MATCH (n) NODETACH DELETE n", .message = "NODETACH DELETE is not supported" },
+        .{ .query = "CREATE INDEX FOR (n:T) ON (n.v)", .message = "Schema statements (CREATE INDEX, CREATE CONSTRAINT, ...) are not supported" },
+        .{ .query = "CREATE CONSTRAINT c FOR (n:T) REQUIRE n.v IS UNIQUE", .message = "Schema statements" },
+        .{ .query = "CREATE FULLTEXT INDEX ft FOR (n:T) ON EACH [n.v]", .message = "Schema statements" },
+        .{ .query = "OPTIONAL CALL db.labels() YIELD label RETURN label", .message = "OPTIONAL CALL is not supported" },
+        .{ .query = "CALL { MATCH (n) RETURN n } RETURN 1", .message = "CALL { ... } subqueries are not supported" },
+        .{ .query = "MATCH p = shortestPath((a)-[*]-(b)) RETURN p", .message = "shortestPath() is not supported" },
+        .{ .query = "MATCH p = allShortestPaths((a)-[*]-(b)) RETURN p", .message = "allShortestPaths() is not supported" },
+        .{ .query = "MATCH ((a)-->(b)){1,3} RETURN a", .message = "Parenthesised path patterns, such as the quantified ((a)-->(b)){1,3}, are not supported" },
+        .{ .query = "MATCH (n:A|B) RETURN n", .message = "Label expressions (:A|B, :!A, :A&B) are not supported" },
+        .{ .query = "MATCH (n:A&B) RETURN n", .message = "label expressions (:A&B, :!A), which are not supported" },
+        .{ .query = "MATCH (n:!A) RETURN n", .message = "label expressions (:A&B, :!A), which are not supported" },
+        .{ .query = "MATCH (n:A WHERE n.v > 1) RETURN n", .message = "WHERE inside a node pattern is not supported" },
+        .{ .query = "MATCH (a)-[r WHERE r.v > 1]->(b) RETURN r", .message = "WHERE inside a relationship pattern is not supported" },
+        .{ .query = "MATCH (n) RETURN *", .message = "RETURN * and WITH * are not supported" },
+        .{ .query = "MATCH (n) WITH * RETURN n", .message = "RETURN * and WITH * are not supported" },
+        .{ .query = "MATCH (n) RETURN n {.name, .age}", .message = "Map projection (n {.name, key: value}) is not supported" },
+        .{ .query = "MATCH (n) RETURN COLLECT { MATCH (n)-->(m) RETURN m } AS c", .message = "COLLECT { ... } subqueries are not supported" },
+        .{ .query = "RETURN 1 IS :: INTEGER AS t", .message = "Type predicates (IS :: TYPE) are not supported" },
+        .{ .query = "RETURN 1 IS NOT TYPED INTEGER AS t", .message = "Type predicates (IS :: TYPE) are not supported" },
+        .{ .query = "RETURN 'a' || 'b' AS s", .message = "'||' is not supported; use +" },
+        .{ .query = "EXISTS { MATCH (n) RETURN n }", .message = "Expected MATCH, OPTIONAL MATCH, WHERE, RETURN" },
+    };
+    for (cases) |c| try expectFailure(db, c.query, .parse, c.message);
+
+    // The words are still names elsewhere.
+    try expectResult(db, "WITH 1 AS load, 2 AS show, 3 AS filter, 4 AS start RETURN load + show + filter + start AS s", "s\n10");
+    try run(db, "CREATE (:Index {use: 1})");
+    try expectResult(db, "MATCH (i:Index) RETURN i.use AS u", "u\n1");
+}

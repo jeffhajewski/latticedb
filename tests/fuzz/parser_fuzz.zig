@@ -271,6 +271,17 @@ test "parser: handles the syntax added after 0.16" {
         "MATCH (n) RETURN n ORDER BY n.v NULLS FIRST, n.w DESC NULLS LAST",
         "MATCH (n) RETURN n ORDER BY n.v NULLS",
         "RETURN 0x1F, 0x, .5, .5e3, ., 0xffffffffffffffffff",
+        "LOAD CSV FROM 'x' AS r RETURN r",
+        "CREATE INDEX FOR (n:T) ON (n.v)",
+        "MATCH p = shortestPath((a)-[*]-(b)) RETURN p",
+        "MATCH ((a)-->(b)){1,3} RETURN a",
+        "MATCH (n:A|B) RETURN n",
+        "MATCH (n:!A&B) RETURN n",
+        "MATCH (n WHERE n.v > 1)-[r WHERE r.x]->(m) RETURN n",
+        "MATCH (n) RETURN *",
+        "MATCH (n) RETURN n {.a}",
+        "RETURN 1 IS :: INTEGER, 'a' || 'b'",
+        "OPTIONAL CALL db.labels()",
     };
     for (corpus) |input| try fuzzParser(allocator, input);
 }

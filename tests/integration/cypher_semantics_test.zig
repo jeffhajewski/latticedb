@@ -1057,6 +1057,24 @@ test "cypher: RETURN DISTINCT applies SKIP and LIMIT to the distinct rows" {
     try std.testing.expectEqual(@as(i64, 2), ordered.rows[1].values[0].int_val);
 }
 
+test "cypher: min and max order values as ORDER BY does" {
+    const path = "/tmp/lattice_cs_min_max_order.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    // Different types compared as equal, so the first value seen won both.
+    var mixed = try db.query("UNWIND ['b', 2, 'a', 1] AS x RETURN min(x) AS lo, max(x) AS hi");
+    defer mixed.deinit();
+    try std.testing.expectEqualStrings("a", mixed.rows[0].values[0].string_val);
+    try std.testing.expectEqual(@as(i64, 2), mixed.rows[0].values[1].int_val);
+
+    // 2^53 + 1 and 2^53 are the same f64.
+    var exact = try db.query("UNWIND [9007199254740992.0, 9007199254740993] AS x RETURN max(x) AS hi, min(x) AS lo");
+    defer exact.deinit();
+    try std.testing.expectEqual(@as(i64, 9007199254740993), exact.rows[0].values[0].int_val);
+    try std.testing.expectEqual(@as(f64, 9007199254740992.0), exact.rows[0].values[1].float_val);
+}
+
 test "cypher: functions of null are null and a map reads by key" {
     const path = "/tmp/lattice_cs_null_functions.ltdb";
     const db = try openTestDb(path);

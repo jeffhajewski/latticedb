@@ -18,6 +18,7 @@ const ExpressionEvaluator = expression.ExpressionEvaluator;
 const EvalResult = expression.EvalResult;
 const EvalError = expression.EvalError;
 const key_encoding = @import("key_encoding.zig");
+const orderValues = @import("limit.zig").orderValues;
 
 const ast = @import("../ast.zig");
 
@@ -192,29 +193,14 @@ const Accumulator = struct {
     }
 };
 
-/// Compare two EvalResults for ordering
+/// The order min and max choose by: the one ORDER BY sorts by.
+///
+/// Values of different types have a fixed order there, and integers and
+/// floats compare by value exactly. Comparing them here as equal made the
+/// answer over mixed types whichever value came first, and going through
+/// f64 confused integers that differ only beyond 2^53.
 fn compareValues(a: EvalResult, b: EvalResult) std.math.Order {
-    return switch (a) {
-        .int_val => |ai| switch (b) {
-            .int_val => |bi| std.math.order(ai, bi),
-            .float_val => |bf| std.math.order(@as(f64, @floatFromInt(ai)), bf),
-            else => .eq,
-        },
-        .float_val => |af| switch (b) {
-            .float_val => |bf| std.math.order(af, bf),
-            .int_val => |bi| std.math.order(af, @as(f64, @floatFromInt(bi))),
-            else => .eq,
-        },
-        .string_val => |as| switch (b) {
-            .string_val => |bs| std.mem.order(u8, as, bs),
-            else => .eq,
-        },
-        .bytes_val => |ab| switch (b) {
-            .bytes_val => |bb| std.mem.order(u8, ab, bb),
-            else => .eq,
-        },
-        else => .eq,
-    };
+    return orderValues(a, b);
 }
 
 // ============================================================================

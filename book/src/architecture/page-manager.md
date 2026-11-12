@@ -430,6 +430,7 @@ reasons:
 | `0x01` | vector index settings | the vector index uses a metric other than cosine or an `m` other than 16 (`ef_construction` only affects how new vectors are inserted, so it does not count) |
 | `0x02` | ordered property index | a property index is declared; 0.16.0 would take its keys for digests and find nothing |
 | `0x04` | changefeed events | a commit records its first changefeed event; 0.16.0's `changes()` would skip events in this release's format without an error, and its trim would leave them |
+| `0x08` | full-text positions | a full-text index that stores word positions takes its first document; 0.16.0 would append posting entries without a position count and garble the page |
 
 Opening never raises it: a read-only open changes nothing, and a read-write open that
 writes nothing leaves the version at 3. A changefeed with retention `off` records no
@@ -447,9 +448,9 @@ until the next flush; that flush writes the whole header with the same values. S
 every state a crash can leave holds either no durable event or a header that already
 refuses 0.16.0. Replaying a log's changefeed records raises the version again in the
 header the replay's flushes write, in case a stale journal put an older header back.
-The other two raise the header in memory, and it reaches the file no later than what
-they describe: in the same flush for a vector index, and before the first entry for
-a property index.
+The other three raise the header in memory, and it reaches the file no later than
+what they describe: in the same flush for a vector index and for a full-text index's
+first postings, and before the first entry for a property index.
 
 0.16.0 predates the minimum writer version: it opens and writes a file that asks for
 a newer writer, and zeroes the field as it writes the header. So a later feature that

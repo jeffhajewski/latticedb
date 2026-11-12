@@ -1216,8 +1216,9 @@ with relationships is one range probe, under 1 µs.
   graph records changefeed events in a format 0.16.0 would misread, so that
   commit first raises the file's minimum reader version to 4. The same happens
   when a file gets a vector index whose metric is Euclidean or dot product or
-  whose `m` is not 16, or an ordered property index. 0.16.0 then refuses the
-  file and leaves it byte for byte as it was: its C API returns
+  whose `m` is not 16 or an ordered property index, and when a full-text
+  index that stores word positions takes its first document. 0.16.0 then
+  refuses the file and leaves it byte for byte as it was: its C API returns
   `LATTICE_ERROR_IO` (-2, "I/O error"), its Python binding raises
   `LatticeIOError: I/O error`, and its CLI says "Failed to open database:
   IoError" (`check`: "Invalid database file"). Nothing lowers the version
@@ -1280,7 +1281,8 @@ with relationships is one range probe, under 1 µs.
   full-text index this release fills holds a document, it stores word
   positions, and 0.16.0 would damage it by appending entries without them; the
   file then asks for this release or later whatever the changefeed setting, and
-  0.16.0 refuses to open it with an I/O error.
+  0.16.0 refuses to open it with an I/O error (`lattice info`: "Min reader: v4,
+  so 0.16.0 cannot open it (full-text positions)").
 
 ## Upgrading
 

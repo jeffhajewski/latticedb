@@ -585,7 +585,8 @@ of an event may survive in a log or a backup.
 
 A file this release only reads, and a file created with retention `off`, keep
 version 3 and stay open to 0.16.0 unless something else raised it (a vector
-index 0.16.0 cannot describe, an ordered property index). To take a written
+index 0.16.0 cannot describe, an ordered property index, a full-text index
+holding documents with word positions). To take a written
 file back to 0.16.0, export it to JSON with this release and import it with
 0.16.0; the changefeed stays behind.
 

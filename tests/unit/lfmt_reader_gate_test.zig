@@ -1,7 +1,8 @@
 //! The file's reader version, raised when it first stores something 0.16.0
 //! would misread: compact changefeed events, a vector index 0.16.0 cannot
-//! describe, an ordered property index. 0.16.0 refuses a file whose
-//! `min_reader_version` is above its format (3).
+//! describe, an ordered property index, a full-text index that stores word
+//! positions. 0.16.0 refuses a file whose `min_reader_version` is above its
+//! format (3).
 
 const std = @import("std");
 const lattice = @import("lattice");
@@ -178,4 +179,25 @@ test "lfmt gate: the other raises record their reason beside the changefeed's" {
     const disk = try onDisk(path);
     try std.testing.expectEqual(types.FORMAT_VERSION, disk.version);
     try std.testing.expectEqual(Reason.vector_index | Reason.ordered_property_index | Reason.changefeed_events, disk.reasons);
+}
+
+test "lfmt gate: a full-text index that stores positions records its reason, with the changefeed off" {
+    const path = "/tmp/lfmt_gate_positions.db";
+    cleanup(path);
+    defer cleanup(path);
+
+    var cfg = config(true);
+    cfg.enable_fts = true;
+    cfg.fts_config.store_positions = true;
+    cfg.changefeed_retention = .off;
+    {
+        const db = try openRw(path, cfg, true);
+        defer db.close();
+        try db.createNodeFtsIndex("Doc", "text");
+        var txn = try db.beginTransaction(.read_write);
+        const id = try db.createNode(&txn, &.{"Doc"});
+        try db.setNodeProperty(&txn, id, "text", .{ .string_val = "the quick brown fox" });
+        try db.commitTransaction(&txn);
+    }
+    try std.testing.expectEqual(OnDisk{ .version = types.FORMAT_VERSION, .reasons = Reason.fulltext_positions }, try onDisk(path));
 }

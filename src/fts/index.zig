@@ -317,7 +317,7 @@ pub const FtsIndex = struct {
         // writing a position count, which garbles the page. It ignores the
         // record's positions bit, so the file has to keep it out.
         if (self.config.store_positions) {
-            self.posting_store.bp.pm.requireReaderVersion(lattice.core.types.FORMAT_VERSION) catch return FtsError.IoError;
+            self.posting_store.bp.pm.requireReaderVersion(lattice.storage.page.FileHeader.ReaderReason.fulltext_positions) catch return FtsError.IoError;
         }
         self.analysis_cache = fresh;
         self.positions_cache = self.config.store_positions;

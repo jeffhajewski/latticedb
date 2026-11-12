@@ -145,11 +145,15 @@ pub const FileHeader = extern struct {
         /// Changefeed events in the compact format, which 0.16.0's
         /// changefeed reader skips and its trim leaves in place.
         pub const changefeed_events: u16 = 0x04;
+        /// A full-text index that stores word positions: 0.16.0 appends to
+        /// its posting pages without a position count and garbles them.
+        pub const fulltext_positions: u16 = 0x08;
 
         pub const all = [_]struct { bit: u16, name: []const u8 }{
             .{ .bit = vector_index, .name = "vector index settings" },
             .{ .bit = ordered_property_index, .name = "ordered property index" },
             .{ .bit = changefeed_events, .name = "changefeed events" },
+            .{ .bit = fulltext_positions, .name = "full-text positions" },
         };
     };
 

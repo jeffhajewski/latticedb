@@ -55,13 +55,15 @@ test "fts ddl: an index whose declaration could not be saved can be declared aga
     try std.testing.expectEqual(@as(usize, 2), found.len);
 }
 
-/// The oldest release the file lets open it, as the file on disk says.
-fn minReaderOnDisk(comptime p: []const u8) !u16 {
+/// The oldest release the file lets open it, and why, as the file on disk
+/// says.
+fn minReaderOnDisk(comptime p: []const u8) !struct { version: u16, reasons: u16 } {
     var buf: [4096]u8 = undefined;
     const file = try @import("compat").fs.cwd().openFile(p, .{});
     defer file.close();
     _ = try file.preadAll(&buf, 0);
-    return std.mem.bytesAsValue(lattice.storage.page.FileHeader, buf[0..@sizeOf(lattice.storage.page.FileHeader)]).min_reader_version;
+    const header = std.mem.bytesToValue(lattice.storage.page.FileHeader, buf[0..@sizeOf(lattice.storage.page.FileHeader)]);
+    return .{ .version = header.min_reader_version, .reasons = header.readerReasons() };
 }
 
 test "fts ddl: an index that stores positions keeps 0.16.0 from opening the file" {
@@ -75,13 +77,15 @@ test "fts ddl: an index that stores positions keeps 0.16.0 from opening the file
         defer @import("compat").fs.cwd().deleteFile(p ++ "-wal") catch {};
         var config: lattice.storage.database.DatabaseConfig = .{ .enable_fts = true, .enable_vector = false };
         config.fts_config.store_positions = positions;
+        // Changefeed events would raise the version on their own.
+        config.changefeed_retention = .off;
         {
             const db = try Database.open(allocator, p, .{ .create = true, .config = config });
             defer db.close();
             try db.createNodeFtsIndex("Doc", "text");
         }
         // Declared and empty: nothing 0.16.0 would damage yet.
-        try std.testing.expectEqual(types.MIN_READER_VERSION, try minReaderOnDisk(p));
+        try std.testing.expectEqual(types.MIN_READER_VERSION, (try minReaderOnDisk(p)).version);
         {
             const db = try Database.open(allocator, p, .{ .config = config });
             defer db.close();
@@ -91,6 +95,9 @@ test "fts ddl: an index that stores positions keeps 0.16.0 from opening the file
         // 0.16.0 appends without position counts to a page whose entries
         // carry them, so once the index stores positions the file asks for
         // a reader of this format.
-        try std.testing.expectEqual(if (positions) types.FORMAT_VERSION else types.MIN_READER_VERSION, try minReaderOnDisk(p));
+        const on_disk = try minReaderOnDisk(p);
+        try std.testing.expectEqual(if (positions) types.FORMAT_VERSION else types.MIN_READER_VERSION, on_disk.version);
+        const Reason = lattice.storage.page.FileHeader.ReaderReason;
+        try std.testing.expectEqual(if (positions) Reason.fulltext_positions else @as(u16, 0), on_disk.reasons);
     }
 }

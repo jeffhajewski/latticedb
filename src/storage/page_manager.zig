@@ -693,14 +693,12 @@ pub const PageManager = struct {
         return true;
     }
 
-    /// Keep releases older than `version` from opening the file: it now
-    /// holds something they would misread or damage. Reaches the file with
-    /// the next flush; never lowered.
-    pub fn requireReaderVersion(self: *Self, version: u16) PageManagerError!void {
+    /// Keep 0.16.0 from opening the file: it now holds `reason` (a
+    /// `FileHeader.ReaderReason` bit), something 0.16.0 would misread or
+    /// damage. Reaches the file with the next flush; never lowered.
+    pub fn requireReaderVersion(self: *Self, reason: u16) PageManagerError!void {
         if (self.read_only) return PageManagerError.PermissionDenied;
-        if (self.header.min_reader_version >= version) return;
-        self.header.min_reader_version = version;
-        self.header_dirty = true;
+        self.raiseMinReaderVersion(reason);
     }
 
     /// Require a reader of this release's format for `reason` (a

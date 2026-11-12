@@ -2617,6 +2617,11 @@ test "hnsw rebuild reuses the connection pages the old graph used" {
     const random = prng.random();
     const count = 400;
     var vectors: [count][dims]f32 = undefined;
+    // Levels come from a clock-seeded generator. Seed it the same way for
+    // the first build and every rebuild, so each rebuild makes the same
+    // graph and needs exactly the pages the first one did.
+    const level_seed = 11;
+    index.rng = std.Random.DefaultPrng.init(level_seed);
     for (&vectors, 1..) |*v, id| {
         for (v) |*x| x.* = random.float(f32);
         try index.insert(id, v);
@@ -2630,6 +2635,7 @@ test "hnsw rebuild reuses the connection pages the old graph used" {
     // place every stored vector again.
     for (0..3) |_| {
         index.resetForRebuild();
+        index.rng = std.Random.DefaultPrng.init(level_seed);
         for (&vectors, locations, 1..) |*v, loc, id| try index.insertStored(id, loc, v);
         try std.testing.expectEqual(pages_before, pm.pageCount());
     }

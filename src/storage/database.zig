@@ -4220,9 +4220,20 @@ pub const Database = struct {
             try self.populateFtsDefinition(definition);
             catalog.create(definition) catch |err| return mapFtsCatalogError(err);
         }
-        self.fts_declared = true;
-        try self.sync();
-        self.page_manager.sync() catch return DatabaseError.IoError;
+        {
+            // A declaration the file did not get is taken back, so the error
+            // means the index does not exist and asking again builds it,
+            // rather than answering AlreadyExists for an index that a reopen
+            // would not have.
+            errdefer {
+                catalog.drop(definition) catch {};
+                self.clearFtsDefinition(definition) catch {};
+                self.fts_declared = self.ftsDeclarationsExist();
+            }
+            self.fts_declared = true;
+            try self.sync();
+            self.page_manager.sync() catch return DatabaseError.IoError;
+        }
         if (self.query_cache) |cache| cache.bumpSchemaVersion();
     }
 

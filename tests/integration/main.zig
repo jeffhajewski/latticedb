@@ -29,6 +29,7 @@ const lcy_cypher_features_test = @import("lcy_cypher_features_test.zig");
 const lnl_nolog_test = @import("lnl_nolog_test.zig");
 const lse_fts_space_test = @import("lse_fts_space_test.zig");
 const lse_fts_query_test = @import("lse_fts_query_test.zig");
+const lse_fts_ddl_test = @import("lse_fts_ddl_test.zig");
 
 // Re-export tests from all modules
 test {
@@ -74,6 +75,8 @@ test {
     _ = lse_fts_space_test;
     // The full-text query language, the same on every path
     _ = lse_fts_query_test;
+    // Declaring a full-text index happens whole or not at all
+    _ = lse_fts_ddl_test;
 }
 
 test "integration test runner initialized" {

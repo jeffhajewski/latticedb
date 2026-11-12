@@ -109,3 +109,31 @@ Compatibility alias:
 All clients should treat the edge ID returned by edge creation or traversal as
 the handle for edge properties. Source/target/type deletion remains available
 for simple graph operations, while property APIs operate by stable edge ID.
+
+## Node Deletion
+
+Since the release after 0.16.0, a plain node delete refuses a node that still
+has relationships, as Cypher's `DELETE` does, and deletes nothing; it used to
+delete the node and leave its relationships pointing at nothing. Code that
+deleted nodes with relationships should call the detach form, which deletes the
+relationships with the node:
+
+| Client | Plain delete (refused while relationships exist) | Detach delete |
+|--------|-----------------------------------------------|---------------|
+| C | `lattice_node_delete` returns `LATTICE_ERROR_HAS_RELATIONSHIPS` (-17) | `lattice_node_detach_delete` |
+| Python | `txn.delete_node(id)` raises `LatticeHasRelationshipsError` | `txn.delete_node(id, detach=True)` |
+| TypeScript | `txn.deleteNode(id)` throws a `LatticeError` with code -17 | `txn.deleteNode(id, { detach: true })` |
+| Go | `tx.DeleteNode(id)` returns `ErrorHasRelationships` | `tx.DetachDeleteNode(id)` |
+| Java | `txn.deleteNode(id)` throws `ErrorCode.HAS_RELATIONSHIPS` | `txn.detachDeleteNode(id)` |
+
+Creating an edge whose source or target does not exist now fails with
+`LATTICE_ERROR_NOT_FOUND` (-4) in every client.
+
+## Vector Options on Reopen
+
+A database file now records its vector index (dimensions, metric and HNSW
+parameters), and a database that has one opens with it without any vector
+options. Code that passed `enable_vectors` and the dimensions at every open can
+stop doing so; if it keeps passing them, they must match the file, or the open
+fails with `LATTICE_ERROR_CONFIG_MISMATCH` (-18).
+

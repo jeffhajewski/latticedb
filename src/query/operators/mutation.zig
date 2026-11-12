@@ -506,8 +506,8 @@ pub const DeleteNode = struct {
 // DeleteEdge Operator
 // ============================================================================
 
-/// Operator that deletes an edge for each input row.
-/// Note: Edge deletion requires knowing source, target, and type.
+/// Operator that deletes an edge for each input row. The edge's id is all
+/// it needs; deleting one already deleted by an earlier row is not an error.
 pub const DeleteEdge = struct {
     /// Input operator
     input: Operator,

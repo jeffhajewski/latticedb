@@ -2645,8 +2645,8 @@ pub const QueryPlanner = struct {
         return slot;
     }
 
-    /// Wrap an input operator in a Materialize barrier to release page latches
-    /// before downstream mutation operators write to the same storage pages.
+    /// Wrap an input operator in a Materialize barrier, so every row of the
+    /// input is read before the clause downstream writes anything.
     fn materializeInput(self: *Self, input: Operator) PlannerError!Operator {
         const mat = materialize_ops.Materialize.init(self.allocator, input) catch return PlannerError.OutOfMemory;
         return mat.operator();

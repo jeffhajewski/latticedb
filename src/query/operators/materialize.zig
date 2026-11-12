@@ -1,10 +1,13 @@
 //! Materialize operator for query execution.
 //!
-//! Buffers all input rows during open(), closes the input to release
-//! page latches, then replays rows from next(). This breaks the
-//! read-write latch conflict that causes self-deadlock when mutation
-//! operators (SET, DELETE, REMOVE) write to pages still held by
-//! upstream scan iterators.
+//! Buffers all input rows during open(), closes the input, then replays
+//! the rows from next(). The planner puts one in front of every writing
+//! clause (CREATE, MERGE, SET, REMOVE, DELETE), so the clause's reads are
+//! finished before its first write: a MATCH sees the graph as it was when
+//! the clause began, not the relationships and labels the same clause is
+//! adding as it goes, and a write cannot move storage under a read that
+//! is still walking it. (Scans no longer hold page latches between rows,
+//! which was the reason first given for this barrier.)
 
 const std = @import("std");
 const Allocator = std.mem.Allocator;
@@ -63,7 +66,7 @@ pub const Materialize = struct {
             self.rows.append(self.allocator, row.clone()) catch return OperatorError.OutOfMemory;
         }
 
-        // Close input to release all page latches
+        // Every read is done; the writes downstream can begin.
         self.input.close(ctx);
 
         self.opened = true;

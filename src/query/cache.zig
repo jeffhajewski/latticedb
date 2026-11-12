@@ -1,8 +1,10 @@
-//! Query plan cache for Lattice database.
+//! Query cache for Lattice database.
 //!
 //! Caches parsed ASTs and semantic analysis results to eliminate re-parsing
-//! for repeated queries. Parameters are resolved at execution time, so the
-//! same cached parse tree works for different parameter values.
+//! for repeated queries. It does not cache plans: every execution plans the
+//! query again, against the indexes and symbols the database has then.
+//! Parameters are resolved at execution time, so the same cached parse tree
+//! works for different parameter values.
 //!
 //! Design:
 //! - Cache key: raw query text bytes, hashed with Wyhash

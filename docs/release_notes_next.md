@@ -2,10 +2,6 @@
 
 Draft for the next release after `0.16.0`.
 
-<!-- Query-engine fixes still on another branch (DELETE without DETACH, MERGE,
-variable-length paths, relationship uniqueness, column naming, =~, aggregates)
-are not described here yet. -->
-
 ## Summary
 
 A database that was killed, or lost power, could reopen missing committed data,
@@ -14,12 +10,15 @@ database file only in whole flushes through a new journal, checkpoints save
 everything they depend on, a commit is durable before it becomes visible, and
 the log survives a torn write at its end.
 
-Several behaviours change, listed under *Breaking changes*: null follows
-Cypher's three-valued logic, `%` takes the sign of the dividend, integer overflow
-is an error, keys are capped at 1012 bytes, C API handles are opaque tokens, the
-JSON export format is version 2, full-text search splits words by Unicode, and
-`set_vector` refuses keys other than `"embedding"`. The page layout of the
-database file is unchanged.
+Cypher queries now give the answers Cypher specifies in many places where they
+did not: null follows three-valued logic, `DELETE` refuses a node that still has
+relationships, `MERGE` matches every label and property, a `MATCH` never uses one
+relationship twice, variable-length patterns return every path, `sum` of integers
+is an integer, and aggregates skip nulls. `=~`, relationship type alternation and
+`count(*)` work. These and the other behaviour changes are listed under *Breaking
+changes*, among them integer overflow as an error, a 1012-byte key cap, opaque C
+API handles, JSON export format version 2, Unicode full-text tokenization and
+stricter `set_vector` keys. The page layout of the database file is unchanged.
 
 ## Durability
 
@@ -64,19 +63,24 @@ the file did not fully hold, a torn last frame that later frames were appended
 behind, or a half-written header. Each of these made the database unopenable or
 reported corruption. Opening now cuts a torn tail back to the last good frame,
 and rebuilds a header whose checksum fails but whose identity fields match.
-Damage with good frames after it is still reported as corruption.
+Damage with good frames after it is still reported as corruption: recovery now
+checks every later frame to decide, where it looked only ten frames ahead and
+could take a longer damaged run for a tail, dropping the commits behind it.
 
 **Open and close empty the log.** Recovery replayed the log and left it in
 place, and closing through the Zig API or the CLI never checkpointed, so every
 open replayed everything since the last truncation and rebuilt every index. Open
-now checkpoints after recovery, and close checkpoints when the log holds frames.
+now checkpoints after recovery, and close checkpoints when the log holds changes
+since its last checkpoint.
 Transaction ids continue above the highest id in the log, so records from two
 sessions can no longer be read as one transaction.
 
 **Syncs cover what they claim.** `sync()` synced the log but not the database
 file, and with the log off nothing synced the file at all; it now does. A newly
 created database's directory is synced, so a power cut right after creation
-cannot leave the files missing from it (not on Windows).
+cannot leave the files missing from it, and so is the directory entry of each
+session's flush journal, before the first page is written in place (neither on
+Windows).
 
 **Full fsync on macOS.** On macOS `fsync` does not ask the drive to flush its own
 cache, so a commit there survives a crash but not necessarily a power cut. The
@@ -110,14 +114,15 @@ The default stays `.full`.
 
 ## Breaking changes
 
+### Cypher
+
 - **Null follows three-valued logic.** A comparison, arithmetic or string
   operation with a null operand is null, and `NOT`, `AND` and `OR` are Kleene:
   `null = null` is null, `NOT null` is null, `false AND null` is false, `true OR
   null` is true, `2 IN [1, null]` is null. A `WHERE` keeps a row only when its
   predicate is true, so `WHERE n.x <> 5` no longer keeps nodes with no `x`, and
   `MATCH (n {x: null})` matches nothing. `IS NULL` and `IS NOT NULL` are
-  unchanged. Grouping, `DISTINCT`, `ORDER BY` and `MERGE` still treat nulls as
-  equal.
+  unchanged. Grouping, `DISTINCT` and `ORDER BY` still treat nulls as equal.
 - **`%` takes the sign of the dividend.** `-7 % 2` is `-1` and `7 % -2` is `1`
   (they were `1` and `-1`). `%` now works on floats (`7.5 % 2` is `1.5`), where it
   returned null, and a zero divisor is an error for floats as for integers.
@@ -127,9 +132,79 @@ The default stays `.full`.
 - **Integer overflow is an error.** `+`, `-`, `*`, `/`, unary minus and `abs()`
   on integers fail the query when the result does not fit in 64 bits.
   `9223372036854775807 + 1` used to panic in debug builds and was undefined in
-  release builds. Float arithmetic is unchanged.
+  release builds. Float arithmetic is unchanged. `toInteger()` of a float outside
+  the 64-bit range, NaN or an infinity also fails, as does a float argument out
+  of range where `substring` or `range` expect an integer; all were undefined
+  behaviour. `range()` of more than ten million elements fails with
+  `RangeTooLarge`; it tried to allocate until memory ran out.
 - **`RETURN` and `WITH` take at most 16 items.** More fails to plan with
   `TooManyVariables`; it used to read past the end of the row.
+- **`DELETE` refuses a node that still has relationships.** The query fails with
+  `NodeHasRelationships` and deletes nothing; it used to delete the node and
+  leave its relationships pointing at nothing. Use `DETACH DELETE`, or delete the
+  relationships in the same statement (`DELETE r, n`). `DETACH DELETE` now
+  removes relationships by id, so parallel relationships and self-loops go too,
+  and deleting one relationship twice in a statement no longer fails. `DELETE` of
+  a value such as `n.name` is rejected, where it did nothing.
+- **`MERGE` matches every label and every property, and returns every match.**
+  `MERGE (n:A:B {k: 1})` matched a node with only `:A`; `MERGE (n {email: 'x'})`,
+  with no label, created a node every time; only the first match was returned.
+  Now a node matches when it has all the pattern's labels and properties, a
+  pattern without a label considers every node, each match is a row with
+  `ON MATCH` applied to it, and a node is created only when nothing matches.
+  Values compare as `=` does, so an integer matches the equal float and lists
+  match by value. A null pattern property fails the query, where it created a
+  node no later `MERGE` could find.
+- **A `MATCH` uses each relationship once.**
+  `MATCH (a {name: 'Alice'})-[:KNOWS]-(b)-[:KNOWS]-(c)` returned Alice as `c` by
+  walking back over the relationship it had just used, and comma-separated patterns could bind one relationship
+  twice. An undirected match returns a self-loop once, not twice. Separate
+  `MATCH` clauses may still reuse a relationship.
+- **Variable-length patterns return every path.** Each path uses a relationship
+  at most once, and nodes may repeat. `MATCH (s)-[:R*1..2]->(x)` over a->b, b->c,
+  a->c, c->d returned b and c, and now returns b, c, c and d: a node reached by
+  two paths comes back twice, and a path can return to its start. The silent
+  100-hop limit on `*` is gone; the number of paths can grow quickly on dense
+  graphs.
+- **`sum` of integers is an integer**, computed exactly: `sum` of 10 and 25 is 35,
+  not 35.0, and a sum that does not fit in 64 bits fails the query. Any float
+  makes the sum a float.
+- **Aggregates skip nulls.** `avg`, `collect`, `min` and `max` skip nulls, as
+  `count(x)` already did; `avg` of 10, null and 30 is 20, not 13.33. `sum` or
+  `avg` of a value that is not a number fails with a type error, where it was
+  ignored.
+- **Unaliased columns are named after their text.** `RETURN null = null` was a
+  column named after whichever variable shared its slot (`y` in one case);
+  `coalesce(a, b)` was named `coalesce`. Columns are now `null = null`,
+  `coalesce(a, b)`, `y + 1`. Columns that had names keep them.
+- **`ORDER BY` has a total order.** Values of different types sort in a fixed
+  order (maps, nodes, relationships, lists, vectors, bytes, strings, booleans,
+  numbers, null), where a mixed sort came back in an order that depended on the
+  sort itself. Integers and floats compare exactly (2^53 + 1 no longer ties with
+  2^53), NaN sorts above all other numbers, booleans can be ordered, and a sort
+  key that fails to evaluate fails the query (`ORDER BY 10 / x` with `x = 0` used
+  to succeed).
+- **`UNWIND` of null gives no rows**, where it gave one null row. An `UNWIND`
+  whose expression fails, including a missing parameter, fails the query; it used
+  to skip the row silently.
+- **A `<=>` predicate searches among the pattern's candidates.** It took the 100
+  nearest vectors in the whole database and kept the pattern's nodes among them,
+  so a label whose nodes were not in that 100 matched nothing and a threshold
+  query returned at most 100 nodes. The search now widens until every candidate
+  within the threshold is found, or the `LIMIT` is met. A threshold passed as a
+  parameter is honoured (it was ignored), any other threshold expression is
+  evaluated exactly, and `<` no longer includes a distance equal to the
+  threshold.
+- **Storage errors fail the query.** A read error in a property access or a
+  label check read as null, or as "no such label"; it now fails the query with
+  `StorageError`.
+- **Function names are not case-sensitive** (`TOLOWER` works), and
+  `toString(null)` is null, where it was the string `'null'`.
+- **`CREATE` cannot add labels or properties to a bound variable.**
+  `MATCH (n) CREATE (n:Extra {p: 1})` silently dropped them; it is now rejected.
+
+### Storage, API and formats
+
 - **Keys are capped at 1012 bytes** (for 4 KB pages). Labels, relationship types
   and property names are stored as keys, so a name of more than about a thousand
   bytes is refused with a storage error. A long name used to be able to overflow
@@ -202,7 +277,57 @@ Other changes, measured by their commits on a busy machine:
 - A second thread waiting on a database lock sleeps instead of spinning on a
   core.
 
+The second table compares the query engine before and after its own fixes in
+this release, so its "before" already includes the gains above. Cypher queries
+read one property at a time instead of copying the whole node, evaluate
+`ORDER BY` keys once per row and keep only the top `k` under a `LIMIT`, stream
+label scans in read-only queries so a `LIMIT` stops them early, and parse a
+prepared query once instead of once for `lattice_query_writes` and again to run
+it. Through the C API, release build, 20,000 nodes, median of three runs on a
+busy machine (±15%):
+
+| query | before | after |
+|---|---:|---:|
+| `MATCH (n:Person) RETURN n.id LIMIT 1`, 20,000 `Person` nodes | 99.7 µs | 1.39 µs |
+| `RETURN` 4 properties | 31.2 ms | 12.4 ms |
+| `WHERE age = 33` | 6.9 ms | 4.3 ms |
+| `ORDER BY age DESC, id LIMIT 10` | 288 ms | 4.9 ms |
+| `ORDER BY name`, all rows | 82 ms | 16.1 ms |
+| `count` + `avg` + `sum` | 12.5 ms | 4.7 ms |
+| 1-hop expand | 21.9 ms | 12.3 ms |
+| `*1..3` from one node | 7.0 ms | 4.4 ms |
+| `<=>` with `LIMIT 10` | 131 µs | 96 µs |
+| `UNWIND` of a tiny list | 0.57 µs | 0.60 µs |
+
+Preparing, running and freeing a tiny read query went from 0.79 µs to 0.60 µs.
+One lookup is slower: an indexed integer equality also probes the equal float,
+about 0.3 µs more.
+
 ## Fixes
+
+**Cypher**
+
+- `=~` works, with a regular-expression engine whose time grows linearly with the
+  text, whatever the pattern. It was a parse error. Backreferences and
+  lookaround fail the query.
+- `-[:A|B]->` matches a relationship of either type, also in variable-length
+  patterns. It was rejected. `-[:A:B]->` is now a parse error.
+- A node variable can be named again, in a later `MATCH`, after `WITH`, or later
+  in the same pattern, and means the same node. It was rejected as already
+  defined.
+- `MATCH (a)-->(b) WITH b RETURN b.name` returned `a`'s name, and a relationship
+  passed through `WITH` was treated as a node, so `WITH r DELETE r` failed.
+- A variable holding null reads as null. `UNWIND [1, null] AS v RETURN v` and
+  `WITH n.x AS x RETURN x` over a node without `x` failed the query.
+- An index lookup for `1` finds a node stored with `1.0`, as a scan does; `MERGE`
+  through the index used to create a duplicate.
+- Lists and maps compare by value: `[1, 2] = [1, 2]` is true.
+- `-9223372036854775808` is a valid literal, and keywords can name properties,
+  labels and map keys (`n.order`, `:Set`, `{limit: 1}`).
+- A query that failed while its operators were opening leaked memory, and reading
+  `n.embedding` leaked a copy of the vector on every row.
+- Decoding a damaged node record no longer frees memory twice or trusts a length
+  field before allocating.
 
 **Full-text search**
 
@@ -220,8 +345,8 @@ Other changes, measured by their commits on a busy machine:
 
 **Vector search**
 
-- `vector_search` with `k` above `ef_search` returns `k` results; Cypher's `<=>`
-  returned 64 of its 100.
+- `vector_search` with `k` above `ef_search` returns `k` results; it returned
+  `ef_search` of them.
 - HNSW inserts and removes are all or nothing. `m` and `m_max0` are capped at 64.
 - Pending vectors are scored on the same scale as committed ones. Under cosine,
   committed vectors read back normalised (documented; unchanged).
@@ -262,6 +387,10 @@ Other changes, measured by their commits on a busy machine:
   carries the real error code, `BigDecimal` is stored as a float, and characters
   outside the BMP survive error text and column names.
 - `LATTICE_PREFIX` on Windows looks for the DLL under `bin/`, then `lib/`.
+- The embedding client applies its timeout (`timeout_ms`, 30 s by default) to the
+  wait for the response to begin; it was stored and never used, so a stalled
+  server kept a request waiting indefinitely. Connecting and reading the rest of
+  a response are not bounded, and Windows is unchanged.
 
 ## Known limits
 
@@ -281,6 +410,14 @@ Other changes, measured by their commits on a busy machine:
   on its own handle ships frames as before.
 - **`sync_mode` and `full_fsync` are set through the environment** outside Zig;
   the C API's open options do not include them.
+- **Some Cypher is not implemented.** `OPTIONAL MATCH`, `CASE`, `UNION`, `CALL`,
+  list indexing, list comprehensions and named paths fail with a parse error.
+  The message names the clauses the parser expected, not the missing feature.
+- **One relationship-uniqueness gap.** A single-hop relationship written after a
+  variable-length one in the same `MATCH` can reuse a relationship of that path.
+- **Strings are measured in bytes.** `size()` and `substring()` count bytes, and
+  `toLower()` and `toUpper()` change ASCII letters only. An unknown function name
+  is reported when it is first evaluated, not when the query is parsed.
 
 ## Upgrade notes
 
@@ -289,6 +426,10 @@ Other changes, measured by their commits on a busy machine:
 - Close a database cleanly with this release before opening it with 0.16.0.
   0.16.0 does not know about the journal, so after a crash it would ignore an
   unfinished flush.
+- Check application code against the Cypher changes above, in particular plain
+  `DELETE` of nodes that may have relationships, code that reads results by
+  the name of an unaliased column, code that expects `sum` of integers to be a
+  float, and `MERGE` patterns without a label or with several labels.
 - 0.16.0 can open a database whose full-text indexes this release wrote, but it
   splits non-ASCII words the old way and will not find words with non-ASCII
   letters indexed by this release.

@@ -83,6 +83,8 @@ Some codes come from more than one place:
 
 | Code | Returned by |
 |------|-------------|
+| `LATTICE_ERROR_VERSION_MISMATCH` | An open, read-only included, of a file or log in a format a newer release wrote |
+| `LATTICE_ERROR_LOCK_TIMEOUT` | Also `lattice_checkpoint` while a transaction already has records in the log |
 | `LATTICE_ERROR_CORRUPTION` | An open whose log holds damage in frames that had been synced, or a committed change that cannot be replayed |
 | `LATTICE_ERROR_NOT_FOUND` | `lattice_edge_create` when either end does not exist; a query that creates a relationship to a node deleted earlier in it |
 | `LATTICE_ERROR_FULL` | A read-only open whose crash recovery needs more memory than it is allowed (see [Read-only opens after a crash](#read-only-opens-after-a-crash)) |
@@ -209,7 +211,8 @@ set", and a value outside its range makes the open return
 | `changefeed_retention_value` | Events for `_LAST`, milliseconds for `_AGE`, at least 1 | Must be set for `_LAST` and `_AGE` |
 
 `lattice_deserialize` and `lattice_deserialize_borrowed` take the v4 options;
-there is no v5 form of them.
+`lattice_deserialize_v5` and `lattice_deserialize_borrowed_v5` take these, and
+check them against the index the bytes record as an open checks a file.
 
 ### Durability settings
 
@@ -259,6 +262,8 @@ it for writing.
 The file header says which releases may read the file and which may write it. A
 file that only a newer release may write opens with `read_only` set; a
 read-write open returns `LATTICE_ERROR_NEEDS_NEWER_WRITER` and writes nothing.
+A file whose format this release cannot read at all is refused by every open
+with `LATTICE_ERROR_VERSION_MISMATCH`.
 
 ### Read-only opens after a crash
 
@@ -316,6 +321,35 @@ Turn `lock` off only on filesystems that do not support locking, such as some
 network filesystems, where the alternative is not being able to open the database
 at all. It does not make concurrent access safe. It removes the thing that was
 going to tell you it was not.
+
+### Checkpoints
+
+A commit is durable once it is in the log. A checkpoint writes the pages the
+log's commits changed into the database file, and can then empty the log. A
+commit runs one once the log holds 1000 frames (one per page written), and open
+and close fold whatever the log holds into the file.
+
+```c
+lattice_checkpoint_stats stats;
+lattice_checkpoint(db, LATTICE_CHECKPOINT_TRUNCATE, &stats);  // stats may be NULL
+
+lattice_set_auto_checkpoint(db, 10000, 0);  // every 10,000 frames, no minimum gap
+lattice_set_auto_checkpoint(db, 0, 0);      // commits never checkpoint
+```
+
+`LATTICE_CHECKPOINT_PASSIVE` gives way if a changed page is in use (then it
+writes nothing and reports 0 pages), `_FULL` writes every changed page, and
+`_TRUNCATE` does that and empties the log; only truncate bounds the log's size.
+The stats report pages written, the duration, the log position the file now
+holds and whether the log was emptied. A read-only handle gets
+`LATTICE_ERROR_READ_ONLY`.
+
+`lattice_set_auto_checkpoint(db, max_wal_frames, min_interval_ms)` changes when
+that handle's commits checkpoint from then on; 0 frames switches them off and the
+log grows until `lattice_checkpoint` or close. Without it, the
+`LATTICE_AUTO_CHECKPOINT_FRAMES` environment variable sets the frame count. A
+larger interval means fewer pauses, each longer, a longer log and more to replay
+after a crash; see [Checkpointing](../configuration/durability.md#checkpointing).
 
 ## Transaction Operations
 

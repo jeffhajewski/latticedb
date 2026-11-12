@@ -52,7 +52,7 @@ defer db.Close()
 | `CacheSizeMB` | How much memory to keep pages in |
 | `PageSize` | Page size in bytes |
 | `EnableVectors` | Create a vector index if the database has none |
-| `VectorDimensions` | How many numbers are in each vector, when `EnableVectors` is set (0 means 128) |
+| `VectorDimensions` | How many numbers are in each vector, when `EnableVectors` is set (0 means the file's; creating an index needs it set) |
 | `VectorMetric` | How a new index measures distance: `VectorMetricCosine` (the default), `VectorMetricEuclidean` or `VectorMetricDotProduct` |
 | `VectorM` | HNSW connections per node for a new index, 2..32 (0 means 16) |
 | `VectorEfConstruction` | HNSW candidate list size while building a new index, 1..4096 (0 means 200) |
@@ -101,10 +101,10 @@ whether or not `EnableVectors` is set, so reopening needs no vector options at
 all, also after a crash. The metric and the two HNSW settings configure a new
 index and are fixed once it exists. Any of them that is set, and
 `VectorDimensions` when `EnableVectors` is set, must match the file, or `Open`
-returns an error whose `Code` is `ErrorConfigMismatch`. Since a zero
-`VectorDimensions` means 128, Go cannot ask for "the file's dimensions" with
-`EnableVectors` set: to open a database whose dimensions you do not know, leave
-`EnableVectors` off.
+returns an error whose `Code` is `ErrorConfigMismatch`. `VectorDimensions` 0
+with `EnableVectors` means the file's dimensions: it opens a database that has an
+index whatever its size, and returns `ErrorInvalidArg` where an index would have
+to be created.
 
 ```go
 db, err := latticedb.Open("vectors.lattice", latticedb.OpenOptions{
@@ -136,8 +136,7 @@ sync without `F_FULLFSYNC`; a value you set wins over them. See
 [Durability and the Log](../configuration/durability.md).
 
 `Open` goes through `lattice_open_v5`, so the binding needs a native library
-that has it. `Deserialize` still opens through the v4 options and ignores these
-fields.
+that has it, as does `Deserialize`, which takes the same options.
 
 ### Read-only opens
 
@@ -147,7 +146,21 @@ the files. A recovery that needs more than 64 MB plus four times the size of the
 log and journal fails with `ErrorFull`; open the database read-write once to
 recover it on disk. A file that a newer release has marked as not writable by
 this one opens only with `ReadOnly: true`; a writable `Open` returns
-`ErrorNeedsNewerWriter` and writes nothing.
+`ErrorNeedsNewerWriter` and writes nothing. A file in a format only a newer
+release can read is refused by every open with `ErrorVersionMismatch`.
+
+### Checkpoints
+
+```go
+stats, err := db.Checkpoint(latticedb.CheckpointTruncate) // fold the log into the file now
+err = db.SetAutoCheckpoint(10000, 0)                       // commits checkpoint every 10,000 frames
+err = db.SetAutoCheckpoint(0, 0)                           // commits never checkpoint
+```
+
+`CheckpointPassive` gives way if a changed page is in use, `CheckpointFull`
+writes every changed page, and `CheckpointTruncate` does that and empties the
+log. `CheckpointStats` reports `PagesFlushed`, `Duration`, `CheckpointLSN` and
+`WALTruncated`. Without the setter, the `LATTICE_AUTO_CHECKPOINT_FRAMES` environment variable sets the frame count (default 1000). A larger interval means fewer pauses, each longer, a longer `-wal` file and more to replay after a crash; see [Checkpointing](../configuration/durability.md#checkpointing).
 
 ## Writing
 

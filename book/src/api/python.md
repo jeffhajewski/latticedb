@@ -137,8 +137,8 @@ environment variables; they apply only when you leave the option unset. See
 
 `sync_mode`, `full_fsync` and the three vector index options need a native
 library with `lattice_open_v5`; against an older one, setting any of them raises
-`LatticeUnsupportedError`. `latticedb.deserialize()` opens through the older
-options and does not take them.
+`LatticeUnsupportedError`. `latticedb.deserialize()` takes them too, through
+`lattice_deserialize_v5`, with the same fallback against an older library.
 
 #### Read-only opens
 
@@ -403,6 +403,20 @@ print(f"Entries: {stats['entries']}, Hits: {stats['hits']}, Misses: {stats['miss
 # Clear the cache
 db.cache_clear()
 ```
+
+### Checkpoints
+
+```python
+stats = db.checkpoint("truncate")   # fold the log into the file now
+db.set_auto_checkpoint(10_000)      # commits checkpoint every 10,000 frames
+db.set_auto_checkpoint(0)           # commits never checkpoint
+```
+
+`"passive"` gives way if a changed page is in use, `"full"` writes every changed
+page and leaves the log, and `"truncate"` (the default) also empties it.
+`CheckpointStats` has `pages_flushed`, `duration_ns`, `checkpoint_lsn` and
+`wal_truncated`; `set_auto_checkpoint` takes `min_interval_ms` as well.
+Without the setter, the `LATTICE_AUTO_CHECKPOINT_FRAMES` environment variable sets the frame count (default 1000). A larger interval means fewer pauses, each longer, a longer `-wal` file and more to replay after a crash; see [Checkpointing](../configuration/durability.md#checkpointing).
 
 ## Supported Property Types
 

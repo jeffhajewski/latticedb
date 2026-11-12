@@ -160,8 +160,8 @@ environment variables; they apply only when you leave the option unset. See
 
 `syncMode`, `fullFsync` and the three vector index options need a native library
 with `lattice_open_v5`; against an older one, setting any of them throws with
-code -14 (`Unsupported`). `deserialize()` opens through the older options and
-ignores them.
+code -14 (`Unsupported`). `deserialize()` takes them too, through
+`lattice_deserialize_v5`, with the same fallback against an older library.
 
 `readOnly: true` on a database that was not closed cleanly recovers it in
 memory: the handle sees every committed transaction, and nothing is written to
@@ -442,6 +442,20 @@ console.log(
 // Clear the cache
 await db.cacheClear();
 ```
+
+### Checkpoints
+
+```typescript
+const stats = await db.checkpoint('truncate'); // fold the log into the file now
+await db.setAutoCheckpoint(10000);             // commits checkpoint every 10,000 frames
+await db.setAutoCheckpoint(0);                 // commits never checkpoint
+```
+
+`'passive'` gives way if a changed page is in use, `'full'` writes every changed
+page and leaves the log, and `'truncate'` (the default) also empties it. The
+stats report `pagesFlushed`, `durationNs`, `checkpointLsn` and `walTruncated`;
+`setAutoCheckpoint` takes an optional minimum gap in milliseconds as its second
+argument. Without the setter, the `LATTICE_AUTO_CHECKPOINT_FRAMES` environment variable sets the frame count (default 1000). A larger interval means fewer pauses, each longer, a longer `-wal` file and more to replay after a crash; see [Checkpointing](../configuration/durability.md#checkpointing).
 
 ## Supported Property Types
 

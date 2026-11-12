@@ -57,9 +57,10 @@ ef_construction. A database that has one opens with it whether or not
 `enableVectors` is set, so reopening needs no vector options, also after a
 crash. `vectorMetric`, `vectorM` and `vectorEfConstruction` configure a new
 index and are fixed once it exists; any of them that is set, and
-`vectorDimensions` when `enableVectors(true)` is set (it defaults to 128 and
-cannot be 0), must match the file, or opening throws `ErrorCode.CONFIG_MISMATCH`.
-To open a database whose dimensions you do not know, leave `enableVectors` off.
+`vectorDimensions` when `enableVectors(true)` is set (it defaults to 128), must
+match the file, or opening throws `ErrorCode.CONFIG_MISMATCH`. `vectorDimensions(0)`
+means the file's dimensions: it opens a database that has an index whatever its
+size, and throws `ErrorCode.INVALID_ARG` where an index would have to be created.
 Cosine stores vectors at unit length and returns the cosine distance; Euclidean
 returns the L2 distance and dot product the negative dot product, both over
 vectors stored as given; results come smallest first.
@@ -91,6 +92,13 @@ given.
 from the database is still open. The `Database` then keeps its handle, so you can
 finish what is open and call `close()` again. A close that fails with
 `ErrorCode.IO` has still closed the database.
+
+`db.checkpoint(CheckpointMode.TRUNCATE)` (or `checkpoint()`) folds the log into
+the database file now and returns `CheckpointStats` (`pagesFlushed`,
+`durationNs`, `checkpointLsn`, `walTruncated`); `PASSIVE` gives way if a changed
+page is in use, `FULL` leaves the log in place. `db.setAutoCheckpoint(maxWalFrames,
+minIntervalMs)` sets when commits checkpoint from then on, 0 frames for never.
+Without the setter, the `LATTICE_AUTO_CHECKPOINT_FRAMES` environment variable sets the frame count (default 1000). A larger interval means fewer pauses, each longer, a longer `-wal` file and more to replay after a crash; see [Checkpointing](../configuration/durability.md#checkpointing).
 
 ## Transactions
 

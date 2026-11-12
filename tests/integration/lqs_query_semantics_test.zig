@@ -733,3 +733,30 @@ test "lqs: a refused delete and a relationship to a deleted node say why" {
     try std.testing.expectEqual(@as(i64, 3), try queryInt(db, "MATCH (n:D) RETURN count(n)"));
     try std.testing.expectEqual(@as(i64, 1), try queryInt(db, "MATCH (:D)-[r:R]->(:D) RETURN count(r)"));
 }
+
+test "lqs: a delete in a transaction sees only the node's own pending relationships" {
+    const path = "/tmp/lattice_lqs_pending_delete.ltdb";
+    const db = try openTxnTestDb(path);
+    defer cleanupTxnTestDb(db, path);
+    try run(db, "UNWIND range(0, 9) AS i CREATE (:N {i: i})");
+
+    var txn = try db.beginTransaction(.read_write);
+    defer db.abortTransaction(&txn) catch {};
+    // Pending edges between other nodes, one on node 0, and one on node 1
+    // that the transaction deletes again.
+    try runIn(db, &txn, "MATCH (a:N), (b:N) WHERE a.i > 2 AND b.i > 2 CREATE (a)-[:R]->(b)");
+    try runIn(db, &txn, "MATCH (a:N {i: 0}), (b:N {i: 5}) CREATE (b)-[:R]->(a)");
+    try runIn(db, &txn, "MATCH (a:N {i: 1}), (b:N {i: 5}) CREATE (a)-[:GONE]->(b)");
+    try runIn(db, &txn, "MATCH (:N {i: 1})-[g:GONE]->() DELETE g");
+
+    const n0: u64 = @intCast(try queryIntIn(db, &txn, "MATCH (n:N {i: 0}) RETURN id(n)"));
+    const n1: u64 = @intCast(try queryIntIn(db, &txn, "MATCH (n:N {i: 1}) RETURN id(n)"));
+    const n2: u64 = @intCast(try queryIntIn(db, &txn, "MATCH (n:N {i: 2}) RETURN id(n)"));
+    try std.testing.expect(try db.nodeHasRelationshipsInTxn(&txn, n0));
+    try std.testing.expect(!try db.nodeHasRelationshipsInTxn(&txn, n1));
+    try std.testing.expect(!try db.nodeHasRelationshipsInTxn(&txn, n2));
+    try std.testing.expectError(error.NodeHasRelationships, db.deleteNode(&txn, n0));
+    try db.deleteNode(&txn, n1);
+    try db.deleteNode(&txn, n2);
+    try std.testing.expectEqual(@as(i64, 8), try queryIntIn(db, &txn, "MATCH (n:N) RETURN count(n)"));
+}

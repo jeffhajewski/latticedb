@@ -6166,7 +6166,8 @@ pub const Database = struct {
     /// transaction has changed edges is more needed. The first committed edge
     /// the transaction has not deleted ends the search, so a node with many
     /// edges costs no more than one with a single edge. What the transaction
-    /// created is then found in its overlay, which this walks in full.
+    /// created is then found among the node's own pending edges
+    /// (`edges_by_node`), not by walking every edge the transaction changed.
     pub fn nodeHasRelationshipsInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError!bool {
         const overlay: ?*TxnOverlay = if (txn) |t| self.getTxnOverlay(t) else null;
         const changed_edges: ?*const std.AutoHashMapUnmanaged(EdgeId, TxnEdgeState) = if (overlay) |o|
@@ -6174,21 +6175,28 @@ pub const Database = struct {
         else
             null;
 
-        var iter = self.edge_store.getAllRefs(node_id) catch return DatabaseError.IoError;
+        var iter = self.edge_store.getAllRefs(node_id) catch |err| return mapEdgeReadError(err);
         defer iter.deinit();
-        while (iter.next() catch return DatabaseError.IoError) |edge_ref| {
+        while (iter.next() catch |err| return mapEdgeReadError(err)) |edge_ref| {
             const states = changed_edges orelse return true;
             const state = states.getPtr(edge_ref.id) orelse return true;
             if (state.exists) return true;
         }
 
         const states = changed_edges orelse return false;
-        var it = states.iterator();
-        while (it.next()) |entry| {
-            const state = entry.value_ptr;
-            if (state.exists and (state.source == node_id or state.target == node_id)) return true;
+        const pending = overlay.?.edges_by_node.get(node_id) orelse return false;
+        for (pending.items) |edge_id| {
+            const state = states.getPtr(edge_id) orelse continue;
+            if (state.exists) return true;
         }
         return false;
+    }
+
+    fn mapEdgeReadError(err: anyerror) DatabaseError {
+        return switch (err) {
+            error.OutOfMemory => DatabaseError.OutOfMemory,
+            else => DatabaseError.IoError,
+        };
     }
 
     /// Delete a node and every relationship it has, as Cypher's DETACH DELETE

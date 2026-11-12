@@ -43,6 +43,13 @@ The comparison may be reversed or nested within an `AND` expression. `OR`
 predicates remain scan-backed so the planner cannot discard rows from the
 other branch.
 
+The same index answers ranges and prefixes on its property (`<`, `<=`, `>`, `>=`
+and `STARTS WITH`, several of them joined by `AND`), and an ascending
+`ORDER BY` on it with a `LIMIT` reads it in order; see
+[Property Indexes](../guides/property-indexes.md#ranges-prefixes-and-sorting).
+
+`MATCH (n)` with no label returns nodes in id order.
+
 ### Label Expressions
 
 `(n:A:B)` matches nodes with both labels. A label expression says more:

@@ -220,6 +220,13 @@ This keeps traversal efficient in either direction without duplicating large
 edge properties. The stable `edge_id` lets callers update properties by ID and
 lets the storage layer restore or delete the exact edge during WAL recovery.
 
+Because the traversal keys carry no payload, changing an edge's properties
+rewrites only its payload entry (`EdgeStore.replaceProperties`, one B+Tree
+`replace`); the traversal keys are left alone. That is so on commit, for direct
+writes, for an undo and for a replayed log record. Setting one property on each
+of 20,000 edges in one transaction went from about 6.6 µs to 3.6 µs an edge,
+commit included.
+
 ### Edge-ID Index
 
 The edge-ID tree is a separate B+Tree from the traversal tree. Unlike the
@@ -412,6 +419,52 @@ while (try iter.next()) |node_id| {
 const person_count = try index.countNodesByLabel(person_id);
 ```
 
+## Property Indexes
+
+An explicit index on a label's (or a relationship type's) property lives in
+three B+Trees: a catalog of declarations, and one entry tree each for nodes and
+edges.
+
+| Tree | Key | Value |
+|------|-----|-------|
+| Catalog | kind (1 node, 2 edge), scope id u16 BE, property id u16 BE | encoding: empty = digest, `[1]` = ordered |
+| Node / edge entries | scope id u16 BE, property id u16 BE, encoded value, entity id u64 BE | empty |
+
+Indexes created by this release use the **ordered** encoding, whose byte order
+is `ORDER BY`'s order, so a range of values is a range of keys:
+
+| Tag | Values | Bytes after the tag |
+|-----|--------|---------------------|
+| `0x10` | lists, maps, vectors | SHA-256 digest (equality only) |
+| `0x20` | byte arrays | as strings |
+| `0x30` | strings | the first 128 bytes, `0x00` written `00 FF`, then `00 00` if that was all of it or `00 01` if the value is longer |
+| `0x40` | booleans | one byte |
+| `0x50` | integers and floats | the largest double not above the value, as 8 bytes that sort like it (`-0` as `+0`), then a u16 BE remainder for integers a double cannot hold |
+| `0x51` | NaN | nothing; after every number |
+| none | null | not indexed |
+
+So `3` and `3.0` share a key, and an integer and a float compare exactly, as
+the query engine compares them. A truncated string or a digest stands for
+several values; lookups re-read the entity and compare, so neither can produce
+a wrong row. Indexes created by 0.16.0 have an empty catalog value and key a
+SHA-256 digest of the value: they answer equality only, and keep doing so, until
+dropped and created again.
+
+Creating an ordered index raises the file header's `min_reader_version` to 4
+before the first key is written, so 0.16.0, which would read the keys as
+digests and find nothing, refuses to open the file. A file without one stays at
+`min_reader_version` 3. The raise is not undone when the index is dropped.
+
+Declarations are cached in memory (up to 32 per kind), so a write does not read
+the catalog. A transaction's own staged nodes and edges are found by indexed
+value through a per-transaction table (`OverlayLookup`), filled on the first
+lookup for a declaration and kept up to date by later staged writes, so a
+lookup inside a transaction that staged 100,000 nodes costs about 1 µs rather
+than a walk of all of them.
+
+How queries use these indexes is in
+[Query Execution](./query-execution.md#scan-operators).
+
 ## Putting It Together
 
 A complete graph operation involves multiple B+Trees:
@@ -469,11 +522,18 @@ overlays; see [Transaction Manager](./transaction-manager.md)); this chapter onl
 describes the underlying graph-storage structures.
 
 1. **Property updates rewrite records**: No in-place partial property update at the storage-record level
+2. **No index from relationship type to edge.** The header's sixteen tree roots
+   are all in use, and an index kept in the label tree would be read by 0.16.0
+   as labels and left stale by its writes, so every file with an edge would have
+   to be closed to 0.16.0; a prototype also cost 7% on edge creation. A pattern
+   that starts from a type, `()-[r:KNOWS]->()`, walks the edge-ID index once
+   instead (66 ms to 20 ms for a count over 1,000,000 edges).
+3. **The edge-ID index walks in a non-numeric order** (its keys are
+   little-endian), and that is the row order of a type-only pattern.
 
 ## Future Enhancements
 
-1. **Edge type index**: Fast lookup by edge type across all nodes
-2. **Cross-node edge type scans**: Dedicated indexes for type-wide traversals
+1. **Edge type index**, if a file format change frees a tree root for it.
 
 ## Summary
 
@@ -486,8 +546,8 @@ describes the underlying graph-storage structures.
 | Edge ID Index | edge_id | Stable edge identity and property payload |
 | Label Index | (label_id, node_id) | Label-based queries |
 | Property Index Catalog | (entity_kind, scope_id, property_id) | Durable explicit index definitions |
-| Node Property Index | (scope_id, property_id, value_digest, node_id) | Indexed node-property equality lookup |
-| Edge Property Index | (scope_id, property_id, value_digest, edge_id) | Indexed edge-property equality lookup |
+| Node Property Index | (scope_id, property_id, encoded value, node_id) | Indexed node-property equality, range and prefix lookup |
+| Edge Property Index | (scope_id, property_id, encoded value, edge_id) | Indexed edge-property lookup |
 
 The graph storage layer transforms B+Trees into a full property graph database
 through careful key design, stable edge IDs, and a traversal/payload split for

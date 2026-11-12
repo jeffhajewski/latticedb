@@ -39,6 +39,10 @@ list and pattern comprehensions, `EXISTS`, `COUNT` and `COLLECT` subqueries,
 map projection, label expressions and `RETURN *`, among others listed under
 *Cypher*. What is still missing fails with an error that names it.
 
+Property indexes keep their values in order, so the planner reads ranges,
+`STARTS WITH` prefixes and ascending `ORDER BY ... LIMIT` from them, not only
+equalities; a file with such an index needs this release to open.
+
 `lattice import` and `lattice export` read and write RDF in Turtle and
 N-Triples, so vocabularies and data sets kept as RDF can be queried with Cypher,
 full-text and vector search, and written back out.
@@ -489,9 +493,20 @@ the GQL-only clauses. `book/src/cypher/overview.md` lists them.
   `WITH` returned a column of nulls. Add a `RETURN` to get values back. The CLI
   prints "Query executed" in a table, `{"columns":[],"rows":[],"count":0}` in
   JSON and nothing in CSV.
+- **`MATCH (n)` returns nodes in id order.** It returned them in the order of
+  the node tree's little-endian keys (1, 257, 513, ...). A pattern that starts
+  from a relationship type, `MATCH (a)-[r:KNOWS]->(b)`, now returns its rows in
+  the edge-ID index's order rather than grouped by `a`. Neither order was
+  promised; add `ORDER BY` where order matters.
 
 ### Storage, API and formats
 
+- **Creating a property index makes the file unreadable by 0.16.0.** Indexes now
+  keep values in an order-preserving encoding that 0.16.0 would misread, so
+  declaring one raises the header's minimum reader version to 4 and 0.16.0
+  refuses the file (with an I/O error). A file without one stays readable by
+  0.16.0, and indexes created by 0.16.0 keep working for equality; see
+  *Upgrade notes*.
 - **Deleting a node that has relationships is refused in every API.**
   `lattice_node_delete`, and so `delete_node` in Python, `deleteNode` in
   TypeScript and Java and `DeleteNode` in Go, removed the node and left its
@@ -619,6 +634,26 @@ the GQL-only clauses. `book/src/cypher/overview.md` lists them.
 
 ## Performance
 
+**Property indexes answer ranges, prefixes and sorting.** `<`, `<=`, `>`, `>=`
+(several on one property joined by `AND` become one range) and `STARTS WITH` on
+an indexed property read only the matching entries, and `ORDER BY n.p [SKIP s]
+LIMIT k` ascending on an indexed property, over one pattern, reads the index in
+order and stops after the first `s + k` rows. 200,000 `:Person` nodes, release
+build, median of seven runs on a busy machine (12 November 2026), the same
+release without and with the index:
+
+| query | label scan | index |
+|---|---:|---:|
+| `WHERE n.age > 97`, 4,000 rows | 65 ms | 1.7 ms |
+| `WHERE n.score >= 500 AND n.score < 505`, 978 rows | 76 ms | 0.62 ms |
+| `WHERE n.name STARTS WITH 'Jo'`, 293 rows | 66 ms | 0.11 ms |
+| `ORDER BY n.score LIMIT 10` | 64 ms | 0.010 ms |
+| `WHERE n.age >= 50 RETURN count(n)`, 100,066 nodes | 64 ms | 3.7 ms |
+| `WHERE n.age >= 0`, every node | 146 ms | 120 ms |
+
+Without statistics, the planner always reads a range from the index; the last
+row shows that even a range that holds every node is no slower.
+
 <!-- Measured on 11 November 2026 on an Apple M5 in ordinary use, not a quiet
      machine: v0.16.0 and this release built ReleaseFast and run alternately,
      medians of three runs for the first table and single runs for the second.
@@ -713,6 +748,20 @@ Other changes, measured by their commits on a busy machine:
   the label index, ids) fill their pages instead of leaving them half empty.
   200,000 in-order inserts went from about 440 to about 290 ns each; random
   inserts are unchanged within measurement noise (about 575 ns).
+- Changing a relationship's property rewrites only its record, not its two
+  traversal keys as well: 6.6 µs to 3.6 µs an update (20,000 relationships, one
+  transaction, commit included). Changing one property no longer copies the
+  whole node or relationship twice first (50 properties: about 9.4 µs to 7.9 µs).
+- A pattern that starts from a relationship type with an unlabelled start node,
+  `MATCH (a)-[:KNOWS]->(b)`, walks the relationships once instead of expanding
+  every node: a count over 1,000,000 relationships 66 ms to 20 ms, two types
+  128 ms to 38 ms.
+- `MATCH (n)` no longer builds a hash set of every node id: `LIMIT 5` over
+  200,000 nodes 9–11 ms to 5 ms.
+- An index lookup inside a transaction finds the transaction's own staged nodes
+  by value instead of checking every one: with 100,000 staged, 857 µs to about
+  1 µs a lookup after a first lookup of 15 ms. Index declarations are kept in
+  memory rather than read from the catalog on each write.
 
 Two checks cost a little. Creating an edge checks that both ends exist, two key
 probes: 100,000 edge creates in one transaction take 21–26 ms instead of 6–7 ms,
@@ -829,6 +878,17 @@ with relationships is one range probe, under 1 µs.
 - A `LIMIT` under `ORDER BY score(d) DESC` bounds the search under a named path
   (`MATCH p = (d:Doc) WHERE ...`) too.
 
+**Graph storage**
+
+- A relationship record holding a value tag no release writes was read as a
+  null property, and the rest of the record from the wrong offset; it is
+  refused as invalid data, as a node record already was.
+- `enable_adjacency_cache` (which only the in-process traversal benchmarks
+  read; queries and the bindings never did) was cleared when a transaction
+  staged an edge but not when the commit applied it, so a read during the
+  transaction left it stale for good. The commit now clears it. The bindings'
+  documentation no longer says the option speeds anything up.
+
 **Vector search**
 
 - A `WHERE` of only `n.embedding <=> $q` after `WITH` (and in the new
@@ -944,6 +1004,13 @@ with relationships is one range probe, under 1 µs.
 - **A read-only recovery is bounded by memory**, 64 MB plus four times the size
   of the log and journal; beyond that the read-only open fails with
   `LATTICE_ERROR_FULL`. `lattice check` does not recover first.
+- **Descending `ORDER BY ... LIMIT` sorts every row**, even on an indexed
+  property; only ascending order is read from an index. Relationship property
+  indexes answer equality only in Cypher.
+- **Indexes created by 0.16.0 answer equality only** until dropped and created
+  again.
+- **There is no index from relationship type to relationship**; a pattern that
+  starts from a type walks every relationship once.
 - **The vector metric, `m` and `ef_construction` cannot be changed** once the
   index exists; export and import into a new database to change them.
 - **`lattice replicate` takes a snapshot after any process that wrote has
@@ -1002,6 +1069,11 @@ with relationships is one range probe, under 1 µs.
   that id is handed out once more, as 0.16.0 would have done; from then on no
   deleted id is reused. A 0.16.0 vector database opens with no vector options;
   opened with different dimensions it is refused with -18.
+- **Property indexes.** Indexes 0.16.0 created keep their encoding and answer
+  equality as before; they are not used for ranges, prefixes or sorting until
+  dropped and created again. Creating an index with this release raises the
+  header's minimum reader version to 4, so 0.16.0 refuses that file from then
+  on, also after the index is dropped. Files without one are unaffected.
 - **Opening a file this release wrote with 0.16.0.** 0.16.0 opens and writes a
   file whose vector index, if any, is cosine with `m` 16, whatever its
   `ef_construction`. It writes zeros over the format-4 fields, and this release

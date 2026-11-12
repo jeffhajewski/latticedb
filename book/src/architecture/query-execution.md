@@ -144,7 +144,9 @@ only the node's label ids. `properties()` still decodes the whole record.
 **AllNodesScan**: Iterates every node in the database.
 
 ```
-open():  Collect every node id visible to the transaction into a slice
+open():  Collect every node id visible to the transaction into a slice,
+           sorted, so rows come in id order (node keys are little-endian, so
+           the tree walk alone is not)
 next():  Take the next id from the slice, set output slot
 close(): Free the slice
 ```
@@ -174,15 +176,48 @@ index covers an equality on the pattern's label (inline `{k: v}` or a `WHERE`
 equality right after the `MATCH`). It evaluates the value once at open and
 reads the matching ids from the index.
 
-All three produce rows with a single slot containing a node reference. None
-keeps a B+Tree iterator open between `next()` calls: the streaming label scan
-opens and closes its own range for each batch, so no page stays pinned or latched
-between calls.
+**IndexRangeScan** (`index_range_scan.zig`): Used when no equality applies and
+the `WHERE` right after the `MATCH` compares an indexed property of the
+pattern's node with a value that does not depend on the row (`<`, `<=`, `>`,
+`>=`, either way round, and `STARTS WITH`). The planner folds every such
+conjunct on one property into one range and takes them out of the `WHERE`
+filter (`consumed_conjuncts`, `residualCondition`). At open the scan evaluates
+the bounds, turns them into a key range, and merges the index's entries with the
+transaction's own nodes of the label that fall in it. It re-checks the consumed
+conjuncts only where the key cannot decide: a string bound longer than the 128
+bytes a key keeps, and NaN, whose entries it reads as a separate segment. Like
+the label scan it streams 256 keys at a time in read-only queries and collects
+its ids up front in queries that write. With no range it can also read a whole
+index in order (`property_order_scan`), followed by the label's nodes that lack
+the property.
 
-A property index keys a value by a digest of its type and bits, so an integer and
-the float with the same value land under different keys. `PropertyIndexScan`
-looks up both forms and merges them, so `{age: 30}` finds a node stored with
-`30.0`, as a scan would.
+**OrderedCutoff** (same file): Placed under the Sort of `ORDER BY n.p [SKIP s]
+LIMIT k` when the scan below reads `p`'s index in order. It passes rows through
+and stops once it has passed `s + k` rows and the sort key moves past the last
+of them, so the Sort sees only the rows that can be returned. The planner uses
+it for a single `MATCH` pattern, an optional `WHERE` without a vector or
+full-text search, and a `RETURN` that neither aggregates nor uses `DISTINCT`,
+sorted ascending first by a property of the scanned node.
+
+**EdgeTypeScan** (`edge_type_scan.zig`): Used for `(a)-[r:T]->(b)` (or
+incoming) when `a` has no label, properties or earlier binding: one walk of the
+edge-ID index, 256 edges at a time, keeping edges of the wanted types whose
+start node exists, plus the transaction's staged edges. There is no index from
+type to edge (see [Graph Storage](./graph-storage.md#current-limitations)); this
+replaces an expand from every node. Rows come in the edge-ID index's order.
+
+All of them produce rows with node references (EdgeTypeScan also fills the
+relationship and the other node). None keeps a B+Tree iterator open between
+`next()` calls: the streaming scans open and close their own range for each
+batch, so no page stays pinned or latched between calls.
+
+A property index created by this release keys a value by an encoding whose byte
+order is `ORDER BY`'s order, in which an integer and the float with the same
+value share a key (see [Graph Storage](./graph-storage.md#property-indexes)).
+An index 0.16.0 created keys a digest of the type and bits, so an integer and the
+equal float land under different keys; `PropertyIndexScan` looks up both forms
+and merges them, so `{age: 30}` finds a node stored with `30.0`, as a scan would,
+and such an index is never used for ranges.
 
 ### Filter Operator
 
@@ -541,6 +576,8 @@ has never seen means nothing can match.
 | File | Operators |
 |------|-----------|
 | `scan.zig` | AllNodesScan, LabelScan, PropertyIndexScan |
+| `index_range_scan.zig` | IndexRangeScan, OrderedCutoff |
+| `edge_type_scan.zig` | EdgeTypeScan |
 | `source.zig` | SingleRow (one empty row: the input of a query that starts with `UNWIND` or `RETURN`) |
 | `filter.zig` | Filter, LabelFilter |
 | `expand.zig` | Expand |
@@ -866,9 +903,13 @@ After:  Expand → Filter(a.x > 10) → LabelScan
 ### Cost-Based Index Selection
 
 The planner already selects explicit property indexes for eligible inline and
-immediately following `WHERE` equalities. A future cost model could choose
-between available label and property indexes using cardinality and selectivity
-statistics instead of the current first-eligible heuristic.
+immediately following `WHERE` equalities, ranges and prefixes, and for an
+ascending `ORDER BY ... LIMIT`. Its rule has no statistics: an equality first,
+then a range on the property the query sorts by (read in order), then the first
+indexed property with a range, then an ordered read for the sort; a range is
+always preferred to the label scan. A future cost model could choose between
+available label and property indexes using cardinality and selectivity
+statistics instead.
 
 ### Join Ordering
 

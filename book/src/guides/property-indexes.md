@@ -159,6 +159,83 @@ RETURN p.name
 The rule of thumb is that an index can help when a condition must be true, and
 cannot when it is only one of several ways to match.
 
+### Ranges, prefixes and sorting
+
+An index keeps its values in order, so it also answers comparisons and prefixes.
+With an index on `Person(age)` and one on `Person(name)`:
+
+```cypher
+MATCH (p:Person) WHERE p.age >= 30 AND p.age < 40 RETURN p.name, p.age
+```
+
+```
+┌─────────┬───────┐
+│ p.name  │ p.age │
+├─────────┼───────┤
+│ "Alice" │ 34    │
+│ "Carol" │ 38    │
+└─────────┴───────┘
+```
+
+```cypher
+MATCH (p:Person) WHERE p.name STARTS WITH 'Al' RETURN p.name
+```
+
+```
+┌─────────┐
+│ p.name  │
+├─────────┤
+│ "Alan"  │
+│ "Alice" │
+└─────────┘
+```
+
+`<`, `<=`, `>` and `>=`, written either way round, and `STARTS WITH` qualify.
+Several comparisons on one property joined by `AND` become one range. The
+comparisons the index answers are not checked again row by row, except where
+the index cannot decide on its own: a string bound longer than 128 bytes, and NaN.
+An equality on an indexed property is preferred to a range; without statistics,
+a range on an indexed property is always read through the index, which measured
+no slower than a scan even when the range holds every node.
+
+A query that sorts by an indexed property and stops after a few rows reads the
+index in order and stops as soon as it has them, rather than sorting every node:
+
+```cypher
+MATCH (p:Person) RETURN p.name, p.age ORDER BY p.age LIMIT 3
+```
+
+```
+┌─────────┬───────┐
+│ p.name  │ p.age │
+├─────────┼───────┤
+│ "Bob"   │ 29    │
+│ "Alice" │ 34    │
+│ "Carol" │ 38    │
+└─────────┴───────┘
+```
+
+That applies to a single `MATCH` pattern, with or without a `WHERE`, whose
+`RETURN` does not aggregate or use `DISTINCT`, sorted ascending by the property,
+with a `LIMIT`. A `WHERE` with a vector or full-text search keeps the ordinary
+sort, since the search returns its rows nearest or best first.
+
+On 200,000 `:Person` nodes (a release build, median of seven runs):
+
+| query | without an index | with one |
+|---|---:|---:|
+| `WHERE p.age > 97` (4,000 rows) | 65 ms | 1.7 ms |
+| `WHERE p.score >= 500 AND p.score < 505` (978 rows) | 76 ms | 0.6 ms |
+| `WHERE p.name STARTS WITH 'Jo'` (293 rows) | 66 ms | 0.11 ms |
+| `ORDER BY p.score LIMIT 10` | 64 ms | 0.01 ms |
+| `WHERE p.age >= 50 RETURN count(p)` (half the nodes) | 64 ms | 3.7 ms |
+| `WHERE p.age >= 0` (every node) | 146 ms | 120 ms |
+
+Values of different types are kept in the order `ORDER BY` puts them in, and
+integers and floats compare by exact value, as in the rest of Cypher: `3` and
+`3.0` are one value, and `9007199254740993` is greater than
+`9007199254740992.0`.
+
 ## Keeping up with changes
 
 You do not have to maintain anything. Once an index exists, it is updated by
@@ -207,9 +284,8 @@ Some things worth knowing before you add one:
 
 - **Index for lookups you actually perform.** An index on a property nothing
   looks up is pure cost.
-- **These are equality indexes.** They answer "which nodes have exactly this
-  value". They do not help with ranges, sorting, or partial text matching. For
-  finding text inside a longer string, you want
+- **Indexes answer equality, ranges and prefixes**, not text inside a longer
+  string (`CONTAINS`, `ENDS WITH`). For finding words in text, you want
   [full-text search](./full-text-search.md) instead.
 - **High-variety properties benefit most.** An index on `email`, where almost
   every value is unique, narrows millions of nodes to one. An index on a
@@ -217,6 +293,16 @@ Some things worth knowing before you add one:
   would have managed nearly as fast.
 - **Index the pair, not the property.** An index covers one label and property
   together. Indexing `email` on `Person` does nothing for `email` on `Company`.
+
+## Indexes and older releases
+
+Creating a property index with this release marks the file as needing format 4
+to open, so LatticeDB 0.16.0 refuses it rather than misreading the index; a
+file without one stays readable by 0.16.0. Dropping the index does not undo
+the mark.
+
+An index that 0.16.0 created keeps working for equality, but is not used for
+ranges, prefixes or sorting until it is dropped and created again.
 
 ## Where to go next
 

@@ -111,6 +111,21 @@ mvn -q compile exec:java@run-example -Dexec.args=/tmp/knowledge.db
   `detachDeleteNode` deletes the node with all its relationships, as
   `DETACH DELETE` does. `createEdge` throws `ErrorCode.NOT_FOUND` if either end
   does not exist as the transaction sees it.
+- A `commit()` that throws `ErrorCode.TXN_ABORTED` has ended the transaction;
+  closing or rolling it back afterwards does nothing. Any other commit failure
+  leaves it open, and closing it rolls it back.
+- `readOnly(true)` on a database that was not closed cleanly recovers it in
+  memory: the handle sees every committed transaction and nothing is written to
+  the files. A recovery that needs more than 64 MB plus four times the size of
+  the log and journal throws `ErrorCode.FULL`; open the database read-write once
+  to recover it on disk.
+- A failed query throws `QueryException` with the code the call returned, the
+  stage, the diagnostic code and the location: `RETURN 1/0` gives
+  `Division by zero: 1 / 0`, `ERROR`, `EXECUTION`, `DivisionByZero`, line 1,
+  column 9. Parse and semantic failures have `INVALID_ARG`; a `DELETE` of a node
+  with relationships has `HAS_RELATIONSHIPS` and a relationship created to a
+  node deleted earlier in the query `NOT_FOUND`; a storage failure under a query
+  has `IO` and an allocation failure `OUT_OF_MEMORY`.
 
 Property values map to Java types as follows: null ↔ `null`, bool ↔ `Boolean`,
 int ↔ `Long`, float ↔ `Double`, string ↔ `String`, bytes ↔ `byte[]`,

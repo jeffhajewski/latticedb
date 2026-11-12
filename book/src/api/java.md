@@ -36,9 +36,48 @@ try (Database db = Database.open("graph.lattice",
 
 `OpenOptions` has `create`, `readOnly`, `cacheSizeMB` (default 100), `pageSize`
 (default 4096), `enableVectors`, `vectorDimensions` (default 128), `enableWal`
-(default true), `enableAdjacencyCache` and `lock` (default true). `:memory:` opens
-an in-memory database, and `Database.deserialize(bytes)` opens one from the bytes
-`db.serialize()` returned.
+(default true), `enableAdjacencyCache` and `lock` (default true), and, passed
+through `lattice_open_v5`, `syncMode(SyncMode.FULL | NORMAL)`,
+`fullFsync(Boolean)`, `vectorMetric(VectorMetric.COSINE | EUCLIDEAN |
+DOT_PRODUCT)`, `vectorM(int)` and `vectorEfConstruction(int)`, all unset by
+default (`null` or 0). `:memory:` opens an in-memory database, and
+`Database.deserialize(bytes)` opens one from the bytes `db.serialize()`
+returned; it takes the older options and ignores the v5 ones.
+
+```java
+try (Database db = Database.open("vectors.lattice",
+        OpenOptions.defaults().create(true).enableVectors(true).vectorDimensions(2)
+                .vectorMetric(VectorMetric.EUCLIDEAN).syncMode(SyncMode.NORMAL))) {
+    // ...
+}
+```
+
+A database file records its vector index: the dimensions, the metric, M and
+ef_construction. A database that has one opens with it whether or not
+`enableVectors` is set, so reopening needs no vector options, also after a
+crash. `vectorMetric`, `vectorM` and `vectorEfConstruction` configure a new
+index and are fixed once it exists; any of them that is set, and
+`vectorDimensions` when `enableVectors(true)` is set (it defaults to 128 and
+cannot be 0), must match the file, or opening throws `ErrorCode.CONFIG_MISMATCH`.
+To open a database whose dimensions you do not know, leave `enableVectors` off.
+Cosine stores vectors at unit length and returns the cosine distance; Euclidean
+returns the L2 distance and dot product the negative dot product, both over
+vectors stored as given; results come smallest first.
+
+`SyncMode.NORMAL` returns from a commit once the operating system has it: it
+survives the process being killed, but a power cut or OS crash can lose the most
+recent commits. `fullFsync(true)` makes each sync on macOS ask the drive to
+flush its cache. Unset, they defer to the `LATTICE_SYNC_MODE` and
+`LATTICE_FULL_FSYNC` environment variables, else a full sync without
+`F_FULLFSYNC`; a value you set wins over them.
+
+`readOnly(true)` on a database that was not closed cleanly recovers it in
+memory: the handle sees every committed transaction and nothing is written to
+the files. A recovery that needs more than 64 MB plus four times the size of the
+log and journal throws `ErrorCode.FULL`; open the database read-write once to
+recover it on disk. A file that a newer release has marked as not writable by
+this one opens only with `readOnly(true)`; a writable open throws
+`ErrorCode.NEEDS_NEWER_WRITER` and writes nothing.
 
 `close()` is refused with `ErrorCode.INVALID_ARG` while a transaction or result
 from the database is still open. The `Database` then keeps its handle, so you can
@@ -62,7 +101,15 @@ long aliceId = db.write(txn -> {
 For manual control, `beginRead()` and `beginWrite()` return a `Transaction`,
 which is `AutoCloseable`: closing it without `commit()` rolls it back. Only one
 write transaction can be open at a time; beginning a second one fails at once with
-`ErrorCode.LOCK_TIMEOUT`.
+`ErrorCode.LOCK_TIMEOUT`. A `commit()` that throws `ErrorCode.TXN_ABORTED` has
+ended the transaction, and closing or rolling it back afterwards does nothing;
+after any other failure it stays open, and closing it rolls it back.
+
+`Transaction.deleteNode` refuses a node that still has relationships with
+`ErrorCode.HAS_RELATIONSHIPS` and deletes nothing, as Cypher's `DELETE` does;
+`detachDeleteNode` deletes the node with all its relationships, as
+`DETACH DELETE` does. `createEdge` throws `ErrorCode.NOT_FOUND` if either end
+does not exist as the transaction sees it.
 
 ## Queries and search
 
@@ -118,6 +165,16 @@ diagnostic code and the source location; when the query has no diagnostic
 message, the message is that code's. `DATABASE_LOCKED` means
 another process holds the file; `LOCK_TIMEOUT` means another write transaction is
 open in this one.
+
+For `RETURN 1/0`, `getMessage()` is `Division by zero: 1 / 0`, `getCode()`
+`ERROR`, `getStage()` `EXECUTION`, `getDiagnosticCode()` `DivisionByZero` and the
+location line 1, column 9, length 1. Parse and semantic failures have
+`INVALID_ARG` and execution failures `ERROR`, except that a `DELETE` of a node
+with relationships has `HAS_RELATIONSHIPS` and a relationship created to a node
+deleted earlier in the query `NOT_FOUND`, as `deleteNode` and `createEdge`
+report them; a storage failure under a query has `IO` and an allocation failure
+`OUT_OF_MEMORY`. `hasLocation()` is false when the failure does not belong to
+one place in the query.
 
 ## More
 

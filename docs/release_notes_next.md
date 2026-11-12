@@ -399,8 +399,6 @@ about 0.3 µs more.
   and its lock, for the whole run, so other processes can write between passes;
   a pass that finds the database open elsewhere is skipped. Its output is
   flushed after every pass.
-- A `replicate` pass with nothing changed ships nothing. Each run was taking a
-  full snapshot.
 - The result table no longer fails on the smallest integer, on floats wider
   than ten characters, or on large node ids.
 

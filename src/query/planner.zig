@@ -180,6 +180,16 @@ pub const QueryPlanner = struct {
     /// can assert an index is actually being used, rather than assuming it from
     /// a result set that would look identical either way.
     last_scan_kind: ScanKind = .none,
+    /// The full-text search each slot's index seek runs, when the MATCH
+    /// being planned seeks one index for it. The WHERE that follows does not
+    /// search again for the same predicate. Reset by every MATCH. Only the
+    /// slots in `fts_seek_mask` hold a search; the rest are undefined, so
+    /// planning a query without one costs nothing here.
+    fts_seeks: [MAX_SLOTS]fts_ops.Search = undefined,
+    fts_seek_mask: u16 = 0,
+    /// How many `@@` row filters (FtsSearchWithInput) the plan holds, so
+    /// tests can see a search planned once rather than twice.
+    fts_filter_count: u32 = 0,
     /// The query each slot's vector search uses; see
     /// ExecutionContext.vector_queries.
     vector_queries: executor.VectorQueries = .{},
@@ -381,6 +391,7 @@ pub const QueryPlanner = struct {
         where_hint: ?*const ast.Expression,
     ) PlannerError!Operator {
         var op = input;
+        self.fts_seek_mask = 0;
 
         var edges: std.ArrayList(*const ast.EdgePattern) = .empty;
         for (match.patterns) |pattern| {
@@ -648,6 +659,12 @@ pub const QueryPlanner = struct {
                                 database,
                             ) catch return PlannerError.OutOfMemory;
                             self.last_scan_kind = .fts_index_seek;
+                            // With one candidate the seek always runs that
+                            // search, so it answers the predicate itself.
+                            if (fts_candidate_count == 1) {
+                                self.fts_seeks[slot] = fts_candidates[0][0];
+                                self.fts_seek_mask |= @as(u16, 1) << @intCast(slot);
+                            }
                             break :blk seek.operator();
                         } else if (indexed_property) |property| blk: {
                             const property_scan = scan_ops.PropertyIndexScan.init(
@@ -1059,6 +1076,8 @@ pub const QueryPlanner = struct {
         limit_hint: VectorLimitHint,
     ) PlannerError!Operator {
         const input_op = input orelse return PlannerError.InvalidQuery;
+        // A seek answers only the WHERE of its own MATCH, planned next.
+        defer self.fts_seek_mask = 0;
 
         // Check for vector search pattern: x.embedding <=> $query [< threshold]
         if (self.detectVectorSearch(where.condition)) |vector_info| {
@@ -1074,6 +1093,10 @@ pub const QueryPlanner = struct {
 
         // Check for FTS pattern: x.text @@ $query, or a disjunction of them
         if (self.detectFtsSearch(where.condition)) |fts_info| {
+            // The MATCH already seeks this very search for the variable, and
+            // every row it gives matches: searching again filters nothing
+            // out. It used to run the whole search a second time.
+            if (self.seekAnswers(fts_info)) return input_op;
             return self.planFtsSearch(input_op, &[_]FtsSearchInfo{fts_info});
         }
         {
@@ -1090,6 +1113,29 @@ pub const QueryPlanner = struct {
         };
 
         return filter.operator();
+    }
+
+    /// Whether the index seek planned for the predicate's variable runs the
+    /// same search as the predicate: same index, same query text or
+    /// parameter.
+    fn seekAnswers(self: *Self, info: FtsSearchInfo) bool {
+        const slot = info.variable_slot orelse return false;
+        if (self.fts_seek_mask & (@as(u16, 1) << @intCast(slot)) == 0) return false;
+        const seek = self.fts_seeks[slot];
+        if (seek.kind != .node) return false;
+        const property = info.property_name orelse return false;
+        if (!std.mem.eql(u8, seek.property, property)) return false;
+        if (!optionalEql(seek.param_name, info.param_name)) return false;
+        if (!optionalEql(seek.literal_query, info.query_text)) return false;
+        // The index the predicate means, resolved the way planFtsSearch
+        // would; the seek's is the one its pattern's labels name.
+        const resolved = self.resolveFtsIndex(info) catch return false;
+        return resolved.kind == seek.kind and std.mem.eql(u8, resolved.scope, seek.scope);
+    }
+
+    fn optionalEql(a: ?[]const u8, b: ?[]const u8) bool {
+        if (a == null or b == null) return a == null and b == null;
+        return std.mem.eql(u8, a.?, b.?);
     }
 
     /// The LIMIT and SKIP that bound a vector predicate's answer.
@@ -1532,6 +1578,7 @@ pub const QueryPlanner = struct {
         ) catch {
             return PlannerError.OutOfMemory;
         };
+        self.fts_filter_count += 1;
 
         return fts_search.operator();
     }

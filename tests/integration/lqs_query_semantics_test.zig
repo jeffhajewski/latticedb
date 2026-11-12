@@ -453,6 +453,69 @@ test "lqs: a MATCH never binds one relationship twice, variable-length or not" {
 }
 
 // ============================================================================
+// A lone @@ is searched once
+// ============================================================================
+
+/// How many `@@` row filters the plan for `cypher` holds.
+fn planFtsFilters(db: *Database, cypher: []const u8) !u32 {
+    const allocator = std.testing.allocator;
+    var parser = lattice.query.parser.Parser.init(allocator, cypher);
+    defer parser.deinit();
+    const parse_result = parser.parse();
+    if (parse_result.query == null) return error.ParseFailed;
+
+    var analyzer = lattice.query.semantic.SemanticAnalyzer.init(allocator);
+    defer analyzer.deinit();
+    const analysis = analyzer.analyze(parse_result.query.?);
+    if (!analysis.success) return error.SemanticFailed;
+
+    var arena = std.heap.ArenaAllocator.init(allocator);
+    defer arena.deinit();
+    var planner = lattice.query.planner.QueryPlanner.init(arena.allocator(), .{
+        .node_tree = &db.node_tree,
+        .label_index = &db.label_index,
+        .edge_store = &db.edge_store,
+        .symbol_table = &db.symbol_table,
+        .hnsw_index = if (db.hnsw_index) |*hnsw| hnsw else null,
+        .fts_index = if (db.fts_index) |*fts| fts else null,
+        .database = db,
+    });
+    defer planner.deinit();
+    const analysis_result = lattice.query.semantic.AnalysisResult{
+        .success = true,
+        .errors = &[_]lattice.query.semantic.SemanticError{},
+        .variables = analysis.variables,
+        .errors_dropped = false,
+    };
+    _ = try planner.plan(parse_result.query.?, &analysis_result);
+    return planner.fts_filter_count;
+}
+
+test "lqs: a lone @@ is answered by its index seek, not searched again" {
+    const path = "/tmp/lattice_lqs_fts_once.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+    try db.createNodeFtsIndex("Doc", "text");
+    try run(db, "CREATE (:Doc {id: 1, text: 'sourdough starter'}), (:Doc {id: 2, text: 'rye bread'}), " ++
+        "(:Doc {id: 3, text: 'starter culture'}), (:Note {id: 4, text: 'starter'})");
+
+    // The seek finds the rows; the filter on top used to search again.
+    try std.testing.expectEqual(@as(u32, 0), try planFtsFilters(db, "MATCH (d:Doc) WHERE d.text @@ 'starter' RETURN d.id"));
+    try std.testing.expectEqual(@as(u32, 0), try planFtsFilters(db, "MATCH (d:Doc) WHERE d.text @@ $q RETURN d.id"));
+    var found = try db.query("MATCH (d:Doc) WHERE d.text @@ 'starter' RETURN d.id ORDER BY d.id");
+    defer found.deinit();
+    try std.testing.expectEqual(@as(usize, 2), found.rowCount());
+    try std.testing.expectEqual(@as(i64, 1), found.rows[0].values[0].int_val);
+    try std.testing.expectEqual(@as(i64, 3), found.rows[1].values[0].int_val);
+
+    // An OR of searches still filters: the seek cannot answer it.
+    try std.testing.expectEqual(@as(u32, 1), try planFtsFilters(db, "MATCH (d:Doc) WHERE d.text @@ 'rye' OR d.text @@ 'culture' RETURN d.id"));
+    var either = try db.query("MATCH (d:Doc) WHERE d.text @@ 'rye' OR d.text @@ 'culture' RETURN d.id ORDER BY d.id");
+    defer either.deinit();
+    try std.testing.expectEqual(@as(usize, 2), either.rowCount());
+}
+
+// ============================================================================
 // Search distances and scores as values
 // ============================================================================
 

@@ -465,6 +465,15 @@ pub const ExpressionEvaluator = struct {
             return EvalResult.fromPropertyValue(prop, self.allocator);
         }
 
+        // A map's entry by key. A key the map does not have reads as null,
+        // like a property a node does not have.
+        if (obj == .map_val) {
+            for (obj.map_val) |entry| {
+                if (std.mem.eql(u8, entry.key, pa.property)) return entry.value;
+            }
+            return .{ .null_val = {} };
+        }
+
         // Unknown object type
         return .{ .null_val = {} };
     }
@@ -646,6 +655,7 @@ pub const ExpressionEvaluator = struct {
             return switch (arg) {
                 .node_ref => |id| .{ .int_val = @intCast(id) },
                 .edge_ref => |id| .{ .int_val = @intCast(id) },
+                .null_val => .{ .null_val = {} },
                 else => EvalError.TypeError,
             };
         }
@@ -664,6 +674,7 @@ pub const ExpressionEvaluator = struct {
             return switch (arg) {
                 .int_val => |i| .{ .int_val = if (i < 0) try checkedInt(std.math.sub(i64, 0, i)) else i },
                 .float_val => |fv| .{ .float_val = @abs(fv) },
+                .null_val => .{ .null_val = {} },
                 else => EvalError.TypeError,
             };
         }
@@ -675,6 +686,7 @@ pub const ExpressionEvaluator = struct {
                 .string_val => |s| .{ .int_val = @intCast(s.len) },
                 .bytes_val => |b| .{ .int_val = @intCast(b.len) },
                 .list_val => |l| .{ .int_val = @intCast(l.len) },
+                .null_val => .{ .null_val = {} },
                 else => EvalError.TypeError,
             };
         }
@@ -886,11 +898,14 @@ pub const ExpressionEvaluator = struct {
             if (f.arguments.len < 2 or f.arguments.len > 3) return EvalError.InvalidArgumentCount;
             const start_arg = try self.evaluate(f.arguments[0], row, ctx);
             const end_arg = try self.evaluate(f.arguments[1], row, ctx);
+            // A function of null is null.
+            if (start_arg.isNull() or end_arg.isNull()) return .{ .null_val = {} };
             const start = start_arg.toInt() orelse return EvalError.TypeError;
             const end = end_arg.toInt() orelse return EvalError.TypeError;
             var step: i64 = 1;
             if (f.arguments.len == 3) {
                 const step_arg = try self.evaluate(f.arguments[2], row, ctx);
+                if (step_arg.isNull()) return .{ .null_val = {} };
                 step = step_arg.toInt() orelse return EvalError.TypeError;
                 if (step == 0) return EvalError.InvalidOperation;
             }

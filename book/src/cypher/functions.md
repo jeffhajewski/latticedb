@@ -106,9 +106,8 @@ taking `%` of zero, fails the query for integers and floats alike.
 
 ## Null
 
-Most functions return null for a null argument (`toString(null)` is null);
-`size`, `abs`, `id` and `range` fail the query with a type error instead, and
-`coalesce` exists to replace nulls.
+Functions return null for a null argument (`toString(null)` and `size(null)`
+are null), and `coalesce` exists to replace nulls.
 
 Null propagates through comparisons, arithmetic and the string operators, and
 `NOT`, `AND` and `OR` use three-valued logic; `IS NULL` and `IS NOT NULL` are always

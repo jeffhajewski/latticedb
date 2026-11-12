@@ -1032,6 +1032,24 @@ test "cypher: function names ignore case, toString(null) is null, booleans order
     try std.testing.expectEqual(false, result.rows[0].values[3].bool_val);
 }
 
+test "cypher: functions of null are null and a map reads by key" {
+    const path = "/tmp/lattice_cs_null_functions.ltdb";
+    const db = try openTestDb(path);
+    defer cleanupTestDb(db, path);
+
+    // Each of these was a TypeError.
+    var nulls = try db.query("UNWIND [1] AS x RETURN size(null) AS a, abs(null) AS b, id(null) AS c, range(null, 2) AS d, range(1, 3, null) AS e");
+    defer nulls.deinit();
+    for (0..5) |column| try expectNull(nulls, 0, column);
+
+    // A map literal's entry read as null whatever the key.
+    var maps = try db.query("UNWIND [1] AS x RETURN {a: 1, b: 'two'}.a AS a, {a: 1, b: 'two'}.b AS b, {a: 1}.missing AS c");
+    defer maps.deinit();
+    try std.testing.expectEqual(@as(i64, 1), maps.rows[0].values[0].int_val);
+    try std.testing.expectEqualStrings("two", maps.rows[0].values[1].string_val);
+    try expectNull(maps, 0, 2);
+}
+
 test "cypher: CREATE on a bound node cannot add labels or properties" {
     const path = "/tmp/lattice_cs_create_bound.ltdb";
     const db = try openTestDb(path);

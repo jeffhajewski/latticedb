@@ -17,7 +17,9 @@ type OpenOptions struct {
 	// DisableWAL explicitly opens without WAL-backed transactions. It exists because
 	// Go bool fields cannot distinguish an omitted EnableWAL from EnableWAL=false.
 	DisableWAL bool
-	// EnableAdjacencyCache enables the in-memory graph adjacency cache.
+	// EnableAdjacencyCache is accepted for compatibility. Queries and the other
+	// methods here read edges from storage either way, so it does not change
+	// their speed or results.
 	EnableAdjacencyCache bool
 	// EnableVectors creates a vector index if the database has none. A database
 	// that already has one opens with it whatever this says.

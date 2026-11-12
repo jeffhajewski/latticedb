@@ -33,7 +33,10 @@ export interface DatabaseOptions {
   cacheSizeMb?: number;
   /** Enable WAL-backed transactions (default: true) */
   enableWal?: boolean;
-  /** Enable in-memory graph adjacency cache */
+  /**
+   * Accepted for compatibility. Queries and the other methods here read edges
+   * from storage either way, so it does not change their speed or results.
+   */
   enableAdjacencyCache?: boolean;
   /**
    * Create a vector index if the database has none. A database that already

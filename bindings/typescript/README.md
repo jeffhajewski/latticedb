@@ -142,7 +142,7 @@ interface DatabaseOptions {
   readOnly?: boolean;        // Open read-only (default: false)
   cacheSizeMb?: number;      // Cache size in MB (default: 100)
   enableWal?: boolean;       // WAL-backed transactions and crash recovery (default: true)
-  enableAdjacencyCache?: boolean; // In-memory graph adjacency cache (default: false)
+  enableAdjacencyCache?: boolean; // Accepted; no effect on queries (default: false)
   enableVectors?: boolean;   // Create a vector index if the file has none
   enableVector?: boolean;    // Deprecated compatibility alias
   vectorDimensions?: number; // Vector dimensions (default: 128; 0 = the file's)

@@ -80,7 +80,11 @@ public final class OpenOptions {
         return this;
     }
 
-    /** Enable the in-memory graph adjacency cache. Default false. */
+    /**
+     * Accepted for compatibility. Queries and the other methods here read edges
+     * from storage either way, so it does not change their speed or results.
+     * Default false.
+     */
     public OpenOptions enableAdjacencyCache(boolean enableAdjacencyCache) {
         this.enableAdjacencyCache = enableAdjacencyCache;
         return this;

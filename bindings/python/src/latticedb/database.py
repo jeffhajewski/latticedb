@@ -119,7 +119,9 @@ class Database:
             read_only: Open in read-only mode.
             cache_size_mb: Size of the page cache in megabytes.
             enable_wal: Enable WAL-backed transactions.
-            enable_adjacency_cache: Enable the in-memory graph adjacency cache.
+            enable_adjacency_cache: Accepted for compatibility. Queries and the
+                other methods here read edges from storage either way, so it
+                does not change their speed or results.
             enable_vectors: Create a vector index if the database has none. A
                 database that already has one opens with it whatever this says.
             enable_vector: Compatibility alias for ``enable_vectors``.

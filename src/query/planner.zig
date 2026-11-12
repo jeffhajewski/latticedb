@@ -2297,6 +2297,12 @@ pub const QueryPlanner = struct {
             else => return null,
         };
         if (order.items.len == 0) return null;
+        // The index holds nulls where ORDER BY puts them by default: last
+        // ascending, first descending. NULLS FIRST or LAST that says
+        // otherwise would need them read out of turn.
+        if (order.items[0].nulls) |nulls| {
+            if ((nulls == .first) != order.items[0].descending) return null;
+        }
         var limited = false;
         for (clauses[i + 2 ..]) |clause| {
             switch (clause) {

@@ -1077,4 +1077,26 @@ test "lcy: the new constructs give the same rows over ordered index scans" {
     try run(indexed, "MATCH (n:P) WHERE n.v > 70 FOREACH (x IN [1, 2] | SET n.f = x)");
     try run(plain, "MATCH (n:P) WHERE n.v > 70 FOREACH (x IN [1, 2] | SET n.f = x)");
     try expectSameWithIndex(indexed, plain, "MATCH (n:P) WHERE n.f = 2 RETURN n.id AS a ORDER BY a");
+
+    // Descending reads. The index holds the nodes without v last ascending
+    // and first descending, where ORDER BY puts nulls by default, so it
+    // serves NULLS FIRST or LAST only where they say the same.
+    for ([_][]const u8{
+        "MATCH (n:P) RETURN n.id AS a, n.v AS v ORDER BY n.v DESC LIMIT 12",
+        "MATCH (n:P) RETURN n.id AS a ORDER BY n.v DESC NULLS FIRST LIMIT 12",
+        "MATCH (n:P) RETURN n.id AS a ORDER BY n.v NULLS LAST LIMIT 77",
+        "MATCH (n:P) RETURN n.id AS a ORDER BY n.w DESC LIMIT 15",
+        "MATCH (n:P) RETURN n.id AS a, CASE WHEN n.v IS NULL THEN 'none' ELSE 'some' END AS b ORDER BY n.v DESC LIMIT 10",
+    }) |q| {
+        try std.testing.expectEqual(Kind.property_order_scan, try planScanKind(indexed, q));
+        try expectSameWithIndex(indexed, plain, q);
+    }
+    for ([_][]const u8{
+        "MATCH (n:P) RETURN n.id AS a ORDER BY n.v NULLS FIRST LIMIT 12",
+        "MATCH (n:P) RETURN n.id AS a ORDER BY n.v DESC NULLS LAST LIMIT 12",
+        "OPTIONAL MATCH (n:P) RETURN n.id AS a ORDER BY n.v DESC LIMIT 3",
+    }) |q| {
+        try std.testing.expect(try planScanKind(indexed, q) != Kind.property_order_scan);
+        try expectSameWithIndex(indexed, plain, q);
+    }
 }

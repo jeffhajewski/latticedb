@@ -351,8 +351,27 @@ pub const PropertyIndex = struct {
     catalog: *BTree,
     node_entries: *BTree,
     edge_entries: *BTree,
+    /// The declarations, decoded once, so that keeping the indexes current
+    /// on every write does not read the catalog for every entity, and costs
+    /// nothing at all when nothing is declared. Dropped on create and drop.
+    cache: DefinitionCache = .{},
 
     const Self = @This();
+
+    /// Held inline, so the index owns no memory. A database with more
+    /// declarations of one kind than fit reads the catalog as before.
+    pub const CACHED_DEFINITIONS = 32;
+
+    const DefinitionCache = struct {
+        loaded: bool = false,
+        /// More of a kind than fit: that kind reads the catalog.
+        node_overflow: bool = false,
+        edge_overflow: bool = false,
+        node_count: usize = 0,
+        edge_count: usize = 0,
+        nodes: [CACHED_DEFINITIONS]Definition = undefined,
+        edges: [CACHED_DEFINITIONS]Definition = undefined,
+    };
 
     pub fn init(allocator: Allocator, catalog: *BTree, node_entries: *BTree, edge_entries: *BTree) Self {
         return .{
@@ -372,7 +391,61 @@ pub const PropertyIndex = struct {
             .digest => &.{},
             .ordered => &.{@intFromEnum(Encoding.ordered)},
         };
+        self.cache.loaded = false;
         self.catalog.insert(&key, value) catch |err| return mapBTreeError(err);
+    }
+
+    fn loadCache(self: *Self) PropertyIndexError!void {
+        var cache = DefinitionCache{};
+        inline for (.{ EntityKind.node, EntityKind.edge }) |kind| {
+            var iter: DefinitionIterator = undefined;
+            try self.iterateDefinitions(kind, &iter);
+            defer iter.deinit();
+            while (try iter.next()) |definition| {
+                const count = if (kind == .node) &cache.node_count else &cache.edge_count;
+                if (count.* == CACHED_DEFINITIONS) {
+                    if (kind == .node) cache.node_overflow = true else cache.edge_overflow = true;
+                    break;
+                }
+                if (kind == .node) cache.nodes[count.*] = definition else cache.edges[count.*] = definition;
+                count.* += 1;
+            }
+        }
+        cache.loaded = true;
+        self.cache = cache;
+    }
+
+    /// The declarations of one kind from the cache, or null when they do not
+    /// fit and the catalog has to be walked.
+    fn cachedDefinitions(self: *Self, kind: EntityKind) PropertyIndexError!?[]const Definition {
+        if (!self.cache.loaded) try self.loadCache();
+        return switch (kind) {
+            .node => if (self.cache.node_overflow) null else self.cache.nodes[0..self.cache.node_count],
+            .edge => if (self.cache.edge_overflow) null else self.cache.edges[0..self.cache.edge_count],
+        };
+    }
+
+    /// Call `visit` with each declaration of `kind`.
+    fn forEachDefinition(
+        self: *Self,
+        kind: EntityKind,
+        context: anytype,
+        comptime visit: fn (@TypeOf(context), Definition) PropertyIndexError!void,
+    ) PropertyIndexError!void {
+        if (try self.cachedDefinitions(kind)) |definitions| {
+            for (definitions) |definition| try visit(context, definition);
+            return;
+        }
+        var iter: DefinitionIterator = undefined;
+        try self.iterateDefinitions(kind, &iter);
+        defer iter.deinit();
+        while (try iter.next()) |definition| try visit(context, definition);
+    }
+
+    /// Whether any index of `kind` is declared.
+    pub fn anyDeclared(self: *Self, kind: EntityKind) PropertyIndexError!bool {
+        const definitions = (try self.cachedDefinitions(kind)) orelse return true;
+        return definitions.len > 0;
     }
 
     /// The stored definition, which carries the index's encoding, or null
@@ -388,6 +461,7 @@ pub const PropertyIndex = struct {
 
     pub fn dropDefinition(self: *Self, definition: Definition) PropertyIndexError!void {
         const key = definitionKey(definition);
+        self.cache.loaded = false;
         self.catalog.delete(&key) catch |err| return mapBTreeError(err);
         try self.clearEntries(definition);
     }
@@ -426,50 +500,121 @@ pub const PropertyIndex = struct {
     }
 
     pub fn indexNode(self: *Self, node_id: u64, labels: []const SymbolId, properties: []const Property) PropertyIndexError!void {
-        var iter: DefinitionIterator = undefined;
-        try self.iterateDefinitions(.node, &iter);
-        defer iter.deinit();
-        while (try iter.next()) |definition| {
-            if (!containsSymbol(labels, definition.scope_id)) continue;
-            if (findProperty(properties, definition.property_id)) |property| {
-                try self.add(definition, node_id, property.value);
-            }
-        }
+        try self.replaceNode(node_id, &.{}, &.{}, labels, properties);
     }
 
     pub fn removeNode(self: *Self, node_id: u64, labels: []const SymbolId, properties: []const Property) PropertyIndexError!void {
-        var iter: DefinitionIterator = undefined;
-        try self.iterateDefinitions(.node, &iter);
-        defer iter.deinit();
-        while (try iter.next()) |definition| {
-            if (!containsSymbol(labels, definition.scope_id)) continue;
-            if (findProperty(properties, definition.property_id)) |property| {
-                try self.remove(definition, node_id, property.value);
+        try self.replaceNode(node_id, labels, properties, &.{}, &.{});
+    }
+
+    /// Move a node's entries from its old labels and properties to its new
+    /// ones. An entry whose key does not change is left where it is, so an
+    /// update that does not touch an indexed property writes nothing here.
+    pub fn replaceNode(
+        self: *Self,
+        node_id: u64,
+        old_labels: []const SymbolId,
+        old_properties: []const Property,
+        new_labels: []const SymbolId,
+        new_properties: []const Property,
+    ) PropertyIndexError!void {
+        const Change = struct {
+            index: *Self,
+            id: u64,
+            old_labels: []const SymbolId,
+            old_properties: []const Property,
+            new_labels: []const SymbolId,
+            new_properties: []const Property,
+
+            fn visit(change: *const @This(), definition: Definition) PropertyIndexError!void {
+                const was: ?PropertyValue = if (containsSymbol(change.old_labels, definition.scope_id))
+                    if (findProperty(change.old_properties, definition.property_id)) |p| p.value else null
+                else
+                    null;
+                const now: ?PropertyValue = if (containsSymbol(change.new_labels, definition.scope_id))
+                    if (findProperty(change.new_properties, definition.property_id)) |p| p.value else null
+                else
+                    null;
+                try change.index.replaceEntry(definition, change.id, was, now);
             }
-        }
+        };
+        const change = Change{
+            .index = self,
+            .id = node_id,
+            .old_labels = old_labels,
+            .old_properties = old_properties,
+            .new_labels = new_labels,
+            .new_properties = new_properties,
+        };
+        try self.forEachDefinition(.node, &change, Change.visit);
     }
 
     pub fn indexEdge(self: *Self, edge_id: u64, edge_type: SymbolId, properties: []const Property) PropertyIndexError!void {
-        var iter: DefinitionIterator = undefined;
-        try self.iterateDefinitions(.edge, &iter);
-        defer iter.deinit();
-        while (try iter.next()) |definition| {
-            if (definition.scope_id != edge_type) continue;
-            if (findProperty(properties, definition.property_id)) |property| {
-                try self.add(definition, edge_id, property.value);
-            }
-        }
+        try self.replaceEdge(edge_id, null, &.{}, edge_type, properties);
     }
 
     pub fn removeEdge(self: *Self, edge_id: u64, edge_type: SymbolId, properties: []const Property) PropertyIndexError!void {
-        var iter: DefinitionIterator = undefined;
-        try self.iterateDefinitions(.edge, &iter);
-        defer iter.deinit();
-        while (try iter.next()) |definition| {
-            if (definition.scope_id != edge_type) continue;
-            if (findProperty(properties, definition.property_id)) |property| {
-                try self.remove(definition, edge_id, property.value);
+        try self.replaceEdge(edge_id, edge_type, properties, null, &.{});
+    }
+
+    /// The same for an edge, scoped by its type. A null type is an edge
+    /// that does not exist on that side.
+    pub fn replaceEdge(
+        self: *Self,
+        edge_id: u64,
+        old_type: ?SymbolId,
+        old_properties: []const Property,
+        new_type: ?SymbolId,
+        new_properties: []const Property,
+    ) PropertyIndexError!void {
+        const Change = struct {
+            index: *Self,
+            id: u64,
+            old_type: ?SymbolId,
+            old_properties: []const Property,
+            new_type: ?SymbolId,
+            new_properties: []const Property,
+
+            fn visit(change: *const @This(), definition: Definition) PropertyIndexError!void {
+                const was: ?PropertyValue = if (change.old_type == definition.scope_id)
+                    if (findProperty(change.old_properties, definition.property_id)) |p| p.value else null
+                else
+                    null;
+                const now: ?PropertyValue = if (change.new_type == definition.scope_id)
+                    if (findProperty(change.new_properties, definition.property_id)) |p| p.value else null
+                else
+                    null;
+                try change.index.replaceEntry(definition, change.id, was, now);
             }
+        };
+        const change = Change{
+            .index = self,
+            .id = edge_id,
+            .old_type = old_type,
+            .old_properties = old_properties,
+            .new_type = new_type,
+            .new_properties = new_properties,
+        };
+        try self.forEachDefinition(.edge, &change, Change.visit);
+    }
+
+    fn replaceEntry(self: *Self, definition: Definition, id: u64, was: ?PropertyValue, now: ?PropertyValue) PropertyIndexError!void {
+        var old_buf: EntryKeyBuffer = undefined;
+        var new_buf: EntryKeyBuffer = undefined;
+        const old_key: ?[]const u8 = if (was) |v| entryKeyFor(definition, v, id, &old_buf) else null;
+        const new_key: ?[]const u8 = if (now) |v| entryKeyFor(definition, v, id, &new_buf) else null;
+        if (old_key != null and new_key != null and std.mem.eql(u8, old_key.?, new_key.?)) return;
+        if (old_key) |key| {
+            self.entryTree(definition.kind).delete(key) catch |err| switch (err) {
+                BTreeError.KeyNotFound => {},
+                else => return mapBTreeError(err),
+            };
+        }
+        if (new_key) |key| {
+            self.entryTree(definition.kind).insert(key, &.{}) catch |err| switch (err) {
+                BTreeError.DuplicateKey => {},
+                else => return mapBTreeError(err),
+            };
         }
     }
 

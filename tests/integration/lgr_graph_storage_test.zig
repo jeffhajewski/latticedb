@@ -628,3 +628,59 @@ test "lgr: an ordered index raises the minimum reader version, an old index keep
         try std.testing.expectEqual(@as(i64, 5), result.rows[0].values[0].int_val);
     }
 }
+
+fn expectFoundNodes(db: *Database, txn: anytype, value: PropertyValue, expected: []const u64) !void {
+    const found = try db.findNodesByLabelProperty(txn, "P", "k", value, 100);
+    defer std.testing.allocator.free(found);
+    try std.testing.expectEqualSlices(u64, expected, found);
+}
+
+test "lgr: declaring and dropping indexes keeps the others maintained" {
+    const path = "/tmp/lgr_index_declarations.ltdb";
+    defer removeFiles(path);
+    var db = try openDb(path, true);
+    defer db.close();
+
+    var txn = try db.beginTransaction(.read_write);
+    const a = try db.createNode(&txn, &.{"P"});
+    try db.setNodeProperty(&txn, a, "k", .{ .int_val = 1 });
+    try db.commitTransaction(&txn);
+
+    try db.createNodePropertyIndex("P", "k");
+    txn = try db.beginTransaction(.read_write);
+    const b = try db.createNode(&txn, &.{"P"});
+    try db.setNodeProperty(&txn, b, "k", .{ .int_val = 1 });
+    try db.setNodeProperty(&txn, b, "j", .{ .int_val = 2 });
+    try db.commitTransaction(&txn);
+
+    try db.createNodePropertyIndex("P", "j");
+    txn = try db.beginTransaction(.read_write);
+    const c = try db.createNode(&txn, &.{"P"});
+    try db.setNodeProperty(&txn, c, "k", .{ .int_val = 1 });
+    try db.setNodeProperty(&txn, c, "j", .{ .int_val = 2 });
+    // An update that leaves the indexed values alone leaves their entries.
+    try db.setNodeProperty(&txn, a, "other", .{ .int_val = 0 });
+    try db.commitTransaction(&txn);
+    try expectFoundNodes(db, null, .{ .int_val = 1 }, &.{ a, b, c });
+    {
+        const found = try db.findNodesByLabelProperty(null, "P", "j", .{ .int_val = 2 }, 100);
+        defer std.testing.allocator.free(found);
+        try std.testing.expectEqualSlices(u64, &.{ b, c }, found);
+    }
+
+    try db.dropNodePropertyIndex("P", "k");
+    txn = try db.beginTransaction(.read_write);
+    const d = try db.createNode(&txn, &.{"P"});
+    try db.setNodeProperty(&txn, d, "k", .{ .int_val = 1 });
+    try db.setNodeProperty(&txn, d, "j", .{ .int_val = 2 });
+    try db.commitTransaction(&txn);
+    try std.testing.expectError(DatabaseError.MissingIndex, db.findNodesByLabelProperty(null, "P", "k", .{ .int_val = 1 }, 100));
+    {
+        const found = try db.findNodesByLabelProperty(null, "P", "j", .{ .int_val = 2 }, 100);
+        defer std.testing.allocator.free(found);
+        try std.testing.expectEqualSlices(u64, &.{ b, c, d }, found);
+    }
+    // Nothing of the dropped index is left behind to come back with it.
+    try db.createNodePropertyIndex("P", "k");
+    try expectFoundNodes(db, null, .{ .int_val = 1 }, &.{ a, b, c, d });
+}

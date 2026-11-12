@@ -3024,8 +3024,7 @@ pub const Database = struct {
         new_properties: []const node_mod.Property,
     ) DatabaseError!void {
         if (self.property_index) |*index| {
-            index.removeNode(node_id, old_labels, old_properties) catch |err| return mapPropertyIndexError(err);
-            index.indexNode(node_id, new_labels, new_properties) catch |err| return mapPropertyIndexError(err);
+            index.replaceNode(node_id, old_labels, old_properties, new_labels, new_properties) catch |err| return mapPropertyIndexError(err);
         }
         try self.ftsReplaceNode(node_id, old_labels, old_properties, new_labels, new_properties);
     }
@@ -3039,8 +3038,7 @@ pub const Database = struct {
         new_properties: []const node_mod.Property,
     ) DatabaseError!void {
         if (self.property_index) |*index| {
-            index.removeEdge(edge_id, old_type, old_properties) catch |err| return mapPropertyIndexError(err);
-            index.indexEdge(edge_id, new_type, new_properties) catch |err| return mapPropertyIndexError(err);
+            index.replaceEdge(edge_id, old_type, old_properties, new_type, new_properties) catch |err| return mapPropertyIndexError(err);
         }
         try self.ftsReplaceEdge(edge_id, old_type, old_properties, new_type, new_properties, true, true);
     }
@@ -3086,8 +3084,7 @@ pub const Database = struct {
                 }
             }
             if (self.property_index) |*index| {
-                index.removeNode(node_id, existing.labels, existing.properties) catch |err| return mapPropertyIndexError(err);
-                index.indexNode(node_id, state.labels, state.properties) catch |err| return mapPropertyIndexError(err);
+                index.replaceNode(node_id, existing.labels, existing.properties, state.labels, state.properties) catch |err| return mapPropertyIndexError(err);
             }
             try self.ftsReplaceNode(node_id, existing.labels, existing.properties, state.labels, state.properties);
             return;
@@ -3157,10 +3154,9 @@ pub const Database = struct {
             };
         }
         if (self.property_index) |*index| {
-            if (current) |existing| {
-                index.removeEdge(edge_id, existing.edge_type, existing.properties) catch |err| return mapPropertyIndexError(err);
-            }
-            index.indexEdge(edge_id, state.edge_type, state.properties) catch |err| return mapPropertyIndexError(err);
+            const old_type: ?symbols_mod.SymbolId = if (current) |existing| existing.edge_type else null;
+            const old_properties: []const node_mod.Property = if (current) |existing| existing.properties else &.{};
+            index.replaceEdge(edge_id, old_type, old_properties, state.edge_type, state.properties) catch |err| return mapPropertyIndexError(err);
         }
         if (current) |existing| {
             try self.ftsReplaceEdge(edge_id, existing.edge_type, existing.properties, state.edge_type, state.properties, true, true);

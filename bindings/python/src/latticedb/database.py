@@ -6,7 +6,7 @@ import ctypes
 import warnings
 from ctypes import POINTER, byref, c_size_t, c_ubyte, c_void_p
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 if TYPE_CHECKING:
     import numpy as np
@@ -23,6 +23,10 @@ from latticedb._bindings import (
     OpenOptionsV3,
     OpenOptionsV4,
     OpenOptionsV5,
+    LATTICE_CHANGEFEED_RETENTION_AGE,
+    LATTICE_CHANGEFEED_RETENTION_ALL,
+    LATTICE_CHANGEFEED_RETENTION_LAST,
+    LATTICE_CHANGEFEED_RETENTION_OFF,
     LATTICE_FULL_FSYNC_OFF,
     LATTICE_FULL_FSYNC_ON,
     LATTICE_SYNC_MODE_FULL,
@@ -33,6 +37,8 @@ from latticedb._bindings import (
     LATTICE_OK,
     LATTICE_ERROR_IO,
     LATTICE_ERROR_UNSUPPORTED,
+    LatticeChangesTrimmedError,
+    LatticeNotFoundError,
     LatticeUnsupportedError,
     check_error,
     check_query_error,
@@ -41,7 +47,13 @@ from latticedb._bindings import (
     value_to_python,
 )
 from latticedb.transaction import Transaction
-from latticedb.types import QueryResult, VectorSearchResult, FtsSearchResult, StreamRecord
+from latticedb.types import (
+    ChangefeedStatus,
+    QueryResult,
+    VectorSearchResult,
+    FtsSearchResult,
+    StreamRecord,
+)
 
 
 _SYNC_MODES = {"full": LATTICE_SYNC_MODE_FULL, "normal": LATTICE_SYNC_MODE_NORMAL}
@@ -61,6 +73,55 @@ def _sync_mode_code(sync_mode: Optional[str]) -> int:
         raise ValueError(
             f"sync_mode must be 'full' or 'normal', not {sync_mode!r}"
         ) from None
+
+
+# Duration suffixes of an "age:" policy, longest-named first so "ms" is not
+# read as "s".
+_DURATION_UNITS = (("ms", 1), ("s", 1000), ("m", 60_000), ("h", 3_600_000), ("d", 86_400_000))
+_U64_MAX = (1 << 64) - 1
+
+
+def _changefeed_retention_code(policy: Optional[str]) -> Tuple[int, int]:
+    """Turn a policy such as ``"last:1000"`` into the C API's mode and value."""
+    if policy is None:
+        return (0, 0)
+    if not isinstance(policy, str):
+        raise TypeError(f"changefeed_retention must be a string, not {type(policy).__name__}")
+    lowered = policy.lower()
+    if lowered == "all":
+        return (LATTICE_CHANGEFEED_RETENTION_ALL, 0)
+    if lowered == "off":
+        return (LATTICE_CHANGEFEED_RETENTION_OFF, 0)
+    if policy.startswith("last:"):
+        digits = policy[5:]
+        if digits.isdigit() and 0 < int(digits) <= _U64_MAX:
+            return (LATTICE_CHANGEFEED_RETENTION_LAST, int(digits))
+    elif policy.startswith("age:"):
+        text = policy[4:]
+        for suffix, ms in _DURATION_UNITS:
+            number = text[: -len(suffix)]
+            if text.endswith(suffix) and number.isdigit():
+                value = int(number) * ms
+                if 0 < value <= _U64_MAX:
+                    return (LATTICE_CHANGEFEED_RETENTION_AGE, value)
+                break
+    raise ValueError(
+        "changefeed_retention must be 'all', 'off', 'last:<events>' or "
+        f"'age:<duration>' (such as 'age:7d', 'age:12h', 'age:500ms'), not {policy!r}"
+    )
+
+
+def _changefeed_retention_text(mode: int, value: int) -> str:
+    if mode == LATTICE_CHANGEFEED_RETENTION_OFF:
+        return "off"
+    if mode == LATTICE_CHANGEFEED_RETENTION_LAST:
+        return f"last:{value}"
+    if mode == LATTICE_CHANGEFEED_RETENTION_AGE:
+        for suffix, ms in reversed(_DURATION_UNITS[1:]):
+            if value % ms == 0:
+                return f"age:{value // ms}{suffix}"
+        return f"age:{value}ms"
+    return "all"
 
 
 def _vector_metric_code(vector_metric: Optional[str]) -> int:
@@ -109,6 +170,7 @@ class Database:
         vector_metric: Optional[str] = None,
         vector_m: Optional[int] = None,
         vector_ef_construction: Optional[int] = None,
+        changefeed_retention: Optional[str] = None,
     ) -> None:
         """
         Open a Lattice database.
@@ -153,12 +215,24 @@ class Database:
                 means the file's, or 16.
             vector_ef_construction: HNSW candidate list size while building a
                 new index, 1..4096. Unset means the file's, or 200.
+            changefeed_retention: How much of the changefeed (see
+                :meth:`changes`) to keep: ``"all"``, ``"off"``,
+                ``"last:<events>"`` or ``"age:<duration>"`` with a duration
+                such as ``"500ms"``, ``"90s"``, ``"30m"``, ``"12h"`` or
+                ``"7d"``. The file records its policy. Unset keeps the
+                file's, which is ``"all"`` unless something set another (for
+                a new database, the ``LATTICE_CHANGEFEED_RETENTION``
+                environment variable). A value set here replaces the file's
+                policy when the database is opened for writing; a read-only
+                open never changes it. Retention drops the oldest events at
+                checkpoints; :meth:`trim_changefeed` applies it at once.
 
         The vector settings are fixed once the index exists: any that is set
         must match the file, or opening raises
         :class:`LatticeConfigMismatchError`. ``sync_mode``, ``full_fsync``,
         ``vector_metric``, ``vector_m`` and ``vector_ef_construction`` need a
-        native library with ``lattice_open_v5``; setting one against an older
+        native library with ``lattice_open_v5``, and ``changefeed_retention``
+        one with ``lattice_changefeed_status``; setting one against an older
         library raises :class:`LatticeUnsupportedError`.
         """
         self._path = Path(path)
@@ -186,6 +260,7 @@ class Database:
         self._vector_metric = _vector_metric_code(vector_metric)
         self._vector_m = vector_m or 0
         self._vector_ef_construction = vector_ef_construction or 0
+        self._changefeed_retention = _changefeed_retention_code(changefeed_retention)
         self._handle: Optional[Any] = None
         self._closed = False
         # Set by deserialize when it points the database at a caller's buffer
@@ -240,6 +315,11 @@ class Database:
 
         lib = get_lib()
         db_ptr = c_void_p()
+        if self._changefeed_retention[0] and not getattr(lib, "_has_changefeed_status", False):
+            raise LatticeUnsupportedError(
+                "the native library is too old to support changefeed_retention",
+                LATTICE_ERROR_UNSUPPORTED,
+            )
         if getattr(lib, "_has_lattice_open_v5", False):
             opts_v5 = OpenOptionsV5(
                 struct_size=ctypes.sizeof(OpenOptionsV5),
@@ -257,6 +337,8 @@ class Database:
                 vector_metric=self._vector_metric,
                 vector_m=self._vector_m,
                 vector_ef_construction=self._vector_ef_construction,
+                changefeed_retention=self._changefeed_retention[0],
+                changefeed_retention_value=self._changefeed_retention[1],
             )
             code = lib._lib.lattice_open_v5(
                 str(self._path).encode("utf-8"),
@@ -695,13 +777,80 @@ class Database:
         limit: int = 100,
         timeout_ms: int = 0,
     ) -> List[StreamRecord]:
-        """Read graph changefeed records from ``__lattice_changes``."""
-        return self.read_stream(
-            "__lattice_changes",
-            after_sequence=after_sequence,
-            limit=limit,
-            timeout_ms=timeout_ms,
+        """Read graph changefeed records from ``__lattice_changes``.
+
+        Returns up to ``limit`` records with a sequence greater than
+        ``after_sequence``, oldest first; ``after_sequence=0`` reads from the
+        oldest event held. With ``timeout_ms`` it waits that long for a
+        record when there is none yet.
+
+        Raises :class:`LatticeChangesTrimmedError` (a
+        :class:`LatticeNotFoundError`) when retention or a trim has dropped
+        the events after ``after_sequence``: the reader has missed changes.
+        Raises :class:`LatticeUnsupportedError` when the retention policy is
+        ``"off"``.
+        """
+        try:
+            return self.read_stream(
+                "__lattice_changes",
+                after_sequence=after_sequence,
+                limit=limit,
+                timeout_ms=timeout_ms,
+            )
+        except LatticeNotFoundError as exc:
+            raise LatticeChangesTrimmedError(
+                f"the changefeed no longer holds the events after sequence {after_sequence}: "
+                "its retention policy or a trim dropped them",
+                exc.code,
+            ) from None
+        except LatticeUnsupportedError as exc:
+            raise LatticeUnsupportedError(
+                "the changefeed is off (changefeed_retention='off')", exc.code
+            ) from None
+
+    def changefeed_status(self) -> ChangefeedStatus:
+        """Return the changefeed's retention policy and the events it holds."""
+        if self._handle is None:
+            raise RuntimeError("Database is not open")
+        lib = get_lib()
+        if not getattr(lib, "_has_changefeed_status", False):
+            raise LatticeUnsupportedError(
+                "the native library is too old to report the changefeed's status",
+                LATTICE_ERROR_UNSUPPORTED,
+            )
+        mode = ctypes.c_uint8()
+        value = ctypes.c_uint64()
+        oldest = ctypes.c_uint64()
+        last = ctypes.c_uint64()
+        code = lib._lib.lattice_changefeed_status(
+            self._handle, byref(mode), byref(value), byref(oldest), byref(last)
         )
+        check_error(code)
+        return ChangefeedStatus(
+            retention=_changefeed_retention_text(mode.value, value.value),
+            oldest_sequence=oldest.value or None,
+            last_sequence=last.value,
+        )
+
+    def trim_changefeed(self) -> int:
+        """Apply the changefeed's retention policy in full now.
+
+        Checkpoints apply it a bounded number of events at a time; this
+        drops everything the policy no longer keeps and makes that durable.
+        Returns the number of events dropped. Raises
+        :class:`LatticeLockTimeoutError` while a write transaction is open.
+        """
+        if self._handle is None:
+            raise RuntimeError("Database is not open")
+        lib = get_lib()
+        if not getattr(lib, "_has_changefeed_status", False):
+            raise LatticeUnsupportedError(
+                "the native library is too old to trim the changefeed",
+                LATTICE_ERROR_UNSUPPORTED,
+            )
+        removed = ctypes.c_uint64()
+        check_error(lib._lib.lattice_changefeed_trim(self._handle, byref(removed)))
+        return removed.value
 
     def vector_search(
         self,

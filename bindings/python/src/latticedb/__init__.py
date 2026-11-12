@@ -22,6 +22,7 @@ from latticedb.types import (
     VectorSearchResult,
     FtsSearchResult,
     StreamRecord,
+    ChangefeedStatus,
 )
 from latticedb.embedding import (
     hash_embed as _hash_embed,
@@ -33,6 +34,7 @@ from latticedb._bindings import (
     LatticeIOError,
     LatticeCorruptionError,
     LatticeNotFoundError,
+    LatticeChangesTrimmedError,
     LatticeAlreadyExistsError,
     LatticeInvalidArgError,
     LatticeTxnAbortedError,
@@ -105,11 +107,13 @@ __all__ = [
     "VectorSearchResult",
     "FtsSearchResult",
     "StreamRecord",
+    "ChangefeedStatus",
     # Exceptions
     "LatticeError",
     "LatticeIOError",
     "LatticeCorruptionError",
     "LatticeNotFoundError",
+    "LatticeChangesTrimmedError",
     "LatticeAlreadyExistsError",
     "LatticeInvalidArgError",
     "LatticeTxnAbortedError",

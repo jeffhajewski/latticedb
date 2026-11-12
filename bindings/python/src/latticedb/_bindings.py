@@ -282,6 +282,16 @@ class LatticeValueTooLargeError(LatticeError):
     pass
 
 
+class LatticeChangesTrimmedError(LatticeNotFoundError):
+    """The changefeed no longer holds the events after the position read from.
+
+    Its retention policy, or a trim, dropped them: the reader has missed
+    changes. Reading from ``after_sequence=0`` starts at the oldest event held.
+    """
+
+    pass
+
+
 class LatticeQueryError(LatticeError):
     """Rich query execution error with stage-aware diagnostics."""
 
@@ -500,6 +510,10 @@ LATTICE_FULL_FSYNC_ON = 2
 LATTICE_VECTOR_METRIC_COSINE = 1
 LATTICE_VECTOR_METRIC_EUCLIDEAN = 2
 LATTICE_VECTOR_METRIC_DOT_PRODUCT = 3
+LATTICE_CHANGEFEED_RETENTION_ALL = 1
+LATTICE_CHANGEFEED_RETENTION_LAST = 2
+LATTICE_CHANGEFEED_RETENTION_AGE = 3
+LATTICE_CHANGEFEED_RETENTION_OFF = 4
 
 
 class OpenOptionsV5(Structure):
@@ -519,6 +533,8 @@ class OpenOptionsV5(Structure):
         ("vector_metric", ctypes.c_uint8),
         ("vector_m", c_uint16),
         ("vector_ef_construction", c_uint16),
+        ("changefeed_retention", ctypes.c_uint8),
+        ("changefeed_retention_value", c_uint64),
     ]
 
 
@@ -566,6 +582,7 @@ class LatticeLib:
         self._has_lattice_open_v5 = hasattr(self._lib, "lattice_open_v5")
         self._has_node_detach_delete = hasattr(self._lib, "lattice_node_detach_delete")
         self._has_serialize = hasattr(self._lib, "lattice_serialize")
+        self._has_changefeed_status = hasattr(self._lib, "lattice_changefeed_status")
         self._has_deserialize_borrowed = hasattr(self._lib, "lattice_deserialize_borrowed")
         self._setup_functions()
 
@@ -610,6 +627,18 @@ class LatticeLib:
                 POINTER(LatticeDatabase),
             ]
             self._lib.lattice_open_v5.restype = c_int
+
+        if self._has_changefeed_status:
+            self._lib.lattice_changefeed_status.argtypes = [
+                LatticeDatabase,
+                POINTER(ctypes.c_uint8),
+                POINTER(c_uint64),
+                POINTER(c_uint64),
+                POINTER(c_uint64),
+            ]
+            self._lib.lattice_changefeed_status.restype = c_int
+            self._lib.lattice_changefeed_trim.argtypes = [LatticeDatabase, POINTER(c_uint64)]
+            self._lib.lattice_changefeed_trim.restype = c_int
 
         if self._has_serialize:
             self._lib.lattice_serialize.argtypes = [

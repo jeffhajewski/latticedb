@@ -169,3 +169,16 @@ class StreamRecord:
     sequence: int
     kind: str
     payload: PropertyValue
+
+
+@dataclass
+class ChangefeedStatus:
+    """The changefeed's retention policy and the events it holds."""
+
+    #: The policy in force: ``"all"``, ``"off"``, ``"last:<events>"`` or
+    #: ``"age:<duration>"`` such as ``"age:7d"``.
+    retention: str
+    #: The oldest event held, or None when the changefeed holds none.
+    oldest_sequence: Optional[int]
+    #: The last sequence handed to an event, 0 if none ever was.
+    last_sequence: int

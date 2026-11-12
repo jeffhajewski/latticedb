@@ -233,7 +233,8 @@ event to the changefeed (`__lattice_changes`), and in 0.16.0 each took about
 map in full. Events now take about 24: a 3- to 5-byte key and a binary value
 that refers to labels, types and property names by their symbol ids and
 carries the commit time once per transaction. What `changes()` and
-`lattice_stream_read` return is unchanged, byte for byte. Loading 200,000
+`lattice_stream_read` return is unchanged, byte for byte, apart from the order
+of events within a transaction (below). Loading 200,000
 nodes with a label and two properties each:
 
 | | 0.16.0 | this release |
@@ -269,8 +270,24 @@ checkpoints, a bounded number each time, or all at once with a trim. With
   TypeScript, `ErrChangesTrimmed` in Go, `ChangesTrimmedException` in Java)
   instead of a silent gap. Sequence numbers are never reused.
 
-The guide, with when to choose each policy and the stored format, is
-`book/src/guides/changefeed.md`.
+**Events within a transaction come in an order a consumer can replay.** In
+0.16.0 and until now, a transaction's events came all nodes first, then all
+edges, each in an order that depended on a hash map's layout: two nodes created
+in that order could appear the other way round, and a node deleted with its
+relationships had its `node.delete` before the `edge.delete` of each of its
+edges, so a consumer applying events in sequence deleted a node that still had
+relationships. Events now come in a fixed order: the edges the transaction
+deletes, the nodes that exist after it, the edges that exist after it, then
+the nodes it deletes, each group by ascending id. An edge is created after both
+its nodes and deleted before either, every change to a node or edge follows its
+creation, and a node's deletion is the last event that names it. As before, the
+events are the transaction's net effect: a property set several times in one
+transaction is one event, from its value before the transaction to its value
+after. Commit cost is unchanged (the ids are sorted once and the sort is reused
+to apply the transaction).
+
+The guide, with when to choose each policy, the order of events and the stored
+format, is `book/src/guides/changefeed.md`.
 
 ## Breaking changes
 

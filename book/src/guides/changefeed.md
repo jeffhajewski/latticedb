@@ -37,6 +37,47 @@ does not double the cost of the write that stored it.
 Vectors are not part of the changefeed: setting or replacing a node's vector
 writes no event.
 
+### What a transaction's events say, and in what order
+
+A transaction's events describe its **net effect**: LatticeDB compares the
+state each node and edge had before the transaction with the state it has
+after, not the individual calls that got it there. So a property set three
+times in one transaction is one `property_set` event, with the value before
+the transaction as `old_value` and the last value as `new_value`; a node
+created and deleted in the same transaction leaves no events; and a label
+added and removed again leaves none.
+
+The events of one transaction come in this order:
+
+1. the deletion of every edge the transaction deletes;
+2. every node that exists after the transaction: for a new node, its
+   `node.insert`, then a `node.label_add` per label, then a
+   `node.property_set` per property; for a node that existed before, its
+   label removals, label additions, property removals and property sets;
+3. every edge that exists after the transaction, in the same way: for a new
+   edge its `edge.insert` and then its properties, for an existing one its
+   property removals and property sets;
+4. the deletion of every node the transaction deletes.
+
+Within each group, nodes and edges come in ascending id order, which for the
+nodes and edges a transaction creates is the order it created them in. A
+consumer that applies events in sequence order can therefore rely on these:
+
+- an edge is created after both of its nodes exist;
+- every label or property change comes after its node's or edge's creation;
+- an edge is deleted before either of its nodes, and a node's deletion is the
+  last event that names it, so a store that refuses to delete a node that
+  still has relationships (as LatticeDB does) can apply the feed as it comes;
+- a property appears at most once per transaction, carrying the change from
+  before the transaction to after it.
+
+What the order does not say is the order in which the transaction's
+statements ran: a transaction that set `a.x` and then created `b` reads the
+same as one that did it the other way round. 0.16.0 put events in a different
+order: all nodes, then all edges, each in an order that depended on how a hash
+map happened to lay them out, and a node's deletion before the deletion of its
+edges.
+
 ## Why it is there
 
 LatticeDB is built to sit underneath tools that edit structured knowledge:

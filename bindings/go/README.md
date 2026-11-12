@@ -187,6 +187,7 @@ For a larger end-to-end example, see [examples/go](../../examples/go).
 - `ReadOnly: true` on a database that was not closed cleanly recovers it in memory: the handle sees every committed transaction and nothing is written to the files. A recovery that needs more than 64 MB plus four times the size of the log and journal fails with `ErrorFull`; open the database read-write once to recover it on disk.
 - A failed query returns a `*QueryError` with `Code`, `Stage`, `Message`, `DiagnosticCode` and `Location` (nil when the failure does not belong to one place in the query); `RETURN 1/0` gives `Division by zero: 1 / 0 (DivisionByZero)` at line 1, column 9. Parse and semantic failures have `ErrorInvalidArg` and execution failures `ErrorGeneric`, except that a `DELETE` of a node with relationships has `ErrorHasRelationships` and a relationship created to a node deleted earlier in the query `ErrorNotFound`; a storage failure under a query has `ErrorIO` and an allocation failure `ErrorOutOfMemory`.
 - Durable streams use explicit cursors: `DB.ReadStream`, `DB.GetStreamOffset`, `DB.Changes`, `Tx.PublishStream`, `Tx.SetStreamOffset`, and `Tx.TrimStream`.
+- `DB.Changes` returns a transaction's net effect in a replayable order: the edges it deletes, the nodes that exist after it, the edges that exist after it, then the nodes it deletes, each group by ascending id, so an edge is created after both its nodes and deleted before either (see the [changefeed guide](https://docs.latticedb.org/guides/changefeed)).
 
 ## Embeddings
 

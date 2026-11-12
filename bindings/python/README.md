@@ -390,6 +390,15 @@ with Database("events.db", create=True) as db:
 graph events such as `node.insert`, `node.property_set`, `edge.delete`, and
 `edge.property_remove`, with payloads represented as normal Python values.
 
+A transaction's events describe its net effect (a property set several times
+is one event, from its value before the transaction to its last value) and
+come in an order that can be replayed as it comes: the edges it deletes, then
+the nodes that exist after it, then the edges that exist after it, then the
+nodes it deletes, each group by ascending id. So an edge is created after both
+its nodes and deleted before either. See the
+[changefeed guide](https://docs.latticedb.org/guides/changefeed) for the details
+and for retention policies.
+
 ## Supported Property Types
 
 - `None` - Null value

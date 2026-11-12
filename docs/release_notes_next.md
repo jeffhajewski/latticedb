@@ -952,7 +952,8 @@ with relationships is one range probe, under 1 µs.
   for a newer writer. 0.16.0 does not know that gate and writes such a file
   anyway.
 - **Some Cypher is not implemented**, each part with an error that names it:
-  quantified path patterns (`((a)-->(b)){1,3}`), `&`, `!` and `%` in a
+  quantified path patterns (`((a)-->(b)){1,3}`, `(x) ((a)-->(b))+`) and
+  relationships (`-[:R]->{1,3}`), `&`, `!` and `%` in a
   relationship pattern's types (`-[:!KNOWS]->`), `WHERE` inside a pattern,
   writing inside `EXISTS { }`, `COUNT { }` or `COLLECT { }`, `CALL { } IN
   TRANSACTIONS`, `OPTIONAL CALL`, procedures other than the four catalog ones,

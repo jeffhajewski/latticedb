@@ -85,8 +85,9 @@ RETURN label ORDER BY label
 These parts of Cypher are not implemented. Each fails before the query runs,
 with an error that names it:
 
-- quantified and parenthesised path patterns, such as `((a)-->(b)){1,3}`; use a
-  variable-length relationship `-[*1..3]->`
+- quantified and parenthesised path patterns, such as `((a)-->(b)){1,3}` or
+  `(x) ((a)-->(b))+`, and quantified relationships such as `-[:R]->{1,3}` or
+  `-[:R]->+`; use a variable-length relationship `-[:R*1..3]->`
 - `&`, `!` and `%` in a relationship's types, as in `-[:!KNOWS]->`; use
   `WHERE NOT r:KNOWS`
 - `WHERE` inside a pattern, as in `(n WHERE n.age > 30)`

@@ -977,6 +977,30 @@ test "lcy: octal integers, and a leading zero refused" {
     try expectResult(db, "WITH 0 AS o RETURN o, 0 AS other", "o | other\n0 | 0");
 }
 
+test "lcy: quantified path patterns and LOAD CSV are refused by name" {
+    const path = "/tmp/lcy_qpp_refused.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+
+    // These forms fell through to "Expected MATCH, OPTIONAL MATCH, ..." or
+    // "Expected '(' to start node pattern".
+    const segment = "A '(' after a pattern starts a quantified path pattern, such as (x) ((a)-->(b)){1,3}, which is not supported";
+    try expectFailure(db, "MATCH (x) ((a)-[:R]->(b))+ RETURN a", .parse, segment);
+    try expectFailure(db, "MATCH (x) ((a)-[:R]->(b)){1,3} (y) RETURN a", .parse, segment);
+    try expectFailure(db, "MATCH (a) (b) RETURN a", .parse, "separate two patterns with a comma");
+    const quantified = "Quantified relationships, such as -[:R]->{1,3} or -[:R]->+, are not supported; write -[:R*1..3]->";
+    try expectFailure(db, "MATCH p = (a)-->{2}(b) RETURN p", .parse, quantified);
+    try expectFailure(db, "MATCH (a)<-[:R]-+(b) RETURN a", .parse, quantified);
+    try expectFailure(db, "MATCH (a) WHERE EXISTS { (a)-[:R]->{1,2}(b) } RETURN a", .parse, quantified);
+    // The leading form and LOAD CSV kept their messages.
+    try expectFailure(db, "MATCH ((a)-->(b)){1,3} RETURN a", .parse, "Parenthesised path patterns, such as the quantified ((a)-->(b)){1,3}, are not supported");
+    try expectFailure(db, "LOAD CSV WITH HEADERS FROM 'file:///x.csv' AS row RETURN row", .parse, "LOAD CSV is not supported; import files with the lattice CLI or the API");
+    // Patterns that are not quantified are untouched, in clauses and in
+    // expressions.
+    try expectResult(db, "CREATE (a:A)-[:R]->(b:B), (b)-[:R]->(:C) RETURN count(*) AS c", "c\n1");
+    try expectResult(db, "MATCH (a:A), (b:B) WHERE (a)-->(b) RETURN [(a)-->(x) | labels(x)] AS l, COUNT { (b)-->() } + 1 AS n", "l | n\n[[\"B\"]] | 2");
+}
+
 test "lcy: properties() of a map is the map" {
     const path = "/tmp/lcy_properties_map.ltdb";
     const db = try openTestDb(path);

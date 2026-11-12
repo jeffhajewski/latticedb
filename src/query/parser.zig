@@ -1448,6 +1448,12 @@ pub const Parser = struct {
                 return null;
             }
 
+            // GQL's quantified relationship, -[:R]->{1,3} or -->+.
+            if (self.check(.lbrace) or self.check(.plus)) {
+                self.errorAtCurrent("Quantified relationships, such as -[:R]->{1,3} or -[:R]->+, are not supported; write -[:R*1..3]-> or -[:R*]->");
+                return null;
+            }
+
             // Edge must be followed by a node
             if (self.parseNodePattern()) |node| {
                 const node_ptr = self.arena.allocator().create(ast.NodePattern) catch return null;
@@ -1457,6 +1463,13 @@ pub const Parser = struct {
                 self.errorAtCurrent("Expected node pattern after relationship");
                 return null;
             }
+        }
+
+        // GQL's quantified path pattern after a node, (x) ((a)-->(b)){1,3}.
+        // Nothing else lets a '(' follow a pattern in a clause.
+        if (!self.pattern_in_expression and shortest == .none and self.check(.lparen)) {
+            self.errorAtCurrent("A '(' after a pattern starts a quantified path pattern, such as (x) ((a)-->(b)){1,3}, which is not supported; separate two patterns with a comma, or use a variable-length relationship -[*1..3]->");
+            return null;
         }
 
         if (shortest != .none and !self.consume(.rparen, "Expected ')' to close shortestPath()")) return null;

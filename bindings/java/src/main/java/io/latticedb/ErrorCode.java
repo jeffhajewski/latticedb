@@ -22,6 +22,14 @@ public enum ErrorCode {
      * 0.13.0). Distinct from {@link #LOCK_TIMEOUT}, which reports a second
      * writer inside this process. */
     DATABASE_LOCKED(-16),
+    /** {@link Transaction#deleteNode(long)} refused a node that still has
+     * relationships, and deleted nothing (native code -17).
+     * {@link Transaction#detachDeleteNode(long)} deletes them with it. */
+    HAS_RELATIONSHIPS(-17),
+    /** The open options contradict the vector index the database file
+     * records: its dimensions, metric, M or ef_construction (native code
+     * -18). */
+    CONFIG_MISMATCH(-18),
     /** Placeholder for native codes this binding does not recognize. The
      * original numeric code is preserved on the exception that carries it
      * (see {@link LatticeException#getNativeCode()}). */

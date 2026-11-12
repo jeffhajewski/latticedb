@@ -635,10 +635,22 @@ JNIEXPORT jlong JNICALL
 Java_io_latticedb_Native_open(JNIEnv *env, jclass cls, jstring path,
         jboolean create, jboolean read_only, jint cache_size_mb, jint page_size,
         jboolean enable_vector, jint vector_dimensions, jboolean enable_wal,
-        jboolean enable_adjacency_cache, jboolean lock) {
+        jboolean enable_adjacency_cache, jboolean lock, jint sync_mode,
+        jint full_fsync, jint vector_metric, jint vector_m,
+        jint vector_ef_construction) {
     init_cache(env);
     (void)cls;
-    lattice_open_options_v4 opts;
+    /* The v5 fields are 0 for "not set". A value that does not fit its C
+     * field is refused here rather than truncated into a valid one; one that
+     * fits but is out of range is refused by lattice_open_v5. */
+    if (sync_mode < 0 || sync_mode > 255 || full_fsync < 0 || full_fsync > 255 ||
+        vector_metric < 0 || vector_metric > 255 || vector_m < 0 ||
+        vector_m > 65535 || vector_ef_construction < 0 ||
+        vector_ef_construction > 65535) {
+        throw_lattice(env, LATTICE_ERROR_INVALID_ARG);
+        return 0;
+    }
+    lattice_open_options_v5 opts;
     memset(&opts, 0, sizeof(opts));
     opts.struct_size = sizeof(opts);
     opts.create = create == JNI_TRUE;
@@ -650,13 +662,18 @@ Java_io_latticedb_Native_open(JNIEnv *env, jclass cls, jstring path,
     opts.enable_wal = enable_wal == JNI_TRUE;
     opts.enable_adjacency_cache = enable_adjacency_cache == JNI_TRUE;
     opts.lock = lock == JNI_TRUE;
+    opts.sync_mode = (uint8_t)sync_mode;
+    opts.full_fsync = (uint8_t)full_fsync;
+    opts.vector_metric = (uint8_t)vector_metric;
+    opts.vector_m = (uint16_t)vector_m;
+    opts.vector_ef_construction = (uint16_t)vector_ef_construction;
 
     size_t path_len = 0;
     char *path_buf = jstring_to_utf8(env, path, &path_len);
     if (path_buf == NULL && (*env)->ExceptionCheck(env)) return 0;
 
     lattice_database *db = NULL;
-    lattice_error rc = lattice_open_v4(path_buf, &opts, &db);
+    lattice_error rc = lattice_open_v5(path_buf, &opts, &db);
     free(path_buf);
     if (!check(env, rc)) return 0;
     return (jlong)(uintptr_t)db;
@@ -818,6 +835,15 @@ Java_io_latticedb_Native_nodeDelete(JNIEnv *env, jclass cls, jlong txn_handle,
     (void)cls;
     check(env, lattice_node_delete((lattice_txn *)(uintptr_t)txn_handle,
                                    (lattice_node_id)node_id));
+}
+
+JNIEXPORT void JNICALL
+Java_io_latticedb_Native_nodeDetachDelete(JNIEnv *env, jclass cls, jlong txn_handle,
+                                          jlong node_id) {
+    init_cache(env);
+    (void)cls;
+    check(env, lattice_node_detach_delete((lattice_txn *)(uintptr_t)txn_handle,
+                                          (lattice_node_id)node_id));
 }
 
 JNIEXPORT void JNICALL

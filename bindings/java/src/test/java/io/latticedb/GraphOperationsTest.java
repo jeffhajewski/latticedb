@@ -52,9 +52,15 @@ class GraphOperationsTest {
 
                 tx.commit();
 
-                // delete after commit boundary in a fresh write txn
+                // delete after commit boundary in a fresh write txn. Alice has
+                // a SELF edge, so a plain delete is refused and leaves her be;
+                // a detach delete takes the edge with her.
                 try (Transaction tx2 = db.beginWrite()) {
-                    tx2.deleteNode(alice.id());
+                    LatticeException refused = assertThrows(LatticeException.class,
+                            () -> tx2.deleteNode(alice.id()));
+                    assertEquals(ErrorCode.HAS_RELATIONSHIPS, refused.getErrorCode());
+                    assertTrue(tx2.nodeExists(alice.id()));
+                    tx2.detachDeleteNode(alice.id());
                     tx2.commit();
                 }
                 try (Transaction tx3 = db.beginRead()) {

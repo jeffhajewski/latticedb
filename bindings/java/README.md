@@ -87,6 +87,28 @@ mvn -q compile exec:java@run-example -Dexec.args=/tmp/knowledge.db
   (Ollama/OpenAI wire formats).
 - Errors: unchecked `LatticeException` (with `ErrorCode`) and `QueryException`
   carrying stage/diagnostic-code/location diagnostics.
+- `OpenOptions` also takes `syncMode(SyncMode.FULL | NORMAL)`, `fullFsync(Boolean)`,
+  `vectorMetric(VectorMetric.COSINE | EUCLIDEAN | DOT_PRODUCT)`, `vectorM(int)` and
+  `vectorEfConstruction(int)`, all unset by default (`null` or 0), passed through
+  `lattice_open_v5`. `SyncMode.NORMAL` returns from a commit once the operating
+  system has it: it survives the process being killed, but a power cut or OS crash
+  can lose the most recent commits. Unset sync settings defer to the
+  `LATTICE_SYNC_MODE` and `LATTICE_FULL_FSYNC` environment variables, else a full
+  sync without `F_FULLFSYNC`. `deserialize` still opens through the v4 options and
+  ignores these.
+- A database file records its vector index (dimensions, metric, M,
+  ef_construction), and a database that has one opens with it whether or not
+  `enableVectors` is set, so reopening needs no vector options. Any vector option
+  that is set, and `vectorDimensions` when `enableVectors(true)` is set (it
+  defaults to 128), must match the file or opening throws
+  `ErrorCode.CONFIG_MISMATCH`. Cosine stores vectors at unit length and returns
+  cosine distance; Euclidean returns the L2 distance and dot product the negative
+  dot product, both over vectors stored as given; results come smallest first.
+- `Transaction.deleteNode` refuses a node that still has relationships with
+  `ErrorCode.HAS_RELATIONSHIPS` and deletes nothing, as Cypher's `DELETE` does;
+  `detachDeleteNode` deletes the node with all its relationships, as
+  `DETACH DELETE` does. `createEdge` throws `ErrorCode.NOT_FOUND` if either end
+  does not exist as the transaction sees it.
 
 Property values map to Java types as follows: null ↔ `null`, bool ↔ `Boolean`,
 int ↔ `Long`, float ↔ `Double`, string ↔ `String`, bytes ↔ `byte[]`,

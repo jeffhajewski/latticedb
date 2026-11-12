@@ -118,9 +118,23 @@ public final class Transaction implements AutoCloseable {
         return createNode(null, null);
     }
 
+    /**
+     * Deletes a node. A node that still has relationships is not deleted: this
+     * throws {@link ErrorCode#HAS_RELATIONSHIPS}, as Cypher's {@code DELETE}
+     * does, since deleting it alone would leave edges pointing at nothing. Use
+     * {@link #detachDeleteNode(long)} to delete them with it. Deleting a node
+     * that does not exist does nothing.
+     */
     public void deleteNode(long nodeId) {
         ensureWritable();
         Native.nodeDelete(handle, nodeId);
+    }
+
+    /** Deletes a node and every relationship it has, as Cypher's
+     * {@code DETACH DELETE} does. All of it is part of this transaction. */
+    public void detachDeleteNode(long nodeId) {
+        ensureWritable();
+        Native.nodeDetachDelete(handle, nodeId);
     }
 
     public boolean nodeExists(long nodeId) {
@@ -188,6 +202,8 @@ public final class Transaction implements AutoCloseable {
     /* Edges                                                               */
     /* ------------------------------------------------------------------ */
 
+    /** Creates an edge. Throws {@link ErrorCode#NOT_FOUND} if either node does
+     * not exist as this transaction sees it. */
     public Edge createEdge(long sourceId, long targetId, String type,
                            Map<String, Object> properties) {
         ensureWritable();

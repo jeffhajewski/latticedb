@@ -19,7 +19,9 @@ final class Native {
     static native long open(String path, boolean create, boolean readOnly,
                             int cacheSizeMB, int pageSize, boolean enableVector,
                             int vectorDimensions, boolean enableWal,
-                            boolean enableAdjacencyCache, boolean lock);
+                            boolean enableAdjacencyCache, boolean lock,
+                            int syncMode, int fullFsync, int vectorMetric,
+                            int vectorM, int vectorEfConstruction);
 
     static native byte[] serialize(long db);
 
@@ -44,6 +46,8 @@ final class Native {
     static native void nodeRemoveLabel(long txn, long nodeId, String label);
 
     static native void nodeDelete(long txn, long nodeId);
+
+    static native void nodeDetachDelete(long txn, long nodeId);
 
     static native void nodeSetProperty(long txn, long nodeId, String key, Object value);
 

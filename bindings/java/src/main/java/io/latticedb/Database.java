@@ -45,7 +45,10 @@ public final class Database implements AutoCloseable {
         long handle = Native.open(path, options.create(), options.readOnly(),
                 options.cacheSizeMB(), options.pageSize(), options.enableVectors(),
                 options.vectorDimensions(), options.enableWal(),
-                options.enableAdjacencyCache(), options.lock());
+                options.enableAdjacencyCache(), options.lock(),
+                options.syncModeCode(), options.fullFsyncCode(),
+                options.vectorMetricCode(), options.vectorM(),
+                options.vectorEfConstruction());
         return new Database(path, options, handle);
     }
 

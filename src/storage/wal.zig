@@ -412,6 +412,13 @@ pub const WalManager = struct {
 
         if (file_size == 0) {
             try self.initNewWal(db_uuid);
+            // A commit syncs the log's contents, which keeps nothing if the
+            // log's name is lost: a power cut before the directory reached
+            // the disk took the file with every commit in it. The log is
+            // created when a database is, and again whenever one is opened
+            // without its log, after a backup was put back without it.
+            self.file.sync() catch return WalError.IoError;
+            vfs_impl.syncParentDir(path);
         } else {
             try self.loadWal(db_uuid);
         }

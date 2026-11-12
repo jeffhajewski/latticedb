@@ -2980,8 +2980,8 @@ pub const QueryPlanner = struct {
                 const arg = self.columnNameForExpression(call.arguments[0]) orelse break :blk null;
                 break :blk std.fmt.allocPrint(
                     self.allocator,
-                    "{s}({s})",
-                    .{ call.name, arg },
+                    "{s}({s}{s})",
+                    .{ call.name, if (call.distinct) "DISTINCT " else "", arg },
                 ) catch null;
             },
             else => null,

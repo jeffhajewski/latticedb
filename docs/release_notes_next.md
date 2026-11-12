@@ -779,6 +779,8 @@ with relationships is one range probe, under 1 µs.
   points to `COUNT { }`, where it said "Operator not valid for these types".
 - `CALL db.labels() YIELD * RETURN *` fails with "YIELD * is only allowed when
   CALL db.labels() is the whole query", where it said no variables were in scope.
+- An aggregate over distinct values is named for it: `count(DISTINCT x)`, where
+  the column was `count(x)` and could not be told from `count(x)` beside it.
 
 **Full-text search**
 

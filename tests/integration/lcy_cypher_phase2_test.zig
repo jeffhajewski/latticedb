@@ -1001,6 +1001,16 @@ test "lcy: quantified path patterns and LOAD CSV are refused by name" {
     try expectResult(db, "MATCH (a:A), (b:B) WHERE (a)-->(b) RETURN [(a)-->(x) | labels(x)] AS l, COUNT { (b)-->() } + 1 AS n", "l | n\n[[\"B\"]] | 2");
 }
 
+test "lcy: an aggregate over DISTINCT values says so in its column name" {
+    const path = "/tmp/lcy_distinct_column.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+
+    // Both were named count(x), two columns no caller could tell apart.
+    try expectResult(db, "UNWIND [1, 1, 2] AS x RETURN count(DISTINCT x), count(x), collect(DISTINCT x)", "count(DISTINCT x) | count(x) | collect(DISTINCT x)\n2 | 3 | [1, 2]");
+    try expectResult(db, "UNWIND [1, 1, 2] AS x WITH x RETURN sum(  DISTINCT x ), count(*)", "sum(DISTINCT x) | count(*)\n3 | 3");
+}
+
 test "lcy: properties() of a map is the map" {
     const path = "/tmp/lcy_properties_map.ltdb";
     const db = try openTestDb(path);

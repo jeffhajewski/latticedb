@@ -184,6 +184,8 @@ For a larger end-to-end example, see [examples/go](../../examples/go).
   must be positive, and a missing index returns `ErrorUnsupported` rather than
   falling back to a scan.
 - A file that a newer release has marked as not writable by this one opens with `ReadOnly: true`; a writable `Open` returns `ErrorNeedsNewerWriter` and writes nothing.
+- `ReadOnly: true` on a database that was not closed cleanly recovers it in memory: the handle sees every committed transaction and nothing is written to the files. A recovery that needs more than 64 MB plus four times the size of the log and journal fails with `ErrorFull`; open the database read-write once to recover it on disk.
+- A failed query returns a `*QueryError` with `Code`, `Stage`, `Message`, `DiagnosticCode` and `Location` (nil when the failure does not belong to one place in the query); `RETURN 1/0` gives `Division by zero: 1 / 0 (DivisionByZero)` at line 1, column 9. Parse and semantic failures have `ErrorInvalidArg` and execution failures `ErrorGeneric`, except that a `DELETE` of a node with relationships has `ErrorHasRelationships` and a relationship created to a node deleted earlier in the query `ErrorNotFound`; a storage failure under a query has `ErrorIO` and an allocation failure `ErrorOutOfMemory`.
 - Durable streams use explicit cursors: `DB.ReadStream`, `DB.GetStreamOffset`, `DB.Changes`, `Tx.PublishStream`, `Tx.SetStreamOffset`, and `Tx.TrimStream`.
 
 ## Embeddings

@@ -51,8 +51,13 @@ defer db.Close()
 | `ReadOnly` | Open without the ability to write |
 | `CacheSizeMB` | How much memory to keep pages in |
 | `PageSize` | Page size in bytes |
-| `EnableVectors` | Turn on the vector index |
-| `VectorDimensions` | How many numbers are in each vector |
+| `EnableVectors` | Create a vector index if the database has none |
+| `VectorDimensions` | How many numbers are in each vector, when `EnableVectors` is set (0 means 128) |
+| `VectorMetric` | How a new index measures distance: `VectorMetricCosine` (the default), `VectorMetricEuclidean` or `VectorMetricDotProduct` |
+| `VectorM` | HNSW connections per node for a new index, 2..32 (0 means 16) |
+| `VectorEfConstruction` | HNSW candidate list size while building a new index, 1..4096 (0 means 200) |
+| `SyncMode` | When a commit waits for the disk: `SyncModeFull` or `SyncModeNormal` |
+| `FullFsync` | On macOS, whether syncs ask the drive to flush its cache: `FullFsyncOn` or `FullFsyncOff` |
 | `EnableAdjacencyCache` | Keep an in-memory map of connections. Queries and edge calls do not read it yet, so it speeds up nothing |
 | `DisableWAL` | Open without write-ahead logging |
 | `DisableLock` | Open without taking a lock on the file |
@@ -86,6 +91,62 @@ apart from "the caller set it to false", and both of those features default to
 on. Set them when you genuinely want them off. There is also an older
 `EnableVector` field kept for
 compatibility; new code should use `EnableVectors`.
+
+### The vector index
+
+A database file records its vector index: the dimensions, the metric,
+`VectorM` and `VectorEfConstruction`. A database that has an index opens with it
+whether or not `EnableVectors` is set, so reopening needs no vector options at
+all, also after a crash. The metric and the two HNSW settings configure a new
+index and are fixed once it exists. Any of them that is set, and
+`VectorDimensions` when `EnableVectors` is set, must match the file, or `Open`
+returns an error whose `Code` is `ErrorConfigMismatch`. Since a zero
+`VectorDimensions` means 128, Go cannot ask for "the file's dimensions" with
+`EnableVectors` set: to open a database whose dimensions you do not know, leave
+`EnableVectors` off.
+
+```go
+db, err := latticedb.Open("vectors.lattice", latticedb.OpenOptions{
+    Create:           true,
+    EnableVectors:    true,
+    VectorDimensions: 2,
+    VectorMetric:     latticedb.VectorMetricEuclidean,
+})
+// ... store vectors, close ...
+
+db, err = latticedb.Open("vectors.lattice", latticedb.OpenOptions{})
+results, err := db.VectorSearch([]float32{1, 0}, latticedb.VectorSearchOptions{K: 2})
+// [{1 0} {2 2.236068}]
+```
+
+Cosine stores vectors at unit length and returns the cosine distance; Euclidean
+returns the L2 distance and dot product the negative dot product, both over
+vectors stored as given. Results come smallest first.
+
+### Durability settings
+
+`SyncModeFull`, the default, syncs the log on every commit, so a commit that has
+returned survives a power cut. `SyncModeNormal` returns once the operating
+system has the commit: it survives the process being killed, but a power cut or
+OS crash can lose the most recent commits. `FullFsyncOn` makes each sync on
+macOS ask the drive to flush its cache. The zero values defer to the
+`LATTICE_SYNC_MODE` and `LATTICE_FULL_FSYNC` environment variables, else a full
+sync without `F_FULLFSYNC`; a value you set wins over them. See
+[Durability and the Log](../configuration/durability.md).
+
+`Open` goes through `lattice_open_v5`, so the binding needs a native library
+that has it. `Deserialize` still opens through the v4 options and ignores these
+fields.
+
+### Read-only opens
+
+`ReadOnly: true` on a database that was not closed cleanly recovers it in
+memory: the handle sees every committed transaction and nothing is written to
+the files. A recovery that needs more than 64 MB plus four times the size of the
+log and journal fails with `ErrorFull`; open the database read-write once to
+recover it on disk. A file that a newer release has marked as not writable by
+this one opens only with `ReadOnly: true`; a writable `Open` returns
+`ErrorNeedsNewerWriter` and writes nothing.
 
 ## Writing
 
@@ -121,6 +182,24 @@ err = db.Update(func(tx *latticedb.Tx) error {
 `int64`, `float64`, `bool`, `[]byte`, and `[]float32` for vectors all work. Note
 `int64` rather than `int`, since the stored type is explicitly 64-bit.
 
+`CreateEdge` returns `ErrorNotFound` unless both ends exist as the transaction
+sees them. `DeleteNode` refuses a node that still has relationships with
+`ErrorHasRelationships` and deletes nothing, as Cypher's `DELETE` does;
+`DetachDeleteNode` deletes the node and all its relationships, as
+`DETACH DELETE` does:
+
+```go
+err = db.Update(func(tx *latticedb.Tx) error {
+    return tx.DeleteNode(aliceID)
+})
+var latticeErr *latticedb.Error
+if errors.As(err, &latticeErr) && latticeErr.Code == latticedb.ErrorHasRelationships {
+    err = db.Update(func(tx *latticedb.Tx) error {
+        return tx.DetachDeleteNode(aliceID)
+    })
+}
+```
+
 Only one write transaction can be open at a time. A second one fails
 immediately with `ErrorLockTimeout` rather than waiting, so if several
 goroutines write, they need to take turns. See
@@ -151,7 +230,9 @@ If you would rather manage the transaction yourself, `BeginRead`, `BeginWrite`,
 `Commit`, and `Rollback` are available. `Update` and `View` are safer, because
 they cannot leave a transaction open on an early return. `Update` also rolls
 back when the commit itself fails; a manual `Commit` that returns an error leaves
-the transaction open, holding the writer slot, until you call `Rollback`.
+the transaction open, holding the writer slot, until you call `Rollback`. The
+exception is `ErrorTxnAborted`: the native transaction is already gone, so the
+`Tx` is no longer active and `Rollback` does nothing.
 
 ## Queries
 
@@ -295,7 +376,27 @@ if errors.As(err, &latticeErr) {
 
 Query failures come back as `QueryError`, which carries where in the query text
 the problem is, so you can point at it rather than just reporting that something
-was wrong.
+was wrong:
+
+```go
+_, err := db.Query("RETURN 1/0", nil)
+var queryErr *latticedb.QueryError
+if errors.As(err, &queryErr) {
+    fmt.Println(err)                       // Division by zero: 1 / 0 (DivisionByZero)
+    fmt.Println(queryErr.Code)             // -1
+    fmt.Println(queryErr.Stage)            // 4, QueryErrorStageExecution
+    fmt.Println(queryErr.DiagnosticCode)   // DivisionByZero
+    fmt.Println(*queryErr.Location)        // {1 9 1}
+}
+```
+
+`Location` is nil when the failure does not belong to one place in the text.
+Parse and semantic failures have `Code` `ErrorInvalidArg` and execution failures
+`ErrorGeneric`, except that a `DELETE` of a node with relationships has
+`ErrorHasRelationships` and a relationship created to a node deleted earlier in
+the query `ErrorNotFound`, as `DeleteNode` and `CreateEdge` report them. A
+storage failure under a query has `ErrorIO` and an allocation failure
+`ErrorOutOfMemory`.
 
 ## Where to go next
 

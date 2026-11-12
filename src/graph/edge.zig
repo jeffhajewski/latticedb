@@ -9,12 +9,14 @@
 //!   - target_id: The node on the other end
 //!   - edge_id: Stable, monotonic edge identity (supports parallel edges)
 //!
-//! Double-write rule: Each edge is stored twice in the traversal tree:
-//!   (A, 0, TYPE, B, EID) -> edge_data (outgoing from A)
-//!   (B, 1, TYPE, A, EID) -> empty     (incoming to B)
+//! Double-write rule: Each edge is keyed twice in the traversal tree, and
+//! both values are empty; the key is all a traversal needs:
+//!   (A, 0, TYPE, B, EID) -> empty (outgoing from A)
+//!   (B, 1, TYPE, A, EID) -> empty (incoming to B)
 //!
-//! Edge ID index:
+//! Edge ID index, keyed by the edge id as 8 little-endian bytes:
 //!   edge_id -> (source, target, type_id, properties)
+//!   0       -> the next edge id to hand out (ids start at 1)
 //!
 //! This layout preserves efficient traversal while storing edge payload once.
 
@@ -435,9 +437,10 @@ pub const EdgeStore = struct {
         };
     }
 
-    /// Lightweight iterator over every edge identity in stable edge ID order.
-    /// This walks the edge ID index, so each logical edge is returned once
-    /// rather than once per traversal direction.
+    /// Lightweight iterator over every edge identity, each returned once
+    /// rather than once per traversal direction. It walks the edge ID index
+    /// in key order, and those keys are little-endian, so the order is
+    /// stable but not numeric: edge 256 comes before edge 2.
     pub const EdgeIdRefIterator = struct {
         tree_iter: btree.BTree.Iterator,
         done: bool,

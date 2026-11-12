@@ -511,7 +511,8 @@ pub const FtsIndex = struct {
             }
 
             // Skip populating the reverse index when the serialized term
-            // list would exceed a single btree leaf page. The document
+            // list would exceed its 32KB cap (`MAX_VALUE_SIZE` in
+            // reverse_index.zig; a list larger than a page is fine). The document
             // stays queryable via the forward posting lists; only future
             // `removeDocument(doc_id)` calls for this specific doc will
             // need to walk the dictionary as a fallback instead of using

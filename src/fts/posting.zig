@@ -1,9 +1,14 @@
 //! Posting List Storage for Full-Text Search.
 //!
-//! Stores document IDs with term frequencies using delta encoding.
+//! Stores document IDs with term frequencies.
 //! Features:
-//! - Delta-varint encoding for 3-5x compression
-//! - Skip pointers every 128 entries for fast intersection
+//! - Each entry is varints: the document id itself (not a delta from the one
+//!   before), the term frequency, and, when the list has positions, a count
+//!   followed by each position, again as itself
+//! - Entries are not kept in doc id order: an update removes a document's
+//!   entries and appends its new ones
+//! - Skip pointers every 128 entries within a page, read only by `skipTo`,
+//!   which assumes doc id order and so is not what search uses
 //! - Optional position lists for phrase queries
 
 const std = @import("std");
@@ -794,7 +799,7 @@ pub const PostingIterator = struct {
     data_start: usize, // Start of posting data (after skip pointers)
     num_skip_pointers: u16,
     skip_pointer_base: usize,
-    last_doc_id: DocId, // For delta decoding (not used in simplified version)
+    last_doc_id: DocId, // Never read: entries store whole doc ids, not deltas
     has_positions: bool,
     done: bool,
     /// Entries decoded ahead by `next`, so a page is pinned once per batch

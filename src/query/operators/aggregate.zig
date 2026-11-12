@@ -306,6 +306,10 @@ pub const Aggregate = struct {
     fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
+        // A plan run once per row of another (CALL { ... }) opens this
+        // again; each run groups its own rows.
+        if (self.consumed) self.resetGroups();
+
         // Open input. If draining it fails, close it here: the caller never
         // closes an operator whose open failed.
         try self.input.open(ctx);
@@ -451,6 +455,19 @@ pub const Aggregate = struct {
     fn close(ptr: *anyopaque, ctx: *ExecutionContext) void {
         const self: *Self = @ptrCast(@alignCast(ptr));
         self.input.close(ctx);
+    }
+
+    fn resetGroups(self: *Self) void {
+        var it = self.groups.iterator();
+        while (it.next()) |entry| {
+            self.allocator.free(entry.key_ptr.*);
+            entry.value_ptr.deinit();
+        }
+        self.groups.clearRetainingCapacity();
+        self.group_iterator = null;
+        if (self.global_group) |*group| group.deinit();
+        self.global_group = null;
+        self.consumed = false;
     }
 
     fn deinitOp(ptr: *anyopaque, allocator: Allocator) void {

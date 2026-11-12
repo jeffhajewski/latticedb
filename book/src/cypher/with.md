@@ -63,3 +63,37 @@ WITH p, count(doc) AS docs
 WITH p, docs WHERE docs > 2
 RETURN p.name, docs
 ```
+
+## Subqueries: `CALL { }`
+
+`CALL { ... }` runs a query once for each incoming row. A leading `WITH` imports
+variables from outside (only plain variables, as in `WITH a, b`); without one,
+the query sees none of them. Aggregation, `ORDER BY` and `LIMIT` inside apply to
+each run on its own, which is what per-row top-k and per-row counts need:
+
+```cypher
+MATCH (t:Team)
+CALL {
+  WITH t
+  MATCH (p:Player)-[:PLAYS_FOR]->(t)
+  RETURN p.name AS top ORDER BY p.goals DESC LIMIT 1
+}
+RETURN t.name, top
+```
+
+Each row the subquery returns extends the incoming row with its columns, so an
+incoming row it returns nothing for is dropped (put an `OPTIONAL MATCH` or an
+aggregate inside to keep one). Returned values must be named (`AS`), and their
+names must be new. A variable inside may not reuse the name of one outside that
+it did not import. The queries of a `UNION` inside each import on their own.
+
+A subquery without `RETURN` runs for its writes, and each incoming row passes on
+once:
+
+```cypher
+MATCH (t:Team)
+CALL { WITH t CREATE (:Audit {team: t.name}) }
+RETURN count(*)
+```
+
+`CALL { ... } IN TRANSACTIONS` is not supported.

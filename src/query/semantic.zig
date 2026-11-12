@@ -100,6 +100,10 @@ pub const SemanticAnalyzer = struct {
     variable_list: std.ArrayList(VariableInfo),
     /// Tracks if any errors were dropped due to OOM
     errors_dropped: bool,
+    /// The scopes around each CALL { } being analysed, innermost last. A
+    /// variable inside one may not take a name from them that it did not
+    /// import.
+    enclosing: std.ArrayList(*const std.StringHashMap(VariableInfo)) = .empty,
 
     const Self = @This();
 
@@ -123,6 +127,7 @@ pub const SemanticAnalyzer = struct {
         self.errors.deinit(self.allocator);
         self.variables.deinit();
         self.variable_list.deinit(self.allocator);
+        self.enclosing.deinit(self.allocator);
     }
 
     /// Analyze a parsed query
@@ -163,6 +168,7 @@ pub const SemanticAnalyzer = struct {
                 .merge => |m| self.analyzeMergeClause(m),
                 .unwind => |u| self.analyzeUnwindClause(u),
                 .foreach => |f| self.analyzeForeach(f),
+                .call_subquery => |sq| self.analyzeCallSubquery(sq),
                 .call => |c| {
                     for (c.arguments) |arg| self.analyzeExpression(arg);
                     if (c.yields) |items| for (items) |item| {
@@ -530,6 +536,7 @@ pub const SemanticAnalyzer = struct {
                 item.expression.variable.name
             else
                 continue;
+            if (self.shadowsEnclosing(name, clause.location)) continue;
 
             for (projected.items) |existing| {
                 if (std.mem.eql(u8, existing.name, name)) {
@@ -842,6 +849,8 @@ pub const SemanticAnalyzer = struct {
     fn registerVariable(self: *Self, name: []const u8, kind: VariableKind, location: ast.SourceLocation) void {
         if (self.variables.contains(name)) {
             self.addErrorFmt(.duplicate_variable, location, "Variable '{s}' is already defined", .{name});
+        } else if (self.shadowsEnclosing(name, location)) {
+            return;
         } else {
             const info = VariableInfo{
                 .name = name,
@@ -856,6 +865,121 @@ pub const SemanticAnalyzer = struct {
                 self.addErrorFmt(.internal_error, location, "Failed to track variable '{s}': out of memory ({any})", .{ name, err });
             };
         }
+    }
+
+    /// Whether `name`, about to be bound inside CALL { }, belongs to a scope
+    /// around it, which the query cannot do without importing it; reports
+    /// it if so.
+    fn shadowsEnclosing(self: *Self, name: []const u8, location: ast.SourceLocation) bool {
+        if (self.variables.contains(name)) return false;
+        for (self.enclosing.items) |scope| {
+            if (scope.contains(name)) {
+                self.addErrorFmt(
+                    .duplicate_variable,
+                    location,
+                    "Variable '{s}' is already defined outside CALL {{ ... }}; import it with WITH {s}, or use another name",
+                    .{ name, name },
+                );
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// CALL { [WITH imports] query [UNION query ...] }.
+    fn analyzeCallSubquery(self: *Self, sq: *const ast.CallSubquery) void {
+        var outer = self.variables.clone() catch {
+            self.addError(.internal_error, sq.location, "Failed to check CALL { ... }: out of memory");
+            return;
+        };
+        defer outer.deinit();
+        const listed = self.variable_list.items.len;
+        self.enclosing.append(self.allocator, &outer) catch {
+            self.addError(.internal_error, sq.location, "Failed to check CALL { ... }: out of memory");
+            return;
+        };
+
+        // The columns of the first query, which the others must match, and
+        // whether it returns any.
+        var columns: ?[]const ast.ReturnItem = null;
+        var returns = false;
+        var kinds: [16]VariableKind = undefined;
+        const branch_count = sq.unions.len + 1;
+        for (0..branch_count) |b| {
+            const clauses = if (b == 0) sq.clauses else sq.unions[b - 1].clauses;
+            const ret = returnOf(clauses);
+            if (b == 0) {
+                returns = ret != null;
+            } else if (returns != (ret != null)) {
+                self.addError(.unsupported_pattern, sq.location, "Every query in a UNION inside CALL { ... } must end with RETURN, or none");
+                break;
+            }
+            self.variables.clearRetainingCapacity();
+            var rest = clauses;
+            if (clauses.len > 0 and clauses[0] == .with and self.importsOnly(clauses[0].with, &outer)) {
+                for (clauses[0].with.items) |item| {
+                    const name = item.expression.variable.name;
+                    self.variables.put(name, outer.get(name).?) catch {};
+                }
+                rest = clauses[1..];
+            }
+            self.analyzeClauses(rest);
+            if (ret) |r| {
+                for (r.items, 0..) |item, i| {
+                    if (item.alias == null and item.expression.* != .variable) {
+                        self.addErrorFmt(.unsupported_pattern, item.expression.getLocation(), "CALL {{ ... }} must name what it returns: add AS to `{s}`", .{item.text});
+                    }
+                    if (b == 0 and i < kinds.len) kinds[i] = self.inferWithItemKind(item);
+                }
+                if (b == 0) columns = r.items;
+            }
+        }
+
+        _ = self.enclosing.pop();
+        std.mem.swap(std.StringHashMap(VariableInfo), &self.variables, &outer);
+        // A WITH inside resets the list.
+        self.variable_list.shrinkRetainingCapacity(@min(listed, self.variable_list.items.len));
+
+        const items = columns orelse return;
+        for (items, 0..) |item, i| {
+            const name = item.alias orelse if (item.expression.* == .variable) item.expression.variable.name else continue;
+            if (self.variables.contains(name)) {
+                self.addErrorFmt(.duplicate_variable, item.expression.getLocation(), "Variable '{s}' returned by CALL {{ ... }} is already defined outside it; rename it with AS", .{name});
+                continue;
+            }
+            self.registerVariable(name, if (i < kinds.len) kinds[i] else .alias, item.expression.getLocation());
+        }
+    }
+
+    /// The RETURN that ends `clauses`, before any ORDER BY, SKIP or LIMIT.
+    fn returnOf(clauses: []const ast.Clause) ?*const ast.ReturnClause {
+        var last = clauses.len;
+        while (last > 0) : (last -= 1) {
+            switch (clauses[last - 1]) {
+                .order_by, .skip, .limit => {},
+                .return_ => |r| return r,
+                else => return null,
+            }
+        }
+        return null;
+    }
+
+    /// A WITH that starts CALL { } imports variables: only plain variables
+    /// from outside. Anything else there is an error.
+    fn importsOnly(self: *Self, with: *const ast.WithClause, outer: *const std.StringHashMap(VariableInfo)) bool {
+        var ok = with.where == null and !with.distinct;
+        for (with.items) |item| {
+            if (item.expression.* != .variable or (item.alias != null and !std.mem.eql(u8, item.alias.?, item.expression.variable.name))) {
+                ok = false;
+            } else if (!outer.contains(item.expression.variable.name)) {
+                self.addErrorFmt(.unbound_variable, item.expression.getLocation(), "Variable '{s}' is not defined", .{item.expression.variable.name});
+                return false;
+            }
+        }
+        if (!ok) {
+            self.addError(.unsupported_pattern, with.location, "The WITH that starts CALL { ... } imports variables and can only list them, as in WITH a, b; project or filter in a second WITH");
+        }
+        return ok;
     }
 
     // ========================================================================

@@ -66,6 +66,12 @@ pub const Query = struct {
         for (clauses) |clause| {
             switch (clause) {
                 .create, .delete, .set, .remove, .merge, .foreach => return true,
+                .call_subquery => |sq| {
+                    if (clausesWriteData(sq.clauses)) return true;
+                    for (sq.unions) |branch| {
+                        if (clausesWriteData(branch.clauses)) return true;
+                    }
+                },
                 .match, .where, .return_, .order_by, .limit, .skip, .with, .unwind, .call => {},
             }
         }
@@ -98,6 +104,19 @@ pub const Clause = union(enum) {
     unwind: *UnwindClause,
     call: *CallClause,
     foreach: *ForeachClause,
+    call_subquery: *CallSubquery,
+};
+
+/// `CALL { query }`: the query runs once for each incoming row. A leading
+/// `WITH a, b` imports those variables; without it the query sees none.
+/// Ending in RETURN, each row it returns extends the incoming row with the
+/// returned columns; otherwise (a unit subquery, for its writes) the
+/// incoming row passes on once.
+pub const CallSubquery = struct {
+    clauses: []Clause,
+    /// UNION [ALL] and the queries after it, inside the braces.
+    unions: []UnionBranch,
+    location: SourceLocation,
 };
 
 /// `FOREACH (variable IN list | clauses)`: the updating clauses run once

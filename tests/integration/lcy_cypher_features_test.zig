@@ -695,7 +695,6 @@ test "lcy: CALL built-in procedures" {
     try expectFailure(db, "CALL db.labels() RETURN 1 AS x", .plan, "CALL db.labels() inside a larger query needs YIELD");
     try expectFailure(db, "CALL db.labels() YIELD * RETURN 1 AS x", .plan, "YIELD * is only allowed when CALL db.labels() is the whole query");
     try expectFailure(db, "CALL db.labels() YIELD label, label", .semantic, "already defined");
-    try expectFailure(db, "CALL { MATCH (n) RETURN n } RETURN 1", .parse, "CALL { ... } subqueries are not supported");
 }
 
 test "lcy: CALL on an empty database" {
@@ -932,7 +931,6 @@ test "lcy: unsupported constructs are named" {
         .{ .query = "CREATE CONSTRAINT c FOR (n:T) REQUIRE n.v IS UNIQUE", .message = "Schema statements" },
         .{ .query = "CREATE FULLTEXT INDEX ft FOR (n:T) ON EACH [n.v]", .message = "Schema statements" },
         .{ .query = "OPTIONAL CALL db.labels() YIELD label RETURN label", .message = "OPTIONAL CALL is not supported" },
-        .{ .query = "CALL { MATCH (n) RETURN n } RETURN 1", .message = "CALL { ... } subqueries are not supported" },
         .{ .query = "MATCH ((a)-->(b)){1,3} RETURN a", .message = "Parenthesised path patterns, such as the quantified ((a)-->(b)){1,3}, are not supported" },
         .{ .query = "MATCH (n:A|B) RETURN n", .message = "Label expressions (:A|B, :!A, :A&B) are not supported" },
         .{ .query = "MATCH (n:A&B) RETURN n", .message = "label expressions (:A&B, :!A), which are not supported" },

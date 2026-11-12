@@ -59,6 +59,11 @@ pub const CrossProduct = struct {
     fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
         const self: *Self = @ptrCast(@alignCast(ptr));
 
+        // Opened again for each row of a CALL { ... }: start afresh.
+        self.inner_rows.clearRetainingCapacity();
+        self.outer_row = null;
+        self.inner_idx = 0;
+
         // Open and materialize inner side. If that fails, close it here: the
         // caller never closes an operator whose open failed.
         try self.inner.open(ctx);

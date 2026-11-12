@@ -460,6 +460,118 @@ test "lcy: shortestPath errors name what is not supported" {
 }
 
 // ============================================================================
+// CALL { } subqueries
+// ============================================================================
+
+/// Two teams: red with ann (3 goals) and bo (5), blue with cy (2); and a
+/// team with no players.
+fn seedTeams(db: *Database) !void {
+    try run(db,
+        \\CREATE (r:Team {name: 'red'}), (b:Team {name: 'blue'}), (:Team {name: 'empty'}),
+        \\       (:P {name: 'ann', goals: 3})-[:IN]->(r), (:P {name: 'bo', goals: 5})-[:IN]->(r),
+        \\       (:P {name: 'cy', goals: 2})-[:IN]->(b)
+    );
+}
+
+test "lcy: CALL { } runs a correlated subquery for each row" {
+    const path = "/tmp/lcy_call_subquery.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedTeams(db);
+
+    // Aggregates per outer row: the reason to use it.
+    try expectResult(db,
+        \\MATCH (t:Team) CALL { WITH t MATCH (p:P)-[:IN]->(t) RETURN count(p) AS players, sum(p.goals) AS goals }
+        \\RETURN t.name, players, goals ORDER BY t.name
+    , "t.name | players | goals\n\"blue\" | 1 | 2\n\"empty\" | 0 | 0\n\"red\" | 2 | 8");
+    // Top one per team, with ORDER BY and LIMIT inside; a team with no
+    // row from the subquery is dropped.
+    try expectResult(db,
+        \\MATCH (t:Team) CALL { WITH t MATCH (p:P)-[:IN]->(t) RETURN p ORDER BY p.goals DESC LIMIT 1 }
+        \\RETURN t.name, p.name ORDER BY t.name
+    , "t.name | p.name\n\"blue\" | \"cy\"\n\"red\" | \"bo\"");
+    // Several rows per outer row, and a returned node used afterwards.
+    try expectResult(db,
+        \\MATCH (t:Team {name: 'red'}) CALL { WITH t MATCH (p:P)-[:IN]->(t) RETURN p } MATCH (p)-[:IN]->(u) RETURN p.name, u.name ORDER BY p.name
+    , "p.name | u.name\n\"ann\" | \"red\"\n\"bo\" | \"red\"");
+    // Operators that read their whole input when opened start afresh for
+    // each outer row: DISTINCT, a cross product, a sort.
+    try expectResult(db,
+        \\MATCH (t:Team) CALL { WITH t MATCH (p:P)-[:IN]->(t) RETURN DISTINCT 1 AS one } RETURN t.name, one ORDER BY t.name
+    , "t.name | one\n\"blue\" | 1\n\"red\" | 1");
+    try expectResult(db,
+        \\MATCH (t:Team) CALL { WITH t MATCH (x:Team), (y:P) WHERE x = t RETURN count(y) AS c } RETURN t.name, c ORDER BY t.name
+    , "t.name | c\n\"blue\" | 3\n\"empty\" | 3\n\"red\" | 3");
+    // Uncorrelated: the same rows for every outer row.
+    try expectResult(db,
+        \\UNWIND [1, 2] AS i CALL { MATCH (p:P) RETURN max(p.goals) AS best } RETURN i, best
+    , "i | best\n1 | 5\n2 | 5");
+    // DISTINCT, WITH and WHERE inside, and the outer variables untouched.
+    try expectResult(db,
+        \\MATCH (t:Team {name: 'red'}) CALL { WITH t MATCH (p:P)-[:IN]->(t) WITH p.goals AS g WHERE g > 3 RETURN collect(DISTINCT g) AS big }
+        \\RETURN t.name, big
+    , "t.name | big\n\"red\" | [5]");
+    // UNION inside: each query imports on its own.
+    try expectResult(db,
+        \\MATCH (t:Team {name: 'red'}) CALL { WITH t MATCH (p:P)-[:IN]->(t) RETURN p.name AS x UNION RETURN 'none' AS x UNION RETURN 'none' AS x }
+        \\RETURN x ORDER BY x
+    , "x\n\"ann\"\n\"bo\"\n\"none\"");
+    try expectResult(db,
+        \\CALL { RETURN 1 AS x UNION ALL RETURN 1 AS x } RETURN count(*) AS c
+    , "c\n2");
+    // Nested, and RETURN * on both sides.
+    try expectResult(db,
+        \\MATCH (t:Team {name: 'blue'}) CALL { WITH t CALL { WITH t MATCH (p)-[:IN]->(t) RETURN p.name AS n } RETURN n } RETURN *
+    , "n | t\n\"cy\" | N");
+    // An OPTIONAL MATCH inside keeps a row for the empty team.
+    try expectResult(db,
+        \\MATCH (t:Team) CALL { WITH t OPTIONAL MATCH (p:P)-[:IN]->(t) RETURN p.name AS n } RETURN t.name, n ORDER BY t.name, n
+    , "t.name | n\n\"blue\" | \"cy\"\n\"empty\" | null\n\"red\" | \"ann\"\n\"red\" | \"bo\"");
+}
+
+test "lcy: CALL { } without RETURN runs for its writes" {
+    const path = "/tmp/lcy_call_unit.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedTeams(db);
+
+    try expectResult(db,
+        \\MATCH (t:Team) CALL { WITH t CREATE (:Audit {team: t.name}) } RETURN count(*) AS rows
+    , "rows\n3");
+    try expectResult(db, "MATCH (a:Audit) RETURN a.team ORDER BY a.team", "a.team\n\"blue\"\n\"empty\"\n\"red\"");
+    try expectResult(db,
+        \\MATCH (t:Team) CALL { WITH t MATCH (p:P)-[:IN]->(t) SET p.team = t.name } RETURN count(*) AS rows
+    , "rows\n3");
+    try expectResult(db, "MATCH (p:P) RETURN p.name, p.team ORDER BY p.name", "p.name | p.team\n\"ann\" | \"red\"\n\"bo\" | \"red\"\n\"cy\" | \"blue\"");
+    // Writes that return.
+    try expectResult(db,
+        \\UNWIND [1, 2] AS i CALL { WITH i CREATE (n:Made {v: i}) RETURN n.v * 10 AS w } RETURN i, w ORDER BY i
+    , "i | w\n1 | 10\n2 | 20");
+}
+
+test "lcy: CALL { } errors" {
+    const path = "/tmp/lcy_call_errors.ltdb";
+    const db = try openTestDb(path);
+    defer closeTestDb(db, path);
+    try seedTeams(db);
+
+    try expectFailure(db, "MATCH (t:Team) CALL { MATCH (t) RETURN t.name AS n } RETURN n", .semantic, "Variable 't' is already defined outside CALL { ... }; import it with WITH t, or use another name");
+    try expectFailure(db, "MATCH (t:Team) CALL { WITH t RETURN t } RETURN t", .semantic, "Variable 't' returned by CALL { ... } is already defined outside it; rename it with AS");
+    try expectFailure(db, "MATCH (t:Team) CALL { WITH t RETURN t.name } RETURN 1", .semantic, "CALL { ... } must name what it returns: add AS to `t.name`");
+    try expectFailure(db, "MATCH (t:Team) CALL { WITH t.name AS n RETURN n AS m } RETURN m", .semantic, "The WITH that starts CALL { ... } imports variables and can only list them");
+    try expectFailure(db, "MATCH (t:Team) CALL { WITH t WHERE t.name = 'red' RETURN 1 AS one } RETURN one", .semantic, "imports variables and can only list them");
+    try expectFailure(db, "CALL { WITH q RETURN 1 AS one } RETURN one", .semantic, "Variable 'q' is not defined");
+    try expectFailure(db, "MATCH (t:Team) CALL { RETURN t.name AS n } RETURN n", .semantic, "Variable 't' is not defined");
+    try expectFailure(db, "CALL { RETURN 1 AS x UNION CREATE (:N) } RETURN x", .semantic, "must end with RETURN, or none");
+    try expectFailure(db, "CALL { RETURN 1 AS x UNION RETURN 2 AS y } RETURN 1", .plan, "All queries in a UNION must return the same column names");
+    try expectFailure(db, "UNWIND [1] AS x CALL { WITH x CREATE (:N) } IN TRANSACTIONS RETURN x", .parse, "CALL { ... } IN TRANSACTIONS is not supported");
+    try expectFailure(db, "CALL { } RETURN 1", .parse, "CALL { } needs a query inside the braces");
+    try expectFailure(db, "CALL { RETURN 1 AS x", .parse, "Expected '}' to close CALL { ... }");
+    // The words stay names.
+    try expectResult(db, "WITH 1 AS call, 2 AS transactions RETURN call + transactions AS s", "s\n3");
+}
+
+// ============================================================================
 // Small fixes
 // ============================================================================
 

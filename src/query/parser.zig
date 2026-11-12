@@ -591,10 +591,7 @@ pub const Parser = struct {
         const loc = self.currentLocation();
         self.advance();
         const a = self.arena.allocator();
-        if (self.check(.lbrace)) {
-            self.errorAtCurrent("CALL { ... } subqueries are not supported");
-            return null;
-        }
+        if (self.check(.lbrace)) return self.parseCallSubquery(loc);
         if (!self.checkName()) {
             self.errorAtCurrent("Expected a procedure name after CALL");
             return null;
@@ -663,6 +660,66 @@ pub const Parser = struct {
             .location = loc,
         };
         return .{ .call = clause };
+    }
+
+    /// `CALL { query }`, at the '{'. The query has its own scope: what a
+    /// leading WITH imports from outside, or nothing.
+    fn parseCallSubquery(self: *Self, loc: ast.SourceLocation) ?ast.Clause {
+        const a = self.arena.allocator();
+        self.advance();
+        const outer = a.dupe([]const u8, self.scope.items) catch return null;
+        defer {
+            self.scope.clearRetainingCapacity();
+            self.scope.appendSlice(a, outer) catch {
+                self.errors_dropped = true;
+            };
+        }
+        self.enterSubqueryScope(outer);
+
+        var clauses: std.ArrayList(ast.Clause) = .empty;
+        var unions = UnionParts{};
+        while (!self.check(.rbrace)) {
+            if (self.check(.eof)) {
+                self.errorAtCurrent("Expected '}' to close CALL { ... }");
+                return null;
+            }
+            if (self.check(.kw_union)) {
+                self.parseUnion(&unions, &clauses);
+                if (self.had_error) return null;
+                self.enterSubqueryScope(outer);
+                continue;
+            }
+            const clause = self.parseClause() orelse return null;
+            clauses.append(a, clause) catch return null;
+            self.updateScope(clause);
+        }
+        self.advance();
+        if (clauses.items.len == 0) {
+            self.errorAt(loc, if (unions.branches.items.len > 0) "Expected a query after UNION" else "CALL { } needs a query inside the braces");
+            return null;
+        }
+        if (self.check(.kw_in)) {
+            self.errorAtCurrent("CALL { ... } IN TRANSACTIONS is not supported; run the batches as separate queries");
+            return null;
+        }
+
+        var first = clauses.items;
+        if (unions.branches.items.len > 0) {
+            unions.branches.items[unions.branches.items.len - 1].clauses = clauses.items;
+            first = unions.first;
+        }
+        const node = a.create(ast.CallSubquery) catch return null;
+        node.* = .{ .clauses = first, .unions = unions.branches.items, .location = loc };
+        return .{ .call_subquery = node };
+    }
+
+    /// The scope a query inside CALL { } starts with: the outer one, for a
+    /// leading WITH to import from, or none.
+    fn enterSubqueryScope(self: *Self, outer: []const []const u8) void {
+        self.scope.clearRetainingCapacity();
+        if (self.check(.kw_with)) self.scope.appendSlice(self.arena.allocator(), outer) catch {
+            self.errors_dropped = true;
+        };
     }
 
     /// Whether the current token is an identifier spelled `word`, in any
@@ -765,6 +822,20 @@ pub const Parser = struct {
             },
             .call => |c| if (c.yields) |yields| {
                 for (yields) |y| self.addToScope(y.alias orelse y.column);
+            },
+            // What the subquery returns joins the scope.
+            .call_subquery => |sq| {
+                var last = sq.clauses.len;
+                while (last > 0 and (sq.clauses[last - 1] == .order_by or sq.clauses[last - 1] == .skip or sq.clauses[last - 1] == .limit)) last -= 1;
+                if (last > 0 and sq.clauses[last - 1] == .return_) {
+                    for (sq.clauses[last - 1].return_.items) |item| {
+                        if (item.alias) |alias| {
+                            self.addToScope(alias);
+                        } else if (item.expression.* == .variable) {
+                            self.addToScope(item.expression.variable.name);
+                        }
+                    }
+                }
             },
             else => {},
         }

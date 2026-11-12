@@ -254,6 +254,108 @@ pub const Foreach = struct {
     }
 };
 
+/// CALL { ... }: for each input row, runs the subquery's plan from the
+/// start, opening it afresh, since a plan with aggregation or a sort reads
+/// all of its input when opened. With `columns`, each row the plan returns
+/// extends the input row: the plan's column i goes to slot `columns[i]`. A
+/// unit subquery (no columns) runs to the end for its writes, and the input
+/// row passes on once.
+pub const CallSubquery = struct {
+    input: Operator,
+    inner: Operator,
+    /// The leaf of each query of the subquery; more than one with UNION.
+    arguments: []const *Argument,
+    columns: []const u8,
+    current: ?*Row = null,
+    inner_open: bool = false,
+    output_row: ?*Row = null,
+    opened: bool = false,
+
+    const Self = @This();
+
+    pub fn init(allocator: Allocator, input: Operator, inner: Operator, arguments: []const *Argument, columns: []const u8) !*Self {
+        const self = try allocator.create(Self);
+        self.* = .{ .input = input, .inner = inner, .arguments = arguments, .columns = columns };
+        return self;
+    }
+
+    pub fn operator(self: *Self) Operator {
+        return .{ .vtable = &vtable, .ptr = self };
+    }
+
+    const vtable = Operator.VTable{
+        .open = open,
+        .next = next,
+        .close = close,
+        .deinit = deinitOp,
+    };
+
+    fn open(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.current = null;
+        self.output_row = ctx.allocRow() catch return OperatorError.OutOfMemory;
+        try self.input.open(ctx);
+        self.opened = true;
+    }
+
+    fn next(ptr: *anyopaque, ctx: *ExecutionContext) OperatorError!?*Row {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        if (!self.opened) return OperatorError.NotInitialized;
+
+        while (true) {
+            const outer = self.current orelse blk: {
+                const row = try self.input.next(ctx) orelse return null;
+                for (self.arguments) |argument| argument.set(row);
+                try self.inner.open(ctx);
+                self.inner_open = true;
+                self.current = row;
+                break :blk row;
+            };
+
+            if (self.columns.len == 0) {
+                // A unit subquery: run it for its writes.
+                while (try self.inner.next(ctx)) |_| {}
+                self.finishRound(ctx);
+                return outer;
+            }
+
+            if (try self.inner.next(ctx)) |row| {
+                const out = self.output_row orelse return OperatorError.NotInitialized;
+                out.* = outer.*;
+                for (self.columns, 0..) |slot, i| {
+                    out.setSlot(slot, row.getSlot(@intCast(i)) orelse .{ .property = .{ .null_val = {} } });
+                }
+                return out;
+            }
+            self.finishRound(ctx);
+        }
+    }
+
+    fn finishRound(self: *Self, ctx: *ExecutionContext) void {
+        if (self.inner_open) {
+            self.inner.close(ctx);
+            self.inner_open = false;
+        }
+        self.current = null;
+    }
+
+    fn close(ptr: *anyopaque, ctx: *ExecutionContext) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.finishRound(ctx);
+        if (self.opened) {
+            self.input.close(ctx);
+            self.opened = false;
+        }
+    }
+
+    fn deinitOp(ptr: *anyopaque, allocator: Allocator) void {
+        const self: *Self = @ptrCast(@alignCast(ptr));
+        self.input.deinit(allocator);
+        self.inner.deinit(allocator);
+        allocator.destroy(self);
+    }
+};
+
 test "Apply vtable is complete" {
     const v = Apply.vtable;
     try std.testing.expect(@TypeOf(v.open) != void);

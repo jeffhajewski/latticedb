@@ -65,6 +65,10 @@ fn validateClause(clause: lattice.query.ast.Clause) bool {
         .unwind => true,
         .call => true,
         .foreach => true,
+        .call_subquery => |sq| blk: {
+            for (sq.clauses) |c| if (!validateClause(c)) break :blk false;
+            break :blk true;
+        },
     };
 }
 
@@ -239,6 +243,15 @@ test "parser: handles the syntax added after 0.16" {
         "CALL db.labels() YIELD",
         "CALL db.labels() YIELD a AS",
         "CALL { RETURN 1 }",
+        "MATCH (n) CALL { WITH n MATCH (n)-->(m) RETURN count(m) AS c } RETURN n, c",
+        "UNWIND [1] AS x CALL { WITH x CREATE (:N {v: x}) } RETURN x",
+        "CALL { MATCH (a:A) RETURN a AS v UNION ALL MATCH (b:B) RETURN b AS v } RETURN v",
+        "CALL { CALL { RETURN 1 AS x } RETURN x } RETURN x",
+        "CALL {",
+        "CALL { }",
+        "CALL { RETURN 1",
+        "CALL { RETURN 1 } IN TRANSACTIONS",
+        "CALL { UNION RETURN 1 }",
         "MATCH p (a) RETURN p",
         "MATCH p = RETURN p",
         "CREATE p = (a)",

@@ -176,6 +176,10 @@ pub const QueryPlanner = struct {
     used_slots: u16 = 0,
     /// Slots used at any point of the query.
     ever_used_slots: u16 = 0,
+    /// Slots of the scopes around the CALL { } being planned, which its
+    /// own variables must not take: the rows it returns are put together
+    /// from the outer row and its columns.
+    reserved_slots: u16 = 0,
     /// A name that had to be bound to a second slot, which the plan refuses.
     slot_conflict: ?[]const u8 = null,
     /// Number of output columns from the RETURN clause (set during planning)
@@ -287,6 +291,7 @@ pub const QueryPlanner = struct {
         self.outer_bindings.clearRetainingCapacity();
         self.used_slots = 0;
         self.ever_used_slots = 0;
+        self.reserved_slots = 0;
         self.slot_conflict = null;
         self.clearHiddenBindingNames();
         self.bindings.clearRetainingCapacity();
@@ -451,6 +456,7 @@ pub const QueryPlanner = struct {
                 .merge => |m| current_op = try self.planMerge(m, current_op),
                 .unwind => |u| current_op = try self.planUnwind(u, current_op),
                 .foreach => |f| current_op = try self.planForeach(f, current_op orelse try self.singleRow()),
+                .call_subquery => |sq| current_op = try self.planCallSubquery(sq, current_op orelse try self.singleRow()),
                 .call => |c| {
                     // A CALL that is the whole query (with at most a WHERE on
                     // what it yields) returns its columns itself.
@@ -646,6 +652,7 @@ pub const QueryPlanner = struct {
             // Elsewhere a subquery is left unplanned, and `hostSubqueries`
             // refuses the query.
             .foreach => |f| try self.planSubqueriesIn(f.list),
+            .call_subquery => {},
             .match, .create, .merge, .remove, .limit, .skip, .call => {},
         }
     }
@@ -783,6 +790,153 @@ pub const QueryPlanner = struct {
         const materialized = try self.materializeInput(input);
         const foreach = optional_ops.Foreach.init(self.allocator, materialized, inner, argument) catch return PlannerError.OutOfMemory;
         return foreach.operator();
+    }
+
+    /// Plan `CALL { ... }`. Each query inside is planned over an Argument
+    /// leaf with only what its leading WITH imports in scope, its new
+    /// variables kept out of the outer slots, and its RETURN as usual; the
+    /// returned columns are then bound outside to slots of their own.
+    fn planCallSubquery(self: *Self, sq: *const ast.CallSubquery, input: Operator) PlannerError!Operator {
+        const a = self.allocator;
+        const saved_bindings = self.bindings.clone() catch return PlannerError.OutOfMemory;
+        const saved_labels = self.pattern_labels.clone() catch return PlannerError.OutOfMemory;
+        const saved_types = self.pattern_edge_types.clone() catch return PlannerError.OutOfMemory;
+        const saved_edges = self.edge_bindings.clone() catch return PlannerError.OutOfMemory;
+        const saved_used = self.used_slots;
+        const saved_reserved = self.reserved_slots;
+        const saved_columns = self.output_columns;
+        const saved_names = self.output_column_names;
+        const saved_hint = self.order_hint;
+        const saved_cutoff = self.order_cutoff_key;
+
+        const count = sq.unions.len + 1;
+        const plans = a.alloc(Operator, count) catch return PlannerError.OutOfMemory;
+        const arguments = a.alloc(*optional_ops.Argument, count) catch return PlannerError.OutOfMemory;
+        var columns: u8 = 0;
+        var names: [MAX_SLOTS]?[]const u8 = undefined;
+        var kinds: [MAX_SLOTS]semantic.VariableKind = undefined;
+
+        self.reserved_slots |= saved_used;
+        for (0..count) |b| {
+            const clauses = if (b == 0) sq.clauses else sq.unions[b - 1].clauses;
+            // What was bound before stays registered for execution.
+            var it = self.bindings.iterator();
+            while (it.next()) |entry| {
+                if (self.outer_bindings.contains(entry.key_ptr.*)) continue;
+                self.outer_bindings.put(entry.key_ptr.*, entry.value_ptr.*) catch return PlannerError.OutOfMemory;
+            }
+            self.bindings.clearRetainingCapacity();
+            self.pattern_labels.clearRetainingCapacity();
+            self.pattern_edge_types.clearRetainingCapacity();
+            self.edge_bindings.clearRetainingCapacity();
+            self.used_slots = saved_used;
+            self.output_columns = 0;
+            self.output_column_names = [_]?[]const u8{null} ** MAX_SLOTS;
+
+            // The importing WITH only narrows the scope to its variables,
+            // which keep their slots.
+            var rest = clauses;
+            if (clauses.len > 0 and clauses[0] == .with) {
+                for (clauses[0].with.items) |item| {
+                    const name = item.expression.variable.name;
+                    const binding = saved_bindings.get(name) orelse return PlannerError.InvalidQuery;
+                    try self.bindVariable(name, binding.slot, binding.kind);
+                    if (saved_labels.get(name)) |labels| self.pattern_labels.put(name, labels) catch return PlannerError.OutOfMemory;
+                    if (saved_types.get(name)) |types| self.pattern_edge_types.put(name, types) catch return PlannerError.OutOfMemory;
+                    if (saved_edges.get(name)) |edge| self.edge_bindings.put(name, edge) catch return PlannerError.OutOfMemory;
+                }
+                rest = clauses[1..];
+            }
+
+            self.order_hint = null;
+            self.order_cutoff_key = null;
+            const argument = optional_ops.Argument.init(a) catch return PlannerError.OutOfMemory;
+            arguments[b] = argument;
+            plans[b] = (try self.planClausesOver(rest, argument.operator())) orelse argument.operator();
+
+            if (b == 0) {
+                columns = self.output_columns;
+                names = self.output_column_names;
+                const ret = returnClauseOf(clauses);
+                for (0..columns) |c| {
+                    kinds[c] = .alias;
+                    const r = ret orelse break;
+                    if (r.items[c].expression.* == .variable) {
+                        if (self.bindings.get(r.items[c].expression.variable.name)) |binding| kinds[c] = binding.kind;
+                    }
+                }
+            } else {
+                if (self.output_columns != columns) {
+                    self.setPlanDetail("All queries in a UNION must return the same number of columns; query 1 returns {d}, query {d} returns {d}", .{ columns, b + 1, self.output_columns });
+                    return PlannerError.InvalidQuery;
+                }
+                for (0..columns) |c| {
+                    const first = names[c] orelse "";
+                    const this = self.output_column_names[c] orelse "";
+                    if (!std.mem.eql(u8, first, this)) {
+                        self.setPlanDetail("All queries in a UNION must return the same column names; column {d} is `{s}` in query 1 and `{s}` in query {d}", .{ c + 1, first, this, b + 1 });
+                        return PlannerError.InvalidQuery;
+                    }
+                }
+            }
+        }
+
+        var inner = plans[0];
+        if (count > 1) {
+            const union_op = union_ops.Union.init(a, plans) catch return PlannerError.OutOfMemory;
+            inner = union_op.operator();
+            if (!sq.unions[0].all) {
+                const distinct = distinct_ops.Distinct.init(a, inner) catch return PlannerError.OutOfMemory;
+                inner = distinct.operator();
+            }
+        }
+
+        // Back to the outer scope, with the inner variables registered.
+        var it = self.bindings.iterator();
+        while (it.next()) |entry| {
+            if (self.outer_bindings.contains(entry.key_ptr.*)) continue;
+            self.outer_bindings.put(entry.key_ptr.*, entry.value_ptr.*) catch return PlannerError.OutOfMemory;
+        }
+        self.bindings = saved_bindings;
+        self.pattern_labels = saved_labels;
+        self.pattern_edge_types = saved_types;
+        self.edge_bindings = saved_edges;
+        self.used_slots = saved_used;
+        self.reserved_slots = saved_reserved;
+        self.output_columns = saved_columns;
+        self.output_column_names = saved_names;
+        self.order_hint = saved_hint;
+        self.order_cutoff_key = saved_cutoff;
+
+        const out_slots = a.alloc(u8, columns) catch return PlannerError.OutOfMemory;
+        for (out_slots, 0..) |*slot, c| {
+            const name = names[c] orelse return PlannerError.InvalidQuery;
+            slot.* = try self.allocateNamedSlot(name);
+            try self.bindVariable(name, slot.*, kinds[c]);
+        }
+
+        // Writes inside run while the input is still being read: read it in
+        // full first, as FOREACH does.
+        const writes = blk: {
+            const q = ast.Query{ .clauses = sq.clauses, .allocator = a, .unions = sq.unions };
+            break :blk q.writesData();
+        };
+        const source = if (writes) try self.materializeInput(input) else input;
+        const call = optional_ops.CallSubquery.init(a, source, inner, arguments, out_slots) catch return PlannerError.OutOfMemory;
+        return call.operator();
+    }
+
+    /// The RETURN that ends `clauses`, before any ORDER BY, SKIP or LIMIT.
+    fn returnClauseOf(clauses: []const ast.Clause) ?*const ast.ReturnClause {
+        var last = clauses.len;
+        while (last > 0) : (last -= 1) {
+            switch (clauses[last - 1]) {
+                .order_by, .skip, .limit => {},
+                .return_ => |r| return r,
+                else => return null,
+            }
+        }
+        return null;
     }
 
     /// Plan `CALL procedure() [YIELD ...]`: each input row once per row of the
@@ -3528,14 +3682,20 @@ pub const QueryPlanner = struct {
             const name = withItemName(item) orelse continue;
             const slot = self.name_slots.get(name) orelse continue;
             if (taken & slotBit(slot) != 0) continue;
+            // A slot of a scope around CALL { } stays with the variable that
+            // holds it.
+            if (self.reserved_slots & slotBit(slot) != 0) {
+                const holder = self.bindings.get(name) orelse continue;
+                if (holder.slot != slot) continue;
+            }
             out_slots[i] = slot;
             placed[i] = true;
             taken |= slotBit(slot);
         }
         for (items, 0..) |_, i| {
             if (placed[i]) continue;
-            var free = all_slots & ~taken & ~self.ever_used_slots;
-            if (free == 0) free = all_slots & ~taken;
+            var free = all_slots & ~taken & ~self.ever_used_slots & ~self.reserved_slots;
+            if (free == 0) free = all_slots & ~taken & ~self.reserved_slots;
             if (free == 0) return PlannerError.TooManyVariables;
             out_slots[i] = @ctz(free);
             taken |= slotBit(out_slots[i]);
@@ -3964,8 +4124,8 @@ pub const QueryPlanner = struct {
     /// share a slot across WITH scopes (see `name_slots`); once those run
     /// out, any slot free in the current scope.
     fn allocateSlot(self: *Self) PlannerError!u8 {
-        var free = all_slots & ~self.ever_used_slots;
-        if (free == 0) free = all_slots & ~self.used_slots;
+        var free = all_slots & ~self.ever_used_slots & ~self.reserved_slots;
+        if (free == 0) free = all_slots & ~self.used_slots & ~self.reserved_slots;
         if (free == 0) {
             self.setPlanDetail("The query uses more than {d} variables, including ones the planner adds for patterns", .{MAX_SLOTS});
             return PlannerError.TooManyVariables;
@@ -3980,7 +4140,7 @@ pub const QueryPlanner = struct {
     fn allocateNamedSlot(self: *Self, name: ?[]const u8) PlannerError!u8 {
         if (name) |n| {
             if (self.name_slots.get(n)) |slot| {
-                if (self.used_slots & slotBit(slot) == 0) {
+                if ((self.used_slots | self.reserved_slots) & slotBit(slot) == 0) {
                     self.markSlot(slot);
                     return slot;
                 }

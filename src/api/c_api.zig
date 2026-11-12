@@ -575,6 +575,74 @@ pub const lattice_open_options_v4 = extern struct {
     lock: bool = true,
 };
 
+/// Values of lattice_open_options_v5.sync_mode.
+pub const lattice_sync_mode = enum(u8) {
+    /// LATTICE_SYNC_MODE from the environment if set, else full.
+    default = 0,
+    full = 1,
+    normal = 2,
+    _,
+};
+
+/// Values of lattice_open_options_v5.full_fsync.
+pub const lattice_full_fsync = enum(u8) {
+    /// LATTICE_FULL_FSYNC from the environment if set, else off.
+    default = 0,
+    off = 1,
+    on = 2,
+    _,
+};
+
+/// Values of lattice_open_options_v5.vector_metric.
+pub const lattice_vector_metric = enum(u8) {
+    /// The file's metric, or cosine for a new index.
+    default = 0,
+    cosine = 1,
+    euclidean = 2,
+    dot_product = 3,
+    _,
+};
+
+/// Versioned open options with durability settings and the vector index's
+/// metric and build parameters. Every field of v4 keeps its meaning.
+pub const lattice_open_options_v5 = extern struct {
+    struct_size: usize = @sizeOf(lattice_open_options_v5),
+    create: bool = false,
+    read_only: bool = false,
+    cache_size_mb: u32 = 100,
+    page_size: u32 = 4096,
+    enable_vector: bool = false,
+    vector_dimensions: u16 = 128,
+    enable_wal: bool = true,
+    /// Carried forward from v3 unchanged.
+    enable_adjacency_cache: bool = false,
+    lock: bool = true,
+    /// A lattice_sync_mode. An explicit value wins over LATTICE_SYNC_MODE.
+    sync_mode: u8 = 0,
+    /// A lattice_full_fsync. An explicit value wins over LATTICE_FULL_FSYNC.
+    full_fsync: u8 = 0,
+    /// A lattice_vector_metric, for a new vector index.
+    vector_metric: u8 = 0,
+    /// HNSW connections per node, 2..32, for a new index; 0 for the file's or 16.
+    vector_m: u16 = 0,
+    /// HNSW build candidate list size, 1..4096, for a new index; 0 for the
+    /// file's or 200.
+    vector_ef_construction: u16 = 0,
+};
+
+comptime {
+    // The offsets the bindings mirror. A change here is an ABI break.
+    std.debug.assert(@offsetOf(lattice_open_options_v5, "create") == @sizeOf(usize));
+    std.debug.assert(@offsetOf(lattice_open_options_v5, "cache_size_mb") == @sizeOf(usize) + 4);
+    std.debug.assert(@offsetOf(lattice_open_options_v5, "vector_dimensions") == @sizeOf(usize) + 14);
+    std.debug.assert(@offsetOf(lattice_open_options_v5, "lock") == @sizeOf(usize) + 18);
+    std.debug.assert(@offsetOf(lattice_open_options_v5, "sync_mode") == @sizeOf(usize) + 19);
+    std.debug.assert(@offsetOf(lattice_open_options_v5, "full_fsync") == @sizeOf(usize) + 20);
+    std.debug.assert(@offsetOf(lattice_open_options_v5, "vector_metric") == @sizeOf(usize) + 21);
+    std.debug.assert(@offsetOf(lattice_open_options_v5, "vector_m") == @sizeOf(usize) + 22);
+    std.debug.assert(@offsetOf(lattice_open_options_v5, "vector_ef_construction") == @sizeOf(usize) + 24);
+}
+
 // ============================================================================
 // Helper Functions
 // ============================================================================
@@ -1371,6 +1439,55 @@ fn buildOpenOptionsV4(options: ?*const lattice_open_options_v4) DatabaseError!Op
     return zig_options;
 }
 
+fn buildOpenOptionsV5(options: ?*const lattice_open_options_v5) DatabaseError!OpenOptions {
+    var zig_options = OpenOptions{
+        .create = false,
+        .read_only = false,
+        .config = DatabaseConfig{
+            .enable_wal = true,
+        },
+    };
+
+    if (options) |opts| {
+        if (opts.struct_size < @sizeOf(lattice_open_options_v5)) {
+            return DatabaseError.InvalidArgument;
+        }
+
+        zig_options.create = opts.create;
+        zig_options.read_only = opts.read_only;
+        zig_options.page_size = if (opts.page_size == 0) types.DEFAULT_PAGE_SIZE else opts.page_size;
+        zig_options.config.buffer_pool_size = @as(usize, opts.cache_size_mb) * 1024 * 1024;
+        zig_options.config.enable_vector = opts.enable_vector;
+        zig_options.config.vector_dimensions = opts.vector_dimensions;
+        zig_options.config.enable_wal = opts.enable_wal;
+        zig_options.config.enable_adjacency_cache = opts.enable_adjacency_cache;
+        zig_options.lock = opts.lock;
+        zig_options.config.sync_mode = switch (@as(lattice_sync_mode, @enumFromInt(opts.sync_mode))) {
+            .default => null,
+            .full => .full,
+            .normal => .normal,
+            _ => return DatabaseError.InvalidArgument,
+        };
+        zig_options.config.full_fsync = switch (@as(lattice_full_fsync, @enumFromInt(opts.full_fsync))) {
+            .default => null,
+            .off => false,
+            .on => true,
+            _ => return DatabaseError.InvalidArgument,
+        };
+        zig_options.config.vector_metric = switch (@as(lattice_vector_metric, @enumFromInt(opts.vector_metric))) {
+            .default => null,
+            .cosine => .cosine,
+            .euclidean => .euclidean,
+            .dot_product => .inner_product,
+            _ => return DatabaseError.InvalidArgument,
+        };
+        zig_options.config.vector_m = if (opts.vector_m == 0) null else opts.vector_m;
+        zig_options.config.vector_ef_construction = if (opts.vector_ef_construction == 0) null else opts.vector_ef_construction;
+    }
+
+    return zig_options;
+}
+
 fn openDatabase(
     path: [*c]const u8,
     zig_options: OpenOptions,
@@ -1469,6 +1586,17 @@ pub export fn lattice_open_v4(
     db_out: *?*lattice_database,
 ) lattice_error {
     const zig_options = buildOpenOptionsV4(options) catch |err| return mapDatabaseError(err);
+    return openDatabase(path, zig_options, db_out);
+}
+
+/// Open a database file with v5 options: durability settings, and the
+/// vector index's metric and build parameters.
+pub export fn lattice_open_v5(
+    path: [*c]const u8,
+    options: ?*const lattice_open_options_v5,
+    db_out: *?*lattice_database,
+) lattice_error {
+    const zig_options = buildOpenOptionsV5(options) catch |err| return mapDatabaseError(err);
     return openDatabase(path, zig_options, db_out);
 }
 

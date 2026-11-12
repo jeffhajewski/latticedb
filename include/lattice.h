@@ -208,6 +208,89 @@ typedef struct {
 /* Default open options v4 */
 #define LATTICE_OPEN_OPTIONS_V4_DEFAULT { sizeof(lattice_open_options_v4), false, false, 100, 4096, false, 128, true, false, true }
 
+/* When a commit waits for the disk (lattice_open_options_v5.sync_mode). */
+typedef enum {
+    /* LATTICE_SYNC_MODE from the environment ("full" or "normal") if it is set,
+     * else FULL. */
+    LATTICE_SYNC_MODE_DEFAULT = 0,
+    /* Sync the log on every commit: a commit that has returned survives a
+     * power cut. */
+    LATTICE_SYNC_MODE_FULL = 1,
+    /* Hand the commit to the operating system and return. It survives the
+     * process being killed; a power cut or OS crash can lose the most recent
+     * commits, from the end only, and the database stays consistent. */
+    LATTICE_SYNC_MODE_NORMAL = 2
+} lattice_sync_mode;
+
+/* Whether syncs ask the drive to flush its cache, on macOS
+ * (lattice_open_options_v5.full_fsync). No effect elsewhere. */
+typedef enum {
+    /* LATTICE_FULL_FSYNC from the environment ("1"/"true" or "0"/"false") if
+     * it is set, else OFF. */
+    LATTICE_FULL_FSYNC_DEFAULT = 0,
+    LATTICE_FULL_FSYNC_OFF = 1,
+    LATTICE_FULL_FSYNC_ON = 2
+} lattice_full_fsync;
+
+/* How the vector index measures distance (lattice_open_options_v5.vector_metric).
+ * Search results are ordered by this distance, smallest first, and the Cypher
+ * <=> operator returns it. */
+typedef enum {
+    /* The metric the database file records, or COSINE for a new index. */
+    LATTICE_VECTOR_METRIC_DEFAULT = 0,
+    /* 1 - cos(a, b), in [0, 2]. Vectors are stored scaled to unit length. */
+    LATTICE_VECTOR_METRIC_COSINE = 1,
+    /* Euclidean (L2) distance, sqrt(sum((a - b)^2)). Vectors are stored as given. */
+    LATTICE_VECTOR_METRIC_EUCLIDEAN = 2,
+    /* Negative dot product, -(a . b): the largest dot product comes first.
+     * Vectors are stored as given. */
+    LATTICE_VECTOR_METRIC_DOT_PRODUCT = 3
+} lattice_vector_metric;
+
+/* Open options v5.
+ *
+ * Every v4 field keeps its meaning. The new fields use 0 for "not set":
+ *
+ * sync_mode and full_fsync take a lattice_sync_mode and lattice_full_fsync. A
+ * value set here wins over the LATTICE_SYNC_MODE and LATTICE_FULL_FSYNC
+ * environment variables; those apply only to a handle that leaves the field at
+ * 0, which is also what every older open function does.
+ *
+ * vector_metric, vector_m and vector_ef_construction configure a vector index
+ * when this open creates one (enable_vector on a database that has none). The
+ * database file records the index's configuration, and a database that has one
+ * opens with it whether or not enable_vector is set. Any of these fields that is
+ * set, and vector_dimensions when enable_vector is set, must then match the file,
+ * or the open fails with LATTICE_ERROR_CONFIG_MISMATCH. A database written by
+ * 0.16.0 records no configuration; its index is cosine, m 16, ef_construction
+ * 200, with the dimensions its vector pages carry, and that configuration is
+ * recorded the first time this release opens it for writing.
+ */
+typedef struct {
+    size_t struct_size;     /* Must be sizeof(lattice_open_options_v5) */
+    bool create;            /* Create if not exists */
+    bool read_only;         /* Open in read-only mode */
+    uint32_t cache_size_mb; /* Cache size in MB (default: 100) */
+    uint32_t page_size;     /* Page size in bytes (default: 4096) */
+    bool enable_vector;     /* Create a vector index if the database has none */
+    uint16_t vector_dimensions; /* Vector dimensions, 1..4096 (default: 128) */
+    bool enable_wal;        /* Enable WAL-backed transactions (default: true) */
+    bool enable_adjacency_cache; /* As in v3: nothing in this API reads it yet */
+    bool lock;              /* As in v4 (default: true) */
+    uint8_t sync_mode;      /* A lattice_sync_mode (default: 0, DEFAULT) */
+    uint8_t full_fsync;     /* A lattice_full_fsync (default: 0, DEFAULT) */
+    uint8_t vector_metric;  /* A lattice_vector_metric (default: 0, DEFAULT) */
+    /* HNSW connections per node, 2..32 (layer 0 keeps twice as many). 0 means
+     * the file's, or 16 for a new index. Fixed once the index exists. */
+    uint16_t vector_m;
+    /* HNSW candidate list size while building, 1..4096. 0 means the file's, or
+     * 200 for a new index. Fixed once the index exists. */
+    uint16_t vector_ef_construction;
+} lattice_open_options_v5;
+
+/* Default open options v5 */
+#define LATTICE_OPEN_OPTIONS_V5_DEFAULT { sizeof(lattice_open_options_v5), false, false, 100, 4096, false, 128, true, false, true, 0, 0, 0, 0, 0 }
+
 /*
  * Database operations
  */
@@ -240,6 +323,17 @@ lattice_error lattice_open_v3(
 lattice_error lattice_open_v4(
     const char* path,
     const lattice_open_options_v4* options,
+    lattice_database** db_out
+);
+
+/* Open a database file with v5 options; see lattice_open_options_v5.
+ * Returns LATTICE_ERROR_CONFIG_MISMATCH if the options contradict the vector
+ * index configuration the file records, and LATTICE_ERROR_INVALID_ARG for a
+ * value out of range. The older open functions behave as this one with the v5
+ * fields at 0. */
+lattice_error lattice_open_v5(
+    const char* path,
+    const lattice_open_options_v5* options,
     lattice_database** db_out
 );
 

@@ -17,6 +17,7 @@ const query_test = @import("query_test.zig");
 const search_test = @import("search_test.zig");
 const stream_store_test = @import("stream_store_test.zig");
 const c_api_test = @import("c_api_test.zig");
+const lfmt_c_api_test = @import("lfmt_c_api_test.zig");
 const concurrency_test = @import("concurrency_test.zig");
 const transaction_test = @import("transaction_test.zig");
 const quipu_repro_test = @import("quipu_longmemeval_repro.zig");
@@ -71,6 +72,7 @@ test {
     _ = search_test;
     _ = stream_store_test;
     _ = c_api_test;
+    _ = lfmt_c_api_test;
     _ = concurrency_test;
     _ = transaction_test;
     _ = quipu_repro_test;

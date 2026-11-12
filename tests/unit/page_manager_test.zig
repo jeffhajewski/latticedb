@@ -703,3 +703,38 @@ test "page_manager: freeing the freelist head again is refused" {
     try std.testing.expectEqual(a, first);
     try std.testing.expect(second != first);
 }
+
+// ============================================================================
+// Contract: a zero checksum passes only for a page nothing has written
+// ============================================================================
+
+test "page_manager: ldur a zero checksum does not excuse a page with data in it" {
+    const allocator = std.testing.allocator;
+    var memory = lattice.storage.memory_vfs.MemoryVfs.init(allocator);
+    defer memory.deinit();
+    const vfs_impl = memory.vfs();
+
+    var pm = try PageManager.init(allocator, vfs_impl, "db", .{ .create = true });
+    defer pm.deinit();
+
+    // A page the file was just extended with has no checksum, and reads.
+    const fresh = try pm.allocatePage();
+    var buf: [4096]u8 align(4096) = undefined;
+    try pm.readPage(fresh, &buf);
+
+    // A written page whose first bytes were then zeroed, checksum included,
+    // as damage to its first sector would leave it.
+    const page_id = try pm.allocatePage();
+    @memset(&buf, 0x5A);
+    try pm.writePage(page_id, &buf);
+    const file = try vfs_impl.open("db", .{ .write = true });
+    defer file.close();
+    const zeroes = [_]u8{0} ** 512;
+    try file.write(@as(u64, page_id) * 4096, &zeroes);
+    try std.testing.expectError(PageManagerError.ChecksumMismatch, pm.readPage(page_id, &buf));
+
+    // Zeroes all through still read, as a page of a file grown with zeroes.
+    const all_zero = [_]u8{0} ** 4096;
+    try file.write(@as(u64, page_id) * 4096, &all_zero);
+    try pm.readPage(page_id, &buf);
+}

@@ -504,9 +504,25 @@ pub const PageManager = struct {
         // Verify checksum
         const header_ptr: *const PageHeader = @ptrCast(@alignCast(buf.ptr));
         const expected = calculateChecksum(buf[8..]);
-        if (header_ptr.checksum != expected and header_ptr.checksum != 0) {
+        if (header_ptr.checksum != expected and !isUnsealedFreePage(buf)) {
             return PageManagerError.ChecksumMismatch;
         }
+    }
+
+    /// Whether a page is one the file was extended with and nothing has
+    /// written since: a free page with nothing in it, or zeroes. Those are the
+    /// only pages written without a checksum (`allocatePage`), in this release
+    /// and in 0.16.0.
+    ///
+    /// Any page whose stored checksum was zero used to pass, whatever it held,
+    /// so damage that zeroed a page's first bytes and left the rest went
+    /// unnoticed. A zero checksum now passes only with nothing behind it.
+    fn isUnsealedFreePage(buf: []const u8) bool {
+        // Byte 0 is the page type, 1 to 3 the flags and reserved bytes, 4 to
+        // 7 the checksum. The type is read as a byte: a damaged page can hold
+        // a value the enum does not have.
+        if (buf[0] != @intFromEnum(PageType.free)) return false;
+        return std.mem.allEqual(u8, buf[1..], 0);
     }
 
     /// Read a page without checksum verification.

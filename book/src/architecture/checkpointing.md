@@ -236,14 +236,18 @@ effort: it runs after the commit has succeeded, and if it fails, or is refused
 because a transaction has records in the log, the commit still reports success and
 the next commit tries again. Setting `auto_checkpoint = null` turns it off.
 
-**At open**, after recovery, if the log still holds frames, so the next open has
-nothing to replay and a torn frame at the log's tail does not sit in front of new
-ones.
+**At open**, after recovery, if the log holds records after its last checkpoint,
+so the next open has nothing to replay and a torn frame at the log's tail does not
+sit in front of new ones.
 
 **At close**, for the same reason: `Database.close()` runs a truncate checkpoint when
-the log holds frames, and the C API's `lattice_close` syncs the database first and
-then does the same. A cleanly closed database is its file alone: the log is empty
-and the journal is deleted. Both the open and the close checkpoint are skipped when
+the log holds records after its last checkpoint, and the C API's `lattice_close`
+syncs the database first and then does the same. A log that ends at its own last
+checkpoint (a `.full` or `.passive` checkpoint, such as the one a replication
+snapshot takes, leaves its records behind) has nothing to fold in and is left as it
+is: resetting it would advance the log's reset counter, which replication reads as
+the start of a new generation. Either way a cleanly closed database needs nothing
+from its log, and the journal is deleted. Both the open and the close checkpoint are skipped when
 `auto_checkpoint` is null, which leaves truncating the log to the caller, and both
 are skipped on a failed handle.
 

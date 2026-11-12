@@ -156,8 +156,9 @@ database is created, its parent directory is synced once after the new database
 file and log are, so a power cut right after creation cannot leave complete files
 that are missing from their directory (not on Windows, where this is skipped). The
 flush journal, `<database>-journal`, is created at every read-write open and removed
-at a clean close; only the open that creates the database syncs the directory after
-creating it.
+at a clean close, so each session's journal is a new name in the directory: the
+first journal write of a session syncs the directory before it returns, which is
+before any page is written in place. A session that never flushes pays nothing.
 
 ## The File Implementation
 

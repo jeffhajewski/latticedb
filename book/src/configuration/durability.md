@@ -34,7 +34,7 @@ database again; recovery replays the log and gives exactly the state it describe
 | File | What it is |
 |------|------------|
 | `<db>` | The database |
-| `<db>-wal` | The write-ahead log. Emptied to a 4 KB header by checkpoints and at a clean close |
+| `<db>-wal` | The write-ahead log. Emptied to a 4 KB header by truncating checkpoints, including the one at a clean close after writes |
 | `<db>-journal` | The flush journal. Present while the database is open read-write, empty between flushes, deleted at a clean close |
 
 The journal holds a copy of the pages a flush is writing, written and synced before
@@ -148,10 +148,11 @@ the next one cannot happen until another thousand frames are written. A time gat
 on top of that does not prevent thrash; it just lets the log grow without limit
 during a burst of writes, which is the thing this is meant to stop.
 
-A checkpoint also runs when a database is opened, after recovery, if the log is not
-empty, and when it is closed, through any API or the CLI. A cleanly closed database
-therefore leaves an empty log and no journal, and the next open has nothing to
-replay.
+A checkpoint also runs when a database is opened, after recovery, and when it is
+closed, through any API or the CLI, if the log holds changes since its last
+checkpoint. A cleanly closed database therefore leaves no journal and nothing in the
+log to replay. A log that ends at a checkpoint is left as it is, which matters for
+replication: see [Backup and Replication](../guides/backup-and-replication.md).
 
 ## Checkpointing by hand
 

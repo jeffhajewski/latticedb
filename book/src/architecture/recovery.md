@@ -312,7 +312,7 @@ Opening the log has normally cut a torn tail off already (see
 
 ### Scan-Ahead Detection
 
-On checksum mismatch, we scan ahead to check for valid frames:
+On checksum mismatch, recovery checks every later frame in the log for a valid one:
 
 **Scenario 1 — tail corruption (a torn write)**
 
@@ -449,10 +449,6 @@ without changing anything.
 
 ## Known Limits
 
-- **The look-ahead during recovery is short.** If the nine frames after a damaged
-  one are all damaged too and valid frames follow them, the damage is treated as a
-  torn tail: the commits after it are not replayed, and the checkpoint at the end
-  of the open then empties the log.
 - **Unsynced frames can reach the disk out of order.** A power cut can leave a later
   unsynced frame whole and an earlier one torn. The earlier frame then looks like
   mid-log damage and the open is refused, where dropping the unsynced frames would

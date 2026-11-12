@@ -57,6 +57,10 @@ pub const RecoveryError = error{
     OutOfMemory,
     /// Invalid record in WAL
     InvalidRecord,
+    /// The log holds vector changes and the database was opened without
+    /// its vector index. Not damage: opening with vectors enabled replays
+    /// them.
+    NeedsVectorIndex,
 };
 
 /// Transaction state during recovery
@@ -487,6 +491,7 @@ pub const RecoveryManager = struct {
                 .vector_set, .vector_remove => self.redoVector(ctx, payload) catch |err| return switch (err) {
                     error.OutOfMemory => RecoveryError.OutOfMemory,
                     error.InvalidRecord => RecoveryError.InvalidRecord,
+                    error.NeedsVectorIndex => RecoveryError.NeedsVectorIndex,
                     else => RecoveryError.IoError,
                 },
                 .stream_offset_set => try self.redoStreamOffset(ctx, payload),
@@ -729,7 +734,7 @@ pub const RecoveryManager = struct {
             // Silently skipping any other vector record would acknowledge a
             // recovered database with missing committed vectors. Refuse an
             // incompatible open instead.
-            return RecoveryError.InvalidRecord;
+            return RecoveryError.NeedsVectorIndex;
         };
         const mutation = wal_payload.deserializeVectorMutation(self.allocator, payload) catch |err| switch (err) {
             error.OutOfMemory => return error.OutOfMemory,

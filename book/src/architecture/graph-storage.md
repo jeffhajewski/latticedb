@@ -436,7 +436,9 @@ label's index is also **dense**: every node with the label has an entry, the
 ones without the property under `0xF0`, after every value, where `ORDER BY`
 puts nulls. So the index read forward or backward is the label's nodes in
 ascending or descending order, nulls included; a node created without the
-property costs one more key per such index, about 0.4 µs at 200,000 nodes. A
+property costs one more key per such index, about 0.1 to 0.2 µs (100,000
+nodes added to 100,000 with three such indexes: 3.0 to 3.2 µs a node with
+indexes that leave them out, 3.5 µs with these). A
 relationship type's index holds only the edges with the property, and an index
 whose keys hold no nulls is used for ranges and equality only. The tags:
 

@@ -646,19 +646,19 @@ LIMIT k` on an indexed property, ascending or descending, over one pattern,
 reads the index in order and stops after the first `s + k` rows, with the same
 rows, ties and nulls included, as the full sort. A label's index holds the
 nodes without the property too, which costs a node created without it about
-0.4 µs per such index. 200,000 `:Person` nodes, release
-build, median of seven runs on a busy machine (12 November 2026), the same
+0.1 to 0.2 µs per such index. 200,000 `:Person` nodes, release
+build, median of seven runs, two rounds (12 November 2026), the same
 release without and with the index:
 
 | query | label scan | index |
 |---|---:|---:|
-| `WHERE n.age > 97`, 4,000 rows | 65 ms | 1.7 ms |
-| `WHERE n.score >= 500 AND n.score < 505`, 978 rows | 76 ms | 0.62 ms |
-| `WHERE n.name STARTS WITH 'Jo'`, 293 rows | 66 ms | 0.11 ms |
-| `ORDER BY n.score LIMIT 10` | 64 ms | 0.010 ms |
-| `ORDER BY n.score DESC LIMIT 10` | 58 ms | 0.016 ms |
-| `WHERE n.age >= 50 RETURN count(n)`, 100,066 nodes | 64 ms | 3.7 ms |
-| `WHERE n.age >= 0`, every node | 146 ms | 120 ms |
+| `WHERE n.age > 97`, 4,000 rows | 48 ms | 1.4 ms |
+| `WHERE n.score >= 500 AND n.score < 505`, 978 rows | 54 ms | 0.33 ms |
+| `WHERE n.name STARTS WITH 'Jo'`, 293 rows | 48 ms | 0.10 ms |
+| `ORDER BY n.score LIMIT 10` | 46 ms | 0.014 ms |
+| `ORDER BY n.score DESC LIMIT 10` | 46 ms | 0.012 ms |
+| `WHERE n.age >= 50 RETURN count(n)`, 100,066 nodes | 49 ms | 3.4 ms |
+| `WHERE n.age >= 0`, every node | 114 ms | 87 to 90 ms |
 
 Without statistics, the planner always reads a range from the index; the last
 row shows that even a range that holds every node is no slower.
@@ -683,15 +683,15 @@ relationship type, `MATCH (a)-[r:KNOWS]->(b)`, now reads the type's index for
 inline map. A relationship read through the index costs about four times a
 step of the walk over every relationship, so a range holding a fifth of them or
 more walks them instead. 1,000,000 `:KNOWS` relationships, `w` spread over
-0–9,999, release build:
+0–9,999, release build, median of three, two rounds:
 
 | query | walk | index |
 |---|---:|---:|
-| `WHERE r.w = 1234`, 115 rows | 173 ms | 0.09 ms |
-| `WHERE r.w > 9990`, 944 rows | 174 ms | 0.75 ms |
-| `WHERE r.w >= 100 AND r.w < 200`, about 10,000 rows | 221 ms | 8.5 ms |
-| `WHERE r.name STARTS WITH 'Jo'`, 1,447 rows | 180 ms | 1.2 ms |
-| `WHERE r.w >= 5000`, half of them | 191 ms | 215 ms |
+| `WHERE r.w = 1234`, 115 rows | 177 ms | 0.09 ms |
+| `WHERE r.w > 9990`, 944 rows | 176 ms | 0.7 ms |
+| `WHERE r.w >= 100 AND r.w < 200`, 9,934 rows | 224 ms | 9.5 ms |
+| `WHERE r.name STARTS WITH 'Jo'`, 1,447 rows | 183 ms | 1.2 ms |
+| `WHERE r.w >= 5000`, half of them (walks) | 280 to 304 ms | 279 to 286 ms |
 
 <!-- Measured on 11 November 2026 on an Apple M5 in ordinary use, not a quiet
      machine: v0.16.0 and this release built ReleaseFast and run alternately,

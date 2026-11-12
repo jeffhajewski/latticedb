@@ -242,13 +242,13 @@ On 200,000 `:Person` nodes (a release build, median of seven runs):
 
 | query | without an index | with one |
 |---|---:|---:|
-| `WHERE p.age > 97` (4,000 rows) | 65 ms | 1.7 ms |
-| `WHERE p.score >= 500 AND p.score < 505` (978 rows) | 76 ms | 0.6 ms |
-| `WHERE p.name STARTS WITH 'Jo'` (293 rows) | 66 ms | 0.11 ms |
-| `ORDER BY p.score LIMIT 10` | 64 ms | 0.01 ms |
-| `ORDER BY p.score DESC LIMIT 10` | 58 ms | 0.02 ms |
-| `WHERE p.age >= 50 RETURN count(p)` (half the nodes) | 64 ms | 3.7 ms |
-| `WHERE p.age >= 0` (every node) | 146 ms | 120 ms |
+| `WHERE p.age > 97` (4,000 rows) | 48 ms | 1.4 ms |
+| `WHERE p.score >= 500 AND p.score < 505` (978 rows) | 54 ms | 0.3 ms |
+| `WHERE p.name STARTS WITH 'Jo'` (293 rows) | 48 ms | 0.10 ms |
+| `ORDER BY p.score LIMIT 10` | 46 ms | 0.01 ms |
+| `ORDER BY p.score DESC LIMIT 10` | 46 ms | 0.01 ms |
+| `WHERE p.age >= 50 RETURN count(p)` (half the nodes) | 49 ms | 3.4 ms |
+| `WHERE p.age >= 0` (every node) | 114 ms | 88 ms |
 
 A relationship type's index answers the same comparisons, and equality, for a
 pattern that starts from the relationship: a single relationship type, with
@@ -275,11 +275,11 @@ more, the query walks them instead. On 1,000,000 `:KNOWS` relationships with
 
 | query | without an index | with one |
 |---|---:|---:|
-| `WHERE r.w = 1234` (115 rows) | 173 ms | 0.09 ms |
-| `WHERE r.w > 9990` (944 rows) | 174 ms | 0.75 ms |
-| `WHERE r.w >= 100 AND r.w < 200` (about 10,000 rows) | 221 ms | 8.5 ms |
-| `WHERE r.name STARTS WITH 'Jo'` (1,447 rows) | 180 ms | 1.2 ms |
-| `WHERE r.w >= 5000` (half) | 191 ms | 215 ms |
+| `WHERE r.w = 1234` (115 rows) | 177 ms | 0.09 ms |
+| `WHERE r.w > 9990` (944 rows) | 176 ms | 0.7 ms |
+| `WHERE r.w >= 100 AND r.w < 200` (about 10,000 rows) | 224 ms | 9.5 ms |
+| `WHERE r.name STARTS WITH 'Jo'` (1,447 rows) | 183 ms | 1.2 ms |
+| `WHERE r.w >= 5000` (half, walked) | 280 ms | 280 ms |
 
 Values of different types are kept in the order `ORDER BY` puts them in, and
 integers and floats compare by exact value, as in the rest of Cypher: `3` and

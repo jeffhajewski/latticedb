@@ -408,7 +408,9 @@ pub const VectorSearchWithInput = struct {
         while (next_row) |row| : (next_row = try self.input.next(ctx)) {
             const slot_val = row.getSlot(self.output_slot) orelse continue;
             const node_id = slot_val.asNodeId() orelse continue;
-            const bare = row.populated == bare_mask and row.getDistance(self.output_slot) == 0 and row.getScore(self.output_slot) == 0;
+            // Bare: nothing but the node, and no search has measured or
+            // scored it. A distance or score of exactly zero is still one.
+            const bare = row.populated == bare_mask and row.measured == 0 and row.scored == 0;
             const candidate = try self.candidateFor(node_id);
             if (bare) {
                 candidate.bare_rows += 1;

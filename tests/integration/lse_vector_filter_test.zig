@@ -505,3 +505,77 @@ test "vector filter: a range on an indexed property beside <=> answers as withou
     }
     try std.testing.expectEqual(count, before[0].len);
 }
+
+/// Rows for given nodes in slot 0, each with a full-text score of zero or
+/// one, as a search operator would hand them on.
+const ScoredRows = struct {
+    ids: []const u64,
+    next_index: usize = 0,
+
+    const executor = lattice.query.executor;
+
+    fn operator(self: *ScoredRows) executor.Operator {
+        return .{ .vtable = &vtable, .ptr = self };
+    }
+
+    const vtable = executor.Operator.VTable{ .open = open, .next = next, .close = close, .deinit = deinit };
+
+    fn open(ptr: *anyopaque, _: *executor.ExecutionContext) executor.OperatorError!void {
+        const self: *ScoredRows = @ptrCast(@alignCast(ptr));
+        self.next_index = 0;
+    }
+
+    fn next(ptr: *anyopaque, ctx: *executor.ExecutionContext) executor.OperatorError!?*executor.Row {
+        const self: *ScoredRows = @ptrCast(@alignCast(ptr));
+        if (self.next_index == self.ids.len) return null;
+        const row = ctx.allocRow() catch return executor.OperatorError.OutOfMemory;
+        row.setSlot(0, .{ .node_ref = self.ids[self.next_index] });
+        row.setScore(0, if (self.next_index % 2 == 0) 0.0 else 1.0);
+        self.next_index += 1;
+        return row;
+    }
+
+    fn close(_: *anyopaque, _: *executor.ExecutionContext) void {}
+    fn deinit(_: *anyopaque, _: std.mem.Allocator) void {}
+};
+
+test "vector filter: a row whose search score is exactly zero keeps it" {
+    const allocator = std.testing.allocator;
+    const path = "lse_vector_filter_zero_score.db";
+    const db = try openDb(allocator, path);
+    defer {
+        db.close();
+        removeFiles(path);
+    }
+    const rare = try populate(db, allocator, 100);
+    defer allocator.free(rare);
+
+    var input = ScoredRows{ .ids = rare };
+    var query: [DIMS]f32 = @splat(0.25);
+    const search = try lattice.query.operators.vector.VectorSearchWithInput.initWithLiteral(
+        allocator,
+        input.operator(),
+        0,
+        &query,
+        .{},
+        db,
+    );
+    const op = search.operator();
+    defer op.deinit(allocator);
+
+    var ctx = lattice.query.executor.ExecutionContext.init(allocator);
+    defer ctx.deinit();
+    try op.open(&ctx);
+    defer op.close(&ctx);
+
+    var seen: usize = 0;
+    while (try op.next(&ctx)) |row| : (seen += 1) {
+        const id = row.getSlot(0).?.asNodeId().?;
+        const i = std.mem.indexOfScalar(u64, rare, id).?;
+        // The score the input gave, zero included, is still there, beside
+        // the distance this search measured.
+        try std.testing.expectEqual(@as(?f32, if (i % 2 == 0) 0.0 else 1.0), row.searchScore(0));
+        try std.testing.expect(row.searchDistance(0) != null);
+    }
+    try std.testing.expectEqual(rare.len, seen);
+}

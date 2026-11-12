@@ -1,6 +1,6 @@
 # Parameters
 
-Parameters allow you to pass values into queries safely using the `$name` syntax. This prevents injection attacks and enables query plan caching.
+Parameters allow you to pass values into queries safely using the `$name` syntax. This prevents injection attacks, and since the query text stays the same, the parsed query can be reused from the cache.
 
 ## Syntax
 
@@ -90,7 +90,9 @@ lattice_query_bind_vector(query, "embedding", vec, 128);
 
 ## Query Caching
 
-Queries are cached by their query text. The cache holds the parsed and analysed query, so the same query with different parameter values skips parsing and analysis.
+Queries are cached by their query text. The cache holds the parsed and analysed query, so the same query with different parameter values skips parsing and analysis. Plans are not cached: each execution is planned again, which takes a microsecond or two.
+
+A prepared query (`lattice_query_prepare` in C, which every binding uses) is parsed once, when it is prepared, and keeps its cache entry for as long as it is open, so executing it does not look the text up again. A query that does not parse still prepares; executing it reports the error.
 
 ```python
 # These share the same cache entry:

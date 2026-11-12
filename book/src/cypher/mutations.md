@@ -31,6 +31,10 @@ CREATE (a)-[:KNOWS]->(b)
 CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})
 ```
 
+A relationship in `CREATE` has exactly one type. A variable that is already bound
+can be used in `CREATE` to connect to it, as above, but not given new labels or
+properties there (`MATCH (n) CREATE (n:Extra)` is rejected); use `SET`.
+
 ## SET
 
 ### Set Properties
@@ -76,9 +80,18 @@ MATCH (n:Person {name: "Charlie"})
 DELETE n
 ```
 
-`DELETE` does not check for edges. If the node has any, it is removed and its
-edges are left behind, pointing at a node that no longer exists. Use
-`DETACH DELETE` for any node that might have edges.
+A node that still has relationships cannot be deleted with plain `DELETE`: the
+query fails with `NodeHasRelationships` and deletes nothing. Either delete the
+relationships in the same statement, which are removed before any node is
+checked:
+
+```cypher
+MATCH (n:Person {name: "Dana"})-[r]-()
+DELETE r, n
+```
+
+or use `DETACH DELETE`. `DELETE` takes nodes and relationships only; deleting a
+value such as `n.name` is rejected, and deleting null does nothing.
 
 ### DETACH DELETE
 

@@ -33,13 +33,18 @@ WITH a, count(b) AS friend_count
 RETURN a.name, friend_count
 ```
 
-In this example, `b` is not available after the `WITH` clause — only `a` and `friend_count` are.
+In this example, `b` is not available after the `WITH` clause — only `a` and `friend_count` are. Naming `b` after it fails with "Variable 'b' is not defined".
 
 ## Multi-Stage Queries
 
-A `MATCH` after `WITH` cannot name a variable that is already bound — `WITH a
-MATCH (a)-[:KNOWS]->(b)` is rejected with "Variable 'a' is already defined". Put
-the whole pattern in the first `MATCH`.
+A `MATCH` after `WITH` can continue from a node the `WITH` passed on:
+
+```cypher
+MATCH (a:Person {name: "Alice"})
+WITH a
+MATCH (a)-[:KNOWS]->(b)
+RETURN a.name, b.name
+```
 
 Chain multiple `WITH` clauses for complex queries:
 

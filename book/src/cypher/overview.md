@@ -31,6 +31,19 @@ RETURN friend.name
 | LIMIT | Limit number of results |
 | SKIP | Skip first N results |
 
+A query may begin with `MATCH`, `CREATE`, `MERGE`, `UNWIND`, `WITH` or `RETURN`;
+`RETURN 1 + 2` on its own returns one row.
+
+## Not Supported
+
+These parts of Cypher are not implemented, and a query that uses them fails with
+a parse error pointing at the first token it could not read: `OPTIONAL MATCH`,
+`CASE`, `UNION`, `CALL`, list indexing (`list[0]`), list comprehensions, named
+paths (`p = (a)-->(b)`), and `NULLS FIRST`/`NULLS LAST`. `exists()` is not a
+function either; it fails when evaluated, like any unknown function. The parse
+error names the clauses it expected rather than the feature, so `CASE` in
+`RETURN CASE WHEN ...` is reported as unexpected text at `WHEN`.
+
 ## LatticeDB Extensions
 
 LatticeDB extends Cypher with two operators for search:
@@ -69,7 +82,8 @@ See [Full-Text Search](./full-text-search.md) for details.
 | Comparison | `=`, `<>`, `<`, `<=`, `>`, `>=` |
 | Logical | `AND`, `OR`, `NOT`, `XOR` |
 | Arithmetic | `+`, `-`, `*`, `/`, `%`, `^` |
-| String | `CONTAINS`, `STARTS WITH`, `ENDS WITH` |
+| String | `CONTAINS`, `STARTS WITH`, `ENDS WITH`, `=~` (regular expression) |
+| List | `IN` |
 | Null | `IS NULL`, `IS NOT NULL` |
 | Search | `<=>` (vector distance), `@@` (full-text) |
 
@@ -84,13 +98,15 @@ See [Full-Text Search](./full-text-search.md) for details.
 | `toInteger(x)` | Convert to integer |
 | `toFloat(x)` | Convert to float |
 
-See [Functions](./functions.md) for details.
+Function names are not case-sensitive. See [Functions](./functions.md) for the
+full list.
 
 ### Aggregations
 
 | Function | Description |
 |----------|-------------|
-| `count(x)` | Count values |
+| `count(x)` | Count non-null values |
+| `count(*)` | Count rows |
 | `sum(x)` | Sum values |
 | `avg(x)` | Average values |
 | `min(x)` | Minimum value |

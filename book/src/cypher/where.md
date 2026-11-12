@@ -31,6 +31,12 @@ WHERE NOT n.field = "Systems"
 RETURN n.name
 ```
 
+A predicate can be true, false or null: a comparison with a missing property is
+null, and `NOT`, `AND` and `OR` follow three-valued logic. `WHERE` keeps a row only
+when the predicate is true, so `WHERE n.email <> "bob@x.org"` skips people with no
+email, and so does `WHERE NOT n.email = "bob@x.org"`. See
+[Functions](./functions.md#null) for the full rules.
+
 ## Null Checks
 
 ```cypher
@@ -45,6 +51,25 @@ MATCH (n:Person) WHERE n.name CONTAINS "li" RETURN n
 MATCH (n:Person) WHERE n.name STARTS WITH "A" RETURN n
 MATCH (n:Person) WHERE n.name ENDS WITH "ce" RETURN n
 ```
+
+## Regular Expressions
+
+`=~` matches a string against a regular expression. The whole string has to match,
+so `"A.*"` finds names starting with "A" and `"li"` matches only the string "li":
+
+```cypher
+MATCH (n:Person) WHERE n.name =~ "A.*" RETURN n.name
+MATCH (n:Person) WHERE n.name =~ "(?i)a.*" RETURN n.name
+```
+
+The supported syntax is a subset of Java's: character classes, `\d`, `\w`, `\s`
+and their negations, groups, alternation, `*`, `+`, `?` and `{n,m}` (lazy forms are
+accepted), the anchors `^`, `$`, `\A`, `\z`, `\b` and `\B`, and the flags `(?i)`
+and `(?s)` at the start of the pattern. Matching follows UTF-8 characters, and its
+time grows with the length of the text times the size of the pattern, whatever the
+pattern, so a pattern taken from a parameter cannot make a query run away.
+Backreferences, lookaround and possessive quantifiers fail the query rather than
+being misread. A null on either side gives null.
 
 ## Property Existence
 

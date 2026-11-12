@@ -13,6 +13,13 @@ MATCH (a)-[*min..max]->(b)
 - `*2..` — match paths of length 2 or more
 - `*` — match paths of any length (at least 1)
 
+A type, or several separated by `|`, restricts every hop: `-[:KNOWS|LIKES*1..2]->`.
+
+Each path is one result. A path uses each relationship at most once, but may pass
+through a node more than once, including the one it started from. A node reached
+by two different paths is therefore returned twice, which is why the examples
+below use `DISTINCT` where they want each node once.
+
 ## Examples
 
 ### Fixed Range
@@ -50,12 +57,19 @@ RETURN DISTINCT b
 A variable-length relationship cannot be given a variable or inline properties:
 `-[r:KNOWS*1..3]->` and `-[:KNOWS*1..3 {since: 2020}]->` are rejected.
 
+If the far end is a node that is already bound, only paths that end at it are
+returned.
+
 ## Performance
 
-Variable-length paths are expanded depth-first, one path at a time; a node already on the current path is not revisited, so cycles do not loop. An unbounded `*` or `*n..` stops at 100 hops. Performance characteristics:
+Paths are expanded depth-first, one path at a time. There is no hop limit: an
+unbounded `*` or `*n..` ends because a path cannot use more relationships than
+exist. The number of paths, though, can grow exponentially with the size of a
+densely connected graph, so give unbounded patterns over large, well-connected
+graphs an upper bound.
 
 - Short paths (1-3 hops): microseconds
-- Deep traversals scale linearly with the number of reachable nodes
-- `DISTINCT` is recommended to avoid duplicate results from multiple paths to the same node
+- The cost grows with the number of paths, not the number of reachable nodes
+- `DISTINCT` removes the duplicate rows that several paths to one node produce
 
 At 10K nodes with 50K edges, a variable path `*1..5` completes in ~82 us. See [Benchmarks](../performance/benchmarks.md) for detailed numbers.

@@ -90,6 +90,16 @@ MATCH (a)-[:KNOWS]->(b) RETURN b
 MATCH (a)-[:AUTHORED_BY]->(b) RETURN b
 ```
 
+List several types with `|` to match a relationship of any of them:
+
+```cypher
+MATCH (a:Person {name: "Alice"})-[r:KNOWS|LIKES]->(b)
+RETURN type(r), b.name
+```
+
+A relationship has one type, so `-[:KNOWS:LIKES]->` is a parse error. `|` is for
+`MATCH` only: `CREATE` and `MERGE` need exactly one type.
+
 ## Multi-Hop Patterns
 
 Chain patterns to traverse multiple hops:
@@ -129,21 +139,35 @@ MATCH (b:Person {name: "Bob"})
 RETURN a, b
 ```
 
-Each variable can be introduced only once in a query. A later `MATCH` — or a
-`MATCH` after `WITH` — cannot name a variable that an earlier clause bound; the
-query is rejected with "Variable 'a' is already defined". Write the whole path as
-one pattern instead:
+A node variable that is already bound can be named again, in a later `MATCH`, after
+`WITH`, or later in the same pattern, and it stands for the same node. Labels and
+properties written at the second mention are checked against that node:
 
 ```cypher
-// Rejected: a is bound by the first MATCH
 MATCH (a:Person {name: "Alice"})
 MATCH (a)-[:KNOWS]->(b)
 RETURN b.name
 
-// Works
-MATCH (a:Person {name: "Alice"})-[:KNOWS]->(b)
-RETURN b.name
+// A cycle back to the starting node
+MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c)-[:KNOWS]->(a)
+RETURN a.name
 ```
 
-Relationship type alternation (`-[:KNOWS|LIKES]->`) is not supported either; run
-one query per type.
+A relationship variable cannot be matched again: `MATCH (a)-[r]->(b) MATCH
+(c)-[r]->(d)` is rejected.
+
+## Relationship Uniqueness
+
+Within one `MATCH`, each relationship is used at most once, as Cypher specifies. A
+pattern that walks out over an undirected relationship cannot come straight back
+over it, so this does not return Alice as `c`:
+
+```cypher
+MATCH (a:Person {name: "Alice"})-[:KNOWS]-(b)-[:KNOWS]-(c)
+RETURN c.name
+```
+
+The same holds across the comma-separated patterns of one `MATCH`. Separate `MATCH`
+clauses may reuse a relationship. One case is not covered: a single-hop
+relationship written after a variable-length one in the same `MATCH` can reuse a
+relationship from that path.

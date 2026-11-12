@@ -943,7 +943,10 @@ typedef struct {
     const char* model;
     lattice_embedding_api_format api_format;
     const char* api_key;        /* NULL for no auth */
-    uint32_t timeout_ms;        /* wait for the response to begin; 0 = 30s */
+    /* How long to wait for the response to begin, in ms; 0 = 30s. Connecting
+     * and reading the rest of a response that has begun are not bounded by it,
+     * and it is not applied on Windows. */
+    uint32_t timeout_ms;
 } lattice_embedding_config;
 
 /* Generate a hash embedding (built-in, no external service).

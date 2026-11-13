@@ -183,6 +183,7 @@ pub fn insert(self: *Self, key: []const u8, value: []const u8) !void {
     // 4. Insert in place; one scan of the slot array finds the free space and
     //    reports PageFull if the entry does not fit
     if (self.insertLeafEntryStored(leaf.data, search.slot, key, prepared.value, prepared.overflow)) |_| {
+        self.noteInsert(leaf.page_id, search.slot); // remembered for splits, below
         return;
     } else |err| if (err != error.PageFull) return err;
 
@@ -196,15 +197,19 @@ pub fn insert(self: *Self, key: []const u8, value: []const u8) !void {
 When a leaf is full:
 
 <img class="diagram" src="../assets/diagrams/btree-leaf-split.svg"
-     alt="A full leaf holding a through e splits when f is inserted. The entries divide into two linked leaves holding a-b-c and d-e-f, and the key d is promoted to the parent as a separator">
+     alt="A full leaf holding a, b, d, e and f splits when c is inserted among them. The entries divide down the middle into two linked leaves holding a-b-c and d-e-f, and the key d is promoted to the parent as a separator">
 
 `splitAndInsert` plans the whole split before it changes anything:
 
-1. Build the leaf's entries plus the new one, in order, and choose a byte-balanced
-   split point that leaves both halves within a page (`chooseLeafSplitPoint`).
+1. Build the leaf's entries plus the new one, in order, and choose the split point
+   (`chooseInsertSplit`): beside the new entry when inserts are arriving in key
+   order (below), otherwise byte-balanced so that both halves fit a page
+   (`chooseLeafSplitPoint`).
 2. Walk up the pinned path while the separator does not fit the parent. For each
    ancestor that overflows, build its combined key/child image and choose the
-   promoted key by bytes (`chooseInternalPromotion`).
+   promoted key: after a leaf split at an edge, when the new separator lands at the
+   same edge of this node, the key next to it (`edgeInternalPromotion`), so the node
+   keeps all but one of its keys; otherwise by bytes (`chooseInternalPromotion`).
 3. Reserve every new page the split needs, one per splitting level plus a new root
    if the root splits, by allocating and pinning it, and find the right sibling
    whose `prev` link must change.
@@ -216,10 +221,31 @@ pinned pages and cannot fail: both leaves are written, the sibling links fixed (
 new → the old leaf's former next leaf), and each separator inserted into its parent
 or carried up into the next split.
 
-The split point is chosen by serialized byte size, not just entry count. This
-matters when a leaf mixes small keys with large values: both halves must fit in
-the configured page size after the new entry is included. Internal nodes are split
-by bytes too; with the key-size cap that always yields two halves that fit.
+A split down the middle is chosen by serialized byte size, not just entry count.
+This matters when a leaf mixes small keys with large values: both halves must fit
+in the configured page size after the new entry is included. Internal nodes are
+split by bytes too; with the key-size cap that always yields two halves that fit.
+
+The middle is the wrong place when keys arrive in order. A tree filled in key order
+(node ids, a label's members, an ordered property index being built) inserts past
+the last entry every time; split down the middle, each leaf is left half empty for
+good, because nothing is inserted into its left half again. So the tree remembers,
+for a few leaves (`recent_inserts`, 16 of them, in memory only), the slot the last
+insert into each took (`noteInsert`). An insert counts as in order when it lands
+right after the previous insert into the same leaf, or past the last entry of the
+rightmost leaf, which needs no history. Then:
+
+- past the last entry, every existing entry stays and the new one starts the new
+  leaf alone;
+- in front of keys already there, the new entry ends this leaf and the keys after it
+  move to the new one, so the ordered run goes on filling this leaf.
+
+Descending order, right before the previous insert or before the first entry of the
+leftmost leaf, is the mirror image. Random inserts meet these conditions about once
+per leaf's worth of inserts, and a leaf split that way splits by bytes the next
+time. A side that would not fit a page falls back to the other side of the new
+entry, then to a split by bytes. An ordered run therefore fills its pages full
+instead of half full.
 
 ### Replacing a Value
 
@@ -278,6 +304,13 @@ The range is half-open: `start_key` is inclusive and `end_key` is exclusive, so
 the iterator stops at the first key that is greater than or equal to `end_key`.
 Call `deinit` on the iterator if you stop early, to unpin the current leaf.
 
+`rangeBackward(start_key, end_key)` reads the same half-open range from its last key
+down. It descends once to the leaf `end_key` leads to, starts below `end_key`'s
+slot, and follows the link each leaf keeps to the one before it, stopping below
+`start_key` (or at the first leaf when `start_key` is null). An ordered property
+index uses it to answer `ORDER BY ... DESC` with a `LIMIT` without reading the
+range forward first.
+
 **Iterator walks the leaf chain:**
 
 <img class="diagram" src="../assets/diagrams/btree-range-scan.svg"
@@ -307,15 +340,20 @@ pub const BTree = struct {
     comparator: KeyComparator, // For ordering
     page_size: u32,            // Usually 4096
     allocator: Allocator,
+    // The slot the last insert into each of a few leaves took, so a split
+    // can tell that inserts arrive in key order. Memory only.
+    recent_inserts: [16]RecentInsert,
 
     // ...methods
 };
 ```
 
-This is just ~40 bytes of metadata. The actual data lives in pages on disk.
+This is 168 bytes of metadata, 128 of them the remembered inserts. The actual data
+lives in pages on disk.
 
 The operations: `get` (owned copy), `getBorrowed` (lent value, `release()` it),
-`contains`, `insert`, `replace`, `put`, `delete`, and `range` (an iterator).
+`contains`, `insert`, `replace`, `put`, `delete`, `range` (an iterator) and
+`rangeBackward` (an iterator from the last key down).
 
 ## Key Design Decisions
 

@@ -6,7 +6,7 @@
 <g id="node1" class="node">
 <title>before</title>
 <path fill="#fdf0ea" stroke="#c2703f" stroke-width="1.2" d="M245.92,-200.25C245.92,-200.25 71.5,-200.25 71.5,-200.25 65.5,-200.25 59.5,-194.25 59.5,-188.25 59.5,-188.25 59.5,-176.25 59.5,-176.25 59.5,-170.25 65.5,-164.25 71.5,-164.25 71.5,-164.25 245.92,-164.25 245.92,-164.25 251.92,-164.25 257.92,-170.25 257.92,-176.25 257.92,-176.25 257.92,-188.25 257.92,-188.25 257.92,-194.25 251.92,-200.25 245.92,-200.25"/>
-<text xml:space="preserve" text-anchor="middle" x="158.71" y="-177.97" font-family="Menlo,Consolas,monospace" font-size="12.00" fill="#1a1a1a">a:1 &#160;b:2 &#160;c:3 &#160;d:4 &#160;e:5</text>
+<text xml:space="preserve" text-anchor="middle" x="158.71" y="-177.97" font-family="Menlo,Consolas,monospace" font-size="12.00" fill="#1a1a1a">a:1 &#160;b:2 &#160;d:4 &#160;e:5 &#160;f:6</text>
 </g>
 <!-- after_l -->
 <g id="node2" class="node">
@@ -17,9 +17,9 @@
 <!-- before&#45;&gt;after_l -->
 <g id="edge1" class="edge">
 <title>before&#45;&gt;after_l</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M113.41,-163.82C103.56,-158.58 93.76,-152.08 85.96,-144.25 79.51,-137.77 74.46,-129.23 70.67,-121.13"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="72.97,-120.28 67.96,-114.81 68.47,-122.21 72.97,-120.28"/>
-<text xml:space="preserve" text-anchor="middle" x="152.34" y="-134.75" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;insert &quot;f:6&quot; — no room, split &#160;</text>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M111.74,-163.65C101.98,-158.47 92.36,-152.04 84.71,-144.25 78.37,-137.79 73.53,-129.25 69.95,-121.16"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="72.3,-120.43 67.42,-114.85 67.76,-122.26 72.3,-120.43"/>
+<text xml:space="preserve" text-anchor="middle" x="152.21" y="-134.75" font-family="Helvetica,Arial,sans-serif" font-size="10.00" fill="#6b7280"> &#160;insert &quot;c:3&quot; — no room, split &#160;</text>
 </g>
 <!-- after_r -->
 <g id="node3" class="node">
@@ -30,8 +30,8 @@
 <!-- before&#45;&gt;after_r -->
 <g id="edge2" class="edge">
 <title>before&#45;&gt;after_r</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M196.1,-163.79C205.7,-158.32 215.59,-151.73 223.71,-144.25 231.03,-137.51 237.58,-128.86 242.88,-120.75"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="244.88,-122.18 246.5,-114.94 240.72,-119.59 244.88,-122.18"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M197.1,-163.75C206.74,-158.32 216.62,-151.76 224.71,-144.25 231.93,-137.55 238.31,-128.91 243.44,-120.79"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="245.42,-122.25 246.93,-114.99 241.22,-119.73 245.42,-122.25"/>
 </g>
 <!-- after_l&#45;&gt;after_r -->
 <g id="edge3" class="edge">

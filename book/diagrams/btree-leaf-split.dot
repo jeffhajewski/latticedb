@@ -1,4 +1,7 @@
 // A full leaf splits in two and promotes a separator key to the parent.
+// The insert lands among the keys, not after the last one, so the split is
+// by bytes, down the middle; inserts arriving in key order split beside the
+// new key instead (BTree.chooseInsertSplit).
 digraph btree_leaf_split {
   bgcolor="transparent"
   rankdir=TB
@@ -11,7 +14,7 @@ digraph btree_leaf_split {
   edge [color="#6b7280" penwidth=1.1 arrowsize=0.7
         fontname="Helvetica,Arial,sans-serif" fontsize=10 fontcolor="#6b7280"]
 
-  before [label="a:1  b:2  c:3  d:4  e:5" fillcolor="#fdf0ea" color="#c2703f"]
+  before [label="a:1  b:2  d:4  e:5  f:6" fillcolor="#fdf0ea" color="#c2703f"]
 
   after_l [label="a:1  b:2  c:3"]
   after_r [label="d:4  e:5  f:6"]
@@ -20,7 +23,7 @@ digraph btree_leaf_split {
             fillcolor="#dbe9f8" color="#4a90d9"
             fontname="Helvetica,Arial,sans-serif" fontsize=11]
 
-  before -> after_l [label="  insert \"f:6\" — no room, split  "]
+  before -> after_l [label="  insert \"c:3\" — no room, split  "]
   before -> after_r
 
   { rank=same

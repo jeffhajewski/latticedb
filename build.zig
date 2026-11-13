@@ -519,6 +519,43 @@ pub fn build(b: *std.Build) void {
     const graph_bench_step = b.step("graph-benchmark", "Run DFS graph traversal benchmarks (LatticeDB vs SQLite)");
     graph_bench_step.dependOn(&run_graph_bench.step);
 
+    // Public-API benchmark: the program behind the published performance
+    // tables. It is C against include/lattice.h and a ReleaseFast liblattice,
+    // so it measures what an application or a binding gets, with the default
+    // options; the steps above call internal Zig paths. The Python driver runs
+    // each workload in fresh processes and reports medians and spreads.
+    const capi_bench_lib = b.addLibrary(.{
+        .name = "lattice-capi-bench",
+        .root_module = bench_lib_module,
+        .linkage = .static,
+    });
+    const capi_bench_module = b.createModule(.{
+        .target = target,
+        .optimize = .ReleaseFast,
+        .link_libc = true,
+    });
+    capi_bench_module.addCSourceFile(.{
+        .file = b.path("tests/benchmark/capi_bench.c"),
+        .flags = &.{ "-std=gnu11", "-O2" },
+    });
+    capi_bench_module.addIncludePath(b.path("include"));
+    capi_bench_module.linkLibrary(capi_bench_lib);
+    capi_bench_module.linkSystemLibrary("sqlite3", .{});
+    const capi_bench_exe = b.addExecutable(.{
+        .name = "capi-bench",
+        .root_module = capi_bench_module,
+    });
+    const run_capi_bench = b.addSystemCommand(&.{"python3"});
+    run_capi_bench.addFileArg(b.path("tests/benchmark/capi_bench.py"));
+    run_capi_bench.addArg("--bin");
+    run_capi_bench.addArtifactArg(capi_bench_exe);
+    run_capi_bench.has_side_effects = true;
+    if (b.args) |args| {
+        run_capi_bench.addArgs(args);
+    }
+    const capi_bench_step = b.step("capi-benchmark", "Run the public C API benchmarks behind the published tables (see book/src/performance/benchmarks.md)");
+    capi_bench_step.dependOn(&run_capi_bench.step);
+
     // Compile every benchmark without running one.
     //
     // The benchmarks are built by no other step, so an API they use can be
@@ -538,6 +575,7 @@ pub fn build(b: *std.Build) void {
         sqlite_bench_exe,
         graph_bench_exe,
         space_report_exe,
+        capi_bench_exe,
     }) |exe| {
         bench_build_step.dependOn(&exe.step);
     }

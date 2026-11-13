@@ -146,8 +146,8 @@ when to use which.
 
 `enable_wal = false` means only that nothing is logged. Transactions, rollback and
 all-or-nothing queries work the same without the log; what you give up is that a
-commit survives a crash only once its pages have been flushed to the file, at
-`sync()` or close. See
+commit survives a crash only once its pages have been flushed to the file: at
+close, when half the page cache holds changes, or on `sync()` in Zig. See
 [Running without the log](./durability.md#running-without-the-log) for exactly
 what a crash leaves and what it saves.
 

@@ -208,11 +208,13 @@ writing query ran straight against the trees, and one that failed part way kept
 what it had done. Transactions now begin, commit and roll back as with a log,
 one writer at a time, readers keep their snapshot, a writing query is all or
 nothing, and indexes, streams and the changefeed are updated at commit. Nothing
-is logged, so a commit reaches the file at the next flush (`sync()`, close, or
-the end of a commit once half the page cache holds changes); after a crash or a
-power cut the file holds the transactions up to some point at or after the last
-`sync()` or close that returned, never part of one. The changefeed's retention runs at those flushes. The book's
-*Durability and the Log* page has the details and a bulk-loading recipe.
+is logged, so a commit reaches the file at the next flush (close, the end of a
+commit once half the page cache holds changes, or `sync()`, which only the Zig
+API has); after a crash or a power cut the file holds the transactions up to
+some point at or after the last close (or `sync()`) that returned, never part
+of one. The changefeed's
+retention runs at those flushes. The book's *Durability and the Log* page has
+the details and a bulk-loading recipe.
 
 **Other recovery fixes.**
 
@@ -1210,8 +1212,9 @@ with relationships is one range probe, under 1 µs.
   writing inside `EXISTS { }`, `COUNT { }` or `COLLECT { }`, `CALL { } IN
   TRANSACTIONS`, `OPTIONAL CALL`, procedures other than the four catalog ones,
   `LOAD CSV`, type predicates (`IS :: INTEGER`), `||`, temporal and spatial
-  types, and schema and administration statements (`CREATE INDEX`, `SHOW`,
-  `EXPLAIN`).
+  types, schema and administration statements (`CREATE INDEX`, `SHOW`,
+  `EXPLAIN`), the GQL clauses `FINISH`, `FILTER`, `LET` and `INSERT`, and the
+  legacy `START`.
 - **Plan errors have no line and column.** Their message names the part of the
   query instead (`ORDER BY item 2`, ``RETURN uses `p` in COUNT { ... }``).
   Parse, semantic and execution errors carry both.

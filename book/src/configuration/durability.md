@@ -127,19 +127,23 @@ and the changefeed are updated at commit and untouched by a rollback. There is n
 `-wal` file.
 
 What you give up is durability between flushes. A commit changes pages in memory,
-and they reach the file only when they are flushed: on `sync()`, at close, or at
-the end of a commit once half the page cache holds changes. A flush never happens
-in the middle of applying a transaction, and each flush goes through the journal,
-so the file always holds a whole number of transactions.
+and they reach the file only when they are flushed: at close, at the end of a
+commit once half the page cache holds changes, or, in the Zig API, on `sync()`.
+A flush never happens in the middle of applying a transaction, and each flush
+goes through the journal, so the file always holds a whole number of
+transactions.
 
 | Event | What a database without a log keeps |
 |-------|-------------------------------------|
-| Process killed, or the machine loses power | The transactions up to some point at or after the last `sync()` or close that returned. Never part of one. Commits after that point may be lost, from the end only. |
+| Process killed, or the machine loses power | The transactions up to some point at or after the last close, or Zig `sync()`, that returned. Never part of one. Commits after that point may be lost, from the end only. |
 | A commit fails while it is being applied (the disk is full, say) | The handle marks itself failed and writes nothing more. Reopened, the database holds the state of the last flush: that commit and every one since are lost. |
 | Clean close | Everything. |
 
-Call `sync()` after anything you could not redo. The power-loss case assumes the
-same of the storage as [What survives what](#what-survives-what) does.
+After anything you could not redo, call `sync()` in Zig. The C API and the
+bindings have no call that flushes without closing (`checkpoint` does nothing
+without a log), so there close the database, and open it again to go on. The
+power-loss case assumes the same of the storage as
+[What survives what](#what-survives-what) does.
 
 Two costs come with it. A transaction's changed pages stay in memory until the whole
 transaction has been applied, so one very large transaction can hold the page cache
@@ -158,7 +162,8 @@ interrupted, delete the file and start over. For such a load:
   from the changefeed (the policy is kept in the file; open with `all` afterwards
   to record changes from then on);
 - give it a page cache about twice the size the file will reach;
-- write in transactions of some thousands of rows, then `sync()` or close.
+- write in transactions of some thousands of rows, then close (or, in Zig,
+  `sync()`).
 
 The cache matters more than the log. A flush writes each changed page twice, once
 to the journal and once in place, and happens whenever half the cache holds

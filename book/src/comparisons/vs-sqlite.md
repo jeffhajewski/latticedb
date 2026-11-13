@@ -19,7 +19,7 @@ If relationships in your data are an occasional join rather than the point of th
 
 Traversal in SQLite means a recursive common table expression. It works, and for one or two hops it works fine. A depth-limited search written with `UNION` deduplicates on (node, depth), so a node reached at several depths is expanded again at each one.
 
-LatticeDB traverses with BFS over an adjacency cache and a bitset for visited tracking, which expands each node once. Both engines below run over the same social-network graph with a power-law degree distribution, LatticeDB with the WAL off. In the hop tables the two sides do not do identical work: LatticeDB counts paths with raw edge iterators, with no edge-type filter and no deduplication, while SQLite runs `SELECT DISTINCT` with a type filter and a join.
+LatticeDB traverses with BFS over an adjacency cache and a bitset for visited tracking, which expands each node once. Both engines below run over the same social-network graph with a power-law degree distribution, LatticeDB with the WAL off. The LatticeDB side is Zig code calling the storage layer in process: Cypher queries, the C API and the bindings read edges from the B+Tree and never use the adjacency cache (`enable_adjacency_cache` is accepted there and changes nothing), and a query has no reachability operator, so `MATCH (a)-[*1..k]->(b)` enumerates paths rather than visiting each node once. In the hop tables the two sides do not do identical work: LatticeDB counts paths with raw edge iterators, with no edge-type filter and no deduplication, while SQLite runs `SELECT DISTINCT` with a type filter and a join.
 
 ### 100K nodes, 500K edges
 

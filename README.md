@@ -393,7 +393,8 @@ The LatticeDB figure searches a 100-document corpus; the other rows come from ot
 
 **Graph**
 - Nodes and edges with labels and arbitrary properties
-- Durable explicit equality indexes for scoped node and edge properties
+- Durable property indexes on node and relationship properties, kept in order, so
+  Cypher reads equality, ranges, `STARTS WITH` and `ORDER BY ... LIMIT` from them
 - Multi-hop traversal, variable-length paths (`*1..3`)
 - ACID transactions with commit/rollback and crash recovery
 - Deleting a node that still has relationships is refused unless asked to detach
@@ -409,11 +410,13 @@ The LatticeDB figure searches a 100-document corpus; the other rows come from ot
 
 **Full-Text Search**
 - BM25-ranked inverted index; words split by Unicode, lowercased and accent-folded, with English stop words dropped
+- One query language everywhere: `OR`, `-exclusions`, `"phrases"`, `prefix*` and `fuzzy~`
 - Fuzzy search with configurable Levenshtein distance
 
 **Cypher Query Language**
-- MATCH, WHERE, RETURN, CREATE, DELETE, SET, REMOVE
-- ORDER BY, LIMIT, SKIP, DETACH DELETE
+- MATCH, OPTIONAL MATCH, WHERE, RETURN, CREATE, DELETE, SET, REMOVE, MERGE, WITH, UNWIND, FOREACH
+- ORDER BY, LIMIT, SKIP, DETACH DELETE, UNION, CASE, `CALL { }` subqueries
+- Named paths, `shortestPath`, list and pattern comprehensions, `EXISTS`, `COUNT` and `COLLECT` subqueries, map projection, label expressions
 - Vector distance operator: `<=>`
 - Full-text search operator: `@@`
 - Regular expressions: `=~`
@@ -433,6 +436,8 @@ The LatticeDB figure searches a 100-document corpus; the other rows come from ot
   databases in object storage
 - In-memory databases with `:memory:`, touching no files at all
 - Durable named streams with explicit consumer offsets, manual trim, and graph changefeeds
+- A compact changefeed with a retention policy (`all`, `last:N`, `age:7d` or `off`)
+- Import and export JSON, JSONL, CSV and RDF (Turtle, N-Triples)
 - Online freelist reuse plus `lattice compact` for safe physical tail reclamation
 - Zero configuration — open a file and start working
 - Embedded single-writer model for local applications

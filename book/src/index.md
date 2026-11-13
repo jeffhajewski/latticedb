@@ -25,6 +25,7 @@ LIMIT 10
 - Nodes and edges with labels and arbitrary properties
 - Multi-hop traversal, variable-length paths (`*1..3`)
 - ACID transactions with snapshot isolation
+- Property indexes on nodes and relationships, for equality, ranges, prefixes and sorting
 - MERGE, WITH, UNWIND, aggregations (`count`, `sum`, `avg`, `min`, `max`, `collect`)
 
 **Vector Search**
@@ -33,21 +34,24 @@ LIMIT 10
 - Batch insert for bulk loading
 
 **Full-Text Search**
-- BM25-ranked inverted index with tokenization and English stop words
+- BM25-ranked inverted index; words split by Unicode, lowercased and accent-folded, with English stop words dropped
+- One query language everywhere: `OR`, `-exclusions`, `"phrases"`, `prefix*` and `fuzzy~`
 - Fuzzy search with configurable Levenshtein distance
 
 **Cypher Query Language**
-- MATCH, WHERE, RETURN, CREATE, DELETE, SET, REMOVE
-- ORDER BY, LIMIT, SKIP, DETACH DELETE
+- MATCH, OPTIONAL MATCH, WHERE, RETURN, CREATE, DELETE, SET, REMOVE, FOREACH
+- ORDER BY, LIMIT, SKIP, DETACH DELETE, UNION, CASE, `CALL { }` subqueries
+- Named paths, `shortestPath`, list and pattern comprehensions, `EXISTS`, `COUNT` and `COLLECT` subqueries
 - Vector distance operator: `<=>`
 - Full-text search operator: `@@`
 - Parameters: `$name`
 
 **Operations**
 - Single-file storage with write-ahead log for crash recovery
-- Durable streams and semantic graph changefeeds
+- Durable streams and semantic graph changefeeds, with a retention policy for the changefeed
+- Import and export JSON, JSONL, CSV and RDF (Turtle, N-Triples)
 - Zero configuration — open a file and start working
-- Clean C API; Python, TypeScript, and Go bindings wrap it
+- Clean C API; Python, TypeScript, Go, and Java bindings wrap it
 
 ## Use Cases
 

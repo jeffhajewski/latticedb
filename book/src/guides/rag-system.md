@@ -210,8 +210,8 @@ with db.write() as txn:
 ## Performance Tips
 
 - Use `batch_insert_vectors()` for bulk loading — it saves one binding call per node; each vector is still inserted into the HNSW index individually
-- Set `ef_search` based on your recall requirements (64 gives 100% recall at 1M vectors)
+- Set `ef_search` based on your recall requirements: the default, 64, measured about 98% recall@10 at 100K vectors and 93–96% at 1M; 128 brought 1M to about 98% (see [Benchmarks](../performance/benchmarks.md#ef_search))
 - End a retrieval query as above, with `ORDER BY` the same `<=>` distance as the `WHERE` and a `LIMIT`: the search then stops once it has enough rows, rather than finding every chunk under the threshold and sorting them. To return the distance, write it in the `RETURN` the same way (`chunk.embedding <=> $query AS dist`) and the measured value is reused
-- Use `cache_size_mb` to control memory usage
+- Use `cache_size_mb` to control memory usage; once the file outgrows the cache (about 100K 128-d vectors at the default 100 MB), vector inserts and searches slow down several times over, so size it to the file for large indexes
 - Declare a full-text index only over properties you actually search; each one costs write time
 - Use parameters (`$name`) so the query text stays the same and its parsed form is reused from the query cache

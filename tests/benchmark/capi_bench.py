@@ -175,6 +175,10 @@ def parse_result(text):
 def run_once(binary, workload, args, db):
     cmd = [binary, workload, "--db", db] + args
     proc = subprocess.run(cmd, capture_output=True, text=True)
+    # Progress and notes (insert rates every minute, exact-search time).
+    for line in proc.stderr.splitlines():
+        if line.startswith("capi_bench:") and proc.returncode == 0:
+            print("    " + line, file=sys.stderr, flush=True)
     if proc.returncode != 0:
         return None, (proc.stderr or proc.stdout).strip().splitlines()[-1:] or ["failed"]
     return parse_result(proc.stdout), None

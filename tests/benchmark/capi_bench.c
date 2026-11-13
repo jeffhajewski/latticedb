@@ -1061,7 +1061,7 @@ static void wl_vector_build(void) {
     lattice_node_id *ids = malloc(sizeof(lattice_node_id) * (size_t)opt.n);
     float *buf = malloc(sizeof(float) * DIM * (size_t)opt.batch);
     lattice_node_with_vector *specs = malloc(sizeof(lattice_node_with_vector) * (size_t)opt.batch);
-    long i = 0;
+    long i = 0, last_i = 0;
     uint64_t t0 = now_ns(), last = t0;
     while (i < opt.n) {
         long m = opt.n - i < opt.batch ? opt.n - i : opt.batch;
@@ -1080,9 +1080,11 @@ static void wl_vector_build(void) {
         i += m;
         uint64_t now = now_ns();
         if (now - last > 60ull * 1000000000ull) {
-            fprintf(stderr, "capi_bench: %ld / %ld vectors, %.0f/s\n", i, opt.n,
-                    (double)i / ((double)(now - t0) / 1e9));
+            fprintf(stderr, "capi_bench: %ld / %ld vectors, %.0f/s overall, %.0f/s in the last minute\n",
+                    i, opt.n, (double)i / ((double)(now - t0) / 1e9),
+                    (double)(i - last_i) / ((double)(now - last) / 1e9));
             last = now;
+            last_i = i;
         }
     }
     double insert_s = (double)(now_ns() - t0) / 1e9;

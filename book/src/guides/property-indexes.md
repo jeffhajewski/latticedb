@@ -349,10 +349,12 @@ Some things worth knowing before you add one:
 
 ## Indexes and older releases
 
-Creating a property index with this release marks the file as needing format 4
-to open, so LatticeDB 0.16.0 refuses it rather than misreading the index; a
-file without one stays readable by 0.16.0. Dropping the index does not undo
-the mark.
+Creating a property index with this release raises the file's minimum reader
+version to 4, so LatticeDB 0.16.0 refuses it rather than misreading the index.
+Dropping the index does not undo the mark. A file without one is not kept out
+by its indexes, though with the changefeed on, as it is by default, the first
+commit keeps 0.16.0 out anyway; see
+[Opening with 0.16.0](./changefeed.md#opening-with-0160).
 
 An index that 0.16.0 created keeps working for equality, but is not used for
 ranges, prefixes or sorting until it is rebuilt. `lattice info` lists each

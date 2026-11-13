@@ -92,6 +92,12 @@ only with `full_fsync` on. Both are open options in every API, and the
 program does not set them. A transaction is never applied in part, after a crash or
 a power cut. See [Durability and the Log](../configuration/durability.md#what-survives-what).
 
+A database opened without the log (`enable_wal = false`) has the same
+transactions: they commit and roll back, and a writing query is all or nothing.
+What changes is durability: a commit survives a crash only once a flush has
+written it to the file. See
+[Running without the log](../configuration/durability.md#running-without-the-log).
+
 ## Concurrency
 
 - Readers never block writers

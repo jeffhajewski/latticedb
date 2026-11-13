@@ -110,11 +110,15 @@ MATCH (me:Person {name: "Alice"})-[:FOLLOWS]->(topic:Topic)<-[:FOLLOWS]-(other:P
 RETURN other.name, collect(topic.name) AS shared_interests
 ```
 
-A variable can be bound only once in a query — naming `me` again in a second
-`MATCH` or a second comma-separated pattern is rejected — so "friends of Alice who
-also share her interests" cannot be written as one query yet. Run the query above and intersect it with the result
-of `MATCH (me:Person {name: "Alice"})-[:KNOWS]->(friend:Person) RETURN id(friend)`
-in your application.
+Naming a variable again, in a second comma-separated pattern or a later `MATCH`,
+means the same node, so "friends of Alice who also share her interests" is one
+query:
+
+```cypher
+MATCH (me:Person {name: "Alice"})-[:KNOWS]->(friend:Person),
+      (me)-[:FOLLOWS]->(topic:Topic)<-[:FOLLOWS]-(friend)
+RETURN friend.name, collect(topic.name) AS shared_interests
+```
 
 ## Modeling Tips
 

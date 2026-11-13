@@ -41,7 +41,7 @@ need no vector options: `Database("mydb.db")` opens the index as it was created,
 also after a crash. An option you do pass must match the file, or the open fails
 with a configuration-mismatch error (`LatticeConfigMismatchError` in Python). The
 TypeScript options are `vectorMetric`, `vectorM` and `vectorEfConstruction`; the
-CLI's are `lattice create --vector-metric=cosine|euclidean|dot --vector-m=<n>
+CLI's are `lattice create --vector-metric=cosine|euclidean|dot_product --vector-m=<n>
 --vector-ef-construction=<n>`.
 
 The metric decides what a distance means, and smaller is always nearer: cosine

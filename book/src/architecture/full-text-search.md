@@ -314,9 +314,8 @@ When a posting list exceeds one page, it chains to overflow pages:
 
 An append goes to the list's last page, found from the dictionary entry's
 `tail_page`, so it costs a page or two however long the list is. Until 0.17.0
-an append walked the list from its head: indexing 100,000 documents that share
-one word took 20 µs per document, against 10 µs now, and a single append to a
-100,000-entry list 650 ns against 17 ns.
+an append walked the list from its head, so a word shared by many documents made
+each new document cost time in proportion to that word's list.
 
 Removing a document's entry rewrites the page it was on. If that page and the
 next together fit in one page and encode positions alike, the next page's
@@ -870,7 +869,7 @@ what one document costs whenever it is indexed.
 ### Indexing one document
 
 <img class="diagram" src="../assets/diagrams/fts-index-document.svg"
-     alt="Indexing document 42 with the text The quick database optimization guide: tokenize with the index's recorded analysis, recording it first if the index is empty, giving quick, database, optimization and guide; normalise and count term frequencies; for each term get or create a dictionary entry, allocate a posting page if needed, append to the first posting page with room and increment doc_freq; store the document length of 4 and update and save the corpus totals; then record the document's terms in the reverse index, skipped when they exceed 32 KiB; it returns 4 tokens indexed">
+     alt="Indexing document 42 with the text The quick database optimization guide: tokenize with the index's recorded analysis, recording it first if the index is empty, giving quick, database, optimization and guide; normalise and count term frequencies; for each term get its dictionary entry or create its posting list, append the document's entry, with its frequency and positions, to the list's last page, found through tail_page, adding a page when that one is full, and increment doc_freq; store the document length of 4 and update and save the corpus totals; then record the document's terms in the reverse index, skipped when they exceed 32 KiB; it returns 4 tokens indexed">
 
 ---
 

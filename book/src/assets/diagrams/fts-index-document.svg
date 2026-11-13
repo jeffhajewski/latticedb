@@ -1,57 +1,60 @@
-<svg width="467" height="759"
- viewBox="0.00 0.00 350.00 569.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
-<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 564.82)">
+<svg width="467" height="812"
+ viewBox="0.00 0.00 350.00 609.00" xmlns="http://www.w3.org/2000/svg" xmlns:xlink="http://www.w3.org/1999/xlink">
+<g id="graph0" class="graph" transform="scale(1 1) rotate(0) translate(4 605.32)">
 <title>fts_index_document</title>
 <!-- in -->
 <g id="node1" class="node">
 <title>in</title>
-<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M330.18,-560.82C330.18,-560.82 12,-560.82 12,-560.82 6,-560.82 0,-554.82 0,-548.82 0,-548.82 0,-527.1 0,-527.1 0,-521.1 6,-515.1 12,-515.1 12,-515.1 330.18,-515.1 330.18,-515.1 336.18,-515.1 342.18,-521.1 342.18,-527.1 342.18,-527.1 342.18,-548.82 342.18,-548.82 342.18,-554.82 336.18,-560.82 330.18,-560.82"/>
-<text xml:space="preserve" text-anchor="start" x="15.84" y="-541.01" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">doc_id = 42</text>
-<text xml:space="preserve" text-anchor="start" x="15.84" y="-527.51" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">text = &quot;The quick database optimization guide&quot;</text>
+<path fill="#f6f8fa" stroke="#c7d0da" stroke-width="1.2" d="M330.18,-601.32C330.18,-601.32 12,-601.32 12,-601.32 6,-601.32 0,-595.32 0,-589.32 0,-589.32 0,-567.6 0,-567.6 0,-561.6 6,-555.6 12,-555.6 12,-555.6 330.18,-555.6 330.18,-555.6 336.18,-555.6 342.18,-561.6 342.18,-567.6 342.18,-567.6 342.18,-589.32 342.18,-589.32 342.18,-595.32 336.18,-601.32 330.18,-601.32"/>
+<text xml:space="preserve" text-anchor="start" x="15.84" y="-581.51" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">doc_id = 42</text>
+<text xml:space="preserve" text-anchor="start" x="15.84" y="-568.01" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">text = &quot;The quick database optimization guide&quot;</text>
 </g>
 <!-- s1 -->
 <g id="node2" class="node">
 <title>s1</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M330.18,-489.1C330.18,-489.1 12,-489.1 12,-489.1 6,-489.1 0,-483.1 0,-477.1 0,-477.1 0,-441.88 0,-441.88 0,-435.88 6,-429.88 12,-429.88 12,-429.88 330.18,-429.88 330.18,-429.88 336.18,-429.88 342.18,-435.88 342.18,-441.88 342.18,-441.88 342.18,-477.1 342.18,-477.1 342.18,-483.1 336.18,-489.1 330.18,-489.1"/>
-<text xml:space="preserve" text-anchor="start" x="15.84" y="-469.29" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">1. Tokenize with the index&#39;s recorded analysis</text>
-<text xml:space="preserve" text-anchor="start" x="15.84" y="-455.79" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;(record it first if the index is empty)</text>
-<text xml:space="preserve" text-anchor="start" x="15.84" y="-442.29" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;→ [quick, database, optimization, guide]</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M330.18,-529.6C330.18,-529.6 12,-529.6 12,-529.6 6,-529.6 0,-523.6 0,-517.6 0,-517.6 0,-482.38 0,-482.38 0,-476.38 6,-470.38 12,-470.38 12,-470.38 330.18,-470.38 330.18,-470.38 336.18,-470.38 342.18,-476.38 342.18,-482.38 342.18,-482.38 342.18,-517.6 342.18,-517.6 342.18,-523.6 336.18,-529.6 330.18,-529.6"/>
+<text xml:space="preserve" text-anchor="start" x="15.84" y="-509.79" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">1. Tokenize with the index&#39;s recorded analysis</text>
+<text xml:space="preserve" text-anchor="start" x="15.84" y="-496.29" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;(record it first if the index is empty)</text>
+<text xml:space="preserve" text-anchor="start" x="15.84" y="-482.79" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;→ [quick, database, optimization, guide]</text>
 </g>
 <!-- in&#45;&gt;s1 -->
 <g id="edge1" class="edge">
 <title>in&#45;&gt;s1</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M171.09,-514.84C171.09,-509.57 171.09,-503.79 171.09,-498.03"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="173.54,-498.34 171.09,-491.34 168.64,-498.34 173.54,-498.34"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M171.09,-555.34C171.09,-550.07 171.09,-544.29 171.09,-538.53"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="173.54,-538.84 171.09,-531.84 168.64,-538.84 173.54,-538.84"/>
 </g>
 <!-- s2 -->
 <g id="node3" class="node">
 <title>s2</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M296.43,-403.88C296.43,-403.88 45.75,-403.88 45.75,-403.88 39.75,-403.88 33.75,-397.88 33.75,-391.88 33.75,-391.88 33.75,-356.66 33.75,-356.66 33.75,-350.66 39.75,-344.66 45.75,-344.66 45.75,-344.66 296.43,-344.66 296.43,-344.66 302.43,-344.66 308.43,-350.66 308.43,-356.66 308.43,-356.66 308.43,-391.88 308.43,-391.88 308.43,-397.88 302.43,-403.88 296.43,-403.88"/>
-<text xml:space="preserve" text-anchor="start" x="49.59" y="-384.07" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">2. Normalise, count term frequencies</text>
-<text xml:space="preserve" text-anchor="start" x="49.59" y="-370.57" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;quick 1 · database 1</text>
-<text xml:space="preserve" text-anchor="start" x="49.59" y="-357.07" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;optimization 1 · guide 1</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M296.43,-444.38C296.43,-444.38 45.75,-444.38 45.75,-444.38 39.75,-444.38 33.75,-438.38 33.75,-432.38 33.75,-432.38 33.75,-397.16 33.75,-397.16 33.75,-391.16 39.75,-385.16 45.75,-385.16 45.75,-385.16 296.43,-385.16 296.43,-385.16 302.43,-385.16 308.43,-391.16 308.43,-397.16 308.43,-397.16 308.43,-432.38 308.43,-432.38 308.43,-438.38 302.43,-444.38 296.43,-444.38"/>
+<text xml:space="preserve" text-anchor="start" x="49.59" y="-424.57" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">2. Normalise, count term frequencies</text>
+<text xml:space="preserve" text-anchor="start" x="49.59" y="-411.07" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;quick 1 · database 1</text>
+<text xml:space="preserve" text-anchor="start" x="49.59" y="-397.57" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;optimization 1 · guide 1</text>
 </g>
 <!-- s1&#45;&gt;s2 -->
 <g id="edge2" class="edge">
 <title>s1&#45;&gt;s2</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M171.09,-429.38C171.09,-424.03 171.09,-418.38 171.09,-412.82"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="173.54,-412.88 171.09,-405.88 168.64,-412.88 173.54,-412.88"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M171.09,-469.88C171.09,-464.53 171.09,-458.88 171.09,-453.32"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="173.54,-453.38 171.09,-446.38 168.64,-453.38 173.54,-453.38"/>
 </g>
 <!-- s3 -->
 <g id="node4" class="node">
 <title>s3</title>
-<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M309.93,-318.66C309.93,-318.66 32.25,-318.66 32.25,-318.66 26.25,-318.66 20.25,-312.66 20.25,-306.66 20.25,-306.66 20.25,-244.44 20.25,-244.44 20.25,-238.44 26.25,-232.44 32.25,-232.44 32.25,-232.44 309.93,-232.44 309.93,-232.44 315.93,-232.44 321.93,-238.44 321.93,-244.44 321.93,-244.44 321.93,-306.66 321.93,-306.66 321.93,-312.66 315.93,-318.66 309.93,-318.66"/>
-<text xml:space="preserve" text-anchor="start" x="36.09" y="-298.85" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">3. For each term</text>
-<text xml:space="preserve" text-anchor="start" x="36.09" y="-285.35" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;a. getOrCreate in dictionary</text>
-<text xml:space="preserve" text-anchor="start" x="36.09" y="-271.85" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;b. allocate posting page if needed</text>
-<text xml:space="preserve" text-anchor="start" x="36.09" y="-258.35" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;c. append to the first page with room</text>
-<text xml:space="preserve" text-anchor="start" x="36.09" y="-244.85" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;d. increment doc_freq</text>
+<path fill="#eef4fb" stroke="#4a90d9" stroke-width="1.2" d="M293.06,-359.16C293.06,-359.16 49.12,-359.16 49.12,-359.16 43.12,-359.16 37.12,-353.16 37.12,-347.16 37.12,-347.16 37.12,-244.44 37.12,-244.44 37.12,-238.44 43.12,-232.44 49.12,-232.44 49.12,-232.44 293.06,-232.44 293.06,-232.44 299.06,-232.44 305.06,-238.44 305.06,-244.44 305.06,-244.44 305.06,-347.16 305.06,-347.16 305.06,-353.16 299.06,-359.16 293.06,-359.16"/>
+<text xml:space="preserve" text-anchor="start" x="52.97" y="-339.35" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a">3. For each term</text>
+<text xml:space="preserve" text-anchor="start" x="52.97" y="-325.85" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;a. get the dictionary entry,</text>
+<text xml:space="preserve" text-anchor="start" x="52.97" y="-312.35" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;&#160;&#160;&#160;or create the term&#39;s list</text>
+<text xml:space="preserve" text-anchor="start" x="52.97" y="-298.85" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;b. append (doc, freq, positions)</text>
+<text xml:space="preserve" text-anchor="start" x="52.97" y="-285.35" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;&#160;&#160;&#160;to the list&#39;s last page,</text>
+<text xml:space="preserve" text-anchor="start" x="52.97" y="-271.85" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;&#160;&#160;&#160;found through tail_page</text>
+<text xml:space="preserve" text-anchor="start" x="52.97" y="-258.35" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;c. a new page if it is full</text>
+<text xml:space="preserve" text-anchor="start" x="52.97" y="-244.85" font-family="Menlo,Consolas,monospace" font-size="11.00" fill="#1a1a1a"> &#160;&#160;d. increment doc_freq</text>
 </g>
 <!-- s2&#45;&gt;s3 -->
 <g id="edge3" class="edge">
 <title>s2&#45;&gt;s3</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M171.09,-344.25C171.09,-338.94 171.09,-333.26 171.09,-327.53"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="173.54,-327.8 171.09,-320.8 168.64,-327.8 173.54,-327.8"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M171.09,-384.86C171.09,-379.67 171.09,-374.07 171.09,-368.29"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="173.54,-368.39 171.09,-361.39 168.64,-368.39 173.54,-368.39"/>
 </g>
 <!-- s4 -->
 <g id="node5" class="node">
@@ -64,8 +67,8 @@
 <!-- s3&#45;&gt;s4 -->
 <g id="edge4" class="edge">
 <title>s3&#45;&gt;s4</title>
-<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M171.09,-231.85C171.09,-226.33 171.09,-220.72 171.09,-215.3"/>
-<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="173.54,-215.65 171.09,-208.65 168.64,-215.65 173.54,-215.65"/>
+<path fill="none" stroke="#6b7280" stroke-width="1.1" d="M171.09,-231.86C171.09,-226.25 171.09,-220.7 171.09,-215.4"/>
+<polygon fill="#6b7280" stroke="#6b7280" stroke-width="1.1" points="173.54,-215.44 171.09,-208.44 168.64,-215.44 173.54,-215.44"/>
 </g>
 <!-- s5 -->
 <g id="node6" class="node">

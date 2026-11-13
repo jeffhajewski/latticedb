@@ -30,8 +30,9 @@ in characters, and integers and floats compare exactly. These and the other
 behaviour changes are listed under *Breaking changes*, among them integer
 overflow as an error, a 1012-byte key cap, opaque C API handles, JSON export
 format version 2, Unicode full-text tokenization and stricter `set_vector` keys.
-The file format is version 4 and the log format version 3; *Upgrade notes* says
-exactly what 0.16.0 can still open.
+The file format is version 4 and the log format version 3. 0.16.0 does not open
+a file once this release has written to it with the changefeed on, as it is by
+default; *Upgrade notes* says exactly what 0.16.0 can still open.
 
 Much more of Cypher runs: `OPTIONAL MATCH`, `UNION`, `CASE`, `CALL { }`
 subqueries, `FOREACH`, named paths, `shortestPath`, list indexing and slicing,
@@ -41,7 +42,18 @@ map projection, label expressions and `RETURN *`, among others listed under
 
 Property indexes keep their values in order, so the planner reads ranges,
 `STARTS WITH` prefixes and `ORDER BY ... LIMIT` in either direction from them,
-not only equalities; a file with such an index needs this release to open.
+not only equalities, on relationships as on nodes; a file with such an index
+needs this release to open. `WHERE id(n) = k` reads that node instead of
+scanning.
+
+Full-text search has one query language on every path (`OR`, exclusions,
+phrases, prefixes and fuzzy words), splits words by Unicode, stores word
+positions for phrases, and gives back the pages it no longer needs. A vector
+search under a label searches among that label's nodes.
+
+A database opened without a log has transactions: they commit and roll back as
+with a log, and a failed query changes nothing. What it gives up is durability
+between flushes.
 
 `lattice import` and `lattice export` read and write RDF in Turtle and
 N-Triples, so vocabularies and data sets kept as RDF can be queried with Cypher,
@@ -50,6 +62,7 @@ full-text and vector search, and written back out.
 Database files are much smaller: the built-in changefeed, which made up over 90%
 of a typical file, is stored about twelve times more compactly, and a retention
 policy can bound it or turn it off. Keeping every event is still the default.
+A transaction's events now come in a fixed order that a consumer can replay.
 
 ## Durability
 
@@ -186,6 +199,20 @@ Python, `syncMode` and `fullFsync` in TypeScript and Java, `SyncMode` and
 `FullFsync` in Go, and fields of `lattice_open_options_v5` in C. The
 `LATTICE_SYNC_MODE` and `LATTICE_FULL_FSYNC` environment variables apply when a
 program does not set them, and are how the CLI sets them.
+
+**A database without a log has transactions.** A database opened with
+`enable_wal = false` had no transaction manager. Through the C API and every
+binding a read-write transaction was refused (`LATTICE_ERROR_UNSUPPORTED`), so
+such a database could not be written at all, streams included; through Zig, a
+writing query ran straight against the trees, and one that failed part way kept
+what it had done. Transactions now begin, commit and roll back as with a log,
+one writer at a time, readers keep their snapshot, a writing query is all or
+nothing, and indexes, streams and the changefeed are updated at commit. Nothing
+is logged, so a commit reaches the file at the next flush (`sync()`, close, or
+the end of a commit once half the page cache holds changes); after a crash or a
+power cut the file holds the transactions up to some point at or after the last
+`sync()` or close that returned, never part of one. The changefeed's retention runs at those flushes. The book's
+*Durability and the Log* page has the details and a bulk-loading recipe.
 
 **Other recovery fixes.**
 
@@ -518,12 +545,26 @@ the GQL-only clauses. `book/src/cypher/overview.md` lists them.
 
 ### Storage, API and formats
 
-- **Creating a property index makes the file unreadable by 0.16.0.** Indexes now
-  keep values in an order-preserving encoding that 0.16.0 would misread, so
-  declaring one raises the header's minimum reader version to 4 and 0.16.0
-  refuses the file (with an I/O error). A file without one stays readable by
-  0.16.0, and indexes created by 0.16.0 keep working for equality; see
-  *Upgrade notes*.
+- **0.16.0 does not open a file this release has written to**, with the
+  changefeed on, as it is by default. The first commit that records a
+  changefeed event raises the header's minimum reader version to 4, since
+  0.16.0 would misread the new events, and 0.16.0 then refuses the file with an
+  I/O error. Creating a property index (its values are kept in an
+  order-preserving encoding 0.16.0 would misread), a vector index whose metric
+  is not cosine or whose `m` is not 16, and a full-text index that stores word
+  positions do the same, with the changefeed on or off. Indexes created by
+  0.16.0 keep working for equality. *Upgrade notes* says what 0.16.0 can still
+  open and how to go back.
+- **A database without a log has read-write transactions** (see *Durability*).
+  With `enable_wal` off, `lattice_begin` of a read-write transaction returns
+  `LATTICE_OK` where it returned `LATTICE_ERROR_UNSUPPORTED`, so the bindings'
+  write transactions, writing queries and stream publishing work; a stream
+  write on a read transaction is `LATTICE_ERROR_READ_ONLY` instead of
+  `LATTICE_ERROR_UNSUPPORTED`; and a writing query records changefeed events.
+- **Changefeed events within a transaction come in a fixed order**: deleted
+  edges, then the nodes and edges that exist after it, then deleted nodes, each
+  by ascending id (see *The changefeed*). They came nodes first, then edges, in
+  an order that depended on a hash map. What each event says is unchanged.
 - **Deleting a node that has relationships is refused in every API.**
   `lattice_node_delete`, and so `delete_node` in Python, `deleteNode` in
   TypeScript and Java and `DeleteNode` in Go, removed the node and left its
@@ -635,7 +676,6 @@ the GQL-only clauses. `book/src/cypher/overview.md` lists them.
   library rather than looking for the function. Python and TypeScript fall back
   to the older open functions, and raise their Unsupported error if one of the
   new options is set against an older library.
-
 - **Keys are capped at 1012 bytes** (for 4 KB pages). Labels, relationship types
   and property names are stored as keys, so a name of more than about a thousand
   bytes is refused with a storage error. A long name used to be able to overflow
@@ -1044,10 +1084,15 @@ with relationships is one range probe, under 1 µs.
 - `--vector-dims`, `--vector-metric`, `--vector-m` and `--vector-ef-construction`
   without `--enable-vector` are refused; `create` made a database with no vector
   index. `--interval` without `--follow` is refused; `replicate` ran once.
-- `info` shows a vector index's dimensions, metric, `m` and `ef_construction`.
-- `info` and `check` show the file's minimum reader version and, when it keeps
-  0.16.0 out, why: `Min reader: v4, so 0.16.0 cannot open it (changefeed
-  events)`; `min_reader_version` and `min_reader_reasons` in JSON and CSV.
+- `info` shows a vector index's dimensions, metric, `m` and `ef_construction`,
+  the file's minimum reader version and, when it keeps 0.16.0 out, why
+  (`Min reader: v4, so 0.16.0 cannot open it (changefeed events)`; the reasons
+  are changefeed events, ordered property index, vector index settings and
+  full-text positions), and each property index with its encoding
+  (`Index: :Person(age)  ordered_dense`), in table, JSON
+  (`vector_metric`, `min_reader_version`, `min_reader_reasons`,
+  `property_indexes`, ...) and CSV. `check` shows the minimum reader version
+  too.
 - JSON exports and dumps record the vector index's metric, `m` and
   `ef_construction` beside its dimensions (`vector_metric`, `vector_m`,
   `vector_ef_construction`; 0.16.0 skips them), and an import with
@@ -1207,24 +1252,32 @@ with relationships is one range probe, under 1 µs.
   equality as before; they are not used for ranges, prefixes or sorting until
   rebuilt. `lattice info` lists every index with its encoding (`digest` is
   0.16.0's), as does the `encoding` column of `CALL db.indexes()`, and
-  `lattice compact --upgrade-indexes` rebuilds the old ones in place. Creating
-  or rebuilding an index with this release raises the header's minimum reader
-  version to 4, so 0.16.0 refuses that file from then on, also after the index
-  is dropped. Files without one are unaffected.
-- **0.16.0 no longer opens a file once this release has written to it with the
-  changefeed on**, which it is by default. The first commit that changes the
-  graph records changefeed events in a format 0.16.0 would misread, so that
-  commit first raises the file's minimum reader version to 4. The same happens
-  when a file gets a vector index whose metric is Euclidean or dot product or
-  whose `m` is not 16 or an ordered property index, and when a full-text
-  index that stores word positions takes its first document. 0.16.0 then
-  refuses the file and leaves it byte for byte as it was: its C API returns
-  `LATTICE_ERROR_IO` (-2, "I/O error"), its Python binding raises
+  `lattice compact --upgrade-indexes` rebuilds the old ones in place. An index
+  this release creates or rebuilds keeps 0.16.0 out of the file (next item).
+- **Opening a file this release wrote with 0.16.0.** 0.16.0 refuses a file whose
+  header asks for reader version 4. This release raises it, durably and for
+  good, the first time the file gets any of the following (the name `lattice
+  info` and `lattice check` give the reason is in brackets):
+  - a changefeed event (*changefeed events*). With the changefeed on, as it is
+    by default, that is the first commit that changes the graph, which raises
+    the version before its events are logged or written. 0.16.0 would open the
+    file and misread the new events: its `changes()` skips them without an
+    error, and its trim leaves them in place;
+  - an ordered property index, created or rebuilt by this release, also after
+    the index is dropped (*ordered property index*);
+  - a vector index whose metric is Euclidean or dot product or whose `m` is
+    not 16 (*vector index settings*);
+  - a document in a full-text index this release created (*full-text
+    positions*). Such an index stores word positions, and 0.16.0 would damage
+    it by appending entries without them.
+
+  0.16.0 then refuses the file and leaves it byte for byte as it was: its C API
+  returns `LATTICE_ERROR_IO` (-2, "I/O error"), its Python binding raises
   `LatticeIOError: I/O error`, and its CLI says "Failed to open database:
   IoError" (`check`: "Invalid database file"). Nothing lowers the version
-  again, also not a retention policy that later drops every event.
-  `lattice info` and `lattice check` show it and what raised it ("Min reader:
-  v4, so 0.16.0 cannot open it (changefeed events)").
+  again, also not a retention policy that later drops every event. `lattice
+  info` and `lattice check` show it and why ("Min reader: v4, so 0.16.0 cannot
+  open it (changefeed events)").
   - **If going back to 0.16.0 is a possibility, back the file up before this
     release first writes to it** (copy it after a clean close, or `lattice
     backup` with 0.16.0). The way back from a written file is a JSON export
@@ -1235,10 +1288,10 @@ with relationships is one range probe, under 1 µs.
     format 4 but the minimum reader stays 3), and a file whose changefeed is
     `off` (`lattice create --changefeed=off`, or `changefeed_retention="off"`
     and its equivalents when the file is created) that has none of the other
-    features above. `off` costs the changefeed: no events are recorded,
-    reading it is an error, and a consumer cannot follow the graph's changes.
-    Turning it off on a file that already holds events does not make the file
-    readable by 0.16.0 again.
+    three. `off` costs the changefeed: no events are recorded, reading it is an
+    error, and a consumer cannot follow the graph's changes. Turning it off on a
+    file that already holds events does not make the file readable by 0.16.0
+    again.
   - On such a file 0.16.0 opens and writes as before. It writes zeros over the
     format-4 fields, and this release derives them again at its next open, as
     for a 0.16.0 file. It does not know the minimum writer version: it writes
@@ -1247,8 +1300,11 @@ with relationships is one range probe, under 1 µs.
     the flag at its next read-write open, since 0.16.0 extends a file with
     pages it does not seal. It records changefeed events whatever the policy,
     in its own format; this release drops them by the policy at its next
-    read-write session. A file a newer release wrote is refused by 0.16.0 as
-    an I/O error and by this release as -11.
+    read-write session. Full-text indexes 0.16.0 built, or that this release
+    has only declared, keep working in it, but it splits non-ASCII words the
+    old way and will not find words with non-ASCII letters indexed by this
+    release. A file a newer release wrote is refused by 0.16.0 as an I/O
+    error and by this release as -11.
 - **The log.** A log that holds frames is format version 3, which 0.16.0 refuses
   to open. A clean close or a truncating checkpoint leaves an empty log, written
   as version 2, which 0.16.0 opens. So close a database cleanly with this
@@ -1256,33 +1312,24 @@ with relationships is one range probe, under 1 µs.
   release first. 0.16.0 does not know about the journal either, so after a crash
   it would ignore an unfinished flush. This release opens and replays logs
   0.16.0 wrote.
+- **Changefeed events 0.16.0 wrote.** A file 0.16.0 created and this release
+  later wrote to holds events in both formats. This release reads them in
+  order, its own continuing 0.16.0's sequence numbers. The old events stay in
+  the old format until the retention policy drops them; nothing rewrites them,
+  and `lattice compact` does not convert them. `lattice changefeed <db>` counts
+  them. To shed them while keeping the graph, export it and import it into a
+  new database.
 - Code that deletes nodes through `lattice_node_delete` or a binding's delete
   now gets -17 for a node with relationships, and must delete them first or use
   the detach variant.
 - A program that relied on `LATTICE_SYNC_MODE` or `LATTICE_FULL_FSYNC` to
   override what it set in code now gets what it set.
-- **Changefeed events written by 0.16.0 stay in the old format** until the
-  retention policy drops them; nothing rewrites them, and `lattice compact`
-  does not convert them. They are read alongside new events, in order.
-  `lattice changefeed <db>` counts them. To shed them while keeping the graph,
-  export it and import it into a new database.
-- **A changefeed holding both formats** arises on a file 0.16.0 created and
-  this release later wrote to. This release reads it in order, the new events
-  continuing 0.16.0's sequence numbers; 0.16.0 can no longer open the file.
 - Check application code against the Cypher changes above, in particular plain
   `DELETE` of nodes that may have relationships, code that reads results by
-  the name of an unaliased column, code that expects `sum` of integers to be a
-  float, and `MERGE` patterns without a label or with several labels.
-- **Full-text indexes and 0.16.0.** With the changefeed on, 0.16.0 does not
-  open a file this release has written to at all (see above). With it off, a
-  file whose full-text indexes 0.16.0 built, or that this release has only
-  declared, still opens in 0.16.0, which splits non-ASCII words the old way and
-  will not find words with non-ASCII letters indexed by this release. Once a
-  full-text index this release fills holds a document, it stores word
-  positions, and 0.16.0 would damage it by appending entries without them; the
-  file then asks for this release or later whatever the changefeed setting, and
-  0.16.0 refuses to open it with an I/O error (`lattice info`: "Min reader: v4,
-  so 0.16.0 cannot open it (full-text positions)").
+  the name of an unaliased column or reads columns from a query without
+  `RETURN`, code that expects `sum` of integers to be a float, integer
+  literals with a leading zero, and `MERGE` patterns without a label or with
+  several labels.
 
 ## Upgrading
 

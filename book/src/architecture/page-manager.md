@@ -274,7 +274,8 @@ the new end of the file.
 
 Every page except the header page carries a CRC32C (Castagnoli) checksum in bytes
 4–7 of its page header. It covers bytes 8 to the end of the page — everything after
-the page header — so the page type and flags in bytes 0–1 are not covered.
+the page header — so the whole header is outside it: the page type and flags in
+bytes 0–1, the reserved bytes 2–3, and the checksum itself.
 
 ### Why Checksums?
 
@@ -540,7 +541,8 @@ The freelist uses the free pages themselves for storage. No external data struct
 
 The checksum doesn't cover itself (circular dependency). It sits in bytes 4–7 and
 covers bytes 8 onward, the whole page after its 8-byte header, in one pass. The
-price of that choice is that the page type and flags in bytes 0–1 are unprotected.
+price of that choice is that the rest of the header is unprotected too: the page
+type and flags in bytes 0–1 and the reserved bytes 2–3.
 
 ### No Internal Fragmentation Tracking
 

@@ -217,45 +217,61 @@ Edge Types:
 Total: 1 label(s), 1 edge type(s)
 ```
 
-`info` describes the file rather than its contents — size, counts, and which features
-it was built with:
+`info` describes the file rather than its contents — size, counts, which features
+it was built with, and which releases can open it. Here for a database
+with a vector index and two [property indexes](../guides/property-indexes.md):
 
 ```bash
-lattice info social.lattice
+lattice info people.lattice
 ```
 
 ```text
-Database: social.lattice
+Database: people.lattice
 ─────────────────────────────
-Size:         64 KB
+Size:         68 KB
 Nodes:        2
 Edges:        1
 Format:       v4
-Min reader:   v4, so 0.16.0 cannot open it (changefeed events)
-Vector:       disabled
+Min reader:   v4, so 0.16.0 cannot open it (ordered property index, changefeed events)
+Vector:       enabled
+  Dimensions: 384
+  Metric:     cosine
+  M:          16
+  ef_construction: 200
 FTS:          enabled
-Changefeed:   keep all, events 1..7
-```
-
-The last line is the [changefeed](../guides/changefeed.md): the record of every
-change, which the database keeps by default. Here the two people and the edge
-between them took seven events. A database with
-[property indexes](../guides/property-indexes.md) lists each on a line of its
-own, with how its keys are encoded:
-
-```text
+Changefeed:   keep all, events 1..10
 Index:        :Person(age)  ordered_dense
 Index:        [:KNOWS](since)  ordered
 ```
 
-An index created by LatticeDB 0.16.0 shows `digest`: it answers equality only
-until `compact --upgrade-indexes` rebuilds it.
-
 `Min reader` is the oldest LatticeDB that can open the file, and, when 0.16.0
-cannot, what keeps it out. Storing changefeed events is the usual reason; a
-file created with `--changefeed=off` and only read by this release says `v3`
+cannot, what keeps it out: `changefeed events`, `ordered property index`,
+`vector index settings` (a metric other than cosine, or an `M` other than 16)
+or `full-text positions`. Storing changefeed events is the usual reason, since
+the database keeps them by default. A file that has none of these says `v3`
 and still opens in 0.16.0
 ([Opening with 0.16.0](../guides/changefeed.md#opening-with-0160)).
+
+`Vector` gives the index's settings, which are fixed when it is created.
+`Changefeed` is the [changefeed](../guides/changefeed.md): the record of every
+change, its retention policy and the events it holds. Here the two people and
+the edge between them, with their labels and properties, took ten events.
+
+Each `Index` line is a property index and how its keys are encoded. An index
+created by LatticeDB 0.16.0 shows `digest`: it answers equality only until
+`compact --upgrade-indexes` rebuilds it.
+
+`--format=json` gives the same as one object, with the reasons as a list and
+the indexes as objects:
+
+```text
+{"path":"people.lattice","size_kb":68,"nodes":2,"edges":1,"format_version":4,"vector_enabled":true,"min_reader_version":4,"min_reader_reasons":["ordered property index","changefeed events"],"vector_dimensions":384,"vector_metric":"cosine","vector_m":16,"vector_ef_construction":200,"fts_enabled":true,"changefeed_retention":"all","changefeed_oldest_sequence":1,"changefeed_last_sequence":10,"property_indexes":[{"entity":"node","scope":"Person","property":"age","encoding":"ordered_dense"},{"entity":"relationship","scope":"KNOWS","property":"since","encoding":"ordered"}]}
+```
+
+`--format=csv` gives `property,value` rows with the same names, the reasons
+joined by `;` (`min_reader_reasons,ordered property index;changefeed events`)
+and one `property_index` row per index (`property_index,:Person(age)
+ordered_dense`).
 
 ## Moving data in and out
 
@@ -831,11 +847,16 @@ write it. A command that writes stops on such a file and names the ones that
 still work:
 
 ```text
-Error: future.lattice was written by a newer LatticeDB that does not let this version write to it. info, count, labels, types, schema, export and dump still read it; use that newer version for anything else.
+Error: future.lattice was written by a newer LatticeDB that does not let this version write to it. info, count, labels, types, schema, export, dump, backup, query and exec (for statements that only read) still read it; use that newer version for anything else.
 ```
 
-`exec` and `query` open the database for writing, so they cannot run even a
-read-only query against such a file.
+`exec` opens the database read-only for a statement that cannot write, and
+`backup` always does, so both work on such a file; `query` opens it read-only
+with a notice. The commands that write, `import`, `compact`, `checkpoint` and an
+`exec` of a writing statement, are refused.
+
+A file whose header asks for a newer *reader* than this release is refused by
+every command, with a message saying a newer LatticeDB wrote it.
 
 ## Output formats
 
@@ -883,7 +904,7 @@ lattice count social.lattice --format=csv >> counts.csv
 | Command | What it does |
 |---------|--------------|
 | `create <path>` | Make a new database |
-| `info <path>` | Show file size, counts, and enabled features |
+| `info <path>` | Show file size, counts, features, indexes, and which releases can open it |
 | `compact <path>` | Give free pages at the end of the file back to the OS |
 | `checkpoint <path>` | Flush pending writes into the file and reset the log |
 | `changefeed <path>` | Show the changefeed, set how much of it to keep, trim it |
@@ -893,8 +914,8 @@ lattice count social.lattice --format=csv >> counts.csv
 | `check <path>` | Verify page checksums in the main file |
 | `query <path>` | Open an interactive Cypher shell |
 | `exec <path>` | Run one query and exit |
-| `import <path>` | Load data from JSON, JSONL, or CSV |
-| `export <path>` | Write data to JSON, JSONL, CSV, or DOT |
+| `import <path>` | Load data from JSON, JSONL, CSV, Turtle or N-Triples |
+| `export <path>` | Write data to JSON, JSONL, CSV, DOT, Turtle or N-Triples |
 | `dump <path>` | Print the whole database as canonical JSON |
 | `labels <path>` | List node labels and their counts |
 | `types <path>` | List edge types and their counts |

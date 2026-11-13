@@ -4841,18 +4841,15 @@ test "begin and rollback on a handle that failed report an I/O error" {
 }
 
 test "cache_size_mb wins over LATTICE_BUFFER_POOL_MB; 0 leaves it to the variable, else 100 MB" {
-    const env = struct {
-        extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-        extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-    };
+    const env = compat.env;
     const mib: usize = 1024 * 1024;
-    _ = env.setenv("LATTICE_BUFFER_POOL_MB", "3", 1);
-    defer _ = env.unsetenv("LATTICE_BUFFER_POOL_MB");
+    env.set("LATTICE_BUFFER_POOL_MB", "3");
+    defer env.unset("LATTICE_BUFFER_POOL_MB");
     const set = buildOpenOptionsV5(&.{ .cache_size_mb = 8 }) catch unreachable;
     try std.testing.expectEqual(8 * mib, set.config.effectiveBufferPoolSize());
     const unset = buildOpenOptionsV5(&.{ .cache_size_mb = 0 }) catch unreachable;
     try std.testing.expectEqual(3 * mib, unset.config.effectiveBufferPoolSize());
-    _ = env.unsetenv("LATTICE_BUFFER_POOL_MB");
+    env.unset("LATTICE_BUFFER_POOL_MB");
     const unset_no_env = buildOpenOptionsV5(&.{ .cache_size_mb = 0 }) catch unreachable;
     try std.testing.expectEqual(100 * mib, unset_no_env.config.effectiveBufferPoolSize());
 }

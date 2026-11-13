@@ -142,10 +142,7 @@ test "lfmt checkpoint: lattice_checkpoint refuses what it cannot do" {
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_set_auto_checkpoint(db, 0, 0));
 }
 
-const env = struct {
-    extern "c" fn setenv(name: [*:0]const u8, value: [*:0]const u8, overwrite: c_int) c_int;
-    extern "c" fn unsetenv(name: [*:0]const u8) c_int;
-};
+const env = @import("compat").env;
 
 test "lfmt checkpoint: LATTICE_AUTO_CHECKPOINT_FRAMES sets the default, and the setter wins" {
     const path = "/tmp/lfmt_ckpt_capi_env.db";
@@ -163,8 +160,8 @@ test "lfmt checkpoint: LATTICE_AUTO_CHECKPOINT_FRAMES sets the default, and the 
         try std.testing.expect(try walSize(path) > 90 * page);
     }
 
-    _ = env.setenv("LATTICE_AUTO_CHECKPOINT_FRAMES", "4", 1);
-    defer _ = env.unsetenv("LATTICE_AUTO_CHECKPOINT_FRAMES");
+    env.set("LATTICE_AUTO_CHECKPOINT_FRAMES", "4");
+    defer env.unset("LATTICE_AUTO_CHECKPOINT_FRAMES");
     var db: ?*lattice_database = null;
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
     defer _ = c_api.lattice_close(db);

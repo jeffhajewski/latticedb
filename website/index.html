@@ -249,6 +249,12 @@ pre .var { color: #9cdcfe; }
   color: #555;
   margin-top: 8px;
 }
+.stats-note {
+  margin-top: 20px;
+  text-align: center;
+  color: #666;
+  font-size: 14px;
+}
 
 /* Comparison */
 .comparison {
@@ -580,22 +586,26 @@ footer .footer-links {
     <h2>Built for speed</h2>
     <div class="stats-grid">
       <div class="stat-card">
-        <div class="stat-number">0.13<span class="stat-unit"> &micro;s</span></div>
-        <div class="stat-label">Node lookup</div>
+        <div class="stat-number">0.22<span class="stat-unit"> &micro;s</span></div>
+        <div class="stat-label">Property read by node id</div>
       </div>
       <div class="stat-card">
-        <div class="stat-number">0.83<span class="stat-unit"> ms</span></div>
-        <div class="stat-label">10-NN vector search @ 1M</div>
+        <div class="stat-number">8.8<span class="stat-unit"> &micro;s</span></div>
+        <div class="stat-label">2-hop Cypher traversal @ 100K nodes</div>
       </div>
       <div class="stat-card">
-        <div class="stat-number">39<span class="stat-unit"> &micro;s</span></div>
-        <div class="stat-label">2-hop traversal @ 100K nodes</div>
+        <div class="stat-number">122<span class="stat-unit"> &micro;s</span></div>
+        <div class="stat-label">10-NN vector search @ 100K, 98% recall</div>
       </div>
       <div class="stat-card">
-        <div class="stat-number">19<span class="stat-unit"> &micro;s</span></div>
-        <div class="stat-label">Full-text search (100 docs)</div>
+        <div class="stat-number">44<span class="stat-unit"> &micro;s</span></div>
+        <div class="stat-label">Durable commit, fsynced</div>
       </div>
     </div>
+    <p class="stats-note">
+      Medians for 0.17.0, measured through the public C API with the default settings on an
+      Apple M5. <a href="https://docs.latticedb.org/performance/benchmarks">Method, spreads and full tables</a>.
+    </p>
   </div>
 </section>
 
@@ -604,43 +614,31 @@ footer .footer-links {
   <div class="container">
     <h2>How it compares</h2>
 
-    <h3>Vector Search (10-NN, 1M vectors)</h3>
+    <h3>LatticeDB and SQLite, same machine, same durability</h3>
     <div class="table-wrapper">
       <table>
         <thead>
-          <tr><th>System</th><th>Latency</th><th>Recall</th><th>Type</th></tr>
+          <tr><th>Operation</th><th>LatticeDB</th><th>SQLite</th></tr>
         </thead>
         <tbody>
-          <tr class="highlight"><td>LatticeDB</td><td>0.83 ms</td><td>100%</td><td>Embedded</td></tr>
-          <tr><td>FAISS HNSW</td><td>0.5&ndash;3 ms</td><td>&mdash;</td><td>Library</td></tr>
-          <tr><td>Weaviate</td><td>1.4 ms</td><td>&mdash;</td><td>Server</td></tr>
-          <tr><td>Qdrant</td><td>~1&ndash;2 ms</td><td>&mdash;</td><td>Server</td></tr>
-          <tr><td>pgvector</td><td>~5 ms</td><td>99%</td><td>Extension</td></tr>
-          <tr><td>Chroma</td><td>4&ndash;5 ms</td><td>&mdash;</td><td>Embedded</td></tr>
-          <tr><td>Pinecone</td><td>~15 ms</td><td>&mdash;</td><td>Cloud</td></tr>
-        </tbody>
-      </table>
-    </div>
-
-    <h3>Graph Traversal (2-hop, 100K nodes)</h3>
-    <div class="table-wrapper">
-      <table>
-        <thead>
-          <tr><th>System</th><th>Latency</th><th>Type</th></tr>
-        </thead>
-        <tbody>
-          <tr class="highlight"><td>LatticeDB</td><td>39 &micro;s</td><td>Embedded</td></tr>
-          <tr><td>SQLite (recursive CTE)</td><td>548 &micro;s</td><td>Embedded</td></tr>
-          <tr><td>Kuzu <span class="note-inline">(archived 2025)</span></td><td>19 ms</td><td>Embedded</td></tr>
-          <tr><td>Neo4j</td><td>10 ms</td><td>Server</td></tr>
+          <tr><td>One-row durable commit</td><td>44 &micro;s</td><td>42 &micro;s</td></tr>
+          <tr><td>Inserts, 1,000 per transaction</td><td>332K nodes/s</td><td>1.84M rows/s</td></tr>
+          <tr><td>Lookup by an indexed property, 100K rows</td><td>2.3 &micro;s</td><td>3.0 &micro;s</td></tr>
+          <tr><td>2-hop count, 100K nodes</td><td>8.8 &micro;s</td><td>8.9 &micro;s</td></tr>
+          <tr><td>3-hop count, 100K nodes</td><td>21 &micro;s</td><td>29 &micro;s</td></tr>
+          <tr><td>Paths of 1 to 5 hops, 100K nodes</td><td>600 &micro;s</td><td>1,361 &micro;s</td></tr>
         </tbody>
       </table>
     </div>
 
     <p class="compare-note">
-      Only the SQLite row is measured head to head on the same machine; the rest are
-      published third-party figures. Full detail, and an honest account of what each
-      alternative does better, in the comparison guides:
+      Medians, each database through its own C API: LatticeDB 0.17.0 with its defaults,
+      SQLite 3.51.0 with WAL and <code>synchronous=FULL</code>, joins on indexed columns
+      and a recursive CTE for the last row. SQLite is level on short traversals and
+      several times faster at bulk inserts; LatticeDB is about twice as fast on long
+      paths. <a href="https://docs.latticedb.org/performance/benchmarks">How it was measured</a>.
+      Other systems' published figures are cited in the docs, apart from these
+      measurements, with an honest account of what each alternative does better:
     </p>
     <div class="compare-links">
       <a href="https://docs.latticedb.org/comparisons/vs-sqlite">vs SQLite</a>
@@ -670,7 +668,7 @@ footer .footer-links {
         <ul>
           <li>HNSW approximate nearest neighbor</li>
           <li>ef_search tunable per query</li>
-          <li>100% recall at 1M vectors</li>
+          <li>98% recall@10 at 100K vectors with the defaults</li>
           <li>Built-in hash embeddings or Ollama/OpenAI</li>
         </ul>
       </div>

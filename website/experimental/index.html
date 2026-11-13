@@ -834,18 +834,18 @@
           <div class="hero-notes">
             <article class="hero-note">
               <span class="micro">vector search</span>
-              <strong>0.83 ms</strong>
-              <p>1M vectors, 100% recall@10.</p>
+              <strong>122 μs</strong>
+              <p>10-NN at 100K vectors, 98% recall@10.</p>
             </article>
             <article class="hero-note">
               <span class="micro">graph traversal</span>
-              <strong>38.7 μs</strong>
-              <p>2-hop traversal at 100K nodes.</p>
+              <strong>8.8 μs</strong>
+              <p>2-hop Cypher traversal at 100K nodes.</p>
             </article>
             <article class="hero-note">
               <span class="micro">point lookup</span>
-              <strong>0.13 μs</strong>
-              <p>7.9M ops/sec.</p>
+              <strong>0.22 μs</strong>
+              <p>Property read by node id.</p>
             </article>
           </div>
         </div>
@@ -862,26 +862,28 @@
       <div class="section-head">
         <h2>Performance</h2>
         <p>
-          Benchmarks from the README, presented the same way a technical reader usually scans them:
-          headline metrics first, then focused comparisons by workload.
+          Medians for 0.17.0, measured through the public C API with the default settings (log on,
+          fsync on every commit, 100 MB cache) on an Apple M5. Headline figures first, then the same
+          workloads against SQLite on the same machine.
+          <a href="https://docs.latticedb.org/performance/benchmarks">Method, spreads and full tables</a>.
         </p>
       </div>
 
       <div class="three-lane">
         <article>
           <span class="micro">vector search</span>
-          <strong>0.83 ms</strong>
-          <p>10-NN at 1M vectors, 100% recall@10.</p>
+          <strong>122 μs</strong>
+          <p>10-NN at 100K vectors, 98% recall@10.</p>
         </article>
         <article>
           <span class="micro">graph traversal</span>
-          <strong>39 μs</strong>
-          <p>2-hop traversal at 100K nodes.</p>
+          <strong>8.8 μs</strong>
+          <p>2-hop Cypher traversal at 100K nodes.</p>
         </article>
         <article>
           <span class="micro">full-text search</span>
-          <strong>19 μs</strong>
-          <p>BM25 search; about 300x faster than SQLite FTS5 in the cited comparison.</p>
+          <strong>104 μs</strong>
+          <p>BM25 top 10, one word, 100K documents (8.5 μs at 10K).</p>
         </article>
       </div>
 
@@ -897,116 +899,90 @@
             </thead>
             <tbody>
               <tr>
-                <td>Node lookup</td>
-                <td><strong>0.13 μs</strong></td>
+                <td>Property read by node id</td>
+                <td><strong>0.22 μs</strong></td>
+              </tr>
+              <tr>
+                <td>Cypher lookup by an indexed property, 100K nodes</td>
+                <td><strong>2.3 μs</strong></td>
+              </tr>
+              <tr>
+                <td>Create a node, one durable commit</td>
+                <td><strong>44 μs</strong></td>
+              </tr>
+              <tr>
+                <td>Create nodes, 1,000 per transaction</td>
+                <td><strong>332,000 nodes/s</strong></td>
+              </tr>
+              <tr>
+                <td>10-NN vector search @ 100K vectors</td>
+                <td><strong>122 μs</strong>, 98.3% recall@10</td>
               </tr>
               <tr>
                 <td>10-NN vector search @ 1M vectors</td>
-                <td><strong>0.83 ms</strong>, 100% recall@10</td>
+                <td><strong>1.34 ms</strong> with the default cache, <strong>0.21 ms</strong> with 2 GB; 95.6% recall@10</td>
               </tr>
               <tr>
-                <td>Full-text search</td>
-                <td><strong>19 μs</strong>, about 300x faster than SQLite FTS5</td>
-              </tr>
-              <tr>
-                <td>Graph traversal vs SQLite</td>
-                <td><strong>14–2819x faster</strong>, depending on traversal depth</td>
-              </tr>
-              <tr>
-                <td>2-hop traversal, 100K nodes</td>
-                <td><strong>39 μs</strong></td>
+                <td>Full-text top 10, one word, 100K documents</td>
+                <td><strong>104 μs</strong></td>
               </tr>
             </tbody>
           </table>
         </article>
       </div>
 
-      <div class="split-layout">
-        <article class="rail-card">
-          <span class="micro">vector search comparison</span>
-          <table class="comparison-table compact-table">
-            <thead>
-              <tr>
-                <th>System</th>
-                <th>Latency</th>
-                <th>Recall</th>
-                <th>Type</th>
-              </tr>
-            </thead>
-            <tbody>
-              <tr>
-                <td><strong>LatticeDB</strong></td>
-                <td><strong>0.83 ms</strong></td>
-                <td><strong>100%</strong></td>
-                <td>Embedded</td>
-              </tr>
-              <tr>
-                <td>FAISS HNSW</td>
-                <td>0.5–3 ms</td>
-                <td>—</td>
-                <td>Library</td>
-              </tr>
-              <tr>
-                <td>Weaviate</td>
-                <td>1.4 ms</td>
-                <td>—</td>
-                <td>Server</td>
-              </tr>
-              <tr>
-                <td>Qdrant</td>
-                <td>~1–2 ms</td>
-                <td>—</td>
-                <td>Server</td>
-              </tr>
-              <tr>
-                <td>pgvector</td>
-                <td>~5 ms</td>
-                <td>99%</td>
-                <td>Extension</td>
-              </tr>
-              <tr>
-                <td>sqlite-vec</td>
-                <td>17 ms</td>
-                <td>—</td>
-                <td>Extension</td>
-              </tr>
-            </tbody>
-          </table>
-        </article>
-
+      <div class="comparison-block">
         <article class="rail-card" style="background: var(--panel);">
-          <span class="micro">graph traversal comparison</span>
+          <span class="micro">LatticeDB and SQLite, same machine, same durability</span>
           <table class="comparison-table compact-table">
             <thead>
               <tr>
-                <th>System</th>
-                <th>Latency</th>
-                <th>Type</th>
+                <th>Operation</th>
+                <th>LatticeDB</th>
+                <th>SQLite</th>
               </tr>
             </thead>
             <tbody>
               <tr>
-                <td><strong>LatticeDB</strong></td>
-                <td><strong>39 μs</strong></td>
-                <td>Embedded</td>
+                <td>One-row durable commit</td>
+                <td>44 μs</td>
+                <td>42 μs</td>
               </tr>
               <tr>
-                <td>SQLite recursive CTE</td>
-                <td>548 μs</td>
-                <td>Embedded</td>
+                <td>Inserts, 1,000 per transaction</td>
+                <td>332K nodes/s</td>
+                <td>1.84M rows/s</td>
               </tr>
               <tr>
-                <td>Neo4j</td>
-                <td>10 ms</td>
-                <td>Server</td>
+                <td>Lookup by an indexed property, 100K rows</td>
+                <td>2.3 μs</td>
+                <td>3.0 μs</td>
               </tr>
               <tr>
-                <td>Kuzu</td>
-                <td>19 ms</td>
-                <td>Embedded</td>
+                <td>2-hop count, 100K nodes</td>
+                <td>8.8 μs</td>
+                <td>8.9 μs</td>
+              </tr>
+              <tr>
+                <td>3-hop count, 100K nodes</td>
+                <td>21 μs</td>
+                <td>29 μs</td>
+              </tr>
+              <tr>
+                <td>Paths of 1 to 5 hops, 100K nodes</td>
+                <td>600 μs</td>
+                <td>1,361 μs</td>
               </tr>
             </tbody>
           </table>
+          <p>
+            Each database through its own C API: SQLite 3.51.0 with WAL and <code>synchronous=FULL</code>,
+            joins on indexed columns and a recursive CTE for the last row. SQLite is level on short
+            traversals and several times faster at bulk inserts; LatticeDB is about twice as fast on
+            long paths. Other systems' published figures are cited in the
+            <a href="https://docs.latticedb.org/performance/competitive-analysis">docs</a>, apart from
+            these measurements.
+          </p>
         </article>
       </div>
     </section>
@@ -1175,11 +1151,12 @@ LIMIT 10</pre>
         <article class="stack-card" style="background: var(--panel);">
           <span class="micro">benchmark snapshot</span>
           <strong>Core operation timings.</strong>
-          <pre class="mini-terminal">node lookup                  0.13 μs
-node creation                0.65 μs
-edge traversal               9 μs
-full-text search (100 docs)  19 μs
-10-NN vector search (1M)     0.83 ms</pre>
+          <pre class="mini-terminal">property read by node id      0.22 μs
+Cypher lookup, indexed        2.3 μs
+1-hop Cypher traversal        4.8 μs
+durable single-node commit    44 μs
+full-text top 10 (100K docs)  104 μs
+10-NN vector search (100K)    122 μs</pre>
         </article>
       </div>
     </section>
@@ -1188,8 +1165,7 @@ full-text search (100 docs)  19 μs
       <div class="section-head">
         <h2>More information</h2>
         <p>
-          The README and getting started guide have the full benchmark tables, examples, and binding
-          details.
+          The README and the docs have the full benchmark tables, examples, and binding details.
         </p>
       </div>
 

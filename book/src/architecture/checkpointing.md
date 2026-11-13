@@ -54,15 +54,19 @@ recovery or a run of direct writes can push the pool well past its configured
 size. So the database also flushes before a checkpoint is due. When at least half
 the pool's frames are dirty and **no page is pinned**, it writes the vector index's
 in-memory node map into its tree, copies the tree roots into the header, syncs the
-log, and flushes. It is called after every commit, between the entities a commit
-applies, before each write made outside a transaction, and between the operations
-recovery replays, and does nothing when it cannot act.
+log, and flushes; without a log, it first applies the changefeed's retention policy
+(below), since there are no checkpoints to do it. It is called after every commit,
+before each write made outside a transaction, and between the operations recovery
+replays, and does nothing when it cannot act. With a log it is also called between
+the entities a commit applies (`relieveApplyPressure`).
 
 "Nothing pinned" is how it knows no B+Tree operation is half done: a page is pinned
 for the length of an operation that touches it. An early flush can still land in
 the middle of a commit and write half a transaction, but that transaction's commit
-record is already synced, so recovery finishes it. Early flushes are not
-checkpoints: they leave the log as it was.
+record is already in the log, so recovery finishes it. Without a log nothing could
+finish it, so no early flush runs while a commit is being applied: the pool grows
+past its size if it must, and the flush the end of the commit offers writes the
+transaction whole. Early flushes are not checkpoints: they leave the log as it was.
 
 ### The journaled flush
 
@@ -102,11 +106,15 @@ close deletes it.
 
 ### Log first, then pages
 
-Every caller of the flush syncs the log first: an early flush, a checkpoint,
-`sync()`, and close. An image may contain half of a transaction that the log can
-finish, but only if the log has it. In the default sync mode the log is already
-synced at every commit and this extra sync is cheap; in `sync_mode = .normal` it is
-what makes recent commit records durable before the pages that depend on them.
+Every caller of the flush syncs the log first when there is one: an early flush, a
+checkpoint, `sync()`, and close. An image may contain half of a transaction that the
+log can finish, but only if the log has it. In the default sync mode the log is
+already synced at every commit and this extra sync is cheap; in
+`sync_mode = .normal` it is what makes recent commit records durable before the
+pages that depend on them. A database opened without a log has only the journaled
+flush: a commit is durable once a flush after it has finished, and because the
+flush never writes part of a transaction, the file always holds whole
+transactions.
 
 ## How a Checkpoint Runs
 
@@ -126,6 +134,23 @@ Two refusals come first:
   transaction's commit. Such a checkpoint returns `TransactionConflict`. Because a
   transaction writes nothing to the log until it commits, this is rare in practice:
   readers, and writers still staging changes, do not hold a checkpoint back.
+
+### Changefeed retention
+
+Next the checkpoint applies the changefeed's retention policy. Under `last:N`
+(keep the newest N events) or `age:` (keep the events committed within that long)
+it drops the events the policy no longer keeps, oldest first; under `all`, the
+default, it does nothing, and under `off` no events are written at all. The deletes
+are not logged. The pass first raises a floor kept beside the feed, below which
+every event is gone, and the floor and the deletes reach the file in this
+checkpoint's flush, together. Replay skips any logged event below the floor, so a
+dropped event cannot come back, and a reader that asks for the feed from its
+beginning starts at the floor. The pass is bounded, to 4,096 events plus those
+committed since the last complete pass, so a backlog left by a stricter policy is
+worked off over several checkpoints instead of stalling one;
+`Database.trimChangefeed` (`lattice_changefeed_trim` in C) applies the policy in
+full and syncs. Without a log, where there are no checkpoints, the same pass runs
+before the flushes of `sync()`, close and the early flush.
 
 ### State outside the buffer pool
 
@@ -242,10 +267,13 @@ the next commit tries again. Setting `auto_checkpoint = null` turns it off.
 set it.
 
 It runs inside the commit call that crossed the threshold, not on a background
-thread, so that one call returns later. Measured through the C API on macOS (20,000
-single-node commits, default settings, release build, a busy machine), commits took
-about 50 µs and the ones that ran a checkpoint, about every thousandth, took 5 to
-12 ms and up to 27 ms. Taking the checkpoint off the commit path would need a
+thread, so that one call returns later. In the published measurements
+([Benchmarks](../performance/benchmarks.md): 0.17.0 through the C API, default
+settings, Apple M5), of 20,000 single-node commits the median took 44 µs and the
+99.9th percentile 1.4 ms; about one commit in a few hundred also ran a checkpoint,
+and those, with the disk's own stalls, are that 99.9th percentile. The slowest
+single commit ranged from 2 ms to over 200 ms from run to run. Taking the
+checkpoint off the commit path would need a
 background checkpointer, which LatticeDB does not have; a program that cannot
 afford the pause can raise the interval, or turn the automatic checkpoint off and
 run checkpoints itself.
@@ -269,7 +297,10 @@ are skipped on a failed handle.
 
 **On request**:
 - **`Database.checkpoint(mode)`** in the Zig API, `lattice_checkpoint(db, mode,
-  &stats)` in C, and each binding's `checkpoint`.
+  &stats)` in C, and each binding's `checkpoint`. While a transaction has records
+  in the log it is refused with `TransactionConflict` (`LATTICE_ERROR_LOCK_TIMEOUT`
+  in C). Without a log it does nothing and reports no pages flushed; on a read-only
+  handle the Zig call does nothing and the C call returns `LATTICE_ERROR_READ_ONLY`.
 - **`lattice checkpoint <path>`**: opens the database and runs a truncate checkpoint.
 - **`backup` and `serialize`**: run a full checkpoint so the copied file stands on
   its own (see [Portable Databases](./portable-databases.md)).
@@ -299,8 +330,9 @@ The Checkpointer coordinates between:
 - **PageManager**: bumps `checkpoint_seq` in the in-memory header
 - **WalManager**: Records checkpoint markers, updates checkpoint_lsn, truncates the log
 
-The database around it decides whether a checkpoint may run at all and puts the
-vector index map and tree roots in place first.
+The database around it decides whether a checkpoint may run at all, applies the
+changefeed's retention policy, and puts the vector index map and tree roots in place
+first.
 
 ## API
 

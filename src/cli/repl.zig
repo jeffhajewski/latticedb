@@ -1018,6 +1018,7 @@ const FLOAT_DISPLAY_MAX = 64;
 /// non-zero number as 0.000000 (1e-300). JSON and CSV output are not
 /// affected; they print every float in full.
 fn formatTableFloat(buf: *[FLOAT_DISPLAY_MAX]u8, f: f64) []const u8 {
+    if (nonFiniteName(f)) |name| return name;
     const magnitude = @abs(f);
     const scientific = std.math.isFinite(f) and f != 0 and (magnitude >= 1e16 or magnitude < 1e-6);
     const written = if (scientific)
@@ -1025,6 +1026,15 @@ fn formatTableFloat(buf: *[FLOAT_DISPLAY_MAX]u8, f: f64) []const u8 {
     else
         std.fmt.bufPrint(buf, "{d:.6}", .{f});
     return written catch unreachable; // 1e16 has 17 digits before the point
+}
+
+/// What NaN and the infinities are written as in every output format: the
+/// spellings `toFloat` reads and a JSON export's `$float` carries, so a value
+/// printed here can be given back. Null for an ordinary number.
+fn nonFiniteName(f: f64) ?[]const u8 {
+    if (std.math.isNan(f)) return "NaN";
+    if (std.math.isInf(f)) return if (f > 0) "Infinity" else "-Infinity";
+    return null;
 }
 
 /// Count decimal digits in a number
@@ -1042,7 +1052,14 @@ fn writeJsonValue(writer: anytype, val: ResultValue) !void {
         .null_val => try writer.writeAll("null"),
         .bool_val => |b| try writer.writeAll(if (b) "true" else "false"),
         .int_val => |i| try writer.print("{d}", .{i}),
-        .float_val => |f| try writer.print("{d}", .{f}),
+        // JSON has no number for NaN or an infinity, and a bare `nan` or
+        // `inf` makes the whole document unreadable. A string keeps which
+        // of the three it was; null would read as a value that is absent.
+        .float_val => |f| if (nonFiniteName(f)) |name| {
+            try writer.print("\"{s}\"", .{name});
+        } else {
+            try writer.print("{d}", .{f});
+        },
         .string_val => |s| try writeJsonString(writer, s),
         .node_id => |id| try writer.print("{d}", .{id}),
         .edge_id => |id| try writer.print("{d}", .{id}),
@@ -1173,7 +1190,11 @@ fn writeCsvValue(allocator: std.mem.Allocator, writer: anytype, val: ResultValue
         .null_val => {},
         .bool_val => |b| try writer.writeAll(if (b) "true" else "false"),
         .int_val => |i| try writer.print("{d}", .{i}),
-        .float_val => |f| try writer.print("{d}", .{f}),
+        .float_val => |f| if (nonFiniteName(f)) |name| {
+            try writer.writeAll(name);
+        } else {
+            try writer.print("{d}", .{f});
+        },
         .string_val => |s| try writeCsvField(writer, s),
         .node_id => |id| try writer.print("{d}", .{id}),
         .edge_id => |id| try writer.print("{d}", .{id}),
@@ -1248,5 +1269,37 @@ test "table cells write huge and tiny floats in scientific form" {
     try std.testing.expectEqualStrings("1e300", formatTableFloat(&buf, 1e300));
     try std.testing.expectEqualStrings("-1.5e-300", formatTableFloat(&buf, -1.5e-300));
     try std.testing.expectEqualStrings("1.7976931348623157e308", formatTableFloat(&buf, std.math.floatMax(f64)));
-    try std.testing.expectEqualStrings("inf", formatTableFloat(&buf, std.math.inf(f64)));
+    try std.testing.expectEqualStrings("Infinity", formatTableFloat(&buf, std.math.inf(f64)));
+    try std.testing.expectEqualStrings("-Infinity", formatTableFloat(&buf, -std.math.inf(f64)));
+    try std.testing.expectEqualStrings("NaN", formatTableFloat(&buf, std.math.nan(f64)));
+}
+
+test "NaN and the infinities are written so that JSON output stays JSON" {
+    const a = std.testing.allocator;
+    var columns = [_][]const u8{ "nan", "up", "down", "plain", "l", "m" };
+    const list = [_]ResultValue{ .{ .float_val = std.math.nan(f64) }, .{ .float_val = 2.5 } };
+    const entries = [_]ResultValue.MapEntry{.{ .key = "k", .value = .{ .float_val = -std.math.inf(f64) } }};
+    var values = [_]ResultValue{
+        .{ .float_val = std.math.nan(f64) },
+        .{ .float_val = std.math.inf(f64) },
+        .{ .float_val = -std.math.inf(f64) },
+        .{ .float_val = 1.5 },
+        .{ .list_val = &list },
+        .{ .map_val = &entries },
+    };
+    var rows = [_]lattice.storage.database.ResultRow{.{ .values = &values }};
+    const result: QueryResult = .{ .columns = &columns, .rows = &rows, .allocator = a };
+
+    var out: std.Io.Writer.Allocating = .init(a);
+    defer out.deinit();
+    // These were written as nan, inf and -inf, which no JSON parser accepts.
+    try writeResultJson(&out.writer, &result);
+    try std.testing.expectEqualStrings("{\"columns\":[\"nan\",\"up\",\"down\",\"plain\",\"l\",\"m\"],\"rows\":[{\"nan\":\"NaN\",\"up\":\"Infinity\",\"down\":\"-Infinity\",\"plain\":1.5,\"l\":[\"NaN\",2.5],\"m\":{\"k\":\"-Infinity\"}}],\"count\":1}\n", out.written());
+    const parsed = try std.json.parseFromSlice(std.json.Value, a, out.written(), .{});
+    parsed.deinit();
+
+    // CSV and the table use the same three words.
+    out.clearRetainingCapacity();
+    try writeResultCsv(a, &out.writer, &result);
+    try std.testing.expectEqualStrings("nan,up,down,plain,l,m\nNaN,Infinity,-Infinity,1.5,\"[\"\"NaN\"\",2.5]\",\"{\"\"k\"\":\"\"-Infinity\"\"}\"\n", out.written());
 }

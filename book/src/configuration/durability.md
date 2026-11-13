@@ -197,17 +197,19 @@ The log grows as you write. A checkpoint folds it back into the database file an
 resets it, which is what stops it growing forever.
 
 This happens on its own, after a commit, once the log holds enough frames. Each
-write transaction adds at least one frame, so with the defaults that is roughly
-every thousand write transactions. Open readers do not hold it back. It is skipped
+write transaction adds at least one frame, so with the defaults that is at most
+every thousand write transactions; single-node commits reach it about once in a few
+hundred. Open readers do not hold it back. It is skipped
 only while an open transaction already has records in the log (one whose commit
 failed part way and has not been rolled back yet), and the next commit tries again.
 
 The automatic checkpoint runs inside the commit that triggers it, not in the
-background, so that one commit takes longer. Measured through the C API on macOS
-(20,000 single-node commits, default settings, release build, a busy machine), most
-commits took about 50 µs and the ones that ran a checkpoint, about every
-thousandth, took 5 to 12 ms and up to 27 ms. If a pause of that size matters to
-you, set a larger or smaller interval, or turn the automatic checkpoint off and run
+background, so that one commit takes longer. Of 20,000 single-node commits through
+the C API with the default settings (see [Benchmarks](../performance/benchmarks.md)),
+the median took 44 µs and the 99.9th percentile 1.4 ms, which is where the commits
+that ran a checkpoint, and the disk's own stalls, show; the slowest single commit
+ranged from 2 ms to over 200 ms from run to run, as it did in 0.16.0. If a pause of
+that size matters to you, set a larger or smaller interval, or turn the automatic checkpoint off and run
 checkpoints at moments you choose. A larger interval means fewer pauses, each
 longer, a longer log on disk and more to replay after a crash; a smaller one means
 shorter pauses, more often.

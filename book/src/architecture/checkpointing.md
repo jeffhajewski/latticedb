@@ -256,7 +256,8 @@ Usually you don't decide. Checkpoints run at four moments.
 | `mode` | `.truncate` | The only mode that resets the log, so the only one that bounds its size |
 
 Each commit that changed something writes at least one frame, so the default is
-roughly a thousand small write transactions. The automatic checkpoint is best
+at most a thousand write transactions; single-node commits reach it about once in a
+few hundred. The automatic checkpoint is best
 effort: it runs after the commit has succeeded, and if it fails, or is refused
 because a transaction has records in the log, the commit still reports success and
 the next commit tries again. Setting `auto_checkpoint = null` turns it off.

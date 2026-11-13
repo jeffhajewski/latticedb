@@ -20,9 +20,11 @@ Not every option below is available everywhere. The bindings and the C API expos
 `enable_adjacency_cache`, `lock`, `sync_mode`, `full_fsync` and
 `changefeed_retention`; the C API, Go and Java also take `page_size` (Python and
 TypeScript always use 4096). In the C API the vector, durability and changefeed
-settings after `lock` are fields of `lattice_open_options_v5`. `enable_fts`, the query-cache settings and
-`auto_checkpoint` are options of the Zig API only — everywhere else they keep
-their defaults.
+settings after `lock` are fields of `lattice_open_options_v5`. `enable_fts` and
+the query-cache settings are options of the Zig API only — everywhere else they
+keep their defaults. `auto_checkpoint` is an open option in Zig only; everywhere
+else it is set on the open database, or through `LATTICE_AUTO_CHECKPOINT_FRAMES`
+(see [Checkpointing](./durability.md#checkpointing)).
 
 ## Decided at creation, and permanent
 
@@ -41,9 +43,10 @@ reopening it needs no vector options at all, after a crash included. Any vector
 setting you do pass must match what the file records, or the open fails with a
 configuration-mismatch error (`LATTICE_ERROR_CONFIG_MISMATCH`): the settings cannot
 be changed after creation. To change them, export the data and import it into a new
-database. In Python and TypeScript `vector_dimensions=0` means "whatever the file
-records"; Go and Java turn 0 into the default or reject it, so there either leave
-vectors off when reopening or pass the dimensions the file has.
+database. With vectors enabled, dimensions 0 means "whatever the file records" in
+every binding (`vector_dimensions=0`, `vectorDimensions: 0`, `VectorDimensions: 0`,
+`vectorDimensions(0)`); where the open would have to create an index, 0 is
+refused as an invalid argument.
 
 The metric decides what `<=>` and vector search return, smallest first:
 
@@ -59,7 +62,8 @@ produces 1536 numbers, so that is the number you would pass for it.
 
 0.16.0 refuses to open a file whose index uses `euclidean` or `dot_product`, or an
 `m` other than 16, because it would misread it. A cosine index with the default `m`
-stays readable by 0.16.0.
+does not keep 0.16.0 out, though other things do, the changefeed above all; see
+[Opening with 0.16.0](../guides/changefeed.md#opening-with-0160).
 
 ## Which features exist
 
@@ -152,7 +156,7 @@ what a crash leaves and what it saves.
 | `enable_wal` | on | Write-ahead logging: a commit survives a crash as soon as it returns. Off, commits survive from the next flush. |
 | `sync_mode` | `.full` | Whether a commit waits for its log record to reach the disk. `.normal` survives a killed process but can lose the latest commits to a power cut. When the program leaves it unset, `LATTICE_SYNC_MODE` applies. |
 | `full_fsync` | off | On macOS, sync with `F_FULLFSYNC` so commits survive power loss, at several milliseconds per sync. When the program leaves it unset, `LATTICE_FULL_FSYNC` applies. |
-| `auto_checkpoint` | every 1000 log frames, truncating | How often the log is folded back into the database file. Zig API only. |
+| `auto_checkpoint` | every 1000 log frames, truncating | How often the log is folded back into the database file. An open option in Zig; elsewhere `lattice_set_auto_checkpoint`, each binding's `set_auto_checkpoint`/`setAutoCheckpoint`/`SetAutoCheckpoint`, `--auto-checkpoint` or `LATTICE_AUTO_CHECKPOINT_FRAMES`. |
 
 [Durability and the Log](./durability.md) explains each of these and what survives
 what.

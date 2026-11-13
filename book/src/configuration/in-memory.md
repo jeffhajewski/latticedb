@@ -16,9 +16,9 @@ db, err := latticedb.Open(":memory:", latticedb.OpenOptions{})
 ```
 
 ```c
-lattice_open_options_v4 options = LATTICE_OPEN_OPTIONS_V4_DEFAULT;
+lattice_open_options_v5 options = LATTICE_OPEN_OPTIONS_V5_DEFAULT;
 lattice_database* db;
-lattice_open_v4(":memory:", &options, &db);
+lattice_open_v5(":memory:", &options, &db);
 ```
 
 ```bash
@@ -109,15 +109,16 @@ There is no way to share one between handles, and no equivalent of SQLite's shar
 cache. If two parts of your program need the same in-memory database, pass the
 same handle.
 
-## The write-ahead log stays on
+## The write-ahead log
 
-Turning it off looks free, since a process holding the only copy of a database
-loses everything when it dies anyway. It is not free: transactions are built on
-the log, so a database without one has no `BEGIN`, no rollback, and no
-multi-statement atomicity. See [Durability and the Log](./durability.md).
+The log is on unless you turn it off, as for a file. It lives in the same memory
+as the database and is bounded by automatic checkpointing, so it costs a few
+megabytes at most.
 
-The log lives in the same memory as the database and is bounded by automatic
-checkpointing, so it costs a few megabytes at most.
+Turning it off (`enable_wal = false`) loses an in-memory database nothing it
+could keep, since a process holding the only copy loses everything when it dies
+anyway. Transactions, rollback and all-or-nothing queries work the same without
+it; see [Running without the log](./durability.md#running-without-the-log).
 
 ## Where to go next
 

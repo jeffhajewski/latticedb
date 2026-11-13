@@ -96,11 +96,15 @@ Turning the write-ahead log off in memory looks free. A log exists so a crash
 cannot lose committed data, and a process holding the only copy of a database in
 its own heap loses everything when it dies regardless.
 
-That reasoning does not survive contact with the code. Transactions are built on
-the log, so a database without one returns `TransactionsNotEnabled` from
-`beginTransaction`: no rollback, no multi-statement atomicity, none of it. That is
-a much larger hole than the allocations it saves, and it would make in-memory
-databases quietly less capable than file-backed ones in a way nobody would expect.
+Until 0.17.0 that reasoning did not survive contact with the code: transactions
+were built on the log, so a database without one returned
+`TransactionsNotEnabled` from `beginTransaction`, with no rollback and no
+multi-statement atomicity. That was a much larger hole than the allocations it
+saved, so the log stayed on in memory as on disk. A database without a log now
+has transactions (see
+[Running without the log](../configuration/durability.md#running-without-the-log)),
+so `enable_wal = false` is a fair choice for an in-memory database; the default
+stays the same for both kinds.
 
 The log becomes a second file in the same memory backend, bounded by automatic
 checkpointing.

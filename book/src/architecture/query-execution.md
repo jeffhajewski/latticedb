@@ -9,7 +9,7 @@ Lattice executes Cypher queries using the **Volcano iterator model**—a pull-ba
 
 ## The Volcano Iterator Model
 
-Every operator implements three methods:
+Every operator implements four methods:
 
 ```zig
 pub const Operator = struct {
@@ -185,9 +185,8 @@ the value, takes every whole non-negative number in it as an id (so
 them, and keeps those that exist as the transaction sees them. The condition
 stays in the `WHERE` and the pattern's labels are checked by `LabelFilter`s,
 so the seek only has to offer every node that could match. A `WHERE` with a
-vector or full-text search keeps its own access path. On 100,000 nodes and
-1,000,000 relationships, `MATCH (a)-[:KNOWS]->(b)-[:KNOWS]->(c) WHERE id(a) =
-k` went from 1.17 s, expanding every node and filtering, to 10 µs.
+vector or full-text search keeps its own access path. Before it, such a query
+read every node and filtered; now it reads only the nodes named.
 
 **IndexRangeScan** (`index_range_scan.zig`): Used when no equality applies and
 the `WHERE` right after the `MATCH` compares an indexed property of the
@@ -230,10 +229,9 @@ inline map compares that property with a value (`=`, a range or `STARTS
 WITH`), the planner uses IndexRangeScan over the type's index instead
 (`edge_range_scan`), which fills the same three slots in the index's order. The
 `WHERE` keeps the conditions and checks each row. A relationship read through
-the index costs about 0.8 µs against 0.18 µs per relationship for the walk, so
-when it opens the scan counts the range's keys, up to a fifth of the highest
-relationship id, and walks the type with EdgeTypeScan instead when it gets
-there.
+the index costs several times one found by the walk, so when it opens the scan
+counts the range's keys, up to a fifth of the highest relationship id, and walks
+the type with EdgeTypeScan instead when it gets there.
 
 All of them produce rows with node references (EdgeTypeScan also fills the
 relationship and the other node). None keeps a B+Tree iterator open between
@@ -417,8 +415,9 @@ reads all of its input, so writes below it happen. Ties keep input order, so the
 result is the same as a stable sort of everything followed by `SKIP` and `LIMIT`.
 
 The keys are compared by `orderValues`, a total order over all values: maps,
-nodes, relationships, lists, vectors, bytes, strings, booleans, numbers, then
-null. Nodes and relationships order by id. Integers and floats compare by exact
+nodes, relationships, lists, paths, vectors, bytes, strings, booleans, numbers,
+then null (`typeRank`). `NULLS FIRST` or `NULLS LAST` on a sort item puts nulls
+where it says, whichever the direction. Nodes and relationships order by id. Integers and floats compare by exact
 value (converting the integer to a float would round above 2^53), and NaN is
 above every other number.
 
@@ -434,7 +433,13 @@ the scan:
 ```text
 open():
     resolve the threshold (a literal or a parameter; null matches nothing)
-    read every input row, grouped by node; the nodes are the candidates
+    if the input is a label scan of this same variable (openOverLabel):
+        read the scan only until it holds more nodes than measuring each
+        would pay for (Database.exactScanCount); a label that ends first is
+        measured node by node, a larger one is searched through the graph
+        with the label as the filter, and the rest of the scan is never read
+    otherwise read every input row, grouped by node; the nodes are the
+    candidates
     k = what bounds the answer: SKIP + LIMIT, or 100 (DEFAULT_K) nodes
     loop:
         results = database.vectorSearchAmongInTxn(txn, query, k, ids = candidates)
@@ -608,7 +613,7 @@ has never seen means nothing can match.
 
 | File | Operators |
 |------|-----------|
-| `scan.zig` | AllNodesScan, LabelScan, PropertyIndexScan |
+| `scan.zig` | AllNodesScan, LabelScan, PropertyIndexScan, NodeIdSeek |
 | `index_range_scan.zig` | IndexRangeScan, OrderedCutoff |
 | `edge_type_scan.zig` | EdgeTypeScan |
 | `source.zig` | SingleRow (one empty row: the input of a query that starts with `UNWIND` or `RETURN`) |
@@ -624,6 +629,12 @@ has never seen means nothing can match.
 | `unwind.zig` | Unwind |
 | `vector.zig` | VectorSearchWithInput (and the unused leaf VectorSearch) |
 | `fts.zig` | FtsIndexSeek, FtsSearchWithInput |
+| `optional.zig` | Argument (the leaf a plan run once per input row starts from), Apply (`OPTIONAL MATCH`), Foreach, CallSubquery (`CALL { ... }`) |
+| `subquery.zig` | SubqueryHost, SubqueryPlan (`EXISTS { }`, `COUNT { }`, `COLLECT { }`, pattern predicates and pattern comprehensions, run by the expression evaluator for the row it is evaluating) |
+| `union.zig` | Union (`UNION ALL`; `UNION` puts a Distinct on top) |
+| `path.zig` | BindPath (a named path, `p = (a)-[r]->(b)`) |
+| `shortest_path.zig` | ShortestPath (`shortestPath`, `allShortestPaths`: breadth-first from both ends) |
+| `procedure.zig` | ProcedureCall (`CALL db.labels()`, `db.relationshipTypes()`, `db.propertyKeys()`, `db.indexes()`) |
 | `mutation.zig` | CreateNode, CreateEdge, DeleteNode, DeleteEdge, SetProperty, SetLabels, SetPropertiesReplace, SetPropertiesMerge, RemoveProperty, RemoveLabels, MergeNode, MergeEdge |
 
 ## Expression Evaluation
@@ -751,12 +762,30 @@ Simplified from `QueryPlanner.plan` in `planner.zig`:
 
 ```zig
 pub fn plan(query: *Query) !Operator {
+    // q1 UNION [ALL] q2 ...: each single query planned on its own, under a
+    // Union (and a Distinct for UNION)
+    var current: ?Operator = if (query.unions.len == 0)
+        try planClauses(query.clauses)
+    else
+        try planUnion(query);
+    // EXISTS / COUNT / COLLECT subqueries and pattern predicates are planned
+    // over Argument leaves and hung from a SubqueryHost at the root
+    if (query.subqueries.len > 0) current = try hostSubqueries(query, current);
+    return current orelse error.InvalidQuery;
+}
+
+fn planClauses(clauses: []Clause) !?Operator {
     var current: ?Operator = null;
 
-    for (query.clauses, 0..) |clause, i| {
+    for (clauses, 0..) |clause, i| {
         current = switch (clause) {
+            // OPTIONAL MATCH, with its WHERE, becomes an Apply over a plan
+            // that starts from an Argument leaf
+            .match => if (clause.match.optional)
+                try planOptionalMatch(clause.match, whereAfter(i), current orelse singleRow())
             // The following WHERE is passed in so an index can be chosen
-            .match => try planMatch(clause.match, current, whereAfter(i)),
+            else
+                try planMatch(clause.match, current, whereAfter(i)),
             .where => try planWhere(clause.where, current),
             // Also plans the ORDER BY / SKIP / LIMIT that follow it:
             // underneath the projection, or on top if it aggregates
@@ -772,10 +801,14 @@ pub fn plan(query: *Query) !Operator {
             .with => try planWith(clause.with, current),
             .merge => try planMerge(clause.merge, current),
             .unwind => try planUnwind(clause.unwind, current),
+            .foreach => try planForeach(clause.foreach, current orelse singleRow()),
+            // CALL { ... }: run once per incoming row
+            .call_subquery => try planCallSubquery(clause.call_subquery, current orelse singleRow()),
+            // CALL db.labels() and the other catalog procedures
+            .call => try planCall(clause.call, current orelse singleRow(), standalone(i)),
         };
     }
-
-    return current orelse error.InvalidQuery;
+    return current;
 }
 ```
 

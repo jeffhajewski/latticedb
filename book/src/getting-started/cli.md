@@ -769,9 +769,9 @@ lattice changefeed social.lattice
 ```text
 Changefeed of social.lattice
   Retention:      all
-  Events held:    7
-  Bytes:          73
-  Sequences:      1..7
+  Events held:    10
+  Bytes:          136
+  Sequences:      1..10
 ```
 
 `--changefeed=<policy>` sets how much to keep: `all`, `off`, `last:<events>`,
@@ -786,9 +786,9 @@ lattice changefeed social.lattice --changefeed=last:2 --trim
 Changefeed of social.lattice
   Retention:      last:2
   Events held:    2
-  Bytes:          31
-  Sequences:      6..7
-  Trimmed:        5 events
+  Bytes:          32
+  Sequences:      9..10
+  Trimmed:        8 events
 ```
 
 Every command that writes takes `--changefeed` too, so

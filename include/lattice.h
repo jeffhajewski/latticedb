@@ -190,7 +190,7 @@ typedef struct {
     bool enable_vector;     /* Create a vector index if none (see v5) */
     uint16_t vector_dimensions; /* Vector dimensions, 1..4096 (default: 128) */
     bool enable_wal;        /* Enable WAL-backed transactions (default: true) */
-    /* Keep an in-memory adjacency cache. Nothing in this API reads it yet:
+    /* Keep an in-memory adjacency cache. Nothing in this API reads it:
      * queries and the edge functions go to the B+Tree either way, so it
      * speeds up nothing here and costs a little on each edge write. */
     bool enable_adjacency_cache;
@@ -209,7 +209,7 @@ typedef struct {
     bool enable_vector;     /* Create a vector index if none (see v5) */
     uint16_t vector_dimensions; /* Vector dimensions, 1..4096 (default: 128) */
     bool enable_wal;        /* Enable WAL-backed transactions (default: true) */
-    /* Keep an in-memory adjacency cache. Nothing in this API reads it yet:
+    /* Keep an in-memory adjacency cache. Nothing in this API reads it:
      * queries and the edge functions go to the B+Tree either way, so it
      * speeds up nothing here and costs a little on each edge write. */
     bool enable_adjacency_cache;
@@ -320,7 +320,7 @@ typedef struct {
     bool enable_vector;     /* Create a vector index if the database has none */
     uint16_t vector_dimensions; /* Vector dimensions, 1..4096 (default: 128) */
     bool enable_wal;        /* Enable WAL-backed transactions (default: true) */
-    bool enable_adjacency_cache; /* As in v3: nothing in this API reads it yet */
+    bool enable_adjacency_cache; /* As in v3: nothing in this API reads it */
     bool lock;              /* As in v4 (default: true) */
     uint8_t sync_mode;      /* A lattice_sync_mode (default: 0, DEFAULT) */
     uint8_t full_fsync;     /* A lattice_full_fsync (default: 0, DEFAULT) */

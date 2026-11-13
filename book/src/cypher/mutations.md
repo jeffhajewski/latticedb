@@ -2,6 +2,14 @@
 
 Mutation clauses modify the graph structure.
 
+A query that only writes returns no columns and no rows; the CLI prints "Query
+executed". To get back what was written, end it with a `RETURN`:
+
+```cypher
+CREATE (a:Person {name: "Alice"})-[:KNOWS]->(b:Person {name: "Bob"})
+RETURN id(a), id(b)
+```
+
 ## CREATE
 
 ### Create a Node
@@ -94,7 +102,9 @@ query fails and deletes nothing.
 
 ```text
 $ lattice exec db.lattice --query="MATCH (n:C {name: 'x'}) DELETE n"
-Error: Execution error (NodeHasRelationships): Cannot delete node 1 because it still has relationships; delete them first, or use DETACH DELETE
+Error: Execution error (NodeHasRelationships) at 1:32: Cannot delete node 1 because it still has relationships; delete them first, or use DETACH DELETE
+  1 | MATCH (n:C {name: 'x'}) DELETE n
+    |                                ^
 ```
 
 Through the C API and the bindings the query returns the same error code as a

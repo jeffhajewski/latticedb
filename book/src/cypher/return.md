@@ -67,6 +67,9 @@ RETURN 1 + 2
 
 `RETURN` and `WITH` take at most 16 items; a query with more fails to plan.
 
+A query without `RETURN` returns no columns and no rows, whatever it wrote; see
+[CREATE, SET, DELETE](./mutations.md).
+
 ## Map Projection
 
 `variable {...}` builds a map from a node, relationship or map:

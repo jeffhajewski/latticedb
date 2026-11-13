@@ -125,6 +125,9 @@ RETURN n.name, toFloat(n.age) AS float_age
 | `type(r)` | A relationship's type |
 | `labels(n)` | A node's labels, as a list |
 | `properties(x)` | A node's or relationship's properties, as a map; a map is returned as it is |
+| `exists(x.prop)` | Whether the property is present: the same as `x.prop IS NOT NULL` |
+| `length(p)` | The number of relationships in a named path |
+| `nodes(p)` / `relationships(p)` | The nodes or the relationships of a named path, as a list; see [Variable-Length Paths](./variable-length-paths.md) |
 | `score(d)` | The BM25 score of the full-text search that matched `d`; see [Full-Text Search](./full-text-search.md#reading-the-score) |
 
 `IN` tests list membership (`n.age IN [30, 40]`). `=~` matches a regular

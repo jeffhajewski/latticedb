@@ -86,6 +86,9 @@ lattice_query_bind_vector(query, "embedding", vec, 128);
 | Float | `float` | `number` | `LATTICE_VALUE_FLOAT` |
 | Boolean | `bool` | `boolean` | `LATTICE_VALUE_BOOL` |
 | Null | `None` | `null` | `LATTICE_VALUE_NULL` |
+| Bytes | `bytes` | `Uint8Array` | `LATTICE_VALUE_BYTES` |
+| List | `list` | `Array` | `LATTICE_VALUE_LIST` |
+| Map | `dict` (string keys) | plain object | `LATTICE_VALUE_MAP` |
 | Vector | `numpy.ndarray` | `Float32Array` | `float*` (via `lattice_query_bind_vector`) |
 
 ## Query Caching

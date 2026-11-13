@@ -29,7 +29,7 @@ equality patterns use it automatically, including parameterized values:
 MATCH (p:Person {email: $email}) RETURN p
 ```
 
-Create the index through the C, Python, TypeScript, or Go database API before
+Create the index through the C, Python, TypeScript, Go or Java database API before
 running the query. Equality predicates in the immediately following `WHERE`
 also use an available index:
 
@@ -50,7 +50,11 @@ type's index answers equality, ranges and prefixes for a pattern that starts
 from the relationship, `MATCH (a)-[r:KNOWS]->(b) WHERE r.since >= 2020`; see
 [Property Indexes](../guides/property-indexes.md#ranges-prefixes-and-sorting).
 
-`MATCH (n)` with no label returns nodes in id order.
+`MATCH (n)` with no label returns nodes in id order. A pattern that starts from
+a relationship type with an unlabelled start node, `MATCH (a)-[r:KNOWS]->(b)`,
+walks the relationships of that type and returns its rows in the order they are
+stored, not grouped by `a`. No order is promised for either; add `ORDER BY`
+where order matters.
 
 ### Label Expressions
 

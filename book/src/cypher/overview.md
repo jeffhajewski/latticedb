@@ -29,7 +29,7 @@ RETURN friend.name
 | [UNWIND](./unwind.md) | Expand lists into rows |
 | OPTIONAL MATCH | Match a pattern, or keep the row with nulls when it is absent |
 | UNION / UNION ALL | Combine the rows of queries with the same columns |
-| FOREACH | Run `CREATE`, `SET`, `MERGE`, `DELETE` or `REMOVE` for each element of a list |
+| FOREACH | Run `CREATE`, `SET`, `MERGE`, `DELETE`, `REMOVE` or a nested `FOREACH` for each element of a list |
 | [CALL { }](./with.md#subqueries-call--) | Run a subquery once for each row |
 | CALL db.labels() | List the catalog: `db.labels()`, `db.relationshipTypes()`, `db.propertyKeys()`, `db.indexes()` |
 | ORDER BY | Sort results, with `NULLS FIRST` or `NULLS LAST` |
@@ -38,6 +38,9 @@ RETURN friend.name
 
 A query may begin with `MATCH`, `OPTIONAL MATCH`, `CREATE`, `MERGE`, `UNWIND`,
 `WITH`, `RETURN`, `CALL` or `FOREACH`; `RETURN 1 + 2` on its own returns one row.
+Only a `RETURN`, or a catalog `CALL` that is the whole query, gives a query
+columns: a query without one, such as a bare `CREATE`, `MERGE`, `SET`, `DELETE`
+or `FOREACH`, returns no columns and no rows. Add a `RETURN` to get values back.
 
 ```cypher
 MATCH (p:Person)

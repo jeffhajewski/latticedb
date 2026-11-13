@@ -18,7 +18,7 @@ MATCH (n:Person) RETURN count(n) AS total
 
 `count(*)` counts rows, nulls included, and its column is named `count(*)`. With
 nothing before it, `RETURN count(*)` returns 1. `count(DISTINCT x)` counts distinct
-non-null values.
+non-null values, and its column is named `count(DISTINCT x)`.
 
 Grouping and `DISTINCT` treat values that `=` calls equal as one value: `1` and
 `1.0` fall into one group, and so do `0` and `-0.0`. Every NaN is one value, though
@@ -89,6 +89,10 @@ ORDER BY papers DESC
 ```
 
 Here `p.name` is the grouping key, and `count(doc)` and `collect(doc.title)` are computed per group.
+
+An aggregate can sit inside a larger expression, and a grouping key can be an
+expression: `RETURN n.age / 10 AS decade, count(n) + 1, sum(n.x) / count(n)`,
+or an aggregate inside a `CASE`.
 
 A `COUNT { }`, `EXISTS { }`, `COLLECT { }` or pattern comprehension beside an
 aggregate may read the grouping keys: `RETURN p, count(f) + COUNT { (p)<--() }`

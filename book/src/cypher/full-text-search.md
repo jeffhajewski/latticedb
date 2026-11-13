@@ -194,10 +194,12 @@ ORDER BY s DESC
 `score(d)` is null when no single search scored `d`: the query has no `@@` on `d`,
 the `MATCH` searched several indexes and chose between them as it ran, or the
 `@@` was checked row by row. That is the case for an `@@` in the `WHERE` of a
-`WITH`, of an `EXISTS` or `COUNT` subquery or a pattern comprehension (which match
-correctly but give no score), and of an `OPTIONAL MATCH` that reaches `d` through
-a relationship; an `OPTIONAL MATCH (d:Label) WHERE d.text @@ ...` reads the index
-and scores. Each part of a `UNION` is scored, and bounded by its own
+`WITH`, of the short form of an `EXISTS` or `COUNT` subquery (a pattern and a
+`WHERE`) or a pattern comprehension (which match correctly but give no score),
+and of an `OPTIONAL MATCH` that reaches `d` through a relationship; an
+`OPTIONAL MATCH (d:Label) WHERE d.text @@ ...` reads the index and scores, and
+so does the `MATCH` of a `CALL { }` subquery or of a whole query inside
+`EXISTS`, `COUNT` or `COLLECT`, once for each incoming row. Each part of a `UNION` is scored, and bounded by its own
 `ORDER BY score(d) DESC LIMIT`, as it would be alone. It is
 carried through `WITH d`, but not under another name (`WITH d AS e`) and not
 through an aggregation. Its argument must be a variable; `score(1)` fails with

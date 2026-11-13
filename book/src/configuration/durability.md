@@ -191,6 +191,11 @@ Peak memory was the cache plus 25 to 80 MB. With the log off, the
 changefeed off and a 1 GB cache, transactions cost no more than the same load
 written directly with a `null` transaction (10–11 s), and they still roll back.
 
+The published figures for this load are measured through the C API on a quiet
+machine, where the default cache is 100 MB and the default sync mode `full`:
+34.4 s with the defaults and 7.9 s with the last row's settings. See
+[Benchmarks](../performance/benchmarks.md#bulk-load).
+
 ## Checkpointing
 
 The log grows as you write. A checkpoint folds it back into the database file and

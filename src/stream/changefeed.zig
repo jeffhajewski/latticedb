@@ -578,7 +578,7 @@ pub const Retention = union(enum) {
         };
     }
 
-    /// Parse the text form used by the CLI and LATTICE_CHANGEFEED: `all`,
+    /// Parse the text form used by the CLI and LATTICE_CHANGEFEED_RETENTION: `all`,
     /// `off`, `last:<events>`, `age:<duration>` with a duration such as
     /// `500ms`, `90s`, `30m`, `12h` or `7d`.
     pub fn parse(text: []const u8) ?Retention {

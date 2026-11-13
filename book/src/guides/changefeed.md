@@ -29,10 +29,13 @@ a **sequence number**: they start at 1, rise by one per event, a transaction's
 events are consecutive, and a number is never reused, not even after old events
 are dropped.
 
-A property change records both the old and the new value. A value larger than
-1 MB is replaced in the event by a summary map
-(`{__lattice_value_omitted: true, type, encoded_bytes}`), so one huge value
-does not double the cost of the write that stored it.
+A property change records both the old and the new value, in full, whatever
+their size, as long as the event stays within the 64 MiB limit on one record.
+When it would not, the old value and then if need be the new one is replaced in
+the event by a summary map
+(`{__lattice_value_omitted: true, type, encoded_bytes}`). A 40 MB string is
+recorded whole; replacing one 40 MB string with another records the new value
+and a summary of the old.
 
 Vectors are not part of the changefeed: setting or replacing a node's vector
 writes no event.
@@ -391,7 +394,9 @@ Events still in the 0.16.0 format are counted separately
 
 `LATTICE_CHANGEFEED_RETENTION=<policy>` sets the policy of a database **when it
 is created** and no option names one. It never changes an existing database,
-which keeps a stray environment variable from discarding history.
+which keeps a stray environment variable from discarding history. A value that
+is not a policy is ignored without an error, and the new database keeps every
+event.
 
 ### Which setting wins
 
@@ -425,7 +430,8 @@ You can also drop events through a sequence yourself, in a write transaction,
 with the stream trim every stream has (`txn.trim_stream("__lattice_changes", s)`,
 `txn.trimStream(...)`, `lattice_stream_trim`), whatever the policy. That is the
 way to discard history up to a point you choose, such as one every consumer has
-passed, while keeping `all` for everything after it.
+passed, while keeping `all` for everything after it. A sequence past the last
+event drops everything there is and no more: events written afterwards are kept.
 
 ## Reading at the edge of the window
 
@@ -535,7 +541,7 @@ The stream-meta B+Tree holds the changefeed's bookkeeping:
 | Key | Value |
 |---|---|
 | `11` `"__lattice_changes"` | the last sequence handed out (8 bytes, little-endian) |
-| `00` `"changefeed.floor"` | every event below this sequence has been dropped (8 bytes, little-endian); missing means 0 |
+| `00` `"changefeed.floor"` | every event below this sequence has been dropped (8 bytes, little-endian); missing means 1, nothing dropped |
 | `00` `"changefeed.retention"` | the policy: mode (1 byte: 1 all, 2 last, 3 age, 4 off), value (8 bytes, little-endian: events or milliseconds); missing means all |
 
 ### In the log

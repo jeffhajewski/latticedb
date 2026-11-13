@@ -8,7 +8,7 @@
 //! Symbol ID ranges:
 //!   - 0: Reserved (null/invalid)
 //!   - 1-999: Reserved for system use
-//!   - 1000-65535: User-defined symbols
+//!   - 1000-65534: User-defined symbols (65535 is never handed out)
 
 const std = @import("std");
 const lattice = @import("lattice");

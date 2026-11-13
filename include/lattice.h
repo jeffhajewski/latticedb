@@ -270,7 +270,8 @@ typedef enum {
 typedef enum {
     /* The policy the file records, or ALL if it records none. A new database
      * takes LATTICE_CHANGEFEED_RETENTION from the environment if it is set
-     * ("all", "off", "last:<events>", "age:<duration>" such as "7d"). */
+     * ("all", "off", "last:<events>", "age:<duration>" such as "7d"); a value
+     * that is none of these is ignored. */
     LATTICE_CHANGEFEED_RETENTION_DEFAULT = 0,
     /* Keep every event. */
     LATTICE_CHANGEFEED_RETENTION_ALL = 1,

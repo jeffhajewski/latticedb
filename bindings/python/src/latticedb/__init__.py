@@ -69,7 +69,7 @@ def version() -> str:
         return cast(str, result.decode("utf-8"))
     return __version__
 
-__version__ = "0.16.0"
+__version__ = "0.17.0"
 
 # Deprecated compatibility alias for latticedb.embedding.EmbeddingApiFormat.
 EmbeddingApiFormat = _EmbeddingApiFormat

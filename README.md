@@ -404,6 +404,7 @@ The links below are the in-repo copies and design notes.
 - [Examples Overview](examples/README.md)
 - [CLI Quickstart](examples/cli/README.md)
 - [Architecture Overview](docs/00_introduction.md)
+- [0.17.0 Release Notes](docs/release_notes_0.17.0.md)
 - [0.16.0 Release Notes](docs/release_notes_0.16.0.md)
 - [0.15.0 Release Notes](docs/release_notes_0.15.0.md)
 - [0.14.0 Release Notes](docs/release_notes_0.14.0.md)

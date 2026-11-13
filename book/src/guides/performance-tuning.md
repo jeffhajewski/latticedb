@@ -107,6 +107,14 @@ it is the whole `WHERE` or a branch of an `AND`, and falls back to examining eve
 node carrying the label when it sits under an `OR` beside a non-text condition.
 See [Full-Text Search](./full-text-search.md#performance).
 
+### Property Indexes
+
+Declare a property index on what queries filter or sort by. Cypher reads it for
+equality, ranges (`<`, `>=`, ...), `STARTS WITH` and `ORDER BY ... LIMIT` in
+either direction, on nodes of a label and on relationships of a type. An index
+created by 0.16.0 answers equality only until `lattice compact
+--upgrade-indexes` rebuilds it. See [Property Indexes](./property-indexes.md).
+
 ### Labels
 
 Use specific labels for nodes you query frequently. Label scans are fast because they use a dedicated index:
@@ -120,13 +128,24 @@ MATCH (n) WHERE n.source = "web" RETURN n
 ```
 
 A label narrows a `<=>` vector search as well: the rows the pattern produces are
-the candidates, and the search widens until it has the candidates the predicate
-asks for. A label that is rare among the vectors therefore costs more searching
-than a common one. To get the nearest `k`, write the distance in the `WHERE` and
+the candidates, and the search looks only among them. A small candidate set is
+measured node by node, exactly, and a large one is searched through the HNSW
+graph with the set as a filter, so a rare label is cheap rather than costly
+(about 10 to 20 µs for `LIMIT 10` over 100 labelled nodes among 100,000
+vectors). To get the nearest `k`, write the distance in the `WHERE` and
 end with `ORDER BY` that same distance and `LIMIT k`: the search then stops once it
 has `k` rows, instead of finding every candidate under the threshold and sorting
 them. Write the distance in the `RETURN` the same way as in the `WHERE` to reuse
 the value the search measured. See [Vector Search in Cypher](../cypher/vector-search.md).
+
+## Bulk Loading and the Changefeed
+
+Every committed change is also recorded in the changefeed, which by default keeps
+every event and can make up most of a file. A database nothing reads the history
+of can keep less, or none (`changefeed_retention`); see
+[The Changefeed](./changefeed.md). A load you can rerun from its source can also
+run without the log and with a large cache; see
+[Bulk loading](../configuration/durability.md#bulk-loading).
 
 ## Transaction Scope
 

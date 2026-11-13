@@ -104,7 +104,7 @@ Database(
     *,
     create: bool = False,        # Create if doesn't exist
     read_only: bool = False,     # Open in read-only mode
-    cache_size_mb: int = 100,    # Page cache size
+    cache_size_mb: int | None = None, # Page cache size; None = LATTICE_BUFFER_POOL_MB or 100
     enable_wal: bool = True,     # log commits so they survive a crash
     enable_adjacency_cache: bool = False, # Accepted; no effect on queries
     enable_vectors: bool | None = None, # Create a vector index if the file has none
@@ -116,6 +116,7 @@ Database(
     vector_metric: str | None = None,   # "cosine", "euclidean" or "dot_product"
     vector_m: int | None = None,        # HNSW connections per node, 2..32 (default 16)
     vector_ef_construction: int | None = None, # HNSW build candidate list, 1..4096 (default 200)
+    changefeed_retention: str | None = None, # "all", "off", "last:N", "age:7d"; None = the file's
 )
 ```
 
@@ -138,9 +139,17 @@ A `sync_mode` or `full_fsync` you pass wins over the `LATTICE_SYNC_MODE` and
 `LATTICE_FULL_FSYNC` environment variables, which apply only when the option is
 left unset.
 
-`sync_mode`, `full_fsync` and the three vector index options need a native
-library with `lattice_open_v5`; against an older one, setting any of them raises
-`LatticeUnsupportedError`.
+`enable_wal=False` logs nothing. Transactions, rollback, streams and the
+changefeed work as with the log, but a commit reaches the file at the next
+flush (`close()`, or when half the page cache holds changes) rather than when it
+returns.
+
+`changefeed_retention` sets how much of the changefeed the file keeps (see
+[Durable Streams and Changefeeds](#durable-streams-and-changefeeds)).
+
+`sync_mode`, `full_fsync`, the three vector index options and
+`changefeed_retention` need a native library with `lattice_open_v5`; against an
+older one, setting any of them raises `LatticeUnsupportedError`.
 
 `read_only=True` on a database that was not closed cleanly recovers it in
 memory: the handle sees every committed transaction and nothing is written to
@@ -160,11 +169,13 @@ recover it on disk.
 - `create_edge_fts_index(edge_type, prop)` / `drop_edge_fts_index(...)` / `has_edge_fts_index(...)` - Manage full-text indexes on edge properties. A node index and a relationship index cannot share a name and property: the second raises `LatticeAlreadyExistsError`
 - `fts_search(label, prop, query, *, limit=10)` - Full-text search over one declared index
 - `fts_search_fuzzy(label, prop, query, *, limit=10, max_distance=0, min_term_length=0)` - Fuzzy full-text search (0 selects the defaults, 2 and 4)
-- `create_node_property_index(label, property_key)` / `drop_node_property_index(...)` - Manage explicit node equality indexes
-- `create_edge_property_index(edge_type, property_key)` / `drop_edge_property_index(...)` - Manage explicit edge equality indexes
+- `create_node_property_index(label, property_key)` / `drop_node_property_index(...)` - Manage explicit node property indexes
+- `create_edge_property_index(edge_type, property_key)` / `drop_edge_property_index(...)` - Manage explicit edge property indexes
 - `read_stream(stream, *, after_sequence=0, limit=100, timeout_ms=0)` - Read durable stream records by cursor
 - `get_stream_offset(stream, consumer)` - Read a committed consumer offset
-- `changes(*, after_sequence=0, limit=100, timeout_ms=0)` - Read the built-in graph changefeed
+- `changes(*, after_sequence=0, limit=100, timeout_ms=0)` - Read the built-in graph changefeed. Raises `LatticeChangesTrimmedError` (a `LatticeNotFoundError`) when retention has dropped the events after `after_sequence`, and `LatticeUnsupportedError` when the policy is `"off"`
+- `changefeed_status()` - The changefeed's policy and range: `ChangefeedStatus(retention, oldest_sequence, last_sequence)`, `oldest_sequence` None when it holds no events
+- `trim_changefeed()` - Apply the retention policy in full now; returns the number of events dropped
 - `serialize()` - Return the whole database as bytes
 - `checkpoint(mode="truncate")` - Fold the log into the database file now; returns `CheckpointStats` (see [Checkpoints](#checkpoints))
 - `set_auto_checkpoint(max_wal_frames, min_interval_ms=0)` - Set when commits checkpoint from now on; `0` frames switches automatic checkpoints off
@@ -237,9 +248,10 @@ with Database("vectors.db", create=True, enable_vectors=True, vector_dimensions=
 
 ### Property Indexes
 
-Property equality indexes are explicit and durable. Create them outside an
-active write transaction; lookup fails instead of silently scanning when the
-requested index does not exist.
+Property indexes are explicit and durable. Create them outside an active write
+transaction; lookup fails instead of silently scanning when the requested index
+does not exist. The lookup methods find equal values; Cypher also reads the
+indexes for ranges, `STARTS WITH` and `ORDER BY ... LIMIT`.
 
 ```python
 db.create_node_property_index("Person", "email")

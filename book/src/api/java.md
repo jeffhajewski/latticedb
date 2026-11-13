@@ -34,15 +34,24 @@ try (Database db = Database.open("graph.lattice",
 }
 ```
 
-`OpenOptions` has `create`, `readOnly`, `cacheSizeMB` (default 100), `pageSize`
+`OpenOptions` has `create`, `readOnly`, `cacheSizeMB` (unset by default: the
+`LATTICE_BUFFER_POOL_MB` environment variable if it is set, else 100), `pageSize`
 (default 4096), `enableVectors`, `vectorDimensions` (default 128), `enableWal`
-(default true), `enableAdjacencyCache` and `lock` (default true), and, passed
-through `lattice_open_v5`, `syncMode(SyncMode.FULL | NORMAL)`,
+(default true), `enableAdjacencyCache` (accepted for compatibility; it changes
+neither the speed nor the results of queries) and `lock` (default true), and,
+passed through `lattice_open_v5`, `syncMode(SyncMode.FULL | NORMAL)`,
 `fullFsync(Boolean)`, `vectorMetric(VectorMetric.COSINE | EUCLIDEAN |
 DOT_PRODUCT)`, `vectorM(int)`, `vectorEfConstruction(int)` and
-`changefeedRetention(String)`, all unset by default (`null` or 0). `:memory:` opens an in-memory database, and
-`Database.deserialize(bytes)` opens one from the bytes `db.serialize()`
-returned; it takes the older options and ignores the v5 ones.
+`changefeedRetention(String)`, all unset by default (`null` or 0). `:memory:`
+opens an in-memory database, and `Database.deserialize(bytes, options)` opens one
+from the bytes `db.serialize()` returned, taking the same options through
+`lattice_deserialize_v5` (`create` and `readOnly` are ignored).
+
+`enableWal(false)` logs nothing. Transactions, rollback, streams and the
+changefeed work as with the log, but a commit reaches the file at the next
+flush (`close()`, or when half the page cache holds changes) rather than when it
+returns; see
+[Running without the log](../configuration/durability.md#running-without-the-log).
 
 ```java
 try (Database db = Database.open("vectors.lattice",
@@ -78,7 +87,8 @@ the files. A recovery that needs more than 64 MB plus four times the size of the
 log and journal throws `ErrorCode.FULL`; open the database read-write once to
 recover it on disk. A file that a newer release has marked as not writable by
 this one opens only with `readOnly(true)`; a writable open throws
-`ErrorCode.NEEDS_NEWER_WRITER` and writes nothing.
+`ErrorCode.NEEDS_NEWER_WRITER` and writes nothing. A file in a format only a
+newer release can read throws `ErrorCode.VERSION_MISMATCH`, read-only or not.
 
 `changefeedRetention` sets how much of the changefeed the file keeps: `"all"`,
 `"off"`, `"last:N"` or `"age:7d"`; unset keeps the file's policy (see
@@ -86,7 +96,11 @@ this one opens only with `readOnly(true)`; a writable open throws
 policy and the range of events held, `db.trimChangefeed()` applies the policy
 in full now, and `db.changes(...)` throws `ChangesTrimmedException` (error code
 `NOT_FOUND`) when retention has dropped the events after the sequence it is
-given.
+given, and a `LatticeException` with `ErrorCode.UNSUPPORTED` when the policy is
+`"off"`. Each transaction's events are its net effect, in an order that can be
+replayed as it comes: the edges it deletes, the nodes that exist after it, the
+edges that exist after it, then the nodes it deletes, each group by ascending
+id.
 
 `close()` is refused with `ErrorCode.INVALID_ARG` while a transaction or result
 from the database is still open. The `Database` then keeps its handle, so you can

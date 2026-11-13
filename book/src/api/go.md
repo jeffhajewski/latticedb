@@ -49,7 +49,7 @@ defer db.Close()
 |-------|--------------|
 | `Create` | Create the file if it is not there |
 | `ReadOnly` | Open without the ability to write |
-| `CacheSizeMB` | How much memory to keep pages in |
+| `CacheSizeMB` | How much memory to keep pages in (0: `LATTICE_BUFFER_POOL_MB` if set, else 100 MB) |
 | `PageSize` | Page size in bytes |
 | `EnableVectors` | Create a vector index if the database has none |
 | `VectorDimensions` | How many numbers are in each vector, when `EnableVectors` is set (0 means the file's; creating an index needs it set) |
@@ -58,16 +58,22 @@ defer db.Close()
 | `VectorEfConstruction` | HNSW candidate list size while building a new index, 1..4096 (0 means 200) |
 | `SyncMode` | When a commit waits for the disk: `SyncModeFull` or `SyncModeNormal` |
 | `FullFsync` | On macOS, whether syncs ask the drive to flush its cache: `FullFsyncOn` or `FullFsyncOff` |
-| `EnableAdjacencyCache` | Keep an in-memory map of connections. Queries and edge calls do not read it yet, so it speeds up nothing |
-| `DisableWAL` | Open without write-ahead logging |
+| `EnableAdjacencyCache` | Accepted for compatibility. Queries and edge calls do not read it, so it changes neither their speed nor their results |
+| `DisableWAL` | Open without write-ahead logging: transactions work as with the log, and a commit reaches the file at the next flush. See [Running without the log](../configuration/durability.md#running-without-the-log) |
 | `DisableLock` | Open without taking a lock on the file |
 | `ChangefeedRetention` | How much of the changefeed to keep: `"all"`, `"off"`, `"last:N"`, `"age:7d"`; empty keeps the file's. See [The Changefeed](../guides/changefeed.md) |
+
+Three of these need a word of explanation. `DisableWAL` and `DisableLock` are
+phrased as negatives because a Go `bool` cannot tell "the caller left this alone"
+apart from "the caller set it to false", and both of those features default to
+on. Set them when you genuinely want them off. There is also an older
+`EnableVector` field kept for compatibility; new code should use `EnableVectors`.
+
+### In-memory databases
 
 ```go
 db, err := latticedb.Open(":memory:", latticedb.OpenOptions{})
 ```
-
-### In-memory databases
 
 Pass `:memory:` as the path and the database has no files behind it. Nothing is
 written to disk and nothing survives closing it, which suits a scratch database, a
@@ -85,13 +91,6 @@ what it would read is a stale file that a checkpoint may be rewriting underneath
 it. Set `DisableLock` only on filesystems where locking does not work; it does not
 make concurrent access safe, it removes the thing that was going to tell you it
 was not.
-
-Three of these need a word of explanation. `DisableWAL` and `DisableLock` are
-phrased as negatives because a Go `bool` cannot tell "the caller left this alone"
-apart from "the caller set it to false", and both of those features default to
-on. Set them when you genuinely want them off. There is also an older
-`EnableVector` field kept for
-compatibility; new code should use `EnableVectors`.
 
 ### The vector index
 
@@ -376,8 +375,12 @@ sequence, exists, err := db.GetStreamOffset("events", "billing-worker")
 `Changes` reads the built-in stream of graph mutations, so you can react to
 writes without publishing anything yourself. It returns an error matching
 `ErrChangesTrimmed` when retention has dropped the events after the sequence
-you pass; `ChangefeedStatus` reports the policy and the range held, and
-`TrimChangefeed` applies the policy in full now. `TrimStream` discards records every
+you pass, and `ErrorUnsupported` when the policy is `"off"`; `ChangefeedStatus`
+reports the policy and the range held, and `TrimChangefeed` applies the policy
+in full now. Each transaction's events are its net effect, in an order that can
+be replayed as it comes: the edges it deletes, the nodes that exist after it,
+the edges that exist after it, then the nodes it deletes, each group by
+ascending id. `TrimStream` discards records every
 consumer has passed; nothing trims automatically.
 
 ## Errors

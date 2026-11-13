@@ -77,7 +77,8 @@ mvn -q compile exec:java@run-example -Dexec.args=/tmp/knowledge.db
   transactions), `query`, `vectorSearch`, full-text index create/drop/exists for node and
   edge properties, `ftsSearch`/`ftsSearchFuzzy`,
   `getNodesByLabel`, property-index create/drop, durable streams
-  (`readStream`, `getLastSequence`, `getStreamOffset`, `changes`),
+  (`readStream`, `getLastSequence`, `getStreamOffset`, `changes`), changefeed
+  retention (`changefeedStatus`, `trimChangefeed`),
   query-cache stats/clear, `checkpoint`/`setAutoCheckpoint`.
 - `Transaction`: node/edge CRUD with properties (nested `List`/`Map` values,
   `byte[]`, `float[]` supported), labels, vectors, equality-index
@@ -88,9 +89,9 @@ mvn -q compile exec:java@run-example -Dexec.args=/tmp/knowledge.db
 - Errors: unchecked `LatticeException` (with `ErrorCode`) and `QueryException`
   carrying stage/diagnostic-code/location diagnostics.
 - `OpenOptions` also takes `syncMode(SyncMode.FULL | NORMAL)`, `fullFsync(Boolean)`,
-  `vectorMetric(VectorMetric.COSINE | EUCLIDEAN | DOT_PRODUCT)`, `vectorM(int)` and
-  `vectorEfConstruction(int)`, all unset by default (`null` or 0), passed through
-  `lattice_open_v5`. `SyncMode.NORMAL` returns from a commit once the operating
+  `vectorMetric(VectorMetric.COSINE | EUCLIDEAN | DOT_PRODUCT)`, `vectorM(int)`,
+  `vectorEfConstruction(int)` and `changefeedRetention(String)`, all unset by
+  default (`null` or 0), passed through `lattice_open_v5`. `SyncMode.NORMAL` returns from a commit once the operating
   system has it: it survives the process being killed, but a power cut or OS crash
   can lose the most recent commits. Unset sync settings defer to the
   `LATTICE_SYNC_MODE` and `LATTICE_FULL_FSYNC` environment variables, else a full
@@ -134,6 +135,23 @@ mvn -q compile exec:java@run-example -Dexec.args=/tmp/knowledge.db
   `IllegalArgumentException`. A larger interval means fewer checkpoints, each a
   longer pause for the commit that runs it, a longer `-wal` file and more to
   replay after a crash; a smaller one means shorter pauses, more often.
+- `cacheSizeMB` unset (0) leaves the cache size to the `LATTICE_BUFFER_POOL_MB`
+  environment variable if it is set, else 100 MB; a size set here wins.
+  `enableWal(false)` logs nothing: transactions, rollback, streams and the
+  changefeed work as with the log, but a commit reaches the file at the next
+  flush (`close()`, or when half the page cache holds changes) rather than when
+  it returns. `enableAdjacencyCache` is accepted for compatibility and changes
+  neither the speed nor the results of queries.
+- `changefeedRetention` sets how much of the changefeed the file keeps: `"all"`
+  (the default), `"off"`, `"last:N"` or `"age:7d"`; unset keeps the file's
+  policy. `db.changefeedStatus()` reports the policy and the range of events
+  held, and `db.trimChangefeed()` applies the policy in full now. `changes(...)`
+  throws `ChangesTrimmedException` (`NOT_FOUND`) when retention has dropped the
+  events after the sequence it is given, and `ErrorCode.UNSUPPORTED` when the
+  policy is `"off"`. A transaction's events are its net effect (a property set
+  several times is one event), in an order that can be replayed as it comes: the
+  edges it deletes, the nodes that exist after it, the edges that exist after
+  it, then the nodes it deletes, each group by ascending id.
 - `Transaction.deleteNode` refuses a node that still has relationships with
   `ErrorCode.HAS_RELATIONSHIPS` and deletes nothing, as Cypher's `DELETE` does;
   `detachDeleteNode` deletes the node with all its relationships, as

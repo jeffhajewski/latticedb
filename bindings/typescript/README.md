@@ -140,7 +140,7 @@ const db = new Database(path: string, options?: DatabaseOptions);
 interface DatabaseOptions {
   create?: boolean;          // Create if not exists (default: false)
   readOnly?: boolean;        // Open read-only (default: false)
-  cacheSizeMb?: number;      // Cache size in MB (default: 100)
+  cacheSizeMb?: number;      // Cache size in MB; unset: LATTICE_BUFFER_POOL_MB, else 100
   enableWal?: boolean;       // log commits so they survive a crash (default: true)
   enableAdjacencyCache?: boolean; // Accepted; no effect on queries (default: false)
   enableVectors?: boolean;   // Create a vector index if the file has none
@@ -152,6 +152,7 @@ interface DatabaseOptions {
   vectorMetric?: 'cosine' | 'euclidean' | 'dot_product'; // For a new index (default: cosine)
   vectorM?: number;               // HNSW connections per node, 2..32 (default: 16)
   vectorEfConstruction?: number;  // HNSW build candidate list, 1..4096 (default: 200)
+  changefeedRetention?: ChangefeedRetention; // 'all', 'off', 'last:N', 'age:7d' (default: the file's)
 }
 ```
 
@@ -172,9 +173,17 @@ A `syncMode` or `fullFsync` you pass wins over the `LATTICE_SYNC_MODE` and
 `LATTICE_FULL_FSYNC` environment variables, which apply only when the option is
 left unset.
 
-`syncMode`, `fullFsync` and the three vector index options need a native library
-with `lattice_open_v5`; against an older one, setting any of them throws with
-code -14 (`Unsupported`). `deserialize()` takes the same options and passes
+`enableWal: false` logs nothing. Transactions, rollback, streams and the
+changefeed work as with the log, but a commit reaches the file at the next
+flush (`close()`, or when half the page cache holds changes) rather than when it
+returns.
+
+`changefeedRetention` sets how much of the changefeed the file keeps (see
+[Durable Streams and Changefeeds](#durable-streams-and-changefeeds)).
+
+`syncMode`, `fullFsync`, the three vector index options and
+`changefeedRetention` need a native library with `lattice_open_v5`; against an
+older one, setting any of them throws with code -14 (`Unsupported`). `deserialize()` takes the same options and passes
 them through `lattice_deserialize_v5`, which needs the same newer library.
 
 `readOnly: true` on a database that was not closed cleanly recovers it in
@@ -198,11 +207,13 @@ Node IDs, edge IDs and stream sequence numbers are `bigint`.
 - `await db.createEdgeFtsIndex(edgeType, property)` / `dropEdgeFtsIndex(...)` / `hasEdgeFtsIndex(...)` - Manage full-text indexes on edge properties. A node index and a relationship index cannot share a name and property: the second is rejected as already existing
 - `await db.ftsSearch(label, property, query, options?)` - Full-text search over one declared index
 - `await db.ftsSearchFuzzy(label, property, query, options?)` - Fuzzy full-text search
-- `await db.createNodePropertyIndex(label, property)` / `dropNodePropertyIndex(...)` - Manage explicit node equality indexes
-- `await db.createEdgePropertyIndex(edgeType, property)` / `dropEdgePropertyIndex(...)` - Manage explicit edge equality indexes
+- `await db.createNodePropertyIndex(label, property)` / `dropNodePropertyIndex(...)` - Manage explicit node property indexes
+- `await db.createEdgePropertyIndex(edgeType, property)` / `dropEdgePropertyIndex(...)` - Manage explicit edge property indexes
 - `await db.readStream(stream, options?)` - Read durable stream records by cursor. With `timeoutMs > 0` the wait runs on a worker thread, so the event loop keeps running and a commit from the same process can end the wait
 - `await db.getStreamOffset(stream, consumer)` - Read a committed consumer offset
-- `await db.changes(options?)` - Read the built-in graph changefeed
+- `await db.changes(options?)` - Read the built-in graph changefeed. Rejects with `LatticeChangesTrimmedError` when retention has dropped the events after `afterSequence`, and with code -14 (`Unsupported`) when the policy is `'off'`
+- `await db.changefeedStatus()` - The changefeed's policy and range: `{ retention, oldestSequence, lastSequence }`, `oldestSequence` null when it holds no events
+- `await db.trimChangefeed()` - Apply the retention policy in full now; resolves to the number of events dropped
 - `await db.checkpoint(mode = 'truncate')` - Fold the log into the database file now; resolves to `CheckpointStats` (see [Checkpoints](#checkpoints))
 - `await db.setAutoCheckpoint(maxWalFrames, minIntervalMs = 0)` - Set when commits checkpoint from now on; `0` frames switches automatic checkpoints off
 - `await db.cacheClear()` - Clear the query cache
@@ -281,9 +292,10 @@ await db.close();
 
 ### Property Indexes
 
-Property equality indexes are explicit and durable. Create them outside an
-active write transaction; lookup fails instead of silently scanning when the
-requested index does not exist.
+Property indexes are explicit and durable. Create them outside an active write
+transaction; lookup fails instead of silently scanning when the requested index
+does not exist. The lookup methods find equal values; Cypher also reads the
+indexes for ranges, `STARTS WITH` and `ORDER BY ... LIMIT`.
 
 ```typescript
 await db.createNodePropertyIndex("Person", "email");
@@ -533,8 +545,9 @@ try {
 ```
 
 Errors from the native library are `LatticeError`s whose `code` is the C error
-code; `LatticeErrorCode` (exported from the package, with `QueryErrorStage` for
-`LatticeQueryError.stage`) names them. For example -4 (not found, also from `createEdge` when either end does not
+code; `LatticeErrorCode` (exported from the package root, with `QueryErrorStage`
+for `LatticeQueryError.stage`; both are plain enums, readable at run time) names
+them. For example -4 (not found, also from `createEdge` when either end does not
 exist), -16 (another process holds the file), -17 (a plain `deleteNode` of a node
 with relationships), -18 (open options that contradict the file's vector
 index), -19 (`NeedsNewerWriter`: a writable open of a file that a newer

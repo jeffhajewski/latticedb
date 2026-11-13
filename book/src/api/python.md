@@ -70,9 +70,9 @@ Database(
     *,
     create: bool = False,        # Create if doesn't exist
     read_only: bool = False,     # Open in read-only mode
-    cache_size_mb: int = 100,    # Page cache size
+    cache_size_mb: int | None = None, # Page cache size; None = LATTICE_BUFFER_POOL_MB or 100
     enable_wal: bool = True,     # log commits so they survive a crash
-    enable_adjacency_cache: bool = False, # In-memory graph adjacency cache
+    enable_adjacency_cache: bool = False, # Accepted; no effect on queries
     enable_vectors: bool | None = None, # Create a vector index if the file has none
     enable_vector: bool | None = None,  # Deprecated compatibility alias
     vector_dimensions: int = 128, # Vector dimensions (0 = the file's)
@@ -135,10 +135,17 @@ value you pass wins over the `LATTICE_SYNC_MODE` and `LATTICE_FULL_FSYNC`
 environment variables; they apply only when you leave the option unset. See
 [Durability and the Log](../configuration/durability.md).
 
-`sync_mode`, `full_fsync` and the three vector index options need a native
-library with `lattice_open_v5`; against an older one, setting any of them raises
-`LatticeUnsupportedError`. `latticedb.deserialize()` takes them too, through
-`lattice_deserialize_v5`, with the same fallback against an older library.
+`enable_wal=False` logs nothing. Transactions, rollback, streams and the
+changefeed work as with the log, but a commit reaches the file at the next
+flush (`close()`, or when half the page cache holds changes) rather than when it
+returns; see
+[Running without the log](../configuration/durability.md#running-without-the-log).
+
+`sync_mode`, `full_fsync`, the three vector index options and
+`changefeed_retention` need a native library with `lattice_open_v5`; against an
+older one, setting any of them raises `LatticeUnsupportedError`.
+`latticedb.deserialize()` takes them too, through `lattice_deserialize_v5`, with
+the same fallback against an older library.
 
 #### Read-only opens
 
@@ -150,14 +157,14 @@ read-write once to recover it on disk. A file that a newer release has marked as
 not writable by this one opens only with `read_only=True`; a writable open
 raises `LatticeNeedsNewerWriterError` and writes nothing.
 
+#### In-memory databases
+
 ```python
 import latticedb
 
 db = latticedb.Database(":memory:")
 db.open()
 ```
-
-### In-memory databases
 
 Pass `:memory:` as the path and the database has no files behind it. Nothing is
 written to disk and nothing survives closing it, which suits a scratch database, a
@@ -166,6 +173,8 @@ test, or one you pulled out of object storage and will hand back as bytes.
 It behaves like any other database — transactions, the write-ahead log, and
 serialization all work. The differences are that it disappears when closed, and
 that nothing locks it, since no other process can reach it.
+
+#### The file lock
 
 A database can only be open in one process at a time. Opening takes a lock on the
 file, so a second process gets `LatticeDatabaseLockedError` rather than quietly
@@ -190,11 +199,11 @@ was not.
 - `fts_search_fuzzy(label, prop, query, *, limit=10, max_distance=0, min_term_length=0)` - Fuzzy full-text search
 - `create_node_fts_index(label, property)` / `drop_node_fts_index(...)` / `has_node_fts_index(...)` - Manage node full-text indexes
 - `create_edge_fts_index(edge_type, property)` / `drop_edge_fts_index(...)` / `has_edge_fts_index(...)` - Manage relationship full-text indexes. A node index and a relationship index cannot share a name and property: the second raises `LatticeAlreadyExistsError`
-- `create_node_property_index(label, property_key)` / `drop_node_property_index(...)` - Manage explicit node equality indexes
-- `create_edge_property_index(edge_type, property_key)` / `drop_edge_property_index(...)` - Manage explicit edge equality indexes
+- `create_node_property_index(label, property_key)` / `drop_node_property_index(...)` - Manage explicit node property indexes, used for equality lookups and by Cypher for ranges, prefixes and sorting
+- `create_edge_property_index(edge_type, property_key)` / `drop_edge_property_index(...)` - Manage explicit edge property indexes
 - `read_stream(stream, *, after_sequence=0, limit=100, timeout_ms=0)` - Read durable stream records by cursor
 - `get_stream_offset(stream, consumer)` - Read a committed consumer offset
-- `changes(*, after_sequence=0, limit=100, timeout_ms=0)` - Read the built-in graph changefeed. Raises `LatticeChangesTrimmedError` (a `LatticeNotFoundError`) when retention has dropped the events after `after_sequence`
+- `changes(*, after_sequence=0, limit=100, timeout_ms=0)` - Read the built-in graph changefeed. Raises `LatticeChangesTrimmedError` (a `LatticeNotFoundError`) when retention has dropped the events after `after_sequence`, and `LatticeUnsupportedError` when the policy is `"off"`
 - `changefeed_status()` - The changefeed's policy and range: `ChangefeedStatus(retention, oldest_sequence, last_sequence)`, `oldest_sequence` None when it holds no events
 - `trim_changefeed()` - Apply the retention policy in full now; returns the number of events dropped
 - `cache_clear()` - Clear the query cache
@@ -361,8 +370,12 @@ records = db.read_stream("jobs", after_sequence=0, limit=100)
 changes = db.changes(after_sequence=0, limit=100)
 ```
 
-How much of the changefeed to keep is set with `changefeed_retention`; see
-[The Changefeed](../guides/changefeed.md).
+`changes()` returns each transaction's net effect (a property set several times
+is one event, from its value before the transaction to its last value), in an
+order that can be replayed as it comes: the edges it deletes, the nodes that
+exist after it, the edges that exist after it, then the nodes it deletes, each
+group by ascending id. How much of the changefeed to keep is set with
+`changefeed_retention`; see [The Changefeed](../guides/changefeed.md).
 
 ### Cypher Queries
 
@@ -456,6 +469,7 @@ The more specific classes include:
 | `LatticeHasRelationshipsError` | -17 | `delete_node` without `detach=True` on a node with relationships |
 | `LatticeConfigMismatchError` | -18 | Open options that contradict the file's vector index |
 | `LatticeNeedsNewerWriterError` | -19 | A writable open of a file only a newer release may write |
+| `LatticeVersionMismatchError` | -11 | An open, read-only included, of a file or log in a format only a newer release can read |
 | `LatticeFullError` | -10 | A read-only open whose crash recovery needs more memory than it may use |
 | `LatticeCorruptionError` | -3 | An open whose log is damaged where it had been synced, or holds a committed change that cannot be replayed |
 | `LatticeQueryError` | varies | Any failed Cypher query (below) |

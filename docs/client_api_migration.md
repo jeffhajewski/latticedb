@@ -137,3 +137,30 @@ options. Code that passed `enable_vectors` and the dimensions at every open can
 stop doing so; if it keeps passing them, they must match the file, or the open
 fails with `LATTICE_ERROR_CONFIG_MISMATCH` (-18).
 
+## Other Behaviour Changes Since 0.16.0
+
+These change what existing client code sees without renaming anything. The
+release notes list them in full.
+
+- A database opened without the log (`enable_wal=False`, `enableWal: false`,
+  `DisableWAL`, `enableWal(false)`) has write transactions; they used to fail
+  with `LATTICE_ERROR_UNSUPPORTED` (-14). A stream write on a read transaction
+  there now fails with `LATTICE_ERROR_READ_ONLY` (-9).
+- A Cypher query without `RETURN` returns no columns and no rows. A bare
+  `CREATE` returned columns named after its variables or `col0`, `col1`, ...;
+  add a `RETURN` to get values back.
+- A file written by a newer release is refused with
+  `LATTICE_ERROR_VERSION_MISMATCH` (-11), where it was an I/O error (-2).
+- `sync_mode`, `full_fsync` and the cache size set in code win over the
+  `LATTICE_SYNC_MODE`, `LATTICE_FULL_FSYNC` and `LATTICE_BUFFER_POOL_MB`
+  environment variables, which now apply only when the option is left unset.
+- A commit that fails with `LATTICE_ERROR_TXN_ABORTED` (-7) has ended the
+  transaction in every binding; rolling it back afterwards does nothing.
+- `changes()` and its equivalents fail with the binding's "changes trimmed"
+  error (`LATTICE_ERROR_NOT_FOUND`, -4) when the changefeed's retention policy
+  has dropped the events a reader asks for, and with
+  `LATTICE_ERROR_UNSUPPORTED` (-14) when the policy is `off`. Events within a
+  transaction come in a fixed order: the edges it deletes, the nodes that exist
+  after it, the edges that exist after it, then the nodes it deletes.
+- TypeScript exports `LatticeErrorCode` from the package root, and it and
+  `QueryErrorStage` are plain enums.

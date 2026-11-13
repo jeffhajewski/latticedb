@@ -163,12 +163,16 @@ checkpoint failed, and the handle must not be used again.
 typedef struct {
     bool create;              // Create if not exists
     bool read_only;           // Open in read-only mode
-    uint32_t cache_size_mb;   // Cache size in MB (default: 100)
+    uint32_t cache_size_mb;   // Cache size in MB (default: 100; 0: not set)
     uint32_t page_size;       // Page size in bytes (default: 4096)
     bool enable_vector;       // Create a vector index if the database has none
     uint16_t vector_dimensions; // Vector dimensions, 1..4096 (default: 128)
 } lattice_open_options;
 ```
+
+A `cache_size_mb` set in any options version wins over the
+`LATTICE_BUFFER_POOL_MB` environment variable. 0 means "not set": the
+variable's size if it is set, else 100 MB.
 
 ### Newer Open Options
 
@@ -189,10 +193,14 @@ lattice_open_v5("graph.lattice", &options, &db);
 ```
 
 Use `lattice_open_v2` with `lattice_open_options_v2`, which adds `enable_wal` to
-the original set.
+the original set. With `enable_wal` false nothing is logged, and everything else
+works as with the log: read-write transactions, rollback, streams and the
+changefeed. A commit then reaches the file at the next flush rather than when it
+returns; see
+[Running without the log](../configuration/durability.md#running-without-the-log).
 `lattice_open_options_v3` adds `enable_adjacency_cache`, which keeps an
 in-memory map of which nodes connect to which. Nothing behind the C API reads
-that map yet, so leave it off.
+that map, so it speeds up nothing; leave it off.
 `lattice_open_options_v4` adds `lock`, which defaults to true and is described
 below.
 `lattice_open_options_v5` adds the durability settings and the vector index's
@@ -450,9 +458,11 @@ infinite component, returns `LATTICE_ERROR_INVALID_ARG`.
 
 ### Explicit Property Indexes
 
-Create equality indexes outside an active write transaction. Indexed lookup
-returns `LATTICE_ERROR_UNSUPPORTED` if the requested definition does not exist;
-it never silently falls back to a scan.
+Create property indexes outside an active write transaction. The lookup
+functions below find equal values; Cypher also reads the same indexes for
+ranges, `STARTS WITH` and `ORDER BY ... LIMIT`. Indexed lookup returns
+`LATTICE_ERROR_UNSUPPORTED` if the requested definition does not exist; it never
+silently falls back to a scan.
 
 ```c
 lattice_node_property_index_create(db, "Person", "email");
@@ -663,7 +673,11 @@ lattice_fts_search_fuzzy(db, "Document", "text", "quik fox", 8, 10, 2, 4, &resul
 
 Plain search requires every term; a term no document contains gives no results.
 Fuzzy search matches documents containing any of the words, or a near spelling
-of one.
+of one. Both read the same query syntax as Cypher's `@@`: `a OR b`, `-word`,
+`"a phrase"`, `word*` and `word~` (see
+[Query syntax](../guides/full-text-search.md#query-syntax)). A query that only
+excludes, or a phrase against an index created before 0.17.0, which stores no
+word positions, returns `LATTICE_ERROR_INVALID_ARG`.
 
 ## Embeddings
 
@@ -835,7 +849,10 @@ The values are `LATTICE_CHANGEFEED_RETENTION_DEFAULT` (keep the file's policy),
 when no events are held), and `lattice_changefeed_trim(db, &removed)` applies
 the policy in full now. Reading after a sequence whose next event was dropped
 returns `LATTICE_ERROR_NOT_FOUND`; reading while the policy is off returns
-`LATTICE_ERROR_UNSUPPORTED`. See [The Changefeed](../guides/changefeed.md).
+`LATTICE_ERROR_UNSUPPORTED`. A transaction's events are its net effect, in an
+order that can be replayed as it comes: the edges it deletes, the nodes that
+exist after it, the edges that exist after it, then the nodes it deletes, each
+group by ascending id. See [The Changefeed](../guides/changefeed.md).
 
 ## Query Operations
 
@@ -955,10 +972,12 @@ and for `MATCH (p:P) DELETE p` over a node with a relationship, with
 
 ```text
 NodeHasRelationships: Cannot delete node 3 because it still has relationships; delete them first, or use DETACH DELETE
+  at line 1, column 20, length 1
 ```
 
 Execution errors carry a location when the failure belongs to one expression or
-clause; a refused delete does not. The location is what lets you point at the
+clause; a refused delete points at the variable in the `DELETE`. Plan errors
+carry none, and name the part of the query in the message instead. The location is what lets you point at the
 offending part of the query, the way the `lattice` command-line tool underlines
 it. The diagnostic code is a stable name for the kind of failure:
 parse and semantic failures use lowercase names such as `unknown_function`, and

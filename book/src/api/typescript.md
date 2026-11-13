@@ -97,9 +97,9 @@ const db = new Database(path: string, options?: DatabaseOptions);
 interface DatabaseOptions {
   create?: boolean;          // Create if not exists (default: false)
   readOnly?: boolean;        // Open read-only (default: false)
-  cacheSizeMb?: number;      // Cache size in MB (default: 100)
+  cacheSizeMb?: number;      // Cache size in MB; unset: LATTICE_BUFFER_POOL_MB, else 100
   enableWal?: boolean;       // log commits so they survive a crash (default: true)
-  enableAdjacencyCache?: boolean; // In-memory graph adjacency cache (default: false)
+  enableAdjacencyCache?: boolean; // Accepted; no effect on queries (default: false)
   enableVectors?: boolean;   // Create a vector index if the file has none
   enableVector?: boolean;    // Deprecated compatibility alias
   vectorDimensions?: number; // Vector dimensions (default: 128; 0 = the file's)
@@ -158,10 +158,17 @@ value you pass wins over the `LATTICE_SYNC_MODE` and `LATTICE_FULL_FSYNC`
 environment variables; they apply only when you leave the option unset. See
 [Durability and the Log](../configuration/durability.md).
 
-`syncMode`, `fullFsync` and the three vector index options need a native library
-with `lattice_open_v5`; against an older one, setting any of them throws with
-code -14 (`Unsupported`). `deserialize()` takes them too, through
-`lattice_deserialize_v5`, with the same fallback against an older library.
+`enableWal: false` logs nothing. Transactions, rollback, streams and the
+changefeed work as with the log, but a commit reaches the file at the next
+flush (`close()`, or when half the page cache holds changes) rather than when it
+returns; see
+[Running without the log](../configuration/durability.md#running-without-the-log).
+
+`syncMode`, `fullFsync`, the three vector index options and
+`changefeedRetention` need a native library with `lattice_open_v5`; against an
+older one, setting any of them throws with code -14 (`Unsupported`).
+`deserialize()` takes them too, through `lattice_deserialize_v5`, with the same
+fallback against an older library.
 
 `readOnly: true` on a database that was not closed cleanly recovers it in
 memory: the handle sees every committed transaction, and nothing is written to
@@ -171,11 +178,11 @@ read-write once to recover it on disk. A file that a newer release has marked as
 not writable by this one opens only with `readOnly: true`; a writable open
 throws with code -19 (`NeedsNewerWriter`) and writes nothing.
 
+#### In-memory databases
+
 ```typescript
 const db = new Database(':memory:');
 ```
-
-### In-memory databases
 
 Pass `:memory:` as the path and the database has no files behind it. Nothing is
 written to disk and nothing survives closing it, which suits a scratch database, a
@@ -184,6 +191,8 @@ test, or one you pulled out of object storage and will hand back as bytes.
 It behaves like any other database — transactions, the write-ahead log, and
 serialization all work. The differences are that it disappears when closed, and
 that nothing locks it, since no other process can reach it.
+
+#### The file lock
 
 A database can only be open in one process at a time. Opening takes a lock on the
 file, so a second process gets a `LatticeError` with
@@ -210,11 +219,11 @@ was not.
 - `await db.ftsSearchFuzzy(label, property, query, options?)` - Fuzzy full-text search
 - `await db.createNodeFtsIndex(label, property)` / `dropNodeFtsIndex(...)` / `hasNodeFtsIndex(...)` - Manage node full-text indexes
 - `await db.createEdgeFtsIndex(edgeType, property)` / `dropEdgeFtsIndex(...)` / `hasEdgeFtsIndex(...)` - Manage relationship full-text indexes. A node index and a relationship index cannot share a name and property: the second is rejected as already existing
-- `await db.createNodePropertyIndex(label, property)` / `dropNodePropertyIndex(...)` - Manage explicit node equality indexes
-- `await db.createEdgePropertyIndex(edgeType, property)` / `dropEdgePropertyIndex(...)` - Manage explicit edge equality indexes
+- `await db.createNodePropertyIndex(label, property)` / `dropNodePropertyIndex(...)` - Manage explicit node property indexes, used for equality lookups and by Cypher for ranges, prefixes and sorting
+- `await db.createEdgePropertyIndex(edgeType, property)` / `dropEdgePropertyIndex(...)` - Manage explicit edge property indexes
 - `await db.readStream(stream, options?)` - Read durable stream records by cursor. With `timeoutMs > 0` the wait runs on a worker thread, so the event loop keeps running and a commit from the same process can end the wait
 - `await db.getStreamOffset(stream, consumer)` - Read a committed consumer offset
-- `await db.changes(options?)` - Read the built-in graph changefeed. Rejects with `LatticeChangesTrimmedError` when retention has dropped the events after `afterSequence`
+- `await db.changes(options?)` - Read the built-in graph changefeed. Rejects with `LatticeChangesTrimmedError` when retention has dropped the events after `afterSequence`, and with code -14 (`Unsupported`) when the policy is `'off'`
 - `await db.changefeedStatus()` - The changefeed's policy and range: `{ retention, oldestSequence, lastSequence }`, `oldestSequence` null when it holds no events
 - `await db.trimChangefeed()` - Apply the retention policy in full now; resolves to the number of events dropped
 - `await db.cacheClear()` - Clear the query cache
@@ -398,8 +407,12 @@ const records = await db.readStream("jobs", { afterSequence: 0n, limit: 100 });
 const changes = await db.changes({ afterSequence: 0n, limit: 100 });
 ```
 
-How much of the changefeed to keep is set with `changefeedRetention`; see
-[The Changefeed](../guides/changefeed.md).
+`changes()` returns each transaction's net effect (a property set several times
+is one event, from its value before the transaction to its last value), in an
+order that can be replayed as it comes: the edges it deletes, the nodes that
+exist after it, the edges that exist after it, then the nodes it deletes, each
+group by ascending id. How much of the changefeed to keep is set with
+`changefeedRetention`; see [The Changefeed](../guides/changefeed.md).
 
 ### Cypher Queries
 
@@ -491,11 +504,15 @@ try {
 ```
 
 Errors from the native library are `LatticeError`s whose `code` is the C error
-code, for example -4 (not found, also from `createEdge` when either end does not
-exist), -10 (a read-only open whose crash recovery needs more memory than it may
-use), -16 (another process holds the file), -17 (a plain `deleteNode` of a node
-with relationships), -18 (open options that contradict the file's vector index)
-and -19 (a writable open of a file only a newer release may write).
+code; `LatticeErrorCode`, exported from the package root, names them (with
+`QueryErrorStage` for `LatticeQueryError.stage`; both are plain enums, readable
+at run time). For example -4 (`NotFound`, also from `createEdge` when either end
+does not exist), -10 (`Full`, a read-only open whose crash recovery needs more
+memory than it may use), -11 (`VersionMismatch`, a file in a format only a newer
+release can read), -16 (`DatabaseLocked`, another process holds the file), -17
+(`HasRelationships`, a plain `deleteNode` of a node with relationships), -18
+(`ConfigMismatch`, open options that contradict the file's vector index) and -19
+(`NeedsNewerWriter`, a writable open of a file only a newer release may write).
 
 A failed Cypher query throws a `LatticeQueryError`, a `LatticeError` that also
 says where the query failed:

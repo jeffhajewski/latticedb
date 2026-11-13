@@ -130,4 +130,4 @@ graphs an upper bound.
 - The cost grows with the number of paths, not the number of reachable nodes
 - `DISTINCT` removes the duplicate rows that several paths to one node produce
 
-At 10K nodes with 50K edges, a variable path `*1..5` completes in ~82 us. See [Benchmarks](../performance/benchmarks.md) for detailed numbers.
+On a graph of 10K nodes with 5 outgoing edges each, `MATCH (a:Person {uid: $uid})-[:KNOWS*1..5]->(b) RETURN count(b)` enumerates about 3,900 paths in 0.47 ms (0.60 ms at 100K nodes), about 0.12 to 0.15 us per path. See [Benchmarks](../performance/benchmarks.md#graph-traversal) for how this was measured.

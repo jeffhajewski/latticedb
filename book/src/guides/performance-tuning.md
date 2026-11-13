@@ -23,19 +23,24 @@ db.open()
 
 The `ef_search` parameter controls the accuracy/speed tradeoff for HNSW vector search.
 
-| ef_search | Mean Latency (1M vectors) | Recall@10 |
-|-----------|--------------------------|-----------|
-| 16 | 506 us | 57% |
-| 32 | 1.9 ms | 79% |
-| 64 | 990 us | 100% |
-| 128 | 3.2 ms | 100% |
-| 256 | 11.6 ms | 100% |
+Mean latency and recall@10 over 128-dimensional clustered vectors, measured
+through the C API with the default 100 MB cache (0.17.0, Apple M5; method and
+more scales on [Benchmarks](../performance/benchmarks.md#vector-search)):
+
+| ef_search | 100,000 vectors | Recall@10 | 1,000,000 vectors | Recall@10 |
+|-----------|----------------:|----------:|------------------:|----------:|
+| 16 | 55 us | 90.7% | 0.71 ms | 72.5% |
+| 32 | 86 us | 96.3% | 1.05 ms | 87.7% |
+| 64 (default) | 123 us | 98.3% | 1.54 ms | 95.6% |
+| 128 | 180 us | 98.5% | 2.0 ms | 98.4% |
+| 256 | 266 us | 98.5% | 2.5 ms | 98.5% |
 
 **Guidelines:**
-- Default is 64, which achieves 100% recall at 1M vectors
-- For latency-sensitive applications, try 32 (79% recall)
-- For maximum recall in critical applications, use 128
-- Values above 128 rarely improve recall but increase latency
+- Default is 64: about 98% recall at 100K vectors on this data, about 96% at 1M
+- At a million vectors, 128 buys back the last few points of recall for about a third more time
+- Below 64, recall falls quickly as the index grows
+- Past 128, latency rises and recall does not
+- At 1M vectors the cache matters more than `ef_search`: see Memory Usage below
 
 ```python
 # Programmatic API
@@ -168,13 +173,20 @@ with db.write() as txn:
 
 ## Memory Usage
 
-Vector storage dominates memory at scale:
+A 128-dimensional vector takes about 1.1 KB of file with its index. What a process
+holds is bounded by the page cache, plus a few MB:
 
-| Scale | Memory |
-|-------|--------|
-| 1,000 vectors (128d) | 1 MB |
-| 10,000 vectors | 10 MB |
-| 100,000 vectors | 101 MB |
-| 1,000,000 vectors | 1,040 MB |
+| Vectors (128-d) | File | Memory, default 100 MB cache | Search p50, default cache | With a larger cache |
+|----------------:|-----:|-----------------------------:|--------------------------:|--------------------:|
+| 1,000 | 1.2 MB | 3 MB | 35 us | |
+| 10,000 | 11 MB | 13 MB | 66 us | |
+| 100,000 | 108 MB | 108 MB | 122 us | 121 us (1 GB cache, 119 MB) |
+| 1,000,000 | 1,074 MB | 185 MB | 1.34 ms | 0.21 ms (2 GB cache, 1.1 GB) |
 
-Plan your `vector_dimensions` and scale accordingly. Lower dimensions use less memory but capture less semantic information.
+"Memory" is what opening the database and searching added to the process. Once the
+file outgrows the cache, searches read pages back from the operating system's file
+cache (or the disk) and get several times slower, and inserts slow down far more
+(see [Benchmarks](../performance/benchmarks.md#vector-search)): building a million
+vectors took 75 minutes with the default cache and 18 with a 2 GB one. For a
+million vectors, give the cache about the size of the file. Lower `vector_dimensions` use
+less of both, but capture less semantic information.

@@ -7,7 +7,7 @@ LatticeDB is a single-file local database for connected, semantic, and textual d
 - **One file.** Your entire database is a single portable file. No server, no configuration.
 - **One query layer.** Graph traversal, HNSW vector similarity, and BM25 full-text — in one query.
 - **One event log.** Durable named streams and the built-in graph changefeed share the same transaction/WAL path as graph writes.
-- **Sub-millisecond.** 0.13 us node lookups. 0.83 ms vector search at 1M vectors with 100% recall.
+- **Fast in process.** 0.2 us reads by node id and 2.3 us Cypher lookups through the C API; top-10 vector search over 100K vectors in 0.12 ms. See [Benchmarks](./performance/benchmarks.md).
 
 ```cypher
 // Find chunks similar to a query, traverse to their document, then to the author

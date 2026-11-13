@@ -2,7 +2,7 @@
 
 SQLite is the closest thing LatticeDB has to a design ancestor: one file, no server, embedded in your process, and boring in all the right ways. The difference is what the file is organised for. SQLite organises rows into tables; LatticeDB organises nodes into a graph, with vector and full-text indexes over their properties.
 
-This is the only comparison in this section measured head to head. Both engines run on the same machine, over the same generated data, in the same harness — `zig build sqlite-benchmark`. You can reproduce every number below.
+This is the only comparison in this section measured head to head. Both engines run on the same machine, over the same generated data, each through its own public C API with comparable durability settings, in the same program — `zig build capi-benchmark -- --suite core --suite sqlite`. You can reproduce every number below.
 
 ## When SQLite is the right answer
 
@@ -15,33 +15,24 @@ Start here, because it often is.
 
 If relationships in your data are an occasional join rather than the point of the query, use SQLite.
 
-## Where the graph model pulls ahead
+## Traversal: closer than you might think
 
-Traversal in SQLite means a recursive common table expression. It works, and for one or two hops it works fine. A depth-limited search written with `UNION` deduplicates on (node, depth), so a node reached at several depths is expanded again at each one.
+Traversal in SQLite means joins of an edge table on itself, or a recursive common table expression for paths of any length. With the edge table indexed on its source column, that is fast, and for a few hops it is as fast as LatticeDB.
 
-LatticeDB traverses with BFS over an adjacency cache and a bitset for visited tracking, which expands each node once. Both engines below run over the same social-network graph with a power-law degree distribution, LatticeDB with the WAL off. The LatticeDB side is Zig code calling the storage layer in process: Cypher queries, the C API and the bindings read edges from the B+Tree and never use the adjacency cache (`enable_adjacency_cache` is accepted there and changes nothing), and a query has no reachability operator, so `MATCH (a)-[*1..k]->(b)` enumerates paths rather than visiting each node once. In the hop tables the two sides do not do identical work: LatticeDB counts paths with raw edge iterators, with no edge-type filter and no deduplication, while SQLite runs `SELECT DISTINCT` with a type filter and a join.
+The figures below are LatticeDB 0.17.0 and SQLite 3.51.0 on an Apple M5 (macOS 26.5, 2026-11-13). Both write a log and fsync it on every commit (`journal_mode=WAL` and `synchronous=FULL` for SQLite, LatticeDB's defaults), with a 100 MB page cache each. The graph is Person nodes (rows) with 5 `KNOWS` edges out of each to random others; each query starts from a random node found through an index on an integer `uid` and counts what it reaches. Medians of five runs, p50 of 2,000 queries each.
 
-### 100K nodes, 500K edges
+| Workload | 10K nodes: LatticeDB | SQLite | 100K nodes: LatticeDB | SQLite |
+|----------|---------------------:|-------:|----------------------:|-------:|
+| 1 hop (5 paths) | 2.5 us | 2.5 us | 4.8 us | 3.6 us |
+| 2 hops (25) | 4.4 us | 5.4 us | 8.8 us | 8.9 us |
+| 3 hops (125) | 14 us | 14 us | 21 us | 29 us |
+| 1 to 5 hops (about 3,905) | 472 us | 1,038 us | 600 us | 1,361 us |
 
-| Workload | LatticeDB | SQLite | Speedup |
-|----------|-----------|--------|--------:|
-| 1-hop traversal | 8.0 us | 290.0 us | 36x |
-| 2-hop traversal | 38.7 us | 548.3 us | 14x |
-| 3-hop traversal | 197.3 us | 1.2 ms | 6x |
-| Variable path (1..5) | 134.4 us | 10.1 ms | 75x |
+LatticeDB runs Cypher (`MATCH (a:Person {uid: $uid})-[:KNOWS*1..5]->(b) RETURN count(b)`); SQLite runs joins, and a recursive CTE with `UNION ALL` for the last row. Both count the same paths. For a few hops the two are level; enumerating longer paths, LatticeDB is about twice as fast. Neither has a reachability operator that visits each node once: both enumerate paths, so the cost of a deep pattern follows the number of paths.
 
-### Depth-limited traversal, 10K nodes
+Point lookups by an indexed value are level too: 2.3 us for the Cypher query against 3.0 us for SQLite at 100,000 rows. Writes are not: SQLite inserts rows in transactions of 1,000 at 1.8 million a second, LatticeDB creates nodes at 330,000 a second, because a node also writes a label index entry, separate property records and changefeed events. A single durable commit costs about the same in both (44 us and 42 us at p50, within run-to-run noise). The full table is in [Competitive Analysis](../performance/competitive-analysis.md#measured-here-latticedb-and-sqlite).
 
-Here both engines compute the same reachable node sets (`zig build graph-benchmark`). The gap widens with depth because SQLite's `UNION` expands a node again at every depth it is reached, while LatticeDB's visited bitset expands it once: it measures that difference in algorithm.
-
-| Depth | LatticeDB | SQLite | Speedup |
-|------:|----------:|-------:|--------:|
-| 10 | 311 us | 121 ms | 390x |
-| 15 | 380 us | 271 ms | 713x |
-| 25 | 318 us | 587 ms | 1,848x |
-| 50 | 500 us | 1.4 s | 2,819x |
-
-Read these as "how much does depth cost you", not as a claim that LatticeDB is three thousand times faster than SQLite. On point lookups the two are far closer: LatticeDB measures 0.13 us against roughly 0.2 us for in-memory SQLite. The B+Tree underneath is doing similar work.
+Earlier editions of this page showed LatticeDB tens to thousands of times faster than SQLite at traversal. Those figures came from Zig code calling the storage layer over an in-memory adjacency cache that queries and the bindings never use, with LatticeDB's log off and SQLite doing more work per query; they are withdrawn.
 
 ## Search: one engine or three
 
@@ -60,7 +51,7 @@ ORDER BY chunk.embedding <=> $query_vector
 LIMIT 10
 ```
 
-For reference, published figures put SQLite FTS5 under 6 ms for full-text search; LatticeDB measures 19 us on its own benchmark. Vector search in `sqlite-vec` is brute-force, measured by its author at around 17 ms over 1M vectors, against 0.83 ms for LatticeDB's HNSW index at 100% recall@10. Those two are not head-to-head measurements — see [how to read the numbers](./overview.md#how-to-read-the-numbers).
+We have not measured FTS5 or `sqlite-vec` against LatticeDB's full-text and vector indexes. `sqlite-vec` searches by brute force, which its author measured at around 17 ms over 1M vectors; LatticeDB's own full-text and vector figures are on [Benchmarks](../performance/benchmarks.md). Those are not a head-to-head comparison — see [how to read the numbers](./overview.md#how-to-read-the-numbers).
 
 ## Durability and transactions
 
@@ -72,7 +63,7 @@ LatticeDB adds one thing SQLite has no equivalent for: [durable streams and chan
 
 | | LatticeDB | SQLite |
 |---|---|---|
-| Best at | Traversal, hybrid retrieval, connected data | Tabular data, universal deployment |
+| Best at | Hybrid retrieval, connected data in one query | Tabular data, universal deployment |
 | Query language | Cypher subset | SQL |
 | Vector search | Native HNSW | Extension, brute force |
 | Full-text search | Native BM25 | FTS5 extension |

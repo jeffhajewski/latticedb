@@ -30,7 +30,7 @@ This is the important section, and [When to Use LatticeDB](../getting-started/wh
 
 **No server.** No process to deploy, secure, monitor, upgrade, or pay for. For a desktop application, a CLI tool, an edge deployment, a notebook, or a test suite, this is often the entire argument.
 
-**No network hop.** Published Neo4j point-lookup figures sit around 28 ms at p99 in a third-party comparison; LatticeDB measures 0.13 us on its own benchmark. Most of that gap is the network and serialisation, not the storage engine — which is exactly the point of embedding, but it also means the comparison is measuring architecture rather than engineering. See [how to read the numbers](./overview.md#how-to-read-the-numbers).
+**No network hop.** A third-party comparison put Neo4j point lookups around 28 ms at p99; a Cypher lookup by an indexed property in LatticeDB, in process, takes about 2.3 us ([Benchmarks](../performance/benchmarks.md#point-lookups)). Most of that gap is the network and serialisation, not the storage engine — which is exactly the point of embedding, but it also means the comparison is measuring architecture rather than engineering, and the two figures come from different machines and methods. See [how to read the numbers](./overview.md#how-to-read-the-numbers).
 
 **Vector and text search in the same engine.** Neo4j does vector indexes and Lucene-backed full-text, but LatticeDB was designed around combining them with traversal in one query rather than adding them alongside it.
 

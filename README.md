@@ -10,7 +10,7 @@ LatticeDB is an embedded, single-file graph database that lets local application
 - **One query layer.** Graph traversal, HNSW vector similarity, and BM25 full-text — in the same query language.
 - **One event log.** Durable named streams and a built-in graph changefeed share the same transaction/WAL path as graph writes.
 - **Local-first.** Designed for one owning process on one machine, with WAL-backed durability.
-- **Fast.** 0.13 μs node lookups. 0.83 ms vector search at 1M vectors with 100% recall.
+- **Fast.** 0.2 μs reads by node id and 2.3 μs Cypher lookups through the C API; top-10 vector search over 100K vectors in 0.12 ms (see [Performance](#performance)).
 
 ```cypher
 // Find chunks similar to a query, traverse to their document, then to the author
@@ -269,125 +269,33 @@ See [bindings/java/README.md](bindings/java/README.md) for build instructions an
 
 ## Performance
 
-Benchmarked on Apple M1, single-threaded, with auto-scaled buffer pool. Run `zig build benchmark` to reproduce.
-For the repeated-term FTS indexing workload that previously exposed quadratic append behavior, run `zig build fts-benchmark`.
+Measured on 0.17.0 through the public C API with the default options (log on and
+fsynced on every commit, 100 MB cache), ReleaseFast, on an Apple M5 (10 cores,
+24 GB, macOS 26.5), 2026-11-13. Medians of five runs; the full tables, the method
+and the spreads are in [Benchmarks](book/src/performance/benchmarks.md), and
+`zig build capi-benchmark` reproduces them.
 
-### Core Operations
+| Operation | p50 | p99 |
+|-----------|----:|----:|
+| Create a node, one durable commit | 44 μs | 70 μs |
+| Create nodes, 1,000 per transaction | 332,000 nodes/s | |
+| Read a property by node id (C API, open read transaction) | 0.22 μs | 0.24 μs |
+| Cypher lookup by an indexed property, 100K nodes | 2.3 μs | 2.5 μs |
+| Cypher 2-hop count from an indexed node, 100K nodes / 500K edges | 8.8 μs | 12 μs |
+| Cypher `*1..5` path count (3,905 paths), 100K nodes | 600 μs | 661 μs |
+| Full-text top-10, one word, 10K / 100K documents | 8.5 / 104 μs | 103 μs / 1.2 ms |
+| Vector top-10, 100K vectors, 128-d (recall@10 98.3%) | 122 μs | 192 μs |
+| Vector top-10, 1M vectors, default 100 MB cache (recall@10 95.6%) | 1.34 ms | 3.1 ms |
+| Vector top-10, 1M vectors, 2 GB cache | 0.21 ms | 0.46 ms |
 
-| Operation | Latency | Throughput | Target | Status |
-|-----------|---------|------------|--------|--------|
-| Node lookup | 0.13 μs | 7.9M ops/sec | < 1 μs | PASS |
-| Node creation | 0.65 μs | 1.5M ops/sec | — | — |
-| Edge traversal | 9 μs | 111K ops/sec | — | — |
-| Full-text search (100 docs) | 19 μs | 53K ops/sec | — | — |
-| 10-NN vector search (1M vectors) | 0.83 ms | 1.2K ops/sec | < 10 ms @ 1M | PASS |
-
-### Vector Search (HNSW) at Scale
-
-128-dimensional cosine vectors, M=16, ef_construction=200, ef_search=64, k=10. Run `zig build vector-benchmark` to reproduce.
-
-| Scale | Mean Latency | P99 Latency | Recall@10 | Memory |
-|-------|-------------|-------------|-----------|--------|
-| 1,000 | 65 μs | 70 μs | 100% | 1 MB |
-| 10,000 | 174 μs | 695 μs | 99% | 10 MB |
-| 100,000 | 438 μs | 1.2 ms | 99% | 101 MB |
-| 1,000,000 | 832 μs | 1.8 ms | 100% | 1,040 MB |
-
-Search latency scales sub-linearly (O(log N)) with 99–100% recall@10. Uses heuristic neighbor selection (HNSW paper Algorithm 4) for diverse graph connectivity, connection page packing to reduce memory, and pre-normalized dot product for fast cosine distance.
-
-**ef_search Sensitivity (1M vectors)**
-
-| ef_search | Mean Latency | Recall@10 |
-|-----------|-------------|-----------|
-| 16 | 506 μs | 57% |
-| 32 | 1.9 ms | 79% |
-| 64 | 990 μs | 100% |
-| 128 | 3.2 ms | 100% |
-| 256 | 11.6 ms | 100% |
-
-### Competitive Analysis
-
-#### Point Lookups
-
-| System | Latency | Type | Source |
-|--------|---------|------|--------|
-| **LatticeDB** | **0.13 μs** | Embedded | `zig build benchmark` |
-| RocksDB (in-memory) | 0.14 μs | Embedded | [RocksDB wiki](https://github.com/facebook/rocksdb/wiki/RocksDB-In-Memory-Workload-Performance-Benchmarks) |
-| SQLite (in-memory) | ~0.2 μs | Embedded | [Turso blog](https://turso.tech/blog/microsecond-level-sql-query-latency-with-libsql-local-replicas-5e4ae19b628b) |
-| SQLite (WAL, disk) | 3 μs (p90) | Embedded | [marending.dev](https://marending.dev/notes/sqlite-benchmarks/) |
-| Neo4j | 28 ms (p99) | Server | [Memgraph comparison](https://memgraph.com/blog/memgraph-vs-neo4j-performance-benchmark-comparison) |
-
-#### Vector Search
-
-| System | Latency (10-NN) | Scale | Type | Source |
-|--------|-----------------|-------|------|--------|
-| **LatticeDB** | **0.83 ms mean, 100% recall** | 1M | Embedded | `zig build vector-benchmark` |
-| FAISS HNSW (single-thread) | 0.5–3 ms | 1M | Library | [FAISS wiki](https://github.com/facebookresearch/faiss/wiki/Indexing-1M-vectors) |
-| Weaviate | 1.4 ms mean, 3.1 ms P99 | 1M | Server | [Weaviate benchmarks](https://docs.weaviate.io/weaviate/benchmarks/ann) |
-| Qdrant | ~1–2 ms | 1M | Server | [Qdrant benchmarks](https://qdrant.tech/benchmarks/) |
-| Milvus + SQ8 | 2.2 ms P99 | 1M | Server | [VectorDBBench](https://zilliz.com/vdbbench-leaderboard) |
-| pgvector HNSW | ~5 ms @ 99% recall | 1M | Extension | [Jonathan Katz](https://jkatz05.com/post/postgres/pgvector-performance-150x-speedup/) |
-| LanceDB | 3–5 ms | 1M | Embedded | [LanceDB blog](https://medium.com/etoai/benchmarking-lancedb-92b01032874a) |
-| Chroma | 4–5 ms mean | 1M | Embedded | [Chroma docs](https://docs.trychroma.com/production/administration/performance) |
-| Pinecone P2 | ~15 ms (incl. network) | 1M | Cloud | [Pinecone blog](https://www.pinecone.io/blog/dedicated-read-nodes/) |
-| sqlite-vec (brute force) | 17 ms | 1M | Extension | [Alex Garcia](https://alexgarcia.xyz/blog/2024/sqlite-vec-stable-release/index.html) |
-
-#### Graph Traversal
-
-| System | 2-hop (100K nodes) | Type | Source |
-|--------|-------------------|------|--------|
-| **LatticeDB** | **39 μs** | Embedded | `zig build sqlite-benchmark` |
-| SQLite (recursive CTE) | 548 μs | Embedded | `zig build sqlite-benchmark` |
-| Kuzu *(archived Oct 2025)* | 19 ms | Embedded | [The Data Quarry](https://thedataquarry.com/blog/embedded-db-2/) |
-| Neo4j | 10 ms (1M nodes) | Server | [Neo4j blog](https://neo4j.com/news/how-much-faster-is-a-graph-database-really/) |
-
-Only the SQLite rows are measured head to head on the same machine in the same harness. The Kuzu and Neo4j figures come from third-party posts on hardware and with methodology we do not control, so treat them as order-of-magnitude orientation rather than a benchmark result.
-
-**LatticeDB vs SQLite** — Social network graph with power-law degree distribution, adjacency cache pre-warmed:
-
-**Small Scale (10K nodes, 50K edges)**
-
-| Workload | LatticeDB | SQLite | Speedup |
-|----------|-----------|--------|--------:|
-| 1-hop traversal | 560 ns | 13.0 μs | **23x** |
-| 2-hop traversal | 3.0 μs | 37.5 μs | **13x** |
-| 3-hop traversal | 19.1 μs | 178.5 μs | **9x** |
-| Variable path (1..5) | 82.4 μs | 4.3 ms | **52x** |
-
-**Medium Scale (100K nodes, 500K edges)**
-
-| Workload | LatticeDB | SQLite | Speedup |
-|----------|-----------|--------|--------:|
-| 1-hop traversal | 8.0 μs | 290.0 μs | **36x** |
-| 2-hop traversal | 38.7 μs | 548.3 μs | **14x** |
-| 3-hop traversal | 197.3 μs | 1.2 ms | **6x** |
-| Variable path (1..5) | 134.4 μs | 10.1 ms | **75x** |
-
-**Depth-Limited Traversal (10K nodes, 50K edges)**
-
-| Depth | LatticeDB | SQLite | Speedup |
-|------:|----------:|-------:|--------:|
-| 10    | 311 μs    | 121 ms | **390x** |
-| 15    | 380 μs    | 271 ms | **713x** |
-| 25    | 318 μs    | 587 ms | **1,848x** |
-| 50    | 500 μs    | 1.4 s  | **2,819x** |
-
-LatticeDB uses BFS with adjacency cache and bitset visited tracking. SQLite uses a recursive CTE with `UNION` deduplication. In this depth-limited test both compute identical reachable node sets (~8K nodes). `UNION` deduplicates on (node, depth), so SQLite expands a node again at every depth it is reached, while the visited bitset expands each node once; the gap measures that difference in algorithm and widens with depth. Run `zig build graph-benchmark -- --quick` to reproduce.
-
-The LatticeDB side of these traversal tables is Zig code calling the storage layer in process, and the adjacency cache it reads is not used by Cypher queries or the C API, which read edges from the B+Tree (`enable_adjacency_cache` is accepted there and changes nothing). Without the cache the same BFS took 3.0 ms at depths 10 and 15, 3.3 ms at 25 and 4.5 ms at 50, against 0.21 to 0.28 ms with it in a run on the same machine. A query has no reachability operator: `MATCH (a)-[*1..k]->(b) RETURN count(DISTINCT b)` enumerates paths, so on a similar 10K-node graph from a hub it took 3.7 ms at `k = 2` and 37 ms at `k = 3` (130K paths to 9.8K nodes) and grows with the number of paths, not nodes.
-
-In the 1-hop to variable-path tables above (`zig build sqlite-benchmark`), the two sides do not run the same work: LatticeDB counts paths with raw edge iterators, with no edge-type filter and no deduplication, while SQLite runs `SELECT DISTINCT` with a type filter and a join. LatticeDB runs with the WAL off in all of these benchmarks.
-
-#### Full-Text Search (BM25)
-
-| System | Search Latency | Type | Source |
-|--------|----------------|------|--------|
-| **LatticeDB** | **19 μs** | Embedded | `zig build benchmark` |
-| SQLite FTS5 | < 6 ms | Embedded | [SQLite Cloud](https://blog.sqlite.ai/real-time-full-text-site-search-with-sqlite-fts5-extension) |
-| Elasticsearch | 1–10 ms | Server | Various |
-| Tantivy | 10–100 μs | Library | Various |
-
-The LatticeDB figure searches a 100-document corpus; the other rows come from other sources and workloads and are not comparable to it.
+With `sync_mode = normal` a single commit takes 6.4 μs. Loading 1M nodes and 2M
+edges takes 34 s with the defaults and 8 s with the
+[bulk-load recipe](book/src/configuration/durability.md#bulk-loading). Against
+SQLite through its own C API with the same durability, LatticeDB is level for one
+to three hops and about twice as fast for `*1..5`, while SQLite inserts rows several
+times faster; see [Competitive Analysis](book/src/performance/competitive-analysis.md),
+which also lists other systems' published figures, as citations kept apart from
+these measurements.
 
 ## Features
 

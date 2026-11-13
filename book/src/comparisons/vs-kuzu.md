@@ -28,14 +28,13 @@ Neither shape is better. They are answers to different questions, and the worklo
 
 ## Published performance figures
 
-The one comparative number in circulation is graph traversal, and it needs a caveat before the table rather than after it: the LatticeDB figure is measured on an Apple M1 by `zig build sqlite-benchmark`, and the Kùzu figure is from a [third-party blog post](https://thedataquarry.com/blog/embedded-db-2/) on hardware and methodology we do not control. These are not comparable in the way a benchmark table implies.
-
-| System | 2-hop traversal, 100K nodes | Source |
-|--------|----------------------------|--------|
-| LatticeDB | 39 us | `zig build sqlite-benchmark`, Apple M1 |
-| Kùzu | 19 ms | The Data Quarry, hardware unknown |
-
-Treat that as "the same order of operation, wildly different order of magnitude, worth investigating on your own data" — not as a benchmark result. If you care about the answer for your workload, run both.
+We have not measured Kùzu or LadybugDB. The one figure in circulation is a
+[third-party blog post](https://thedataquarry.com/blog/embedded-db-2/)'s 19 ms for a
+2-hop traversal over 100K nodes, on hardware and with a query we do not know in
+detail. LatticeDB's own 2-hop figure (a Cypher count from an indexed node, 100K
+nodes and 500K edges, 8.8 us at p50) is on [Benchmarks](../performance/benchmarks.md#graph-traversal),
+measured by a different method on different data, so the two are not a comparison.
+If you care about the answer for your workload, run both.
 
 ## What LatticeDB has that Kùzu did not
 

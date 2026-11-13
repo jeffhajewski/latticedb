@@ -29,7 +29,7 @@ If you are deciding whether LatticeDB fits your problem at all, start with [When
 
 Benchmark comparisons in this section come from two very different places, and it matters which is which.
 
-**Head-to-head measurements.** The SQLite comparison runs both engines on the same machine, over the same data, in the same benchmark harness (`zig build sqlite-benchmark` and `zig build graph-benchmark`), and you can reproduce them yourself. They are closer to comparable than anything else here, but not identical work: LatticeDB runs with the WAL off, and in the 1- to 3-hop tests it counts paths without the type filter and deduplication the SQLite query does. [Competitive Analysis](../performance/competitive-analysis.md#latticedb-vs-sqlite) has the details.
+**Head-to-head measurements.** The SQLite comparison runs both engines on the same machine, over the same data, each through its own public C API with the same durability settings (a log fsynced on every commit), in one program (`zig build capi-benchmark`), and you can reproduce it yourself. [Competitive Analysis](../performance/competitive-analysis.md#measured-here-latticedb-and-sqlite) states the settings and the queries on both sides.
 
 **Published third-party figures.** Numbers for Kùzu, Neo4j, Weaviate, Qdrant, Chroma, and the rest are taken from their own documentation or from third-party blog posts, on hardware we do not control, with methodology we did not choose. They are useful for order-of-magnitude orientation and nothing more. Do not read a 2x difference between LatticeDB and a third-party figure as meaningful.
 

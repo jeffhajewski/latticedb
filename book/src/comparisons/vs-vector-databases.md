@@ -41,11 +41,10 @@ Vector similarity, lexical matching, graph traversal, and a metadata filter, res
 
 ## Published latency figures
 
-Every number below except the LatticeDB row comes from the vendor's own documentation or a third-party benchmark, on hardware and with methodology we did not control. They are order-of-magnitude orientation, not a head-to-head result — see [how to read the numbers](./overview.md#how-to-read-the-numbers).
+Every number below comes from the vendor's own documentation or a third-party benchmark, on hardware, data and settings we did not control, and none was measured here. They are order-of-magnitude orientation, not a head-to-head result — see [how to read the numbers](./overview.md#how-to-read-the-numbers).
 
-| System | 10-NN latency at 1M vectors | Type |
+| System | Published 10-NN latency at 1M vectors | Type |
 |--------|----------------------------|------|
-| LatticeDB | 0.83 ms mean, 100% recall@10 | Embedded |
 | FAISS HNSW (single thread) | 0.5–3 ms | Library |
 | Weaviate | 1.4 ms mean, 3.1 ms p99 | Server |
 | Qdrant | ~1–2 ms | Server |
@@ -56,7 +55,7 @@ Every number below except the LatticeDB row comes from the vendor's own document
 | Pinecone P2 | ~15 ms including network | Cloud |
 | sqlite-vec | 17 ms (brute force) | Extension |
 
-Sources for each row are in [Competitive Analysis](../performance/competitive-analysis.md). LatticeDB's own measurements, including recall and memory at every scale, are in [Benchmarks](../performance/benchmarks.md).
+Sources for each row are in [Competitive Analysis](../performance/competitive-analysis.md#cited-from-others). LatticeDB's own measurements, on synthetic clustered vectors, are in [Benchmarks](../performance/benchmarks.md#vector-search): at 1M vectors, 1.34 ms at p50 with 95.6% recall@10 and the default 100 MB cache, 0.21 ms with a 2 GB cache.
 
 ## When a vector database is still the better choice
 

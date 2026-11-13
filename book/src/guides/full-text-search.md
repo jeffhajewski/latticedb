@@ -227,13 +227,16 @@ LIMIT 10
 
 ## Performance
 
-Full-text search in LatticeDB is fast:
+Top-10 BM25 searches through the C API, on synthetic 50-word documents (0.17.0,
+Apple M5; [Benchmarks](../performance/benchmarks.md#full-text-search) has the method):
 
-| Operation | Latency |
-|-----------|---------|
-| FTS search (100 docs) | 19 us |
+| Documents | One word: p50 / p99 | Two words: p50 / p99 |
+|----------:|--------------------:|---------------------:|
+| 10,000 | 8.5 us / 103 us | 9.0 us / 70 us |
+| 100,000 | 104 us / 1.2 ms | 78 us / 0.70 ms |
 
-See [Benchmarks](../performance/benchmarks.md) for details.
+Ranking reads every posting of the query's words, so a search costs in proportion
+to how many documents contain them; the p99 is the most common words.
 
 ### Write the query so it can use the index
 

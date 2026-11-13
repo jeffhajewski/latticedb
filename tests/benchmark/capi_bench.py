@@ -41,11 +41,17 @@ def lat(prefix):
     return [m.format(p=prefix) for m in LAT]
 
 
+# Single commits: 20,000 per run, so the automatic checkpoints (one per
+# 1,000 log frames) sit inside p99.9 rather than on the edge of p99.
+def commit_lat():
+    return ["commit_us_p50", "commit_us_p99", "commit_us_p999", "commit_us_max"]
+
+
 CORE = [
-    ("commit_node", "commit_node", ["--ops", "5000"], 5, lat("commit_us") + ["per_sec"],
+    ("commit_node", "commit_node", ["--ops", "20000"], 5, commit_lat() + ["per_sec"],
      "1 node (label + 2 properties) per transaction"),
-    ("commit_edge", "commit_edge", ["--n", "100000", "--ops", "5000"], 5,
-     lat("commit_us") + ["per_sec"], "1 edge per transaction, 100K nodes present"),
+    ("commit_edge", "commit_edge", ["--n", "100000", "--ops", "20000"], 5,
+     commit_lat() + ["per_sec"], "1 edge per transaction, 100K nodes present"),
     ("batch_nodes_10", "batch_nodes", ["--ops", "50000", "--batch", "10"], 5,
      ["per_sec", "txn_us_p50"], "nodes in transactions of 10"),
     ("batch_nodes_100", "batch_nodes", ["--ops", "200000", "--batch", "100"], 5,
@@ -85,8 +91,8 @@ CORE = [
 
 # Settings other than the defaults; never in place of a default row.
 OPTIONS = [
-    ("commit_node_normal", "commit_node", ["--ops", "5000", "--sync", "normal"], 5,
-     lat("commit_us") + ["per_sec"], "1 node per transaction, sync_mode normal"),
+    ("commit_node_normal", "commit_node", ["--ops", "20000", "--sync", "normal"], 5,
+     commit_lat() + ["per_sec"], "1 node per transaction, sync_mode normal"),
     ("batch_nodes_1000_normal", "batch_nodes",
      ["--ops", "200000", "--batch", "1000", "--sync", "normal"], 5,
      ["per_sec", "txn_us_p50"], "nodes in transactions of 1,000, sync_mode normal"),
@@ -122,10 +128,10 @@ VECTOR = vector_rows(1000, 3, 0) + vector_rows(10000, 3, 0) + vector_rows(100000
 VECTOR_1M = vector_rows(1000000, 1, 2048)
 
 SQLITE = [
-    ("sqlite_commit_node", "sqlite_commit_node", ["--ops", "5000"], 5,
-     lat("commit_us") + ["per_sec"], "1 row per transaction"),
-    ("sqlite_commit_node_normal", "sqlite_commit_node", ["--ops", "5000", "--sync", "normal"], 5,
-     lat("commit_us") + ["per_sec"], "1 row per transaction, synchronous=NORMAL"),
+    ("sqlite_commit_node", "sqlite_commit_node", ["--ops", "20000"], 5,
+     commit_lat() + ["per_sec"], "1 row per transaction"),
+    ("sqlite_commit_node_normal", "sqlite_commit_node", ["--ops", "20000", "--sync", "normal"], 5,
+     commit_lat() + ["per_sec"], "1 row per transaction, synchronous=NORMAL"),
     ("sqlite_batch_nodes_1000", "sqlite_batch_nodes", ["--ops", "200000", "--batch", "1000"], 5,
      ["per_sec"], "rows in transactions of 1,000"),
     ("sqlite_lookup_100k", "sqlite_lookup", ["--n", "100000", "--ops", "20000"], 5,
@@ -352,7 +358,7 @@ def cmd_compare(ns):
             ratio = mn / mo if mo else float("inf")
             higher = any(h in m for h in HIGHER_IS_BETTER)
             if any(h in m for h in ("mean_count", "mean_hits", "file_mb", "footprint",
-                                    "peak_rss", "open_ms")):
+                                    "peak_rss", "open_ms", "_max")):
                 verdict = ""
             else:
                 worse = (ratio < 0.9 and hi_n < lo_o) if higher else (ratio > 1.1 and lo_n > hi_o)

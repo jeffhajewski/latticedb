@@ -119,7 +119,7 @@ static int cmp_u64(const void *a, const void *b) {
 }
 
 typedef struct {
-    double p50, p90, p99, max, mean;
+    double p50, p90, p99, p999, max, mean;
 } stats;
 
 /* Sorts the samples. Nanoseconds in, microseconds out. */
@@ -132,9 +132,11 @@ static stats summarize(uint64_t *s, long n, double divisor) {
     long i50 = (long)(0.50 * (double)(n - 1) + 0.5);
     long i90 = (long)(0.90 * (double)(n - 1) + 0.5);
     long i99 = (long)(0.99 * (double)(n - 1) + 0.5);
+    long i999 = (long)(0.999 * (double)(n - 1) + 0.5);
     st.p50 = (double)s[i50] / divisor / 1000.0;
     st.p90 = (double)s[i90] / divisor / 1000.0;
     st.p99 = (double)s[i99] / divisor / 1000.0;
+    st.p999 = (double)s[i999] / divisor / 1000.0;
     st.max = (double)s[n - 1] / divisor / 1000.0;
     st.mean = sum / (double)n / divisor / 1000.0;
     return st;
@@ -329,8 +331,9 @@ static void print_common(void) {
 }
 
 static void print_stats(const char *prefix, stats st) {
-    printf(" %s_p50=%.3f %s_p90=%.3f %s_p99=%.3f %s_max=%.3f %s_mean=%.3f", prefix, st.p50,
-           prefix, st.p90, prefix, st.p99, prefix, st.max, prefix, st.mean);
+    printf(" %s_p50=%.3f %s_p90=%.3f %s_p99=%.3f %s_p999=%.3f %s_max=%.3f %s_mean=%.3f", prefix,
+           st.p50, prefix, st.p90, prefix, st.p99, prefix, st.p999, prefix, st.max, prefix,
+           st.mean);
 }
 
 /* ------------------------------------------------------------------------ */

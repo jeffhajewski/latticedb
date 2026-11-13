@@ -343,7 +343,7 @@ pub fn build(b: *std.Build) void {
     const run_bench = b.addRunArtifact(bench_exe);
     run_bench.step.dependOn(&bench_exe.step);
 
-    const bench_step = b.step("benchmark", "Run performance benchmarks");
+    const bench_step = b.step("benchmark", "Run internal-path micro-benchmarks (developer use; published figures come from capi-benchmark)");
     bench_step.dependOn(&run_bench.step);
 
     // Stress test module
@@ -419,7 +419,7 @@ pub fn build(b: *std.Build) void {
         run_vector_bench.addArgs(args);
     }
 
-    const vector_bench_step = b.step("vector-benchmark", "Run HNSW vector performance benchmarks");
+    const vector_bench_step = b.step("vector-benchmark", "Run HNSW index benchmarks without the database around it (developer use; see capi-benchmark)");
     vector_bench_step.dependOn(&run_vector_bench.step);
 
     // Storage-core micro-benchmarks (checksums, page allocation, B+Tree)
@@ -489,7 +489,7 @@ pub fn build(b: *std.Build) void {
     const run_sqlite_bench = b.addRunArtifact(sqlite_bench_exe);
     run_sqlite_bench.step.dependOn(&sqlite_bench_exe.step);
 
-    const sqlite_bench_step = b.step("sqlite-benchmark", "Run SQLite vs LatticeDB comparison benchmark");
+    const sqlite_bench_step = b.step("sqlite-benchmark", "Run in-process traversal vs SQLite, log off, adjacency cache (developer use; not the published comparison, see capi-benchmark)");
     sqlite_bench_step.dependOn(&run_sqlite_bench.step);
 
     // Graph DFS benchmark module
@@ -516,7 +516,7 @@ pub fn build(b: *std.Build) void {
         run_graph_bench.addArgs(args);
     }
 
-    const graph_bench_step = b.step("graph-benchmark", "Run DFS graph traversal benchmarks (LatticeDB vs SQLite)");
+    const graph_bench_step = b.step("graph-benchmark", "Run in-process DFS over the adjacency cache vs SQLite (developer use; queries never use the cache, see capi-benchmark)");
     graph_bench_step.dependOn(&run_graph_bench.step);
 
     // Public-API benchmark: the program behind the published performance
@@ -545,7 +545,11 @@ pub fn build(b: *std.Build) void {
         .name = "capi-bench",
         .root_module = capi_bench_module,
     });
+    // Installed (zig-out/bin/capi-bench) by this step only, so one workload
+    // can be run by hand; the default install does not build it.
+    const install_capi_bench = b.addInstallArtifact(capi_bench_exe, .{});
     const run_capi_bench = b.addSystemCommand(&.{"python3"});
+    run_capi_bench.step.dependOn(&install_capi_bench.step);
     run_capi_bench.addFileArg(b.path("tests/benchmark/capi_bench.py"));
     run_capi_bench.addArg("--bin");
     run_capi_bench.addArtifactArg(capi_bench_exe);

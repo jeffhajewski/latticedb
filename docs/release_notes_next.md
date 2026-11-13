@@ -649,6 +649,11 @@ the GQL-only clauses. `book/src/cypher/overview.md` lists them.
   none. `cache_size_mb` 0 in any options version means "not set": the variable's
   size if it is set, else 100 MB. The bindings leave the size unset unless given
   one, and `lattice create --cache-size` wins over the variable too.
+- **The CLI spells non-finite floats `NaN`, `Infinity` and `-Infinity`** in
+  query results, as `toFloat()` reads them: strings in `--format=json`, bare
+  words in CSV and the table, where they were `nan`, `inf` and `-inf`. A
+  script that matched the old spelling in CSV or table output needs the new
+  one.
 - **TypeScript exports `LatticeErrorCode`** from the package root, and it and
   `QueryErrorStage` are plain enums, readable at run time; they were const enums
   that compiled away.
@@ -1105,6 +1110,11 @@ with relationships is one range probe, under 1 µs.
   names the line and the reason; it said "Import failed: ParseError". It says to
   fix the file, since `--on-error=skip` cannot read past such a fault and is no
   help once given.
+- A query result with a float that is not a number or is infinite is valid
+  JSON: `--format=json` wrote `nan`, `inf` and `-inf`, which no JSON parser
+  accepts, and now writes the strings `"NaN"`, `"Infinity"` and
+  `"-Infinity"`, inside lists and maps too. CSV and the table print the same
+  words unquoted.
 - The result table prints floats of 1e16 and above, or below 1e-6, in size in
   the shortest scientific form (`1e300`, `1e-300`), where `1e300` took 301
   digits and `1e-300` printed as `0.000000`.

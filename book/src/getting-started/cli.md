@@ -880,7 +880,13 @@ edge_types,1
 decimals, and in the shortest scientific form that reads back as the same number
 when they are 1e16 or more, or below 1e-6, in size (`1e300`, `1e-300`), so a very
 small number never shows as `0.000000`. `json` and `csv` are meant for piping
-somewhere else, and print floats in full, as plain decimals:
+somewhere else, and print floats in full, as plain decimals. A float that is not
+a number or is infinite is written `NaN`, `Infinity` or `-Infinity`: as strings
+in JSON (`"NaN"`, also inside lists and maps), since JSON has no number for
+them, and as the bare words in CSV and in a table. These are the spellings
+`toFloat()` reads back. A query's JSON is for display, not a typed format: a
+float such as `2.0` prints as `2`; [exports](../guides/data-export.md) keep
+types.
 
 ```bash
 lattice exec social.lattice --query="MATCH (p:Person) RETURN p.name" --format=json | jq

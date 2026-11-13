@@ -282,10 +282,11 @@ names the operation (`wal_payload.PayloadType`):
 | `label_add`, `label_remove` | Node store and label index |
 | `vector_set`, `vector_remove` | Vector index |
 | `stream_append`, `stream_offset_set`, `stream_trim` | Stream trees |
+| `changefeed_events` | Changefeed: a run of compact events, with the names of the symbols they use; the names are interned again and each event stored with the recovered ids. Events below the changefeed's floor, dropped by retention after they were logged, stay dropped, and the file's minimum reader version is raised again |
 
 The database opens recovery with a `LogicalRecoveryContext` that points at the node
-store, edge store, symbol table, label index, stream trees and, when vectors are
-enabled, the vector index. Labels, edge types and property keys are mostly logged
+store, edge store, symbol table, label index, stream trees, the page manager and,
+when vectors are enabled, the vector index. Labels, edge types and property keys are mostly logged
 by name and re-interned through the symbol table, so symbol ids need not match the
 session that wrote the log.
 
@@ -503,8 +504,15 @@ var rm = RecoveryManager.initWithLogicalContext(allocator, .{
     .file_has_vectors = has_vector_data,
     // Called between records: the early flush
     .between_operations = .{ .context = self, .call = relieveBufferPressureHook },
+    // Whose header a replayed changefeed run raises the reader version in
+    .page_manager = &self.page_manager,
 });
-const stats = try rm.recover(wal, &self.page_manager);
+const stats = rm.recover(wal, &self.page_manager) catch |err| switch (err) {
+    // Damage in synced frames, or a committed record that cannot be applied
+    error.MidLogCorruption, error.InvalidRecord, error.CorruptedWal => return DatabaseError.InvalidDatabase,
+    error.OutOfMemory => return DatabaseError.OutOfMemory,
+    else => return DatabaseError.IoError,
+};
 ```
 
 `recoverDatabase(allocator, &wal, &pm)` and `RecoveryManager.init` also exist, but

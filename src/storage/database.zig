@@ -2806,8 +2806,23 @@ pub const Database = struct {
             try self.logWalStreamOffset(txn, offset);
         }
         for (overlay.stream_trims.items) |trim_op| {
-            try self.logWalStreamTrim(txn, trim_op);
+            try self.logWalStreamTrim(txn, try self.boundChangefeedTrim(overlay, trim_op));
         }
+    }
+
+    /// A trim of the changefeed, as it goes into the log: through the last
+    /// event there is once this transaction's own are counted, however far
+    /// past it the caller asked. `trimBelow` stops there when the trim is
+    /// applied; logging the same sequence makes replay raise the floor to
+    /// the same place, whatever later events the file holds by then.
+    fn boundChangefeedTrim(self: *Self, overlay: *const TxnOverlay, trim_op: TxnStreamTrim) DatabaseError!TxnStreamTrim {
+        if (!std.mem.eql(u8, trim_op.stream, stream_store_mod.changes_stream)) return trim_op;
+        const trees = self.streamTrees() orelse return trim_op;
+        var last = changefeed_mod.lastSequence(trees) catch |err| return mapChangefeedError(err);
+        if (overlay.changefeed.count() > 0) {
+            last = @max(last, overlay.changefeed.first_sequence + overlay.changefeed.count() - 1);
+        }
+        return .{ .stream = trim_op.stream, .through_sequence = @min(trim_op.through_sequence, last) };
     }
 
     fn logCommittedNodeState(

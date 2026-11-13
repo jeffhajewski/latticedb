@@ -214,6 +214,82 @@ test "lcf trimming the changefeed by hand moves the floor" {
     try std.testing.expectError(DatabaseError.ChangesTrimmed, db.readChanges(1, 10, 0));
 }
 
+test "lcf a trim past the last event stops there, and later events are kept" {
+    const path = "/tmp/lcfz_retention_trim_past_end.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    {
+        var db = try open(path, null);
+        defer db.close();
+        try commitNodes(db, 3); // events 1..6
+        var txn = try db.beginTransaction(.read_write);
+        try db.trimStream(&txn, "__lattice_changes", 1000);
+        try db.commitTransaction(&txn);
+
+        // Everything there was is gone, and the floor is the next sequence,
+        // not 1001: a reader that had read through 6 has missed nothing.
+        const none = try sequences(db, 0);
+        defer std.testing.allocator.free(none);
+        try std.testing.expectEqual(@as(usize, 0), none.len);
+        var caught_up = try db.readChanges(6, 10, 0);
+        caught_up.deinit();
+
+        try commitNodes(db, 2); // events 7..10
+        const seqs = try sequences(db, 0);
+        defer std.testing.allocator.free(seqs);
+        try std.testing.expectEqualSlices(u64, &.{ 7, 8, 9, 10 }, seqs);
+        const after = try sequences(db, 6);
+        defer std.testing.allocator.free(after);
+        try std.testing.expectEqualSlices(u64, &.{ 7, 8, 9, 10 }, after);
+
+        // Keeping everything, a retention pass drops nothing.
+        try std.testing.expectEqual(@as(u64, 0), try db.trimChangefeed());
+    }
+
+    var db = try open(path, null);
+    defer db.close();
+    const seqs = try sequences(db, 0);
+    defer std.testing.allocator.free(seqs);
+    try std.testing.expectEqualSlices(u64, &.{ 7, 8, 9, 10 }, seqs);
+}
+
+test "lcf a trim past the last event replays to the same floor" {
+    const path = "/tmp/lcfz_retention_trim_past_end_replay.ltdb";
+    const crashed = "/tmp/lcfz_retention_trim_past_end_crashed.ltdb";
+
+    // The copy is taken with everything still in the log, and again after a
+    // flush has put the later events in the file under the log that trims.
+    for ([_]bool{ false, true }) |flush_first| {
+        cleanup(path);
+        cleanup(crashed);
+        defer cleanup(path);
+        defer cleanup(crashed);
+        {
+            var db = try open(path, null);
+            defer db.close();
+            try commitNodes(db, 3); // events 1..6
+            var txn = try db.beginTransaction(.read_write);
+            try db.trimStream(&txn, "__lattice_changes", 1000);
+            try db.commitTransaction(&txn);
+            try commitNodes(db, 2); // events 7..10
+            if (flush_first) try db.sync();
+            try copyFile(path, crashed);
+            var from: [256]u8 = undefined;
+            var to: [256]u8 = undefined;
+            try copyFile(
+                try std.fmt.bufPrint(&from, "{s}-wal", .{path}),
+                try std.fmt.bufPrint(&to, "{s}-wal", .{crashed}),
+            );
+        }
+        var db = try open(crashed, null);
+        defer db.close();
+        const seqs = try sequences(db, 0);
+        defer std.testing.allocator.free(seqs);
+        try std.testing.expectEqualSlices(u64, &.{ 7, 8, 9, 10 }, seqs);
+    }
+}
+
 test "lcf events dropped by retention stay dropped when the log is replayed" {
     const path = "/tmp/lcfz_retention_replay.ltdb";
     const crashed = "/tmp/lcfz_retention_replay_crashed.ltdb";

@@ -1067,10 +1067,16 @@ pub const TrimResult = struct {
 /// raises the floor only to the first event it kept. If the oldest event
 /// left belongs to a transaction whose head was dropped, it is rewritten to
 /// carry the transaction header.
+///
+/// A target past the next sequence to be handed out stops there. The floor
+/// says which events are gone, and one above the next sequence would also
+/// swallow events not written yet: readers would never see them and the
+/// next pass would delete them.
 pub fn trimBelow(trees: store.TreeSet, allocator: Allocator, target_in: u64, max_events: u64) Error!TrimResult {
     var result = TrimResult{};
     const current_floor = try floor(trees);
-    const target = @max(target_in, current_floor);
+    const next_sequence = (try lastSequence(trees)) +| 1;
+    const target = @max(@min(target_in, next_sequence), current_floor);
 
     var legacy_keys: std.ArrayListUnmanaged([]u8) = .empty;
     defer {

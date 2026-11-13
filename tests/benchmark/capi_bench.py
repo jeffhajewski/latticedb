@@ -127,6 +127,19 @@ def vector_rows(n, runs, cache_extra):
 VECTOR = vector_rows(1000, 3, 0) + vector_rows(10000, 3, 0) + vector_rows(100000, 3, 1024)
 VECTOR_1M = vector_rows(1000000, 1, 2048)
 
+# What the cache does to building past the point where the file outgrows it.
+VECTOR_CACHE = [
+    ("vector_build_250k", "vector_build", ["--n", "250000"], 1,
+     ["insert_per_sec", "insert_s", "file_mb"], "build 250,000 vectors, default cache"),
+    ("vector_build_250k_2g", "vector_build", ["--n", "250000", "--cache", "2048"], 1,
+     ["insert_per_sec", "insert_s", "file_mb"], "build 250,000 vectors, 2 GB cache"),
+    ("vector_1m_2g", "vector", ["--n", "1000000", "--ops", "1000", "--ef", "0",
+                                "--build-cache", "2048"], 1,
+     ["insert_per_sec", "insert_s"] + lat("search_ef0_us") + ["search_ef0_recall",
+                                                              "footprint_mb", "open_ms"],
+     "1,000,000 vectors built and searched with a 2 GB cache"),
+]
+
 SQLITE = [
     ("sqlite_commit_node", "sqlite_commit_node", ["--ops", "20000"], 5,
      commit_lat() + ["per_sec"], "1 row per transaction"),
@@ -153,6 +166,7 @@ SUITES = {
     "options": OPTIONS,
     "vector": VECTOR,
     "vector-1m": VECTOR_1M,
+    "vector-cache": VECTOR_CACHE,
     "sqlite": SQLITE,
 }
 DEFAULT_SUITES = ["core", "options", "vector", "sqlite"]
@@ -198,6 +212,11 @@ def run_row(binary, row, scratch, runs_override):
         if error:
             break
         results.append(res)
+        for suffix in ("", "-wal", ".ids"):
+            try:
+                os.unlink(db + suffix)
+            except FileNotFoundError:
+                pass
         print(f"  {rid} run {r + 1}/{runs}: {time.time() - t0:.1f}s", file=sys.stderr, flush=True)
     return {"id": rid, "workload": workload, "args": args, "runs": results, "error": error}
 
@@ -211,8 +230,13 @@ def run_vector(binary, args, db):
         i = args.index("--extra-cache")
         extra = args[i + 1]
         del args[i:i + 2]
+    build_args = []
+    if "--build-cache" in args:
+        i = args.index("--build-cache")
+        build_args = ["--cache", args[i + 1]]
+        args[i] = "--cache"
     n = args[args.index("--n") + 1]
-    build, err = run_once(binary, "vector_build", ["--n", n], db)
+    build, err = run_once(binary, "vector_build", ["--n", n] + build_args, db)
     if err:
         return None, err
     search, err = run_once(binary, "vector_search", args + ["--keep"], db)

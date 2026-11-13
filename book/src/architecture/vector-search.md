@@ -152,7 +152,7 @@ with `m_max0 = 2 × m`) and `ef_construction` (1 to 4096), defaulting to cosine,
 16, 32 and 200. In Zig these are `DatabaseConfig.vector_dimensions`,
 `vector_metric`, `vector_m` and `vector_ef_construction`; the C API's
 `lattice_open_options_v5`, the bindings and `lattice create`
-(`--vector-metric=cosine|euclidean|dot`, `--vector-m`, `--vector-ef-construction`)
+(`--vector-metric=cosine|euclidean|dot_product`, `--vector-m`, `--vector-ef-construction`)
 pass the same values.
 
 The file's header records all five from the moment the index exists, and every

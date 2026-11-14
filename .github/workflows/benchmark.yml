@@ -12,7 +12,7 @@ env:
 jobs:
   benchmark:
     name: Run Benchmarks
-    runs-on: macos-14  # Apple Silicon, matches README numbers
+    runs-on: macos-15  # Apple Silicon, matches README numbers
 
     steps:
       - uses: actions/checkout@v4

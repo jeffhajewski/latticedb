@@ -5,6 +5,7 @@
 //! format (3).
 
 const std = @import("std");
+const builtin = @import("builtin");
 const lattice = @import("lattice");
 const compat = @import("compat");
 
@@ -86,6 +87,11 @@ test "lfmt gate: a new file, and opens that store no event, leave the reader ver
 }
 
 test "lfmt gate: the first changefeed event raises the reader version on disk before its commit returns" {
+    // Reads the file through a second handle while the database is open.
+    // Windows enforces the database's lock on reads, so that read is refused
+    // there (FILE_LOCK_CONFLICT); the tests that read after close still run.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
     inline for (.{ true, false }) |wal| {
         const path = if (wal) "/tmp/lfmt_gate_event.db" else "/tmp/lfmt_gate_event_nolog.db";
         cleanup(path);
@@ -104,6 +110,11 @@ test "lfmt gate: the first changefeed event raises the reader version on disk be
 }
 
 test "lfmt gate: a commit that fails after staging its events raises nothing, and its retry raises once" {
+    // Reads the file through a second handle while the database is open.
+    // Windows enforces the database's lock on reads, so that read is refused
+    // there (FILE_LOCK_CONFLICT); the tests that read after close still run.
+    if (builtin.os.tag == .windows) return error.SkipZigTest;
+
     inline for (.{ true, false }) |wal| {
         const path = if (wal) "/tmp/lfmt_gate_retry.db" else "/tmp/lfmt_gate_retry_nolog.db";
         cleanup(path);

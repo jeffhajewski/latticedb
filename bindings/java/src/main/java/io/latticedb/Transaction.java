@@ -199,6 +199,34 @@ public final class Transaction implements AutoCloseable {
     }
 
     /**
+     * The node's vector as this transaction sees it, or empty when it has
+     * none. {@code key} must be {@code "embedding"} or {@code ""}, as in
+     * {@link #setVector}. Throws {@link ErrorCode#NOT_FOUND} when the node does
+     * not exist.
+     *
+     * <p>Under the cosine metric, the default, a committed vector reads back
+     * scaled to unit length: {@code {3, 4}} reads back as {@code {0.6, 0.8}}.
+     * The direction, and so every cosine distance, is unchanged. Under the
+     * euclidean and dot-product metrics it reads back as stored. A vector set
+     * earlier in this transaction reads back as written.
+     */
+    public Optional<float[]> getVector(long nodeId, String key) {
+        ensureActive();
+        return Optional.ofNullable(Native.nodeGetVector(handle, nodeId, key));
+    }
+
+    /**
+     * Removes the node's vector. The node keeps its labels and properties;
+     * vector search no longer returns it. Removing a vector the node does not
+     * have does nothing. Throws {@link ErrorCode#NOT_FOUND} when the node does
+     * not exist.
+     */
+    public void removeVector(long nodeId, String key) {
+        ensureWritable();
+        Native.nodeRemoveVector(handle, nodeId, key);
+    }
+
+    /**
      * Finds node ids through a required explicit equality index. Throws
      * {@link ErrorCode#UNSUPPORTED} when the index does not exist.
      */

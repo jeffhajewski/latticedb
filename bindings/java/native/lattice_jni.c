@@ -1094,6 +1094,41 @@ Java_io_latticedb_Native_nodeSetVector(JNIEnv *env, jclass cls, jlong txn_handle
     check(env, rc);
 }
 
+JNIEXPORT jfloatArray JNICALL
+Java_io_latticedb_Native_nodeGetVector(JNIEnv *env, jclass cls, jlong txn_handle,
+                                       jlong node_id, jstring key) {
+    init_cache(env);
+    (void)cls;
+    char *key_buf = key ? jstring_to_utf8(env, key, &(size_t){0}) : NULL;
+    if ((*env)->ExceptionCheck(env)) return NULL;
+    float *vector = NULL;
+    uint32_t dims = 0;
+    lattice_error rc = lattice_node_get_vector((lattice_txn *)(uintptr_t)txn_handle,
+        (lattice_node_id)node_id, key_buf, &vector, &dims);
+    free(key_buf);
+    if (!check(env, rc)) return NULL;
+    if (vector == NULL) return NULL;
+    jfloatArray arr = (*env)->NewFloatArray(env, (jsize)dims);
+    if (arr != NULL && dims > 0) {
+        (*env)->SetFloatArrayRegion(env, arr, 0, (jsize)dims, vector);
+    }
+    lattice_free_vector(vector, dims);
+    return arr;
+}
+
+JNIEXPORT void JNICALL
+Java_io_latticedb_Native_nodeRemoveVector(JNIEnv *env, jclass cls, jlong txn_handle,
+                                          jlong node_id, jstring key) {
+    init_cache(env);
+    (void)cls;
+    char *key_buf = key ? jstring_to_utf8(env, key, &(size_t){0}) : NULL;
+    if ((*env)->ExceptionCheck(env)) return;
+    lattice_error rc = lattice_node_remove_vector((lattice_txn *)(uintptr_t)txn_handle,
+        (lattice_node_id)node_id, key_buf);
+    free(key_buf);
+    check(env, rc);
+}
+
 /* ------------------------------------------------------------------ */
 /* Batch insert                                                        */
 /* ------------------------------------------------------------------ */

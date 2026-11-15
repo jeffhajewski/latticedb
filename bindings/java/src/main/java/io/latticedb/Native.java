@@ -76,6 +76,10 @@ final class Native {
 
     static native void nodeSetVector(long txn, long nodeId, String key, float[] vector);
 
+    static native float[] nodeGetVector(long txn, long nodeId, String key);
+
+    static native void nodeRemoveVector(long txn, long nodeId, String key);
+
     static native long[] batchInsert(long txn, String label, float[][] vectors);
 
     /* Edges */

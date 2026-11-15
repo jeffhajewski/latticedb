@@ -32,6 +32,70 @@ class SearchTest {
     }
 
     @Test
+    void getVectorAndRemoveVector() {
+        String path = dir.resolve("crud.db").toString();
+        long[] ids = new long[2];
+        try (Database db = Database.open(path,
+                OpenOptions.defaults().create(true).enableVectors(true).vectorDimensions(2))) {
+            db.write(tx -> {
+                Node node = tx.createNode(List.of("Doc"));
+                Node other = tx.createNode(List.of("Doc"));
+                ids[0] = node.id();
+                ids[1] = other.id();
+                assertTrue(tx.getVector(node.id(), "embedding").isEmpty());
+                tx.setVector(node.id(), "embedding", new float[]{3, 4});
+                tx.setVector(other.id(), "embedding", new float[]{0, 1});
+                // Uncommitted: as written.
+                assertArrayEquals(new float[]{3, 4}, tx.getVector(node.id(), "").orElseThrow());
+                return null;
+            });
+            db.read(tx -> {
+                // Committed, under the default cosine metric: normalised.
+                assertArrayEquals(new float[]{0.6f, 0.8f},
+                        tx.getVector(ids[0], "embedding").orElseThrow(), 1e-6f);
+                LatticeException missing = assertThrows(LatticeException.class,
+                        () -> tx.getVector(ids[0] + 1000, "embedding"));
+                assertEquals(ErrorCode.NOT_FOUND, missing.getErrorCode());
+                LatticeException otherKey = assertThrows(LatticeException.class,
+                        () -> tx.getVector(ids[0], "title_vec"));
+                assertEquals(ErrorCode.UNSUPPORTED, otherKey.getErrorCode());
+                LatticeException readOnly = assertThrows(LatticeException.class,
+                        () -> tx.removeVector(ids[0], "embedding"));
+                assertEquals(ErrorCode.READ_ONLY, readOnly.getErrorCode());
+                return null;
+            });
+            db.write(tx -> {
+                tx.removeVector(ids[0], "embedding");
+                assertTrue(tx.getVector(ids[0], "embedding").isEmpty());
+                // Removing a vector the node does not have does nothing.
+                tx.removeVector(ids[0], "");
+                LatticeException missing = assertThrows(LatticeException.class,
+                        () -> tx.removeVector(ids[0] + 1000, "embedding"));
+                assertEquals(ErrorCode.NOT_FOUND, missing.getErrorCode());
+                return null;
+            });
+            List<VectorSearchResult> results = db.vectorSearch(
+                    new float[]{3, 4}, VectorSearchOptions.defaults().k(5));
+            assertEquals(1, results.size());
+            assertEquals(ids[1], results.get(0).nodeId());
+        }
+
+        // After reopening, the removal holds and the node can take a vector again.
+        try (Database db = Database.open(path, OpenOptions.defaults())) {
+            db.write(tx -> {
+                assertTrue(tx.getVector(ids[0], "embedding").isEmpty());
+                assertTrue(tx.nodeExists(ids[0]));
+                tx.setVector(ids[0], "embedding", new float[]{1, 0});
+                return null;
+            });
+            db.read(tx -> {
+                assertArrayEquals(new float[]{1, 0}, tx.getVector(ids[0], "embedding").orElseThrow());
+                return null;
+            });
+        }
+    }
+
+    @Test
     void vectorSearchInTransaction() {
         try (Database db = Database.open(dir.resolve("vt.db").toString(),
                 OpenOptions.defaults().create(true).enableVectors(true).vectorDimensions(2))) {

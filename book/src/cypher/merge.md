@@ -35,6 +35,11 @@ it, so the `MERGE` would create a new node every time it ran.
 When an explicit property index covers one of the pattern's labels and properties,
 `MERGE` looks candidates up there instead of reading every node with the label.
 
+On a database with a vector index, `embedding` in the pattern is the node's
+vector, not an ordinary property: it matches against the stored vector and, when
+a node is created, sets it. See
+[Set a Node's Vector](mutations.md#set-a-nodes-vector).
+
 ## MERGE with Properties
 
 ```cypher

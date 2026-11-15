@@ -81,12 +81,20 @@ To use vector search:
 # Store an embedding. A node has one vector; Cypher reads it as n.embedding.
 txn.set_vector(node.id, "embedding", vector)
 
+# Read it back, or take it off the node (the node itself stays)
+stored = txn.get_vector(node.id)   # None when the node has no vector
+txn.remove_vector(node.id)
+
 # Search by similarity
 results = db.vector_search(query_vector, k=10)
 
 # Or in Cypher
 db.query("MATCH (n:Chunk) WHERE n.embedding <=> $q < 0.5 RETURN n", parameters={"q": query_vector})
 ```
+
+Cypher can write the vector as well: `SET n.embedding = $vector` stores it and
+`REMOVE n.embedding` removes it. See
+[Set a Node's Vector](../cypher/mutations.md#set-a-nodes-vector).
 
 ### Embeddings
 

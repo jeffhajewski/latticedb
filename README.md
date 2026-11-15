@@ -313,6 +313,8 @@ these measurements.
 - HNSW approximate nearest neighbor, with `ef_search` tunable per query
 - Cosine, Euclidean or dot-product distance, chosen when the index is created; the
   file records the index, so reopening needs no vector options
+- Set, read and remove a node's vector from any binding, or from Cypher with
+  `SET n.embedding = $vector` and `REMOVE n.embedding`
 - Built-in hash embeddings or HTTP client for Ollama/OpenAI
 - Bulk vector node insertion for fast ingestion
 

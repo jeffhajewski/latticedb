@@ -37,8 +37,8 @@ the event by a summary map
 recorded whole; replacing one 40 MB string with another records the new value
 and a summary of the old.
 
-Vectors are not part of the changefeed: setting or replacing a node's vector
-writes no event.
+Vectors are not part of the changefeed: setting, replacing or removing a node's
+vector writes no event, whether the API or a Cypher statement did it.
 
 ### What a transaction's events say, and in what order
 

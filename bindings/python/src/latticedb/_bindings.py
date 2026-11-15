@@ -984,6 +984,31 @@ class LatticeLib:
         ]
         self._lib.lattice_node_set_vector.restype = c_int
 
+        # lattice_node_get_vector
+        self._lib.lattice_node_get_vector.argtypes = [
+            LatticeTxn,
+            LatticeNodeId,
+            c_char_p,
+            POINTER(POINTER(ctypes.c_float)),
+            POINTER(c_uint32),
+        ]
+        self._lib.lattice_node_get_vector.restype = c_int
+
+        # lattice_free_vector
+        self._lib.lattice_free_vector.argtypes = [
+            POINTER(ctypes.c_float),
+            c_uint32,
+        ]
+        self._lib.lattice_free_vector.restype = None
+
+        # lattice_node_remove_vector
+        self._lib.lattice_node_remove_vector.argtypes = [
+            LatticeTxn,
+            LatticeNodeId,
+            c_char_p,
+        ]
+        self._lib.lattice_node_remove_vector.restype = c_int
+
         # lattice_batch_insert
         self._lib.lattice_batch_insert.argtypes = [
             LatticeTxn,

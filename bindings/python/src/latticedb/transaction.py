@@ -663,6 +663,85 @@ class Transaction:
         )
         check_error(code)
 
+    def get_vector(
+        self,
+        node_id: int,
+        key: str = "embedding",
+    ) -> Optional["NDArray[np.float32]"]:
+        """
+        Get a node's vector as this transaction sees it.
+
+        Under the cosine metric, the default, a committed vector reads back
+        scaled to unit length: ``[3, 4]`` reads back as ``[0.6, 0.8]``. The
+        direction, and so every cosine distance, is unchanged. Under the
+        euclidean and dot-product metrics it reads back as stored. A vector
+        set earlier in this transaction reads back as written.
+
+        Args:
+            node_id: The node ID.
+            key: Vector key; must be ``"embedding"`` or ``""``.
+
+        Returns:
+            The vector as a float32 array, or None if the node has no vector.
+
+        Raises:
+            LatticeNotFoundError: If the node does not exist.
+        """
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        import numpy as np
+
+        lib = get_lib()
+        vector_ptr = ctypes.POINTER(ctypes.c_float)()
+        dims = ctypes.c_uint32()
+        code = lib._lib.lattice_node_get_vector(
+            self._handle,
+            node_id,
+            key.encode("utf-8"),
+            byref(vector_ptr),
+            byref(dims),
+        )
+        check_error(code)
+        if not vector_ptr:
+            return None
+        try:
+            result = np.ctypeslib.as_array(vector_ptr, shape=(dims.value,)).copy()
+            return cast("NDArray[np.float32]", result)
+        finally:
+            lib._lib.lattice_free_vector(vector_ptr, dims)
+
+    def remove_vector(
+        self,
+        node_id: int,
+        key: str = "embedding",
+    ) -> None:
+        """
+        Remove a node's vector.
+
+        The node keeps its labels and properties; vector search no longer
+        returns it. Removing a vector the node does not have does nothing.
+
+        Args:
+            node_id: The node ID.
+            key: Vector key; must be ``"embedding"`` or ``""``.
+
+        Raises:
+            LatticeNotFoundError: If the node does not exist.
+        """
+        if self._read_only:
+            raise RuntimeError("Cannot remove vector in read-only transaction")
+        if self._handle is None:
+            raise RuntimeError("Transaction not started")
+
+        lib = get_lib()
+        code = lib._lib.lattice_node_remove_vector(
+            self._handle,
+            node_id,
+            key.encode("utf-8"),
+        )
+        check_error(code)
+
     def batch_insert_vectors(
         self,
         label: str,

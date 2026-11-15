@@ -128,11 +128,13 @@ class TestNode:
         assert node.get_property("missing", "default") == "default"
 
     def test_set_vector(self) -> None:
-        """Test setting a vector."""
+        """Node.set_vector and Node.get_vector are local only, and deprecated."""
         node = Node(id=1)
         vector = np.array([1.0, 2.0, 3.0], dtype=np.float32)
-        node.set_vector("embedding", vector)
-        result = node.get_vector("embedding")
+        with pytest.deprecated_call(match=r"Node\.set_vector\(\.\.\.\) stores nothing"):
+            node.set_vector("embedding", vector)
+        with pytest.deprecated_call(match=r"Node\.get_vector\(\.\.\.\) does not read the stored vector"):
+            result = node.get_vector("embedding")
         assert result is not None
         np.testing.assert_array_equal(result, vector)
 

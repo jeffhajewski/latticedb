@@ -2,6 +2,7 @@
 Type definitions for Lattice Python bindings.
 """
 
+import warnings
 from dataclasses import dataclass, field
 from typing import Dict, Iterator, List, Optional, Union
 
@@ -48,11 +49,31 @@ class Node:
         return self.properties.get(key, default)
 
     def set_vector(self, key: str, vector: NDArray[np.float32]) -> None:
-        """Set a vector embedding on this node."""
+        """Deprecated: keep a vector on this object only.
+
+        Nothing is stored. Use :meth:`Transaction.set_vector` to store a
+        node's vector.
+        """
+        warnings.warn(
+            "Node.set_vector(...) stores nothing and is deprecated; "
+            "use Transaction.set_vector(node_id, key, vector).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         self._vectors[key] = vector.astype(np.float32)
 
     def get_vector(self, key: str) -> Optional[NDArray[np.float32]]:
-        """Get a vector embedding from this node."""
+        """Deprecated: read a vector kept on this object by :meth:`set_vector`.
+
+        This does not go to storage, so it returns None for a node that has a
+        stored vector. Use :meth:`Transaction.get_vector` to read it.
+        """
+        warnings.warn(
+            "Node.get_vector(...) does not read the stored vector and is deprecated; "
+            "use Transaction.get_vector(node_id).",
+            DeprecationWarning,
+            stacklevel=2,
+        )
         return self._vectors.get(key)
 
 

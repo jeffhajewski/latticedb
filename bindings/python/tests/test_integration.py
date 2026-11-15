@@ -922,6 +922,61 @@ class TestVectorOperations:
                 txn.set_vector(node.id, "embedding", vector)
                 txn.commit()
 
+    def test_get_and_remove_vector(self, tmp_path):
+        """A node's vector reads back, and removing it takes it out of search."""
+        pytest.importorskip("numpy")
+        import numpy as np
+
+        db_path = tmp_path / "test.db"
+        with Database(db_path, create=True, enable_vectors=True, vector_dimensions=2) as db:
+            with db.write() as txn:
+                node = txn.create_node(labels=["Doc"])
+                other = txn.create_node(labels=["Doc"])
+                assert txn.get_vector(node.id) is None
+                txn.set_vector(node.id, "embedding", np.array([3.0, 4.0], dtype=np.float32))
+                txn.set_vector(other.id, "embedding", np.array([0.0, 1.0], dtype=np.float32))
+                # Uncommitted: as written.
+                np.testing.assert_allclose(txn.get_vector(node.id), [3.0, 4.0])
+                txn.commit()
+
+            with db.read() as txn:
+                # Committed, under the default cosine metric: normalised.
+                vector = txn.get_vector(node.id, "embedding")
+                assert vector is not None
+                assert vector.dtype == np.float32
+                np.testing.assert_allclose(vector, [0.6, 0.8], rtol=1e-6)
+                with pytest.raises(LatticeNotFoundError):
+                    txn.get_vector(node.id + 1000)
+                with pytest.raises(LatticeUnsupportedError):
+                    txn.get_vector(node.id, "title_vec")
+                with pytest.raises(RuntimeError):
+                    txn.remove_vector(node.id)
+
+            with db.write() as txn:
+                txn.remove_vector(node.id)
+                assert txn.get_vector(node.id) is None
+                # Removing a vector the node does not have does nothing.
+                txn.remove_vector(node.id, "embedding")
+                with pytest.raises(LatticeNotFoundError):
+                    txn.remove_vector(node.id + 1000)
+                txn.commit()
+
+            query = np.array([3.0, 4.0], dtype=np.float32)
+            assert [r.node_id for r in db.vector_search(query, k=10)] == [other.id]
+            with db.read() as txn:
+                assert txn.node_exists(node.id)
+                assert txn.get_vector(node.id) is None
+
+        # After reopening, the removal holds and the node can take a vector again.
+        with Database(db_path) as db:
+            with db.read() as txn:
+                assert txn.get_vector(node.id) is None
+            with db.write() as txn:
+                txn.set_vector(node.id, "embedding", np.array([1.0, 0.0], dtype=np.float32))
+                txn.commit()
+            with db.read() as txn:
+                np.testing.assert_allclose(txn.get_vector(node.id), [1.0, 0.0])
+
     def test_vector_search(self, tmp_path):
         """Test vector similarity search."""
         pytest.importorskip("numpy")

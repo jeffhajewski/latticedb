@@ -952,6 +952,46 @@ export class LatticeFFI {
   }
 
   /**
+   * Get a node's vector, or null when it has none.
+   */
+  getVector(txn: TransactionHandle, nodeId: bigint, key: string): Float32Array | null {
+    if (!this.bindings.lattice_node_get_vector || !this.bindings.lattice_free_vector) {
+      throw new LatticeError(
+        'lattice_node_get_vector is required to read a node\'s vector',
+        LatticeErrorCode.Unsupported
+      );
+    }
+    const vectorOut: unknown[] = [null];
+    const dimsOut = Buffer.alloc(4);
+    const err = this.bindings.lattice_node_get_vector(txn, nodeId, key, vectorOut, dimsOut);
+    this.checkError(err);
+
+    const ptr = vectorOut[0];
+    const dims = dimsOut.readUInt32LE();
+    if (!ptr || dims === 0) return null;
+    try {
+      const floats = koffi.decode(ptr, 'float', dims) as number[];
+      return new Float32Array(floats);
+    } finally {
+      this.bindings.lattice_free_vector(ptr, dims);
+    }
+  }
+
+  /**
+   * Remove a node's vector. Removing a vector the node does not have does nothing.
+   */
+  removeVector(txn: TransactionHandle, nodeId: bigint, key: string): void {
+    if (!this.bindings.lattice_node_remove_vector) {
+      throw new LatticeError(
+        'lattice_node_remove_vector is required to remove a node\'s vector',
+        LatticeErrorCode.Unsupported
+      );
+    }
+    const err = this.bindings.lattice_node_remove_vector(txn, nodeId, key);
+    this.checkError(err);
+  }
+
+  /**
    * Batch insert multiple nodes with vectors.
    */
   batchInsert(

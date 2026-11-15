@@ -1074,6 +1074,58 @@ describeIfNative('Database Integration', () => {
       const resultNodeIds = results.map((r) => r.nodeId);
       expect(resultNodeIds).toContain(nodeId!);
     });
+
+    test('getVector reads a vector back and removeVector takes it out of search', async () => {
+      let nodeId: bigint;
+      let otherId: bigint;
+      const vector = new Float32Array([3, 4, 0, 0]);
+
+      await db.write(async (txn) => {
+        const node = await txn.createNode({ labels: ['VectorNode'] });
+        const other = await txn.createNode({ labels: ['VectorNode'] });
+        nodeId = node.id;
+        otherId = other.id;
+        expect(await txn.getVector(node.id)).toBeNull();
+        await txn.setVector(node.id, 'embedding', vector);
+        await txn.setVector(other.id, 'embedding', new Float32Array([0, 0, 1, 0]));
+        // Uncommitted: as written.
+        expect(Array.from((await txn.getVector(node.id))!)).toEqual([3, 4, 0, 0]);
+      });
+
+      await db.read(async (txn) => {
+        // Committed, under the default cosine metric: normalised.
+        const stored = await txn.getVector(nodeId!, 'embedding');
+        expect(stored).toBeInstanceOf(Float32Array);
+        expect(stored![0]).toBeCloseTo(0.6, 6);
+        expect(stored![1]).toBeCloseTo(0.8, 6);
+        await expect(txn.getVector(nodeId! + 1000n)).rejects.toMatchObject({ code: LatticeErrorCode.NotFound });
+        await expect(txn.getVector(nodeId!, 'title_vec')).rejects.toMatchObject({ code: LatticeErrorCode.Unsupported });
+        await expect(txn.removeVector(nodeId!)).rejects.toThrow(/read-only/i);
+      });
+
+      await db.write(async (txn) => {
+        await txn.removeVector(nodeId!);
+        expect(await txn.getVector(nodeId!)).toBeNull();
+        // Removing a vector the node does not have does nothing.
+        await txn.removeVector(nodeId!, 'embedding');
+        await expect(txn.removeVector(nodeId! + 1000n)).rejects.toMatchObject({ code: LatticeErrorCode.NotFound });
+      });
+
+      const results = await db.vectorSearch(vector, { k: 5 });
+      expect(results.map((r) => r.nodeId)).toEqual([otherId!]);
+      await db.read(async (txn) => {
+        expect(await txn.nodeExists(nodeId!)).toBe(true);
+        expect(await txn.getVector(nodeId!)).toBeNull();
+      });
+
+      // The node can take a vector again.
+      await db.write(async (txn) => {
+        await txn.setVector(nodeId!, 'embedding', new Float32Array([1, 0, 0, 0]));
+      });
+      await db.read(async (txn) => {
+        expect(Array.from((await txn.getVector(nodeId!))!)).toEqual([1, 0, 0, 0]);
+      });
+    });
   });
 
   describe('Full-text search', () => {

@@ -258,6 +258,39 @@ export class Transaction {
   }
 
   /**
+   * Get a node's vector as this transaction sees it.
+   *
+   * Under the cosine metric, the default, a committed vector reads back
+   * scaled to unit length: `[3, 4]` reads back as `[0.6, 0.8]`. The
+   * direction, and so every cosine distance, is unchanged. Under the
+   * euclidean and dot-product metrics it reads back as stored. A vector set
+   * earlier in this transaction reads back as written.
+   *
+   * @param nodeId - The node ID
+   * @param key - Vector key: `'embedding'` (the default) or `''`
+   * @returns The vector, or null if the node has none
+   * @throws LatticeError with code -4 (NotFound) if the node does not exist
+   */
+  async getVector(nodeId: bigint, key: string = 'embedding'): Promise<Float32Array | null> {
+    this.ensureActive();
+    return this.ffi.getVector(this.txnHandle!, nodeId, key);
+  }
+
+  /**
+   * Remove a node's vector. The node keeps its labels and properties; vector
+   * search no longer returns it. Removing a vector the node does not have
+   * does nothing.
+   *
+   * @param nodeId - The node ID
+   * @param key - Vector key: `'embedding'` (the default) or `''`
+   * @throws LatticeError with code -4 (NotFound) if the node does not exist
+   */
+  async removeVector(nodeId: bigint, key: string = 'embedding'): Promise<void> {
+    this.ensureWritable();
+    this.ffi.removeVector(this.txnHandle!, nodeId, key);
+  }
+
+  /**
    * Insert multiple vector-bearing nodes in a single call.
    *
    * @param label - Label for all nodes

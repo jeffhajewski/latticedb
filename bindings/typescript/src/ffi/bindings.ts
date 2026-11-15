@@ -455,6 +455,15 @@ export interface LatticeBindings {
     vector: Float32Array,
     dimensions: number
   ) => number;
+  lattice_node_get_vector?: (
+    txn: unknown,
+    node_id: bigint,
+    key: string,
+    vector_out: unknown[],
+    dimensions_out: Buffer
+  ) => number;
+  lattice_free_vector?: (vector: unknown, dimensions: number) => void;
+  lattice_node_remove_vector?: (txn: unknown, node_id: bigint, key: string) => number;
   lattice_batch_insert: (
     txn: unknown,
     nodes: unknown,
@@ -1049,6 +1058,22 @@ function createBindings(): LatticeBindings {
       'str', // key
       koffi.pointer('float'), // vector
       'uint32', // dimensions
+    ]),
+    lattice_node_get_vector: tryOptionalFunc(lib, 'lattice_node_get_vector', 'int', [
+      TxnPtr,
+      'uint64', // node_id
+      'str', // key
+      koffi.out(koffi.pointer(koffi.pointer('float'))), // vector_out
+      koffi.out(koffi.pointer('uint32')), // dimensions_out
+    ]),
+    lattice_free_vector: tryOptionalFunc(lib, 'lattice_free_vector', 'void', [
+      koffi.pointer('float'), // vector
+      'uint32', // dimensions
+    ]),
+    lattice_node_remove_vector: tryOptionalFunc(lib, 'lattice_node_remove_vector', 'int', [
+      TxnPtr,
+      'uint64', // node_id
+      'str', // key
     ]),
     lattice_batch_insert: lib.func('lattice_batch_insert', 'int', [
       TxnPtr,

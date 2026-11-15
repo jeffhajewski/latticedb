@@ -151,6 +151,37 @@ func (tx *Tx) SetVector(nodeID NodeID, key string, vector []float32) error {
 	return wrapError(tx.raw.SetNodeVector(uint64(nodeID), key, vector))
 }
 
+// GetVector returns the node's vector as this transaction sees it, with ok
+// false when the node has none. key must be "embedding" or "", as in
+// SetVector. A node that does not exist returns ErrorNotFound.
+//
+// Under the cosine metric, the default, a committed vector reads back scaled
+// to unit length: {3, 4} reads back as {0.6, 0.8}. The direction, and so every
+// cosine distance, is unchanged. Under the euclidean and dot-product metrics it
+// reads back as stored. A vector set earlier in this transaction reads back as
+// written.
+func (tx *Tx) GetVector(nodeID NodeID, key string) ([]float32, bool, error) {
+	if err := tx.ensureActive(); err != nil {
+		return nil, false, err
+	}
+	vector, err := tx.raw.GetNodeVector(uint64(nodeID), key)
+	if err != nil {
+		return nil, false, wrapError(err)
+	}
+	return vector, vector != nil, nil
+}
+
+// RemoveVector removes the node's vector. The node keeps its labels and
+// properties; vector search no longer returns it. Removing a vector the node
+// does not have does nothing. A node that does not exist returns
+// ErrorNotFound.
+func (tx *Tx) RemoveVector(nodeID NodeID, key string) error {
+	if err := tx.ensureWritable(); err != nil {
+		return err
+	}
+	return wrapError(tx.raw.RemoveNodeVector(uint64(nodeID), key))
+}
+
 func (tx *Tx) GetProperty(nodeID NodeID, key string) (Value, bool, error) {
 	if err := tx.ensureActive(); err != nil {
 		return nil, false, err

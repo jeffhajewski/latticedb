@@ -618,6 +618,43 @@ func (tx *Tx) SetNodeVector(nodeID uint64, key string, vector []float32) error {
 	)))
 }
 
+// GetNodeVector returns the node's vector, or nil when it has none.
+func (tx *Tx) GetNodeVector(nodeID uint64, key string) ([]float32, error) {
+	cKey := C.CString(key)
+	defer C.free(unsafe.Pointer(cKey))
+
+	var vectorOut *C.float
+	var dimsOut C.uint32_t
+	if err := errorFromCode(ErrorCode(C.lattice_node_get_vector(
+		tx.ptr,
+		C.lattice_node_id(nodeID),
+		cKey,
+		&vectorOut,
+		&dimsOut,
+	))); err != nil {
+		return nil, err
+	}
+	if vectorOut == nil || dimsOut == 0 {
+		return nil, nil
+	}
+	defer C.lattice_free_vector(vectorOut, dimsOut)
+
+	out := make([]float32, int(dimsOut))
+	copy(out, unsafe.Slice((*float32)(unsafe.Pointer(vectorOut)), len(out)))
+	return out, nil
+}
+
+func (tx *Tx) RemoveNodeVector(nodeID uint64, key string) error {
+	cKey := C.CString(key)
+	defer C.free(unsafe.Pointer(cKey))
+
+	return errorFromCode(ErrorCode(C.lattice_node_remove_vector(
+		tx.ptr,
+		C.lattice_node_id(nodeID),
+		cKey,
+	)))
+}
+
 func (tx *Tx) BatchInsert(label string, vectors [][]float32) ([]uint64, error) {
 	if len(vectors) == 0 {
 		return []uint64{}, nil

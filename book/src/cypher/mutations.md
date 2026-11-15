@@ -145,6 +145,41 @@ MATCH (n:Person {name: "Alice"})
 REMOVE n:Verified
 ```
 
+### Set a Node's Vector
+
+On a database with a vector index, `embedding` names the node's vector, and
+writing it from Cypher stores the vector, as `set_vector` does:
+
+```cypher
+MATCH (d:Doc {id: 42})
+SET d.embedding = $vector
+
+CREATE (d:Doc {id: 43, embedding: [0.1, 0.7, 0.2]})
+
+MERGE (d:Doc {id: 44}) ON CREATE SET d.embedding = $vector
+
+MATCH (d:Doc {id: 45})
+SET d += {title: "Notes", embedding: $vector}
+```
+
+The value must be a list of numbers, or a vector parameter, with exactly the
+index's dimensions and no NaN or infinite element; anything else fails the
+statement, and nothing it would have written is written. Setting the vector
+also drops any ordinary property named `embedding` the node had, so it cannot
+reappear when the vector is removed. `SET d = {...}` replaces the node's
+properties but leaves its vector alone unless the map has an `embedding` key.
+
+`MERGE (d:Doc {embedding: [...]})` matches a node whose vector is the one
+given, compared as stored: under the cosine metric a committed vector is kept
+scaled to unit length, so `[3, 4]` matches the stored `[0.6, 0.8]`. Matching on
+another property and setting the vector with `ON CREATE SET` is usually what you
+want.
+
+On a database without a vector index, `embedding` is an ordinary property like
+any other. Before 0.18.0 every write to `embedding` went to an ordinary property,
+also on a database with a vector index: a node created with
+`{embedding: [...]}` read the list back but was not in vector search.
+
 ### Remove a Node's Vector
 
 `n.embedding` reads a node's vector. On a database with a vector index,

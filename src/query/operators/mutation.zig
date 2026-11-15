@@ -173,6 +173,8 @@ pub const CreateNode = struct {
             &evaluated,
         );
 
+        try checkVectorItems(self.database, ctx, evaluated.items);
+
         // Create node with labels
         const node_id = self.database.createNode(ctx.txn, self.labels) catch |err|
             return ctx.storageFailure(err, "creating a node", .{});
@@ -692,8 +694,13 @@ pub const SetProperty = struct {
                     if (isVectorKey(self.database, self.property_name)) try removeVector(self.database, ctx, node_id);
                 } else {
                     const prop_value = (evalResultToPropertyValue(value, self.evaluator.allocator) catch return OperatorError.OutOfMemory) orelse return OperatorError.TypeError;
-                    self.database.setNodeProperty(ctx.txn, node_id, self.property_name, prop_value) catch |err|
-                        return ctx.storageFailure(err, "setting property '{s}' of node {d}", .{ self.property_name, node_id });
+                    if (isVectorKey(self.database, self.property_name)) {
+                        try checkVectorValue(self.database, ctx, prop_value);
+                        try writeNodeVector(self.database, ctx, node_id, prop_value);
+                    } else {
+                        self.database.setNodeProperty(ctx.txn, node_id, self.property_name, prop_value) catch |err|
+                            return ctx.storageFailure(err, "setting property '{s}' of node {d}", .{ self.property_name, node_id });
+                    }
                 }
             },
             .edge_ref => |edge_id| {
@@ -912,6 +919,8 @@ pub const SetPropertiesReplace = struct {
 
         switch (target_val) {
             .node_ref => |node_id| {
+                // A refused vector must not leave the properties cleared.
+                try checkVectorItems(self.database, ctx, evaluated.items);
                 // Clear existing properties and apply new values.
                 self.database.clearNodeProperties(ctx.txn, node_id) catch |err|
                     return ctx.storageFailure(err, "clearing the properties of node {d}", .{node_id});
@@ -1278,6 +1287,107 @@ fn removeVector(database: *Database, ctx: *const ExecutionContext, node_id: Node
         return ctx.storageFailure(err, "removing the vector of node {d}", .{node_id});
 }
 
+/// Refuse a value for a node's vector as lattice_node_set_vector refuses
+/// one: anything but a list (or vector) of exactly the index's number of
+/// finite numbers. Null, which removes the vector, passes.
+fn checkVectorValue(database: *Database, ctx: *const ExecutionContext, value: PropertyValue) OperatorError!void {
+    const dimensions: usize = (database.vectorConfig() orelse return).dimensions;
+    const len = switch (value) {
+        .null_val => return,
+        .vector_val => |v| v.len,
+        .list_val => |items| items.len,
+        else => return ctx.fail(OperatorError.TypeError, null, "embedding is the node's vector on a database with a vector index, and takes a list of {d} numbers, not a {s}", .{ dimensions, propertyTypeName(value) }),
+    };
+    if (len != dimensions) return ctx.fail(OperatorError.TypeError, null, "embedding is the node's vector, which has {d} dimensions in this database; the value has {d}", .{ dimensions, len });
+    switch (value) {
+        .vector_val => |v| for (v) |component| {
+            if (!std.math.isFinite(component)) return nonFiniteVector(ctx);
+        },
+        .list_val => |items| for (items) |item| {
+            const component: f32 = switch (item) {
+                .int_val => |n| @floatFromInt(n),
+                .float_val => |f| @floatCast(f),
+                else => return ctx.fail(OperatorError.TypeError, null, "embedding is the node's vector, and every element must be a number, not a {s}", .{propertyTypeName(item)}),
+            };
+            if (!std.math.isFinite(component)) return nonFiniteVector(ctx);
+        },
+        else => unreachable,
+    }
+}
+
+fn nonFiniteVector(ctx: *const ExecutionContext) OperatorError {
+    @branchHint(.cold);
+    return ctx.fail(OperatorError.TypeError, null, "embedding is the node's vector, and every element must be a finite number (no NaN or infinity, or a float too large for 32 bits)", .{});
+}
+
+/// Check every vector a property list writes before anything is written.
+fn checkVectorItems(database: *Database, ctx: *const ExecutionContext, items: []const EvaluatedProperty) OperatorError!void {
+    if (database.vectorConfig() == null) return;
+    for (items) |item| {
+        if (std.mem.eql(u8, item.key, "embedding")) try checkVectorValue(database, ctx, item.value);
+    }
+}
+
+/// Write a checked value to a node's vector: null removes it, anything else
+/// replaces it. An ordinary property named `embedding`, hidden by the vector
+/// on read, goes either way, so it cannot come back when the vector does.
+fn writeNodeVector(database: *Database, ctx: *const ExecutionContext, node_id: NodeId, value: PropertyValue) OperatorError!void {
+    database.removeNodeProperty(ctx.txn, node_id, "embedding") catch |err|
+        return ctx.storageFailure(err, "removing property 'embedding' of node {d}", .{node_id});
+    switch (value) {
+        .null_val => return removeVector(database, ctx, node_id),
+        .vector_val => |vector| database.setNodeVectorInTxn(ctx.txn, node_id, vector) catch |err|
+            return ctx.storageFailure(err, "setting the vector of node {d}", .{node_id}),
+        .list_val => |items| {
+            const vector = database.allocator.alloc(f32, items.len) catch return OperatorError.OutOfMemory;
+            defer database.allocator.free(vector);
+            for (items, vector) |item, *component| component.* = switch (item) {
+                .int_val => |n| @floatFromInt(n),
+                .float_val => |f| @floatCast(f),
+                else => return OperatorError.TypeError,
+            };
+            database.setNodeVectorInTxn(ctx.txn, node_id, vector) catch |err|
+                return ctx.storageFailure(err, "setting the vector of node {d}", .{node_id});
+        },
+        else => return OperatorError.TypeError,
+    }
+}
+
+/// The value as a vector, for comparing it with a node's vector. Null when
+/// it is not one; a checked value always is.
+fn vectorOfValue(allocator: Allocator, value: PropertyValue) Allocator.Error!?[]f32 {
+    return switch (value) {
+        .vector_val => |v| try allocator.dupe(f32, v),
+        .list_val => |items| blk: {
+            const vector = try allocator.alloc(f32, items.len);
+            for (items, vector) |item, *component| component.* = switch (item) {
+                .int_val => |n| @floatFromInt(n),
+                .float_val => |f| @floatCast(f),
+                else => {
+                    allocator.free(vector);
+                    break :blk null;
+                },
+            };
+            break :blk vector;
+        },
+        else => null,
+    };
+}
+
+fn propertyTypeName(value: PropertyValue) []const u8 {
+    return switch (value) {
+        .null_val => "null",
+        .bool_val => "boolean",
+        .int_val => "integer",
+        .float_val => "float",
+        .string_val => "string",
+        .bytes_val => "byte string",
+        .vector_val => "vector",
+        .list_val => "list",
+        .map_val => "map",
+    };
+}
+
 /// Convert EvalResult to PropertyValue
 fn evalResultToPropertyValue(result: EvalResult, allocator: Allocator) Allocator.Error!?PropertyValue {
     return switch (result) {
@@ -1364,7 +1474,12 @@ fn applyEvaluatedNodeProperties(
     node_id: NodeId,
     items: []const EvaluatedProperty,
 ) OperatorError!void {
+    try checkVectorItems(database, ctx, items);
     for (items) |item| {
+        if (isVectorKey(database, item.key)) {
+            try writeNodeVector(database, ctx, node_id, item.value);
+            continue;
+        }
         database.setNodeProperty(ctx.txn, node_id, item.key, item.value) catch |err|
             return ctx.storageFailure(err, "setting property '{s}' of node {d}", .{ item.key, node_id });
     }
@@ -1553,8 +1668,38 @@ pub const MergeNode = struct {
                 .{prop.key},
             );
         }
+        try checkVectorItems(self.database, ctx, evaluated_pattern.items);
 
-        try self.findMatches(ctx, evaluated_pattern.items);
+        // On a database with a vector index, `embedding` in the pattern is
+        // the node's vector, which is not among its properties: match the
+        // rest, then keep the nodes whose vector is the one given.
+        var wanted_vector: ?[]f32 = null;
+        defer if (wanted_vector) |v| self.allocator.free(v);
+        var match_props = evaluated_pattern.items;
+        var without_vector: std.ArrayList(EvaluatedProperty) = .empty;
+        defer without_vector.deinit(self.allocator);
+        for (evaluated_pattern.items) |prop| {
+            if (!isVectorKey(self.database, prop.key)) continue;
+            wanted_vector = (vectorOfValue(self.allocator, prop.value) catch return OperatorError.OutOfMemory) orelse
+                return OperatorError.TypeError;
+            for (evaluated_pattern.items) |other| {
+                if (isVectorKey(self.database, other.key)) continue;
+                without_vector.append(self.allocator, other) catch return OperatorError.OutOfMemory;
+            }
+            match_props = without_vector.items;
+            break;
+        }
+
+        try self.findMatches(ctx, match_props);
+        if (wanted_vector) |vector| {
+            var kept: usize = 0;
+            for (self.pending.items) |node_id| {
+                if (!self.database.nodeVectorEqualsInTxn(ctx.txn, node_id, vector)) continue;
+                self.pending.items[kept] = node_id;
+                kept += 1;
+            }
+            self.pending.items.len = kept;
+        }
 
         if (self.pending.items.len > 0) {
             for (self.pending.items) |node_id| {

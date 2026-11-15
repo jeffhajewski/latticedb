@@ -7962,6 +7962,23 @@ pub const Database = struct {
         };
     }
 
+    /// Whether the vector `txn` sees for a node is `vector`. A vector written
+    /// in `txn` compares as written; a committed one as the index stores it,
+    /// so under the cosine metric `vector` is first scaled to unit length, as
+    /// storing it would.
+    pub fn nodeVectorEqualsInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId, vector: []const f32) bool {
+        if (txn) |t| {
+            if (self.getTxnOverlay(t)) |overlay| {
+                if (overlay.vector_states.get(node_id)) |state| return switch (state) {
+                    .absent => false,
+                    .value => |pending| std.mem.eql(f32, pending, vector),
+                };
+            }
+        }
+        const hnsw = if (self.hnsw_index) |*h| h else return false;
+        return hnsw.holdsVector(node_id, vector);
+    }
+
     /// Score a transaction's pending vector exactly as the committed index
     /// would score it once stored, so pending and committed results rank on
     /// one scale.

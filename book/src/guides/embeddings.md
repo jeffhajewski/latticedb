@@ -59,7 +59,9 @@ name. Setting a vector on a node that already has one replaces it.
 `get_vector` reads a node's vector back, and `remove_vector` takes it away: the
 node stays, with its labels and properties, and vector search no longer returns
 it. Removing a vector the node does not have does nothing. In Cypher,
-`REMOVE n.embedding` and `SET n.embedding = null` do the same. Removing a node's
+`REMOVE n.embedding` and `SET n.embedding = null` do the same, and
+`SET n.embedding = $vector` (or `embedding` in a `CREATE` or `MERGE` map) sets
+the vector, on a database with a vector index. Removing a node's
 labels leaves its vector alone, and deleting the node removes it.
 
 ```python

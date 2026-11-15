@@ -34,6 +34,15 @@ makes those two Cypher statements remove it.
   database with a vector index both statements now remove the node's vector, and
   any ordinary property named `embedding` with it. On a database without a vector
   index `embedding` is an ordinary property, as before.
+- **Cypher sets the vector too.** On a database with a vector index,
+  `SET n.embedding = <list or vector parameter>`, and `embedding` in a `CREATE`
+  or `MERGE` property map, `ON CREATE SET`/`ON MATCH SET` and `SET n += {...}`,
+  store the node's vector, with the checks `set_vector` makes: the index's
+  dimensions, numbers only, no NaN or infinity. A value that fails them fails the
+  statement. In 0.17.0 these wrote an ordinary property, so a node created with
+  `{embedding: [...]}` read the list back but was not in vector search. `MERGE`
+  on `embedding` matches the stored vector; under the cosine metric that is the
+  unit-length copy.
 
 ## API Notes
 
@@ -55,6 +64,10 @@ makes those two Cypher statements remove it.
   written by 0.18.0.
 - If a 0.17.0 statement ran `REMOVE n.embedding` or `SET n.embedding = null`
   on a node with a vector expecting nothing to happen, it now removes the vector.
+- On a database with a vector index, a statement that wrote something other than
+  a vector to `embedding` (a string, a list of the wrong length) now fails, and
+  one that wrote a list of numbers now sets the vector. Ordinary `embedding`
+  properties written before keep reading back on nodes that have no vector.
 
 ## Validation Notes
 

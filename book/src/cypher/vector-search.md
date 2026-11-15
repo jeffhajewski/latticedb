@@ -24,9 +24,11 @@ length, because the index stores only the normalised copy: a stored `[3, 4]`
 returns as `[0.6, 0.8]`. Under the Euclidean and dot-product metrics vectors are
 stored, and read back, as given.
 
-`REMOVE n.embedding` and `SET n.embedding = null` remove the node's vector, on a
-database with a vector index: the node stays, and vector search no longer returns
-it. See [Remove a Node's Vector](mutations.md#remove-a-nodes-vector).
+On a database with a vector index, Cypher writes the vector too:
+`SET n.embedding = $v`, and `embedding` in a `CREATE`, `MERGE` or `SET +=` map,
+store it, and `REMOVE n.embedding` and `SET n.embedding = null` remove it; the
+node stays, and vector search no longer returns it. See
+[Set a Node's Vector](mutations.md#set-a-nodes-vector).
 
 A query vector must have the database's dimensions and finite components. A
 vector containing NaN or infinity fails the query, as it fails `set_vector`.

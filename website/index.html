@@ -723,41 +723,43 @@ footer .footer-links {
 <!-- Release Notes -->
 <section class="release-notes">
   <div class="container">
-    <h2>What's new in 0.17.0</h2>
-    <p class="caption">Crash safety end to end, far more of Cypher, ordered indexes, and files a fraction of the size.</p>
+    <h2>What's new in 0.18.0</h2>
+    <p class="caption">Read, replace and remove a node's vector, from every binding and from Cypher.</p>
     <div class="release-grid">
       <div class="release-card">
-        <h3>Crash Safety</h3>
+        <h3>Vector API</h3>
         <ul>
-          <li>Pages reach the file only in whole, journaled flushes</li>
-          <li>A commit is durable before anyone can see it</li>
-          <li>Tested on a simulated disk that cuts power at every sync</li>
-          <li>A read-only open recovers a crashed database in memory</li>
+          <li>Read the vector a node holds with <code>get_vector</code></li>
+          <li><code>remove_vector</code> takes it out of search and keeps the node</li>
+          <li>In C, Python, TypeScript, Go and Java</li>
+          <li>A removal commits with its transaction and survives a crash</li>
         </ul>
       </div>
       <div class="release-card">
         <h3>Cypher</h3>
         <ul>
-          <li><code>OPTIONAL MATCH</code>, <code>UNION</code>, <code>CASE</code>, <code>CALL { }</code>, <code>shortestPath</code></li>
-          <li>Comprehensions and <code>EXISTS</code>, <code>COUNT</code>, <code>COLLECT</code> subqueries</li>
-          <li>Nulls, <code>MERGE</code>, <code>DELETE</code> and aggregates behave as Cypher specifies</li>
-          <li>Errors say what failed, and where</li>
+          <li><code>SET n.embedding = $vector</code> stores the node's vector</li>
+          <li>So does an <code>embedding</code> key in <code>CREATE</code> and <code>MERGE</code></li>
+          <li><code>REMOVE n.embedding</code> and <code>SET n.embedding = null</code> remove it</li>
+          <li>A value that cannot be a vector fails the statement</li>
         </ul>
       </div>
       <div class="release-card">
-        <h3>Indexes, Search and Size</h3>
+        <h3>Compatibility</h3>
         <ul>
-          <li>Property indexes answer ranges, prefixes and <code>ORDER BY ... LIMIT</code></li>
-          <li>Full-text phrases, prefixes, <code>OR</code> and exclusions; Unicode words</li>
-          <li>Cosine, Euclidean or dot-product vectors; RDF import and export</li>
-          <li>The changefeed stored about 12x smaller, with retention policies</li>
+          <li>No change to the file or the log format</li>
+          <li>0.17.0 opens a database 0.18.0 has written</li>
+          <li>The C API only gains functions; none change</li>
+          <li>Python's <code>Node.get_vector</code> and <code>Node.set_vector</code> are deprecated</li>
         </ul>
       </div>
     </div>
     <p class="release-meta">
-      Reads, traversals and batched writes are many times faster than 0.16.0. Some Cypher
-      results and the file format change: read the upgrade notes first.
-      <a href="https://github.com/jeffhajewski/latticedb/blob/main/docs/release_notes_0.17.0.md">Read the 0.17.0 release notes</a>
+      On a database with a vector index, Cypher writes to <code>embedding</code> now reach the
+      vector instead of an ordinary property: read the upgrade notes if you use that name.
+      <a href="https://github.com/jeffhajewski/latticedb/blob/main/docs/release_notes_0.18.0.md">Read the 0.18.0 release notes</a>
+      &middot;
+      <a href="https://github.com/jeffhajewski/latticedb/blob/main/docs/release_notes_0.17.0.md">0.17.0 release notes</a>
     </p>
   </div>
 </section>

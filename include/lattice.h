@@ -19,9 +19,9 @@ extern "C" {
 #endif
 
 /* Version information */
-#define LATTICE_VERSION "0.17.0"
+#define LATTICE_VERSION "0.18.0"
 #define LATTICE_VERSION_MAJOR 0
-#define LATTICE_VERSION_MINOR 17
+#define LATTICE_VERSION_MINOR 18
 #define LATTICE_VERSION_PATCH 0
 
 /* Opaque handle types */

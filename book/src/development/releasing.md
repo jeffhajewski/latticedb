@@ -19,7 +19,7 @@ Then, before committing:
 2. Rewrite the "What's new" caption and cards in `website/index.html` by hand. The
    bumper only moves the heading and the release-notes link.
 
-Then commit everything the bumper changed, tag the release commit, and push:
+Then commit everything the bumper changed and push `main`:
 
 ```bash
 git diff
@@ -27,14 +27,31 @@ git status --short --branch
 git add build.zig build.zig.zon src/main.zig src/api/c_api.zig include/lattice.h \
   bindings/ examples/ conformance/ book/src/api/c.md website/index.html docs/
 git commit -m "Release v0.17.0"
-git tag -a v0.17.0 -m "LatticeDB 0.17.0"
 git push origin main
+```
+
+Wait for the CI run on that commit to pass on every platform, Windows included,
+before tagging. Some failures only show up there: a runner image GitHub has
+retired, a test that reads the database file while it is open (Windows enforces
+the lock), a text fixture checked out with CRLF line endings. The Linux Zig job
+takes about 45 minutes and the binding jobs wait for it.
+
+```bash
+gh run list --branch main --limit 5
+gh run watch <run id>
+```
+
+Then tag the release commit and push the tag:
+
+```bash
+git tag -a v0.17.0 -m "LatticeDB 0.17.0"
 git push origin v0.17.0
 ```
 
-Pushing the tag runs `.github/workflows/release.yml`, which builds the release
-and **publishes to PyPI and npm**. Those versions cannot be reused, so be sure
-before you push it.
+Pushing the tag runs `.github/workflows/release.yml`, which runs the full CI
+again, builds the release and **publishes to PyPI and npm**. Those versions
+cannot be reused, so be sure before you push it. If the release run fails before
+it publishes, fix `main`, wait for CI, and move the tag to the new commit.
 
 `prepare_release.sh` also accepts `--tag` and `--push-tag`, but they run before
 anything is committed, so they tag the commit *before* the version bump. Do not

@@ -4490,7 +4490,7 @@ pub export fn lattice_query_cache_stats(
 
 /// Get version string
 pub export fn lattice_version() [*c]const u8 {
-    return "0.17.0";
+    return "0.18.0";
 }
 
 /// Get error message for error code
@@ -4719,7 +4719,7 @@ test "value type tags match header" {
 test "version returns expected string" {
     const version = lattice_version();
     try std.testing.expect(version != null);
-    try std.testing.expectEqualStrings("0.17.0", std.mem.sliceTo(version, 0));
+    try std.testing.expectEqualStrings("0.18.0", std.mem.sliceTo(version, 0));
 }
 
 test "error message returns valid strings" {

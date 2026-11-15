@@ -77,16 +77,29 @@ fn copyAsIfKilled(allocator: std.mem.Allocator, src: []const u8, dst: []const u8
     try copyFile(allocator, src_wal, dst_wal);
 }
 
+/// Windows enforces the database's file lock on reads, so the file of a
+/// database that is still open cannot be copied there. A test that needs such
+/// a copy is skipped on Windows.
+fn skipIfLockedOnWindows(err: anyerror) anyerror {
+    if (@import("builtin").os.tag == .windows and err == error.LockViolation) return error.SkipZigTest;
+    return err;
+}
+
 fn copyFile(allocator: std.mem.Allocator, src: []const u8, dst: []const u8) !void {
+    _ = allocator;
     const fs = @import("compat").fs;
     const in = try fs.cwd().openFile(src, .{});
     defer in.close();
-    const bytes = try in.readToEndAlloc(allocator, 1 << 30);
-    defer allocator.free(bytes);
-
     const out = try fs.cwd().createFile(dst, .{ .truncate = true });
     defer out.close();
-    try out.pwriteAll(bytes, 0);
+    var buf: [65536]u8 = undefined;
+    var offset: u64 = 0;
+    while (true) {
+        const n = in.preadAll(&buf, offset) catch |err| return skipIfLockedOnWindows(err);
+        if (n == 0) break;
+        try out.pwriteAll(buf[0..n], offset);
+        offset += n;
+    }
 }
 
 /// Clean up database and WAL files.

@@ -160,15 +160,28 @@ fn deleteDatabaseFiles(path: []const u8) void {
     compat.fs.cwd().deleteFile(wal) catch {};
 }
 
+/// Windows enforces the database's file lock on reads, so the file of a
+/// database that is still open cannot be copied there. A test that needs such
+/// a copy is skipped on Windows.
+fn skipIfLockedOnWindows(err: anyerror) anyerror {
+    if (@import("builtin").os.tag == .windows and err == error.LockViolation) return error.SkipZigTest;
+    return err;
+}
+
 fn copyFile(allocator: std.mem.Allocator, src: []const u8, dst: []const u8) !void {
+    _ = allocator;
     const in = try compat.fs.cwd().openFile(src, .{});
     defer in.close();
-    const bytes = try in.readToEndAlloc(allocator, 1 << 30);
-    defer allocator.free(bytes);
-
     const out = try compat.fs.cwd().createFile(dst, .{ .truncate = true });
     defer out.close();
-    try out.pwriteAll(bytes, 0);
+    var buf: [65536]u8 = undefined;
+    var offset: u64 = 0;
+    while (true) {
+        const n = in.preadAll(&buf, offset) catch |err| return skipIfLockedOnWindows(err);
+        if (n == 0) break;
+        try out.pwriteAll(buf[0..n], offset);
+        offset += n;
+    }
 }
 
 /// Copy a database and its log while the handle is still open, so the copy is
@@ -759,6 +772,9 @@ test "cli: import stops at an edge whose node is missing, and says which" {
 }
 
 test "cli: output redirected with >> is appended to the file" {
+    // The redirect is done by /bin/sh, which Windows does not have.
+    if (@import("builtin").os.tag == .windows) return error.SkipZigTest;
+
     const allocator = std.testing.allocator;
     const out = "/tmp/lattice_cli_append.txt";
     defer compat.fs.cwd().deleteFile(out) catch {};

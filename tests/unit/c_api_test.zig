@@ -3860,6 +3860,89 @@ test "c_api: set_vector rejects a key other than embedding" {
     try std.testing.expect(distance < 1e-3);
 }
 
+fn expectNoVector(txn: ?*lattice_txn, node: lattice_node_id) !void {
+    var vector: ?[*]f32 = null;
+    var dims: u32 = 99;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_get_vector(txn, node, "embedding", &vector, &dims));
+    try std.testing.expect(vector == null);
+    try std.testing.expectEqual(@as(u32, 0), dims);
+}
+
+fn expectVector(txn: ?*lattice_txn, node: lattice_node_id, expected: []const f32) !void {
+    var vector: ?[*]f32 = null;
+    var dims: u32 = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_get_vector(txn, node, null, &vector, &dims));
+    defer c_api.lattice_free_vector(vector, dims);
+    try std.testing.expectEqual(@as(u32, @intCast(expected.len)), dims);
+    for (expected, vector.?[0..dims]) |want, got| try std.testing.expectApproxEqAbs(want, got, 1e-6);
+}
+
+fn vectorSearchCount(db: ?*lattice_database, query: []const f32) !u32 {
+    var results: ?*lattice_vector_result = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_vector_search(db, query.ptr, @intCast(query.len), 10, 0, &results));
+    defer c_api.lattice_vector_result_free(results);
+    return c_api.lattice_vector_result_count(results);
+}
+
+test "c_api: get_vector and remove_vector" {
+    const path = "/tmp/lvc_capi_vector_crud_test.db";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    var db: ?*lattice_database = null;
+    const options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = true,
+        .vector_dimensions = 2,
+    };
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer removeScratchDb(path);
+    defer _ = c_api.lattice_close(db);
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+    var node: lattice_node_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "N", &node));
+    try expectNoVector(txn, node);
+    // An uncommitted vector reads back as written...
+    const vector = [_]f32{ 3, 4 };
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_vector(txn, node, "embedding", &vector, 2));
+    try expectVector(txn, node, &vector);
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+
+    // ...and a committed one normalised, under the default cosine metric.
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &txn));
+    try expectVector(txn, node, &.{ 0.6, 0.8 });
+    var missing: ?[*]f32 = null;
+    var missing_dims: u32 = 0;
+    try std.testing.expectEqual(lattice_error.err_not_found, c_api.lattice_node_get_vector(txn, node + 100, "", &missing, &missing_dims));
+    try std.testing.expect(missing == null);
+    try std.testing.expectEqual(lattice_error.err_unsupported, c_api.lattice_node_get_vector(txn, node, "title_vec", &missing, &missing_dims));
+    try std.testing.expectEqual(lattice_error.err_invalid_arg, c_api.lattice_node_get_vector(txn, node, null, null, &missing_dims));
+    try std.testing.expectEqual(lattice_error.err_read_only, c_api.lattice_node_remove_vector(txn, node, "embedding"));
+    _ = c_api.lattice_rollback(txn);
+    try std.testing.expectEqual(@as(u32, 1), try vectorSearchCount(db, &vector));
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+    try std.testing.expectEqual(lattice_error.err_unsupported, c_api.lattice_node_remove_vector(txn, node, "title_vec"));
+    try std.testing.expectEqual(lattice_error.err_not_found, c_api.lattice_node_remove_vector(txn, node + 100, null));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_remove_vector(txn, node, "embedding"));
+    try expectNoVector(txn, node);
+    // Removing it again changes nothing.
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_remove_vector(txn, node, ""));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+    try std.testing.expectEqual(@as(u32, 0), try vectorSearchCount(db, &vector));
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &txn));
+    try expectNoVector(txn, node);
+    var exists = false;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_exists(txn, node, &exists));
+    try std.testing.expect(exists);
+    _ = c_api.lattice_rollback(txn);
+}
+
 fn cacheEntries(db: ?*lattice_database) !u32 {
     var entries: u32 = 0;
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_cache_stats(db, &entries, null, null));

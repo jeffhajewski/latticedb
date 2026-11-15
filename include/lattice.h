@@ -905,6 +905,43 @@ lattice_error lattice_node_set_vector(
     uint32_t dimensions
 );
 
+/* Get a node's vector as the transaction sees it, including a vector set or
+ * removed earlier in the same transaction. `key` must be "embedding", "" or
+ * NULL, as in lattice_node_set_vector; any other key returns
+ * LATTICE_ERROR_UNSUPPORTED. A node without a vector, or a database without a
+ * vector index, is not an error: *vector_out is NULL and *dimensions_out is 0.
+ * Returns LATTICE_ERROR_NOT_FOUND if the node does not exist.
+ *
+ * Under the cosine metric, the default, the index keeps each vector scaled to
+ * unit length and the file holds no other copy, so a committed vector reads
+ * back normalised: (3, 4) reads back as (0.6, 0.8). The direction, and so every
+ * cosine distance, is unchanged. Under the euclidean and dot-product metrics a
+ * vector reads back as it was stored. A vector set earlier in the same
+ * transaction and not yet committed reads back as written.
+ *
+ * The caller owns *vector_out and must release it with lattice_free_vector(). */
+lattice_error lattice_node_get_vector(
+    lattice_txn* txn,
+    lattice_node_id node_id,
+    const char* key,
+    float** vector_out,
+    uint32_t* dimensions_out
+);
+
+/* Free a vector returned by lattice_node_get_vector. NULL is ignored. */
+void lattice_free_vector(float* vector, uint32_t dimensions);
+
+/* Remove a node's vector. The node keeps its labels and properties; it no
+ * longer reads back a vector, and vector search no longer returns it. Removing
+ * a vector the node does not have succeeds and changes nothing. `key` is
+ * checked as in lattice_node_set_vector. Returns LATTICE_ERROR_NOT_FOUND if the
+ * node does not exist and LATTICE_ERROR_READ_ONLY in a read-only transaction. */
+lattice_error lattice_node_remove_vector(
+    lattice_txn* txn,
+    lattice_node_id node_id,
+    const char* key
+);
+
 /*
  * Batch insert operations
  */

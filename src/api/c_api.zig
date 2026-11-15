@@ -3113,6 +3113,84 @@ pub export fn lattice_node_set_vector(
     return .ok;
 }
 
+/// A node has one vector, which Cypher reads as `n.embedding`; the vector
+/// calls accept that name, "" or NULL for it.
+fn isVectorKey(key: [*c]const u8) bool {
+    const key_slice = cStrToSlice(key) orelse return true;
+    return key_slice.len == 0 or std.mem.eql(u8, key_slice, "embedding");
+}
+
+/// Get a node's vector as the transaction sees it. A node without one is
+/// success with a null vector and 0 dimensions. The caller frees the vector
+/// with lattice_free_vector().
+pub export fn lattice_node_get_vector(
+    txn: ?*lattice_txn,
+    node_id: lattice_node_id,
+    key: [*c]const u8,
+    vector_out: ?*?[*]f32,
+    dimensions_out: ?*u32,
+) lattice_error {
+    const out = vector_out orelse return .err_invalid_arg;
+    const dims_out = dimensions_out orelse return .err_invalid_arg;
+    out.* = null;
+    dims_out.* = 0;
+
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
+
+    if (!isVectorKey(key)) return .err_unsupported;
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
+
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+    const db = txn_handle.db_handle.db;
+
+    const exists = db.nodeExistsInTxn(txn_ptr, node_id) catch |err| return mapDatabaseError(err);
+    if (!exists) return .err_not_found;
+
+    const vector = (db.getNodeVectorInTxn(txn_ptr, node_id) catch |err| return mapDatabaseError(err)) orelse return .ok;
+    defer db.allocator.free(vector);
+    const copy = global_allocator.dupe(f32, vector) catch return .err_out_of_memory;
+    out.* = copy.ptr;
+    dims_out.* = @intCast(copy.len);
+    return .ok;
+}
+
+/// Free a vector returned by lattice_node_get_vector().
+pub export fn lattice_free_vector(vector: ?[*]f32, dimensions: u32) void {
+    const ptr = vector orelse return;
+    if (dimensions == 0) return;
+    global_allocator.free(ptr[0..dimensions]);
+}
+
+/// Remove a node's vector. Removing a vector the node does not have succeeds.
+pub export fn lattice_node_remove_vector(
+    txn: ?*lattice_txn,
+    node_id: lattice_node_id,
+    key: [*c]const u8,
+) lattice_error {
+    const txn_handle = acquireTxn(txn) orelse return .err_invalid_arg;
+    defer releaseTxn(txn_handle);
+
+    if (!isVectorKey(key)) return .err_unsupported;
+
+    const active_txn_result = lockActiveTxnDb(txn_handle);
+    if (active_txn_result != .ok) return active_txn_result;
+    defer unlockTxnDb(txn_handle);
+
+    if (txn_handle.txn.mode == .read_only) return .err_read_only;
+
+    const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
+
+    txn_handle.db_handle.db.removeNodeVectorInTxn(txn_ptr, node_id) catch |err| {
+        return mapDatabaseError(err);
+    };
+
+    return .ok;
+}
+
 // ============================================================================
 // Batch Insert Operations
 // ============================================================================

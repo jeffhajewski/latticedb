@@ -608,9 +608,9 @@ the GQL-only clauses. `book/src/cypher/overview.md` lists them.
   and adding a label back did not restore it. Nothing about having no labels
   puts a vector out of reach: a node created without labels can hold one, vector
   search returns it and `MATCH (n) WHERE n.embedding <=> ...` finds it. A vector
-  now goes only when it is cleared or its node is deleted. If you relied on a
-  label removal to take a node out of vector search, clear its vector or delete
-  the node instead.
+  now goes only when its node is deleted. If you relied on a label removal to
+  take a node out of vector search, delete the node instead: 0.17.0 has no call
+  or Cypher statement that removes a node's vector. 0.18.0 adds them.
 - **A node's id is never handed out again.** Every open found the next node id
   by scanning for the highest one, so deleting the newest node and reopening gave
   its id to the next node created. The counter is now stored in the file. Ids

@@ -144,3 +144,20 @@ REMOVE n.city
 MATCH (n:Person {name: "Alice"})
 REMOVE n:Verified
 ```
+
+### Remove a Node's Vector
+
+`n.embedding` reads a node's vector. On a database with a vector index,
+`REMOVE n.embedding` and `SET n.embedding = null` remove that vector, and any
+ordinary property named `embedding` with it:
+
+```cypher
+MATCH (d:Doc {id: 42})
+REMOVE d.embedding
+```
+
+The node keeps its labels and other properties, and vector search no longer
+returns it. Removing a vector the node does not have does nothing. On a database
+without a vector index, `embedding` is an ordinary property like any other.
+Before 0.18.0 both statements changed only the ordinary property, which the
+vector hides on read, so they appeared to succeed and left the vector in place.

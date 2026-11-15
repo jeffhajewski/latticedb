@@ -24,6 +24,10 @@ length, because the index stores only the normalised copy: a stored `[3, 4]`
 returns as `[0.6, 0.8]`. Under the Euclidean and dot-product metrics vectors are
 stored, and read back, as given.
 
+`REMOVE n.embedding` and `SET n.embedding = null` remove the node's vector, on a
+database with a vector index: the node stays, and vector search no longer returns
+it. See [Remove a Node's Vector](mutations.md#remove-a-nodes-vector).
+
 A query vector must have the database's dimensions and finite components. A
 vector containing NaN or infinity fails the query, as it fails `set_vector`.
 

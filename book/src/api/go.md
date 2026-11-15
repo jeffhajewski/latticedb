@@ -319,6 +319,14 @@ Cypher reads as `n.embedding`; a key other than `"embedding"` (or `""`) returns
 `ErrorUnsupported`, and a vector with NaN or infinite components
 `ErrorInvalidArg`. A `K` larger than `EfSearch` widens the search to `K`.
 
+`tx.GetVector(nodeID, "embedding")` returns the node's vector, with `ok` false
+when it has none. Under the cosine metric, the default, a committed vector reads
+back normalised to unit length (`{3, 4}` reads back as `{0.6, 0.8}`); an
+uncommitted one reads back as written. `tx.RemoveVector(nodeID, "embedding")`
+takes it away: the node keeps its labels and properties, and vector search no
+longer returns it. Removing a vector the node does not have does nothing. Both
+return `ErrorNotFound` for a node that does not exist.
+
 ## Full-text search
 
 ```go

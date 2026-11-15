@@ -173,6 +173,7 @@ For a larger end-to-end example, see [examples/go](../../examples/go).
   - `map[string]any`
 - Query results are materialized into `[]map[string]Value`.
 - A node has one vector, which Cypher reads as `n.embedding`. `Tx.SetVector` takes a key that must be `"embedding"` (or `""`); any other key returns `ErrorUnsupported`, and a vector with NaN or infinite components returns `ErrorInvalidArg`.
+- `Tx.GetVector(nodeID, key)` returns the node's vector, with `ok` false when it has none; under the cosine metric, the default, a committed vector reads back normalised to unit length. `Tx.RemoveVector(nodeID, key)` removes it, and removing a vector the node does not have does nothing. Both return `ErrorNotFound` for a missing node.
 - `DB.Update` (and `DB.Query` for a query that writes) rolls the transaction back when its commit fails, so a failed commit does not keep the single writer slot.
 - `Tx.Commit` that fails with `ErrorTxnAborted` ends the transaction: the native handle is gone, so `IsActive` is false and `Rollback` is a no-op. Any other commit failure leaves it open for `Rollback`.
 - `Tx.DeleteNode` refuses a node that still has relationships with `ErrorHasRelationships` and deletes nothing, as Cypher's `DELETE` does; `Tx.DetachDeleteNode` deletes the node and all its relationships, as `DETACH DELETE` does. Deleting a node that does not exist succeeds. `Tx.CreateEdge` returns `ErrorNotFound` if either end does not exist as the transaction sees it.

@@ -236,6 +236,7 @@ configures an index in bytes that have none.
 - `await txn.getNode(nodeId)` - Get a node by ID, returns `Node` or `null`
 - `await txn.nodeExists(nodeId)` - Check if a node exists
 - `await txn.getProperty(nodeId, key)` - Get a property value, or `null` when the node does not have it
+- `await txn.getVector(nodeId, key = "embedding")` - The node's vector as a `Float32Array`, or `null` if it has none. Rejects with code -4 (`NotFound`) if the node does not exist. Under the cosine metric, the default, a committed vector reads back normalised to unit length (`[3, 4]` reads back as `[0.6, 0.8]`); an uncommitted one reads back as written.
 - `await txn.getOutgoingEdges(nodeId)` - Get outgoing edges from a node
 - `await txn.getIncomingEdges(nodeId)` - Get incoming edges to a node
 - `await txn.getOutgoingEdgesByType(nodeId, edgeType, ...)` / `getIncomingEdgesByType(...)` - Edges of one type
@@ -252,6 +253,7 @@ configures an index in bytes that have none.
 - `await txn.deleteNode(nodeId, { detach })` - Delete a node. A node that still has relationships is refused with code -17 (`HasRelationships`) and nothing is deleted, as Cypher's `DELETE` does; `{ detach: true }` deletes its relationships with it, as `DETACH DELETE` does. Deleting a node that does not exist does nothing.
 - `await txn.setProperty(nodeId, key, value)` - Set a property. If a full-text index is declared for one of the node's labels and this property, the index is kept current.
 - `await txn.setVector(nodeId, key, vector)` - Set the node's vector embedding. A node has one vector, which Cypher reads as `n.embedding`; `key` must be `"embedding"` (or `""`), and any other key is rejected with an unsupported-operation error. A vector with NaN or infinite components is rejected as an invalid argument.
+- `await txn.removeVector(nodeId, key = "embedding")` - Remove the node's vector. The node keeps its labels and properties, and vector search no longer returns it. Removing a vector the node does not have does nothing. Rejects with code -4 (`NotFound`) if the node does not exist.
 - `await txn.batchInsertVectors(label, vectors)` - Insert vector-bearing nodes in one call
 - `await txn.batchInsert(label, vectors)` - Deprecated compatibility alias for `batchInsertVectors`
 - `await txn.createEdge(sourceId, targetId, edgeType, options?)` - Create an edge

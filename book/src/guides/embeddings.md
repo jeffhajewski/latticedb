@@ -56,6 +56,24 @@ a key argument, which must be `"embedding"` (an empty key also works); any other
 key is rejected with an unsupported-operation error rather than stored under that
 name. Setting a vector on a node that already has one replaces it.
 
+`get_vector` reads a node's vector back, and `remove_vector` takes it away: the
+node stays, with its labels and properties, and vector search no longer returns
+it. Removing a vector the node does not have does nothing. In Cypher,
+`REMOVE n.embedding` and `SET n.embedding = null` do the same. Removing a node's
+labels leaves its vector alone, and deleting the node removes it.
+
+```python
+with db.write() as txn:
+    vector = txn.get_vector(node.id)   # None if the node has no vector
+    txn.remove_vector(node.id)
+    txn.commit()
+```
+
+The other bindings have the same calls: `getVector`/`removeVector` in
+TypeScript and Java, `GetVector`/`RemoveVector` in Go, and
+`lattice_node_get_vector`/`lattice_node_remove_vector` in C. Before 0.18.0 there
+was no way to remove a vector short of deleting the node.
+
 Every component must be a finite number: a vector containing NaN or infinity is
 rejected with an invalid-argument error, both when stored and when used as a
 search query. Under the cosine metric the database keeps only the normalised

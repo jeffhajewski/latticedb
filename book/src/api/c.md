@@ -456,6 +456,36 @@ A node holds one vector, which Cypher reads as `n.embedding`. The key must be
 A vector whose length is not the database's dimensions, or with a NaN or
 infinite component, returns `LATTICE_ERROR_INVALID_ARG`.
 
+### Get or Remove a Vector
+
+```c
+float* vector = NULL;
+uint32_t dims = 0;
+lattice_node_get_vector(txn, node_id, "embedding", &vector, &dims);
+if (vector != NULL) {
+    // ... use vector[0..dims) ...
+    lattice_free_vector(vector, dims);
+}
+
+lattice_node_remove_vector(txn, node_id, "embedding");
+```
+
+`lattice_node_get_vector` returns the vector the transaction sees, including one
+set or removed earlier in the same transaction. A node without a vector is not an
+error: `vector` comes back `NULL` and `dims` 0. Free a returned vector with
+`lattice_free_vector`. Under the cosine metric, the default, a committed vector
+reads back normalised to unit length, because the index keeps only that copy: a
+stored `(3, 4)` reads back as `(0.6, 0.8)`. Under the Euclidean and dot-product
+metrics it reads back as stored, and an uncommitted vector always reads back as
+written.
+
+`lattice_node_remove_vector` takes the vector away. The node keeps its labels and
+properties, and vector search no longer returns it. Removing a vector the node
+does not have succeeds and changes nothing. Both calls take the same key as
+`lattice_node_set_vector`, return `LATTICE_ERROR_NOT_FOUND` for a node that does
+not exist, and the removal returns `LATTICE_ERROR_READ_ONLY` in a read-only
+transaction. Both were added in 0.18.0.
+
 ### Explicit Property Indexes
 
 Create property indexes outside an active write transaction. The lookup

@@ -167,6 +167,14 @@ key, vector)` takes a key that must be `"embedding"` (or `""`); any other key
 fails with `ErrorCode.UNSUPPORTED`, and a vector with NaN or infinite components
 with `ErrorCode.INVALID_ARG`.
 
+`getVector(nodeId, key)` returns the node's vector as an `Optional<float[]>`,
+empty when it has none. Under the cosine metric, the default, a committed vector
+reads back normalised to unit length (`{3, 4}` reads back as `{0.6, 0.8}`); an
+uncommitted one reads back as written. `removeVector(nodeId, key)` takes it away:
+the node keeps its labels and properties, and vector search no longer returns it.
+Removing a vector the node does not have does nothing. Both fail with
+`ErrorCode.NOT_FOUND` for a node that does not exist.
+
 ## Values
 
 | LatticeDB | Java |

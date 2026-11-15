@@ -200,6 +200,7 @@ setting any of them raises `LatticeUnsupportedError`.
 - `get_node(node_id)` - Get a node by ID, returns `Node` or `None`
 - `node_exists(node_id)` - Check if a node exists
 - `get_property(node_id, key)` - Get a property value
+- `get_vector(node_id, key="embedding")` - The node's vector as a float32 array, or `None` if it has none. Raises `LatticeNotFoundError` if the node does not exist. Under the cosine metric, the default, a committed vector reads back normalised to unit length (`[3, 4]` reads back as `[0.6, 0.8]`); an uncommitted one reads back as written.
 - `get_outgoing_edges(node_id)` - Get outgoing edges from a node
 - `get_incoming_edges(node_id)` - Get incoming edges to a node
 - `get_outgoing_edges_by_type(node_id, edge_type, *, limit=0)` / `get_incoming_edges_by_type(...)` - Edges of one type (0 means no limit)
@@ -217,6 +218,7 @@ setting any of them raises `LatticeUnsupportedError`.
 - `delete_node(node_id, *, detach=False)` - Delete a node. A node that still has relationships raises `LatticeHasRelationshipsError` and nothing is deleted, as Cypher's `DELETE` does; `detach=True` deletes its relationships with it, as `DETACH DELETE` does. Deleting a node that does not exist does nothing.
 - `set_property(node_id, key, value)` - Set a property on a node. If a full-text index is declared for one of the node's labels and this property, the index is kept current.
 - `set_vector(node_id, key, vector)` - Set the node's vector embedding. A node has one vector, which Cypher reads as `n.embedding`; `key` must be `"embedding"` (or `""`), and any other key raises `LatticeUnsupportedError`. A vector with NaN or infinite components raises `LatticeInvalidArgError`.
+- `remove_vector(node_id, key="embedding")` - Remove the node's vector. The node keeps its labels and properties, and vector search no longer returns it. Removing a vector the node does not have does nothing. Raises `LatticeNotFoundError` if the node does not exist.
 - `batch_insert_vectors(label, vectors)` - Insert vector-bearing nodes in one call
 - `batch_insert(label, vectors)` - Deprecated compatibility alias for `batch_insert_vectors`
 - `create_edge(source_id, target_id, edge_type, properties=None)` - Create an edge

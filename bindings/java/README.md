@@ -81,7 +81,8 @@ mvn -q compile exec:java@run-example -Dexec.args=/tmp/knowledge.db
   retention (`changefeedStatus`, `trimChangefeed`),
   query-cache stats/clear, `checkpoint`/`setAutoCheckpoint`.
 - `Transaction`: node/edge CRUD with properties (nested `List`/`Map` values,
-  `byte[]`, `float[]` supported), labels, vectors, equality-index
+  `byte[]`, `float[]` supported), labels, vectors (`setVector`, `getVector`,
+  `removeVector`), equality-index
   lookups, batch vector insert, stream publish/offsets/trim, Cypher queries,
   transaction-scoped search (`queryVector`, `ftsSearch`).
 - `Embedding`: deterministic `hashEmbed` plus native HTTP embedding `Client`

@@ -689,6 +689,7 @@ pub const SetProperty = struct {
                     // NULL removes property
                     self.database.removeNodeProperty(ctx.txn, node_id, self.property_name) catch |err|
                         return ctx.storageFailure(err, "removing property '{s}' of node {d}", .{ self.property_name, node_id });
+                    if (isVectorKey(self.database, self.property_name)) try removeVector(self.database, ctx, node_id);
                 } else {
                     const prop_value = (evalResultToPropertyValue(value, self.evaluator.allocator) catch return OperatorError.OutOfMemory) orelse return OperatorError.TypeError;
                     self.database.setNodeProperty(ctx.txn, node_id, self.property_name, prop_value) catch |err|
@@ -1127,6 +1128,7 @@ pub const RemoveProperty = struct {
             .node_ref => |node_id| {
                 self.database.removeNodeProperty(ctx.txn, node_id, self.property_name) catch |err|
                     return ctx.storageFailure(err, "removing property '{s}' of node {d}", .{ self.property_name, node_id });
+                if (isVectorKey(self.database, self.property_name)) try removeVector(self.database, ctx, node_id);
             },
             .edge_ref => |edge_id| {
                 self.database.removeEdgePropertyById(ctx.txn, edge_id, self.property_name) catch |err|
@@ -1262,6 +1264,18 @@ fn endpointFailure(ctx: *const ExecutionContext, comptime clause: []const u8, va
         return ctx.fail(OperatorError.TypeError, null, clause ++ " needs a node at each end of a relationship, but one end is null (an OPTIONAL MATCH that found nothing leaves its variables null)", .{});
     }
     return ctx.fail(OperatorError.TypeError, null, clause ++ " needs a node at each end of a relationship, but one end is not a node", .{});
+}
+
+/// Whether `key` names a node's vector rather than a property: `embedding`,
+/// which Cypher reads as the node's vector, on a database with a vector
+/// index. Without an index `embedding` is an ordinary property.
+fn isVectorKey(database: *Database, key: []const u8) bool {
+    return database.vectorConfig() != null and std.mem.eql(u8, key, "embedding");
+}
+
+fn removeVector(database: *Database, ctx: *const ExecutionContext, node_id: NodeId) OperatorError!void {
+    database.removeNodeVectorInTxn(ctx.txn, node_id) catch |err|
+        return ctx.storageFailure(err, "removing the vector of node {d}", .{node_id});
 }
 
 /// Convert EvalResult to PropertyValue

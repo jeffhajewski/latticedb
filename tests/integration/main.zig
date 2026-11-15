@@ -22,6 +22,7 @@ const lfmt_sync_test = @import("lfmt_sync_test.zig");
 const lqs_query_semantics_test = @import("lqs_query_semantics_test.zig");
 const llv_label_vector_test = @import("llv_label_vector_test.zig");
 const lvc_vector_crud_test = @import("lvc_vector_crud_test.zig");
+const lvc_cypher_vector_test = @import("lvc_cypher_vector_test.zig");
 const lrdf_rdf_test = @import("lrdf_rdf_test.zig");
 const lgr_graph_storage_test = @import("lgr_graph_storage_test.zig");
 const lcf_changefeed_golden_test = @import("lcf_changefeed_golden_test.zig");
@@ -67,6 +68,8 @@ test {
     _ = llv_label_vector_test;
     // Reading and removing a node's vector
     _ = lvc_vector_crud_test;
+    // Cypher writes to n.embedding, the node's vector
+    _ = lvc_cypher_vector_test;
     // RDF import and export through the command-line tool
     _ = lrdf_rdf_test;
     // Graph storage: edge updates, ordered property indexes, type scans

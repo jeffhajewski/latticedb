@@ -348,6 +348,60 @@ test "a vector removal is replayed when the file has vectors and the open does n
     try std.testing.expectApproxEqAbs(@as(f32, 4), results[0].distance, 1e-4);
 }
 
+test "a committed vector removal survives a kill and replays" {
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lvc_crash_vector_remove.ltdb";
+    const killed = "/tmp/lvc_crash_vector_remove_killed.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+    cleanup(killed);
+    defer cleanup(killed);
+
+    const dims = 4;
+    const config = DatabaseConfig{
+        .enable_fts = false,
+        .enable_vector = true,
+        .vector_dimensions = dims,
+        .vector_metric = .euclidean,
+        .auto_checkpoint = null,
+    };
+    const near = [_]f32{ 1, 0, 0, 0 };
+    const far = [_]f32{ 0, 0, 0, 5 };
+    var removed: NodeId = undefined;
+    var kept: NodeId = undefined;
+    {
+        var db = try Database.open(allocator, path, .{ .create = true, .config = config });
+        defer db.close();
+        var txn = try db.beginTransaction(.read_write);
+        removed = try db.createNode(&txn, &.{"Chunk"});
+        try db.setNodeProperty(&txn, removed, "name", .{ .string_val = "first" });
+        try db.setNodeVectorInTxn(&txn, removed, &near);
+        kept = try db.createNode(&txn, &.{"Chunk"});
+        try db.setNodeVectorInTxn(&txn, kept, &far);
+        try db.commitTransaction(&txn);
+        // Fold the vectors into the file, so only the log knows of the
+        // removal below.
+        _ = try db.checkpoint(.truncate);
+        txn = try db.beginTransaction(.read_write);
+        try db.removeNodeVectorInTxn(&txn, removed);
+        try db.commitTransaction(&txn);
+        try copyAsIfKilled(allocator, path, killed);
+    }
+
+    var db = try Database.open(allocator, killed, .{ .config = config });
+    defer db.close();
+    // The node and its property are there; its vector is not.
+    try std.testing.expect(try db.nodeExists(removed));
+    var name = (try db.getNodePropertyInTxn(null, removed, "name")).?;
+    defer name.deinit(db.allocator);
+    try std.testing.expectEqualStrings("first", name.string_val);
+    try std.testing.expect((try db.getNodeVectorInTxn(null, removed)) == null);
+    const results = try db.vectorSearch(&near, 10, null);
+    defer db.freeVectorSearchResults(results);
+    try std.testing.expectEqual(@as(usize, 1), results.len);
+    try std.testing.expectEqual(kept, results[0].node_id);
+}
+
 test "vectors added to an existing file survive a kill before any checkpoint" {
     const allocator = std.testing.allocator;
     const path = "/tmp/lattice_crash_vector_added.ltdb";

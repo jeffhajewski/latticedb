@@ -7909,6 +7909,39 @@ pub const Database = struct {
         try self.setNodeVector(node_id, vector);
     }
 
+    /// Remove a node's vector. The node keeps its labels and properties; it
+    /// no longer reads back a vector and no vector search returns it.
+    /// Removing a vector the node does not have, or on a database without a
+    /// vector index, does nothing. `NotFound` if the node does not exist.
+    pub fn removeNodeVector(self: *Self, node_id: NodeId) DatabaseError!void {
+        if (self.read_only) return DatabaseError.PermissionDenied;
+        if (!(try self.nodeExists(node_id))) return DatabaseError.NotFound;
+        if (self.hnsw_index) |*hnsw| {
+            hnsw.remove(node_id) catch |err| return mapHnswError(err);
+        }
+    }
+
+    /// `removeNodeVector` in `txn`: the removal is visible to the
+    /// transaction's own reads and searches at once, and to everyone else
+    /// when it commits. It is logged and replayed as the removal that deleting
+    /// a node logs.
+    pub fn removeNodeVectorInTxn(self: *Self, txn: ?*Transaction, node_id: NodeId) DatabaseError!void {
+        if (txn) |t| {
+            if (!t.isActive()) return DatabaseError.TransactionNotActive;
+            if (t.mode == .read_only) return DatabaseError.TransactionReadOnly;
+            if (self.getTxnOverlay(t)) |overlay| {
+                if (!(try self.nodeExistsInTxn(txn, node_id))) return DatabaseError.NotFound;
+                // Nothing staged and nothing committed: nothing to remove.
+                if (self.hnsw_index == null) return;
+                if (!overlay.vector_states.contains(node_id) and !self.baseHasVector(node_id)) return;
+                try self.storeVectorOverlayState(overlay, node_id, .{ .absent = {} });
+                overlay.markDirty();
+                return;
+            }
+        }
+        try self.removeNodeVector(node_id);
+    }
+
     /// The vector visible to `txn` for a node, or null if it has none.
     ///
     /// Under the cosine metric, the default, the index stores each vector

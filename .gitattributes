@@ -1,0 +1,3 @@
+# Compared byte for byte by lcf_changefeed_golden_test.zig. Without this, a
+# Windows checkout rewrites its line endings to CRLF and the comparison fails.
+tests/integration/lcf_changefeed_golden.txt text eol=lf

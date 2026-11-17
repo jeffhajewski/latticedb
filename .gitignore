@@ -32,6 +32,8 @@ yarn-debug.log*
 yarn-error.log*
 .npm
 bindings/typescript/dist/
+# jest --coverage output, written by every coverage run
+bindings/typescript/coverage/
 *.tsbuildinfo
 
 # Java

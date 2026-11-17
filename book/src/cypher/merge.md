@@ -30,7 +30,10 @@ RETURN n.name
 ```
 
 A pattern property whose value is null fails the query: no node could ever match
-it, so the `MERGE` would create a new node every time it ran.
+it, so the `MERGE` would create a new node every time it ran. The same goes for a
+relationship's pattern properties. Before 0.18.1 a relationship `MERGE` with a
+null property stored the null and matched it on later runs; it now fails, as a
+node `MERGE` always has.
 
 When an explicit property index covers one of the pattern's labels and properties,
 `MERGE` looks candidates up there instead of reading every node with the label.
@@ -61,7 +64,8 @@ ON MATCH SET n.last_seen = "2024-01-15"
 RETURN n
 ```
 
-`ON MATCH` applies to every node that matched.
+`ON MATCH` applies to every node that matched. Setting a property to null in
+either removes it, as `SET` does.
 
 ## MERGE Edges
 

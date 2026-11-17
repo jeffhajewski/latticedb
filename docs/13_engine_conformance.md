@@ -239,6 +239,8 @@ The following behaviors are part of the contract:
 - `SET target.prop = expr` updates or removes a property depending on whether `expr` evaluates to non-`NULL` or `NULL`
 - `SET target = {...}` replaces the property map on the target
 - `SET target += {...}` merges into the property map on the target
+- no property is stored as `NULL`: a `NULL` value in a `SET target += {...}` map or in `ON CREATE SET` / `ON MATCH SET` removes that property, and one in a `SET target = {...}` map or a `CREATE` pattern leaves it out
+- a `NULL` pattern property in `MERGE`, on a node or a relationship, is an error
 - `REMOVE target.prop` removes a property
 - `REMOVE target:Label` removes a label
 - mutation against a bound edge variable targets the matched stable edge instance, not all parallel edges with the same endpoints

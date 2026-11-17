@@ -77,6 +77,23 @@ MATCH (n:Person {name: "Alice"})
 SET n:Admin:Verified
 ```
 
+### Set Properties from a Map
+
+`SET n += {...}` adds the map's properties to the node, replacing those it
+already has and leaving the rest alone. `SET n = {...}` replaces all of them: the
+node keeps only what is in the map.
+
+```cypher
+MATCH (n:Person {name: "Alice"})
+SET n += {age: 31, city: "NYC"}
+
+MATCH (n:Person {name: "Alice"})
+SET n = {name: "Alice", age: 31}
+```
+
+Both work on relationships too, and the map can be a parameter
+(`SET n += $props`).
+
 ### Remove a Property via SET
 
 Setting a property to `NULL` removes it:
@@ -85,6 +102,22 @@ Setting a property to `NULL` removes it:
 MATCH (n:Person {name: "Alice"})
 SET n.city = NULL
 ```
+
+A property is never stored as null, so a null anywhere a property is written
+means "no such property". In `SET n += {city: NULL}`, as in `ON CREATE SET` and
+`ON MATCH SET`, it removes the property. In `SET n = {...}` and in a `CREATE`
+pattern (`CREATE (n:Person {name: "Alice", city: NULL})`) the property is left
+out. The same holds for relationships and for a null that arrives in a parameter.
+Afterwards `n.city` is null, `n.city IS NULL` is true, and `properties(n)` has no
+`city` key.
+
+Before 0.18.1, every one of these but `SET n.city = NULL` stored the null as a
+property: `properties(n)` listed `city: null`, the changefeed recorded
+`node.property_set` with a null `new_value`, and the property survived reopening.
+A database written by 0.18.0 can hold such properties, and they read back as they
+were written, `city: null` in `properties(n)` and in a dump, until something
+removes them: `SET n.city = NULL`, `SET n += {city: NULL}`, `SET n = {...}` and
+`REMOVE n.city` all do. Nothing rewrites them on open.
 
 ## DELETE
 

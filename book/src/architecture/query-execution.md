@@ -599,7 +599,11 @@ MATCH (n:Person {name: "Alice"}) REMOVE n:Verified
 
 The remaining mutation operators are **CreateEdge**, **DeleteEdge**,
 **SetPropertiesReplace** (`SET n = {...}`), **SetPropertiesMerge**
-(`SET n += {...}`), and **MergeNode** / **MergeEdge** for `MERGE`.
+(`SET n += {...}`), and **MergeNode** / **MergeEdge** for `MERGE`. None of them
+stores a null: where the node or relationship may already have the property
+(`SET n += {...}`, `ON CREATE SET`, `ON MATCH SET`) a null removes it, as in
+**SetProperty**, and where it cannot (a `CREATE`, or `SET n = {...}` after it has
+cleared the properties) the null is skipped.
 
 **MergeNode** evaluates the pattern's properties once (a null value is an
 error), then takes candidates from a property index on one of the pattern's
@@ -607,7 +611,8 @@ labels when one exists, otherwise from the first label's index, otherwise from
 every node. It keeps the candidates that carry every label and every property,
 comparing as `=` does, and emits a row for each, applying `ON MATCH` to each. It
 creates a node only when nothing matches. A label or property name the database
-has never seen means nothing can match.
+has never seen means nothing can match. **MergeEdge** refuses a null pattern
+property the same way before it looks for a relationship.
 
 ### Operator Inventory
 

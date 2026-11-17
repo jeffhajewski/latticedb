@@ -179,7 +179,7 @@ pub const CreateNode = struct {
         const node_id = self.database.createNode(ctx.txn, self.labels) catch |err|
             return ctx.storageFailure(err, "creating a node", .{});
 
-        try applyEvaluatedNodeProperties(self.database, ctx, node_id, evaluated.items);
+        try applyEvaluatedNodeProperties(self.database, ctx, node_id, evaluated.items, .skip);
         return node_id;
     }
 
@@ -312,6 +312,8 @@ pub const CreateEdge = struct {
             return ctx.storageFailure(err, "creating a relationship from node {d} to node {d}", .{ source_id, target_id });
 
         for (evaluated.items) |item| {
+            // A new relationship has nothing a null could remove.
+            if (item.value == .null_val) continue;
             self.database.setEdgePropertyById(ctx.txn, edge_id, item.key, item.value) catch |err| {
                 // Best-effort rollback to avoid exposing partially initialized
                 // edges. The query fails either way, with the first error.
@@ -924,11 +926,11 @@ pub const SetPropertiesReplace = struct {
                 // Clear existing properties and apply new values.
                 self.database.clearNodeProperties(ctx.txn, node_id) catch |err|
                     return ctx.storageFailure(err, "clearing the properties of node {d}", .{node_id});
-                try applyEvaluatedNodeProperties(self.database, ctx, node_id, evaluated.items);
+                try applyEvaluatedNodeProperties(self.database, ctx, node_id, evaluated.items, .skip);
             },
             .edge_ref => |edge_id| {
                 try clearEdgeProperties(self.database, ctx, edge_id);
-                try applyEvaluatedEdgeProperties(self.database, ctx, edge_id, evaluated.items);
+                try applyEvaluatedEdgeProperties(self.database, ctx, edge_id, evaluated.items, .skip);
             },
             else => return OperatorError.TypeError,
         }
@@ -1038,8 +1040,8 @@ pub const SetPropertiesMerge = struct {
             &evaluated,
         );
         switch (target_val) {
-            .node_ref => |node_id| try applyEvaluatedNodeProperties(self.database, ctx, node_id, evaluated.items),
-            .edge_ref => |edge_id| try applyEvaluatedEdgeProperties(self.database, ctx, edge_id, evaluated.items),
+            .node_ref => |node_id| try applyEvaluatedNodeProperties(self.database, ctx, node_id, evaluated.items, .remove),
+            .edge_ref => |edge_id| try applyEvaluatedEdgeProperties(self.database, ctx, edge_id, evaluated.items, .remove),
             else => return OperatorError.TypeError,
         }
 
@@ -1468,16 +1470,32 @@ fn evaluateMapExpression(
     }
 }
 
+/// What a null value in a property list does. Cypher never stores a null
+/// property: a null means the property is absent. Where the node or
+/// relationship may already have the property (`SET n += {...}`, `ON CREATE
+/// SET`, `ON MATCH SET`) the null removes it, as `SET n.x = null` does. Where it
+/// cannot (one being created, or one whose properties `SET n = {...}` has just
+/// cleared) there is nothing to remove, and the null is skipped.
+const NullProperty = enum { remove, skip };
+
 fn applyEvaluatedNodeProperties(
     database: *Database,
     ctx: *const ExecutionContext,
     node_id: NodeId,
     items: []const EvaluatedProperty,
+    on_null: NullProperty,
 ) OperatorError!void {
     try checkVectorItems(database, ctx, items);
     for (items) |item| {
+        // A null `embedding` removes the node's vector, whichever the mode.
         if (isVectorKey(database, item.key)) {
             try writeNodeVector(database, ctx, node_id, item.value);
+            continue;
+        }
+        if (item.value == .null_val) {
+            if (on_null == .skip) continue;
+            database.removeNodeProperty(ctx.txn, node_id, item.key) catch |err|
+                return ctx.storageFailure(err, "removing property '{s}' of node {d}", .{ item.key, node_id });
             continue;
         }
         database.setNodeProperty(ctx.txn, node_id, item.key, item.value) catch |err|
@@ -1490,10 +1508,31 @@ fn applyEvaluatedEdgeProperties(
     ctx: *const ExecutionContext,
     edge_id: EdgeId,
     items: []const EvaluatedProperty,
+    on_null: NullProperty,
 ) OperatorError!void {
     for (items) |item| {
+        if (item.value == .null_val) {
+            if (on_null == .skip) continue;
+            database.removeEdgePropertyById(ctx.txn, edge_id, item.key) catch |err|
+                return ctx.storageFailure(err, "removing property '{s}' of relationship {d}", .{ item.key, edge_id });
+            continue;
+        }
         database.setEdgePropertyById(ctx.txn, edge_id, item.key, item.value) catch |err|
             return ctx.storageFailure(err, "setting property '{s}' of relationship {d}", .{ item.key, edge_id });
+    }
+}
+
+/// A MERGE pattern property whose value is null fails the query: no node or
+/// relationship could ever match it, since none stores a null, so the MERGE
+/// would create a new one every time it ran.
+fn refuseNullPatternProperties(ctx: *const ExecutionContext, items: []const EvaluatedProperty) OperatorError!void {
+    for (items) |prop| {
+        if (prop.value == .null_val) return ctx.fail(
+            OperatorError.EvaluationError,
+            null,
+            "MERGE cannot match a null property value: '{s}' is null; use MATCH, or give it a value",
+            .{prop.key},
+        );
     }
 }
 
@@ -1660,14 +1699,7 @@ pub const MergeNode = struct {
             ctx,
             &evaluated_pattern,
         );
-        for (evaluated_pattern.items) |prop| {
-            if (prop.value == .null_val) return ctx.fail(
-                OperatorError.EvaluationError,
-                null,
-                "MERGE cannot match a null property value: '{s}' is null; use MATCH, or give it a value",
-                .{prop.key},
-            );
-        }
+        try refuseNullPatternProperties(ctx, evaluated_pattern.items);
         try checkVectorItems(self.database, ctx, evaluated_pattern.items);
 
         // On a database with a vector index, `embedding` in the pattern is
@@ -1711,7 +1743,7 @@ pub const MergeNode = struct {
         // Not found — create the node
         const node_id = self.database.createNode(ctx.txn, self.labels) catch |err|
             return ctx.storageFailure(err, "creating a node", .{});
-        try applyEvaluatedNodeProperties(self.database, ctx, node_id, evaluated_pattern.items);
+        try applyEvaluatedNodeProperties(self.database, ctx, node_id, evaluated_pattern.items, .skip);
         try self.applySetItems(node_id, self.on_create_props, ctx, row);
         self.pending.append(self.allocator, node_id) catch return OperatorError.OutOfMemory;
     }
@@ -1802,7 +1834,7 @@ pub const MergeNode = struct {
             ctx,
             &evaluated,
         );
-        try applyEvaluatedNodeProperties(self.database, ctx, node_id, evaluated.items);
+        try applyEvaluatedNodeProperties(self.database, ctx, node_id, evaluated.items, .remove);
     }
 
     fn close(ptr: *anyopaque, ctx: *ExecutionContext) void {
@@ -1866,6 +1898,7 @@ fn mergeValuesEqual(a: PropertyValue, b: PropertyValue) bool {
 
 /// Operator that implements MERGE for a single relationship pattern.
 /// Finds an existing edge matching source/target/type/(optional properties), or creates one.
+/// A pattern property whose value is null is an error, as in a node MERGE.
 pub const MergeEdge = struct {
     /// Input operator providing source/target node bindings
     input: Operator,
@@ -1971,8 +2004,15 @@ pub const MergeEdge = struct {
         source_id: NodeId,
         target_id: NodeId,
     ) OperatorError!EdgeId {
+        if (self.properties.len > 0) {
+            var evaluated_pattern: std.ArrayList(EvaluatedProperty) = .empty;
+            defer evaluated_pattern.deinit(self.allocator);
+            try evaluatePropertyExprList(self.allocator, &self.evaluator, self.properties, row, ctx, &evaluated_pattern);
+            try refuseNullPatternProperties(ctx, evaluated_pattern.items);
+        }
+
         if (try self.findMatchingEdgeId(ctx, row, source_id, target_id)) |edge_id| {
-            try self.applyEdgeSetItems(edge_id, self.on_match_props, ctx, row);
+            try self.applyEdgeSetItems(edge_id, self.on_match_props, ctx, row, .remove);
             return edge_id;
         }
 
@@ -1980,8 +2020,8 @@ pub const MergeEdge = struct {
             return ctx.storageFailure(err, "creating a relationship from node {d} to node {d}", .{ source_id, target_id });
 
         // MERGE pattern properties initialize newly created relationships.
-        try self.applyEdgeSetItems(edge_id, self.properties, ctx, row);
-        try self.applyEdgeSetItems(edge_id, self.on_create_props, ctx, row);
+        try self.applyEdgeSetItems(edge_id, self.properties, ctx, row, .skip);
+        try self.applyEdgeSetItems(edge_id, self.on_create_props, ctx, row, .remove);
 
         return edge_id;
     }
@@ -2060,6 +2100,7 @@ pub const MergeEdge = struct {
         items: []const CreateNode.PropertyKV,
         ctx: *ExecutionContext,
         row: *const Row,
+        on_null: NullProperty,
     ) OperatorError!void {
         if (items.len == 0) return;
 
@@ -2073,11 +2114,7 @@ pub const MergeEdge = struct {
             ctx,
             &evaluated,
         );
-
-        for (evaluated.items) |item| {
-            self.database.setEdgePropertyById(ctx.txn, edge_id, item.key, item.value) catch |err|
-                return ctx.storageFailure(err, "setting property '{s}' of relationship {d}", .{ item.key, edge_id });
-        }
+        try applyEvaluatedEdgeProperties(self.database, ctx, edge_id, evaluated.items, on_null);
     }
 
     fn close(ptr: *anyopaque, ctx: *ExecutionContext) void {

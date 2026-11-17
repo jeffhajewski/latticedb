@@ -54,7 +54,10 @@ one created with the new metric. See
 A node holds one vector, and Cypher reads it as `n.embedding`. `set_vector` takes
 a key argument, which must be `"embedding"` (an empty key also works); any other
 key is rejected with an unsupported-operation error rather than stored under that
-name. Setting a vector on a node that already has one replaces it.
+name. Setting a vector on a node that already has one replaces it. On a database
+created without a vector index, setting a vector, inserting nodes with vectors and
+searching them fail with an unsupported-operation error that says so (before
+0.18.1, an I/O error); opening the database with vectors enabled adds an index.
 
 `get_vector` reads a node's vector back, and `remove_vector` takes it away: the
 node stays, with its labels and properties, and vector search no longer returns

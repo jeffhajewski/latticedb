@@ -193,9 +193,24 @@ public final class Transaction implements AutoCloseable {
         return Optional.ofNullable(Native.nodeGetProperty(handle, nodeId, key));
     }
 
+    /**
+     * Sets the node's vector. {@code key} must be {@code "embedding"} or
+     * {@code ""}. Throws {@link ErrorCode#UNSUPPORTED} when the database was
+     * created without a vector index, or for another key, and
+     * {@link ErrorCode#INVALID_ARG} for a vector without the index's
+     * dimensions or with a NaN or infinite element.
+     */
     public void setVector(long nodeId, String key, float[] vector) {
         ensureWritable();
-        Native.nodeSetVector(handle, nodeId, key, vector);
+        // Another key is refused as unsupported before the index is looked at.
+        if (key != null && !key.isEmpty() && !key.equals("embedding")) {
+            Native.nodeSetVector(handle, nodeId, key, vector);
+            return;
+        }
+        LatticeException.needingVectorIndex("set a vector", () -> {
+            Native.nodeSetVector(handle, nodeId, key, vector);
+            return null;
+        });
     }
 
     /**
@@ -237,10 +252,15 @@ public final class Transaction implements AutoCloseable {
                 Native.findNodesByLabelProperty(handle, label, property, value, limit));
     }
 
-    /** Inserts multiple vector-bearing nodes with the same label in one call. */
+    /**
+     * Inserts multiple vector-bearing nodes with the same label in one call.
+     * Throws {@link ErrorCode#UNSUPPORTED}, and creates no node, when the
+     * database was created without a vector index.
+     */
     public List<Long> batchInsertVectors(String label, float[][] vectors) {
         ensureWritable();
-        return Database.toIdList(Native.batchInsert(handle, label, vectors));
+        return Database.toIdList(LatticeException.needingVectorIndex(
+                "insert nodes with vectors", () -> Native.batchInsert(handle, label, vectors)));
     }
 
     /* ------------------------------------------------------------------ */
@@ -339,11 +359,15 @@ public final class Transaction implements AutoCloseable {
     /* Search (transaction-scoped)                                         */
     /* ------------------------------------------------------------------ */
 
-    /** Vector search within this transaction's snapshot. */
+    /**
+     * Vector search within this transaction's snapshot. Throws
+     * {@link ErrorCode#UNSUPPORTED} when the database was created without a
+     * vector index.
+     */
     public List<VectorSearchResult> queryVector(float[] vector, int k, int efSearch) {
         ensureActive();
-        return Database.zipVectorResults(
-                Native.vectorSearchTxn(handle, vector, k, efSearch));
+        return Database.zipVectorResults(LatticeException.needingVectorIndex(
+                "search vectors", () -> Native.vectorSearchTxn(handle, vector, k, efSearch)));
     }
 
     /** Searches one declared index within this transaction's snapshot. */

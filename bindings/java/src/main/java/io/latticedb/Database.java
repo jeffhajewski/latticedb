@@ -210,10 +210,16 @@ public final class Database implements AutoCloseable {
     /* Search                                                              */
     /* ------------------------------------------------------------------ */
 
+    /**
+     * The nearest nodes to {@code vector}. Throws {@link ErrorCode#UNSUPPORTED}
+     * when the database was created without a vector index.
+     */
     public List<VectorSearchResult> vectorSearch(float[] vector, VectorSearchOptions opts) {
         int k = opts == null ? 10 : opts.k();
         int ef = opts == null ? 0 : opts.efSearch();
-        Object[] out = Native.vectorSearch(handle(), vector, k, ef);
+        long db = handle();
+        Object[] out = LatticeException.needingVectorIndex(
+                "search vectors", () -> Native.vectorSearch(db, vector, k, ef));
         return zipVectorResults(out);
     }
 

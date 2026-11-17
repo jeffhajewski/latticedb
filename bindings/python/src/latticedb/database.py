@@ -46,6 +46,7 @@ from latticedb._bindings import (
     LatticeUnsupportedError,
     check_error,
     check_query_error,
+    check_vector_error,
     get_lib,
     python_to_value,
     value_to_python,
@@ -884,6 +885,10 @@ class Database:
 
         Returns:
             List of search results with node IDs and distances, sorted by similarity.
+
+        Raises:
+            LatticeUnsupportedError: If the database was created without a
+                vector index.
         """
         if self._handle is None:
             raise RuntimeError("Database is not open")
@@ -910,7 +915,7 @@ class Database:
             ef_search,
             byref(result_ptr),
         )
-        check_error(code)
+        check_vector_error(code, "search vectors")
 
         try:
             # Get result count

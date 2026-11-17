@@ -172,7 +172,7 @@ For a larger end-to-end example, see [examples/go](../../examples/go).
   - `[]any`
   - `map[string]any`
 - Query results are materialized into `[]map[string]Value`.
-- A node has one vector, which Cypher reads as `n.embedding`. `Tx.SetVector` takes a key that must be `"embedding"` (or `""`); any other key returns `ErrorUnsupported`, and a vector with NaN or infinite components returns `ErrorInvalidArg`.
+- A node has one vector, which Cypher reads as `n.embedding`. `Tx.SetVector` takes a key that must be `"embedding"` (or `""`); any other key returns `ErrorUnsupported`, and a vector with NaN or infinite components returns `ErrorInvalidArg`. On a database created without a vector index, `SetVector`, `BatchInsertVectors` (before it creates any node) and `VectorSearch` return `ErrorUnsupported` with a message that says so; before 0.18.1 they returned `ErrorIO`. Opening the database with `EnableVectors` and `VectorDimensions` adds an index.
 - `Tx.GetVector(nodeID, key)` returns the node's vector, with `ok` false when it has none; under the cosine metric, the default, a committed vector reads back normalised to unit length. `Tx.RemoveVector(nodeID, key)` removes it, and removing a vector the node does not have does nothing. Both return `ErrorNotFound` for a missing node.
 - `DB.Update` (and `DB.Query` for a query that writes) rolls the transaction back when its commit fails, so a failed commit does not keep the single writer slot.
 - `Tx.Commit` that fails with `ErrorTxnAborted` ends the transaction: the native handle is gone, so `IsActive` is false and `Rollback` is a no-op. Any other commit failure leaves it open for `Rollback`.

@@ -127,3 +127,16 @@ func wrapError(err error) error {
 
 	return err
 }
+
+// wrapVectorError is wrapError for a call that needs the vector index. On a
+// database created without one the code is ErrorUnsupported (ErrorIO before
+// 0.18.1), and the library's text for that code does not say why.
+func wrapVectorError(err error, action string) error {
+	err = wrapError(err)
+	var latticeErr *Error
+	if errors.As(err, &latticeErr) && latticeErr.Code == ErrorUnsupported {
+		return &Error{Code: ErrorUnsupported, Message: "cannot " + action + ": the database was created " +
+			"without a vector index; open it with EnableVectors and VectorDimensions to add one"}
+	}
+	return err
+}

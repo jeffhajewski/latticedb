@@ -96,6 +96,56 @@ class SearchTest {
     }
 
     @Test
+    void vectorCallsWithoutAVectorIndex() {
+        String path = dir.resolve("novec.db").toString();
+        float[] vector = {1, 0};
+        long[] ids = new long[1];
+        try (Database db = Database.open(path, OpenOptions.defaults().create(true))) {
+            db.write(tx -> {
+                ids[0] = tx.createNode(List.of("Doc")).id();
+                // These failed with ErrorCode.IO, which reads like a disk fault.
+                assertNoVectorIndex(() -> tx.setVector(ids[0], "embedding", vector));
+                assertNoVectorIndex(() -> tx.setVector(ids[0], "", vector));
+                assertNoVectorIndex(() -> tx.batchInsertVectors("Doc", new float[][]{vector}));
+                assertNoVectorIndex(() -> tx.queryVector(vector, 1, 0));
+                // Another key is still refused for being another key.
+                LatticeException otherKey = assertThrows(LatticeException.class,
+                        () -> tx.setVector(ids[0], "title_vec", vector));
+                assertEquals(ErrorCode.UNSUPPORTED, otherKey.getErrorCode());
+                assertFalse(otherKey.getMessage().contains("vector index"));
+                // Reading finds no vector and removing has nothing to remove.
+                assertTrue(tx.getVector(ids[0], "embedding").isEmpty());
+                tx.removeVector(ids[0], "embedding");
+                return null;
+            });
+            assertNoVectorIndex(() -> db.vectorSearch(vector, VectorSearchOptions.defaults().k(1)));
+            db.read(tx -> {
+                // The refused batch insert created nothing.
+                assertFalse(tx.nodeExists(ids[0] + 1));
+                return null;
+            });
+        }
+
+        // Opening it with vectors on adds the index.
+        try (Database db = Database.open(path,
+                OpenOptions.defaults().enableVectors(true).vectorDimensions(2))) {
+            db.write(tx -> {
+                tx.setVector(ids[0], "embedding", vector);
+                return null;
+            });
+            List<VectorSearchResult> results = db.vectorSearch(vector, VectorSearchOptions.defaults().k(1));
+            assertEquals(1, results.size());
+            assertEquals(ids[0], results.get(0).nodeId());
+        }
+    }
+
+    private static void assertNoVectorIndex(org.junit.jupiter.api.function.Executable call) {
+        LatticeException e = assertThrows(LatticeException.class, call);
+        assertEquals(ErrorCode.UNSUPPORTED, e.getErrorCode());
+        assertTrue(e.getMessage().contains("created without a vector index"), e.getMessage());
+    }
+
+    @Test
     void vectorSearchInTransaction() {
         try (Database db = Database.open(dir.resolve("vt.db").toString(),
                 OpenOptions.defaults().create(true).enableVectors(true).vectorDimensions(2))) {

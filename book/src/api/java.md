@@ -167,6 +167,12 @@ key, vector)` takes a key that must be `"embedding"` (or `""`); any other key
 fails with `ErrorCode.UNSUPPORTED`, and a vector with NaN or infinite components
 with `ErrorCode.INVALID_ARG`.
 
+On a database created without a vector index, `setVector`, `batchInsertVectors`
+(before it creates any node), `queryVector` and `Database.vectorSearch` fail with
+`ErrorCode.UNSUPPORTED` and a message that says the database was created without
+a vector index; before 0.18.1 they failed with `ErrorCode.IO`. Opening the
+database with `enableVectors(true)` and `vectorDimensions` adds an index.
+
 `getVector(nodeId, key)` returns the node's vector as an `Optional<float[]>`,
 empty when it has none. Under the cosine metric, the default, a committed vector
 reads back normalised to unit length (`{3, 4}` reads back as `{0.6, 0.8}`); an

@@ -175,7 +175,9 @@ pub const DatabaseError = error{
     /// Serialized node/edge payload exceeds the B-tree value limit or could
     /// not be represented by the on-disk value layout.
     ValueTooLarge,
-    /// The requested explicit property index does not exist.
+    /// The index the call needs does not exist: an explicit property or
+    /// full-text index that was never declared, or the vector index of a
+    /// database created without one.
     MissingIndex,
     /// Another process holds this database. A writer takes it exclusively and a
     /// reader shares it, so a reader is refused while a writer has it open.
@@ -5434,9 +5436,13 @@ pub const Database = struct {
         };
     }
 
+    /// Refuse a vector this database cannot store or search with:
+    /// `MissingIndex` when it was created without a vector index (it used to
+    /// be `IoError`, which read like a disk fault), `InvalidArgument` for the
+    /// wrong dimensions or a NaN or infinite component.
     fn validateVectorValue(self: *Self, vector: []const f32) DatabaseError!void {
+        const vs = self.vector_storage orelse return DatabaseError.MissingIndex;
         if (!types.isValidVectorDimensions(vector.len)) return DatabaseError.InvalidArgument;
-        const vs = self.vector_storage orelse return DatabaseError.IoError;
         if (vector.len != vs.dimensions) return DatabaseError.InvalidArgument;
         // A NaN or infinite component makes every distance to it NaN or
         // infinite, which breaks the ordering the index search relies on.
@@ -7872,8 +7878,7 @@ pub const Database = struct {
     ) !void {
         if (self.read_only) return DatabaseError.PermissionDenied;
 
-        // Check if vector storage is enabled
-        _ = self.vector_storage orelse return DatabaseError.IoError;
+        // A database created without a vector index has nowhere to put it.
         try self.validateVectorValue(vector);
 
         // Verify node exists
@@ -8142,7 +8147,7 @@ pub const Database = struct {
         member: ?VectorFilter,
     ) DatabaseError![]VectorSearchResult {
         try self.validateVectorValue(query_vector);
-        const hnsw = &(self.hnsw_index orelse return DatabaseError.IoError);
+        const hnsw = &(self.hnsw_index orelse return DatabaseError.MissingIndex);
 
         if (!exactScanPays(ids.len, hnsw.vector_count, ef_search orelse hnsw.config.ef_search, hnsw.config.m_max0)) {
             if (member) |m| return self.vectorSearchWhereInTxn(txn, query_vector, k, ef_search, m);
@@ -8266,7 +8271,7 @@ pub const Database = struct {
         filter: ?VectorFilter,
     ) DatabaseError![]VectorSearchResult {
         try self.validateVectorValue(query_vector);
-        const hnsw = &(self.hnsw_index orelse return DatabaseError.IoError);
+        const hnsw = &(self.hnsw_index orelse return DatabaseError.MissingIndex);
 
         // The index widens its beam to the number of results asked for, so
         // asking for every vector would make each query exhaustive. A full beam

@@ -144,11 +144,20 @@ func (tx *Tx) SetProperty(nodeID NodeID, key string, value Value) error {
 	return wrapError(tx.raw.SetNodeProperty(uint64(nodeID), key, value))
 }
 
+// SetVector sets the node's vector. key must be "embedding" or "". It
+// returns ErrorUnsupported when the database was created without a vector
+// index, or for another key, and ErrorInvalidArg for a vector without the
+// index's dimensions or with a NaN or infinite element.
 func (tx *Tx) SetVector(nodeID NodeID, key string, vector []float32) error {
 	if err := tx.ensureWritable(); err != nil {
 		return err
 	}
-	return wrapError(tx.raw.SetNodeVector(uint64(nodeID), key, vector))
+	err := tx.raw.SetNodeVector(uint64(nodeID), key, vector)
+	// Another key is refused as unsupported before the index is looked at.
+	if key != "embedding" && key != "" {
+		return wrapError(err)
+	}
+	return wrapVectorError(err, "set a vector")
 }
 
 // GetVector returns the node's vector as this transaction sees it, with ok
@@ -335,13 +344,15 @@ func (tx *Tx) GetIncomingEdgesByType(nodeID NodeID, edgeType string, limit uint)
 }
 
 // BatchInsertVectors inserts multiple vector-bearing nodes in a single call.
+// It returns ErrorUnsupported, and creates no node, when the database was
+// created without a vector index.
 func (tx *Tx) BatchInsertVectors(label string, vectors [][]float32) ([]NodeID, error) {
 	if err := tx.ensureWritable(); err != nil {
 		return nil, err
 	}
 	nodeIDs, err := tx.raw.BatchInsert(label, vectors)
 	if err != nil {
-		return nil, wrapError(err)
+		return nil, wrapVectorError(err, "insert nodes with vectors")
 	}
 	out := make([]NodeID, len(nodeIDs))
 	for i, nodeID := range nodeIDs {

@@ -38,6 +38,11 @@ export {
   LatticeCheckpointMode,
 } from './types';
 
+/** Why a vector call fails on a database that has no vector index. */
+const NO_VECTOR_INDEX_MESSAGE =
+  'the database was created without a vector index; open it with enableVectors: true and ' +
+  'vectorDimensions to add one';
+
 /**
  * Error class for Lattice operations.
  */
@@ -366,6 +371,18 @@ export class LatticeFFI {
       const message = this.bindings.lattice_error_message(code);
       throw new LatticeError(message, code as LatticeErrorCode);
     }
+  }
+
+  /**
+   * Check the code of a call that needs the vector index. On a database
+   * created without one it is `Unsupported` (`IoError` before 0.18.1), and
+   * the library's text for that code does not say why.
+   */
+  private checkVectorError(code: number, action: string): void {
+    if (code === LatticeErrorCode.Unsupported) {
+      throw new LatticeError(`cannot ${action}: ${NO_VECTOR_INDEX_MESSAGE}`, LatticeErrorCode.Unsupported);
+    }
+    this.checkError(code);
   }
 
   private normalizeQueryStage(stage: number): QueryErrorStage {
@@ -948,7 +965,9 @@ export class LatticeFFI {
       vector,
       vector.length
     );
-    this.checkError(err);
+    // Another key is refused as unsupported before the index is looked at.
+    if (key === 'embedding' || key === '') this.checkVectorError(err, 'set a vector');
+    else this.checkError(err);
   }
 
   /**
@@ -1021,7 +1040,7 @@ export class LatticeFFI {
       nodeIdsOut,
       countOut
     );
-    this.checkError(err);
+    this.checkVectorError(err, 'insert nodes with vectors');
 
     const created = countOut.readUInt32LE();
     if (created < count) {
@@ -1641,7 +1660,7 @@ export class LatticeFFI {
       efSearch,
       resultOut
     );
-    this.checkError(err);
+    this.checkVectorError(err, 'search vectors');
     return resultOut[0];
   }
 
@@ -1663,7 +1682,7 @@ export class LatticeFFI {
       efSearch,
       resultOut
     );
-    this.checkError(err);
+    this.checkVectorError(err, 'search vectors');
     return resultOut[0];
   }
 

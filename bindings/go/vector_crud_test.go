@@ -3,6 +3,7 @@ package latticedb
 import (
 	"math"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -117,5 +118,78 @@ func TestGetVectorAndRemoveVector(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("read again: %v", err)
+	}
+}
+
+func TestVectorCallsWithoutAVectorIndex(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "no-vector-index.db")
+	db, err := Open(dbPath, OpenOptions{Create: true})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	vector := []float32{1, 0}
+	wantNoIndex := func(what string, err error) {
+		t.Helper()
+		// These returned ErrorIO, which reads like a disk fault.
+		wantCode(t, what, err, ErrorUnsupported)
+		if !strings.Contains(err.Error(), "created without a vector index") {
+			t.Fatalf("%s message = %q, want it to say the database has no vector index", what, err.Error())
+		}
+	}
+
+	var node NodeID
+	err = db.Update(func(tx *Tx) error {
+		n, err := tx.CreateNode(CreateNodeOptions{Labels: []string{"Doc"}})
+		if err != nil {
+			return err
+		}
+		node = n.ID
+		wantNoIndex("SetVector", tx.SetVector(node, "embedding", vector))
+		wantNoIndex("SetVector with an empty key", tx.SetVector(node, "", vector))
+		_, err = tx.BatchInsertVectors("Doc", [][]float32{vector})
+		wantNoIndex("BatchInsertVectors", err)
+		// Another key is still refused for being another key.
+		err = tx.SetVector(node, "title_vec", vector)
+		wantCode(t, "SetVector under another key", err, ErrorUnsupported)
+		if strings.Contains(err.Error(), "vector index") {
+			t.Fatalf("another key's message = %q, want no mention of the vector index", err.Error())
+		}
+		// Reading finds no vector and removing has nothing to remove.
+		if _, ok, err := tx.GetVector(node, "embedding"); err != nil || ok {
+			t.Fatalf("GetVector: ok=%v err=%v, want none", ok, err)
+		}
+		return tx.RemoveVector(node, "embedding")
+	})
+	if err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_, err = db.VectorSearch(vector, VectorSearchOptions{K: 1})
+	wantNoIndex("VectorSearch", err)
+	err = db.View(func(tx *Tx) error {
+		// The refused batch insert created nothing.
+		if exists, err := tx.NodeExists(node + 1); err != nil || exists {
+			t.Fatalf("node after the refused batch insert: exists=%v err=%v", exists, err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	// Opening it with vectors on adds the index.
+	db, err = Open(dbPath, OpenOptions{EnableVectors: true, VectorDimensions: 2})
+	if err != nil {
+		t.Fatalf("reopen with vectors: %v", err)
+	}
+	defer db.Close()
+	if err := db.Update(func(tx *Tx) error { return tx.SetVector(node, "embedding", vector) }); err != nil {
+		t.Fatalf("set after adding the index: %v", err)
+	}
+	results, err := db.VectorSearch(vector, VectorSearchOptions{K: 1})
+	if err != nil || len(results) != 1 || results[0].NodeID != node {
+		t.Fatalf("search after adding the index = %+v, %v; want node %d", results, err, node)
 	}
 }

@@ -20,6 +20,7 @@ from latticedb._bindings import (
     NodeWithVector,
     check_error,
     check_query_error,
+    check_vector_error,
     get_lib,
     python_to_value,
     value_to_python,
@@ -640,8 +641,14 @@ class Transaction:
 
         Args:
             node_id: The node ID.
-            key: Vector property key.
+            key: Vector key; must be ``"embedding"`` or ``""``.
             vector: Vector data as float32 array.
+
+        Raises:
+            LatticeUnsupportedError: If the database was created without a
+                vector index, or the key is another name.
+            LatticeInvalidArgError: If the vector does not have the
+                index's dimensions, or has a NaN or infinite element.
         """
         if self._read_only:
             raise RuntimeError("Cannot set vector in read-only transaction")
@@ -661,7 +668,11 @@ class Transaction:
             vec_ptr,
             len(vec),
         )
-        check_error(code)
+        # Another key is refused as unsupported before the index is looked at.
+        if key in ("embedding", ""):
+            check_vector_error(code, "set a vector")
+        else:
+            check_error(code)
 
     def get_vector(
         self,
@@ -755,6 +766,10 @@ class Transaction:
 
         Returns:
             List of N node IDs.
+
+        Raises:
+            LatticeUnsupportedError: If the database was created without a
+                vector index. No node is created.
         """
         if self._read_only:
             raise RuntimeError("Cannot insert in read-only transaction")
@@ -792,7 +807,7 @@ class Transaction:
             node_ids,
             ctypes.byref(count_out),
         )
-        check_error(code)
+        check_vector_error(code, "insert nodes with vectors")
 
         created = count_out.value
         if created < n:
@@ -825,6 +840,10 @@ class Transaction:
     ) -> List[VectorSearchResult]:
         """
         Search for similar vectors within this transaction.
+
+        Raises:
+            LatticeUnsupportedError: If the database was created without a
+                vector index.
         """
         if self._handle is None:
             raise RuntimeError("Transaction not started")
@@ -848,7 +867,7 @@ class Transaction:
             ef_search,
             byref(result_ptr),
         )
-        check_error(code)
+        check_vector_error(code, "search vectors")
 
         try:
             count = lib._lib.lattice_vector_result_count(result_ptr)

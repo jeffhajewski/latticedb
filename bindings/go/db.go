@@ -482,6 +482,8 @@ func (db *DB) GetNodesByLabel(label string) ([]NodeID, error) {
 	return out, nil
 }
 
+// VectorSearch returns the nearest nodes to vector. It returns
+// ErrorUnsupported when the database was created without a vector index.
 func (db *DB) VectorSearch(vector []float32, opts VectorSearchOptions) ([]VectorSearchResult, error) {
 	if db == nil || db.raw == nil {
 		return nil, ErrDatabaseClosed
@@ -490,7 +492,7 @@ func (db *DB) VectorSearch(vector []float32, opts VectorSearchOptions) ([]Vector
 
 	results, err := db.raw.VectorSearch(vector, opts.K, opts.EfSearch)
 	if err != nil {
-		return nil, wrapError(err)
+		return nil, wrapVectorError(err, "search vectors")
 	}
 
 	out := make([]VectorSearchResult, 0, len(results))

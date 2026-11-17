@@ -91,6 +91,7 @@ Some codes come from more than one place:
 | `LATTICE_ERROR_HAS_RELATIONSHIPS` | `lattice_node_delete`, and a query whose `DELETE` names a node that still has relationships |
 | `LATTICE_ERROR_CONFIG_MISMATCH` | `lattice_open*` with vector options that contradict the index the file records |
 | `LATTICE_ERROR_NEEDS_NEWER_WRITER` | A read-write open of a file whose header says only a newer release may write it; it still opens read-only |
+| `LATTICE_ERROR_UNSUPPORTED` | A lookup or search in an index that does not exist: an undeclared property or full-text index, or, on a database created without a vector index, `lattice_node_set_vector`, `lattice_batch_insert` and vector search (`LATTICE_ERROR_IO` before 0.18.1) |
 | `LATTICE_ERROR_IO`, `LATTICE_ERROR_OUT_OF_MEMORY` | Also `lattice_query_execute`, when the storage or an allocation failed under the query rather than the query itself |
 
 ### Value Types
@@ -455,6 +456,15 @@ A node holds one vector, which Cypher reads as `n.embedding`. The key must be
 `"embedding"`, `""` or `NULL`; any other key returns `LATTICE_ERROR_UNSUPPORTED`.
 A vector whose length is not the database's dimensions, or with a NaN or
 infinite component, returns `LATTICE_ERROR_INVALID_ARG`.
+
+A database created without a vector index has nowhere to keep a vector. There
+`lattice_node_set_vector`, `lattice_batch_insert` (before it creates any node),
+`lattice_vector_search` and `lattice_vector_search_txn` return
+`LATTICE_ERROR_UNSUPPORTED`, the code a missing property or full-text index
+gives; before 0.18.1 they returned `LATTICE_ERROR_IO`, which read like a disk
+fault. `lattice_node_get_vector` finds no vector there and
+`lattice_node_remove_vector` has nothing to remove, so both succeed. Opening the
+database with `enable_vector` and `vector_dimensions` set adds an index.
 
 ### Get or Remove a Vector
 

@@ -1477,6 +1477,32 @@ def check_error(code: int) -> None:
     raise exc_class(message, code)
 
 
+NO_VECTOR_INDEX_MESSAGE = (
+    "the database was created without a vector index; open it with "
+    "enable_vectors=True and vector_dimensions=<n> to add one"
+)
+
+
+def check_vector_error(code: int, action: str) -> None:
+    """Check the code of a call that needs the vector index.
+
+    Such a call returns LATTICE_ERROR_UNSUPPORTED on a database created
+    without one (LATTICE_ERROR_IO before 0.18.1), and the library's text for
+    that code does not say so.
+
+    Args:
+        code: The error code returned by the C API function.
+        action: What the call does, for the message ("set a vector").
+
+    Raises:
+        LatticeUnsupportedError: If the database has no vector index.
+        LatticeError: For any other error.
+    """
+    if code == LATTICE_ERROR_UNSUPPORTED:
+        raise LatticeUnsupportedError(f"cannot {action}: {NO_VECTOR_INDEX_MESSAGE}", code)
+    check_error(code)
+
+
 def check_query_error(code: int, query_ptr: Any) -> None:
     """Check query error code and raise query diagnostics when available.
 

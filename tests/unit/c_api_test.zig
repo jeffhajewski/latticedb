@@ -3943,6 +3943,74 @@ test "c_api: get_vector and remove_vector" {
     _ = c_api.lattice_rollback(txn);
 }
 
+test "c_api: vector calls on a database without a vector index return UNSUPPORTED, not IO" {
+    const path = "/tmp/lattice_capi_no_vector_index_test.db";
+    @import("compat").fs.cwd().deleteFile(path) catch {};
+    @import("compat").fs.cwd().deleteFile(path ++ "-wal") catch {};
+    defer removeScratchDb(path);
+    var options = lattice_open_options{
+        .create = true,
+        .read_only = false,
+        .cache_size_mb = 4,
+        .page_size = 4096,
+        .enable_vector = false,
+        .vector_dimensions = 2,
+    };
+    const vector = [_]f32{ 1, 0 };
+    var node: lattice_node_id = 0;
+    {
+        var db: ?*lattice_database = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+        defer _ = c_api.lattice_close(db);
+
+        var txn: ?*lattice_txn = null;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "N", &node));
+        // These returned LATTICE_ERROR_IO, which reads like a disk fault.
+        try std.testing.expectEqual(lattice_error.err_unsupported, c_api.lattice_node_set_vector(txn, node, "embedding", &vector, 2));
+        try std.testing.expectEqual(lattice_error.err_unsupported, c_api.lattice_node_set_vector(txn, node, null, &vector, 2));
+        // Whatever the length: the missing index is the answer, not the size.
+        const long = [_]f32{ 1, 0, 0 };
+        try std.testing.expectEqual(lattice_error.err_unsupported, c_api.lattice_node_set_vector(txn, node, "", &long, 3));
+
+        // Refused before it creates a node.
+        const specs = [_]c_api.lattice_node_with_vector{
+            .{ .label = "N", .vector = &vector, .dimensions = 2 },
+            .{ .label = "N", .vector = &vector, .dimensions = 2 },
+        };
+        var ids = [_]lattice_node_id{ 0, 0 };
+        var created: u32 = 99;
+        try std.testing.expectEqual(lattice_error.err_unsupported, c_api.lattice_batch_insert(txn, &specs, specs.len, &ids, &created));
+        try std.testing.expectEqual(@as(u32, 0), created);
+        var exists = true;
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_exists(txn, node + 1, &exists));
+        try std.testing.expect(!exists);
+
+        // Reading finds no vector and removing has nothing to remove, as before.
+        try expectNoVector(txn, node);
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_remove_vector(txn, node, "embedding"));
+
+        var results: ?*lattice_vector_result = null;
+        try std.testing.expectEqual(lattice_error.err_unsupported, c_api.lattice_vector_search_txn(txn, &vector, 2, 1, 0, &results));
+        try std.testing.expect(results == null);
+        try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+        try std.testing.expectEqual(lattice_error.err_unsupported, c_api.lattice_vector_search(db, &vector, 2, 1, 0, &results));
+        try std.testing.expect(results == null);
+    }
+
+    // Opening it with vectors on adds the index, and the same call succeeds.
+    options.create = false;
+    options.enable_vector = true;
+    var db: ?*lattice_database = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_open(path, &options, &db));
+    defer _ = c_api.lattice_close(db);
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_vector(txn, node, "embedding", &vector, 2));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+    try std.testing.expectEqual(@as(u32, 1), try vectorSearchCount(db, &vector));
+}
+
 fn cacheEntries(db: ?*lattice_database) !u32 {
     var entries: u32 = 0;
     try std.testing.expectEqual(lattice_error.ok, c_api.lattice_query_cache_stats(db, &entries, null, null));

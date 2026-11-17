@@ -319,6 +319,12 @@ Cypher reads as `n.embedding`; a key other than `"embedding"` (or `""`) returns
 `ErrorUnsupported`, and a vector with NaN or infinite components
 `ErrorInvalidArg`. A `K` larger than `EfSearch` widens the search to `K`.
 
+On a database created without a vector index, `SetVector`, `BatchInsertVectors`
+(before it creates any node) and `VectorSearch` return `ErrorUnsupported`, with a
+message that says the database was created without a vector index; before
+0.18.1 they returned `ErrorIO`. Opening the database with `EnableVectors` and
+`VectorDimensions` adds an index.
+
 `tx.GetVector(nodeID, "embedding")` returns the node's vector, with `ok` false
 when it has none. Under the cosine metric, the default, a committed vector reads
 back normalised to unit length (`{3, 4}` reads back as `{0.6, 0.8}`); an

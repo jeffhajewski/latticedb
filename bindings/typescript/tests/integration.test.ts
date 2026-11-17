@@ -1128,6 +1128,49 @@ describeIfNative('Database Integration', () => {
     });
   });
 
+  describe('Vector operations without a vector index', () => {
+    test('writing or searching a vector is Unsupported, not an I/O error', async () => {
+      db = new Database(dbPath, { create: true });
+      await db.open();
+      const vector = new Float32Array([1, 0]);
+      const noIndex = {
+        code: LatticeErrorCode.Unsupported,
+        message: expect.stringContaining('created without a vector index'),
+      };
+      let nodeId: bigint;
+
+      await db.write(async (txn) => {
+        nodeId = (await txn.createNode({ labels: ['Doc'] })).id;
+        await expect(txn.setVector(nodeId, 'embedding', vector)).rejects.toMatchObject(noIndex);
+        await expect(txn.setVector(nodeId, '', vector)).rejects.toMatchObject(noIndex);
+        await expect(txn.batchInsertVectors('Doc', [vector])).rejects.toMatchObject(noIndex);
+        // Another key is still refused for being another key.
+        const otherKey = txn.setVector(nodeId, 'title_vec', vector);
+        await expect(otherKey).rejects.toMatchObject({ code: LatticeErrorCode.Unsupported });
+        await expect(otherKey).rejects.not.toThrow(/vector index/);
+        // Reading finds no vector and removing has nothing to remove.
+        expect(await txn.getVector(nodeId)).toBeNull();
+        await txn.removeVector(nodeId);
+        await expect(txn.vectorSearch(vector, { k: 1 })).rejects.toMatchObject(noIndex);
+      });
+      await expect(db.vectorSearch(vector, { k: 1 })).rejects.toMatchObject(noIndex);
+      await db.read(async (txn) => {
+        // The refused batch insert created nothing.
+        expect(await txn.nodeExists(nodeId! + 1n)).toBe(false);
+      });
+      await db.close();
+
+      // Opening it with vectors on adds the index.
+      db = new Database(dbPath, { enableVectors: true, vectorDimensions: 2 });
+      await db.open();
+      await db.write(async (txn) => {
+        await txn.setVector(nodeId!, 'embedding', vector);
+      });
+      const results = await db.vectorSearch(vector, { k: 1 });
+      expect(results.map((r) => r.nodeId)).toEqual([nodeId!]);
+    });
+  });
+
   describe('Full-text search', () => {
     beforeEach(async () => {
       db = new Database(dbPath, { create: true });

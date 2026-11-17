@@ -896,7 +896,11 @@ lattice_error lattice_stream_trim(
 
 /* Set a vector on a node. A node holds one vector, read in Cypher as
  * `n.embedding`; `key` must be "embedding", "" or NULL, and any other key
- * returns LATTICE_ERROR_UNSUPPORTED. */
+ * returns LATTICE_ERROR_UNSUPPORTED. A database created without a vector index
+ * also returns LATTICE_ERROR_UNSUPPORTED (before 0.18.1, LATTICE_ERROR_IO);
+ * opening it with enable_vector and vector_dimensions adds one. A vector whose
+ * length is not the index's dimensions, or with a NaN or infinite component,
+ * returns LATTICE_ERROR_INVALID_ARG. */
 lattice_error lattice_node_set_vector(
     lattice_txn* txn,
     lattice_node_id node_id,
@@ -958,6 +962,8 @@ typedef struct {
  * On success, node_ids_out[0..count_out] contains created node IDs.
  * On partial failure, count_out indicates how many succeeded;
  * caller should rollback the transaction.
+ * A database created without a vector index returns LATTICE_ERROR_UNSUPPORTED
+ * before creating any node.
  */
 lattice_error lattice_batch_insert(
     lattice_txn* txn,
@@ -989,7 +995,8 @@ lattice_error lattice_batch_insert(
  *   lattice_vector_result_free(results);
  */
 
-/* Search for similar vectors */
+/* Search for similar vectors. A database created without a vector index
+ * returns LATTICE_ERROR_UNSUPPORTED (before 0.18.1, LATTICE_ERROR_IO). */
 lattice_error lattice_vector_search(
     lattice_database* db,
     const float* vector,

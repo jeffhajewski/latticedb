@@ -977,6 +977,44 @@ class TestVectorOperations:
             with db.read() as txn:
                 np.testing.assert_allclose(txn.get_vector(node.id), [1.0, 0.0])
 
+    def test_vector_calls_without_a_vector_index(self, tmp_path):
+        """Without a vector index, writing or searching a vector is unsupported, not an I/O error."""
+        pytest.importorskip("numpy")
+        import numpy as np
+
+        vector = np.array([1.0, 0.0], dtype=np.float32)
+        db_path = tmp_path / "test.db"
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                node = txn.create_node(labels=["Doc"])
+                with pytest.raises(LatticeUnsupportedError, match="created without a vector index"):
+                    txn.set_vector(node.id, "embedding", vector)
+                with pytest.raises(LatticeUnsupportedError, match="created without a vector index"):
+                    txn.batch_insert_vectors("Doc", np.array([[1.0, 0.0]], dtype=np.float32))
+                # Another key is still refused for being another key.
+                with pytest.raises(LatticeUnsupportedError) as other_key:
+                    txn.set_vector(node.id, "title_vec", vector)
+                assert "vector index" not in str(other_key.value)
+                # Reading finds no vector and removing has nothing to remove.
+                assert txn.get_vector(node.id) is None
+                txn.remove_vector(node.id)
+                with pytest.raises(LatticeUnsupportedError, match="created without a vector index"):
+                    txn.vector_search(vector, k=1)
+                txn.commit()
+            with pytest.raises(LatticeUnsupportedError, match="created without a vector index") as err:
+                db.vector_search(vector, k=1)
+            assert err.value.code == -14
+            with db.read() as txn:
+                # The refused batch insert created nothing.
+                assert not txn.node_exists(node.id + 1)
+
+        # Opening it with vectors on adds the index.
+        with Database(db_path, enable_vectors=True, vector_dimensions=2) as db:
+            with db.write() as txn:
+                txn.set_vector(node.id, "embedding", vector)
+                txn.commit()
+            assert [r.node_id for r in db.vector_search(vector, k=1)] == [node.id]
+
     def test_vector_search(self, tmp_path):
         """Test vector similarity search."""
         pytest.importorskip("numpy")

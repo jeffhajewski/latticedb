@@ -3223,6 +3223,8 @@ pub export fn lattice_batch_insert(
     defer unlockTxnDb(txn_handle);
 
     if (txn_handle.txn.mode == .read_only) return .err_read_only;
+    // Refused before the first node is created, so nothing is left behind.
+    if (txn_handle.db_handle.db.vectorConfig() == null) return .err_unsupported;
 
     const txn_ptr: ?*Transaction = if (txn_handle.txn.id != 0) &txn_handle.txn else null;
 

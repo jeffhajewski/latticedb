@@ -5,8 +5,11 @@
 0.18.1 is a patch release. Cypher no longer stores a null as a property:
 `SET n += {x: null}` removes `x`, as Cypher says it should, and `SET n = {...}`,
 `CREATE`, `ON CREATE SET` and `ON MATCH SET` leave a null out or remove the
-property instead of storing it, on nodes and relationships alike. The release
-also stops the repository tracking the TypeScript binding's coverage report.
+property instead of storing it, on nodes and relationships alike. Setting,
+batch-inserting or searching vectors on a database created without a vector
+index now fails as unsupported, with a message that says why, instead of as an
+I/O error. The release also stops the repository tracking the TypeScript
+binding's coverage report.
 
 ## Fixes
 
@@ -28,6 +31,22 @@ also stops the repository tracking the TypeScript binding's coverage report.
   With nulls no longer stored it would have created a new relationship every
   run, so it now fails with the node form's error: `MERGE cannot match a null
   property value: 'w' is null; use MATCH, or give it a value`.
+- **A vector call on a database without a vector index says so.** On a
+  database created without a vector index, `lattice_node_set_vector`,
+  `lattice_batch_insert`, `lattice_vector_search` and
+  `lattice_vector_search_txn` returned `LATTICE_ERROR_IO`, whose text is "I/O
+  error", which reads like a disk fault. The engine's vector check
+  (`Database.validateVectorValue`) reported a missing index as an I/O error.
+  They now return `LATTICE_ERROR_UNSUPPORTED`, the code an undeclared property
+  or full-text index already gives, and `lattice_batch_insert` returns it before
+  it creates any node; in 0.18.0 it created the first node, without a vector,
+  and then failed. Each binding raises its unsupported error with a message
+  that says the database was created without a vector index and how to add one:
+  `LatticeUnsupportedError` in Python, a `LatticeError` with code `Unsupported`
+  in TypeScript, `ErrorUnsupported` in Go and `ErrorCode.UNSUPPORTED` in Java,
+  from `set_vector`, `batch_insert_vectors` and both vector searches. Reading a
+  vector on such a database still finds none and removing one still does
+  nothing, as documented.
 - **The TypeScript coverage report is no longer tracked.**
   `bindings/typescript/coverage/`, which `npm run test:coverage` rewrites on
   every run, was committed, so a coverage run left the working tree dirty. It is
@@ -46,6 +65,16 @@ also stops the repository tracking the TypeScript binding's coverage report.
 - `lattice_node_set_property` and `lattice_edge_set_property` (and the
   bindings' `set_property`) are unchanged: given a null value, they still store
   it.
+- The C API's signatures are unchanged. `lattice_node_set_vector`,
+  `lattice_batch_insert`, `lattice_vector_search` and
+  `lattice_vector_search_txn` return a different code on a database without a
+  vector index, `LATTICE_ERROR_UNSUPPORTED` (-14) instead of
+  `LATTICE_ERROR_IO` (-2). `lattice_error_message(-14)` is still the generic
+  "Unsupported operation or value type": the bindings supply the specific
+  message. `lattice_node_set_vector` also returns -14 for a key other than
+  `"embedding"` or `""`, as before; the bindings tell the two apart by the key.
+- Cypher is unaffected: on a database without a vector index `embedding` is an
+  ordinary property, so Cypher never reaches the vector index there.
 
 ## Upgrade Notes
 
@@ -60,6 +89,9 @@ also stops the repository tracking the TypeScript binding's coverage report.
   `properties(n)` or in the changefeed now sees the key gone and a
   `property_remove` event.
 - `MERGE (a)-[r:T {w: null}]->(b)` now fails instead of succeeding.
+- Code that caught the I/O error (`LatticeIOError`, `IoError`, `ErrorIO`,
+  `ErrorCode.IO`) from setting, batch-inserting or searching vectors on a
+  database without a vector index now gets the unsupported error instead.
 
 ## Validation Notes
 
@@ -67,5 +99,9 @@ also stops the repository tracking the TypeScript binding's coverage report.
   nodes and relationships, parameters, the changefeed events, reopening, the
   `embedding` key with and without a vector index, and how a null property
   already in the file reads and is removed.
+- A new C API unit test covers every vector call on a database without a vector
+  index, that the refused batch insert creates no node, and that reopening with
+  vectors enabled adds an index; each of the Python, TypeScript, Go and Java
+  suites has a test that checks the error type and message.
 - `git status` stays clean after `npm run test:coverage` in
   `bindings/typescript`.

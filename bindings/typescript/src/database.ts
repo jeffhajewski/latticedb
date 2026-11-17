@@ -439,6 +439,8 @@ export class Database {
    * @param vector - Query vector
    * @param options - Search options
    * @returns Search results
+   * @throws LatticeError with code -14 (Unsupported) if the database was
+   *   created without a vector index
    */
   async vectorSearch(
     vector: Float32Array,

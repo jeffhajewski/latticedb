@@ -245,8 +245,10 @@ export class Transaction {
    * Set a vector embedding on a node.
    *
    * @param nodeId - The node ID
-   * @param key - Vector property key
+   * @param key - Vector key: `'embedding'` or `''`
    * @param vector - Vector data
+   * @throws LatticeError with code -14 (Unsupported) if the database was
+   *   created without a vector index, or the key is another name
    */
   async setVector(
     nodeId: bigint,
@@ -296,6 +298,8 @@ export class Transaction {
    * @param label - Label for all nodes
    * @param vectors - Array of vectors (one per node)
    * @returns Array of created node IDs
+   * @throws LatticeError with code -14 (Unsupported) if the database was
+   *   created without a vector index; no node is created
    */
   async batchInsertVectors(
     label: string,
@@ -630,6 +634,9 @@ export class Transaction {
 
   /**
    * Search for similar vectors inside this transaction.
+   *
+   * @throws LatticeError with code -14 (Unsupported) if the database was
+   *   created without a vector index
    */
   async vectorSearch(
     vector: Float32Array,

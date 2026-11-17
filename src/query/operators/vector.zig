@@ -529,7 +529,7 @@ pub const VectorSearchWithInput = struct {
         label_id: SymbolId,
         first: *Row,
     ) OperatorError!void {
-        const index = &(self.database.hnsw_index orelse return ctx.storageFailure(error.IoError, "searching the vector index", .{}));
+        const index = &(self.database.hnsw_index orelse return ctx.storageFailure(error.MissingIndex, "searching the vector index", .{}));
         const enough = Database.exactScanCount(index.vector_count, index.config.ef_search, index.config.m_max0);
 
         var ids: std.ArrayListUnmanaged(NodeId) = .empty;

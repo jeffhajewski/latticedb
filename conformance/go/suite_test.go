@@ -305,15 +305,14 @@ func TestConformanceMissingVsNullAndNestedRoundTrip(t *testing.T) {
 	defer closeDB(t, db)
 
 	err = db.View(func(tx Tx) error {
+		// A nil value stores no property, as null does in Cypher. Up to
+		// 0.18.0 it stored a null.
 		note, ok, err := tx.GetProperty(nodeID, "note")
 		if err != nil {
 			return err
 		}
-		if !ok {
-			t.Fatalf("expected stored null property")
-		}
-		if note != nil {
-			t.Fatalf("expected stored null, got %#v", note)
+		if ok {
+			t.Fatalf("expected no note property, got %#v", note)
 		}
 
 		missing, ok, err := tx.GetProperty(nodeID, "missing")

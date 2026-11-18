@@ -411,6 +411,14 @@ lattice_value out;
 lattice_node_get_property(txn, node_id, "name", &out);
 ```
 
+Setting a property to a `LATTICE_VALUE_NULL` value removes it, as Cypher's
+`SET n.x = null` does, and returns `LATTICE_OK` when the node has no such
+property; `lattice_edge_set_property` does the same for an edge. No property
+is ever stored as null, so a node created and then given a null property
+simply does not have it. A null inside a list or a map is kept. Before 0.18.1
+both calls stored the null, and a file written then can still hold one: it
+reads back as a `LATTICE_VALUE_NULL` until it is set or removed.
+
 ### Check Existence
 
 ```c

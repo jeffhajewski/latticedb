@@ -544,7 +544,11 @@ lattice_error lattice_node_detach_delete(
 /* Set a property on a node.
  * The value tree is borrowed for the duration of the call only.
  * STRING/BYTES/VECTOR pointers may be NULL only when their lengths are zero.
- * LIST/MAP container pointers must be non-NULL; empty containers use len=0. */
+ * LIST/MAP container pointers must be non-NULL; empty containers use len=0.
+ * A LATTICE_VALUE_NULL value removes the property, as Cypher's
+ * SET n.x = null does, and returns LATTICE_OK when the node has no such
+ * property; no property is ever stored as null. (Up to 0.18.0 it stored the
+ * null.) A null inside a LIST or MAP is stored as given. */
 lattice_error lattice_node_set_property(
     lattice_txn* txn,
     lattice_node_id node_id,
@@ -1219,7 +1223,9 @@ lattice_error lattice_edge_delete(
 );
 
 /* Set a property on an edge by stable edge ID.
- * The value tree is borrowed for the duration of the call only. */
+ * The value tree is borrowed for the duration of the call only.
+ * A LATTICE_VALUE_NULL value removes the property, as for
+ * lattice_node_set_property. */
 lattice_error lattice_edge_set_property(
     lattice_txn* txn,
     lattice_edge_id edge_id,

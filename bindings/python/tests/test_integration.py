@@ -279,6 +279,43 @@ class TestNodeOperations:
                 txn.set_property(node.id, "score", 3.14)
                 txn.commit()
 
+    def test_none_stores_no_property(self, tmp_path):
+        """None removes a property and creates none, as null does in Cypher."""
+        db_path = tmp_path / "test.db"
+
+        with Database(db_path, create=True) as db:
+            with db.write() as txn:
+                a = txn.create_node(labels=["P"], properties={"name": "a", "x": None, "y": 1})
+                b = txn.create_node(labels=["P"], properties={"name": "b"})
+                edge = txn.create_edge(a.id, b.id, "R", properties={"w": None, "v": 1})
+                txn.commit()
+            # Up to 0.18.0 these held, and stored, x and w as None.
+            assert a.properties == {"name": "a", "y": 1}
+            assert edge.properties == {"v": 1}
+            after = db.changes(limit=1000)[-1].sequence
+
+            with db.write() as txn:
+                txn.set_property(a.id, "y", None)
+                txn.set_property(a.id, "absent", None)
+                txn.set_edge_property(edge.id, "v", None)
+                txn.set_edge_property(edge.id, "absent", None)
+                txn.commit()
+
+            rows = db.query(
+                "MATCH (n:P {name: 'a'})-[r:R]->() RETURN properties(n) AS n, properties(r) AS r"
+            )
+            assert [dict(row) for row in rows] == [{"n": {"name": "a"}, "r": {}}]
+            events = [
+                (record.kind, record.payload["key"])
+                for record in db.changes(after_sequence=after)
+                if "property" in record.kind
+            ]
+            assert events == [("node.property_remove", "y"), ("edge.property_remove", "v")]
+
+            with db.write() as txn:
+                with pytest.raises(LatticeNotFoundError):
+                    txn.set_property(999_999, "x", None)
+
     def test_cannot_write_in_read_transaction(self, tmp_path):
         """Test that write operations fail in read-only transaction."""
         db_path = tmp_path / "test.db"

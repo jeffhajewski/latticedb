@@ -23,6 +23,18 @@ import {
 } from './ffi';
 
 /**
+ * The properties a create call stores: a null (or undefined) value stores
+ * nothing, as in Cypher, so the returned node or edge leaves it out too.
+ */
+function withoutNulls(properties: Record<string, PropertyValue>): Record<string, PropertyValue> {
+  const stored: Record<string, PropertyValue> = {};
+  for (const [key, value] of Object.entries(properties)) {
+    if (value !== null && value !== undefined) stored[key] = value;
+  }
+  return stored;
+}
+
+/**
  * A database transaction.
  *
  * Transactions provide atomic, isolated access to the database.
@@ -150,7 +162,7 @@ export class Transaction {
     return {
       id: nodeId,
       labels,
-      properties,
+      properties: withoutNulls(properties),
     };
   }
 
@@ -215,6 +227,10 @@ export class Transaction {
 
   /**
    * Set a property on a node.
+   *
+   * A null value removes the property, as Cypher's `SET n.x = null` does;
+   * removing one the node does not have does nothing. (Up to 0.18.0 it
+   * stored the null.)
    *
    * @param nodeId - The node ID
    * @param key - Property key
@@ -351,7 +367,7 @@ export class Transaction {
       sourceId,
       targetId,
       type: edgeType,
-      properties,
+      properties: withoutNulls(properties),
     };
   }
 
@@ -373,6 +389,8 @@ export class Transaction {
 
   /**
    * Set a property on an edge.
+   *
+   * A null value removes the property, as `setProperty` does.
    *
    * @param edgeId - The stable edge ID
    * @param key - Property key

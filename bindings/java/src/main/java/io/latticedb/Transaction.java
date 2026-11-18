@@ -107,7 +107,8 @@ public final class Transaction implements AutoCloseable {
     /* Nodes                                                               */
     /* ------------------------------------------------------------------ */
 
-    /** Creates a node with labels and properties. */
+    /** Creates a node with labels and properties. A property whose value is
+     * null is left out, as in Cypher's CREATE. */
     public Node createNode(List<String> labels, Map<String, Object> properties) {
         ensureWritable();
         String first = labels == null || labels.isEmpty() ? "" : labels.get(0);
@@ -121,7 +122,9 @@ public final class Transaction implements AutoCloseable {
         if (properties != null) {
             for (Map.Entry<String, Object> e : properties.entrySet()) {
                 Native.nodeSetProperty(handle, id, e.getKey(), e.getValue());
-                props.put(e.getKey(), e.getValue());
+                if (e.getValue() != null) {
+                    props.put(e.getKey(), e.getValue());
+                }
             }
         }
         return new Node(id, labels == null ? List.of() : List.copyOf(labels), props);
@@ -182,6 +185,9 @@ public final class Transaction implements AutoCloseable {
         Native.nodeRemoveLabel(handle, nodeId, label);
     }
 
+    /** Sets a property on a node. A null value removes the property, as
+     * Cypher's {@code SET n.x = null} does; removing one the node does not
+     * have does nothing. (Up to 0.18.0 it stored the null.) */
     public void setProperty(long nodeId, String key, Object value) {
         ensureWritable();
         Native.nodeSetProperty(handle, nodeId, key, value);
@@ -268,7 +274,8 @@ public final class Transaction implements AutoCloseable {
     /* ------------------------------------------------------------------ */
 
     /** Creates an edge. Throws {@link ErrorCode#NOT_FOUND} if either node does
-     * not exist as this transaction sees it. */
+     * not exist as this transaction sees it. A property whose value is null is
+     * left out. */
     public Edge createEdge(long sourceId, long targetId, String type,
                            Map<String, Object> properties) {
         ensureWritable();
@@ -277,7 +284,9 @@ public final class Transaction implements AutoCloseable {
         if (properties != null) {
             for (Map.Entry<String, Object> e : properties.entrySet()) {
                 Native.edgeSetProperty(handle, edgeId, e.getKey(), e.getValue());
-                props.put(e.getKey(), e.getValue());
+                if (e.getValue() != null) {
+                    props.put(e.getKey(), e.getValue());
+                }
             }
         }
         return new Edge(edgeId, sourceId, targetId, type, props);
@@ -292,6 +301,8 @@ public final class Transaction implements AutoCloseable {
         Native.edgeDelete(handle, sourceId, targetId, type);
     }
 
+    /** Sets a property on an edge. A null value removes the property, as
+     * {@link #setProperty} does. */
     public void setEdgeProperty(long edgeId, String key, Object value) {
         ensureWritable();
         Native.edgeSetProperty(handle, edgeId, key, value);

@@ -996,7 +996,7 @@ test "import_export: CSV export and import keep properties, types, ids and vecto
     try source.setNodeProperty(null, alice, "code", .{ .string_val = "2024" });
     try source.setNodeProperty(null, alice, "blob", .{ .bytes_val = &[_]u8{ 1, 2, 3 } });
     try source.setNodeProperty(null, alice, "score", .{ .float_val = 2.0 });
-    try source.setNodeProperty(null, bob, "nothing", .{ .null_val = {} });
+    try source.setNodeProperty(null, bob, "nothing", .{ .list_val = &.{.{ .null_val = {} }} });
     try source.setNodeVector(alice, &[_]f32{ 0, 0, 1, 0 });
     const first = try source.createEdgeAndGetId(null, alice, bob, rel_type);
     const second = try source.createEdgeAndGetId(null, alice, bob, rel_type);
@@ -1021,10 +1021,69 @@ test "import_export: CSV export and import keep properties, types, ids and vecto
     try std.testing.expectEqualSlices(u8, &[_]u8{ 1, 2, 3 }, blob.bytes_val);
     var nothing = (try imported.getNodeProperty(2, "nothing")).?;
     defer nothing.deinit(allocator);
-    try std.testing.expect(nothing == .null_val);
+    try std.testing.expectEqual(@as(usize, 1), nothing.list_val.len);
+    try std.testing.expect(nothing.list_val[0] == .null_val);
     const vector = (try imported.getNodeVectorInTxn(null, 1)).?;
     defer allocator.free(vector);
     try std.testing.expectEqualSlices(f32, &[_]f32{ 0, 0, 1, 0 }, vector);
+}
+
+test "import_export: a null property in an export file is left out on import" {
+    // 0.18.0 could store a null property and exported it as these files show.
+    // Since 0.18.1 no write path stores a null, so importing one leaves the
+    // property out, as Cypher's CREATE does; a null inside a list stays.
+    const allocator = std.testing.allocator;
+    const path = "/tmp/lattice_import_null_property.ltdb";
+    const json =
+        \\{"version":2,"nodes":[{"id":"1","labels":["P"],"properties":{"name":"a","x":null,"l":[null]}},
+        \\{"id":"2","labels":["P"],"properties":{"name":"b"}}],
+        \\"edges":[{"source":"1","target":"2","type":"R","properties":{"name":"r","w":null}}]}
+    ;
+    const jsonl =
+        \\{"kind":"node","id":"1","labels":["P"],"properties":{"name":"a","x":null,"l":[null]}}
+        \\{"kind":"node","id":"2","labels":["P"],"properties":{"name":"b"}}
+        \\{"kind":"edge","source":"1","target":"2","type":"R","properties":{"name":"r","w":null}}
+        \\
+    ;
+    const csv_nodes =
+        \\_id,_labels,name:json,x:json,l:json
+        \\1,"P","""a""",null,[null]
+        \\2,"P","""b""",,
+        \\
+    ;
+    const csv_edges =
+        \\_source,_target,_type,name:json,w:json
+        \\1,2,R,"""r""",null
+        \\
+    ;
+
+    for (0..3) |format| {
+        const db = try openTestDb(path);
+        defer cleanupTestDb(db, path);
+        const stats = switch (format) {
+            0 => try import_export.importJsonContent(allocator, db, json, .{}),
+            1 => try import_export.importJsonlContent(allocator, db, jsonl, .{}),
+            else => try import_export.importCsvPairContent(allocator, db, csv_nodes, csv_edges, .{}),
+        };
+        try std.testing.expectEqual(@as(u64, 2), stats.nodes_imported);
+        try std.testing.expectEqual(@as(u64, 1), stats.edges_imported);
+
+        try expectStringProperty(db, 1, "name", "a");
+        try std.testing.expect((try db.getNodeProperty(1, "x")) == null);
+        var list = (try db.getNodeProperty(1, "l")).?;
+        defer list.deinit(allocator);
+        try std.testing.expectEqual(@as(usize, 1), list.list_val.len);
+        try std.testing.expect(list.list_val[0] == .null_val);
+
+        var edges = try db.query("MATCH ()-[r:R]->() RETURN id(r)");
+        defer edges.deinit();
+        try std.testing.expectEqual(@as(usize, 1), edges.rowCount());
+        const edge_id: u64 = @intCast(edges.rows[0].values[0].int_val);
+        var name = (try db.getEdgePropertyById(edge_id, "name")).?;
+        defer name.deinit(allocator);
+        try std.testing.expectEqualStrings("r", name.string_val);
+        try std.testing.expect((try db.getEdgePropertyById(edge_id, "w")) == null);
+    }
 }
 
 test "import_export: CSV import refuses a repeated _id and CSV export a label it cannot hold" {
@@ -1182,7 +1241,6 @@ fn buildRoundTripGraph(db: *Database) !void {
     const acme = try db.createNode(null, &.{company_label});
     const loner = try db.createNode(null, &.{});
 
-    try db.setNodeProperty(null, alice, "null", .{ .null_val = {} });
     try db.setNodeProperty(null, alice, "yes", .{ .bool_val = true });
     try db.setNodeProperty(null, alice, "no", .{ .bool_val = false });
     try db.setNodeProperty(null, alice, "int", .{ .int_val = -42 });

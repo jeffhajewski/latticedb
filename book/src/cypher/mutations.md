@@ -111,13 +111,22 @@ out. The same holds for relationships and for a null that arrives in a parameter
 Afterwards `n.city` is null, `n.city IS NULL` is true, and `properties(n)` has no
 `city` key.
 
+The API follows the same rule. Setting a property to null through
+`lattice_node_set_property` or `lattice_edge_set_property`, or a binding's
+`set_property`, removes it and logs the same changefeed event as
+`SET n.city = NULL`. A binding's create call leaves a null property out, as
+`CREATE` does, and so do the JSON, JSONL and CSV importers. A null inside a list
+or a map is a value, not a missing property, and is kept everywhere.
+
 Before 0.18.1, every one of these but `SET n.city = NULL` stored the null as a
 property: `properties(n)` listed `city: null`, the changefeed recorded
 `node.property_set` with a null `new_value`, and the property survived reopening.
 A database written by 0.18.0 can hold such properties, and they read back as they
 were written, `city: null` in `properties(n)` and in a dump, until something
-removes them: `SET n.city = NULL`, `SET n += {city: NULL}`, `SET n = {...}` and
-`REMOVE n.city` all do. Nothing rewrites them on open.
+removes them: `SET n.city = NULL`, `SET n += {city: NULL}`, `SET n = {...}`,
+`REMOVE n.city` and setting it to null through the API all do. Nothing rewrites
+them on open. Exporting such a database still writes `city: null`, and importing
+that file leaves `city` out.
 
 ## DELETE
 

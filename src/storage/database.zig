@@ -7195,6 +7195,10 @@ pub const Database = struct {
 
     /// Set a property on a node
     /// If txn is null, the operation is auto-committed
+    ///
+    /// A null value removes the property, as Cypher's `SET n.x = null` does,
+    /// and does nothing when the node has no such property: no write path
+    /// stores a null. Up to 0.18.0 this stored the null as a property.
     pub fn setNodeProperty(
         self: *Self,
         txn: ?*Transaction,
@@ -7202,6 +7206,7 @@ pub const Database = struct {
         key: []const u8,
         value: PropertyValue,
     ) !void {
+        if (value == .null_val) return self.removeNodeProperty(txn, node_id, key);
         if (self.read_only) return DatabaseError.PermissionDenied;
         if (txn == null) self.relieveBufferPressure();
 
@@ -8606,6 +8611,9 @@ pub const Database = struct {
     }
 
     /// Set a property on an edge by stable edge ID.
+    ///
+    /// A null value removes the property, and does nothing when the edge has
+    /// no such property, as `setNodeProperty` does.
     pub fn setEdgePropertyById(
         self: *Self,
         txn: ?*Transaction,
@@ -8613,6 +8621,7 @@ pub const Database = struct {
         key: []const u8,
         value: PropertyValue,
     ) !void {
+        if (value == .null_val) return self.removeEdgePropertyById(txn, edge_id, key);
         if (self.read_only) return DatabaseError.PermissionDenied;
         if (txn == null) self.relieveBufferPressure();
 

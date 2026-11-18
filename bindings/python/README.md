@@ -214,16 +214,16 @@ setting any of them raises `LatticeUnsupportedError`.
 
 #### Write Operations
 
-- `create_node(labels=[], properties=None)` - Create a node
+- `create_node(labels=[], properties=None)` - Create a node. A property whose value is `None` is left out, as in Cypher's `CREATE`
 - `delete_node(node_id, *, detach=False)` - Delete a node. A node that still has relationships raises `LatticeHasRelationshipsError` and nothing is deleted, as Cypher's `DELETE` does; `detach=True` deletes its relationships with it, as `DETACH DELETE` does. Deleting a node that does not exist does nothing.
-- `set_property(node_id, key, value)` - Set a property on a node. If a full-text index is declared for one of the node's labels and this property, the index is kept current.
+- `set_property(node_id, key, value)` - Set a property on a node. If a full-text index is declared for one of the node's labels and this property, the index is kept current. A value of `None` removes the property, as Cypher's `SET n.x = null` does; before 0.18.1 it stored the `None`.
 - `set_vector(node_id, key, vector)` - Set the node's vector embedding. A node has one vector, which Cypher reads as `n.embedding`; `key` must be `"embedding"` (or `""`), and any other key raises `LatticeUnsupportedError`. A vector with NaN or infinite components raises `LatticeInvalidArgError`. On a database created without a vector index, `set_vector`, `batch_insert_vectors` (before it creates any node) and `vector_search` raise `LatticeUnsupportedError` with a message that says so; before 0.18.1 they raised `LatticeIOError`. Opening the database with `enable_vectors=True` and `vector_dimensions` adds an index.
 - `remove_vector(node_id, key="embedding")` - Remove the node's vector. The node keeps its labels and properties, and vector search no longer returns it. Removing a vector the node does not have does nothing. Raises `LatticeNotFoundError` if the node does not exist.
 - `batch_insert_vectors(label, vectors)` - Insert vector-bearing nodes in one call
 - `batch_insert(label, vectors)` - Deprecated compatibility alias for `batch_insert_vectors`
-- `create_edge(source_id, target_id, edge_type, properties=None)` - Create an edge
+- `create_edge(source_id, target_id, edge_type, properties=None)` - Create an edge. A property whose value is `None` is left out
 - `delete_edge(source_id, target_id, edge_type)` - Delete an edge
-- `set_edge_property(edge_id, key, value)` - Set an edge property by stable edge ID
+- `set_edge_property(edge_id, key, value)` - Set an edge property by stable edge ID. A value of `None` removes it
 - `get_edge_property(edge_id, key)` - Get an edge property by stable edge ID
 - `remove_edge_property(edge_id, key)` - Remove an edge property by stable edge ID
 - `publish_stream(stream, payload, kind="message")` - Publish a durable stream record

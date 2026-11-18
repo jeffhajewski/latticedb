@@ -11,7 +11,7 @@ The initial suite covers:
 - persistence across reopen
 - stable monotonic edge identity across rollback and reopen
 - nested value round-trips
-- missing versus stored `NULL` semantics in direct property APIs
+- a `nil` property written through the direct property APIs storing no property (since 0.18.1)
 - read-only rejection, single-writer enforcement, own-write visibility, commit visibility to newly started transactions, and rollback cleanup
 - rollback behavior
 - query mutation atomicity

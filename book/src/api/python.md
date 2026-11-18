@@ -233,16 +233,16 @@ produced by `serialize()`, taking the same options as `Database` apart from `pat
 
 #### Write Operations
 
-- `create_node(labels=[], properties=None)` - Create a node
+- `create_node(labels=[], properties=None)` - Create a node. A property whose value is `None` is left out, as in Cypher's `CREATE`, and the returned `Node` leaves it out too
 - `delete_node(node_id, *, detach=False)` - Delete a node. A node that still has relationships raises `LatticeHasRelationshipsError` and nothing is deleted, as Cypher's `DELETE` does; `detach=True` deletes its relationships with it, as `DETACH DELETE` does. Deleting a node that does not exist does nothing.
-- `set_property(node_id, key, value)` - Set a property on a node
+- `set_property(node_id, key, value)` - Set a property on a node. A value of `None` removes the property, as Cypher's `SET n.x = null` does; removing one the node does not have does nothing. Before 0.18.1 it stored the `None`
 - `set_vector(node_id, key, vector)` - Set the node's vector embedding. A node has one vector, which Cypher reads as `n.embedding`; `key` must be `"embedding"` (or `""`), and any other key raises `LatticeUnsupportedError`. A vector with NaN or infinite components raises `LatticeInvalidArgError`. On a database created without a vector index, `set_vector`, `batch_insert_vectors` (before it creates any node) and `vector_search` raise `LatticeUnsupportedError` with a message that says so; before 0.18.1 they raised `LatticeIOError`. Opening the database with `enable_vectors=True` and `vector_dimensions` adds an index.
 - `remove_vector(node_id, key="embedding")` - Remove the node's vector. The node keeps its labels and properties, and vector search no longer returns it. Removing a vector the node does not have does nothing. Raises `LatticeNotFoundError` if the node does not exist.
 - `batch_insert_vectors(label, vectors)` - Insert vector-bearing nodes in one call
 - `batch_insert(label, vectors)` - Deprecated compatibility alias for `batch_insert_vectors`
-- `create_edge(source_id, target_id, edge_type, properties=None)` - Create an edge and return its stable edge ID on the `Edge`. Raises `LatticeNotFoundError` unless both ends exist as the transaction sees them
+- `create_edge(source_id, target_id, edge_type, properties=None)` - Create an edge and return its stable edge ID on the `Edge`. Raises `LatticeNotFoundError` unless both ends exist as the transaction sees them. A property whose value is `None` is left out
 - `delete_edge(source_id, target_id, edge_type)` - Delete an edge
-- `set_edge_property(edge_id, key, value)` - Set an edge property by stable edge ID
+- `set_edge_property(edge_id, key, value)` - Set an edge property by stable edge ID. A value of `None` removes it, as `set_property` does
 - `get_edge_property(edge_id, key)` - Get an edge property by stable edge ID
 - `remove_edge_property(edge_id, key)` - Remove an edge property by stable edge ID
 - `publish_stream(stream, payload, kind="message")` - Publish a durable stream record
@@ -435,7 +435,7 @@ Without the setter, the `LATTICE_AUTO_CHECKPOINT_FRAMES` environment variable se
 
 ## Supported Property Types
 
-- `None` - Null value
+- `None` - Null value. A property is never stored as `None`: writing one removes the property (see `set_property`). `None` inside a list or a map is kept
 - `bool` - Boolean
 - `int` - 64-bit integer; a value outside the signed 64-bit range raises `OverflowError`
 - `float` - 64-bit float

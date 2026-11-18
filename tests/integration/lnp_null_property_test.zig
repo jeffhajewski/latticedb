@@ -321,27 +321,85 @@ test "lnp: a null embedding removes the vector on a database with a vector index
     try expectNodeKeys(db, a, "name");
 }
 
+/// Store `key: null` on a node the way 0.18.0 did, below every write path
+/// that now refuses to: it stands in for a file written by 0.18.0.
+fn storeLegacyNull(db: *Database, node_id: NodeId, key: []const u8) !void {
+    const a = std.testing.allocator;
+    var node = try db.node_store.get(node_id);
+    defer node.deinit(a);
+    var props: std.ArrayListUnmanaged(lattice.graph.node.Property) = .empty;
+    defer props.deinit(a);
+    try props.appendSlice(a, node.properties);
+    try props.append(a, .{ .key_id = try db.symbol_table.intern(key), .value = .{ .null_val = {} } });
+    try db.node_store.update(node_id, node.labels, props.items);
+}
+
 test "lnp: a null property already stored reads back as before, and any removal takes it away" {
-    // 0.18.0 stored these from Cypher; the API still stores one when asked
-    // to, which stands in for a file written by 0.18.0.
     const path = "/tmp/lnp_stored_null.ltdb";
     cleanup(path);
     defer cleanup(path);
 
     var db = try openDb(path, true, false);
     defer db.close();
-    try run(db, "CREATE (:P {name: 'plus'}), (:P {name: 'set'}), (:P {name: 'removed'}), (:P {name: 'kept'})");
-    for ([_][]const u8{ "plus", "set", "removed", "kept" }) |name| {
-        try db.setNodeProperty(null, try nodeNamed(db, name), "x", .{ .null_val = {} });
+    try run(db, "CREATE (:P {name: 'plus'}), (:P {name: 'set'}), (:P {name: 'removed'}), (:P {name: 'api'}), (:P {name: 'kept'})");
+    for ([_][]const u8{ "plus", "set", "removed", "api", "kept" }) |name| {
+        try storeLegacyNull(db, try nodeNamed(db, name), "x");
     }
     try expectNodeKeys(db, try nodeNamed(db, "kept"), "name x=null");
-    try std.testing.expectEqual(@as(i64, 4), try queryInt(db, "MATCH (n:P) WHERE n.x IS NULL RETURN count(n)"));
+    try std.testing.expectEqual(@as(i64, 5), try queryInt(db, "MATCH (n:P) WHERE n.x IS NULL RETURN count(n)"));
 
     try run(db, "MATCH (n:P {name: 'plus'}) SET n += {x: null}");
     try run(db, "MATCH (n:P {name: 'set'}) SET n.x = null");
     try run(db, "MATCH (n:P {name: 'removed'}) REMOVE n.x");
+    try db.setNodeProperty(null, try nodeNamed(db, "api"), "x", .{ .null_val = {} });
     try expectNodeKeys(db, try nodeNamed(db, "plus"), "name");
+    try expectNodeKeys(db, try nodeNamed(db, "api"), "name");
     try expectNodeKeys(db, try nodeNamed(db, "set"), "name");
     try expectNodeKeys(db, try nodeNamed(db, "removed"), "name");
     try expectNodeKeys(db, try nodeNamed(db, "kept"), "name x=null");
+}
+
+test "lnp: the property setters remove a property given null, and log what Cypher logs" {
+    // The C API, every binding and the JSON and CSV importers write through
+    // these two calls. Up to 0.18.0 they stored the null.
+    const path = "/tmp/lnp_api_null.ltdb";
+    cleanup(path);
+    defer cleanup(path);
+
+    var db = try openDb(path, true, false);
+    defer db.close();
+    try run(db, "CREATE (:A {name: 'a', y: 1})-[:R {name: 'r', v: 1}]->(:A {name: 'b', y: 1})");
+    const a = try nodeNamed(db, "a");
+    const b = try nodeNamed(db, "b");
+    const r = try edgeNamed(db, "r");
+    const null_val: PropertyValue = .{ .null_val = {} };
+
+    // In a transaction: a present key is removed, an absent one is left alone.
+    var seq = try lastSequence(db);
+    {
+        var txn = try db.beginTransaction(.read_write);
+        errdefer db.abortTransaction(&txn) catch {};
+        try db.setNodeProperty(&txn, a, "y", null_val);
+        try db.setNodeProperty(&txn, a, "z", null_val);
+        try db.setEdgePropertyById(&txn, r, "v", null_val);
+        try db.setEdgePropertyById(&txn, r, "u", null_val);
+        try db.commitTransaction(&txn);
+    }
+    try expectNodeKeys(db, a, "name");
+    try expectEdgeKeys(db, r, "name");
+    try expectPropertyEvents(db, seq, "node.property_remove y\nedge.property_remove v\n");
+
+    // Cypher logs the same for the same change.
+    seq = try lastSequence(db);
+    try run(db, "MATCH (n:A {name: 'b'}) SET n.y = null, n.z = null");
+    try expectPropertyEvents(db, seq, "node.property_remove y\n");
+
+    // Without a transaction too.
+    try db.setNodeProperty(null, b, "name", null_val);
+    try db.setNodeProperty(null, b, "never", null_val);
+    try expectNodeKeys(db, b, "");
+
+    // A node or edge that does not exist is still an error.
+    try std.testing.expectError(error.NotFound, db.setNodeProperty(null, 999_999, "x", null_val));
+    try std.testing.expectError(error.NotFound, db.setEdgePropertyById(null, 999_999, "x", null_val));
 }

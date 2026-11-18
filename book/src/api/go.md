@@ -195,6 +195,12 @@ err = db.Update(func(tx *latticedb.Tx) error {
 `int64`, `float64`, `bool`, `[]byte`, and `[]float32` for vectors all work. Note
 `int64` rather than `int`, since the stored type is explicitly 64-bit.
 
+A `nil` value stores no property, as null does in Cypher. `CreateNode` and
+`CreateEdge` leave a `nil` property out, of the stored node and of the one they
+return; `SetProperty` and `SetEdgeProperty` with `nil` remove the property, and
+removing one that is not there does nothing. A `nil` inside a slice or a map is
+kept. Before 0.18.1 these stored the `nil` as a null property.
+
 `CreateEdge` returns `ErrorNotFound` unless both ends exist as the transaction
 sees them. `DeleteNode` refuses a node that still has relationships with
 `ErrorHasRelationships` and deletes nothing, as Cypher's `DELETE` does;

@@ -151,6 +151,14 @@ A node's own embedding is the separate `"vector"` field, not a property.
 JSONL uses the same encoding, one node or edge per line with a `"kind"` field,
 and no version or dimensions line.
 
+A property whose value is `null` is left out on import, in JSON, JSONL and a
+CSV `:json` column alike, because a property is never stored as null (see
+[Remove a Property via SET](../cypher/mutations.md#remove-a-property-via-set)).
+A `null` inside a list or a map is kept. A database written by 0.18.0 or earlier
+can hold null properties, and its export lists them as `"city": null`; importing
+that export into 0.18.1 or later drops them, so the copy has no `city` key where
+the original had a null one. Every query reads the two the same way.
+
 ### Files written by 0.16.0 and earlier
 
 A JSON file with no `"version"` field is read as the old format, so exports

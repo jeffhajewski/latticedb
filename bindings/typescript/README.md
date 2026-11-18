@@ -249,16 +249,16 @@ configures an index in bytes that have none.
 
 #### Write Operations
 
-- `await txn.createNode({ labels, properties })` - Create a node
+- `await txn.createNode({ labels, properties })` - Create a node. A property whose value is `null` is left out, as in Cypher's `CREATE`
 - `await txn.deleteNode(nodeId, { detach })` - Delete a node. A node that still has relationships is refused with code -17 (`HasRelationships`) and nothing is deleted, as Cypher's `DELETE` does; `{ detach: true }` deletes its relationships with it, as `DETACH DELETE` does. Deleting a node that does not exist does nothing.
-- `await txn.setProperty(nodeId, key, value)` - Set a property. If a full-text index is declared for one of the node's labels and this property, the index is kept current.
+- `await txn.setProperty(nodeId, key, value)` - Set a property. If a full-text index is declared for one of the node's labels and this property, the index is kept current. A `null` value removes the property, as Cypher's `SET n.x = null` does; before 0.18.1 it stored the `null`.
 - `await txn.setVector(nodeId, key, vector)` - Set the node's vector embedding. A node has one vector, which Cypher reads as `n.embedding`; `key` must be `"embedding"` (or `""`), and any other key is rejected with an unsupported-operation error. A vector with NaN or infinite components is rejected as an invalid argument. On a database created without a vector index, `setVector`, `batchInsertVectors` (before it creates any node) and `vectorSearch` reject with a `LatticeError` whose code is `Unsupported` and whose message says so; before 0.18.1 the code was `IoError`. Opening the database with `enableVectors: true` and `vectorDimensions` adds an index.
 - `await txn.removeVector(nodeId, key = "embedding")` - Remove the node's vector. The node keeps its labels and properties, and vector search no longer returns it. Removing a vector the node does not have does nothing. Rejects with code -4 (`NotFound`) if the node does not exist.
 - `await txn.batchInsertVectors(label, vectors)` - Insert vector-bearing nodes in one call
 - `await txn.batchInsert(label, vectors)` - Deprecated compatibility alias for `batchInsertVectors`
-- `await txn.createEdge(sourceId, targetId, edgeType, options?)` - Create an edge
+- `await txn.createEdge(sourceId, targetId, edgeType, options?)` - Create an edge. A property whose value is `null` is left out
 - `await txn.deleteEdge(sourceId, targetId, edgeType)` - Delete an edge
-- `await txn.setEdgeProperty(edgeId, key, value)` - Set an edge property by stable edge ID
+- `await txn.setEdgeProperty(edgeId, key, value)` - Set an edge property by stable edge ID. A `null` value removes it
 - `await txn.getEdgeProperty(edgeId, key)` - Get an edge property by stable edge ID
 - `await txn.removeEdgeProperty(edgeId, key)` - Remove an edge property by stable edge ID
 - `txn.publishStream(stream, payload, kind?)` - Publish a durable stream record

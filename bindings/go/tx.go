@@ -48,6 +48,8 @@ func (tx *Tx) Rollback() error {
 	return err
 }
 
+// CreateNode creates a node. A property whose value is nil is left out, as in
+// Cypher's CREATE.
 func (tx *Tx) CreateNode(opts CreateNodeOptions) (Node, error) {
 	if err := tx.ensureWritable(); err != nil {
 		return Node{}, err
@@ -79,7 +81,7 @@ func (tx *Tx) CreateNode(opts CreateNodeOptions) (Node, error) {
 	return Node{
 		ID:         NodeID(nodeID),
 		Labels:     append([]string(nil), opts.Labels...),
-		Properties: cloneValueMap(opts.Properties),
+		Properties: storedValues(opts.Properties),
 	}, nil
 }
 
@@ -137,6 +139,9 @@ func (tx *Tx) GetNode(nodeID NodeID) (*Node, error) {
 	}, nil
 }
 
+// SetProperty sets a property on a node. A nil value removes the property, as
+// Cypher's SET n.x = null does; removing one the node does not have does
+// nothing. (Up to 0.18.0 it stored the nil as a null property.)
 func (tx *Tx) SetProperty(nodeID NodeID, key string, value Value) error {
 	if err := tx.ensureWritable(); err != nil {
 		return err
@@ -222,7 +227,7 @@ func (tx *Tx) FindNodesByLabelProperty(
 }
 
 // CreateEdge creates an edge. It returns ErrorNotFound if either node does not
-// exist as this transaction sees it.
+// exist as this transaction sees it. A property whose value is nil is left out.
 func (tx *Tx) CreateEdge(sourceID, targetID NodeID, edgeType string, opts CreateEdgeOptions) (Edge, error) {
 	if err := tx.ensureWritable(); err != nil {
 		return Edge{}, err
@@ -244,7 +249,7 @@ func (tx *Tx) CreateEdge(sourceID, targetID NodeID, edgeType string, opts Create
 		SourceID:   sourceID,
 		TargetID:   targetID,
 		Type:       edgeType,
-		Properties: cloneValueMap(opts.Properties),
+		Properties: storedValues(opts.Properties),
 	}, nil
 }
 
@@ -255,6 +260,8 @@ func (tx *Tx) DeleteEdge(sourceID, targetID NodeID, edgeType string) error {
 	return wrapError(tx.raw.DeleteEdge(uint64(sourceID), uint64(targetID), edgeType))
 }
 
+// SetEdgeProperty sets a property on an edge. A nil value removes the
+// property, as SetProperty does.
 func (tx *Tx) SetEdgeProperty(edgeID EdgeID, key string, value Value) error {
 	if err := tx.ensureWritable(); err != nil {
 		return err
@@ -440,13 +447,14 @@ func edgeRecordsToEdges(records []cgobridge.EdgeRecord) []Edge {
 	return edges
 }
 
-func cloneValueMap(values map[string]Value) map[string]Value {
-	if len(values) == 0 {
-		return map[string]Value{}
-	}
-	cloned := make(map[string]Value, len(values))
+// storedValues copies the properties a create call stores: a nil value
+// stores nothing, as in Cypher, so the returned node or edge leaves it out.
+func storedValues(values map[string]Value) map[string]Value {
+	stored := make(map[string]Value, len(values))
 	for key, value := range values {
-		cloned[key] = value
+		if value != nil {
+			stored[key] = value
+		}
 	}
-	return cloned
+	return stored
 }

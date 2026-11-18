@@ -239,7 +239,8 @@ class Transaction:
 
         Args:
             labels: Node labels.
-            properties: Node properties.
+            properties: Node properties. A key whose value is None is left
+                out, as in Cypher's ``CREATE``.
         """
         if self._read_only:
             raise RuntimeError("Cannot create node in read-only transaction")
@@ -272,11 +273,13 @@ class Transaction:
             properties={},
         )
 
-        # Set properties if provided
+        # Set properties if provided. A None value stores nothing, as in
+        # Cypher, so the returned node leaves it out too.
         if properties:
             for key, value in properties.items():
                 self.set_property(node.id, key, value)
-                node.properties[key] = value
+                if value is not None:
+                    node.properties[key] = value
 
         return node
 
@@ -379,6 +382,10 @@ class Transaction:
     ) -> None:
         """
         Set a property on a node.
+
+        A value of None removes the property, as Cypher's ``SET n.x = null``
+        does; removing one the node does not have does nothing. (Up to
+        0.18.0 it stored the None.)
 
         Args:
             node_id: The node ID.
@@ -996,7 +1003,7 @@ class Transaction:
             source_id: Source node ID.
             target_id: Target node ID.
             edge_type: Edge type/label.
-            properties: Edge properties.
+            properties: Edge properties. A key whose value is None is left out.
 
         Returns:
             The created edge.
@@ -1029,10 +1036,13 @@ class Transaction:
             properties={},
         )
 
+        # A None value stores nothing, as in Cypher, so the returned edge
+        # leaves it out too.
         if properties:
             for key, value in properties.items():
                 self.set_edge_property(edge.id, key, value)
-                edge.properties[key] = value
+                if value is not None:
+                    edge.properties[key] = value
 
         return edge
 
@@ -1064,6 +1074,8 @@ class Transaction:
     ) -> None:
         """
         Set a property on an edge.
+
+        A value of None removes the property, as :meth:`set_property` does.
 
         Args:
             edge_id: The stable edge ID.

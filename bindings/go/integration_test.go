@@ -103,15 +103,14 @@ func TestNodePropertyRoundTripAndMissingVsNull(t *testing.T) {
 			t.Fatalf("unexpected profile: %#v", profile)
 		}
 
+		// A nil value stores no property, as null does in Cypher. Up to
+		// 0.18.0 it stored a null.
 		note, ok, err := tx.GetProperty(nodeID, "note")
 		if err != nil {
 			return err
 		}
-		if !ok {
-			t.Fatalf("expected note property to exist")
-		}
-		if note != nil {
-			t.Fatalf("expected stored null, got %#v", note)
+		if ok {
+			t.Fatalf("expected no note property, got %#v", note)
 		}
 
 		missing, ok, err := tx.GetProperty(nodeID, "missing")
@@ -1042,4 +1041,87 @@ func TestUpdateRollsBackAfterFailedCommit(t *testing.T) {
 	if got := result.Rows[0]["c"]; got != int64(1) {
 		t.Fatalf("node count = %v, want 1 (only the write that committed)", got)
 	}
+}
+
+// A nil value stores no property, as null does in Cypher. Up to 0.18.0
+// SetProperty, SetEdgeProperty and the create calls stored it as a null.
+func TestNilStoresNoProperty(t *testing.T) {
+	dbPath := filepath.Join(t.TempDir(), "nil-property.db")
+	db, err := Open(dbPath, OpenOptions{Create: true})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	defer db.Close()
+
+	var a Node
+	var edge Edge
+	err = db.Update(func(tx *Tx) error {
+		var err error
+		a, err = tx.CreateNode(CreateNodeOptions{Labels: []string{"P"}, Properties: map[string]Value{"name": "a", "x": nil, "y": int64(1)}})
+		if err != nil {
+			return err
+		}
+		b, err := tx.CreateNode(CreateNodeOptions{Labels: []string{"P"}, Properties: map[string]Value{"name": "b"}})
+		if err != nil {
+			return err
+		}
+		edge, err = tx.CreateEdge(a.ID, b.ID, "R", CreateEdgeOptions{Properties: map[string]Value{"w": nil, "v": int64(1)}})
+		return err
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if want := (map[string]Value{"name": "a", "y": int64(1)}); !reflect.DeepEqual(a.Properties, want) {
+		t.Fatalf("created node properties = %v, want %v", a.Properties, want)
+	}
+	if want := (map[string]Value{"v": int64(1)}); !reflect.DeepEqual(edge.Properties, want) {
+		t.Fatalf("created edge properties = %v, want %v", edge.Properties, want)
+	}
+	before, err := db.Changes(0, 1000, 0)
+	if err != nil || len(before) == 0 {
+		t.Fatalf("changes = %v, %v", before, err)
+	}
+	after := before[len(before)-1].Sequence
+
+	err = db.Update(func(tx *Tx) error {
+		for _, err := range []error{
+			tx.SetProperty(a.ID, "y", nil),
+			tx.SetProperty(a.ID, "absent", nil),
+			tx.SetEdgeProperty(edge.ID, "v", nil),
+			tx.SetEdgeProperty(edge.ID, "absent", nil),
+		} {
+			if err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("set nil: %v", err)
+	}
+
+	result, err := db.Query("MATCH (n:P {name: 'a'})-[r:R]->() RETURN properties(n) AS n, properties(r) AS r", nil)
+	if err != nil {
+		t.Fatalf("query: %v", err)
+	}
+	want := []map[string]Value{{"n": map[string]Value{"name": "a"}, "r": map[string]Value{}}}
+	if !reflect.DeepEqual(result.Rows, want) {
+		t.Fatalf("stored properties = %v, want %v", result.Rows, want)
+	}
+	records, err := db.Changes(after, 1000, 0)
+	if err != nil {
+		t.Fatalf("changes: %v", err)
+	}
+	var events []string
+	for _, record := range records {
+		if payload, ok := record.Payload.(map[string]Value); ok && payload["key"] != nil {
+			events = append(events, record.Kind+" "+payload["key"].(string))
+		}
+	}
+	if want := []string{"node.property_remove y", "edge.property_remove v"}; !reflect.DeepEqual(events, want) {
+		t.Fatalf("property events = %v, want %v", events, want)
+	}
+
+	err = db.Update(func(tx *Tx) error { return tx.SetProperty(999999, "x", nil) })
+	wantCode(t, "SetProperty(nil) on a missing node", err, ErrorNotFound)
 }

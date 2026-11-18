@@ -130,7 +130,7 @@ export interface VectorSearchResult {
 export interface CreateNodeOptions {
   /** Node labels */
   labels?: string[];
-  /** Node properties */
+  /** Node properties. A key whose value is null is left out, as in Cypher's CREATE. */
   properties?: Record<string, PropertyValue>;
 }
 
@@ -150,7 +150,7 @@ export interface DeleteNodeOptions {
  * Options for creating an edge.
  */
 export interface CreateEdgeOptions {
-  /** Edge properties */
+  /** Edge properties. A key whose value is null is left out. */
   properties?: Record<string, PropertyValue>;
 }
 

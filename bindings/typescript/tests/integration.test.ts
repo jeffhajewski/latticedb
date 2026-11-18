@@ -10,6 +10,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { Database, deserialize } from '../src/database';
 import { Transaction } from '../src/transaction';
+import type { Edge, Node } from '../src/types';
 import { isLibraryAvailable, LatticeErrorCode, LatticeQueryError, QueryErrorStage } from '../src/ffi';
 
 // Skip all tests if native library is not available
@@ -1125,6 +1126,51 @@ describeIfNative('Database Integration', () => {
       await db.read(async (txn) => {
         expect(Array.from((await txn.getVector(nodeId!))!)).toEqual([1, 0, 0, 0]);
       });
+    });
+  });
+
+  describe('Null property values', () => {
+    test('null removes a property and creates none, as in Cypher', async () => {
+      db = new Database(dbPath, { create: true });
+      await db.open();
+      let a: Node;
+      let edge: Edge;
+
+      await db.write(async (txn) => {
+        a = await txn.createNode({ labels: ['P'], properties: { name: 'a', x: null, y: 1 } });
+        const b = await txn.createNode({ labels: ['P'], properties: { name: 'b' } });
+        edge = await txn.createEdge(a.id, b.id, 'R', { properties: { w: null, v: 1 } });
+      });
+      // Up to 0.18.0 these held, and stored, x and w as null.
+      expect(a!.properties).toEqual({ name: 'a', y: 1 });
+      expect(edge!.properties).toEqual({ v: 1 });
+      const before = await db.changes({ limit: 1000 });
+      const after = before[before.length - 1]!.sequence;
+
+      await db.write(async (txn) => {
+        await txn.setProperty(a!.id, 'y', null);
+        await txn.setProperty(a!.id, 'absent', null);
+        await txn.setEdgeProperty(edge!.id, 'v', null);
+        await txn.setEdgeProperty(edge!.id, 'absent', null);
+      });
+
+      const result = await db.query(
+        "MATCH (n:P {name: 'a'})-[r:R]->() RETURN properties(n) AS n, properties(r) AS r"
+      );
+      expect(result.rows).toEqual([{ n: { name: 'a' }, r: {} }]);
+      const events = (await db.changes({ afterSequence: after }))
+        .filter((record) => record.kind.includes('property'))
+        .map((record) => [record.kind, (record.payload as Record<string, unknown>).key]);
+      expect(events).toEqual([
+        ['node.property_remove', 'y'],
+        ['edge.property_remove', 'v'],
+      ]);
+
+      await expect(
+        db.write(async (txn) => {
+          await txn.setProperty(999999n, 'x', null);
+        })
+      ).rejects.toMatchObject({ code: LatticeErrorCode.NotFound });
     });
   });
 

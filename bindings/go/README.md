@@ -160,7 +160,8 @@ For a larger end-to-end example, see [examples/go](../../examples/go).
 ## API Notes
 
 - Prefer `BeginRead()` and `BeginWrite()` for manual transaction control. `Begin(readOnly bool)` remains as a deprecated compatibility alias.
-- Property getters return `(value, ok, error)` so stored `NULL` is distinguishable from a missing property.
+- A `nil` value stores no property, as null does in Cypher: `CreateNode` and `CreateEdge` leave it out, and `SetProperty` and `SetEdgeProperty` remove the property. Before 0.18.1 these stored the `nil` as a null property.
+- Property getters return `(value, ok, error)`, so a null property a 0.18.0 file still holds is distinguishable from a missing one.
 - Nested values use ordinary Go shapes:
   - `nil`
   - `bool`

@@ -121,26 +121,30 @@ The detailed nested-value contract lives in [archive/c_api_nested_values.md](arc
 
 ### Missing Versus `NULL`
 
-Missing property and stored `NULL` are distinct concepts.
+Since 0.18.1 no write path stores a `NULL` property, so a property is either
+present with a non-`NULL` value or missing.
 
-- Direct property APIs must preserve the distinction.
-- High-level bindings should expose a way to distinguish them.
 - Query property access on a missing property yields `NULL`, not an error.
-- Query results may therefore contain `NULL` for both:
-  - an explicitly stored `NULL`
-  - a missing property referenced through query evaluation
-
-That distinction is only guaranteed through the direct property APIs, not through query projection alone.
+- A database written by 0.18.0 or earlier can still hold a stored `NULL`
+  property. It reads back as written until it is removed, and direct property
+  APIs report it as present with a `NULL` value; high-level bindings should keep
+  a way to tell it from a missing property.
+- `NULL` inside a list or a map is a value and is stored as given.
 
 ### Property Mutation Semantics
 
-The direct property APIs and Cypher mutation syntax are intentionally different:
+The direct property APIs and Cypher mutation syntax follow one rule:
 
-- Direct property setters may store an explicit `NULL` value.
-- In query mutation semantics, `SET n.prop = null` behaves like property removal.
+- Writing `NULL` to a property removes it. This holds for `SET n.prop = null`,
+  for the direct property setters (`lattice_node_set_property`,
+  `lattice_edge_set_property` and every binding's setter), and for the JSON,
+  JSONL and CSV importers. Removing a property that is not there does nothing.
+- A create call given a `NULL` property, in Cypher or a binding, leaves it out.
 - `REMOVE n.prop` also removes the property.
 
-This distinction is part of the public contract and should not be normalized away by a future engine.
+Up to 0.18.0 the direct setters stored an explicit `NULL`, and this document
+called that distinction part of the public contract. 0.18.1 dropped it so that
+the API and Cypher cannot disagree about whether a property exists.
 
 ## Transaction Semantics
 
@@ -369,7 +373,7 @@ The current extracted suite already covers black-box cases drawn from these sour
   - deleted-version invisibility
 - `conformance/go/suite_test.go`
   - persistence across reopen and stable edge IDs
-  - missing versus `NULL` properties, and nested values
+  - a `NULL` write storing no property, and nested values
   - mutation atomicity and parallel edges
   - search operators and the query cache
   - read-only rejection
@@ -394,7 +398,7 @@ The current extracted suite already covers black-box cases drawn from these sour
   - aborted tail inserts remaining invisible after replay
   - post-recovery edge-ID monotonicity relative to committed state
 - binding integration tests
-  - missing-versus-`NULL` distinction in direct property APIs
+  - a `NULL` write through the direct property APIs removing the property
   - query cache surface behavior
   - nested value round-trips through public APIs
 

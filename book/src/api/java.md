@@ -141,6 +141,12 @@ after any other failure it stays open, and closing it rolls it back.
 `DETACH DELETE` does. `createEdge` throws `ErrorCode.NOT_FOUND` if either end
 does not exist as the transaction sees it.
 
+A `null` value stores no property, as in Cypher. `createNode` and `createEdge`
+leave a `null` property out, of the stored node and of the one they return;
+`setProperty` and `setEdgeProperty` with `null` remove the property, and
+removing one that is not there does nothing. A `null` inside a list or a map is
+kept. Before 0.18.1 these stored the `null` as a property.
+
 ## Queries and search
 
 ```java

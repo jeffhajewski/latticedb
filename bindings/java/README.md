@@ -180,3 +180,7 @@ vector ↔ `float[]`, list ↔ `List<Object>`, map ↔ `Map<String,Object>`
 (any `Number`, `List`, or `Map` is accepted on input; the fixed-width integer
 types and a `BigInteger` that fits in 64 bits are stored as int, every other
 `Number`, `BigDecimal` included, as float).
+
+A `null` property value stores nothing, as in Cypher: `createNode` and
+`createEdge` leave it out, and `setProperty` and `setEdgeProperty` remove the
+property. Before 0.18.1 these stored the `null`.

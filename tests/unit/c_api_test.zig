@@ -1136,6 +1136,50 @@ test "c_api: node properties set and get" {
     _ = c_api.lattice_commit(txn);
 }
 
+test "c_api: setting a property to null removes it, as Cypher's SET n.x = null does" {
+    // Up to 0.18.0 both calls stored the null as a property.
+    const path = "/tmp/lattice_capi_null_property_test.db";
+    const db = try openScratchDb(path);
+    defer removeScratchDb(path);
+    defer _ = c_api.lattice_close(db);
+
+    var txn: ?*lattice_txn = null;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+    var a: lattice_node_id = 0;
+    var b: lattice_node_id = 0;
+    var edge: lattice_edge_id = 0;
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "N", &a));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_create(txn, "N", &b));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_create(txn, a, b, "R", &edge));
+    var one = lattice_value{ .value_type = .int, .data = .{ .int_val = 1 } };
+    var null_value = lattice_value{ .value_type = .null, .data = .{ .int_val = 0 } };
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_property(txn, a, "x", &one));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_set_property(txn, edge, "x", &one));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+    // A present key is removed; an absent one is not an error.
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_property(txn, a, "x", &null_value));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_node_set_property(txn, a, "absent", &null_value));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_set_property(txn, edge, "x", &null_value));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_edge_set_property(txn, edge, "absent", &null_value));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_commit(txn));
+
+    // A node or edge that does not exist is still not found.
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_write, &txn));
+    try std.testing.expectEqual(lattice_error.err_not_found, c_api.lattice_node_set_property(txn, 999_999, "x", &null_value));
+    try std.testing.expectEqual(lattice_error.err_not_found, c_api.lattice_edge_set_property(txn, 999_999, "x", &null_value));
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_rollback(txn));
+
+    try std.testing.expectEqual(lattice_error.ok, c_api.lattice_begin(db, .read_only, &txn));
+    defer _ = c_api.lattice_rollback(txn);
+    var out: lattice_value = undefined;
+    for ([_][*:0]const u8{ "x", "absent" }) |key| {
+        try std.testing.expectEqual(lattice_error.err_not_found, c_api.lattice_node_get_property(txn, a, key, &out));
+        try std.testing.expectEqual(lattice_error.err_not_found, c_api.lattice_edge_get_property(txn, edge, key, &out));
+    }
+}
+
 test "c_api: delete node" {
     const path = "/tmp/lattice_capi_node_delete_test.db";
     @import("compat").fs.cwd().deleteFile(path) catch {};
